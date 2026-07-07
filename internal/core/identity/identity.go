@@ -68,6 +68,7 @@ type AuditEntry struct {
 	ProjectID string
 	Action    string
 	CreatedAt time.Time
+	Seq       int64
 }
 
 // Audit action names recorded by the identity service.
@@ -164,6 +165,9 @@ func (s *Store) Register(ctx context.Context, projectID string, permissions []st
 // never as an error. A second passport for the same agent+project pair
 // is rejected — passports are append-only.
 func (s *Store) IssuePassport(ctx context.Context, agentID, projectID string, repositories, roles []string) (Passport, error) {
+	if agentID == "" || projectID == "" {
+		return Passport{}, ErrInvalidScope
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Passport{}, fmt.Errorf("identity: begin tx: %w", err)
@@ -194,9 +198,9 @@ func recordAction(ctx context.Context, db dbtx, agentID, projectID, action strin
 	var entry AuditEntry
 	err := db.QueryRowContext(ctx,
 		`INSERT INTO audit_log (agent_id, project_id, action) VALUES ($1, $2, $3)
-		 RETURNING id, agent_id, project_id, action, created_at`,
+		 RETURNING id, agent_id, project_id, action, created_at, seq`,
 		agentID, projectID, action,
-	).Scan(&entry.ID, &entry.AgentID, &entry.ProjectID, &entry.Action, &entry.CreatedAt)
+	).Scan(&entry.ID, &entry.AgentID, &entry.ProjectID, &entry.Action, &entry.CreatedAt, &entry.Seq)
 	if err != nil {
 		return AuditEntry{}, fmt.Errorf("identity: insert audit entry: %w", err)
 	}
@@ -207,10 +211,10 @@ func recordAction(ctx context.Context, db dbtx, agentID, projectID, action strin
 // first.
 func (s *Store) ListAuditTrail(ctx context.Context, agentID, projectID string) ([]AuditEntry, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, agent_id, project_id, action, created_at
+		`SELECT id, agent_id, project_id, action, created_at, seq
 		 FROM audit_log
 		 WHERE agent_id = $1 AND project_id = $2
-		 ORDER BY created_at ASC`,
+		 ORDER BY seq ASC`,
 		agentID, projectID,
 	)
 	if err != nil {
@@ -221,7 +225,7 @@ func (s *Store) ListAuditTrail(ctx context.Context, agentID, projectID string) (
 	entries := []AuditEntry{}
 	for rows.Next() {
 		var entry AuditEntry
-		if err := rows.Scan(&entry.ID, &entry.AgentID, &entry.ProjectID, &entry.Action, &entry.CreatedAt); err != nil {
+		if err := rows.Scan(&entry.ID, &entry.AgentID, &entry.ProjectID, &entry.Action, &entry.CreatedAt, &entry.Seq); err != nil {
 			return nil, fmt.Errorf("identity: scan audit entry: %w", err)
 		}
 		entries = append(entries, entry)
@@ -237,7 +241,6 @@ func (s *Store) ListAuditTrail(ctx context.Context, agentID, projectID string) (
 // transaction.
 type dbtx interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
 func issuePassport(ctx context.Context, db dbtx, agentID, projectID string, repositories, roles []string) (Passport, error) {
