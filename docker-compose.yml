@@ -1,0 +1,15 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: wormhole
+      POSTGRES_PASSWORD: wormhole
+      POSTGRES_DB: wormhole
+    ports:
+      - "5432:5432"
+    volumes:
+      - wormhole_db_data:/var/lib/postgresql/data
+
+volumes:
+  wormhole_db_data:

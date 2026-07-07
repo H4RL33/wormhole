@@ -3,6 +3,10 @@
 Source: [RFC-0001 Wormhole Core](docs/rfcs/wormhole_rfc.md) §12 MVP Scope, §14 Roadmap.
 One entry per day. Each entry lists that day's full task list. Status updated as work lands.
 
+**Alpha definition:** two different MCP clients (e.g. Claude Code, Codex) connect to one Wormhole server, share task list + KB, coordinate on same project. Matches RFC-0001 §14 V1 exit criteria (Day 24).
+
+Non-goals for alpha (RFC-0001 §4.2/§12, already binding): no Governance, plugins, dashboards, CI integrations, polished web UI.
+
 ## Milestones
 
 | Milestone | Days | Scope |
@@ -21,10 +25,15 @@ Boundary days (6, 12, 18) carry over: prior milestone's review/demo plus next mi
 
 ### Day 1 — 2026-07-07
 - [x] Init git repo (`main` branch)
-- [ ] Docker-compose: Postgres + pgvector, single-service target (RFC §7.1, §11)
-- [ ] Server skeleton (API process, config loading)
-- [ ] MCP interface stub (empty tool registry, wired to server)
-- [ ] This ROADMAP.md
+- [x] Repo scaffolding: README, LICENSE (Apache 2.0), CONTRIBUTING, issue templates
+- [x] Freeze tech stack for the month: Go, Postgres+pgvector, MCP
+- [x] Module layout sketch: `cmd/wormhole-server`, `cmd/wormhole-cli`, `internal/mcp`, `internal/core/{identity,tasks,events,kb,permissions}`, `internal/storage`, `internal/types`
+- [x] Convert RFC MVP scope into GitHub issues (10 filed: bootstrap, identity model, DB schema, MCP server, task CRUD, event bus, KB storage, semantic search, `wormhole join`, alpha demo)
+- [x] Sketch DB entities (no SQL yet) — `docs/db-entities.md`
+- [x] Docker-compose: Postgres + pgvector, single-service target (RFC §7.1, §11)
+- [x] Server skeleton (API process, config loading)
+- [x] MCP interface stub (empty tool registry, wired to server, `/mcp/tools` + `/healthz`)
+- [x] This ROADMAP.md
 
 ### Day 2 — 2026-07-08
 - [ ] DB schema: projects, agent identities, permissions tables (RFC §8.4)
