@@ -3,11 +3,12 @@ services:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
-      POSTGRES_USER: wormhole
-      POSTGRES_PASSWORD: wormhole
+      POSTGRES_USER: ${POSTGRES_USER:-wormhole}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wormhole}
       POSTGRES_DB: wormhole
     ports:
-      - "5432:5432"
+      # Dev-only defaults; override POSTGRES_USER/POSTGRES_PASSWORD for production
+      - "127.0.0.1:5432:5432"
     volumes:
       - wormhole_db_data:/var/lib/postgresql/data
 

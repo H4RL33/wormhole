@@ -10,7 +10,7 @@ type Config struct {
 func LoadConfig() Config {
 	return Config{
 		ListenAddr:  getEnv("WORMHOLE_LISTEN_ADDR", ":8080"),
-		DatabaseURL: getEnv("WORMHOLE_DATABASE_URL", "postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable"),
+		DatabaseURL: getEnv("WORMHOLE_DATABASE_URL", "postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=prefer"),
 	}
 }
 
