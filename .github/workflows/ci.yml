@@ -37,9 +37,6 @@ jobs:
       - name: Run migrations up
         run: migrate -path migrations -database "postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable" up
 
-      - name: Run migrations down
-        run: migrate -path migrations -database "postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable" down -all
-
       - name: Build
         run: go build ./...
 
@@ -47,4 +44,10 @@ jobs:
         run: go vet ./...
 
       - name: Test
+        env:
+          WORMHOLE_INTEGRATION_REQUIRED: "1"
+          WORMHOLE_DATABASE_URL: postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable
         run: go test ./...
+
+      - name: Verify migrations down
+        run: migrate -path migrations -database "postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable" down -all

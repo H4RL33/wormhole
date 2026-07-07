@@ -3,6 +3,9 @@ package identity
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"os"
+	"reflect"
 	"testing"
 
 	_ "github.com/lib/pq"
@@ -22,10 +25,27 @@ func testStore(t *testing.T) *Store {
 		t.Fatalf("open db: %v", err)
 	}
 	if err := db.PingContext(context.Background()); err != nil {
+		if os.Getenv("WORMHOLE_INTEGRATION_REQUIRED") == "1" {
+			t.Fatalf("postgres required but not reachable: %v", err)
+		}
 		t.Skipf("postgres not reachable (%v) — run `docker compose up -d db` and apply migrations before running this test", err)
 	}
 	t.Cleanup(func() { db.Close() })
 	return NewStore(db)
+}
+
+func createProject(t *testing.T, s *Store, name string) string {
+	t.Helper()
+	var id string
+	if err := s.db.QueryRow(`INSERT INTO projects (name, owner) VALUES ($1, $2) RETURNING id`, name, "harley").Scan(&id); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := s.db.Exec(`DELETE FROM projects WHERE id = $1`, id); err != nil {
+			t.Logf("cleanup: delete project %s: %v", id, err)
+		}
+	})
+	return id
 }
 
 func cleanupAgent(t *testing.T, s *Store, agentID string) {
@@ -43,8 +63,9 @@ func cleanupAgent(t *testing.T, s *Store, agentID string) {
 func TestRegister_WhoAmI_RoundTrip(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
+	projectID := createProject(t, s, "round-trip")
 
-	agent, token, err := s.Register(ctx, "harley", "claude", []string{"code_review", "write_kb"})
+	agent, token, err := s.Register(ctx, projectID, []string{"event.publish", "kb.write"}, "harley", "claude", []string{"code_review", "write_kb"})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -54,22 +75,28 @@ func TestRegister_WhoAmI_RoundTrip(t *testing.T) {
 		t.Fatal("Register returned empty token")
 	}
 
-	got, err := s.WhoAmI(ctx, token)
+	got, err := s.WhoAmI(ctx, projectID, token)
 	if err != nil {
 		t.Fatalf("WhoAmI: %v", err)
 	}
 
-	if got.ID != agent.ID {
-		t.Errorf("WhoAmI ID = %q, want %q", got.ID, agent.ID)
+	if got.Agent.ID != agent.ID {
+		t.Errorf("WhoAmI ID = %q, want %q", got.Agent.ID, agent.ID)
 	}
-	if got.Owner != "harley" {
-		t.Errorf("WhoAmI Owner = %q, want %q", got.Owner, "harley")
+	if got.Agent.Owner != "harley" {
+		t.Errorf("WhoAmI Owner = %q, want %q", got.Agent.Owner, "harley")
 	}
-	if got.Model != "claude" {
-		t.Errorf("WhoAmI Model = %q, want %q", got.Model, "claude")
+	if got.Agent.Model != "claude" {
+		t.Errorf("WhoAmI Model = %q, want %q", got.Agent.Model, "claude")
 	}
-	if len(got.Capabilities) != 2 || got.Capabilities[0] != "code_review" || got.Capabilities[1] != "write_kb" {
-		t.Errorf("WhoAmI Capabilities = %v, want [code_review write_kb]", got.Capabilities)
+	if got.ProjectID != projectID {
+		t.Errorf("WhoAmI ProjectID = %q, want %q", got.ProjectID, projectID)
+	}
+	if !reflect.DeepEqual(got.Permissions, []string{"event.publish", "kb.write"}) {
+		t.Errorf("WhoAmI Permissions = %v, want [event.publish kb.write]", got.Permissions)
+	}
+	if !reflect.DeepEqual(got.Agent.Capabilities, []string{"code_review", "write_kb"}) {
+		t.Errorf("WhoAmI Capabilities = %v, want [code_review write_kb]", got.Agent.Capabilities)
 	}
 }
 
@@ -79,19 +106,33 @@ func TestRegister_WhoAmI_RoundTrip(t *testing.T) {
 func TestRegister_CapabilitiesEmpty(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
+	projectID := createProject(t, s, "empty-capabilities")
 
-	agent, token, err := s.Register(ctx, "harley", "codex", nil)
+	agent, token, err := s.Register(ctx, projectID, []string{}, "harley", "codex", nil)
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	cleanupAgent(t, s, agent.ID)
 
-	got, err := s.WhoAmI(ctx, token)
+	got, err := s.WhoAmI(ctx, projectID, token)
 	if err != nil {
 		t.Fatalf("WhoAmI: %v", err)
 	}
-	if len(got.Capabilities) != 0 {
-		t.Errorf("WhoAmI Capabilities = %v, want empty", got.Capabilities)
+	if len(got.Agent.Capabilities) != 0 {
+		t.Errorf("WhoAmI Capabilities = %v, want empty", got.Agent.Capabilities)
+	}
+}
+
+func TestRegister_RequiresProjectAndExplicitPermissions(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "required-scope")
+
+	if _, _, err := s.Register(ctx, "", []string{"kb.read"}, "harley", "codex", nil); !errors.Is(err, ErrInvalidScope) {
+		t.Errorf("Register(empty project) error = %v, want ErrInvalidScope", err)
+	}
+	if _, _, err := s.Register(ctx, projectID, nil, "harley", "codex", nil); !errors.Is(err, ErrInvalidScope) {
+		t.Errorf("Register(nil permissions) error = %v, want ErrInvalidScope", err)
 	}
 }
 
@@ -101,7 +142,7 @@ func TestWhoAmI_ForgedTokenRejected(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	_, err := s.WhoAmI(ctx, "0000000000000000000000000000000000000000000000000000000000000000")
+	_, err := s.WhoAmI(ctx, "00000000-0000-0000-0000-000000000000", "0000000000000000000000000000000000000000000000000000000000000000")
 	if err != ErrInvalidToken {
 		t.Errorf("WhoAmI(forged) error = %v, want ErrInvalidToken", err)
 	}
@@ -112,7 +153,7 @@ func TestWhoAmI_EmptyTokenRejected(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	_, err := s.WhoAmI(ctx, "")
+	_, err := s.WhoAmI(ctx, "00000000-0000-0000-0000-000000000000", "")
 	if err != ErrInvalidToken {
 		t.Errorf("WhoAmI(\"\") error = %v, want ErrInvalidToken", err)
 	}
@@ -124,8 +165,9 @@ func TestWhoAmI_EmptyTokenRejected(t *testing.T) {
 func TestWhoAmI_TamperedTokenRejected(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
+	projectID := createProject(t, s, "tampered")
 
-	agent, token, err := s.Register(ctx, "harley", "claude", nil)
+	agent, token, err := s.Register(ctx, projectID, []string{"kb.read"}, "harley", "claude", nil)
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -138,7 +180,7 @@ func TestWhoAmI_TamperedTokenRejected(t *testing.T) {
 		tampered[0] = 'a'
 	}
 
-	_, err = s.WhoAmI(ctx, string(tampered))
+	_, err = s.WhoAmI(ctx, projectID, string(tampered))
 	if err != ErrInvalidToken {
 		t.Errorf("WhoAmI(tampered) error = %v, want ErrInvalidToken", err)
 	}
@@ -150,39 +192,82 @@ func TestWhoAmI_TamperedTokenRejected(t *testing.T) {
 func TestWhoAmI_ScopedToOwnAgent(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
+	projectID := createProject(t, s, "agents")
 
-	agentA, tokenA, err := s.Register(ctx, "harley", "claude", []string{"a"})
+	agentA, tokenA, err := s.Register(ctx, projectID, []string{"kb.read"}, "harley", "claude", []string{"a"})
 	if err != nil {
 		t.Fatalf("Register A: %v", err)
 	}
 	cleanupAgent(t, s, agentA.ID)
 
-	agentB, tokenB, err := s.Register(ctx, "harley", "codex", []string{"b"})
+	agentB, tokenB, err := s.Register(ctx, projectID, []string{"kb.write"}, "harley", "codex", []string{"b"})
 	if err != nil {
 		t.Fatalf("Register B: %v", err)
 	}
 	cleanupAgent(t, s, agentB.ID)
 
-	gotA, err := s.WhoAmI(ctx, tokenA)
+	gotA, err := s.WhoAmI(ctx, projectID, tokenA)
 	if err != nil {
 		t.Fatalf("WhoAmI(tokenA): %v", err)
 	}
-	if gotA.ID != agentA.ID {
-		t.Errorf("WhoAmI(tokenA).ID = %q, want %q", gotA.ID, agentA.ID)
+	if gotA.Agent.ID != agentA.ID {
+		t.Errorf("WhoAmI(tokenA).ID = %q, want %q", gotA.Agent.ID, agentA.ID)
 	}
-	if gotA.ID == agentB.ID {
+	if gotA.Agent.ID == agentB.ID {
 		t.Error("WhoAmI(tokenA) resolved to agent B — cross-identity leakage")
 	}
 
-	gotB, err := s.WhoAmI(ctx, tokenB)
+	gotB, err := s.WhoAmI(ctx, projectID, tokenB)
 	if err != nil {
 		t.Fatalf("WhoAmI(tokenB): %v", err)
 	}
-	if gotB.ID != agentB.ID {
-		t.Errorf("WhoAmI(tokenB).ID = %q, want %q", gotB.ID, agentB.ID)
+	if gotB.Agent.ID != agentB.ID {
+		t.Errorf("WhoAmI(tokenB).ID = %q, want %q", gotB.Agent.ID, agentB.ID)
 	}
-	if gotB.ID == agentA.ID {
+	if gotB.Agent.ID == agentA.ID {
 		t.Error("WhoAmI(tokenB) resolved to agent A — cross-identity leakage")
+	}
+}
+
+func TestWhoAmI_RejectsSameAgentTokenInDifferentProject(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectA := createProject(t, s, "project-a")
+	projectB := createProject(t, s, "project-b")
+
+	agent, tokenA, err := s.Register(ctx, projectA, []string{"kb.read"}, "harley", "claude", nil)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	cleanupAgent(t, s, agent.ID)
+	tokenB, err := s.IssueToken(ctx, agent.ID, projectB, []string{"kb.write"})
+	if err != nil {
+		t.Fatalf("IssueToken: %v", err)
+	}
+
+	if _, err := s.WhoAmI(ctx, projectB, tokenA); !errors.Is(err, ErrInvalidToken) {
+		t.Errorf("WhoAmI(projectB, tokenA) error = %v, want ErrInvalidToken", err)
+	}
+	if _, err := s.WhoAmI(ctx, projectA, tokenB); !errors.Is(err, ErrInvalidToken) {
+		t.Errorf("WhoAmI(projectA, tokenB) error = %v, want ErrInvalidToken", err)
+	}
+
+	scopeA, err := s.WhoAmI(ctx, projectA, tokenA)
+	if err != nil {
+		t.Fatalf("WhoAmI(projectA, tokenA): %v", err)
+	}
+	scopeB, err := s.WhoAmI(ctx, projectB, tokenB)
+	if err != nil {
+		t.Fatalf("WhoAmI(projectB, tokenB): %v", err)
+	}
+	if scopeA.Agent.ID != scopeB.Agent.ID {
+		t.Errorf("agent IDs differ: %q != %q", scopeA.Agent.ID, scopeB.Agent.ID)
+	}
+	if !reflect.DeepEqual(scopeA.Permissions, []string{"kb.read"}) {
+		t.Errorf("project A permissions = %v, want [kb.read]", scopeA.Permissions)
+	}
+	if !reflect.DeepEqual(scopeB.Permissions, []string{"kb.write"}) {
+		t.Errorf("project B permissions = %v, want [kb.write]", scopeB.Permissions)
 	}
 }
 
@@ -192,8 +277,9 @@ func TestWhoAmI_ScopedToOwnAgent(t *testing.T) {
 func TestRegister_TokenHashNotReversible(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
+	projectID := createProject(t, s, "hash")
 
-	agent, token, err := s.Register(ctx, "harley", "claude", nil)
+	agent, token, err := s.Register(ctx, projectID, []string{"kb.read"}, "harley", "claude", nil)
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
