@@ -65,7 +65,7 @@ func TestRegister_WhoAmI_RoundTrip(t *testing.T) {
 	ctx := context.Background()
 	projectID := createProject(t, s, "round-trip")
 
-	agent, token, err := s.Register(ctx, projectID, []string{"event.publish", "kb.write"}, "harley", "claude", []string{"code_review", "write_kb"})
+	agent, _, token, err := s.Register(ctx, projectID, []string{"event.publish", "kb.write"}, "harley", "claude", []string{"code_review", "write_kb"}, nil, nil)
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestRegister_CapabilitiesEmpty(t *testing.T) {
 	ctx := context.Background()
 	projectID := createProject(t, s, "empty-capabilities")
 
-	agent, token, err := s.Register(ctx, projectID, []string{}, "harley", "codex", nil)
+	agent, _, token, err := s.Register(ctx, projectID, []string{}, "harley", "codex", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -128,10 +128,10 @@ func TestRegister_RequiresProjectAndExplicitPermissions(t *testing.T) {
 	ctx := context.Background()
 	projectID := createProject(t, s, "required-scope")
 
-	if _, _, err := s.Register(ctx, "", []string{"kb.read"}, "harley", "codex", nil); !errors.Is(err, ErrInvalidScope) {
+	if _, _, _, err := s.Register(ctx, "", []string{"kb.read"}, "harley", "codex", nil, nil, nil); !errors.Is(err, ErrInvalidScope) {
 		t.Errorf("Register(empty project) error = %v, want ErrInvalidScope", err)
 	}
-	if _, _, err := s.Register(ctx, projectID, nil, "harley", "codex", nil); !errors.Is(err, ErrInvalidScope) {
+	if _, _, _, err := s.Register(ctx, projectID, nil, "harley", "codex", nil, nil, nil); !errors.Is(err, ErrInvalidScope) {
 		t.Errorf("Register(nil permissions) error = %v, want ErrInvalidScope", err)
 	}
 }
@@ -167,7 +167,7 @@ func TestWhoAmI_TamperedTokenRejected(t *testing.T) {
 	ctx := context.Background()
 	projectID := createProject(t, s, "tampered")
 
-	agent, token, err := s.Register(ctx, projectID, []string{"kb.read"}, "harley", "claude", nil)
+	agent, _, token, err := s.Register(ctx, projectID, []string{"kb.read"}, "harley", "claude", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -194,13 +194,13 @@ func TestWhoAmI_ScopedToOwnAgent(t *testing.T) {
 	ctx := context.Background()
 	projectID := createProject(t, s, "agents")
 
-	agentA, tokenA, err := s.Register(ctx, projectID, []string{"kb.read"}, "harley", "claude", []string{"a"})
+	agentA, _, tokenA, err := s.Register(ctx, projectID, []string{"kb.read"}, "harley", "claude", []string{"a"}, nil, nil)
 	if err != nil {
 		t.Fatalf("Register A: %v", err)
 	}
 	cleanupAgent(t, s, agentA.ID)
 
-	agentB, tokenB, err := s.Register(ctx, projectID, []string{"kb.write"}, "harley", "codex", []string{"b"})
+	agentB, _, tokenB, err := s.Register(ctx, projectID, []string{"kb.write"}, "harley", "codex", []string{"b"}, nil, nil)
 	if err != nil {
 		t.Fatalf("Register B: %v", err)
 	}
@@ -235,7 +235,7 @@ func TestWhoAmI_RejectsSameAgentTokenInDifferentProject(t *testing.T) {
 	projectA := createProject(t, s, "project-a")
 	projectB := createProject(t, s, "project-b")
 
-	agent, tokenA, err := s.Register(ctx, projectA, []string{"kb.read"}, "harley", "claude", nil)
+	agent, _, tokenA, err := s.Register(ctx, projectA, []string{"kb.read"}, "harley", "claude", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -279,7 +279,7 @@ func TestRegister_TokenHashNotReversible(t *testing.T) {
 	ctx := context.Background()
 	projectID := createProject(t, s, "hash")
 
-	agent, token, err := s.Register(ctx, projectID, []string{"kb.read"}, "harley", "claude", nil)
+	agent, _, token, err := s.Register(ctx, projectID, []string{"kb.read"}, "harley", "claude", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -296,5 +296,84 @@ func TestRegister_TokenHashNotReversible(t *testing.T) {
 	}
 	if storedHash == "" {
 		t.Error("stored token_hash is empty")
+	}
+}
+
+// TestRegister_IssuesPassport is the roadmap Day 4 "passport issuance on
+// registration" requirement: registering an agent must also create its
+// passport for that project, carrying the declared repositories and roles
+// (RFC-0001 §8.4).
+func TestRegister_IssuesPassport(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "passport-issuance")
+
+	agent, passport, _, err := s.Register(ctx, projectID, []string{"kb.read"}, "harley", "claude",
+		[]string{"code_review"}, []string{"github.com/acme/backend"}, []string{"contributor"})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	cleanupAgent(t, s, agent.ID)
+
+	if passport.ID == "" {
+		t.Fatal("Register returned passport with empty ID")
+	}
+	if passport.AgentID != agent.ID {
+		t.Errorf("Passport.AgentID = %q, want %q", passport.AgentID, agent.ID)
+	}
+	if passport.ProjectID != projectID {
+		t.Errorf("Passport.ProjectID = %q, want %q", passport.ProjectID, projectID)
+	}
+	if !reflect.DeepEqual(passport.Repositories, []string{"github.com/acme/backend"}) {
+		t.Errorf("Passport.Repositories = %v, want [github.com/acme/backend]", passport.Repositories)
+	}
+	if !reflect.DeepEqual(passport.Roles, []string{"contributor"}) {
+		t.Errorf("Passport.Roles = %v, want [contributor]", passport.Roles)
+	}
+	if passport.IssuedAt.IsZero() {
+		t.Error("Passport.IssuedAt is zero")
+	}
+}
+
+// TestRegister_PassportRepositoriesRolesNilBecomeEmpty covers the
+// nil-repositories/nil-roles edge case, mirroring the existing
+// nil-capabilities handling.
+func TestRegister_PassportRepositoriesRolesNilBecomeEmpty(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "passport-nil-fields")
+
+	agent, passport, _, err := s.Register(ctx, projectID, []string{"kb.read"}, "harley", "codex", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	cleanupAgent(t, s, agent.ID)
+
+	if len(passport.Repositories) != 0 {
+		t.Errorf("Passport.Repositories = %v, want empty", passport.Repositories)
+	}
+	if len(passport.Roles) != 0 {
+		t.Errorf("Passport.Roles = %v, want empty", passport.Roles)
+	}
+}
+
+// TestIssuePassport_DuplicateRejected: a second passport for the same
+// agent+project pair must be rejected — the passports table's
+// UNIQUE(agent_id, project_id) constraint is the source of truth, and
+// IssuePassport must surface it as ErrPassportExists, not a raw SQL error.
+func TestIssuePassport_DuplicateRejected(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "passport-duplicate")
+
+	agent, _, _, err := s.Register(ctx, projectID, []string{"kb.read"}, "harley", "claude", nil, nil, []string{"contributor"})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	cleanupAgent(t, s, agent.ID)
+
+	_, err = s.IssuePassport(ctx, agent.ID, projectID, nil, []string{"reviewer"})
+	if !errors.Is(err, ErrPassportExists) {
+		t.Errorf("IssuePassport(duplicate) error = %v, want ErrPassportExists", err)
 	}
 }
