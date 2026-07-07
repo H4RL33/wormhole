@@ -41,9 +41,9 @@ Boundary days (6, 12, 18) carry over: prior milestone's review/demo plus next mi
 - [x] Row-level project scoping baked into schema from day one (RFC §13 multi-tenancy) — RLS policies on `passports`/`permissions`
 
 ### Day 3 — 2026-07-09
-- [ ] Agent identity service: register, token issuance
-- [ ] `wormhole.agent.whoami` logic (identity resolution from token)
-- [ ] Unit tests: identity forgery rejected, scoped-token boundaries hold
+- [x] Agent identity service: register, token issuance — `internal/core/identity/identity.go`, `agent_tokens` table (`migrations/000002_agent_tokens.*.sql`)
+- [x] `wormhole.agent.whoami` logic (identity resolution from token) — `Store.WhoAmI`
+- [x] Unit tests: identity forgery rejected, scoped-token boundaries hold — `internal/core/identity/identity_test.go` (7 tests, all passing against real Postgres)
 
 ### Day 4 — 2026-07-10
 - [ ] Passport object model (RFC §8.4): owner, model, capabilities, repositories, roles
