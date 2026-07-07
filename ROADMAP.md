@@ -46,9 +46,9 @@ Boundary days (6, 12, 18) carry over: prior milestone's review/demo plus next mi
 - [x] DB-backed tests: forgery/tamper/hash protection, cross-agent isolation, cross-project rejection, permission-scope preservation — `internal/core/identity/identity_test.go`
 
 ### Day 4 — 2026-07-10
-- [ ] Passport object model (RFC §8.4): owner, model, capabilities, repositories, roles
-- [ ] Passport issuance on registration
-- [ ] Audit trail: append-only action log per identity
+- [x] Passport object model (RFC §8.4): owner, model, capabilities, repositories, roles — `internal/core/identity/identity.go` (`Passport` struct; owner/model/capabilities already on `Agent`, repositories/roles on `Passport`)
+- [x] Passport issuance on registration — `Store.Register` issues agent + passport + token in one transaction; `Store.IssuePassport` for standalone issuance
+- [x] Audit trail: append-only action log per identity — `audit_log` table (`migrations/000003_audit_trail.*.sql`), `Store.RecordAction`/`Store.ListAuditTrail`, wired into `Register`/`IssueToken`/`IssuePassport`
 
 ### Day 5 — 2026-07-11
 - [ ] Wire MCP tools: `wormhole.agent.register`, `wormhole.agent.whoami`
