@@ -60,6 +60,23 @@ type Passport struct {
 	IssuedAt     time.Time
 }
 
+// AuditEntry is one append-only record in an identity's audit trail
+// (RFC-0001 §8.4).
+type AuditEntry struct {
+	ID        string
+	AgentID   string
+	ProjectID string
+	Action    string
+	CreatedAt time.Time
+}
+
+// Audit action names recorded by the identity service.
+const (
+	ActionAgentRegistered = "agent.registered"
+	ActionTokenIssued     = "token.issued"
+	ActionPassportIssued  = "passport.issued"
+)
+
 type Store struct {
 	db *sql.DB
 }
@@ -105,10 +122,16 @@ func (s *Store) Register(ctx context.Context, projectID string, permissions []st
 	if err != nil {
 		return Agent{}, Passport{}, "", fmt.Errorf("identity: insert agent: %w", err)
 	}
+	if _, err := recordAction(ctx, tx, agent.ID, projectID, ActionAgentRegistered); err != nil {
+		return Agent{}, Passport{}, "", fmt.Errorf("identity: record audit entry: %w", err)
+	}
 
 	passport, err := issuePassport(ctx, tx, agent.ID, projectID, repositories, roles)
 	if err != nil {
 		return Agent{}, Passport{}, "", fmt.Errorf("identity: issue passport: %w", err)
+	}
+	if _, err := recordAction(ctx, tx, agent.ID, projectID, ActionPassportIssued); err != nil {
+		return Agent{}, Passport{}, "", fmt.Errorf("identity: record audit entry: %w", err)
 	}
 
 	permissionsJSON, err := json.Marshal(permissions)
@@ -120,6 +143,9 @@ func (s *Store) Register(ctx context.Context, projectID string, permissions []st
 		agent.ID, projectID, permissionsJSON, tokenHash,
 	); err != nil {
 		return Agent{}, Passport{}, "", fmt.Errorf("identity: insert token: %w", err)
+	}
+	if _, err := recordAction(ctx, tx, agent.ID, projectID, ActionTokenIssued); err != nil {
+		return Agent{}, Passport{}, "", fmt.Errorf("identity: record audit entry: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -138,13 +164,69 @@ func (s *Store) Register(ctx context.Context, projectID string, permissions []st
 // never as an error. A second passport for the same agent+project pair
 // is rejected — passports are append-only.
 func (s *Store) IssuePassport(ctx context.Context, agentID, projectID string, repositories, roles []string) (Passport, error) {
-	return issuePassport(ctx, s.db, agentID, projectID, repositories, roles)
+	passport, err := issuePassport(ctx, s.db, agentID, projectID, repositories, roles)
+	if err != nil {
+		return Passport{}, err
+	}
+	if _, err := recordAction(ctx, s.db, agentID, projectID, ActionPassportIssued); err != nil {
+		return Passport{}, fmt.Errorf("identity: record audit entry: %w", err)
+	}
+	return passport, nil
 }
 
-// dbtx is satisfied by both *sql.DB and *sql.Tx, letting issuePassport run
-// standalone (Store.IssuePassport) or inside Register's transaction.
+// RecordAction appends one entry to agentID's audit trail for projectID.
+func (s *Store) RecordAction(ctx context.Context, agentID, projectID, action string) (AuditEntry, error) {
+	return recordAction(ctx, s.db, agentID, projectID, action)
+}
+
+func recordAction(ctx context.Context, db dbtx, agentID, projectID, action string) (AuditEntry, error) {
+	var entry AuditEntry
+	err := db.QueryRowContext(ctx,
+		`INSERT INTO audit_log (agent_id, project_id, action) VALUES ($1, $2, $3)
+		 RETURNING id, agent_id, project_id, action, created_at`,
+		agentID, projectID, action,
+	).Scan(&entry.ID, &entry.AgentID, &entry.ProjectID, &entry.Action, &entry.CreatedAt)
+	if err != nil {
+		return AuditEntry{}, fmt.Errorf("identity: insert audit entry: %w", err)
+	}
+	return entry, nil
+}
+
+// ListAuditTrail returns agentID's audit trail for projectID, oldest
+// first.
+func (s *Store) ListAuditTrail(ctx context.Context, agentID, projectID string) ([]AuditEntry, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, agent_id, project_id, action, created_at
+		 FROM audit_log
+		 WHERE agent_id = $1 AND project_id = $2
+		 ORDER BY created_at ASC`,
+		agentID, projectID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("identity: list audit trail: %w", err)
+	}
+	defer rows.Close()
+
+	entries := []AuditEntry{}
+	for rows.Next() {
+		var entry AuditEntry
+		if err := rows.Scan(&entry.ID, &entry.AgentID, &entry.ProjectID, &entry.Action, &entry.CreatedAt); err != nil {
+			return nil, fmt.Errorf("identity: scan audit entry: %w", err)
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("identity: iterate audit trail: %w", err)
+	}
+	return entries, nil
+}
+
+// dbtx is satisfied by both *sql.DB and *sql.Tx, letting issuePassport and
+// recordAction run standalone (Store methods) or inside Register's
+// transaction.
 type dbtx interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
 func issuePassport(ctx context.Context, db dbtx, agentID, projectID string, repositories, roles []string) (Passport, error) {
@@ -203,6 +285,9 @@ func (s *Store) IssueToken(ctx context.Context, agentID, projectID string, permi
 		agentID, projectID, permissionsJSON, tokenHash,
 	); err != nil {
 		return "", fmt.Errorf("identity: insert token: %w", err)
+	}
+	if _, err := recordAction(ctx, s.db, agentID, projectID, ActionTokenIssued); err != nil {
+		return "", fmt.Errorf("identity: record audit entry: %w", err)
 	}
 	return rawToken, nil
 }

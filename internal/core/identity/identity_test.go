@@ -377,3 +377,89 @@ func TestIssuePassport_DuplicateRejected(t *testing.T) {
 		t.Errorf("IssuePassport(duplicate) error = %v, want ErrPassportExists", err)
 	}
 }
+
+// TestRegister_RecordsAuditTrail: registering an agent must leave an
+// append-only audit trail entry for the registration itself, the passport
+// issuance, and the token issuance (RFC-0001 §8.4 Audit Trail).
+func TestRegister_RecordsAuditTrail(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "audit-trail")
+
+	agent, _, _, err := s.Register(ctx, projectID, []string{"kb.read"}, "harley", "claude", nil, nil, []string{"contributor"})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	cleanupAgent(t, s, agent.ID)
+
+	entries, err := s.ListAuditTrail(ctx, agent.ID, projectID)
+	if err != nil {
+		t.Fatalf("ListAuditTrail: %v", err)
+	}
+
+	wantActions := []string{ActionAgentRegistered, ActionPassportIssued, ActionTokenIssued}
+	if len(entries) != len(wantActions) {
+		t.Fatalf("ListAuditTrail returned %d entries, want %d: %+v", len(entries), len(wantActions), entries)
+	}
+	for i, entry := range entries {
+		if entry.Action != wantActions[i] {
+			t.Errorf("entries[%d].Action = %q, want %q", i, entry.Action, wantActions[i])
+		}
+		if entry.AgentID != agent.ID {
+			t.Errorf("entries[%d].AgentID = %q, want %q", i, entry.AgentID, agent.ID)
+		}
+		if entry.ProjectID != projectID {
+			t.Errorf("entries[%d].ProjectID = %q, want %q", i, entry.ProjectID, projectID)
+		}
+	}
+}
+
+// TestIssueToken_RecordsAuditTrail: a separately issued token (IssueToken,
+// outside Register) must also append to the trail.
+func TestIssueToken_RecordsAuditTrail(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectA := createProject(t, s, "audit-issue-token-a")
+	projectB := createProject(t, s, "audit-issue-token-b")
+
+	agent, _, _, err := s.Register(ctx, projectA, []string{"kb.read"}, "harley", "claude", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	cleanupAgent(t, s, agent.ID)
+
+	if _, err := s.IssueToken(ctx, agent.ID, projectB, []string{"kb.write"}); err != nil {
+		t.Fatalf("IssueToken: %v", err)
+	}
+
+	entries, err := s.ListAuditTrail(ctx, agent.ID, projectB)
+	if err != nil {
+		t.Fatalf("ListAuditTrail: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Action != ActionTokenIssued {
+		t.Fatalf("ListAuditTrail(projectB) = %+v, want single %q entry", entries, ActionTokenIssued)
+	}
+}
+
+// TestListAuditTrail_ScopedToProject: audit entries for one project must
+// not leak into another project's trail for the same agent.
+func TestListAuditTrail_ScopedToProject(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectA := createProject(t, s, "audit-scope-a")
+	projectB := createProject(t, s, "audit-scope-b")
+
+	agent, _, _, err := s.Register(ctx, projectA, []string{"kb.read"}, "harley", "claude", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	cleanupAgent(t, s, agent.ID)
+
+	entriesB, err := s.ListAuditTrail(ctx, agent.ID, projectB)
+	if err != nil {
+		t.Fatalf("ListAuditTrail(projectB): %v", err)
+	}
+	if len(entriesB) != 0 {
+		t.Errorf("ListAuditTrail(projectB) = %+v, want empty (registration was under projectA)", entriesB)
+	}
+}
