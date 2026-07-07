@@ -164,13 +164,24 @@ func (s *Store) Register(ctx context.Context, projectID string, permissions []st
 // never as an error. A second passport for the same agent+project pair
 // is rejected — passports are append-only.
 func (s *Store) IssuePassport(ctx context.Context, agentID, projectID string, repositories, roles []string) (Passport, error) {
-	passport, err := issuePassport(ctx, s.db, agentID, projectID, repositories, roles)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Passport{}, fmt.Errorf("identity: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	passport, err := issuePassport(ctx, tx, agentID, projectID, repositories, roles)
 	if err != nil {
 		return Passport{}, err
 	}
-	if _, err := recordAction(ctx, s.db, agentID, projectID, ActionPassportIssued); err != nil {
+	if _, err := recordAction(ctx, tx, agentID, projectID, ActionPassportIssued); err != nil {
 		return Passport{}, fmt.Errorf("identity: record audit entry: %w", err)
 	}
+
+	if err := tx.Commit(); err != nil {
+		return Passport{}, fmt.Errorf("identity: commit: %w", err)
+	}
+
 	return passport, nil
 }
 
@@ -280,15 +291,27 @@ func (s *Store) IssueToken(ctx context.Context, agentID, projectID string, permi
 	if err != nil {
 		return "", err
 	}
-	if _, err := s.db.ExecContext(ctx,
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("identity: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO agent_tokens (agent_id, project_id, permissions, token_hash) VALUES ($1, $2, $3, $4)`,
 		agentID, projectID, permissionsJSON, tokenHash,
 	); err != nil {
 		return "", fmt.Errorf("identity: insert token: %w", err)
 	}
-	if _, err := recordAction(ctx, s.db, agentID, projectID, ActionTokenIssued); err != nil {
+	if _, err := recordAction(ctx, tx, agentID, projectID, ActionTokenIssued); err != nil {
 		return "", fmt.Errorf("identity: record audit entry: %w", err)
 	}
+
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("identity: commit: %w", err)
+	}
+
 	return rawToken, nil
 }
 
