@@ -36,9 +36,9 @@ Boundary days (6, 12, 18) carry over: prior milestone's review/demo plus next mi
 - [x] This ROADMAP.md
 
 ### Day 2 — 2026-07-08
-- [ ] DB schema: projects, agent identities, permissions tables (RFC §8.4)
-- [ ] Migration tooling setup (up/down migrations, applied in CI)
-- [ ] Row-level project scoping baked into schema from day one (RFC §13 multi-tenancy)
+- [x] DB schema: projects, agents, passports, permissions tables (RFC §8.4) — `migrations/000001_init_schema.up.sql`
+- [x] Migration tooling setup (golang-migrate, up/down verified against real Postgres, applied in CI — `.github/workflows/ci.yml`)
+- [x] Row-level project scoping baked into schema from day one (RFC §13 multi-tenancy) — RLS policies on `passports`/`permissions`
 
 ### Day 3 — 2026-07-09
 - [ ] Agent identity service: register, token issuance

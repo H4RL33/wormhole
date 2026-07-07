@@ -1,0 +1,4 @@
+DROP TABLE IF EXISTS permissions;
+DROP TABLE IF EXISTS passports;
+DROP TABLE IF EXISTS agents;
+DROP TABLE IF EXISTS projects;

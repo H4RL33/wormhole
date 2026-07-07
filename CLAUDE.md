@@ -114,3 +114,13 @@ Run silently before sending:
 - [ ] Inference vs documented fact distinguished.
 - [ ] Response answers what user asked this turn, not tangent.
 - [ ] Tone matches senior design review, not tutorial or pitch.
+
+---
+
+## 8. Execution Mode: Subagent-Driven Development, Always
+
+Every change in this repo, no matter how small (typo, one-line fix, single config value), goes through `superpowers:subagent-driven-development`. No exceptions for "smallest change" — the point is keeping main-thread context clear across a long-running 24-day build, not judging task size.
+
+- Dispatch implementation work to Haiku-tier subagents by default.
+- Escalate to Sonnet only for periodic checks: reviewing subagent output, resolving ambiguity, architectural calls the RFC doesn't settle.
+- Main thread orchestrates and reviews; it does not do the edit itself, even for a one-liner.
