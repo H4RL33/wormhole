@@ -61,6 +61,18 @@ func createAgent(t *testing.T, s *Store) string {
 	return id
 }
 
+func createPassport(t *testing.T, s *Store, agentID, projectID string) {
+	t.Helper()
+	if _, err := s.db.Exec(`INSERT INTO passports (agent_id, project_id) VALUES ($1, $2)`, agentID, projectID); err != nil {
+		t.Fatalf("create passport: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := s.db.Exec(`DELETE FROM passports WHERE agent_id = $1 AND project_id = $2`, agentID, projectID); err != nil {
+			t.Logf("cleanup: delete passport for agent %s in project %s: %v", agentID, projectID, err)
+		}
+	})
+}
+
 func TestCreateChannel_Success(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -139,6 +151,7 @@ func TestPublishEvent_Success(t *testing.T) {
 	ctx := context.Background()
 	projectID := createProject(t, s, "publish-event-success")
 	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
 	channel, err := s.CreateChannel(ctx, projectID, "events-channel")
 	if err != nil {
 		t.Fatalf("CreateChannel: %v", err)
@@ -182,6 +195,7 @@ func TestPublishEvent_InvalidTypeRejected(t *testing.T) {
 	ctx := context.Background()
 	projectID := createProject(t, s, "publish-invalid-type")
 	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
 	channel, err := s.CreateChannel(ctx, projectID, "events-channel")
 	if err != nil {
 		t.Fatalf("CreateChannel: %v", err)
@@ -194,11 +208,53 @@ func TestPublishEvent_InvalidTypeRejected(t *testing.T) {
 	}
 }
 
+func TestPublishEvent_PassportRequired(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "publish-passport-required")
+	agentID := createAgent(t, s)
+	channel, err := s.CreateChannel(ctx, projectID, "events-channel")
+	if err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+
+	payload := json.RawMessage(`{"status":"success"}`)
+	_, err = s.PublishEvent(ctx, projectID, channel.ID, agentID, "task.status_changed", payload, nil)
+	if !errors.Is(err, ErrPassportNotFound) {
+		t.Fatalf("expected ErrPassportNotFound, got: %v", err)
+	}
+}
+
+func TestPublishEvent_CrossProjectAgentRejected(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID1 := createProject(t, s, "cross-project-1")
+	projectID2 := createProject(t, s, "cross-project-2")
+	agentID := createAgent(t, s)
+
+	// Agent has passport in project 1, but NOT in project 2
+	createPassport(t, s, agentID, projectID1)
+
+	// Create channel in project 2
+	channel, err := s.CreateChannel(ctx, projectID2, "events-channel")
+	if err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+
+	// Try to publish event to channel in project 2 with agentID that only has a passport in project 1
+	payload := json.RawMessage(`{"status":"success"}`)
+	_, err = s.PublishEvent(ctx, projectID2, channel.ID, agentID, "task.status_changed", payload, nil)
+	if !errors.Is(err, ErrPassportNotFound) {
+		t.Fatalf("expected ErrPassportNotFound, got: %v", err)
+	}
+}
+
 func TestListEvents_Scoping(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	projectID := createProject(t, s, "list-events-scoping")
 	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
 	channelA, err := s.CreateChannel(ctx, projectID, "channel-a")
 	if err != nil {
 		t.Fatalf("CreateChannel A: %v", err)

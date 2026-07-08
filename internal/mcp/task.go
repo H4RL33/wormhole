@@ -11,7 +11,7 @@ import (
 )
 
 // CreateTaskInput is the wormhole.task.create argument shape. Schema is
-// indicative per architecture.md M1 — frozen here at implementation time,
+// indicative per architecture.md M1: frozen here at implementation time,
 // not finalized by any RFC text.
 type CreateTaskInput struct {
 	Title        string     `json:"title"`

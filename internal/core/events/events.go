@@ -11,6 +11,7 @@ import (
 
 var ErrInvalidEventType = errors.New("events: invalid event type")
 var ErrChannelNotFound = errors.New("events: channel not found")
+var ErrPassportNotFound = errors.New("events: agent not registered or has no passport for this project")
 
 var AllowedEventTypes = map[string]bool{
 	"task.status_changed": true,
@@ -163,8 +164,16 @@ func (s *Store) PublishEvent(ctx context.Context, projectID, channelID, agentID,
 		return Event{}, fmt.Errorf("events: publish event: set project id: %w", err)
 	}
 
-	// Verify channel exists in this project
+	// Verify agent has a passport for this project
 	var dummy int
+	err = tx.QueryRowContext(ctx, "SELECT 1 FROM passports WHERE agent_id = $1 AND project_id = $2", agentID, projectID).Scan(&dummy)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Event{}, fmt.Errorf("events: publish event: agent not registered or has no passport for this project: %w", ErrPassportNotFound)
+	} else if err != nil {
+		return Event{}, fmt.Errorf("events: publish event: passport lookup: %w", err)
+	}
+
+	// Verify channel exists in this project
 	err = tx.QueryRowContext(ctx, "SELECT 1 FROM channels WHERE id = $1 AND project_id = $2", channelID, projectID).Scan(&dummy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Event{}, ErrChannelNotFound

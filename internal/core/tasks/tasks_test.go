@@ -15,8 +15,8 @@ import (
 )
 
 // testStore opens a real connection to the configured Postgres instance and
-// skips the test if it isn't reachable — these are integration tests against
-// real schema behavior, not mocks (mirrors internal/core/identity's pattern).
+// skips the test if it isn't reachable (these are integration tests against
+// real schema behavior, not mocks; mirrors internal/core/identity's pattern).
 func testStore(t *testing.T) *Store {
 	t.Helper()
 	cfg := types.LoadConfig()
@@ -28,7 +28,7 @@ func testStore(t *testing.T) *Store {
 		if os.Getenv("WORMHOLE_INTEGRATION_REQUIRED") == "1" {
 			t.Fatalf("postgres required but not reachable: %v", err)
 		}
-		t.Skipf("postgres not reachable (%v) — run `docker compose up -d db` and apply migrations before running this test", err)
+		t.Skipf("postgres not reachable (%v); run `docker compose up -d db` and apply migrations before running this test", err)
 	}
 	t.Cleanup(func() { db.Close() })
 	return NewStore(db)
