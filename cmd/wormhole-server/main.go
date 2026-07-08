@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/core/events"
+	"github.com/H4RL33/wormhole/internal/core/git"
 	"github.com/H4RL33/wormhole/internal/core/identity"
 	"github.com/H4RL33/wormhole/internal/core/tasks"
 	"github.com/H4RL33/wormhole/internal/mcp"
@@ -26,6 +27,7 @@ func main() {
 	identityStore := identity.NewStore(db)
 	eventsStore := events.NewStore(db)
 	tasksStore := tasks.NewStore(db, eventsStore)
+	gitStore := git.NewStore(db)
 
 	registry := mcp.NewRegistry()
 	registry.Register(mcp.RegisterAgentTool(identityStore))
@@ -37,6 +39,8 @@ func main() {
 	registry.Register(mcp.CreateChannelTool(eventsStore))
 	registry.Register(mcp.PostEventTool(eventsStore))
 	registry.Register(mcp.SubscribeChannelTool(eventsStore))
+	registry.Register(mcp.LinkCommitTool(gitStore))
+	registry.Register(mcp.RequestReviewTool(gitStore))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {

@@ -165,6 +165,7 @@ cmd/wormhole-server ──► internal/mcp (tool registry + auth boundary)
 | `internal/core/events` | Channels, append-only event log, typed event payloads | `internal/types`, stdlib |
 | `internal/core/kb` | KB articles, links, embeddings, compliance checks, semantic search | `internal/types`, stdlib |
 | `internal/core/permissions` | Permission resolution/enforcement helpers | `internal/types`, stdlib |
+| `internal/core/git` | Git integration pointers: commit links, review requests (manual-link only, RFC-0001 §8.6) | `internal/types`, stdlib |
 | `internal/storage` | DB connection only (`Open`) | `internal/types`, `lib/pq` |
 | `internal/types` | Config, shared plain types | stdlib only |
 
