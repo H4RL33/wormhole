@@ -22,10 +22,10 @@ type Handler func(ctx context.Context, scope *identity.AuthenticatedScope, proje
 // Tool is an MCP tool descriptor: name, docs, whether the auth middleware
 // must resolve a scope before dispatch, and the handler itself.
 type Tool struct {
-	Name         string
-	Description  string
-	RequiresAuth bool
-	Handler      Handler
+	Name         string  `json:"name"`
+	Description  string  `json:"description"`
+	RequiresAuth bool    `json:"requires_auth"`
+	Handler      Handler `json:"-"`
 }
 
 // Registry holds the set of MCP tools this server exposes. Empty at boot
