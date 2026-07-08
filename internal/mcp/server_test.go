@@ -30,7 +30,7 @@ func testIdentityStore(t *testing.T) *identity.Store {
 		if os.Getenv("WORMHOLE_INTEGRATION_REQUIRED") == "1" {
 			t.Fatalf("postgres required but not reachable: %v", err)
 		}
-		t.Skipf("postgres not reachable (%v) — run `docker compose up -d db` and apply migrations before running this test", err)
+		t.Skipf("postgres not reachable (%v); run `docker compose up -d db` and apply migrations before running this test", err)
 	}
 	t.Cleanup(func() { db.Close() })
 	return identity.NewStore(db)
@@ -154,5 +154,93 @@ func TestCallHandler_NoAuthRequiredDispatchesDirectly(t *testing.T) {
 	}
 	if !called {
 		t.Fatalf("handler was not called")
+	}
+}
+
+func TestToolsDiscoveryEndpoint(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(Tool{
+		Name:         "test.dummy.tool",
+		Description:  "A dummy tool for testing",
+		RequiresAuth: true,
+		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
+			return nil, nil
+		},
+	})
+
+	// 1. Test json.Marshal directly
+	tools := registry.List()
+	body, err := json.Marshal(tools)
+	if err != nil {
+		t.Fatalf("failed to marshal tools: %v", err)
+	}
+
+	var rawList []map[string]any
+	if err := json.Unmarshal(body, &rawList); err != nil {
+		t.Fatalf("failed to unmarshal marshaled tools: %v", err)
+	}
+
+	if len(rawList) != 1 {
+		t.Fatalf("got %d tools, want 1", len(rawList))
+	}
+
+	toolMap := rawList[0]
+	requiredKeys := []string{"name", "description", "requires_auth"}
+	for _, key := range requiredKeys {
+		if _, ok := toolMap[key]; !ok {
+			t.Errorf("missing key %q in serialized tool map", key)
+		}
+	}
+
+	forbiddenKeys := []string{"handler", "Handler"}
+	for _, key := range forbiddenKeys {
+		if _, ok := toolMap[key]; ok {
+			t.Errorf("forbidden key %q found in serialized tool map", key)
+		}
+	}
+
+	// 2. Test the HTTP handler logic matching the one in main.go
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tools := registry.List()
+		w.Header().Set("Content-Type", "application/json")
+		if len(tools) == 0 {
+			w.Write([]byte("[]"))
+			return
+		}
+		json.NewEncoder(w).Encode(tools)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/mcp/tools", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HTTP status: got %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	contentType := rec.Header().Get("Content-Type")
+	if contentType != "application/json" {
+		t.Errorf("Content-Type: got %q, want %q", contentType, "application/json")
+	}
+
+	var httpList []map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&httpList); err != nil {
+		t.Fatalf("failed to decode response body: %v", err)
+	}
+
+	if len(httpList) != 1 {
+		t.Fatalf("HTTP body got %d tools, want 1", len(httpList))
+	}
+
+	httpToolMap := httpList[0]
+	for _, key := range requiredKeys {
+		if _, ok := httpToolMap[key]; !ok {
+			t.Errorf("HTTP response missing key %q in tool map", key)
+		}
+	}
+	for _, key := range forbiddenKeys {
+		if _, ok := httpToolMap[key]; ok {
+			t.Errorf("HTTP response forbidden key %q found in tool map", key)
+		}
 	}
 }
