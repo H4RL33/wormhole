@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 	"time"
@@ -43,6 +44,7 @@ func main() {
 			w.Write([]byte("[]"))
 			return
 		}
+		json.NewEncoder(w).Encode(tools)
 	})
 	mux.HandleFunc("/mcp/tools/call", mcp.NewCallHandler(registry, identityStore))
 
