@@ -86,9 +86,9 @@ Boundary days (6, 12, 18) carry over: prior milestone's review/demo plus next mi
 - [x] `wormhole.git.link_commit`, `wormhole.git.request_review` (manual-link only, RFC §12 MVP note)
 
 ### Day 12 — 2026-07-18
-- [ ] M2 integration test: create task → assign → transition status → event appears on channel
-- [ ] M2 review/demo
-- [ ] Kick off M3: KB schema draft (atomic articles, links table, pgvector embeddings column)
+- [x] M2 integration test: create task → assign → transition status → event appears on channel
+- [x] M2 review/demo
+- [x] Kick off M3: KB schema draft (atomic articles, links table, pgvector embeddings column)
 
 ---
 
