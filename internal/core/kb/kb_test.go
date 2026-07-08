@@ -30,7 +30,7 @@ func testStore(t *testing.T) *Store {
 		t.Skipf("postgres not reachable (%v); run `docker compose up -d db` and apply migrations before running this test", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return NewStore(db, StubEmbedder{})
+	return NewStore(db, StubEmbedder{}, 0.85)
 }
 
 func createProject(t *testing.T, s *Store, name string) string {
@@ -532,7 +532,7 @@ func TestSearchArticles_CrossProjectIsolation(t *testing.T) {
 	}
 
 	// Using a restricted connection with project A context, search should return only project A articles.
-	restrictedStore := NewStore(restrictedDB, StubEmbedder{})
+	restrictedStore := NewStore(restrictedDB, StubEmbedder{}, 0.85)
 
 	resultsA, err := restrictedStore.SearchArticles(ctx, projectA, agentID, "body a", 10)
 	if err != nil {

@@ -29,7 +29,7 @@ func main() {
 	eventsStore := events.NewStore(db)
 	tasksStore := tasks.NewStore(db, eventsStore)
 	gitStore := git.NewStore(db)
-	kbStore := kb.NewStore(db, kb.StubEmbedder{})
+	kbStore := kb.NewStore(db, kb.StubEmbedder{}, cfg.KBDedupThreshold)
 
 	registry := mcp.NewRegistry()
 	registry.Register(mcp.RegisterAgentTool(identityStore))

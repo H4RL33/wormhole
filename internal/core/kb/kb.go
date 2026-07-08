@@ -92,12 +92,13 @@ func formatVectorLiteral(vec []float32) string {
 }
 
 type Store struct {
-	db       *sql.DB
-	embedder Embedder
+	db             *sql.DB
+	embedder       Embedder
+	dedupThreshold float64
 }
 
-func NewStore(db *sql.DB, embedder Embedder) *Store {
-	return &Store{db: db, embedder: embedder}
+func NewStore(db *sql.DB, embedder Embedder, dedupThreshold float64) *Store {
+	return &Store{db: db, embedder: embedder, dedupThreshold: dedupThreshold}
 }
 
 const articleColumns = `id, project_id, title, body, frontmatter, author_agent_id, created_at, updated_at`
