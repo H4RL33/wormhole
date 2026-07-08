@@ -59,7 +59,18 @@ const taskColumns = `id, project_id, parent_task_id, title, description, owner_a
 
 // Create inserts a new task, always starting at status "todo".
 func (s *Store) Create(ctx context.Context, projectID, title, description string, parentTaskID *string, priority int, dueBy *time.Time) (Task, error) {
-	row := s.db.QueryRowContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Task{}, fmt.Errorf("tasks: create: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// SET LOCAL wormhole.project_id = $1
+	if _, err := tx.ExecContext(ctx, "SELECT set_config('wormhole.project_id', $1, true)", projectID); err != nil {
+		return Task{}, fmt.Errorf("tasks: create: set project id: %w", err)
+	}
+
+	row := tx.QueryRowContext(ctx,
 		`INSERT INTO tasks (project_id, parent_task_id, title, description, priority, due_by) VALUES ($1, $2, $3, $4, $5, $6)
 		 RETURNING `+taskColumns,
 		projectID, parentTaskID, title, description, priority, dueBy,
@@ -68,12 +79,27 @@ func (s *Store) Create(ctx context.Context, projectID, title, description string
 	if err != nil {
 		return Task{}, fmt.Errorf("tasks: create: %w", err)
 	}
+
+	if err := tx.Commit(); err != nil {
+		return Task{}, fmt.Errorf("tasks: create: commit: %w", err)
+	}
 	return task, nil
 }
 
 // Assign sets a task's owner_agent_id.
 func (s *Store) Assign(ctx context.Context, projectID, taskID, ownerAgentID string) (Task, error) {
-	row := s.db.QueryRowContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Task{}, fmt.Errorf("tasks: assign: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// SET LOCAL wormhole.project_id = $1
+	if _, err := tx.ExecContext(ctx, "SELECT set_config('wormhole.project_id', $1, true)", projectID); err != nil {
+		return Task{}, fmt.Errorf("tasks: assign: set project id: %w", err)
+	}
+
+	row := tx.QueryRowContext(ctx,
 		`UPDATE tasks SET owner_agent_id = $1, updated_at = now() WHERE id = $2 AND project_id = $3
 		 RETURNING `+taskColumns,
 		ownerAgentID, taskID, projectID,
@@ -85,21 +111,35 @@ func (s *Store) Assign(ctx context.Context, projectID, taskID, ownerAgentID stri
 	if err != nil {
 		return Task{}, fmt.Errorf("tasks: assign: %w", err)
 	}
+
+	if err := tx.Commit(); err != nil {
+		return Task{}, fmt.Errorf("tasks: assign: commit: %w", err)
+	}
 	return task, nil
 }
 
 // List returns projectID's tasks, oldest first. A nil status returns tasks
 // of any status; a non-nil status filters to exactly that status.
 func (s *Store) List(ctx context.Context, projectID string, status *string) ([]Task, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("tasks: list: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// SET LOCAL wormhole.project_id = $1
+	if _, err := tx.ExecContext(ctx, "SELECT set_config('wormhole.project_id', $1, true)", projectID); err != nil {
+		return nil, fmt.Errorf("tasks: list: set project id: %w", err)
+	}
+
 	var rows *sql.Rows
-	var err error
 	if status != nil {
-		rows, err = s.db.QueryContext(ctx,
+		rows, err = tx.QueryContext(ctx,
 			`SELECT `+taskColumns+` FROM tasks WHERE project_id = $1 AND status = $2 ORDER BY created_at`,
 			projectID, *status,
 		)
 	} else {
-		rows, err = s.db.QueryContext(ctx,
+		rows, err = tx.QueryContext(ctx,
 			`SELECT `+taskColumns+` FROM tasks WHERE project_id = $1 ORDER BY created_at`,
 			projectID,
 		)
@@ -120,15 +160,30 @@ func (s *Store) List(ctx context.Context, projectID string, status *string) ([]T
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("tasks: list iterate: %w", err)
 	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("tasks: list: commit: %w", err)
+	}
 	return tasks, nil
 }
 
 // UpdateStatus moves a task to newStatus, rejecting any transition not in
 // validTransitions. On rejection, the row is left untouched.
 func (s *Store) UpdateStatus(ctx context.Context, projectID, taskID, newStatus string) (Task, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Task{}, fmt.Errorf("tasks: update status: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// SET LOCAL wormhole.project_id = $1
+	if _, err := tx.ExecContext(ctx, "SELECT set_config('wormhole.project_id', $1, true)", projectID); err != nil {
+		return Task{}, fmt.Errorf("tasks: update status: set project id: %w", err)
+	}
+
 	var currentStatus string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT status FROM tasks WHERE id = $1 AND project_id = $2`,
+	err = tx.QueryRowContext(ctx,
+		`SELECT status FROM tasks WHERE id = $1 AND project_id = $2 FOR UPDATE`,
 		taskID, projectID,
 	).Scan(&currentStatus)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -149,7 +204,7 @@ func (s *Store) UpdateStatus(ctx context.Context, projectID, taskID, newStatus s
 		return Task{}, ErrInvalidTransition
 	}
 
-	row := s.db.QueryRowContext(ctx,
+	row := tx.QueryRowContext(ctx,
 		`UPDATE tasks SET status = $1, updated_at = now() WHERE id = $2 AND project_id = $3
 		 RETURNING `+taskColumns,
 		newStatus, taskID, projectID,
@@ -160,6 +215,10 @@ func (s *Store) UpdateStatus(ctx context.Context, projectID, taskID, newStatus s
 	}
 	if err != nil {
 		return Task{}, fmt.Errorf("tasks: update status: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Task{}, fmt.Errorf("tasks: update status: commit: %w", err)
 	}
 	return task, nil
 }

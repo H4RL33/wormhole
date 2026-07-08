@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"net/url"
 	"os"
 	"testing"
 
@@ -274,5 +276,136 @@ func TestUpdateStatus_UnknownTaskReturnsNotFound(t *testing.T) {
 	_, err := s.UpdateStatus(ctx, projectID, "00000000-0000-0000-0000-000000000000", "wip")
 	if !errors.Is(err, ErrTaskNotFound) {
 		t.Errorf("UpdateStatus(unknown task) error = %v, want ErrTaskNotFound", err)
+	}
+}
+
+func TestRLSIsolation(t *testing.T) {
+	ownerStore := testStore(t)
+
+	roleName := "rls_test_user"
+	rolePassword := "rls_test_password"
+
+	// Ensure clean slate and cleanup afterwards
+	t.Cleanup(func() {
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE tasks FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE projects FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("DROP ROLE IF EXISTS %s", roleName))
+	})
+
+	_, err := ownerStore.db.Exec(fmt.Sprintf("DROP ROLE IF EXISTS %s", roleName))
+	if err != nil {
+		t.Fatalf("failed to drop pre-existing role: %v", err)
+	}
+
+	_, err = ownerStore.db.Exec(fmt.Sprintf("CREATE ROLE %s WITH LOGIN PASSWORD '%s'", roleName, rolePassword))
+	if err != nil {
+		t.Fatalf("failed to create role: %v", err)
+	}
+
+	_, err = ownerStore.db.Exec(fmt.Sprintf("GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE tasks, projects TO %s", roleName))
+	if err != nil {
+		t.Fatalf("failed to grant table privileges: %v", err)
+	}
+
+	cfg := types.LoadConfig()
+	u, err := url.Parse(cfg.DatabaseURL)
+	if err != nil {
+		t.Fatalf("failed to parse database URL: %v", err)
+	}
+	u.User = url.UserPassword(roleName, rolePassword)
+	restrictedDSN := u.String()
+
+	restrictedDb, err := sql.Open("postgres", restrictedDSN)
+	if err != nil {
+		t.Fatalf("failed to open restricted db connection: %v", err)
+	}
+	t.Cleanup(func() {
+		restrictedDb.Close()
+	})
+
+	if err := restrictedDb.PingContext(context.Background()); err != nil {
+		t.Fatalf("failed to ping restricted database: %v", err)
+	}
+
+	// Create two projects
+	projectAID := createProject(t, ownerStore, "Project A")
+	projectBID := createProject(t, ownerStore, "Project B")
+
+	// Insert task in Project A using owner connection
+	ctx := context.Background()
+	task, err := ownerStore.Create(ctx, projectAID, "Task in Project A", "RLS verification", nil, 1, nil)
+	if err != nil {
+		t.Fatalf("failed to create task in project A: %v", err)
+	}
+
+	// 1. Attempt to read Project A's task using the restricted connection without setting RLS context, verifying RLS blocks it.
+	var foundID string
+	err = restrictedDb.QueryRowContext(ctx, "SELECT id FROM tasks WHERE id = $1", task.ID).Scan(&foundID)
+	if err == nil {
+		t.Errorf("expected task to be hidden by RLS when no project context is set, but read ID: %s", foundID)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("unexpected error when querying task without project context: %v", err)
+	}
+
+	// 2. Attempt to read Project A's task using the restricted connection with RLS context set, verifying it succeeds.
+	restrictedStore := NewStore(restrictedDb)
+	tasks, err := restrictedStore.List(ctx, projectAID, nil)
+	if err != nil {
+		t.Fatalf("failed to list tasks under restricted store with correct context: %v", err)
+	}
+	found := false
+	for _, tsk := range tasks {
+		if tsk.ID == task.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected task %s to be visible with correct project context, but it was not found in the list", task.ID)
+	}
+
+	// Test manually within a transaction setting the correct context
+	tx, err := restrictedDb.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("failed to begin transaction: %v", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, "SELECT set_config('wormhole.project_id', $1, true)", projectAID); err != nil {
+		t.Fatalf("failed to set RLS context: %v", err)
+	}
+
+	err = tx.QueryRowContext(ctx, "SELECT id FROM tasks WHERE id = $1", task.ID).Scan(&foundID)
+	if err != nil {
+		t.Errorf("expected task to be visible manually with project A RLS context, got error: %v", err)
+	}
+
+	// 3. Attempt to read Project A's task using the restricted connection with Project B's RLS context set, verifying it returns empty/not found.
+	tasksB, err := restrictedStore.List(ctx, projectBID, nil)
+	if err != nil {
+		t.Fatalf("failed to list tasks under restricted store with project B context: %v", err)
+	}
+	for _, tsk := range tasksB {
+		if tsk.ID == task.ID {
+			t.Errorf("task %s (from project A) was visible under restricted store when project B context was set", task.ID)
+		}
+	}
+
+	// Test manually within a transaction setting the wrong context (Project B)
+	txB, err := restrictedDb.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("failed to begin transaction B: %v", err)
+	}
+	defer txB.Rollback()
+
+	if _, err := txB.ExecContext(ctx, "SELECT set_config('wormhole.project_id', $1, true)", projectBID); err != nil {
+		t.Fatalf("failed to set RLS context to project B: %v", err)
+	}
+
+	err = txB.QueryRowContext(ctx, "SELECT id FROM tasks WHERE id = $1", task.ID).Scan(&foundID)
+	if err == nil {
+		t.Errorf("expected task to be hidden manually when project B context is set, but read ID: %s", foundID)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("unexpected error when querying task with mismatched context: %v", err)
 	}
 }
