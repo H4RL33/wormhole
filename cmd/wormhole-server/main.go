@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/core/identity"
+	"github.com/H4RL33/wormhole/internal/core/tasks"
 	"github.com/H4RL33/wormhole/internal/mcp"
 	"github.com/H4RL33/wormhole/internal/storage"
 	"github.com/H4RL33/wormhole/internal/types"
@@ -21,10 +22,15 @@ func main() {
 	defer db.Close()
 
 	identityStore := identity.NewStore(db)
+	tasksStore := tasks.NewStore(db)
 
 	registry := mcp.NewRegistry()
 	registry.Register(mcp.RegisterAgentTool(identityStore))
 	registry.Register(mcp.WhoAmITool())
+	registry.Register(mcp.CreateTaskTool(tasksStore))
+	registry.Register(mcp.AssignTaskTool(tasksStore))
+	registry.Register(mcp.ListTasksTool(tasksStore))
+	registry.Register(mcp.UpdateTaskStatusTool(tasksStore))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
