@@ -17,7 +17,7 @@ import (
 func testKBStore(t *testing.T) *kb.Store {
 	t.Helper()
 	db := testDB(t)
-	return kb.NewStore(db, kb.StubEmbedder{}, 0.85)
+	return kb.NewStore(db, kb.StubEmbedder{}, 0.85, 2000, 1, 1, 1)
 }
 
 func TestKBTools_WriteArticle(t *testing.T) {

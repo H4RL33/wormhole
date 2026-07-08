@@ -6,9 +6,13 @@ import (
 )
 
 type Config struct {
-	ListenAddr       string
-	DatabaseURL      string
-	KBDedupThreshold float64
+	ListenAddr          string
+	DatabaseURL         string
+	KBDedupThreshold    float64
+	KBMaxBodyLength     int
+	KBMinLinksDecision  int
+	KBMinLinksPolicy    int
+	KBMinLinksProcedure int
 }
 
 func LoadConfig() Config {
@@ -18,10 +22,38 @@ func LoadConfig() Config {
 			threshold = parsed
 		}
 	}
+	maxBodyLength := 2000
+	if val, ok := os.LookupEnv("WORMHOLE_KB_MAX_BODY_LENGTH"); ok {
+		if parsed, err := strconv.Atoi(val); err == nil {
+			maxBodyLength = parsed
+		}
+	}
+	minLinksDecision := 1
+	if val, ok := os.LookupEnv("WORMHOLE_KB_MIN_LINKS_DECISION"); ok {
+		if parsed, err := strconv.Atoi(val); err == nil {
+			minLinksDecision = parsed
+		}
+	}
+	minLinksPolicy := 1
+	if val, ok := os.LookupEnv("WORMHOLE_KB_MIN_LINKS_POLICY"); ok {
+		if parsed, err := strconv.Atoi(val); err == nil {
+			minLinksPolicy = parsed
+		}
+	}
+	minLinksProcedure := 1
+	if val, ok := os.LookupEnv("WORMHOLE_KB_MIN_LINKS_PROCEDURE"); ok {
+		if parsed, err := strconv.Atoi(val); err == nil {
+			minLinksProcedure = parsed
+		}
+	}
 	return Config{
-		ListenAddr:       getEnv("WORMHOLE_LISTEN_ADDR", ":8080"),
-		DatabaseURL:      getEnv("WORMHOLE_DATABASE_URL", "postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=prefer"),
-		KBDedupThreshold: threshold,
+		ListenAddr:          getEnv("WORMHOLE_LISTEN_ADDR", ":8080"),
+		DatabaseURL:         getEnv("WORMHOLE_DATABASE_URL", "postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=prefer"),
+		KBDedupThreshold:    threshold,
+		KBMaxBodyLength:     maxBodyLength,
+		KBMinLinksDecision:  minLinksDecision,
+		KBMinLinksPolicy:    minLinksPolicy,
+		KBMinLinksProcedure: minLinksProcedure,
 	}
 }
 
