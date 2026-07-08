@@ -85,11 +85,14 @@ Valid status state-machine transitions (which statuses can transition to which) 
 
 ## task_links
 - `id`
+- `project_id` -> projects
 - `task_id` -> tasks
 - `link_type` (kb_article / commit / pr / event)
 - `target_ref` (kb_article_id, commit_sha, pr_url, or event_id depending on link_type)
 
 RFC-0001 §8.2 doesn't specify exact column names/types for `tasks`/`task_links` — this sketch is a reasonable extension, not an RFC-literal schema.
+
+`project_id` added Day 7 (deviation from the original Day 1/Day 6 sketch above): D3 requires a `project_id` + RLS policy on every project-scoped table, and `task_links` had none in the original sketch.
 
 ## kb_articles
 - `id`
