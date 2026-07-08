@@ -111,8 +111,8 @@ Boundary days (6, 12, 18) carry over: prior milestone's review/demo plus next mi
 - [x] Required-link validation where applicable
 
 ### Day 17 — 2026-07-23
-- [ ] `wormhole.kb.get` — article retrieval by ID
-- [ ] `[[link]]` resolution / graph traversal between articles
+- [x] `wormhole.kb.get` — article retrieval by ID
+- [x] `[[link]]` resolution / graph traversal between articles
 
 ### Day 18 — 2026-07-24
 - [ ] M3 integration test: write article → search retrieves it → dedup/conciseness checks fire on bad input
