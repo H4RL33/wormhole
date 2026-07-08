@@ -56,9 +56,9 @@ Boundary days (6, 12, 18) carry over: prior milestone's review/demo plus next mi
 - [x] Auth middleware: reject unscoped/expired tokens at MCP boundary — `internal/mcp/server.go` (`NewCallHandler`), token expiry added in `internal/core/identity` (30-day TTL, migration `000005`)
 
 ### Day 6 — 2026-07-12
-- [ ] M1 integration test: register → passport issued → authenticated MCP call succeeds
-- [ ] M1 review/demo: identity + passport loop working
-- [ ] Kick off M2: task graph schema draft (Project → Task → Subtask, RFC §8.2)
+- [x] M1 integration test: register → passport issued → authenticated MCP call succeeds — `internal/mcp/m1_integration_test.go` (`TestM1_RegisterPassportAuthenticatedCall`, drives real `/mcp/tools/call` HTTP endpoint, verifies audit-trail entry (`ActionAgentRegistered`) in addition to the register→whoami loop Day 5's e2e test already covered)
+- [x] M1 review/demo: identity + passport loop working — register issues agent + passport + token in one transaction, passport carries repositories/roles, token resolves via `WhoAmI` at the MCP auth boundary, expired/forged/cross-project tokens rejected, every step audited (`audit_log`). Full loop proven end-to-end through the real HTTP endpoint, not just unit-level. M1 exit bar met.
+- [x] Kick off M2: task graph schema draft (Project → Task → Subtask, RFC §8.2) — folded into `docs/db-entities.md`'s existing `tasks`/`task_links` sketch (Day 1) rather than a new file, per architecture.md D2 single-authority rule; added state-machine-deferred and RFC-inference notes
 
 ---
 
