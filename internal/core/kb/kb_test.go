@@ -1,0 +1,294 @@
+package kb
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"testing"
+
+	_ "github.com/lib/pq"
+
+	"github.com/H4RL33/wormhole/internal/types"
+)
+
+func testStore(t *testing.T) *Store {
+	t.Helper()
+	cfg := types.LoadConfig()
+	db, err := sql.Open("postgres", cfg.DatabaseURL)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.PingContext(context.Background()); err != nil {
+		if os.Getenv("WORMHOLE_INTEGRATION_REQUIRED") == "1" {
+			t.Fatalf("postgres required but not reachable: %v", err)
+		}
+		t.Skipf("postgres not reachable (%v); run `docker compose up -d db` and apply migrations before running this test", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return NewStore(db)
+}
+
+func createProject(t *testing.T, s *Store, name string) string {
+	t.Helper()
+	var id string
+	if err := s.db.QueryRow(`INSERT INTO projects (name, owner) VALUES ($1, $2) RETURNING id`, name, "harley").Scan(&id); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := s.db.Exec(`DELETE FROM projects WHERE id = $1`, id); err != nil {
+			t.Logf("cleanup: delete project %s: %v", id, err)
+		}
+	})
+	return id
+}
+
+func createAgent(t *testing.T, s *Store) string {
+	t.Helper()
+	var id string
+	if err := s.db.QueryRow(`INSERT INTO agents (owner, model, capabilities) VALUES ($1, $2, $3) RETURNING id`,
+		"harley", "claude", `[]`).Scan(&id); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := s.db.Exec(`DELETE FROM agents WHERE id = $1`, id); err != nil {
+			t.Logf("cleanup: delete agent %s: %v", id, err)
+		}
+	})
+	return id
+}
+
+func createPassport(t *testing.T, s *Store, agentID, projectID string) {
+	t.Helper()
+	if _, err := s.db.Exec(`INSERT INTO passports (agent_id, project_id) VALUES ($1, $2)`, agentID, projectID); err != nil {
+		t.Fatalf("create passport: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := s.db.Exec(`DELETE FROM passports WHERE agent_id = $1 AND project_id = $2`, agentID, projectID); err != nil {
+			t.Logf("cleanup: delete passport for agent %s in project %s: %v", agentID, projectID, err)
+		}
+	})
+}
+
+func TestWriteArticle_SuccessNoLinks(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-write-success-no-links")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+
+	article, err := s.WriteArticle(ctx, projectID, agentID, "how to deploy", "run the deploy script", nil, nil)
+	if err != nil {
+		t.Fatalf("WriteArticle: %v", err)
+	}
+
+	if article.ID == "" {
+		t.Error("article.ID is empty")
+	}
+	if article.ProjectID != projectID {
+		t.Errorf("article.ProjectID = %q, want %q", article.ProjectID, projectID)
+	}
+	if article.Title != "how to deploy" {
+		t.Errorf("article.Title = %q, want %q", article.Title, "how to deploy")
+	}
+	if article.Body != "run the deploy script" {
+		t.Errorf("article.Body = %q, want %q", article.Body, "run the deploy script")
+	}
+	if string(article.Frontmatter) != "{}" {
+		t.Errorf("article.Frontmatter = %q, want %q", article.Frontmatter, "{}")
+	}
+	if article.AuthorAgentID != agentID {
+		t.Errorf("article.AuthorAgentID = %q, want %q", article.AuthorAgentID, agentID)
+	}
+	if article.CreatedAt.IsZero() {
+		t.Error("article.CreatedAt is zero")
+	}
+	if article.UpdatedAt.IsZero() {
+		t.Error("article.UpdatedAt is zero")
+	}
+
+	var embeddingIsNull bool
+	if err := s.db.QueryRow(`SELECT embedding IS NULL FROM kb_articles WHERE id = $1`, article.ID).Scan(&embeddingIsNull); err != nil {
+		t.Fatalf("query embedding: %v", err)
+	}
+	if !embeddingIsNull {
+		t.Error("expected embedding column to be NULL")
+	}
+}
+
+func TestWriteArticle_SuccessWithLinks(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-write-success-with-links")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+
+	target, err := s.WriteArticle(ctx, projectID, agentID, "target article", "target body", nil, nil)
+	if err != nil {
+		t.Fatalf("WriteArticle (target): %v", err)
+	}
+
+	frontmatter := json.RawMessage(`{"type":"decision"}`)
+	article, err := s.WriteArticle(ctx, projectID, agentID, "linking article", "linking body", frontmatter, []string{target.ID})
+	if err != nil {
+		t.Fatalf("WriteArticle (linking): %v", err)
+	}
+
+	var gotFrontmatter map[string]string
+	if err := json.Unmarshal(article.Frontmatter, &gotFrontmatter); err != nil {
+		t.Fatalf("article.Frontmatter is not valid JSON: %v", err)
+	}
+	if gotFrontmatter["type"] != "decision" {
+		t.Errorf("article.Frontmatter[type] = %q, want %q", gotFrontmatter["type"], "decision")
+	}
+
+	var count int
+	if err := s.db.QueryRow(`SELECT count(*) FROM kb_links WHERE from_article_id = $1 AND to_article_id = $2 AND project_id = $3`,
+		article.ID, target.ID, projectID).Scan(&count); err != nil {
+		t.Fatalf("query kb_links: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("kb_links row count = %d, want 1", count)
+	}
+}
+
+func TestWriteArticle_UnknownLinkTargetLeavesNoPartialRow(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-write-unknown-link")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+
+	const title = "orphaned article attempt"
+	unknownTargetID := "00000000-0000-0000-0000-000000000000"
+	_, err := s.WriteArticle(ctx, projectID, agentID, title, "body", nil, []string{unknownTargetID})
+	if !errors.Is(err, ErrLinkedArticleNotFound) {
+		t.Fatalf("expected ErrLinkedArticleNotFound, got: %v", err)
+	}
+
+	var count int
+	if err := s.db.QueryRow(`SELECT count(*) FROM kb_articles WHERE project_id = $1 AND title = $2`, projectID, title).Scan(&count); err != nil {
+		t.Fatalf("query kb_articles: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("kb_articles row count for %q = %d, want 0 (partial write leaked past rollback)", title, count)
+	}
+}
+
+func TestWriteArticle_PassportRequired(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-write-passport-required")
+	agentID := createAgent(t, s)
+
+	_, err := s.WriteArticle(ctx, projectID, agentID, "title", "body", nil, nil)
+	if !errors.Is(err, ErrPassportNotFound) {
+		t.Fatalf("expected ErrPassportNotFound, got: %v", err)
+	}
+}
+
+// TestWriteArticle_CrossProjectIsolation mirrors git_test.go's
+// TestGitLinks_CrossProjectIsolation: a plain project_id-scoped connection
+// using the table owner role bypasses RLS entirely (Postgres does not
+// enforce RLS against the table owner), so this test creates a restricted,
+// non-owner role to prove the policy itself hides project A's article when
+// project B's context is set.
+func TestWriteArticle_CrossProjectIsolation(t *testing.T) {
+	ownerStore := testStore(t)
+	ctx := context.Background()
+
+	roleName := "kb_rls_test_user"
+	rolePassword := "kb_rls_test_password"
+
+	t.Cleanup(func() {
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE kb_articles FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE kb_links FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE projects FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE agents FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE passports FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("DROP ROLE IF EXISTS %s", roleName))
+	})
+
+	if _, err := ownerStore.db.Exec(fmt.Sprintf("DROP ROLE IF EXISTS %s", roleName)); err != nil {
+		t.Fatalf("failed to drop pre-existing role: %v", err)
+	}
+	if _, err := ownerStore.db.Exec(fmt.Sprintf("CREATE ROLE %s WITH LOGIN PASSWORD '%s'", roleName, rolePassword)); err != nil {
+		t.Fatalf("failed to create role: %v", err)
+	}
+	if _, err := ownerStore.db.Exec(fmt.Sprintf("GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE kb_articles, kb_links, projects, agents, passports TO %s", roleName)); err != nil {
+		t.Fatalf("failed to grant table privileges: %v", err)
+	}
+
+	cfg := types.LoadConfig()
+	u, err := url.Parse(cfg.DatabaseURL)
+	if err != nil {
+		t.Fatalf("failed to parse database URL: %v", err)
+	}
+	u.User = url.UserPassword(roleName, rolePassword)
+	restrictedDSN := u.String()
+
+	restrictedDB, err := sql.Open("postgres", restrictedDSN)
+	if err != nil {
+		t.Fatalf("failed to open restricted db connection: %v", err)
+	}
+	t.Cleanup(func() { restrictedDB.Close() })
+
+	if err := restrictedDB.PingContext(ctx); err != nil {
+		t.Fatalf("failed to ping restricted database: %v", err)
+	}
+
+	projectA := createProject(t, ownerStore, "kb-isolation-project-a")
+	projectB := createProject(t, ownerStore, "kb-isolation-project-b")
+	agentID := createAgent(t, ownerStore)
+	createPassport(t, ownerStore, agentID, projectA)
+
+	// Create the article via the (RLS-bypassing) owner store so the
+	// restricted connection below has done nothing but Ping before its first
+	// query; this avoids the restricted session's wormhole.project_id
+	// placeholder GUC being left at '' (rather than unset) by an earlier
+	// local SET on the same pooled connection, which would make the "no
+	// context set" check below fail with a cast error instead of exercising
+	// RLS.
+	article, err := ownerStore.WriteArticle(ctx, projectA, agentID, "project a article", "body", nil, nil)
+	if err != nil {
+		t.Fatalf("WriteArticle (project A): %v", err)
+	}
+
+	// 1. No project context set: RLS must hide the row entirely.
+	var found string
+	err = restrictedDB.QueryRowContext(ctx, "SELECT id FROM kb_articles WHERE id = $1", article.ID).Scan(&found)
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("expected kb_articles row to be hidden with no project context set, got err=%v found=%q", err, found)
+	}
+
+	// 2. Project B's context set: project A's row must still be invisible.
+	tx, err := restrictedDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "SELECT set_config('wormhole.project_id', $1, true)", projectB); err != nil {
+		t.Fatalf("set project id: %v", err)
+	}
+	err = tx.QueryRowContext(ctx, "SELECT id FROM kb_articles WHERE id = $1", article.ID).Scan(&found)
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected kb_articles row from project A to be hidden under project B's RLS context, got err=%v found=%q", err, found)
+	}
+
+	// 3. Project A's own context set: the row must be visible (sanity check
+	// that RLS scopes rather than blanket-denies).
+	tx2, err := restrictedDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx2.Rollback()
+	if _, err := tx2.ExecContext(ctx, "SELECT set_config('wormhole.project_id', $1, true)", projectA); err != nil {
+		t.Fatalf("set project id: %v", err)
+	}
+	if err := tx2.QueryRowContext(ctx, "SELECT id FROM kb_articles WHERE id = $1", article.ID).Scan(&found); err != nil {
+		t.Fatalf("expected kb_articles row to be visible under its own project context, got err=%v", err)
+	}
+}
