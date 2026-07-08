@@ -116,3 +116,62 @@ func TestKBTools_WriteArticleUnknownLink(t *testing.T) {
 		t.Fatalf("Handler error: got %v, want to wrap ErrLinkedArticleNotFound", err)
 	}
 }
+
+func TestKBTools_SearchArticles(t *testing.T) {
+	store := testKBStore(t)
+	projectID := mustCreateProject(t, "mcp-kb-search-articles")
+	agentID, _ := mustRegisterAgent(t, projectID)
+	scope := mustBuildScope(agentID, projectID)
+
+	writeTool := WriteArticleTool(store)
+	searchTool := SearchArticlesTool(store)
+
+	if searchTool.Name != "wormhole.kb.search" {
+		t.Fatalf("Name: got %q, want %q", searchTool.Name, "wormhole.kb.search")
+	}
+	if !searchTool.RequiresAuth {
+		t.Fatalf("RequiresAuth: got false, want true")
+	}
+
+	// Write two articles
+	args1, _ := json.Marshal(WriteArticleInput{
+		Title: "deployment instructions",
+		Body:  "run script using production config",
+	})
+	if _, err := writeTool.Handler(context.Background(), scope, projectID, args1); err != nil {
+		t.Fatalf("write article 1: %v", err)
+	}
+
+	args2, _ := json.Marshal(WriteArticleInput{
+		Title: "setup instructions",
+		Body:  "install docker daemon and run compose",
+	})
+	if _, err := writeTool.Handler(context.Background(), scope, projectID, args2); err != nil {
+		t.Fatalf("write article 2: %v", err)
+	}
+
+	// Search for the second article's body
+	searchArgs, _ := json.Marshal(SearchArticlesInput{
+		Query: "install docker daemon and run compose",
+		Limit: 10,
+	})
+	result, err := searchTool.Handler(context.Background(), scope, projectID, searchArgs)
+	if err != nil {
+		t.Fatalf("Search handler: %v", err)
+	}
+
+	out, ok := result.(SearchArticlesOutput)
+	if !ok {
+		t.Fatalf("result type: got %T, want SearchArticlesOutput", result)
+	}
+
+	if len(out.Articles) != 2 {
+		t.Fatalf("expected 2 search results, got %d", len(out.Articles))
+	}
+
+	// The first article in results should be the second one we wrote (distance 0)
+	if out.Articles[0].Title != "setup instructions" {
+		t.Errorf("expected first search result to be 'setup instructions', got %q", out.Articles[0].Title)
+	}
+}
+

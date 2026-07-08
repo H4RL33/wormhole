@@ -44,6 +44,7 @@ func main() {
 	registry.Register(mcp.LinkCommitTool(gitStore))
 	registry.Register(mcp.RequestReviewTool(gitStore))
 	registry.Register(mcp.WriteArticleTool(kbStore))
+	registry.Register(mcp.SearchArticlesTool(kbStore))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {

@@ -361,3 +361,191 @@ func TestWriteArticle_EmbeddingDeterministic(t *testing.T) {
 		t.Fatalf("embeddings for identical body text differ: first=%q second=%q", firstEmbedding, secondEmbedding)
 	}
 }
+
+func TestSearchArticles_SuccessAndLimit(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-search-success-limit")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+
+	// Create 3 articles with distinct body texts.
+	_, err := s.WriteArticle(ctx, projectID, agentID, "deploy guide", "run the production deploy script carefully", nil, nil)
+	if err != nil {
+		t.Fatalf("WriteArticle 1: %v", err)
+	}
+	a2, err := s.WriteArticle(ctx, projectID, agentID, "setup guide", "install go and docker compose first", nil, nil)
+	if err != nil {
+		t.Fatalf("WriteArticle 2: %v", err)
+	}
+	_, err = s.WriteArticle(ctx, projectID, agentID, "database backup", "backup postgres daily using pg_dump", nil, nil)
+	if err != nil {
+		t.Fatalf("WriteArticle 3: %v", err)
+	}
+
+	// 1. Search with exact body of a2. Under StubEmbedder, identical text produces identical embedding.
+	// Cosine distance should be 0, so a2 must rank first.
+	results, err := s.SearchArticles(ctx, projectID, agentID, "install go and docker compose first", 10)
+	if err != nil {
+		t.Fatalf("SearchArticles: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+	if results[0].ID != a2.ID {
+		t.Errorf("expected first ranked article to be %s (a2), got %s", a2.ID, results[0].ID)
+	}
+
+	// 2. Test limit parameter caps results.
+	resultsCap, err := s.SearchArticles(ctx, projectID, agentID, "install go and docker compose first", 2)
+	if err != nil {
+		t.Fatalf("SearchArticles limit 2: %v", err)
+	}
+	if len(resultsCap) != 2 {
+		t.Errorf("expected 2 results, got %d", len(resultsCap))
+	}
+	if resultsCap[0].ID != a2.ID {
+		t.Errorf("expected first ranked article to be %s (a2), got %s", a2.ID, resultsCap[0].ID)
+	}
+
+	// 3. Test limit defaulting to 10 when <= 0.
+	resultsDefault, err := s.SearchArticles(ctx, projectID, agentID, "install go and docker compose first", 0)
+	if err != nil {
+		t.Fatalf("SearchArticles limit 0: %v", err)
+	}
+	if len(resultsDefault) != 3 {
+		t.Errorf("expected 3 results due to defaulting limit to 10, got %d", len(resultsDefault))
+	}
+}
+
+func TestSearchArticles_PassportRequired(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-search-passport-required")
+	agentID := createAgent(t, s)
+
+	_, err := s.SearchArticles(ctx, projectID, agentID, "some query", 10)
+	if !errors.Is(err, ErrPassportNotFound) {
+		t.Fatalf("expected ErrPassportNotFound, got: %v", err)
+	}
+}
+
+func TestSearchArticles_ExcludeNullEmbedding(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-search-exclude-null")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+
+	// Create a normal article (has embedding).
+	_, err := s.WriteArticle(ctx, projectID, agentID, "normal article", "normal body", nil, nil)
+	if err != nil {
+		t.Fatalf("WriteArticle: %v", err)
+	}
+
+	// Manually insert an article with NULL embedding (simulating pre-Task-1 legacy row).
+	var legacyID string
+	err = s.db.QueryRowContext(ctx,
+		`INSERT INTO kb_articles (project_id, title, body, frontmatter, author_agent_id, embedding)
+		 VALUES ($1, $2, $3, $4, $5, NULL)
+		 RETURNING id`,
+		projectID, "legacy article", "legacy body", json.RawMessage(`{}`), agentID,
+	).Scan(&legacyID)
+	if err != nil {
+		t.Fatalf("manual insert of null embedding: %v", err)
+	}
+	defer func() {
+		_, _ = s.db.ExecContext(ctx, "DELETE FROM kb_articles WHERE id = $1", legacyID)
+	}()
+
+	// Search should only return the normal article, completely excluding the legacy one.
+	results, err := s.SearchArticles(ctx, projectID, agentID, "normal body", 10)
+	if err != nil {
+		t.Fatalf("SearchArticles: %v", err)
+	}
+
+	for _, res := range results {
+		if res.ID == legacyID {
+			t.Errorf("search results included legacy article %s which has a NULL embedding", legacyID)
+		}
+	}
+}
+
+func TestSearchArticles_CrossProjectIsolation(t *testing.T) {
+	ownerStore := testStore(t)
+	ctx := context.Background()
+
+	roleName := "kb_search_rls_test_user"
+	rolePassword := "kb_search_rls_test_password"
+
+	t.Cleanup(func() {
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE kb_articles FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE kb_links FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE projects FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE agents FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE passports FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("DROP ROLE IF EXISTS %s", roleName))
+	})
+
+	if _, err := ownerStore.db.Exec(fmt.Sprintf("DROP ROLE IF EXISTS %s", roleName)); err != nil {
+		t.Fatalf("failed to drop pre-existing role: %v", err)
+	}
+	if _, err := ownerStore.db.Exec(fmt.Sprintf("CREATE ROLE %s WITH LOGIN PASSWORD '%s'", roleName, rolePassword)); err != nil {
+		t.Fatalf("failed to create role: %v", err)
+	}
+	if _, err := ownerStore.db.Exec(fmt.Sprintf("GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE kb_articles, kb_links, projects, agents, passports TO %s", roleName)); err != nil {
+		t.Fatalf("failed to grant table privileges: %v", err)
+	}
+
+	cfg := types.LoadConfig()
+	u, err := url.Parse(cfg.DatabaseURL)
+	if err != nil {
+		t.Fatalf("failed to parse database URL: %v", err)
+	}
+	u.User = url.UserPassword(roleName, rolePassword)
+	restrictedDSN := u.String()
+
+	restrictedDB, err := sql.Open("postgres", restrictedDSN)
+	if err != nil {
+		t.Fatalf("failed to open restricted db connection: %v", err)
+	}
+	t.Cleanup(func() { restrictedDB.Close() })
+
+	if err := restrictedDB.PingContext(ctx); err != nil {
+		t.Fatalf("failed to ping restricted database: %v", err)
+	}
+
+	projectA := createProject(t, ownerStore, "kb-search-isolation-a")
+	projectB := createProject(t, ownerStore, "kb-search-isolation-b")
+	agentID := createAgent(t, ownerStore)
+	createPassport(t, ownerStore, agentID, projectA)
+	createPassport(t, ownerStore, agentID, projectB)
+
+	// Create articles in both projects.
+	_, err = ownerStore.WriteArticle(ctx, projectA, agentID, "project a article", "body a", nil, nil)
+	if err != nil {
+		t.Fatalf("WriteArticle (project A): %v", err)
+	}
+	_, err = ownerStore.WriteArticle(ctx, projectB, agentID, "project b article", "body b", nil, nil)
+	if err != nil {
+		t.Fatalf("WriteArticle (project B): %v", err)
+	}
+
+	// Using a restricted connection with project A context, search should return only project A articles.
+	restrictedStore := NewStore(restrictedDB, StubEmbedder{})
+
+	resultsA, err := restrictedStore.SearchArticles(ctx, projectA, agentID, "body a", 10)
+	if err != nil {
+		t.Fatalf("SearchArticles restricted A: %v", err)
+	}
+
+	if len(resultsA) == 0 {
+		t.Fatal("expected results, got 0")
+	}
+	for _, res := range resultsA {
+		if res.ProjectID != projectA {
+			t.Errorf("leaked article from other project: %+v", res)
+		}
+	}
+}
+

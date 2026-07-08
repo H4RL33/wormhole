@@ -170,3 +170,72 @@ func (s *Store) WriteArticle(ctx context.Context, projectID, agentID, title, bod
 	}
 	return article, nil
 }
+
+// SearchArticles performs semantic search on KB articles using pgvector.
+// It retrieves articles in the project ranked by cosine distance to the query embedding.
+func (s *Store) SearchArticles(ctx context.Context, projectID, agentID, query string, limit int) ([]Article, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("kb: search articles: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, "SELECT set_config('wormhole.project_id', $1, true)", projectID); err != nil {
+		return nil, fmt.Errorf("kb: search articles: set project id: %w", err)
+	}
+
+	// Verify agent has a passport for this project.
+	var dummy int
+	err = tx.QueryRowContext(ctx, "SELECT 1 FROM passports WHERE agent_id = $1 AND project_id = $2", agentID, projectID).Scan(&dummy)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("kb: search articles: agent not registered or has no passport for this project: %w", ErrPassportNotFound)
+	} else if err != nil {
+		return nil, fmt.Errorf("kb: search articles: passport lookup: %w", err)
+	}
+
+	embedding, err := s.embedder.Embed(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("kb: search articles: embed query: %w", err)
+	}
+
+	// We use the cosine distance operator (<=>) for semantic search ranking.
+	// Unlike dot product, pgvector's cosine distance operator computes the normalized angle
+	// (1 - cosine similarity) and does not require the vectors to be pre-normalized.
+	// It only requires the vectors to be non-zero, which our stub embedding naturally guarantees.
+	rows, err := tx.QueryContext(ctx,
+		`SELECT `+articleColumns+`
+		 FROM kb_articles
+		 WHERE project_id = $1 AND embedding IS NOT NULL
+		 ORDER BY embedding <=> $2::vector
+		 LIMIT $3`,
+		projectID, formatVectorLiteral(embedding), limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("kb: search articles: query: %w", err)
+	}
+	defer rows.Close()
+
+	var articles []Article
+	for rows.Next() {
+		var article Article
+		err = rows.Scan(&article.ID, &article.ProjectID, &article.Title, &article.Body, &article.Frontmatter, &article.AuthorAgentID, &article.CreatedAt, &article.UpdatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("kb: search articles: scan: %w", err)
+		}
+		articles = append(articles, article)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("kb: search articles: iterate: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("kb: search articles: commit: %w", err)
+	}
+
+	return articles, nil
+}
+
