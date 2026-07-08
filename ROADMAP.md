@@ -78,12 +78,12 @@ Boundary days (6, 12, 18) carry over: prior milestone's review/demo plus next mi
 - [x] Channel model: create, project/topic scoping -- `internal/core/events` (`Store`, `Channel`, `Event`; CreateChannel, ListChannels, GetChannel, PublishEvent with passport scoping, ListEvents)
 
 ### Day 10 — 2026-07-16
-- [ ] `wormhole.channel.create`, `wormhole.channel.post`, `wormhole.channel.subscribe` (poll-based, RFC §15 open question deferred to poll for V1)
-- [ ] Typed event shapes: `task.status_changed`, `build.failed`, `discovery.logged`, `message.posted` (RFC §8.1)
+- [x] `wormhole.channel.create`, `wormhole.channel.post`, `wormhole.channel.subscribe` (poll-based, RFC §15 open question deferred to poll for V1)
+- [x] Typed event shapes: `task.status_changed`, `build.failed`, `discovery.logged`, `message.posted` (RFC §8.1)
 
 ### Day 11 — 2026-07-17
-- [ ] Wire task-status transitions to auto-emit `task.status_changed` events (RFC §8.2 key property: no separate sync step)
-- [ ] `wormhole.git.link_commit`, `wormhole.git.request_review` (manual-link only, RFC §12 MVP note)
+- [x] Wire task-status transitions to auto-emit `task.status_changed` events (RFC §8.2 key property: no separate sync step)
+- [x] `wormhole.git.link_commit`, `wormhole.git.request_review` (manual-link only, RFC §12 MVP note)
 
 ### Day 12 — 2026-07-18
 - [ ] M2 integration test: create task → assign → transition status → event appears on channel
