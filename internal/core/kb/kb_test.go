@@ -961,4 +961,133 @@ func TestWriteArticle_RequiredLinksNormal(t *testing.T) {
 
 
 
+func TestGetArticle_HappyPath(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-get-happy")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
 
+	written, err := s.WriteArticle(ctx, projectID, agentID, "get article title", "get article body", nil, nil, false)
+	if err != nil {
+		t.Fatalf("WriteArticle: %v", err)
+	}
+
+	got, err := s.GetArticle(ctx, projectID, agentID, written.ID)
+	if err != nil {
+		t.Fatalf("GetArticle: %v", err)
+	}
+	if got.ID != written.ID {
+		t.Errorf("ID: got %q, want %q", got.ID, written.ID)
+	}
+	if got.ProjectID != projectID {
+		t.Errorf("ProjectID: got %q, want %q", got.ProjectID, projectID)
+	}
+	if got.Title != written.Title {
+		t.Errorf("Title: got %q, want %q", got.Title, written.Title)
+	}
+	if got.Body != written.Body {
+		t.Errorf("Body: got %q, want %q", got.Body, written.Body)
+	}
+	if got.AuthorAgentID != agentID {
+		t.Errorf("AuthorAgentID: got %q, want %q", got.AuthorAgentID, agentID)
+	}
+	if got.CreatedAt.IsZero() {
+		t.Error("CreatedAt is zero")
+	}
+	if got.UpdatedAt.IsZero() {
+		t.Error("UpdatedAt is zero")
+	}
+}
+
+func TestGetArticle_NotFound(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-get-not-found")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+
+	_, err := s.GetArticle(ctx, projectID, agentID, "00000000-0000-0000-0000-000000000000")
+	if !errors.Is(err, ErrArticleNotFound) {
+		t.Fatalf("expected ErrArticleNotFound, got: %v", err)
+	}
+}
+
+// TestGetArticle_CrossProjectIsolation mirrors TestWriteArticle_CrossProjectIsolation:
+// creates a restricted (non-owner) role so RLS is enforced, writes an article
+// under project A via the owner store, then calls GetArticle with project B's
+// context and expects ErrArticleNotFound (RLS hides project A's row).
+func TestGetArticle_CrossProjectIsolation(t *testing.T) {
+	ownerStore := testStore(t)
+	ctx := context.Background()
+
+	roleName := "kb_get_rls_test_user"
+	rolePassword := "kb_get_rls_test_password"
+
+	t.Cleanup(func() {
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE kb_articles FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE kb_links FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE projects FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE agents FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE passports FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("DROP ROLE IF EXISTS %s", roleName))
+	})
+
+	if _, err := ownerStore.db.Exec(fmt.Sprintf("DROP ROLE IF EXISTS %s", roleName)); err != nil {
+		t.Fatalf("failed to drop pre-existing role: %v", err)
+	}
+	if _, err := ownerStore.db.Exec(fmt.Sprintf("CREATE ROLE %s WITH LOGIN PASSWORD '%s'", roleName, rolePassword)); err != nil {
+		t.Fatalf("failed to create role: %v", err)
+	}
+	if _, err := ownerStore.db.Exec(fmt.Sprintf("GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE kb_articles, kb_links, projects, agents, passports TO %s", roleName)); err != nil {
+		t.Fatalf("failed to grant table privileges: %v", err)
+	}
+
+	cfg := types.LoadConfig()
+	u, err := url.Parse(cfg.DatabaseURL)
+	if err != nil {
+		t.Fatalf("failed to parse database URL: %v", err)
+	}
+	u.User = url.UserPassword(roleName, rolePassword)
+	restrictedDSN := u.String()
+
+	restrictedDB, err := sql.Open("postgres", restrictedDSN)
+	if err != nil {
+		t.Fatalf("failed to open restricted db connection: %v", err)
+	}
+	t.Cleanup(func() { restrictedDB.Close() })
+
+	if err := restrictedDB.PingContext(ctx); err != nil {
+		t.Fatalf("failed to ping restricted database: %v", err)
+	}
+
+	projectA := createProject(t, ownerStore, "kb-get-isolation-a")
+	projectB := createProject(t, ownerStore, "kb-get-isolation-b")
+	agentID := createAgent(t, ownerStore)
+	createPassport(t, ownerStore, agentID, projectA)
+	createPassport(t, ownerStore, agentID, projectB)
+
+	article, err := ownerStore.WriteArticle(ctx, projectA, agentID, "project a article", "body a", nil, nil, false)
+	if err != nil {
+		t.Fatalf("WriteArticle (project A): %v", err)
+	}
+
+	// GetArticle scoped to project B must not see project A's article (RLS).
+	restrictedStore := NewStore(restrictedDB, StubEmbedder{}, 0.85, 2000, 1, 1, 1)
+	_, err = restrictedStore.GetArticle(ctx, projectB, agentID, article.ID)
+	if !errors.Is(err, ErrArticleNotFound) {
+		t.Fatalf("expected ErrArticleNotFound (RLS isolation), got: %v", err)
+	}
+}
+
+func TestGetArticle_NoPassport(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-get-no-passport")
+	agentID := createAgent(t, s)
+
+	_, err := s.GetArticle(ctx, projectID, agentID, "00000000-0000-0000-0000-000000000000")
+	if !errors.Is(err, ErrPassportNotFound) {
+		t.Fatalf("expected ErrPassportNotFound, got: %v", err)
+	}
+}

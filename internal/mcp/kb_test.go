@@ -595,3 +595,104 @@ func TestMcp_WriteArticle_RequiredLinksViolation(t *testing.T) {
 }
 
 
+
+func TestMcp_GetArticle_HappyPath(t *testing.T) {
+	store := testKBStore(t)
+	identityStore := testIdentityStore(t)
+	projectID := mustCreateProject(t, "mcp-kb-get-article")
+	_, token := mustRegisterAgent(t, projectID)
+
+	registry := NewRegistry()
+	registry.Register(WriteArticleTool(store))
+	registry.Register(GetArticleTool(store))
+	handler := NewCallHandler(registry, identityStore)
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	// 1. Write an article via the write tool.
+	writeArgs, _ := json.Marshal(WriteArticleInput{
+		Title: "retrievable article",
+		Body:  "body content of the article",
+	})
+	reqBody1, _ := json.Marshal(CallRequest{
+		Tool:      "wormhole.kb.write",
+		ProjectID: projectID,
+		Arguments: writeArgs,
+	})
+	req1, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBody1))
+	req1.Header.Set("Content-Type", "application/json")
+	req1.Header.Set("Authorization", "Bearer "+token)
+	resp1, err := http.DefaultClient.Do(req1)
+	if err != nil {
+		t.Fatalf("write POST: %v", err)
+	}
+	defer resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("write status: got %d, want 200", resp1.StatusCode)
+	}
+
+	var writeResp CallResponse
+	if err := json.NewDecoder(resp1.Body).Decode(&writeResp); err != nil {
+		t.Fatalf("decode write response: %v", err)
+	}
+	resultBytes, _ := json.Marshal(writeResp.Result)
+	var writeOut WriteArticleOutput
+	if err := json.Unmarshal(resultBytes, &writeOut); err != nil {
+		t.Fatalf("unmarshal write output: %v", err)
+	}
+
+	// 2. Retrieve the article via wormhole.kb.get.
+	getArgs, _ := json.Marshal(GetArticleInput{ArticleID: writeOut.ArticleID})
+	reqBody2, _ := json.Marshal(CallRequest{
+		Tool:      "wormhole.kb.get",
+		ProjectID: projectID,
+		Arguments: getArgs,
+	})
+	req2, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBody2))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("Authorization", "Bearer "+token)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("get POST: %v", err)
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("get status: got %d, want 200", resp2.StatusCode)
+	}
+
+	var callResp CallResponse
+	if err := json.NewDecoder(resp2.Body).Decode(&callResp); err != nil {
+		t.Fatalf("decode get response: %v", err)
+	}
+	if callResp.Error != "" {
+		t.Fatalf("unexpected error in get response: %q", callResp.Error)
+	}
+
+	resultBytes2, _ := json.Marshal(callResp.Result)
+	var getOut GetArticleOutput
+	if err := json.Unmarshal(resultBytes2, &getOut); err != nil {
+		t.Fatalf("unmarshal get output: %v", err)
+	}
+	if getOut.ArticleID != writeOut.ArticleID {
+		t.Errorf("ArticleID: got %q, want %q", getOut.ArticleID, writeOut.ArticleID)
+	}
+	if getOut.ProjectID != projectID {
+		t.Errorf("ProjectID: got %q, want %q", getOut.ProjectID, projectID)
+	}
+	if getOut.Title != "retrievable article" {
+		t.Errorf("Title: got %q, want %q", getOut.Title, "retrievable article")
+	}
+	if getOut.Body != "body content of the article" {
+		t.Errorf("Body: got %q, want %q", getOut.Body, "body content of the article")
+	}
+	if getOut.AuthorAgentID == "" {
+		t.Error("AuthorAgentID is empty")
+	}
+	if getOut.CreatedAt.IsZero() {
+		t.Error("CreatedAt is zero")
+	}
+	if getOut.UpdatedAt.IsZero() {
+		t.Error("UpdatedAt is zero")
+	}
+}

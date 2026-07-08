@@ -129,3 +129,49 @@ func SearchArticlesTool(store *kb.Store) Tool {
 	}
 }
 
+// GetArticleInput is the wormhole.kb.get argument shape.
+type GetArticleInput struct {
+	ArticleID string `json:"article_id"`
+}
+
+// GetArticleOutput is the wormhole.kb.get result shape.
+type GetArticleOutput struct {
+	ArticleID     string          `json:"article_id"`
+	ProjectID     string          `json:"project_id"`
+	Title         string          `json:"title"`
+	Body          string          `json:"body"`
+	Frontmatter   json.RawMessage `json:"frontmatter,omitempty"`
+	AuthorAgentID string          `json:"author_agent_id"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
+}
+
+// GetArticleTool wires wormhole.kb.get. Retrieves one KB article by ID
+// within the authenticated agent's project scope.
+func GetArticleTool(store *kb.Store) Tool {
+	return Tool{
+		Name:         "wormhole.kb.get",
+		Description:  "Retrieves a single knowledge base article by ID within the authenticated agent's project scope.",
+		RequiresAuth: true,
+		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
+			var in GetArticleInput
+			if err := json.Unmarshal(arguments, &in); err != nil {
+				return nil, fmt.Errorf("mcp: decode wormhole.kb.get arguments: %w", err)
+			}
+			article, err := store.GetArticle(ctx, projectID, scope.Agent.ID, in.ArticleID)
+			if err != nil {
+				return nil, fmt.Errorf("mcp: wormhole.kb.get: %w", err)
+			}
+			return GetArticleOutput{
+				ArticleID:     article.ID,
+				ProjectID:     article.ProjectID,
+				Title:         article.Title,
+				Body:          article.Body,
+				Frontmatter:   article.Frontmatter,
+				AuthorAgentID: article.AuthorAgentID,
+				CreatedAt:     article.CreatedAt,
+				UpdatedAt:     article.UpdatedAt,
+			}, nil
+		},
+	}
+}

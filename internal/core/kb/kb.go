@@ -27,6 +27,7 @@ import (
 
 var ErrPassportNotFound = errors.New("kb: agent not registered or has no passport for this project")
 var ErrLinkedArticleNotFound = errors.New("kb: linked article not found")
+var ErrArticleNotFound = errors.New("kb: article not found")
 
 type ErrDedupViolation struct {
 	ExistingID    string  `json:"existing_article_id"`
@@ -419,5 +420,46 @@ func (s *Store) SearchArticles(ctx context.Context, projectID, agentID, query st
 	}
 
 	return articles, nil
+}
+
+// GetArticle retrieves a single KB article by ID within the calling agent's
+// project scope (RFC-0001 §8.3). Returns ErrArticleNotFound if the article
+// does not exist or belongs to a different project. Returns
+// ErrPassportNotFound if the agent has no passport for this project.
+func (s *Store) GetArticle(ctx context.Context, projectID, agentID, articleID string) (Article, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Article{}, fmt.Errorf("kb: get article: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, "SELECT set_config('wormhole.project_id', $1, true)", projectID); err != nil {
+		return Article{}, fmt.Errorf("kb: get article: set project id: %w", err)
+	}
+
+	// Verify agent has a passport for this project.
+	var dummy int
+	err = tx.QueryRowContext(ctx, "SELECT 1 FROM passports WHERE agent_id = $1 AND project_id = $2", agentID, projectID).Scan(&dummy)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Article{}, fmt.Errorf("kb: get article: agent not registered or has no passport for this project: %w", ErrPassportNotFound)
+	} else if err != nil {
+		return Article{}, fmt.Errorf("kb: get article: passport lookup: %w", err)
+	}
+
+	var article Article
+	err = tx.QueryRowContext(ctx,
+		`SELECT `+articleColumns+` FROM kb_articles WHERE id = $1 AND project_id = $2`,
+		articleID, projectID,
+	).Scan(&article.ID, &article.ProjectID, &article.Title, &article.Body, &article.Frontmatter, &article.AuthorAgentID, &article.CreatedAt, &article.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Article{}, ErrArticleNotFound
+	} else if err != nil {
+		return Article{}, fmt.Errorf("kb: get article: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Article{}, fmt.Errorf("kb: get article: commit: %w", err)
+	}
+	return article, nil
 }
 
