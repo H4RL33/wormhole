@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/H4RL33/wormhole/internal/core/kb"
@@ -247,12 +246,26 @@ func TestMcp_WriteArticle_DedupViolation(t *testing.T) {
 		t.Fatal("expected error field in CallResponse, got empty string")
 	}
 
-	// Parse the structured error JSON inside CallResponse.Error
-	if !strings.Contains(callResp.Error, "DEDUP_VIOLATION") {
-		t.Errorf("expected CallResponse.Error to contain DEDUP_VIOLATION, got: %q", callResp.Error)
+	// Verify the error is valid raw JSON (not wrapped/prefixed)
+	var parsedErr struct {
+		Error          string `json:"error"`
+		Code           string `json:"code"`
+		ClosestArticle struct {
+			ID         string  `json:"id"`
+			Title      string  `json:"title"`
+			Similarity float64 `json:"similarity"`
+		} `json:"closest_article"`
+		Suggestion string `json:"suggestion"`
 	}
-	if !strings.Contains(callResp.Error, "kb: write article: semantic duplicate found") {
-		t.Errorf("expected CallResponse.Error to contain error description, got: %q", callResp.Error)
+	if err := json.Unmarshal([]byte(callResp.Error), &parsedErr); err != nil {
+		t.Fatalf("expected CallResponse.Error to be valid raw JSON, got: %q (unmarshal error: %v)", callResp.Error, err)
+	}
+
+	if parsedErr.Code != "DEDUP_VIOLATION" {
+		t.Errorf("expected Code to be 'DEDUP_VIOLATION', got: %q", parsedErr.Code)
+	}
+	if parsedErr.Error != "kb: write article: semantic duplicate found" {
+		t.Errorf("expected Error to be 'kb: write article: semantic duplicate found', got: %q", parsedErr.Error)
 	}
 }
 

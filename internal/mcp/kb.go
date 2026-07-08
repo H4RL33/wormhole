@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -45,6 +46,10 @@ func WriteArticleTool(store *kb.Store) Tool {
 			}
 			article, err := store.WriteArticle(ctx, projectID, scope.Agent.ID, in.Title, in.Body, frontmatter, in.Links, in.Force)
 			if err != nil {
+				var dedupErr *kb.ErrDedupViolation
+				if errors.As(err, &dedupErr) {
+					return nil, dedupErr
+				}
 				return nil, fmt.Errorf("mcp: wormhole.kb.write: %w", err)
 			}
 			return WriteArticleOutput{

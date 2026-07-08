@@ -43,7 +43,7 @@ func (e *ErrDedupViolation) Error() string {
 			"title":      e.ExistingTitle,
 			"similarity": e.Similarity,
 		},
-		"suggestion": fmt.Sprintf("The article is too similar to '%s' (similarity %f >= threshold %f). Use the existing article, update it, or set the 'force' parameter to true to write it anyway.", e.ExistingTitle, e.Similarity, e.Threshold),
+		"suggestion": fmt.Sprintf("The article is too similar to '%s' (similarity %.2f >= threshold %.2f). Use the existing article, update it, or set the 'force' parameter to true to write it anyway.", e.ExistingTitle, e.Similarity, e.Threshold),
 	}
 	b, _ := json.Marshal(m)
 	return string(b)
