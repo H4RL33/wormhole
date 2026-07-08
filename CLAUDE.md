@@ -19,6 +19,8 @@ Wormhole = **persistent organisational infrastructure, built for AI agents first
 - **RFC-0001: Wormhole Core** — event bus, task graph, knowledge graph, identity/permissions, all via MCP.
 - **RFC-0002: Wormhole Governance** — Constitution (versioned org policy), Congress (turn-based agent/human debate), built atop Core primitives.
 
+**`docs/architecture.md` is required reading before touching any code.** Authored by Fable 5 specifically to keep lower-capability implementation models aligned on this codebase — it derives from the RFCs, states module boundaries, layering pattern (`internal/core/identity` as reference shape), DB/MCP/testing rules, and an ambiguity-resolution ladder. Authority order: RFC-0001 > RFC-0002 > `docs/architecture.md` > existing code. Every implementer subagent dispatch (any model tier) must be pointed at it.
+
 ### 2.1 One-line mental model
 
 **Code versioned by Git. Orgs versioned by Wormhole.** Git remembers software. Wormhole remembers decisions, knowledge, tasks, identities, optionally procedure. Never stores/mirrors code, only pointers (commit SHAs, PR URLs) + commentary.
