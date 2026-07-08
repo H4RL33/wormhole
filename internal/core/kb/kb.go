@@ -463,3 +463,69 @@ func (s *Store) GetArticle(ctx context.Context, projectID, agentID, articleID st
 	return article, nil
 }
 
+// GetArticleLinks returns the articles that the given article links to
+// (one-hop outbound traversal of the kb_links graph, RFC-0001 §8.3).
+// Returns ErrArticleNotFound if the source article does not exist in this
+// project. Returns an empty slice (not nil) if the article has no outbound
+// links. Returns ErrPassportNotFound if the agent has no passport for this
+// project.
+func (s *Store) GetArticleLinks(ctx context.Context, projectID, agentID, articleID string) ([]Article, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("kb: get article links: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, "SELECT set_config('wormhole.project_id', $1, true)", projectID); err != nil {
+		return nil, fmt.Errorf("kb: get article links: set project id: %w", err)
+	}
+
+	// Verify agent has a passport for this project.
+	var dummy int
+	err = tx.QueryRowContext(ctx, "SELECT 1 FROM passports WHERE agent_id = $1 AND project_id = $2", agentID, projectID).Scan(&dummy)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("kb: get article links: agent not registered or has no passport for this project: %w", ErrPassportNotFound)
+	} else if err != nil {
+		return nil, fmt.Errorf("kb: get article links: passport lookup: %w", err)
+	}
+
+	// Verify the source article exists in-project.
+	err = tx.QueryRowContext(ctx, "SELECT 1 FROM kb_articles WHERE id = $1 AND project_id = $2", articleID, projectID).Scan(&dummy)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrArticleNotFound
+	} else if err != nil {
+		return nil, fmt.Errorf("kb: get article links: source article lookup: %w", err)
+	}
+
+	rows, err := tx.QueryContext(ctx,
+		`SELECT a.id, a.project_id, a.title, a.body, a.frontmatter, a.author_agent_id, a.created_at, a.updated_at
+		 FROM kb_articles a
+		 JOIN kb_links l ON l.to_article_id = a.id
+		 WHERE l.from_article_id = $1 AND l.project_id = $2
+		 ORDER BY a.created_at ASC`,
+		articleID, projectID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("kb: get article links: query: %w", err)
+	}
+	defer rows.Close()
+
+	articles := []Article{}
+	for rows.Next() {
+		var article Article
+		err = rows.Scan(&article.ID, &article.ProjectID, &article.Title, &article.Body, &article.Frontmatter, &article.AuthorAgentID, &article.CreatedAt, &article.UpdatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("kb: get article links: scan: %w", err)
+		}
+		articles = append(articles, article)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("kb: get article links: iterate: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("kb: get article links: commit: %w", err)
+	}
+	return articles, nil
+}
+

@@ -696,3 +696,125 @@ func TestMcp_GetArticle_HappyPath(t *testing.T) {
 		t.Error("UpdatedAt is zero")
 	}
 }
+
+func TestMcp_GetArticleLinks_HappyPath(t *testing.T) {
+	store := testKBStore(t)
+	identityStore := testIdentityStore(t)
+	projectID := mustCreateProject(t, "mcp-kb-get-links")
+	_, token := mustRegisterAgent(t, projectID)
+
+	registry := NewRegistry()
+	registry.Register(WriteArticleTool(store))
+	registry.Register(GetArticleLinksTool(store))
+	handler := NewCallHandler(registry, identityStore)
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	// 1. Write the target article (B).
+	writeArgsB, _ := json.Marshal(WriteArticleInput{
+		Title: "target article B",
+		Body:  "body of target article B",
+	})
+	reqBodyB, _ := json.Marshal(CallRequest{
+		Tool:      "wormhole.kb.write",
+		ProjectID: projectID,
+		Arguments: writeArgsB,
+	})
+	reqB, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBodyB))
+	reqB.Header.Set("Content-Type", "application/json")
+	reqB.Header.Set("Authorization", "Bearer "+token)
+	respB, err := http.DefaultClient.Do(reqB)
+	if err != nil {
+		t.Fatalf("write B POST: %v", err)
+	}
+	defer respB.Body.Close()
+	if respB.StatusCode != http.StatusOK {
+		t.Fatalf("write B status: got %d, want 200", respB.StatusCode)
+	}
+	var writeBResp CallResponse
+	if err := json.NewDecoder(respB.Body).Decode(&writeBResp); err != nil {
+		t.Fatalf("decode write B response: %v", err)
+	}
+	resultBBytes, _ := json.Marshal(writeBResp.Result)
+	var writeBOut WriteArticleOutput
+	if err := json.Unmarshal(resultBBytes, &writeBOut); err != nil {
+		t.Fatalf("unmarshal write B output: %v", err)
+	}
+
+	// 2. Write the source article (A) linking to B.
+	writeArgsA, _ := json.Marshal(WriteArticleInput{
+		Title: "source article A",
+		Body:  "body of source article A",
+		Links: []string{writeBOut.ArticleID},
+	})
+	reqBodyA, _ := json.Marshal(CallRequest{
+		Tool:      "wormhole.kb.write",
+		ProjectID: projectID,
+		Arguments: writeArgsA,
+	})
+	reqA, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBodyA))
+	reqA.Header.Set("Content-Type", "application/json")
+	reqA.Header.Set("Authorization", "Bearer "+token)
+	respA, err := http.DefaultClient.Do(reqA)
+	if err != nil {
+		t.Fatalf("write A POST: %v", err)
+	}
+	defer respA.Body.Close()
+	if respA.StatusCode != http.StatusOK {
+		t.Fatalf("write A status: got %d, want 200", respA.StatusCode)
+	}
+	var writeAResp CallResponse
+	if err := json.NewDecoder(respA.Body).Decode(&writeAResp); err != nil {
+		t.Fatalf("decode write A response: %v", err)
+	}
+	resultABytes, _ := json.Marshal(writeAResp.Result)
+	var writeAOut WriteArticleOutput
+	if err := json.Unmarshal(resultABytes, &writeAOut); err != nil {
+		t.Fatalf("unmarshal write A output: %v", err)
+	}
+
+	// 3. Call wormhole.kb.get_links on article A.
+	getLinksArgs, _ := json.Marshal(GetArticleLinksInput{ArticleID: writeAOut.ArticleID})
+	reqBodyLinks, _ := json.Marshal(CallRequest{
+		Tool:      "wormhole.kb.get_links",
+		ProjectID: projectID,
+		Arguments: getLinksArgs,
+	})
+	reqLinks, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBodyLinks))
+	reqLinks.Header.Set("Content-Type", "application/json")
+	reqLinks.Header.Set("Authorization", "Bearer "+token)
+	respLinks, err := http.DefaultClient.Do(reqLinks)
+	if err != nil {
+		t.Fatalf("get_links POST: %v", err)
+	}
+	defer respLinks.Body.Close()
+	if respLinks.StatusCode != http.StatusOK {
+		t.Fatalf("get_links status: got %d, want 200", respLinks.StatusCode)
+	}
+
+	var callResp CallResponse
+	if err := json.NewDecoder(respLinks.Body).Decode(&callResp); err != nil {
+		t.Fatalf("decode get_links response: %v", err)
+	}
+	if callResp.Error != "" {
+		t.Fatalf("unexpected error: %q", callResp.Error)
+	}
+
+	resultBytes, _ := json.Marshal(callResp.Result)
+	var linksOut GetArticleLinksOutput
+	if err := json.Unmarshal(resultBytes, &linksOut); err != nil {
+		t.Fatalf("unmarshal get_links output: %v", err)
+	}
+	if linksOut.ArticleID != writeAOut.ArticleID {
+		t.Errorf("ArticleID: got %q, want %q", linksOut.ArticleID, writeAOut.ArticleID)
+	}
+	if len(linksOut.Links) != 1 {
+		t.Fatalf("expected 1 link, got %d", len(linksOut.Links))
+	}
+	if linksOut.Links[0].ArticleID != writeBOut.ArticleID {
+		t.Errorf("Links[0].ArticleID: got %q, want %q", linksOut.Links[0].ArticleID, writeBOut.ArticleID)
+	}
+	if linksOut.Links[0].Title != "target article B" {
+		t.Errorf("Links[0].Title: got %q, want %q", linksOut.Links[0].Title, "target article B")
+	}
+}

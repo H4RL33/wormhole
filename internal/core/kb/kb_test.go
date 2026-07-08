@@ -1091,3 +1091,168 @@ func TestGetArticle_NoPassport(t *testing.T) {
 		t.Fatalf("expected ErrPassportNotFound, got: %v", err)
 	}
 }
+
+func TestGetArticleLinks_HappyPath(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-get-links-happy")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+
+	// Write article B (target).
+	b, err := s.WriteArticle(ctx, projectID, agentID, "article B", "body B", nil, nil, false)
+	if err != nil {
+		t.Fatalf("WriteArticle B: %v", err)
+	}
+
+	// Write article A linking to B.
+	a, err := s.WriteArticle(ctx, projectID, agentID, "article A", "body A", nil, []string{b.ID}, false)
+	if err != nil {
+		t.Fatalf("WriteArticle A: %v", err)
+	}
+
+	links, err := s.GetArticleLinks(ctx, projectID, agentID, a.ID)
+	if err != nil {
+		t.Fatalf("GetArticleLinks: %v", err)
+	}
+	if len(links) != 1 {
+		t.Fatalf("expected 1 link, got %d", len(links))
+	}
+	if links[0].ID != b.ID {
+		t.Errorf("links[0].ID = %q, want %q", links[0].ID, b.ID)
+	}
+	if links[0].Title != "article B" {
+		t.Errorf("links[0].Title = %q, want %q", links[0].Title, "article B")
+	}
+	if links[0].Body != "body B" {
+		t.Errorf("links[0].Body = %q, want %q", links[0].Body, "body B")
+	}
+	if links[0].ProjectID != projectID {
+		t.Errorf("links[0].ProjectID = %q, want %q", links[0].ProjectID, projectID)
+	}
+	if links[0].CreatedAt.IsZero() {
+		t.Error("links[0].CreatedAt is zero")
+	}
+}
+
+func TestGetArticleLinks_NoLinks(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-get-links-empty")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+
+	article, err := s.WriteArticle(ctx, projectID, agentID, "lonely article", "no links here", nil, nil, false)
+	if err != nil {
+		t.Fatalf("WriteArticle: %v", err)
+	}
+
+	links, err := s.GetArticleLinks(ctx, projectID, agentID, article.ID)
+	if err != nil {
+		t.Fatalf("GetArticleLinks: %v", err)
+	}
+	if links == nil {
+		t.Fatal("expected non-nil empty slice, got nil")
+	}
+	if len(links) != 0 {
+		t.Errorf("expected 0 links, got %d", len(links))
+	}
+}
+
+func TestGetArticleLinks_ArticleNotFound(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-get-links-not-found")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+
+	_, err := s.GetArticleLinks(ctx, projectID, agentID, "00000000-0000-0000-0000-000000000000")
+	if !errors.Is(err, ErrArticleNotFound) {
+		t.Fatalf("expected ErrArticleNotFound, got: %v", err)
+	}
+}
+
+// TestGetArticleLinks_CrossProjectIsolation verifies that calling
+// GetArticleLinks from project B's context on an article that belongs to
+// project A returns ErrArticleNotFound (both the source article check and the
+// JOIN respect RLS). Uses a restricted (non-owner) role so RLS is enforced.
+func TestGetArticleLinks_CrossProjectIsolation(t *testing.T) {
+	ownerStore := testStore(t)
+	ctx := context.Background()
+
+	roleName := "kb_get_links_rls_test_user"
+	rolePassword := "kb_get_links_rls_test_password"
+
+	t.Cleanup(func() {
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE kb_articles FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE kb_links FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE projects FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE agents FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE passports FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("DROP ROLE IF EXISTS %s", roleName))
+	})
+
+	if _, err := ownerStore.db.Exec(fmt.Sprintf("DROP ROLE IF EXISTS %s", roleName)); err != nil {
+		t.Fatalf("failed to drop pre-existing role: %v", err)
+	}
+	if _, err := ownerStore.db.Exec(fmt.Sprintf("CREATE ROLE %s WITH LOGIN PASSWORD '%s'", roleName, rolePassword)); err != nil {
+		t.Fatalf("failed to create role: %v", err)
+	}
+	if _, err := ownerStore.db.Exec(fmt.Sprintf("GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE kb_articles, kb_links, projects, agents, passports TO %s", roleName)); err != nil {
+		t.Fatalf("failed to grant table privileges: %v", err)
+	}
+
+	cfg := types.LoadConfig()
+	u, err := url.Parse(cfg.DatabaseURL)
+	if err != nil {
+		t.Fatalf("failed to parse database URL: %v", err)
+	}
+	u.User = url.UserPassword(roleName, rolePassword)
+	restrictedDSN := u.String()
+
+	restrictedDB, err := sql.Open("postgres", restrictedDSN)
+	if err != nil {
+		t.Fatalf("failed to open restricted db connection: %v", err)
+	}
+	t.Cleanup(func() { restrictedDB.Close() })
+
+	if err := restrictedDB.PingContext(ctx); err != nil {
+		t.Fatalf("failed to ping restricted database: %v", err)
+	}
+
+	projectA := createProject(t, ownerStore, "kb-get-links-isolation-a")
+	projectB := createProject(t, ownerStore, "kb-get-links-isolation-b")
+	agentID := createAgent(t, ownerStore)
+	createPassport(t, ownerStore, agentID, projectA)
+	createPassport(t, ownerStore, agentID, projectB)
+
+	// Write two articles in project A and link them via owner store.
+	target, err := ownerStore.WriteArticle(ctx, projectA, agentID, "target article", "target body", nil, nil, false)
+	if err != nil {
+		t.Fatalf("WriteArticle target (project A): %v", err)
+	}
+	source, err := ownerStore.WriteArticle(ctx, projectA, agentID, "source article", "source body", nil, []string{target.ID}, false)
+	if err != nil {
+		t.Fatalf("WriteArticle source (project A): %v", err)
+	}
+
+	// Call GetArticleLinks scoped to project B on project A's source article.
+	// The source article check must return ErrArticleNotFound (RLS hides it).
+	restrictedStore := NewStore(restrictedDB, StubEmbedder{}, 0.85, 2000, 1, 1, 1)
+	_, err = restrictedStore.GetArticleLinks(ctx, projectB, agentID, source.ID)
+	if !errors.Is(err, ErrArticleNotFound) {
+		t.Fatalf("expected ErrArticleNotFound (RLS isolation), got: %v", err)
+	}
+}
+
+func TestGetArticleLinks_NoPassport(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-get-links-no-passport")
+	agentID := createAgent(t, s)
+
+	_, err := s.GetArticleLinks(ctx, projectID, agentID, "00000000-0000-0000-0000-000000000000")
+	if !errors.Is(err, ErrPassportNotFound) {
+		t.Fatalf("expected ErrPassportNotFound, got: %v", err)
+	}
+}

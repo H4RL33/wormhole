@@ -175,3 +175,51 @@ func GetArticleTool(store *kb.Store) Tool {
 		},
 	}
 }
+
+// GetArticleLinksInput is the wormhole.kb.get_links argument shape.
+type GetArticleLinksInput struct {
+	ArticleID string `json:"article_id"`
+}
+
+// GetArticleLinksOutput is the wormhole.kb.get_links result shape.
+type GetArticleLinksOutput struct {
+	ArticleID string           `json:"article_id"`
+	Links     []ArticleSummary `json:"links"`
+}
+
+// GetArticleLinksTool wires wormhole.kb.get_links. Returns one-hop outbound
+// linked articles for the given article (RFC-0001 §8.3 graph traversal).
+func GetArticleLinksTool(store *kb.Store) Tool {
+	return Tool{
+		Name:         "wormhole.kb.get_links",
+		Description:  "Returns the articles that a given article links to (one-hop outbound graph traversal of the kb_links graph, RFC-0001 §8.3).",
+		RequiresAuth: true,
+		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
+			var in GetArticleLinksInput
+			if err := json.Unmarshal(arguments, &in); err != nil {
+				return nil, fmt.Errorf("mcp: decode wormhole.kb.get_links arguments: %w", err)
+			}
+			linkedArticles, err := store.GetArticleLinks(ctx, projectID, scope.Agent.ID, in.ArticleID)
+			if err != nil {
+				return nil, fmt.Errorf("mcp: wormhole.kb.get_links: %w", err)
+			}
+			links := make([]ArticleSummary, 0, len(linkedArticles))
+			for _, a := range linkedArticles {
+				links = append(links, ArticleSummary{
+					ArticleID:     a.ID,
+					ProjectID:     a.ProjectID,
+					Title:         a.Title,
+					Body:          a.Body,
+					Frontmatter:   a.Frontmatter,
+					AuthorAgentID: a.AuthorAgentID,
+					CreatedAt:     a.CreatedAt,
+					UpdatedAt:     a.UpdatedAt,
+				})
+			}
+			return GetArticleLinksOutput{
+				ArticleID: in.ArticleID,
+				Links:     links,
+			}, nil
+		},
+	}
+}
