@@ -1,9 +1,10 @@
 // Package kb implements the Knowledge Base pillar's write path (RFC-0001
-// §8.3): atomic, explicitly linked articles. This is plumbing only, per Day
-// 13 scope: no compliance checks (semantic dedup, conciseness, required
-// links, all RFC-0001 §15 open-question territory per docs/kb-schema.md) and
-// no embedding generation (Day 14's concern; the embedding column exists but
-// stays NULL/unpopulated here).
+// §8.3): atomic, explicitly linked articles. Day 13 shipped this as
+// plumbing only: no compliance checks (semantic dedup, conciseness, required
+// links, all RFC-0001 §15 open-question territory per docs/kb-schema.md).
+// Day 14 wires in a deterministic stub embedding pipeline (see StubEmbedder)
+// so every write populates the embedding column; the real embedding
+// provider choice stays open (RFC-0001 §15).
 //
 // This package stays isolated per architecture.md R2: it does not import
 // internal/core/tasks or internal/core/events. Link-target existence checks
@@ -13,10 +14,13 @@ package kb
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -36,12 +40,64 @@ type Article struct {
 	UpdatedAt     time.Time
 }
 
-type Store struct {
-	db *sql.DB
+// Embedder produces a vector embedding for a piece of text. It is the seam
+// between this package's write/search plumbing and whatever embedding
+// provider is in use; RFC-0001 §15 leaves the provider choice open, so
+// callers plug in an implementation rather than this package hardcoding one.
+type Embedder interface {
+	Embed(ctx context.Context, text string) ([]float32, error)
 }
 
-func NewStore(db *sql.DB) *Store {
-	return &Store{db: db}
+// StubEmbedder is a deterministic, dependency-free placeholder Embedder.
+//
+// It is NOT semantically meaningful: its output does not capture anything
+// about the meaning of the input text. It exists only to make the
+// wormhole.kb.write / wormhole.kb.search pipeline real and testable end to
+// end (populated embedding column, working pgvector distance ranking)
+// without committing to an external embedding API or a new Go dependency
+// before that choice is made (docs/superpowers/plans/2026-07-20-day14-kb-embeddings-search.md,
+// "Embedding provider decision"; RFC-0001 §15 open question). The real
+// provider is deferred to a later day.
+//
+// Algorithm: sha256 the input text, take the first 16 bytes of the digest,
+// map each byte b to a float32 via (float32(b)-128)/128.0, producing a
+// fixed 16-dimensional vector in roughly [-1, 1). The dimension (16) is an
+// arbitrary placeholder, not a modeling decision; a future real-provider
+// swap should not assume this dimension is load-bearing.
+type StubEmbedder struct{}
+
+// stubEmbeddingDim is the fixed, arbitrary dimension of StubEmbedder's
+// output. Not a modeling decision, see StubEmbedder's doc comment.
+const stubEmbeddingDim = 16
+
+func (StubEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	digest := sha256.Sum256([]byte(text))
+	vec := make([]float32, stubEmbeddingDim)
+	for i := 0; i < stubEmbeddingDim; i++ {
+		vec[i] = (float32(digest[i]) - 128) / 128.0
+	}
+	return vec, nil
+}
+
+// formatVectorLiteral renders a []float32 as a pgvector text-input literal,
+// e.g. "[0.1,0.2,0.3]" (comma-separated, no spaces), for use with a
+// $N::vector cast. lib/pq has no native vector type, so this is done by
+// hand.
+func formatVectorLiteral(vec []float32) string {
+	parts := make([]string, len(vec))
+	for i, v := range vec {
+		parts[i] = strconv.FormatFloat(float64(v), 'f', -1, 32)
+	}
+	return "[" + strings.Join(parts, ",") + "]"
+}
+
+type Store struct {
+	db       *sql.DB
+	embedder Embedder
+}
+
+func NewStore(db *sql.DB, embedder Embedder) *Store {
+	return &Store{db: db, embedder: embedder}
 }
 
 const articleColumns = `id, project_id, title, body, frontmatter, author_agent_id, created_at, updated_at`
@@ -75,11 +131,16 @@ func (s *Store) WriteArticle(ctx context.Context, projectID, agentID, title, bod
 		frontmatter = json.RawMessage(`{}`)
 	}
 
+	embedding, err := s.embedder.Embed(ctx, body)
+	if err != nil {
+		return Article{}, fmt.Errorf("kb: write article: embed: %w", err)
+	}
+
 	row := tx.QueryRowContext(ctx,
-		`INSERT INTO kb_articles (project_id, title, body, frontmatter, author_agent_id)
-		 VALUES ($1, $2, $3, $4, $5)
+		`INSERT INTO kb_articles (project_id, title, body, frontmatter, author_agent_id, embedding)
+		 VALUES ($1, $2, $3, $4, $5, $6::vector)
 		 RETURNING `+articleColumns,
-		projectID, title, body, frontmatter, agentID,
+		projectID, title, body, frontmatter, agentID, formatVectorLiteral(embedding),
 	)
 
 	var article Article

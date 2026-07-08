@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 
 	_ "github.com/lib/pq"
@@ -29,7 +30,7 @@ func testStore(t *testing.T) *Store {
 		t.Skipf("postgres not reachable (%v); run `docker compose up -d db` and apply migrations before running this test", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return NewStore(db)
+	return NewStore(db, StubEmbedder{})
 }
 
 func createProject(t *testing.T, s *Store, name string) string {
@@ -110,12 +111,16 @@ func TestWriteArticle_SuccessNoLinks(t *testing.T) {
 		t.Error("article.UpdatedAt is zero")
 	}
 
+	// Day 14 wires the stub embedder into every write, so the embedding
+	// column is now populated (Day 13 left it NULL; see
+	// TestWriteArticle_EmbeddingPopulated for the dedicated coverage of
+	// this behavior).
 	var embeddingIsNull bool
 	if err := s.db.QueryRow(`SELECT embedding IS NULL FROM kb_articles WHERE id = $1`, article.ID).Scan(&embeddingIsNull); err != nil {
 		t.Fatalf("query embedding: %v", err)
 	}
-	if !embeddingIsNull {
-		t.Error("expected embedding column to be NULL")
+	if embeddingIsNull {
+		t.Error("expected embedding column to be populated, got NULL")
 	}
 }
 
@@ -290,5 +295,69 @@ func TestWriteArticle_CrossProjectIsolation(t *testing.T) {
 	}
 	if err := tx2.QueryRowContext(ctx, "SELECT id FROM kb_articles WHERE id = $1", article.ID).Scan(&found); err != nil {
 		t.Fatalf("expected kb_articles row to be visible under its own project context, got err=%v", err)
+	}
+}
+
+// TestWriteArticle_EmbeddingPopulated proves WriteArticle actually stores a
+// stub embedding (not just leaving the column NULL as Day 13 did): the
+// pgvector text representation must round-trip a 16-element vector.
+func TestWriteArticle_EmbeddingPopulated(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-embedding-populated")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+
+	article, err := s.WriteArticle(ctx, projectID, agentID, "title", "the article body text", nil, nil)
+	if err != nil {
+		t.Fatalf("WriteArticle: %v", err)
+	}
+
+	var embeddingText sql.NullString
+	if err := s.db.QueryRow(`SELECT embedding::text FROM kb_articles WHERE id = $1`, article.ID).Scan(&embeddingText); err != nil {
+		t.Fatalf("query embedding: %v", err)
+	}
+	if !embeddingText.Valid || embeddingText.String == "" {
+		t.Fatal("expected embedding column to be non-null and non-empty")
+	}
+
+	trimmed := strings.Trim(embeddingText.String, "[]")
+	components := strings.Split(trimmed, ",")
+	if len(components) != 16 {
+		t.Fatalf("stored embedding has %d dimensions, want 16 (raw: %q)", len(components), embeddingText.String)
+	}
+}
+
+// TestWriteArticle_EmbeddingDeterministic proves two articles with identical
+// body text produce identical stored embeddings. Task 2's search test
+// depends on this: searching with an article's own body text must find it
+// at distance 0, since the same text hashes to the same stub vector.
+func TestWriteArticle_EmbeddingDeterministic(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-embedding-deterministic")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+
+	const body = "identical body text for both articles"
+	first, err := s.WriteArticle(ctx, projectID, agentID, "first", body, nil, nil)
+	if err != nil {
+		t.Fatalf("WriteArticle (first): %v", err)
+	}
+	second, err := s.WriteArticle(ctx, projectID, agentID, "second", body, nil, nil)
+	if err != nil {
+		t.Fatalf("WriteArticle (second): %v", err)
+	}
+
+	var firstEmbedding, secondEmbedding string
+	if err := s.db.QueryRow(`SELECT embedding::text FROM kb_articles WHERE id = $1`, first.ID).Scan(&firstEmbedding); err != nil {
+		t.Fatalf("query embedding (first): %v", err)
+	}
+	if err := s.db.QueryRow(`SELECT embedding::text FROM kb_articles WHERE id = $1`, second.ID).Scan(&secondEmbedding); err != nil {
+		t.Fatalf("query embedding (second): %v", err)
+	}
+
+	if firstEmbedding != secondEmbedding {
+		t.Fatalf("embeddings for identical body text differ: first=%q second=%q", firstEmbedding, secondEmbedding)
 	}
 }
