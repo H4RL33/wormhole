@@ -107,8 +107,8 @@ Boundary days (6, 12, 18) carry over: prior milestone's review/demo plus next mi
 - [ ] Tests: near-duplicate article rejected/merged correctly
 
 ### Day 16 — 2026-07-22
-- [ ] Compliance check: conciseness ceiling — reject/rewrite-prompt if exceeded
-- [ ] Required-link validation where applicable
+- [x] Compliance check: conciseness ceiling — reject/rewrite-prompt if exceeded
+- [x] Required-link validation where applicable
 
 ### Day 17 — 2026-07-23
 - [ ] `wormhole.kb.get` — article retrieval by ID
