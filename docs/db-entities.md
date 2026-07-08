@@ -81,11 +81,15 @@ Append-only.
 
 Status transitions emit `task.status_changed` events (RFC §8.2 key property — no separate sync step).
 
+Valid status state-machine transitions (which statuses can transition to which) are deferred to Day 8's `wormhole.task.update_status` implementation, not decided yet.
+
 ## task_links
 - `id`
 - `task_id` -> tasks
 - `link_type` (kb_article / commit / pr / event)
 - `target_ref` (kb_article_id, commit_sha, pr_url, or event_id depending on link_type)
+
+RFC-0001 §8.2 doesn't specify exact column names/types for `tasks`/`task_links` — this sketch is a reasonable extension, not an RFC-literal schema.
 
 ## kb_articles
 - `id`
