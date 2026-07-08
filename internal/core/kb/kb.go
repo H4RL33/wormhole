@@ -27,6 +27,29 @@ import (
 var ErrPassportNotFound = errors.New("kb: agent not registered or has no passport for this project")
 var ErrLinkedArticleNotFound = errors.New("kb: linked article not found")
 
+type ErrDedupViolation struct {
+	ExistingID    string  `json:"existing_article_id"`
+	ExistingTitle string  `json:"existing_article_title"`
+	Similarity    float64 `json:"similarity"`
+	Threshold     float64 `json:"threshold"`
+}
+
+func (e *ErrDedupViolation) Error() string {
+	m := map[string]any{
+		"error": "kb: write article: semantic duplicate found",
+		"code":  "DEDUP_VIOLATION",
+		"closest_article": map[string]any{
+			"id":         e.ExistingID,
+			"title":      e.ExistingTitle,
+			"similarity": e.Similarity,
+		},
+		"suggestion": fmt.Sprintf("The article is too similar to '%s' (similarity %f >= threshold %f). Use the existing article, update it, or set the 'force' parameter to true to write it anyway.", e.ExistingTitle, e.Similarity, e.Threshold),
+	}
+	b, _ := json.Marshal(m)
+	return string(b)
+}
+
+
 // Article is a single atomic knowledge base entry (RFC-0001 §8.3: one
 // article = one fact, decision, or procedure).
 type Article struct {
@@ -108,7 +131,7 @@ const articleColumns = `id, project_id, title, body, frontmatter, author_agent_i
 // (RFC-0001 §9 wormhole.kb.write(title, body, links[])). If any link target
 // does not exist in-project, the whole write rolls back: no partial article
 // with dangling links is ever left behind.
-func (s *Store) WriteArticle(ctx context.Context, projectID, agentID, title, body string, frontmatter json.RawMessage, linkTargetIDs []string) (Article, error) {
+func (s *Store) WriteArticle(ctx context.Context, projectID, agentID, title, body string, frontmatter json.RawMessage, linkTargetIDs []string, force bool) (Article, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Article{}, fmt.Errorf("kb: write article: begin tx: %w", err)
@@ -135,6 +158,35 @@ func (s *Store) WriteArticle(ctx context.Context, projectID, agentID, title, bod
 	embedding, err := s.embedder.Embed(ctx, body)
 	if err != nil {
 		return Article{}, fmt.Errorf("kb: write article: embed: %w", err)
+	}
+
+	if !force {
+		var existingID string
+		var existingTitle string
+		var similarity float64
+
+		// pgvector cosine distance <= 1 - threshold maps to similarity >= threshold
+		err = tx.QueryRowContext(ctx,
+			`SELECT id, title, (1 - (embedding <=> $1::vector)) AS similarity
+			 FROM kb_articles
+			 WHERE project_id = $2 AND embedding IS NOT NULL
+			 ORDER BY embedding <=> $1::vector
+			 LIMIT 1`,
+			formatVectorLiteral(embedding), projectID,
+		).Scan(&existingID, &existingTitle, &similarity)
+
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return Article{}, fmt.Errorf("kb: write article: dedup query: %w", err)
+		}
+
+		if err == nil && similarity >= s.dedupThreshold {
+			return Article{}, &ErrDedupViolation{
+				ExistingID:    existingID,
+				ExistingTitle: existingTitle,
+				Similarity:    similarity,
+				Threshold:     s.dedupThreshold,
+			}
+		}
 	}
 
 	row := tx.QueryRowContext(ctx,

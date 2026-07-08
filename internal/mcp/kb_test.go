@@ -1,9 +1,13 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/H4RL33/wormhole/internal/core/kb"
@@ -172,6 +176,83 @@ func TestKBTools_SearchArticles(t *testing.T) {
 	// The first article in results should be the second one we wrote (distance 0)
 	if out.Articles[0].Title != "setup instructions" {
 		t.Errorf("expected first search result to be 'setup instructions', got %q", out.Articles[0].Title)
+	}
+}
+
+func TestMcp_WriteArticle_DedupViolation(t *testing.T) {
+	store := testKBStore(t)
+	identityStore := testIdentityStore(t)
+	projectID := mustCreateProject(t, "mcp-kb-dedup-violation")
+	_, token := mustRegisterAgent(t, projectID)
+
+	registry := NewRegistry()
+	registry.Register(WriteArticleTool(store))
+	handler := NewCallHandler(registry, identityStore)
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	// 1. Write the first article.
+	writeArgs1, _ := json.Marshal(WriteArticleInput{
+		Title: "first article",
+		Body:  "unique article body content for dedup test",
+	})
+	reqBody1, _ := json.Marshal(CallRequest{
+		Tool:      "wormhole.kb.write",
+		ProjectID: projectID,
+		Arguments: writeArgs1,
+	})
+
+	req1, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBody1))
+	req1.Header.Set("Content-Type", "application/json")
+	req1.Header.Set("Authorization", "Bearer "+token)
+	resp1, err := http.DefaultClient.Do(req1)
+	if err != nil {
+		t.Fatalf("first write POST: %v", err)
+	}
+	defer resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("first write status: got %d, want 200", resp1.StatusCode)
+	}
+
+	// 2. Write the duplicate article.
+	writeArgs2, _ := json.Marshal(WriteArticleInput{
+		Title: "second article",
+		Body:  "unique article body content for dedup test",
+	})
+	reqBody2, _ := json.Marshal(CallRequest{
+		Tool:      "wormhole.kb.write",
+		ProjectID: projectID,
+		Arguments: writeArgs2,
+	})
+
+	req2, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBody2))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("Authorization", "Bearer "+token)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("second write POST: %v", err)
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusBadRequest {
+		t.Fatalf("second write status: got %d, want 400 (BadRequest)", resp2.StatusCode)
+	}
+
+	var callResp CallResponse
+	if err := json.NewDecoder(resp2.Body).Decode(&callResp); err != nil {
+		t.Fatalf("decode call response: %v", err)
+	}
+
+	if callResp.Error == "" {
+		t.Fatal("expected error field in CallResponse, got empty string")
+	}
+
+	// Parse the structured error JSON inside CallResponse.Error
+	if !strings.Contains(callResp.Error, "DEDUP_VIOLATION") {
+		t.Errorf("expected CallResponse.Error to contain DEDUP_VIOLATION, got: %q", callResp.Error)
+	}
+	if !strings.Contains(callResp.Error, "kb: write article: semantic duplicate found") {
+		t.Errorf("expected CallResponse.Error to contain error description, got: %q", callResp.Error)
 	}
 }
 

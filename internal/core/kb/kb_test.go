@@ -81,7 +81,7 @@ func TestWriteArticle_SuccessNoLinks(t *testing.T) {
 	agentID := createAgent(t, s)
 	createPassport(t, s, agentID, projectID)
 
-	article, err := s.WriteArticle(ctx, projectID, agentID, "how to deploy", "run the deploy script", nil, nil)
+	article, err := s.WriteArticle(ctx, projectID, agentID, "how to deploy", "run the deploy script", nil, nil, false)
 	if err != nil {
 		t.Fatalf("WriteArticle: %v", err)
 	}
@@ -131,13 +131,13 @@ func TestWriteArticle_SuccessWithLinks(t *testing.T) {
 	agentID := createAgent(t, s)
 	createPassport(t, s, agentID, projectID)
 
-	target, err := s.WriteArticle(ctx, projectID, agentID, "target article", "target body", nil, nil)
+	target, err := s.WriteArticle(ctx, projectID, agentID, "target article", "target body", nil, nil, false)
 	if err != nil {
 		t.Fatalf("WriteArticle (target): %v", err)
 	}
 
 	frontmatter := json.RawMessage(`{"type":"decision"}`)
-	article, err := s.WriteArticle(ctx, projectID, agentID, "linking article", "linking body", frontmatter, []string{target.ID})
+	article, err := s.WriteArticle(ctx, projectID, agentID, "linking article", "linking body", frontmatter, []string{target.ID}, false)
 	if err != nil {
 		t.Fatalf("WriteArticle (linking): %v", err)
 	}
@@ -169,7 +169,7 @@ func TestWriteArticle_UnknownLinkTargetLeavesNoPartialRow(t *testing.T) {
 
 	const title = "orphaned article attempt"
 	unknownTargetID := "00000000-0000-0000-0000-000000000000"
-	_, err := s.WriteArticle(ctx, projectID, agentID, title, "body", nil, []string{unknownTargetID})
+	_, err := s.WriteArticle(ctx, projectID, agentID, title, "body", nil, []string{unknownTargetID}, false)
 	if !errors.Is(err, ErrLinkedArticleNotFound) {
 		t.Fatalf("expected ErrLinkedArticleNotFound, got: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestWriteArticle_PassportRequired(t *testing.T) {
 	projectID := createProject(t, s, "kb-write-passport-required")
 	agentID := createAgent(t, s)
 
-	_, err := s.WriteArticle(ctx, projectID, agentID, "title", "body", nil, nil)
+	_, err := s.WriteArticle(ctx, projectID, agentID, "title", "body", nil, nil, false)
 	if !errors.Is(err, ErrPassportNotFound) {
 		t.Fatalf("expected ErrPassportNotFound, got: %v", err)
 	}
@@ -257,7 +257,7 @@ func TestWriteArticle_CrossProjectIsolation(t *testing.T) {
 	// local SET on the same pooled connection, which would make the "no
 	// context set" check below fail with a cast error instead of exercising
 	// RLS.
-	article, err := ownerStore.WriteArticle(ctx, projectA, agentID, "project a article", "body", nil, nil)
+	article, err := ownerStore.WriteArticle(ctx, projectA, agentID, "project a article", "body", nil, nil, false)
 	if err != nil {
 		t.Fatalf("WriteArticle (project A): %v", err)
 	}
@@ -308,7 +308,7 @@ func TestWriteArticle_EmbeddingPopulated(t *testing.T) {
 	agentID := createAgent(t, s)
 	createPassport(t, s, agentID, projectID)
 
-	article, err := s.WriteArticle(ctx, projectID, agentID, "title", "the article body text", nil, nil)
+	article, err := s.WriteArticle(ctx, projectID, agentID, "title", "the article body text", nil, nil, false)
 	if err != nil {
 		t.Fatalf("WriteArticle: %v", err)
 	}
@@ -340,11 +340,11 @@ func TestWriteArticle_EmbeddingDeterministic(t *testing.T) {
 	createPassport(t, s, agentID, projectID)
 
 	const body = "identical body text for both articles"
-	first, err := s.WriteArticle(ctx, projectID, agentID, "first", body, nil, nil)
+	first, err := s.WriteArticle(ctx, projectID, agentID, "first", body, nil, nil, false)
 	if err != nil {
 		t.Fatalf("WriteArticle (first): %v", err)
 	}
-	second, err := s.WriteArticle(ctx, projectID, agentID, "second", body, nil, nil)
+	second, err := s.WriteArticle(ctx, projectID, agentID, "second", body, nil, nil, true)
 	if err != nil {
 		t.Fatalf("WriteArticle (second): %v", err)
 	}
@@ -370,15 +370,15 @@ func TestSearchArticles_SuccessAndLimit(t *testing.T) {
 	createPassport(t, s, agentID, projectID)
 
 	// Create 3 articles with distinct body texts.
-	_, err := s.WriteArticle(ctx, projectID, agentID, "deploy guide", "run the production deploy script carefully", nil, nil)
+	_, err := s.WriteArticle(ctx, projectID, agentID, "deploy guide", "run the production deploy script carefully", nil, nil, false)
 	if err != nil {
 		t.Fatalf("WriteArticle 1: %v", err)
 	}
-	a2, err := s.WriteArticle(ctx, projectID, agentID, "setup guide", "install go and docker compose first", nil, nil)
+	a2, err := s.WriteArticle(ctx, projectID, agentID, "setup guide", "install go and docker compose first", nil, nil, false)
 	if err != nil {
 		t.Fatalf("WriteArticle 2: %v", err)
 	}
-	_, err = s.WriteArticle(ctx, projectID, agentID, "database backup", "backup postgres daily using pg_dump", nil, nil)
+	_, err = s.WriteArticle(ctx, projectID, agentID, "database backup", "backup postgres daily using pg_dump", nil, nil, false)
 	if err != nil {
 		t.Fatalf("WriteArticle 3: %v", err)
 	}
@@ -438,7 +438,7 @@ func TestSearchArticles_ExcludeNullEmbedding(t *testing.T) {
 	createPassport(t, s, agentID, projectID)
 
 	// Create a normal article (has embedding).
-	_, err := s.WriteArticle(ctx, projectID, agentID, "normal article", "normal body", nil, nil)
+	_, err := s.WriteArticle(ctx, projectID, agentID, "normal article", "normal body", nil, nil, false)
 	if err != nil {
 		t.Fatalf("WriteArticle: %v", err)
 	}
@@ -522,11 +522,11 @@ func TestSearchArticles_CrossProjectIsolation(t *testing.T) {
 	createPassport(t, ownerStore, agentID, projectB)
 
 	// Create articles in both projects.
-	_, err = ownerStore.WriteArticle(ctx, projectA, agentID, "project a article", "body a", nil, nil)
+	_, err = ownerStore.WriteArticle(ctx, projectA, agentID, "project a article", "body a", nil, nil, false)
 	if err != nil {
 		t.Fatalf("WriteArticle (project A): %v", err)
 	}
-	_, err = ownerStore.WriteArticle(ctx, projectB, agentID, "project b article", "body b", nil, nil)
+	_, err = ownerStore.WriteArticle(ctx, projectB, agentID, "project b article", "body b", nil, nil, false)
 	if err != nil {
 		t.Fatalf("WriteArticle (project B): %v", err)
 	}
@@ -548,4 +548,107 @@ func TestSearchArticles_CrossProjectIsolation(t *testing.T) {
 		}
 	}
 }
+
+func TestWriteArticle_DedupViolation(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-dedup-violation")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+
+	const title1 = "first article"
+	const body = "This is the body of the article."
+	a1, err := s.WriteArticle(ctx, projectID, agentID, title1, body, nil, nil, false)
+	if err != nil {
+		t.Fatalf("WriteArticle first: %v", err)
+	}
+
+	const title2 = "duplicate article"
+	_, err = s.WriteArticle(ctx, projectID, agentID, title2, body, nil, nil, false)
+	if err == nil {
+		t.Fatal("expected ErrDedupViolation error, got nil")
+	}
+
+	var dedupErr *ErrDedupViolation
+	if !errors.As(err, &dedupErr) {
+		t.Fatalf("expected ErrDedupViolation, got type %T: %v", err, err)
+	}
+
+	if dedupErr.ExistingID != a1.ID {
+		t.Errorf("dedupErr.ExistingID = %q, want %q", dedupErr.ExistingID, a1.ID)
+	}
+	if dedupErr.ExistingTitle != a1.Title {
+		t.Errorf("dedupErr.ExistingTitle = %q, want %q", dedupErr.ExistingTitle, a1.Title)
+	}
+	if dedupErr.Similarity < 0.99 {
+		t.Errorf("dedupErr.Similarity = %f, want ~1.0", dedupErr.Similarity)
+	}
+	if dedupErr.Threshold != s.dedupThreshold {
+		t.Errorf("dedupErr.Threshold = %f, want %f", dedupErr.Threshold, s.dedupThreshold)
+	}
+
+	// Verify rollback: title2 should not exist in the database.
+	var count int
+	err = s.db.QueryRowContext(ctx, "SELECT count(*) FROM kb_articles WHERE project_id = $1 AND title = $2", projectID, title2).Scan(&count)
+	if err != nil {
+		t.Fatalf("query count of title2: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 articles for title %q due to transaction rollback, got %d", title2, count)
+	}
+}
+
+func TestWriteArticle_DedupBypass(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-dedup-bypass")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+
+	const title1 = "first article"
+	const body = "This is the body of the article."
+	_, err := s.WriteArticle(ctx, projectID, agentID, title1, body, nil, nil, false)
+	if err != nil {
+		t.Fatalf("WriteArticle first: %v", err)
+	}
+
+	const title2 = "duplicate article"
+	_, err = s.WriteArticle(ctx, projectID, agentID, title2, body, nil, nil, true)
+	if err != nil {
+		t.Fatalf("expected successful bypass, got error: %v", err)
+	}
+
+	// Verify both exist.
+	var count int
+	err = s.db.QueryRowContext(ctx, "SELECT count(*) FROM kb_articles WHERE project_id = $1", projectID).Scan(&count)
+	if err != nil {
+		t.Fatalf("query count: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 articles in project, got %d", count)
+	}
+}
+
+func TestWriteArticle_DedupCrossProject(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectA := createProject(t, s, "kb-dedup-cross-a")
+	projectB := createProject(t, s, "kb-dedup-cross-b")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectA)
+	createPassport(t, s, agentID, projectB)
+
+	const body = "This is the body of the article."
+	_, err := s.WriteArticle(ctx, projectA, agentID, "title a", body, nil, nil, false)
+	if err != nil {
+		t.Fatalf("WriteArticle project A: %v", err)
+	}
+
+	// Write same body in project B without force, should succeed due to isolation.
+	_, err = s.WriteArticle(ctx, projectB, agentID, "title b", body, nil, nil, false)
+	if err != nil {
+		t.Fatalf("expected WriteArticle in project B to succeed, got error: %v", err)
+	}
+}
+
 

@@ -16,6 +16,7 @@ type WriteArticleInput struct {
 	Body        string          `json:"body"`
 	Frontmatter json.RawMessage `json:"frontmatter,omitempty"`
 	Links       []string        `json:"links"`
+	Force       bool            `json:"force"`
 }
 
 // WriteArticleOutput is the wormhole.kb.write result shape.
@@ -27,12 +28,11 @@ type WriteArticleOutput struct {
 }
 
 // WriteArticleTool wires wormhole.kb.write. The authenticated agent's ID is
-// recorded as the article's author. No compliance checks (dedup,
-// conciseness, required links) run here; that's deferred per docs/kb-schema.md.
+// recorded as the article's author.
 func WriteArticleTool(store *kb.Store) Tool {
 	return Tool{
 		Name:         "wormhole.kb.write",
-		Description:  "Writes an atomic knowledge base article, optionally linked to existing articles. No compliance checks or embeddings yet.",
+		Description:  "Writes an atomic knowledge base article, optionally linked to existing articles. Validates semantic deduplication unless bypassed with force=true.",
 		RequiresAuth: true,
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in WriteArticleInput
@@ -43,7 +43,7 @@ func WriteArticleTool(store *kb.Store) Tool {
 			if len(frontmatter) == 0 {
 				frontmatter = json.RawMessage(`{}`)
 			}
-			article, err := store.WriteArticle(ctx, projectID, scope.Agent.ID, in.Title, in.Body, frontmatter, in.Links)
+			article, err := store.WriteArticle(ctx, projectID, scope.Agent.ID, in.Title, in.Body, frontmatter, in.Links, in.Force)
 			if err != nil {
 				return nil, fmt.Errorf("mcp: wormhole.kb.write: %w", err)
 			}
