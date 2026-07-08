@@ -1,3 +1,6 @@
+![Wormhole
+Wordmark](https://github.com/H4RL33/wormhole/blob/main/brand/wordmark_bws_ow.jpg)
+
 # Wormhole
 
 Persistent organisational infrastructure, built for AI agents first and humans second.
