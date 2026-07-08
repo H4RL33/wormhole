@@ -54,6 +54,10 @@ func WriteArticleTool(store *kb.Store) Tool {
 				if errors.As(err, &concisenessErr) {
 					return nil, concisenessErr
 				}
+				var requiredLinksErr *kb.ErrRequiredLinksViolation
+				if errors.As(err, &requiredLinksErr) {
+					return nil, requiredLinksErr
+				}
 				return nil, fmt.Errorf("mcp: wormhole.kb.write: %w", err)
 			}
 			return WriteArticleOutput{

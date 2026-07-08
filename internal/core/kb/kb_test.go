@@ -756,5 +756,170 @@ func TestWriteArticle_ConcisenessBypass(t *testing.T) {
 	}
 }
 
+func TestWriteArticle_RequiredLinksViolation(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-req-links-violation")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+
+	// Create 4 articles to have plenty of candidates for suggestions
+	_, err := s.WriteArticle(ctx, projectID, agentID, "Setup Guide", "Install all dependencies and run setup", nil, nil, false)
+	if err != nil {
+		t.Fatalf("WriteArticle a1: %v", err)
+	}
+	_, err = s.WriteArticle(ctx, projectID, agentID, "Deploy Guide", "Deploying database migrations and frontend assets", nil, nil, false)
+	if err != nil {
+		t.Fatalf("WriteArticle a2: %v", err)
+	}
+	_, err = s.WriteArticle(ctx, projectID, agentID, "Backup Policy", "Scheduled database backups everyday at midnight", nil, nil, false)
+	if err != nil {
+		t.Fatalf("WriteArticle a3: %v", err)
+	}
+	_, err = s.WriteArticle(ctx, projectID, agentID, "Monitoring", "Use Prometheus and Grafana for system metrics", nil, nil, false)
+	if err != nil {
+		t.Fatalf("WriteArticle a4: %v", err)
+	}
+
+	body := "Need to make a decision about architecture and links"
+	embedder := StubEmbedder{}
+	queryEmbedding, err := embedder.Embed(ctx, body)
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+
+	// Fetch expected top 3 closest articles from the db using pgvector
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, title
+		 FROM kb_articles
+		 WHERE project_id = $1 AND embedding IS NOT NULL
+		 ORDER BY embedding <=> $2::vector
+		 LIMIT 3`,
+		projectID, formatVectorLiteral(queryEmbedding),
+	)
+	if err != nil {
+		t.Fatalf("query expected suggestions: %v", err)
+	}
+	defer rows.Close()
+
+	var expectedSuggestions []LinkSuggestion
+	for rows.Next() {
+		var sugg LinkSuggestion
+		if err := rows.Scan(&sugg.ID, &sugg.Title); err != nil {
+			t.Fatalf("scan expected suggestion: %v", err)
+		}
+		expectedSuggestions = append(expectedSuggestions, sugg)
+	}
+
+	typesToTest := []string{"decision", "policy", "procedure"}
+	for _, aType := range typesToTest {
+		t.Run(aType, func(t *testing.T) {
+			frontmatter := json.RawMessage(fmt.Sprintf(`{"type":"%s"}`, aType))
+			_, err := s.WriteArticle(ctx, projectID, agentID, "My Article", body, frontmatter, nil, false)
+			if err == nil {
+				t.Fatalf("expected ErrRequiredLinksViolation, got nil")
+			}
+
+			var violationErr *ErrRequiredLinksViolation
+			if !errors.As(err, &violationErr) {
+				t.Fatalf("expected ErrRequiredLinksViolation, got type %T: %v", err, err)
+			}
+
+			if strings.ToLower(violationErr.ArticleType) != aType {
+				t.Errorf("violationErr.ArticleType = %q, want %q", violationErr.ArticleType, aType)
+			}
+			if violationErr.LinkCount != 0 {
+				t.Errorf("violationErr.LinkCount = %d, want 0", violationErr.LinkCount)
+			}
+			if violationErr.MinLinks != 1 {
+				t.Errorf("violationErr.MinLinks = %d, want 1", violationErr.MinLinks)
+			}
+
+			// Validate suggestions list length and values (must match expectedSuggestions exactly, including order)
+			if len(violationErr.Suggestions) != len(expectedSuggestions) {
+				t.Fatalf("violationErr.Suggestions count = %d, want %d", len(violationErr.Suggestions), len(expectedSuggestions))
+			}
+			for i, sugg := range violationErr.Suggestions {
+				if sugg.ID != expectedSuggestions[i].ID {
+					t.Errorf("suggestion %d ID = %q, want %q", i, sugg.ID, expectedSuggestions[i].ID)
+				}
+				if sugg.Title != expectedSuggestions[i].Title {
+					t.Errorf("suggestion %d Title = %q, want %q", i, sugg.Title, expectedSuggestions[i].Title)
+				}
+			}
+
+			// Verify JSON format of Error()
+			var parsed struct {
+				Error   string `json:"error"`
+				Code    string `json:"code"`
+				Details struct {
+					ArticleType string           `json:"article_type"`
+					LinkCount   int              `json:"link_count"`
+					MinLinks    int              `json:"min_links"`
+					Suggestions []LinkSuggestion `json:"suggestions"`
+				} `json:"details"`
+				Suggestion string `json:"suggestion"`
+			}
+			if err := json.Unmarshal([]byte(violationErr.Error()), &parsed); err != nil {
+				t.Fatalf("expected Error() to be valid JSON, got: %s", violationErr.Error())
+			}
+			if parsed.Code != "REQUIRED_LINKS_VIOLATION" {
+				t.Errorf("parsed.Code = %q, want 'REQUIRED_LINKS_VIOLATION'", parsed.Code)
+			}
+			if parsed.Details.ArticleType != aType {
+				t.Errorf("parsed.Details.ArticleType = %q, want %q", parsed.Details.ArticleType, aType)
+			}
+			if parsed.Details.LinkCount != 0 {
+				t.Errorf("parsed.Details.LinkCount = %d, want 0", parsed.Details.LinkCount)
+			}
+			if parsed.Details.MinLinks != 1 {
+				t.Errorf("parsed.Details.MinLinks = %d, want 1", parsed.Details.MinLinks)
+			}
+		})
+	}
+}
+
+func TestWriteArticle_RequiredLinksBypass(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-req-links-bypass")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+
+	frontmatter := json.RawMessage(`{"type":"decision"}`)
+	article, err := s.WriteArticle(ctx, projectID, agentID, "forced article", "body content", frontmatter, nil, true)
+	if err != nil {
+		t.Fatalf("expected write with force=true to bypass link requirement, got: %v", err)
+	}
+
+	if article.Title != "forced article" {
+		t.Errorf("article.Title = %q, want %q", article.Title, "forced article")
+	}
+}
+
+func TestWriteArticle_RequiredLinksNormal(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-req-links-normal")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+
+	target, err := s.WriteArticle(ctx, projectID, agentID, "target", "body target", nil, nil, false)
+	if err != nil {
+		t.Fatalf("WriteArticle (target): %v", err)
+	}
+
+	frontmatter := json.RawMessage(`{"type":"decision"}`)
+	article, err := s.WriteArticle(ctx, projectID, agentID, "decision article", "body content", frontmatter, []string{target.ID}, false)
+	if err != nil {
+		t.Fatalf("expected write with sufficient links to succeed, got: %v", err)
+	}
+
+	if article.Title != "decision article" {
+		t.Errorf("article.Title = %q, want %q", article.Title, "decision article")
+	}
+}
+
+
 
 

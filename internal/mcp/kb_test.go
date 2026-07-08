@@ -376,4 +376,132 @@ func TestMcp_WriteArticle_ConcisenessBypass(t *testing.T) {
 	}
 }
 
+func TestMcp_WriteArticle_RequiredLinksViolation(t *testing.T) {
+	store := testKBStore(t)
+	identityStore := testIdentityStore(t)
+	projectID := mustCreateProject(t, "mcp-kb-req-links-violation")
+	_, token := mustRegisterAgent(t, projectID)
+
+	registry := NewRegistry()
+	registry.Register(WriteArticleTool(store))
+	handler := NewCallHandler(registry, identityStore)
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	// 1. Create a background article so we have a suggestion candidate.
+	writeArgs1, _ := json.Marshal(WriteArticleInput{
+		Title: "Existing Helpful Article",
+		Body:  "Relevant content about something related to our database architecture",
+	})
+	reqBody1, _ := json.Marshal(CallRequest{
+		Tool:      "wormhole.kb.write",
+		ProjectID: projectID,
+		Arguments: writeArgs1,
+	})
+	req1, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBody1))
+	req1.Header.Set("Content-Type", "application/json")
+	req1.Header.Set("Authorization", "Bearer "+token)
+	resp1, err := http.DefaultClient.Do(req1)
+	if err != nil {
+		t.Fatalf("first write POST: %v", err)
+	}
+	defer resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("first write status: got %d, want 200", resp1.StatusCode)
+	}
+
+	// Decode the first write response to get the ID.
+	var write1Out CallResponse
+	if err := json.NewDecoder(resp1.Body).Decode(&write1Out); err != nil {
+		t.Fatalf("decode first write response: %v", err)
+	}
+	if write1Out.Error != "" {
+		t.Fatalf("expected no error in first write, got: %q", write1Out.Error)
+	}
+
+	var write1OutVal WriteArticleOutput
+	resultBytes, _ := json.Marshal(write1Out.Result)
+	if err := json.Unmarshal(resultBytes, &write1OutVal); err != nil {
+		t.Fatalf("unmarshal first write output: %v", err)
+	}
+	existingID := write1OutVal.ArticleID
+
+	// 2. Write the decision article without links.
+	fm, _ := json.Marshal(map[string]string{"type": "decision"})
+	writeArgs2, _ := json.Marshal(WriteArticleInput{
+		Title:       "Architecture Decision",
+		Body:        "We decide to use PostgreSQL and pgvector for our semantic search implementation",
+		Frontmatter: fm,
+		Links:       nil,
+	})
+	reqBody2, _ := json.Marshal(CallRequest{
+		Tool:      "wormhole.kb.write",
+		ProjectID: projectID,
+		Arguments: writeArgs2,
+	})
+
+	req2, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBody2))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("Authorization", "Bearer "+token)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("second write POST: %v", err)
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusBadRequest {
+		t.Fatalf("second write status: got %d, want 400 (BadRequest)", resp2.StatusCode)
+	}
+
+	var callResp CallResponse
+	if err := json.NewDecoder(resp2.Body).Decode(&callResp); err != nil {
+		t.Fatalf("decode call response: %v", err)
+	}
+
+	if callResp.Error == "" {
+		t.Fatal("expected error field in CallResponse, got empty string")
+	}
+
+	// Verify the error is valid raw JSON (not wrapped/prefixed)
+	var parsedErr struct {
+		Error   string `json:"error"`
+		Code    string `json:"code"`
+		Details struct {
+			ArticleType string `json:"article_type"`
+			LinkCount   int    `json:"link_count"`
+			MinLinks    int    `json:"min_links"`
+			Suggestions []struct {
+				ID    string `json:"id"`
+				Title string `json:"title"`
+			} `json:"suggestions"`
+		} `json:"details"`
+		Suggestion string `json:"suggestion"`
+	}
+	if err := json.Unmarshal([]byte(callResp.Error), &parsedErr); err != nil {
+		t.Fatalf("expected CallResponse.Error to be valid raw JSON, got: %q (unmarshal error: %v)", callResp.Error, err)
+	}
+
+	if parsedErr.Code != "REQUIRED_LINKS_VIOLATION" {
+		t.Errorf("expected Code to be 'REQUIRED_LINKS_VIOLATION', got: %q", parsedErr.Code)
+	}
+	if parsedErr.Details.ArticleType != "decision" {
+		t.Errorf("expected ArticleType to be 'decision', got: %q", parsedErr.Details.ArticleType)
+	}
+	if parsedErr.Details.LinkCount != 0 {
+		t.Errorf("expected LinkCount to be 0, got: %d", parsedErr.Details.LinkCount)
+	}
+	if parsedErr.Details.MinLinks != 1 {
+		t.Errorf("expected MinLinks to be 1, got: %d", parsedErr.Details.MinLinks)
+	}
+	if len(parsedErr.Details.Suggestions) != 1 {
+		t.Fatalf("expected 1 suggestion, got: %d", len(parsedErr.Details.Suggestions))
+	}
+	if parsedErr.Details.Suggestions[0].ID != existingID {
+		t.Errorf("expected suggested ID to be %q, got: %q", existingID, parsedErr.Details.Suggestions[0].ID)
+	}
+	if parsedErr.Details.Suggestions[0].Title != "Existing Helpful Article" {
+		t.Errorf("expected suggested Title to be 'Existing Helpful Article', got: %q", parsedErr.Details.Suggestions[0].Title)
+	}
+}
+
 

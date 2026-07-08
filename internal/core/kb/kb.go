@@ -68,7 +68,44 @@ func (e *ErrConcisenessViolation) Error() string {
 	return string(b)
 }
 
+type LinkSuggestion struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
 
+type ErrRequiredLinksViolation struct {
+	ArticleType string           `json:"article_type"`
+	LinkCount   int              `json:"link_count"`
+	MinLinks    int              `json:"min_links"`
+	Suggestions []LinkSuggestion `json:"suggestions"`
+}
+
+func (e *ErrRequiredLinksViolation) Error() string {
+	m := map[string]any{
+		"error": "kb: write article: missing required links",
+		"code":  "REQUIRED_LINKS_VIOLATION",
+		"details": map[string]any{
+			"article_type": e.ArticleType,
+			"link_count":   e.LinkCount,
+			"min_links":    e.MinLinks,
+			"suggestions":  e.Suggestions,
+		},
+		"suggestion": fmt.Sprintf("Articles of type '%s' require at least %d links (got %d). We suggest linking to related articles such as: %s.", e.ArticleType, e.MinLinks, e.LinkCount, formatSuggestions(e.Suggestions)),
+	}
+	b, _ := json.Marshal(m)
+	return string(b)
+}
+
+func formatSuggestions(s []LinkSuggestion) string {
+	var parts []string
+	for _, item := range s {
+		parts = append(parts, fmt.Sprintf("'%s' (%s)", item.Title, item.ID))
+	}
+	if len(parts) == 0 {
+		return "none found"
+	}
+	return strings.Join(parts, ", ")
+}
 
 // Article is a single atomic knowledge base entry (RFC-0001 §8.3: one
 // article = one fact, decision, or procedure).
@@ -224,6 +261,54 @@ func (s *Store) WriteArticle(ctx context.Context, projectID, agentID, title, bod
 				ExistingTitle: existingTitle,
 				Similarity:    similarity,
 				Threshold:     s.dedupThreshold,
+			}
+		}
+	}
+
+	if !force {
+		var fm struct {
+			Type string `json:"type"`
+		}
+		if len(frontmatter) > 0 {
+			_ = json.Unmarshal(frontmatter, &fm)
+		}
+		minLinks := 0
+		switch strings.ToLower(fm.Type) {
+		case "decision":
+			minLinks = s.minLinksDecision
+		case "policy":
+			minLinks = s.minLinksPolicy
+		case "procedure":
+			minLinks = s.minLinksProcedure
+		}
+		if minLinks > 0 && len(linkTargetIDs) < minLinks {
+			// Retrieve closest articles as suggestions using pgvector
+			rows, err := tx.QueryContext(ctx,
+				`SELECT id, title
+				 FROM kb_articles
+				 WHERE project_id = $1 AND embedding IS NOT NULL
+				 ORDER BY embedding <=> $2::vector
+				 LIMIT 3`,
+				projectID, formatVectorLiteral(embedding),
+			)
+			if err != nil {
+				return Article{}, fmt.Errorf("kb: write article: link suggestions query: %w", err)
+			}
+			defer rows.Close()
+
+			var suggestions []LinkSuggestion
+			for rows.Next() {
+				var sugg LinkSuggestion
+				if err := rows.Scan(&sugg.ID, &sugg.Title); err != nil {
+					return Article{}, fmt.Errorf("kb: write article: scan link suggestion: %w", err)
+				}
+				suggestions = append(suggestions, sugg)
+			}
+			return Article{}, &ErrRequiredLinksViolation{
+				ArticleType: fm.Type,
+				LinkCount:   len(linkTargetIDs),
+				MinLinks:    minLinks,
+				Suggestions: suggestions,
 			}
 		}
 	}
