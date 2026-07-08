@@ -74,8 +74,8 @@ Boundary days (6, 12, 18) carry over: prior milestone's review/demo plus next mi
 - [x] Tests: status transitions respect valid state machine
 
 ### Day 9 — 2026-07-15
-- [ ] Event log schema (append-only, RFC §7.1): typed events, channel scoping
-- [ ] Channel model: create, project/topic scoping
+- [x] Event log schema (append-only, RFC §7.1): typed events, channel scoping -- `migrations/000007_event_channels.up.sql`, RLS policies, typed `event_type` CHECK constraint
+- [x] Channel model: create, project/topic scoping -- `internal/core/events` (`Store`, `Channel`, `Event`; CreateChannel, ListChannels, GetChannel, PublishEvent with passport scoping, ListEvents)
 
 ### Day 10 — 2026-07-16
 - [ ] `wormhole.channel.create`, `wormhole.channel.post`, `wormhole.channel.subscribe` (poll-based, RFC §15 open question deferred to poll for V1)

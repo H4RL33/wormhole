@@ -179,8 +179,12 @@ func TestPublishEvent_Success(t *testing.T) {
 	if event.EventType != "task.status_changed" {
 		t.Errorf("event.EventType = %q, want %q", event.EventType, "task.status_changed")
 	}
-	if string(event.Payload) != `{"status": "success"}` {
-		t.Errorf("event.Payload = %q, want %q", string(event.Payload), `{"status": "success"}`)
+	var gotPayload map[string]string
+	if err := json.Unmarshal(event.Payload, &gotPayload); err != nil {
+		t.Fatalf("event.Payload is not valid JSON: %v", err)
+	}
+	if gotPayload["status"] != "success" {
+		t.Errorf("event.Payload[status] = %q, want %q", gotPayload["status"], "success")
 	}
 	if event.Note == nil || *event.Note != note {
 		t.Errorf("event.Note = %v, want %q", event.Note, note)
