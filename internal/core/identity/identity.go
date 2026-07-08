@@ -31,6 +31,11 @@ var ErrInvalidScope = errors.New("identity: invalid scope")
 // project_id)).
 var ErrPassportExists = errors.New("identity: passport already issued for this agent and project")
 
+// tokenTTL is an inferred alpha default — neither RFC-0001 nor RFC-0002
+// specifies a token lifetime. See Global Constraints in
+// docs/superpowers/plans/2026-07-11-day5-mcp-wiring.md.
+const tokenTTL = 30 * 24 * time.Hour
+
 type Agent struct {
 	ID           string
 	Owner        string
@@ -140,8 +145,8 @@ func (s *Store) Register(ctx context.Context, projectID string, permissions []st
 		return Agent{}, Passport{}, "", fmt.Errorf("identity: marshal permissions: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO agent_tokens (agent_id, project_id, permissions, token_hash) VALUES ($1, $2, $3, $4)`,
-		agent.ID, projectID, permissionsJSON, tokenHash,
+		`INSERT INTO agent_tokens (agent_id, project_id, permissions, token_hash, expires_at) VALUES ($1, $2, $3, $4, $5)`,
+		agent.ID, projectID, permissionsJSON, tokenHash, time.Now().Add(tokenTTL),
 	); err != nil {
 		return Agent{}, Passport{}, "", fmt.Errorf("identity: insert token: %w", err)
 	}
@@ -302,8 +307,8 @@ func (s *Store) IssueToken(ctx context.Context, agentID, projectID string, permi
 	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO agent_tokens (agent_id, project_id, permissions, token_hash) VALUES ($1, $2, $3, $4)`,
-		agentID, projectID, permissionsJSON, tokenHash,
+		`INSERT INTO agent_tokens (agent_id, project_id, permissions, token_hash, expires_at) VALUES ($1, $2, $3, $4, $5)`,
+		agentID, projectID, permissionsJSON, tokenHash, time.Now().Add(tokenTTL),
 	); err != nil {
 		return "", fmt.Errorf("identity: insert token: %w", err)
 	}
@@ -336,7 +341,7 @@ func (s *Store) WhoAmI(ctx context.Context, projectID, rawToken string) (Authent
 		`SELECT a.id, a.owner, a.model, a.capabilities, a.created_at, t.permissions
 		 FROM agents a
 		 JOIN agent_tokens t ON t.agent_id = a.id
-		 WHERE t.token_hash = $1 AND t.project_id = $2`,
+		 WHERE t.token_hash = $1 AND t.project_id = $2 AND t.expires_at > now()`,
 		hash, projectID,
 	).Scan(&agent.ID, &agent.Owner, &agent.Model, &capsRaw, &agent.CreatedAt, &permissionsRaw)
 	if errors.Is(err, sql.ErrNoRows) {

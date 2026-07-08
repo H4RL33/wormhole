@@ -463,3 +463,30 @@ func TestListAuditTrail_ScopedToProject(t *testing.T) {
 		t.Errorf("ListAuditTrail(projectB) = %+v, want empty (registration was under projectA)", entriesB)
 	}
 }
+
+// TestWhoAmI_ExpiredTokenRejected covers the expiry half of RFC-0001 §13's
+// unforgeable-identity guarantee: a token past its expires_at must be
+// rejected the same way a forged one is (ErrInvalidToken, no distinct
+// error), never resolved to a live scope.
+func TestWhoAmI_ExpiredTokenRejected(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "expired-token")
+
+	agent, _, token, err := s.Register(ctx, projectID, []string{"event.publish"}, "harley", "claude", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	cleanupAgent(t, s, agent.ID)
+
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE agent_tokens SET expires_at = now() - interval '1 hour' WHERE agent_id = $1`,
+		agent.ID,
+	); err != nil {
+		t.Fatalf("backdate token expiry: %v", err)
+	}
+
+	if _, err := s.WhoAmI(ctx, projectID, token); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("WhoAmI with expired token: got err %v, want ErrInvalidToken", err)
+	}
+}
