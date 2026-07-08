@@ -756,6 +756,45 @@ func TestWriteArticle_ConcisenessBypass(t *testing.T) {
 	}
 }
 
+func TestWriteArticle_ConcisenessUTF8(t *testing.T) {
+	s := testStoreWithLimit(t, 5)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-conciseness-utf8")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+
+	// "🚀🤖🌟🔥💫" has 5 characters (emojis) but 20 bytes.
+	// Since maxBodyLength is 5, it should succeed.
+	const bodyValid = "🚀🤖🌟🔥💫"
+	article, err := s.WriteArticle(ctx, projectID, agentID, "valid utf8", bodyValid, nil, nil, false)
+	if err != nil {
+		t.Fatalf("expected 5-rune UTF-8 body to succeed under maxBodyLength=5, got error: %v", err)
+	}
+	if article.Body != bodyValid {
+		t.Errorf("article.Body = %q, want %q", article.Body, bodyValid)
+	}
+
+	// "🚀🤖🌟🔥💫✨" has 6 characters (emojis) but 24 bytes.
+	// Since maxBodyLength is 5, it should violate the ceiling.
+	const bodyInvalid = "🚀🤖🌟🔥💫✨"
+	_, err = s.WriteArticle(ctx, projectID, agentID, "invalid utf8", bodyInvalid, nil, nil, false)
+	if err == nil {
+		t.Fatal("expected ErrConcisenessViolation, got nil")
+	}
+
+	var concisenessErr *ErrConcisenessViolation
+	if !errors.As(err, &concisenessErr) {
+		t.Fatalf("expected ErrConcisenessViolation, got type %T: %v", err, err)
+	}
+
+	if concisenessErr.Length != 6 {
+		t.Errorf("concisenessErr.Length = %d, want 6", concisenessErr.Length)
+	}
+	if concisenessErr.MaxLength != 5 {
+		t.Errorf("concisenessErr.MaxLength = %d, want 5", concisenessErr.MaxLength)
+	}
+}
+
 func TestWriteArticle_RequiredLinksViolation(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

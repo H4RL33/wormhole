@@ -376,6 +376,96 @@ func TestMcp_WriteArticle_ConcisenessBypass(t *testing.T) {
 	}
 }
 
+func TestMcp_WriteArticle_ConcisenessUTF8(t *testing.T) {
+	db := testDB(t)
+	store := kb.NewStore(db, kb.StubEmbedder{}, 0.85, 5, 1, 1, 1)
+	identityStore := testIdentityStore(t)
+	projectID := mustCreateProject(t, "mcp-kb-conciseness-utf8")
+	_, token := mustRegisterAgent(t, projectID)
+
+	registry := NewRegistry()
+	registry.Register(WriteArticleTool(store))
+	handler := NewCallHandler(registry, identityStore)
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	// "🚀🤖🌟🔥💫" has 5 characters (emojis) but 20 bytes.
+	// Since maxBodyLength is 5, it should succeed (status 200).
+	writeArgsValid, _ := json.Marshal(WriteArticleInput{
+		Title: "valid utf8",
+		Body:  "🚀🤖🌟🔥💫",
+	})
+	reqBodyValid, _ := json.Marshal(CallRequest{
+		Tool:      "wormhole.kb.write",
+		ProjectID: projectID,
+		Arguments: writeArgsValid,
+	})
+
+	reqValid, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBodyValid))
+	reqValid.Header.Set("Content-Type", "application/json")
+	reqValid.Header.Set("Authorization", "Bearer "+token)
+	respValid, err := http.DefaultClient.Do(reqValid)
+	if err != nil {
+		t.Fatalf("write valid POST: %v", err)
+	}
+	defer respValid.Body.Close()
+	if respValid.StatusCode != http.StatusOK {
+		t.Fatalf("write valid status: got %d, want 200", respValid.StatusCode)
+	}
+
+	// "🚀🤖🌟🔥💫✨" has 6 characters (emojis) but 24 bytes.
+	// Since maxBodyLength is 5, it should violate the ceiling (status 400).
+	writeArgsInvalid, _ := json.Marshal(WriteArticleInput{
+		Title: "invalid utf8",
+		Body:  "🚀🤖🌟🔥💫✨",
+	})
+	reqBodyInvalid, _ := json.Marshal(CallRequest{
+		Tool:      "wormhole.kb.write",
+		ProjectID: projectID,
+		Arguments: writeArgsInvalid,
+	})
+
+	reqInvalid, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBodyInvalid))
+	reqInvalid.Header.Set("Content-Type", "application/json")
+	reqInvalid.Header.Set("Authorization", "Bearer "+token)
+	respInvalid, err := http.DefaultClient.Do(reqInvalid)
+	if err != nil {
+		t.Fatalf("write invalid POST: %v", err)
+	}
+	defer respInvalid.Body.Close()
+	if respInvalid.StatusCode != http.StatusBadRequest {
+		t.Fatalf("write invalid status: got %d, want 400", respInvalid.StatusCode)
+	}
+
+	var callResp CallResponse
+	if err := json.NewDecoder(respInvalid.Body).Decode(&callResp); err != nil {
+		t.Fatalf("decode call response: %v", err)
+	}
+
+	var parsedErr struct {
+		Error   string `json:"error"`
+		Code    string `json:"code"`
+		Details struct {
+			Length    int `json:"length"`
+			MaxLength int `json:"max_length"`
+		} `json:"details"`
+		Suggestion string `json:"suggestion"`
+	}
+	if err := json.Unmarshal([]byte(callResp.Error), &parsedErr); err != nil {
+		t.Fatalf("expected CallResponse.Error to be valid raw JSON, got: %q", callResp.Error)
+	}
+
+	if parsedErr.Code != "CONCISENESS_VIOLATION" {
+		t.Errorf("expected Code to be 'CONCISENESS_VIOLATION', got: %q", parsedErr.Code)
+	}
+	if parsedErr.Details.Length != 6 {
+		t.Errorf("expected Details.Length to be 6, got: %d", parsedErr.Details.Length)
+	}
+	if parsedErr.Details.MaxLength != 5 {
+		t.Errorf("expected Details.MaxLength to be 5, got: %d", parsedErr.Details.MaxLength)
+	}
+}
+
 func TestMcp_WriteArticle_RequiredLinksViolation(t *testing.T) {
 	store := testKBStore(t)
 	identityStore := testIdentityStore(t)

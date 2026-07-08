@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 var ErrPassportNotFound = errors.New("kb: agent not registered or has no passport for this project")
@@ -224,9 +225,10 @@ func (s *Store) WriteArticle(ctx context.Context, projectID, agentID, title, bod
 		frontmatter = json.RawMessage(`{}`)
 	}
 
-	if !force && s.maxBodyLength > 0 && len(body) > s.maxBodyLength {
+	bodyRunes := utf8.RuneCountInString(body)
+	if !force && s.maxBodyLength > 0 && bodyRunes > s.maxBodyLength {
 		return Article{}, &ErrConcisenessViolation{
-			Length:    len(body),
+			Length:    bodyRunes,
 			MaxLength: s.maxBodyLength,
 		}
 	}
@@ -303,6 +305,9 @@ func (s *Store) WriteArticle(ctx context.Context, projectID, agentID, title, bod
 					return Article{}, fmt.Errorf("kb: write article: scan link suggestion: %w", err)
 				}
 				suggestions = append(suggestions, sugg)
+			}
+			if err := rows.Err(); err != nil {
+				return Article{}, fmt.Errorf("kb: write article: iterate suggestions error: %w", err)
 			}
 			return Article{}, &ErrRequiredLinksViolation{
 				ArticleType: fm.Type,
