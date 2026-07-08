@@ -65,8 +65,8 @@ Boundary days (6, 12, 18) carry over: prior milestone's review/demo plus next mi
 ## M2 — Coordination
 
 ### Day 7 — 2026-07-13
-- [ ] Task graph schema + migrations: owner, status, priority, due date, links
-- [ ] Status enum: `todo` / `wip` / `blocked` / `done` (RFC §8.2)
+- [x] Task graph schema + migrations: owner, status, priority, due date, links — `migrations/000006_task_graph.up.sql`/`.down.sql` (`tasks`, `task_links` tables, full D3 RLS treatment, project_id added to `task_links` beyond the original db-entities.md sketch and documented there)
+- [x] Status enum: `todo` / `wip` / `blocked` / `done` (RFC §8.2) — `tasks.status CHECK` constraint, default `'todo'`, verified rejecting invalid values against a live Postgres instance
 
 ### Day 8 — 2026-07-14
 - [ ] `wormhole.task.create`, `wormhole.task.assign`, `wormhole.task.list`
