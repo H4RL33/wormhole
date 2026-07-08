@@ -63,6 +63,18 @@ func createAgent(t *testing.T, s *Store) string {
 	return id
 }
 
+func createPassport(t *testing.T, s *Store, agentID, projectID string) {
+	t.Helper()
+	if _, err := s.db.Exec(`INSERT INTO passports (agent_id, project_id) VALUES ($1, $2)`, agentID, projectID); err != nil {
+		t.Fatalf("create passport: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := s.db.Exec(`DELETE FROM passports WHERE agent_id = $1 AND project_id = $2`, agentID, projectID); err != nil {
+			t.Logf("cleanup: delete passport for agent %s in project %s: %v", agentID, projectID, err)
+		}
+	})
+}
+
 func TestCreate_ReturnsPopulatedTask(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -127,6 +139,7 @@ func TestAssign_SetsOwner(t *testing.T) {
 	ctx := context.Background()
 	projectID := createProject(t, s, "assign-task")
 	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
 
 	task, err := s.Create(ctx, projectID, "Assign me", "", nil, 0, nil)
 	if err != nil {
@@ -407,5 +420,106 @@ func TestRLSIsolation(t *testing.T) {
 		t.Errorf("expected task to be hidden manually when project B context is set, but read ID: %s", foundID)
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		t.Errorf("unexpected error when querying task with mismatched context: %v", err)
+	}
+}
+
+func TestRLSProjectBoundaries(t *testing.T) {
+	ownerStore := testStore(t)
+
+	roleName := "rls_boundary_test_user"
+	rolePassword := "rls_boundary_test_password"
+
+	// Ensure clean slate and cleanup afterwards
+	t.Cleanup(func() {
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE tasks FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE projects FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE passports FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("DROP ROLE IF EXISTS %s", roleName))
+	})
+
+	_, err := ownerStore.db.Exec(fmt.Sprintf("DROP ROLE IF EXISTS %s", roleName))
+	if err != nil {
+		t.Fatalf("failed to drop pre-existing role: %v", err)
+	}
+
+	_, err = ownerStore.db.Exec(fmt.Sprintf("CREATE ROLE %s WITH LOGIN PASSWORD '%s'", roleName, rolePassword))
+	if err != nil {
+		t.Fatalf("failed to create role: %v", err)
+	}
+
+	_, err = ownerStore.db.Exec(fmt.Sprintf("GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE tasks, projects, passports TO %s", roleName))
+	if err != nil {
+		t.Fatalf("failed to grant table privileges: %v", err)
+	}
+
+	cfg := types.LoadConfig()
+	u, err := url.Parse(cfg.DatabaseURL)
+	if err != nil {
+		t.Fatalf("failed to parse database URL: %v", err)
+	}
+	u.User = url.UserPassword(roleName, rolePassword)
+	restrictedDSN := u.String()
+
+	restrictedDb, err := sql.Open("postgres", restrictedDSN)
+	if err != nil {
+		t.Fatalf("failed to open restricted db connection: %v", err)
+	}
+	t.Cleanup(func() {
+		restrictedDb.Close()
+	})
+
+	if err := restrictedDb.PingContext(context.Background()); err != nil {
+		t.Fatalf("failed to ping restricted database: %v", err)
+	}
+
+	restrictedStore := NewStore(restrictedDb)
+	ctx := context.Background()
+
+	// Create two projects using ownerStore
+	projectAID := createProject(t, ownerStore, "Project A (Boundaries)")
+	projectBID := createProject(t, ownerStore, "Project B (Boundaries)")
+
+	// Create a task in Project A
+	taskA, err := ownerStore.Create(ctx, projectAID, "Task in Project A", "", nil, 1, nil)
+	if err != nil {
+		t.Fatalf("failed to create task in project A: %v", err)
+	}
+
+	// 1. Attempt to create a task in Project B with ParentTaskID pointing to Project A's task
+	_, err = restrictedStore.Create(ctx, projectBID, "Child Task in Project B", "", &taskA.ID, 1, nil)
+	if err == nil {
+		t.Errorf("expected cross-project parent task linkage to fail, but it succeeded")
+	} else if !errors.Is(err, ErrTaskNotFound) {
+		t.Errorf("expected error wrapping ErrTaskNotFound, got: %v", err)
+	}
+
+	// 2. Create agent and passport in Project A
+	agentID := createAgent(t, ownerStore)
+	createPassport(t, ownerStore, agentID, projectAID)
+
+	// Create a task in Project B using ownerStore
+	taskB, err := ownerStore.Create(ctx, projectBID, "Task in Project B", "", nil, 1, nil)
+	if err != nil {
+		t.Fatalf("failed to create task in project B: %v", err)
+	}
+
+	// 3. Attempt to assign task in Project B to the agent who only has passport in Project A
+	_, err = restrictedStore.Assign(ctx, projectBID, taskB.ID, agentID)
+	if err == nil {
+		t.Errorf("expected cross-project agent assignment to fail, but it succeeded")
+	} else if !errors.Is(err, ErrPassportNotFound) {
+		t.Errorf("expected error wrapping ErrPassportNotFound, got: %v", err)
+	}
+
+	// 4. Create passport for the agent in Project B using ownerStore
+	createPassport(t, ownerStore, agentID, projectBID)
+
+	// 5. Try assignment again, which should now succeed because the agent has a passport in Project B
+	gotTask, err := restrictedStore.Assign(ctx, projectBID, taskB.ID, agentID)
+	if err != nil {
+		t.Errorf("expected assignment to succeed, but got error: %v", err)
+	}
+	if gotTask.OwnerAgentID == nil || *gotTask.OwnerAgentID != agentID {
+		t.Errorf("expected assignee to be %q, got %v", agentID, gotTask.OwnerAgentID)
 	}
 }

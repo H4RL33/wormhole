@@ -21,6 +21,10 @@ var ErrTaskNotFound = errors.New("tasks: task not found")
 // task between two statuses that aren't an allowed transition.
 var ErrInvalidTransition = errors.New("tasks: invalid status transition")
 
+// ErrPassportNotFound is returned when an assignment references an agent that
+// is not registered or has no passport for the given project.
+var ErrPassportNotFound = errors.New("tasks: agent not registered or has no passport for this project")
+
 // validTransitions encodes the allowed status transitions. Neither RFC-0001
 // nor RFC-0002 specifies task lifecycle transitions; this is an inferred
 // alpha default from this plan's Global Constraints (Day 8 task-1 brief),
@@ -70,6 +74,16 @@ func (s *Store) Create(ctx context.Context, projectID, title, description string
 		return Task{}, fmt.Errorf("tasks: create: set project id: %w", err)
 	}
 
+	if parentTaskID != nil {
+		var dummy int
+		err := tx.QueryRowContext(ctx, "SELECT 1 FROM tasks WHERE id = $1 AND project_id = $2", *parentTaskID, projectID).Scan(&dummy)
+		if errors.Is(err, sql.ErrNoRows) {
+			return Task{}, fmt.Errorf("tasks: create: parent task not found or in another project: %w", ErrTaskNotFound)
+		} else if err != nil {
+			return Task{}, fmt.Errorf("tasks: create: parent task lookup: %w", err)
+		}
+	}
+
 	row := tx.QueryRowContext(ctx,
 		`INSERT INTO tasks (project_id, parent_task_id, title, description, priority, due_by) VALUES ($1, $2, $3, $4, $5, $6)
 		 RETURNING `+taskColumns,
@@ -97,6 +111,14 @@ func (s *Store) Assign(ctx context.Context, projectID, taskID, ownerAgentID stri
 	// SET LOCAL wormhole.project_id = $1
 	if _, err := tx.ExecContext(ctx, "SELECT set_config('wormhole.project_id', $1, true)", projectID); err != nil {
 		return Task{}, fmt.Errorf("tasks: assign: set project id: %w", err)
+	}
+
+	var dummy int
+	err = tx.QueryRowContext(ctx, "SELECT 1 FROM passports WHERE agent_id = $1 AND project_id = $2", ownerAgentID, projectID).Scan(&dummy)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Task{}, fmt.Errorf("tasks: assign: agent not registered or has no passport for this project: %w", ErrPassportNotFound)
+	} else if err != nil {
+		return Task{}, fmt.Errorf("tasks: assign: passport lookup: %w", err)
 	}
 
 	row := tx.QueryRowContext(ctx,
