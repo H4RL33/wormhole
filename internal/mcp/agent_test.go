@@ -18,7 +18,7 @@ func TestRegisterAgentTool_Handler(t *testing.T) {
 		t.Fatalf("RequiresAuth: got true, want false — registration bootstraps identity, no token exists yet")
 	}
 
-	projectID := mustCreateProject(t, store, "mcp-register")
+	projectID := mustCreateProject(t, "mcp-register")
 	arguments, _ := json.Marshal(RegisterAgentInput{
 		Permissions:  []string{"event.publish"},
 		Owner:        "harley",
@@ -42,9 +42,9 @@ func TestRegisterAgentTool_Handler(t *testing.T) {
 // mustCreateProject inserts a project directly (identity.Store has no
 // project-creation method — projects are out of this task's scope) and
 // registers cleanup. Mirrors identity_test.go's createProject.
-func mustCreateProject(t *testing.T, store *identity.Store, name string) string {
+func mustCreateProject(t *testing.T, name string) string {
 	t.Helper()
-	db := store.DB()
+	db := testDB(t)
 	var id string
 	if err := db.QueryRow(`INSERT INTO projects (name, owner) VALUES ($1, $2) RETURNING id`, name, "harley").Scan(&id); err != nil {
 		t.Fatalf("create project: %v", err)

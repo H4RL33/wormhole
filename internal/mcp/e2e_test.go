@@ -22,7 +22,7 @@ func TestE2E_RegisterThenWhoAmI(t *testing.T) {
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
-	projectID := mustCreateProject(t, store, "e2e-register-whoami")
+	projectID := mustCreateProject(t, "e2e-register-whoami")
 
 	registerArgs, _ := json.Marshal(RegisterAgentInput{
 		Permissions: []string{"event.publish", "kb.write"},
@@ -94,7 +94,7 @@ func TestE2E_WhoAmI_RejectsExpiredToken(t *testing.T) {
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
-	projectID := mustCreateProject(t, store, "e2e-expired-token")
+	projectID := mustCreateProject(t, "e2e-expired-token")
 
 	registerArgs, _ := json.Marshal(RegisterAgentInput{Permissions: []string{"event.publish"}, Owner: "harley", Model: "claude"})
 	registerBody, _ := json.Marshal(CallRequest{Tool: "wormhole.agent.register", ProjectID: projectID, Arguments: registerArgs})
@@ -109,7 +109,7 @@ func TestE2E_WhoAmI_RejectsExpiredToken(t *testing.T) {
 	var registerOut RegisterAgentOutput
 	json.Unmarshal(resultRaw, &registerOut)
 
-	if _, err := store.DB().ExecContext(context.Background(),
+	if _, err := testDB(t).ExecContext(context.Background(),
 		`UPDATE agent_tokens SET expires_at = now() - interval '1 hour' WHERE agent_id = $1`,
 		registerOut.AgentID,
 	); err != nil {

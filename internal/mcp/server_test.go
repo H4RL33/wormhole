@@ -36,6 +36,20 @@ func testIdentityStore(t *testing.T) *identity.Store {
 	return identity.NewStore(db)
 }
 
+// testDB opens an independent Postgres connection for tests that need raw
+// SQL access to set up fixtures or backdate rows outside identity.Store's
+// own API surface (mirrors identity_test.go's testStore(t) pattern).
+func testDB(t *testing.T) *sql.DB {
+	t.Helper()
+	cfg := types.LoadConfig()
+	db, err := sql.Open("postgres", cfg.DatabaseURL)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
 func TestCallHandler_UnknownTool(t *testing.T) {
 	registry := NewRegistry()
 	store := testIdentityStore(t)
