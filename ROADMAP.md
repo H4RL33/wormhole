@@ -69,9 +69,9 @@ Boundary days (6, 12, 18) carry over: prior milestone's review/demo plus next mi
 - [x] Status enum: `todo` / `wip` / `blocked` / `done` (RFC §8.2) — `tasks.status CHECK` constraint, default `'todo'`, verified rejecting invalid values against a live Postgres instance
 
 ### Day 8 — 2026-07-14
-- [ ] `wormhole.task.create`, `wormhole.task.assign`, `wormhole.task.list`
-- [ ] `wormhole.task.update_status`
-- [ ] Tests: status transitions respect valid state machine
+- [x] `wormhole.task.create`, `wormhole.task.assign`, `wormhole.task.list`
+- [x] `wormhole.task.update_status`
+- [x] Tests: status transitions respect valid state machine
 
 ### Day 9 — 2026-07-15
 - [ ] Event log schema (append-only, RFC §7.1): typed events, channel scoping
