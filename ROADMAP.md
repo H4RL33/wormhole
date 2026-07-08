@@ -51,9 +51,9 @@ Boundary days (6, 12, 18) carry over: prior milestone's review/demo plus next mi
 - [x] Audit trail: append-only action log per identity — `audit_log` table (`migrations/000003_audit_trail.*.sql`), `Store.RecordAction`/`Store.ListAuditTrail`, wired into `Register`/`IssueToken`/`IssuePassport`
 
 ### Day 5 — 2026-07-11
-- [ ] Wire MCP tools: `wormhole.agent.register`, `wormhole.agent.whoami`
-- [ ] End-to-end: MCP client registers agent, receives passport, calls whoami
-- [ ] Auth middleware: reject unscoped/expired tokens at MCP boundary
+- [x] Wire MCP tools: `wormhole.agent.register`, `wormhole.agent.whoami` — `internal/mcp/agent.go`, registered in `cmd/wormhole-server/main.go`
+- [x] End-to-end: MCP client registers agent, receives passport, calls whoami — `internal/mcp/e2e_test.go`, real HTTP round trip through `/mcp/tools/call`
+- [x] Auth middleware: reject unscoped/expired tokens at MCP boundary — `internal/mcp/server.go` (`NewCallHandler`), token expiry added in `internal/core/identity` (30-day TTL, migration `000005`)
 
 ### Day 6 — 2026-07-12
 - [ ] M1 integration test: register → passport issued → authenticated MCP call succeeds
