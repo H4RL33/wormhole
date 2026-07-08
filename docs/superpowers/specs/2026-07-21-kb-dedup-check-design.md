@@ -49,7 +49,7 @@ Prevent duplicate knowledge storage by rejecting or warning agents when they att
 ### Rejection Output: `CallResponse`
 ```json
 {
-  "error": "{\"error\":\"kb: write article: semantic duplicate found\",\"code\":\"DEDUP_VIOLATION\",\"closest_article\":{\"id\":\"uuid-of-existing\",\"title\":\"Title of existing article\",\"similarity\":0.895},\"suggestion\":\"The article is too similar to 'Title of existing article' (similarity 0.895000 >= threshold 0.850000). Use the existing article, update it, or set the 'force' parameter to true to write it anyway.\"}"
+  "error": "{\"error\":\"kb: write article: semantic duplicate found\",\"code\":\"DEDUP_VIOLATION\",\"closest_article\":{\"id\":\"uuid-of-existing\",\"title\":\"Title of existing article\",\"similarity\":0.895},\"suggestion\":\"The article is too similar to 'Title of existing article' (similarity 0.90 >= threshold 0.85). Use the existing article, update it, or set the 'force' parameter to true to write it anyway.\"}"
 }
 ```
 
