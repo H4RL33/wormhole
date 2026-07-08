@@ -91,6 +91,12 @@ func NewStore(db *sql.DB) *Store {
 	return &Store{db: db}
 }
 
+// DB exposes the underlying database handle for tests that need to set up
+// fixtures (e.g. inserting a project row) outside Store's own API surface.
+func (s *Store) DB() *sql.DB {
+	return s.db
+}
+
 // Register creates a new agent identity, issues its passport for
 // projectID, and issues a bearer token for it. The raw token is returned
 // exactly once — only its SHA-256 hash is persisted, so the raw value can
