@@ -1,16 +1,21 @@
 // Package tasks implements the Coordination pillar's Task Graph
 // (RFC-0001 §8.2): Project -> Task -> Subtask hierarchy via parent_task_id,
 // with owner/status/priority/links. Status transitions are validated here;
-// emitting task.status_changed events onto the Event Bus is wired later
-// (Day 11), not part of this store.
+// legal transitions also emit a task.status_changed event onto the given
+// channel, atomically with the status update (RFC-0001 §8.2, "no separate
+// sync step").
 package tasks
 
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/H4RL33/wormhole/internal/core/events"
+	"github.com/H4RL33/wormhole/internal/types"
 )
 
 // ErrTaskNotFound is returned when an operation references a task id that
@@ -52,11 +57,12 @@ type Task struct {
 }
 
 type Store struct {
-	db *sql.DB
+	db     *sql.DB
+	events *events.Store
 }
 
-func NewStore(db *sql.DB) *Store {
-	return &Store{db: db}
+func NewStore(db *sql.DB, eventsStore *events.Store) *Store {
+	return &Store{db: db, events: eventsStore}
 }
 
 const taskColumns = `id, project_id, parent_task_id, title, description, owner_agent_id, status, priority, due_by, created_at, updated_at`
@@ -190,8 +196,12 @@ func (s *Store) List(ctx context.Context, projectID string, status *string) ([]T
 }
 
 // UpdateStatus moves a task to newStatus, rejecting any transition not in
-// validTransitions. On rejection, the row is left untouched.
-func (s *Store) UpdateStatus(ctx context.Context, projectID, taskID, newStatus string) (Task, error) {
+// validTransitions. On rejection, the row is left untouched. A legal
+// transition also inserts a task.status_changed event onto channelID,
+// attributed to agentID, in the same transaction as the status update: a
+// crash can never produce a transition without its event, or vice versa
+// (RFC-0001 §8.2, architecture.md §9.1).
+func (s *Store) UpdateStatus(ctx context.Context, projectID, taskID, newStatus, channelID, agentID string) (Task, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Task{}, fmt.Errorf("tasks: update status: begin tx: %w", err)
@@ -237,6 +247,18 @@ func (s *Store) UpdateStatus(ctx context.Context, projectID, taskID, newStatus s
 	}
 	if err != nil {
 		return Task{}, fmt.Errorf("tasks: update status: %w", err)
+	}
+
+	payload, err := json.Marshal(types.TaskStatusChangedPayload{
+		TaskID:     taskID,
+		FromStatus: currentStatus,
+		ToStatus:   newStatus,
+	})
+	if err != nil {
+		return Task{}, fmt.Errorf("tasks: update status: marshal event payload: %w", err)
+	}
+	if _, err := s.events.PublishEventInTx(ctx, tx, projectID, channelID, agentID, "task.status_changed", payload, nil); err != nil {
+		return Task{}, fmt.Errorf("tasks: update status: publish event: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {

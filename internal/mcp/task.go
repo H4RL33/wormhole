@@ -150,9 +150,12 @@ func ListTasksTool(store *tasks.Store) Tool {
 }
 
 // UpdateTaskStatusInput is the wormhole.task.update_status argument shape.
+// ChannelID is required (no implicit/default channel exists anywhere in this
+// codebase; wormhole.channel.post already requires channel_id explicitly).
 type UpdateTaskStatusInput struct {
 	TaskID    string `json:"task_id"`
 	NewStatus string `json:"new_status"`
+	ChannelID string `json:"channel_id"`
 }
 
 // UpdateTaskStatusOutput is the wormhole.task.update_status result shape.
@@ -164,18 +167,21 @@ type UpdateTaskStatusOutput struct {
 // UpdateTaskStatusTool wires wormhole.task.update_status (RFC-0001 §8.2,
 // Task Graph). Invalid transitions are rejected by tasks.Store.UpdateStatus
 // (tasks.ErrInvalidTransition) and surfaced here as a wrapped error, which
-// NewCallHandler's existing generic error path already maps to a 400.
+// NewCallHandler's existing generic error path already maps to a 400. A
+// legal transition also emits a task.status_changed event onto the given
+// channel_id, attributed to the calling agent, atomically with the status
+// update.
 func UpdateTaskStatusTool(store *tasks.Store) Tool {
 	return Tool{
 		Name:         "wormhole.task.update_status",
-		Description:  "Transitions a task to a new status, rejecting any transition not in the valid state machine.",
+		Description:  "Transitions a task to a new status, rejecting any transition not in the valid state machine, and emits a task.status_changed event onto channel_id.",
 		RequiresAuth: true,
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in UpdateTaskStatusInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
 				return nil, fmt.Errorf("mcp: decode wormhole.task.update_status arguments: %w", err)
 			}
-			task, err := store.UpdateStatus(ctx, projectID, in.TaskID, in.NewStatus)
+			task, err := store.UpdateStatus(ctx, projectID, in.TaskID, in.NewStatus, in.ChannelID, scope.Agent.ID)
 			if err != nil {
 				return nil, fmt.Errorf("mcp: wormhole.task.update_status: %w", err)
 			}

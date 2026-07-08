@@ -3,6 +3,7 @@ package tasks
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 
 	_ "github.com/lib/pq"
 
+	"github.com/H4RL33/wormhole/internal/core/events"
 	"github.com/H4RL33/wormhole/internal/types"
 )
 
@@ -31,7 +33,18 @@ func testStore(t *testing.T) *Store {
 		t.Skipf("postgres not reachable (%v); run `docker compose up -d db` and apply migrations before running this test", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return NewStore(db)
+	return NewStore(db, events.NewStore(db))
+}
+
+// createChannel creates an events channel in projectID and returns its ID,
+// for use as the required channelID argument to UpdateStatus.
+func createChannel(t *testing.T, s *Store, projectID, name string) string {
+	t.Helper()
+	channel, err := s.events.CreateChannel(context.Background(), projectID, name)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	return channel.ID
 }
 
 func createProject(t *testing.T, s *Store, name string) string {
@@ -172,7 +185,10 @@ func TestList_FiltersByProjectAndStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create(wip): %v", err)
 	}
-	if _, err := s.UpdateStatus(ctx, project1, wipTask.ID, "wip"); err != nil {
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, project1)
+	channelID := createChannel(t, s, project1, "list-filter-events")
+	if _, err := s.UpdateStatus(ctx, project1, wipTask.ID, "wip", channelID, agentID); err != nil {
 		t.Fatalf("UpdateStatus: %v", err)
 	}
 	if _, err := s.Create(ctx, project2, "Other project task", "", nil, 0, nil); err != nil {
@@ -229,12 +245,45 @@ func TestUpdateStatus_ValidTransitions(t *testing.T) {
 				t.Fatalf("insert task at status %q: %v", tt.from, err)
 			}
 
-			got, err := s.UpdateStatus(ctx, projectID, taskID, tt.to)
+			agentID := createAgent(t, s)
+			createPassport(t, s, agentID, projectID)
+			channelID := createChannel(t, s, projectID, "transition-events")
+
+			got, err := s.UpdateStatus(ctx, projectID, taskID, tt.to, channelID, agentID)
 			if err != nil {
 				t.Fatalf("UpdateStatus(%s->%s): %v", tt.from, tt.to, err)
 			}
 			if got.Status != tt.to {
 				t.Errorf("UpdateStatus(%s->%s).Status = %q, want %q", tt.from, tt.to, got.Status, tt.to)
+			}
+
+			var eventCount int
+			var payload []byte
+			if err := s.db.QueryRowContext(ctx,
+				`SELECT count(*) FROM events WHERE channel_id = $1 AND event_type = 'task.status_changed'`,
+				channelID,
+			).Scan(&eventCount); err != nil {
+				t.Fatalf("count events: %v", err)
+			}
+			if eventCount != 1 {
+				t.Fatalf("event count after legal transition = %d, want 1", eventCount)
+			}
+			var gotAgentID string
+			if err := s.db.QueryRowContext(ctx,
+				`SELECT agent_id, payload FROM events WHERE channel_id = $1 AND event_type = 'task.status_changed'`,
+				channelID,
+			).Scan(&gotAgentID, &payload); err != nil {
+				t.Fatalf("fetch event: %v", err)
+			}
+			if gotAgentID != agentID {
+				t.Errorf("event agent_id = %q, want %q", gotAgentID, agentID)
+			}
+			var gotPayload types.TaskStatusChangedPayload
+			if err := json.Unmarshal(payload, &gotPayload); err != nil {
+				t.Fatalf("unmarshal event payload: %v", err)
+			}
+			if gotPayload.TaskID != taskID || gotPayload.FromStatus != tt.from || gotPayload.ToStatus != tt.to {
+				t.Errorf("event payload = %+v, want {TaskID: %q, FromStatus: %q, ToStatus: %q}", gotPayload, taskID, tt.from, tt.to)
 			}
 		})
 	}
@@ -265,7 +314,11 @@ func TestUpdateStatus_InvalidTransitionsRejected(t *testing.T) {
 				t.Fatalf("insert task at status %q: %v", tt.from, err)
 			}
 
-			_, err := s.UpdateStatus(ctx, projectID, taskID, tt.to)
+			agentID := createAgent(t, s)
+			createPassport(t, s, agentID, projectID)
+			channelID := createChannel(t, s, projectID, "invalid-transition-events")
+
+			_, err := s.UpdateStatus(ctx, projectID, taskID, tt.to, channelID, agentID)
 			if !errors.Is(err, ErrInvalidTransition) {
 				t.Fatalf("UpdateStatus(%s->%s) error = %v, want ErrInvalidTransition", tt.from, tt.to, err)
 			}
@@ -277,6 +330,20 @@ func TestUpdateStatus_InvalidTransitionsRejected(t *testing.T) {
 			if status != tt.from {
 				t.Errorf("status after rejected transition = %q, want unchanged %q", status, tt.from)
 			}
+
+			// The tx rolled back on rejection, so no event row should exist
+			// for this channel either: no orphan event without its status
+			// transition (RFC-0001 §8.2, architecture.md §9.1).
+			var eventCount int
+			if err := s.db.QueryRowContext(ctx,
+				`SELECT count(*) FROM events WHERE channel_id = $1`,
+				channelID,
+			).Scan(&eventCount); err != nil {
+				t.Fatalf("count events: %v", err)
+			}
+			if eventCount != 0 {
+				t.Errorf("event count after rejected transition = %d, want 0 (no orphan event on rollback)", eventCount)
+			}
 		})
 	}
 }
@@ -286,7 +353,11 @@ func TestUpdateStatus_UnknownTaskReturnsNotFound(t *testing.T) {
 	ctx := context.Background()
 	projectID := createProject(t, s, "unknown-task")
 
-	_, err := s.UpdateStatus(ctx, projectID, "00000000-0000-0000-0000-000000000000", "wip")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+	channelID := createChannel(t, s, projectID, "unknown-task-events")
+
+	_, err := s.UpdateStatus(ctx, projectID, "00000000-0000-0000-0000-000000000000", "wip", channelID, agentID)
 	if !errors.Is(err, ErrTaskNotFound) {
 		t.Errorf("UpdateStatus(unknown task) error = %v, want ErrTaskNotFound", err)
 	}
@@ -361,7 +432,7 @@ func TestRLSIsolation(t *testing.T) {
 	}
 
 	// 2. Attempt to read Project A's task using the restricted connection with RLS context set, verifying it succeeds.
-	restrictedStore := NewStore(restrictedDb)
+	restrictedStore := NewStore(restrictedDb, events.NewStore(restrictedDb))
 	tasks, err := restrictedStore.List(ctx, projectAID, nil)
 	if err != nil {
 		t.Fatalf("failed to list tasks under restricted store with correct context: %v", err)
@@ -472,7 +543,7 @@ func TestRLSProjectBoundaries(t *testing.T) {
 		t.Fatalf("failed to ping restricted database: %v", err)
 	}
 
-	restrictedStore := NewStore(restrictedDb)
+	restrictedStore := NewStore(restrictedDb, events.NewStore(restrictedDb))
 	ctx := context.Background()
 
 	// Create two projects using ownerStore

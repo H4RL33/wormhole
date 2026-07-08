@@ -16,7 +16,7 @@ var ErrPassportNotFound = errors.New("events: agent not registered or has no pas
 var AllowedEventTypes = map[string]bool{
 	"task.status_changed": true,
 	"review.requested":    true,
-	"build.failed":         true,
+	"build.failed":        true,
 	"discovery.logged":    true,
 	"message.posted":      true,
 }
@@ -146,14 +146,6 @@ func (s *Store) GetChannel(ctx context.Context, projectID, channelID string) (Ch
 }
 
 func (s *Store) PublishEvent(ctx context.Context, projectID, channelID, agentID, eventType string, payload json.RawMessage, note *string) (Event, error) {
-	if !AllowedEventTypes[eventType] {
-		return Event{}, ErrInvalidEventType
-	}
-
-	if len(payload) == 0 {
-		payload = json.RawMessage(`{}`)
-	}
-
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Event{}, fmt.Errorf("events: publish event: begin tx: %w", err)
@@ -164,9 +156,35 @@ func (s *Store) PublishEvent(ctx context.Context, projectID, channelID, agentID,
 		return Event{}, fmt.Errorf("events: publish event: set project id: %w", err)
 	}
 
+	event, err := s.PublishEventInTx(ctx, tx, projectID, channelID, agentID, eventType, payload, note)
+	if err != nil {
+		return Event{}, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Event{}, fmt.Errorf("events: publish event: commit: %w", err)
+	}
+	return event, nil
+}
+
+// PublishEventInTx is the tx-scoped core of PublishEvent, for callers (such as
+// tasks.Store.UpdateStatus) that need the event insert to happen atomically
+// alongside their own writes in an existing transaction. The caller owns
+// tx's lifecycle (commit/rollback) and must have already set
+// wormhole.project_id on it. See RFC-0001 §8.2 and architecture.md §9.1: the
+// status update and its event insert must succeed or fail together.
+func (s *Store) PublishEventInTx(ctx context.Context, tx *sql.Tx, projectID, channelID, agentID, eventType string, payload json.RawMessage, note *string) (Event, error) {
+	if !AllowedEventTypes[eventType] {
+		return Event{}, ErrInvalidEventType
+	}
+
+	if len(payload) == 0 {
+		payload = json.RawMessage(`{}`)
+	}
+
 	// Verify agent has a passport for this project
 	var dummy int
-	err = tx.QueryRowContext(ctx, "SELECT 1 FROM passports WHERE agent_id = $1 AND project_id = $2", agentID, projectID).Scan(&dummy)
+	err := tx.QueryRowContext(ctx, "SELECT 1 FROM passports WHERE agent_id = $1 AND project_id = $2", agentID, projectID).Scan(&dummy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Event{}, fmt.Errorf("events: publish event: agent not registered or has no passport for this project: %w", ErrPassportNotFound)
 	} else if err != nil {
@@ -194,9 +212,6 @@ func (s *Store) PublishEvent(ctx context.Context, projectID, channelID, agentID,
 		return Event{}, fmt.Errorf("events: publish event: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return Event{}, fmt.Errorf("events: publish event: commit: %w", err)
-	}
 	return event, nil
 }
 

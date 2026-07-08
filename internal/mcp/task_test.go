@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/H4RL33/wormhole/internal/core/events"
 	"github.com/H4RL33/wormhole/internal/core/tasks"
 )
 
@@ -16,7 +17,7 @@ import (
 func testTasksStore(t *testing.T) *tasks.Store {
 	t.Helper()
 	db := testDB(t)
-	return tasks.NewStore(db)
+	return tasks.NewStore(db, events.NewStore(db))
 }
 
 func TestCreateTaskTool_Handler(t *testing.T) {
@@ -134,6 +135,14 @@ func TestUpdateTaskStatusTool_Handler(t *testing.T) {
 		t.Fatalf("create task: %v", err)
 	}
 
+	eventsStore := testEventsStore(t)
+	channel, err := eventsStore.CreateChannel(context.Background(), projectID, "task-status")
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	agentID, _ := mustRegisterAgent(t, projectID)
+	scope := mustBuildScope(agentID, projectID)
+
 	tool := UpdateTaskStatusTool(store)
 	if tool.Name != "wormhole.task.update_status" {
 		t.Fatalf("Name: got %q", tool.Name)
@@ -145,8 +154,9 @@ func TestUpdateTaskStatusTool_Handler(t *testing.T) {
 	arguments, _ := json.Marshal(UpdateTaskStatusInput{
 		TaskID:    task.ID,
 		NewStatus: "wip",
+		ChannelID: channel.ID,
 	})
-	result, err := tool.Handler(context.Background(), nil, projectID, arguments)
+	result, err := tool.Handler(context.Background(), scope, projectID, arguments)
 	if err != nil {
 		t.Fatalf("Handler: %v", err)
 	}
@@ -161,8 +171,9 @@ func TestUpdateTaskStatusTool_Handler(t *testing.T) {
 	invalidArgs, _ := json.Marshal(UpdateTaskStatusInput{
 		TaskID:    task.ID,
 		NewStatus: "todo",
+		ChannelID: channel.ID,
 	})
-	_, err = tool.Handler(context.Background(), nil, projectID, invalidArgs)
+	_, err = tool.Handler(context.Background(), scope, projectID, invalidArgs)
 	if err == nil {
 		t.Fatalf("Handler: got nil error, want error for invalid transition wip -> todo")
 	}
@@ -174,6 +185,7 @@ func TestUpdateTaskStatusTool_Handler(t *testing.T) {
 func TestE2E_CreateAssignUpdateStatus(t *testing.T) {
 	identityStore := testIdentityStore(t)
 	tasksStore := testTasksStore(t)
+	eventsStore := testEventsStore(t)
 	registry := NewRegistry()
 	registry.Register(RegisterAgentTool(identityStore))
 	registry.Register(CreateTaskTool(tasksStore))
@@ -185,6 +197,11 @@ func TestE2E_CreateAssignUpdateStatus(t *testing.T) {
 	defer srv.Close()
 
 	projectID := mustCreateProject(t, "e2e-task-lifecycle")
+
+	channel, err := eventsStore.CreateChannel(context.Background(), projectID, "task-status")
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
 
 	registerArgs, _ := json.Marshal(RegisterAgentInput{Permissions: []string{"event.publish"}, Owner: "harley", Model: "claude"})
 	registerBody, _ := json.Marshal(CallRequest{Tool: "wormhole.agent.register", ProjectID: projectID, Arguments: registerArgs})
@@ -240,8 +257,8 @@ func TestE2E_CreateAssignUpdateStatus(t *testing.T) {
 		t.Fatalf("assign output: %+v", assignOut)
 	}
 
-	callTool("wormhole.task.update_status", UpdateTaskStatusInput{TaskID: createOut.TaskID, NewStatus: "wip"})
-	updateResp := callTool("wormhole.task.update_status", UpdateTaskStatusInput{TaskID: createOut.TaskID, NewStatus: "done"})
+	callTool("wormhole.task.update_status", UpdateTaskStatusInput{TaskID: createOut.TaskID, NewStatus: "wip", ChannelID: channel.ID})
+	updateResp := callTool("wormhole.task.update_status", UpdateTaskStatusInput{TaskID: createOut.TaskID, NewStatus: "done", ChannelID: channel.ID})
 	updateRaw, _ := json.Marshal(updateResp.Result)
 	var updateOut UpdateTaskStatusOutput
 	json.Unmarshal(updateRaw, &updateOut)
@@ -266,4 +283,3 @@ func TestE2E_CreateAssignUpdateStatus(t *testing.T) {
 		t.Fatalf("created task not found in list: %+v", listOut.Tasks)
 	}
 }
-

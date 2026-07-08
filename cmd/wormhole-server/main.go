@@ -24,8 +24,8 @@ func main() {
 	defer db.Close()
 
 	identityStore := identity.NewStore(db)
-	tasksStore := tasks.NewStore(db)
 	eventsStore := events.NewStore(db)
+	tasksStore := tasks.NewStore(db, eventsStore)
 
 	registry := mcp.NewRegistry()
 	registry.Register(mcp.RegisterAgentTool(identityStore))
