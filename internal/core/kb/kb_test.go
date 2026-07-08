@@ -651,4 +651,110 @@ func TestWriteArticle_DedupCrossProject(t *testing.T) {
 	}
 }
 
+func testStoreWithLimit(t *testing.T, maxBodyLength int) *Store {
+	t.Helper()
+	cfg := types.LoadConfig()
+	db, err := sql.Open("postgres", cfg.DatabaseURL)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.PingContext(context.Background()); err != nil {
+		if os.Getenv("WORMHOLE_INTEGRATION_REQUIRED") == "1" {
+			t.Fatalf("postgres required but not reachable: %v", err)
+		}
+		t.Skipf("postgres not reachable (%v); run `docker compose up -d db` and apply migrations before running this test", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return NewStore(db, StubEmbedder{}, 0.85, maxBodyLength, 1, 1, 1)
+}
+
+func TestWriteArticle_ConcisenessViolation(t *testing.T) {
+	s := testStoreWithLimit(t, 10)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-conciseness-violation")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+
+	const title = "too long"
+	const body = "This is a body that is longer than 10 characters."
+
+	_, err := s.WriteArticle(ctx, projectID, agentID, title, body, nil, nil, false)
+	if err == nil {
+		t.Fatal("expected ErrConcisenessViolation, got nil")
+	}
+
+	var concisenessErr *ErrConcisenessViolation
+	if !errors.As(err, &concisenessErr) {
+		t.Fatalf("expected ErrConcisenessViolation, got type %T: %v", err, err)
+	}
+
+	if concisenessErr.Length != len(body) {
+		t.Errorf("concisenessErr.Length = %d, want %d", concisenessErr.Length, len(body))
+	}
+	if concisenessErr.MaxLength != 10 {
+		t.Errorf("concisenessErr.MaxLength = %d, want 10", concisenessErr.MaxLength)
+	}
+
+	var parsed struct {
+		Error   string `json:"error"`
+		Code    string `json:"code"`
+		Details struct {
+			Length    int `json:"length"`
+			MaxLength int `json:"max_length"`
+		} `json:"details"`
+		Suggestion string `json:"suggestion"`
+	}
+	if err := json.Unmarshal([]byte(concisenessErr.Error()), &parsed); err != nil {
+		t.Fatalf("expected Error() to be valid JSON, got: %s", concisenessErr.Error())
+	}
+	if parsed.Code != "CONCISENESS_VIOLATION" {
+		t.Errorf("parsed.Code = %q, want 'CONCISENESS_VIOLATION'", parsed.Code)
+	}
+	if parsed.Details.Length != len(body) {
+		t.Errorf("parsed.Details.Length = %d, want %d", parsed.Details.Length, len(body))
+	}
+	if parsed.Details.MaxLength != 10 {
+		t.Errorf("parsed.Details.MaxLength = %d, want 10", parsed.Details.MaxLength)
+	}
+
+	var count int
+	err = s.db.QueryRowContext(ctx, "SELECT count(*) FROM kb_articles WHERE project_id = $1 AND title = $2", projectID, title).Scan(&count)
+	if err != nil {
+		t.Fatalf("query count of title: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 articles for title %q due to transaction rollback, got %d", title, count)
+	}
+}
+
+func TestWriteArticle_ConcisenessBypass(t *testing.T) {
+	s := testStoreWithLimit(t, 10)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-conciseness-bypass")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+
+	const title = "too long but forced"
+	const body = "This is a body that is longer than 10 characters."
+
+	article, err := s.WriteArticle(ctx, projectID, agentID, title, body, nil, nil, true)
+	if err != nil {
+		t.Fatalf("expected write with force=true to bypass conciseness ceiling, got: %v", err)
+	}
+
+	if article.Body != body {
+		t.Errorf("article.Body = %q, want %q", article.Body, body)
+	}
+
+	var count int
+	err = s.db.QueryRowContext(ctx, "SELECT count(*) FROM kb_articles WHERE project_id = $1 AND id = $2", projectID, article.ID).Scan(&count)
+	if err != nil {
+		t.Fatalf("query count: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 article in db, got %d", count)
+	}
+}
+
+
 

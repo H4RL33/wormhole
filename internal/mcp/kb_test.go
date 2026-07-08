@@ -269,3 +269,111 @@ func TestMcp_WriteArticle_DedupViolation(t *testing.T) {
 	}
 }
 
+func TestMcp_WriteArticle_ConcisenessViolation(t *testing.T) {
+	db := testDB(t)
+	store := kb.NewStore(db, kb.StubEmbedder{}, 0.85, 10, 1, 1, 1)
+	identityStore := testIdentityStore(t)
+	projectID := mustCreateProject(t, "mcp-kb-conciseness-violation")
+	_, token := mustRegisterAgent(t, projectID)
+
+	registry := NewRegistry()
+	registry.Register(WriteArticleTool(store))
+	handler := NewCallHandler(registry, identityStore)
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	writeArgs, _ := json.Marshal(WriteArticleInput{
+		Title: "too long article",
+		Body:  "123456789012345",
+	})
+	reqBody, _ := json.Marshal(CallRequest{
+		Tool:      "wormhole.kb.write",
+		ProjectID: projectID,
+		Arguments: writeArgs,
+	})
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("write POST: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("write status: got %d, want 400 (BadRequest)", resp.StatusCode)
+	}
+
+	var callResp CallResponse
+	if err := json.NewDecoder(resp.Body).Decode(&callResp); err != nil {
+		t.Fatalf("decode call response: %v", err)
+	}
+
+	if callResp.Error == "" {
+		t.Fatal("expected error field in CallResponse, got empty string")
+	}
+
+	var parsedErr struct {
+		Error   string `json:"error"`
+		Code    string `json:"code"`
+		Details struct {
+			Length    int `json:"length"`
+			MaxLength int `json:"max_length"`
+		} `json:"details"`
+		Suggestion string `json:"suggestion"`
+	}
+	if err := json.Unmarshal([]byte(callResp.Error), &parsedErr); err != nil {
+		t.Fatalf("expected CallResponse.Error to be valid raw JSON, got: %q (unmarshal error: %v)", callResp.Error, err)
+	}
+
+	if parsedErr.Code != "CONCISENESS_VIOLATION" {
+		t.Errorf("expected Code to be 'CONCISENESS_VIOLATION', got: %q", parsedErr.Code)
+	}
+	if parsedErr.Details.Length != 15 {
+		t.Errorf("expected Details.Length to be 15, got: %d", parsedErr.Details.Length)
+	}
+	if parsedErr.Details.MaxLength != 10 {
+		t.Errorf("expected Details.MaxLength to be 10, got: %d", parsedErr.Details.MaxLength)
+	}
+}
+
+func TestMcp_WriteArticle_ConcisenessBypass(t *testing.T) {
+	db := testDB(t)
+	store := kb.NewStore(db, kb.StubEmbedder{}, 0.85, 10, 1, 1, 1)
+	identityStore := testIdentityStore(t)
+	projectID := mustCreateProject(t, "mcp-kb-conciseness-bypass")
+	_, token := mustRegisterAgent(t, projectID)
+
+	registry := NewRegistry()
+	registry.Register(WriteArticleTool(store))
+	handler := NewCallHandler(registry, identityStore)
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	writeArgs, _ := json.Marshal(WriteArticleInput{
+		Title: "too long article but forced",
+		Body:  "123456789012345",
+		Force: true,
+	})
+	reqBody, _ := json.Marshal(CallRequest{
+		Tool:      "wormhole.kb.write",
+		ProjectID: projectID,
+		Arguments: writeArgs,
+	})
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("write POST: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("write status: got %d, want 200 (OK)", resp.StatusCode)
+	}
+}
+
+

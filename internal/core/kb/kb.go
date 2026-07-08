@@ -49,6 +49,26 @@ func (e *ErrDedupViolation) Error() string {
 	return string(b)
 }
 
+type ErrConcisenessViolation struct {
+	Length    int `json:"length"`
+	MaxLength int `json:"max_length"`
+}
+
+func (e *ErrConcisenessViolation) Error() string {
+	m := map[string]any{
+		"error": "kb: write article: conciseness ceiling exceeded",
+		"code":  "CONCISENESS_VIOLATION",
+		"details": map[string]any{
+			"length":     e.Length,
+			"max_length": e.MaxLength,
+		},
+		"suggestion": fmt.Sprintf("The article body is too long (%d characters). The maximum allowed length is %d characters. Please summarize the article to make it more concise.", e.Length, e.MaxLength),
+	}
+	b, _ := json.Marshal(m)
+	return string(b)
+}
+
+
 
 // Article is a single atomic knowledge base entry (RFC-0001 §8.3: one
 // article = one fact, decision, or procedure).
@@ -165,6 +185,13 @@ func (s *Store) WriteArticle(ctx context.Context, projectID, agentID, title, bod
 
 	if len(frontmatter) == 0 {
 		frontmatter = json.RawMessage(`{}`)
+	}
+
+	if !force && s.maxBodyLength > 0 && len(body) > s.maxBodyLength {
+		return Article{}, &ErrConcisenessViolation{
+			Length:    len(body),
+			MaxLength: s.maxBodyLength,
+		}
 	}
 
 	embedding, err := s.embedder.Embed(ctx, body)
