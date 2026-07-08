@@ -95,8 +95,8 @@ Boundary days (6, 12, 18) carry over: prior milestone's review/demo plus next mi
 ## M3 — Knowledge Base
 
 ### Day 13 — 2026-07-19
-- [ ] KB article schema: title, body, frontmatter, embedding vector, outbound links
-- [ ] `wormhole.kb.write` endpoint (no compliance checks yet, plumbing only)
+- [x] KB article schema: title, body, frontmatter, embedding vector, outbound links
+- [x] `wormhole.kb.write` endpoint (no compliance checks yet, plumbing only)
 
 ### Day 14 — 2026-07-20
 - [ ] Embedding generation pipeline on write
