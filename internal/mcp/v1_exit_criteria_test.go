@@ -85,9 +85,13 @@ func TestE2E_V1ExitCriteria(t *testing.T) {
 		t.Fatalf("list channels failed: %v", err)
 	}
 	var listChansResp callResponse
-	_ = json.Unmarshal([]byte(body), &listChansResp)
+	if err := json.Unmarshal([]byte(body), &listChansResp); err != nil {
+		t.Fatalf("failed to unmarshal list channels response: %v", err)
+	}
 	var listChans ListChannelsOutput
-	_ = json.Unmarshal(listChansResp.Result, &listChans)
+	if err := json.Unmarshal(listChansResp.Result, &listChans); err != nil {
+		t.Fatalf("failed to unmarshal list channels result: %v", err)
+	}
 
 	var introChanID string
 	for _, c := range listChans.Channels {
@@ -101,7 +105,10 @@ func TestE2E_V1ExitCriteria(t *testing.T) {
 	}
 
 	// 4. Post self-introduction to Introductions channel
-	payloadBytes, _ := json.Marshal(map[string]string{"text": "exit-agent (gpt-4) joined the project."})
+	payloadBytes, err := json.Marshal(map[string]string{"text": "exit-agent (gpt-4) joined the project."})
+	if err != nil {
+		t.Fatalf("failed to marshal intro payload: %v", err)
+	}
 	status, body, err = makeMCPCall(t, srv.URL, "wormhole.channel.post", projectID, token, PostEventInput{
 		ChannelID: introChanID,
 		EventType: "message.posted",
@@ -123,9 +130,13 @@ func TestE2E_V1ExitCriteria(t *testing.T) {
 		t.Fatalf("create task failed: %v", err)
 	}
 	var createTaskResp callResponse
-	_ = json.Unmarshal([]byte(body), &createTaskResp)
+	if err := json.Unmarshal([]byte(body), &createTaskResp); err != nil {
+		t.Fatalf("failed to unmarshal create task response: %v", err)
+	}
 	var createTaskOut CreateTaskOutput
-	_ = json.Unmarshal(createTaskResp.Result, &createTaskOut)
+	if err := json.Unmarshal(createTaskResp.Result, &createTaskOut); err != nil {
+		t.Fatalf("failed to unmarshal create task result: %v", err)
+	}
 
 	taskID := createTaskOut.TaskID
 
@@ -192,9 +203,13 @@ func TestE2E_V1ExitCriteria(t *testing.T) {
 	}
 
 	var searchResp callResponse
-	_ = json.Unmarshal([]byte(body), &searchResp)
+	if err := json.Unmarshal([]byte(body), &searchResp); err != nil {
+		t.Fatalf("failed to unmarshal search response: %v", err)
+	}
 	var searchOut SearchArticlesOutput
-	_ = json.Unmarshal(searchResp.Result, &searchOut)
+	if err := json.Unmarshal(searchResp.Result, &searchOut); err != nil {
+		t.Fatalf("failed to unmarshal search result: %v", err)
+	}
 
 	if len(searchOut.Articles) == 0 {
 		t.Fatalf("search returned 0 articles, expected to find the written discovery")
