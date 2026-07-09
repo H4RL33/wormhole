@@ -62,6 +62,16 @@ func TestRunJoin_MissingProjectOnly(t *testing.T) {
 // tests can exercise the full two-call join sequence without a real
 // Postgres-backed server.
 func fakeServer(t *testing.T, searchArticles func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse)) *httptest.Server {
+	return fakeServerExtended(t, searchArticles, nil, nil, nil)
+}
+
+func fakeServerExtended(
+	t *testing.T,
+	searchArticles func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse),
+	listChannels func(t *testing.T) (listChannelsOutput, *callResponse),
+	postEvent func(t *testing.T, in postEventInput) (postEventOutput, *callResponse),
+	listTasks func(t *testing.T) (listTasksOutput, *callResponse),
+) *httptest.Server {
 	t.Helper()
 	issuedAt := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -101,6 +111,71 @@ func fakeServer(t *testing.T, searchArticles func(t *testing.T, in searchArticle
 				t.Fatalf("decode search arguments: %v", err)
 			}
 			out, errResp := searchArticles(t, in)
+			if errResp != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(*errResp)
+				return
+			}
+			resultRaw, _ := json.Marshal(out)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(callResponse{Result: resultRaw})
+		case "wormhole.channel.list":
+			if got := r.Header.Get("Authorization"); got != "Bearer sekrit-token" {
+				t.Fatalf("channel.list Authorization header: got %q, want %q", got, "Bearer sekrit-token")
+			}
+			var out listChannelsOutput
+			var errResp *callResponse
+			if listChannels != nil {
+				out, errResp = listChannels(t)
+			} else {
+				out = listChannelsOutput{
+					Channels: []channelSummary{
+						{ChannelID: "chan-1", Name: "introductions"},
+					},
+				}
+			}
+			if errResp != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(*errResp)
+				return
+			}
+			resultRaw, _ := json.Marshal(out)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(callResponse{Result: resultRaw})
+		case "wormhole.channel.post":
+			if got := r.Header.Get("Authorization"); got != "Bearer sekrit-token" {
+				t.Fatalf("channel.post Authorization header: got %q, want %q", got, "Bearer sekrit-token")
+			}
+			var in postEventInput
+			if err := json.Unmarshal(req.Arguments, &in); err != nil {
+				t.Fatalf("decode post event arguments: %v", err)
+			}
+			var out postEventOutput
+			var errResp *callResponse
+			if postEvent != nil {
+				out, errResp = postEvent(t, in)
+			} else {
+				out = postEventOutput{EventID: "evt-1"}
+			}
+			if errResp != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(*errResp)
+				return
+			}
+			resultRaw, _ := json.Marshal(out)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(callResponse{Result: resultRaw})
+		case "wormhole.task.list":
+			if got := r.Header.Get("Authorization"); got != "Bearer sekrit-token" {
+				t.Fatalf("task.list Authorization header: got %q, want %q", got, "Bearer sekrit-token")
+			}
+			var out listTasksOutput
+			var errResp *callResponse
+			if listTasks != nil {
+				out, errResp = listTasks(t)
+			} else {
+				out = listTasksOutput{Tasks: []taskSummary{}}
+			}
 			if errResp != nil {
 				w.WriteHeader(http.StatusBadRequest)
 				json.NewEncoder(w).Encode(*errResp)
@@ -361,3 +436,283 @@ func TestRunJoin_KBSync_FailureIsNonFatal(t *testing.T) {
 		t.Fatalf("credentials file should still exist after a KB sync failure: %v", err)
 	}
 }
+
+func TestRunJoin_Step3_PostsToIntroductionsChannel(t *testing.T) {
+	var gotChannelID string
+	var gotPayloadText string
+
+	srv := fakeServerExtended(t,
+		func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
+			return searchArticlesOutput{Articles: []articleSummary{}}, nil
+		},
+		func(t *testing.T) (listChannelsOutput, *callResponse) {
+			return listChannelsOutput{
+				Channels: []channelSummary{
+					{ChannelID: "chan-general", Name: "general"},
+					{ChannelID: "chan-intro", Name: "introductions"},
+				},
+			}, nil
+		},
+		func(t *testing.T, in postEventInput) (postEventOutput, *callResponse) {
+			gotChannelID = in.ChannelID
+			var payload struct {
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(in.Payload, &payload); err != nil {
+				t.Fatalf("unmarshal post payload: %v", err)
+			}
+			gotPayloadText = payload.Text
+			return postEventOutput{EventID: "evt-123"}, nil
+		},
+		nil,
+	)
+	defer srv.Close()
+
+	var stdout, stderr bytes.Buffer
+	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
+	code := run([]string{
+		"join",
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--owner", "harley",
+		"--model", "claude",
+		"--token-file", tokenFile,
+	}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
+	}
+	if gotChannelID != "chan-intro" {
+		t.Fatalf("posted to channel %q, want %q", gotChannelID, "chan-intro")
+	}
+	wantText := "harley (claude) joined the project."
+	if gotPayloadText != wantText {
+		t.Fatalf("posted payload text %q, want %q", gotPayloadText, wantText)
+	}
+	if !strings.Contains(stdout.String(), "Introducing agent to #introductions...") {
+		t.Fatalf("stdout missing introduction notice: %q", stdout.String())
+	}
+}
+
+func TestRunJoin_Step3_IntroFallbackToAgentID(t *testing.T) {
+	var gotPayloadText string
+
+	srv := fakeServerExtended(t,
+		func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
+			return searchArticlesOutput{Articles: []articleSummary{}}, nil
+		},
+		func(t *testing.T) (listChannelsOutput, *callResponse) {
+			return listChannelsOutput{
+				Channels: []channelSummary{
+					{ChannelID: "chan-intro", Name: "introductions"},
+				},
+			}, nil
+		},
+		func(t *testing.T, in postEventInput) (postEventOutput, *callResponse) {
+			var payload struct {
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(in.Payload, &payload); err != nil {
+				t.Fatalf("unmarshal post payload: %v", err)
+			}
+			gotPayloadText = payload.Text
+			return postEventOutput{EventID: "evt-123"}, nil
+		},
+		nil,
+	)
+	defer srv.Close()
+
+	var stdout, stderr bytes.Buffer
+	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
+	code := run([]string{
+		"join",
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--token-file", tokenFile,
+	}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
+	}
+	wantText := "agent-1 joined the project."
+	if gotPayloadText != wantText {
+		t.Fatalf("posted payload text %q, want %q", gotPayloadText, wantText)
+	}
+}
+
+func TestRunJoin_Step3_NoIntroductionsChannel_NonFatal(t *testing.T) {
+	srv := fakeServerExtended(t,
+		func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
+			return searchArticlesOutput{Articles: []articleSummary{}}, nil
+		},
+		func(t *testing.T) (listChannelsOutput, *callResponse) {
+			return listChannelsOutput{
+				Channels: []channelSummary{
+					{ChannelID: "chan-general", Name: "general"},
+				},
+			}, nil
+		},
+		func(t *testing.T, in postEventInput) (postEventOutput, *callResponse) {
+			t.Fatal("should not call post event if introductions channel is absent")
+			return postEventOutput{}, nil
+		},
+		nil,
+	)
+	defer srv.Close()
+
+	var stdout, stderr bytes.Buffer
+	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
+	code := run([]string{
+		"join",
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--token-file", tokenFile,
+	}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "introductions channel not found") {
+		t.Fatalf("stderr missing introductions warning: %q", stderr.String())
+	}
+}
+
+func TestRunJoin_Step3_ListChannelsFailure_NonFatal(t *testing.T) {
+	srv := fakeServerExtended(t,
+		func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
+			return searchArticlesOutput{Articles: []articleSummary{}}, nil
+		},
+		func(t *testing.T) (listChannelsOutput, *callResponse) {
+			return listChannelsOutput{}, &callResponse{Error: "list channels failed"}
+		},
+		nil,
+		nil,
+	)
+	defer srv.Close()
+
+	var stdout, stderr bytes.Buffer
+	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
+	code := run([]string{
+		"join",
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--token-file", tokenFile,
+	}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "self-introduction failed") {
+		t.Fatalf("stderr missing self-introduction warning: %q", stderr.String())
+	}
+}
+
+func TestRunJoin_Step3_PostEventFailure_NonFatal(t *testing.T) {
+	srv := fakeServerExtended(t,
+		func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
+			return searchArticlesOutput{Articles: []articleSummary{}}, nil
+		},
+		func(t *testing.T) (listChannelsOutput, *callResponse) {
+			return listChannelsOutput{
+				Channels: []channelSummary{
+					{ChannelID: "chan-intro", Name: "introductions"},
+				},
+			}, nil
+		},
+		func(t *testing.T, in postEventInput) (postEventOutput, *callResponse) {
+			return postEventOutput{}, &callResponse{Error: "post failed"}
+		},
+		nil,
+	)
+	defer srv.Close()
+
+	var stdout, stderr bytes.Buffer
+	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
+	code := run([]string{
+		"join",
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--token-file", tokenFile,
+	}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "self-introduction failed") {
+		t.Fatalf("stderr missing self-introduction warning: %q", stderr.String())
+	}
+}
+
+func TestRunJoin_Step4_PrintsCorrectTaskCounts(t *testing.T) {
+	srv := fakeServerExtended(t,
+		func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
+			return searchArticlesOutput{Articles: []articleSummary{}}, nil
+		},
+		nil,
+		nil,
+		func(t *testing.T) (listTasksOutput, *callResponse) {
+			return listTasksOutput{
+				Tasks: []taskSummary{
+					{Status: "todo"},
+					{Status: "wip"},
+					{Status: "blocked"},
+					{Status: "done"},
+					{Status: "done"},
+					{Status: "unknown"},
+				},
+			}, nil
+		},
+	)
+	defer srv.Close()
+
+	var stdout, stderr bytes.Buffer
+	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
+	code := run([]string{
+		"join",
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--token-file", tokenFile,
+	}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
+	}
+	wantStdout := "Ready. 3 open tasks, 2 done."
+	if !strings.Contains(stdout.String(), wantStdout) {
+		t.Fatalf("stdout missing expected task summary %q: got %q", wantStdout, stdout.String())
+	}
+}
+
+func TestRunJoin_Step4_ListTasksFailure_NonFatal(t *testing.T) {
+	srv := fakeServerExtended(t,
+		func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
+			return searchArticlesOutput{Articles: []articleSummary{}}, nil
+		},
+		nil,
+		nil,
+		func(t *testing.T) (listTasksOutput, *callResponse) {
+			return listTasksOutput{}, &callResponse{Error: "list tasks failed"}
+		},
+	)
+	defer srv.Close()
+
+	var stdout, stderr bytes.Buffer
+	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
+	code := run([]string{
+		"join",
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--token-file", tokenFile,
+	}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "task list failed") {
+		t.Fatalf("stderr missing task list warning: %q", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Ready.") {
+		t.Fatalf("stdout should not contain Ready tasks summary when task list fails: %q", stdout.String())
+	}
+}
+

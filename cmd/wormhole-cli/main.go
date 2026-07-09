@@ -96,6 +96,33 @@ type searchArticlesOutput struct {
 	Articles []articleSummary `json:"articles"`
 }
 
+type channelSummary struct {
+	ChannelID string `json:"channel_id"`
+	Name      string `json:"name"`
+}
+
+type listChannelsOutput struct {
+	Channels []channelSummary `json:"channels"`
+}
+
+type postEventInput struct {
+	ChannelID string          `json:"channel_id"`
+	EventType string          `json:"event_type"`
+	Payload   json.RawMessage `json:"payload"`
+}
+
+type postEventOutput struct {
+	EventID string `json:"event_id"`
+}
+
+type taskSummary struct {
+	Status string `json:"status"`
+}
+
+type listTasksOutput struct {
+	Tasks []taskSummary `json:"tasks"`
+}
+
 // credentials is what gets persisted to the token file after a successful
 // join, so later join steps (Day 21 self-introduction) can reuse the
 // issued token without re-registering.
@@ -175,6 +202,53 @@ func doSearch(client *http.Client, server, project, token, query string, limit i
 	}
 	return out, nil
 }
+
+// doListChannels calls wormhole.channel.list with the token issued by doRegister
+// to list all channels.
+func doListChannels(client *http.Client, server, project, token string) (listChannelsOutput, error) {
+	resultRaw, err := callTool(client, server, "wormhole.channel.list", project, token, struct{}{})
+	if err != nil {
+		return listChannelsOutput{}, err
+	}
+	var out listChannelsOutput
+	if err := json.Unmarshal(resultRaw, &out); err != nil {
+		return listChannelsOutput{}, fmt.Errorf("decode list channels result: %w", err)
+	}
+	return out, nil
+}
+
+// doPostEvent calls wormhole.channel.post to post a self-introduction message
+// to the introductions channel.
+func doPostEvent(client *http.Client, server, project, token, channelID, eventType string, payload json.RawMessage) (postEventOutput, error) {
+	in := postEventInput{
+		ChannelID: channelID,
+		EventType: eventType,
+		Payload:   payload,
+	}
+	resultRaw, err := callTool(client, server, "wormhole.channel.post", project, token, in)
+	if err != nil {
+		return postEventOutput{}, err
+	}
+	var out postEventOutput
+	if err := json.Unmarshal(resultRaw, &out); err != nil {
+		return postEventOutput{}, fmt.Errorf("decode post event result: %w", err)
+	}
+	return out, nil
+}
+
+// doListTasks calls wormhole.task.list to retrieve all tasks.
+func doListTasks(client *http.Client, server, project, token string) (listTasksOutput, error) {
+	resultRaw, err := callTool(client, server, "wormhole.task.list", project, token, struct{}{})
+	if err != nil {
+		return listTasksOutput{}, err
+	}
+	var out listTasksOutput
+	if err := json.Unmarshal(resultRaw, &out); err != nil {
+		return listTasksOutput{}, fmt.Errorf("decode list tasks result: %w", err)
+	}
+	return out, nil
+}
+
 
 // defaultTokenFilePath is where credentials land when --token-file isn't
 // given: ~/.wormhole/credentials.json.
@@ -318,6 +392,67 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	fmt.Fprintln(stdout, "Self-introduction and task summary land Day 21+ (RFC-0001 §8.5)")
+	// Step 3: Self-introduction
+	channelsOut, chanErr := doListChannels(http.DefaultClient, *server, *project, out.Token)
+	if chanErr != nil {
+		fmt.Fprintf(stderr, "wormhole join: self-introduction failed: %v\n", chanErr)
+	} else {
+		var introChan *channelSummary
+		for _, ch := range channelsOut.Channels {
+			if ch.Name == "introductions" {
+				introChan = &ch
+				break
+			}
+		}
+		if introChan == nil {
+			fmt.Fprintln(stderr, "wormhole join: introductions channel not found")
+		} else {
+			var introText string
+			if *owner != "" && *model != "" {
+				introText = fmt.Sprintf("%s (%s) joined the project.", *owner, *model)
+			} else if *owner != "" {
+				introText = fmt.Sprintf("%s joined the project.", *owner)
+			} else if *model != "" {
+				introText = fmt.Sprintf("%s joined the project.", *model)
+			} else {
+				introText = fmt.Sprintf("%s joined the project.", out.AgentID)
+			}
+
+			payloadStruct := struct {
+				Text string `json:"text"`
+			}{
+				Text: introText,
+			}
+			payloadRaw, err := json.Marshal(payloadStruct)
+			if err != nil {
+				fmt.Fprintf(stderr, "wormhole join: self-introduction failed: %v\n", err)
+			} else {
+				_, postErr := doPostEvent(http.DefaultClient, *server, *project, out.Token, introChan.ChannelID, "message.posted", payloadRaw)
+				if postErr != nil {
+					fmt.Fprintf(stderr, "wormhole join: self-introduction failed: %v\n", postErr)
+				} else {
+					fmt.Fprintln(stdout, "Introducing agent to #introductions...")
+				}
+			}
+		}
+	}
+
+	// Step 4: Task summary
+	tasksOut, tasksErr := doListTasks(http.DefaultClient, *server, *project, out.Token)
+	if tasksErr != nil {
+		fmt.Fprintf(stderr, "wormhole join: task list failed: %v\n", tasksErr)
+	} else {
+		var openCount, doneCount int
+		for _, t := range tasksOut.Tasks {
+			switch strings.ToLower(t.Status) {
+			case "todo", "wip", "blocked":
+				openCount++
+			case "done":
+				doneCount++
+			}
+		}
+		fmt.Fprintf(stdout, "Ready. %d open tasks, %d done.\n", openCount, doneCount)
+	}
+
 	return 0
 }
