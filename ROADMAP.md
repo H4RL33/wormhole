@@ -99,12 +99,12 @@ Boundary days (6, 12, 18) carry over: prior milestone's review/demo plus next mi
 - [x] `wormhole.kb.write` endpoint (no compliance checks yet, plumbing only)
 
 ### Day 14 — 2026-07-20
-- [ ] Embedding generation pipeline on write
-- [ ] `wormhole.kb.search` — semantic search via pgvector, ranked results
+- [x] Embedding generation pipeline on write — deterministic stub embedding wired into `wormhole.kb.write`
+- [x] `wormhole.kb.search` — semantic search via pgvector, ranked results — `wormhole.kb.search` (stub embeddings)
 
 ### Day 15 — 2026-07-21
-- [ ] Compliance check: dedup — semantic similarity threshold, block or merge on write (RFC §8.3, server-side per §13)
-- [ ] Tests: near-duplicate article rejected/merged correctly
+- [x] Compliance check: dedup — semantic similarity threshold, block or merge on write (RFC §8.3, server-side per §13) — `kb.write` enforces dedup, bypass flag
+- [x] Tests: near-duplicate article rejected/merged correctly
 
 ### Day 16 — 2026-07-22
 - [x] Compliance check: conciseness ceiling — reject/rewrite-prompt if exceeded
@@ -115,9 +115,9 @@ Boundary days (6, 12, 18) carry over: prior milestone's review/demo plus next mi
 - [x] `[[link]]` resolution / graph traversal between articles
 
 ### Day 18 — 2026-07-24
-- [ ] M3 integration test: write article → search retrieves it → dedup/conciseness checks fire on bad input
-- [ ] M3 review/demo
-- [ ] Kick off M4: `wormhole join` CLI scaffold
+- [x] M3 integration test: write article → search retrieves it → dedup/conciseness checks fire on bad input — `TestM3_KBWriteSearchComplianceLoop`, `internal/mcp/m3_integration_test.go`
+- [x] M3 review/demo — full write→search→compliance loop proven through the real MCP HTTP boundary in one test: article written via `wormhole.kb.write`, retrieved via `wormhole.kb.search`, semantic duplicate rejected (`DEDUP_VIOLATION`), over-length body rejected (`CONCISENESS_VIOLATION`). Combined with Days 13–17 (write plumbing, embeddings, dedup, conciseness/required-links, get/get_links), M3 exit bar met.
+- [x] Kick off M4: `wormhole join` CLI scaffold — `cmd/wormhole-cli/main.go`, `run`/`runJoin` dispatch flag-parses `--server`/`--project`/`--owner`/`--model`/`--capabilities`; no network call yet, passport issuance deferred to Day 19 (RFC-0001 §8.5)
 
 ---
 
