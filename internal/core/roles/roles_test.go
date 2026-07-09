@@ -3,7 +3,6 @@ package roles
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"os"
 	"reflect"
@@ -33,83 +32,6 @@ func testStore(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { db.Close() })
 	return NewStore(db)
-}
-
-// TestGetTemplate_BackendEngineer covers the happy path: retrieving
-// a seeded template and verifying its permission bundle and default task view.
-func TestGetTemplate_BackendEngineer(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-
-	got, err := s.GetTemplate(ctx, "backend-engineer")
-	if err != nil {
-		t.Fatalf("GetTemplate: %v", err)
-	}
-
-	if got.Name != "backend-engineer" {
-		t.Errorf("Name = %q, want %q", got.Name, "backend-engineer")
-	}
-
-	expectedPerms := []string{
-		"task.read", "task.write", "kb.read", "kb.write",
-		"channel.read", "channel.write",
-	}
-	if !reflect.DeepEqual(got.PermissionBundle, expectedPerms) {
-		t.Errorf("PermissionBundle = %v, want %v", got.PermissionBundle, expectedPerms)
-	}
-
-	// Verify default task view is present and valid JSON
-	if len(got.DefaultTaskView) == 0 {
-		t.Fatal("DefaultTaskView is empty")
-	}
-	var taskView map[string]interface{}
-	if err := json.Unmarshal(got.DefaultTaskView, &taskView); err != nil {
-		t.Errorf("DefaultTaskView unmarshal: %v", err)
-	}
-}
-
-// TestGetTemplate_ProjectManager covers another happy path with a different
-// permission bundle (includes task.assign).
-func TestGetTemplate_ProjectManager(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-
-	got, err := s.GetTemplate(ctx, "project-manager")
-	if err != nil {
-		t.Fatalf("GetTemplate: %v", err)
-	}
-
-	if got.Name != "project-manager" {
-		t.Errorf("Name = %q, want %q", got.Name, "project-manager")
-	}
-
-	expectedPerms := []string{
-		"task.read", "task.write", "kb.read", "kb.write",
-		"channel.read", "channel.write", "task.assign",
-	}
-	if !reflect.DeepEqual(got.PermissionBundle, expectedPerms) {
-		t.Errorf("PermissionBundle = %v, want %v", got.PermissionBundle, expectedPerms)
-	}
-}
-
-// TestGetTemplate_Reviewer covers a template with a minimal permission set
-// (task.read only, no task.write).
-func TestGetTemplate_Reviewer(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-
-	got, err := s.GetTemplate(ctx, "reviewer")
-	if err != nil {
-		t.Fatalf("GetTemplate: %v", err)
-	}
-
-	expectedPerms := []string{
-		"task.read", "kb.read", "kb.write",
-		"channel.read", "channel.write",
-	}
-	if !reflect.DeepEqual(got.PermissionBundle, expectedPerms) {
-		t.Errorf("PermissionBundle = %v, want %v", got.PermissionBundle, expectedPerms)
-	}
 }
 
 // TestGetTemplate_NotFound covers the error case when a template name
@@ -207,8 +129,8 @@ func TestGetTemplate_AllSeededRoles(t *testing.T) {
 	ctx := context.Background()
 
 	testCases := []struct {
-		name            string
-		expectedPerms   []string
+		name          string
+		expectedPerms []string
 	}{
 		{
 			"backend-engineer",

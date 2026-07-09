@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 )
 
 var ErrTemplateNotFound = errors.New("roles: template not found")
@@ -19,7 +20,7 @@ type Template struct {
 	Name             string
 	PermissionBundle []string
 	DefaultTaskView  json.RawMessage
-	CreatedAt        string // returned as ISO 8601 string from Postgres timestamptz
+	CreatedAt        time.Time
 }
 
 type Store struct {
@@ -46,7 +47,7 @@ func (s *Store) GetTemplate(ctx context.Context, name string) (Template, error) 
 	).Scan(&t.Name, &permBundle, &defaultView, &t.CreatedAt)
 
 	if err == sql.ErrNoRows {
-		return Template{}, fmt.Errorf("roles: %w", ErrTemplateNotFound)
+		return Template{}, ErrTemplateNotFound
 	}
 	if err != nil {
 		return Template{}, fmt.Errorf("roles: get template: %w", err)
