@@ -72,8 +72,9 @@ func WriteArticleTool(store *kb.Store) Tool {
 
 // SearchArticlesInput is the wormhole.kb.search argument shape.
 type SearchArticlesInput struct {
-	Query string `json:"query"`
-	Limit int    `json:"limit,omitempty"`
+	ProjectID string `json:"project_id,omitempty"`
+	Query     string `json:"query"`
+	Limit     int    `json:"limit,omitempty"`
 }
 
 // ArticleSummary is one article's shape within SearchArticlesOutput.

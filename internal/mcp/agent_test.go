@@ -138,3 +138,36 @@ func TestWhoAmITool_Handler(t *testing.T) {
 		t.Fatalf("output: got %+v", out)
 	}
 }
+
+func TestRegisterAgentTool_Handler_NameFallback(t *testing.T) {
+	store := testIdentityStore(t)
+	eventsStore := testEventsStore(t)
+	tool := RegisterAgentTool(store, eventsStore)
+
+	projectID := mustCreateProject(t, "mcp-register-fallback")
+	arguments, _ := json.Marshal(RegisterAgentInput{
+		Permissions:  []string{"event.publish"},
+		Name:         "harley-fallback",
+		Model:        "claude",
+		Capabilities: []string{"code_review"},
+	})
+
+	result, err := tool.Handler(context.Background(), nil, projectID, arguments)
+	if err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+	out, ok := result.(RegisterAgentOutput)
+	if !ok {
+		t.Fatalf("result type: got %T, want RegisterAgentOutput", result)
+	}
+
+	db := testDB(t)
+	var owner string
+	err = db.QueryRow(`SELECT owner FROM agents WHERE id = $1`, out.AgentID).Scan(&owner)
+	if err != nil {
+		t.Fatalf("query agent owner: %v", err)
+	}
+	if owner != "harley-fallback" {
+		t.Fatalf("expected owner to be %q, got %q", "harley-fallback", owner)
+	}
+}

@@ -14,6 +14,7 @@ import (
 // indicative per architecture.md M1: frozen here at implementation time,
 // not finalized by any RFC text.
 type CreateTaskInput struct {
+	ProjectID    string     `json:"project_id,omitempty"`
 	Title        string     `json:"title"`
 	Description  string     `json:"description"`
 	ParentTaskID *string    `json:"parent_task_id"`
@@ -96,7 +97,8 @@ func AssignTaskTool(store *tasks.Store) Tool {
 // ListTasksInput is the wormhole.task.list argument shape. A nil Status
 // returns tasks of any status.
 type ListTasksInput struct {
-	Status *string `json:"status"`
+	ProjectID string  `json:"project_id,omitempty"`
+	Status    *string `json:"status"`
 }
 
 // TaskSummary is one task's shape within ListTasksOutput.

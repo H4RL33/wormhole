@@ -44,6 +44,7 @@ func ensureDefaultChannels(ctx context.Context, store *events.Store, projectID s
 // Schema is indicative per architecture.md M1 — frozen here at
 // implementation time, not finalized by any RFC text.
 type RegisterAgentInput struct {
+	Name         string   `json:"name,omitempty"`
 	Permissions  []string `json:"permissions"`
 	Owner        string   `json:"owner"`
 	Model        string   `json:"model"`
@@ -76,6 +77,9 @@ func RegisterAgentTool(store *identity.Store, eventsStore *events.Store) Tool {
 			var in RegisterAgentInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
 				return nil, fmt.Errorf("mcp: decode wormhole.agent.register arguments: %w", err)
+			}
+			if in.Owner == "" && in.Name != "" {
+				in.Owner = in.Name
 			}
 			agent, passport, token, err := store.Register(ctx, projectID, in.Permissions, in.Owner, in.Model, in.Capabilities, in.Repositories, in.Roles)
 			if err != nil {

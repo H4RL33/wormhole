@@ -12,7 +12,8 @@ import (
 
 // CreateChannelInput is the wormhole.channel.create argument shape.
 type CreateChannelInput struct {
-	Name string `json:"name"`
+	ProjectID string `json:"project_id,omitempty"`
+	Name      string `json:"name"`
 }
 
 // CreateChannelOutput is the wormhole.channel.create result shape.
