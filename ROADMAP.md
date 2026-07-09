@@ -134,8 +134,8 @@ Boundary days (6, 12, 18) carry over: prior milestone's review/demo plus next mi
 - [x] Join flow step 4: open-task summary surfaced to joining agent — `wormhole join` retrieves and counts open (`todo`+`wip`+`blocked`) and `done` tasks from `wormhole.task.list` and prints summary to stdout, non-fatal
 
 ### Day 22 — 2026-07-28
-- [ ] Full MCP tool surface audit against RFC-0001 §9 — every listed tool implemented
-- [ ] Close gaps found in audit
+- [x] Full MCP tool surface audit against RFC-0001 §9 — wrote programmatic registry and auth verification suite in `internal/mcp/audit_test.go`
+- [x] Close gaps found in audit — aligned inputs for `wormhole.agent.register` (`name` fallback), task, channel, and KB tools (`project_id`), enforcing mismatch validations
 
 ### Day 23 — 2026-07-29
 - [ ] Hardening: multi-tenant isolation tests (cross-project KB/task leakage checks, RFC §13)
