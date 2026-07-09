@@ -127,7 +127,7 @@ Boundary days (6, 12, 18) carry over: prior milestone's review/demo plus next mi
 - [x] Join flow step 1: passport creation + permission grant on project join (RFC §8.5) — `cmd/wormhole-cli/main.go`'s `wormhole join` now calls `wormhole.agent.register` over `/mcp/tools/call`, persists the issued passport/token to `~/.wormhole/credentials.json` (0600) for Day 20/21's join steps to reuse
 
 ### Day 20 — 2026-07-26
-- [ ] Join flow step 2: KB sync — relevant-article slice retrieval on join (semantic filter against project context)
+- [x] Join flow step 2: KB sync — relevant-article slice retrieval on join (semantic filter against project context) — `wormhole join` now calls `wormhole.kb.search` with the token from step 1, query built from owner/model/capabilities/roles (or `--context`), prints `Synchronising knowledge graph (N relevant)...`; sync failure is non-fatal, empty-context sync is skipped
 
 ### Day 21 — 2026-07-27
 - [ ] Join flow step 3: self-introduction post to project channel
