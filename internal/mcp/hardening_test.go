@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -216,4 +218,135 @@ func TestMCP_MultiTenantIsolation(t *testing.T) {
 	if mcpGetResp.Error == "" {
 		t.Errorf("expected error when getting Project B article using Project A token; body: %s", body)
 	}
+}
+
+func TestMCP_LoadSmokeTest(t *testing.T) {
+	db := testDB(t)
+	identityStore := identity.NewStore(db)
+	eventsStore := events.NewStore(db)
+	tasksStore := tasks.NewStore(db, eventsStore)
+	kbStore := kb.NewStore(db, kb.StubEmbedder{}, 0.9, 5000, 0, 0, 0)
+
+	registry := NewRegistry()
+	registry.Register(RegisterAgentTool(identityStore, eventsStore))
+	registry.Register(WhoAmITool())
+	registry.Register(ListChannelsTool(eventsStore))
+	registry.Register(PostEventTool(eventsStore))
+	registry.Register(CreateTaskTool(tasksStore))
+	registry.Register(ListTasksTool(tasksStore))
+	registry.Register(SearchArticlesTool(kbStore))
+	registry.Register(WriteArticleTool(kbStore))
+
+	handler := NewCallHandler(registry, identityStore)
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	projectID := mustCreateProject(t, "load-smoke-project")
+
+	const concurrencyLimit = 10
+	var wg sync.WaitGroup
+	wg.Add(concurrencyLimit)
+
+	for i := 0; i < concurrencyLimit; i++ {
+		go func(agentIndex int) {
+			defer wg.Done()
+
+			owner := fmt.Sprintf("agent-owner-%d", agentIndex)
+			model := "gpt-4"
+			
+			// 1. Register agent
+			status, body := makeMCPCall(t, srv.URL, "wormhole.agent.register", projectID, "", RegisterAgentInput{
+				Permissions:  []string{"event.publish", "task.create", "task.list", "kb.write", "kb.search"},
+				Owner:        owner,
+				Model:        model,
+				Capabilities: []string{"testing"},
+			})
+			if status != http.StatusOK {
+				t.Errorf("[Agent %d] Registration failed: %s", agentIndex, body)
+				return
+			}
+
+			type callResponse struct {
+				Result json.RawMessage `json:"result"`
+				Error  string          `json:"error"`
+			}
+			var mcpResp callResponse
+			_ = json.Unmarshal([]byte(body), &mcpResp)
+			var regOut RegisterAgentOutput
+			_ = json.Unmarshal(mcpResp.Result, &regOut)
+
+			// 2. WhoAmI Check
+			status, body = makeMCPCall(t, srv.URL, "wormhole.agent.whoami", projectID, regOut.Token, struct{}{})
+			if status != http.StatusOK {
+				t.Errorf("[Agent %d] WhoAmI check failed: %s", agentIndex, body)
+				return
+			}
+
+			// 3. List Channels (Step 3 Join Flow Simulation)
+			status, body = makeMCPCall(t, srv.URL, "wormhole.channel.list", projectID, regOut.Token, struct{}{})
+			if status != http.StatusOK {
+				t.Errorf("[Agent %d] List channels failed: %s", agentIndex, body)
+				return
+			}
+			var listChanResp callResponse
+			_ = json.Unmarshal([]byte(body), &listChanResp)
+			var listChans ListChannelsOutput
+			_ = json.Unmarshal(listChanResp.Result, &listChans)
+
+			var introChanID string
+			for _, c := range listChans.Channels {
+				if c.Name == "introductions" {
+					introChanID = c.ChannelID
+					break
+				}
+			}
+			if introChanID == "" {
+				t.Errorf("[Agent %d] Introductions channel not found", agentIndex)
+				return
+			}
+
+			// 4. Post self-introduction
+			status, body = makeMCPCall(t, srv.URL, "wormhole.channel.post", projectID, regOut.Token, PostEventInput{
+				ChannelID: introChanID,
+				EventType: "message.posted",
+				Payload:   json.RawMessage(fmt.Sprintf(`{"text": "%s joined"}`, owner)),
+			})
+			if status != http.StatusOK {
+				t.Errorf("[Agent %d] Post self-introduction failed: %s", agentIndex, body)
+				return
+			}
+
+			// 5. Create Task (Step 4 Join Flow Task count verification)
+			status, body = makeMCPCall(t, srv.URL, "wormhole.task.create", projectID, regOut.Token, CreateTaskInput{
+				Title:       fmt.Sprintf("Task from Agent %d", agentIndex),
+				Description: "Load testing task",
+			})
+			if status != http.StatusOK {
+				t.Errorf("[Agent %d] Create task failed: %s", agentIndex, body)
+				return
+			}
+
+			// 6. Write KB Article
+			status, body = makeMCPCall(t, srv.URL, "wormhole.kb.write", projectID, regOut.Token, WriteArticleInput{
+				Title: fmt.Sprintf("KB Article from Agent %d", agentIndex),
+				Body:  fmt.Sprintf("This is body text for load test from agent %d.", agentIndex),
+				Links: []string{},
+			})
+			if status != http.StatusOK {
+				t.Errorf("[Agent %d] Write article failed: %s", agentIndex, body)
+				return
+			}
+
+			// 7. KB Search
+			status, body = makeMCPCall(t, srv.URL, "wormhole.kb.search", projectID, regOut.Token, SearchArticlesInput{
+				Query: "load test",
+			})
+			if status != http.StatusOK {
+				t.Errorf("[Agent %d] KB Search failed: %s", agentIndex, body)
+				return
+			}
+		}(i)
+	}
+
+	wg.Wait()
 }
