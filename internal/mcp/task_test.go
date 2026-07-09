@@ -1,10 +1,8 @@
 package mcp
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -192,8 +190,7 @@ func TestE2E_CreateAssignUpdateStatus(t *testing.T) {
 	registry.Register(AssignTaskTool(tasksStore))
 	registry.Register(UpdateTaskStatusTool(tasksStore))
 	registry.Register(ListTasksTool(tasksStore))
-	handler := NewCallHandler(registry, identityStore)
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(NewMCPHandler(registry, identityStore))
 	defer srv.Close()
 
 	projectID := mustCreateProject(t, "e2e-task-lifecycle")
@@ -204,53 +201,27 @@ func TestE2E_CreateAssignUpdateStatus(t *testing.T) {
 	}
 
 	registerArgs, _ := json.Marshal(RegisterAgentInput{Permissions: []string{"event.publish"}, Owner: "harley", Model: "claude"})
-	registerBody, _ := json.Marshal(CallRequest{Tool: "wormhole.agent.register", ProjectID: projectID, Arguments: registerArgs})
-	resp, err := http.Post(srv.URL, "application/json", bytes.NewReader(registerBody))
-	if err != nil {
-		t.Fatalf("register POST: %v", err)
-	}
-	var registerResp CallResponse
-	json.NewDecoder(resp.Body).Decode(&registerResp)
-	resp.Body.Close()
-	resultRaw, _ := json.Marshal(registerResp.Result)
+	registerResult := mustToolResult(t, srv, "", "wormhole.agent.register", projectID, registerArgs)
 	var registerOut RegisterAgentOutput
-	json.Unmarshal(resultRaw, &registerOut)
+	json.Unmarshal(registerResult, &registerOut)
 	if registerOut.Token == "" {
 		t.Fatalf("register output missing token: %+v", registerOut)
 	}
 
-	callTool := func(tool string, args any) CallResponse {
+	callTool := func(tool string, args any) json.RawMessage {
 		t.Helper()
 		argBytes, _ := json.Marshal(args)
-		body, _ := json.Marshal(CallRequest{Tool: tool, ProjectID: projectID, Arguments: argBytes})
-		req, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+registerOut.Token)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("%s POST: %v", tool, err)
-		}
-		defer resp.Body.Close()
-		var callResp CallResponse
-		if err := json.NewDecoder(resp.Body).Decode(&callResp); err != nil {
-			t.Fatalf("%s decode: %v", tool, err)
-		}
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("%s status: got %d, body %+v", tool, resp.StatusCode, callResp)
-		}
-		return callResp
+		return mustToolResult(t, srv, registerOut.Token, tool, projectID, argBytes)
 	}
 
-	createResp := callTool("wormhole.task.create", CreateTaskInput{Title: "Ship it", Description: "e2e task", Priority: 1})
-	createRaw, _ := json.Marshal(createResp.Result)
+	createRaw := callTool("wormhole.task.create", CreateTaskInput{Title: "Ship it", Description: "e2e task", Priority: 1})
 	var createOut CreateTaskOutput
 	json.Unmarshal(createRaw, &createOut)
 	if createOut.TaskID == "" || createOut.Status != "todo" {
 		t.Fatalf("create output: %+v", createOut)
 	}
 
-	assignResp := callTool("wormhole.task.assign", AssignTaskInput{TaskID: createOut.TaskID, OwnerAgentID: registerOut.AgentID})
-	assignRaw, _ := json.Marshal(assignResp.Result)
+	assignRaw := callTool("wormhole.task.assign", AssignTaskInput{TaskID: createOut.TaskID, OwnerAgentID: registerOut.AgentID})
 	var assignOut AssignTaskOutput
 	json.Unmarshal(assignRaw, &assignOut)
 	if assignOut.OwnerAgentID != registerOut.AgentID {
@@ -258,16 +229,14 @@ func TestE2E_CreateAssignUpdateStatus(t *testing.T) {
 	}
 
 	callTool("wormhole.task.update_status", UpdateTaskStatusInput{TaskID: createOut.TaskID, NewStatus: "wip", ChannelID: channel.ID})
-	updateResp := callTool("wormhole.task.update_status", UpdateTaskStatusInput{TaskID: createOut.TaskID, NewStatus: "done", ChannelID: channel.ID})
-	updateRaw, _ := json.Marshal(updateResp.Result)
+	updateRaw := callTool("wormhole.task.update_status", UpdateTaskStatusInput{TaskID: createOut.TaskID, NewStatus: "done", ChannelID: channel.ID})
 	var updateOut UpdateTaskStatusOutput
 	json.Unmarshal(updateRaw, &updateOut)
 	if updateOut.Status != "done" {
 		t.Fatalf("update output: %+v", updateOut)
 	}
 
-	listResp := callTool("wormhole.task.list", ListTasksInput{})
-	listRaw, _ := json.Marshal(listResp.Result)
+	listRaw := callTool("wormhole.task.list", ListTasksInput{})
 	var listOut ListTasksOutput
 	json.Unmarshal(listRaw, &listOut)
 	found := false

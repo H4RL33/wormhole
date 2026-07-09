@@ -1,9 +1,7 @@
 package mcp
 
 import (
-	"bytes"
 	"encoding/json"
-	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -32,38 +30,14 @@ func TestM3_KBWriteSearchComplianceLoop(t *testing.T) {
 	registry := NewRegistry()
 	registry.Register(WriteArticleTool(store))
 	registry.Register(SearchArticlesTool(store))
-	handler := NewCallHandler(registry, identityStore)
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(NewMCPHandler(registry, identityStore))
 	defer srv.Close()
 
-	callTool := func(tool string, args any) (*http.Response, CallResponse) {
-		t.Helper()
-		argBytes, _ := json.Marshal(args)
-		body, _ := json.Marshal(CallRequest{Tool: tool, ProjectID: projectID, Arguments: argBytes})
-		req, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+token)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("%s POST: %v", tool, err)
-		}
-		defer resp.Body.Close()
-		var callResp CallResponse
-		if decodeErr := json.NewDecoder(resp.Body).Decode(&callResp); decodeErr != nil {
-			t.Fatalf("%s decode: %v", tool, decodeErr)
-		}
-		return resp, callResp
-	}
-
 	// 1. Write an article.
-	writeResp, writeCall := callTool("wormhole.kb.write", WriteArticleInput{
+	writeRaw := mustToolResult(t, srv, token, "wormhole.kb.write", projectID, mustMarshal(t, WriteArticleInput{
 		Title: "deploy runbook",
 		Body:  "run deploy.sh then verify the health endpoint returns 200",
-	})
-	if writeResp.StatusCode != http.StatusOK {
-		t.Fatalf("write status: got %d, want 200, body %+v", writeResp.StatusCode, writeCall)
-	}
-	writeRaw, _ := json.Marshal(writeCall.Result)
+	}))
 	var writeOut WriteArticleOutput
 	json.Unmarshal(writeRaw, &writeOut)
 	if writeOut.ArticleID == "" {
@@ -71,11 +45,7 @@ func TestM3_KBWriteSearchComplianceLoop(t *testing.T) {
 	}
 
 	// 2. Search retrieves it.
-	searchResp, searchCall := callTool("wormhole.kb.search", SearchArticlesInput{Query: "deploy runbook"})
-	if searchResp.StatusCode != http.StatusOK {
-		t.Fatalf("search status: got %d, want 200, body %+v", searchResp.StatusCode, searchCall)
-	}
-	searchRaw, _ := json.Marshal(searchCall.Result)
+	searchRaw := mustToolResult(t, srv, token, "wormhole.kb.search", projectID, mustMarshal(t, SearchArticlesInput{Query: "deploy runbook"}))
 	var searchOut SearchArticlesOutput
 	json.Unmarshal(searchRaw, &searchOut)
 	found := false
@@ -91,19 +61,29 @@ func TestM3_KBWriteSearchComplianceLoop(t *testing.T) {
 
 	// 3. Dedup check fires on a semantic duplicate (same body, stub
 	// embedder is deterministic so identical body -> identical embedding
-	// -> similarity 1.0 >= threshold).
-	dedupResp, dedupCall := callTool("wormhole.kb.write", WriteArticleInput{
+	// -> similarity 1.0 >= threshold). Under the JSON-RPC protocol this is
+	// a tool-level failure: rpcResp.Error == nil, but the decoded
+	// toolCallResult.IsError == true, and Content[0].Text carries the same
+	// JSON error string kb.ErrDedupViolation.Error() always produced.
+	_, dedupRPCResp := toolsCallRPC(t, srv, token, "wormhole.kb.write", projectID, mustMarshal(t, WriteArticleInput{
 		Title: "deploy runbook (copy)",
 		Body:  "run deploy.sh then verify the health endpoint returns 200",
-	})
-	if dedupResp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("dedup write status: got %d, want 400, body %+v", dedupResp.StatusCode, dedupCall)
+	}))
+	if dedupRPCResp.Error != nil {
+		t.Fatalf("dedup write: unexpected RPC error: %+v", dedupRPCResp.Error)
+	}
+	var dedupResult toolCallResult
+	if err := json.Unmarshal(mustMarshal(t, dedupRPCResp.Result), &dedupResult); err != nil {
+		t.Fatalf("dedup write: decode result wrapper: %v", err)
+	}
+	if !dedupResult.IsError {
+		t.Fatalf("dedup write: expected IsError true, got false")
 	}
 	var dedupErr struct {
 		Code string `json:"code"`
 	}
-	if err := json.Unmarshal([]byte(dedupCall.Error), &dedupErr); err != nil {
-		t.Fatalf("dedup error not valid JSON: %q (%v)", dedupCall.Error, err)
+	if err := json.Unmarshal([]byte(dedupResult.Content[0].Text), &dedupErr); err != nil {
+		t.Fatalf("dedup error not valid JSON: %q (%v)", dedupResult.Content[0].Text, err)
 	}
 	if dedupErr.Code != "DEDUP_VIOLATION" {
 		t.Fatalf("dedup error code: got %q, want DEDUP_VIOLATION", dedupErr.Code)
@@ -112,18 +92,25 @@ func TestM3_KBWriteSearchComplianceLoop(t *testing.T) {
 	// 4. Conciseness check fires on an over-length body (store configured
 	// with maxBodyLength=120 above; this body is 130 runes).
 	longBody := strings.Repeat("x", 130)
-	concisenessResp, concisenessCall := callTool("wormhole.kb.write", WriteArticleInput{
+	_, concisenessRPCResp := toolsCallRPC(t, srv, token, "wormhole.kb.write", projectID, mustMarshal(t, WriteArticleInput{
 		Title: "too long",
 		Body:  longBody,
-	})
-	if concisenessResp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("conciseness write status: got %d, want 400, body %+v", concisenessResp.StatusCode, concisenessCall)
+	}))
+	if concisenessRPCResp.Error != nil {
+		t.Fatalf("conciseness write: unexpected RPC error: %+v", concisenessRPCResp.Error)
+	}
+	var concisenessResult toolCallResult
+	if err := json.Unmarshal(mustMarshal(t, concisenessRPCResp.Result), &concisenessResult); err != nil {
+		t.Fatalf("conciseness write: decode result wrapper: %v", err)
+	}
+	if !concisenessResult.IsError {
+		t.Fatalf("conciseness write: expected IsError true, got false")
 	}
 	var concisenessErr struct {
 		Code string `json:"code"`
 	}
-	if err := json.Unmarshal([]byte(concisenessCall.Error), &concisenessErr); err != nil {
-		t.Fatalf("conciseness error not valid JSON: %q (%v)", concisenessCall.Error, err)
+	if err := json.Unmarshal([]byte(concisenessResult.Content[0].Text), &concisenessErr); err != nil {
+		t.Fatalf("conciseness error not valid JSON: %q (%v)", concisenessResult.Content[0].Text, err)
 	}
 	if concisenessErr.Code != "CONCISENESS_VIOLATION" {
 		t.Fatalf("conciseness error code: got %q, want CONCISENESS_VIOLATION", concisenessErr.Code)

@@ -1,11 +1,9 @@
 package mcp
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -186,8 +184,7 @@ func TestMcp_WriteArticle_DedupViolation(t *testing.T) {
 
 	registry := NewRegistry()
 	registry.Register(WriteArticleTool(store))
-	handler := NewCallHandler(registry, identityStore)
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(NewMCPHandler(registry, identityStore))
 	defer srv.Close()
 
 	// 1. Write the first article.
@@ -195,55 +192,23 @@ func TestMcp_WriteArticle_DedupViolation(t *testing.T) {
 		Title: "first article",
 		Body:  "unique article body content for dedup test",
 	})
-	reqBody1, _ := json.Marshal(CallRequest{
-		Tool:      "wormhole.kb.write",
-		ProjectID: projectID,
-		Arguments: writeArgs1,
-	})
-
-	req1, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBody1))
-	req1.Header.Set("Content-Type", "application/json")
-	req1.Header.Set("Authorization", "Bearer "+token)
-	resp1, err := http.DefaultClient.Do(req1)
-	if err != nil {
-		t.Fatalf("first write POST: %v", err)
-	}
-	defer resp1.Body.Close()
-	if resp1.StatusCode != http.StatusOK {
-		t.Fatalf("first write status: got %d, want 200", resp1.StatusCode)
-	}
+	mustToolResult(t, srv, token, "wormhole.kb.write", projectID, writeArgs1)
 
 	// 2. Write the duplicate article.
 	writeArgs2, _ := json.Marshal(WriteArticleInput{
 		Title: "second article",
 		Body:  "unique article body content for dedup test",
 	})
-	reqBody2, _ := json.Marshal(CallRequest{
-		Tool:      "wormhole.kb.write",
-		ProjectID: projectID,
-		Arguments: writeArgs2,
-	})
-
-	req2, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBody2))
-	req2.Header.Set("Content-Type", "application/json")
-	req2.Header.Set("Authorization", "Bearer "+token)
-	resp2, err := http.DefaultClient.Do(req2)
-	if err != nil {
-		t.Fatalf("second write POST: %v", err)
+	_, rpcResp := toolsCallRPC(t, srv, token, "wormhole.kb.write", projectID, writeArgs2)
+	if rpcResp.Error != nil {
+		t.Fatalf("unexpected RPC error: %+v", rpcResp.Error)
 	}
-	defer resp2.Body.Close()
-
-	if resp2.StatusCode != http.StatusBadRequest {
-		t.Fatalf("second write status: got %d, want 400 (BadRequest)", resp2.StatusCode)
+	var result toolCallResult
+	if err := json.Unmarshal(mustMarshal(t, rpcResp.Result), &result); err != nil {
+		t.Fatalf("decode result wrapper: %v", err)
 	}
-
-	var callResp CallResponse
-	if err := json.NewDecoder(resp2.Body).Decode(&callResp); err != nil {
-		t.Fatalf("decode call response: %v", err)
-	}
-
-	if callResp.Error == "" {
-		t.Fatal("expected error field in CallResponse, got empty string")
+	if !result.IsError {
+		t.Fatal("expected tool result IsError true, got false")
 	}
 
 	// Verify the error is valid raw JSON (not wrapped/prefixed)
@@ -257,8 +222,8 @@ func TestMcp_WriteArticle_DedupViolation(t *testing.T) {
 		} `json:"closest_article"`
 		Suggestion string `json:"suggestion"`
 	}
-	if err := json.Unmarshal([]byte(callResp.Error), &parsedErr); err != nil {
-		t.Fatalf("expected CallResponse.Error to be valid raw JSON, got: %q (unmarshal error: %v)", callResp.Error, err)
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &parsedErr); err != nil {
+		t.Fatalf("expected result.Content[0].Text to be valid raw JSON, got: %q (unmarshal error: %v)", result.Content[0].Text, err)
 	}
 
 	if parsedErr.Code != "DEDUP_VIOLATION" {
@@ -278,40 +243,23 @@ func TestMcp_WriteArticle_ConcisenessViolation(t *testing.T) {
 
 	registry := NewRegistry()
 	registry.Register(WriteArticleTool(store))
-	handler := NewCallHandler(registry, identityStore)
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(NewMCPHandler(registry, identityStore))
 	defer srv.Close()
 
 	writeArgs, _ := json.Marshal(WriteArticleInput{
 		Title: "too long article",
 		Body:  "123456789012345",
 	})
-	reqBody, _ := json.Marshal(CallRequest{
-		Tool:      "wormhole.kb.write",
-		ProjectID: projectID,
-		Arguments: writeArgs,
-	})
-
-	req, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("write POST: %v", err)
+	_, rpcResp := toolsCallRPC(t, srv, token, "wormhole.kb.write", projectID, writeArgs)
+	if rpcResp.Error != nil {
+		t.Fatalf("unexpected RPC error: %+v", rpcResp.Error)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("write status: got %d, want 400 (BadRequest)", resp.StatusCode)
+	var result toolCallResult
+	if err := json.Unmarshal(mustMarshal(t, rpcResp.Result), &result); err != nil {
+		t.Fatalf("decode result wrapper: %v", err)
 	}
-
-	var callResp CallResponse
-	if err := json.NewDecoder(resp.Body).Decode(&callResp); err != nil {
-		t.Fatalf("decode call response: %v", err)
-	}
-
-	if callResp.Error == "" {
-		t.Fatal("expected error field in CallResponse, got empty string")
+	if !result.IsError {
+		t.Fatal("expected tool result IsError true, got false")
 	}
 
 	var parsedErr struct {
@@ -323,8 +271,8 @@ func TestMcp_WriteArticle_ConcisenessViolation(t *testing.T) {
 		} `json:"details"`
 		Suggestion string `json:"suggestion"`
 	}
-	if err := json.Unmarshal([]byte(callResp.Error), &parsedErr); err != nil {
-		t.Fatalf("expected CallResponse.Error to be valid raw JSON, got: %q (unmarshal error: %v)", callResp.Error, err)
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &parsedErr); err != nil {
+		t.Fatalf("expected result.Content[0].Text to be valid raw JSON, got: %q (unmarshal error: %v)", result.Content[0].Text, err)
 	}
 
 	if parsedErr.Code != "CONCISENESS_VIOLATION" {
@@ -347,8 +295,7 @@ func TestMcp_WriteArticle_ConcisenessBypass(t *testing.T) {
 
 	registry := NewRegistry()
 	registry.Register(WriteArticleTool(store))
-	handler := NewCallHandler(registry, identityStore)
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(NewMCPHandler(registry, identityStore))
 	defer srv.Close()
 
 	writeArgs, _ := json.Marshal(WriteArticleInput{
@@ -356,24 +303,7 @@ func TestMcp_WriteArticle_ConcisenessBypass(t *testing.T) {
 		Body:  "123456789012345",
 		Force: true,
 	})
-	reqBody, _ := json.Marshal(CallRequest{
-		Tool:      "wormhole.kb.write",
-		ProjectID: projectID,
-		Arguments: writeArgs,
-	})
-
-	req, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("write POST: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("write status: got %d, want 200 (OK)", resp.StatusCode)
-	}
+	mustToolResult(t, srv, token, "wormhole.kb.write", projectID, writeArgs)
 }
 
 func TestMcp_WriteArticle_ConcisenessUTF8(t *testing.T) {
@@ -385,61 +315,33 @@ func TestMcp_WriteArticle_ConcisenessUTF8(t *testing.T) {
 
 	registry := NewRegistry()
 	registry.Register(WriteArticleTool(store))
-	handler := NewCallHandler(registry, identityStore)
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(NewMCPHandler(registry, identityStore))
 	defer srv.Close()
 
 	// "🚀🤖🌟🔥💫" has 5 characters (emojis) but 20 bytes.
-	// Since maxBodyLength is 5, it should succeed (status 200).
+	// Since maxBodyLength is 5, it should succeed.
 	writeArgsValid, _ := json.Marshal(WriteArticleInput{
 		Title: "valid utf8",
 		Body:  "🚀🤖🌟🔥💫",
 	})
-	reqBodyValid, _ := json.Marshal(CallRequest{
-		Tool:      "wormhole.kb.write",
-		ProjectID: projectID,
-		Arguments: writeArgsValid,
-	})
-
-	reqValid, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBodyValid))
-	reqValid.Header.Set("Content-Type", "application/json")
-	reqValid.Header.Set("Authorization", "Bearer "+token)
-	respValid, err := http.DefaultClient.Do(reqValid)
-	if err != nil {
-		t.Fatalf("write valid POST: %v", err)
-	}
-	defer respValid.Body.Close()
-	if respValid.StatusCode != http.StatusOK {
-		t.Fatalf("write valid status: got %d, want 200", respValid.StatusCode)
-	}
+	mustToolResult(t, srv, token, "wormhole.kb.write", projectID, writeArgsValid)
 
 	// "🚀🤖🌟🔥💫✨" has 6 characters (emojis) but 24 bytes.
-	// Since maxBodyLength is 5, it should violate the ceiling (status 400).
+	// Since maxBodyLength is 5, it should violate the ceiling.
 	writeArgsInvalid, _ := json.Marshal(WriteArticleInput{
 		Title: "invalid utf8",
 		Body:  "🚀🤖🌟🔥💫✨",
 	})
-	reqBodyInvalid, _ := json.Marshal(CallRequest{
-		Tool:      "wormhole.kb.write",
-		ProjectID: projectID,
-		Arguments: writeArgsInvalid,
-	})
-
-	reqInvalid, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBodyInvalid))
-	reqInvalid.Header.Set("Content-Type", "application/json")
-	reqInvalid.Header.Set("Authorization", "Bearer "+token)
-	respInvalid, err := http.DefaultClient.Do(reqInvalid)
-	if err != nil {
-		t.Fatalf("write invalid POST: %v", err)
+	_, rpcResp := toolsCallRPC(t, srv, token, "wormhole.kb.write", projectID, writeArgsInvalid)
+	if rpcResp.Error != nil {
+		t.Fatalf("unexpected RPC error: %+v", rpcResp.Error)
 	}
-	defer respInvalid.Body.Close()
-	if respInvalid.StatusCode != http.StatusBadRequest {
-		t.Fatalf("write invalid status: got %d, want 400", respInvalid.StatusCode)
+	var result toolCallResult
+	if err := json.Unmarshal(mustMarshal(t, rpcResp.Result), &result); err != nil {
+		t.Fatalf("decode result wrapper: %v", err)
 	}
-
-	var callResp CallResponse
-	if err := json.NewDecoder(respInvalid.Body).Decode(&callResp); err != nil {
-		t.Fatalf("decode call response: %v", err)
+	if !result.IsError {
+		t.Fatal("expected tool result IsError true, got false")
 	}
 
 	var parsedErr struct {
@@ -451,8 +353,8 @@ func TestMcp_WriteArticle_ConcisenessUTF8(t *testing.T) {
 		} `json:"details"`
 		Suggestion string `json:"suggestion"`
 	}
-	if err := json.Unmarshal([]byte(callResp.Error), &parsedErr); err != nil {
-		t.Fatalf("expected CallResponse.Error to be valid raw JSON, got: %q", callResp.Error)
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &parsedErr); err != nil {
+		t.Fatalf("expected result.Content[0].Text to be valid raw JSON, got: %q", result.Content[0].Text)
 	}
 
 	if parsedErr.Code != "CONCISENESS_VIOLATION" {
@@ -474,8 +376,7 @@ func TestMcp_WriteArticle_RequiredLinksViolation(t *testing.T) {
 
 	registry := NewRegistry()
 	registry.Register(WriteArticleTool(store))
-	handler := NewCallHandler(registry, identityStore)
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(NewMCPHandler(registry, identityStore))
 	defer srv.Close()
 
 	// 1. Create a background article so we have a suggestion candidate.
@@ -483,35 +384,9 @@ func TestMcp_WriteArticle_RequiredLinksViolation(t *testing.T) {
 		Title: "Existing Helpful Article",
 		Body:  "Relevant content about something related to our database architecture",
 	})
-	reqBody1, _ := json.Marshal(CallRequest{
-		Tool:      "wormhole.kb.write",
-		ProjectID: projectID,
-		Arguments: writeArgs1,
-	})
-	req1, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBody1))
-	req1.Header.Set("Content-Type", "application/json")
-	req1.Header.Set("Authorization", "Bearer "+token)
-	resp1, err := http.DefaultClient.Do(req1)
-	if err != nil {
-		t.Fatalf("first write POST: %v", err)
-	}
-	defer resp1.Body.Close()
-	if resp1.StatusCode != http.StatusOK {
-		t.Fatalf("first write status: got %d, want 200", resp1.StatusCode)
-	}
-
-	// Decode the first write response to get the ID.
-	var write1Out CallResponse
-	if err := json.NewDecoder(resp1.Body).Decode(&write1Out); err != nil {
-		t.Fatalf("decode first write response: %v", err)
-	}
-	if write1Out.Error != "" {
-		t.Fatalf("expected no error in first write, got: %q", write1Out.Error)
-	}
-
+	write1Result := mustToolResult(t, srv, token, "wormhole.kb.write", projectID, writeArgs1)
 	var write1OutVal WriteArticleOutput
-	resultBytes, _ := json.Marshal(write1Out.Result)
-	if err := json.Unmarshal(resultBytes, &write1OutVal); err != nil {
+	if err := json.Unmarshal(write1Result, &write1OutVal); err != nil {
 		t.Fatalf("unmarshal first write output: %v", err)
 	}
 	existingID := write1OutVal.ArticleID
@@ -524,32 +399,16 @@ func TestMcp_WriteArticle_RequiredLinksViolation(t *testing.T) {
 		Frontmatter: fm,
 		Links:       nil,
 	})
-	reqBody2, _ := json.Marshal(CallRequest{
-		Tool:      "wormhole.kb.write",
-		ProjectID: projectID,
-		Arguments: writeArgs2,
-	})
-
-	req2, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBody2))
-	req2.Header.Set("Content-Type", "application/json")
-	req2.Header.Set("Authorization", "Bearer "+token)
-	resp2, err := http.DefaultClient.Do(req2)
-	if err != nil {
-		t.Fatalf("second write POST: %v", err)
+	_, rpcResp := toolsCallRPC(t, srv, token, "wormhole.kb.write", projectID, writeArgs2)
+	if rpcResp.Error != nil {
+		t.Fatalf("unexpected RPC error: %+v", rpcResp.Error)
 	}
-	defer resp2.Body.Close()
-
-	if resp2.StatusCode != http.StatusBadRequest {
-		t.Fatalf("second write status: got %d, want 400 (BadRequest)", resp2.StatusCode)
+	var result toolCallResult
+	if err := json.Unmarshal(mustMarshal(t, rpcResp.Result), &result); err != nil {
+		t.Fatalf("decode result wrapper: %v", err)
 	}
-
-	var callResp CallResponse
-	if err := json.NewDecoder(resp2.Body).Decode(&callResp); err != nil {
-		t.Fatalf("decode call response: %v", err)
-	}
-
-	if callResp.Error == "" {
-		t.Fatal("expected error field in CallResponse, got empty string")
+	if !result.IsError {
+		t.Fatal("expected tool result IsError true, got false")
 	}
 
 	// Verify the error is valid raw JSON (not wrapped/prefixed)
@@ -567,8 +426,8 @@ func TestMcp_WriteArticle_RequiredLinksViolation(t *testing.T) {
 		} `json:"details"`
 		Suggestion string `json:"suggestion"`
 	}
-	if err := json.Unmarshal([]byte(callResp.Error), &parsedErr); err != nil {
-		t.Fatalf("expected CallResponse.Error to be valid raw JSON, got: %q (unmarshal error: %v)", callResp.Error, err)
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &parsedErr); err != nil {
+		t.Fatalf("expected result.Content[0].Text to be valid raw JSON, got: %q (unmarshal error: %v)", result.Content[0].Text, err)
 	}
 
 	if parsedErr.Code != "REQUIRED_LINKS_VIOLATION" {
@@ -603,8 +462,7 @@ func TestMcp_GetArticle_HappyPath(t *testing.T) {
 	registry := NewRegistry()
 	registry.Register(WriteArticleTool(store))
 	registry.Register(GetArticleTool(store))
-	handler := NewCallHandler(registry, identityStore)
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(NewMCPHandler(registry, identityStore))
 	defer srv.Close()
 
 	// 1. Write an article via the write tool.
@@ -612,64 +470,17 @@ func TestMcp_GetArticle_HappyPath(t *testing.T) {
 		Title: "retrievable article",
 		Body:  "body content of the article",
 	})
-	reqBody1, _ := json.Marshal(CallRequest{
-		Tool:      "wormhole.kb.write",
-		ProjectID: projectID,
-		Arguments: writeArgs,
-	})
-	req1, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBody1))
-	req1.Header.Set("Content-Type", "application/json")
-	req1.Header.Set("Authorization", "Bearer "+token)
-	resp1, err := http.DefaultClient.Do(req1)
-	if err != nil {
-		t.Fatalf("write POST: %v", err)
-	}
-	defer resp1.Body.Close()
-	if resp1.StatusCode != http.StatusOK {
-		t.Fatalf("write status: got %d, want 200", resp1.StatusCode)
-	}
-
-	var writeResp CallResponse
-	if err := json.NewDecoder(resp1.Body).Decode(&writeResp); err != nil {
-		t.Fatalf("decode write response: %v", err)
-	}
-	resultBytes, _ := json.Marshal(writeResp.Result)
+	writeResult := mustToolResult(t, srv, token, "wormhole.kb.write", projectID, writeArgs)
 	var writeOut WriteArticleOutput
-	if err := json.Unmarshal(resultBytes, &writeOut); err != nil {
+	if err := json.Unmarshal(writeResult, &writeOut); err != nil {
 		t.Fatalf("unmarshal write output: %v", err)
 	}
 
 	// 2. Retrieve the article via wormhole.kb.get.
 	getArgs, _ := json.Marshal(GetArticleInput{ArticleID: writeOut.ArticleID})
-	reqBody2, _ := json.Marshal(CallRequest{
-		Tool:      "wormhole.kb.get",
-		ProjectID: projectID,
-		Arguments: getArgs,
-	})
-	req2, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBody2))
-	req2.Header.Set("Content-Type", "application/json")
-	req2.Header.Set("Authorization", "Bearer "+token)
-	resp2, err := http.DefaultClient.Do(req2)
-	if err != nil {
-		t.Fatalf("get POST: %v", err)
-	}
-	defer resp2.Body.Close()
-
-	if resp2.StatusCode != http.StatusOK {
-		t.Fatalf("get status: got %d, want 200", resp2.StatusCode)
-	}
-
-	var callResp CallResponse
-	if err := json.NewDecoder(resp2.Body).Decode(&callResp); err != nil {
-		t.Fatalf("decode get response: %v", err)
-	}
-	if callResp.Error != "" {
-		t.Fatalf("unexpected error in get response: %q", callResp.Error)
-	}
-
-	resultBytes2, _ := json.Marshal(callResp.Result)
+	getResult := mustToolResult(t, srv, token, "wormhole.kb.get", projectID, getArgs)
 	var getOut GetArticleOutput
-	if err := json.Unmarshal(resultBytes2, &getOut); err != nil {
+	if err := json.Unmarshal(getResult, &getOut); err != nil {
 		t.Fatalf("unmarshal get output: %v", err)
 	}
 	if getOut.ArticleID != writeOut.ArticleID {
@@ -704,8 +515,7 @@ func TestMcp_GetArticleLinks_HappyPath(t *testing.T) {
 	registry := NewRegistry()
 	registry.Register(WriteArticleTool(store))
 	registry.Register(GetArticleLinksTool(store))
-	handler := NewCallHandler(registry, identityStore)
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(NewMCPHandler(registry, identityStore))
 	defer srv.Close()
 
 	// 1. Write the target article (B).
@@ -713,29 +523,9 @@ func TestMcp_GetArticleLinks_HappyPath(t *testing.T) {
 		Title: "target article B",
 		Body:  "body of target article B",
 	})
-	reqBodyB, _ := json.Marshal(CallRequest{
-		Tool:      "wormhole.kb.write",
-		ProjectID: projectID,
-		Arguments: writeArgsB,
-	})
-	reqB, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBodyB))
-	reqB.Header.Set("Content-Type", "application/json")
-	reqB.Header.Set("Authorization", "Bearer "+token)
-	respB, err := http.DefaultClient.Do(reqB)
-	if err != nil {
-		t.Fatalf("write B POST: %v", err)
-	}
-	defer respB.Body.Close()
-	if respB.StatusCode != http.StatusOK {
-		t.Fatalf("write B status: got %d, want 200", respB.StatusCode)
-	}
-	var writeBResp CallResponse
-	if err := json.NewDecoder(respB.Body).Decode(&writeBResp); err != nil {
-		t.Fatalf("decode write B response: %v", err)
-	}
-	resultBBytes, _ := json.Marshal(writeBResp.Result)
+	writeBResult := mustToolResult(t, srv, token, "wormhole.kb.write", projectID, writeArgsB)
 	var writeBOut WriteArticleOutput
-	if err := json.Unmarshal(resultBBytes, &writeBOut); err != nil {
+	if err := json.Unmarshal(writeBResult, &writeBOut); err != nil {
 		t.Fatalf("unmarshal write B output: %v", err)
 	}
 
@@ -745,62 +535,17 @@ func TestMcp_GetArticleLinks_HappyPath(t *testing.T) {
 		Body:  "body of source article A",
 		Links: []string{writeBOut.ArticleID},
 	})
-	reqBodyA, _ := json.Marshal(CallRequest{
-		Tool:      "wormhole.kb.write",
-		ProjectID: projectID,
-		Arguments: writeArgsA,
-	})
-	reqA, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBodyA))
-	reqA.Header.Set("Content-Type", "application/json")
-	reqA.Header.Set("Authorization", "Bearer "+token)
-	respA, err := http.DefaultClient.Do(reqA)
-	if err != nil {
-		t.Fatalf("write A POST: %v", err)
-	}
-	defer respA.Body.Close()
-	if respA.StatusCode != http.StatusOK {
-		t.Fatalf("write A status: got %d, want 200", respA.StatusCode)
-	}
-	var writeAResp CallResponse
-	if err := json.NewDecoder(respA.Body).Decode(&writeAResp); err != nil {
-		t.Fatalf("decode write A response: %v", err)
-	}
-	resultABytes, _ := json.Marshal(writeAResp.Result)
+	writeAResult := mustToolResult(t, srv, token, "wormhole.kb.write", projectID, writeArgsA)
 	var writeAOut WriteArticleOutput
-	if err := json.Unmarshal(resultABytes, &writeAOut); err != nil {
+	if err := json.Unmarshal(writeAResult, &writeAOut); err != nil {
 		t.Fatalf("unmarshal write A output: %v", err)
 	}
 
 	// 3. Call wormhole.kb.get_links on article A.
 	getLinksArgs, _ := json.Marshal(GetArticleLinksInput{ArticleID: writeAOut.ArticleID})
-	reqBodyLinks, _ := json.Marshal(CallRequest{
-		Tool:      "wormhole.kb.get_links",
-		ProjectID: projectID,
-		Arguments: getLinksArgs,
-	})
-	reqLinks, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(reqBodyLinks))
-	reqLinks.Header.Set("Content-Type", "application/json")
-	reqLinks.Header.Set("Authorization", "Bearer "+token)
-	respLinks, err := http.DefaultClient.Do(reqLinks)
-	if err != nil {
-		t.Fatalf("get_links POST: %v", err)
-	}
-	defer respLinks.Body.Close()
-	if respLinks.StatusCode != http.StatusOK {
-		t.Fatalf("get_links status: got %d, want 200", respLinks.StatusCode)
-	}
-
-	var callResp CallResponse
-	if err := json.NewDecoder(respLinks.Body).Decode(&callResp); err != nil {
-		t.Fatalf("decode get_links response: %v", err)
-	}
-	if callResp.Error != "" {
-		t.Fatalf("unexpected error: %q", callResp.Error)
-	}
-
-	resultBytes, _ := json.Marshal(callResp.Result)
+	linksResult := mustToolResult(t, srv, token, "wormhole.kb.get_links", projectID, getLinksArgs)
 	var linksOut GetArticleLinksOutput
-	if err := json.Unmarshal(resultBytes, &linksOut); err != nil {
+	if err := json.Unmarshal(linksResult, &linksOut); err != nil {
 		t.Fatalf("unmarshal get_links output: %v", err)
 	}
 	if linksOut.ArticleID != writeAOut.ArticleID {
