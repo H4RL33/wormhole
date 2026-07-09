@@ -57,7 +57,7 @@ func main() {
 	log.Printf("wormhole-server listening on %s", cfg.ListenAddr)
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           mux,
+		Handler:           loggingMiddleware(mux),
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
