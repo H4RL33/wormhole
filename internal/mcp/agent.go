@@ -70,9 +70,9 @@ type RegisterAgentOutput struct {
 // §8.5 joining flow, step 1).
 func RegisterAgentTool(store *identity.Store, eventsStore *events.Store) Tool {
 	return Tool{
-		Name:         "wormhole.agent.register",
-		Description:  "Registers a new agent identity, issues its passport and a project-scoped bearer token.",
-		RequiresAuth: false,
+		Name:             "wormhole.agent.register",
+		Description:      "Registers a new agent identity, issues its passport and a project-scoped bearer token.",
+		RequiresAuth:     false,
 		ArgumentsExample: RegisterAgentInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in RegisterAgentInput
@@ -117,9 +117,9 @@ type WhoAmIOutput struct {
 // middleware (architecture.md M4) is the entire answer.
 func WhoAmITool() Tool {
 	return Tool{
-		Name:         "wormhole.agent.whoami",
-		Description:  "Returns the identity and authorization scope resolved from the caller's bearer token.",
-		RequiresAuth: true,
+		Name:             "wormhole.agent.whoami",
+		Description:      "Returns the identity and authorization scope resolved from the caller's bearer token.",
+		RequiresAuth:     true,
 		ArgumentsExample: nil,
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			return WhoAmIOutput{

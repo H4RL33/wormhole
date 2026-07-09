@@ -152,7 +152,7 @@ func TestMCP_MultiTenantIsolation(t *testing.T) {
 		t.Fatalf("failed to create task in project B: %s", body)
 	}
 	var createdTask CreateTaskOutput
-	
+
 	type callResponse struct {
 		Result json.RawMessage `json:"result"`
 		Error  string          `json:"error"`
@@ -318,7 +318,7 @@ func TestMCP_LoadSmokeTest(t *testing.T) {
 
 			owner := fmt.Sprintf("agent-owner-%d", agentIndex)
 			model := "gpt-4"
-			
+
 			// 1. Register agent
 			status, body, err := makeMCPCall(t, srv.URL, "wormhole.agent.register", projectID, "", RegisterAgentInput{
 				Permissions:  []string{"event.publish", "task.create", "task.list", "kb.write", "kb.search"},

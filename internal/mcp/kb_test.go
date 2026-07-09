@@ -594,8 +594,6 @@ func TestMcp_WriteArticle_RequiredLinksViolation(t *testing.T) {
 	}
 }
 
-
-
 func TestMcp_GetArticle_HappyPath(t *testing.T) {
 	store := testKBStore(t)
 	identityStore := testIdentityStore(t)

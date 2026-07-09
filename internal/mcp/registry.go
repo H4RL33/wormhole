@@ -22,9 +22,9 @@ type Handler func(ctx context.Context, scope *identity.AuthenticatedScope, proje
 // Tool is an MCP tool descriptor: name, docs, whether the auth middleware
 // must resolve a scope before dispatch, and the handler itself.
 type Tool struct {
-	Name         string  `json:"name"`
-	Description  string  `json:"description"`
-	RequiresAuth bool    `json:"requires_auth"`
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	RequiresAuth bool   `json:"requires_auth"`
 	// ArgumentsExample is a zero-value instance of the tool's argument
 	// struct (e.g. CreateTaskInput{}), used by tools/list's schema
 	// generator to reflect field names/types/json tags without any

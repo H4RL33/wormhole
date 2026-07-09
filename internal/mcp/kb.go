@@ -32,9 +32,9 @@ type WriteArticleOutput struct {
 // recorded as the article's author.
 func WriteArticleTool(store *kb.Store) Tool {
 	return Tool{
-		Name:         "wormhole.kb.write",
-		Description:  "Writes an atomic knowledge base article, optionally linked to existing articles. Validates semantic deduplication unless bypassed with force=true.",
-		RequiresAuth: true,
+		Name:             "wormhole.kb.write",
+		Description:      "Writes an atomic knowledge base article, optionally linked to existing articles. Validates semantic deduplication unless bypassed with force=true.",
+		RequiresAuth:     true,
 		ArgumentsExample: WriteArticleInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in WriteArticleInput
@@ -98,9 +98,9 @@ type SearchArticlesOutput struct {
 // SearchArticlesTool wires wormhole.kb.search.
 func SearchArticlesTool(store *kb.Store) Tool {
 	return Tool{
-		Name:         "wormhole.kb.search",
-		Description:  "Searches the knowledge base using semantic search, ranked by similarity to the query.",
-		RequiresAuth: true,
+		Name:             "wormhole.kb.search",
+		Description:      "Searches the knowledge base using semantic search, ranked by similarity to the query.",
+		RequiresAuth:     true,
 		ArgumentsExample: SearchArticlesInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in SearchArticlesInput
@@ -156,9 +156,9 @@ type GetArticleOutput struct {
 // within the authenticated agent's project scope.
 func GetArticleTool(store *kb.Store) Tool {
 	return Tool{
-		Name:         "wormhole.kb.get",
-		Description:  "Retrieves a single knowledge base article by ID within the authenticated agent's project scope.",
-		RequiresAuth: true,
+		Name:             "wormhole.kb.get",
+		Description:      "Retrieves a single knowledge base article by ID within the authenticated agent's project scope.",
+		RequiresAuth:     true,
 		ArgumentsExample: GetArticleInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in GetArticleInput
@@ -198,9 +198,9 @@ type GetArticleLinksOutput struct {
 // linked articles for the given article (RFC-0001 §8.3 graph traversal).
 func GetArticleLinksTool(store *kb.Store) Tool {
 	return Tool{
-		Name:         "wormhole.kb.get_links",
-		Description:  "Returns the articles that a given article links to (one-hop outbound graph traversal of the kb_links graph, RFC-0001 §8.3).",
-		RequiresAuth: true,
+		Name:             "wormhole.kb.get_links",
+		Description:      "Returns the articles that a given article links to (one-hop outbound graph traversal of the kb_links graph, RFC-0001 §8.3).",
+		RequiresAuth:     true,
 		ArgumentsExample: GetArticleLinksInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in GetArticleLinksInput

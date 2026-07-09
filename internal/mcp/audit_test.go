@@ -8,7 +8,7 @@ import (
 
 func TestMCPAudit_ToolSurfaceCompleteness(t *testing.T) {
 	r := NewRegistry()
-	
+
 	// Register all tools using dummy stores
 	r.Register(RegisterAgentTool(nil, nil))
 	r.Register(WhoAmITool())
