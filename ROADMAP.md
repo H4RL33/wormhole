@@ -124,7 +124,7 @@ Boundary days (6, 12, 18) carry over: prior milestone's review/demo plus next mi
 ## M4 — Joining + MCP Completion
 
 ### Day 19 — 2026-07-25
-- [ ] Join flow step 1: passport creation + permission grant on project join (RFC §8.5)
+- [x] Join flow step 1: passport creation + permission grant on project join (RFC §8.5) — `cmd/wormhole-cli/main.go`'s `wormhole join` now calls `wormhole.agent.register` over `/mcp/tools/call`, persists the issued passport/token to `~/.wormhole/credentials.json` (0600) for Day 20/21's join steps to reuse
 
 ### Day 20 — 2026-07-26
 - [ ] Join flow step 2: KB sync — relevant-article slice retrieval on join (semantic filter against project context)
