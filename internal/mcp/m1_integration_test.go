@@ -19,8 +19,9 @@ import (
 // the audit-trail assertion that Day 5 never checked.
 func TestM1_RegisterPassportAuthenticatedCall(t *testing.T) {
 	store := testIdentityStore(t)
+	eventsStore := testEventsStore(t)
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(store))
+	registry.Register(RegisterAgentTool(store, eventsStore))
 	registry.Register(WhoAmITool())
 	handler := NewCallHandler(registry, store)
 	srv := httptest.NewServer(handler)

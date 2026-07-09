@@ -4,10 +4,41 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 
+	"github.com/H4RL33/wormhole/internal/core/events"
 	"github.com/H4RL33/wormhole/internal/core/identity"
 )
+
+// defaultChannelNames are bootstrapped into every project the first time an
+// agent registers into it (RFC-0001 §8.5 joining flow).
+var defaultChannelNames = []string{"introductions", "general"}
+
+// ensureDefaultChannels creates any of defaultChannelNames missing from the
+// project. It lists existing channels first and only creates names that are
+// absent, since events.Store.CreateChannel has no unique constraint on
+// (project_id, name) and would otherwise duplicate channels on every
+// registration into the same project.
+func ensureDefaultChannels(ctx context.Context, store *events.Store, projectID string) error {
+	existing, err := store.ListChannels(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("ensure default channels: list channels: %w", err)
+	}
+	have := make(map[string]bool, len(existing))
+	for _, c := range existing {
+		have[c.Name] = true
+	}
+	for _, name := range defaultChannelNames {
+		if have[name] {
+			continue
+		}
+		if _, err := store.CreateChannel(ctx, projectID, name); err != nil {
+			return fmt.Errorf("ensure default channels: create channel %q: %w", name, err)
+		}
+	}
+	return nil
+}
 
 // RegisterAgentInput is the wormhole.agent.register argument shape.
 // Schema is indicative per architecture.md M1 — frozen here at
@@ -36,7 +67,7 @@ type RegisterAgentOutput struct {
 // RegisterAgentTool wires wormhole.agent.register: no auth required, since
 // registration is how an identity first comes into existence (RFC-0001
 // §8.5 joining flow, step 1).
-func RegisterAgentTool(store *identity.Store) Tool {
+func RegisterAgentTool(store *identity.Store, eventsStore *events.Store) Tool {
 	return Tool{
 		Name:         "wormhole.agent.register",
 		Description:  "Registers a new agent identity, issues its passport and a project-scoped bearer token.",
@@ -49,6 +80,9 @@ func RegisterAgentTool(store *identity.Store) Tool {
 			agent, passport, token, err := store.Register(ctx, projectID, in.Permissions, in.Owner, in.Model, in.Capabilities, in.Repositories, in.Roles)
 			if err != nil {
 				return nil, fmt.Errorf("mcp: wormhole.agent.register: %w", err)
+			}
+			if err := ensureDefaultChannels(ctx, eventsStore, projectID); err != nil {
+				log.Printf("mcp: wormhole.agent.register: default channel bootstrap failed: %v", err)
 			}
 			return RegisterAgentOutput{
 				AgentID:      agent.ID,

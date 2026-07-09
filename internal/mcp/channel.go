@@ -94,6 +94,49 @@ func PostEventTool(store *events.Store) Tool {
 	}
 }
 
+// ListChannelsInput is the wormhole.channel.list argument shape. No fields:
+// project scoping comes from the authenticated call, matching
+// wormhole.task.list's pattern of implicit project scoping.
+type ListChannelsInput struct{}
+
+// ChannelSummary is one channel's shape within ListChannelsOutput.
+type ChannelSummary struct {
+	ChannelID string    `json:"channel_id"`
+	ProjectID string    `json:"project_id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ListChannelsOutput is the wormhole.channel.list result shape.
+type ListChannelsOutput struct {
+	Channels []ChannelSummary `json:"channels"`
+}
+
+// ListChannelsTool wires wormhole.channel.list.
+func ListChannelsTool(store *events.Store) Tool {
+	return Tool{
+		Name:         "wormhole.channel.list",
+		Description:  "Lists the event channels within the project.",
+		RequiresAuth: true,
+		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
+			channelList, err := store.ListChannels(ctx, projectID)
+			if err != nil {
+				return nil, fmt.Errorf("mcp: wormhole.channel.list: %w", err)
+			}
+			out := ListChannelsOutput{Channels: make([]ChannelSummary, 0, len(channelList))}
+			for _, c := range channelList {
+				out.Channels = append(out.Channels, ChannelSummary{
+					ChannelID: c.ID,
+					ProjectID: c.ProjectID,
+					Name:      c.Name,
+					CreatedAt: c.CreatedAt,
+				})
+			}
+			return out, nil
+		},
+	}
+}
+
 // SubscribeChannelInput is the wormhole.channel.subscribe argument shape.
 // Limit and Offset default to 50 and 0 respectively when absent or zero.
 type SubscribeChannelInput struct {

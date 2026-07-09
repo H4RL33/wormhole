@@ -22,7 +22,7 @@ func TestM2_TaskLifecycleEventsOnChannel(t *testing.T) {
 	tasksStore := testTasksStore(t)
 	eventsStore := testEventsStore(t)
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(identityStore))
+	registry.Register(RegisterAgentTool(identityStore, eventsStore))
 	registry.Register(CreateChannelTool(eventsStore))
 	registry.Register(CreateTaskTool(tasksStore))
 	registry.Register(AssignTaskTool(tasksStore))

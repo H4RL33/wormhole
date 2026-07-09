@@ -179,6 +179,69 @@ func TestChannelTools_Subscribe(t *testing.T) {
 	}
 }
 
+func TestChannelTools_ListChannels(t *testing.T) {
+	store := testEventsStore(t)
+	tool := ListChannelsTool(store)
+
+	if tool.Name != "wormhole.channel.list" {
+		t.Fatalf("Name: got %q, want %q", tool.Name, "wormhole.channel.list")
+	}
+	if !tool.RequiresAuth {
+		t.Fatalf("RequiresAuth: got false, want true")
+	}
+
+	projectID := mustCreateProject(t, "mcp-channel-list")
+	arguments, _ := json.Marshal(ListChannelsInput{})
+
+	// Zero channels.
+	result, err := tool.Handler(context.Background(), nil, projectID, arguments)
+	if err != nil {
+		t.Fatalf("Handler (zero channels): %v", err)
+	}
+	out, ok := result.(ListChannelsOutput)
+	if !ok {
+		t.Fatalf("result type: got %T, want ListChannelsOutput", result)
+	}
+	if len(out.Channels) != 0 {
+		t.Fatalf("Channels (zero): got %d, want 0", len(out.Channels))
+	}
+
+	// One channel.
+	first, err := store.CreateChannel(context.Background(), projectID, "alpha")
+	if err != nil {
+		t.Fatalf("create channel alpha: %v", err)
+	}
+	result, err = tool.Handler(context.Background(), nil, projectID, arguments)
+	if err != nil {
+		t.Fatalf("Handler (one channel): %v", err)
+	}
+	out = result.(ListChannelsOutput)
+	if len(out.Channels) != 1 {
+		t.Fatalf("Channels (one): got %d, want 1", len(out.Channels))
+	}
+	if out.Channels[0].ChannelID != first.ID || out.Channels[0].Name != "alpha" || out.Channels[0].ProjectID != projectID {
+		t.Fatalf("Channels[0]: got %+v", out.Channels[0])
+	}
+
+	// Two channels.
+	second, err := store.CreateChannel(context.Background(), projectID, "beta")
+	if err != nil {
+		t.Fatalf("create channel beta: %v", err)
+	}
+	result, err = tool.Handler(context.Background(), nil, projectID, arguments)
+	if err != nil {
+		t.Fatalf("Handler (two channels): %v", err)
+	}
+	out = result.(ListChannelsOutput)
+	if len(out.Channels) != 2 {
+		t.Fatalf("Channels (two): got %d, want 2", len(out.Channels))
+	}
+	names := map[string]string{out.Channels[0].Name: out.Channels[0].ChannelID, out.Channels[1].Name: out.Channels[1].ChannelID}
+	if names["alpha"] != first.ID || names["beta"] != second.ID {
+		t.Fatalf("Channels: got %+v, want alpha=%s beta=%s", out.Channels, first.ID, second.ID)
+	}
+}
+
 func TestChannelTools_PostInvalidEventType(t *testing.T) {
 	store := testEventsStore(t)
 	projectID := mustCreateProject(t, "mcp-channel-invalid-type")

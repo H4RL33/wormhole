@@ -10,7 +10,8 @@ import (
 
 func TestRegisterAgentTool_Handler(t *testing.T) {
 	store := testIdentityStore(t)
-	tool := RegisterAgentTool(store)
+	eventsStore := testEventsStore(t)
+	tool := RegisterAgentTool(store, eventsStore)
 	if tool.Name != "wormhole.agent.register" {
 		t.Fatalf("Name: got %q", tool.Name)
 	}
@@ -36,6 +37,60 @@ func TestRegisterAgentTool_Handler(t *testing.T) {
 	}
 	if out.AgentID == "" || out.PassportID == "" || out.Token == "" {
 		t.Fatalf("output missing fields: %+v", out)
+	}
+}
+
+// TestRegisterAgentTool_BootstrapsDefaultChannelsOnce proves ensureDefaultChannels
+// creates "introductions" and "general" exactly once per project, even when a
+// second agent registers into the same project (guards against events.Store.
+// CreateChannel's lack of a unique(project_id, name) constraint causing
+// duplicate default channels).
+func TestRegisterAgentTool_BootstrapsDefaultChannelsOnce(t *testing.T) {
+	identityStore := testIdentityStore(t)
+	eventsStore := testEventsStore(t)
+	tool := RegisterAgentTool(identityStore, eventsStore)
+
+	projectID := mustCreateProject(t, "mcp-register-bootstrap")
+
+	firstArgs, _ := json.Marshal(RegisterAgentInput{
+		Permissions: []string{"event.publish"},
+		Owner:       "harley",
+		Model:       "claude",
+	})
+	if _, err := tool.Handler(context.Background(), nil, projectID, firstArgs); err != nil {
+		t.Fatalf("Handler (first register): %v", err)
+	}
+
+	channels, err := eventsStore.ListChannels(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("ListChannels after first register: %v", err)
+	}
+	if len(channels) != 2 {
+		t.Fatalf("channel count after first register: got %d, want 2 (%+v)", len(channels), channels)
+	}
+	names := map[string]bool{}
+	for _, c := range channels {
+		names[c.Name] = true
+	}
+	if !names["introductions"] || !names["general"] {
+		t.Fatalf("expected introductions and general channels, got %+v", channels)
+	}
+
+	secondArgs, _ := json.Marshal(RegisterAgentInput{
+		Permissions: []string{"event.publish"},
+		Owner:       "harley2",
+		Model:       "claude",
+	})
+	if _, err := tool.Handler(context.Background(), nil, projectID, secondArgs); err != nil {
+		t.Fatalf("Handler (second register): %v", err)
+	}
+
+	channels, err = eventsStore.ListChannels(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("ListChannels after second register: %v", err)
+	}
+	if len(channels) != 2 {
+		t.Fatalf("channel count after second register: got %d, want 2 (no duplicates), got %+v", len(channels), channels)
 	}
 }
 

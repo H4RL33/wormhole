@@ -15,8 +15,9 @@ import (
 // token and gets back the same identity.
 func TestE2E_RegisterThenWhoAmI(t *testing.T) {
 	store := testIdentityStore(t)
+	eventsStore := testEventsStore(t)
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(store))
+	registry.Register(RegisterAgentTool(store, eventsStore))
 	registry.Register(WhoAmITool())
 	handler := NewCallHandler(registry, store)
 	srv := httptest.NewServer(handler)
@@ -87,8 +88,9 @@ func TestE2E_RegisterThenWhoAmI(t *testing.T) {
 // already covers the Store layer directly).
 func TestE2E_WhoAmI_RejectsExpiredToken(t *testing.T) {
 	store := testIdentityStore(t)
+	eventsStore := testEventsStore(t)
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(store))
+	registry.Register(RegisterAgentTool(store, eventsStore))
 	registry.Register(WhoAmITool())
 	handler := NewCallHandler(registry, store)
 	srv := httptest.NewServer(handler)
