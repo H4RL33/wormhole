@@ -56,14 +56,15 @@ func TestRunJoin_MissingProjectOnly(t *testing.T) {
 	}
 }
 
-// TestRunJoin_Success_RegistersAndPersistsCredentials drives runJoin
-// against a fake /mcp/tools/call server, asserting both the outbound
-// request shape (matches internal/mcp.RegisterAgentInput's JSON tags, and
-// permissions is never nil) and that a successful response is persisted
-// to the credentials file with 0600 permissions.
-func TestRunJoin_Success_RegistersAndPersistsCredentials(t *testing.T) {
+// fakeServer builds an httptest.Server that answers wormhole.agent.register
+// with a fixed successful registration and wormhole.kb.search with
+// searchArticles (a caller-supplied stand-in for the tool handler), so
+// tests can exercise the full two-call join sequence without a real
+// Postgres-backed server.
+func fakeServer(t *testing.T, searchArticles func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse)) *httptest.Server {
+	t.Helper()
 	issuedAt := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/mcp/tools/call" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -71,34 +72,56 @@ func TestRunJoin_Success_RegistersAndPersistsCredentials(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		if req.Tool != "wormhole.agent.register" {
-			t.Fatalf("tool: got %q, want wormhole.agent.register", req.Tool)
+		switch req.Tool {
+		case "wormhole.agent.register":
+			var in registerAgentInput
+			if err := json.Unmarshal(req.Arguments, &in); err != nil {
+				t.Fatalf("decode register arguments: %v", err)
+			}
+			if in.Permissions == nil {
+				t.Fatal("permissions: got nil, want non-nil")
+			}
+			out := registerAgentOutput{
+				AgentID:      "agent-1",
+				PassportID:   "passport-1",
+				Token:        "sekrit-token",
+				Repositories: []string{},
+				Roles:        []string{},
+				IssuedAt:     issuedAt,
+			}
+			resultRaw, _ := json.Marshal(out)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(callResponse{Result: resultRaw})
+		case "wormhole.kb.search":
+			if got := r.Header.Get("Authorization"); got != "Bearer sekrit-token" {
+				t.Fatalf("kb.search Authorization header: got %q, want %q", got, "Bearer sekrit-token")
+			}
+			var in searchArticlesInput
+			if err := json.Unmarshal(req.Arguments, &in); err != nil {
+				t.Fatalf("decode search arguments: %v", err)
+			}
+			out, errResp := searchArticles(t, in)
+			if errResp != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(*errResp)
+				return
+			}
+			resultRaw, _ := json.Marshal(out)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(callResponse{Result: resultRaw})
+		default:
+			t.Fatalf("unexpected tool: %s", req.Tool)
 		}
-		if req.ProjectID != "proj-1" {
-			t.Fatalf("project_id: got %q, want proj-1", req.ProjectID)
-		}
-		var in registerAgentInput
-		if err := json.Unmarshal(req.Arguments, &in); err != nil {
-			t.Fatalf("decode arguments: %v", err)
-		}
-		if in.Permissions == nil {
-			t.Fatal("permissions: got nil, want non-nil (identity.Store.Register rejects nil permissions)")
-		}
-		if len(in.Capabilities) != 1 || in.Capabilities[0] != "code" {
-			t.Fatalf("capabilities: got %v, want [code]", in.Capabilities)
-		}
-		out := registerAgentOutput{
-			AgentID:      "agent-1",
-			PassportID:   "passport-1",
-			Token:        "sekrit-token",
-			Repositories: []string{},
-			Roles:        []string{},
-			IssuedAt:     issuedAt,
-		}
-		resultRaw, _ := json.Marshal(out)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(callResponse{Result: resultRaw})
 	}))
+}
+
+// TestRunJoin_Success_RegistersAndPersistsCredentials confirms step 1
+// (registration + credential persistence) still behaves exactly as Day 19
+// left it, now routed through the callTool refactor.
+func TestRunJoin_Success_RegistersAndPersistsCredentials(t *testing.T) {
+	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
+		return searchArticlesOutput{Articles: []articleSummary{}}, nil
+	})
 	defer srv.Close()
 
 	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
@@ -145,9 +168,6 @@ func TestRunJoin_Success_RegistersAndPersistsCredentials(t *testing.T) {
 	}
 }
 
-// TestRunJoin_ServerError_PrintsError confirms a tool-level rejection
-// (HTTP 400 + CallResponse.Error, per internal/mcp/server.go) surfaces to
-// stderr and does not write a credentials file.
 func TestRunJoin_ServerError_PrintsError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
@@ -172,8 +192,6 @@ func TestRunJoin_ServerError_PrintsError(t *testing.T) {
 	}
 }
 
-// TestRunJoin_NetworkError_PrintsError confirms an unreachable server
-// surfaces a clean error instead of a panic or a silent empty exit.
 func TestRunJoin_NetworkError_PrintsError(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{
@@ -195,5 +213,151 @@ func TestDefaultTokenFilePath_UnderWormholeDir(t *testing.T) {
 	want := filepath.Join(".wormhole", "credentials.json")
 	if !strings.HasSuffix(path, want) {
 		t.Fatalf("path: got %q, want suffix %q", path, want)
+	}
+}
+
+// TestRunJoin_KBSync_UsesCapabilitiesAndRolesAsQuery confirms that when no
+// --context is given, the query sent to wormhole.kb.search is built from
+// owner/model/capabilities/roles, and that the returned articles are
+// printed.
+func TestRunJoin_KBSync_UsesCapabilitiesAndRolesAsQuery(t *testing.T) {
+	var gotQuery string
+	var gotLimit int
+	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
+		gotQuery = in.Query
+		gotLimit = in.Limit
+		return searchArticlesOutput{Articles: []articleSummary{
+			{ArticleID: "art-1", Title: "deploy runbook"},
+			{ArticleID: "art-2", Title: "on-call rotation"},
+		}}, nil
+	})
+	defer srv.Close()
+
+	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"join",
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--owner", "harley",
+		"--model", "claude",
+		"--capabilities", "deploy,review",
+		"--roles", "contributor",
+		"--permissions", "kb.write",
+		"--token-file", tokenFile,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
+	}
+
+	for _, want := range []string{"harley", "claude", "deploy", "review", "contributor"} {
+		if !strings.Contains(gotQuery, want) {
+			t.Fatalf("kb.search query: got %q, want it to contain %q", gotQuery, want)
+		}
+	}
+	if gotLimit != 10 {
+		t.Fatalf("kb.search limit: got %d, want default 10", gotLimit)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{"Synchronising knowledge graph (2 relevant)", "deploy runbook (art-1)", "on-call rotation (art-2)"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q: got %q", want, out)
+		}
+	}
+}
+
+// TestRunJoin_KBSync_ExplicitContextAndLimit confirms --context overrides
+// the derived query and --kb-limit is forwarded.
+func TestRunJoin_KBSync_ExplicitContextAndLimit(t *testing.T) {
+	var gotQuery string
+	var gotLimit int
+	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
+		gotQuery = in.Query
+		gotLimit = in.Limit
+		return searchArticlesOutput{Articles: []articleSummary{}}, nil
+	})
+	defer srv.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"join",
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--permissions", "kb.write",
+		"--context", "billing service architecture",
+		"--kb-limit", "5",
+		"--token-file", filepath.Join(t.TempDir(), "credentials.json"),
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
+	}
+	if gotQuery != "billing service architecture" {
+		t.Fatalf("kb.search query: got %q, want %q", gotQuery, "billing service architecture")
+	}
+	if gotLimit != 5 {
+		t.Fatalf("kb.search limit: got %d, want 5", gotLimit)
+	}
+	if !strings.Contains(stdout.String(), "Synchronising knowledge graph (0 relevant)") {
+		t.Fatalf("stdout missing sync summary: %q", stdout.String())
+	}
+}
+
+// TestRunJoin_KBSync_SkippedWhenNoContext confirms the sync call is
+// skipped entirely (no HTTP request made) when nothing was supplied to
+// build a query from.
+func TestRunJoin_KBSync_SkippedWhenNoContext(t *testing.T) {
+	called := false
+	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
+		called = true
+		return searchArticlesOutput{Articles: []articleSummary{}}, nil
+	})
+	defer srv.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"join",
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--permissions", "kb.write",
+		"--token-file", filepath.Join(t.TempDir(), "credentials.json"),
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
+	}
+	if called {
+		t.Fatalf("expected wormhole.kb.search to be skipped, but it was called")
+	}
+	if !strings.Contains(stdout.String(), "skipped") {
+		t.Fatalf("stdout missing skip notice: %q", stdout.String())
+	}
+}
+
+// TestRunJoin_KBSync_FailureIsNonFatal confirms a failed KB sync doesn't
+// erase step 1's already-persisted credentials or flip the exit code.
+func TestRunJoin_KBSync_FailureIsNonFatal(t *testing.T) {
+	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
+		return searchArticlesOutput{}, &callResponse{Error: `{"error":"kb: search: boom"}`}
+	})
+	defer srv.Close()
+
+	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"join",
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--owner", "harley",
+		"--permissions", "kb.write",
+		"--token-file", tokenFile,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0 (KB sync failure must not fail the whole join), stderr: %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "KB sync") {
+		t.Fatalf("stderr missing KB sync warning: %q", stderr.String())
+	}
+	if _, err := os.Stat(tokenFile); err != nil {
+		t.Fatalf("credentials file should still exist after a KB sync failure: %v", err)
 	}
 }

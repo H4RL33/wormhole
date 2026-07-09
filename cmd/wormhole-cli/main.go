@@ -76,9 +76,29 @@ type registerAgentOutput struct {
 	IssuedAt     time.Time `json:"issued_at"`
 }
 
+// searchArticlesInput mirrors internal/mcp.SearchArticlesInput's JSON
+// shape (internal/mcp/kb.go). searchArticlesOutput/articleSummary are a
+// deliberately partial mirror of SearchArticlesOutput/ArticleSummary: the
+// CLI only needs article_id and title for the join-time sync summary, and
+// encoding/json safely ignores the other fields (body, frontmatter,
+// author_agent_id, created_at, updated_at) on decode.
+type searchArticlesInput struct {
+	Query string `json:"query"`
+	Limit int    `json:"limit,omitempty"`
+}
+
+type articleSummary struct {
+	ArticleID string `json:"article_id"`
+	Title     string `json:"title"`
+}
+
+type searchArticlesOutput struct {
+	Articles []articleSummary `json:"articles"`
+}
+
 // credentials is what gets persisted to the token file after a successful
-// join, so later join steps (Day 20 KB sync, Day 21 self-introduction) can
-// reuse the issued token without re-registering.
+// join, so later join steps (Day 21 self-introduction) can reuse the
+// issued token without re-registering.
 type credentials struct {
 	Server     string    `json:"server"`
 	ProjectID  string    `json:"project_id"`
@@ -88,42 +108,70 @@ type credentials struct {
 	IssuedAt   time.Time `json:"issued_at"`
 }
 
-// doRegister calls wormhole.agent.register at server's /mcp/tools/call
-// endpoint (cmd/wormhole-server/main.go) and decodes the result.
-func doRegister(client *http.Client, server, project string, in registerAgentInput) (registerAgentOutput, error) {
-	argsRaw, err := json.Marshal(in)
+// callTool POSTs one MCP tool invocation to server's /mcp/tools/call
+// endpoint (cmd/wormhole-server/main.go) and returns the decoded result's
+// raw JSON. token is optional: pass "" for tools that don't require auth
+// (e.g. wormhole.agent.register); a non-empty token is sent as a bearer
+// Authorization header for tools that do (e.g. wormhole.kb.search).
+func callTool(client *http.Client, server, tool, projectID, token string, args any) (json.RawMessage, error) {
+	argsRaw, err := json.Marshal(args)
 	if err != nil {
-		return registerAgentOutput{}, fmt.Errorf("marshal register arguments: %w", err)
+		return nil, fmt.Errorf("marshal %s arguments: %w", tool, err)
 	}
-	reqBody, err := json.Marshal(callRequest{Tool: "wormhole.agent.register", ProjectID: project, Arguments: argsRaw})
+	reqBody, err := json.Marshal(callRequest{Tool: tool, ProjectID: projectID, Arguments: argsRaw})
 	if err != nil {
-		return registerAgentOutput{}, fmt.Errorf("marshal call request: %w", err)
+		return nil, fmt.Errorf("marshal call request: %w", err)
 	}
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(server, "/")+"/mcp/tools/call", bytes.NewReader(reqBody))
 	if err != nil {
-		return registerAgentOutput{}, fmt.Errorf("build request: %w", err)
+		return nil, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return registerAgentOutput{}, fmt.Errorf("call wormhole.agent.register: %w", err)
+		return nil, fmt.Errorf("call %s: %w", tool, err)
 	}
 	defer resp.Body.Close()
 
 	var callResp callResponse
 	if err := json.NewDecoder(resp.Body).Decode(&callResp); err != nil {
-		return registerAgentOutput{}, fmt.Errorf("decode response: %w", err)
+		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	if callResp.Error != "" {
-		return registerAgentOutput{}, fmt.Errorf("%s", callResp.Error)
+		return nil, fmt.Errorf("%s", callResp.Error)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return registerAgentOutput{}, fmt.Errorf("server returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("server returned status %d", resp.StatusCode)
 	}
+	return callResp.Result, nil
+}
 
+// doRegister calls wormhole.agent.register (no auth required).
+func doRegister(client *http.Client, server, project string, in registerAgentInput) (registerAgentOutput, error) {
+	resultRaw, err := callTool(client, server, "wormhole.agent.register", project, "", in)
+	if err != nil {
+		return registerAgentOutput{}, err
+	}
 	var out registerAgentOutput
-	if err := json.Unmarshal(callResp.Result, &out); err != nil {
+	if err := json.Unmarshal(resultRaw, &out); err != nil {
 		return registerAgentOutput{}, fmt.Errorf("decode register result: %w", err)
+	}
+	return out, nil
+}
+
+// doSearch calls wormhole.kb.search with the token issued by doRegister
+// (join flow step 2, RFC-0001 §8.5: relevant-article slice retrieval).
+func doSearch(client *http.Client, server, project, token, query string, limit int) (searchArticlesOutput, error) {
+	resultRaw, err := callTool(client, server, "wormhole.kb.search", project, token, searchArticlesInput{Query: query, Limit: limit})
+	if err != nil {
+		return searchArticlesOutput{}, err
+	}
+	var out searchArticlesOutput
+	if err := json.Unmarshal(resultRaw, &out); err != nil {
+		return searchArticlesOutput{}, fmt.Errorf("decode search result: %w", err)
 	}
 	return out, nil
 }
@@ -155,10 +203,12 @@ func writeCredentials(path string, creds credentials) error {
 	return nil
 }
 
-// runJoin implements join flow step 1 (RFC-0001 §8.5): it calls
+// runJoin implements join flow steps 1-2 (RFC-0001 §8.5): step 1 calls
 // wormhole.agent.register to create a passport and grant permissions, then
-// persists the issued credentials. KB sync, self-introduction, and the
-// open-task summary are later join steps (Day 20+).
+// persists the issued credentials; step 2 retrieves a relevant KB slice
+// via wormhole.kb.search, filtered against the agent's declared context.
+// Self-introduction and the open-task summary are later join steps
+// (Day 21+).
 func runJoin(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("join", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -171,6 +221,8 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 	roles := fs.String("roles", "", "comma-separated list of project-level roles")
 	permissions := fs.String("permissions", "", "comma-separated list of permissions to request (e.g. task.create,kb.write)")
 	tokenFile := fs.String("token-file", "", "path to write issued credentials to (default: ~/.wormhole/credentials.json)")
+	context := fs.String("context", "", "explicit text to use for the KB semantic-sync query (default: built from owner/model/capabilities/roles)")
+	kbLimit := fs.Int("kb-limit", 10, "max number of KB articles to retrieve during join sync")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -238,6 +290,34 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintln(stdout, "Passport created.")
 	fmt.Fprintf(stdout, "agent_id=%s passport_id=%s project=%s\n", out.AgentID, out.PassportID, *project)
 	fmt.Fprintf(stdout, "credentials written to %s\n", path)
-	fmt.Fprintln(stdout, "KB sync, self-introduction, and task summary land Day 20+ (RFC-0001 §8.5)")
+
+	kbQuery := *context
+	if kbQuery == "" {
+		parts := []string{}
+		if *owner != "" {
+			parts = append(parts, *owner)
+		}
+		if *model != "" {
+			parts = append(parts, *model)
+		}
+		parts = append(parts, in.Capabilities...)
+		parts = append(parts, in.Roles...)
+		kbQuery = strings.Join(parts, " ")
+	}
+	if kbQuery == "" {
+		fmt.Fprintln(stdout, "Synchronising knowledge graph... skipped (no --context, capabilities, roles, owner, or model to build a query from)")
+	} else {
+		searchOut, searchErr := doSearch(http.DefaultClient, *server, *project, out.Token, kbQuery, *kbLimit)
+		if searchErr != nil {
+			fmt.Fprintf(stderr, "wormhole join: KB sync failed: %v\n", searchErr)
+		} else {
+			fmt.Fprintf(stdout, "Synchronising knowledge graph (%d relevant)...\n", len(searchOut.Articles))
+			for _, a := range searchOut.Articles {
+				fmt.Fprintf(stdout, "  - %s (%s)\n", a.Title, a.ArticleID)
+			}
+		}
+	}
+
+	fmt.Fprintln(stdout, "Self-introduction and task summary land Day 21+ (RFC-0001 §8.5)")
 	return 0
 }
