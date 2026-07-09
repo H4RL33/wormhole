@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -18,7 +19,7 @@ func main() {
 }
 
 func usage() string {
-	return "usage: wormhole <command> [flags]\n\ncommands:\n  join    join a Wormhole project (RFC-0001 §8.5)"
+	return "usage: wormhole <command> [flags]\n\ncommands:\n  join     join a Wormhole project (RFC-0001 §8.5)\n  connect  join a project and register it as a Claude Code MCP connector"
 }
 
 // run dispatches to a subcommand and returns the process exit code. It
@@ -32,6 +33,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "join":
 		return runJoin(args[1:], stdout, stderr)
+	case "connect":
+		return runConnect(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "wormhole: unknown command %q\n\n%s\n", args[0], usage())
 		return 2
@@ -515,5 +518,112 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "Ready. %d open tasks, %d done.\n", openCount, doneCount)
 	}
 
+	return 0
+}
+
+// runConnect implements `wormhole connect`: it performs the same
+// wormhole.agent.register call as `wormhole join` (via the same
+// doRegister/writeCredentials helpers), then wires the issued token into
+// Claude Code's MCP connector config by shelling out to the `claude` CLI
+// (`claude mcp remove` then `claude mcp add -H`). Unlike `join`, it does
+// not run the KB-sync/self-introduction/task-summary steps — those are
+// join's concern for an already-connected identity, not connect's concern
+// of wiring up the transport.
+func runConnect(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	server := fs.String("server", "", "Wormhole server base URL (required)")
+	project := fs.String("project", "", "project ID to join (required)")
+	owner := fs.String("owner", "", "human/org owner of this agent identity")
+	model := fs.String("model", "", "model identifier for this agent identity")
+	capabilities := fs.String("capabilities", "", "comma-separated list of agent capabilities")
+	repositories := fs.String("repositories", "", "comma-separated list of git repositories this identity is scoped to")
+	roles := fs.String("roles", "", "comma-separated list of project-level roles")
+	permissions := fs.String("permissions", "", "comma-separated list of permissions to request (e.g. task.create,kb.write)")
+	tokenFile := fs.String("token-file", "", "path to write issued credentials to (default: ~/.wormhole/credentials.json)")
+	connectorName := fs.String("connector-name", "wormhole", "name to register the MCP connector under (claude mcp add/remove)")
+	claudeBin := fs.String("claude-bin", "claude", "path to the claude CLI binary")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *server == "" || *project == "" {
+		fmt.Fprintln(stderr, "wormhole connect: --server and --project are required")
+		fs.Usage()
+		return 2
+	}
+
+	splitOrNil := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		return strings.Split(s, ",")
+	}
+	splitOrEmpty := func(s string) []string {
+		if s == "" {
+			return []string{}
+		}
+		return strings.Split(s, ",")
+	}
+
+	in := registerAgentInput{
+		Permissions:  splitOrEmpty(*permissions),
+		Owner:        *owner,
+		Model:        *model,
+		Capabilities: splitOrNil(*capabilities),
+		Repositories: splitOrNil(*repositories),
+		Roles:        splitOrNil(*roles),
+	}
+
+	out, err := doRegister(http.DefaultClient, *server, *project, in)
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole connect: %v\n", err)
+		return 1
+	}
+
+	path := *tokenFile
+	if path == "" {
+		defaultPath, err := defaultTokenFilePath()
+		if err != nil {
+			fmt.Fprintf(stderr, "wormhole connect: %v\n", err)
+			return 1
+		}
+		path = defaultPath
+	}
+
+	creds := credentials{
+		Server:     *server,
+		ProjectID:  *project,
+		AgentID:    out.AgentID,
+		PassportID: out.PassportID,
+		Token:      out.Token,
+		IssuedAt:   out.IssuedAt,
+	}
+	if err := writeCredentials(path, creds); err != nil {
+		fmt.Fprintf(stderr, "wormhole connect: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintln(stdout, "Passport created.")
+	fmt.Fprintf(stdout, "agent_id=%s passport_id=%s project=%s\n", out.AgentID, out.PassportID, *project)
+	fmt.Fprintf(stdout, "credentials written to %s\n", path)
+
+	mcpURL := strings.TrimRight(*server, "/") + "/mcp"
+	if _, lookErr := exec.LookPath(*claudeBin); lookErr != nil {
+		fmt.Fprintf(stderr, "wormhole connect: %q not found in PATH — wire the connector manually:\n  claude mcp add --transport http %s %s -H \"Authorization: Bearer %s\"\n", *claudeBin, *connectorName, mcpURL, out.Token)
+		return 1
+	}
+
+	removeCmd := exec.Command(*claudeBin, "mcp", "remove", *connectorName, "-s", "local")
+	removeCmd.Run() // best-effort: fine if the connector wasn't registered yet
+
+	addCmd := exec.Command(*claudeBin, "mcp", "add", "--transport", "http", *connectorName, mcpURL, "-H", "Authorization: Bearer "+out.Token)
+	addCmd.Stdout = stdout
+	addCmd.Stderr = stderr
+	if err := addCmd.Run(); err != nil {
+		fmt.Fprintf(stderr, "wormhole connect: claude mcp add failed: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "Connector %q registered with %s (run /mcp inside Claude Code to reconnect).\n", *connectorName, mcpURL)
 	return 0
 }

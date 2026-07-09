@@ -725,3 +725,169 @@ func TestRunJoin_Step4_ListTasksFailure_NonFatal(t *testing.T) {
 	}
 }
 
+// fakeClaudeScript writes an executable shell script to t.TempDir() that
+// appends every invocation's arguments as one line to <script-dir>/calls.log,
+// then always exits 0. Tests use this instead of invoking a real `claude`
+// binary, which cannot be assumed present in any environment running this
+// suite.
+func fakeClaudeScript(t *testing.T) (scriptPath, logPath string) {
+	t.Helper()
+	dir := t.TempDir()
+	scriptPath = filepath.Join(dir, "fake-claude.sh")
+	logPath = filepath.Join(dir, "calls.log")
+	script := "#!/bin/sh\necho \"$@\" >> \"" + logPath + "\"\nexit 0\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake claude script: %v", err)
+	}
+	return scriptPath, logPath
+}
+
+func TestRunConnect_Success_RegistersAndWiresConnector(t *testing.T) {
+	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
+		t.Fatal("connect must not call wormhole.kb.search")
+		return searchArticlesOutput{}, nil
+	})
+	defer srv.Close()
+
+	claudeBin, logPath := fakeClaudeScript(t)
+	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"connect",
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--owner", "harley",
+		"--model", "claude-code",
+		"--permissions", "task.read",
+		"--token-file", tokenFile,
+		"--claude-bin", claudeBin,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
+	}
+
+	data, err := os.ReadFile(tokenFile)
+	if err != nil {
+		t.Fatalf("read credentials file: %v", err)
+	}
+	var creds credentials
+	if err := json.Unmarshal(data, &creds); err != nil {
+		t.Fatalf("decode credentials file: %v", err)
+	}
+	if creds.Token != "sekrit-token" {
+		t.Fatalf("credentials.Token: got %q, want %q", creds.Token, "sekrit-token")
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read fake claude call log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(logData)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("fake claude invocation count: got %d, want 2 (remove, add): %q", len(lines), logData)
+	}
+	if !strings.Contains(lines[0], "mcp remove wormhole -s local") {
+		t.Fatalf("first invocation: got %q, want it to contain %q", lines[0], "mcp remove wormhole -s local")
+	}
+	wantAdd := "mcp add --transport http wormhole " + srv.URL + "/mcp -H Authorization: Bearer sekrit-token"
+	if !strings.Contains(lines[1], wantAdd) {
+		t.Fatalf("second invocation: got %q, want it to contain %q", lines[1], wantAdd)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{"Passport created.", "Connector \"wormhole\" registered"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q: got %q", want, out)
+		}
+	}
+}
+
+func TestRunConnect_CustomConnectorName(t *testing.T) {
+	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
+		t.Fatal("connect must not call wormhole.kb.search")
+		return searchArticlesOutput{}, nil
+	})
+	defer srv.Close()
+
+	claudeBin, logPath := fakeClaudeScript(t)
+	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"connect",
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--permissions", "task.read",
+		"--token-file", tokenFile,
+		"--claude-bin", claudeBin,
+		"--connector-name", "wh-staging",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read fake claude call log: %v", err)
+	}
+	if !strings.Contains(string(logData), "wh-staging") {
+		t.Fatalf("fake claude call log missing custom connector name: %q", logData)
+	}
+}
+
+func TestRunConnect_RegisterFailure_NeverInvokesClaude(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req rpcRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		result := toolCallResult{
+			Content: []toolCallResultContent{{Type: "text", Text: `{"error":"identity: invalid scope"}`}},
+			IsError: true,
+		}
+		resultRaw, _ := json.Marshal(result)
+		json.NewEncoder(w).Encode(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: resultRaw})
+	}))
+	defer srv.Close()
+
+	claudeBin, logPath := fakeClaudeScript(t)
+	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"connect", "--server", srv.URL, "--project", "proj-1", "--permissions", "task.read",
+		"--token-file", tokenFile, "--claude-bin", claudeBin,
+	}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit code: got %d, want 1", code)
+	}
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("fake claude should never have been invoked on register failure")
+	}
+	if _, err := os.Stat(tokenFile); !os.IsNotExist(err) {
+		t.Fatalf("credentials file should not have been written on register failure")
+	}
+}
+
+func TestRunConnect_ClaudeBinaryNotFound_PrintsManualFallback(t *testing.T) {
+	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
+		t.Fatal("connect must not call wormhole.kb.search")
+		return searchArticlesOutput{}, nil
+	})
+	defer srv.Close()
+
+	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"connect", "--server", srv.URL, "--project", "proj-1", "--permissions", "task.read",
+		"--token-file", tokenFile, "--claude-bin", "definitely-not-a-real-binary-xyz",
+	}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit code: got %d, want 1", code)
+	}
+	// Registration itself must still have succeeded and been persisted —
+	// only the auto-wire step failed.
+	if _, err := os.Stat(tokenFile); err != nil {
+		t.Fatalf("credentials file should have been written even though claude binary was missing: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "sekrit-token") {
+		t.Fatalf("stderr missing manual-fallback command with token: %q", stderr.String())
+	}
+}
+
