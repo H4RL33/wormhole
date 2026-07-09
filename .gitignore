@@ -1,0 +1,17 @@
+# Build artifacts
+/wormhole-server
+/wormhole-cli
+*.exe
+*.test
+*.out
+
+# Local env
+.env
+.env.local
+
+# Agent tooling cache (plugin/skill source, not project content)
+/.agents/
+
+# OS/editor
+.DS_Store
+*.swp

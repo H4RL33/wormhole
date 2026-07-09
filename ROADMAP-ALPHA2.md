@@ -62,19 +62,19 @@ system, git integration beyond the existing manual link tools, write access from
       of the 16 registered tools' schemas)
 
 ### Chapter 3 — 2026-08-02
-- [ ] `tools/call` method handler wired to `Registry.Call`, reusing existing per-tool auth/scope
+- [x] `tools/call` method handler wired to `Registry.Call`, reusing existing per-tool auth/scope
       resolution from `internal/mcp/server.go`
-- [ ] Replace `/mcp/tools` + `/mcp/tools/call` with the single `/mcp` Streamable HTTP endpoint in
+- [x] Replace `/mcp/tools` + `/mcp/tools/call` with the single `/mcp` Streamable HTTP endpoint in
       `cmd/wormhole-server/main.go` — no back-compat shim, this is pre-1.0
-- [ ] Migrate all existing tests that hit the old endpoints (`e2e_test.go`, `m1/m2/m3_integration_test.go`,
+- [x] Migrate all existing tests that hit the old endpoints (`e2e_test.go`, `m1/m2/m3_integration_test.go`,
       `hardening_test.go`, `audit_test.go`) onto the new `/mcp` JSON-RPC shape
 
 ### Chapter 4 — 2026-08-03
-- [ ] Live connector test: `claude mcp add --transport http wormhole http://localhost:8080/mcp`,
+- [x] Live connector test: `claude mcp add --transport http wormhole http://localhost:8080/mcp`,
       confirm `/mcp` in Claude Code lists all registered tools and a real call round-trips
-- [ ] `docs/claude-code-connector.md`: setup steps, auth token acquisition via `wormhole join`,
+- [x] `docs/claude-code-connector.md`: setup steps, auth token acquisition via `wormhole join`,
       troubleshooting
-- [ ] M1 review/demo: a real Claude Code session, not a Go test, calls `wormhole.task.list` and
+- [x] M1 review/demo: a real Claude Code session, not a Go test, calls `wormhole.task.list` and
       gets a real answer. M1 exit bar met.
 
 ---
@@ -82,11 +82,11 @@ system, git integration beyond the existing manual link tools, write access from
 ## M2 — Role System
 
 ### Chapter 5 — 2026-08-04
-- [ ] Role template schema: `migrations/000008_role_templates.up.sql` — `role_templates` table
+- [x] Role template schema: `migrations/000010_role_templates.up.sql` — `role_templates` table
       (name, permission bundle, default task-view filter), seeded with `backend-engineer`,
       `frontend-engineer`, `project-manager`, plus the existing RFC-0001 §8.4 tags
       (`contributor`, `reviewer`, `maintainer`)
-- [ ] New package `internal/core/roles`: `Store.GetTemplate(name)`, `Store.ListTemplates()`
+- [x] New package `internal/core/roles`: `Store.GetTemplate(name)`, `Store.ListTemplates()`
 
 ### Chapter 6 — 2026-08-05
 - [ ] `wormhole.agent.register` and `wormhole join --role <name>` resolve a role template and
