@@ -35,6 +35,7 @@ func CreateTaskTool(store *tasks.Store) Tool {
 		Name:         "wormhole.task.create",
 		Description:  "Creates a new task in the project's task graph, starting at status \"todo\".",
 		RequiresAuth: true,
+		ArgumentsExample: CreateTaskInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in CreateTaskInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
@@ -75,6 +76,7 @@ func AssignTaskTool(store *tasks.Store) Tool {
 		Name:         "wormhole.task.assign",
 		Description:  "Assigns a task to an agent by setting its owner_agent_id.",
 		RequiresAuth: true,
+		ArgumentsExample: AssignTaskInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in AssignTaskInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
@@ -127,6 +129,7 @@ func ListTasksTool(store *tasks.Store) Tool {
 		Name:         "wormhole.task.list",
 		Description:  "Lists a project's tasks, optionally filtered by status.",
 		RequiresAuth: true,
+		ArgumentsExample: ListTasksInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in ListTasksInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
@@ -184,6 +187,7 @@ func UpdateTaskStatusTool(store *tasks.Store) Tool {
 		Name:         "wormhole.task.update_status",
 		Description:  "Transitions a task to a new status, rejecting any transition not in the valid state machine, and emits a task.status_changed event onto channel_id.",
 		RequiresAuth: true,
+		ArgumentsExample: UpdateTaskStatusInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in UpdateTaskStatusInput
 			if err := json.Unmarshal(arguments, &in); err != nil {

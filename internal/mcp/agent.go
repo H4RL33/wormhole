@@ -73,6 +73,7 @@ func RegisterAgentTool(store *identity.Store, eventsStore *events.Store) Tool {
 		Name:         "wormhole.agent.register",
 		Description:  "Registers a new agent identity, issues its passport and a project-scoped bearer token.",
 		RequiresAuth: false,
+		ArgumentsExample: RegisterAgentInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in RegisterAgentInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
@@ -119,6 +120,7 @@ func WhoAmITool() Tool {
 		Name:         "wormhole.agent.whoami",
 		Description:  "Returns the identity and authorization scope resolved from the caller's bearer token.",
 		RequiresAuth: true,
+		ArgumentsExample: nil,
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			return WhoAmIOutput{
 				AgentID:      scope.Agent.ID,

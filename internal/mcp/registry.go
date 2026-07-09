@@ -25,7 +25,13 @@ type Tool struct {
 	Name         string  `json:"name"`
 	Description  string  `json:"description"`
 	RequiresAuth bool    `json:"requires_auth"`
-	Handler      Handler `json:"-"`
+	// ArgumentsExample is a zero-value instance of the tool's argument
+	// struct (e.g. CreateTaskInput{}), used by tools/list's schema
+	// generator to reflect field names/types/json tags without any
+	// hand-written per-tool schema literal. Nil for tools that take no
+	// arguments (e.g. wormhole.agent.whoami).
+	ArgumentsExample any     `json:"-"`
+	Handler          Handler `json:"-"`
 }
 
 // Registry holds the set of MCP tools this server exposes. Empty at boot

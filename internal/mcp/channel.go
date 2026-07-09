@@ -30,6 +30,7 @@ func CreateChannelTool(store *events.Store) Tool {
 		Name:         "wormhole.channel.create",
 		Description:  "Creates a new event channel within the project.",
 		RequiresAuth: true,
+		ArgumentsExample: CreateChannelInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in CreateChannelInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
@@ -77,6 +78,7 @@ func PostEventTool(store *events.Store) Tool {
 		Name:         "wormhole.channel.post",
 		Description:  "Publishes an event to a project channel. The calling agent is recorded as the author.",
 		RequiresAuth: true,
+		ArgumentsExample: PostEventInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in PostEventInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
@@ -122,6 +124,7 @@ func ListChannelsTool(store *events.Store) Tool {
 		Name:         "wormhole.channel.list",
 		Description:  "Lists the event channels within the project.",
 		RequiresAuth: true,
+		ArgumentsExample: ListChannelsInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			channelList, err := store.ListChannels(ctx, projectID)
 			if err != nil {
@@ -145,8 +148,8 @@ func ListChannelsTool(store *events.Store) Tool {
 // Limit and Offset default to 50 and 0 respectively when absent or zero.
 type SubscribeChannelInput struct {
 	ChannelID string `json:"channel_id"`
-	Limit     int    `json:"limit"`
-	Offset    int    `json:"offset"`
+	Limit     int    `json:"limit,omitempty"`
+	Offset    int    `json:"offset,omitempty"`
 }
 
 // EventSummary is one event's shape within SubscribeChannelOutput.
@@ -172,6 +175,7 @@ func SubscribeChannelTool(store *events.Store) Tool {
 		Name:         "wormhole.channel.subscribe",
 		Description:  "Returns a page of events from a project channel, ordered oldest-first.",
 		RequiresAuth: true,
+		ArgumentsExample: SubscribeChannelInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in SubscribeChannelInput
 			if err := json.Unmarshal(arguments, &in); err != nil {

@@ -35,6 +35,7 @@ func WriteArticleTool(store *kb.Store) Tool {
 		Name:         "wormhole.kb.write",
 		Description:  "Writes an atomic knowledge base article, optionally linked to existing articles. Validates semantic deduplication unless bypassed with force=true.",
 		RequiresAuth: true,
+		ArgumentsExample: WriteArticleInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in WriteArticleInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
@@ -100,6 +101,7 @@ func SearchArticlesTool(store *kb.Store) Tool {
 		Name:         "wormhole.kb.search",
 		Description:  "Searches the knowledge base using semantic search, ranked by similarity to the query.",
 		RequiresAuth: true,
+		ArgumentsExample: SearchArticlesInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in SearchArticlesInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
@@ -157,6 +159,7 @@ func GetArticleTool(store *kb.Store) Tool {
 		Name:         "wormhole.kb.get",
 		Description:  "Retrieves a single knowledge base article by ID within the authenticated agent's project scope.",
 		RequiresAuth: true,
+		ArgumentsExample: GetArticleInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in GetArticleInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
@@ -198,6 +201,7 @@ func GetArticleLinksTool(store *kb.Store) Tool {
 		Name:         "wormhole.kb.get_links",
 		Description:  "Returns the articles that a given article links to (one-hop outbound graph traversal of the kb_links graph, RFC-0001 §8.3).",
 		RequiresAuth: true,
+		ArgumentsExample: GetArticleLinksInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in GetArticleLinksInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
