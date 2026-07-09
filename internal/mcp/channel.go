@@ -35,6 +35,9 @@ func CreateChannelTool(store *events.Store) Tool {
 			if err := json.Unmarshal(arguments, &in); err != nil {
 				return nil, fmt.Errorf("mcp: decode wormhole.channel.create arguments: %w", err)
 			}
+			if in.ProjectID != "" && in.ProjectID != projectID {
+				return nil, fmt.Errorf("mcp: project_id mismatch: got %q, authenticated as %q", in.ProjectID, projectID)
+			}
 			channel, err := store.CreateChannel(ctx, projectID, in.Name)
 			if err != nil {
 				return nil, fmt.Errorf("mcp: wormhole.channel.create: %w", err)

@@ -40,6 +40,9 @@ func CreateTaskTool(store *tasks.Store) Tool {
 			if err := json.Unmarshal(arguments, &in); err != nil {
 				return nil, fmt.Errorf("mcp: decode wormhole.task.create arguments: %w", err)
 			}
+			if in.ProjectID != "" && in.ProjectID != projectID {
+				return nil, fmt.Errorf("mcp: project_id mismatch: got %q, authenticated as %q", in.ProjectID, projectID)
+			}
 			task, err := store.Create(ctx, projectID, in.Title, in.Description, in.ParentTaskID, in.Priority, in.DueBy)
 			if err != nil {
 				return nil, fmt.Errorf("mcp: wormhole.task.create: %w", err)
@@ -128,6 +131,9 @@ func ListTasksTool(store *tasks.Store) Tool {
 			var in ListTasksInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
 				return nil, fmt.Errorf("mcp: decode wormhole.task.list arguments: %w", err)
+			}
+			if in.ProjectID != "" && in.ProjectID != projectID {
+				return nil, fmt.Errorf("mcp: project_id mismatch: got %q, authenticated as %q", in.ProjectID, projectID)
 			}
 			taskList, err := store.List(ctx, projectID, in.Status)
 			if err != nil {

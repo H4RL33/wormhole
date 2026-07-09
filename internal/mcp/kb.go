@@ -105,6 +105,9 @@ func SearchArticlesTool(store *kb.Store) Tool {
 			if err := json.Unmarshal(arguments, &in); err != nil {
 				return nil, fmt.Errorf("mcp: decode wormhole.kb.search arguments: %w", err)
 			}
+			if in.ProjectID != "" && in.ProjectID != projectID {
+				return nil, fmt.Errorf("mcp: project_id mismatch: got %q, authenticated as %q", in.ProjectID, projectID)
+			}
 			if in.Limit == 0 {
 				in.Limit = 10
 			}

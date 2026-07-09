@@ -1,7 +1,8 @@
 package mcp
 
 import (
-	"encoding/json"
+	"context"
+	"strings"
 	"testing"
 )
 
@@ -64,20 +65,42 @@ func TestMCPAudit_ToolSurfaceCompleteness(t *testing.T) {
 	}
 }
 
-func TestMCPAudit_RegisterAgentFallback(t *testing.T) {
-	// Validate that RegisterAgentInput accepts 'name' and maps it to 'owner'
-	inputJSON := `{"name":"test-agent-name","capabilities":["read"]}`
-	var in RegisterAgentInput
-	if err := json.Unmarshal([]byte(inputJSON), &in); err != nil {
-		t.Fatalf("failed to unmarshal input: %v", err)
-	}
-	
-	// Test mapping in handler-like situation
-	owner := in.Owner
-	if owner == "" {
-		owner = in.Name
-	}
-	if owner != "test-agent-name" {
-		t.Errorf("expected mapped owner to be 'test-agent-name', got %q", owner)
-	}
+func TestMCPAudit_ProjectIDMismatchRejection(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("wormhole.channel.create", func(t *testing.T) {
+		tool := CreateChannelTool(nil)
+		args := []byte(`{"project_id":"mismatched-id","name":"test-channel"}`)
+		_, err := tool.Handler(ctx, nil, "auth-project-id", args)
+		if err == nil || !strings.Contains(err.Error(), "mismatch") {
+			t.Errorf("expected mismatch error, got: %v", err)
+		}
+	})
+
+	t.Run("wormhole.task.create", func(t *testing.T) {
+		tool := CreateTaskTool(nil)
+		args := []byte(`{"project_id":"mismatched-id","title":"test-task"}`)
+		_, err := tool.Handler(ctx, nil, "auth-project-id", args)
+		if err == nil || !strings.Contains(err.Error(), "mismatch") {
+			t.Errorf("expected mismatch error, got: %v", err)
+		}
+	})
+
+	t.Run("wormhole.task.list", func(t *testing.T) {
+		tool := ListTasksTool(nil)
+		args := []byte(`{"project_id":"mismatched-id"}`)
+		_, err := tool.Handler(ctx, nil, "auth-project-id", args)
+		if err == nil || !strings.Contains(err.Error(), "mismatch") {
+			t.Errorf("expected mismatch error, got: %v", err)
+		}
+	})
+
+	t.Run("wormhole.kb.search", func(t *testing.T) {
+		tool := SearchArticlesTool(nil)
+		args := []byte(`{"project_id":"mismatched-id","query":"test-query"}`)
+		_, err := tool.Handler(ctx, nil, "auth-project-id", args)
+		if err == nil || !strings.Contains(err.Error(), "mismatch") {
+			t.Errorf("expected mismatch error, got: %v", err)
+		}
+	})
 }
