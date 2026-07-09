@@ -100,7 +100,7 @@ Client-to-server, sent once at connection start.
 Request `params`:
 ```json
 {
-  "protocolVersion": "2025-03-26",
+  "protocolVersion": "2025-11-25",
   "capabilities": {},
   "clientInfo": { "name": "claude-code", "version": "..." }
 }
@@ -109,17 +109,17 @@ Request `params`:
 Response `result`:
 ```json
 {
-  "protocolVersion": "2025-03-26",
+  "protocolVersion": "2025-11-25",
   "capabilities": { "tools": {} },
   "serverInfo": { "name": "wormhole", "version": "0.2.0-alpha" }
 }
 ```
 
-`protocolVersion` pin: `2025-03-26` is the last MCP spec revision known at the time this
-document was written (introduces Streamable HTTP transport, which this design uses). Chapter 2's
-implementer must verify this string against the current published MCP specification before
-freezing `internal/mcp/jsonrpc.go` — if a newer revision exists, use it instead and update this
-document in the same change. This is a flagged inference (rung 6), not a verified fact.
+`protocolVersion` pin: `2025-11-25` is the current published stable MCP specification revision,
+verified at Chapter 2 implementation time (2026-07-09). `2025-03-26` was the last known revision
+when this document was first written (Chapter 1) and has since been superseded. A `2026-07-28`
+revision exists as a release candidate at verification time but is not yet a published stable
+spec, so it is not used here. Re-verify before any future protocol bump.
 
 Server capabilities are `{"tools": {}}` only — no `resources`, `prompts`, `sampling`, or
 `logging` capability objects, since Wormhole exposes only tools (RFC-0001 §5.5: every
