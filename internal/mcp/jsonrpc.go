@@ -101,9 +101,16 @@ func HandleToolsList(registry *Registry) any {
 // Schema object (properties + required), then injects project_id as a
 // required string property unless the tool is project-agnostic
 // (docs/mcp-protocol.md §4.1, §4).
+//
+// Invariant: project_id injection below assumes any ...Input struct that
+// declares its own ProjectID field tags it ",omitempty" (true today for
+// CreateTaskInput, ListTasksInput, SearchArticlesInput, CreateChannelInput),
+// so reflectStructSchema never adds "project_id" to required on its own. If
+// a future struct declares ProjectID without omitempty, it would end up
+// duplicated in the required slice below.
 func buildInputSchema(tool Tool) map[string]any {
 	properties := map[string]any{}
-	var required []string
+	required := []string{}
 
 	if tool.ArgumentsExample != nil {
 		properties, required = reflectStructSchema(reflect.TypeOf(tool.ArgumentsExample))
@@ -128,7 +135,7 @@ func buildInputSchema(tool Tool) map[string]any {
 // optionality; see ROADMAP-ALPHA2.md Chapter 2 plan Global Constraints).
 func reflectStructSchema(t reflect.Type) (map[string]any, []string) {
 	properties := map[string]any{}
-	var required []string
+	required := []string{}
 
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)

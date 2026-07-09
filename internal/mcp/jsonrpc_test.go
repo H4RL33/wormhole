@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -138,6 +139,40 @@ func TestHandleToolsList_ProjectIDRequiredExceptWhoAmI(t *testing.T) {
 	whoAmIProps := whoAmI.InputSchema["properties"].(map[string]any)
 	if _, ok := whoAmIProps["project_id"]; ok {
 		t.Errorf("wormhole.agent.whoami properties has project_id, want absent")
+	}
+
+	// A nil []string and an empty []string are equal under reflect.DeepEqual,
+	// but encoding/json marshals them differently (null vs []). tools/list is
+	// JSON-RPC wire output, so the marshaled bytes are what actually matters
+	// here, not the Go value.
+	whoAmIJSON, err := json.Marshal(whoAmI.InputSchema)
+	if err != nil {
+		t.Fatalf("json.Marshal(whoAmI.InputSchema) error: %v", err)
+	}
+	if strings.Contains(string(whoAmIJSON), `"required":null`) {
+		t.Errorf("wormhole.agent.whoami inputSchema marshaled with required:null, want required:[] or omitted key: %s", whoAmIJSON)
+	}
+
+	// No tool's required array should contain "project_id" twice.
+	for i := range entries {
+		entryJSON, err := json.Marshal(entries[i].InputSchema)
+		if err != nil {
+			t.Fatalf("json.Marshal(%s.InputSchema) error: %v", entries[i].Name, err)
+		}
+		if strings.Contains(string(entryJSON), `"required":null`) {
+			t.Errorf("%s inputSchema marshaled with required:null, want required:[] or omitted key: %s", entries[i].Name, entryJSON)
+		}
+
+		required, _ := entries[i].InputSchema["required"].([]string)
+		count := 0
+		for _, name := range required {
+			if name == "project_id" {
+				count++
+			}
+		}
+		if count > 1 {
+			t.Errorf("%s required = %#v, want at most one %q", entries[i].Name, required, "project_id")
+		}
 	}
 }
 
