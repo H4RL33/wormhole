@@ -1,10 +1,15 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"time"
+
+	"github.com/H4RL33/wormhole/internal/core/identity"
 )
 
 // RPCRequest is the JSON-RPC 2.0 request envelope (docs/mcp-protocol.md §3).
@@ -207,4 +212,98 @@ func jsonSchemaForType(t reflect.Type) map[string]any {
 	default:
 		return map[string]any{"type": "object"}
 	}
+}
+
+// toolsCallParams is the tools/call method's params shape
+// (docs/mcp-protocol.md §4).
+type toolsCallParams struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
+// toolCallResultContent is the MCP content-wrapper item type.
+type toolCallResultContent struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// toolCallResult is the tools/call result shape wrapping a tool's own
+// output or failure message (docs/mcp-protocol.md §3, §4).
+type toolCallResult struct {
+	Content []toolCallResultContent `json:"content"`
+	IsError bool                    `json:"isError,omitempty"`
+}
+
+// HandleToolsCall implements the JSON-RPC "tools/call" method
+// (docs/mcp-protocol.md §4, §4.1, §5). project_id is read out of
+// arguments per §4.1 — there is no sibling envelope field. Unknown tool
+// name is treated as -32602 Invalid params (flagged inference,
+// docs/mcp-protocol.md doesn't decide this case explicitly; consistent
+// with the doc's own example of a params-shape failure). Auth failure
+// (missing/invalid token) is an RPC error per §5; a tool's own handler
+// returning an error is NOT an RPC error — it's a successful result with
+// isError: true (§3).
+func HandleToolsCall(ctx context.Context, registry *Registry, identityStore *identity.Store, authHeader string, rawParams json.RawMessage) (any, *RPCError) {
+	var params toolsCallParams
+	if err := json.Unmarshal(rawParams, &params); err != nil || params.Name == "" {
+		return nil, &RPCError{Code: RPCInvalidParams, Message: "tools/call requires params.name"}
+	}
+
+	tool, ok := registry.Get(params.Name)
+	if !ok {
+		return nil, &RPCError{Code: RPCInvalidParams, Message: "unknown tool: " + params.Name}
+	}
+
+	projectID, err := extractProjectID(params.Arguments)
+	if err != nil {
+		return nil, &RPCError{Code: RPCInvalidParams, Message: err.Error()}
+	}
+
+	var scope *identity.AuthenticatedScope
+	if tool.RequiresAuth {
+		token := bearerToken(authHeader)
+		if token == "" {
+			return nil, &RPCError{Code: RPCInvalidParams, Message: "missing bearer token"}
+		}
+		resolved, err := identityStore.WhoAmI(ctx, projectID, token)
+		if errors.Is(err, identity.ErrInvalidToken) {
+			return nil, &RPCError{Code: -32001, Message: "invalid or expired token"}
+		}
+		if err != nil {
+			return nil, &RPCError{Code: RPCInternalError, Message: "auth resolution failed"}
+		}
+		scope = &resolved
+	}
+
+	result, err := tool.Handler(ctx, scope, projectID, params.Arguments)
+	if err != nil {
+		return toolCallResult{
+			Content: []toolCallResultContent{{Type: "text", Text: err.Error()}},
+			IsError: true,
+		}, nil
+	}
+
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		return nil, &RPCError{Code: RPCInternalError, Message: "encode tool result"}
+	}
+	return toolCallResult{
+		Content: []toolCallResultContent{{Type: "text", Text: string(resultJSON)}},
+	}, nil
+}
+
+// extractProjectID reads project_id out of a tools/call arguments object
+// (docs/mcp-protocol.md §4.1 — project_id lives inside arguments, not a
+// sibling envelope field). Missing project_id is a params-shape failure:
+// every project-scoped tool's inputSchema marks it required (Chapter 2's
+// tools/list), so a caller omitting it has violated the advertised
+// schema.
+func extractProjectID(arguments json.RawMessage) (string, error) {
+	var probe struct {
+		ProjectID string `json:"project_id"`
+	}
+	if err := json.Unmarshal(arguments, &probe); err != nil {
+		return "", fmt.Errorf("decode arguments: %w", err)
+	}
+	return probe.ProjectID, nil
 }
