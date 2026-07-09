@@ -325,25 +325,39 @@ func (s *Store) IssueToken(ctx context.Context, agentID, projectID string, permi
 
 // WhoAmI resolves a raw bearer token to the agent identity that owns it.
 // Returns ErrInvalidToken for any token that doesn't match a stored hash —
-// forged, expired-format, or simply unknown.
+// forged, expired-format, or simply unknown. projectID is optional: when
+// non-empty, the token must belong to exactly that project (cross-tenant
+// isolation — a token issued for project A must never resolve under
+// project B's id, github.com/H4RL33/wormhole/issues/11 comment thread).
+// When empty (wormhole.agent.whoami's schema is exempted from requiring
+// project_id per RFC-0001 §9 — see internal/mcp/jsonrpc.go's
+// buildInputSchema), the token's own project is resolved from
+// agent_tokens.project_id instead of requiring the caller to already know
+// it.
 func (s *Store) WhoAmI(ctx context.Context, projectID, rawToken string) (AuthenticatedScope, error) {
-	if projectID == "" || rawToken == "" {
+	if rawToken == "" {
 		return AuthenticatedScope{}, ErrInvalidToken
 	}
 
 	sum := sha256.Sum256([]byte(rawToken))
 	hash := hex.EncodeToString(sum[:])
 
+	query := `SELECT a.id, a.owner, a.model, a.capabilities, a.created_at, t.permissions, t.project_id
+		 FROM agents a
+		 JOIN agent_tokens t ON t.agent_id = a.id
+		 WHERE t.token_hash = $1 AND t.expires_at > now()`
+	args := []any{hash}
+	if projectID != "" {
+		query += ` AND t.project_id = $2`
+		args = append(args, projectID)
+	}
+
 	var agent Agent
 	var capsRaw []byte
 	var permissionsRaw []byte
-	err := s.db.QueryRowContext(ctx,
-		`SELECT a.id, a.owner, a.model, a.capabilities, a.created_at, t.permissions
-		 FROM agents a
-		 JOIN agent_tokens t ON t.agent_id = a.id
-		 WHERE t.token_hash = $1 AND t.project_id = $2 AND t.expires_at > now()`,
-		hash, projectID,
-	).Scan(&agent.ID, &agent.Owner, &agent.Model, &capsRaw, &agent.CreatedAt, &permissionsRaw)
+	var resolvedProjectID string
+	err := s.db.QueryRowContext(ctx, query, args...).
+		Scan(&agent.ID, &agent.Owner, &agent.Model, &capsRaw, &agent.CreatedAt, &permissionsRaw, &resolvedProjectID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AuthenticatedScope{}, ErrInvalidToken
 	}
@@ -359,7 +373,7 @@ func (s *Store) WhoAmI(ctx context.Context, projectID, rawToken string) (Authent
 		return AuthenticatedScope{}, fmt.Errorf("identity: unmarshal permissions: %w", err)
 	}
 
-	return AuthenticatedScope{Agent: agent, ProjectID: projectID, Permissions: permissions}, nil
+	return AuthenticatedScope{Agent: agent, ProjectID: resolvedProjectID, Permissions: permissions}, nil
 }
 
 func generateToken() (raw string, hash string, err error) {

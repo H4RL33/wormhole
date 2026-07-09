@@ -271,6 +271,35 @@ func TestWhoAmI_RejectsSameAgentTokenInDifferentProject(t *testing.T) {
 	}
 }
 
+// TestWhoAmI_EmptyProjectIDResolvesFromToken proves whoami is reachable
+// from a spec-compliant MCP client that omits project_id, per RFC-0001 §9
+// (whoami's tool schema exempts project_id from "required" — see
+// internal/mcp/jsonrpc.go's buildInputSchema). An empty projectID must
+// resolve the token's own project from agent_tokens instead of being
+// rejected outright (github.com/H4RL33/wormhole/issues/11).
+func TestWhoAmI_EmptyProjectIDResolvesFromToken(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "whoami-empty-project-id")
+
+	agent, _, token, err := s.Register(ctx, projectID, []string{"kb.read"}, "harley", "claude", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	cleanupAgent(t, s, agent.ID)
+
+	scope, err := s.WhoAmI(ctx, "", token)
+	if err != nil {
+		t.Fatalf("WhoAmI(\"\", token) error = %v, want nil", err)
+	}
+	if scope.Agent.ID != agent.ID {
+		t.Errorf("WhoAmI(\"\", token).Agent.ID = %q, want %q", scope.Agent.ID, agent.ID)
+	}
+	if scope.ProjectID != projectID {
+		t.Errorf("WhoAmI(\"\", token).ProjectID = %q, want %q (resolved from agent_tokens, not caller-supplied)", scope.ProjectID, projectID)
+	}
+}
+
 // TestRegister_TokenHashNotReversible: the raw token must never be
 // recoverable from storage — only its hash is persisted, and the hash
 // must differ from the raw value (RFC-0001 §13).
