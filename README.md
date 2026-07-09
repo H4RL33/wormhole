@@ -50,7 +50,7 @@ Follow this guide to spin up a local instance of `wormhole-server` and verify th
 
 ### Prerequisites
 
-- Go 1.21+
+- Go 1.26.4+
 - Docker & Docker Compose
 - PostgreSQL client (`psql`) installed locally (optional, for manual queries)
 
@@ -112,6 +112,13 @@ go run cmd/wormhole-cli/main.go join \
 ```
 
 Upon success, the CLI will output your credentials and persist them to `~/.wormhole/credentials.json`.
+
+---
+
+## Design Documents
+
+- [RFC-0001: Wormhole Core](docs/rfcs/wormhole_rfc.md)
+- [RFC-0002: Wormhole Governance](docs/rfcs/wormhole_rfc_governance.md)
 
 ---
 

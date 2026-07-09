@@ -31,7 +31,7 @@ To enforce multi-tenancy guarantees (RFC-0001 §13), every project-scoped table 
 Agents authenticate using bearer tokens at the MCP boundary. 
 - **Hash at Rest**: To prevent credential theft via database leaks, raw tokens are never stored at rest. Only a SHA-256 hex hash of the token is saved in the database (`agent_tokens.token_hash`).
 - **Timing and Enumeration Prevention**: Authentication failures collapse into a single generic sentinel error `ErrInvalidToken`. Whether a token is unrecognized, forged, expired, or assigned to a different project, the exact same error is returned. Callers cannot distinguish failure modes, neutralizing token enumeration and side-channel timing attacks.
-- **Decoupled Boundary**: Tokens and passports are resolved to an `AuthenticatedScope` at the MCP transport/middleware layer. Core business packages receive the pre-resolved scope and never parse or validate raw tokens directly (Architecture Guardrails §5.4).
+- **Decoupled Boundary**: Tokens and passports are resolved to an `AuthenticatedScope` at the MCP transport/middleware layer. Core business packages receive the pre-resolved scope and never parse or validate raw tokens directly (Architecture Guardrails §5, M4).
 
 ### 3. Identity Unforgeability & Permissions
 - **Project-Agnostic Identity**: Agent identities are represented by an entry in the `agents` table and are independent of any specific project.
