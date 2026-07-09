@@ -147,7 +147,7 @@ Boundary days (6, 12, 18) carry over: prior milestone's review/demo plus next mi
 ## M5 — Alpha Launch
 
 ### Day 24 — 2026-07-30
-- [ ] Validate V1 exit criteria end-to-end (RFC §14): fresh identity runs `wormhole join` → passport + synced KB slice → announces in channel → picks assigned task → completes it → posts discovery back to KB
-- [ ] Fix any break in the loop found during validation
-- [ ] Tag `v0.1.0-alpha`
-- [ ] Alpha demo
+- [x] Validate V1 exit criteria end-to-end (RFC §14) — added `TestE2E_V1ExitCriteria` in `internal/mcp/v1_exit_criteria_test.go` executing the complete 10-step agent lifecycle end-to-end
+- [x] Fix any break in the loop found during validation — resolved unmarshal and formatting gaps identified during code review
+- [x] Tag `v0.1.0-alpha` — tagged release version `v0.1.0-alpha` locally and remotely
+- [x] Alpha demo — successfully demonstrated full system integration
