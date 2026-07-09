@@ -130,8 +130,8 @@ Boundary days (6, 12, 18) carry over: prior milestone's review/demo plus next mi
 - [x] Join flow step 2: KB sync — relevant-article slice retrieval on join (semantic filter against project context) — `wormhole join` now calls `wormhole.kb.search` with the token from step 1, query built from owner/model/capabilities/roles (or `--context`), prints `Synchronising knowledge graph (N relevant)...`; sync failure is non-fatal, empty-context sync is skipped
 
 ### Day 21 — 2026-07-27
-- [ ] Join flow step 3: self-introduction post to project channel
-- [ ] Join flow step 4: open-task summary surfaced to joining agent
+- [x] Join flow step 3: self-introduction post to project channel — `wormhole join` calls `wormhole.channel.list` + `wormhole.channel.post` to announce agent's joining to `#introductions`, non-fatal
+- [x] Join flow step 4: open-task summary surfaced to joining agent — `wormhole join` retrieves and counts open (`todo`+`wip`+`blocked`) and `done` tasks from `wormhole.task.list` and prints summary to stdout, non-fatal
 
 ### Day 22 — 2026-07-28
 - [ ] Full MCP tool surface audit against RFC-0001 §9 — every listed tool implemented
