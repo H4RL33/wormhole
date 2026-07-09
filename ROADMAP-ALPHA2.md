@@ -56,9 +56,9 @@ system, git integration beyond the existing manual link tools, write access from
       custom header check into the JSON-RPC transport's `Authorization` header handling
 
 ### Chapter 2 — 2026-08-01
-- [ ] New `internal/mcp/jsonrpc.go`: JSON-RPC 2.0 request/response envelope types, error codes
-- [ ] `initialize` method handler (protocol version, server capabilities/name/version)
-- [ ] `tools/list` method handler, auto-derived from the existing `Registry` (no manual duplication
+- [x] New `internal/mcp/jsonrpc.go`: JSON-RPC 2.0 request/response envelope types, error codes
+- [x] `initialize` method handler (protocol version, server capabilities/name/version)
+- [x] `tools/list` method handler, auto-derived from the existing `Registry` (no manual duplication
       of the 16 registered tools' schemas)
 
 ### Chapter 3 — 2026-08-02
