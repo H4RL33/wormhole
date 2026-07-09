@@ -1,0 +1,251 @@
+package roles
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"os"
+	"reflect"
+	"testing"
+
+	_ "github.com/lib/pq"
+
+	"github.com/H4RL33/wormhole/internal/types"
+)
+
+// testStore opens a real connection to the configured Postgres instance
+// and skips the test if it isn't reachable — these are integration tests
+// against real schema/RLS behavior, not mocks (RFC-0001 §13 claims are
+// about actual storage guarantees).
+func testStore(t *testing.T) *Store {
+	t.Helper()
+	cfg := types.LoadConfig()
+	db, err := sql.Open("postgres", cfg.DatabaseURL)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.PingContext(context.Background()); err != nil {
+		if os.Getenv("WORMHOLE_INTEGRATION_REQUIRED") == "1" {
+			t.Fatalf("postgres required but not reachable: %v", err)
+		}
+		t.Skipf("postgres not reachable (%v) — run `docker compose up -d db` and apply migrations before running this test", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return NewStore(db)
+}
+
+// TestGetTemplate_BackendEngineer covers the happy path: retrieving
+// a seeded template and verifying its permission bundle and default task view.
+func TestGetTemplate_BackendEngineer(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	got, err := s.GetTemplate(ctx, "backend-engineer")
+	if err != nil {
+		t.Fatalf("GetTemplate: %v", err)
+	}
+
+	if got.Name != "backend-engineer" {
+		t.Errorf("Name = %q, want %q", got.Name, "backend-engineer")
+	}
+
+	expectedPerms := []string{
+		"task.read", "task.write", "kb.read", "kb.write",
+		"channel.read", "channel.write",
+	}
+	if !reflect.DeepEqual(got.PermissionBundle, expectedPerms) {
+		t.Errorf("PermissionBundle = %v, want %v", got.PermissionBundle, expectedPerms)
+	}
+
+	// Verify default task view is present and valid JSON
+	if len(got.DefaultTaskView) == 0 {
+		t.Fatal("DefaultTaskView is empty")
+	}
+	var taskView map[string]interface{}
+	if err := json.Unmarshal(got.DefaultTaskView, &taskView); err != nil {
+		t.Errorf("DefaultTaskView unmarshal: %v", err)
+	}
+}
+
+// TestGetTemplate_ProjectManager covers another happy path with a different
+// permission bundle (includes task.assign).
+func TestGetTemplate_ProjectManager(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	got, err := s.GetTemplate(ctx, "project-manager")
+	if err != nil {
+		t.Fatalf("GetTemplate: %v", err)
+	}
+
+	if got.Name != "project-manager" {
+		t.Errorf("Name = %q, want %q", got.Name, "project-manager")
+	}
+
+	expectedPerms := []string{
+		"task.read", "task.write", "kb.read", "kb.write",
+		"channel.read", "channel.write", "task.assign",
+	}
+	if !reflect.DeepEqual(got.PermissionBundle, expectedPerms) {
+		t.Errorf("PermissionBundle = %v, want %v", got.PermissionBundle, expectedPerms)
+	}
+}
+
+// TestGetTemplate_Reviewer covers a template with a minimal permission set
+// (task.read only, no task.write).
+func TestGetTemplate_Reviewer(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	got, err := s.GetTemplate(ctx, "reviewer")
+	if err != nil {
+		t.Fatalf("GetTemplate: %v", err)
+	}
+
+	expectedPerms := []string{
+		"task.read", "kb.read", "kb.write",
+		"channel.read", "channel.write",
+	}
+	if !reflect.DeepEqual(got.PermissionBundle, expectedPerms) {
+		t.Errorf("PermissionBundle = %v, want %v", got.PermissionBundle, expectedPerms)
+	}
+}
+
+// TestGetTemplate_NotFound covers the error case when a template name
+// doesn't exist.
+func TestGetTemplate_NotFound(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	_, err := s.GetTemplate(ctx, "nonexistent-role")
+	if err == nil {
+		t.Fatal("GetTemplate: expected error, got nil")
+	}
+	if !errors.Is(err, ErrTemplateNotFound) {
+		t.Errorf("error = %v, want ErrTemplateNotFound", err)
+	}
+}
+
+// TestListTemplates_All verifies that ListTemplates returns all six
+// pre-seeded templates in deterministic order (by name ascending).
+func TestListTemplates_All(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	got, err := s.ListTemplates(ctx)
+	if err != nil {
+		t.Fatalf("ListTemplates: %v", err)
+	}
+
+	if len(got) != 6 {
+		t.Errorf("count = %d, want 6", len(got))
+	}
+
+	expectedOrder := []string{
+		"backend-engineer",
+		"contributor",
+		"frontend-engineer",
+		"maintainer",
+		"project-manager",
+		"reviewer",
+	}
+
+	if len(got) > 0 {
+		gotNames := make([]string, len(got))
+		for i, template := range got {
+			gotNames[i] = template.Name
+		}
+		if !reflect.DeepEqual(gotNames, expectedOrder) {
+			t.Errorf("order = %v, want %v", gotNames, expectedOrder)
+		}
+	}
+
+	// Verify each template has a non-empty permission bundle and default view
+	for _, tmpl := range got {
+		if len(tmpl.PermissionBundle) == 0 {
+			t.Errorf("template %q: PermissionBundle is empty", tmpl.Name)
+		}
+		if len(tmpl.DefaultTaskView) == 0 {
+			t.Errorf("template %q: DefaultTaskView is empty", tmpl.Name)
+		}
+	}
+}
+
+// TestListTemplates_OrderingDeterministic verifies that ListTemplates
+// always returns templates in the same order (alphabetically by name).
+func TestListTemplates_OrderingDeterministic(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Call ListTemplates twice and verify identical order
+	list1, err := s.ListTemplates(ctx)
+	if err != nil {
+		t.Fatalf("first ListTemplates: %v", err)
+	}
+
+	list2, err := s.ListTemplates(ctx)
+	if err != nil {
+		t.Fatalf("second ListTemplates: %v", err)
+	}
+
+	if len(list1) != len(list2) {
+		t.Errorf("count differs: %d vs %d", len(list1), len(list2))
+	}
+
+	for i := range list1 {
+		if list1[i].Name != list2[i].Name {
+			t.Errorf("order differs at index %d: %q vs %q", i, list1[i].Name, list2[i].Name)
+		}
+	}
+}
+
+// TestGetTemplate_AllSeededRoles verifies that all six seeded templates
+// can be retrieved and have the correct permission bundles.
+func TestGetTemplate_AllSeededRoles(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	testCases := []struct {
+		name            string
+		expectedPerms   []string
+	}{
+		{
+			"backend-engineer",
+			[]string{"task.read", "task.write", "kb.read", "kb.write", "channel.read", "channel.write"},
+		},
+		{
+			"frontend-engineer",
+			[]string{"task.read", "task.write", "kb.read", "kb.write", "channel.read", "channel.write"},
+		},
+		{
+			"project-manager",
+			[]string{"task.read", "task.write", "kb.read", "kb.write", "channel.read", "channel.write", "task.assign"},
+		},
+		{
+			"contributor",
+			[]string{"task.read", "task.write", "kb.read", "kb.write", "channel.read", "channel.write"},
+		},
+		{
+			"reviewer",
+			[]string{"task.read", "kb.read", "kb.write", "channel.read", "channel.write"},
+		},
+		{
+			"maintainer",
+			[]string{"task.read", "task.write", "kb.read", "kb.write", "channel.read", "channel.write", "task.assign"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := s.GetTemplate(ctx, tc.name)
+			if err != nil {
+				t.Fatalf("GetTemplate: %v", err)
+			}
+
+			if !reflect.DeepEqual(got.PermissionBundle, tc.expectedPerms) {
+				t.Errorf("PermissionBundle = %v, want %v", got.PermissionBundle, tc.expectedPerms)
+			}
+		})
+	}
+}
