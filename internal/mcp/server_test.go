@@ -1,13 +1,13 @@
 package mcp
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	_ "github.com/lib/pq"
@@ -53,18 +53,15 @@ func testDB(t *testing.T) *sql.DB {
 func TestCallHandler_UnknownTool(t *testing.T) {
 	registry := NewRegistry()
 	store := testIdentityStore(t)
-	handler := NewCallHandler(registry, store)
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(NewMCPHandler(registry, store))
 	defer srv.Close()
 
-	body, _ := json.Marshal(CallRequest{Tool: "wormhole.agent.nonexistent", ProjectID: "00000000-0000-0000-0000-000000000000", Arguments: json.RawMessage(`{}`)})
-	resp, err := http.Post(srv.URL, "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("POST: %v", err)
+	status, rpcResp := toolsCallRPC(t, srv, "", "wormhole.agent.nonexistent", "00000000-0000-0000-0000-000000000000", json.RawMessage(`{}`))
+	if status != http.StatusOK {
+		t.Fatalf("status: got %d, want %d", status, http.StatusOK)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("status: got %d, want %d", resp.StatusCode, http.StatusNotFound)
+	if rpcResp.Error == nil || rpcResp.Error.Code != RPCInvalidParams {
+		t.Fatalf("rpcResp.Error: got %+v, want Code %d", rpcResp.Error, RPCInvalidParams)
 	}
 }
 
@@ -78,18 +75,18 @@ func TestCallHandler_RequiresAuthMissingToken(t *testing.T) {
 		},
 	})
 	store := testIdentityStore(t)
-	handler := NewCallHandler(registry, store)
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(NewMCPHandler(registry, store))
 	defer srv.Close()
 
-	body, _ := json.Marshal(CallRequest{Tool: "wormhole.agent.whoami", ProjectID: "00000000-0000-0000-0000-000000000000", Arguments: json.RawMessage(`{}`)})
-	resp, err := http.Post(srv.URL, "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("POST: %v", err)
+	status, rpcResp := toolsCallRPC(t, srv, "", "wormhole.agent.whoami", "00000000-0000-0000-0000-000000000000", json.RawMessage(`{}`))
+	if status != http.StatusOK {
+		t.Fatalf("status: got %d, want %d", status, http.StatusOK)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("status: got %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	if rpcResp.Error == nil || rpcResp.Error.Code != RPCInvalidParams {
+		t.Fatalf("rpcResp.Error: got %+v, want Code %d", rpcResp.Error, RPCInvalidParams)
+	}
+	if !strings.Contains(rpcResp.Error.Message, "missing bearer token") {
+		t.Fatalf("rpcResp.Error.Message: got %q, want it to contain %q", rpcResp.Error.Message, "missing bearer token")
 	}
 }
 
@@ -103,21 +100,15 @@ func TestCallHandler_RequiresAuthInvalidToken(t *testing.T) {
 		},
 	})
 	store := testIdentityStore(t)
-	handler := NewCallHandler(registry, store)
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(NewMCPHandler(registry, store))
 	defer srv.Close()
 
-	body, _ := json.Marshal(CallRequest{Tool: "wormhole.agent.whoami", ProjectID: "00000000-0000-0000-0000-000000000000", Arguments: json.RawMessage(`{}`)})
-	req, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer not-a-real-token")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("POST: %v", err)
+	status, rpcResp := toolsCallRPC(t, srv, "not-a-real-token", "wormhole.agent.whoami", "00000000-0000-0000-0000-000000000000", json.RawMessage(`{}`))
+	if status != http.StatusOK {
+		t.Fatalf("status: got %d, want %d", status, http.StatusOK)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("status: got %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	if rpcResp.Error == nil || rpcResp.Error.Code != -32001 {
+		t.Fatalf("rpcResp.Error: got %+v, want Code %d", rpcResp.Error, -32001)
 	}
 }
 
@@ -139,19 +130,10 @@ func TestCallHandler_NoAuthRequiredDispatchesDirectly(t *testing.T) {
 		},
 	})
 	store := testIdentityStore(t)
-	handler := NewCallHandler(registry, store)
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(NewMCPHandler(registry, store))
 	defer srv.Close()
 
-	body, _ := json.Marshal(CallRequest{Tool: "wormhole.agent.register", ProjectID: "proj-1", Arguments: json.RawMessage(`{}`)})
-	resp, err := http.Post(srv.URL, "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("POST: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status: got %d, want %d", resp.StatusCode, http.StatusOK)
-	}
+	mustToolResult(t, srv, "", "wormhole.agent.register", "proj-1", json.RawMessage(`{}`))
 	if !called {
 		t.Fatalf("handler was not called")
 	}
@@ -196,51 +178,6 @@ func TestToolsDiscoveryEndpoint(t *testing.T) {
 	for _, key := range forbiddenKeys {
 		if _, ok := toolMap[key]; ok {
 			t.Errorf("forbidden key %q found in serialized tool map", key)
-		}
-	}
-
-	// 2. Test the HTTP handler logic matching the one in main.go
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tools := registry.List()
-		w.Header().Set("Content-Type", "application/json")
-		if len(tools) == 0 {
-			w.Write([]byte("[]"))
-			return
-		}
-		json.NewEncoder(w).Encode(tools)
-	})
-
-	req := httptest.NewRequest(http.MethodGet, "/mcp/tools", nil)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("HTTP status: got %d, want %d", rec.Code, http.StatusOK)
-	}
-
-	contentType := rec.Header().Get("Content-Type")
-	if contentType != "application/json" {
-		t.Errorf("Content-Type: got %q, want %q", contentType, "application/json")
-	}
-
-	var httpList []map[string]any
-	if err := json.NewDecoder(rec.Body).Decode(&httpList); err != nil {
-		t.Fatalf("failed to decode response body: %v", err)
-	}
-
-	if len(httpList) != 1 {
-		t.Fatalf("HTTP body got %d tools, want 1", len(httpList))
-	}
-
-	httpToolMap := httpList[0]
-	for _, key := range requiredKeys {
-		if _, ok := httpToolMap[key]; !ok {
-			t.Errorf("HTTP response missing key %q in tool map", key)
-		}
-	}
-	for _, key := range forbiddenKeys {
-		if _, ok := httpToolMap[key]; ok {
-			t.Errorf("HTTP response forbidden key %q found in tool map", key)
 		}
 	}
 }
