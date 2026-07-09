@@ -31,6 +31,16 @@ freezes and Chapters 2-4 build against; there is no back-compat shim (project is
   zero current consumers would violate `docs/architecture.md` §0.5 (smallest correct diff).
 - Every request and response body is `Content-Type: application/json`.
 
+HTTP status codes carry only transport-level meaning, never RPC-level outcome: every
+well-formed JSON-RPC request/response exchange over `POST /mcp` returns HTTP `200 OK`
+regardless of whether the RPC call succeeds or the response body's `error` field is populated
+(a JSON-RPC error is still valid JSON-RPC, decoded from a normal 200 body). `GET /mcp` always
+returns `405 Method Not Allowed` (no SSE stream implemented, see below). A notification (no
+`id` field) gets no response body at all — HTTP `202 Accepted`, empty, since there is nothing
+to decode. Malformed input that fails before a `RPCRequest` can even be decoded (invalid JSON)
+still returns `200` with a JSON-RPC `-32700` error body, not an HTTP `4xx` — the malformed body
+is a protocol-level failure the client parses via the JSON-RPC envelope, not the HTTP layer.
+
 ## 3. JSON-RPC 2.0 envelope
 
 Request:

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"log"
 	"net/http"
 	"time"
@@ -53,16 +52,7 @@ func main() {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.HandleFunc("/mcp/tools", func(w http.ResponseWriter, r *http.Request) {
-		tools := registry.List()
-		w.Header().Set("Content-Type", "application/json")
-		if len(tools) == 0 {
-			w.Write([]byte("[]"))
-			return
-		}
-		json.NewEncoder(w).Encode(tools)
-	})
-	mux.HandleFunc("/mcp/tools/call", mcp.NewCallHandler(registry, identityStore))
+	mux.HandleFunc("/mcp", mcp.NewMCPHandler(registry, identityStore))
 
 	log.Printf("wormhole-server listening on %s", cfg.ListenAddr)
 	server := &http.Server{

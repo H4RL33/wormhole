@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
 	"strings"
 	"time"
@@ -306,4 +307,74 @@ func extractProjectID(arguments json.RawMessage) (string, error) {
 		return "", fmt.Errorf("decode arguments: %w", err)
 	}
 	return probe.ProjectID, nil
+}
+
+// bearerToken extracts the raw token from an `Authorization: Bearer <token>`
+// header value, or "" if the header doesn't carry that scheme.
+func bearerToken(header string) string {
+	const prefix = "Bearer "
+	if !strings.HasPrefix(header, prefix) {
+		return ""
+	}
+	return strings.TrimPrefix(header, prefix)
+}
+
+// NewMCPHandler builds the single /mcp Streamable HTTP endpoint
+// (docs/mcp-protocol.md §2): POST carries JSON-RPC requests/notifications,
+// GET is reserved for a server-push SSE stream this server doesn't
+// implement yet (405, per §2 — no current consumer, docs/architecture.md
+// §0.5 smallest correct diff).
+func NewMCPHandler(registry *Registry, identityStore *identity.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req RPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeRPCResponse(w, RPCResponse{JSONRPC: "2.0", Error: &RPCError{Code: RPCParseError, Message: "parse error"}})
+			return
+		}
+
+		// jsonrpc/method validity is checked before notification status:
+		// a message missing "jsonrpc" or "method" is malformed regardless
+		// of whether it also happens to omit "id" — it never qualifies as
+		// a valid notification (docs/mcp-protocol.md §3.1, -32600).
+		if req.JSONRPC != "2.0" || req.Method == "" {
+			writeRPCResponse(w, RPCResponse{JSONRPC: "2.0", ID: req.ID, Error: &RPCError{Code: RPCInvalidRequest, Message: "invalid request"}})
+			return
+		}
+
+		isNotification := len(req.ID) == 0 || string(req.ID) == "null"
+		if isNotification {
+			// No result/error is ever produced for a notification — the
+			// method (e.g. notifications/initialized) is acknowledged
+			// with an empty 202, never dispatched to a method handler
+			// that expects to answer (docs/mcp-protocol.md §3).
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+
+		var result any
+		var rpcErr *RPCError
+		switch req.Method {
+		case "initialize":
+			result = HandleInitialize()
+		case "tools/list":
+			result = HandleToolsList(registry)
+		case "tools/call":
+			result, rpcErr = HandleToolsCall(r.Context(), registry, identityStore, r.Header.Get("Authorization"), req.Params)
+		default:
+			rpcErr = &RPCError{Code: RPCMethodNotFound, Message: "method not found: " + req.Method}
+		}
+
+		writeRPCResponse(w, RPCResponse{JSONRPC: "2.0", ID: req.ID, Result: result, Error: rpcErr})
+	}
+}
+
+func writeRPCResponse(w http.ResponseWriter, resp RPCResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(resp)
 }
