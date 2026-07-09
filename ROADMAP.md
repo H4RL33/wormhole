@@ -138,9 +138,9 @@ Boundary days (6, 12, 18) carry over: prior milestone's review/demo plus next mi
 - [x] Close gaps found in audit — aligned inputs for `wormhole.agent.register` (`name` fallback), task, channel, and KB tools (`project_id`), enforcing mismatch validations
 
 ### Day 23 — 2026-07-29
-- [ ] Hardening: multi-tenant isolation tests (cross-project KB/task leakage checks, RFC §13)
-- [ ] Hardening: auth edge cases, expired/forged token attempts
-- [ ] Load smoke test on join flow + KB search
+- [x] Hardening: multi-tenant isolation tests (cross-project KB/task leakage checks, RFC §13) — added `TestMCP_MultiTenantIsolation` in `internal/mcp/hardening_test.go` to assert no cross-project leakage at MCP boundary
+- [x] Hardening: auth edge cases, expired/forged token attempts — added `TestMCP_AuthEdgeCases` validating forged/expired/mismatch token rejections
+- [x] Load smoke test on join flow + KB search — added `TestMCP_LoadSmokeTest` verifying concurrent registration, joining, and KB usage under load without races
 
 ---
 
