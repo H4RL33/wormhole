@@ -56,6 +56,8 @@ Because of that, it is relatively trivial to create third-party connectors to ot
 
 We state that we will never officially support the aforementioned providers, however it would be impossible for us to stop the development of community connectors for these platforms; so simply, if one was made, go ahead and use it.
 
+Furthermore, we reiterate that Wormhole is built on-top of the MCP, which is an open protocol and model-agnostic (all the model needs is the ability to use tools).
+
 All we can do is encourage you to reconsider your provider of choice.
 
 ## Status
