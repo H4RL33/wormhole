@@ -38,21 +38,46 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
-// callRequest/callResponse mirror internal/mcp.CallRequest/CallResponse's
-// JSON shape (internal/mcp/server.go). cmd/wormhole-cli cannot import
-// internal/mcp (docs/architecture.md §2 module table restricts this
-// package to internal/types and client-side code only, and mcp pulls in
-// the server's registry/auth stack), so the wire contract is duplicated
-// here instead.
-type callRequest struct {
-	Tool      string          `json:"tool"`
-	ProjectID string          `json:"project_id"`
+// rpcRequest/rpcResponse/rpcError/toolsCallParams/toolCallResult mirror
+// internal/mcp's JSON-RPC 2.0 wire shapes (internal/mcp/jsonrpc.go,
+// docs/mcp-protocol.md §3-§4). cmd/wormhole-cli cannot import internal/mcp
+// (docs/architecture.md §2 module table restricts this package to
+// internal/types and client-side code only, and mcp pulls in the server's
+// registry/auth stack), so the wire contract is duplicated here instead,
+// same pattern as registerAgentInput/registerAgentOutput below.
+type rpcRequest struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id,omitempty"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
+}
+
+type rpcResponse struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id,omitempty"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Error   *rpcError       `json:"error,omitempty"`
+}
+
+type rpcError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
+}
+
+type toolsCallParams struct {
+	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments"`
 }
 
-type callResponse struct {
-	Result json.RawMessage `json:"result,omitempty"`
-	Error  string          `json:"error,omitempty"`
+type toolCallResultContent struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type toolCallResult struct {
+	Content []toolCallResultContent `json:"content"`
+	IsError bool                    `json:"isError,omitempty"`
 }
 
 // registerAgentInput/registerAgentOutput mirror
@@ -135,21 +160,49 @@ type credentials struct {
 	IssuedAt   time.Time `json:"issued_at"`
 }
 
-// callTool POSTs one MCP tool invocation to server's /mcp/tools/call
-// endpoint (cmd/wormhole-server/main.go) and returns the decoded result's
-// raw JSON. token is optional: pass "" for tools that don't require auth
-// (e.g. wormhole.agent.register); a non-empty token is sent as a bearer
-// Authorization header for tools that do (e.g. wormhole.kb.search).
+// callTool sends one JSON-RPC 2.0 "tools/call" request to server's single
+// /mcp endpoint (docs/mcp-protocol.md §2-§4.1, internal/mcp/jsonrpc.go) and
+// returns the decoded tool result's raw JSON. project_id is folded into
+// arguments, not sent as a sibling field (§4.1 — there is no envelope
+// field for it). token is optional: pass "" for tools that don't require
+// auth (e.g. wormhole.agent.register); a non-empty token is sent as a
+// bearer Authorization header for tools that do (e.g. wormhole.kb.search).
+// A tool-handler failure (isError: true) and a JSON-RPC-level error both
+// surface as a plain Go error — callers don't need to distinguish them,
+// matching this function's pre-Chapter-4 behavior.
 func callTool(client *http.Client, server, tool, projectID, token string, args any) (json.RawMessage, error) {
 	argsRaw, err := json.Marshal(args)
 	if err != nil {
 		return nil, fmt.Errorf("marshal %s arguments: %w", tool, err)
 	}
-	reqBody, err := json.Marshal(callRequest{Tool: tool, ProjectID: projectID, Arguments: argsRaw})
-	if err != nil {
-		return nil, fmt.Errorf("marshal call request: %w", err)
+	var argsMap map[string]any
+	if err := json.Unmarshal(argsRaw, &argsMap); err != nil {
+		return nil, fmt.Errorf("decode %s arguments for project_id injection: %w", tool, err)
 	}
-	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(server, "/")+"/mcp/tools/call", bytes.NewReader(reqBody))
+	if argsMap == nil {
+		argsMap = map[string]any{}
+	}
+	argsMap["project_id"] = projectID
+	argsWithProject, err := json.Marshal(argsMap)
+	if err != nil {
+		return nil, fmt.Errorf("marshal %s arguments with project_id: %w", tool, err)
+	}
+
+	paramsRaw, err := json.Marshal(toolsCallParams{Name: tool, Arguments: argsWithProject})
+	if err != nil {
+		return nil, fmt.Errorf("marshal tools/call params: %w", err)
+	}
+	reqBody, err := json.Marshal(rpcRequest{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage("1"),
+		Method:  "tools/call",
+		Params:  paramsRaw,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal JSON-RPC request: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(server, "/")+"/mcp", bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -163,17 +216,25 @@ func callTool(client *http.Client, server, tool, projectID, token string, args a
 	}
 	defer resp.Body.Close()
 
-	var callResp callResponse
-	if err := json.NewDecoder(resp.Body).Decode(&callResp); err != nil {
+	var rpcResp rpcResponse
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
-	if callResp.Error != "" {
-		return nil, fmt.Errorf("%s", callResp.Error)
+	if rpcResp.Error != nil {
+		return nil, fmt.Errorf("%s", rpcResp.Error.Message)
 	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("server returned status %d", resp.StatusCode)
+
+	var result toolCallResult
+	if err := json.Unmarshal(rpcResp.Result, &result); err != nil {
+		return nil, fmt.Errorf("decode tools/call result: %w", err)
 	}
-	return callResp.Result, nil
+	if len(result.Content) == 0 {
+		return nil, fmt.Errorf("%s: empty tool result content", tool)
+	}
+	if result.IsError {
+		return nil, fmt.Errorf("%s", result.Content[0].Text)
+	}
+	return json.RawMessage(result.Content[0].Text), nil
 }
 
 // doRegister calls wormhole.agent.register (no auth required).

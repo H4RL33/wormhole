@@ -56,6 +56,15 @@ func TestRunJoin_MissingProjectOnly(t *testing.T) {
 	}
 }
 
+// callResponse is a test-only convenience type: a callback returns either
+// its tool's real output or a *callResponse carrying an error message,
+// which fakeServerExtended wraps into a JSON-RPC isError:true result
+// (docs/mcp-protocol.md §3.1 — a tool-handler failure is a successful RPC
+// call whose result carries isError:true, never a JSON-RPC error object).
+type callResponse struct {
+	Error string
+}
+
 // fakeServer builds an httptest.Server that answers wormhole.agent.register
 // with a fixed successful registration and wormhole.kb.search with
 // searchArticles (a caller-supplied stand-in for the tool handler), so
@@ -75,17 +84,39 @@ func fakeServerExtended(
 	t.Helper()
 	issuedAt := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/mcp/tools/call" {
+		if r.URL.Path != "/mcp" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		var req callRequest
+		var req rpcRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		switch req.Tool {
+		var params toolsCallParams
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			t.Fatalf("decode tools/call params: %v", err)
+		}
+
+		writeResult := func(resultOut any) {
+			resultRaw, _ := json.Marshal(resultOut)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: resultRaw})
+		}
+		writeToolResult := func(out any, errResp *callResponse) {
+			if errResp != nil {
+				writeResult(toolCallResult{
+					Content: []toolCallResultContent{{Type: "text", Text: errResp.Error}},
+					IsError: true,
+				})
+				return
+			}
+			outRaw, _ := json.Marshal(out)
+			writeResult(toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: string(outRaw)}}})
+		}
+
+		switch params.Name {
 		case "wormhole.agent.register":
 			var in registerAgentInput
-			if err := json.Unmarshal(req.Arguments, &in); err != nil {
+			if err := json.Unmarshal(params.Arguments, &in); err != nil {
 				t.Fatalf("decode register arguments: %v", err)
 			}
 			if in.Permissions == nil {
@@ -99,26 +130,17 @@ func fakeServerExtended(
 				Roles:        []string{},
 				IssuedAt:     issuedAt,
 			}
-			resultRaw, _ := json.Marshal(out)
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(callResponse{Result: resultRaw})
+			writeToolResult(out, nil)
 		case "wormhole.kb.search":
 			if got := r.Header.Get("Authorization"); got != "Bearer sekrit-token" {
 				t.Fatalf("kb.search Authorization header: got %q, want %q", got, "Bearer sekrit-token")
 			}
 			var in searchArticlesInput
-			if err := json.Unmarshal(req.Arguments, &in); err != nil {
+			if err := json.Unmarshal(params.Arguments, &in); err != nil {
 				t.Fatalf("decode search arguments: %v", err)
 			}
 			out, errResp := searchArticles(t, in)
-			if errResp != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(*errResp)
-				return
-			}
-			resultRaw, _ := json.Marshal(out)
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(callResponse{Result: resultRaw})
+			writeToolResult(out, errResp)
 		case "wormhole.channel.list":
 			if got := r.Header.Get("Authorization"); got != "Bearer sekrit-token" {
 				t.Fatalf("channel.list Authorization header: got %q, want %q", got, "Bearer sekrit-token")
@@ -134,20 +156,13 @@ func fakeServerExtended(
 					},
 				}
 			}
-			if errResp != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(*errResp)
-				return
-			}
-			resultRaw, _ := json.Marshal(out)
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(callResponse{Result: resultRaw})
+			writeToolResult(out, errResp)
 		case "wormhole.channel.post":
 			if got := r.Header.Get("Authorization"); got != "Bearer sekrit-token" {
 				t.Fatalf("channel.post Authorization header: got %q, want %q", got, "Bearer sekrit-token")
 			}
 			var in postEventInput
-			if err := json.Unmarshal(req.Arguments, &in); err != nil {
+			if err := json.Unmarshal(params.Arguments, &in); err != nil {
 				t.Fatalf("decode post event arguments: %v", err)
 			}
 			var out postEventOutput
@@ -157,14 +172,7 @@ func fakeServerExtended(
 			} else {
 				out = postEventOutput{EventID: "evt-1"}
 			}
-			if errResp != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(*errResp)
-				return
-			}
-			resultRaw, _ := json.Marshal(out)
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(callResponse{Result: resultRaw})
+			writeToolResult(out, errResp)
 		case "wormhole.task.list":
 			if got := r.Header.Get("Authorization"); got != "Bearer sekrit-token" {
 				t.Fatalf("task.list Authorization header: got %q, want %q", got, "Bearer sekrit-token")
@@ -176,16 +184,9 @@ func fakeServerExtended(
 			} else {
 				out = listTasksOutput{Tasks: []taskSummary{}}
 			}
-			if errResp != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(*errResp)
-				return
-			}
-			resultRaw, _ := json.Marshal(out)
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(callResponse{Result: resultRaw})
+			writeToolResult(out, errResp)
 		default:
-			t.Fatalf("unexpected tool: %s", req.Tool)
+			t.Fatalf("unexpected tool: %s", params.Name)
 		}
 	}))
 }
@@ -245,8 +246,16 @@ func TestRunJoin_Success_RegistersAndPersistsCredentials(t *testing.T) {
 
 func TestRunJoin_ServerError_PrintsError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(callResponse{Error: `{"error":"identity: invalid scope","code":"INVALID_SCOPE"}`})
+		var req rpcRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		result := toolCallResult{
+			Content: []toolCallResultContent{{Type: "text", Text: `{"error":"identity: invalid scope","code":"INVALID_SCOPE"}`}},
+			IsError: true,
+		}
+		resultRaw, _ := json.Marshal(result)
+		json.NewEncoder(w).Encode(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: resultRaw})
 	}))
 	defer srv.Close()
 
