@@ -1,0 +1,119 @@
+// Package webui implements the read-only human dashboard API (RFC-0001 §14
+// V2, pulled forward into Alpha-2 M3). It is a plain JSON REST surface, not
+// MCP/JSON-RPC — docs/architecture.md §5 M3 names the human read-only
+// dashboard as an RFC-sanctioned exception to "every capability is an MCP
+// tool", not a precedent for further REST endpoints. This package stays
+// unmounted until Chapter 10 wires it under /dashboard in
+// cmd/wormhole-server/main.go.
+package webui
+
+import (
+	"encoding/json"
+	"net/http"
+	"strings"
+
+	"github.com/H4RL33/wormhole/internal/core/events"
+	"github.com/H4RL33/wormhole/internal/core/identity"
+	"github.com/H4RL33/wormhole/internal/core/kb"
+	"github.com/H4RL33/wormhole/internal/core/tasks"
+)
+
+// Handler serves the read-only dashboard API.
+type Handler struct {
+	Identity *identity.Store
+	Tasks    *tasks.Store
+	Events   *events.Store
+	KB       *kb.Store
+}
+
+// NewMux returns the dashboard API's routes, unmounted — Chapter 10 mounts
+// this under /dashboard in cmd/wormhole-server/main.go.
+func (h *Handler) NewMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /dashboard/api/projects/{id}/tasks", h.withViewerAuth(h.listTasks))
+	mux.HandleFunc("GET /dashboard/api/projects/{id}/events", h.withViewerAuth(h.listEvents))
+	mux.HandleFunc("GET /dashboard/api/projects/{id}/kb", h.withViewerAuth(h.listKB))
+	return mux
+}
+
+// withViewerAuth resolves the Authorization: Bearer <key> header against
+// identity.Store.ResolveViewerKey, scoped to the {id} path param's project.
+// Any failure (missing header, malformed header, unknown key, key belongs to
+// a different project) returns the same 403 JSON error —
+// docs/architecture.md §3.4's single-error-shape rule applies to this
+// human-facing boundary too.
+func (h *Handler) withViewerAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		projectID := r.PathValue("id")
+		token := extractBearerToken(r.Header.Get("Authorization"))
+		if _, err := h.Identity.ResolveViewerKey(r.Context(), projectID, token); err != nil {
+			writeJSONError(w, http.StatusForbidden, "invalid or unauthorized viewer key")
+			return
+		}
+		next(w, r)
+	}
+}
+
+// extractBearerToken parses "Bearer <token>" from an Authorization header
+// value, returning "" if the header is missing or malformed. A malformed
+// header is an auth failure handled uniformly by withViewerAuth, not a
+// server error — this function never panics.
+func extractBearerToken(header string) string {
+	const prefix = "Bearer "
+	if !strings.HasPrefix(header, prefix) {
+		return ""
+	}
+	return strings.TrimPrefix(header, prefix)
+}
+
+// writeJSONError writes {"error": message} with the given status code.
+func writeJSONError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]string{"error": message})
+}
+
+// writeJSON writes v as a JSON body with Content-Type: application/json.
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(v)
+}
+
+func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("id")
+	result, err := h.Tasks.List(r.Context(), projectID, nil)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to list tasks")
+		return
+	}
+	if result == nil {
+		result = []tasks.Task{}
+	}
+	writeJSON(w, result)
+}
+
+func (h *Handler) listEvents(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("id")
+	result, err := h.Events.ListEventsByProject(r.Context(), projectID, 100, 0)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to list events")
+		return
+	}
+	if result == nil {
+		result = []events.Event{}
+	}
+	writeJSON(w, result)
+}
+
+func (h *Handler) listKB(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("id")
+	result, err := h.KB.ListArticles(r.Context(), projectID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to list kb articles")
+		return
+	}
+	if result == nil {
+		result = []kb.Article{}
+	}
+	writeJSON(w, result)
+}
