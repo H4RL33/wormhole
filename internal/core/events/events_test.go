@@ -416,3 +416,156 @@ func TestRLSIsolation(t *testing.T) {
 		}
 	}
 }
+
+func TestListEventsByProject_HappyPath(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "events-list-by-project-happy-path")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+
+	// Create 2 channels in the project
+	channel1, err := s.CreateChannel(ctx, projectID, "channel-1")
+	if err != nil {
+		t.Fatalf("CreateChannel 1: %v", err)
+	}
+
+	channel2, err := s.CreateChannel(ctx, projectID, "channel-2")
+	if err != nil {
+		t.Fatalf("CreateChannel 2: %v", err)
+	}
+
+	// Publish 2 events to channel 1
+	payload1 := json.RawMessage(`{"task_id":"task-1"}`)
+	event1, err := s.PublishEvent(ctx, projectID, channel1.ID, agentID, "task.status_changed", payload1, nil)
+	if err != nil {
+		t.Fatalf("PublishEvent 1: %v", err)
+	}
+
+	payload2 := json.RawMessage(`{"task_id":"task-2"}`)
+	event2, err := s.PublishEvent(ctx, projectID, channel1.ID, agentID, "task.status_changed", payload2, nil)
+	if err != nil {
+		t.Fatalf("PublishEvent 2: %v", err)
+	}
+
+	// Publish 1 event to channel 2
+	payload3 := json.RawMessage(`{"task_id":"task-3"}`)
+	event3, err := s.PublishEvent(ctx, projectID, channel2.ID, agentID, "task.status_changed", payload3, nil)
+	if err != nil {
+		t.Fatalf("PublishEvent 3: %v", err)
+	}
+
+	// List all events in the project
+	events, err := s.ListEventsByProject(ctx, projectID, 100, 0)
+	if err != nil {
+		t.Fatalf("ListEventsByProject: %v", err)
+	}
+
+	// Should have all 3 events
+	if len(events) != 3 {
+		t.Errorf("expected 3 events, got %d", len(events))
+	}
+
+	// Verify ordering: newest (event3) first, oldest (event1) last
+	if events[0].ID != event3.ID {
+		t.Errorf("first event should be event3 (ID %q), got %q", event3.ID, events[0].ID)
+	}
+	if events[1].ID != event2.ID {
+		t.Errorf("second event should be event2 (ID %q), got %q", event2.ID, events[1].ID)
+	}
+	if events[2].ID != event1.ID {
+		t.Errorf("third event should be event1 (ID %q), got %q", event1.ID, events[2].ID)
+	}
+
+	// Verify events from both channels are included
+	channelIDs := map[string]bool{}
+	for _, event := range events {
+		if event.ProjectID != projectID {
+			t.Errorf("event ProjectID = %q, want %q", event.ProjectID, projectID)
+		}
+		channelIDs[event.ChannelID] = true
+	}
+	if !channelIDs[channel1.ID] {
+		t.Errorf("missing events from channel1")
+	}
+	if !channelIDs[channel2.ID] {
+		t.Errorf("missing events from channel2")
+	}
+}
+
+func TestListEventsByProject_CrossProjectIsolation(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectA := createProject(t, s, "events-list-isolation-a")
+	projectB := createProject(t, s, "events-list-isolation-b")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectA)
+	createPassport(t, s, agentID, projectB)
+
+	// Create channels in both projects
+	channelA, err := s.CreateChannel(ctx, projectA, "channel-a")
+	if err != nil {
+		t.Fatalf("CreateChannel in A: %v", err)
+	}
+
+	channelB, err := s.CreateChannel(ctx, projectB, "channel-b")
+	if err != nil {
+		t.Fatalf("CreateChannel in B: %v", err)
+	}
+
+	// Publish events to project A
+	payload1 := json.RawMessage(`{"task_id":"task-a1"}`)
+	_, err = s.PublishEvent(ctx, projectA, channelA.ID, agentID, "task.status_changed", payload1, nil)
+	if err != nil {
+		t.Fatalf("PublishEvent in A: %v", err)
+	}
+
+	payload2 := json.RawMessage(`{"task_id":"task-a2"}`)
+	_, err = s.PublishEvent(ctx, projectA, channelA.ID, agentID, "task.status_changed", payload2, nil)
+	if err != nil {
+		t.Fatalf("PublishEvent in A: %v", err)
+	}
+
+	// Publish events to project B
+	payload3 := json.RawMessage(`{"task_id":"task-b1"}`)
+	_, err = s.PublishEvent(ctx, projectB, channelB.ID, agentID, "task.status_changed", payload3, nil)
+	if err != nil {
+		t.Fatalf("PublishEvent in B: %v", err)
+	}
+
+	// List events in project A
+	eventsA, err := s.ListEventsByProject(ctx, projectA, 100, 0)
+	if err != nil {
+		t.Fatalf("ListEventsByProject for A: %v", err)
+	}
+
+	// Should only have 2 events from project A
+	if len(eventsA) != 2 {
+		t.Errorf("expected 2 events in project A, got %d", len(eventsA))
+	}
+
+	// All events should belong to project A
+	for _, event := range eventsA {
+		if event.ProjectID != projectA {
+			t.Errorf("event in project A list has ProjectID %q, want %q", event.ProjectID, projectA)
+		}
+	}
+
+	// List events in project B
+	eventsB, err := s.ListEventsByProject(ctx, projectB, 100, 0)
+	if err != nil {
+		t.Fatalf("ListEventsByProject for B: %v", err)
+	}
+
+	// Should only have 1 event from project B
+	if len(eventsB) != 1 {
+		t.Errorf("expected 1 event in project B, got %d", len(eventsB))
+	}
+
+	// All events should belong to project B
+	for _, event := range eventsB {
+		if event.ProjectID != projectB {
+			t.Errorf("event in project B list has ProjectID %q, want %q", event.ProjectID, projectB)
+		}
+	}
+}

@@ -261,3 +261,44 @@ func (s *Store) ListEvents(ctx context.Context, projectID, channelID string, lim
 	}
 	return events, nil
 }
+
+// ListEventsByProject returns events across every channel in the project,
+// newest first, for the read-only dashboard (Alpha-2 Chapter 9). Unlike
+// ListEvents this is not scoped to one channel.
+func (s *Store) ListEventsByProject(ctx context.Context, projectID string, limit, offset int) ([]Event, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("events: list events by project: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, "SELECT set_config('wormhole.project_id', $1, true)", projectID); err != nil {
+		return nil, fmt.Errorf("events: list events by project: set project id: %w", err)
+	}
+
+	rows, err := tx.QueryContext(ctx,
+		`SELECT `+eventColumns+` FROM events WHERE project_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+		projectID, limit, offset,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("events: list events by project: %w", err)
+	}
+	defer rows.Close()
+
+	var events []Event
+	for rows.Next() {
+		var event Event
+		if err := rows.Scan(&event.ID, &event.ProjectID, &event.ChannelID, &event.AgentID, &event.EventType, &event.Payload, &event.Note, &event.CreatedAt); err != nil {
+			return nil, fmt.Errorf("events: list events by project scan: %w", err)
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("events: list events by project iterate: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("events: list events by project commit: %w", err)
+	}
+	return events, nil
+}

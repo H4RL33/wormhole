@@ -529,3 +529,49 @@ func (s *Store) GetArticleLinks(ctx context.Context, projectID, agentID, article
 	return articles, nil
 }
 
+// ListArticles returns every KB article in the project, newest first. Unlike
+// SearchArticles this has no query/similarity component — it's the plain
+// listing the read-only dashboard needs (Alpha-2 Chapter 9).
+func (s *Store) ListArticles(ctx context.Context, projectID string) ([]Article, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("kb: list articles: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, "SELECT set_config('wormhole.project_id', $1, true)", projectID); err != nil {
+		return nil, fmt.Errorf("kb: list articles: set project id: %w", err)
+	}
+
+	rows, err := tx.QueryContext(ctx,
+		`SELECT `+articleColumns+`
+		 FROM kb_articles
+		 WHERE project_id = $1
+		 ORDER BY created_at DESC`,
+		projectID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("kb: list articles: query: %w", err)
+	}
+	defer rows.Close()
+
+	var articles []Article
+	for rows.Next() {
+		var article Article
+		err = rows.Scan(&article.ID, &article.ProjectID, &article.Title, &article.Body, &article.Frontmatter, &article.AuthorAgentID, &article.CreatedAt, &article.UpdatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("kb: list articles: scan: %w", err)
+		}
+		articles = append(articles, article)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("kb: list articles: iterate: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("kb: list articles: commit: %w", err)
+	}
+
+	return articles, nil
+}
+

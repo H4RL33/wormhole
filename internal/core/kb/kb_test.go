@@ -1256,3 +1256,118 @@ func TestGetArticleLinks_NoPassport(t *testing.T) {
 		t.Fatalf("expected ErrPassportNotFound, got: %v", err)
 	}
 }
+
+func TestListArticles_HappyPath(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-list-articles-happy-path")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+
+	// Create 3 articles
+	article1, err := s.WriteArticle(ctx, projectID, agentID, "Article 1", "Body 1", nil, nil, false)
+	if err != nil {
+		t.Fatalf("WriteArticle 1: %v", err)
+	}
+
+	article2, err := s.WriteArticle(ctx, projectID, agentID, "Article 2", "Body 2", nil, nil, false)
+	if err != nil {
+		t.Fatalf("WriteArticle 2: %v", err)
+	}
+
+	article3, err := s.WriteArticle(ctx, projectID, agentID, "Article 3", "Body 3", nil, nil, false)
+	if err != nil {
+		t.Fatalf("WriteArticle 3: %v", err)
+	}
+
+	// List articles
+	articles, err := s.ListArticles(ctx, projectID)
+	if err != nil {
+		t.Fatalf("ListArticles: %v", err)
+	}
+
+	// Should have all 3 articles, ordered by created_at DESC (newest first)
+	if len(articles) != 3 {
+		t.Errorf("expected 3 articles, got %d", len(articles))
+	}
+
+	// Verify ordering: newest (article3) first, oldest (article1) last
+	if articles[0].ID != article3.ID {
+		t.Errorf("first article should be article3 (ID %q), got %q", article3.ID, articles[0].ID)
+	}
+	if articles[1].ID != article2.ID {
+		t.Errorf("second article should be article2 (ID %q), got %q", article2.ID, articles[1].ID)
+	}
+	if articles[2].ID != article1.ID {
+		t.Errorf("third article should be article1 (ID %q), got %q", article1.ID, articles[2].ID)
+	}
+
+	// Verify all articles belong to the correct project
+	for i, article := range articles {
+		if article.ProjectID != projectID {
+			t.Errorf("article %d: ProjectID = %q, want %q", i, article.ProjectID, projectID)
+		}
+	}
+}
+
+func TestListArticles_CrossProjectIsolation(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectA := createProject(t, s, "kb-list-articles-isolation-a")
+	projectB := createProject(t, s, "kb-list-articles-isolation-b")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectA)
+	createPassport(t, s, agentID, projectB)
+
+	// Create articles in project A
+	_, err := s.WriteArticle(ctx, projectA, agentID, "A Article 1", "Body A1", nil, nil, false)
+	if err != nil {
+		t.Fatalf("WriteArticle in A: %v", err)
+	}
+	_, err = s.WriteArticle(ctx, projectA, agentID, "A Article 2", "Body A2", nil, nil, false)
+	if err != nil {
+		t.Fatalf("WriteArticle in A: %v", err)
+	}
+
+	// Create articles in project B
+	_, err = s.WriteArticle(ctx, projectB, agentID, "B Article 1", "Body B1", nil, nil, false)
+	if err != nil {
+		t.Fatalf("WriteArticle in B: %v", err)
+	}
+
+	// List articles in project A
+	articlesA, err := s.ListArticles(ctx, projectA)
+	if err != nil {
+		t.Fatalf("ListArticles for project A: %v", err)
+	}
+
+	// Should only have 2 articles from project A
+	if len(articlesA) != 2 {
+		t.Errorf("expected 2 articles in project A, got %d", len(articlesA))
+	}
+
+	// All articles should belong to project A
+	for _, article := range articlesA {
+		if article.ProjectID != projectA {
+			t.Errorf("article in project A list has ProjectID %q, want %q", article.ProjectID, projectA)
+		}
+	}
+
+	// List articles in project B
+	articlesB, err := s.ListArticles(ctx, projectB)
+	if err != nil {
+		t.Fatalf("ListArticles for project B: %v", err)
+	}
+
+	// Should only have 1 article from project B
+	if len(articlesB) != 1 {
+		t.Errorf("expected 1 article in project B, got %d", len(articlesB))
+	}
+
+	// All articles should belong to project B
+	for _, article := range articlesB {
+		if article.ProjectID != projectB {
+			t.Errorf("article in project B list has ProjectID %q, want %q", article.ProjectID, projectB)
+		}
+	}
+}
