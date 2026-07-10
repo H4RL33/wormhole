@@ -3,12 +3,14 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/core/events"
 	"github.com/H4RL33/wormhole/internal/core/identity"
+	"github.com/H4RL33/wormhole/internal/core/roles"
 )
 
 // defaultChannelNames are bootstrapped into every project the first time an
@@ -51,6 +53,7 @@ type RegisterAgentInput struct {
 	Capabilities []string `json:"capabilities"`
 	Repositories []string `json:"repositories"`
 	Roles        []string `json:"roles"`
+	Role         string   `json:"role,omitempty"`
 }
 
 // RegisterAgentOutput is the wormhole.agent.register result shape. Token
@@ -63,12 +66,37 @@ type RegisterAgentOutput struct {
 	Repositories []string  `json:"repositories"`
 	Roles        []string  `json:"roles"`
 	IssuedAt     time.Time `json:"issued_at"`
+	Role         string    `json:"role,omitempty"`
+}
+
+// unionAppend returns a new slice containing base's elements followed by
+// any of extra's elements not already present in base, preserving base's
+// original order and appending new elements in extra's order. Used to
+// merge caller-supplied permissions with a resolved role template's
+// permission bundle (and to add a resolved role name into the roles tag
+// slice) deterministically.
+func unionAppend(base, extra []string) []string {
+	seen := make(map[string]bool, len(base))
+	out := make([]string, 0, len(base)+len(extra))
+	for _, v := range base {
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	for _, v := range extra {
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // RegisterAgentTool wires wormhole.agent.register: no auth required, since
 // registration is how an identity first comes into existence (RFC-0001
 // §8.5 joining flow, step 1).
-func RegisterAgentTool(store *identity.Store, eventsStore *events.Store) Tool {
+func RegisterAgentTool(store *identity.Store, eventsStore *events.Store, rolesStore *roles.Store) Tool {
 	return Tool{
 		Name:             "wormhole.agent.register",
 		Description:      "Registers a new agent identity, issues its passport and a project-scoped bearer token.",
@@ -81,6 +109,17 @@ func RegisterAgentTool(store *identity.Store, eventsStore *events.Store) Tool {
 			}
 			if in.Owner == "" && in.Name != "" {
 				in.Owner = in.Name
+			}
+			if in.Role != "" {
+				template, err := rolesStore.GetTemplate(ctx, in.Role)
+				if errors.Is(err, roles.ErrTemplateNotFound) {
+					return nil, fmt.Errorf("mcp: wormhole.agent.register: unknown role template %q: %w", in.Role, err)
+				}
+				if err != nil {
+					return nil, fmt.Errorf("mcp: wormhole.agent.register: %w", err)
+				}
+				in.Permissions = unionAppend(in.Permissions, template.PermissionBundle)
+				in.Roles = unionAppend(in.Roles, []string{in.Role})
 			}
 			agent, passport, token, err := store.Register(ctx, projectID, in.Permissions, in.Owner, in.Model, in.Capabilities, in.Repositories, in.Roles)
 			if err != nil {
@@ -96,6 +135,7 @@ func RegisterAgentTool(store *identity.Store, eventsStore *events.Store) Tool {
 				Repositories: passport.Repositories,
 				Roles:        passport.Roles,
 				IssuedAt:     passport.IssuedAt,
+				Role:         in.Role,
 			}, nil
 		},
 	}
