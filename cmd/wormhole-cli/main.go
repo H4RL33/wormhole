@@ -163,6 +163,11 @@ type credentials struct {
 	PassportID string    `json:"passport_id"`
 	Token      string    `json:"token"`
 	IssuedAt   time.Time `json:"issued_at"`
+	// Role is the resolved role template name (Chapter 6's --role), empty
+	// when join/connect ran without one. Chapter 8: read back by
+	// listCredentialProfiles/resolveWhoamiProfile for `wormhole whoami` /
+	// `wormhole profile list` display.
+	Role string `json:"role,omitempty"`
 }
 
 // callTool sends one JSON-RPC 2.0 "tools/call" request to server's single
