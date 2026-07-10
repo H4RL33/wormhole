@@ -42,8 +42,6 @@ Open-source, open-weight models will always be our first-class citizens, proprie
 
 To that extent, we will officially provide Claude Code connectors only. Neither Gemini nor OpenAI models will ever see official support in Wormhole.
 
-Anthropic is a fear-mongering organisation, but we sincerely believe that they have the good of the people at least in the same postcode as their heart; Gemini and OpenAI come from mass surveilling, data farming, double-crossing, and genocide-enabling providers.
-
 #### Being Open-Source
 
 Wormhole will always remain open-source, as we believe that all products in the AI-space should be.
