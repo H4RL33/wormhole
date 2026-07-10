@@ -89,10 +89,10 @@ system, git integration beyond the existing manual link tools, write access from
 - [x] New package `internal/core/roles`: `Store.GetTemplate(name)`, `Store.ListTemplates()`
 
 ### Chapter 6 — 2026-08-05
-- [ ] `wormhole.agent.register` and `wormhole join --role <name>` resolve a role template and
+- [x] `wormhole.agent.register` and `wormhole join --role <name>` resolve a role template and
       apply its permission bundle at passport issuance time (extends `issuePassport` in
       `internal/core/identity/identity.go`, still writes to the existing `passports.roles` column)
-- [ ] Unknown role name rejected with a clear error (`ErrRoleTemplateNotFound`), not silently ignored
+- [x] Unknown role name rejected with a clear error (`ErrRoleTemplateNotFound`), not silently ignored
 
 ### Chapter 7 — 2026-08-06
 - [ ] `wormhole.task.list` gains an optional `role` filter (defaults to the calling agent's own
