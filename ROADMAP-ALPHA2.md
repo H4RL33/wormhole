@@ -123,9 +123,9 @@ system, git integration beyond the existing manual link tools, write access from
 ## M3 — Read-Only Web UI
 
 ### Chapter 9 — 2026-08-08
-- [ ] New `internal/webui/api.go`: plain read-only JSON GET endpoints, no MCP/JSON-RPC —
+- [x] New `internal/webui/api.go`: plain read-only JSON GET endpoints, no MCP/JSON-RPC —
       `/dashboard/api/projects/{id}/tasks`, `/events`, `/kb`
-- [ ] Human-facing auth: a project-scoped read-only viewer key (RFC-0001 §8.4 human oversight
+- [x] Human-facing auth: a project-scoped read-only viewer key (RFC-0001 §8.4 human oversight
       role), separate from agent bearer tokens — new `viewer_keys` table,
       `migrations/000009_viewer_keys.up.sql`
 
