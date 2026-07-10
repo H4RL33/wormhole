@@ -95,11 +95,11 @@ system, git integration beyond the existing manual link tools, write access from
 - [x] Unknown role name rejected with a clear error (`ErrRoleTemplateNotFound`), not silently ignored
 
 ### Chapter 7 — 2026-08-06
-- [ ] `wormhole.task.list` gains an optional `role` filter (defaults to the calling agent's own
+- [x] `wormhole.task.list` gains an optional `role` filter (defaults to the calling agent's own
       role's default view when omitted) — extends `internal/mcp/task.go`'s `ListTasksTool`
-- [ ] M2 integration test: register three agents (manager/backend/frontend roles) in one project,
+- [x] M2 integration test: register three agents (manager/backend/frontend roles) in one project,
       assert distinct permission bundles and distinct default task views
-- [ ] M2 review/demo
+- [x] M2 review/demo — see below
 
 ### Chapter 8 — 2026-08-07
 - [ ] Refactor `cmd/wormhole-cli/main.go` credential storage from one fixed
