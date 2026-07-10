@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -62,7 +63,7 @@ func TestListTasksTool_Handler(t *testing.T) {
 		t.Fatalf("create task B: %v", err)
 	}
 
-	tool := ListTasksTool(store)
+	tool := ListTasksTool(store, testRolesStore(t))
 	if tool.Name != "wormhole.task.list" {
 		t.Fatalf("Name: got %q", tool.Name)
 	}
@@ -189,7 +190,7 @@ func TestE2E_CreateAssignUpdateStatus(t *testing.T) {
 	registry.Register(CreateTaskTool(tasksStore))
 	registry.Register(AssignTaskTool(tasksStore))
 	registry.Register(UpdateTaskStatusTool(tasksStore))
-	registry.Register(ListTasksTool(tasksStore))
+	registry.Register(ListTasksTool(tasksStore, testRolesStore(t)))
 	srv := httptest.NewServer(NewMCPHandler(registry, identityStore))
 	defer srv.Close()
 
@@ -250,5 +251,174 @@ func TestE2E_CreateAssignUpdateStatus(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("created task not found in list: %+v", listOut.Tasks)
+	}
+}
+
+// TestListTasksTool_DefaultsToCallerRoleView covers Chapter 7 Task 2: with
+// no explicit Role, wormhole.task.list applies the caller's own passport
+// role's default_task_view (backend-engineer: {"status": ["todo",
+// "in_progress"], "assignee": "self"}), so only the caller's own "todo"
+// task is returned, not another agent's unowned task.
+func TestListTasksTool_DefaultsToCallerRoleView(t *testing.T) {
+	identityStore := testIdentityStore(t)
+	tasksStore := testTasksStore(t)
+	eventsStore := testEventsStore(t)
+	rolesStore := testRolesStore(t)
+	registry := NewRegistry()
+	registry.Register(RegisterAgentTool(identityStore, eventsStore, rolesStore))
+	registry.Register(CreateTaskTool(tasksStore))
+	registry.Register(AssignTaskTool(tasksStore))
+	registry.Register(ListTasksTool(tasksStore, rolesStore))
+	srv := httptest.NewServer(NewMCPHandler(registry, identityStore))
+	defer srv.Close()
+
+	projectID := mustCreateProject(t, "list-tasks-role-view")
+
+	registerArgs, _ := json.Marshal(RegisterAgentInput{
+		Permissions: []string{"task.read", "task.write"},
+		Owner:       "harley",
+		Model:       "claude",
+		Role:        "backend-engineer",
+	})
+	registerResult := mustToolResult(t, srv, "", "wormhole.agent.register", projectID, registerArgs)
+	var registerOut RegisterAgentOutput
+	json.Unmarshal(registerResult, &registerOut)
+
+	callTool := func(tool string, args any) json.RawMessage {
+		t.Helper()
+		argBytes, _ := json.Marshal(args)
+		return mustToolResult(t, srv, registerOut.Token, tool, projectID, argBytes)
+	}
+
+	// Task owned by this agent, status "todo" -> included in
+	// backend-engineer's view ({"status": ["todo", "in_progress"], "assignee": "self"}).
+	// Note: the seeded view says "in_progress" but this codebase's status
+	// machine (internal/core/tasks/tasks.go) uses "wip", not "in_progress" —
+	// treat the view's string values as opaque membership tokens, do not
+	// remap them; a task with status "wip" will NOT match "in_progress" in
+	// the view, which is intentional and covered by the second task below.
+	ownRaw := callTool("wormhole.task.create", CreateTaskInput{Title: "own todo task", Priority: 1})
+	var ownOut CreateTaskOutput
+	json.Unmarshal(ownRaw, &ownOut)
+	callTool("wormhole.task.assign", AssignTaskInput{TaskID: ownOut.TaskID, OwnerAgentID: registerOut.AgentID})
+
+	// Second agent's task, unowned by the first agent -> excluded by
+	// "assignee": "self".
+	registerArgs2, _ := json.Marshal(RegisterAgentInput{
+		Permissions: []string{"task.read", "task.write"},
+		Owner:       "harley",
+		Model:       "claude",
+	})
+	registerResult2 := mustToolResult(t, srv, "", "wormhole.agent.register", projectID, registerArgs2)
+	var registerOut2 RegisterAgentOutput
+	json.Unmarshal(registerResult2, &registerOut2)
+	otherRaw := callTool("wormhole.task.create", CreateTaskInput{Title: "other agent task", Priority: 1})
+	var otherOut CreateTaskOutput
+	json.Unmarshal(otherRaw, &otherOut)
+	callTool("wormhole.task.assign", AssignTaskInput{TaskID: otherOut.TaskID, OwnerAgentID: registerOut2.AgentID})
+
+	listRaw := callTool("wormhole.task.list", ListTasksInput{})
+	var listOut ListTasksOutput
+	json.Unmarshal(listRaw, &listOut)
+
+	if len(listOut.Tasks) != 1 || listOut.Tasks[0].TaskID != ownOut.TaskID {
+		t.Fatalf("wormhole.task.list with no explicit role/status = %+v, want exactly [%s] (own todo task, backend-engineer default view)", listOut.Tasks, ownOut.TaskID)
+	}
+}
+
+// TestListTasksTool_ExplicitRoleOverridesCallerRole covers Chapter 7 Task
+// 2: an explicit Role argument overrides the caller's own passport role,
+// applying that role's view instead (here project-manager's unfiltered
+// view, which does not exclude the unassigned task the way the caller's
+// own backend-engineer role would).
+func TestListTasksTool_ExplicitRoleOverridesCallerRole(t *testing.T) {
+	identityStore := testIdentityStore(t)
+	tasksStore := testTasksStore(t)
+	eventsStore := testEventsStore(t)
+	rolesStore := testRolesStore(t)
+	registry := NewRegistry()
+	registry.Register(RegisterAgentTool(identityStore, eventsStore, rolesStore))
+	registry.Register(CreateTaskTool(tasksStore))
+	registry.Register(ListTasksTool(tasksStore, rolesStore))
+	srv := httptest.NewServer(NewMCPHandler(registry, identityStore))
+	defer srv.Close()
+
+	projectID := mustCreateProject(t, "list-tasks-explicit-role")
+
+	registerArgs, _ := json.Marshal(RegisterAgentInput{
+		Permissions: []string{"task.read", "task.write"},
+		Owner:       "harley",
+		Model:       "claude",
+		Role:        "backend-engineer",
+	})
+	registerResult := mustToolResult(t, srv, "", "wormhole.agent.register", projectID, registerArgs)
+	var registerOut RegisterAgentOutput
+	json.Unmarshal(registerResult, &registerOut)
+
+	callTool := func(tool string, args any) json.RawMessage {
+		t.Helper()
+		argBytes, _ := json.Marshal(args)
+		return mustToolResult(t, srv, registerOut.Token, tool, projectID, argBytes)
+	}
+
+	callTool("wormhole.task.create", CreateTaskInput{Title: "unassigned task", Priority: 1})
+
+	// project-manager's view is {"status": [], "assignee": null} — no
+	// filtering at all, so the unassigned, unowned task is still included
+	// even though the caller's own role (backend-engineer) would have
+	// excluded it via "assignee": "self".
+	role := "project-manager"
+	listRaw := callTool("wormhole.task.list", ListTasksInput{Role: &role})
+	var listOut ListTasksOutput
+	json.Unmarshal(listRaw, &listOut)
+
+	if len(listOut.Tasks) != 1 {
+		t.Fatalf("wormhole.task.list with role=project-manager = %+v, want 1 task (unfiltered view)", listOut.Tasks)
+	}
+}
+
+// TestListTasksTool_UnknownRoleRejected covers Chapter 7 Task 2: an
+// explicit Role naming a template that doesn't exist must surface as an
+// RPC error, not silently fall back to an unfiltered or default view.
+func TestListTasksTool_UnknownRoleRejected(t *testing.T) {
+	identityStore := testIdentityStore(t)
+	tasksStore := testTasksStore(t)
+	rolesStore := testRolesStore(t)
+	eventsStore := testEventsStore(t)
+	registry := NewRegistry()
+	registry.Register(RegisterAgentTool(identityStore, eventsStore, rolesStore))
+	registry.Register(ListTasksTool(tasksStore, rolesStore))
+	srv := httptest.NewServer(NewMCPHandler(registry, identityStore))
+	defer srv.Close()
+
+	projectID := mustCreateProject(t, "list-tasks-unknown-role")
+
+	registerArgs, _ := json.Marshal(RegisterAgentInput{Permissions: []string{"task.read"}, Owner: "harley", Model: "claude"})
+	registerResult := mustToolResult(t, srv, "", "wormhole.agent.register", projectID, registerArgs)
+	var registerOut RegisterAgentOutput
+	json.Unmarshal(registerResult, &registerOut)
+
+	// This codebase's documented tools/call convention (internal/mcp/jsonrpc.go,
+	// HandleToolsCall's doc comment) is that a tool handler's own error is
+	// NOT an RPC-level error (RPCResponse.Error) — it's a successful RPC
+	// response carrying result.isError: true. The brief's original
+	// assertion (rpcResp.Error == nil) can never fail under that
+	// convention; asserting on IsError instead is the deviation, verified
+	// against jsonrpc.go and toolsCallRPC's own doc comment.
+	role := "nonexistent-role"
+	argBytes, _ := json.Marshal(ListTasksInput{Role: &role})
+	status, rpcResp := toolsCallRPC(t, srv, registerOut.Token, "wormhole.task.list", projectID, argBytes)
+	if status != http.StatusOK {
+		t.Fatalf("wormhole.task.list with unknown role: HTTP status got %d, want 200", status)
+	}
+	if rpcResp.Error != nil {
+		t.Fatalf("wormhole.task.list with unknown role: unexpected RPC-level error: %+v", rpcResp.Error)
+	}
+	var result toolCallResult
+	if err := json.Unmarshal(mustMarshal(t, rpcResp.Result), &result); err != nil {
+		t.Fatalf("wormhole.task.list with unknown role: decode result wrapper: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("wormhole.task.list with unknown role: want tool-level error (isError: true), got success: %+v", result)
 	}
 }

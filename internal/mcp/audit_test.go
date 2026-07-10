@@ -14,7 +14,7 @@ func TestMCPAudit_ToolSurfaceCompleteness(t *testing.T) {
 	r.Register(WhoAmITool())
 	r.Register(CreateTaskTool(nil))
 	r.Register(AssignTaskTool(nil))
-	r.Register(ListTasksTool(nil))
+	r.Register(ListTasksTool(nil, nil))
 	r.Register(UpdateTaskStatusTool(nil))
 	r.Register(CreateChannelTool(nil))
 	r.Register(PostEventTool(nil))
@@ -87,7 +87,7 @@ func TestMCPAudit_ProjectIDMismatchRejection(t *testing.T) {
 	})
 
 	t.Run("wormhole.task.list", func(t *testing.T) {
-		tool := ListTasksTool(nil)
+		tool := ListTasksTool(nil, nil)
 		args := []byte(`{"project_id":"mismatched-id"}`)
 		_, err := tool.Handler(ctx, nil, "auth-project-id", args)
 		if err == nil || !strings.Contains(err.Error(), "mismatch") {

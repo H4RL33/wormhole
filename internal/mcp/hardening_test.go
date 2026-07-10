@@ -170,7 +170,7 @@ func TestMCP_MultiTenantIsolation(t *testing.T) {
 
 	registry := NewRegistry()
 	registry.Register(RegisterAgentTool(identityStore, eventsStore, testRolesStore(t)))
-	registry.Register(ListTasksTool(tasksStore))
+	registry.Register(ListTasksTool(tasksStore, testRolesStore(t)))
 	registry.Register(CreateTaskTool(tasksStore))
 	registry.Register(WriteArticleTool(kbStore))
 	registry.Register(SearchArticlesTool(kbStore))
@@ -389,7 +389,7 @@ func TestMCP_LoadSmokeTest(t *testing.T) {
 	registry.Register(ListChannelsTool(eventsStore))
 	registry.Register(PostEventTool(eventsStore))
 	registry.Register(CreateTaskTool(tasksStore))
-	registry.Register(ListTasksTool(tasksStore))
+	registry.Register(ListTasksTool(tasksStore, testRolesStore(t)))
 	registry.Register(SearchArticlesTool(kbStore))
 	registry.Register(WriteArticleTool(kbStore))
 
