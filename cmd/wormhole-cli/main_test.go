@@ -360,17 +360,6 @@ func TestRunJoin_NetworkError_PrintsError(t *testing.T) {
 	}
 }
 
-func TestDefaultTokenFilePath_UnderWormholeDir(t *testing.T) {
-	path, err := defaultTokenFilePath()
-	if err != nil {
-		t.Fatalf("defaultTokenFilePath: %v", err)
-	}
-	want := filepath.Join(".wormhole", "credentials.json")
-	if !strings.HasSuffix(path, want) {
-		t.Fatalf("path: got %q, want suffix %q", path, want)
-	}
-}
-
 // TestRunJoin_KBSync_UsesCapabilitiesAndRolesAsQuery confirms that when no
 // --context is given, the query sent to wormhole.kb.search is built from
 // owner/model/capabilities/roles, and that the returned articles are
@@ -959,6 +948,173 @@ func TestRunConnect_ClaudeBinaryNotFound_PrintsManualFallback(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "sekrit-token") {
 		t.Fatalf("stderr missing manual-fallback command with token: %q", stderr.String())
+	}
+}
+
+// TestRunJoin_DefaultProfile_DerivedFromProjectAndRole confirms Chapter 8:
+// with neither --token-file nor --profile given, join writes into
+// ~/.wormhole/credentials/<project>__<role>.json instead of the old fixed
+// ~/.wormhole/credentials.json.
+func TestRunJoin_DefaultProfile_DerivedFromProjectAndRole(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
+		return searchArticlesOutput{Articles: []articleSummary{}}, nil
+	})
+	defer srv.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"join",
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--role", "backend-engineer",
+		"--owner", "harley",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
+	}
+
+	wantPath := filepath.Join(home, ".wormhole", "credentials", "proj-1__backend-engineer.json")
+	data, err := os.ReadFile(wantPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", wantPath, err)
+	}
+	var creds credentials
+	if err := json.Unmarshal(data, &creds); err != nil {
+		t.Fatalf("decode credentials: %v", err)
+	}
+	if creds.Role != "backend-engineer" || creds.ProjectID != "proj-1" {
+		t.Fatalf("credentials: got %+v", creds)
+	}
+}
+
+// TestRunJoin_TwoRoles_DoNotClobberEachOther confirms Chapter 8's core
+// requirement: joining the same project with two different roles produces
+// two separate credential files, neither overwriting the other.
+func TestRunJoin_TwoRoles_DoNotClobberEachOther(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
+		return searchArticlesOutput{Articles: []articleSummary{}}, nil
+	})
+	defer srv.Close()
+
+	for _, role := range []string{"backend-engineer", "frontend-engineer"} {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{
+			"join",
+			"--server", srv.URL,
+			"--project", "proj-1",
+			"--role", role,
+			"--owner", "harley",
+		}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("join role=%s exit code: got %d, want 0, stderr: %q", role, code, stderr.String())
+		}
+	}
+
+	backendPath := filepath.Join(home, ".wormhole", "credentials", "proj-1__backend-engineer.json")
+	frontendPath := filepath.Join(home, ".wormhole", "credentials", "proj-1__frontend-engineer.json")
+	if _, err := os.Stat(backendPath); err != nil {
+		t.Fatalf("backend profile missing: %v", err)
+	}
+	if _, err := os.Stat(frontendPath); err != nil {
+		t.Fatalf("frontend profile missing: %v", err)
+	}
+}
+
+// TestRunJoin_ExplicitProfile_WritesNamedFile confirms --profile picks the
+// filename directly, bypassing the project/role-derived default.
+func TestRunJoin_ExplicitProfile_WritesNamedFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
+		return searchArticlesOutput{Articles: []articleSummary{}}, nil
+	})
+	defer srv.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"join",
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--profile", "my-manager-session",
+		"--owner", "harley",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
+	}
+
+	wantPath := filepath.Join(home, ".wormhole", "credentials", "my-manager-session.json")
+	if _, err := os.Stat(wantPath); err != nil {
+		t.Fatalf("stat %s: %v", wantPath, err)
+	}
+}
+
+// TestRunJoin_ExplicitProfile_RejectsUnsafeName confirms a --profile value
+// that could escape the credentials directory is rejected, not sanitized.
+func TestRunJoin_ExplicitProfile_RejectsUnsafeName(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"join",
+		"--server", "http://example.invalid",
+		"--project", "proj-1",
+		"--profile", "../escape",
+		"--owner", "harley",
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("exit code: got 0, want non-zero, stdout: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "profile") {
+		t.Fatalf("stderr should mention the profile-name error: got %q", stderr.String())
+	}
+}
+
+// TestRunConnect_DefaultProfile_DerivedFromProject confirms connect (no
+// --role flag) derives its default profile key using the "default" role
+// placeholder.
+func TestRunConnect_DefaultProfile_DerivedFromProject(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	claudeBin := filepath.Join(t.TempDir(), "claude")
+	script := "#!/bin/sh\nexit 0\n"
+	if err := os.WriteFile(claudeBin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake claude bin: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req rpcRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		out := registerAgentOutput{AgentID: "agent-1", PassportID: "passport-1", Token: "sekrit-token", Repositories: []string{}, Roles: []string{}}
+		outRaw, _ := json.Marshal(out)
+		resultRaw, _ := json.Marshal(toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: string(outRaw)}}})
+		json.NewEncoder(w).Encode(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: resultRaw})
+	}))
+	defer srv.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"connect",
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--owner", "harley",
+		"--claude-bin", claudeBin,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
+	}
+
+	wantPath := filepath.Join(home, ".wormhole", "credentials", "proj-1__default.json")
+	if _, err := os.Stat(wantPath); err != nil {
+		t.Fatalf("stat %s: %v", wantPath, err)
 	}
 }
 
