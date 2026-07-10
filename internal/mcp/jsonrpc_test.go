@@ -38,7 +38,7 @@ func buildFullRegistry() *Registry {
 	registry.Register(WhoAmITool())
 	registry.Register(CreateTaskTool(nil))
 	registry.Register(AssignTaskTool(nil))
-	registry.Register(ListTasksTool(nil))
+	registry.Register(ListTasksTool(nil, nil))
 	registry.Register(UpdateTaskStatusTool(nil))
 	registry.Register(CreateChannelTool(nil))
 	registry.Register(PostEventTool(nil))

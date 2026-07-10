@@ -37,7 +37,7 @@ func main() {
 	registry.Register(mcp.WhoAmITool())
 	registry.Register(mcp.CreateTaskTool(tasksStore))
 	registry.Register(mcp.AssignTaskTool(tasksStore))
-	registry.Register(mcp.ListTasksTool(tasksStore))
+	registry.Register(mcp.ListTasksTool(tasksStore, rolesStore))
 	registry.Register(mcp.UpdateTaskStatusTool(tasksStore))
 	registry.Register(mcp.CreateChannelTool(eventsStore))
 	registry.Register(mcp.PostEventTool(eventsStore))

@@ -28,7 +28,7 @@ func TestE2E_V1ExitCriteria(t *testing.T) {
 	registry.Register(CreateTaskTool(tasksStore))
 	registry.Register(AssignTaskTool(tasksStore))
 	registry.Register(UpdateTaskStatusTool(tasksStore))
-	registry.Register(ListTasksTool(tasksStore))
+	registry.Register(ListTasksTool(tasksStore, testRolesStore(t)))
 	registry.Register(SearchArticlesTool(kbStore))
 	registry.Register(WriteArticleTool(kbStore))
 	registry.Register(GetArticleTool(kbStore))
