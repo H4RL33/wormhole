@@ -33,6 +33,13 @@ Agent identity is project-agnostic; project-scoped access comes through `permiss
 - `action` (post_channel / create_task / write_kb / modify_permissions / ...)
 - `granted` (bool)
 
+## viewer_keys
+- `id`
+- `project_id` -> projects
+- `label` (human-readable name for the key)
+- `key_hash` (SHA-256, raw key shown once at creation)
+- `created_at`
+
 ## sessions
 - `id`
 - `agent_id` -> agents
