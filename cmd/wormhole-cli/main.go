@@ -321,16 +321,6 @@ func doListTasks(client *http.Client, server, project, token string) (listTasksO
 }
 
 
-// defaultTokenFilePath is where credentials land when --token-file isn't
-// given: ~/.wormhole/credentials.json.
-func defaultTokenFilePath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve home directory: %w", err)
-	}
-	return filepath.Join(home, ".wormhole", "credentials.json"), nil
-}
-
 // writeCredentials persists creds to path as indented JSON, creating the
 // parent directory if needed. File mode is 0600 (owner read/write only)
 // since it contains a live bearer token.
@@ -366,7 +356,8 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 	roles := fs.String("roles", "", "comma-separated list of project-level roles")
 	role := fs.String("role", "", "role template name to resolve permissions from (e.g. backend-engineer)")
 	permissions := fs.String("permissions", "", "comma-separated list of permissions to request (e.g. task.create,kb.write)")
-	tokenFile := fs.String("token-file", "", "path to write issued credentials to (default: ~/.wormhole/credentials.json)")
+	tokenFile := fs.String("token-file", "", "path to write issued credentials to (overrides --profile and the derived default)")
+	profile := fs.String("profile", "", "profile name to store credentials under (default: derived from --project and --role, e.g. proj-1__backend-engineer)")
 	context := fs.String("context", "", "explicit text to use for the KB semantic-sync query (default: built from owner/model/capabilities/roles)")
 	kbLimit := fs.Int("kb-limit", 10, "max number of KB articles to retrieve during join sync")
 	if err := fs.Parse(args); err != nil {
@@ -405,20 +396,19 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 		Role:         *role,
 	}
 
-	out, err := doRegister(http.DefaultClient, *server, *project, in)
+	// Resolve (and validate) the credentials path before making any network
+	// call: an invalid --profile name should fail fast, not after a
+	// register round-trip against a possibly-unreachable server.
+	path, err := resolveCredentialsPath(*tokenFile, *profile, *project, *role)
 	if err != nil {
 		fmt.Fprintf(stderr, "wormhole join: %v\n", err)
 		return 1
 	}
 
-	path := *tokenFile
-	if path == "" {
-		defaultPath, err := defaultTokenFilePath()
-		if err != nil {
-			fmt.Fprintf(stderr, "wormhole join: %v\n", err)
-			return 1
-		}
-		path = defaultPath
+	out, err := doRegister(http.DefaultClient, *server, *project, in)
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole join: %v\n", err)
+		return 1
 	}
 
 	creds := credentials{
@@ -428,6 +418,7 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 		PassportID: out.PassportID,
 		Token:      out.Token,
 		IssuedAt:   out.IssuedAt,
+		Role:       *role,
 	}
 	if err := writeCredentials(path, creds); err != nil {
 		fmt.Fprintf(stderr, "wormhole join: %v\n", err)
@@ -549,7 +540,8 @@ func runConnect(args []string, stdout, stderr io.Writer) int {
 	repositories := fs.String("repositories", "", "comma-separated list of git repositories this identity is scoped to")
 	roles := fs.String("roles", "", "comma-separated list of project-level roles")
 	permissions := fs.String("permissions", "", "comma-separated list of permissions to request (e.g. task.create,kb.write)")
-	tokenFile := fs.String("token-file", "", "path to write issued credentials to (default: ~/.wormhole/credentials.json)")
+	tokenFile := fs.String("token-file", "", "path to write issued credentials to (overrides --profile and the derived default)")
+	profile := fs.String("profile", "", "profile name to store credentials under (default: derived from --project, e.g. proj-1__default)")
 	connectorName := fs.String("connector-name", "wormhole", "name to register the MCP connector under (claude mcp add/remove)")
 	claudeBin := fs.String("claude-bin", "claude", "path to the claude CLI binary")
 	if err := fs.Parse(args); err != nil {
@@ -583,20 +575,19 @@ func runConnect(args []string, stdout, stderr io.Writer) int {
 		Roles:        splitOrNil(*roles),
 	}
 
-	out, err := doRegister(http.DefaultClient, *server, *project, in)
+	// Resolve (and validate) the credentials path before making any network
+	// call: an invalid --profile name should fail fast, not after a
+	// register round-trip against a possibly-unreachable server.
+	path, err := resolveCredentialsPath(*tokenFile, *profile, *project, "")
 	if err != nil {
 		fmt.Fprintf(stderr, "wormhole connect: %v\n", err)
 		return 1
 	}
 
-	path := *tokenFile
-	if path == "" {
-		defaultPath, err := defaultTokenFilePath()
-		if err != nil {
-			fmt.Fprintf(stderr, "wormhole connect: %v\n", err)
-			return 1
-		}
-		path = defaultPath
+	out, err := doRegister(http.DefaultClient, *server, *project, in)
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole connect: %v\n", err)
+		return 1
 	}
 
 	creds := credentials{
