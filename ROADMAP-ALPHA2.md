@@ -102,20 +102,20 @@ system, git integration beyond the existing manual link tools, write access from
 - [x] M2 review/demo — see below
 
 ### Chapter 8 — 2026-08-07
-- [ ] Refactor `cmd/wormhole-cli/main.go` credential storage from one fixed
+- [x] Refactor `cmd/wormhole-cli/main.go` credential storage from one fixed
       `~/.wormhole/credentials.json` to a keyed store: `~/.wormhole/credentials/<project>__<role>.json`
       (or `--profile <name>` to pick the file name directly), directory-scanned by a new
       `listCredentialProfiles()` helper
-- [ ] `wormhole join --role <name>` writes to its own profile file instead of clobbering the
+- [x] `wormhole join --role <name>` writes to its own profile file instead of clobbering the
       default; existing `--token-file` flag still works as an explicit override, now just a path
       into (or outside) the profile directory
-- [ ] New `wormhole whoami --profile <name>` / `wormhole profile list` CLI subcommand: lists
+- [x] New `wormhole whoami --profile <name>` / `wormhole profile list` CLI subcommand: lists
       stored profiles (project, role, agent id, token expiry) so a human running three sessions
       on one machine can tell them apart without opening the JSON files
-- [ ] No silent default when more than one profile exists — CLI errors asking for `--profile`
+- [x] No silent default when more than one profile exists — CLI errors asking for `--profile`
       rather than guessing which passport to use; single-profile case keeps working with no flag
       (backward compatible with Day 19's original one-passport flow)
-- [ ] Unit tests for the keyed store (write two profiles, confirm neither clobbers the other, confirm
+- [x] Unit tests for the keyed store (write two profiles, confirm neither clobbers the other, confirm
       listing surfaces both); M2 review/demo covers this alongside Chapter 7's
 
 ---
