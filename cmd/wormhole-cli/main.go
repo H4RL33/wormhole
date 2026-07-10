@@ -19,7 +19,7 @@ func main() {
 }
 
 func usage() string {
-	return "usage: wormhole <command> [flags]\n\ncommands:\n  join     join a Wormhole project (RFC-0001 §8.5)\n  connect  join a project and register it as a Claude Code MCP connector"
+	return "usage: wormhole <command> [flags]\n\ncommands:\n  join          join a Wormhole project (RFC-0001 §8.5)\n  connect       join a project and register it as a Claude Code MCP connector\n  whoami        show the active (or a named) credential profile\n  profile list  list all stored credential profiles"
 }
 
 // run dispatches to a subcommand and returns the process exit code. It
@@ -35,6 +35,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runJoin(args[1:], stdout, stderr)
 	case "connect":
 		return runConnect(args[1:], stdout, stderr)
+	case "whoami":
+		return runWhoami(args[1:], stdout, stderr)
+	case "profile":
+		return runProfile(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "wormhole: unknown command %q\n\n%s\n", args[0], usage())
 		return 2
@@ -625,5 +629,108 @@ func runConnect(args []string, stdout, stderr io.Writer) int {
 	}
 
 	fmt.Fprintf(stdout, "Connector %q registered with %s (run /mcp inside Claude Code to reconnect).\n", *connectorName, mcpURL)
+	return 0
+}
+
+// runWhoami implements `wormhole whoami`: prints one stored credential
+// profile's identifying fields (project, role, agent ID, issued/expiry
+// times), reading local files only — no server call. With --profile it
+// reads that named profile; without it, it auto-selects the sole stored
+// profile, or errors if zero or more than one exist (Chapter 8 roadmap:
+// "no silent default when more than one profile exists").
+func runWhoami(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("whoami", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	profile := fs.String("profile", "", "profile name to inspect (default: the sole stored profile, if only one exists)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	dir, err := profilesDir()
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole whoami: %v\n", err)
+		return 1
+	}
+
+	var entry profileEntry
+	if *profile != "" {
+		if verr := validateProfileName(*profile); verr != nil {
+			fmt.Fprintf(stderr, "wormhole whoami: --profile: %v\n", verr)
+			return 2
+		}
+		creds, rerr := readCredentials(filepath.Join(dir, *profile+".json"))
+		if rerr != nil {
+			fmt.Fprintf(stderr, "wormhole whoami: profile %q: %v\n", *profile, rerr)
+			return 1
+		}
+		entry = profileEntry{
+			Name:      *profile,
+			Project:   creds.ProjectID,
+			Role:      creds.Role,
+			AgentID:   creds.AgentID,
+			IssuedAt:  creds.IssuedAt,
+			ExpiresAt: creds.IssuedAt.Add(cliTokenTTL),
+		}
+	} else {
+		resolved, rerr := resolveWhoamiProfile(dir)
+		if rerr != nil {
+			fmt.Fprintf(stderr, "wormhole whoami: %v\n", rerr)
+			return 1
+		}
+		entry = resolved
+	}
+
+	role := entry.Role
+	if role == "" {
+		role = "(none)"
+	}
+	fmt.Fprintf(stdout, "profile=%s project=%s role=%s agent_id=%s issued_at=%s expires_at=%s\n",
+		entry.Name, entry.Project, role, entry.AgentID,
+		entry.IssuedAt.Format(time.RFC3339), entry.ExpiresAt.Format(time.RFC3339))
+	return 0
+}
+
+// runProfile dispatches `wormhole profile <subcommand>`. Only "list" exists
+// as of Chapter 8.
+func runProfile(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || args[0] != "list" {
+		fmt.Fprintln(stderr, "usage: wormhole profile list")
+		return 2
+	}
+	return runProfileList(args[1:], stdout, stderr)
+}
+
+// runProfileList implements `wormhole profile list`: prints every stored
+// credential profile's name, project, role, agent ID, and expiry, reading
+// local files only — no server call.
+func runProfileList(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("profile list", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	dir, err := profilesDir()
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole profile list: %v\n", err)
+		return 1
+	}
+	entries, err := listCredentialProfiles(dir)
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole profile list: %v\n", err)
+		return 1
+	}
+	if len(entries) == 0 {
+		fmt.Fprintln(stdout, "no stored credential profiles")
+		return 0
+	}
+	for _, e := range entries {
+		role := e.Role
+		if role == "" {
+			role = "(none)"
+		}
+		fmt.Fprintf(stdout, "%s  project=%s role=%s agent_id=%s expires_at=%s\n",
+			e.Name, e.Project, role, e.AgentID, e.ExpiresAt.Format(time.RFC3339))
+	}
 	return 0
 }
