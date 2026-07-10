@@ -51,6 +51,11 @@ type AuthenticatedScope struct {
 	Agent       Agent
 	ProjectID   string
 	Permissions []string
+	// Roles is the calling agent's passport role tags for ProjectID
+	// (RFC-0001 §8.4's free-text roles tags, plus any Chapter-6-resolved
+	// role template names folded in at registration). Empty when the
+	// agent's passport carries no role tags.
+	Roles []string
 }
 
 // Passport is the portable, project-scoped identity record an agent
@@ -342,9 +347,15 @@ func (s *Store) WhoAmI(ctx context.Context, projectID, rawToken string) (Authent
 	sum := sha256.Sum256([]byte(rawToken))
 	hash := hex.EncodeToString(sum[:])
 
-	query := `SELECT a.id, a.owner, a.model, a.capabilities, a.created_at, t.permissions, t.project_id
+	// passports is LEFT JOINed, not INNER JOINed: IssueToken (unlike
+	// Register) issues a token for a project without requiring a passport
+	// to already exist there (see TestWhoAmI_RejectsSameAgentTokenInDifferentProject),
+	// so a token can legitimately resolve with no matching passport row.
+	// p.roles is nil in that case and treated as empty below, not an error.
+	query := `SELECT a.id, a.owner, a.model, a.capabilities, a.created_at, t.permissions, t.project_id, p.roles
 		 FROM agents a
 		 JOIN agent_tokens t ON t.agent_id = a.id
+		 LEFT JOIN passports p ON p.agent_id = a.id AND p.project_id = t.project_id
 		 WHERE t.token_hash = $1 AND t.expires_at > now()`
 	args := []any{hash}
 	if projectID != "" {
@@ -355,9 +366,10 @@ func (s *Store) WhoAmI(ctx context.Context, projectID, rawToken string) (Authent
 	var agent Agent
 	var capsRaw []byte
 	var permissionsRaw []byte
+	var rolesRaw []byte
 	var resolvedProjectID string
 	err := s.db.QueryRowContext(ctx, query, args...).
-		Scan(&agent.ID, &agent.Owner, &agent.Model, &capsRaw, &agent.CreatedAt, &permissionsRaw, &resolvedProjectID)
+		Scan(&agent.ID, &agent.Owner, &agent.Model, &capsRaw, &agent.CreatedAt, &permissionsRaw, &resolvedProjectID, &rolesRaw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AuthenticatedScope{}, ErrInvalidToken
 	}
@@ -372,8 +384,14 @@ func (s *Store) WhoAmI(ctx context.Context, projectID, rawToken string) (Authent
 	if err := json.Unmarshal(permissionsRaw, &permissions); err != nil {
 		return AuthenticatedScope{}, fmt.Errorf("identity: unmarshal permissions: %w", err)
 	}
+	var roles []string
+	if rolesRaw != nil {
+		if err := json.Unmarshal(rolesRaw, &roles); err != nil {
+			return AuthenticatedScope{}, fmt.Errorf("identity: unmarshal roles: %w", err)
+		}
+	}
 
-	return AuthenticatedScope{Agent: agent, ProjectID: resolvedProjectID, Permissions: permissions}, nil
+	return AuthenticatedScope{Agent: agent, ProjectID: resolvedProjectID, Permissions: permissions, Roles: roles}, nil
 }
 
 func generateToken() (raw string, hash string, err error) {

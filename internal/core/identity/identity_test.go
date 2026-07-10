@@ -519,3 +519,52 @@ func TestWhoAmI_ExpiredTokenRejected(t *testing.T) {
 		t.Fatalf("WhoAmI with expired token: got err %v, want ErrInvalidToken", err)
 	}
 }
+
+// TestWhoAmI_ReturnsPassportRoles covers Chapter 7 Task 1: WhoAmI must
+// surface the calling agent's passport role tags on AuthenticatedScope, so
+// downstream consumers (task-list role filtering) can pick a default role
+// without a separate passport lookup.
+func TestWhoAmI_ReturnsPassportRoles(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "whoami-roles")
+
+	agent, _, rawToken, err := s.Register(ctx, projectID,
+		[]string{"task.read"}, "harley", "claude", nil, nil, []string{"backend-engineer"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	cleanupAgent(t, s, agent.ID)
+
+	scope, err := s.WhoAmI(ctx, projectID, rawToken)
+	if err != nil {
+		t.Fatalf("whoami: %v", err)
+	}
+	if !reflect.DeepEqual(scope.Roles, []string{"backend-engineer"}) {
+		t.Fatalf("scope.Roles = %v, want [backend-engineer]", scope.Roles)
+	}
+}
+
+// TestWhoAmI_ReturnsEmptyRolesWhenNoneSet covers the no-roles-set edge case:
+// scope.Roles must be empty, not nil-panic or error, when the passport was
+// issued with no role tags.
+func TestWhoAmI_ReturnsEmptyRolesWhenNoneSet(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "whoami-no-roles")
+
+	agent, _, rawToken, err := s.Register(ctx, projectID,
+		[]string{"task.read"}, "harley", "claude", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	cleanupAgent(t, s, agent.ID)
+
+	scope, err := s.WhoAmI(ctx, projectID, rawToken)
+	if err != nil {
+		t.Fatalf("whoami: %v", err)
+	}
+	if len(scope.Roles) != 0 {
+		t.Fatalf("scope.Roles = %v, want empty", scope.Roles)
+	}
+}
