@@ -8,6 +8,7 @@ import (
 
 	"github.com/H4RL33/wormhole/internal/core/events"
 	"github.com/H4RL33/wormhole/internal/core/identity"
+	"github.com/H4RL33/wormhole/internal/core/roles"
 )
 
 // testEventsStore returns a real events.Store backed by Postgres. Skips the
@@ -16,6 +17,14 @@ func testEventsStore(t *testing.T) *events.Store {
 	t.Helper()
 	db := testDB(t)
 	return events.NewStore(db)
+}
+
+// testRolesStore returns a real roles.Store backed by Postgres, sharing the
+// same skip-if-unreachable pattern as testEventsStore/testIdentityStore.
+func testRolesStore(t *testing.T) *roles.Store {
+	t.Helper()
+	db := testDB(t)
+	return roles.NewStore(db)
 }
 
 // mustRegisterAgent registers an agent in the given project and returns its ID

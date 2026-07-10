@@ -9,6 +9,7 @@ import (
 	"github.com/H4RL33/wormhole/internal/core/git"
 	"github.com/H4RL33/wormhole/internal/core/identity"
 	"github.com/H4RL33/wormhole/internal/core/kb"
+	"github.com/H4RL33/wormhole/internal/core/roles"
 	"github.com/H4RL33/wormhole/internal/core/tasks"
 	"github.com/H4RL33/wormhole/internal/mcp"
 	"github.com/H4RL33/wormhole/internal/storage"
@@ -29,9 +30,10 @@ func main() {
 	tasksStore := tasks.NewStore(db, eventsStore)
 	gitStore := git.NewStore(db)
 	kbStore := kb.NewStore(db, kb.StubEmbedder{}, cfg.KBDedupThreshold, cfg.KBMaxBodyLength, cfg.KBMinLinksDecision, cfg.KBMinLinksPolicy, cfg.KBMinLinksProcedure)
+	rolesStore := roles.NewStore(db)
 
 	registry := mcp.NewRegistry()
-	registry.Register(mcp.RegisterAgentTool(identityStore, eventsStore))
+	registry.Register(mcp.RegisterAgentTool(identityStore, eventsStore, rolesStore))
 	registry.Register(mcp.WhoAmITool())
 	registry.Register(mcp.CreateTaskTool(tasksStore))
 	registry.Register(mcp.AssignTaskTool(tasksStore))

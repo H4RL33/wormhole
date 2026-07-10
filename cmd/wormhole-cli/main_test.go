@@ -244,6 +244,77 @@ func TestRunJoin_Success_RegistersAndPersistsCredentials(t *testing.T) {
 	}
 }
 
+// TestRunJoin_Role_SendsRoleInRegisterRequest confirms --role is wired
+// through to wormhole.agent.register's request body as the "role" field
+// (Chapter 6: registerAgentInput gains a singular Role field distinct from
+// the existing plural Roles tag slice).
+func TestRunJoin_Role_SendsRoleInRegisterRequest(t *testing.T) {
+	issuedAt := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	var gotIn registerAgentInput
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req rpcRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		var params toolsCallParams
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			t.Fatalf("decode tools/call params: %v", err)
+		}
+		switch params.Name {
+		case "wormhole.agent.register":
+			if err := json.Unmarshal(params.Arguments, &gotIn); err != nil {
+				t.Fatalf("decode register arguments: %v", err)
+			}
+			out := registerAgentOutput{
+				AgentID:      "agent-1",
+				PassportID:   "passport-1",
+				Token:        "sekrit-token",
+				Repositories: []string{},
+				Roles:        []string{"backend-engineer"},
+				IssuedAt:     issuedAt,
+				Role:         "backend-engineer",
+			}
+			outRaw, _ := json.Marshal(out)
+			resultRaw, _ := json.Marshal(toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: string(outRaw)}}})
+			json.NewEncoder(w).Encode(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: resultRaw})
+		case "wormhole.kb.search":
+			outRaw, _ := json.Marshal(searchArticlesOutput{Articles: []articleSummary{}})
+			resultRaw, _ := json.Marshal(toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: string(outRaw)}}})
+			json.NewEncoder(w).Encode(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: resultRaw})
+		case "wormhole.channel.list":
+			outRaw, _ := json.Marshal(listChannelsOutput{Channels: []channelSummary{}})
+			resultRaw, _ := json.Marshal(toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: string(outRaw)}}})
+			json.NewEncoder(w).Encode(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: resultRaw})
+		case "wormhole.task.list":
+			outRaw, _ := json.Marshal(listTasksOutput{Tasks: []taskSummary{}})
+			resultRaw, _ := json.Marshal(toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: string(outRaw)}}})
+			json.NewEncoder(w).Encode(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: resultRaw})
+		default:
+			t.Fatalf("unexpected tool call: %s", params.Name)
+		}
+	}))
+	defer srv.Close()
+
+	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"join",
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--owner", "harley",
+		"--model", "claude",
+		"--role", "backend-engineer",
+		"--token-file", tokenFile,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
+	}
+
+	if gotIn.Role != "backend-engineer" {
+		t.Fatalf("registerAgentInput.Role: got %q, want %q", gotIn.Role, "backend-engineer")
+	}
+}
+
 func TestRunJoin_ServerError_PrintsError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req rpcRequest

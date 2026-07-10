@@ -3,15 +3,18 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/H4RL33/wormhole/internal/core/identity"
+	"github.com/H4RL33/wormhole/internal/core/roles"
 )
 
 func TestRegisterAgentTool_Handler(t *testing.T) {
 	store := testIdentityStore(t)
 	eventsStore := testEventsStore(t)
-	tool := RegisterAgentTool(store, eventsStore)
+	tool := RegisterAgentTool(store, eventsStore, testRolesStore(t))
 	if tool.Name != "wormhole.agent.register" {
 		t.Fatalf("Name: got %q", tool.Name)
 	}
@@ -48,7 +51,7 @@ func TestRegisterAgentTool_Handler(t *testing.T) {
 func TestRegisterAgentTool_BootstrapsDefaultChannelsOnce(t *testing.T) {
 	identityStore := testIdentityStore(t)
 	eventsStore := testEventsStore(t)
-	tool := RegisterAgentTool(identityStore, eventsStore)
+	tool := RegisterAgentTool(identityStore, eventsStore, testRolesStore(t))
 
 	projectID := mustCreateProject(t, "mcp-register-bootstrap")
 
@@ -142,7 +145,7 @@ func TestWhoAmITool_Handler(t *testing.T) {
 func TestRegisterAgentTool_Handler_NameFallback(t *testing.T) {
 	store := testIdentityStore(t)
 	eventsStore := testEventsStore(t)
-	tool := RegisterAgentTool(store, eventsStore)
+	tool := RegisterAgentTool(store, eventsStore, testRolesStore(t))
 
 	projectID := mustCreateProject(t, "mcp-register-fallback")
 	arguments, _ := json.Marshal(RegisterAgentInput{
@@ -169,5 +172,170 @@ func TestRegisterAgentTool_Handler_NameFallback(t *testing.T) {
 	}
 	if owner != "harley-fallback" {
 		t.Fatalf("expected owner to be %q, got %q", "harley-fallback", owner)
+	}
+}
+
+// permsSuperset reports whether got contains every element of want.
+func permsSuperset(got, want []string) bool {
+	have := make(map[string]bool, len(got))
+	for _, p := range got {
+		have[p] = true
+	}
+	for _, p := range want {
+		if !have[p] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestRegisterAgentTool_Handler_KnownRole verifies that a known --role
+// template resolves: the passport's roles tag includes the template name,
+// and the issued token's granted permissions are a superset of the
+// template's seeded permission bundle (Chapter 5 migration:
+// backend-engineer -> task.read, task.write, kb.read, kb.write,
+// channel.read, channel.write).
+func TestRegisterAgentTool_Handler_KnownRole(t *testing.T) {
+	store := testIdentityStore(t)
+	eventsStore := testEventsStore(t)
+	rolesStore := testRolesStore(t)
+	tool := RegisterAgentTool(store, eventsStore, rolesStore)
+
+	projectID := mustCreateProject(t, "mcp-register-role")
+	arguments, _ := json.Marshal(RegisterAgentInput{
+		Permissions: []string{},
+		Owner:       "harley",
+		Model:       "claude",
+		Role:        "backend-engineer",
+	})
+
+	result, err := tool.Handler(context.Background(), nil, projectID, arguments)
+	if err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+	out, ok := result.(RegisterAgentOutput)
+	if !ok {
+		t.Fatalf("result type: got %T, want RegisterAgentOutput", result)
+	}
+	if out.Role != "backend-engineer" {
+		t.Fatalf("Role: got %q, want %q", out.Role, "backend-engineer")
+	}
+
+	found := false
+	for _, r := range out.Roles {
+		if r == "backend-engineer" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Roles: got %v, want to contain %q", out.Roles, "backend-engineer")
+	}
+
+	scope, err := store.WhoAmI(context.Background(), projectID, out.Token)
+	if err != nil {
+		t.Fatalf("WhoAmI: %v", err)
+	}
+	wantBundle := []string{"task.read", "task.write", "kb.read", "kb.write", "channel.read", "channel.write"}
+	if !permsSuperset(scope.Permissions, wantBundle) {
+		t.Fatalf("Permissions: got %v, want superset of %v", scope.Permissions, wantBundle)
+	}
+}
+
+// TestRegisterAgentTool_Handler_KnownRole_UnionsExplicitPermissions proves
+// that resolving a role unions the template's permission bundle with
+// caller-supplied permissions rather than overriding them: an explicit
+// permission outside the bundle (task.assign) survives alongside the
+// bundle's permissions.
+func TestRegisterAgentTool_Handler_KnownRole_UnionsExplicitPermissions(t *testing.T) {
+	store := testIdentityStore(t)
+	eventsStore := testEventsStore(t)
+	rolesStore := testRolesStore(t)
+	tool := RegisterAgentTool(store, eventsStore, rolesStore)
+
+	projectID := mustCreateProject(t, "mcp-register-role-union")
+	arguments, _ := json.Marshal(RegisterAgentInput{
+		Permissions: []string{"task.assign"},
+		Owner:       "harley",
+		Model:       "claude",
+		Role:        "backend-engineer",
+	})
+
+	result, err := tool.Handler(context.Background(), nil, projectID, arguments)
+	if err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+	out, ok := result.(RegisterAgentOutput)
+	if !ok {
+		t.Fatalf("result type: got %T, want RegisterAgentOutput", result)
+	}
+
+	scope, err := store.WhoAmI(context.Background(), projectID, out.Token)
+	if err != nil {
+		t.Fatalf("WhoAmI: %v", err)
+	}
+	wantAll := []string{"task.assign", "task.read", "task.write", "kb.read", "kb.write", "channel.read", "channel.write"}
+	if !permsSuperset(scope.Permissions, wantAll) {
+		t.Fatalf("Permissions: got %v, want superset of %v", scope.Permissions, wantAll)
+	}
+}
+
+// TestRegisterAgentTool_Handler_UnknownRole verifies that an unresolvable
+// role name fails the call and the error unwraps to
+// roles.ErrTemplateNotFound.
+func TestRegisterAgentTool_Handler_UnknownRole(t *testing.T) {
+	store := testIdentityStore(t)
+	eventsStore := testEventsStore(t)
+	rolesStore := testRolesStore(t)
+	tool := RegisterAgentTool(store, eventsStore, rolesStore)
+
+	projectID := mustCreateProject(t, "mcp-register-role-unknown")
+	arguments, _ := json.Marshal(RegisterAgentInput{
+		Permissions: []string{},
+		Owner:       "harley",
+		Model:       "claude",
+		Role:        "nonexistent",
+	})
+
+	_, err := tool.Handler(context.Background(), nil, projectID, arguments)
+	if err == nil {
+		t.Fatal("Handler: expected error, got nil")
+	}
+	if !errors.Is(err, roles.ErrTemplateNotFound) {
+		t.Fatalf("error = %v, want to wrap roles.ErrTemplateNotFound", err)
+	}
+	if !strings.Contains(err.Error(), "nonexistent") {
+		t.Fatalf("error message %q does not identify unknown role name %q", err.Error(), "nonexistent")
+	}
+}
+
+// TestRegisterAgentTool_Handler_EmptyRole confirms the pre-Chapter-6 path
+// (role == "") is unchanged: no role resolution occurs, Role echoes back
+// empty, and registration proceeds exactly as before.
+func TestRegisterAgentTool_Handler_EmptyRole(t *testing.T) {
+	store := testIdentityStore(t)
+	eventsStore := testEventsStore(t)
+	rolesStore := testRolesStore(t)
+	tool := RegisterAgentTool(store, eventsStore, rolesStore)
+
+	projectID := mustCreateProject(t, "mcp-register-role-empty")
+	arguments, _ := json.Marshal(RegisterAgentInput{
+		Permissions: []string{"event.publish"},
+		Owner:       "harley",
+		Model:       "claude",
+	})
+
+	result, err := tool.Handler(context.Background(), nil, projectID, arguments)
+	if err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+	out, ok := result.(RegisterAgentOutput)
+	if !ok {
+		t.Fatalf("result type: got %T, want RegisterAgentOutput", result)
+	}
+	if out.Role != "" {
+		t.Fatalf("Role: got %q, want empty", out.Role)
+	}
+	if len(out.Roles) != 0 {
+		t.Fatalf("Roles: got %v, want empty", out.Roles)
 	}
 }

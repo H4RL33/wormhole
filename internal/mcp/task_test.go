@@ -185,7 +185,7 @@ func TestE2E_CreateAssignUpdateStatus(t *testing.T) {
 	tasksStore := testTasksStore(t)
 	eventsStore := testEventsStore(t)
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(identityStore, eventsStore))
+	registry.Register(RegisterAgentTool(identityStore, eventsStore, testRolesStore(t)))
 	registry.Register(CreateTaskTool(tasksStore))
 	registry.Register(AssignTaskTool(tasksStore))
 	registry.Register(UpdateTaskStatusTool(tasksStore))

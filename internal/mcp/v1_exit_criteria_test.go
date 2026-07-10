@@ -20,7 +20,7 @@ func TestE2E_V1ExitCriteria(t *testing.T) {
 	kbStore := kb.NewStore(db, kb.StubEmbedder{}, 0.9, 5000, 0, 0, 0)
 
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(identityStore, eventsStore))
+	registry.Register(RegisterAgentTool(identityStore, eventsStore, testRolesStore(t)))
 	registry.Register(WhoAmITool())
 	registry.Register(CreateChannelTool(eventsStore))
 	registry.Register(PostEventTool(eventsStore))

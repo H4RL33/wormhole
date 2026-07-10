@@ -93,6 +93,7 @@ type registerAgentInput struct {
 	Capabilities []string `json:"capabilities"`
 	Repositories []string `json:"repositories"`
 	Roles        []string `json:"roles"`
+	Role         string   `json:"role,omitempty"`
 }
 
 type registerAgentOutput struct {
@@ -102,6 +103,7 @@ type registerAgentOutput struct {
 	Repositories []string  `json:"repositories"`
 	Roles        []string  `json:"roles"`
 	IssuedAt     time.Time `json:"issued_at"`
+	Role         string    `json:"role,omitempty"`
 }
 
 // searchArticlesInput mirrors internal/mcp.SearchArticlesInput's JSON
@@ -357,6 +359,7 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 	capabilities := fs.String("capabilities", "", "comma-separated list of agent capabilities")
 	repositories := fs.String("repositories", "", "comma-separated list of git repositories this identity is scoped to")
 	roles := fs.String("roles", "", "comma-separated list of project-level roles")
+	role := fs.String("role", "", "role template name to resolve permissions from (e.g. backend-engineer)")
 	permissions := fs.String("permissions", "", "comma-separated list of permissions to request (e.g. task.create,kb.write)")
 	tokenFile := fs.String("token-file", "", "path to write issued credentials to (default: ~/.wormhole/credentials.json)")
 	context := fs.String("context", "", "explicit text to use for the KB semantic-sync query (default: built from owner/model/capabilities/roles)")
@@ -394,6 +397,7 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 		Capabilities: splitOrNil(*capabilities),
 		Repositories: splitOrNil(*repositories),
 		Roles:        splitOrNil(*roles),
+		Role:         *role,
 	}
 
 	out, err := doRegister(http.DefaultClient, *server, *project, in)
