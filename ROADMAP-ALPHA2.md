@@ -127,7 +127,7 @@ system, git integration beyond the existing manual link tools, write access from
       `/dashboard/api/projects/{id}/tasks`, `/events`, `/kb`
 - [x] Human-facing auth: a project-scoped read-only viewer key (RFC-0001 §8.4 human oversight
       role), separate from agent bearer tokens — new `viewer_keys` table,
-      `migrations/000009_viewer_keys.up.sql`
+      `migrations/000011_viewer_keys.up.sql`
 
 ### Chapter 10 — 2026-08-09
 - [ ] Static single page, no JS framework (matches the project's dependency-light convention):
