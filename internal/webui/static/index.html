@@ -378,8 +378,13 @@
             fetch(url, { headers: getHeaders() })
                 .then(response => {
                     if (!response.ok) {
-                        return response.json().then(err => {
-                            throw new Error(err.error || 'Failed to load tasks');
+                        return response.text().then(text => {
+                            try {
+                                const err = JSON.parse(text);
+                                throw new Error(err.error || 'Failed to load tasks');
+                            } catch (e) {
+                                throw new Error(`Request failed (status ${response.status})`);
+                            }
                         });
                     }
                     return response.json();
@@ -468,8 +473,13 @@
             fetch(url, { headers: getHeaders() })
                 .then(response => {
                     if (!response.ok) {
-                        return response.json().then(err => {
-                            throw new Error(err.error || 'Failed to load events');
+                        return response.text().then(text => {
+                            try {
+                                const err = JSON.parse(text);
+                                throw new Error(err.error || 'Failed to load events');
+                            } catch (e) {
+                                throw new Error(`Request failed (status ${response.status})`);
+                            }
                         });
                     }
                     return response.json();
@@ -527,8 +537,13 @@
             fetch(url, { headers: getHeaders() })
                 .then(response => {
                     if (!response.ok) {
-                        return response.json().then(err => {
-                            throw new Error(err.error || 'Failed to load KB articles');
+                        return response.text().then(text => {
+                            try {
+                                const err = JSON.parse(text);
+                                throw new Error(err.error || 'Failed to load KB articles');
+                            } catch (e) {
+                                throw new Error(`Request failed (status ${response.status})`);
+                            }
                         });
                     }
                     return response.json();
