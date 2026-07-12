@@ -136,11 +136,23 @@ system, git integration beyond the existing manual link tools, write access from
 - [x] Mount static file server + API under `/dashboard` in `cmd/wormhole-server/main.go`
 
 ### Chapter 11 — 2026-08-10
-- [ ] Hardening test: assert no POST/PUT/DELETE route exists under `/dashboard/api/*` — read-only
+- [x] Hardening test: assert no POST/PUT/DELETE route exists under `/dashboard/api/*` — read-only
       is enforced at the router, not just by convention
-- [ ] M3 integration test: seed a project via existing MCP tools, hit every `/dashboard/api` route,
+- [x] M3 integration test: seed a project via existing MCP tools, hit every `/dashboard/api` route,
       assert it reflects the seeded state
-- [ ] M3 review/demo
+- [x] M3 review/demo — see below
+
+**M3 review/demo:** `TestDashboardAPI_ReadOnlyEnforcedAtRouter`
+(`internal/webui/hardening_test.go`) proves POST/PUT/DELETE/PATCH against all three
+`/dashboard/api/*` routes are rejected with 405 by `net/http.ServeMux`'s own
+method-pattern matching, before any handler (and therefore any store) is reached —
+read-only is a routing-level guarantee, not a convention a handler could violate.
+`TestM3_MCPSeededStateReflectedInDashboard` (`cmd/wormhole-server/m3_integration_test.go`)
+proves the read side is correct end to end: it registers an agent and creates a task,
+channel, event, and KB article through real `/mcp` JSON-RPC `tools/call` requests (the
+same protocol a live Claude Code session uses), then confirms all three dashboard
+routes return exactly those MCP-created rows via a viewer key. M3 (Chapters 9-11) is
+closed.
 
 ---
 
