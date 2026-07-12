@@ -14,6 +14,7 @@ import (
 	"github.com/H4RL33/wormhole/internal/mcp"
 	"github.com/H4RL33/wormhole/internal/storage"
 	"github.com/H4RL33/wormhole/internal/types"
+	"github.com/H4RL33/wormhole/internal/webui"
 )
 
 func main() {
@@ -55,6 +56,14 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/mcp", mcp.NewMCPHandler(registry, identityStore))
+
+	webuiHandler := &webui.Handler{
+		Identity: identityStore,
+		Tasks:    tasksStore,
+		Events:   eventsStore,
+		KB:       kbStore,
+	}
+	mux.Handle("/dashboard/", webuiHandler.NewMux())
 
 	log.Printf("wormhole-server listening on %s", cfg.ListenAddr)
 	server := &http.Server{

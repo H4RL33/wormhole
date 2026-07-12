@@ -8,6 +8,7 @@
 package webui
 
 import (
+	_ "embed"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -17,6 +18,19 @@ import (
 	"github.com/H4RL33/wormhole/internal/core/kb"
 	"github.com/H4RL33/wormhole/internal/core/tasks"
 )
+
+// indexHTML is Task 1's static dashboard page, embedded at build time so
+// cmd/wormhole-server/main.go can serve it without a runtime filesystem
+// dependency.
+//
+//go:embed static/index.html
+var indexHTML []byte
+
+// serveIndex serves the embedded static dashboard page.
+func serveIndex(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(indexHTML)
+}
 
 // Handler serves the read-only dashboard API.
 type Handler struct {
@@ -30,6 +44,7 @@ type Handler struct {
 // this under /dashboard in cmd/wormhole-server/main.go.
 func (h *Handler) NewMux() *http.ServeMux {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /dashboard/", serveIndex)
 	mux.HandleFunc("GET /dashboard/api/projects/{id}/tasks", h.withViewerAuth(h.listTasks))
 	mux.HandleFunc("GET /dashboard/api/projects/{id}/events", h.withViewerAuth(h.listEvents))
 	mux.HandleFunc("GET /dashboard/api/projects/{id}/kb", h.withViewerAuth(h.listKB))
