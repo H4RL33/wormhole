@@ -379,12 +379,14 @@
                 .then(response => {
                     if (!response.ok) {
                         return response.text().then(text => {
+                            let message;
                             try {
                                 const err = JSON.parse(text);
-                                throw new Error(err.error || 'Failed to load tasks');
+                                message = err.error || `Request failed (status ${response.status})`;
                             } catch (e) {
-                                throw new Error(`Request failed (status ${response.status})`);
+                                message = `Request failed (status ${response.status})`;
                             }
+                            throw new Error(message);
                         });
                     }
                     return response.json();
@@ -474,12 +476,14 @@
                 .then(response => {
                     if (!response.ok) {
                         return response.text().then(text => {
+                            let message;
                             try {
                                 const err = JSON.parse(text);
-                                throw new Error(err.error || 'Failed to load events');
+                                message = err.error || `Request failed (status ${response.status})`;
                             } catch (e) {
-                                throw new Error(`Request failed (status ${response.status})`);
+                                message = `Request failed (status ${response.status})`;
                             }
+                            throw new Error(message);
                         });
                     }
                     return response.json();
@@ -538,12 +542,14 @@
                 .then(response => {
                     if (!response.ok) {
                         return response.text().then(text => {
+                            let message;
                             try {
                                 const err = JSON.parse(text);
-                                throw new Error(err.error || 'Failed to load KB articles');
+                                message = err.error || `Request failed (status ${response.status})`;
                             } catch (e) {
-                                throw new Error(`Request failed (status ${response.status})`);
+                                message = `Request failed (status ${response.status})`;
                             }
+                            throw new Error(message);
                         });
                     }
                     return response.json();
