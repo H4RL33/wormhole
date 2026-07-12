@@ -130,10 +130,10 @@ system, git integration beyond the existing manual link tools, write access from
       `migrations/000011_viewer_keys.up.sql`
 
 ### Chapter 10 — 2026-08-09
-- [ ] Static single page, no JS framework (matches the project's dependency-light convention):
+- [x] Static single page, no JS framework (matches the project's dependency-light convention):
       `internal/webui/static/index.html` — task board grouped by status, channel event feed, KB
       article list, each pulling from Chapter 9's endpoints
-- [ ] Mount static file server + API under `/dashboard` in `cmd/wormhole-server/main.go`
+- [x] Mount static file server + API under `/dashboard` in `cmd/wormhole-server/main.go`
 
 ### Chapter 11 — 2026-08-10
 - [ ] Hardening test: assert no POST/PUT/DELETE route exists under `/dashboard/api/*` — read-only
