@@ -23,6 +23,8 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
@@ -93,6 +95,10 @@ type Server struct {
 	token       string
 	projectID   string
 	store       *localstore.Store
+
+	closeOnce sync.Once
+	closeErr  error
+	shutdown  atomic.Bool
 }
 
 // New binds the Unix domain socket at socketPath. Callers must call Serve
@@ -113,21 +119,33 @@ func New(socketPath, coordServerURL, token, projectID string, store *localstore.
 	}, nil
 }
 
-// Close stops accepting connections and releases the socket.
+// Close stops accepting connections and releases the socket. Safe to call
+// multiple times, and safe to call independently of ctx cancellation (i.e.
+// without ever cancelling the ctx passed to Serve): either path marks
+// shutdown as intentional so Serve returns nil instead of an accept error.
 func (s *Server) Close() error {
-	return s.listener.Close()
+	s.closeOnce.Do(func() {
+		s.shutdown.Store(true)
+		s.closeErr = s.listener.Close()
+	})
+	return s.closeErr
 }
 
 // Serve accepts connections until ctx is cancelled or the listener closes.
 func (s *Server) Serve(ctx context.Context) error {
+	done := make(chan struct{})
+	defer close(done)
 	go func() {
-		<-ctx.Done()
-		s.listener.Close()
+		select {
+		case <-ctx.Done():
+			s.Close()
+		case <-done:
+		}
 	}()
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
-			if ctx.Err() != nil {
+			if ctx.Err() != nil || s.shutdown.Load() {
 				return nil
 			}
 			return fmt.Errorf("localapi: accept: %w", err)

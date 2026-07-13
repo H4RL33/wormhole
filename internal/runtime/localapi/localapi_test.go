@@ -115,6 +115,63 @@ func TestServer_ProxiesWhoAmI(t *testing.T) {
 	}
 }
 
+// TestServer_CloseWithoutCancelReturnsNil proves Close() alone (without
+// ever cancelling the ctx passed to Serve) is a valid graceful-shutdown
+// path: Serve must return nil promptly, not a wrapped accept error.
+func TestServer_CloseWithoutCancelReturnsNil(t *testing.T) {
+	coord := fakeCoordServer(t)
+	defer coord.Close()
+	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
+	if err != nil {
+		t.Fatalf("localstore.Open: %v", err)
+	}
+	defer store.Close()
+
+	socketPath := filepath.Join(t.TempDir(), "wormholed.sock")
+	srv, err := New(socketPath, coord.URL, "test-token", "project-1", store)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Deliberately never cancelled during the assertion below: Close()
+	// must be sufficient on its own to make Serve return nil.
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- srv.Serve(ctx)
+	}()
+
+	// Give Serve a moment to bind and start accepting.
+	for i := 0; i < 50; i++ {
+		conn, dialErr := net.Dial("unix", socketPath)
+		if dialErr == nil {
+			conn.Close()
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := srv.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	select {
+	case err := <-serveErr:
+		if err != nil {
+			t.Fatalf("Serve returned non-nil error after Close(): %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return within 2s after Close()")
+	}
+
+	// Calling Close() again must not panic or double-close.
+	if err := srv.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
 func TestServer_UnknownTool(t *testing.T) {
 	coord := fakeCoordServer(t)
 	defer coord.Close()
