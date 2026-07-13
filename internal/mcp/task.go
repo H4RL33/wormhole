@@ -256,7 +256,7 @@ func ListTasksTool(store *tasks.Store, rolesStore *roles.Store) Tool {
 // codebase; wormhole.channel.post already requires channel_id explicitly).
 type UpdateTaskStatusInput struct {
 	TaskID    string `json:"task_id"`
-	NewStatus string `json:"new_status"`
+	NewStatus string `json:"new_status" enum:"todo,wip,blocked,done"`
 	ChannelID string `json:"channel_id"`
 }
 

@@ -422,3 +422,26 @@ func TestListTasksTool_UnknownRoleRejected(t *testing.T) {
 		t.Fatalf("wormhole.task.list with unknown role: want tool-level error (isError: true), got success: %+v", result)
 	}
 }
+
+func TestUpdateTaskStatusSchemaHasStatusEnum(t *testing.T) {
+	tool := UpdateTaskStatusTool(nil)
+	schema := buildInputSchema(tool)
+	props := schema["properties"].(map[string]any)
+	newStatus, ok := props["new_status"].(map[string]any)
+	if !ok {
+		t.Fatalf("new_status property missing or wrong type: %#v", props["new_status"])
+	}
+	enumVal, ok := newStatus["enum"].([]any)
+	if !ok {
+		t.Fatalf("new_status schema has no enum: %#v", newStatus)
+	}
+	want := []string{"todo", "wip", "blocked", "done"}
+	if len(enumVal) != len(want) {
+		t.Fatalf("enum = %v, want %v", enumVal, want)
+	}
+	for i, v := range want {
+		if enumVal[i] != v {
+			t.Fatalf("enum[%d] = %v, want %v", i, enumVal[i], v)
+		}
+	}
+}

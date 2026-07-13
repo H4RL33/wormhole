@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/core/events"
@@ -233,7 +234,10 @@ func (s *Store) UpdateStatus(ctx context.Context, projectID, taskID, newStatus, 
 		}
 	}
 	if !allowed {
-		return Task{}, ErrInvalidTransition
+		if len(validTransitions[currentStatus]) == 0 {
+			return Task{}, fmt.Errorf("tasks: invalid status transition: %s -> %s (%s is a terminal state, no valid transitions): %w", currentStatus, newStatus, currentStatus, ErrInvalidTransition)
+		}
+		return Task{}, fmt.Errorf("tasks: invalid status transition: %s -> %s (valid from %s: %s): %w", currentStatus, newStatus, currentStatus, strings.Join(validTransitions[currentStatus], ", "), ErrInvalidTransition)
 	}
 
 	row := tx.QueryRowContext(ctx,
