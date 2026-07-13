@@ -13,11 +13,35 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // ErrCredentialsNotFound is returned when the named profile has no
 // credentials file under ~/.wormhole/credentials/.
 var ErrCredentialsNotFound = errors.New("config: credentials not found")
+
+// ErrInvalidProfileName is returned when the profile name passed to Load
+// could escape ~/.wormhole/credentials/ (path separators, ".." traversal,
+// empty string) — mirrors cmd/wormhole-cli/profiles.go's
+// validateProfileName, since profileName here also originates as a
+// command-line argument (os.Args[1] in cmd/wormholed/main.go).
+var ErrInvalidProfileName = errors.New("config: invalid profile name")
+
+// validateProfileName rejects a profile name that could escape the
+// credentials directory when joined into a file path. Mirrors
+// cmd/wormhole-cli/profiles.go's validateProfileName rules exactly.
+func validateProfileName(name string) error {
+	if name == "" {
+		return fmt.Errorf("%w: %q: must not be empty", ErrInvalidProfileName, name)
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("%w: %q: must not contain path separators", ErrInvalidProfileName, name)
+	}
+	if name == "." || name == ".." || strings.Contains(name, "..") {
+		return fmt.Errorf("%w: %q: must not contain %q", ErrInvalidProfileName, name, "..")
+	}
+	return nil
+}
 
 // Credentials mirrors the fields of cmd/wormhole-cli's credentials struct
 // that wormholed needs to proxy calls to the Coordination Server.
@@ -37,6 +61,10 @@ type Config struct {
 
 // Load resolves paths and reads the named credential profile.
 func Load(profileName string) (Config, error) {
+	if err := validateProfileName(profileName); err != nil {
+		return Config{}, err
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return Config{}, fmt.Errorf("config: resolve home directory: %w", err)
