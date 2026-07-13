@@ -89,7 +89,8 @@ func TestDashboardAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create channel: %v", err)
 	}
-	event, err := eventsStore.PublishEvent(context.Background(), projectID, channel.ID, agentID, "message.posted", json.RawMessage(`{"text":"hello"}`), nil)
+	seedNote := "hello"
+	event, err := eventsStore.PublishEvent(context.Background(), projectID, channel.ID, agentID, "message.posted", json.RawMessage(`{"text":"hello"}`), &seedNote)
 	if err != nil {
 		t.Fatalf("publish event: %v", err)
 	}

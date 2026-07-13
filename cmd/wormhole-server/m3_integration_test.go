@@ -251,10 +251,12 @@ func TestM3_MCPSeededStateReflectedInDashboard(t *testing.T) {
 	}
 
 	// Step 4: post an event onto that channel via /mcp.
+	eventNote := "m3 integration event"
 	eventResultRaw := m3CallTool(t, srv.URL, "wormhole.channel.post", projectID, token, mcp.PostEventInput{
 		ChannelID: channelOut.ChannelID,
 		EventType: "message.posted",
 		Payload:   json.RawMessage(`{"text":"m3 integration event"}`),
+		Note:      &eventNote,
 	})
 	var eventOut mcp.PostEventOutput
 	if err := json.Unmarshal(eventResultRaw, &eventOut); err != nil {
