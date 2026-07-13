@@ -63,6 +63,19 @@ func TestLoad_MissingProfile(t *testing.T) {
 	}
 }
 
+func TestLoad_InvalidProfileName(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cases := []string{"", "../escape", "a/b", "a\\b", ".."}
+	for _, name := range cases {
+		_, err := Load(name)
+		if !errors.Is(err, ErrInvalidProfileName) {
+			t.Fatalf("Load(%q): got err %v, want ErrInvalidProfileName", name, err)
+		}
+	}
+}
+
 func TestLoad_FallsBackToHomeWhenXDGUnset(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
