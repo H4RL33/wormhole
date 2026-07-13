@@ -34,12 +34,12 @@ Boundary phases carry over: prior phase's review/demo plus next phase's kickoff,
 
 **Exit criteria:** a coding harness can dial `wormholed`'s local socket, call `wormhole.agent.whoami`, and get back the identity resolved by the (unmodified) Coordination Server — proving the full chain: harness → local socket → `wormholed` → HTTP → Coordination Server → Postgres, with a local SQLite cache write on success.
 
-- [ ] `internal/runtime/config`: XDG-compliant local paths, org connection config (server URL + credential file path)
-- [ ] `internal/runtime/localstore`: SQLite `Store` (pure-Go driver), schema-on-open, `WhoAmI` cache read/write, sentinel errors matching `internal/core/identity` pattern
-- [ ] `internal/runtime/localapi`: Unix domain socket JSON-RPC server, single tool `wormhole.agent.whoami`, proxies to Coordination Server's existing `/mcp` endpoint, writes through to localstore cache on success
-- [ ] `cmd/wormholed`: wires config + localstore + localapi, graceful shutdown, testable `Run(cfg) error` entrypoint
-- [ ] P1 integration test: fake Coordination Server (`httptest.Server`) + real socket dial + real SQLite file, full round trip asserted
-- [ ] P1 review/demo, kick off P2
+- [x] `internal/runtime/config`: XDG-compliant local paths, org connection config (server URL + credential file path)
+- [x] `internal/runtime/localstore`: SQLite `Store` (pure-Go driver), schema-on-open, `WhoAmI` cache read/write, sentinel errors matching `internal/core/identity` pattern
+- [x] `internal/runtime/localapi`: Unix domain socket JSON-RPC server, single tool `wormhole.agent.whoami`, proxies to Coordination Server's existing `/mcp` endpoint, writes through to localstore cache on success
+- [x] `cmd/wormholed`: wires config + localstore + localapi, graceful shutdown, testable `Run(cfg) error` entrypoint
+- [x] P1 integration test: fake Coordination Server (`httptest.Server`) + real socket dial + real SQLite file, full round trip asserted
+- [x] P1 review/demo, kick off P2 — completed 2026-07-13. 4 tasks, 8 commits (6 feature/fix + 2 final-review fixes), each individually reviewed plus one whole-branch review. `go build`/`go vet`/`go test ./...` clean.
 
 Detailed plan: `docs/superpowers/plans/2026-07-13-local-runtime-p1-walking-skeleton.md`.
 
