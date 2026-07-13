@@ -1153,5 +1153,5 @@ git commit -m "feat(wormholed): daemon entrypoint, P1 walking skeleton complete"
 ## P1 Exit Check
 
 - [ ] `go build ./...`, `go vet ./...`, `go test ./...` all pass with output pasted into the completion report (mirrors `docs/architecture.md` §0.7/T4).
-- [ ] Manual smoke: run `wormhole join` (existing CLI) against a running `wormhole-server`, then `go run ./cmd/wormholed default` and dial its socket by hand (e.g. `echo '{"tool":"wormhole.agent.whoami"}' | nc -U $XDG_RUNTIME_DIR/wormhole/wormholed.sock`) — confirms the skeleton against a *real* Coordination Server, not just the test's `httptest.Server` stand-in.
+- [ ] Manual smoke: run `wormhole join --server <url> --project <id> --profile default` (existing CLI; the explicit `--profile default` is required — without it, `wormhole join` derives the filename as `<project>__<role>.json`, not `default.json`) against a running `wormhole-server`, then `go run ./cmd/wormholed default` and dial its socket by hand (e.g. `echo '{"tool":"wormhole.agent.whoami"}' | nc -U $XDG_RUNTIME_DIR/wormhole/wormholed.sock`) — confirms the skeleton against a *real* Coordination Server, not just the test's `httptest.Server` stand-in.
 - [ ] Check off P1 in `ROADMAP-LOCAL-RUNTIME.md`, note completion date, kick off P2 detailed plan.
