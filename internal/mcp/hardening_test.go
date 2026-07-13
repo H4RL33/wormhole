@@ -98,7 +98,7 @@ func TestMCP_AuthEdgeCases(t *testing.T) {
 	identityStore := identity.NewStore(db)
 	eventsStore := events.NewStore(db)
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(identityStore, eventsStore, testRolesStore(t)))
+	registry.Register(RegisterAgentTool(identityStore, eventsStore, testRolesStore(t), testKBStore(t)))
 	registry.Register(WhoAmITool())
 
 	srv := httptest.NewServer(NewMCPHandler(registry, identityStore))
@@ -169,7 +169,7 @@ func TestMCP_MultiTenantIsolation(t *testing.T) {
 	kbStore := kb.NewStore(db, kb.StubEmbedder{}, 0.9, 5000, 0, 0, 0)
 
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(identityStore, eventsStore, testRolesStore(t)))
+	registry.Register(RegisterAgentTool(identityStore, eventsStore, testRolesStore(t), kbStore))
 	registry.Register(ListTasksTool(tasksStore, testRolesStore(t)))
 	registry.Register(CreateTaskTool(tasksStore))
 	registry.Register(WriteArticleTool(kbStore))
@@ -384,7 +384,7 @@ func TestMCP_LoadSmokeTest(t *testing.T) {
 	kbStore := kb.NewStore(db, kb.StubEmbedder{}, 0.9, 5000, 0, 0, 0)
 
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(identityStore, eventsStore, testRolesStore(t)))
+	registry.Register(RegisterAgentTool(identityStore, eventsStore, testRolesStore(t), kbStore))
 	registry.Register(WhoAmITool())
 	registry.Register(ListChannelsTool(eventsStore))
 	registry.Register(PostEventTool(eventsStore))

@@ -169,7 +169,7 @@ func TestM3_MCPSeededStateReflectedInDashboard(t *testing.T) {
 	// order, so this test exercises the real production tool surface, not
 	// a subset.
 	registry := mcp.NewRegistry()
-	registry.Register(mcp.RegisterAgentTool(identityStore, eventsStore, rolesStore))
+	registry.Register(mcp.RegisterAgentTool(identityStore, eventsStore, rolesStore, kbStore))
 	registry.Register(mcp.WhoAmITool())
 	registry.Register(mcp.CreateTaskTool(tasksStore))
 	registry.Register(mcp.AssignTaskTool(tasksStore))

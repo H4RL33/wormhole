@@ -8,13 +8,14 @@ import (
 	"testing"
 
 	"github.com/H4RL33/wormhole/internal/core/identity"
+	"github.com/H4RL33/wormhole/internal/core/kb"
 	"github.com/H4RL33/wormhole/internal/core/roles"
 )
 
 func TestRegisterAgentTool_Handler(t *testing.T) {
 	store := testIdentityStore(t)
 	eventsStore := testEventsStore(t)
-	tool := RegisterAgentTool(store, eventsStore, testRolesStore(t))
+	tool := RegisterAgentTool(store, eventsStore, testRolesStore(t), testKBStore(t))
 	if tool.Name != "wormhole.agent.register" {
 		t.Fatalf("Name: got %q", tool.Name)
 	}
@@ -51,7 +52,7 @@ func TestRegisterAgentTool_Handler(t *testing.T) {
 func TestRegisterAgentTool_BootstrapsDefaultChannelsOnce(t *testing.T) {
 	identityStore := testIdentityStore(t)
 	eventsStore := testEventsStore(t)
-	tool := RegisterAgentTool(identityStore, eventsStore, testRolesStore(t))
+	tool := RegisterAgentTool(identityStore, eventsStore, testRolesStore(t), testKBStore(t))
 
 	projectID := mustCreateProject(t, "mcp-register-bootstrap")
 
@@ -145,7 +146,7 @@ func TestWhoAmITool_Handler(t *testing.T) {
 func TestRegisterAgentTool_Handler_NameFallback(t *testing.T) {
 	store := testIdentityStore(t)
 	eventsStore := testEventsStore(t)
-	tool := RegisterAgentTool(store, eventsStore, testRolesStore(t))
+	tool := RegisterAgentTool(store, eventsStore, testRolesStore(t), testKBStore(t))
 
 	projectID := mustCreateProject(t, "mcp-register-fallback")
 	arguments, _ := json.Marshal(RegisterAgentInput{
@@ -199,7 +200,7 @@ func TestRegisterAgentTool_Handler_KnownRole(t *testing.T) {
 	store := testIdentityStore(t)
 	eventsStore := testEventsStore(t)
 	rolesStore := testRolesStore(t)
-	tool := RegisterAgentTool(store, eventsStore, rolesStore)
+	tool := RegisterAgentTool(store, eventsStore, rolesStore, testKBStore(t))
 
 	projectID := mustCreateProject(t, "mcp-register-role")
 	arguments, _ := json.Marshal(RegisterAgentInput{
@@ -250,7 +251,7 @@ func TestRegisterAgentTool_Handler_KnownRole_UnionsExplicitPermissions(t *testin
 	store := testIdentityStore(t)
 	eventsStore := testEventsStore(t)
 	rolesStore := testRolesStore(t)
-	tool := RegisterAgentTool(store, eventsStore, rolesStore)
+	tool := RegisterAgentTool(store, eventsStore, rolesStore, testKBStore(t))
 
 	projectID := mustCreateProject(t, "mcp-register-role-union")
 	arguments, _ := json.Marshal(RegisterAgentInput{
@@ -286,7 +287,7 @@ func TestRegisterAgentTool_Handler_UnknownRole(t *testing.T) {
 	store := testIdentityStore(t)
 	eventsStore := testEventsStore(t)
 	rolesStore := testRolesStore(t)
-	tool := RegisterAgentTool(store, eventsStore, rolesStore)
+	tool := RegisterAgentTool(store, eventsStore, rolesStore, testKBStore(t))
 
 	projectID := mustCreateProject(t, "mcp-register-role-unknown")
 	arguments, _ := json.Marshal(RegisterAgentInput{
@@ -315,7 +316,7 @@ func TestRegisterAgentTool_Handler_EmptyRole(t *testing.T) {
 	store := testIdentityStore(t)
 	eventsStore := testEventsStore(t)
 	rolesStore := testRolesStore(t)
-	tool := RegisterAgentTool(store, eventsStore, rolesStore)
+	tool := RegisterAgentTool(store, eventsStore, rolesStore, testKBStore(t))
 
 	projectID := mustCreateProject(t, "mcp-register-role-empty")
 	arguments, _ := json.Marshal(RegisterAgentInput{
@@ -338,4 +339,67 @@ func TestRegisterAgentTool_Handler_EmptyRole(t *testing.T) {
 	if len(out.Roles) != 0 {
 		t.Fatalf("Roles: got %v, want empty", out.Roles)
 	}
+}
+
+// TestRegisterAgentSeedsOnboardingArticle proves the first agent.register
+// into a project seeds the fixed "How This Project Works" KB article, and
+// a second registration into the same project does not duplicate it (see
+// design note above Task 3 in the plan: no project-creation hook exists,
+// so first-registration is the earliest point a real authoring agent with
+// a passport exists).
+func TestRegisterAgentSeedsOnboardingArticle(t *testing.T) {
+	identityStore := testIdentityStore(t)
+	eventsStore := testEventsStore(t)
+	rolesStore := testRolesStore(t)
+	kbStore := testKBStore(t)
+	projectID := mustCreateProject(t, "onboarding-article-test")
+
+	tool := RegisterAgentTool(identityStore, eventsStore, rolesStore, kbStore)
+	args, _ := json.Marshal(RegisterAgentInput{Owner: "harley", Model: "claude", Permissions: []string{"event.publish"}})
+	_, err := tool.Handler(context.Background(), nil, projectID, args)
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	articles, err := kbStore.ListArticles(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("list articles: %v", err)
+	}
+	found := false
+	for _, a := range articles {
+		if a.Title == onboardingArticleTitle {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected onboarding article %q after first registration, got titles: %v", onboardingArticleTitle, articlesTitles(articles))
+	}
+
+	// second registration into the same project must not duplicate the article
+	args2, _ := json.Marshal(RegisterAgentInput{Owner: "second-agent", Model: "claude", Permissions: []string{"event.publish"}})
+	_, err = tool.Handler(context.Background(), nil, projectID, args2)
+	if err != nil {
+		t.Fatalf("second register: %v", err)
+	}
+	articles2, err := kbStore.ListArticles(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("list articles after second register: %v", err)
+	}
+	count := 0
+	for _, a := range articles2 {
+		if a.Title == onboardingArticleTitle {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly 1 onboarding article after 2 registrations, got %d", count)
+	}
+}
+
+func articlesTitles(articles []kb.Article) []string {
+	out := make([]string, len(articles))
+	for i, a := range articles {
+		out[i] = a.Title
+	}
+	return out
 }

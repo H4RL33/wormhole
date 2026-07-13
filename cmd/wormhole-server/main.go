@@ -34,7 +34,7 @@ func main() {
 	rolesStore := roles.NewStore(db)
 
 	registry := mcp.NewRegistry()
-	registry.Register(mcp.RegisterAgentTool(identityStore, eventsStore, rolesStore))
+	registry.Register(mcp.RegisterAgentTool(identityStore, eventsStore, rolesStore, kbStore))
 	registry.Register(mcp.WhoAmITool())
 	registry.Register(mcp.CreateTaskTool(tasksStore))
 	registry.Register(mcp.AssignTaskTool(tasksStore))

@@ -19,7 +19,7 @@ func TestM1_RegisterPassportAuthenticatedCall(t *testing.T) {
 	store := testIdentityStore(t)
 	eventsStore := testEventsStore(t)
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(store, eventsStore, testRolesStore(t)))
+	registry.Register(RegisterAgentTool(store, eventsStore, testRolesStore(t), testKBStore(t)))
 	registry.Register(WhoAmITool())
 	srv := httptest.NewServer(NewMCPHandler(registry, store))
 	defer srv.Close()

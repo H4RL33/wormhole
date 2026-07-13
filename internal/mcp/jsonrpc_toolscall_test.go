@@ -164,7 +164,7 @@ func TestHandleToolsCall_RealToolEndToEnd(t *testing.T) {
 	store := testIdentityStore(t)
 	eventsStore := testEventsStore(t)
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(store, eventsStore, testRolesStore(t)))
+	registry.Register(RegisterAgentTool(store, eventsStore, testRolesStore(t), testKBStore(t)))
 	registry.Register(WhoAmITool())
 
 	projectID := mustCreateProject(t, "toolscall-e2e")
