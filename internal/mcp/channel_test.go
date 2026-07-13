@@ -109,10 +109,12 @@ func TestChannelTools_PostEvent(t *testing.T) {
 	// Build a minimal AuthenticatedScope so the handler can read Agent.ID.
 	scope := mustBuildScope(agentID, projectID)
 
+	note := "hello"
 	arguments, _ := json.Marshal(PostEventInput{
 		ChannelID: channel.ID,
 		EventType: "message.posted",
 		Payload:   json.RawMessage(`{"text":"hello"}`),
+		Note:      &note,
 	})
 
 	result, err := tool.Handler(context.Background(), scope, projectID, arguments)
@@ -153,7 +155,8 @@ func TestChannelTools_Subscribe(t *testing.T) {
 
 	// Publish two events directly via the store.
 	payload := json.RawMessage(`{}`)
-	if _, err := store.PublishEvent(context.Background(), projectID, channel.ID, agentID, "message.posted", payload, nil); err != nil {
+	note := "hello"
+	if _, err := store.PublishEvent(context.Background(), projectID, channel.ID, agentID, "message.posted", payload, &note); err != nil {
 		t.Fatalf("publish event 1: %v", err)
 	}
 	if _, err := store.PublishEvent(context.Background(), projectID, channel.ID, agentID, "build.failed", payload, nil); err != nil {
@@ -276,5 +279,28 @@ func TestChannelTools_PostInvalidEventType(t *testing.T) {
 	}
 	if !errors.Is(err, events.ErrInvalidEventType) {
 		t.Fatalf("Handler error: got %v, want to wrap ErrInvalidEventType", err)
+	}
+}
+
+func TestPostEventSchemaHasEventTypeEnum(t *testing.T) {
+	tool := PostEventTool(nil)
+	schema := buildInputSchema(tool)
+	props := schema["properties"].(map[string]any)
+	eventType, ok := props["event_type"].(map[string]any)
+	if !ok {
+		t.Fatalf("event_type property missing or wrong type: %#v", props["event_type"])
+	}
+	enumVal, ok := eventType["enum"].([]any)
+	if !ok {
+		t.Fatalf("event_type schema has no enum: %#v", eventType)
+	}
+	want := []string{"task.status_changed", "review.requested", "build.failed", "discovery.logged", "message.posted"}
+	if len(enumVal) != len(want) {
+		t.Fatalf("enum = %v, want %v", enumVal, want)
+	}
+	for i, v := range want {
+		if enumVal[i] != v {
+			t.Fatalf("enum[%d] = %v, want %v", i, enumVal[i], v)
+		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 
 	_ "github.com/lib/pq"
@@ -567,5 +568,72 @@ func TestListEventsByProject_CrossProjectIsolation(t *testing.T) {
 		if event.ProjectID != projectB {
 			t.Errorf("event in project B list has ProjectID %q, want %q", event.ProjectID, projectB)
 		}
+	}
+}
+
+func TestPublishEventUnknownTypeMessage(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "event-type-msg-test")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+	channel, err := s.CreateChannel(ctx, projectID, "general")
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+
+	_, err = s.PublishEvent(ctx, projectID, channel.ID, agentID, "bogus_type", nil, nil)
+	if err == nil {
+		t.Fatal("expected error for unknown event_type")
+	}
+	want := "events: unknown event_type \"bogus_type\", valid types: task.status_changed, review.requested, build.failed, discovery.logged, message.posted"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("error = %q, want it to contain %q", err.Error(), want)
+	}
+}
+
+func TestPublishEventMessagePostedRequiresNote(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "message-posted-note-test")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+	channel, err := s.CreateChannel(ctx, projectID, "general")
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+
+	_, err = s.PublishEvent(ctx, projectID, channel.ID, agentID, "message.posted", nil, nil)
+	if !errors.Is(err, ErrEmptyMessagePostedNote) {
+		t.Fatalf("nil note: err = %v, want ErrEmptyMessagePostedNote", err)
+	}
+
+	empty := "   "
+	_, err = s.PublishEvent(ctx, projectID, channel.ID, agentID, "message.posted", nil, &empty)
+	if !errors.Is(err, ErrEmptyMessagePostedNote) {
+		t.Fatalf("whitespace note: err = %v, want ErrEmptyMessagePostedNote", err)
+	}
+
+	real := "hello team"
+	_, err = s.PublishEvent(ctx, projectID, channel.ID, agentID, "message.posted", nil, &real)
+	if err != nil {
+		t.Fatalf("non-empty note: unexpected error: %v", err)
+	}
+}
+
+func TestPublishEventNonMessagePostedAllowsEmptyNote(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "regression-empty-note-test")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+	channel, err := s.CreateChannel(ctx, projectID, "general")
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+
+	_, err = s.PublishEvent(ctx, projectID, channel.ID, agentID, "discovery.logged", json.RawMessage(`{"finding":"x"}`), nil)
+	if err != nil {
+		t.Fatalf("discovery.logged with nil note: unexpected error: %v", err)
 	}
 }

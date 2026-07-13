@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
 var ErrInvalidEventType = errors.New("events: invalid event type")
+var ErrEmptyMessagePostedNote = errors.New("events: message.posted requires a non-empty note")
 var ErrChannelNotFound = errors.New("events: channel not found")
 var ErrPassportNotFound = errors.New("events: agent not registered or has no passport for this project")
 
@@ -175,7 +177,10 @@ func (s *Store) PublishEvent(ctx context.Context, projectID, channelID, agentID,
 // status update and its event insert must succeed or fail together.
 func (s *Store) PublishEventInTx(ctx context.Context, tx *sql.Tx, projectID, channelID, agentID, eventType string, payload json.RawMessage, note *string) (Event, error) {
 	if !AllowedEventTypes[eventType] {
-		return Event{}, ErrInvalidEventType
+		return Event{}, fmt.Errorf("events: unknown event_type %q, valid types: task.status_changed, review.requested, build.failed, discovery.logged, message.posted: %w", eventType, ErrInvalidEventType)
+	}
+	if eventType == "message.posted" && (note == nil || strings.TrimSpace(*note) == "") {
+		return Event{}, ErrEmptyMessagePostedNote
 	}
 
 	if len(payload) == 0 {
