@@ -63,7 +63,7 @@ func TestServer_ProxiesWhoAmI(t *testing.T) {
 	defer store.Close()
 
 	socketPath := filepath.Join(t.TempDir(), "wormholed.sock")
-	srv, err := New(socketPath, coord.URL, "test-token", "project-1", store)
+	srv, err := New(socketPath, coord.URL, "test-token", "project-1", store, localstore.NewTaskRepo(store.DB()), localstore.NewEventRepo(store.DB()), localstore.NewKBRepo(store.DB()))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestServer_CloseWithoutCancelReturnsNil(t *testing.T) {
 	defer store.Close()
 
 	socketPath := filepath.Join(t.TempDir(), "wormholed.sock")
-	srv, err := New(socketPath, coord.URL, "test-token", "project-1", store)
+	srv, err := New(socketPath, coord.URL, "test-token", "project-1", store, localstore.NewTaskRepo(store.DB()), localstore.NewEventRepo(store.DB()), localstore.NewKBRepo(store.DB()))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestServer_UnknownTool(t *testing.T) {
 	defer store.Close()
 
 	socketPath := filepath.Join(t.TempDir(), "wormholed.sock")
-	srv, err := New(socketPath, coord.URL, "test-token", "project-1", store)
+	srv, err := New(socketPath, coord.URL, "test-token", "project-1", store, localstore.NewTaskRepo(store.DB()), localstore.NewEventRepo(store.DB()), localstore.NewKBRepo(store.DB()))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

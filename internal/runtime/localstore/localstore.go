@@ -30,6 +30,56 @@ CREATE TABLE IF NOT EXISTS whoami_cache (
 	permissions  TEXT NOT NULL DEFAULT '[]',
 	cached_at    TIMESTAMP NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS tasks (
+	id              TEXT PRIMARY KEY,
+	namespace_id    TEXT NOT NULL,
+	parent_task_id  TEXT,
+	title           TEXT NOT NULL,
+	description     TEXT NOT NULL DEFAULT '',
+	owner_agent_id  TEXT,
+	status          TEXT NOT NULL DEFAULT 'todo',
+	priority        INTEGER NOT NULL DEFAULT 0,
+	due_by          TEXT,
+	created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS channels (
+	id             TEXT PRIMARY KEY,
+	namespace_id   TEXT NOT NULL,
+	name           TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS events (
+	id              TEXT PRIMARY KEY,
+	namespace_id    TEXT NOT NULL,
+	channel_id      TEXT NOT NULL,
+	agent_id        TEXT NOT NULL,
+	event_type      TEXT NOT NULL,
+	payload         TEXT NOT NULL DEFAULT '{}',
+	note            TEXT,
+	created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS kb_articles (
+	id               TEXT PRIMARY KEY,
+	namespace_id     TEXT NOT NULL,
+	title            TEXT NOT NULL,
+	body             TEXT NOT NULL,
+	frontmatter      TEXT NOT NULL DEFAULT '{}',
+	author_agent_id  TEXT NOT NULL,
+	created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS kb_links (
+	id               TEXT PRIMARY KEY,
+	namespace_id     TEXT NOT NULL,
+	from_article_id  TEXT NOT NULL,
+	to_article_id    TEXT NOT NULL
+);
+
 `
 
 // Store wraps a *sql.DB backed by a local SQLite file.
@@ -54,6 +104,13 @@ func Open(path string) (*Store, error) {
 // Close releases the underlying database handle.
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// DB returns the underlying *sql.DB for constructing repositories that share
+// the same connection. P2: used by cmd/wormholed to wire TaskRepo, EventRepo,
+// and KBRepo on the same SQLite file.
+func (s *Store) DB() *sql.DB {
+	return s.db
 }
 
 // WhoAmICache is the cached wormhole.agent.whoami result for one agent.

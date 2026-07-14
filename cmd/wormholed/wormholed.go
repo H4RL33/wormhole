@@ -38,7 +38,7 @@ func Run(ctx context.Context, profileName string) error {
 	}
 	defer store.Close()
 
-	srv, err := localapi.New(cfg.SocketPath, cfg.Credentials.Server, cfg.Credentials.Token, cfg.Credentials.ProjectID, store)
+	srv, err := localapi.New(cfg.SocketPath, cfg.Credentials.Server, cfg.Credentials.Token, cfg.Credentials.ProjectID, store, localstore.NewTaskRepo(store.DB()), localstore.NewEventRepo(store.DB()), localstore.NewKBRepo(store.DB()))
 	if err != nil {
 		return fmt.Errorf("wormholed: start local api: %w", err)
 	}
