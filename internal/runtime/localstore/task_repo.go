@@ -215,6 +215,36 @@ func (r *TaskRepo) UpdateStatus(ctx context.Context, namespaceID, taskID, newSta
 	return task, nil
 }
 
+// Assign sets a task's owner_agent_id in namespaceID (an ownership change,
+// distinct from workflow status — mirrors internal/core/tasks.Store.Assign,
+// RFC-0001 §8.2). Core's Assign does not emit an event on the owner change,
+// so this local mirror does not invent one either.
+func (r *TaskRepo) Assign(ctx context.Context, namespaceID, taskID, ownerAgentID string) (Task, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Task{}, fmt.Errorf("localstore/task: assign: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	row := tx.QueryRowContext(ctx,
+		`UPDATE tasks SET owner_agent_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND namespace_id = ?
+		 RETURNING id, namespace_id, parent_task_id, title, description, owner_agent_id, status, priority, due_by, created_at, updated_at`,
+		ownerAgentID, taskID, namespaceID,
+	)
+	task, err := scanTask(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Task{}, ErrTaskNotFound
+	}
+	if err != nil {
+		return Task{}, fmt.Errorf("localstore/task: assign: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Task{}, fmt.Errorf("localstore/task: assign: commit: %w", err)
+	}
+	return task, nil
+}
+
 func queryTask(ctx context.Context, tx *sql.Tx, namespaceID, taskID string) (Task, error) {
 	row := tx.QueryRowContext(ctx,
 		`SELECT id, namespace_id, parent_task_id, title, description, owner_agent_id, status, priority, due_by, created_at, updated_at

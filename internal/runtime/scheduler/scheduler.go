@@ -32,11 +32,17 @@ var ErrAgentUnknown = fmt.Errorf("scheduler: agent unknown")
 
 // Scheduler manages agent registration, presence tracking, capability matching,
 // and local task routing (RFC-0003 §6.1). It is safe for concurrent use.
+//
+// Task identity and workflow status are NOT owned here (Findings 1/2 of the
+// P3 review): the scheduler's only job is capability matching — picking which
+// locally-registered agent a given (already-persisted) task should go to. The
+// task's one true ID and its RFC-0001 §8.2 status (todo/wip/blocked/done) live
+// in localstore.TaskRepo; the scheduler caches just enough (ID, capability,
+// AssignedTo) to do routing without a round trip.
 type Scheduler struct {
-	mu      sync.RWMutex
-	agents  map[string]*RegisteredAgent // keyed by AgentID
-	tasks   []*Task
-	nextID  int
+	mu     sync.RWMutex
+	agents map[string]*RegisteredAgent // keyed by AgentID
+	tasks  []*Task
 }
 
 // NewScheduler creates a fresh scheduler instance.
@@ -98,36 +104,40 @@ func (s *Scheduler) UpdatePresence(agentID string, status AgentStatus) error {
 	return nil
 }
 
-// Task represents a unit of work that needs routing to an agent.
+// Task is the scheduler's routing-only view of a task: just enough to match
+// capabilities and record which agent got it. It deliberately has no Status
+// field — that vocabulary is RFC-0001 §8.2's todo/wip/blocked/done, owned and
+// validated by localstore.TaskRepo, not invented here (Findings 1/2).
 type Task struct {
-	ID           string
-	NamespaceID  string
-	Capability   string // the capability required to execute this task
-	Status       string // "unassigned" | "assigned" | "done"
-	AssignedTo   string // AgentID once assigned
+	ID          string
+	NamespaceID string
+	Capability  string // the capability required to execute this task
+	AssignedTo  string // AgentID once assigned
 }
 
 var ErrNoMatch = fmt.Errorf("scheduler: no eligible agent")
 
-// RegisterTask creates a new unassigned task.
-func (s *Scheduler) RegisterTask(namespaceID, capability string) (*Task, error) {
+// RegisterTask records a task needing capability-based routing. taskID must
+// be the caller-supplied, already-persisted task identifier (the localstore-
+// generated UUID) — the scheduler does not mint its own task IDs (Finding 1).
+func (s *Scheduler) RegisterTask(namespaceID, capability, taskID string) (*Task, error) {
 	if namespaceID == "" {
 		return nil, fmt.Errorf("scheduler: register task: namespace must not be empty")
 	}
 	if capability == "" {
 		return nil, fmt.Errorf("scheduler: register task: capability must not be empty")
 	}
+	if taskID == "" {
+		return nil, fmt.Errorf("scheduler: register task: taskID must not be empty")
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.nextID++
 	task := &Task{
-		ID:           fmt.Sprintf("task-%d", s.nextID),
-		NamespaceID:  namespaceID,
-		Capability:   capability,
-		Status:       "unassigned",
-		AssignedTo:   "",
+		ID:          taskID,
+		NamespaceID: namespaceID,
+		Capability:  capability,
 	}
 	s.tasks = append(s.tasks, task)
 	return task, nil
@@ -169,7 +179,6 @@ func (s *Scheduler) AssignTask(taskID string) (*RegisteredAgent, error) {
 
 	// Pick the first eligible agent (simple assignment; round-robin is v1).
 	agent := eligible[0]
-	target.Status = "assigned"
 	target.AssignedTo = agent.AgentID
 	return agent, nil
 }
@@ -207,14 +216,17 @@ func (s *Scheduler) ListAgents() []*RegisteredAgent {
 	return result
 }
 
-// TaskStatus returns the current status of taskID.
-func (s *Scheduler) TaskStatus(taskID string) (string, error) {
+// AssignedAgent returns the AgentID assigned to taskID, or "" if the task is
+// registered but not yet assigned. Task workflow status is not tracked here
+// (Findings 1/2) — callers needing RFC-0001 §8.2 status must read it from
+// localstore.TaskRepo, the source of truth.
+func (s *Scheduler) AssignedAgent(taskID string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	for _, t := range s.tasks {
 		if t.ID == taskID {
-			return t.Status, nil
+			return t.AssignedTo, nil
 		}
 	}
 	return "", fmt.Errorf("scheduler: unknown task %q", taskID)

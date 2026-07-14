@@ -53,16 +53,26 @@ func NewEventBus() *EventBus {
 	}
 }
 
-// Publish sends raw JSON bytes to all subscribers whose key matches the namespace
-// or event type. It broadcasts to both namespace-level and event-type-level
-// subscriptions.
-func (eb *EventBus) Publish(ctx context.Context, namespace, eventType string, payload []byte) {
+// Publish sends raw JSON bytes to every subscriber whose scoping matches any
+// of namespace, eventType, capability, or agentID (empty dimensions are not
+// matched). A subscription registered under more than one matching dimension
+// still receives the payload exactly once per Publish call (Finding 3): the
+// dedup is by Subscription.ID across every key visited, not per-key.
+func (eb *EventBus) Publish(ctx context.Context, namespace, eventType, capability, agentID string, payload []byte) {
 	eb.mu.RLock()
 	defer eb.mu.RUnlock()
 
-	keys := []string{namespace, eventType}
+	seen := make(map[string]bool)
+	keys := []string{namespace, eventType, capability, agentID}
 	for _, key := range keys {
+		if key == "" {
+			continue
+		}
 		for _, sub := range eb.subscribers[key] {
+			if seen[sub.ID] {
+				continue
+			}
+			seen[sub.ID] = true
 			select {
 			case <-ctx.Done():
 				return
@@ -74,15 +84,17 @@ func (eb *EventBus) Publish(ctx context.Context, namespace, eventType string, pa
 	}
 }
 
-// Subscribe registers a new subscription scoped to namespace and eventType.
-// The subscription receives events matching either the namespace OR the event type,
-// but NOT both simultaneously (broadcast semantics).
-func (eb *EventBus) Subscribe(namespace string, eventType string) (*Subscription, error) {
+// Subscribe registers a new subscription scoped to any combination of
+// namespace, eventType, capability, and agentID. At least one dimension must
+// be non-empty. The subscription receives events matching ANY of its
+// non-empty dimensions (broadcast semantics), delivered exactly once per
+// Publish call regardless of how many dimensions match (see Publish).
+func (eb *EventBus) Subscribe(namespace, eventType, capability, agentID string) (*Subscription, error) {
 	eb.mu.Lock()
 	defer eb.mu.Unlock()
 
-	if namespace == "" && eventType == "" {
-		return nil, fmt.Errorf("eventbus: subscribe: at least one of namespace or event type must be non-empty")
+	if namespace == "" && eventType == "" && capability == "" && agentID == "" {
+		return nil, fmt.Errorf("eventbus: subscribe: at least one of namespace, event type, capability, or agent id must be non-empty")
 	}
 
 	sub := &Subscription{
@@ -91,11 +103,10 @@ func (eb *EventBus) Subscribe(namespace string, eventType string) (*Subscription
 		done: make(chan struct{}),
 	}
 
-	if namespace != "" {
-		eb.subscribers[namespace] = append(eb.subscribers[namespace], sub)
-	}
-	if eventType != "" {
-		eb.subscribers[eventType] = append(eb.subscribers[eventType], sub)
+	for _, key := range []string{namespace, eventType, capability, agentID} {
+		if key != "" {
+			eb.subscribers[key] = append(eb.subscribers[key], sub)
+		}
 	}
 
 	eb.nextID++

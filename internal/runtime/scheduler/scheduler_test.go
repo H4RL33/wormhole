@@ -71,26 +71,31 @@ func TestUpdatePresenceUnknownAgent(t *testing.T) {
 func TestRegisterTask(t *testing.T) {
 	sched := NewScheduler()
 
-	task, err := sched.RegisterTask("ns-1", "code")
+	task, err := sched.RegisterTask("ns-1", "code", "task-ext-1")
 	if err != nil {
 		t.Fatalf("register task: %v", err)
 	}
-	if task.NamespaceID != "ns-1" || task.Capability != "code" || task.Status != "unassigned" {
-		t.Fatalf("task = %+v, want unassigned code task in ns-1", task)
+	if task.NamespaceID != "ns-1" || task.Capability != "code" || task.ID != "task-ext-1" || task.AssignedTo != "" {
+		t.Fatalf("task = %+v, want unassigned task-ext-1 code task in ns-1", task)
 	}
 }
 
 func TestRegisterTaskEmptyFields(t *testing.T) {
 	sched := NewScheduler()
 
-	_, err := sched.RegisterTask("", "code")
+	_, err := sched.RegisterTask("", "code", "task-1")
 	if err == nil {
 		t.Fatal("expected error for empty namespace")
 	}
 
-	_, err = sched.RegisterTask("ns-1", "")
+	_, err = sched.RegisterTask("ns-1", "", "task-1")
 	if err == nil {
 		t.Fatal("expected error for empty capability")
+	}
+
+	_, err = sched.RegisterTask("ns-1", "code", "")
+	if err == nil {
+		t.Fatal("expected error for empty taskID")
 	}
 }
 
@@ -100,7 +105,7 @@ func TestAssignTaskMatchesCapability(t *testing.T) {
 	sched.RegisterAgent("agent-code", "ns-1", []string{"code"})
 	sched.RegisterAgent("agent-review", "ns-1", []string{"review"})
 
-	task, _ := sched.RegisterTask("ns-1", "code")
+	task, _ := sched.RegisterTask("ns-1", "code", "task-1")
 
 	agent, err := sched.AssignTask(task.ID)
 	if err != nil {
@@ -110,10 +115,13 @@ func TestAssignTaskMatchesCapability(t *testing.T) {
 		t.Errorf("assigned to %s, want agent-code", agent.AgentID)
 	}
 
-	// Verify task status changed.
-	status, _ := sched.TaskStatus(task.ID)
-	if status != "assigned" {
-		t.Errorf("task status = %s, want assigned", status)
+	// Verify assignment recorded, via both the returned task and AssignedAgent.
+	assignedTo, err := sched.AssignedAgent(task.ID)
+	if err != nil {
+		t.Fatalf("AssignedAgent: %v", err)
+	}
+	if assignedTo != "agent-code" {
+		t.Errorf("AssignedAgent = %s, want agent-code", assignedTo)
 	}
 	if task.AssignedTo != "agent-code" {
 		t.Errorf("task assigned to %s, want agent-code", task.AssignedTo)
@@ -125,7 +133,7 @@ func TestAssignTaskNoMatch(t *testing.T) {
 
 	sched.RegisterAgent("agent-review", "ns-1", []string{"review"})
 
-	task, _ := sched.RegisterTask("ns-1", "code")
+	task, _ := sched.RegisterTask("ns-1", "code", "task-1")
 
 	_, err := sched.AssignTask(task.ID)
 	if !errors.Is(err, ErrNoMatch) {
@@ -139,7 +147,7 @@ func TestAssignTaskNamespaceMismatch(t *testing.T) {
 	// Agent in different namespace.
 	sched.RegisterAgent("agent-1", "ns-2", []string{"code"})
 
-	task, _ := sched.RegisterTask("ns-1", "code")
+	task, _ := sched.RegisterTask("ns-1", "code", "task-1")
 
 	_, err := sched.AssignTask(task.ID)
 	if !errors.Is(err, ErrNoMatch) {
@@ -199,7 +207,7 @@ func TestTwoAgentsSameMachine(t *testing.T) {
 	}
 
 	// agent-a should be able to run a task assigned to agent-a.
-	task, _ := sched.RegisterTask("ns-1", "code")
+	task, _ := sched.RegisterTask("ns-1", "code", "task-1")
 	routedAgent, err := sched.AssignTask(task.ID)
 	if err != nil {
 		t.Fatalf("assign: %v", err)
@@ -209,7 +217,7 @@ func TestTwoAgentsSameMachine(t *testing.T) {
 		// This is fine — the key property is that a match was found.
 	}
 
-	if task.Status != "assigned" {
-		t.Errorf("task status = %s, want assigned", task.Status)
+	if task.AssignedTo == "" {
+		t.Errorf("task.AssignedTo empty, want an assigned agent")
 	}
 }

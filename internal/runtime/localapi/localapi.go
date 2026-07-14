@@ -719,7 +719,9 @@ func (s *Server) handleAgentRegister(ctx context.Context, args json.RawMessage) 
 		return nil, fmt.Errorf("localapi: agent register: %w", err)
 	}
 
-	// Publish presence event to the eventbus.
+	// Publish presence event to the eventbus. Scoped by namespace, event type,
+	// and agent id (Finding 5); no single capability applies since an agent
+	// can register with several.
 	payload, _ := json.Marshal(map[string]interface{}{
 		"agent":        agent.AgentID,
 		"status":       string(scheduler.StatusOnline),
@@ -727,7 +729,7 @@ func (s *Server) handleAgentRegister(ctx context.Context, args json.RawMessage) 
 		"capabilities": agent.Capabilities,
 	})
 	if s.eventbus != nil {
-		s.eventbus.Publish(ctx, s.projectID, "presence.online", payload)
+		s.eventbus.Publish(ctx, s.projectID, "presence.online", "", agent.AgentID, payload)
 	}
 
 	return map[string]interface{}{
@@ -768,7 +770,7 @@ func (s *Server) handleAgentPresence(ctx context.Context, args json.RawMessage) 
 		"status": statusStr,
 	})
 	if s.eventbus != nil {
-		s.eventbus.Publish(ctx, s.projectID, "presence."+statusStr, payload)
+		s.eventbus.Publish(ctx, s.projectID, "presence."+statusStr, "", agentID, payload)
 	}
 
 	return map[string]interface{}{
@@ -796,7 +798,11 @@ func (s *Server) handleAgentList(ctx context.Context) (map[string]interface{}, e
 	return map[string]interface{}{"agents": out}, nil
 }
 
-// handleTaskRoute creates and routes a task to a locally-registered agent.
+// handleTaskRoute creates a task in localstore (the one true task ID and
+// RFC-0001 §8.2 status, retrievable via wormhole.task.get/list) and routes it
+// to a locally-registered agent via the scheduler's capability matching. The
+// routing decision is recorded as an ownership change (TaskRepo.Assign), not
+// a status transition (Findings 1/2).
 // Args: {"capability": "code", "title": "x", "description": "y"}
 func (s *Server) handleTaskRoute(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
 	if s.scheduler == nil {
@@ -817,50 +823,66 @@ func (s *Server) handleTaskRoute(ctx context.Context, args json.RawMessage) (map
 		return nil, fmt.Errorf("localapi: task route: missing capability")
 	}
 
-	task, err := s.scheduler.RegisterTask(s.projectID, capability)
+	// Create the task in localstore FIRST: its UUID is the one true task ID
+	// (Finding 1). A creation failure is fatal to the request, not swallowed.
+	createdTask, err := s.tr.CreateTask(ctx, s.projectID, title, desc, nil, 0, nil)
 	if err != nil {
+		return nil, fmt.Errorf("localapi: task route: create: %w", err)
+	}
+
+	// The scheduler is used purely for capability matching / agent selection,
+	// keyed by the localstore-generated task ID — it does not mint its own ID
+	// or track a competing status (Finding 2).
+	if _, err := s.scheduler.RegisterTask(s.projectID, capability, createdTask.ID); err != nil {
 		return nil, fmt.Errorf("localapi: task route: register: %w", err)
 	}
 
-	agent, err := s.scheduler.AssignTask(task.ID)
+	agent, err := s.scheduler.AssignTask(createdTask.ID)
 	if err != nil {
 		return map[string]interface{}{
-			"task_id":      task.ID,
-			"namespace_id": task.NamespaceID,
-			"capability":   task.Capability,
+			"task_id":      createdTask.ID,
+			"namespace_id": s.projectID,
+			"capability":   capability,
 			"title":        title,
 			"description":  desc,
-			"status":       task.Status,
+			"status":       createdTask.Status,
 			"assigned_to":  "",
 			"error":        err.Error(),
 		}, nil
 	}
 
-	// Persist the routed task to the local store so it appears in wormhole.task.list/get.
-	// This uses the scheduler's task ID as the primary identifier.
-	// Note: CreateTask generates its own UUID, so we create an entry that will have
-	// a different ID in localstore. This is acceptable as long as the scheduler task
-	// is the source of truth for routing decisions.
-	_, persistErr := s.tr.CreateTask(ctx, s.projectID, title, desc, nil, 0, nil)
-	_ = persistErr // persistence failure is non-fatal; scheduler task is still valid
+	// Record the routing decision as an ownership change, mirroring
+	// internal/core/tasks.Store.Assign — this is what makes the task's owner
+	// visible via wormhole.task.get/list, and what a future status transition
+	// (wormhole.task.update_status) will build on.
+	assignedTask, err := s.tr.Assign(ctx, s.projectID, createdTask.ID, agent.AgentID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: task route: assign: %w", err)
+	}
 
 	return map[string]interface{}{
-		"task_id":      task.ID,
-		"namespace_id": task.NamespaceID,
-		"capability":   task.Capability,
+		"task_id":      assignedTask.ID,
+		"namespace_id": s.projectID,
+		"capability":   capability,
 		"title":        title,
 		"description":  desc,
-		"status":       task.Status,
+		"status":       assignedTask.Status,
 		"assigned_to":  agent.AgentID,
 		"agent_status": string(agent.Status),
 	}, nil
 }
 
 // handleChannelSubscribe creates an eventbus subscription for the caller's connection.
-// Args: {"namespace": "x", "event_type": "presence.online"} (one or both).
+// Args: {"namespace": "x", "event_type": "presence.online", "capability": "code",
+// "agent_id": "agent-a"} (any one or more). "namespace" and "project" are the same
+// concept in this local runtime (s.projectID is passed as the eventbus namespace
+// everywhere a publish happens), so there is no separate project dimension to add
+// on top of namespace (Finding 5).
 // The subscription ID is returned; events will be delivered on this connection as
 // newline-delimited JSON messages until the subscriber calls close or the connection
-// is dropped. This function blocks until the subscription is closed.
+// is dropped. This function blocks until the subscription is closed or ctx is
+// cancelled (server shutdown), at which point it unsubscribes to release the
+// eventbus's subscriber-map entry and let this goroutine exit (Finding 4).
 func (s *Server) handleChannelSubscribe(ctx context.Context, conn net.Conn, args json.RawMessage) error {
 	if s.eventbus == nil {
 		return fmt.Errorf("localapi: channel subscribe: eventbus not available")
@@ -875,18 +897,32 @@ func (s *Server) handleChannelSubscribe(ctx context.Context, conn net.Conn, args
 
 	ns, _ := argMap["namespace"].(string)
 	et, _ := argMap["event_type"].(string)
+	capability, _ := argMap["capability"].(string)
+	agentID, _ := argMap["agent_id"].(string)
 
-	sub, err := s.eventbus.Subscribe(ns, et)
+	sub, err := s.eventbus.Subscribe(ns, et, capability, agentID)
 	if err != nil {
 		return fmt.Errorf("localapi: channel subscribe: %w", err)
 	}
 
 	// Return the subscription info first so the caller knows it was created.
-	writeResponse(conn, localResponse{Result: json.RawMessage(fmt.Sprintf(`{"subscription_id":"%s","namespace":"%s","event_type":"%s"}`, sub.ID, ns, et))})
+	respJSON, _ := json.Marshal(map[string]string{
+		"subscription_id": sub.ID,
+		"namespace":        ns,
+		"event_type":       et,
+		"capability":       capability,
+		"agent_id":         agentID,
+	})
+	writeResponse(conn, localResponse{Result: respJSON})
 
-	// Block-deliver events on this connection until subscription is closed.
+	// Block-deliver events on this connection until the subscription is closed
+	// or ctx is cancelled (server shutdown). Either path unsubscribes so the
+	// eventbus stops tracking this connection and this goroutine exits.
 	for {
 		select {
+		case <-ctx.Done():
+			s.eventbus.Unsubscribe(sub)
+			return nil
 		case <-sub.Done():
 			return nil // unsubscription
 		case payload, ok := <-sub.Events():

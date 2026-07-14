@@ -227,18 +227,35 @@ func TestTaskRoutedWithoutCoordinationServer(t *testing.T) {
 		t.Fatal("task route returned empty assigned_to — no agent matched")
 	}
 
+	// Assignment is an ownership change, not a status transition (Findings
+	// 1/2): a freshly routed task stays at RFC-0001 §8.2's initial "todo"
+	// status until an explicit status transition moves it.
 	status, _ := taskResult["status"].(string)
-	if status != "assigned" {
-		t.Errorf("task status = %s, want assigned", status)
+	if status != "todo" {
+		t.Errorf("task status = %s, want todo", status)
 	}
 
-	// Verify the scheduler has the task in assigned state.
-	taskStatus, err := sched.TaskStatus(taskID)
+	// Verify the scheduler recorded the assignment.
+	schedAssignedTo, err := sched.AssignedAgent(taskID)
 	if err != nil {
-		t.Fatalf("scheduler TaskStatus: %v", err)
+		t.Fatalf("scheduler AssignedAgent: %v", err)
 	}
-	if taskStatus != "assigned" {
-		t.Errorf("scheduler task status = %s, want assigned", taskStatus)
+	if schedAssignedTo != assignedTo {
+		t.Errorf("scheduler AssignedAgent = %s, want %s", schedAssignedTo, assignedTo)
+	}
+
+	// Verify the task is retrievable via wormhole.task.get using the same ID
+	// (Finding 1: the response task_id must be the localstore-generated ID).
+	respGet := sendRequest(t, socketPath, "wormhole.task.get", map[string]interface{}{
+		"task_id": taskID,
+	})
+	if respGet.Error != "" {
+		t.Fatalf("task get: %s", respGet.Error)
+	}
+	var getResult map[string]interface{}
+	json.Unmarshal(respGet.Result, &getResult)
+	if getResult["owner_agent_id"] != assignedTo {
+		t.Errorf("task.get owner_agent_id = %v, want %s", getResult["owner_agent_id"], assignedTo)
 	}
 
 	// Verify the task is assigned to the correct agent.
