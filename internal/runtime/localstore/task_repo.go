@@ -3,11 +3,13 @@ package localstore
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/H4RL33/wormhole/internal/types"
 )
 
 // ErrTaskNotFound is returned when a task lookup has no matching row in the
@@ -47,12 +49,13 @@ type Task struct {
 
 // TaskRepo provides a SQLite-backed task repository (mirrors internal/core/tasks.Store shape).
 type TaskRepo struct {
-	db *sql.DB
+	db  *sql.DB
+	er  *EventRepo
 }
 
-// NewTaskRepo returns a new task repository backed by db.
-func NewTaskRepo(db *sql.DB) *TaskRepo {
-	return &TaskRepo{db: db}
+// NewTaskRepo returns a new task repository backed by db and er.
+func NewTaskRepo(db *sql.DB, er *EventRepo) *TaskRepo {
+	return &TaskRepo{db: db, er: er}
 }
 
 // CreateTask inserts a new task at status "todo", scoped to namespaceID.
@@ -148,7 +151,9 @@ func (r *TaskRepo) ListTasks(ctx context.Context, namespaceID string, status *st
 }
 
 // UpdateStatus moves task in namespaceID to newStatus, validating the transition.
-func (r *TaskRepo) UpdateStatus(ctx context.Context, namespaceID, taskID, newStatus string) (Task, error) {
+// A legal transition also inserts a task.status_changed event onto channelID,
+// attributed to agentID, in the same transaction as the status update (RFC-0001 §8.2).
+func (r *TaskRepo) UpdateStatus(ctx context.Context, namespaceID, taskID, newStatus, channelID, agentID string) (Task, error) {
 	if !validTaskStatuses[newStatus] {
 		return Task{}, fmt.Errorf("localstore/task: invalid status %q", newStatus)
 	}
@@ -189,6 +194,19 @@ func (r *TaskRepo) UpdateStatus(ctx context.Context, namespaceID, taskID, newSta
 	}
 	if err != nil {
 		return Task{}, fmt.Errorf("localstore/task: update status: %w", err)
+	}
+
+	// Emit task.status_changed event in the same transaction.
+	payload, err := json.Marshal(types.TaskStatusChangedPayload{
+		TaskID:     taskID,
+		FromStatus: currentStatus,
+		ToStatus:   newStatus,
+	})
+	if err != nil {
+		return Task{}, fmt.Errorf("localstore/task: update status: marshal event payload: %w", err)
+	}
+	if _, err := r.er.publishEventInTx(ctx, tx, namespaceID, channelID, agentID, "task.status_changed", payload, nil); err != nil {
+		return Task{}, fmt.Errorf("localstore/task: update status: publish event: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {

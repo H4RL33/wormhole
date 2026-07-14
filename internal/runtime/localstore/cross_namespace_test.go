@@ -20,7 +20,8 @@ func TestTaskCrossNamespaceRejection(t *testing.T) {
 	defer store.Close()
 
 	ctx := context.Background()
-	tr := NewTaskRepo(store.db)
+	er := NewEventRepo(store.db)
+	tr := NewTaskRepo(store.db, er)
 	nsA := "namespace-a"
 	nsB := "namespace-b"
 
@@ -73,7 +74,7 @@ func TestTaskCrossNamespaceRejection(t *testing.T) {
 	}
 
 	// UpdateStatus should fail for a task in the wrong namespace.
-	_, err = tr.UpdateStatus(ctx, nsB, taskA.ID, "wip")
+	_, err = tr.UpdateStatus(ctx, nsB, taskA.ID, "wip", "channel-1", "agent-1")
 	if !errors.Is(err, ErrTaskNotFound) {
 		t.Fatalf("UpdateStatus(nsB): got %v, want ErrTaskNotFound", err)
 	}
@@ -240,8 +241,14 @@ func TestTaskStatusTransitions(t *testing.T) {
 	defer store.Close()
 
 	ctx := context.Background()
-	tr := NewTaskRepo(store.db)
+	er := NewEventRepo(store.db)
+	tr := NewTaskRepo(store.db, er)
 	ns := "ns-transitions"
+	// Create a channel for event publishing.
+	chID, err := er.CreateChannel(ctx, ns, "test-channel")
+	if err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
 
 	// todo -> wip
 	task, err := tr.CreateTask(ctx, ns, "Transition task", "", nil, 0, nil)
@@ -273,7 +280,7 @@ func TestTaskStatusTransitions(t *testing.T) {
 			t.Fatalf("before transition %d: status = %q, want %q", i, current.Status, wantStatus)
 		}
 
-		task, err = tr.UpdateStatus(ctx, ns, task.ID, tt.to)
+		task, err = tr.UpdateStatus(ctx, ns, task.ID, tt.to, chID, "agent-test")
 		if err != nil {
 			t.Fatalf("UpdateStatus(%s->%s): %v", tt.from, tt.to, err)
 		}
@@ -289,15 +296,83 @@ func TestTaskStatusTransitions(t *testing.T) {
 	}
 
 	// done -> todo should fail (no legal transition out of done).
-	_, err = tr.UpdateStatus(ctx, ns, task.ID, "todo")
+	_, err = tr.UpdateStatus(ctx, ns, task.ID, "todo", chID, "agent-test")
 	if err == nil {
 		t.Fatal("UpdateStatus(done->todo) should have failed, got nil")
 	}
 
 	// Invalid status should fail.
-	_, err = tr.UpdateStatus(ctx, ns, task.ID, "invalid-status")
+	_, err = tr.UpdateStatus(ctx, ns, task.ID, "invalid-status", chID, "agent-test")
 	if err == nil {
 		t.Fatal("UpdateStatus with invalid status should have failed")
+	}
+}
+
+// TestTaskStatusChangeEmitsEvent verifies that UpdateStatus emits task.status_changed events.
+func TestTaskStatusChangeEmitsEvent(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(filepath.Join(dir, "wormholed.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	er := NewEventRepo(store.db)
+	tr := NewTaskRepo(store.db, er)
+	ns := "ns-events"
+
+	// Create channel and task.
+	chID, err := er.CreateChannel(ctx, ns, "test-channel")
+	if err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+
+	task, err := tr.CreateTask(ctx, ns, "Event test task", "", nil, 0, nil)
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	// Update status; this should emit an event.
+	_, err = tr.UpdateStatus(ctx, ns, task.ID, "wip", chID, "agent-test")
+	if err != nil {
+		t.Fatalf("UpdateStatus: %v", err)
+	}
+
+	// Verify event was written.
+	events, err := er.ListEvents(ctx, ns, chID, 10, 0)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+
+	event := events[0]
+	if event.EventType != "task.status_changed" {
+		t.Errorf("event type = %q, want task.status_changed", event.EventType)
+	}
+	if event.AgentID != "agent-test" {
+		t.Errorf("event agent_id = %q, want agent-test", event.AgentID)
+	}
+
+	// Verify payload contains expected fields.
+	var payload struct {
+		TaskID     string `json:"task_id"`
+		FromStatus string `json:"from_status"`
+		ToStatus   string `json:"to_status"`
+	}
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.TaskID != task.ID {
+		t.Errorf("payload task_id = %q, want %q", payload.TaskID, task.ID)
+	}
+	if payload.FromStatus != "todo" {
+		t.Errorf("payload from_status = %q, want todo", payload.FromStatus)
+	}
+	if payload.ToStatus != "wip" {
+		t.Errorf("payload to_status = %q, want wip", payload.ToStatus)
 	}
 }
 
@@ -311,12 +386,14 @@ func TestTaskListStatusFilter(t *testing.T) {
 	defer store.Close()
 
 	ctx := context.Background()
-	tr := NewTaskRepo(store.db)
+	er := NewEventRepo(store.db)
+	tr := NewTaskRepo(store.db, er)
 	ns := "ns-filter"
+	chID, _ := er.CreateChannel(ctx, ns, "test-channel")
 
 	task1, _ := tr.CreateTask(ctx, ns, "Todo task", "", nil, 0, nil)
 	task2, _ := tr.CreateTask(ctx, ns, "Wip task", "", nil, 0, nil)
-	_, _ = tr.UpdateStatus(ctx, ns, task2.ID, "wip")
+	_, _ = tr.UpdateStatus(ctx, ns, task2.ID, "wip", chID, "agent-test")
 
 	all, err := tr.ListTasks(ctx, ns, nil)
 	if err != nil {
@@ -497,5 +574,3 @@ func TestWhoAmICache_UTC(t *testing.T) {
 		t.Errorf("cached_at = %v, want %v", got.CachedAt, want.CachedAt)
 	}
 }
-
-// TestSyncQueueCrossNamespaceRejection verifies that sync queue items are isolated by namespace.

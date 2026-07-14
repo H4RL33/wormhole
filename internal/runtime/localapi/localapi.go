@@ -115,6 +115,7 @@ type Server struct {
 	bindings   []config.ProjectBinding // project_id → org_name mappings
 	isMultiOrg bool                    // true if using multi-org mode
 
+	// P2 local-read repositories (single-org mode)
 	store *localstore.Store
 	tr    *localstore.TaskRepo
 	er    *localstore.EventRepo

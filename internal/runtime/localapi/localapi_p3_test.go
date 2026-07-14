@@ -76,7 +76,7 @@ func TestTwoAgentsPresenceWithoutCoordinationServer(t *testing.T) {
 
 	socketPath := filepath.Join(t.TempDir(), "p3.sock")
 	srv, err := NewWithRuntime(socketPath, coord.URL, "test-token", "project-1",
-		store, localstore.NewTaskRepo(store.DB()), localstore.NewEventRepo(store.DB()),
+		store, localstore.NewTaskRepo(store.DB(), localstore.NewEventRepo(store.DB())), localstore.NewEventRepo(store.DB()),
 		localstore.NewKBRepo(store.DB()), bus, sched, nil)
 	if err != nil {
 		t.Fatalf("new server: %v", err)
@@ -182,7 +182,7 @@ func TestTaskRoutedWithoutCoordinationServer(t *testing.T) {
 	// No fake coordination server — this test must work entirely without one.
 	socketPath := filepath.Join(t.TempDir(), "p3-task.sock")
 	srv, err := NewWithRuntime(socketPath, "", "", "project-1",
-		store, localstore.NewTaskRepo(store.DB()), localstore.NewEventRepo(store.DB()),
+		store, localstore.NewTaskRepo(store.DB(), localstore.NewEventRepo(store.DB())), localstore.NewEventRepo(store.DB()),
 		localstore.NewKBRepo(store.DB()), bus, sched, nil)
 	if err != nil {
 		t.Fatalf("new server: %v", err)
@@ -273,7 +273,7 @@ func TestSubscriptionDeliversEvents(t *testing.T) {
 
 	socketPath := filepath.Join(t.TempDir(), "p3-sub.sock")
 	srv, err := NewWithRuntime(socketPath, "", "", "project-1",
-		store, localstore.NewTaskRepo(store.DB()), localstore.NewEventRepo(store.DB()),
+		store, localstore.NewTaskRepo(store.DB(), localstore.NewEventRepo(store.DB())), localstore.NewEventRepo(store.DB()),
 		localstore.NewKBRepo(store.DB()), bus, sched, nil)
 	if err != nil {
 		t.Fatalf("new server: %v", err)

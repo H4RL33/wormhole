@@ -33,8 +33,8 @@ func newTestServerWithQueue(t *testing.T) (srv *Server, tr *localstore.TaskRepo,
 		t.Fatalf("localstore.Open: %v", err)
 	}
 
-	tr = localstore.NewTaskRepo(store.DB())
 	er = localstore.NewEventRepo(store.DB())
+	tr = localstore.NewTaskRepo(store.DB(), er)
 	kb = localstore.NewKBRepo(store.DB())
 	qr = sync.NewQueueRepo(store.DB())
 

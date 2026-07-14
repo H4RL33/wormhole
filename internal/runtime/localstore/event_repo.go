@@ -127,18 +127,31 @@ func (r *EventRepo) PublishEvent(ctx context.Context, namespaceID, channelID, ag
 	}
 	defer tx.Rollback()
 
+	event, err := r.publishEventInTx(ctx, tx, namespaceID, channelID, agentID, eventType, payload, note)
+	if err != nil {
+		return DurableEvent{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return DurableEvent{}, fmt.Errorf("localstore/event: publish: commit: %w", err)
+	}
+	return event, nil
+}
+
+// publishEventInTx inserts a durable event within an existing transaction.
+// Used by TaskRepo.UpdateStatus and other operations that emit events atomically.
+func (r *EventRepo) publishEventInTx(ctx context.Context, tx *sql.Tx, namespaceID, channelID, agentID, eventType string, payload json.RawMessage, note *string) (DurableEvent, error) {
 	if len(payload) == 0 {
 		payload = json.RawMessage(`{}`)
 	}
 
 	// Verify channel exists in this namespace.
 	var dummy int
-	err = tx.QueryRowContext(ctx, "SELECT 1 FROM channels WHERE id = ? AND namespace_id = ?", channelID, namespaceID).Scan(&dummy)
+	err := tx.QueryRowContext(ctx, "SELECT 1 FROM channels WHERE id = ? AND namespace_id = ?", channelID, namespaceID).Scan(&dummy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DurableEvent{}, ErrEventNotFound
 	}
 	if err != nil {
-		return DurableEvent{}, fmt.Errorf("localstore/event: publish: channel lookup: %w", err)
+		return DurableEvent{}, fmt.Errorf("localstore/event: publish in tx: channel lookup: %w", err)
 	}
 
 	eventID := uuid.New().String()
@@ -150,10 +163,7 @@ func (r *EventRepo) PublishEvent(ctx context.Context, namespaceID, channelID, ag
 	)
 	event, err := scanEvent(row)
 	if err != nil {
-		return DurableEvent{}, fmt.Errorf("localstore/event: publish: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return DurableEvent{}, fmt.Errorf("localstore/event: publish: commit: %w", err)
+		return DurableEvent{}, fmt.Errorf("localstore/event: publish in tx: %w", err)
 	}
 	return event, nil
 }

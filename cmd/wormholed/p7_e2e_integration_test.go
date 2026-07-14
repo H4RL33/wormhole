@@ -292,7 +292,7 @@ func TestP7_LocalTaskPersistence(t *testing.T) {
 			t.Fatalf("Open 1: %v", err)
 		}
 
-		taskRepo := localstore.NewTaskRepo(store.DB())
+		taskRepo := localstore.NewTaskRepo(store.DB(), localstore.NewEventRepo(store.DB()))
 		task, err := taskRepo.CreateTask(ctx, "project-1", "Task title", "Task description", nil, 1, nil)
 		if err != nil {
 			t.Fatalf("CreateTask 1: %v", err)
@@ -311,7 +311,7 @@ func TestP7_LocalTaskPersistence(t *testing.T) {
 		}
 		defer store2.Close()
 
-		taskRepo2 := localstore.NewTaskRepo(store2.DB())
+		taskRepo2 := localstore.NewTaskRepo(store2.DB(), localstore.NewEventRepo(store2.DB()))
 		retrieved, err := taskRepo2.GetTask(ctx, "project-1", taskID)
 		if err != nil {
 			t.Fatalf("GetTask 2: %v", err)

@@ -47,8 +47,8 @@ func Run(ctx context.Context, profileName string) error {
 	syncCfg := sync.DefaultConfig()
 	syncEngine := sync.New(cfg.Credentials.Server, cfg.Credentials.Token, cfg.Credentials.ProjectID, queueRepo, auditRepo, syncCfg)
 
-	tr := localstore.NewTaskRepo(store.DB())
 	er := localstore.NewEventRepo(store.DB())
+	tr := localstore.NewTaskRepo(store.DB(), er)
 	kb := localstore.NewKBRepo(store.DB())
 
 	// P3: eventbus + scheduler are always constructed so agent registration,
