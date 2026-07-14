@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/H4RL33/wormhole/internal/types"
+	"github.com/google/uuid"
 )
 
 // ErrTaskNotFound is returned when a task lookup has no matching row in the
@@ -18,10 +18,10 @@ var ErrTaskNotFound = errors.New("localstore/task: not found")
 
 // validTaskStatuses enumerates the legal task statuses (RFC-0001 §8.2).
 var validTaskStatuses = map[string]bool{
-	"todo":  true,
-	"wip":   true,
+	"todo":    true,
+	"wip":     true,
 	"blocked": true,
-	"done":  true,
+	"done":    true,
 }
 
 // ValidTaskTransitions encodes allowed status transitions (RFC-0001 §8.2).
@@ -49,8 +49,8 @@ type Task struct {
 
 // TaskRepo provides a SQLite-backed task repository (mirrors internal/core/tasks.Store shape).
 type TaskRepo struct {
-	db  *sql.DB
-	er  *EventRepo
+	db *sql.DB
+	er *EventRepo
 }
 
 // NewTaskRepo returns a new task repository backed by db and er.

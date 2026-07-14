@@ -17,14 +17,14 @@ var ErrEventNotFound = errors.New("localstore/event: not found")
 // DurableEvent is a persisted event from the durable event tier (RFC-0003 §6.1).
 // Ephemeral events never reach localstore; they stay in-memory only.
 type DurableEvent struct {
-	ID        string
+	ID          string
 	NamespaceID string // project_id in coordination-server terminology
-	ChannelID string
-	AgentID   string
-	EventType string
-	Payload   json.RawMessage
-	Note      *string
-	CreatedAt time.Time
+	ChannelID   string
+	AgentID     string
+	EventType   string
+	Payload     json.RawMessage
+	Note        *string
+	CreatedAt   time.Time
 }
 
 // EventRepo provides a SQLite-backed durable event repository (mirrors internal/core/events.Store shape).
