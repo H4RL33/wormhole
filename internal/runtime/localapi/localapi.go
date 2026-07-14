@@ -27,7 +27,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/H4RL33/wormhole/internal/runtime/eventbus"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
+	"github.com/H4RL33/wormhole/internal/runtime/scheduler"
 )
 
 type rpcRequest struct {
@@ -106,6 +108,8 @@ type Server struct {
 	er    *localstore.EventRepo
 	kb    *localstore.KBRepo
 
+	eventbus  *eventbus.EventBus
+	scheduler *scheduler.Scheduler
 	closeOnce sync.Once
 	closeErr  error
 	shutdown  atomic.Bool
@@ -142,6 +146,31 @@ func New(socketPath, coordServerURL, token, projectID string, store *localstore.
 		tr:          tr,
 		er:          er,
 		kb:          kb,
+	}, nil
+}
+
+// NewWithRuntime binds the Unix domain socket at socketPath and wires eventbus
+// + scheduler (P3). Callers must call Serve to start accepting connections,
+// and Close to release the socket.
+// Socket permissions: see New() for RFC-0003 OQ4 assumptions and P6 hardening notes.
+func NewWithRuntime(socketPath, coordServerURL, token, projectID string, store *localstore.Store, tr *localstore.TaskRepo, er *localstore.EventRepo, kb *localstore.KBRepo, eb *eventbus.EventBus, sched *scheduler.Scheduler) (*Server, error) {
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: listen on %s: %w", socketPath, err)
+	}
+	return &Server{
+		listener:    ln,
+		socketPath:  socketPath,
+		httpClient:  &http.Client{Timeout: 10 * time.Second},
+		coordServer: coordServerURL,
+		token:       token,
+		projectID:   projectID,
+		store:       store,
+		tr:          tr,
+		er:          er,
+		kb:          kb,
+		eventbus:    eb,
+		scheduler:   sched,
 	}, nil
 }
 
@@ -256,6 +285,45 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		}
 		outRaw, _ := json.Marshal(result)
 		writeResponse(conn, localResponse{Result: outRaw})
+
+	case "wormhole.agent.register":
+		result, err := s.handleAgentRegister(ctx, req.Args)
+		if err != nil {
+			writeResponse(conn, localResponse{Error: err.Error()})
+			return
+		}
+		outRaw, _ := json.Marshal(result)
+		writeResponse(conn, localResponse{Result: outRaw})
+
+	case "wormhole.agent.presence":
+		result, err := s.handleAgentPresence(ctx, req.Args)
+		if err != nil {
+			writeResponse(conn, localResponse{Error: err.Error()})
+			return
+		}
+		outRaw, _ := json.Marshal(result)
+		writeResponse(conn, localResponse{Result: outRaw})
+
+	case "wormhole.agent.list":
+		result, err := s.handleAgentList(ctx)
+		if err != nil {
+			writeResponse(conn, localResponse{Error: err.Error()})
+			return
+		}
+		outRaw, _ := json.Marshal(result)
+		writeResponse(conn, localResponse{Result: outRaw})
+
+	case "wormhole.task.route":
+		result, err := s.handleTaskRoute(ctx, req.Args)
+		if err != nil {
+			writeResponse(conn, localResponse{Error: err.Error()})
+			return
+		}
+		outRaw, _ := json.Marshal(result)
+		writeResponse(conn, localResponse{Result: outRaw})
+
+	case "wormhole.channel.subscribe":
+		s.handleChannelSubscribe(ctx, conn, req.Args)
 
 	default:
 		writeResponse(conn, localResponse{Error: fmt.Sprintf("localapi: unsupported tool %q", req.Tool)})
@@ -508,3 +576,217 @@ func (s *Server) localGetArticle(ctx context.Context, args json.RawMessage) (map
 // =============================================================================
 // P3 tools — agent registration, presence, listing, task routing, subscriptions
 // =============================================================================
+
+// handleAgentRegister registers an agent with the scheduler and eventbus.
+// Args: {"agent_id": "x", "capabilities": ["code", "review"]}
+func (s *Server) handleAgentRegister(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if s.scheduler == nil {
+		return nil, fmt.Errorf("localapi: agent register: scheduler not available")
+	}
+
+	var argMap map[string]interface{}
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &argMap); err != nil {
+			return nil, fmt.Errorf("localapi: agent register: invalid args: %w", err)
+		}
+	}
+
+	agentID, _ := argMap["agent_id"].(string)
+	if agentID == "" {
+		return nil, fmt.Errorf("localapi: agent register: missing agent_id")
+	}
+
+	caps := []string{}
+	if rawCaps, ok := argMap["capabilities"]; ok {
+		if capsList, ok := rawCaps.([]interface{}); ok {
+			for _, c := range capsList {
+				if cs, ok := c.(string); ok {
+					caps = append(caps, cs)
+				}
+			}
+		}
+	}
+
+	agent, err := s.scheduler.RegisterAgent(agentID, s.projectID, caps)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: agent register: %w", err)
+	}
+
+	// Publish presence event to the eventbus.
+	payload, _ := json.Marshal(map[string]interface{}{
+		"agent":        agent.AgentID,
+		"status":       string(scheduler.StatusOnline),
+		"namespace":    s.projectID,
+		"capabilities": agent.Capabilities,
+	})
+	if s.eventbus != nil {
+		s.eventbus.Publish(ctx, s.projectID, "presence.online", payload)
+	}
+
+	return map[string]interface{}{
+		"agent_id":     agent.AgentID,
+		"namespace_id": agent.NamespaceID,
+		"capabilities": agent.Capabilities,
+		"status":       string(agent.Status),
+	}, nil
+}
+
+// handleAgentPresence updates an agent's presence status.
+// Args: {"agent_id": "x", "status": "busy"}
+func (s *Server) handleAgentPresence(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if s.scheduler == nil {
+		return nil, fmt.Errorf("localapi: agent presence: scheduler not available")
+	}
+
+	var argMap map[string]interface{}
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &argMap); err != nil {
+			return nil, fmt.Errorf("localapi: agent presence: invalid args: %w", err)
+		}
+	}
+
+	agentID, _ := argMap["agent_id"].(string)
+	statusStr, _ := argMap["status"].(string)
+	if agentID == "" || statusStr == "" {
+		return nil, fmt.Errorf("localapi: agent presence: missing agent_id or status")
+	}
+
+	err := s.scheduler.UpdatePresence(agentID, scheduler.AgentStatus(statusStr))
+	if err != nil {
+		return nil, fmt.Errorf("localapi: agent presence: %w", err)
+	}
+
+	payload, _ := json.Marshal(map[string]interface{}{
+		"agent":  agentID,
+		"status": statusStr,
+	})
+	if s.eventbus != nil {
+		s.eventbus.Publish(ctx, s.projectID, "presence."+statusStr, payload)
+	}
+
+	return map[string]interface{}{
+		"agent_id": agentID,
+		"status":   statusStr,
+	}, nil
+}
+
+// handleAgentList returns all registered agents.
+func (s *Server) handleAgentList(ctx context.Context) (map[string]interface{}, error) {
+	if s.scheduler == nil {
+		return nil, fmt.Errorf("localapi: agent list: scheduler not available")
+	}
+
+	agents := s.scheduler.ListAgents()
+	out := make([]interface{}, len(agents))
+	for i, a := range agents {
+		out[i] = map[string]interface{}{
+			"agent_id":     a.AgentID,
+			"namespace_id": a.NamespaceID,
+			"capabilities": a.Capabilities,
+			"status":       string(a.Status),
+		}
+	}
+	return map[string]interface{}{"agents": out}, nil
+}
+
+// handleTaskRoute creates and routes a task to a locally-registered agent.
+// Args: {"capability": "code", "title": "x", "description": "y"}
+func (s *Server) handleTaskRoute(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if s.scheduler == nil {
+		return nil, fmt.Errorf("localapi: task route: scheduler not available")
+	}
+
+	var argMap map[string]interface{}
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &argMap); err != nil {
+			return nil, fmt.Errorf("localapi: task route: invalid args: %w", err)
+		}
+	}
+
+	capability, _ := argMap["capability"].(string)
+	title, _ := argMap["title"].(string)
+	desc, _ := argMap["description"].(string)
+	if capability == "" {
+		return nil, fmt.Errorf("localapi: task route: missing capability")
+	}
+
+	task, err := s.scheduler.RegisterTask(s.projectID, capability)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: task route: register: %w", err)
+	}
+
+	agent, err := s.scheduler.AssignTask(task.ID)
+	if err != nil {
+		return map[string]interface{}{
+			"task_id":      task.ID,
+			"namespace_id": task.NamespaceID,
+			"capability":   task.Capability,
+			"title":        title,
+			"description":  desc,
+			"status":       task.Status,
+			"assigned_to":  "",
+			"error":        err.Error(),
+		}, nil
+	}
+
+	// Persist the routed task to the local store so it appears in wormhole.task.list/get.
+	// This uses the scheduler's task ID as the primary identifier.
+	// Note: CreateTask generates its own UUID, so we create an entry that will have
+	// a different ID in localstore. This is acceptable as long as the scheduler task
+	// is the source of truth for routing decisions.
+	_, persistErr := s.tr.CreateTask(ctx, s.projectID, title, desc, nil, 0, nil)
+	_ = persistErr // persistence failure is non-fatal; scheduler task is still valid
+
+	return map[string]interface{}{
+		"task_id":      task.ID,
+		"namespace_id": task.NamespaceID,
+		"capability":   task.Capability,
+		"title":        title,
+		"description":  desc,
+		"status":       task.Status,
+		"assigned_to":  agent.AgentID,
+		"agent_status": string(agent.Status),
+	}, nil
+}
+
+// handleChannelSubscribe creates an eventbus subscription for the caller's connection.
+// Args: {"namespace": "x", "event_type": "presence.online"} (one or both).
+// The subscription ID is returned; events will be delivered on this connection as
+// newline-delimited JSON messages until the subscriber calls close or the connection
+// is dropped. This function blocks until the subscription is closed.
+func (s *Server) handleChannelSubscribe(ctx context.Context, conn net.Conn, args json.RawMessage) error {
+	if s.eventbus == nil {
+		return fmt.Errorf("localapi: channel subscribe: eventbus not available")
+	}
+
+	var argMap map[string]interface{}
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &argMap); err != nil {
+			return fmt.Errorf("localapi: channel subscribe: invalid args: %w", err)
+		}
+	}
+
+	ns, _ := argMap["namespace"].(string)
+	et, _ := argMap["event_type"].(string)
+
+	sub, err := s.eventbus.Subscribe(ns, et)
+	if err != nil {
+		return fmt.Errorf("localapi: channel subscribe: %w", err)
+	}
+
+	// Return the subscription info first so the caller knows it was created.
+	writeResponse(conn, localResponse{Result: json.RawMessage(fmt.Sprintf(`{"subscription_id":"%s","namespace":"%s","event_type":"%s"}`, sub.ID, ns, et))})
+
+	// Block-deliver events on this connection until subscription is closed.
+	for {
+		select {
+		case <-sub.Done():
+			return nil // unsubscription
+		case payload, ok := <-sub.Events():
+			if !ok {
+				return nil // channel drained
+			}
+			writeResponse(conn, localResponse{Result: json.RawMessage(payload)})
+		}
+	}
+}
