@@ -27,6 +27,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/H4RL33/wormhole/internal/runtime/config"
 	"github.com/H4RL33/wormhole/internal/runtime/eventbus"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/runtime/scheduler"
@@ -75,6 +76,13 @@ type whoAmIOutput struct {
 	Permissions  []string `json:"permissions"`
 }
 
+// OrgContext holds org-specific routing info for a request (P5 multi-org support).
+type OrgContext struct {
+	OrgName   string             // which org to route to
+	Creds     config.Credentials // credentials for this org
+	ProjectID string             // project within this org
+}
+
 // localRequest is a P1/P2 local-socket request. P1: Tool only. P2+: args may be populated.
 type localRequest struct {
 	Tool string          `json:"tool"`
@@ -102,6 +110,9 @@ type Server struct {
 	projectID   string
 
 	// Multi-org mode (P5+)
+	orgs       map[string]config.Org   // org_name → Org credentials
+	bindings   []config.ProjectBinding // project_id → org_name mappings
+	isMultiOrg bool                    // true if using multi-org mode
 
 	store *localstore.Store
 	tr    *localstore.TaskRepo
@@ -142,6 +153,7 @@ func New(socketPath, coordServerURL, token, projectID string, store *localstore.
 		coordServer: coordServerURL,
 		token:       token,
 		projectID:   projectID,
+		isMultiOrg:  false,
 		store:       store,
 		tr:          tr,
 		er:          er,
@@ -165,6 +177,7 @@ func NewWithRuntime(socketPath, coordServerURL, token, projectID string, store *
 		coordServer: coordServerURL,
 		token:       token,
 		projectID:   projectID,
+		isMultiOrg:  false,
 		store:       store,
 		tr:          tr,
 		er:          er,
@@ -172,6 +185,67 @@ func NewWithRuntime(socketPath, coordServerURL, token, projectID string, store *
 		eventbus:    eb,
 		scheduler:   sched,
 	}, nil
+}
+
+// NewMultiOrg binds the Unix domain socket and configures multi-org support (P5+, RFC-0003 §7.1).
+// Orgs is a map of org_name → Org credentials. Bindings map project contexts to org names.
+// Callers must call Serve to start accepting connections, and Close to release the socket.
+// Socket permissions: see New() for RFC-0003 OQ4 assumptions and P6 hardening notes.
+func NewMultiOrg(socketPath string, orgs map[string]config.Org, bindings []config.ProjectBinding, store *localstore.Store, tr *localstore.TaskRepo, er *localstore.EventRepo, kb *localstore.KBRepo, eb *eventbus.EventBus, sched *scheduler.Scheduler) (*Server, error) {
+	if len(orgs) == 0 {
+		return nil, fmt.Errorf("localapi: NewMultiOrg: no orgs provided")
+	}
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: listen on %s: %w", socketPath, err)
+	}
+	return &Server{
+		listener:   ln,
+		socketPath: socketPath,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+		orgs:       orgs,
+		bindings:   bindings,
+		isMultiOrg: true,
+		store:      store,
+		tr:         tr,
+		er:         er,
+		kb:         kb,
+		eventbus:   eb,
+		scheduler:  sched,
+	}, nil
+}
+
+// resolveOrgContext returns the org/creds/projectID for a request (P5 multi-org).
+// If single-org mode, always returns the configured org.
+// If multi-org mode, looks up the project in bindings and returns corresponding org.
+// RFC-0003 §7.1: project bindings are explicit, no implicit default.
+func (s *Server) resolveOrgContext(projectID string) (OrgContext, error) {
+	if !s.isMultiOrg {
+		// Single-org mode: use configured credentials
+		return OrgContext{
+			OrgName:   "default",
+			Creds:     config.Credentials{Server: s.coordServer, Token: s.token},
+			ProjectID: s.projectID,
+		}, nil
+	}
+
+	// Multi-org mode: look up binding for this project
+	for _, binding := range s.bindings {
+		if binding.ProjectID == projectID {
+			org, ok := s.orgs[binding.OrgName]
+			if !ok {
+				return OrgContext{}, fmt.Errorf("localapi: org %q for project %q not found", binding.OrgName, projectID)
+			}
+			return OrgContext{
+				OrgName:   binding.OrgName,
+				Creds:     org.Credentials,
+				ProjectID: projectID,
+			}, nil
+		}
+	}
+
+	// No binding found: RFC-0003 §7.1 requires explicit bindings, no implicit default
+	return OrgContext{}, fmt.Errorf("localapi: no project binding for %q — RFC-0003 §7.1 requires explicit project bindings, no implicit default", projectID)
 }
 
 // Close stops accepting connections and releases the socket. Safe to call
