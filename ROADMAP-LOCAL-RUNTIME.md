@@ -54,7 +54,7 @@ Detailed plan: `docs/superpowers/plans/2026-07-13-local-runtime-p1-walking-skele
 - [x] `internal/runtime/localstore`: KB repository (mirrors `internal/core/kb` shape, no compliance checks locally — those stay server-side per RFC-0001 §13)
 - [x] Cross-namespace rejection tests for every repository added this phase (§7.2 mandatory, not optional)
 - [x] `internal/runtime/localapi`: extend tool registry with local-servable reads for the above pillars
-- [ ] P2 review/demo, kick off P3
+- [x] P2 review/demo, kick off P3 — completed 2026-07-14. Merged via cherry-pick from `p2-local-storage-replica` onto main. Initial review found 4 Important findings (missing `task.status_changed` event emission, missing socket-level tests for 6 new tools, dangling dead-code comment, mislabeled P5 comment); fixed and re-reviewed clean. `go build`/`go vet`/`go test ./internal/runtime/...` clean (26 tests).
 
 ---
 
