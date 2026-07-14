@@ -27,6 +27,9 @@ var ErrCredentialsNotFound = errors.New("config: credentials not found")
 // command-line argument (os.Args[1] in cmd/wormholed/main.go).
 var ErrInvalidProfileName = errors.New("config: invalid profile name")
 
+// ErrNoCredentials is returned when LoadMultiOrg finds no credential profiles.
+var ErrNoCredentials = errors.New("config: no credential profiles found")
+
 // validateProfileName rejects a profile name that could escape the
 // credentials directory when joined into a file path. Mirrors
 // cmd/wormhole-cli/profiles.go's validateProfileName rules exactly.
@@ -52,11 +55,32 @@ type Credentials struct {
 	Token     string `json:"token"`
 }
 
+// Org wraps credentials with an org identifier (RFC-0003 §7.1: multi-org support).
+type Org struct {
+	Name        string      // org identifier (e.g. "acme-corp")
+	Credentials Credentials // server, projectID, agentID, token for this org
+}
+
+// ProjectBinding maps a harness project context to a specific (org, project)
+// tuple (RFC-0003 §7.1: explicit project bindings, no implicit default).
+type ProjectBinding struct {
+	ProjectID string // the harness project context
+	OrgName   string // which org to use for this project
+}
+
 // Config is wormholed's resolved local configuration for one run.
 type Config struct {
-	SocketPath  string
-	DBPath      string
+	SocketPath string
+	DBPath     string
 	Credentials Credentials
+}
+
+// MultiOrgConfig is wormholed's configuration for multi-org support (P5+).
+type MultiOrgConfig struct {
+	SocketPath string
+	DBPath     string
+	Orgs       map[string]Org        // org_name → Org credentials
+	Bindings   []ProjectBinding      // harness project → (org, project) mappings
 }
 
 // Load resolves paths and reads the named credential profile.
@@ -96,5 +120,67 @@ func Load(profileName string) (Config, error) {
 		SocketPath:  filepath.Join(runtimeDir, "wormhole", "wormholed.sock"),
 		DBPath:      filepath.Join(dataDir, "wormhole", "wormholed.db"),
 		Credentials: creds,
+	}, nil
+}
+
+// LoadMultiOrg reads all credential profiles from ~/.wormhole/credentials/
+// and returns them as an org map. Supports multi-org wormholed (RFC-0003 §7.1, P5).
+// Returns ErrNoCredentials if no profiles are found.
+func LoadMultiOrg() (MultiOrgConfig, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return MultiOrgConfig{}, fmt.Errorf("config: resolve home directory: %w", err)
+	}
+
+	credDir := filepath.Join(home, ".wormhole", "credentials")
+	entries, err := os.ReadDir(credDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return MultiOrgConfig{}, fmt.Errorf("%w: credentials directory does not exist", ErrNoCredentials)
+		}
+		return MultiOrgConfig{}, fmt.Errorf("config: list credentials directory: %w", err)
+	}
+
+	orgs := make(map[string]Org)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		profileName := strings.TrimSuffix(entry.Name(), ".json")
+		if err := validateProfileName(profileName); err != nil {
+			continue // skip invalid profile names silently
+		}
+
+		credPath := filepath.Join(credDir, entry.Name())
+		data, err := os.ReadFile(credPath)
+		if err != nil {
+			continue // skip unreadable files silently
+		}
+		var creds Credentials
+		if err := json.Unmarshal(data, &creds); err != nil {
+			continue // skip malformed files silently
+		}
+
+		orgs[profileName] = Org{Name: profileName, Credentials: creds}
+	}
+
+	if len(orgs) == 0 {
+		return MultiOrgConfig{}, fmt.Errorf("%w: no valid credential profiles found in %s", ErrNoCredentials, credDir)
+	}
+
+	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
+	if runtimeDir == "" {
+		runtimeDir = filepath.Join(os.TempDir(), "wormhole-runtime")
+	}
+	dataDir := os.Getenv("XDG_DATA_HOME")
+	if dataDir == "" {
+		dataDir = filepath.Join(home, ".local", "share")
+	}
+
+	return MultiOrgConfig{
+		SocketPath: filepath.Join(runtimeDir, "wormhole", "wormholed.sock"),
+		DBPath:     filepath.Join(dataDir, "wormhole", "wormholed.db"),
+		Orgs:       orgs,
+		Bindings:   nil, // empty by default, caller can populate if needed
 	}, nil
 }
