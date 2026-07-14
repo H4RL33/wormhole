@@ -130,25 +130,36 @@ unverified, because ___", stated exactly that way.
 
 ## 1. System in One Paragraph
 
-Wormhole is a single Go backend (`wormhole-server`) plus a CLI (`wormhole-cli`), backed by
-one Postgres database with pgvector. It exposes four pillars — Event Bus, Task Graph,
-Knowledge Base, Identity & Permissions — exclusively through an MCP tool surface. Git stays
+Wormhole is a two-layer system (RFC-0003): a per-user local runtime (`wormholed`) with a
+SQLite replica plus a Coordination Server (`wormhole-server`) with a Postgres database.
+Coding harnesses talk only to `wormholed` over local IPC (MCP tools); `wormholed` syncs
+incrementally with the Coordination Server. The platform exposes four pillars — Event Bus,
+Task Graph, Knowledge Base, Identity & Permissions — exclusively through MCP. Git stays
 the sole source of truth for code; Wormhole stores pointers (commit SHAs, PR URLs) and
-commentary only. There is no message broker, no second datastore, no web UI in scope.
-Governance (Constitution, Congress; RFC-0002) is **not** being built in the current
-24-day alpha and must not leak into Core code.
+commentary only. There is no message broker, no second coordination datastore, no web UI
+in scope. Governance (Constitution, Congress; RFC-0002) is optional and must not leak
+into Core code.
 
 ```
-MCP clients (Claude, Codex, Gemini, ...)
-        │  MCP tools only — the sole platform surface (RFC-0001 §5.5)
+Coding harnesses (Claude Code, OpenCode, Goose, ...)
+        │  MCP tools, local IPC only
         ▼
-cmd/wormhole-server ──► internal/mcp (tool registry + auth boundary)
-                              │
-                              ▼
-                internal/core/{identity,tasks,events,kb,permissions}
-                              │
-                              ▼
-                internal/storage ──► Postgres + pgvector (only external dependency)
+wormholed (per-user daemon, RFC-0003 §5)
+        │  internal/runtime/* packages: local API, SQLite store, sync engine, scheduler
+        │
+        ├─► localapi (MCP tool registry + org routing)
+        ├─► localstore (SQLite tasks, events, KB, namespace-scoped)
+        ├─► sync (outbound queue, bootstrap/incremental pull/push)
+        ├─► scheduler (agent presence, task routing)
+        └─► eventbus (ephemeral pub/sub)
+        │
+        ▼  wormhole.sync.* tools over HTTP
+        │
+Coordination Server (cmd/wormhole-server)
+        │  internal/mcp (tool registry + auth boundary)
+        │  internal/core/* (identity, tasks, events, kb, permissions)
+        ▼
+Postgres + pgvector (single external dependency)
 ```
 
 ---
@@ -169,7 +180,31 @@ cmd/wormhole-server ──► internal/mcp (tool registry + auth boundary)
 | `internal/storage` | DB connection only (`Open`) | `internal/types`, `lib/pq` |
 | `internal/types` | Config, shared plain types | stdlib only |
 
-**Hard dependency rules:**
+### 2.1 Local Runtime Module Map (RFC-0003 §6.3)
+
+The local-first runtime (`wormholed`) uses `internal/runtime/*` packages, separate from and
+parallel to `internal/core/*` (which stays coordination-server-only). Local packages follow
+the same layering pattern and isolation discipline.
+
+| Package | Owns | May import |
+|---|---|---|
+| `cmd/wormholed` | Process wiring: config load, localstore, localapi, sync engine, graceful shutdown | `internal/runtime/*`, `internal/types` |
+| `internal/runtime/config` | XDG-compliant local paths, org connection config, project bindings (RFC-0003 §7.1, §8.1) | `internal/types`, stdlib |
+| `internal/runtime/localstore` | SQLite-backed repositories for tasks, events, KB, namespaced per project (RFC-0003 §7.2) | `internal/types`, stdlib, sqlite3 driver |
+| `internal/runtime/localapi` | Local IPC server (Unix domain socket), tool registry, request routing, org context resolution (RFC-0003 §6.1) | `internal/runtime/localstore`, `internal/runtime/eventbus`, `internal/runtime/scheduler`, `internal/types`, stdlib |
+| `internal/runtime/eventbus` | In-memory pub/sub for ephemeral events (presence, heartbeats); never persists (RFC-0003 §8.2) | `internal/types`, stdlib |
+| `internal/runtime/scheduler` | Agent registration, presence tracking, capability matching, local task routing (RFC-0003 design brief) | `internal/types`, stdlib |
+| `internal/runtime/sync` | Outbound queue (durable, SQLite-backed), bootstrap/incremental pull/push clients, conflict audit logging (RFC-0003 §8.2, §8.3) | `internal/types`, stdlib, sqlite3 driver |
+
+**Local runtime hard dependency rules (RFC-0003 §6.3):**
+
+- LR1: `internal/runtime/*` packages never import `internal/core/*` or `internal/mcp`. Local storage and coordination are strictly separated.
+- LR2: `internal/runtime/localapi` may import all other `internal/runtime/*` packages (it wires them together). Other runtime packages may not import `localapi`.
+- LR3: `internal/runtime/localstore` repository methods enforce namespace isolation by construction: every query is namespace-scoped via mandatory parameters, never inferred from ambient state (RFC-0003 §7.2 — accepted RLS-gap risk with process discipline).
+- LR4: Ephemeral events (presence, heartbeats) are eventbus-only; durable events (task/KB changes) go through localstore. Never persist ephemeral state.
+- LR5: Sync queue is SQLite-backed and restart-surviving (RFC-0003 G4). Local writes become durable before sync is attempted; sync never blocks local writes.
+
+**Hard dependency rules (Coordination Server, unchanged):**
 
 - R1: `internal/core/*` packages never import `internal/mcp`. Flow is one-way: mcp → core.
 - R2: `internal/core/*` packages never import each other, with one sanctioned exception:
