@@ -901,16 +901,23 @@ func (s *Server) handleChannelSubscribe(ctx context.Context, conn net.Conn, args
 // Local write tools — task.create, kb.write, channel.post. Each writes the
 // entity to the local SQLite replica, then enqueues it on the outbound sync
 // queue (RFC-0003 §8.2) so the sync engine pushes it to the Coordination
-// Server on its next cycle. Namespace is resolved from the request args
-// (same pattern as handleAgentRegister's agent_id extraction) — cross-namespace
-// isolation depends on every write path taking namespace_id from the caller,
-// never inferring or defaulting it.
+// Server on its next cycle. Namespace is resolved from s.projectID — the
+// value fixed at socket-construction time — same as every other handler in
+// this file (see localGetTask, localListChannelEvents, localGetArticle,
+// handleTaskRoute, handleAgentRegister). A client-supplied namespace_id in
+// the request args is never trusted for authorization: honoring it would let
+// any caller dialing a socket bound to one org/project write into another
+// org/project's namespace. If the request also supplies namespace_id, it is
+// ignored in favor of the resolved value (consistent with how the rest of
+// this file silently uses s.projectID regardless of request args).
 // =============================================================================
 
 // handleTaskCreate serves wormhole.task.create: creates a task locally and
 // enqueues it for sync.
-// Args: {"namespace_id": "x", "title": "y", "description": "z", "priority": 0,
+// Args: {"title": "y", "description": "z", "priority": 0,
 //        "parent_task_id": "..." (optional), "due_by": "RFC3339..." (optional)}
+// namespace_id, if present in args, is ignored — namespace is always resolved
+// from the socket's bound project (s.projectID), never from the request.
 func (s *Server) handleTaskCreate(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
 	if s.qr == nil {
 		return nil, fmt.Errorf("localapi: task create: sync queue not available")
@@ -923,7 +930,7 @@ func (s *Server) handleTaskCreate(ctx context.Context, args json.RawMessage) (ma
 		}
 	}
 
-	namespaceID, _ := argMap["namespace_id"].(string)
+	namespaceID := s.projectID
 	title, _ := argMap["title"].(string)
 	description, _ := argMap["description"].(string)
 	if namespaceID == "" || title == "" {
@@ -979,8 +986,10 @@ func (s *Server) handleTaskCreate(ctx context.Context, args json.RawMessage) (ma
 
 // handleKBWrite serves wormhole.kb.write: writes a KB article locally and
 // enqueues it for sync.
-// Args: {"namespace_id": "x", "agent_id": "y", "title": "z", "body": "...",
+// Args: {"agent_id": "y", "title": "z", "body": "...",
 //        "frontmatter": {...} (optional)}
+// namespace_id, if present in args, is ignored — namespace is always resolved
+// from the socket's bound project (s.projectID), never from the request.
 func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
 	if s.qr == nil {
 		return nil, fmt.Errorf("localapi: kb write: sync queue not available")
@@ -993,7 +1002,7 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 		}
 	}
 
-	namespaceID, _ := argMap["namespace_id"].(string)
+	namespaceID := s.projectID
 	agentID, _ := argMap["agent_id"].(string)
 	title, _ := argMap["title"].(string)
 	body, _ := argMap["body"].(string)
@@ -1037,9 +1046,11 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 
 // handleChannelPost serves wormhole.channel.post: publishes a durable event
 // to a channel locally and enqueues it for sync.
-// Args: {"namespace_id": "x", "channel_id": "y", "agent_id": "z",
+// Args: {"channel_id": "y", "agent_id": "z",
 //        "event_type": "discovery.logged", "payload": {...} (optional),
 //        "note": "..." (optional)}
+// namespace_id, if present in args, is ignored — namespace is always resolved
+// from the socket's bound project (s.projectID), never from the request.
 func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
 	if s.qr == nil {
 		return nil, fmt.Errorf("localapi: channel post: sync queue not available")
@@ -1052,7 +1063,7 @@ func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (m
 		}
 	}
 
-	namespaceID, _ := argMap["namespace_id"].(string)
+	namespaceID := s.projectID
 	channelID, _ := argMap["channel_id"].(string)
 	agentID, _ := argMap["agent_id"].(string)
 	eventType, _ := argMap["event_type"].(string)

@@ -201,3 +201,136 @@ func TestLocalChannelPost_EnqueuesForSync(t *testing.T) {
 		t.Fatalf("expected event enqueued for sync, got pending=%+v err=%v", pending, err)
 	}
 }
+
+// TestLocalWrites_IgnoreClientSuppliedNamespaceID proves the cross-namespace
+// write vulnerability is closed: a socket bound to "ns-1" (see
+// newTestServerWithQueue) must not honor a client-supplied namespace_id of
+// "ns-EVIL" — every write must land in the socket's bound namespace ("ns-1")
+// regardless of what the request body claims, and nothing must be written to
+// or enqueued for the mismatched namespace.
+func TestLocalWrites_IgnoreClientSuppliedNamespaceID(t *testing.T) {
+	srv, tr, er, kb, qr, cleanup := newTestServerWithQueue(t)
+	defer cleanup()
+
+	const evilNS = "ns-EVIL"
+
+	t.Run("task.create", func(t *testing.T) {
+		resp := dialAndCall(t, srv, "wormhole.task.create", map[string]interface{}{
+			"namespace_id": evilNS,
+			"title":        "cross-namespace task",
+			"description":  "should land in ns-1, not ns-EVIL",
+		})
+		if resp.Error != nil {
+			t.Fatalf("unexpected error: %v", resp.Error)
+		}
+		var out map[string]interface{}
+		json.Unmarshal(resp.Result, &out)
+		taskID, _ := out["id"].(string)
+		if taskID == "" {
+			t.Fatal("expected non-empty task id in response")
+		}
+		if ns, _ := out["namespace_id"].(string); ns != "ns-1" {
+			t.Fatalf("expected task written to bound namespace ns-1, response reports namespace_id=%q", ns)
+		}
+
+		if got, err := tr.GetTask(context.Background(), "ns-1", taskID); err != nil || got.Title != "cross-namespace task" {
+			t.Fatalf("task not persisted in bound namespace ns-1: got=%+v err=%v", got, err)
+		}
+		if _, err := tr.GetTask(context.Background(), evilNS, taskID); err == nil {
+			t.Fatalf("task leaked into client-supplied namespace %q", evilNS)
+		}
+
+		pendingEvil, err := qr.ListPending(context.Background(), evilNS, 10)
+		if err != nil {
+			t.Fatalf("ListPending(evilNS): %v", err)
+		}
+		if len(pendingEvil) != 0 {
+			t.Fatalf("expected nothing enqueued under client-supplied namespace %q, got %+v", evilNS, pendingEvil)
+		}
+	})
+
+	t.Run("kb.write", func(t *testing.T) {
+		resp := dialAndCall(t, srv, "wormhole.kb.write", map[string]interface{}{
+			"namespace_id": evilNS,
+			"agent_id":     "agent-1",
+			"title":        "cross-namespace article",
+			"body":         "should land in ns-1, not ns-EVIL",
+		})
+		if resp.Error != nil {
+			t.Fatalf("unexpected error: %v", resp.Error)
+		}
+		var out map[string]interface{}
+		json.Unmarshal(resp.Result, &out)
+		articleID, _ := out["id"].(string)
+		if articleID == "" {
+			t.Fatal("expected non-empty article id in response")
+		}
+		if ns, _ := out["namespace_id"].(string); ns != "ns-1" {
+			t.Fatalf("expected article written to bound namespace ns-1, response reports namespace_id=%q", ns)
+		}
+
+		if got, err := kb.GetArticle(context.Background(), "ns-1", articleID); err != nil || got.Title != "cross-namespace article" {
+			t.Fatalf("article not persisted in bound namespace ns-1: got=%+v err=%v", got, err)
+		}
+		if _, err := kb.GetArticle(context.Background(), evilNS, articleID); err == nil {
+			t.Fatalf("article leaked into client-supplied namespace %q", evilNS)
+		}
+
+		pendingEvil, err := qr.ListPending(context.Background(), evilNS, 10)
+		if err != nil {
+			t.Fatalf("ListPending(evilNS): %v", err)
+		}
+		if len(pendingEvil) != 0 {
+			t.Fatalf("expected nothing enqueued under client-supplied namespace %q, got %+v", evilNS, pendingEvil)
+		}
+	})
+
+	t.Run("channel.post", func(t *testing.T) {
+		channelID, err := er.CreateChannel(context.Background(), "ns-1", "general2")
+		if err != nil {
+			t.Fatalf("create channel: %v", err)
+		}
+
+		resp := dialAndCall(t, srv, "wormhole.channel.post", map[string]interface{}{
+			"namespace_id": evilNS,
+			"channel_id":   channelID,
+			"agent_id":     "agent-1",
+			"event_type":   "discovery.logged",
+			"payload":      map[string]interface{}{"found": "cross-namespace attempt"},
+		})
+		if resp.Error != nil {
+			t.Fatalf("unexpected error: %v", resp.Error)
+		}
+		var out map[string]interface{}
+		json.Unmarshal(resp.Result, &out)
+		eventID, _ := out["id"].(string)
+		if eventID == "" {
+			t.Fatal("expected non-empty event id in response")
+		}
+		if ns, _ := out["namespace_id"].(string); ns != "ns-1" {
+			t.Fatalf("expected event written to bound namespace ns-1, response reports namespace_id=%q", ns)
+		}
+
+		pendingBound, err := qr.ListPending(context.Background(), "ns-1", 10)
+		if err != nil {
+			t.Fatalf("ListPending(ns-1): %v", err)
+		}
+		found := false
+		for _, p := range pendingBound {
+			if p.EntityID == eventID {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("expected event enqueued under bound namespace ns-1, got %+v", pendingBound)
+		}
+
+		pendingEvil, err := qr.ListPending(context.Background(), evilNS, 10)
+		if err != nil {
+			t.Fatalf("ListPending(evilNS): %v", err)
+		}
+		if len(pendingEvil) != 0 {
+			t.Fatalf("expected nothing enqueued under client-supplied namespace %q, got %+v", evilNS, pendingEvil)
+		}
+	})
+}
