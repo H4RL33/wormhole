@@ -66,7 +66,7 @@ Detailed plan: `docs/superpowers/plans/2026-07-13-local-runtime-p1-walking-skele
 - [x] `internal/runtime/scheduler`: agent registration, presence tracking, capability matching
 - [x] `internal/runtime/scheduler`: local task routing decision (assign among locally-registered agents matching capability)
 - [x] `internal/runtime/localapi`: subscription support (namespace/project/event-type/capability/agent scoped, per design brief "Event Subscriptions")
-- [ ] P3 review/demo, kick off P4
+- [x] P3 review/demo, kick off P4 — completed 2026-07-14. Merged via cherry-pick from `p3-local-runtime-event-bus-scheduler` onto main. Initial review found 2 Critical (task routing bypassed durable status machine and discarded CreateTask's ID/error; scheduler invented a non-RFC `unassigned/assigned/done` status vocabulary) + 3 Important (EventBus.Publish double-delivery on multi-dimension subscription match, subscription/goroutine leak on disconnect, missing capability/agent_id subscription scoping) findings; all fixed and re-reviewed clean. Task routing now uses the localstore-generated UUID as the sole task_id and a new `TaskRepo.Assign` (mirroring Core's `Store.Assign`, owner-only, no invented status). `go build`/`go vet`/`go test ./...` clean (51 tests in internal/runtime/...).
 
 ---
 
