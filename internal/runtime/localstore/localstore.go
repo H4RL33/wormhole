@@ -80,6 +80,31 @@ CREATE TABLE IF NOT EXISTS kb_links (
 	to_article_id    TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS sync_queue (
+	id             TEXT PRIMARY KEY,
+	namespace_id   TEXT NOT NULL,
+	entity_type    TEXT NOT NULL,
+	entity_id      TEXT NOT NULL,
+	operation      TEXT NOT NULL,
+	payload        TEXT NOT NULL,
+	priority       INTEGER NOT NULL DEFAULT 0,
+	created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	delivered_at   TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS sync_audit (
+	id             TEXT PRIMARY KEY,
+	namespace_id   TEXT NOT NULL,
+	entity_type    TEXT NOT NULL,
+	entity_id      TEXT NOT NULL,
+	conflict_type  TEXT,
+	server_value   TEXT,
+	local_value    TEXT,
+	resolved_value TEXT,
+	resolved_by    TEXT,
+	created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 `
 
 // Store wraps a *sql.DB backed by a local SQLite file.

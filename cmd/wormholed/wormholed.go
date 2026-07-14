@@ -13,6 +13,7 @@ import (
 	"github.com/H4RL33/wormhole/internal/runtime/config"
 	"github.com/H4RL33/wormhole/internal/runtime/localapi"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
+	"github.com/H4RL33/wormhole/internal/runtime/sync"
 )
 
 func Run(ctx context.Context, profileName string) error {
@@ -38,11 +39,21 @@ func Run(ctx context.Context, profileName string) error {
 	}
 	defer store.Close()
 
+	// Initialize sync engine repositories and engine (RFC-0003 §8.2).
+	queueRepo := sync.NewQueueRepo(store.DB())
+	auditRepo := sync.NewAuditRepo(store.DB())
+	syncCfg := sync.DefaultConfig()
+	syncEngine := sync.New(cfg.Credentials.Server, cfg.Credentials.Token, cfg.Credentials.ProjectID, queueRepo, auditRepo, syncCfg)
+
 	srv, err := localapi.New(cfg.SocketPath, cfg.Credentials.Server, cfg.Credentials.Token, cfg.Credentials.ProjectID, store, localstore.NewTaskRepo(store.DB()), localstore.NewEventRepo(store.DB()), localstore.NewKBRepo(store.DB()))
 	if err != nil {
 		return fmt.Errorf("wormholed: start local api: %w", err)
 	}
 	defer srv.Close()
+
+	// Start the background sync loop (RFC-0003 §8.2: incremental push/pull cycle).
+	syncEngine.Start(ctx)
+	defer syncEngine.Stop()
 
 	return srv.Serve(ctx)
 }
