@@ -14,11 +14,12 @@ var ErrChannelNotFound = errors.New("events: channel not found")
 var ErrPassportNotFound = errors.New("events: agent not registered or has no passport for this project")
 
 var AllowedEventTypes = map[string]bool{
-	"task.status_changed": true,
-	"review.requested":    true,
-	"build.failed":        true,
-	"discovery.logged":    true,
-	"message.posted":      true,
+	"task.status_changed":    true,
+	"review.requested":       true,
+	"build.failed":           true,
+	"discovery.logged":       true,
+	"message.posted":         true,
+	"sync.conflict_resolved": true,
 }
 
 type Channel struct {

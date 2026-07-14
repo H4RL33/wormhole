@@ -50,10 +50,10 @@ func main() {
 	registry.Register(mcp.SearchArticlesTool(kbStore))
 	registry.Register(mcp.GetArticleTool(kbStore))
 	registry.Register(mcp.GetArticleLinksTool(kbStore))
-	registry.Register(mcp.BootstrapTool())
-	registry.Register(mcp.IncrementalPullTool())
-	registry.Register(mcp.IncrementalPushTool())
-	registry.Register(mcp.ConflictReportTool())
+	registry.Register(mcp.BootstrapTool(tasksStore, kbStore, eventsStore))
+	registry.Register(mcp.IncrementalPullTool(tasksStore, kbStore, eventsStore))
+	registry.Register(mcp.IncrementalPushTool(tasksStore, kbStore, eventsStore))
+	registry.Register(mcp.ConflictReportTool(tasksStore, kbStore, eventsStore))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
