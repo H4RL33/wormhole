@@ -63,9 +63,9 @@ func Run(ctx context.Context, profileName string) error {
 	// already-resolved Credentials) are unaffected.
 	var srv *localapi.Server
 	if multiCfg, mErr := config.LoadMultiOrg(); mErr == nil && len(multiCfg.Orgs) > 1 {
-		srv, err = localapi.NewMultiOrg(cfg.SocketPath, multiCfg.Orgs, multiCfg.Bindings, store, tr, er, kb, eb, sched)
+		srv, err = localapi.NewMultiOrg(cfg.SocketPath, multiCfg.Orgs, multiCfg.Bindings, store, tr, er, kb, eb, sched, queueRepo)
 	} else {
-		srv, err = localapi.NewWithRuntime(cfg.SocketPath, cfg.Credentials.Server, cfg.Credentials.Token, cfg.Credentials.ProjectID, store, tr, er, kb, eb, sched)
+		srv, err = localapi.NewWithRuntime(cfg.SocketPath, cfg.Credentials.Server, cfg.Credentials.Token, cfg.Credentials.ProjectID, store, tr, er, kb, eb, sched, queueRepo)
 	}
 	if err != nil {
 		return fmt.Errorf("wormholed: start local api: %w", err)

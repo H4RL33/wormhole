@@ -31,6 +31,7 @@ import (
 	"github.com/H4RL33/wormhole/internal/runtime/eventbus"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/runtime/scheduler"
+	syncpkg "github.com/H4RL33/wormhole/internal/runtime/sync"
 )
 
 type rpcRequest struct {
@@ -118,6 +119,7 @@ type Server struct {
 	tr    *localstore.TaskRepo
 	er    *localstore.EventRepo
 	kb    *localstore.KBRepo
+	qr    *syncpkg.QueueRepo
 
 	eventbus  *eventbus.EventBus
 	scheduler *scheduler.Scheduler
@@ -141,7 +143,7 @@ type Server struct {
 // Production deployments concerned with multi-user isolation should implement
 // stricter socket permissions (chmod 0700 after creation) or use an additional
 // local authentication layer — currently out of scope per RFC-0003 OQ4.
-func New(socketPath, coordServerURL, token, projectID string, store *localstore.Store, tr *localstore.TaskRepo, er *localstore.EventRepo, kb *localstore.KBRepo) (*Server, error) {
+func New(socketPath, coordServerURL, token, projectID string, store *localstore.Store, tr *localstore.TaskRepo, er *localstore.EventRepo, kb *localstore.KBRepo, qr *syncpkg.QueueRepo) (*Server, error) {
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: listen on %s: %w", socketPath, err)
@@ -158,6 +160,7 @@ func New(socketPath, coordServerURL, token, projectID string, store *localstore.
 		tr:          tr,
 		er:          er,
 		kb:          kb,
+		qr:          qr,
 	}, nil
 }
 
@@ -165,7 +168,7 @@ func New(socketPath, coordServerURL, token, projectID string, store *localstore.
 // + scheduler (P3). Callers must call Serve to start accepting connections,
 // and Close to release the socket.
 // Socket permissions: see New() for RFC-0003 OQ4 assumptions and P6 hardening notes.
-func NewWithRuntime(socketPath, coordServerURL, token, projectID string, store *localstore.Store, tr *localstore.TaskRepo, er *localstore.EventRepo, kb *localstore.KBRepo, eb *eventbus.EventBus, sched *scheduler.Scheduler) (*Server, error) {
+func NewWithRuntime(socketPath, coordServerURL, token, projectID string, store *localstore.Store, tr *localstore.TaskRepo, er *localstore.EventRepo, kb *localstore.KBRepo, eb *eventbus.EventBus, sched *scheduler.Scheduler, qr *syncpkg.QueueRepo) (*Server, error) {
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: listen on %s: %w", socketPath, err)
@@ -182,6 +185,7 @@ func NewWithRuntime(socketPath, coordServerURL, token, projectID string, store *
 		tr:          tr,
 		er:          er,
 		kb:          kb,
+		qr:          qr,
 		eventbus:    eb,
 		scheduler:   sched,
 	}, nil
@@ -191,7 +195,7 @@ func NewWithRuntime(socketPath, coordServerURL, token, projectID string, store *
 // Orgs is a map of org_name → Org credentials. Bindings map project contexts to org names.
 // Callers must call Serve to start accepting connections, and Close to release the socket.
 // Socket permissions: see New() for RFC-0003 OQ4 assumptions and P6 hardening notes.
-func NewMultiOrg(socketPath string, orgs map[string]config.Org, bindings []config.ProjectBinding, store *localstore.Store, tr *localstore.TaskRepo, er *localstore.EventRepo, kb *localstore.KBRepo, eb *eventbus.EventBus, sched *scheduler.Scheduler) (*Server, error) {
+func NewMultiOrg(socketPath string, orgs map[string]config.Org, bindings []config.ProjectBinding, store *localstore.Store, tr *localstore.TaskRepo, er *localstore.EventRepo, kb *localstore.KBRepo, eb *eventbus.EventBus, sched *scheduler.Scheduler, qr *syncpkg.QueueRepo) (*Server, error) {
 	if len(orgs) == 0 {
 		return nil, fmt.Errorf("localapi: NewMultiOrg: no orgs provided")
 	}
@@ -210,6 +214,7 @@ func NewMultiOrg(socketPath string, orgs map[string]config.Org, bindings []confi
 		tr:         tr,
 		er:         er,
 		kb:         kb,
+		qr:         qr,
 		eventbus:   eb,
 		scheduler:  sched,
 	}, nil
@@ -398,6 +403,33 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 
 	case "wormhole.channel.subscribe":
 		s.handleChannelSubscribe(ctx, conn, req.Args)
+
+	case "wormhole.task.create":
+		result, err := s.handleTaskCreate(ctx, req.Args)
+		if err != nil {
+			writeResponse(conn, localResponse{Error: err.Error()})
+			return
+		}
+		outRaw, _ := json.Marshal(result)
+		writeResponse(conn, localResponse{Result: outRaw})
+
+	case "wormhole.kb.write":
+		result, err := s.handleKBWrite(ctx, req.Args)
+		if err != nil {
+			writeResponse(conn, localResponse{Error: err.Error()})
+			return
+		}
+		outRaw, _ := json.Marshal(result)
+		writeResponse(conn, localResponse{Result: outRaw})
+
+	case "wormhole.channel.post":
+		result, err := s.handleChannelPost(ctx, req.Args)
+		if err != nil {
+			writeResponse(conn, localResponse{Error: err.Error()})
+			return
+		}
+		outRaw, _ := json.Marshal(result)
+		writeResponse(conn, localResponse{Result: outRaw})
 
 	default:
 		writeResponse(conn, localResponse{Error: fmt.Sprintf("localapi: unsupported tool %q", req.Tool)})
@@ -863,4 +895,206 @@ func (s *Server) handleChannelSubscribe(ctx context.Context, conn net.Conn, args
 			writeResponse(conn, localResponse{Result: json.RawMessage(payload)})
 		}
 	}
+}
+
+// =============================================================================
+// Local write tools — task.create, kb.write, channel.post. Each writes the
+// entity to the local SQLite replica, then enqueues it on the outbound sync
+// queue (RFC-0003 §8.2) so the sync engine pushes it to the Coordination
+// Server on its next cycle. Namespace is resolved from the request args
+// (same pattern as handleAgentRegister's agent_id extraction) — cross-namespace
+// isolation depends on every write path taking namespace_id from the caller,
+// never inferring or defaulting it.
+// =============================================================================
+
+// handleTaskCreate serves wormhole.task.create: creates a task locally and
+// enqueues it for sync.
+// Args: {"namespace_id": "x", "title": "y", "description": "z", "priority": 0,
+//        "parent_task_id": "..." (optional), "due_by": "RFC3339..." (optional)}
+func (s *Server) handleTaskCreate(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if s.qr == nil {
+		return nil, fmt.Errorf("localapi: task create: sync queue not available")
+	}
+
+	var argMap map[string]interface{}
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &argMap); err != nil {
+			return nil, fmt.Errorf("localapi: task create: invalid args: %w", err)
+		}
+	}
+
+	namespaceID, _ := argMap["namespace_id"].(string)
+	title, _ := argMap["title"].(string)
+	description, _ := argMap["description"].(string)
+	if namespaceID == "" || title == "" {
+		return nil, fmt.Errorf("localapi: task create: missing namespace_id or title")
+	}
+
+	priority := 0
+	if p, ok := argMap["priority"].(float64); ok {
+		priority = int(p)
+	}
+
+	var parentTaskID *string
+	if pid, ok := argMap["parent_task_id"].(string); ok && pid != "" {
+		parentTaskID = &pid
+	}
+
+	var dueBy *time.Time
+	if db, ok := argMap["due_by"].(string); ok && db != "" {
+		if t, err := time.Parse(time.RFC3339, db); err == nil {
+			dueBy = &t
+		}
+	}
+
+	task, err := s.tr.CreateTask(ctx, namespaceID, title, description, parentTaskID, priority, dueBy)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: task create: %w", err)
+	}
+
+	out := map[string]interface{}{
+		"id":             task.ID,
+		"namespace_id":   task.NamespaceID,
+		"title":          task.Title,
+		"description":    task.Description,
+		"status":         task.Status,
+		"priority":       task.Priority,
+		"owner_agent_id": task.OwnerAgentID,
+		"parent_task_id": task.ParentTaskID,
+		"due_by":         task.DueBy,
+		"created_at":     task.CreatedAt,
+		"updated_at":     task.UpdatedAt,
+	}
+
+	payload, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: task create: marshal payload: %w", err)
+	}
+	if _, err := s.qr.Enqueue(ctx, namespaceID, "task", task.ID, "create", payload, 0); err != nil {
+		return nil, fmt.Errorf("localapi: task create: enqueue sync: %w", err)
+	}
+
+	return out, nil
+}
+
+// handleKBWrite serves wormhole.kb.write: writes a KB article locally and
+// enqueues it for sync.
+// Args: {"namespace_id": "x", "agent_id": "y", "title": "z", "body": "...",
+//        "frontmatter": {...} (optional)}
+func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if s.qr == nil {
+		return nil, fmt.Errorf("localapi: kb write: sync queue not available")
+	}
+
+	var argMap map[string]interface{}
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &argMap); err != nil {
+			return nil, fmt.Errorf("localapi: kb write: invalid args: %w", err)
+		}
+	}
+
+	namespaceID, _ := argMap["namespace_id"].(string)
+	agentID, _ := argMap["agent_id"].(string)
+	title, _ := argMap["title"].(string)
+	body, _ := argMap["body"].(string)
+	if namespaceID == "" || title == "" {
+		return nil, fmt.Errorf("localapi: kb write: missing namespace_id or title")
+	}
+
+	var frontmatter json.RawMessage
+	if fm, ok := argMap["frontmatter"]; ok {
+		if fmRaw, err := json.Marshal(fm); err == nil {
+			frontmatter = fmRaw
+		}
+	}
+
+	article, err := s.kb.WriteArticle(ctx, namespaceID, agentID, title, body, frontmatter)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: kb write: %w", err)
+	}
+
+	out := map[string]interface{}{
+		"id":              article.ID,
+		"namespace_id":    article.NamespaceID,
+		"title":           article.Title,
+		"body":            article.Body,
+		"frontmatter":     string(article.Frontmatter),
+		"author_agent_id": article.AuthorAgentID,
+		"created_at":      article.CreatedAt,
+		"updated_at":      article.UpdatedAt,
+	}
+
+	payload, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: kb write: marshal payload: %w", err)
+	}
+	if _, err := s.qr.Enqueue(ctx, namespaceID, "kb_article", article.ID, "create", payload, 0); err != nil {
+		return nil, fmt.Errorf("localapi: kb write: enqueue sync: %w", err)
+	}
+
+	return out, nil
+}
+
+// handleChannelPost serves wormhole.channel.post: publishes a durable event
+// to a channel locally and enqueues it for sync.
+// Args: {"namespace_id": "x", "channel_id": "y", "agent_id": "z",
+//        "event_type": "discovery.logged", "payload": {...} (optional),
+//        "note": "..." (optional)}
+func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if s.qr == nil {
+		return nil, fmt.Errorf("localapi: channel post: sync queue not available")
+	}
+
+	var argMap map[string]interface{}
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &argMap); err != nil {
+			return nil, fmt.Errorf("localapi: channel post: invalid args: %w", err)
+		}
+	}
+
+	namespaceID, _ := argMap["namespace_id"].(string)
+	channelID, _ := argMap["channel_id"].(string)
+	agentID, _ := argMap["agent_id"].(string)
+	eventType, _ := argMap["event_type"].(string)
+	if namespaceID == "" || channelID == "" || eventType == "" {
+		return nil, fmt.Errorf("localapi: channel post: missing namespace_id, channel_id, or event_type")
+	}
+
+	var eventPayload json.RawMessage
+	if p, ok := argMap["payload"]; ok {
+		if pRaw, err := json.Marshal(p); err == nil {
+			eventPayload = pRaw
+		}
+	}
+
+	var note *string
+	if n, ok := argMap["note"].(string); ok && n != "" {
+		note = &n
+	}
+
+	ev, err := s.er.PublishEvent(ctx, namespaceID, channelID, agentID, eventType, eventPayload, note)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: channel post: %w", err)
+	}
+
+	out := map[string]interface{}{
+		"id":           ev.ID,
+		"namespace_id": ev.NamespaceID,
+		"channel_id":   ev.ChannelID,
+		"agent_id":     ev.AgentID,
+		"event_type":   ev.EventType,
+		"payload":      string(ev.Payload),
+		"note":         ev.Note,
+		"created_at":   ev.CreatedAt,
+	}
+
+	payload, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: channel post: marshal payload: %w", err)
+	}
+	if _, err := s.qr.Enqueue(ctx, namespaceID, "event", ev.ID, "create", payload, 0); err != nil {
+		return nil, fmt.Errorf("localapi: channel post: enqueue sync: %w", err)
+	}
+
+	return out, nil
 }

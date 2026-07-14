@@ -55,6 +55,7 @@ func TestMultiOrgResolveContext(t *testing.T) {
 		localstore.NewKBRepo(store.DB()),
 		nil, // eventbus
 		nil, // scheduler
+		nil, // queue repo
 	)
 	if err != nil {
 		t.Fatalf("NewMultiOrg: %v", err)
@@ -160,6 +161,7 @@ func TestMultiOrgCrossOrgIsolation(t *testing.T) {
 		localstore.NewKBRepo(store.DB()),
 		nil, // eventbus
 		nil, // scheduler
+		nil, // queue repo
 	)
 	if err != nil {
 		t.Fatalf("NewMultiOrg: %v", err)
@@ -309,6 +311,7 @@ func TestMultiOrgNoImplicitDefault(t *testing.T) {
 		localstore.NewKBRepo(store.DB()),
 		nil, // eventbus
 		nil, // scheduler
+		nil, // queue repo
 	)
 	if err != nil {
 		t.Fatalf("NewMultiOrg: %v", err)
@@ -341,6 +344,7 @@ func TestSingleOrgBackwardCompatibility(t *testing.T) {
 		localstore.NewTaskRepo(store.DB()),
 		localstore.NewEventRepo(store.DB()),
 		localstore.NewKBRepo(store.DB()),
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -397,6 +401,7 @@ func TestProjectBindingExplicit(t *testing.T) {
 		localstore.NewTaskRepo(store.DB()),
 		localstore.NewEventRepo(store.DB()),
 		localstore.NewKBRepo(store.DB()),
+		nil,
 		nil,
 		nil,
 	)
