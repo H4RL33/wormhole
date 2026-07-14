@@ -49,11 +49,11 @@ Detailed plan: `docs/superpowers/plans/2026-07-13-local-runtime-p1-walking-skele
 
 **Exit criteria:** `wormholed` can serve task/event/KB reads from its local SQLite replica without a network call when data has already been bootstrapped/cached, and every `localstore` repository has an explicit cross-namespace rejection test (RFC-0003 §7.2 — the accepted RLS-gap risk).
 
-- [ ] `internal/runtime/localstore`: task repository (mirrors `internal/core/tasks` shape)
-- [ ] `internal/runtime/localstore`: event repository (mirrors `internal/core/events` shape, durable-tier only — ephemeral events never persist here per §6.1/RFC-0001 event categories)
-- [ ] `internal/runtime/localstore`: KB repository (mirrors `internal/core/kb` shape, no compliance checks locally — those stay server-side per RFC-0001 §13)
-- [ ] Cross-namespace rejection tests for every repository added this phase (§7.2 mandatory, not optional)
-- [ ] `internal/runtime/localapi`: extend tool registry with local-servable reads for the above pillars
+- [x] `internal/runtime/localstore`: task repository (mirrors `internal/core/tasks` shape)
+- [x] `internal/runtime/localstore`: event repository (mirrors `internal/core/events` shape, durable-tier only — ephemeral events never persist here per §6.1/RFC-0001 event categories)
+- [x] `internal/runtime/localstore`: KB repository (mirrors `internal/core/kb` shape, no compliance checks locally — those stay server-side per RFC-0001 §13)
+- [x] Cross-namespace rejection tests for every repository added this phase (§7.2 mandatory, not optional)
+- [x] `internal/runtime/localapi`: extend tool registry with local-servable reads for the above pillars
 - [ ] P2 review/demo, kick off P3
 
 ---
@@ -62,10 +62,10 @@ Detailed plan: `docs/superpowers/plans/2026-07-13-local-runtime-p1-walking-skele
 
 **Exit criteria:** two agents on the same machine (different harness processes, one `wormholed`) see each other's presence and can have a task routed between them without a Coordination Server round trip.
 
-- [ ] `internal/runtime/eventbus`: in-memory pub/sub, ephemeral event class (presence, heartbeats, temporary status) — never touches SQLite
-- [ ] `internal/runtime/scheduler`: agent registration, presence tracking, capability matching
-- [ ] `internal/runtime/scheduler`: local task routing decision (assign among locally-registered agents matching capability)
-- [ ] `internal/runtime/localapi`: subscription support (namespace/project/event-type/capability/agent scoped, per design brief "Event Subscriptions")
+- [x] `internal/runtime/eventbus`: in-memory pub/sub, ephemeral event class (presence, heartbeats, temporary status) — never touches SQLite
+- [x] `internal/runtime/scheduler`: agent registration, presence tracking, capability matching
+- [x] `internal/runtime/scheduler`: local task routing decision (assign among locally-registered agents matching capability)
+- [x] `internal/runtime/localapi`: subscription support (namespace/project/event-type/capability/agent scoped, per design brief "Event Subscriptions")
 - [ ] P3 review/demo, kick off P4
 
 ---
@@ -74,12 +74,12 @@ Detailed plan: `docs/superpowers/plans/2026-07-13-local-runtime-p1-walking-skele
 
 **Exit criteria:** a local write made while the Coordination Server is unreachable becomes visible on the server once connectivity returns, with no manual intervention, and every overwrite from a conflict is visible in the audit trail (RFC-0003 §8.3 last-write-wins v1 answer).
 
-- [ ] `internal/runtime/sync`: durable outbound queue (SQLite-backed, restart-surviving)
-- [ ] `internal/runtime/sync`: bootstrap client (`wormhole.sync.bootstrap` bulk pull)
-- [ ] `internal/runtime/sync`: incremental push/pull cycle
-- [ ] Coordination Server: `wormhole.sync.*` MCP tools (bootstrap, incremental pull, incremental push, conflict report) — new pillar prefix ratified by RFC-0003 §4
-- [ ] Conflict handling: last-write-wins, server-timestamp authoritative, audit log entry per overwrite (RFC-0003 §8.3)
-- [ ] Batching: time/queue-size/priority criteria, latency-sensitive bypass
+- [x] `internal/runtime/sync`: durable outbound queue (SQLite-backed, restart-surviving)
+- [x] `internal/runtime/sync`: bootstrap client (`wormhole.sync.bootstrap` bulk pull)
+- [x] `internal/runtime/sync`: incremental push/pull cycle
+- [x] Coordination Server: `wormhole.sync.*` MCP tools (bootstrap, incremental pull, incremental push, conflict report) — new pillar prefix ratified by RFC-0003 §4
+- [x] Conflict handling: last-write-wins, server-timestamp authoritative, audit log entry per overwrite (RFC-0003 §8.3)
+- [ ] Batching: time/queue-size/priority criteria, latency-sensitive bypass — time- and size-based batch triggers and priority-ordered dequeue implemented (`internal/runtime/sync.Engine`, `QueueRepo.ListPending`); no explicit latency-sensitive bypass path found, left unchecked
 - [ ] P4 review/demo, kick off P5
 
 ---
@@ -88,11 +88,11 @@ Detailed plan: `docs/superpowers/plans/2026-07-13-local-runtime-p1-walking-skele
 
 **Exit criteria:** one `wormholed` instance is simultaneously joined to two different organisations (two different Coordination Servers), with a harness able to address either by explicit project binding, and no data crossing between them.
 
-- [ ] `wormhole join` (CLI) retargeted: talks to `wormholed`, not the Coordination Server directly
-- [ ] Full bootstrap lifecycle: Authentication → Enrolment → Bootstrap → Synchronisation → Normal operation (RFC-0003 §8.1)
-- [ ] Project bindings: explicit config mapping harness/project context to (org, project, identity) tuple, no implicit default (RFC-0003 §7.1)
-- [ ] Multi-org routing test: two orgs, two Passports, cross-org isolation asserted at `localapi` boundary
-- [ ] Credential recovery flow: identity records recoverable, credentials regenerated not redistributed (RFC-0003 §7.3)
+- [ ] `wormhole join` (CLI) retargeted: talks to `wormholed`, not the Coordination Server directly — NOT implemented; `cmd/wormhole-cli/main.go`'s `runJoin` still takes `--server` and talks to the Coordination Server directly, no `wormholed` socket path added
+- [x] Full bootstrap lifecycle: Authentication → Enrolment → Bootstrap → Synchronisation → Normal operation (RFC-0003 §8.1)
+- [x] Project bindings: explicit config mapping harness/project context to (org, project, identity) tuple, no implicit default (RFC-0003 §7.1)
+- [x] Multi-org routing test: two orgs, two Passports, cross-org isolation asserted at `localapi` boundary
+- [x] Credential recovery flow: identity records recoverable, credentials regenerated not redistributed (RFC-0003 §7.3)
 - [ ] P5 review/demo, kick off P6
 
 ---
@@ -100,6 +100,8 @@ Detailed plan: `docs/superpowers/plans/2026-07-13-local-runtime-p1-walking-skele
 ## P6 — Coordination Server Retrofit & Hardening
 
 **Exit criteria:** Coordination Server survives a `wormholed` disconnect/reconnect cycle and a version-skewed client without data corruption; security review of the local-isolation gap (§7.2) completed with no open findings above low severity.
+
+**Integration note (2026-07-14):** `p6-local-runtime-coordination-server-hardening` branch has zero unique commits over its base (`p5-local-runtime-org-bootstrap-multi-org` == `p6-local-runtime-coordination-server-hardening` exactly). No P6 work was implemented on that branch. P6 was not attempted in this integration pass — all items below remain open.
 
 - [ ] Coordination Server: harden `wormhole.sync.*` handlers (auth, rate limits, malformed-payload rejection)
 - [ ] Offline/reconnect test suite: kill network mid-sync, verify queue survives and resumes cleanly
@@ -113,9 +115,9 @@ Detailed plan: `docs/superpowers/plans/2026-07-13-local-runtime-p1-walking-skele
 
 **Exit criteria:** full local-first loop demonstrated end-to-end and tagged.
 
-- [ ] E2E validation: agent writes task while offline → reconnect → task visible on Coordination Server dashboard → second agent (different machine) sees it after its own sync
-- [ ] Fix any break found during validation
-- [ ] `docs/architecture.md` companion revision reflecting `internal/runtime/*` module map and dependency rules (RFC-0003 §13 flags this as needed)
+- [ ] E2E validation: agent writes task while offline → reconnect → task visible on Coordination Server dashboard → second agent (different machine) sees it after its own sync — partially implemented: `TestP7_LocalFirstLoop`, `TestP7_LocalTaskPersistence`, `TestP7_SyncQueueDurability` pass (single-daemon offline-write→reconnect→sync loop); `TestP7_MultiDaemonSync` is present but explicitly `t.Skip`'d — "requires server-side sync implementation (currently stubs); deferred to P8"
+- [ ] Fix any break found during validation — not fully assessable until multi-daemon validation above is unblocked
+- [x] `docs/architecture.md` companion revision reflecting `internal/runtime/*` module map and dependency rules (RFC-0003 §13 flags this as needed)
 - [ ] Tag release
 - [ ] Launch demo
 
