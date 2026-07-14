@@ -73,11 +73,10 @@ type whoAmIOutput struct {
 	Permissions  []string `json:"permissions"`
 }
 
-// localRequest is the P1 local-socket request: one tool call, no
-// arguments needed yet (whoami takes none beyond project_id, which the
-// Server already knows from its own config).
+// localRequest is a P1/P2 local-socket request. P1: Tool only. P2+: args may be populated.
 type localRequest struct {
-	Tool string `json:"tool"`
+	Tool string          `json:"tool"`
+	Args json.RawMessage `json:"args,omitempty"`
 }
 
 // localResponse is the P1 local-socket response.
@@ -86,15 +85,26 @@ type localResponse struct {
 	Error  string          `json:"error,omitempty"`
 }
 
-// Server is wormholed's local API socket server.
+// Server is wormholed's local API socket server (RFC-0003 §6.1).
+// P1 shipped whoami; P2 adds local-servable reads for tasks, events, and KB.
+// P3 adds eventbus, scheduler, and subscription support.
+// P5 adds multi-org support (RFC-0003 §7.1, §8.1).
 type Server struct {
-	listener    net.Listener
-	socketPath  string
-	httpClient  *http.Client
+	listener   net.Listener
+	socketPath string
+	httpClient *http.Client
+
+	// Single-org mode (P1-P4 backward compatibility)
 	coordServer string
 	token       string
 	projectID   string
-	store       *localstore.Store
+
+	// Multi-org mode (P5+)
+
+	store *localstore.Store
+	tr    *localstore.TaskRepo
+	er    *localstore.EventRepo
+	kb    *localstore.KBRepo
 
 	closeOnce sync.Once
 	closeErr  error
@@ -103,7 +113,20 @@ type Server struct {
 
 // New binds the Unix domain socket at socketPath. Callers must call Serve
 // to start accepting connections, and Close to release the socket.
-func New(socketPath, coordServerURL, token, projectID string, store *localstore.Store) (*Server, error) {
+// Single-org mode (P1-P4).
+//
+// Socket permissions (RFC-0003 OQ4, §7.2, P6 hardening): net.Listen("unix", path)
+// creates a socket file with OS-default permissions (typically 0755 on most Unix variants).
+// This means the socket is world-accessible by path. Access control relies on
+// file-system-level permissions and the assumption that only the owning user's
+// processes will dial it (RFC-0003 OQ4 conservative default: "same-user process trust
+// assumed... unless a concrete threat model says otherwise; multi-user machine sharing
+// a single wormholed is out of scope for v1").
+//
+// Production deployments concerned with multi-user isolation should implement
+// stricter socket permissions (chmod 0700 after creation) or use an additional
+// local authentication layer — currently out of scope per RFC-0003 OQ4.
+func New(socketPath, coordServerURL, token, projectID string, store *localstore.Store, tr *localstore.TaskRepo, er *localstore.EventRepo, kb *localstore.KBRepo) (*Server, error) {
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: listen on %s: %w", socketPath, err)
@@ -116,6 +139,9 @@ func New(socketPath, coordServerURL, token, projectID string, store *localstore.
 		token:       token,
 		projectID:   projectID,
 		store:       store,
+		tr:          tr,
+		er:          er,
+		kb:          kb,
 	}, nil
 }
 
@@ -176,8 +202,63 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		}
 		outRaw, _ := json.Marshal(out)
 		writeResponse(conn, localResponse{Result: outRaw})
+
+	case "wormhole.task.list":
+		result, err := s.localListTasks(ctx, req.Args)
+		if err != nil {
+			writeResponse(conn, localResponse{Error: err.Error()})
+			return
+		}
+		outRaw, _ := json.Marshal(result)
+		writeResponse(conn, localResponse{Result: outRaw})
+
+	case "wormhole.task.get":
+		result, err := s.localGetTask(ctx, req.Args)
+		if err != nil {
+			writeResponse(conn, localResponse{Error: err.Error()})
+			return
+		}
+		outRaw, _ := json.Marshal(result)
+		writeResponse(conn, localResponse{Result: outRaw})
+
+	case "wormhole.channel.list":
+		result, err := s.localListChannels(ctx)
+		if err != nil {
+			writeResponse(conn, localResponse{Error: err.Error()})
+			return
+		}
+		outRaw, _ := json.Marshal(result)
+		writeResponse(conn, localResponse{Result: outRaw})
+
+	case "wormhole.channel.events":
+		result, err := s.localListChannelEvents(ctx)
+		if err != nil {
+			writeResponse(conn, localResponse{Error: err.Error()})
+			return
+		}
+		outRaw, _ := json.Marshal(result)
+		writeResponse(conn, localResponse{Result: outRaw})
+
+	case "wormhole.kb.list":
+		result, err := s.localListArticles(ctx)
+		if err != nil {
+			writeResponse(conn, localResponse{Error: err.Error()})
+			return
+		}
+		outRaw, _ := json.Marshal(result)
+		writeResponse(conn, localResponse{Result: outRaw})
+
+	case "wormhole.kb.get":
+		result, err := s.localGetArticle(ctx, req.Args)
+		if err != nil {
+			writeResponse(conn, localResponse{Error: err.Error()})
+			return
+		}
+		outRaw, _ := json.Marshal(result)
+		writeResponse(conn, localResponse{Result: outRaw})
+
 	default:
-		writeResponse(conn, localResponse{Error: fmt.Sprintf("localapi: unsupported tool %q in P1 walking skeleton", req.Tool)})
+		writeResponse(conn, localResponse{Error: fmt.Sprintf("localapi: unsupported tool %q", req.Tool)})
 	}
 }
 
@@ -254,3 +335,176 @@ func (s *Server) proxyWhoAmI(ctx context.Context) (whoAmIOutput, error) {
 
 	return out, nil
 }
+
+// localListTasks serves wormhole.task.list from the local SQLite replica.
+// Args: {"status": "wip"} (optional).
+func (s *Server) localListTasks(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	status := (*string)(nil)
+	if len(args) > 0 {
+		var argMap map[string]string
+		if err := json.Unmarshal(args, &argMap); err == nil {
+			if s, ok := argMap["status"]; ok && s != "" {
+				status = &s
+			}
+		}
+	}
+
+	tasks, err := s.tr.ListTasks(ctx, s.projectID, status)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: list tasks: %w", err)
+	}
+
+	out := make([]interface{}, len(tasks))
+	for i, t := range tasks {
+		out[i] = map[string]interface{}{
+			"id":             t.ID,
+			"title":          t.Title,
+			"description":    t.Description,
+			"status":         t.Status,
+			"priority":       t.Priority,
+			"owner_agent_id": t.OwnerAgentID,
+			"parent_task_id": t.ParentTaskID,
+			"due_by":         t.DueBy,
+			"created_at":     t.CreatedAt,
+			"updated_at":     t.UpdatedAt,
+		}
+	}
+	return map[string]interface{}{"tasks": out}, nil
+}
+
+// localGetTask serves wormhole.task.get from the local SQLite replica.
+// Args: {"task_id": "xxx"}.
+func (s *Server) localGetTask(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("localapi: get task: missing task_id argument")
+	}
+	var argMap map[string]string
+	if err := json.Unmarshal(args, &argMap); err != nil {
+		return nil, fmt.Errorf("localapi: get task: invalid args: %w", err)
+	}
+	taskID, ok := argMap["task_id"]
+	if !ok || taskID == "" {
+		return nil, fmt.Errorf("localapi: get task: missing task_id argument")
+	}
+
+	t, err := s.tr.GetTask(ctx, s.projectID, taskID)
+	if errors.Is(err, localstore.ErrTaskNotFound) {
+		return nil, fmt.Errorf("localapi: task not found")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("localapi: get task: %w", err)
+	}
+
+	return map[string]interface{}{
+		"id":             t.ID,
+		"title":          t.Title,
+		"description":    t.Description,
+		"status":         t.Status,
+		"priority":       t.Priority,
+		"owner_agent_id": t.OwnerAgentID,
+		"parent_task_id": t.ParentTaskID,
+		"due_by":         t.DueBy,
+		"created_at":     t.CreatedAt,
+		"updated_at":     t.UpdatedAt,
+	}, nil
+}
+
+// localListChannels serves wormhole.channel.list from the local SQLite replica.
+func (s *Server) localListChannels(ctx context.Context) (map[string]interface{}, error) {
+	channels, err := s.er.ListChannels(ctx, s.projectID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: list channels: %w", err)
+	}
+
+	out := make([]interface{}, len(channels))
+	for i, ch := range channels {
+		out[i] = map[string]interface{}{
+			"id":   ch.ID,
+			"name": ch.Name,
+		}
+	}
+	return map[string]interface{}{"channels": out}, nil
+}
+
+// localListChannelEvents serves wormhole.channel.events from the local SQLite replica.
+func (s *Server) localListChannelEvents(ctx context.Context) (map[string]interface{}, error) {
+	events, err := s.er.ListEventsByNamespace(ctx, s.projectID, 50, 0)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: list channel events: %w", err)
+	}
+
+	out := make([]interface{}, len(events))
+	for i, ev := range events {
+		out[i] = map[string]interface{}{
+			"id":         ev.ID,
+			"channel_id": ev.ChannelID,
+			"agent_id":   ev.AgentID,
+			"event_type": ev.EventType,
+			"payload":    string(ev.Payload),
+			"note":       ev.Note,
+			"created_at": ev.CreatedAt,
+		}
+	}
+	return map[string]interface{}{"events": out}, nil
+}
+
+// localListArticles serves wormhole.kb.list from the local SQLite replica.
+func (s *Server) localListArticles(ctx context.Context) (map[string]interface{}, error) {
+	articles, err := s.kb.ListArticles(ctx, s.projectID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: list articles: %w", err)
+	}
+
+	out := make([]interface{}, len(articles))
+	for i, a := range articles {
+		out[i] = map[string]interface{}{
+			"id":              a.ID,
+			"title":           a.Title,
+			"body":            a.Body,
+			"frontmatter":     string(a.Frontmatter),
+			"author_agent_id": a.AuthorAgentID,
+			"created_at":      a.CreatedAt,
+			"updated_at":      a.UpdatedAt,
+		}
+	}
+	return map[string]interface{}{"articles": out}, nil
+}
+
+// localGetArticle serves wormhole.kb.get from the local SQLite replica.
+// Args: {"article_id": "xxx"} (optional — if omitted returns all).
+func (s *Server) localGetArticle(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if len(args) == 0 {
+		// fallback: list all
+		return s.localListArticles(ctx)
+	}
+	var argMap map[string]string
+	if err := json.Unmarshal(args, &argMap); err != nil {
+		return nil, fmt.Errorf("localapi: get article: invalid args: %w", err)
+	}
+	articleID, ok := argMap["article_id"]
+	if !ok || articleID == "" {
+		return s.localListArticles(ctx)
+	}
+
+	a, err := s.kb.GetArticle(ctx, s.projectID, articleID)
+	if errors.Is(err, localstore.ErrArticleNotFound) {
+		return nil, fmt.Errorf("localapi: article not found")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("localapi: get article: %w", err)
+	}
+
+	return map[string]interface{}{
+		"id":              a.ID,
+		"title":           a.Title,
+		"body":            a.Body,
+		"frontmatter":     string(a.Frontmatter),
+		"author_agent_id": a.AuthorAgentID,
+		"created_at":      a.CreatedAt,
+		"updated_at":      a.UpdatedAt,
+	}, nil
+}
+
+// =============================================================================
+// P3 tools — agent registration, presence, listing, task routing, subscriptions
+// =============================================================================

@@ -1,0 +1,250 @@
+package localstore
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// ErrTaskNotFound is returned when a task lookup has no matching row in the
+// requested namespace.
+var ErrTaskNotFound = errors.New("localstore/task: not found")
+
+// validTaskStatuses enumerates the legal task statuses (RFC-0001 §8.2).
+var validTaskStatuses = map[string]bool{
+	"todo":  true,
+	"wip":   true,
+	"blocked": true,
+	"done":  true,
+}
+
+// ValidTaskTransitions encodes allowed status transitions (RFC-0001 §8.2).
+var validTaskTransitions = map[string][]string{
+	"todo":    {"wip"},
+	"wip":     {"blocked", "done"},
+	"blocked": {"wip"},
+	"done":    {},
+}
+
+// Task is a local replica of one task node (mirrors internal/core/tasks.Task).
+type Task struct {
+	ID           string
+	NamespaceID  string // project_id in coordination-server terminology
+	ParentTaskID *string
+	Title        string
+	Description  string
+	OwnerAgentID *string
+	Status       string
+	Priority     int
+	DueBy        *time.Time
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+// TaskRepo provides a SQLite-backed task repository (mirrors internal/core/tasks.Store shape).
+type TaskRepo struct {
+	db *sql.DB
+}
+
+// NewTaskRepo returns a new task repository backed by db.
+func NewTaskRepo(db *sql.DB) *TaskRepo {
+	return &TaskRepo{db: db}
+}
+
+// CreateTask inserts a new task at status "todo", scoped to namespaceID.
+func (r *TaskRepo) CreateTask(ctx context.Context, namespaceID, title, description string, parentTaskID *string, priority int, dueBy *time.Time) (Task, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Task{}, fmt.Errorf("localstore/task: create: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	taskID := uuid.New().String()
+	row := tx.QueryRowContext(ctx,
+		`INSERT INTO tasks (id, namespace_id, parent_task_id, title, description, priority, due_by) VALUES (?, ?, ?, ?, ?, ?, ?)
+		 RETURNING id, namespace_id, parent_task_id, title, description, owner_agent_id, status, priority, due_by, created_at, updated_at`,
+		taskID, namespaceID, parentTaskID, title, description, priority, dueBy,
+	)
+	task, err := scanTask(row)
+	if err != nil {
+		return Task{}, fmt.Errorf("localstore/task: create: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Task{}, fmt.Errorf("localstore/task: create: commit: %w", err)
+	}
+	return task, nil
+}
+
+// GetTask returns the task in namespaceID with taskID, or ErrTaskNotFound.
+func (r *TaskRepo) GetTask(ctx context.Context, namespaceID, taskID string) (Task, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Task{}, fmt.Errorf("localstore/task: get: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	task, err := queryTask(ctx, tx, namespaceID, taskID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Task{}, ErrTaskNotFound
+	}
+	if err != nil {
+		return Task{}, fmt.Errorf("localstore/task: get: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Task{}, fmt.Errorf("localstore/task: get: commit: %w", err)
+	}
+	return task, nil
+}
+
+// ListTasks returns all tasks in namespaceID, filtered by status if non-nil.
+func (r *TaskRepo) ListTasks(ctx context.Context, namespaceID string, status *string) ([]Task, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("localstore/task: list: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	var rows *sql.Rows
+	if status != nil {
+		rows, err = tx.QueryContext(ctx,
+			`SELECT id, namespace_id, parent_task_id, title, description, owner_agent_id, status, priority, due_by, created_at, updated_at
+			 FROM tasks WHERE namespace_id = ? AND status = ? ORDER BY created_at`,
+			namespaceID, *status,
+		)
+	} else {
+		rows, err = tx.QueryContext(ctx,
+			`SELECT id, namespace_id, parent_task_id, title, description, owner_agent_id, status, priority, due_by, created_at, updated_at
+			 FROM tasks WHERE namespace_id = ? ORDER BY created_at`,
+			namespaceID,
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("localstore/task: list: %w", err)
+	}
+	defer rows.Close()
+
+	tasks := []Task{}
+	for rows.Next() {
+		task, err := scanTaskRows(rows)
+		if err != nil {
+			return nil, fmt.Errorf("localstore/task: list scan: %w", err)
+		}
+		tasks = append(tasks, task)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("localstore/task: list iterate: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("localstore/task: list: commit: %w", err)
+	}
+	return tasks, nil
+}
+
+// UpdateStatus moves task in namespaceID to newStatus, validating the transition.
+func (r *TaskRepo) UpdateStatus(ctx context.Context, namespaceID, taskID, newStatus string) (Task, error) {
+	if !validTaskStatuses[newStatus] {
+		return Task{}, fmt.Errorf("localstore/task: invalid status %q", newStatus)
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Task{}, fmt.Errorf("localstore/task: update status: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Lock the row for update.
+	var currentStatus string
+	err = tx.QueryRowContext(ctx,
+		`SELECT status FROM tasks WHERE id = ? AND namespace_id = ?`,
+		taskID, namespaceID,
+	).Scan(&currentStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Task{}, ErrTaskNotFound
+	}
+	if err != nil {
+		return Task{}, fmt.Errorf("localstore/task: update status lookup: %w", err)
+	}
+
+	allowed := false
+	for _, next := range validTaskTransitions[currentStatus] {
+		if next == newStatus {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return Task{}, fmt.Errorf("localstore/task: invalid transition %s -> %s", currentStatus, newStatus)
+	}
+
+	task, err := updateTaskStatus(ctx, tx, taskID, namespaceID, newStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Task{}, ErrTaskNotFound
+	}
+	if err != nil {
+		return Task{}, fmt.Errorf("localstore/task: update status: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Task{}, fmt.Errorf("localstore/task: update status: commit: %w", err)
+	}
+	return task, nil
+}
+
+func queryTask(ctx context.Context, tx *sql.Tx, namespaceID, taskID string) (Task, error) {
+	row := tx.QueryRowContext(ctx,
+		`SELECT id, namespace_id, parent_task_id, title, description, owner_agent_id, status, priority, due_by, created_at, updated_at
+		 FROM tasks WHERE id = ? AND namespace_id = ?`,
+		taskID, namespaceID,
+	)
+	return scanTask(row)
+}
+
+func updateTaskStatus(ctx context.Context, tx *sql.Tx, taskID, namespaceID, newStatus string) (Task, error) {
+	row := tx.QueryRowContext(ctx,
+		`UPDATE tasks SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND namespace_id = ?
+		 RETURNING id, namespace_id, parent_task_id, title, description, owner_agent_id, status, priority, due_by, created_at, updated_at`,
+		newStatus, taskID, namespaceID,
+	)
+	return scanTask(row)
+}
+
+func scanTask(row interface {
+	Scan(...interface{}) error
+}) (Task, error) {
+	return scanTaskRows(row)
+}
+
+func scanTaskRows(row interface {
+	Scan(...interface{}) error
+}) (Task, error) {
+	var task Task
+	var parentTaskID, ownerAgentID sql.NullString
+	var dueBy sql.NullTime
+	var status string
+
+	err := row.Scan(
+		&task.ID, &task.NamespaceID, &parentTaskID, &task.Title, &task.Description,
+		&ownerAgentID, &status, &task.Priority, &dueBy, &task.CreatedAt, &task.UpdatedAt,
+	)
+	if err != nil {
+		return Task{}, err
+	}
+	task.Status = status
+	if parentTaskID.Valid {
+		task.ParentTaskID = &parentTaskID.String
+	}
+	if ownerAgentID.Valid {
+		task.OwnerAgentID = &ownerAgentID.String
+	}
+	if dueBy.Valid {
+		task.DueBy = &dueBy.Time
+	}
+	return task, nil
+}
