@@ -34,7 +34,7 @@ func TestHandleInitialize(t *testing.T) {
 // safe here.
 func buildFullRegistry() *Registry {
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(nil, nil, nil))
+	registry.Register(RegisterAgentTool(nil, nil, nil, nil))
 	registry.Register(WhoAmITool())
 	registry.Register(CreateTaskTool(nil))
 	registry.Register(AssignTaskTool(nil))

@@ -10,6 +10,7 @@ import (
 
 	"github.com/H4RL33/wormhole/internal/core/events"
 	"github.com/H4RL33/wormhole/internal/core/identity"
+	"github.com/H4RL33/wormhole/internal/core/kb"
 	"github.com/H4RL33/wormhole/internal/core/roles"
 )
 
@@ -38,6 +39,46 @@ func ensureDefaultChannels(ctx context.Context, store *events.Store, projectID s
 		if _, err := store.CreateChannel(ctx, projectID, name); err != nil {
 			return fmt.Errorf("ensure default channels: create channel %q: %w", name, err)
 		}
+	}
+	return nil
+}
+
+// onboardingArticleTitle is the fixed title used both to write the
+// onboarding article and to check for its existence idempotently — kept
+// as a named constant so Task 3's test and this seeding logic can't drift.
+const onboardingArticleTitle = "How This Project Works"
+
+// onboardingArticleBody is seeded once per project, on the first agent
+// registration into it (see design note above Task 3 in the plan: there
+// is no project-creation hook to attach this to, so first-registration is
+// the earliest point a real authoring agent with a passport exists).
+const onboardingArticleBody = `This project uses Wormhole's MCP tool surface for coordination. Three things every joining agent should know:
+
+**Task status values:** exactly ` + "`todo`, `wip`, `blocked`, `done`" + `. Valid transitions: todo->wip, wip->blocked, wip->done, blocked->wip. done is terminal.
+
+**Channel event types:** exactly ` + "`task.status_changed`, `review.requested`, `build.failed`, `discovery.logged`, `message.posted`" + `. ` + "`message.posted`" + ` requires a non-empty note (free-text message content); the other four carry structured payload instead.
+
+**The channel is the changelog:** ` + "`wormhole.channel.subscribe`" + ` returns a project's full event history — read it to see what other agents have done and how they've used these values in practice, the same way you'd read git log to learn a team's commit conventions.`
+
+// ensureOnboardingArticle writes the fixed onboarding KB article for
+// projectID if it doesn't already have one, authored by authorAgentID.
+// Idempotent: lists existing articles and checks title match first, so
+// concurrent/repeated registrations into the same project never duplicate
+// it. Errors here are the caller's decision whether to fail registration
+// or log-and-continue (RegisterAgentTool below chooses log-and-continue,
+// mirroring ensureDefaultChannels' existing best-effort treatment).
+func ensureOnboardingArticle(ctx context.Context, kbStore *kb.Store, projectID, authorAgentID string) error {
+	existing, err := kbStore.ListArticles(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("ensure onboarding article: list articles: %w", err)
+	}
+	for _, a := range existing {
+		if a.Title == onboardingArticleTitle {
+			return nil
+		}
+	}
+	if _, err := kbStore.WriteArticle(ctx, projectID, authorAgentID, onboardingArticleTitle, onboardingArticleBody, nil, nil, true); err != nil {
+		return fmt.Errorf("ensure onboarding article: write: %w", err)
 	}
 	return nil
 }
@@ -96,7 +137,7 @@ func unionAppend(base, extra []string) []string {
 // RegisterAgentTool wires wormhole.agent.register: no auth required, since
 // registration is how an identity first comes into existence (RFC-0001
 // §8.5 joining flow, step 1).
-func RegisterAgentTool(store *identity.Store, eventsStore *events.Store, rolesStore *roles.Store) Tool {
+func RegisterAgentTool(store *identity.Store, eventsStore *events.Store, rolesStore *roles.Store, kbStore *kb.Store) Tool {
 	return Tool{
 		Name:             "wormhole.agent.register",
 		Description:      "Registers a new agent identity, issues its passport and a project-scoped bearer token.",
@@ -127,6 +168,9 @@ func RegisterAgentTool(store *identity.Store, eventsStore *events.Store, rolesSt
 			}
 			if err := ensureDefaultChannels(ctx, eventsStore, projectID); err != nil {
 				log.Printf("mcp: wormhole.agent.register: default channel bootstrap failed: %v", err)
+			}
+			if err := ensureOnboardingArticle(ctx, kbStore, projectID, agent.ID); err != nil {
+				log.Printf("mcp: wormhole.agent.register: onboarding article bootstrap failed: %v", err)
 			}
 			return RegisterAgentOutput{
 				AgentID:      agent.ID,

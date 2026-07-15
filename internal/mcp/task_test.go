@@ -186,7 +186,7 @@ func TestE2E_CreateAssignUpdateStatus(t *testing.T) {
 	tasksStore := testTasksStore(t)
 	eventsStore := testEventsStore(t)
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(identityStore, eventsStore, testRolesStore(t)))
+	registry.Register(RegisterAgentTool(identityStore, eventsStore, testRolesStore(t), testKBStore(t)))
 	registry.Register(CreateTaskTool(tasksStore))
 	registry.Register(AssignTaskTool(tasksStore))
 	registry.Register(UpdateTaskStatusTool(tasksStore))
@@ -265,7 +265,7 @@ func TestListTasksTool_DefaultsToCallerRoleView(t *testing.T) {
 	eventsStore := testEventsStore(t)
 	rolesStore := testRolesStore(t)
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(identityStore, eventsStore, rolesStore))
+	registry.Register(RegisterAgentTool(identityStore, eventsStore, rolesStore, testKBStore(t)))
 	registry.Register(CreateTaskTool(tasksStore))
 	registry.Register(AssignTaskTool(tasksStore))
 	registry.Register(ListTasksTool(tasksStore, rolesStore))
@@ -337,7 +337,7 @@ func TestListTasksTool_ExplicitRoleOverridesCallerRole(t *testing.T) {
 	eventsStore := testEventsStore(t)
 	rolesStore := testRolesStore(t)
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(identityStore, eventsStore, rolesStore))
+	registry.Register(RegisterAgentTool(identityStore, eventsStore, rolesStore, testKBStore(t)))
 	registry.Register(CreateTaskTool(tasksStore))
 	registry.Register(ListTasksTool(tasksStore, rolesStore))
 	srv := httptest.NewServer(NewMCPHandler(registry, identityStore))
@@ -386,7 +386,7 @@ func TestListTasksTool_UnknownRoleRejected(t *testing.T) {
 	rolesStore := testRolesStore(t)
 	eventsStore := testEventsStore(t)
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(identityStore, eventsStore, rolesStore))
+	registry.Register(RegisterAgentTool(identityStore, eventsStore, rolesStore, testKBStore(t)))
 	registry.Register(ListTasksTool(tasksStore, rolesStore))
 	srv := httptest.NewServer(NewMCPHandler(registry, identityStore))
 	defer srv.Close()
@@ -420,5 +420,28 @@ func TestListTasksTool_UnknownRoleRejected(t *testing.T) {
 	}
 	if !result.IsError {
 		t.Fatalf("wormhole.task.list with unknown role: want tool-level error (isError: true), got success: %+v", result)
+	}
+}
+
+func TestUpdateTaskStatusSchemaHasStatusEnum(t *testing.T) {
+	tool := UpdateTaskStatusTool(nil)
+	schema := buildInputSchema(tool)
+	props := schema["properties"].(map[string]any)
+	newStatus, ok := props["new_status"].(map[string]any)
+	if !ok {
+		t.Fatalf("new_status property missing or wrong type: %#v", props["new_status"])
+	}
+	enumVal, ok := newStatus["enum"].([]any)
+	if !ok {
+		t.Fatalf("new_status schema has no enum: %#v", newStatus)
+	}
+	want := []string{"todo", "wip", "blocked", "done"}
+	if len(enumVal) != len(want) {
+		t.Fatalf("enum = %v, want %v", enumVal, want)
+	}
+	for i, v := range want {
+		if enumVal[i] != v {
+			t.Fatalf("enum[%d] = %v, want %v", i, enumVal[i], v)
+		}
 	}
 }

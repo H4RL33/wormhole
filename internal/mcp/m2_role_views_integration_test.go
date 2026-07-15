@@ -19,7 +19,7 @@ func TestM2_ThreeRolesDistinctPermissionsAndViews(t *testing.T) {
 	eventsStore := testEventsStore(t)
 	rolesStore := testRolesStore(t)
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(identityStore, eventsStore, rolesStore))
+	registry.Register(RegisterAgentTool(identityStore, eventsStore, rolesStore, testKBStore(t)))
 	registry.Register(WhoAmITool())
 	registry.Register(CreateTaskTool(tasksStore))
 	registry.Register(AssignTaskTool(tasksStore))

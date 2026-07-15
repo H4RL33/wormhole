@@ -56,7 +56,7 @@ func CreateChannelTool(store *events.Store) Tool {
 // PostEventInput is the wormhole.channel.post argument shape.
 type PostEventInput struct {
 	ChannelID string          `json:"channel_id"`
-	EventType string          `json:"event_type"`
+	EventType string          `json:"event_type" enum:"task.status_changed,review.requested,build.failed,discovery.logged,message.posted"`
 	Payload   json.RawMessage `json:"payload"`
 	Note      *string         `json:"note"`
 }

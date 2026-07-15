@@ -594,3 +594,61 @@ func TestRLSProjectBoundaries(t *testing.T) {
 		t.Errorf("expected assignee to be %q, got %v", agentID, gotTask.OwnerAgentID)
 	}
 }
+
+func TestUpdateStatusInvalidTransitionMessage(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "transition-msg-test")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+	channelID := createChannel(t, s, projectID, "transition-msg-events")
+
+	task, err := s.Create(ctx, projectID, "t", "d", nil, 0, nil)
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	_, err = s.UpdateStatus(ctx, projectID, task.ID, "blocked", channelID, agentID)
+	if err == nil {
+		t.Fatal("expected error for todo -> blocked")
+	}
+	want := "tasks: invalid status transition: todo -> blocked (valid from todo: wip): tasks: invalid status transition"
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
+	}
+	if !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("errors.Is(err, ErrInvalidTransition) = false, want true")
+	}
+}
+
+func TestUpdateStatusInvalidTransitionMessageTerminal(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "transition-msg-terminal-test")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+	channelID := createChannel(t, s, projectID, "transition-msg-terminal-events")
+
+	task, err := s.Create(ctx, projectID, "t", "d", nil, 0, nil)
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if _, err := s.UpdateStatus(ctx, projectID, task.ID, "wip", channelID, agentID); err != nil {
+		t.Fatalf("todo -> wip: %v", err)
+	}
+	if _, err := s.UpdateStatus(ctx, projectID, task.ID, "done", channelID, agentID); err != nil {
+		t.Fatalf("wip -> done: %v", err)
+	}
+
+	_, err = s.UpdateStatus(ctx, projectID, task.ID, "wip", channelID, agentID)
+	if err == nil {
+		t.Fatal("expected error for done -> wip")
+	}
+	want := "tasks: invalid status transition: done -> wip (done is a terminal state, no valid transitions): tasks: invalid status transition"
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
+	}
+	if !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("errors.Is(err, ErrInvalidTransition) = false, want true")
+	}
+}

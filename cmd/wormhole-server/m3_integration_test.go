@@ -169,7 +169,7 @@ func TestM3_MCPSeededStateReflectedInDashboard(t *testing.T) {
 	// order, so this test exercises the real production tool surface, not
 	// a subset.
 	registry := mcp.NewRegistry()
-	registry.Register(mcp.RegisterAgentTool(identityStore, eventsStore, rolesStore))
+	registry.Register(mcp.RegisterAgentTool(identityStore, eventsStore, rolesStore, kbStore))
 	registry.Register(mcp.WhoAmITool())
 	registry.Register(mcp.CreateTaskTool(tasksStore))
 	registry.Register(mcp.AssignTaskTool(tasksStore))
@@ -251,10 +251,12 @@ func TestM3_MCPSeededStateReflectedInDashboard(t *testing.T) {
 	}
 
 	// Step 4: post an event onto that channel via /mcp.
+	eventNote := "m3 integration event"
 	eventResultRaw := m3CallTool(t, srv.URL, "wormhole.channel.post", projectID, token, mcp.PostEventInput{
 		ChannelID: channelOut.ChannelID,
 		EventType: "message.posted",
 		Payload:   json.RawMessage(`{"text":"m3 integration event"}`),
+		Note:      &eventNote,
 	})
 	var eventOut mcp.PostEventOutput
 	if err := json.Unmarshal(eventResultRaw, &eventOut); err != nil {
@@ -324,8 +326,17 @@ func TestM3_MCPSeededStateReflectedInDashboard(t *testing.T) {
 	t.Run("kb route reflects MCP-written article", func(t *testing.T) {
 		var got []kb.Article
 		getJSON(fmt.Sprintf("/dashboard/api/projects/%s/kb", projectID), &got)
-		if len(got) != 1 || got[0].ID != kbOut.ArticleID {
-			t.Fatalf("kb articles: got %+v, want single article %s", got, kbOut.ArticleID)
+		// Registration seeds an onboarding article (mcp.RegisterAgentTool), so
+		// the written article isn't the only one — just confirm it's present.
+		found := false
+		for _, a := range got {
+			if a.ID == kbOut.ArticleID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("kb articles: got %+v, want article %s present", got, kbOut.ArticleID)
 		}
 	})
 }

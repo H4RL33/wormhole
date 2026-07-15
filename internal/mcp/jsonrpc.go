@@ -158,7 +158,16 @@ func reflectStructSchema(t reflect.Type) (map[string]any, []string) {
 			optional = true
 		}
 
-		properties[name] = jsonSchemaForType(fieldType)
+		schema := jsonSchemaForType(fieldType)
+		if enumTag := field.Tag.Get("enum"); enumTag != "" {
+			values := strings.Split(enumTag, ",")
+			enumValues := make([]any, len(values))
+			for i, v := range values {
+				enumValues[i] = v
+			}
+			schema["enum"] = enumValues
+		}
+		properties[name] = schema
 		if !optional {
 			required = append(required, name)
 		}
