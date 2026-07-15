@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -21,7 +23,7 @@ func TestRunConnect_OpenCodeTarget_CreatesFreshConfig(t *testing.T) {
 
 	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
 	configPath := filepath.Join(t.TempDir(), "nested", "opencode.json")
-	var stdout, stderr bytesBufferHolder
+	var stdout, stderr bytes.Buffer
 	code := run([]string{
 		"connect",
 		"--server", srv.URL,
@@ -30,9 +32,9 @@ func TestRunConnect_OpenCodeTarget_CreatesFreshConfig(t *testing.T) {
 		"--token-file", tokenFile,
 		"--target", "opencode",
 		"--opencode-config", configPath,
-	}, stdout.buf, stderr.buf)
+	}, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.buf.String())
+		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
 	}
 
 	data, err := os.ReadFile(configPath)
@@ -71,8 +73,8 @@ func TestRunConnect_OpenCodeTarget_CreatesFreshConfig(t *testing.T) {
 		t.Fatalf("mcp.wormhole.headers.Authorization: got %v, want Bearer sekrit-token", headers["Authorization"])
 	}
 
-	if !contains(stdout.buf.String(), "wormhole") || !contains(stdout.buf.String(), configPath) {
-		t.Fatalf("stdout missing confirmation of written config: %q", stdout.buf.String())
+	if !strings.Contains(stdout.String(), "wormhole") || !strings.Contains(stdout.String(), configPath) {
+		t.Fatalf("stdout missing confirmation of written config: %q", stdout.String())
 	}
 }
 
@@ -103,7 +105,7 @@ func TestRunConnect_OpenCodeTarget_MergesExistingConfig(t *testing.T) {
 	}
 
 	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
-	var stdout, stderr bytesBufferHolder
+	var stdout, stderr bytes.Buffer
 	code := run([]string{
 		"connect",
 		"--server", srv.URL,
@@ -112,9 +114,9 @@ func TestRunConnect_OpenCodeTarget_MergesExistingConfig(t *testing.T) {
 		"--token-file", tokenFile,
 		"--target", "opencode",
 		"--opencode-config", configPath,
-	}, stdout.buf, stderr.buf)
+	}, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.buf.String())
+		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
 	}
 
 	data, err := os.ReadFile(configPath)
@@ -163,7 +165,7 @@ func TestRunConnect_OpenCodeTarget_CustomConnectorName(t *testing.T) {
 
 	configPath := filepath.Join(t.TempDir(), "opencode.json")
 	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
-	var stdout, stderr bytesBufferHolder
+	var stdout, stderr bytes.Buffer
 	code := run([]string{
 		"connect",
 		"--server", srv.URL,
@@ -173,9 +175,9 @@ func TestRunConnect_OpenCodeTarget_CustomConnectorName(t *testing.T) {
 		"--target", "opencode",
 		"--opencode-config", configPath,
 		"--connector-name", "wh-staging",
-	}, stdout.buf, stderr.buf)
+	}, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.buf.String())
+		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
 	}
 
 	data, err := os.ReadFile(configPath)
@@ -198,18 +200,18 @@ func TestRunConnect_OpenCodeTarget_CustomConnectorName(t *testing.T) {
 // TestRunConnect_UnknownTarget_Errors confirms an invalid --target value is
 // rejected before any network call.
 func TestRunConnect_UnknownTarget_Errors(t *testing.T) {
-	var stdout, stderr bytesBufferHolder
+	var stdout, stderr bytes.Buffer
 	code := run([]string{
 		"connect",
 		"--server", "http://localhost:9999",
 		"--project", "proj-1",
 		"--target", "bogus-ide",
-	}, stdout.buf, stderr.buf)
+	}, &stdout, &stderr)
 	if code != 2 {
 		t.Fatalf("exit code: got %d, want 2", code)
 	}
-	if !contains(stderr.buf.String(), "--target") {
-		t.Fatalf("stderr missing --target error text: %q", stderr.buf.String())
+	if !strings.Contains(stderr.String(), "--target") {
+		t.Fatalf("stderr missing --target error text: %q", stderr.String())
 	}
 }
 
@@ -278,7 +280,3 @@ func TestResolveOpenCodeConfigPath_NoProjectConfig_FallsBackGlobal(t *testing.T)
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
-
-// bytesBufferHolder and contains are tiny local test helpers so this file
-// doesn't need to duplicate main_test.go's bytes.Buffer/strings.Contains
-// imports awkwardly; see init below.

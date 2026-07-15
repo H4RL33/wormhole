@@ -641,11 +641,18 @@ func runConnect(args []string, stdout, stderr io.Writer) int {
 	profile := fs.String("profile", "", "profile name to store credentials under (default: derived from --project, e.g. proj-1__default)")
 	connectorName := fs.String("connector-name", "wormhole", "name to register the MCP connector under (claude mcp add/remove)")
 	claudeBin := fs.String("claude-bin", "claude", "path to the claude CLI binary")
+	target := fs.String("target", "claude", "connector target: \"claude\" or \"opencode\"")
+	openCodeConfig := fs.String("opencode-config", "", "path to the OpenCode config file (default: nearest opencode.json/.jsonc walking up to .git, else $HOME/.config/opencode/opencode.json)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *server == "" || *project == "" {
 		fmt.Fprintln(stderr, "wormhole connect: --server and --project are required")
+		fs.Usage()
+		return 2
+	}
+	if *target != "claude" && *target != "opencode" {
+		fmt.Fprintf(stderr, "wormhole connect: --target: unknown value %q (must be \"claude\" or \"opencode\")\n", *target)
 		fs.Usage()
 		return 2
 	}
@@ -705,6 +712,11 @@ func runConnect(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "credentials written to %s\n", path)
 
 	mcpURL := strings.TrimRight(*server, "/") + "/mcp"
+
+	if *target == "opencode" {
+		return runConnectOpenCode(*openCodeConfig, *connectorName, mcpURL, out.Token, stdout, stderr)
+	}
+
 	if _, lookErr := exec.LookPath(*claudeBin); lookErr != nil {
 		fmt.Fprintf(stderr, "wormhole connect: %q not found in PATH — wire the connector manually:\n  claude mcp add --transport http %s %s -H \"Authorization: Bearer %s\"\n", *claudeBin, *connectorName, mcpURL, out.Token)
 		return 1
@@ -723,6 +735,104 @@ func runConnect(args []string, stdout, stderr io.Writer) int {
 
 	fmt.Fprintf(stdout, "Connector %q registered with %s (run /mcp inside Claude Code to reconnect).\n", *connectorName, mcpURL)
 	return 0
+}
+
+// runConnectOpenCode implements the --target opencode branch of `wormhole
+// connect`: it writes (or merges into) an OpenCode config file's mcp.<name>
+// entry, per the opencode.ai/config.json schema (confirmed shape: $schema,
+// mcp.<name>.{type, url, enabled, headers.Authorization}).
+func runConnectOpenCode(explicitPath, connectorName, mcpURL, token string, stdout, stderr io.Writer) int {
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole connect: %v\n", err)
+		return 1
+	}
+	configPath, err := resolveOpenCodeConfigPath(explicitPath, cwd)
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole connect: %v\n", err)
+		return 1
+	}
+
+	cfg := map[string]any{}
+	if data, readErr := os.ReadFile(configPath); readErr == nil {
+		if jsonErr := json.Unmarshal(data, &cfg); jsonErr != nil {
+			fmt.Fprintf(stderr, "wormhole connect: parse existing %s: %v\n", configPath, jsonErr)
+			return 1
+		}
+	} else if !os.IsNotExist(readErr) {
+		fmt.Fprintf(stderr, "wormhole connect: read %s: %v\n", configPath, readErr)
+		return 1
+	}
+
+	if _, ok := cfg["$schema"]; !ok {
+		cfg["$schema"] = "https://opencode.ai/config.json"
+	}
+
+	mcp, ok := cfg["mcp"].(map[string]any)
+	if !ok {
+		mcp = map[string]any{}
+	}
+	mcp[connectorName] = map[string]any{
+		"type":    "remote",
+		"url":     mcpURL,
+		"enabled": true,
+		"headers": map[string]any{
+			"Authorization": "Bearer " + token,
+		},
+	}
+	cfg["mcp"] = mcp
+
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		fmt.Fprintf(stderr, "wormhole connect: create config directory: %v\n", err)
+		return 1
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole connect: encode config: %v\n", err)
+		return 1
+	}
+	if err := os.WriteFile(configPath, data, 0o644); err != nil {
+		fmt.Fprintf(stderr, "wormhole connect: write %s: %v\n", configPath, err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "Connector %q written to wormhole config in %s.\n", connectorName, configPath)
+	return 0
+}
+
+// resolveOpenCodeConfigPath decides which OpenCode config file to write.
+// An explicit path always wins. Otherwise it walks up from cwd looking for
+// opencode.json or opencode.jsonc, stopping (inclusive) at the first
+// directory containing .git; if none is found by then, it falls back to
+// the global $HOME/.config/opencode/opencode.json.
+func resolveOpenCodeConfigPath(explicit, cwd string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+
+	dir := cwd
+	for {
+		for _, name := range []string{"opencode.json", "opencode.jsonc"} {
+			candidate := filepath.Join(dir, name)
+			if _, err := os.Stat(candidate); err == nil {
+				return candidate, nil
+			}
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve opencode config path: %w", err)
+	}
+	return filepath.Join(home, ".config", "opencode", "opencode.json"), nil
 }
 
 // runWhoami implements `wormhole whoami`: prints one stored credential
