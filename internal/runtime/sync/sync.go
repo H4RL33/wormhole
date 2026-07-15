@@ -62,6 +62,10 @@ func DefaultConfig() Config {
 // existing unit tests here), in which case a pull response with a non-empty
 // task_list/kb_list is an error rather than a silent no-op.
 func New(coordServerURL, token, namespaceID string, queueRepo *QueueRepo, auditRepo *AuditRepo, taskRepo *localstore.TaskRepo, kbRepo *localstore.KBRepo, cfg Config) *Engine {
+	latencyCheckInterval := cfg.LatencyCheckInterval
+	if latencyCheckInterval <= 0 {
+		latencyCheckInterval = DefaultConfig().LatencyCheckInterval
+	}
 	return &Engine{
 		httpClient:            &http.Client{Timeout: 30 * time.Second},
 		coordServer:           coordServerURL,
@@ -73,7 +77,7 @@ func New(coordServerURL, token, namespaceID string, queueRepo *QueueRepo, auditR
 		kbRepo:                kbRepo,
 		batchInterval:         cfg.BatchInterval,
 		batchSize:             cfg.BatchSize,
-		latencyCheckInterval:  cfg.LatencyCheckInterval,
+		latencyCheckInterval:  latencyCheckInterval,
 		highPriorityThreshold: cfg.HighPriorityThreshold,
 		shutdown:              make(chan struct{}),
 	}
