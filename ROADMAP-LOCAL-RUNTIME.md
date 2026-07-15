@@ -101,13 +101,19 @@ Detailed plan: `docs/superpowers/plans/2026-07-13-local-runtime-p1-walking-skele
 
 **Exit criteria:** Coordination Server survives a `wormholed` disconnect/reconnect cycle and a version-skewed client without data corruption; security review of the local-isolation gap (§7.2) completed with no open findings above low severity.
 
-**Integration note (2026-07-14):** `p6-local-runtime-coordination-server-hardening` branch has zero unique commits over its base (`p5-local-runtime-org-bootstrap-multi-org` == `p6-local-runtime-coordination-server-hardening` exactly). No P6 work was implemented on that branch. P6 was not attempted in this integration pass — all items below remain open.
+**Integration note (2026-07-14):** `p6-local-runtime-coordination-server-hardening` branch has zero unique commits over its base (`p5-local-runtime-org-bootstrap-multi-org` == `p6-local-runtime-coordination-server-hardening` exactly). No P6 work was implemented on that branch.
 
-- [ ] Coordination Server: harden `wormhole.sync.*` handlers (auth, rate limits, malformed-payload rejection)
-- [ ] Offline/reconnect test suite: kill network mid-sync, verify queue survives and resumes cleanly
-- [ ] Protocol version negotiation: minimal answer to OQ5 (RFC-0003 §9) — reject unknown/incompatible versions rather than silently misbehaving
-- [ ] Security review pass: local credential storage, socket permission model (OQ4), isolation-gap audit across all `localstore` repositories
+**Minimal hardening pass for alpha (2026-07-15):** full P6 is out of scope for the functional-alpha milestone; the pass below sizes the three highest-value items only and leaves the rest open, tracked as backlog.
+
+- [x] Coordination Server: `wormhole.sync.*` handlers reject malformed payloads cleanly — confirmed the `tools/call` dispatch layer (`internal/mcp/jsonrpc.go` `HandleToolsCall`/`extractProjectID`) already returns a typed JSON-RPC error on unparseable arguments before a handler ever runs, and each of the 4 handlers in `internal/mcp/sync.go` (`BootstrapTool`, `IncrementalPullTool`, `IncrementalPushTool`, `ConflictReportTool`) already returns a wrapped error (not a panic) on bad JSON or missing required fields (`namespace_id`, item `entity_type`/`entity_id`/`operation`, empty `items`, conflict `entity_type`/`entity_id`). Added `internal/mcp/sync_test.go` coverage proving malformed JSON, empty push batches, and missing conflict-report fields all fail cleanly instead of crashing. Auth is already enforced per-tool via `RequiresAuth`/bearer token; rate limiting is explicitly deferred (see below).
+- [x] Protocol version check, minimal answer to OQ5 (RFC-0003 §9): `SyncProtocolVersion` constant in `internal/mcp/sync.go` is already compared against each request's `version` field on all 4 sync tools, with a clean rejection error on mismatch (no negotiation protocol, single-version comparison only, per client mirror in `internal/runtime/sync/sync.go`). Added explicit version-mismatch tests for all 4 tools in `internal/mcp/sync_test.go`.
+- [x] Security review note (partial): local credential storage confirmed at `~/.wormhole/credentials/<profile>.json`, written by `cmd/wormhole-cli/main.go`'s `writeCredentials` with directory mode `0o700` and file mode `0o600` (owner-only) — matches expected practice, no gap found. Socket permission model confirmed matching its documented default: `internal/runtime/localapi/localapi.go`'s `New()`/`NewWithRuntime()` doc comments state OS-default `net.Listen("unix", ...)` permissions with same-user process trust and no `chmod` hardening (RFC-0003 OQ4 accepted default); the code matches the comment exactly, no drift found. Isolation-gap audit across every `localstore` repo is **not** re-run here — P2's per-repo cross-namespace tests remain the existing mitigation, not new work.
+- [ ] Offline/reconnect test suite: kill network mid-sync, verify queue survives and resumes cleanly — **deferred to beta**
+- [ ] Rate limiting on `wormhole.sync.*` handlers — **deferred to beta**
+- [ ] Comprehensive isolation-gap audit across every `localstore` repo (beyond P2's existing per-repo cross-namespace tests) — **deferred to beta**
 - [ ] P6 review/demo, kick off P7
+
+**Deferred to post-alpha beta pass:** rate limiting, offline/reconnect kill-network test suite, and the comprehensive cross-repo isolation-gap audit are explicitly out of scope for alpha; full P6 exit criteria remain unmet.
 
 ---
 

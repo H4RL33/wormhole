@@ -279,3 +279,170 @@ func TestConflictReportTool_PublishesAuditEvent(t *testing.T) {
 		t.Fatalf("audit payload: got %+v, want winning/losing values to match the reported conflict", payload)
 	}
 }
+
+// P6 hardening: malformed-payload rejection. Each sync tool must return a
+// clean error from json.Unmarshal on invalid JSON arguments, not panic.
+// mustNotPanic wraps tool.Handler so a regression (a handler that panics on
+// bad input instead of erroring) fails the test with a message rather than
+// crashing the whole `go test` run.
+func mustNotPanic(t *testing.T, call func() (any, error)) (result any, err error) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("handler panicked on malformed input instead of returning an error: %v", r)
+		}
+	}()
+	return call()
+}
+
+func TestBootstrapTool_RejectsMalformedJSON(t *testing.T) {
+	tool := BootstrapTool(testTasksStore(t), testKBStore(t), testEventsStore(t))
+	projectID := mustCreateProject(t, "mcp-sync-bootstrap-malformed")
+
+	_, err := mustNotPanic(t, func() (any, error) {
+		return tool.Handler(context.Background(), nil, projectID, json.RawMessage(`{not valid json`))
+	})
+	if err == nil {
+		t.Fatalf("Handler: expected error on malformed JSON, got nil")
+	}
+}
+
+func TestIncrementalPullTool_RejectsMalformedJSON(t *testing.T) {
+	tool := IncrementalPullTool(testTasksStore(t), testKBStore(t), testEventsStore(t))
+	projectID := mustCreateProject(t, "mcp-sync-pull-malformed")
+
+	_, err := mustNotPanic(t, func() (any, error) {
+		return tool.Handler(context.Background(), nil, projectID, json.RawMessage(`{not valid json`))
+	})
+	if err == nil {
+		t.Fatalf("Handler: expected error on malformed JSON, got nil")
+	}
+}
+
+func TestIncrementalPushTool_RejectsMalformedJSON(t *testing.T) {
+	tool := IncrementalPushTool(testTasksStore(t), testKBStore(t), testEventsStore(t))
+	projectID := mustCreateProject(t, "mcp-sync-push-malformed")
+
+	_, err := mustNotPanic(t, func() (any, error) {
+		return tool.Handler(context.Background(), nil, projectID, json.RawMessage(`{not valid json`))
+	})
+	if err == nil {
+		t.Fatalf("Handler: expected error on malformed JSON, got nil")
+	}
+}
+
+func TestIncrementalPushTool_RejectsEmptyItems(t *testing.T) {
+	tool := IncrementalPushTool(testTasksStore(t), testKBStore(t), testEventsStore(t))
+	projectID := mustCreateProject(t, "mcp-sync-push-empty-items")
+
+	arguments := mustMarshal(t, IncrementalPushInput{NamespaceID: projectID, Version: SyncProtocolVersion})
+	_, err := mustNotPanic(t, func() (any, error) {
+		return tool.Handler(context.Background(), nil, projectID, arguments)
+	})
+	if err == nil {
+		t.Fatalf("Handler: expected error on empty items array, got nil")
+	}
+}
+
+func TestConflictReportTool_RejectsMalformedJSON(t *testing.T) {
+	tool := ConflictReportTool(testTasksStore(t), testKBStore(t), testEventsStore(t))
+	projectID := mustCreateProject(t, "mcp-sync-conflict-malformed")
+
+	_, err := mustNotPanic(t, func() (any, error) {
+		return tool.Handler(context.Background(), nil, projectID, json.RawMessage(`{not valid json`))
+	})
+	if err == nil {
+		t.Fatalf("Handler: expected error on malformed JSON, got nil")
+	}
+}
+
+func TestConflictReportTool_RejectsMissingRequiredFields(t *testing.T) {
+	tasksStore := testTasksStore(t)
+	kbStore := testKBStore(t)
+	eventsStore := testEventsStore(t)
+	projectID := mustCreateProject(t, "mcp-sync-conflict-missing-fields")
+	agentID, _ := mustRegisterAgent(t, projectID)
+	scope := mustBuildScope(agentID, projectID)
+
+	tool := ConflictReportTool(tasksStore, kbStore, eventsStore)
+	// EntityType and EntityID both omitted.
+	arguments := mustMarshal(t, ConflictReportInput{
+		NamespaceID: projectID,
+		Version:     SyncProtocolVersion,
+	})
+
+	_, err := mustNotPanic(t, func() (any, error) {
+		return tool.Handler(context.Background(), scope, projectID, arguments)
+	})
+	if err == nil {
+		t.Fatalf("Handler: expected error on missing entity_type/entity_id, got nil")
+	}
+}
+
+// P6 hardening (RFC-0003 OQ5): protocol version check. Each sync tool must
+// reject an unrecognized/incompatible version cleanly rather than silently
+// proceeding.
+func TestBootstrapTool_RejectsUnsupportedVersion(t *testing.T) {
+	tool := BootstrapTool(testTasksStore(t), testKBStore(t), testEventsStore(t))
+	projectID := mustCreateProject(t, "mcp-sync-bootstrap-version")
+
+	arguments := mustMarshal(t, BootstrapInput{NamespaceID: projectID, Version: SyncProtocolVersion + 1})
+	if _, err := tool.Handler(context.Background(), nil, projectID, arguments); err == nil {
+		t.Fatalf("Handler: expected error on unsupported protocol version, got nil")
+	}
+}
+
+func TestIncrementalPullTool_RejectsUnsupportedVersion(t *testing.T) {
+	tool := IncrementalPullTool(testTasksStore(t), testKBStore(t), testEventsStore(t))
+	projectID := mustCreateProject(t, "mcp-sync-pull-version")
+
+	arguments := mustMarshal(t, IncrementalPullInput{NamespaceID: projectID, Version: SyncProtocolVersion + 1})
+	if _, err := tool.Handler(context.Background(), nil, projectID, arguments); err == nil {
+		t.Fatalf("Handler: expected error on unsupported protocol version, got nil")
+	}
+}
+
+func TestIncrementalPushTool_RejectsUnsupportedVersion(t *testing.T) {
+	tool := IncrementalPushTool(testTasksStore(t), testKBStore(t), testEventsStore(t))
+	projectID := mustCreateProject(t, "mcp-sync-push-version")
+
+	payload, _ := json.Marshal(syncTaskCreatePayload{Title: "x", Description: "y", Priority: 1})
+	arguments := mustMarshal(t, IncrementalPushInput{
+		NamespaceID: projectID,
+		Version:     SyncProtocolVersion + 1,
+		Items: []struct {
+			EntityType string          `json:"entity_type"`
+			EntityID   string          `json:"entity_id"`
+			Operation  string          `json:"operation"`
+			Payload    json.RawMessage `json:"payload"`
+		}{
+			{EntityType: "task", EntityID: "id-1", Operation: "create", Payload: payload},
+		},
+	})
+	if _, err := tool.Handler(context.Background(), nil, projectID, arguments); err == nil {
+		t.Fatalf("Handler: expected error on unsupported protocol version, got nil")
+	}
+}
+
+func TestConflictReportTool_RejectsUnsupportedVersion(t *testing.T) {
+	tasksStore := testTasksStore(t)
+	kbStore := testKBStore(t)
+	eventsStore := testEventsStore(t)
+	projectID := mustCreateProject(t, "mcp-sync-conflict-version")
+	agentID, _ := mustRegisterAgent(t, projectID)
+	scope := mustBuildScope(agentID, projectID)
+
+	tool := ConflictReportTool(tasksStore, kbStore, eventsStore)
+	arguments := mustMarshal(t, ConflictReportInput{
+		NamespaceID:  projectID,
+		Version:      SyncProtocolVersion + 1,
+		EntityType:   "task",
+		EntityID:     "task-123",
+		ConflictType: "update_conflict",
+		ServerValue:  "server wins",
+		LocalValue:   "local loses",
+	})
+	if _, err := tool.Handler(context.Background(), scope, projectID, arguments); err == nil {
+		t.Fatalf("Handler: expected error on unsupported protocol version, got nil")
+	}
+}
