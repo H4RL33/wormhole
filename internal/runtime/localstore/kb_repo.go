@@ -174,6 +174,47 @@ func (r *KBRepo) GetArticleLinks(ctx context.Context, namespaceID, articleID str
 	return links, nil
 }
 
+// UpsertArticle inserts or replaces the KB article identified by articleID
+// (server is authoritative — sync local-apply path, RFC-0003 §8.1/§8.2; the
+// server already ran WriteArticle's compliance checks before returning this
+// row, so they are not repeated here per this file's read-only-path scope
+// note above).
+func (r *KBRepo) UpsertArticle(ctx context.Context, namespaceID, articleID, title, body string, frontmatter json.RawMessage, authorAgentID string, createdAt, updatedAt time.Time) (KBArticle, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return KBArticle{}, fmt.Errorf("localstore/kb: upsert: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if len(frontmatter) == 0 {
+		frontmatter = json.RawMessage(`{}`)
+	}
+
+	row := tx.QueryRowContext(ctx,
+		`INSERT INTO kb_articles (id, namespace_id, title, body, frontmatter, author_agent_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+			namespace_id = excluded.namespace_id,
+			title = excluded.title,
+			body = excluded.body,
+			frontmatter = excluded.frontmatter,
+			author_agent_id = excluded.author_agent_id,
+			created_at = excluded.created_at,
+			updated_at = excluded.updated_at
+		 RETURNING id, namespace_id, title, body, frontmatter, author_agent_id, created_at, updated_at`,
+		articleID, namespaceID, title, body, string(frontmatter), authorAgentID, createdAt, updatedAt,
+	)
+	article, err := scanKBArticle(row)
+	if err != nil {
+		return KBArticle{}, fmt.Errorf("localstore/kb: upsert: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return KBArticle{}, fmt.Errorf("localstore/kb: upsert: commit: %w", err)
+	}
+	return article, nil
+}
+
 func queryKBArticle(ctx context.Context, tx *sql.Tx, namespaceID, articleID string) (KBArticle, error) {
 	row := tx.QueryRowContext(ctx,
 		`SELECT id, namespace_id, title, body, frontmatter, author_agent_id, created_at, updated_at

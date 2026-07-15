@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	stdsync "sync"
 	"testing"
 	"time"
 
@@ -377,9 +378,199 @@ func TestP7_SyncQueueDurability(t *testing.T) {
 	}
 }
 
-// TestP7_MultiDaemonSync simulates two wormholed instances: one writes offline,
-// the other syncs from server to read the change. Requires a real coordination
-// server with incremental_pull/push support, or a more sophisticated fake.
+// statefulCoordServer is a fake Coordination Server that actually retains
+// pushed tasks in memory, so a second daemon's Bootstrap/PullIncremental can
+// observe what a first daemon pushed. testFakeCoordServer above is
+// intentionally stateless (incremental_pull always returns empty) which was
+// enough before internal/runtime/sync.Engine had a local-apply path to
+// exercise; this one is state-carrying so TestP7_MultiDaemonSync can prove
+// daemon B's own SQLite replica — not the server — ends up with the task.
+func statefulCoordServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	type serverTask struct {
+		TaskID      string `json:"task_id"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Status      string `json:"status"`
+		Priority    int    `json:"priority"`
+	}
+	var mu stdsync.Mutex
+	tasks := map[string]serverTask{}
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var params struct {
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		var resultData interface{}
+		switch params.Name {
+		case "wormhole.sync.incremental_push":
+			var pushArgs struct {
+				Items []struct {
+					EntityType string          `json:"entity_type"`
+					EntityID   string          `json:"entity_id"`
+					Operation  string          `json:"operation"`
+					Payload    json.RawMessage `json:"payload"`
+				} `json:"items"`
+			}
+			if err := json.Unmarshal(params.Arguments, &pushArgs); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			for _, item := range pushArgs.Items {
+				if item.EntityType != "task" {
+					continue
+				}
+				var payload struct {
+					Title       string `json:"title"`
+					Description string `json:"description"`
+				}
+				_ = json.Unmarshal(item.Payload, &payload)
+				tasks[item.EntityID] = serverTask{
+					TaskID:      item.EntityID,
+					Title:       payload.Title,
+					Description: payload.Description,
+					Status:      "todo",
+					Priority:    1,
+				}
+			}
+			mu.Unlock()
+			resultData = map[string]interface{}{
+				"items_received": len(pushArgs.Items),
+				"timestamp":      time.Now().UTC().Format(time.RFC3339),
+				"version":        1,
+			}
+
+		case "wormhole.sync.bootstrap":
+			mu.Lock()
+			taskList := make([]serverTask, 0, len(tasks))
+			for _, task := range tasks {
+				taskList = append(taskList, task)
+			}
+			mu.Unlock()
+			resultData = map[string]interface{}{
+				"org_config":   map[string]interface{}{},
+				"project_list": []string{},
+				"task_list":    taskList,
+				"kb_list":      []interface{}{},
+				"timestamp":    time.Now().UTC().Format(time.RFC3339),
+				"version":      1,
+			}
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		resultRaw, _ := json.Marshal(resultData)
+		toolResult := map[string]interface{}{
+			"content": []map[string]string{{"type": "text", "text": string(resultRaw)}},
+		}
+		toolResultRaw, _ := json.Marshal(toolResult)
+		resp := map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "result": json.RawMessage(toolResultRaw)}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+}
+
+// TestP7_MultiDaemonSync simulates two wormholed instances against one
+// shared (fake) coordination server: daemon A writes a task locally and
+// pushes it; daemon B, which never saw the write directly, calls Bootstrap
+// and must end up with that task in its own SQLite replica. This exercises
+// internal/runtime/sync.Engine's local-apply path (sync.go's applyTask,
+// wired through TaskRepo.UpsertTask) added to close the gap this test used
+// to be skipped for — see internal/runtime/sync/sync_apply_test.go for the
+// focused unit coverage of that path.
 func TestP7_MultiDaemonSync(t *testing.T) {
-	t.Skip("Multi-daemon test requires server-side sync implementation (currently stubs); deferred to P8")
+	coordSrv := statefulCoordServer(t)
+	defer coordSrv.Close()
+
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	// Daemon A: writes and pushes a task.
+	storeA, err := localstore.Open(filepath.Join(tmpDir, "a.db"))
+	if err != nil {
+		t.Fatalf("open store A: %v", err)
+	}
+	defer storeA.Close()
+	queueA := sync.NewQueueRepo(storeA.DB())
+	auditA := sync.NewAuditRepo(storeA.DB())
+	taskRepoA := localstore.NewTaskRepo(storeA.DB(), localstore.NewEventRepo(storeA.DB()))
+	kbRepoA := localstore.NewKBRepo(storeA.DB())
+	fastCfg := sync.Config{BatchInterval: 20 * time.Millisecond, BatchSize: 50}
+	engineA := sync.New(coordSrv.URL, "test-token", "project-1", queueA, auditA, taskRepoA, kbRepoA, fastCfg)
+
+	task, err := taskRepoA.CreateTask(ctx, "project-1", "Daemon A task", "written offline", nil, 1, nil)
+	if err != nil {
+		t.Fatalf("CreateTask on daemon A: %v", err)
+	}
+	payload, _ := json.Marshal(map[string]interface{}{"title": task.Title, "description": task.Description})
+	if _, err := queueA.Enqueue(ctx, "project-1", "task", task.ID, "create", payload, 0); err != nil {
+		t.Fatalf("Enqueue on daemon A: %v", err)
+	}
+
+	// pushBatch is unexported (called only from Engine's own background
+	// loop), so drive the push via Start/Stop like the queue-durability
+	// tests above do, and poll until the queue drains rather than assume a
+	// fixed sleep is long enough.
+	syncCtx, syncCancel := context.WithCancel(ctx)
+	engineA.Start(syncCtx)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		pending, err := queueA.ListPending(ctx, "project-1", 10)
+		if err != nil {
+			t.Fatalf("ListPending on daemon A: %v", err)
+		}
+		if len(pending) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("daemon A push did not drain queue within deadline")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	syncCancel()
+	engineA.Stop()
+
+	// Daemon B: never saw daemon A's write locally. Bootstrap must pull it
+	// from the (shared, fake) coordination server and land it in daemon B's
+	// own SQLite replica.
+	storeB, err := localstore.Open(filepath.Join(tmpDir, "b.db"))
+	if err != nil {
+		t.Fatalf("open store B: %v", err)
+	}
+	defer storeB.Close()
+	queueB := sync.NewQueueRepo(storeB.DB())
+	auditB := sync.NewAuditRepo(storeB.DB())
+	taskRepoB := localstore.NewTaskRepo(storeB.DB(), localstore.NewEventRepo(storeB.DB()))
+	kbRepoB := localstore.NewKBRepo(storeB.DB())
+	engineB := sync.New(coordSrv.URL, "test-token", "project-1", queueB, auditB, taskRepoB, kbRepoB, sync.DefaultConfig())
+
+	if err := engineB.Bootstrap(ctx); err != nil {
+		t.Fatalf("Bootstrap on daemon B: %v", err)
+	}
+
+	gotOnB, err := taskRepoB.GetTask(ctx, "project-1", task.ID)
+	if err != nil {
+		t.Fatalf("daemon B did not receive daemon A's task via Bootstrap: %v", err)
+	}
+	if gotOnB.Title != "Daemon A task" {
+		t.Errorf("daemon B task title = %q, want %q", gotOnB.Title, "Daemon A task")
+	}
 }

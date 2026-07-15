@@ -245,6 +245,51 @@ func (r *TaskRepo) Assign(ctx context.Context, namespaceID, taskID, ownerAgentID
 	return task, nil
 }
 
+// UpsertTask inserts or replaces the task identified by taskID (server is
+// authoritative here — this is the sync local-apply path, RFC-0003 §8.1/§8.2,
+// not the agent-facing status-transition path, so the validTaskTransitions
+// state machine does not gate it; the server already enforced that machine
+// before this row was returned to us). An unknown status is still rejected
+// since accepting it would leave a row UpdateStatus's transition table can
+// never reason about again.
+func (r *TaskRepo) UpsertTask(ctx context.Context, namespaceID, taskID, title, description string, parentTaskID, ownerAgentID *string, status string, priority int, dueBy *time.Time) (Task, error) {
+	if !validTaskStatuses[status] {
+		return Task{}, fmt.Errorf("localstore/task: upsert: invalid status %q", status)
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Task{}, fmt.Errorf("localstore/task: upsert: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	row := tx.QueryRowContext(ctx,
+		`INSERT INTO tasks (id, namespace_id, parent_task_id, title, description, owner_agent_id, status, priority, due_by)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+			namespace_id = excluded.namespace_id,
+			parent_task_id = excluded.parent_task_id,
+			title = excluded.title,
+			description = excluded.description,
+			owner_agent_id = excluded.owner_agent_id,
+			status = excluded.status,
+			priority = excluded.priority,
+			due_by = excluded.due_by,
+			updated_at = CURRENT_TIMESTAMP
+		 RETURNING id, namespace_id, parent_task_id, title, description, owner_agent_id, status, priority, due_by, created_at, updated_at`,
+		taskID, namespaceID, parentTaskID, title, description, ownerAgentID, status, priority, dueBy,
+	)
+	task, err := scanTask(row)
+	if err != nil {
+		return Task{}, fmt.Errorf("localstore/task: upsert: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Task{}, fmt.Errorf("localstore/task: upsert: commit: %w", err)
+	}
+	return task, nil
+}
+
 func queryTask(ctx context.Context, tx *sql.Tx, namespaceID, taskID string) (Task, error) {
 	row := tx.QueryRowContext(ctx,
 		`SELECT id, namespace_id, parent_task_id, title, description, owner_agent_id, status, priority, due_by, created_at, updated_at

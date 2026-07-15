@@ -16,7 +16,7 @@ func TestEngineNew(t *testing.T) {
 	defer qRepo.db.Close()
 
 	cfg := DefaultConfig()
-	engine := New("http://localhost:8080", "token", "ns-1", qRepo, aRepo, cfg)
+	engine := New("http://localhost:8080", "token", "ns-1", qRepo, aRepo, nil, nil, cfg)
 
 	if engine.namespaceID != "ns-1" {
 		t.Errorf("NamespaceID mismatch: got %q, want %q", engine.namespaceID, "ns-1")
@@ -35,7 +35,7 @@ func TestEnginePushBatchEmpty(t *testing.T) {
 	defer qRepo.db.Close()
 
 	cfg := DefaultConfig()
-	engine := New("http://localhost:8080", "token", "ns-1", qRepo, aRepo, cfg)
+	engine := New("http://localhost:8080", "token", "ns-1", qRepo, aRepo, nil, nil, cfg)
 
 	ctx := context.Background()
 	// pushBatch on empty queue should succeed without making network calls.
@@ -74,7 +74,7 @@ func TestEngineStartStop(t *testing.T) {
 		BatchInterval: 100 * time.Millisecond,
 		BatchSize:     10,
 	}
-	engine := New("http://localhost:8080", "token", "ns-1", qRepo, aRepo, cfg)
+	engine := New("http://localhost:8080", "token", "ns-1", qRepo, aRepo, nil, nil, cfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -181,7 +181,7 @@ func TestOfflineQueueSurvivalNetworkFailure(t *testing.T) {
 		BatchInterval: 50 * time.Millisecond,
 		BatchSize:     10,
 	}
-	engine := New("http://unreachable-server:9999", "token", "ns-1", qRepo, aRepo, cfg)
+	engine := New("http://unreachable-server:9999", "token", "ns-1", qRepo, aRepo, nil, nil, cfg)
 
 	// Attempt pushBatch (will fail due to network error).
 	err = engine.pushBatch(ctx)

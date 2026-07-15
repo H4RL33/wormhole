@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 )
 
 // Engine orchestrates the local sync lifecycle: bootstrap, incremental push/pull,
@@ -22,6 +24,8 @@ type Engine struct {
 	namespaceID   string
 	queueRepo     *QueueRepo
 	auditRepo     *AuditRepo
+	taskRepo      *localstore.TaskRepo
+	kbRepo        *localstore.KBRepo
 	mu            sync.Mutex
 	lastSyncTime  time.Time
 	batchInterval time.Duration
@@ -44,8 +48,12 @@ func DefaultConfig() Config {
 	}
 }
 
-// New creates a new sync engine for one (org, project) binding.
-func New(coordServerURL, token, namespaceID string, queueRepo *QueueRepo, auditRepo *AuditRepo, cfg Config) *Engine {
+// New creates a new sync engine for one (org, project) binding. taskRepo/
+// kbRepo are the local-apply targets for Bootstrap/PullIncremental (RFC-0003
+// §8.1/§8.2); either may be nil for callers that only exercise push (e.g.
+// existing unit tests here), in which case a pull response with a non-empty
+// task_list/kb_list is an error rather than a silent no-op.
+func New(coordServerURL, token, namespaceID string, queueRepo *QueueRepo, auditRepo *AuditRepo, taskRepo *localstore.TaskRepo, kbRepo *localstore.KBRepo, cfg Config) *Engine {
 	return &Engine{
 		httpClient:    &http.Client{Timeout: 30 * time.Second},
 		coordServer:   coordServerURL,
@@ -53,6 +61,8 @@ func New(coordServerURL, token, namespaceID string, queueRepo *QueueRepo, auditR
 		namespaceID:   namespaceID,
 		queueRepo:     queueRepo,
 		auditRepo:     auditRepo,
+		taskRepo:      taskRepo,
+		kbRepo:        kbRepo,
 		batchInterval: cfg.BatchInterval,
 		batchSize:     cfg.BatchSize,
 		shutdown:      make(chan struct{}),
@@ -167,9 +177,32 @@ func (e *Engine) PullIncremental(ctx context.Context) error {
 		return fmt.Errorf("sync: pull incremental: call server: %w", err)
 	}
 
-	// Result should be a list of updated entities with server timestamps.
-	// For now, we log receipt but don't apply them (that's repository-layer work).
-	_ = result
+	updates, err := decodeIncrementalPullResult(result)
+	if err != nil {
+		return fmt.Errorf("sync: pull incremental: decode result: %w", err)
+	}
+	for _, u := range updates {
+		switch u.Type {
+		case "task":
+			var task taskSummaryWire
+			if err := json.Unmarshal(u.Data, &task); err != nil {
+				return fmt.Errorf("sync: pull incremental: decode task update: %w", err)
+			}
+			if err := e.applyTask(ctx, task); err != nil {
+				return fmt.Errorf("sync: pull incremental: apply task: %w", err)
+			}
+		case "kb":
+			var article articleSummaryWire
+			if err := json.Unmarshal(u.Data, &article); err != nil {
+				return fmt.Errorf("sync: pull incremental: decode kb update: %w", err)
+			}
+			if err := e.applyArticle(ctx, article); err != nil {
+				return fmt.Errorf("sync: pull incremental: apply kb article: %w", err)
+			}
+		default:
+			return fmt.Errorf("sync: pull incremental: unknown update type %q", u.Type)
+		}
+	}
 
 	return nil
 }
@@ -191,11 +224,118 @@ func (e *Engine) Bootstrap(ctx context.Context) error {
 		return fmt.Errorf("sync: bootstrap: call server: %w", err)
 	}
 
-	// Result should contain org config, project manifests, initial KB, tasks, policies, etc.
-	// For now, we log receipt but don't apply them (that's repository-layer work).
-	_ = result
+	out, err := decodeBootstrapResult(result)
+	if err != nil {
+		return fmt.Errorf("sync: bootstrap: decode result: %w", err)
+	}
+	for _, task := range out.TaskList {
+		if err := e.applyTask(ctx, task); err != nil {
+			return fmt.Errorf("sync: bootstrap: apply task: %w", err)
+		}
+	}
+	for _, article := range out.KBList {
+		if err := e.applyArticle(ctx, article); err != nil {
+			return fmt.Errorf("sync: bootstrap: apply kb article: %w", err)
+		}
+	}
 
 	return nil
+}
+
+// taskSummaryWire mirrors internal/mcp.TaskSummary's JSON shape. This
+// package cannot import internal/mcp (RFC-0003 §6.3 keeps internal/runtime/*
+// and internal/mcp separate trees), so the wire contract is duplicated
+// here, same as internal/runtime/localapi already does for the same reason.
+type taskSummaryWire struct {
+	TaskID       string     `json:"task_id"`
+	ParentTaskID *string    `json:"parent_task_id"`
+	Title        string     `json:"title"`
+	Description  string     `json:"description"`
+	OwnerAgentID *string    `json:"owner_agent_id"`
+	Status       string     `json:"status"`
+	Priority     int        `json:"priority"`
+	DueBy        *time.Time `json:"due_by"`
+}
+
+// articleSummaryWire mirrors internal/mcp.ArticleSummary's JSON shape.
+type articleSummaryWire struct {
+	ArticleID     string          `json:"article_id"`
+	ProjectID     string          `json:"project_id"`
+	Title         string          `json:"title"`
+	Body          string          `json:"body"`
+	Frontmatter   json.RawMessage `json:"frontmatter,omitempty"`
+	AuthorAgentID string          `json:"author_agent_id"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
+}
+
+// bootstrapResultWire mirrors internal/mcp.BootstrapOutput's JSON shape.
+type bootstrapResultWire struct {
+	TaskList []taskSummaryWire    `json:"task_list"`
+	KBList   []articleSummaryWire `json:"kb_list"`
+}
+
+// syncUpdateEnvelopeWire mirrors internal/mcp's syncUpdateEnvelope.
+type syncUpdateEnvelopeWire struct {
+	Type string          `json:"type"`
+	Data json.RawMessage `json:"data"`
+}
+
+// incrementalPullResultWire mirrors internal/mcp.IncrementalPullOutput's JSON shape.
+type incrementalPullResultWire struct {
+	Updates []syncUpdateEnvelopeWire `json:"updates"`
+}
+
+// decodeBootstrapResult re-marshals the generic interface{} that
+// callSyncToolWithResult returns back into JSON and decodes it into the
+// typed bootstrap wire shape. The round-trip is redundant work but keeps
+// callSyncToolWithResult's signature generic for every wormhole.sync.* tool.
+func decodeBootstrapResult(result interface{}) (bootstrapResultWire, error) {
+	var out bootstrapResultWire
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return out, fmt.Errorf("marshal: %w", err)
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return out, fmt.Errorf("unmarshal: %w", err)
+	}
+	return out, nil
+}
+
+// decodeIncrementalPullResult is decodeBootstrapResult's counterpart for
+// wormhole.sync.incremental_pull's result shape.
+func decodeIncrementalPullResult(result interface{}) ([]syncUpdateEnvelopeWire, error) {
+	var out incrementalPullResultWire
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return nil, fmt.Errorf("marshal: %w", err)
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("unmarshal: %w", err)
+	}
+	return out.Updates, nil
+}
+
+// applyTask upserts one server task into the local task replica
+// (RFC-0003 §8.1/§8.2 local-apply). A nil taskRepo (callers that only
+// exercise push) is a configuration error, not a silent no-op.
+func (e *Engine) applyTask(ctx context.Context, task taskSummaryWire) error {
+	if e.taskRepo == nil {
+		return errors.New("sync: no taskRepo configured to apply server task")
+	}
+	_, err := e.taskRepo.UpsertTask(ctx, e.namespaceID, task.TaskID, task.Title, task.Description,
+		task.ParentTaskID, task.OwnerAgentID, task.Status, task.Priority, task.DueBy)
+	return err
+}
+
+// applyArticle upserts one server KB article into the local KB replica.
+func (e *Engine) applyArticle(ctx context.Context, article articleSummaryWire) error {
+	if e.kbRepo == nil {
+		return errors.New("sync: no kbRepo configured to apply server kb article")
+	}
+	_, err := e.kbRepo.UpsertArticle(ctx, e.namespaceID, article.ArticleID, article.Title, article.Body,
+		article.Frontmatter, article.AuthorAgentID, article.CreatedAt, article.UpdatedAt)
+	return err
 }
 
 // callSyncTool makes a JSON-RPC 2.0 call to a wormhole.sync.* tool on the coordination server.

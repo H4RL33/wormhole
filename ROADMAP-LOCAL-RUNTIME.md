@@ -75,8 +75,8 @@ Detailed plan: `docs/superpowers/plans/2026-07-13-local-runtime-p1-walking-skele
 **Exit criteria:** a local write made while the Coordination Server is unreachable becomes visible on the server once connectivity returns, with no manual intervention, and every overwrite from a conflict is visible in the audit trail (RFC-0003 §8.3 last-write-wins v1 answer).
 
 - [x] `internal/runtime/sync`: durable outbound queue (SQLite-backed, restart-surviving)
-- [x] `internal/runtime/sync`: bootstrap client (`wormhole.sync.bootstrap` bulk pull)
-- [x] `internal/runtime/sync`: incremental push/pull cycle
+- [x] `internal/runtime/sync`: bootstrap client (`wormhole.sync.bootstrap` bulk pull) — local-apply added: `Engine.Bootstrap` now upserts the returned task/KB lists into `localstore.TaskRepo`/`localstore.KBRepo` (new `UpsertTask`/`UpsertArticle`, insert-or-replace-by-id) instead of discarding the response; see P7 note below.
+- [x] `internal/runtime/sync`: incremental push/pull cycle — `Engine.PullIncremental` local-apply added the same way, dispatching each `{type, data}` update envelope to the matching upsert.
 - [x] Coordination Server: `wormhole.sync.*` MCP tools (bootstrap, incremental pull, incremental push, conflict report) — new pillar prefix ratified by RFC-0003 §4
 - [x] Conflict handling: last-write-wins, server-timestamp authoritative, audit log entry per overwrite (RFC-0003 §8.3)
 - [ ] Batching: time/queue-size/priority criteria, latency-sensitive bypass — time- and size-based batch triggers and priority-ordered dequeue implemented (`internal/runtime/sync.Engine`, `QueueRepo.ListPending`); no explicit latency-sensitive bypass path found, left unchecked
@@ -115,8 +115,8 @@ Detailed plan: `docs/superpowers/plans/2026-07-13-local-runtime-p1-walking-skele
 
 **Exit criteria:** full local-first loop demonstrated end-to-end and tagged.
 
-- [ ] E2E validation: agent writes task while offline → reconnect → task visible on Coordination Server dashboard → second agent (different machine) sees it after its own sync — partially implemented: `TestP7_LocalFirstLoop`, `TestP7_LocalTaskPersistence`, `TestP7_SyncQueueDurability` pass (single-daemon offline-write→reconnect→sync loop); `TestP7_MultiDaemonSync` is present but explicitly `t.Skip`'d — "requires server-side sync implementation (currently stubs); deferred to P8"
-- [ ] Fix any break found during validation — not fully assessable until multi-daemon validation above is unblocked
+- [x] E2E validation: agent writes task while offline → reconnect → task visible on Coordination Server dashboard → second agent (different machine) sees it after its own sync — `TestP7_LocalFirstLoop`, `TestP7_LocalTaskPersistence`, `TestP7_SyncQueueDurability` pass (single-daemon offline-write→reconnect→sync loop). `TestP7_MultiDaemonSync` is unblocked and passing: `internal/runtime/sync.Engine.Bootstrap`/`Engine.PullIncremental` (`internal/runtime/sync/sync.go`) no longer discard the server's task/KB response — they upsert it into `localstore.TaskRepo`/`localstore.KBRepo` (new `UpsertTask`/`UpsertArticle`, insert-or-replace-by-id, ON CONFLICT(id) DO UPDATE). `TestP7_MultiDaemonSync` now drives two real `localstore` instances against one shared (stateful, in-memory) fake coordination server: daemon A writes+pushes a task, daemon B (which never saw the write) calls `Bootstrap` and asserts the task is present in its own SQLite replica — proving daemon B's local state, not the shared Postgres. Focused unit coverage of the local-apply path itself lives in `internal/runtime/sync/sync_apply_test.go`.
+- [x] Fix any break found during validation — no breaks found in multi-daemon validation once local-apply landed; full `go build`/`go vet`/`go test ./... -count=1` clean across all packages
 - [x] `docs/architecture.md` companion revision reflecting `internal/runtime/*` module map and dependency rules (RFC-0003 §13 flags this as needed)
 - [ ] Tag release
 - [ ] Launch demo

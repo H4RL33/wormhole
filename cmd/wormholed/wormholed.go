@@ -41,15 +41,17 @@ func Run(ctx context.Context, profileName string) error {
 	}
 	defer store.Close()
 
-	// Initialize sync engine repositories and engine (RFC-0003 §8.2).
-	queueRepo := sync.NewQueueRepo(store.DB())
-	auditRepo := sync.NewAuditRepo(store.DB())
-	syncCfg := sync.DefaultConfig()
-	syncEngine := sync.New(cfg.Credentials.Server, cfg.Credentials.Token, cfg.Credentials.ProjectID, queueRepo, auditRepo, syncCfg)
-
 	er := localstore.NewEventRepo(store.DB())
 	tr := localstore.NewTaskRepo(store.DB(), er)
 	kb := localstore.NewKBRepo(store.DB())
+
+	// Initialize sync engine repositories and engine (RFC-0003 §8.2). tr/kb
+	// are the local-apply targets for Bootstrap/PullIncremental so a synced
+	// task/KB article actually lands in this daemon's SQLite replica.
+	queueRepo := sync.NewQueueRepo(store.DB())
+	auditRepo := sync.NewAuditRepo(store.DB())
+	syncCfg := sync.DefaultConfig()
+	syncEngine := sync.New(cfg.Credentials.Server, cfg.Credentials.Token, cfg.Credentials.ProjectID, queueRepo, auditRepo, tr, kb, syncCfg)
 
 	// P3: eventbus + scheduler are always constructed so agent registration,
 	// presence, task routing, and subscriptions (wormhole.agent.register,

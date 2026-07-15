@@ -1,4 +1,7 @@
-package localstore
+// This file is package localstore_test (not localstore) so it can import
+// internal/runtime/sync without an import cycle now that sync imports
+// localstore (sync local-apply work, RFC-0003 §8).
+package localstore_test
 
 import (
 	"context"
@@ -9,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/H4RL33/wormhole/internal/runtime/sync"
+	_ "modernc.org/sqlite"
 )
 
 // TestSyncQueueCrossNamespaceRejection verifies that sync queue items are isolated by namespace.
