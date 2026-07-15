@@ -71,8 +71,10 @@ func TestEngineStartStop(t *testing.T) {
 	defer qRepo.db.Close()
 
 	cfg := Config{
-		BatchInterval: 100 * time.Millisecond,
-		BatchSize:     10,
+		BatchInterval:         100 * time.Millisecond,
+		BatchSize:             10,
+		LatencyCheckInterval:  50 * time.Millisecond,
+		HighPriorityThreshold: 2,
 	}
 	engine := New("http://localhost:8080", "token", "ns-1", qRepo, aRepo, nil, nil, cfg)
 
@@ -178,8 +180,10 @@ func TestOfflineQueueSurvivalNetworkFailure(t *testing.T) {
 
 	// Create engine with unreachable server (intentional network failure).
 	cfg := Config{
-		BatchInterval: 50 * time.Millisecond,
-		BatchSize:     10,
+		BatchInterval:         50 * time.Millisecond,
+		BatchSize:             10,
+		LatencyCheckInterval:  25 * time.Millisecond,
+		HighPriorityThreshold: 2,
 	}
 	engine := New("http://unreachable-server:9999", "token", "ns-1", qRepo, aRepo, nil, nil, cfg)
 

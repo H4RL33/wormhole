@@ -18,33 +18,41 @@ import (
 // Engine orchestrates the local sync lifecycle: bootstrap, incremental push/pull,
 // and batching (RFC-0003 §8). It holds per-org state including queue and audit repos.
 type Engine struct {
-	httpClient    *http.Client
-	coordServer   string
-	token         string
-	namespaceID   string
-	queueRepo     *QueueRepo
-	auditRepo     *AuditRepo
-	taskRepo      *localstore.TaskRepo
-	kbRepo        *localstore.KBRepo
-	mu            sync.Mutex
-	lastSyncTime  time.Time
-	batchInterval time.Duration
-	batchSize     int
-	shutdown      chan struct{}
-	wg            sync.WaitGroup
+	httpClient            *http.Client
+	coordServer           string
+	token                 string
+	namespaceID           string
+	queueRepo             *QueueRepo
+	auditRepo             *AuditRepo
+	taskRepo              *localstore.TaskRepo
+	kbRepo                *localstore.KBRepo
+	mu                    sync.Mutex
+	lastSyncTime          time.Time
+	batchInterval         time.Duration
+	batchSize             int
+	latencyCheckInterval  time.Duration
+	highPriorityThreshold int
+	shutdown              chan struct{}
+	wg                    sync.WaitGroup
 }
 
 // Config holds tunable sync batching parameters (RFC-0003 §8.2).
 type Config struct {
-	BatchInterval time.Duration // time-based batching threshold
-	BatchSize     int           // queue-size batching threshold
+	BatchInterval         time.Duration // time-based batching threshold
+	BatchSize             int           // queue-size batching threshold
+	LatencyCheckInterval  time.Duration // how often to check for high-priority entries needing an immediate push
+	HighPriorityThreshold int           // queue entries with Priority >= this bypass BatchInterval
 }
 
-// DefaultConfig returns conservative batching defaults: 5 sec interval, 50 item batch.
+// DefaultConfig returns conservative batching defaults: 5 sec interval, 50
+// item batch, high-priority entries (priority >= 2) checked every 500ms
+// instead of waiting the full 5 sec.
 func DefaultConfig() Config {
 	return Config{
-		BatchInterval: 5 * time.Second,
-		BatchSize:     50,
+		BatchInterval:         5 * time.Second,
+		BatchSize:             50,
+		LatencyCheckInterval:  500 * time.Millisecond,
+		HighPriorityThreshold: 2,
 	}
 }
 
@@ -55,17 +63,19 @@ func DefaultConfig() Config {
 // task_list/kb_list is an error rather than a silent no-op.
 func New(coordServerURL, token, namespaceID string, queueRepo *QueueRepo, auditRepo *AuditRepo, taskRepo *localstore.TaskRepo, kbRepo *localstore.KBRepo, cfg Config) *Engine {
 	return &Engine{
-		httpClient:    &http.Client{Timeout: 30 * time.Second},
-		coordServer:   coordServerURL,
-		token:         token,
-		namespaceID:   namespaceID,
-		queueRepo:     queueRepo,
-		auditRepo:     auditRepo,
-		taskRepo:      taskRepo,
-		kbRepo:        kbRepo,
-		batchInterval: cfg.BatchInterval,
-		batchSize:     cfg.BatchSize,
-		shutdown:      make(chan struct{}),
+		httpClient:            &http.Client{Timeout: 30 * time.Second},
+		coordServer:           coordServerURL,
+		token:                 token,
+		namespaceID:           namespaceID,
+		queueRepo:             queueRepo,
+		auditRepo:             auditRepo,
+		taskRepo:              taskRepo,
+		kbRepo:                kbRepo,
+		batchInterval:         cfg.BatchInterval,
+		batchSize:             cfg.BatchSize,
+		latencyCheckInterval:  cfg.LatencyCheckInterval,
+		highPriorityThreshold: cfg.HighPriorityThreshold,
+		shutdown:              make(chan struct{}),
 	}
 }
 
@@ -89,6 +99,9 @@ func (e *Engine) syncLoop(ctx context.Context) {
 	ticker := time.NewTicker(e.batchInterval)
 	defer ticker.Stop()
 
+	latencyTicker := time.NewTicker(e.latencyCheckInterval)
+	defer latencyTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -100,6 +113,10 @@ func (e *Engine) syncLoop(ctx context.Context) {
 			if err := e.pushBatch(ctx); err != nil {
 				// Best-effort: log error and continue. The batch remains queued
 				// for retry on the next interval.
+				_ = err
+			}
+		case <-latencyTicker.C:
+			if err := e.checkLatencySensitive(ctx); err != nil {
 				_ = err
 			}
 		}
@@ -157,6 +174,24 @@ func (e *Engine) pushBatch(ctx context.Context) error {
 
 	e.lastSyncTime = time.Now().UTC()
 	return nil
+}
+
+// checkLatencySensitive peeks the highest-priority pending entry and, if it
+// meets highPriorityThreshold, pushes immediately rather than waiting for
+// the next batchInterval tick (RFC-0003 §8.2 latency-sensitive bypass).
+// ListPending already orders priority DESC, so the first row is the one
+// that matters.
+func (e *Engine) checkLatencySensitive(ctx context.Context) error {
+	e.mu.Lock()
+	entries, err := e.queueRepo.ListPending(ctx, e.namespaceID, 1)
+	e.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("sync: check latency-sensitive: list pending: %w", err)
+	}
+	if len(entries) == 0 || entries[0].Priority < e.highPriorityThreshold {
+		return nil
+	}
+	return e.pushBatch(ctx)
 }
 
 // PullIncremental fetches the latest state from the server for all entities,
