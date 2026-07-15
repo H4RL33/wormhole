@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/core/events"
@@ -24,6 +25,51 @@ const SyncProtocolVersion = 1
 // finds-or-creates a channel with this name per project the first time a
 // conflict is reported there. Named per the Day 32 task-3 brief.
 const SyncAuditChannelID = "wormhole-sync-audit"
+
+// syncRateLimiter enforces a simple fixed-window per-namespace request cap
+// on wormhole.sync.* handlers (P6 minimal hardening — RFC-0003 §10; this
+// was explicitly deferred to the beta pass in ROADMAP-LOCAL-RUNTIME.md and
+// is now closed for the alpha tag).
+type syncRateLimiter struct {
+	mu     sync.Mutex
+	limit  int
+	window time.Duration
+	hits   map[string][]time.Time
+}
+
+func newSyncRateLimiter(limit int, window time.Duration) *syncRateLimiter {
+	return &syncRateLimiter{limit: limit, window: window, hits: make(map[string][]time.Time)}
+}
+
+// allow reports whether namespaceID may make another sync call at time now,
+// recording the call if so. Timestamps older than window are pruned first.
+func (r *syncRateLimiter) allow(namespaceID string, now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	cutoff := now.Add(-r.window)
+	kept := make([]time.Time, 0, len(r.hits[namespaceID]))
+	for _, t := range r.hits[namespaceID] {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) >= r.limit {
+		r.hits[namespaceID] = kept
+		return false
+	}
+	r.hits[namespaceID] = append(kept, now)
+	return true
+}
+
+// globalSyncRateLimiter is shared across every wormhole.sync.* handler
+// instance the process constructs (there is one Coordination Server process
+// per deployment, so one limiter is correct — not per-Tool-construction
+// state). 30 calls/minute/namespace comfortably exceeds the default sync
+// engine's busiest case (BatchInterval=5s plus latency-sensitive bypass
+// checks every 500ms would only call incremental_push, never bootstrap or
+// conflict_report, at that rate) while still bounding abuse.
+var globalSyncRateLimiter = newSyncRateLimiter(30, time.Minute)
 
 // validateNamespace enforces RFC-0003 §7.2 cross-namespace isolation: the
 // client-supplied namespace_id is never trusted on its own for
@@ -138,6 +184,9 @@ func BootstrapTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *even
 			if in.Version != SyncProtocolVersion {
 				return nil, fmt.Errorf("mcp: wormhole.sync.bootstrap: unsupported protocol version %d (expected %d)", in.Version, SyncProtocolVersion)
 			}
+			if !globalSyncRateLimiter.allow(in.NamespaceID, time.Now()) {
+				return nil, fmt.Errorf("mcp: wormhole.sync.bootstrap: rate limit exceeded for namespace %q", in.NamespaceID)
+			}
 
 			taskList, err := tasksStore.List(ctx, projectID, nil)
 			if err != nil {
@@ -210,6 +259,9 @@ func IncrementalPullTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore
 			}
 			if in.Version != SyncProtocolVersion {
 				return nil, fmt.Errorf("mcp: wormhole.sync.incremental_pull: unsupported protocol version %d (expected %d)", in.Version, SyncProtocolVersion)
+			}
+			if !globalSyncRateLimiter.allow(in.NamespaceID, time.Now()) {
+				return nil, fmt.Errorf("mcp: wormhole.sync.incremental_pull: rate limit exceeded for namespace %q", in.NamespaceID)
 			}
 
 			// A nil/empty last_sync cursor means "everything" (equivalent to
@@ -359,6 +411,9 @@ func IncrementalPushTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore
 			if in.Version != SyncProtocolVersion {
 				return nil, fmt.Errorf("mcp: wormhole.sync.incremental_push: unsupported protocol version %d (expected %d)", in.Version, SyncProtocolVersion)
 			}
+			if !globalSyncRateLimiter.allow(in.NamespaceID, time.Now()) {
+				return nil, fmt.Errorf("mcp: wormhole.sync.incremental_push: rate limit exceeded for namespace %q", in.NamespaceID)
+			}
 
 			// Validate items array (P6 hardening: malformed-payload rejection).
 			if len(in.Items) == 0 {
@@ -505,6 +560,9 @@ func ConflictReportTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore 
 			}
 			if in.Version != SyncProtocolVersion {
 				return nil, fmt.Errorf("mcp: wormhole.sync.conflict_report: unsupported protocol version %d (expected %d)", in.Version, SyncProtocolVersion)
+			}
+			if !globalSyncRateLimiter.allow(in.NamespaceID, time.Now()) {
+				return nil, fmt.Errorf("mcp: wormhole.sync.conflict_report: rate limit exceeded for namespace %q", in.NamespaceID)
 			}
 			if in.EntityType == "" {
 				return nil, fmt.Errorf("mcp: wormhole.sync.conflict_report: missing entity_type")
