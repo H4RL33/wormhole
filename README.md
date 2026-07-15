@@ -40,7 +40,7 @@ We don't believe that smaller models are less-capable, we believe that they just
 
 Open-source, open-weight models will always be our first-class citizens, proprietary models we will support simply because we cannot be oblivious to their out-of-box better output, however we will not officially support models that we believe on a case-by-case basis come from providers that harm society.
 
-To that extent, we will officially provide Claude Code connectors only. Neither Gemini nor OpenAI models will ever see official support in Wormhole.
+To that extent, we officially provide connectors for harnesses that do not lock an agent to a single proprietary model provider by design — currently Claude Code and OpenCode. We will not officially support connectors whose entire purpose is wiring up a specific provider we've chosen not to endorse (e.g. a "Gemini connector" or "OpenAI connector" as such), though nothing stops a harness-level connector like OpenCode's from being pointed at any model the user chooses — that choice is the user's, not Wormhole's to gate.
 
 #### Being Open-Source
 
@@ -58,7 +58,7 @@ All we can do is encourage you to reconsider your provider of choice.
 
 ## Status
 
-**Alpha Release (v0.1.0-alpha)**. Core data schemas, Row-Level Security, multi-tenant isolation, and MCP tools for all four pillars are implemented. See [ROADMAP.md](ROADMAP.md) for future plans.
+**Local Runtime Alpha (v0.2.0-alpha)**. Core data schemas, Row-Level Security, multi-tenant isolation, and MCP tools for all four pillars are implemented (see [ROADMAP.md](ROADMAP.md)), plus the local-first runtime layer: `wormholed` daemon, SQLite replica, event bus/scheduler, sync engine with offline-write/reconnect, and multi-org bootstrap (see [ROADMAP-LOCAL-RUNTIME.md](ROADMAP-LOCAL-RUNTIME.md)). Offline/reconnect kill-network test suite and a comprehensive cross-repo isolation audit remain deferred to the beta pass — see that roadmap's P6 section for exact scope.
 
 ---
 
@@ -94,13 +94,14 @@ Self-owned agent credentials and strict access controls.
 
 ## Quickstart / Local Demo
 
-Follow this guide to spin up a local instance of `wormhole-server` and verify the CLI join flow.
+Follow this guide to spin up a local instance of `wormhole-server` (the Coordination Server), run `wormholed` (the local daemon each agent talks to), and connect a coding harness to it.
 
 ### Prerequisites
 
 - Go 1.26.4+
 - Docker & Docker Compose
 - PostgreSQL client (`psql`) installed locally (optional, for manual queries)
+- Claude Code and/or OpenCode installed, if you intend to connect one of those harnesses
 
 ### 1. Run PostgreSQL with pgvector
 
@@ -135,7 +136,7 @@ docker compose exec db psql -U wormhole -d wormhole -c \
   "INSERT INTO projects (id, name, owner) VALUES ('00000000-0000-0000-0000-000000000001', 'Demo Project', 'demo-owner');"
 ```
 
-### 4. Run the Wormhole Server
+### 4. Run the Coordination Server
 
 Build and run `wormhole-server`. By default, it connects to the local Postgres database and listens on `:8080`.
 
@@ -143,23 +144,77 @@ Build and run `wormhole-server`. By default, it connects to the local Postgres d
 go run cmd/wormhole-server/main.go
 ```
 
-### 5. Join the Project with the CLI
+### 5. Run `wormholed`
 
-Use `wormhole-cli` to introduce your agent, generate a passport, request permissions, and retrieve project context:
+`wormholed` is the local daemon a coding harness talks to over a Unix domain socket — it proxies to the Coordination Server and caches state in a local SQLite replica so reads keep working offline. Install it once:
 
 ```bash
-go run cmd/wormhole-cli/main.go join \
+go install ./cmd/wormholed
+```
+
+Then run it (it reads its org connection config from `$XDG_CONFIG_HOME/wormhole/` or `~/.config/wormhole/` by default — see `internal/runtime/config` if you need to point it elsewhere):
+
+```bash
+wormholed
+```
+
+Leave it running in its own terminal/session; every command below talks to it.
+
+### 6. Connect a harness
+
+`wormhole connect` registers a fresh agent identity (a Passport), then wires the issued MCP token into your harness of choice. Install the CLI:
+
+```bash
+go install ./cmd/wormhole-cli
+```
+
+**Claude Code:**
+
+```bash
+wormhole-cli connect \
   --server http://localhost:8080 \
   --project 00000000-0000-0000-0000-000000000001 \
   --owner "demo-owner" \
-  --model "claude-3-5-sonnet" \
+  --model "claude-sonnet-5" \
+  --permissions "task.create,kb.write" \
+  --target claude
+```
+
+This shells out to the `claude` CLI (`claude mcp add/remove`) to register the connector. Run `/mcp` inside Claude Code afterward to reconnect.
+
+**OpenCode:**
+
+```bash
+wormhole-cli connect \
+  --server http://localhost:8080 \
+  --project 00000000-0000-0000-0000-000000000001 \
+  --owner "demo-owner" \
+  --model "opencode" \
+  --permissions "task.create,kb.write" \
+  --target opencode
+```
+
+This writes (or merges into) an `opencode.json`/`opencode.jsonc` config — by default the nearest one found walking up from your current directory to your project's `.git` root, falling back to `~/.config/opencode/opencode.json` if none exists. Pass `--opencode-config <path>` to target a specific file instead.
+
+Either connector accepts `--connector-name <name>` to register under a name other than the default `wormhole`.
+
+### 7. Join and verify
+
+`wormhole join` performs the same registration, then runs a KB-sync/self-introduction/task-summary handshake so an agent's first turn already has context:
+
+```bash
+wormhole-cli join \
+  --server http://localhost:8080 \
+  --project 00000000-0000-0000-0000-000000000001 \
+  --owner "demo-owner" \
+  --model "claude-sonnet-5" \
   --capabilities "code_edit,run_tests" \
   --repositories "github.com/H4RL33/wormhole" \
   --roles "developer" \
   --permissions "task.create,kb.write"
 ```
 
-Upon success, the CLI will output your credentials and persist them to `~/.wormhole/credentials.json`.
+Credentials are written under `~/.wormhole/credentials/` (see `wormhole-cli whoami` and `wormhole-cli profile list` to inspect stored profiles).
 
 ---
 
