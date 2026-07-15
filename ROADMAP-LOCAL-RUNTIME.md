@@ -88,7 +88,7 @@ Detailed plan: `docs/superpowers/plans/2026-07-13-local-runtime-p1-walking-skele
 
 **Exit criteria:** one `wormholed` instance is simultaneously joined to two different organisations (two different Coordination Servers), with a harness able to address either by explicit project binding, and no data crossing between them.
 
-- [ ] `wormhole join` (CLI) retargeted: talks to `wormholed`, not the Coordination Server directly — NOT implemented; `cmd/wormhole-cli/main.go`'s `runJoin` still takes `--server` and talks to the Coordination Server directly, no `wormholed` socket path added
+- [x] `wormhole join` (CLI) retargeted: talks to `wormholed`, not the Coordination Server directly — `runJoin` now dials wormholed's local socket first (`internal/runtime/localapi`'s join-shaped `wormhole.agent.register` dispatch) and falls back to the direct `--server` path only when the socket is unreachable, per RFC-0003 §3.2/§6.1 (wormholed availability not mandated). 4 new tests (2 `localapi`, 2 `cmd/wormhole-cli`), full suite green.
 - [x] Full bootstrap lifecycle: Authentication → Enrolment → Bootstrap → Synchronisation → Normal operation (RFC-0003 §8.1)
 - [x] Project bindings: explicit config mapping harness/project context to (org, project, identity) tuple, no implicit default (RFC-0003 §7.1)
 - [x] Multi-org routing test: two orgs, two Passports, cross-org isolation asserted at `localapi` boundary

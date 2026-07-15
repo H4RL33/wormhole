@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -251,6 +252,85 @@ func callTool(client *http.Client, server, tool, projectID, token string, args a
 	return json.RawMessage(result.Content[0].Text), nil
 }
 
+// localSocketRequest/localSocketResponse mirror
+// internal/runtime/localapi's localRequest/localResponse wire shapes
+// (internal/runtime/localapi/localapi.go). cmd/wormhole-cli cannot import
+// internal/runtime/localapi (docs/architecture.md §2 restricts this package
+// to internal/types and client-side code only), so the wire contract is
+// duplicated here, same pattern as rpcRequest/rpcResponse above and
+// internal/runtime/config's own header comment on this precedent.
+type localSocketRequest struct {
+	Tool string          `json:"tool"`
+	Args json.RawMessage `json:"args,omitempty"`
+}
+
+type localSocketResponse struct {
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  string          `json:"error,omitempty"`
+}
+
+// wormholedSocketPath derives wormholed's local API socket path, mirroring
+// internal/runtime/config.Load's XDG_RUNTIME_DIR resolution
+// (internal/runtime/config/config.go) exactly. Duplicated rather than
+// imported for the same module-boundary reason as localSocketRequest above.
+func wormholedSocketPath() string {
+	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
+	if runtimeDir == "" {
+		runtimeDir = filepath.Join(os.TempDir(), "wormhole-runtime")
+	}
+	return filepath.Join(runtimeDir, "wormhole", "wormholed.sock")
+}
+
+// doRegisterViaSocket attempts wormhole.agent.register through wormholed's
+// local socket (RFC-0003 §8.1: "wormhole join... now targets wormholed").
+// reachable=false means the socket wasn't dialable (wormholed not running);
+// callers fall back to the direct --server path in that case, since RFC-0003
+// §3.2/§6.1 doesn't mandate wormholed's availability for standalone CLI use.
+// reachable=true with a non-nil error means the socket answered but the call
+// itself failed — that error is real and must not be silently swallowed.
+func doRegisterViaSocket(socketPath, project string, in registerAgentInput) (out registerAgentOutput, reachable bool, err error) {
+	conn, dialErr := net.DialTimeout("unix", socketPath, 2*time.Second)
+	if dialErr != nil {
+		return registerAgentOutput{}, false, nil
+	}
+	defer conn.Close()
+
+	argsRaw, err := json.Marshal(in)
+	if err != nil {
+		return registerAgentOutput{}, true, fmt.Errorf("marshal register arguments: %w", err)
+	}
+	var argsMap map[string]any
+	if err := json.Unmarshal(argsRaw, &argsMap); err != nil {
+		return registerAgentOutput{}, true, fmt.Errorf("decode register arguments for project_id injection: %w", err)
+	}
+	argsMap["project_id"] = project
+	argsWithProject, err := json.Marshal(argsMap)
+	if err != nil {
+		return registerAgentOutput{}, true, fmt.Errorf("marshal register arguments with project_id: %w", err)
+	}
+
+	reqBody, err := json.Marshal(localSocketRequest{Tool: "wormhole.agent.register", Args: argsWithProject})
+	if err != nil {
+		return registerAgentOutput{}, true, fmt.Errorf("marshal local socket request: %w", err)
+	}
+	if _, err := conn.Write(append(reqBody, '\n')); err != nil {
+		return registerAgentOutput{}, true, fmt.Errorf("write to wormholed socket: %w", err)
+	}
+
+	var resp localSocketResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return registerAgentOutput{}, true, fmt.Errorf("decode wormholed response: %w", err)
+	}
+	if resp.Error != "" {
+		return registerAgentOutput{}, true, fmt.Errorf("%s", resp.Error)
+	}
+
+	if err := json.Unmarshal(resp.Result, &out); err != nil {
+		return registerAgentOutput{}, true, fmt.Errorf("decode register result: %w", err)
+	}
+	return out, true, nil
+}
+
 // doRegister calls wormhole.agent.register (no auth required).
 func doRegister(client *http.Client, server, project string, in registerAgentInput) (registerAgentOutput, error) {
 	resultRaw, err := callTool(client, server, "wormhole.agent.register", project, "", in)
@@ -409,10 +489,23 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	out, err := doRegister(http.DefaultClient, *server, *project, in)
-	if err != nil {
-		fmt.Fprintf(stderr, "wormhole join: %v\n", err)
+	// RFC-0003 §8.1: `wormhole join` now targets wormholed first. If its
+	// local socket is reachable, registration is proxied through it
+	// (internal/runtime/localapi's join-shaped wormhole.agent.register
+	// dispatch); otherwise this falls back to the pre-RFC-0003 direct path,
+	// since wormholed's availability isn't mandated for standalone CLI use.
+	out, viaSocket, sockErr := doRegisterViaSocket(wormholedSocketPath(), *project, in)
+	if viaSocket && sockErr != nil {
+		fmt.Fprintf(stderr, "wormhole join: %v\n", sockErr)
 		return 1
+	}
+	if !viaSocket {
+		var err error
+		out, err = doRegister(http.DefaultClient, *server, *project, in)
+		if err != nil {
+			fmt.Fprintf(stderr, "wormhole join: %v\n", err)
+			return 1
+		}
 	}
 
 	creds := credentials{

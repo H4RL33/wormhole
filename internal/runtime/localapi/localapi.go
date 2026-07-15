@@ -367,6 +367,22 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		writeResponse(conn, localResponse{Result: outRaw})
 
 	case "wormhole.agent.register":
+		if isJoinRegisterArgs(req.Args) {
+			// RFC-0003 §8.1: `wormhole join` now targets wormholed, which
+			// proxies passport creation to the Coordination Server. RFC-0001
+			// §9 defines a single wormhole.agent.register tool for this and
+			// for local presence registration (P3's handleAgentRegister
+			// below); the two shapes never overlap in practice (join args
+			// carry owner/model/etc., presence args carry agent_id), so
+			// dispatch is by shape rather than inventing a second tool name.
+			outRaw, err := s.proxyRegister(ctx, req.Args)
+			if err != nil {
+				writeResponse(conn, localResponse{Error: err.Error()})
+				return
+			}
+			writeResponse(conn, localResponse{Result: outRaw})
+			return
+		}
 		result, err := s.handleAgentRegister(ctx, req.Args)
 		if err != nil {
 			writeResponse(conn, localResponse{Error: err.Error()})
@@ -443,6 +459,88 @@ func writeResponse(conn net.Conn, resp localResponse) {
 		return
 	}
 	conn.Write(append(data, '\n'))
+}
+
+// isJoinRegisterArgs reports whether a wormhole.agent.register call's args
+// are the join/passport-creation shape (RFC-0001 §9, cmd/wormhole-cli's
+// registerAgentInput: owner/model/capabilities/roles/permissions, no
+// agent_id) rather than P3's local presence-registration shape (agent_id +
+// capabilities). See the switch case in handle for why this dispatches on
+// shape instead of a second tool name.
+func isJoinRegisterArgs(args json.RawMessage) bool {
+	var argMap map[string]interface{}
+	if len(args) == 0 {
+		return false
+	}
+	if err := json.Unmarshal(args, &argMap); err != nil {
+		return false
+	}
+	_, hasAgentID := argMap["agent_id"]
+	return !hasAgentID
+}
+
+// proxyRegister forwards a join-shaped wormhole.agent.register call to the
+// Coordination Server, unauthenticated (matching cmd/wormhole-cli's
+// doRegister, which sends no bearer token for this call — a Passport
+// doesn't exist yet). project_id is expected to already be present in args
+// (cmd/wormhole-cli's callTool folds it in before sending), so this simply
+// forwards the args as given; no local caching, matching this call's write
+// (not cacheable read) semantics.
+func (s *Server) proxyRegister(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+	var argMap map[string]interface{}
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &argMap); err != nil {
+			return nil, fmt.Errorf("localapi: agent register: invalid args: %w", err)
+		}
+	}
+	projectID, _ := argMap["project_id"].(string)
+
+	orgCtx, err := s.resolveOrgContext(projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	paramsRaw, err := json.Marshal(toolsCallParams{Name: "wormhole.agent.register", Arguments: args})
+	if err != nil {
+		return nil, fmt.Errorf("localapi: marshal params: %w", err)
+	}
+	reqBody, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "tools/call", Params: paramsRaw})
+	if err != nil {
+		return nil, fmt.Errorf("localapi: marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(orgCtx.Creds.Server, "/")+"/mcp", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("localapi: build request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: call coordination server: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var rpcResp rpcResponse
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		return nil, fmt.Errorf("localapi: decode coordination server response: %w", err)
+	}
+	if rpcResp.Error != nil {
+		return nil, errors.New(rpcResp.Error.Message)
+	}
+
+	var result toolCallResult
+	if err := json.Unmarshal(rpcResp.Result, &result); err != nil {
+		return nil, fmt.Errorf("localapi: decode tools/call result: %w", err)
+	}
+	if len(result.Content) == 0 {
+		return nil, errors.New("localapi: empty register result from coordination server")
+	}
+	if result.IsError {
+		return nil, errors.New(result.Content[0].Text)
+	}
+
+	return json.RawMessage(result.Content[0].Text), nil
 }
 
 // proxyWhoAmI forwards wormhole.agent.whoami to the Coordination Server
