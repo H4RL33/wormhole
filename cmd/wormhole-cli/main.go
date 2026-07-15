@@ -782,7 +782,7 @@ func runConnectOpenCode(explicitPath, connectorName, mcpURL, token string, stdou
 	}
 	cfg["mcp"] = mcp
 
-	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
 		fmt.Fprintf(stderr, "wormhole connect: create config directory: %v\n", err)
 		return 1
 	}
@@ -791,7 +791,7 @@ func runConnectOpenCode(explicitPath, connectorName, mcpURL, token string, stdou
 		fmt.Fprintf(stderr, "wormhole connect: encode config: %v\n", err)
 		return 1
 	}
-	if err := os.WriteFile(configPath, data, 0o644); err != nil {
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
 		fmt.Fprintf(stderr, "wormhole connect: write %s: %v\n", configPath, err)
 		return 1
 	}

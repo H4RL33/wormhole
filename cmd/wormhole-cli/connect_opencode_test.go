@@ -197,6 +197,53 @@ func TestRunConnect_OpenCodeTarget_CustomConnectorName(t *testing.T) {
 	}
 }
 
+// TestRunConnect_OpenCodeTarget_ProtectsConfigFilePermissions confirms the
+// OpenCode config file (which contains a live Bearer token) is written with
+// owner-only permissions (0o600), and the parent directory is created with
+// owner-only access (0o700).
+func TestRunConnect_OpenCodeTarget_ProtectsConfigFilePermissions(t *testing.T) {
+	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
+		t.Fatal("connect must not call wormhole.kb.search")
+		return searchArticlesOutput{}, nil
+	})
+	defer srv.Close()
+
+	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
+	configPath := filepath.Join(t.TempDir(), "nested", "opencode.json")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"connect",
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--permissions", "task.read",
+		"--token-file", tokenFile,
+		"--target", "opencode",
+		"--opencode-config", configPath,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
+	}
+
+	// Verify config file has owner-only read/write (0o600)
+	info, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("stat config file: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("config file permissions: got %o, want 0o600", info.Mode().Perm())
+	}
+
+	// Verify parent directory has owner-only access (0o700)
+	parentDir := filepath.Dir(configPath)
+	parentInfo, err := os.Stat(parentDir)
+	if err != nil {
+		t.Fatalf("stat parent directory: %v", err)
+	}
+	if parentInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("parent directory permissions: got %o, want 0o700", parentInfo.Mode().Perm())
+	}
+}
+
 // TestRunConnect_UnknownTarget_Errors confirms an invalid --target value is
 // rejected before any network call.
 func TestRunConnect_UnknownTarget_Errors(t *testing.T) {
