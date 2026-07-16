@@ -446,6 +446,8 @@ func IncrementalPushTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore
 			for _, item := range in.Items {
 				result := AppliedItem{ID: item.EntityID, Type: item.EntityType}
 
+				// Update and delete operations intentionally unimplemented pending
+				// RFC-0003 decision on per-entity-type update/delete semantics.
 				if item.Operation != "create" {
 					result.Error = fmt.Sprintf("unsupported operation %q", item.Operation)
 					applied = append(applied, result)

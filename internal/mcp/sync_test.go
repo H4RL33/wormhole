@@ -101,6 +101,65 @@ func TestIncrementalPushTool_PartialFailureDoesNotAbortBatch(t *testing.T) {
 	}
 }
 
+func TestIncrementalPushTool_RejectsNonCreateOperation(t *testing.T) {
+	tasksStore := testTasksStore(t)
+	tool := IncrementalPushTool(tasksStore, testKBStore(t), testEventsStore(t))
+	projectID := mustCreateProject(t, "mcp-sync-push-non-create")
+
+	goodPayload, _ := json.Marshal(syncTaskCreatePayload{Title: "good task", Description: "d", Priority: 1})
+	in := IncrementalPushInput{
+		NamespaceID: projectID,
+		Version:     SyncProtocolVersion,
+		Items: []struct {
+			EntityType string          `json:"entity_type"`
+			EntityID   string          `json:"entity_id"`
+			Operation  string          `json:"operation"`
+			Payload    json.RawMessage `json:"payload"`
+		}{
+			{EntityType: "task", EntityID: "update-item", Operation: "update", Payload: goodPayload},
+			{EntityType: "kb", EntityID: "delete-item", Operation: "delete", Payload: json.RawMessage(`{}`)},
+			{EntityType: "task", EntityID: "good-item", Operation: "create", Payload: goodPayload},
+		},
+	}
+	arguments := mustMarshal(t, in)
+
+	result, err := tool.Handler(context.Background(), nil, projectID, arguments)
+	if err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+	out := result.(IncrementalPushOutput)
+	if out.ItemsReceived != 3 {
+		t.Fatalf("ItemsReceived: got %d, want 3", out.ItemsReceived)
+	}
+	if len(out.Applied) != 3 {
+		t.Fatalf("Applied: got %d entries, want 3", len(out.Applied))
+	}
+	// First item: "update" operation should be rejected
+	if out.Applied[0].ID != "update-item" || out.Applied[0].Error == "" {
+		t.Fatalf("Applied[0] (update item): got %+v, want a non-empty Error", out.Applied[0])
+	}
+	if out.Applied[0].Error != `unsupported operation "update"` {
+		t.Fatalf("Applied[0].Error: got %q, want %q", out.Applied[0].Error, `unsupported operation "update"`)
+	}
+	// Second item: "delete" operation should be rejected
+	if out.Applied[1].ID != "delete-item" || out.Applied[1].Error == "" {
+		t.Fatalf("Applied[1] (delete item): got %+v, want a non-empty Error", out.Applied[1])
+	}
+	if out.Applied[1].Error != `unsupported operation "delete"` {
+		t.Fatalf("Applied[1].Error: got %q, want %q", out.Applied[1].Error, `unsupported operation "delete"`)
+	}
+	// Third item: "create" operation should succeed
+	if out.Applied[2].ID != "good-item" || out.Applied[2].Error != "" {
+		t.Fatalf("Applied[2] (good item): got %+v, want empty Error", out.Applied[2])
+	}
+
+	// Verify only the good item was applied to the store
+	list, err := tasksStore.List(context.Background(), projectID, nil)
+	if err != nil || len(list) != 1 || list[0].Title != "good task" {
+		t.Fatalf("only the create operation should have been applied to store: list=%+v err=%v", list, err)
+	}
+}
+
 func TestIncrementalPushTool_RejectsNamespaceMismatch(t *testing.T) {
 	tasksStore := testTasksStore(t)
 	tool := IncrementalPushTool(tasksStore, testKBStore(t), testEventsStore(t))
