@@ -1,6 +1,7 @@
 package localapi
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/H4RL33/wormhole/internal/runtime/config"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
+	syncpkg "github.com/H4RL33/wormhole/internal/runtime/sync"
 )
 
 // TestMultiOrgResolveContext verifies org resolution from project bindings (RFC-0003 §7.1, P5).
@@ -483,6 +485,150 @@ func TestCredentialRecoveryFlow(t *testing.T) {
 	}
 
 	t.Logf("credential recovery: identity %q preserved, token regenerated", org.Credentials.AgentID)
+}
+
+// TestMultiOrgHandlerIsolation verifies that handlers respect project bindings and don't
+// cross namespaces (RFC-0003 §7.2: multi-org isolation via explicit bindings).
+// This test drives actual handlers (task.create, task.list) through multi-org mode
+// and verifies data isolation.
+func TestMultiOrgHandlerIsolation(t *testing.T) {
+	orgs := map[string]config.Org{
+		"org-a": {
+			Name: "org-a",
+			Credentials: config.Credentials{
+				Server:    "https://a.example.com",
+				ProjectID: "proj-a-creds",
+				AgentID:   "agent-a",
+				Token:     "token-a",
+			},
+		},
+		"org-b": {
+			Name: "org-b",
+			Credentials: config.Credentials{
+				Server:    "https://b.example.com",
+				ProjectID: "proj-b-creds",
+				AgentID:   "agent-b",
+				Token:     "token-b",
+			},
+		},
+	}
+
+	bindings := []config.ProjectBinding{
+		{ProjectID: "proj-a", OrgName: "org-a"},
+		{ProjectID: "proj-b", OrgName: "org-b"},
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "test-handler-isolation.db")
+	store, err := localstore.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	tr := localstore.NewTaskRepo(store.DB(), localstore.NewEventRepo(store.DB()))
+	er := localstore.NewEventRepo(store.DB())
+	kb := localstore.NewKBRepo(store.DB())
+	qr := syncpkg.NewQueueRepo(store.DB())
+
+	srv, err := NewMultiOrg(
+		filepath.Join(t.TempDir(), "test.sock"),
+		orgs,
+		bindings,
+		store,
+		tr,
+		er,
+		kb,
+		nil, // eventbus
+		nil, // scheduler
+		qr,
+	)
+	if err != nil {
+		t.Fatalf("NewMultiOrg: %v", err)
+	}
+	defer srv.Close()
+
+	// Simulate task.create calls from both orgs via handlers
+	// Args for org-a task
+	argMapA := map[string]interface{}{
+		"project_id":  "proj-a",
+		"title":       "Task from org-a",
+		"description": "Description for org-a task",
+		"priority":    1,
+	}
+	argsA, _ := json.Marshal(argMapA)
+
+	// Args for org-b task
+	argMapB := map[string]interface{}{
+		"project_id":  "proj-b",
+		"title":       "Task from org-b",
+		"description": "Description for org-b task",
+		"priority":    2,
+	}
+	argsB, _ := json.Marshal(argMapB)
+
+	ctx := context.Background()
+
+	// Create task in org-a
+	resultA, err := srv.handleTaskCreate(ctx, argsA)
+	if err != nil {
+		t.Fatalf("handleTaskCreate for org-a: %v", err)
+	}
+	taskIDA := resultA["id"].(string)
+	if resultA["namespace_id"].(string) != "proj-a" {
+		t.Errorf("org-a task namespace: got %q, want proj-a", resultA["namespace_id"])
+	}
+
+	// Create task in org-b
+	resultB, err := srv.handleTaskCreate(ctx, argsB)
+	if err != nil {
+		t.Fatalf("handleTaskCreate for org-b: %v", err)
+	}
+	taskIDB := resultB["id"].(string)
+	if resultB["namespace_id"].(string) != "proj-b" {
+		t.Errorf("org-b task namespace: got %q, want proj-b", resultB["namespace_id"])
+	}
+
+	// List tasks in org-a — should only see org-a task
+	listArgsA := map[string]interface{}{
+		"project_id": "proj-a",
+	}
+	listArgsAJSON, _ := json.Marshal(listArgsA)
+	listA, err := srv.localListTasks(ctx, listArgsAJSON)
+	if err != nil {
+		t.Fatalf("localListTasks for org-a: %v", err)
+	}
+	tasksA := listA["tasks"].([]interface{})
+	if len(tasksA) != 1 {
+		t.Errorf("org-a task count: got %d, want 1 (saw %d, wanted to see only org-a task)", len(tasksA), len(tasksA))
+	}
+	if len(tasksA) > 0 {
+		firstTask := tasksA[0].(map[string]interface{})
+		if firstTask["id"].(string) != taskIDA {
+			t.Errorf("org-a list returned wrong task: got %q, want %q", firstTask["id"], taskIDA)
+		}
+	}
+
+	// List tasks in org-b — should only see org-b task
+	listArgsB := map[string]interface{}{
+		"project_id": "proj-b",
+	}
+	listArgsBJSON, _ := json.Marshal(listArgsB)
+	listB, err := srv.localListTasks(ctx, listArgsBJSON)
+	if err != nil {
+		t.Fatalf("localListTasks for org-b: %v", err)
+	}
+	tasksB := listB["tasks"].([]interface{})
+	if len(tasksB) != 1 {
+		t.Errorf("org-b task count: got %d, want 1 (isolation broken: org-b can see %d tasks instead of 1)", len(tasksB), len(tasksB))
+	}
+	if len(tasksB) > 0 {
+		firstTask := tasksB[0].(map[string]interface{})
+		if firstTask["id"].(string) != taskIDB {
+			t.Errorf("org-b list returned wrong task: got %q, want %q", firstTask["id"], taskIDB)
+		}
+	}
+
+	t.Logf("handler isolation verified: org-a and org-b tasks remain in separate namespaces")
 }
 
 // TestBootstrapLifecycle is a placeholder for the full bootstrap flow
