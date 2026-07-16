@@ -37,7 +37,8 @@ type syncRateLimiter struct {
 	hits   map[string][]time.Time
 }
 
-func newSyncRateLimiter(limit int, window time.Duration) *syncRateLimiter {
+// NewSyncRateLimiter constructs a rate limiter for sync operations.
+func NewSyncRateLimiter(limit int, window time.Duration) *syncRateLimiter {
 	return &syncRateLimiter{limit: limit, window: window, hits: make(map[string][]time.Time)}
 }
 
@@ -62,14 +63,6 @@ func (r *syncRateLimiter) allow(namespaceID string, now time.Time) bool {
 	return true
 }
 
-// globalSyncRateLimiter is shared across every wormhole.sync.* handler
-// instance the process constructs (there is one Coordination Server process
-// per deployment, so one limiter is correct — not per-Tool-construction
-// state). 30 calls/minute/namespace comfortably exceeds the default sync
-// engine's busiest case (BatchInterval=5s plus latency-sensitive bypass
-// checks every 500ms would only call incremental_push, never bootstrap or
-// conflict_report, at that rate) while still bounding abuse.
-var globalSyncRateLimiter = newSyncRateLimiter(30, time.Minute)
 
 // validateNamespace enforces RFC-0003 §7.2 cross-namespace isolation: the
 // client-supplied namespace_id is never trusted on its own for
@@ -165,7 +158,7 @@ func articleToSummary(article kb.Article) ArticleSummary {
 
 // BootstrapTool wires wormhole.sync.bootstrap. This is called by wormholed on org enrolment.
 // RFC-0003 §8.1: one-time bulk pull of complete working environment.
-func BootstrapTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store) Tool {
+func BootstrapTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, limiter *syncRateLimiter) Tool {
 	return Tool{
 		Name:             "wormhole.sync.bootstrap",
 		Description:      "One-time bulk pull of org configuration, project manifests, initial KB, tasks, and policies on org enrolment (RFC-0003 §8.1)",
@@ -184,7 +177,7 @@ func BootstrapTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *even
 			if in.Version != SyncProtocolVersion {
 				return nil, fmt.Errorf("mcp: wormhole.sync.bootstrap: unsupported protocol version %d (expected %d)", in.Version, SyncProtocolVersion)
 			}
-			if !globalSyncRateLimiter.allow(in.NamespaceID, time.Now()) {
+			if !limiter.allow(in.NamespaceID, time.Now()) {
 				return nil, fmt.Errorf("mcp: wormhole.sync.bootstrap: rate limit exceeded for namespace %q", in.NamespaceID)
 			}
 
@@ -241,7 +234,7 @@ type IncrementalPullOutput struct {
 
 // IncrementalPullTool wires wormhole.sync.incremental_pull.
 // RFC-0003 §8.2: steady-state incremental pull of changed entities.
-func IncrementalPullTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store) Tool {
+func IncrementalPullTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, limiter *syncRateLimiter) Tool {
 	return Tool{
 		Name:             "wormhole.sync.incremental_pull",
 		Description:      "Incremental pull of entity changes since last sync (RFC-0003 §8.2)",
@@ -260,7 +253,7 @@ func IncrementalPullTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore
 			if in.Version != SyncProtocolVersion {
 				return nil, fmt.Errorf("mcp: wormhole.sync.incremental_pull: unsupported protocol version %d (expected %d)", in.Version, SyncProtocolVersion)
 			}
-			if !globalSyncRateLimiter.allow(in.NamespaceID, time.Now()) {
+			if !limiter.allow(in.NamespaceID, time.Now()) {
 				return nil, fmt.Errorf("mcp: wormhole.sync.incremental_pull: rate limit exceeded for namespace %q", in.NamespaceID)
 			}
 
@@ -392,7 +385,7 @@ type syncEventCreatePayload struct {
 
 // IncrementalPushTool wires wormhole.sync.incremental_push.
 // RFC-0003 §8.2: wormholed pushes batched local changes to the server.
-func IncrementalPushTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store) Tool {
+func IncrementalPushTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, limiter *syncRateLimiter) Tool {
 	return Tool{
 		Name:             "wormhole.sync.incremental_push",
 		Description:      "Incremental push of batched local changes to the server (RFC-0003 §8.2)",
@@ -411,7 +404,7 @@ func IncrementalPushTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore
 			if in.Version != SyncProtocolVersion {
 				return nil, fmt.Errorf("mcp: wormhole.sync.incremental_push: unsupported protocol version %d (expected %d)", in.Version, SyncProtocolVersion)
 			}
-			if !globalSyncRateLimiter.allow(in.NamespaceID, time.Now()) {
+			if !limiter.allow(in.NamespaceID, time.Now()) {
 				return nil, fmt.Errorf("mcp: wormhole.sync.incremental_push: rate limit exceeded for namespace %q", in.NamespaceID)
 			}
 
@@ -544,7 +537,7 @@ type syncConflictAuditPayload struct {
 // RFC-0003 §8.3: last-write-wins conflict resolution, server-timestamp authoritative,
 // every overwrite logged to append-only audit trail (via a
 // "sync.conflict_resolved" event, Global Constraints — no new audit table).
-func ConflictReportTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store) Tool {
+func ConflictReportTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, limiter *syncRateLimiter) Tool {
 	return Tool{
 		Name:             "wormhole.sync.conflict_report",
 		Description:      "Report and resolve sync conflicts using last-write-wins; server timestamp is authoritative (RFC-0003 §8.3)",
@@ -563,7 +556,7 @@ func ConflictReportTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore 
 			if in.Version != SyncProtocolVersion {
 				return nil, fmt.Errorf("mcp: wormhole.sync.conflict_report: unsupported protocol version %d (expected %d)", in.Version, SyncProtocolVersion)
 			}
-			if !globalSyncRateLimiter.allow(in.NamespaceID, time.Now()) {
+			if !limiter.allow(in.NamespaceID, time.Now()) {
 				return nil, fmt.Errorf("mcp: wormhole.sync.conflict_report: rate limit exceeded for namespace %q", in.NamespaceID)
 			}
 			if in.EntityType == "" {

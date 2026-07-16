@@ -9,7 +9,7 @@ import (
 
 func TestIncrementalPushTool_AppliesTaskCreate(t *testing.T) {
 	tasksStore := testTasksStore(t)
-	tool := IncrementalPushTool(tasksStore, testKBStore(t), testEventsStore(t))
+	tool := IncrementalPushTool(tasksStore, testKBStore(t), testEventsStore(t), NewSyncRateLimiter(30, time.Minute))
 
 	projectID := mustCreateProject(t, "mcp-sync-push-task")
 
@@ -58,7 +58,7 @@ func TestIncrementalPushTool_AppliesTaskCreate(t *testing.T) {
 
 func TestIncrementalPushTool_PartialFailureDoesNotAbortBatch(t *testing.T) {
 	tasksStore := testTasksStore(t)
-	tool := IncrementalPushTool(tasksStore, testKBStore(t), testEventsStore(t))
+	tool := IncrementalPushTool(tasksStore, testKBStore(t), testEventsStore(t), NewSyncRateLimiter(30, time.Minute))
 	projectID := mustCreateProject(t, "mcp-sync-push-partial")
 
 	goodPayload, _ := json.Marshal(syncTaskCreatePayload{Title: "good task", Description: "d", Priority: 1})
@@ -103,7 +103,7 @@ func TestIncrementalPushTool_PartialFailureDoesNotAbortBatch(t *testing.T) {
 
 func TestIncrementalPushTool_RejectsNonCreateOperation(t *testing.T) {
 	tasksStore := testTasksStore(t)
-	tool := IncrementalPushTool(tasksStore, testKBStore(t), testEventsStore(t))
+	tool := IncrementalPushTool(tasksStore, testKBStore(t), testEventsStore(t), NewSyncRateLimiter(30, time.Minute))
 	projectID := mustCreateProject(t, "mcp-sync-push-non-create")
 
 	goodPayload, _ := json.Marshal(syncTaskCreatePayload{Title: "good task", Description: "d", Priority: 1})
@@ -162,7 +162,7 @@ func TestIncrementalPushTool_RejectsNonCreateOperation(t *testing.T) {
 
 func TestIncrementalPushTool_RejectsNamespaceMismatch(t *testing.T) {
 	tasksStore := testTasksStore(t)
-	tool := IncrementalPushTool(tasksStore, testKBStore(t), testEventsStore(t))
+	tool := IncrementalPushTool(tasksStore, testKBStore(t), testEventsStore(t), NewSyncRateLimiter(30, time.Minute))
 	projectID := mustCreateProject(t, "mcp-sync-push-ns-mismatch")
 	otherProjectID := mustCreateProject(t, "mcp-sync-push-ns-mismatch-other")
 
@@ -208,7 +208,7 @@ func TestBootstrapTool_ReturnsRealTaskAndKBLists(t *testing.T) {
 		t.Fatalf("write article: %v", err)
 	}
 
-	tool := BootstrapTool(tasksStore, kbStore, eventsStore)
+	tool := BootstrapTool(tasksStore, kbStore, eventsStore, NewSyncRateLimiter(30, time.Minute))
 	arguments := mustMarshal(t, BootstrapInput{NamespaceID: projectID, Version: SyncProtocolVersion})
 
 	result, err := tool.Handler(context.Background(), nil, projectID, arguments)
@@ -245,7 +245,7 @@ func TestIncrementalPullTool_FiltersByCursor(t *testing.T) {
 		t.Fatalf("create new task: %v", err)
 	}
 
-	tool := IncrementalPullTool(tasksStore, kbStore, eventsStore)
+	tool := IncrementalPullTool(tasksStore, kbStore, eventsStore, NewSyncRateLimiter(30, time.Minute))
 	lastSync := cursor.Format(time.RFC3339)
 	arguments := mustMarshal(t, IncrementalPullInput{NamespaceID: projectID, Version: SyncProtocolVersion, LastSync: &lastSync})
 
@@ -283,7 +283,7 @@ func TestConflictReportTool_PublishesAuditEvent(t *testing.T) {
 	agentID, _ := mustRegisterAgent(t, projectID)
 	scope := mustBuildScope(agentID, projectID)
 
-	tool := ConflictReportTool(tasksStore, kbStore, eventsStore)
+	tool := ConflictReportTool(tasksStore, kbStore, eventsStore, NewSyncRateLimiter(30, time.Minute))
 	arguments := mustMarshal(t, ConflictReportInput{
 		NamespaceID:  projectID,
 		Version:      SyncProtocolVersion,
@@ -355,7 +355,7 @@ func mustNotPanic(t *testing.T, call func() (any, error)) (result any, err error
 }
 
 func TestBootstrapTool_RejectsMalformedJSON(t *testing.T) {
-	tool := BootstrapTool(testTasksStore(t), testKBStore(t), testEventsStore(t))
+	tool := BootstrapTool(testTasksStore(t), testKBStore(t), testEventsStore(t), NewSyncRateLimiter(30, time.Minute))
 	projectID := mustCreateProject(t, "mcp-sync-bootstrap-malformed")
 
 	_, err := mustNotPanic(t, func() (any, error) {
@@ -367,7 +367,7 @@ func TestBootstrapTool_RejectsMalformedJSON(t *testing.T) {
 }
 
 func TestIncrementalPullTool_RejectsMalformedJSON(t *testing.T) {
-	tool := IncrementalPullTool(testTasksStore(t), testKBStore(t), testEventsStore(t))
+	tool := IncrementalPullTool(testTasksStore(t), testKBStore(t), testEventsStore(t), NewSyncRateLimiter(30, time.Minute))
 	projectID := mustCreateProject(t, "mcp-sync-pull-malformed")
 
 	_, err := mustNotPanic(t, func() (any, error) {
@@ -379,7 +379,7 @@ func TestIncrementalPullTool_RejectsMalformedJSON(t *testing.T) {
 }
 
 func TestIncrementalPushTool_RejectsMalformedJSON(t *testing.T) {
-	tool := IncrementalPushTool(testTasksStore(t), testKBStore(t), testEventsStore(t))
+	tool := IncrementalPushTool(testTasksStore(t), testKBStore(t), testEventsStore(t), NewSyncRateLimiter(30, time.Minute))
 	projectID := mustCreateProject(t, "mcp-sync-push-malformed")
 
 	_, err := mustNotPanic(t, func() (any, error) {
@@ -391,7 +391,7 @@ func TestIncrementalPushTool_RejectsMalformedJSON(t *testing.T) {
 }
 
 func TestIncrementalPushTool_RejectsEmptyItems(t *testing.T) {
-	tool := IncrementalPushTool(testTasksStore(t), testKBStore(t), testEventsStore(t))
+	tool := IncrementalPushTool(testTasksStore(t), testKBStore(t), testEventsStore(t), NewSyncRateLimiter(30, time.Minute))
 	projectID := mustCreateProject(t, "mcp-sync-push-empty-items")
 
 	arguments := mustMarshal(t, IncrementalPushInput{NamespaceID: projectID, Version: SyncProtocolVersion})
@@ -404,7 +404,7 @@ func TestIncrementalPushTool_RejectsEmptyItems(t *testing.T) {
 }
 
 func TestConflictReportTool_RejectsMalformedJSON(t *testing.T) {
-	tool := ConflictReportTool(testTasksStore(t), testKBStore(t), testEventsStore(t))
+	tool := ConflictReportTool(testTasksStore(t), testKBStore(t), testEventsStore(t), NewSyncRateLimiter(30, time.Minute))
 	projectID := mustCreateProject(t, "mcp-sync-conflict-malformed")
 
 	_, err := mustNotPanic(t, func() (any, error) {
@@ -423,7 +423,7 @@ func TestConflictReportTool_RejectsMissingRequiredFields(t *testing.T) {
 	agentID, _ := mustRegisterAgent(t, projectID)
 	scope := mustBuildScope(agentID, projectID)
 
-	tool := ConflictReportTool(tasksStore, kbStore, eventsStore)
+	tool := ConflictReportTool(tasksStore, kbStore, eventsStore, NewSyncRateLimiter(30, time.Minute))
 	// EntityType and EntityID both omitted.
 	arguments := mustMarshal(t, ConflictReportInput{
 		NamespaceID: projectID,
@@ -442,7 +442,7 @@ func TestConflictReportTool_RejectsMissingRequiredFields(t *testing.T) {
 // reject an unrecognized/incompatible version cleanly rather than silently
 // proceeding.
 func TestBootstrapTool_RejectsUnsupportedVersion(t *testing.T) {
-	tool := BootstrapTool(testTasksStore(t), testKBStore(t), testEventsStore(t))
+	tool := BootstrapTool(testTasksStore(t), testKBStore(t), testEventsStore(t), NewSyncRateLimiter(30, time.Minute))
 	projectID := mustCreateProject(t, "mcp-sync-bootstrap-version")
 
 	arguments := mustMarshal(t, BootstrapInput{NamespaceID: projectID, Version: SyncProtocolVersion + 1})
@@ -452,7 +452,7 @@ func TestBootstrapTool_RejectsUnsupportedVersion(t *testing.T) {
 }
 
 func TestIncrementalPullTool_RejectsUnsupportedVersion(t *testing.T) {
-	tool := IncrementalPullTool(testTasksStore(t), testKBStore(t), testEventsStore(t))
+	tool := IncrementalPullTool(testTasksStore(t), testKBStore(t), testEventsStore(t), NewSyncRateLimiter(30, time.Minute))
 	projectID := mustCreateProject(t, "mcp-sync-pull-version")
 
 	arguments := mustMarshal(t, IncrementalPullInput{NamespaceID: projectID, Version: SyncProtocolVersion + 1})
@@ -462,7 +462,7 @@ func TestIncrementalPullTool_RejectsUnsupportedVersion(t *testing.T) {
 }
 
 func TestIncrementalPushTool_RejectsUnsupportedVersion(t *testing.T) {
-	tool := IncrementalPushTool(testTasksStore(t), testKBStore(t), testEventsStore(t))
+	tool := IncrementalPushTool(testTasksStore(t), testKBStore(t), testEventsStore(t), NewSyncRateLimiter(30, time.Minute))
 	projectID := mustCreateProject(t, "mcp-sync-push-version")
 
 	payload, _ := json.Marshal(syncTaskCreatePayload{Title: "x", Description: "y", Priority: 1})
@@ -491,7 +491,7 @@ func TestConflictReportTool_RejectsUnsupportedVersion(t *testing.T) {
 	agentID, _ := mustRegisterAgent(t, projectID)
 	scope := mustBuildScope(agentID, projectID)
 
-	tool := ConflictReportTool(tasksStore, kbStore, eventsStore)
+	tool := ConflictReportTool(tasksStore, kbStore, eventsStore, NewSyncRateLimiter(30, time.Minute))
 	arguments := mustMarshal(t, ConflictReportInput{
 		NamespaceID:  projectID,
 		Version:      SyncProtocolVersion + 1,
