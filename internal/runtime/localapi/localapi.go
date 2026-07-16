@@ -1343,7 +1343,7 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 	if err != nil {
 		return nil, fmt.Errorf("localapi: kb write: marshal payload: %w", err)
 	}
-	if _, err := s.qr.Enqueue(ctx, orgCtx.ProjectID, "kb_article", article.ID, "create", payload, 0); err != nil {
+	if _, err := s.qr.Enqueue(ctx, orgCtx.ProjectID, "kb", article.ID, "create", payload, 0); err != nil {
 		return nil, fmt.Errorf("localapi: kb write: enqueue sync: %w", err)
 	}
 

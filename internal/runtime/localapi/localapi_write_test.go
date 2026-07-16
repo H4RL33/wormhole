@@ -165,8 +165,8 @@ func TestLocalKBWrite_EnqueuesForSync(t *testing.T) {
 	}
 
 	pending, err := qr.ListPending(context.Background(), "ns-1", 10)
-	if err != nil || len(pending) != 1 || pending[0].EntityID != articleID || pending[0].Operation != "create" {
-		t.Fatalf("expected article enqueued for sync, got pending=%+v err=%v", pending, err)
+	if err != nil || len(pending) != 1 || pending[0].EntityID != articleID || pending[0].Operation != "create" || pending[0].EntityType != "kb" {
+		t.Fatalf("expected article enqueued for sync with entity_type=kb, got pending=%+v err=%v", pending, err)
 	}
 }
 
