@@ -10,7 +10,7 @@ import (
 // `window` succeed and the next one is rejected (P6 hardening: rate
 // limiting on wormhole.sync.* handlers, previously deferred to beta).
 func TestSyncRateLimiter_AllowsUpToLimit(t *testing.T) {
-	rl := newSyncRateLimiter(3, time.Minute)
+	rl := NewSyncRateLimiter(3, time.Minute)
 	now := time.Now()
 
 	for i := 0; i < 3; i++ {
@@ -26,7 +26,7 @@ func TestSyncRateLimiter_AllowsUpToLimit(t *testing.T) {
 // TestSyncRateLimiter_NamespacesIndependent confirms one namespace hitting
 // its limit does not affect another namespace's budget.
 func TestSyncRateLimiter_NamespacesIndependent(t *testing.T) {
-	rl := newSyncRateLimiter(1, time.Minute)
+	rl := NewSyncRateLimiter(1, time.Minute)
 	now := time.Now()
 
 	if !rl.allow("ns-1", now) {
@@ -43,7 +43,7 @@ func TestSyncRateLimiter_NamespacesIndependent(t *testing.T) {
 // TestSyncRateLimiter_WindowExpires confirms a call outside the window no
 // longer counts against the limit.
 func TestSyncRateLimiter_WindowExpires(t *testing.T) {
-	rl := newSyncRateLimiter(1, time.Minute)
+	rl := NewSyncRateLimiter(1, time.Minute)
 	now := time.Now()
 
 	if !rl.allow("ns-1", now) {
@@ -57,18 +57,14 @@ func TestSyncRateLimiter_WindowExpires(t *testing.T) {
 
 // TestBootstrapTool_RateLimitRejectsCleanly confirms the handler itself
 // (not just the limiter struct in isolation) returns a clean error once the
-// per-namespace budget is exhausted, restoring the limiter afterward so
-// this test doesn't leak state into others in the package.
+// per-namespace budget is exhausted.
 func TestBootstrapTool_RateLimitRejectsCleanly(t *testing.T) {
-	prev := globalSyncRateLimiter
-	globalSyncRateLimiter = newSyncRateLimiter(1, time.Minute)
-	defer func() { globalSyncRateLimiter = prev }()
-
 	tasksStore := testTasksStore(t)
 	kbStore := testKBStore(t)
 	eventsStore := testEventsStore(t)
 	projectID := mustCreateProject(t, "mcp-sync-ratelimit")
-	tool := BootstrapTool(tasksStore, kbStore, eventsStore)
+	limiter := NewSyncRateLimiter(1, time.Minute)
+	tool := BootstrapTool(tasksStore, kbStore, eventsStore, limiter)
 
 	in := BootstrapInput{NamespaceID: projectID, Version: SyncProtocolVersion}
 	argsFirst := mustMarshal(t, in)
