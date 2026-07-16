@@ -137,6 +137,14 @@ func TestLocalTaskCreate_EnqueuesForSync(t *testing.T) {
 	if err != nil || len(pending) != 1 || pending[0].EntityID != taskID || pending[0].Operation != "create" {
 		t.Fatalf("expected task enqueued for sync, got pending=%+v err=%v", pending, err)
 	}
+
+	// GH-19 regression: the task's priority must be threaded through to the
+	// queue entry, not hardcoded to 0 — otherwise the sync engine's
+	// latency-sensitive bypass (HighPriorityThreshold, checkLatencySensitive)
+	// can never trigger from a real request path.
+	if pending[0].Priority != 2 {
+		t.Fatalf("expected enqueued priority 2 (matching task priority), got %d", pending[0].Priority)
+	}
 }
 
 func TestLocalKBWrite_EnqueuesForSync(t *testing.T) {

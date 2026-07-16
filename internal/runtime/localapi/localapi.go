@@ -1272,7 +1272,7 @@ func (s *Server) handleTaskCreate(ctx context.Context, args json.RawMessage) (ma
 	if err != nil {
 		return nil, fmt.Errorf("localapi: task create: marshal payload: %w", err)
 	}
-	if _, err := s.qr.Enqueue(ctx, orgCtx.ProjectID, "task", task.ID, "create", payload, 0); err != nil {
+	if _, err := s.qr.Enqueue(ctx, orgCtx.ProjectID, "task", task.ID, "create", payload, task.Priority); err != nil {
 		return nil, fmt.Errorf("localapi: task create: enqueue sync: %w", err)
 	}
 
@@ -1343,6 +1343,9 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 	if err != nil {
 		return nil, fmt.Errorf("localapi: kb write: marshal payload: %w", err)
 	}
+	// KB articles have no priority concept (internal/core/kb has no Priority
+	// field, unlike tasks) — 0 here is the correct default, not a placeholder
+	// for a value that should have been threaded through.
 	if _, err := s.qr.Enqueue(ctx, orgCtx.ProjectID, "kb", article.ID, "create", payload, 0); err != nil {
 		return nil, fmt.Errorf("localapi: kb write: enqueue sync: %w", err)
 	}
@@ -1420,6 +1423,9 @@ func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (m
 	if err != nil {
 		return nil, fmt.Errorf("localapi: channel post: marshal payload: %w", err)
 	}
+	// Events have no priority concept (internal/core/events has no Priority
+	// field, unlike tasks) — 0 here is the correct default, not a placeholder
+	// for a value that should have been threaded through.
 	if _, err := s.qr.Enqueue(ctx, orgCtx.ProjectID, "event", ev.ID, "create", payload, 0); err != nil {
 		return nil, fmt.Errorf("localapi: channel post: enqueue sync: %w", err)
 	}
