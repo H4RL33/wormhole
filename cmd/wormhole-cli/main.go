@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"flag"
@@ -253,23 +254,6 @@ func callTool(client *http.Client, server, tool, projectID, token string, args a
 	return json.RawMessage(result.Content[0].Text), nil
 }
 
-// localSocketRequest/localSocketResponse mirror
-// internal/runtime/localapi's localRequest/localResponse wire shapes
-// (internal/runtime/localapi/localapi.go). cmd/wormhole-cli cannot import
-// internal/runtime/localapi (docs/architecture.md §2 restricts this package
-// to internal/types and client-side code only), so the wire contract is
-// duplicated here, same pattern as rpcRequest/rpcResponse above and
-// internal/runtime/config's own header comment on this precedent.
-type localSocketRequest struct {
-	Tool string          `json:"tool"`
-	Args json.RawMessage `json:"args,omitempty"`
-}
-
-type localSocketResponse struct {
-	Result json.RawMessage `json:"result,omitempty"`
-	Error  string          `json:"error,omitempty"`
-}
-
 // wormholedSocketPath derives wormholed's local API socket path, mirroring
 // internal/runtime/config.Load's XDG_RUNTIME_DIR resolution
 // (internal/runtime/config/config.go) exactly. Duplicated rather than
@@ -284,6 +268,13 @@ func wormholedSocketPath() string {
 
 // doRegisterViaSocket attempts wormhole.agent.register through wormholed's
 // local socket (RFC-0003 §8.1: "wormhole join... now targets wormholed").
+// wormholed's socket speaks real MCP JSON-RPC 2.0 (design doc:
+// docs/superpowers/plans/2026-07-16-wormholed-mcp-endpoint-design.md, issue
+// #20 subtask 2), so this performs the same handshake a real MCP client
+// would: initialize -> notifications/initialized -> tools/call
+// "wormhole.agent.register", all on one persistent connection, then closes
+// it — this CLI process has no further use for the connection after one
+// call.
 // reachable=false means the socket wasn't dialable (wormholed not running);
 // callers fall back to the direct --server path in that case, since RFC-0003
 // §3.2/§6.1 doesn't mandate wormholed's availability for standalone CLI use.
@@ -295,6 +286,35 @@ func doRegisterViaSocket(socketPath, project string, in registerAgentInput) (out
 		return registerAgentOutput{}, false, nil
 	}
 	defer conn.Close()
+
+	reader := bufio.NewReader(conn)
+
+	initReq, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "initialize", Params: json.RawMessage(`{}`)})
+	if err != nil {
+		return registerAgentOutput{}, true, fmt.Errorf("marshal initialize request: %w", err)
+	}
+	if _, err := conn.Write(append(initReq, '\n')); err != nil {
+		return registerAgentOutput{}, true, fmt.Errorf("write initialize to wormholed socket: %w", err)
+	}
+	initLine, err := reader.ReadBytes('\n')
+	if err != nil {
+		return registerAgentOutput{}, true, fmt.Errorf("read initialize response from wormholed socket: %w", err)
+	}
+	var initResp rpcResponse
+	if err := json.Unmarshal(bytes.TrimSpace(initLine), &initResp); err != nil {
+		return registerAgentOutput{}, true, fmt.Errorf("decode initialize response: %w", err)
+	}
+	if initResp.Error != nil {
+		return registerAgentOutput{}, true, fmt.Errorf("initialize: %s", initResp.Error.Message)
+	}
+
+	initializedNotif, err := json.Marshal(rpcRequest{JSONRPC: "2.0", Method: "notifications/initialized"})
+	if err != nil {
+		return registerAgentOutput{}, true, fmt.Errorf("marshal notifications/initialized: %w", err)
+	}
+	if _, err := conn.Write(append(initializedNotif, '\n')); err != nil {
+		return registerAgentOutput{}, true, fmt.Errorf("write notifications/initialized to wormholed socket: %w", err)
+	}
 
 	argsRaw, err := json.Marshal(in)
 	if err != nil {
@@ -310,23 +330,42 @@ func doRegisterViaSocket(socketPath, project string, in registerAgentInput) (out
 		return registerAgentOutput{}, true, fmt.Errorf("marshal register arguments with project_id: %w", err)
 	}
 
-	reqBody, err := json.Marshal(localSocketRequest{Tool: "wormhole.agent.register", Args: argsWithProject})
+	paramsRaw, err := json.Marshal(toolsCallParams{Name: "wormhole.agent.register", Arguments: argsWithProject})
 	if err != nil {
-		return registerAgentOutput{}, true, fmt.Errorf("marshal local socket request: %w", err)
+		return registerAgentOutput{}, true, fmt.Errorf("marshal tools/call params: %w", err)
 	}
-	if _, err := conn.Write(append(reqBody, '\n')); err != nil {
-		return registerAgentOutput{}, true, fmt.Errorf("write to wormholed socket: %w", err)
+	callReq, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("2"), Method: "tools/call", Params: paramsRaw})
+	if err != nil {
+		return registerAgentOutput{}, true, fmt.Errorf("marshal tools/call request: %w", err)
 	}
-
-	var resp localSocketResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		return registerAgentOutput{}, true, fmt.Errorf("decode wormholed response: %w", err)
-	}
-	if resp.Error != "" {
-		return registerAgentOutput{}, true, fmt.Errorf("%s", resp.Error)
+	if _, err := conn.Write(append(callReq, '\n')); err != nil {
+		return registerAgentOutput{}, true, fmt.Errorf("write tools/call to wormholed socket: %w", err)
 	}
 
-	if err := json.Unmarshal(resp.Result, &out); err != nil {
+	callLine, err := reader.ReadBytes('\n')
+	if err != nil {
+		return registerAgentOutput{}, true, fmt.Errorf("read tools/call response from wormholed socket: %w", err)
+	}
+	var callResp rpcResponse
+	if err := json.Unmarshal(bytes.TrimSpace(callLine), &callResp); err != nil {
+		return registerAgentOutput{}, true, fmt.Errorf("decode tools/call response: %w", err)
+	}
+	if callResp.Error != nil {
+		return registerAgentOutput{}, true, fmt.Errorf("%s", callResp.Error.Message)
+	}
+
+	var result toolCallResult
+	if err := json.Unmarshal(callResp.Result, &result); err != nil {
+		return registerAgentOutput{}, true, fmt.Errorf("decode tools/call result: %w", err)
+	}
+	if len(result.Content) == 0 {
+		return registerAgentOutput{}, true, fmt.Errorf("empty register result from wormholed")
+	}
+	if result.IsError {
+		return registerAgentOutput{}, true, fmt.Errorf("%s", result.Content[0].Text)
+	}
+
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &out); err != nil {
 		return registerAgentOutput{}, true, fmt.Errorf("decode register result: %w", err)
 	}
 	return out, true, nil
@@ -405,7 +444,6 @@ func doListTasks(client *http.Client, server, project, token string) (listTasksO
 	}
 	return out, nil
 }
-
 
 // writeCredentials persists creds to path as indented JSON, creating the
 // parent directory if needed. File mode is 0600 (owner read/write only)

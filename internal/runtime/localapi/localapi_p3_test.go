@@ -4,6 +4,8 @@
 package localapi
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
@@ -16,7 +18,8 @@ import (
 	"github.com/H4RL33/wormhole/internal/runtime/scheduler"
 )
 
-// dialLocalSocket dials socketPath with retry.
+// dialLocalSocket dials socketPath with retry. Transport-agnostic (design
+// doc §3): unchanged by the P1 bespoke-protocol -> MCP JSON-RPC migration.
 func dialLocalSocket(t *testing.T, socketPath string) net.Conn {
 	t.Helper()
 	var conn net.Conn
@@ -31,33 +34,19 @@ func dialLocalSocket(t *testing.T, socketPath string) net.Conn {
 	return nil
 }
 
-// sendRequest sends one JSON-RPC tool call on a fresh connection to socketPath,
-// returning the parsed response. The P1 protocol is strictly one-request-per-
-// connection: handle reads one request, writes one response, then closes the
-// conn. Reusing a conn across calls fails silently because the server's next
-// ReadBytes blocks on EOF from the prior close().
-func sendRequest(t *testing.T, socketPath string, tool string, args map[string]interface{}) localResponse {
+// sendRequest performs the initialize -> notifications/initialized
+// handshake on a fresh connection to socketPath, then issues one
+// "tools/call", and returns the decoded result. Each call gets its own
+// connection (matching this suite's original one-call-per-connection test
+// style), unlike a real MCP client which would reuse one persistent
+// connection for many calls.
+func sendRequest(t *testing.T, socketPath string, tool string, args map[string]interface{}) mcpToolResponse {
 	t.Helper()
-	var conn net.Conn
-	for i := 0; i < 50; i++ {
-		conn, _ = net.Dial("unix", socketPath)
-		if conn != nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if conn == nil {
-		t.Fatal("could not dial socket")
-	}
+	conn := dialLocalSocket(t, socketPath)
 	defer conn.Close()
-
-	rawArgs, _ := json.Marshal(args)
-	req, _ := json.Marshal(localRequest{Tool: tool, Args: rawArgs})
-	conn.Write(append(req, '\n'))
-
-	var resp localResponse
-	json.NewDecoder(conn).Decode(&resp)
-	return resp
+	reader := bufio.NewReader(conn)
+	mcpInitialize(t, conn, reader)
+	return mcpCallTool(t, conn, reader, 2, tool, args)
 }
 
 // TestTwoAgentsPresenceWithoutCoordinationServer proves two agents on the same
@@ -314,22 +303,18 @@ func TestSubscriptionDeliversEvents(t *testing.T) {
 		"capabilities": []string{"review"},
 	})
 
-	// Open a persistent connection for subscription that will block and listen.
+	// Open a persistent connection for subscription that will keep listening
+	// for notifications/wormhole.event messages after the subscribe ack.
 	subConn := dialLocalSocket(t, socketPath)
 	defer subConn.Close()
+	subReader := bufio.NewReader(subConn)
+	mcpInitialize(t, subConn, subReader)
 
-	// Send subscription request on the persistent connection.
-	// This request will block inside handleChannelSubscribe until events arrive or connection closes.
-	rawArgs, _ := json.Marshal(map[string]interface{}{"namespace": "project-1"})
-	req, _ := json.Marshal(localRequest{Tool: "wormhole.channel.subscribe", Args: rawArgs})
-	subConn.Write(append(req, '\n'))
-
-	// Read the subscription_id response (first message on the subscription connection).
-	var subResp localResponse
-	err = json.NewDecoder(subConn).Decode(&subResp)
-	if err != nil {
-		t.Fatalf("no subscription response: %v", err)
-	}
+	// tools/call wormhole.channel.subscribe: the ack comes back as a normal
+	// tools/call result; event delivery afterward is
+	// notifications/wormhole.event messages on this same connection (design
+	// doc §1's resolved subscription-delivery question).
+	subResp := mcpCallTool(t, subConn, subReader, 2, "wormhole.channel.subscribe", map[string]interface{}{"namespace": "project-1"})
 	if subResp.Error != "" {
 		t.Fatalf("subscribe error: %s", subResp.Error)
 	}
@@ -353,21 +338,24 @@ func TestSubscriptionDeliversEvents(t *testing.T) {
 	// Give the event time to propagate through the eventbus → delivery goroutine → socket.
 	time.Sleep(50 * time.Millisecond)
 
-	// Read the delivered event from subConn.
-	var deliveredResp localResponse
+	// Read the delivered notification from subConn.
 	subConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-	err = json.NewDecoder(subConn).Decode(&deliveredResp)
+	line, err := subReader.ReadBytes('\n')
 	subConn.SetReadDeadline(time.Time{}) // clear deadline
 	if err != nil {
 		t.Fatalf("no event delivered over subscription: %v", err)
 	}
-	if deliveredResp.Error != "" {
-		t.Errorf("subscription delivered error: %s", deliveredResp.Error)
+	var note rpcRequest
+	if err := json.Unmarshal(bytes.TrimSpace(line), &note); err != nil {
+		t.Fatalf("decode notification: %v", err)
+	}
+	if note.Method != "notifications/wormhole.event" {
+		t.Fatalf("notification method = %q, want notifications/wormhole.event", note.Method)
 	}
 
 	// Verify the payload contains the agent-y presence data.
 	var result map[string]interface{}
-	json.Unmarshal(deliveredResp.Result, &result)
+	json.Unmarshal(note.Params, &result)
 	if agent, ok := result["agent"].(string); !ok || agent != "agent-y" {
 		t.Errorf("subscription event agent = %v, want agent-y", result["agent"])
 	}

@@ -9,13 +9,12 @@
 package localapi
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
-	"net"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/runtime/sync"
@@ -64,42 +63,17 @@ type callResponse struct {
 	Error  error
 }
 
-// dialAndCall dials srv's socket, sends a single localRequest for tool with
-// args marshaled as the request's Args, and decodes the response.
+// dialAndCall dials srv's socket, performs the initialize ->
+// notifications/initialized handshake, sends a single "tools/call" for
+// tool with args, and decodes the response.
 func dialAndCall(t *testing.T, srv *Server, tool string, args map[string]interface{}) callResponse {
 	t.Helper()
 
-	var conn net.Conn
-	var err error
-	for i := 0; i < 50; i++ {
-		conn, err = net.Dial("unix", srv.socketPath)
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if err != nil {
-		t.Fatalf("dial socket: %v", err)
-	}
+	conn := dialLocalSocket(t, srv.socketPath)
 	defer conn.Close()
-
-	argsRaw, err := json.Marshal(args)
-	if err != nil {
-		t.Fatalf("marshal args: %v", err)
-	}
-
-	reqRaw, err := json.Marshal(localRequest{Tool: tool, Args: argsRaw})
-	if err != nil {
-		t.Fatalf("marshal request: %v", err)
-	}
-	if _, err := conn.Write(append(reqRaw, '\n')); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
-	var resp localResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
+	reader := bufio.NewReader(conn)
+	mcpInitialize(t, conn, reader)
+	resp := mcpCallTool(t, conn, reader, 2, tool, args)
 	if resp.Error != "" {
 		return callResponse{Error: errors.New(resp.Error)}
 	}

@@ -1,14 +1,19 @@
 // Package localapi is wormholed's local API: a Unix-domain-socket server
-// coding harnesses connect to (RFC-0003 §6.1). Wire shapes (localRequest/
-// localResponse) are P1's own minimal protocol — one JSON request per
-// connection, one JSON response, connection closed. Later phases (P2+)
-// extend this to a persistent, multiplexed, subscription-capable protocol;
-// P1 deliberately keeps it to the smallest thing that proves the chain.
+// coding harnesses connect to (RFC-0003 §6.1), speaking real MCP JSON-RPC
+// 2.0 (initialize / notifications/initialized / tools/list / tools/call)
+// over a persistent, newline-delimited-JSON connection per client (design
+// doc: docs/superpowers/plans/2026-07-16-wormholed-mcp-endpoint-design.md,
+// issue #20 subtask 2). This replaced P1's one-shot {tool,args}->
+// {result,error} bespoke protocol (localRequest/localResponse, now
+// deleted) — see mcp.go for the tool registry, schema reflection, and
+// per-message dispatch (dispatchMCPMessage) that implement the MCP surface
+// on top of the handler methods below, which are unchanged internally.
 //
 // rpcRequest/rpcResponse/toolsCallParams/toolCallResult/whoAmIOutput mirror
 // internal/mcp's JSON-RPC 2.0 wire shapes for talking to the Coordination
-// Server. localapi cannot import internal/mcp (RFC-0003 §6.3 keeps
-// internal/runtime/* and internal/mcp separate trees), so the wire
+// Server (and, as of this MCP surface, for wormholed's own local socket
+// too — see mcp.go). localapi cannot import internal/mcp (RFC-0003 §6.3
+// keeps internal/runtime/* and internal/mcp separate trees), so the wire
 // contract is duplicated here, same as cmd/wormhole-cli/main.go already
 // does for the same reason.
 package localapi
@@ -84,18 +89,6 @@ type OrgContext struct {
 	ProjectID string             // project within this org
 }
 
-// localRequest is a P1/P2 local-socket request. P1: Tool only. P2+: args may be populated.
-type localRequest struct {
-	Tool string          `json:"tool"`
-	Args json.RawMessage `json:"args,omitempty"`
-}
-
-// localResponse is the P1 local-socket response.
-type localResponse struct {
-	Result json.RawMessage `json:"result,omitempty"`
-	Error  string          `json:"error,omitempty"`
-}
-
 // Server is wormholed's local API socket server (RFC-0003 §6.1).
 // P1 shipped whoami; P2 adds local-servable reads for tasks, events, and KB.
 // P3 adds eventbus, scheduler, and subscription support.
@@ -127,6 +120,11 @@ type Server struct {
 	closeOnce sync.Once
 	closeErr  error
 	shutdown  atomic.Bool
+
+	// registry is the local MCP tool registry (mcp.go), built once at
+	// construction time from the Server that will service every
+	// connection's tools/call dispatch (design doc §5 subtask 2).
+	registry *localRegistry
 }
 
 // New binds the Unix domain socket at socketPath. Callers must call Serve
@@ -149,7 +147,7 @@ func New(socketPath, coordServerURL, token, projectID string, store *localstore.
 	if err != nil {
 		return nil, fmt.Errorf("localapi: listen on %s: %w", socketPath, err)
 	}
-	return &Server{
+	srv := &Server{
 		listener:    ln,
 		socketPath:  socketPath,
 		httpClient:  &http.Client{Timeout: 10 * time.Second},
@@ -162,7 +160,9 @@ func New(socketPath, coordServerURL, token, projectID string, store *localstore.
 		er:          er,
 		kb:          kb,
 		qr:          qr,
-	}, nil
+	}
+	srv.registry = newLocalRegistry(srv)
+	return srv, nil
 }
 
 // NewWithRuntime binds the Unix domain socket at socketPath and wires eventbus
@@ -174,7 +174,7 @@ func NewWithRuntime(socketPath, coordServerURL, token, projectID string, store *
 	if err != nil {
 		return nil, fmt.Errorf("localapi: listen on %s: %w", socketPath, err)
 	}
-	return &Server{
+	srv := &Server{
 		listener:    ln,
 		socketPath:  socketPath,
 		httpClient:  &http.Client{Timeout: 10 * time.Second},
@@ -189,7 +189,9 @@ func NewWithRuntime(socketPath, coordServerURL, token, projectID string, store *
 		qr:          qr,
 		eventbus:    eb,
 		scheduler:   sched,
-	}, nil
+	}
+	srv.registry = newLocalRegistry(srv)
+	return srv, nil
 }
 
 // NewMultiOrg binds the Unix domain socket and configures multi-org support (P5+, RFC-0003 §7.1).
@@ -204,7 +206,7 @@ func NewMultiOrg(socketPath string, orgs map[string]config.Org, bindings []confi
 	if err != nil {
 		return nil, fmt.Errorf("localapi: listen on %s: %w", socketPath, err)
 	}
-	return &Server{
+	srv := &Server{
 		listener:   ln,
 		socketPath: socketPath,
 		httpClient: &http.Client{Timeout: 10 * time.Second},
@@ -218,7 +220,9 @@ func NewMultiOrg(socketPath string, orgs map[string]config.Org, bindings []confi
 		qr:         qr,
 		eventbus:   eb,
 		scheduler:  sched,
-	}, nil
+	}
+	srv.registry = newLocalRegistry(srv)
+	return srv, nil
 }
 
 // resolveOrgContext returns the org/creds/projectID for a request (P5 multi-org).
@@ -289,176 +293,31 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 }
 
+// handle services one connection as a persistent MCP JSON-RPC 2.0 session
+// (design doc §2, §5 subtask 2): initialize -> notifications/initialized ->
+// N x tools/list/tools/call, all on the same connection, until the client
+// disconnects. This replaces the old one-shot ReadBytes-once/dispatch-once/
+// close shape; mcpSession carries the per-connection lifecycle state
+// (initialized) and write serialization (writeMu) that one-shot dispatch
+// never needed.
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
+	sess := &mcpSession{}
 	reader := bufio.NewReader(conn)
-	line, err := reader.ReadBytes('\n')
-	if err != nil && len(line) == 0 {
-		return
-	}
-	var req localRequest
-	if err := json.Unmarshal(bytes.TrimSpace(line), &req); err != nil {
-		writeResponse(conn, localResponse{Error: fmt.Sprintf("localapi: decode request: %v", err)})
-		return
-	}
-
-	switch req.Tool {
-	case "wormhole.agent.whoami":
-		out, err := s.proxyWhoAmI(ctx)
-		if err != nil {
-			writeResponse(conn, localResponse{Error: err.Error()})
-			return
-		}
-		outRaw, _ := json.Marshal(out)
-		writeResponse(conn, localResponse{Result: outRaw})
-
-	case "wormhole.task.list":
-		result, err := s.localListTasks(ctx, req.Args)
-		if err != nil {
-			writeResponse(conn, localResponse{Error: err.Error()})
-			return
-		}
-		outRaw, _ := json.Marshal(result)
-		writeResponse(conn, localResponse{Result: outRaw})
-
-	case "wormhole.task.get":
-		result, err := s.localGetTask(ctx, req.Args)
-		if err != nil {
-			writeResponse(conn, localResponse{Error: err.Error()})
-			return
-		}
-		outRaw, _ := json.Marshal(result)
-		writeResponse(conn, localResponse{Result: outRaw})
-
-	case "wormhole.channel.list":
-		result, err := s.localListChannels(ctx, req.Args)
-		if err != nil {
-			writeResponse(conn, localResponse{Error: err.Error()})
-			return
-		}
-		outRaw, _ := json.Marshal(result)
-		writeResponse(conn, localResponse{Result: outRaw})
-
-	case "wormhole.channel.events":
-		result, err := s.localListChannelEvents(ctx, req.Args)
-		if err != nil {
-			writeResponse(conn, localResponse{Error: err.Error()})
-			return
-		}
-		outRaw, _ := json.Marshal(result)
-		writeResponse(conn, localResponse{Result: outRaw})
-
-	case "wormhole.kb.list":
-		result, err := s.localListArticles(ctx, req.Args)
-		if err != nil {
-			writeResponse(conn, localResponse{Error: err.Error()})
-			return
-		}
-		outRaw, _ := json.Marshal(result)
-		writeResponse(conn, localResponse{Result: outRaw})
-
-	case "wormhole.kb.get":
-		result, err := s.localGetArticle(ctx, req.Args)
-		if err != nil {
-			writeResponse(conn, localResponse{Error: err.Error()})
-			return
-		}
-		outRaw, _ := json.Marshal(result)
-		writeResponse(conn, localResponse{Result: outRaw})
-
-	case "wormhole.agent.register":
-		if isJoinRegisterArgs(req.Args) {
-			// RFC-0003 §8.1: `wormhole join` now targets wormholed, which
-			// proxies passport creation to the Coordination Server. RFC-0001
-			// §9 defines a single wormhole.agent.register tool for this and
-			// for local presence registration (P3's handleAgentRegister
-			// below); the two shapes never overlap in practice (join args
-			// carry owner/model/etc., presence args carry agent_id), so
-			// dispatch is by shape rather than inventing a second tool name.
-			outRaw, err := s.proxyRegister(ctx, req.Args)
-			if err != nil {
-				writeResponse(conn, localResponse{Error: err.Error()})
-				return
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(bytes.TrimSpace(line)) > 0 {
+			req, decodeErr := decodeMCPLine(line)
+			if decodeErr != nil {
+				writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", Error: &rpcError{Code: rpcParseError, Message: fmt.Sprintf("parse error: %v", decodeErr)}})
+			} else {
+				s.dispatchMCPMessage(ctx, sess, conn, s.registry, req)
 			}
-			writeResponse(conn, localResponse{Result: outRaw})
-			return
 		}
-		result, err := s.handleAgentRegister(ctx, req.Args)
 		if err != nil {
-			writeResponse(conn, localResponse{Error: err.Error()})
-			return
+			return // EOF or read error: connection done.
 		}
-		outRaw, _ := json.Marshal(result)
-		writeResponse(conn, localResponse{Result: outRaw})
-
-	case "wormhole.agent.presence":
-		result, err := s.handleAgentPresence(ctx, req.Args)
-		if err != nil {
-			writeResponse(conn, localResponse{Error: err.Error()})
-			return
-		}
-		outRaw, _ := json.Marshal(result)
-		writeResponse(conn, localResponse{Result: outRaw})
-
-	case "wormhole.agent.list":
-		result, err := s.handleAgentList(ctx, req.Args)
-		if err != nil {
-			writeResponse(conn, localResponse{Error: err.Error()})
-			return
-		}
-		outRaw, _ := json.Marshal(result)
-		writeResponse(conn, localResponse{Result: outRaw})
-
-	case "wormhole.task.route":
-		result, err := s.handleTaskRoute(ctx, req.Args)
-		if err != nil {
-			writeResponse(conn, localResponse{Error: err.Error()})
-			return
-		}
-		outRaw, _ := json.Marshal(result)
-		writeResponse(conn, localResponse{Result: outRaw})
-
-	case "wormhole.channel.subscribe":
-		s.handleChannelSubscribe(ctx, conn, req.Args)
-
-	case "wormhole.task.create":
-		result, err := s.handleTaskCreate(ctx, req.Args)
-		if err != nil {
-			writeResponse(conn, localResponse{Error: err.Error()})
-			return
-		}
-		outRaw, _ := json.Marshal(result)
-		writeResponse(conn, localResponse{Result: outRaw})
-
-	case "wormhole.kb.write":
-		result, err := s.handleKBWrite(ctx, req.Args)
-		if err != nil {
-			writeResponse(conn, localResponse{Error: err.Error()})
-			return
-		}
-		outRaw, _ := json.Marshal(result)
-		writeResponse(conn, localResponse{Result: outRaw})
-
-	case "wormhole.channel.post":
-		result, err := s.handleChannelPost(ctx, req.Args)
-		if err != nil {
-			writeResponse(conn, localResponse{Error: err.Error()})
-			return
-		}
-		outRaw, _ := json.Marshal(result)
-		writeResponse(conn, localResponse{Result: outRaw})
-
-	default:
-		writeResponse(conn, localResponse{Error: fmt.Sprintf("localapi: unsupported tool %q", req.Tool)})
 	}
-}
-
-func writeResponse(conn net.Conn, resp localResponse) {
-	data, err := json.Marshal(resp)
-	if err != nil {
-		return
-	}
-	conn.Write(append(data, '\n'))
 }
 
 // isJoinRegisterArgs reports whether a wormhole.agent.register call's args
@@ -1119,67 +978,10 @@ func (s *Server) handleTaskRoute(ctx context.Context, args json.RawMessage) (map
 	}, nil
 }
 
-// handleChannelSubscribe creates an eventbus subscription for the caller's connection.
-// Args: {"namespace": "x", "event_type": "presence.online", "capability": "code",
-// "agent_id": "agent-a"} (any one or more). "namespace" and "project" are the same
-// concept in this local runtime (s.projectID is passed as the eventbus namespace
-// everywhere a publish happens), so there is no separate project dimension to add
-// on top of namespace (Finding 5).
-// The subscription ID is returned; events will be delivered on this connection as
-// newline-delimited JSON messages until the subscriber calls close or the connection
-// is dropped. This function blocks until the subscription is closed or ctx is
-// cancelled (server shutdown), at which point it unsubscribes to release the
-// eventbus's subscriber-map entry and let this goroutine exit (Finding 4).
-func (s *Server) handleChannelSubscribe(ctx context.Context, conn net.Conn, args json.RawMessage) error {
-	if s.eventbus == nil {
-		return fmt.Errorf("localapi: channel subscribe: eventbus not available")
-	}
-
-	var argMap map[string]interface{}
-	if len(args) > 0 {
-		if err := json.Unmarshal(args, &argMap); err != nil {
-			return fmt.Errorf("localapi: channel subscribe: invalid args: %w", err)
-		}
-	}
-
-	ns, _ := argMap["namespace"].(string)
-	et, _ := argMap["event_type"].(string)
-	capability, _ := argMap["capability"].(string)
-	agentID, _ := argMap["agent_id"].(string)
-
-	sub, err := s.eventbus.Subscribe(ns, et, capability, agentID)
-	if err != nil {
-		return fmt.Errorf("localapi: channel subscribe: %w", err)
-	}
-
-	// Return the subscription info first so the caller knows it was created.
-	respJSON, _ := json.Marshal(map[string]string{
-		"subscription_id": sub.ID,
-		"namespace":        ns,
-		"event_type":       et,
-		"capability":       capability,
-		"agent_id":         agentID,
-	})
-	writeResponse(conn, localResponse{Result: respJSON})
-
-	// Block-deliver events on this connection until the subscription is closed
-	// or ctx is cancelled (server shutdown). Either path unsubscribes so the
-	// eventbus stops tracking this connection and this goroutine exits.
-	for {
-		select {
-		case <-ctx.Done():
-			s.eventbus.Unsubscribe(sub)
-			return nil
-		case <-sub.Done():
-			return nil // unsubscription
-		case payload, ok := <-sub.Events():
-			if !ok {
-				return nil // channel drained
-			}
-			writeResponse(conn, localResponse{Result: json.RawMessage(payload)})
-		}
-	}
-}
+// handleChannelSubscribe's old body moved to handleChannelSubscribeMCP
+// (mcp.go): event delivery is now notifications/wormhole.event messages
+// interleaved with other tools/call traffic on the same connection, not
+// this connection's sole writer (design doc §1, §2).
 
 // =============================================================================
 // Local write tools — task.create, kb.write, channel.post. Each writes the
@@ -1199,8 +1001,10 @@ func (s *Server) handleChannelSubscribe(ctx context.Context, conn net.Conn, args
 // handleTaskCreate serves wormhole.task.create: creates a task locally and
 // enqueues it for sync.
 // Args: {"title": "y", "description": "z", "priority": 0,
-//        "project_id": "xxx" (optional in single-org, required in multi-org),
-//        "parent_task_id": "..." (optional), "due_by": "RFC3339..." (optional)}
+//
+//	"project_id": "xxx" (optional in single-org, required in multi-org),
+//	"parent_task_id": "..." (optional), "due_by": "RFC3339..." (optional)}
+//
 // namespace_id, if present in args, is ignored — namespace is always resolved
 // from project_id (with multi-org bindings in P5+), never from the request.
 func (s *Server) handleTaskCreate(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
@@ -1282,8 +1086,10 @@ func (s *Server) handleTaskCreate(ctx context.Context, args json.RawMessage) (ma
 // handleKBWrite serves wormhole.kb.write: writes a KB article locally and
 // enqueues it for sync.
 // Args: {"agent_id": "y", "title": "z", "body": "...",
-//        "project_id": "xxx" (optional in single-org, required in multi-org),
-//        "frontmatter": {...} (optional)}
+//
+//	"project_id": "xxx" (optional in single-org, required in multi-org),
+//	"frontmatter": {...} (optional)}
+//
 // namespace_id, if present in args, is ignored — namespace is always resolved
 // from project_id (with multi-org bindings in P5+), never from the request.
 func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
@@ -1356,9 +1162,11 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 // handleChannelPost serves wormhole.channel.post: publishes a durable event
 // to a channel locally and enqueues it for sync.
 // Args: {"channel_id": "y", "agent_id": "z",
-//        "event_type": "discovery.logged",
-//        "project_id": "xxx" (optional in single-org, required in multi-org),
-//        "payload": {...} (optional), "note": "..." (optional)}
+//
+//	"event_type": "discovery.logged",
+//	"project_id": "xxx" (optional in single-org, required in multi-org),
+//	"payload": {...} (optional), "note": "..." (optional)}
+//
 // namespace_id, if present in args, is ignored — namespace is always resolved
 // from project_id (with multi-org bindings in P5+), never from the request.
 func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {

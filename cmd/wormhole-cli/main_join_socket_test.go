@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"net"
@@ -16,10 +17,12 @@ import (
 
 // fakeWormholed starts a fake wormholed local socket at the path
 // wormholedSocketPath() would derive under XDG_RUNTIME_DIR (set by the
-// caller via t.Setenv before calling this), and answers exactly one
-// wormhole.agent.register call with a canned localapi-shaped response
-// (RFC-0003 §8.1 join proxy, matching internal/runtime/localapi's
-// localRequest/localResponse wire shapes). Returns the socket path.
+// caller via t.Setenv before calling this), and speaks the real MCP
+// handshake (initialize -> notifications/initialized -> tools/call) that
+// doRegisterViaSocket now uses (RFC-0003 §8.1 join proxy, design doc:
+// docs/superpowers/plans/2026-07-16-wormholed-mcp-endpoint-design.md).
+// Answers exactly one wormhole.agent.register tools/call with a canned
+// result. Returns the socket path.
 func fakeWormholed(t *testing.T, out registerAgentOutput) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "runtime")
@@ -41,23 +44,56 @@ func fakeWormholed(t *testing.T, out registerAgentOutput) string {
 		}
 		defer conn.Close()
 
-		buf := make([]byte, 65536)
-		n, err := conn.Read(buf)
+		reader := bufio.NewReader(conn)
+
+		// initialize
+		line, err := reader.ReadBytes('\n')
 		if err != nil {
 			return
 		}
-		var req localSocketRequest
-		if err := json.Unmarshal(bytes.TrimSpace(buf[:n]), &req); err != nil {
+		var initReq rpcRequest
+		if err := json.Unmarshal(bytes.TrimSpace(line), &initReq); err != nil || initReq.Method != "initialize" {
 			return
 		}
-		if req.Tool != "wormhole.agent.register" {
-			resp, _ := json.Marshal(localSocketResponse{Error: "unexpected tool: " + req.Tool})
-			conn.Write(resp)
+		initResp, _ := json.Marshal(rpcResponse{JSONRPC: "2.0", ID: initReq.ID, Result: json.RawMessage(`{}`)})
+		conn.Write(append(initResp, '\n'))
+
+		// notifications/initialized (no response)
+		line, err = reader.ReadBytes('\n')
+		if err != nil {
+			return
+		}
+		var notif rpcRequest
+		if err := json.Unmarshal(bytes.TrimSpace(line), &notif); err != nil || notif.Method != "notifications/initialized" {
+			return
+		}
+
+		// tools/call
+		line, err = reader.ReadBytes('\n')
+		if err != nil {
+			return
+		}
+		var callReq rpcRequest
+		if err := json.Unmarshal(bytes.TrimSpace(line), &callReq); err != nil || callReq.Method != "tools/call" {
+			return
+		}
+		var params toolsCallParams
+		if err := json.Unmarshal(callReq.Params, &params); err != nil {
+			return
+		}
+		if params.Name != "wormhole.agent.register" {
+			result, _ := json.Marshal(toolCallResult{
+				Content: []toolCallResultContent{{Type: "text", Text: "unexpected tool: " + params.Name}},
+				IsError: true,
+			})
+			resp, _ := json.Marshal(rpcResponse{JSONRPC: "2.0", ID: callReq.ID, Result: result})
+			conn.Write(append(resp, '\n'))
 			return
 		}
 		outRaw, _ := json.Marshal(out)
-		resp, _ := json.Marshal(localSocketResponse{Result: outRaw})
-		conn.Write(resp)
+		result, _ := json.Marshal(toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: string(outRaw)}}})
+		resp, _ := json.Marshal(rpcResponse{JSONRPC: "2.0", ID: callReq.ID, Result: result})
+		conn.Write(append(resp, '\n'))
 	}()
 
 	return socketPath

@@ -74,29 +74,7 @@ func TestServer_ProxiesWhoAmI(t *testing.T) {
 	go srv.Serve(ctx)
 	defer srv.Close()
 
-	// Give Serve a moment to bind the socket.
-	var conn net.Conn
-	for i := 0; i < 50; i++ {
-		conn, err = net.Dial("unix", socketPath)
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if err != nil {
-		t.Fatalf("dial socket: %v", err)
-	}
-	defer conn.Close()
-
-	reqRaw, _ := json.Marshal(localRequest{Tool: "wormhole.agent.whoami"})
-	if _, err := conn.Write(append(reqRaw, '\n')); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
-	var resp localResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
+	resp := sendRequest(t, socketPath, "wormhole.agent.whoami", nil)
 	if resp.Error != "" {
 		t.Fatalf("got error response: %s", resp.Error)
 	}
@@ -197,28 +175,13 @@ func TestServer_UnknownTool(t *testing.T) {
 	go srv.Serve(ctx)
 	defer srv.Close()
 
-	var conn net.Conn
-	for i := 0; i < 50; i++ {
-		conn, err = net.Dial("unix", socketPath)
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if err != nil {
-		t.Fatalf("dial socket: %v", err)
-	}
-	defer conn.Close()
-
-	reqRaw, _ := json.Marshal(localRequest{Tool: "wormhole.task.create"})
-	conn.Write(append(reqRaw, '\n'))
-
-	var resp localResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
+	// This server was constructed with qr=nil, so wormhole.task.create's
+	// handler itself errors ("sync queue not available") — still exercises
+	// the "tools/call wraps a handler error into isError:true" path this
+	// test originally proved for an unrecognized tool name.
+	resp := sendRequest(t, socketPath, "wormhole.task.create", nil)
 	if resp.Error == "" {
-		t.Fatalf("want error for unsupported tool, got none")
+		t.Fatalf("want error response, got none")
 	}
 }
 
@@ -250,28 +213,7 @@ func TestServer_LocalTaskList(t *testing.T) {
 	go srv.Serve(ctx)
 	defer srv.Close()
 
-	var conn net.Conn
-	for i := 0; i < 50; i++ {
-		conn, err = net.Dial("unix", socketPath)
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if err != nil {
-		t.Fatalf("dial socket: %v", err)
-	}
-	defer conn.Close()
-
-	reqRaw, _ := json.Marshal(localRequest{Tool: "wormhole.task.list"})
-	if _, err := conn.Write(append(reqRaw, '\n')); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
-	var resp localResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
+	resp := sendRequest(t, socketPath, "wormhole.task.list", nil)
 	if resp.Error != "" {
 		t.Fatalf("got error response: %s", resp.Error)
 	}
@@ -318,29 +260,7 @@ func TestServer_LocalTaskGet(t *testing.T) {
 	go srv.Serve(ctx)
 	defer srv.Close()
 
-	var conn net.Conn
-	for i := 0; i < 50; i++ {
-		conn, err = net.Dial("unix", socketPath)
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if err != nil {
-		t.Fatalf("dial socket: %v", err)
-	}
-	defer conn.Close()
-
-	args, _ := json.Marshal(map[string]string{"task_id": task.ID})
-	reqRaw, _ := json.Marshal(localRequest{Tool: "wormhole.task.get", Args: args})
-	if _, err := conn.Write(append(reqRaw, '\n')); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
-	var resp localResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
+	resp := sendRequest(t, socketPath, "wormhole.task.get", map[string]interface{}{"task_id": task.ID})
 	if resp.Error != "" {
 		t.Fatalf("got error response: %s", resp.Error)
 	}
@@ -377,30 +297,8 @@ func TestServer_LocalTaskGetMissingTaskID(t *testing.T) {
 	go srv.Serve(ctx)
 	defer srv.Close()
 
-	var conn net.Conn
-	for i := 0; i < 50; i++ {
-		conn, err = net.Dial("unix", socketPath)
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if err != nil {
-		t.Fatalf("dial socket: %v", err)
-	}
-	defer conn.Close()
-
 	// Send request with empty args (no task_id).
-	args, _ := json.Marshal(map[string]string{})
-	reqRaw, _ := json.Marshal(localRequest{Tool: "wormhole.task.get", Args: args})
-	if _, err := conn.Write(append(reqRaw, '\n')); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
-	var resp localResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
+	resp := sendRequest(t, socketPath, "wormhole.task.get", map[string]interface{}{})
 	if resp.Error == "" {
 		t.Fatalf("want error for missing task_id, got none")
 	}
@@ -431,28 +329,7 @@ func TestServer_LocalChannelList(t *testing.T) {
 	go srv.Serve(ctx)
 	defer srv.Close()
 
-	var conn net.Conn
-	for i := 0; i < 50; i++ {
-		conn, err = net.Dial("unix", socketPath)
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if err != nil {
-		t.Fatalf("dial socket: %v", err)
-	}
-	defer conn.Close()
-
-	reqRaw, _ := json.Marshal(localRequest{Tool: "wormhole.channel.list"})
-	if _, err := conn.Write(append(reqRaw, '\n')); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
-	var resp localResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
+	resp := sendRequest(t, socketPath, "wormhole.channel.list", nil)
 	if resp.Error != "" {
 		t.Fatalf("got error response: %s", resp.Error)
 	}
@@ -495,28 +372,7 @@ func TestServer_LocalChannelEvents(t *testing.T) {
 	go srv.Serve(ctx)
 	defer srv.Close()
 
-	var conn net.Conn
-	for i := 0; i < 50; i++ {
-		conn, err = net.Dial("unix", socketPath)
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if err != nil {
-		t.Fatalf("dial socket: %v", err)
-	}
-	defer conn.Close()
-
-	reqRaw, _ := json.Marshal(localRequest{Tool: "wormhole.channel.events"})
-	if _, err := conn.Write(append(reqRaw, '\n')); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
-	var resp localResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
+	resp := sendRequest(t, socketPath, "wormhole.channel.events", nil)
 	if resp.Error != "" {
 		t.Fatalf("got error response: %s", resp.Error)
 	}
@@ -560,28 +416,7 @@ func TestServer_LocalKBList(t *testing.T) {
 	go srv.Serve(ctx)
 	defer srv.Close()
 
-	var conn net.Conn
-	for i := 0; i < 50; i++ {
-		conn, err = net.Dial("unix", socketPath)
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if err != nil {
-		t.Fatalf("dial socket: %v", err)
-	}
-	defer conn.Close()
-
-	reqRaw, _ := json.Marshal(localRequest{Tool: "wormhole.kb.list"})
-	if _, err := conn.Write(append(reqRaw, '\n')); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
-	var resp localResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
+	resp := sendRequest(t, socketPath, "wormhole.kb.list", nil)
 	if resp.Error != "" {
 		t.Fatalf("got error response: %s", resp.Error)
 	}
@@ -620,30 +455,8 @@ func TestServer_LocalKBGetMissingArticleID(t *testing.T) {
 	go srv.Serve(ctx)
 	defer srv.Close()
 
-	var conn net.Conn
-	for i := 0; i < 50; i++ {
-		conn, err = net.Dial("unix", socketPath)
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if err != nil {
-		t.Fatalf("dial socket: %v", err)
-	}
-	defer conn.Close()
-
 	// Send request with empty args (no article_id) - should fallback to list.
-	args, _ := json.Marshal(map[string]string{})
-	reqRaw, _ := json.Marshal(localRequest{Tool: "wormhole.kb.get", Args: args})
-	if _, err := conn.Write(append(reqRaw, '\n')); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
-	var resp localResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
+	resp := sendRequest(t, socketPath, "wormhole.kb.get", map[string]interface{}{})
 	if resp.Error != "" {
 		t.Fatalf("got error response: %s", resp.Error)
 	}
