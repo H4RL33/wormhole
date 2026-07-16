@@ -91,3 +91,85 @@ func TestLoad_FallsBackToHomeWhenXDGUnset(t *testing.T) {
 		t.Fatalf("got db path %q, want XDG default fallback under home", cfg.DBPath)
 	}
 }
+
+func writeFakeCredentialsWithProjectID(t *testing.T, home, profile string, projectID string) {
+	t.Helper()
+	dir := filepath.Join(home, ".wormhole", "credentials")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	data, err := json.Marshal(map[string]string{
+		"server":     "http://localhost:8080",
+		"project_id": projectID,
+		"agent_id":   "agent-1",
+		"token":      "test-token",
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, profile+".json"), data, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+}
+
+func TestLoadMultiOrg_NoCredentials(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	_, err := LoadMultiOrg()
+	if !errors.Is(err, ErrNoCredentials) {
+		t.Fatalf("got err %v, want ErrNoCredentials", err)
+	}
+}
+
+func TestLoadMultiOrg_PopulatesBindings(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(home, "run"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+
+	// Write multiple profiles with different project IDs
+	writeFakeCredentialsWithProjectID(t, home, "acme-corp", "proj-acme")
+	writeFakeCredentialsWithProjectID(t, home, "widgets-inc", "proj-widgets")
+	// Profile with empty project ID should be skipped
+	writeFakeCredentialsWithProjectID(t, home, "no-project", "")
+
+	cfg, err := LoadMultiOrg()
+	if err != nil {
+		t.Fatalf("LoadMultiOrg: %v", err)
+	}
+
+	// Verify orgs are loaded
+	if len(cfg.Orgs) != 3 {
+		t.Fatalf("got %d orgs, want 3", len(cfg.Orgs))
+	}
+
+	// Verify bindings are populated and correct
+	if len(cfg.Bindings) != 2 {
+		t.Fatalf("got %d bindings, want 2 (empty project_id should be skipped)", len(cfg.Bindings))
+	}
+
+	// Find the bindings and verify them
+	bindingMap := make(map[string]string)
+	for _, b := range cfg.Bindings {
+		bindingMap[b.ProjectID] = b.OrgName
+	}
+
+	if bindingMap["proj-acme"] != "acme-corp" {
+		t.Fatalf("binding for proj-acme: got %q, want acme-corp", bindingMap["proj-acme"])
+	}
+	if bindingMap["proj-widgets"] != "widgets-inc" {
+		t.Fatalf("binding for proj-widgets: got %q, want widgets-inc", bindingMap["proj-widgets"])
+	}
+	if _, hasNoProject := bindingMap[""]; hasNoProject {
+		t.Fatalf("binding for empty project_id should not exist")
+	}
+
+	// Verify paths are set correctly
+	if cfg.SocketPath != filepath.Join(home, "run", "wormhole", "wormholed.sock") {
+		t.Fatalf("got socket path %q", cfg.SocketPath)
+	}
+	if cfg.DBPath != filepath.Join(home, "data", "wormhole", "wormholed.db") {
+		t.Fatalf("got db path %q", cfg.DBPath)
+	}
+}
