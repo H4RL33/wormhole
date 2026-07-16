@@ -33,6 +33,8 @@ func main() {
 	kbStore := kb.NewStore(db, kb.StubEmbedder{}, cfg.KBDedupThreshold, cfg.KBMaxBodyLength, cfg.KBMinLinksDecision, cfg.KBMinLinksPolicy, cfg.KBMinLinksProcedure)
 	rolesStore := roles.NewStore(db)
 
+	syncRateLimiter := mcp.NewSyncRateLimiter(30, time.Minute)
+
 	registry := mcp.NewRegistry()
 	registry.Register(mcp.RegisterAgentTool(identityStore, eventsStore, rolesStore, kbStore))
 	registry.Register(mcp.WhoAmITool())
@@ -50,10 +52,10 @@ func main() {
 	registry.Register(mcp.SearchArticlesTool(kbStore))
 	registry.Register(mcp.GetArticleTool(kbStore))
 	registry.Register(mcp.GetArticleLinksTool(kbStore))
-	registry.Register(mcp.BootstrapTool(tasksStore, kbStore, eventsStore))
-	registry.Register(mcp.IncrementalPullTool(tasksStore, kbStore, eventsStore))
-	registry.Register(mcp.IncrementalPushTool(tasksStore, kbStore, eventsStore))
-	registry.Register(mcp.ConflictReportTool(tasksStore, kbStore, eventsStore))
+	registry.Register(mcp.BootstrapTool(tasksStore, kbStore, eventsStore, syncRateLimiter))
+	registry.Register(mcp.IncrementalPullTool(tasksStore, kbStore, eventsStore, syncRateLimiter))
+	registry.Register(mcp.IncrementalPushTool(tasksStore, kbStore, eventsStore, syncRateLimiter))
+	registry.Register(mcp.ConflictReportTool(tasksStore, kbStore, eventsStore, syncRateLimiter))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {

@@ -71,8 +71,10 @@ func TestEngineStartStop(t *testing.T) {
 	defer qRepo.db.Close()
 
 	cfg := Config{
-		BatchInterval: 100 * time.Millisecond,
-		BatchSize:     10,
+		BatchInterval:         100 * time.Millisecond,
+		BatchSize:             10,
+		LatencyCheckInterval:  50 * time.Millisecond,
+		HighPriorityThreshold: 2,
 	}
 	engine := New("http://localhost:8080", "token", "ns-1", qRepo, aRepo, nil, nil, cfg)
 
@@ -178,8 +180,10 @@ func TestOfflineQueueSurvivalNetworkFailure(t *testing.T) {
 
 	// Create engine with unreachable server (intentional network failure).
 	cfg := Config{
-		BatchInterval: 50 * time.Millisecond,
-		BatchSize:     10,
+		BatchInterval:         50 * time.Millisecond,
+		BatchSize:             10,
+		LatencyCheckInterval:  25 * time.Millisecond,
+		HighPriorityThreshold: 2,
 	}
 	engine := New("http://unreachable-server:9999", "token", "ns-1", qRepo, aRepo, nil, nil, cfg)
 
@@ -313,6 +317,92 @@ func TestOfflineQueueReconnect(t *testing.T) {
 		if len(stillPending) != 0 {
 			t.Fatalf("Phase 3: After delivery, expected 0 pending, got %d", len(stillPending))
 		}
+	}
+}
+
+// TestPushBatchPartialFailure tests that pushBatch correctly handles per-item errors
+// from the server: failed items remain pending, successful items are marked delivered.
+// This tests the fix for issue #15.
+func TestPushBatchPartialFailure(t *testing.T) {
+	qRepo, aRepo := setupTestRepos(t)
+	defer qRepo.db.Close()
+
+	ctx := context.Background()
+
+	// Enqueue two items: task-1 and task-2.
+	payload1 := json.RawMessage(`{"title": "task 1"}`)
+	_, err := qRepo.Enqueue(ctx, "ns-1", "task", "task-1", "create", payload1, 0)
+	if err != nil {
+		t.Fatalf("Enqueue entry1 failed: %v", err)
+	}
+
+	payload2 := json.RawMessage(`{"title": "task 2"}`)
+	_, err = qRepo.Enqueue(ctx, "ns-1", "task", "task-2", "create", payload2, 0)
+	if err != nil {
+		t.Fatalf("Enqueue entry2 failed: %v", err)
+	}
+
+	// Verify both entries are pending.
+	pending, err := qRepo.ListPending(ctx, "ns-1", 10)
+	if err != nil {
+		t.Fatalf("ListPending failed: %v", err)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("Expected 2 pending entries, got %d", len(pending))
+	}
+
+	// Create an engine with a mock callSyncToolWithResult that simulates
+	// a partial-failure server response: task-1 succeeds, task-2 fails.
+	cfg := DefaultConfig()
+	engine := New("http://localhost:8080", "token", "ns-1", qRepo, aRepo, nil, nil, cfg)
+
+	// Set test hook to return a mock response with partial failure.
+	engine.testCallSyncToolWithResultFn = func(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
+		// Mock server response with partial failure: task-1 succeeds, task-2 fails.
+		return map[string]interface{}{
+			"items_received": 2,
+			"applied": []map[string]interface{}{
+				{
+					"id":    "task-1",
+					"type":  "task",
+					"error": "", // empty error = success
+				},
+				{
+					"id":    "task-2",
+					"type":  "task",
+					"error": "unsupported entity_type", // non-empty error = failure
+				},
+			},
+			"timestamp": "2026-01-01T00:00:00Z",
+			"version":   1,
+		}, nil
+	}
+
+	// Call pushBatch.
+	err = engine.pushBatch(ctx)
+	if err != nil {
+		t.Fatalf("pushBatch failed: %v", err)
+	}
+
+	// Verify that task-1 is no longer pending (marked delivered).
+	stillPending, err := qRepo.ListPending(ctx, "ns-1", 10)
+	if err != nil {
+		t.Fatalf("ListPending after push failed: %v", err)
+	}
+
+	// We expect only task-2 to still be pending (task-1 should be delivered).
+	if len(stillPending) != 1 {
+		t.Fatalf("Expected 1 pending entry after push, got %d", len(stillPending))
+	}
+
+	// The remaining entry should be task-2 (the one that failed).
+	if stillPending[0].EntityID != "task-2" {
+		t.Errorf("Expected task-2 to remain pending, but got %s", stillPending[0].EntityID)
+	}
+
+	// Verify that task-2 is not marked as delivered.
+	if stillPending[0].DeliveredAt != nil {
+		t.Errorf("task-2 should not be marked delivered, but DeliveredAt is %v", stillPending[0].DeliveredAt)
 	}
 }
 

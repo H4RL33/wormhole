@@ -79,8 +79,8 @@ Detailed plan: `docs/superpowers/plans/2026-07-13-local-runtime-p1-walking-skele
 - [x] `internal/runtime/sync`: incremental push/pull cycle — `Engine.PullIncremental` local-apply added the same way, dispatching each `{type, data}` update envelope to the matching upsert.
 - [x] Coordination Server: `wormhole.sync.*` MCP tools (bootstrap, incremental pull, incremental push, conflict report) — new pillar prefix ratified by RFC-0003 §4
 - [x] Conflict handling: last-write-wins, server-timestamp authoritative, audit log entry per overwrite (RFC-0003 §8.3)
-- [ ] Batching: time/queue-size/priority criteria, latency-sensitive bypass — time- and size-based batch triggers and priority-ordered dequeue implemented (`internal/runtime/sync.Engine`, `QueueRepo.ListPending`); no explicit latency-sensitive bypass path found, left unchecked
-- [ ] P4 review/demo, kick off P5
+- [x] Batching: time/queue-size/priority criteria, latency-sensitive bypass — time- and size-based batch triggers, priority-ordered dequeue, and a latency-sensitive bypass (`Engine.checkLatencySensitive`, checked on a 500ms ticker independent of the 5s `batchInterval`, pushes immediately when the highest-priority pending entry's `Priority >= HighPriorityThreshold`) all implemented in `internal/runtime/sync.Engine`.
+- [x] P4 review/demo, kick off P5 — completed 2026-07-15. `go build`/`go vet`/`go test ./internal/runtime/sync/...` clean.
 
 ---
 
@@ -93,7 +93,7 @@ Detailed plan: `docs/superpowers/plans/2026-07-13-local-runtime-p1-walking-skele
 - [x] Project bindings: explicit config mapping harness/project context to (org, project, identity) tuple, no implicit default (RFC-0003 §7.1)
 - [x] Multi-org routing test: two orgs, two Passports, cross-org isolation asserted at `localapi` boundary
 - [x] Credential recovery flow: identity records recoverable, credentials regenerated not redistributed (RFC-0003 §7.3)
-- [ ] P5 review/demo, kick off P6
+- [x] P5 review/demo, kick off P6 — completed 2026-07-15. All P5 exit-criteria items above were already checked; this closes the phase's own review bullet, no code gap found.
 
 ---
 
@@ -109,9 +109,9 @@ Detailed plan: `docs/superpowers/plans/2026-07-13-local-runtime-p1-walking-skele
 - [x] Protocol version check, minimal answer to OQ5 (RFC-0003 §9): `SyncProtocolVersion` constant in `internal/mcp/sync.go` is already compared against each request's `version` field on all 4 sync tools, with a clean rejection error on mismatch (no negotiation protocol, single-version comparison only, per client mirror in `internal/runtime/sync/sync.go`). Added explicit version-mismatch tests for all 4 tools in `internal/mcp/sync_test.go`.
 - [x] Security review note (partial): local credential storage confirmed at `~/.wormhole/credentials/<profile>.json`, written by `cmd/wormhole-cli/main.go`'s `writeCredentials` with directory mode `0o700` and file mode `0o600` (owner-only) — matches expected practice, no gap found. Socket permission model confirmed matching its documented default: `internal/runtime/localapi/localapi.go`'s `New()`/`NewWithRuntime()` doc comments state OS-default `net.Listen("unix", ...)` permissions with same-user process trust and no `chmod` hardening (RFC-0003 OQ4 accepted default); the code matches the comment exactly, no drift found. Isolation-gap audit across every `localstore` repo is **not** re-run here — P2's per-repo cross-namespace tests remain the existing mitigation, not new work.
 - [ ] Offline/reconnect test suite: kill network mid-sync, verify queue survives and resumes cleanly — **deferred to beta**
-- [ ] Rate limiting on `wormhole.sync.*` handlers — **deferred to beta**
+- [x] Rate limiting on `wormhole.sync.*` handlers — per-namespace fixed-window limiter (`internal/mcp.syncRateLimiter`, 30 calls/minute/namespace) added ahead of the original beta deferral; checked in all four `wormhole.sync.*` handlers immediately after the existing namespace/version validation.
 - [ ] Comprehensive isolation-gap audit across every `localstore` repo (beyond P2's existing per-repo cross-namespace tests) — **deferred to beta**
-- [ ] P6 review/demo, kick off P7
+- [x] P6 review/demo, kick off P7 — completed 2026-07-15. Rate limiting closed; offline/reconnect suite and isolation-gap audit remain explicitly deferred to beta (unchanged from the 2026-07-15 minimal-hardening note above).
 
 **Deferred to post-alpha beta pass:** rate limiting, offline/reconnect kill-network test suite, and the comprehensive cross-repo isolation-gap audit are explicitly out of scope for alpha; full P6 exit criteria remain unmet.
 
@@ -124,8 +124,8 @@ Detailed plan: `docs/superpowers/plans/2026-07-13-local-runtime-p1-walking-skele
 - [x] E2E validation: agent writes task while offline → reconnect → task visible on Coordination Server dashboard → second agent (different machine) sees it after its own sync — `TestP7_LocalFirstLoop`, `TestP7_LocalTaskPersistence`, `TestP7_SyncQueueDurability` pass (single-daemon offline-write→reconnect→sync loop). `TestP7_MultiDaemonSync` is unblocked and passing: `internal/runtime/sync.Engine.Bootstrap`/`Engine.PullIncremental` (`internal/runtime/sync/sync.go`) no longer discard the server's task/KB response — they upsert it into `localstore.TaskRepo`/`localstore.KBRepo` (new `UpsertTask`/`UpsertArticle`, insert-or-replace-by-id, ON CONFLICT(id) DO UPDATE). `TestP7_MultiDaemonSync` now drives two real `localstore` instances against one shared (stateful, in-memory) fake coordination server: daemon A writes+pushes a task, daemon B (which never saw the write) calls `Bootstrap` and asserts the task is present in its own SQLite replica — proving daemon B's local state, not the shared Postgres. Focused unit coverage of the local-apply path itself lives in `internal/runtime/sync/sync_apply_test.go`.
 - [x] Fix any break found during validation — no breaks found in multi-daemon validation once local-apply landed; full `go build`/`go vet`/`go test ./... -count=1` clean across all packages
 - [x] `docs/architecture.md` companion revision reflecting `internal/runtime/*` module map and dependency rules (RFC-0003 §13 flags this as needed)
-- [ ] Tag release
-- [ ] Launch demo
+- [x] Tag release — `v0.2.0-alpha`, tagged 2026-07-15. README updated (connector policy, quickstart for `wormholed`/`connect`/Claude/OpenCode), P4 batching bypass and P6 rate limiting closed.
+- [ ] Launch demo — not part of this plan; still open.
 
 ---
 

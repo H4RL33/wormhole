@@ -509,6 +509,7 @@ func TestRunJoin_KBSync_FailureIsNonFatal(t *testing.T) {
 func TestRunJoin_Step3_PostsToIntroductionsChannel(t *testing.T) {
 	var gotChannelID string
 	var gotPayloadText string
+	var gotNote *string
 
 	srv := fakeServerExtended(t,
 		func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
@@ -531,6 +532,7 @@ func TestRunJoin_Step3_PostsToIntroductionsChannel(t *testing.T) {
 				t.Fatalf("unmarshal post payload: %v", err)
 			}
 			gotPayloadText = payload.Text
+			gotNote = in.Note
 			return postEventOutput{EventID: "evt-123"}, nil
 		},
 		nil,
@@ -558,6 +560,9 @@ func TestRunJoin_Step3_PostsToIntroductionsChannel(t *testing.T) {
 	if gotPayloadText != wantText {
 		t.Fatalf("posted payload text %q, want %q", gotPayloadText, wantText)
 	}
+	if gotNote == nil || *gotNote != wantText {
+		t.Fatalf("posted note field: got %v, want %q", gotNote, wantText)
+	}
 	if !strings.Contains(stdout.String(), "Introducing agent to #introductions...") {
 		t.Fatalf("stdout missing introduction notice: %q", stdout.String())
 	}
@@ -565,6 +570,7 @@ func TestRunJoin_Step3_PostsToIntroductionsChannel(t *testing.T) {
 
 func TestRunJoin_Step3_IntroFallbackToAgentID(t *testing.T) {
 	var gotPayloadText string
+	var gotNote *string
 
 	srv := fakeServerExtended(t,
 		func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
@@ -585,6 +591,7 @@ func TestRunJoin_Step3_IntroFallbackToAgentID(t *testing.T) {
 				t.Fatalf("unmarshal post payload: %v", err)
 			}
 			gotPayloadText = payload.Text
+			gotNote = in.Note
 			return postEventOutput{EventID: "evt-123"}, nil
 		},
 		nil,
@@ -606,6 +613,9 @@ func TestRunJoin_Step3_IntroFallbackToAgentID(t *testing.T) {
 	wantText := "agent-1 joined the project."
 	if gotPayloadText != wantText {
 		t.Fatalf("posted payload text %q, want %q", gotPayloadText, wantText)
+	}
+	if gotNote == nil || *gotNote != wantText {
+		t.Fatalf("posted note field: got %v, want %q", gotNote, wantText)
 	}
 }
 

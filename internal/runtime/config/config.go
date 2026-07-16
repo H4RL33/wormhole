@@ -126,6 +126,8 @@ func Load(profileName string) (Config, error) {
 // LoadMultiOrg reads all credential profiles from ~/.wormhole/credentials/
 // and returns them as an org map. Supports multi-org wormholed (RFC-0003 §7.1, P5).
 // Returns ErrNoCredentials if no profiles are found.
+// RFC-0003 §7.1 requires explicit project bindings: each org's ProjectID (if non-empty)
+// is automatically bound to that org, with no implicit default.
 func LoadMultiOrg() (MultiOrgConfig, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -142,6 +144,7 @@ func LoadMultiOrg() (MultiOrgConfig, error) {
 	}
 
 	orgs := make(map[string]Org)
+	bindings := []ProjectBinding{}
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
@@ -162,6 +165,15 @@ func LoadMultiOrg() (MultiOrgConfig, error) {
 		}
 
 		orgs[profileName] = Org{Name: profileName, Credentials: creds}
+
+		// Build bindings: each org with a non-empty ProjectID gets a binding.
+		// This ensures explicit bindings per RFC-0003 §7.1 with no implicit default.
+		if creds.ProjectID != "" {
+			bindings = append(bindings, ProjectBinding{
+				ProjectID: creds.ProjectID,
+				OrgName:   profileName,
+			})
+		}
 	}
 
 	if len(orgs) == 0 {
@@ -181,6 +193,6 @@ func LoadMultiOrg() (MultiOrgConfig, error) {
 		SocketPath: filepath.Join(runtimeDir, "wormhole", "wormholed.sock"),
 		DBPath:     filepath.Join(dataDir, "wormhole", "wormholed.db"),
 		Orgs:       orgs,
-		Bindings:   nil, // empty by default, caller can populate if needed
+		Bindings:   bindings,
 	}, nil
 }

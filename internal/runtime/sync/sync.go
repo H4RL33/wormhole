@@ -18,33 +18,43 @@ import (
 // Engine orchestrates the local sync lifecycle: bootstrap, incremental push/pull,
 // and batching (RFC-0003 §8). It holds per-org state including queue and audit repos.
 type Engine struct {
-	httpClient    *http.Client
-	coordServer   string
-	token         string
-	namespaceID   string
-	queueRepo     *QueueRepo
-	auditRepo     *AuditRepo
-	taskRepo      *localstore.TaskRepo
-	kbRepo        *localstore.KBRepo
-	mu            sync.Mutex
-	lastSyncTime  time.Time
-	batchInterval time.Duration
-	batchSize     int
-	shutdown      chan struct{}
-	wg            sync.WaitGroup
+	httpClient            *http.Client
+	coordServer           string
+	token                 string
+	namespaceID           string
+	queueRepo             *QueueRepo
+	auditRepo             *AuditRepo
+	taskRepo              *localstore.TaskRepo
+	kbRepo                *localstore.KBRepo
+	mu                    sync.Mutex
+	lastSyncTime          time.Time
+	batchInterval         time.Duration
+	batchSize             int
+	latencyCheckInterval  time.Duration
+	highPriorityThreshold int
+	shutdown              chan struct{}
+	wg                    sync.WaitGroup
+	// testCallSyncToolWithResultFn is for testing only: if set, overrides callSyncToolWithResult.
+	testCallSyncToolWithResultFn func(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error)
 }
 
 // Config holds tunable sync batching parameters (RFC-0003 §8.2).
 type Config struct {
-	BatchInterval time.Duration // time-based batching threshold
-	BatchSize     int           // queue-size batching threshold
+	BatchInterval         time.Duration // time-based batching threshold
+	BatchSize             int           // queue-size batching threshold
+	LatencyCheckInterval  time.Duration // how often to check for high-priority entries needing an immediate push
+	HighPriorityThreshold int           // queue entries with Priority >= this bypass BatchInterval
 }
 
-// DefaultConfig returns conservative batching defaults: 5 sec interval, 50 item batch.
+// DefaultConfig returns conservative batching defaults: 5 sec interval, 50
+// item batch, high-priority entries (priority >= 2) checked every 500ms
+// instead of waiting the full 5 sec.
 func DefaultConfig() Config {
 	return Config{
-		BatchInterval: 5 * time.Second,
-		BatchSize:     50,
+		BatchInterval:         5 * time.Second,
+		BatchSize:             50,
+		LatencyCheckInterval:  500 * time.Millisecond,
+		HighPriorityThreshold: 2,
 	}
 }
 
@@ -54,18 +64,24 @@ func DefaultConfig() Config {
 // existing unit tests here), in which case a pull response with a non-empty
 // task_list/kb_list is an error rather than a silent no-op.
 func New(coordServerURL, token, namespaceID string, queueRepo *QueueRepo, auditRepo *AuditRepo, taskRepo *localstore.TaskRepo, kbRepo *localstore.KBRepo, cfg Config) *Engine {
+	latencyCheckInterval := cfg.LatencyCheckInterval
+	if latencyCheckInterval <= 0 {
+		latencyCheckInterval = DefaultConfig().LatencyCheckInterval
+	}
 	return &Engine{
-		httpClient:    &http.Client{Timeout: 30 * time.Second},
-		coordServer:   coordServerURL,
-		token:         token,
-		namespaceID:   namespaceID,
-		queueRepo:     queueRepo,
-		auditRepo:     auditRepo,
-		taskRepo:      taskRepo,
-		kbRepo:        kbRepo,
-		batchInterval: cfg.BatchInterval,
-		batchSize:     cfg.BatchSize,
-		shutdown:      make(chan struct{}),
+		httpClient:            &http.Client{Timeout: 30 * time.Second},
+		coordServer:           coordServerURL,
+		token:                 token,
+		namespaceID:           namespaceID,
+		queueRepo:             queueRepo,
+		auditRepo:             auditRepo,
+		taskRepo:              taskRepo,
+		kbRepo:                kbRepo,
+		batchInterval:         cfg.BatchInterval,
+		batchSize:             cfg.BatchSize,
+		latencyCheckInterval:  latencyCheckInterval,
+		highPriorityThreshold: cfg.HighPriorityThreshold,
+		shutdown:              make(chan struct{}),
 	}
 }
 
@@ -89,6 +105,9 @@ func (e *Engine) syncLoop(ctx context.Context) {
 	ticker := time.NewTicker(e.batchInterval)
 	defer ticker.Stop()
 
+	latencyTicker := time.NewTicker(e.latencyCheckInterval)
+	defer latencyTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -100,6 +119,10 @@ func (e *Engine) syncLoop(ctx context.Context) {
 			if err := e.pushBatch(ctx); err != nil {
 				// Best-effort: log error and continue. The batch remains queued
 				// for retry on the next interval.
+				_ = err
+			}
+		case <-latencyTicker.C:
+			if err := e.checkLatencySensitive(ctx); err != nil {
 				_ = err
 			}
 		}
@@ -137,26 +160,64 @@ func (e *Engine) pushBatch(ctx context.Context) error {
 
 	// Call wormhole.sync.incremental_push on the coordination server.
 	// Include protocol version per RFC-0003 §9 OQ5 (P6 hardening).
+	// Use callSyncToolWithResult to get the response body for per-item error checking.
 	const SyncProtocolVersion = 1
-	if err := e.callSyncTool(ctx, "wormhole.sync.incremental_push", map[string]interface{}{
+	result, err := e.callSyncToolWithResult(ctx, "wormhole.sync.incremental_push", map[string]interface{}{
 		"namespace_id": e.namespaceID,
 		"version":      SyncProtocolVersion,
 		"items":        pushItems,
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("sync: push batch: call server: %w", err)
 	}
 
-	// Mark all entries as delivered.
+	// Decode the response to extract per-item results (issue #15).
+	// If decoding fails, treat conservatively: mark no entries delivered, let the
+	// batch retry on the next cycle.
+	pushResult, err := decodeIncrementalPushResult(result)
+	if err != nil {
+		return fmt.Errorf("sync: push batch: decode result: %w", err)
+	}
+
+	// Build a set of entity IDs that had non-empty Error in the response.
+	failedEntityIDs := make(map[string]bool)
+	for _, applied := range pushResult.Applied {
+		if applied.Error != "" {
+			failedEntityIDs[applied.ID] = true
+		}
+	}
+
+	// Mark only successful entries as delivered. Failed entries remain in the queue for retry.
 	for _, entry := range entries {
-		if err := e.queueRepo.MarkDelivered(ctx, e.namespaceID, entry.ID); err != nil {
-			// If marking fails, the entry will be retried on the next cycle.
-			// Do not fail the entire batch.
-			_ = err
+		if !failedEntityIDs[entry.EntityID] {
+			if err := e.queueRepo.MarkDelivered(ctx, e.namespaceID, entry.ID); err != nil {
+				// If marking fails, the entry will be retried on the next cycle.
+				// Do not fail the entire batch.
+				_ = err
+			}
 		}
 	}
 
 	e.lastSyncTime = time.Now().UTC()
 	return nil
+}
+
+// checkLatencySensitive peeks the highest-priority pending entry and, if it
+// meets highPriorityThreshold, pushes immediately rather than waiting for
+// the next batchInterval tick (RFC-0003 §8.2 latency-sensitive bypass).
+// ListPending already orders priority DESC, so the first row is the one
+// that matters.
+func (e *Engine) checkLatencySensitive(ctx context.Context) error {
+	e.mu.Lock()
+	entries, err := e.queueRepo.ListPending(ctx, e.namespaceID, 1)
+	e.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("sync: check latency-sensitive: list pending: %w", err)
+	}
+	if len(entries) == 0 || entries[0].Priority < e.highPriorityThreshold {
+		return nil
+	}
+	return e.pushBatch(ctx)
 }
 
 // PullIncremental fetches the latest state from the server for all entities,
@@ -286,6 +347,25 @@ type incrementalPullResultWire struct {
 	Updates []syncUpdateEnvelopeWire `json:"updates"`
 }
 
+// appliedItemWire mirrors internal/mcp.AppliedItem's JSON shape for decoding
+// wormhole.sync.incremental_push responses. ID matches the client's entity_id;
+// Error is empty on success, set on per-item failure (partial-success semantics).
+type appliedItemWire struct {
+	ID    string `json:"id"`
+	Type  string `json:"type"`
+	Error string `json:"error,omitempty"`
+}
+
+// incrementalPushResultWire mirrors internal/mcp.IncrementalPushOutput's JSON shape
+// for decoding push responses. Applied carries per-item outcome; one non-empty Error
+// does not fail the entire batch.
+type incrementalPushResultWire struct {
+	ItemsReceived int               `json:"items_received"`
+	Applied       []appliedItemWire `json:"applied"`
+	Timestamp     string            `json:"timestamp"`
+	Version       int               `json:"version"`
+}
+
 // decodeBootstrapResult re-marshals the generic interface{} that
 // callSyncToolWithResult returns back into JSON and decodes it into the
 // typed bootstrap wire shape. The round-trip is redundant work but keeps
@@ -314,6 +394,21 @@ func decodeIncrementalPullResult(result interface{}) ([]syncUpdateEnvelopeWire, 
 		return nil, fmt.Errorf("unmarshal: %w", err)
 	}
 	return out.Updates, nil
+}
+
+// decodeIncrementalPushResult re-marshals the generic interface{} that
+// callSyncToolWithResult returns back into JSON and decodes it into the
+// typed push result wire shape (internal/mcp.IncrementalPushOutput).
+func decodeIncrementalPushResult(result interface{}) (incrementalPushResultWire, error) {
+	var out incrementalPushResultWire
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return out, fmt.Errorf("marshal: %w", err)
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return out, fmt.Errorf("unmarshal: %w", err)
+	}
+	return out, nil
 }
 
 // applyTask upserts one server task into the local task replica
@@ -347,7 +442,13 @@ func (e *Engine) callSyncTool(ctx context.Context, toolName string, args map[str
 
 // callSyncToolWithResult makes a JSON-RPC 2.0 call and returns the result.
 // Mirrors localapi's proxyWhoAmI pattern for coordinating with the server.
+// If testCallSyncToolWithResultFn is set (testing only), it is used instead.
 func (e *Engine) callSyncToolWithResult(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
+	// Test hook for injection (testing only).
+	if e.testCallSyncToolWithResultFn != nil {
+		return e.testCallSyncToolWithResultFn(ctx, toolName, args)
+	}
+
 	argsJSON, _ := json.Marshal(args)
 	paramsRaw, err := json.Marshal(map[string]interface{}{
 		"name":      toolName,

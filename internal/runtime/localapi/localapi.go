@@ -331,7 +331,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		writeResponse(conn, localResponse{Result: outRaw})
 
 	case "wormhole.channel.list":
-		result, err := s.localListChannels(ctx)
+		result, err := s.localListChannels(ctx, req.Args)
 		if err != nil {
 			writeResponse(conn, localResponse{Error: err.Error()})
 			return
@@ -340,7 +340,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		writeResponse(conn, localResponse{Result: outRaw})
 
 	case "wormhole.channel.events":
-		result, err := s.localListChannelEvents(ctx)
+		result, err := s.localListChannelEvents(ctx, req.Args)
 		if err != nil {
 			writeResponse(conn, localResponse{Error: err.Error()})
 			return
@@ -349,7 +349,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		writeResponse(conn, localResponse{Result: outRaw})
 
 	case "wormhole.kb.list":
-		result, err := s.localListArticles(ctx)
+		result, err := s.localListArticles(ctx, req.Args)
 		if err != nil {
 			writeResponse(conn, localResponse{Error: err.Error()})
 			return
@@ -401,7 +401,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		writeResponse(conn, localResponse{Result: outRaw})
 
 	case "wormhole.agent.list":
-		result, err := s.handleAgentList(ctx)
+		result, err := s.handleAgentList(ctx, req.Args)
 		if err != nil {
 			writeResponse(conn, localResponse{Error: err.Error()})
 			return
@@ -610,19 +610,32 @@ func (s *Server) proxyWhoAmI(ctx context.Context) (whoAmIOutput, error) {
 }
 
 // localListTasks serves wormhole.task.list from the local SQLite replica.
-// Args: {"status": "wip"} (optional).
+// Args: {"status": "wip" (optional), "project_id": "xxx" (optional in single-org, required in multi-org)}.
 func (s *Server) localListTasks(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
-	status := (*string)(nil)
+	var argMap map[string]interface{}
 	if len(args) > 0 {
-		var argMap map[string]string
-		if err := json.Unmarshal(args, &argMap); err == nil {
-			if s, ok := argMap["status"]; ok && s != "" {
-				status = &s
-			}
+		if err := json.Unmarshal(args, &argMap); err != nil {
+			return nil, fmt.Errorf("localapi: list tasks: invalid args: %w", err)
 		}
 	}
 
-	tasks, err := s.tr.ListTasks(ctx, s.projectID, status)
+	// Extract project_id and resolve org context (multi-org aware)
+	projectID := s.projectID // fallback to configured project in single-org mode
+	if projectIDVal, ok := argMap["project_id"].(string); ok && projectIDVal != "" {
+		projectID = projectIDVal
+	}
+
+	orgCtx, err := s.resolveOrgContext(projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	status := (*string)(nil)
+	if statusVal, ok := argMap["status"].(string); ok && statusVal != "" {
+		status = &statusVal
+	}
+
+	tasks, err := s.tr.ListTasks(ctx, orgCtx.ProjectID, status)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: list tasks: %w", err)
 	}
@@ -646,21 +659,33 @@ func (s *Server) localListTasks(ctx context.Context, args json.RawMessage) (map[
 }
 
 // localGetTask serves wormhole.task.get from the local SQLite replica.
-// Args: {"task_id": "xxx"}.
+// Args: {"task_id": "xxx", "project_id": "yyy" (optional in single-org, required in multi-org)}.
 func (s *Server) localGetTask(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("localapi: get task: missing task_id argument")
 	}
-	var argMap map[string]string
+	var argMap map[string]interface{}
 	if err := json.Unmarshal(args, &argMap); err != nil {
 		return nil, fmt.Errorf("localapi: get task: invalid args: %w", err)
 	}
-	taskID, ok := argMap["task_id"]
+
+	taskID, ok := argMap["task_id"].(string)
 	if !ok || taskID == "" {
 		return nil, fmt.Errorf("localapi: get task: missing task_id argument")
 	}
 
-	t, err := s.tr.GetTask(ctx, s.projectID, taskID)
+	// Extract project_id and resolve org context (multi-org aware)
+	projectID := s.projectID // fallback to configured project in single-org mode
+	if projectIDVal, ok := argMap["project_id"].(string); ok && projectIDVal != "" {
+		projectID = projectIDVal
+	}
+
+	orgCtx, err := s.resolveOrgContext(projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	t, err := s.tr.GetTask(ctx, orgCtx.ProjectID, taskID)
 	if errors.Is(err, localstore.ErrTaskNotFound) {
 		return nil, fmt.Errorf("localapi: task not found")
 	}
@@ -683,8 +708,27 @@ func (s *Server) localGetTask(ctx context.Context, args json.RawMessage) (map[st
 }
 
 // localListChannels serves wormhole.channel.list from the local SQLite replica.
-func (s *Server) localListChannels(ctx context.Context) (map[string]interface{}, error) {
-	channels, err := s.er.ListChannels(ctx, s.projectID)
+// Args: {"project_id": "xxx" (optional in single-org, required in multi-org)}.
+func (s *Server) localListChannels(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	var argMap map[string]interface{}
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &argMap); err != nil {
+			return nil, fmt.Errorf("localapi: list channels: invalid args: %w", err)
+		}
+	}
+
+	// Extract project_id and resolve org context (multi-org aware)
+	projectID := s.projectID // fallback to configured project in single-org mode
+	if projectIDVal, ok := argMap["project_id"].(string); ok && projectIDVal != "" {
+		projectID = projectIDVal
+	}
+
+	orgCtx, err := s.resolveOrgContext(projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	channels, err := s.er.ListChannels(ctx, orgCtx.ProjectID)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: list channels: %w", err)
 	}
@@ -700,8 +744,27 @@ func (s *Server) localListChannels(ctx context.Context) (map[string]interface{},
 }
 
 // localListChannelEvents serves wormhole.channel.events from the local SQLite replica.
-func (s *Server) localListChannelEvents(ctx context.Context) (map[string]interface{}, error) {
-	events, err := s.er.ListEventsByNamespace(ctx, s.projectID, 50, 0)
+// Args: {"project_id": "xxx" (optional in single-org, required in multi-org)}.
+func (s *Server) localListChannelEvents(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	var argMap map[string]interface{}
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &argMap); err != nil {
+			return nil, fmt.Errorf("localapi: list channel events: invalid args: %w", err)
+		}
+	}
+
+	// Extract project_id and resolve org context (multi-org aware)
+	projectID := s.projectID // fallback to configured project in single-org mode
+	if projectIDVal, ok := argMap["project_id"].(string); ok && projectIDVal != "" {
+		projectID = projectIDVal
+	}
+
+	orgCtx, err := s.resolveOrgContext(projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	events, err := s.er.ListEventsByNamespace(ctx, orgCtx.ProjectID, 50, 0)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: list channel events: %w", err)
 	}
@@ -722,8 +785,27 @@ func (s *Server) localListChannelEvents(ctx context.Context) (map[string]interfa
 }
 
 // localListArticles serves wormhole.kb.list from the local SQLite replica.
-func (s *Server) localListArticles(ctx context.Context) (map[string]interface{}, error) {
-	articles, err := s.kb.ListArticles(ctx, s.projectID)
+// Args: {"project_id": "xxx" (optional in single-org, required in multi-org)}.
+func (s *Server) localListArticles(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	var argMap map[string]interface{}
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &argMap); err != nil {
+			return nil, fmt.Errorf("localapi: list articles: invalid args: %w", err)
+		}
+	}
+
+	// Extract project_id and resolve org context (multi-org aware)
+	projectID := s.projectID // fallback to configured project in single-org mode
+	if projectIDVal, ok := argMap["project_id"].(string); ok && projectIDVal != "" {
+		projectID = projectIDVal
+	}
+
+	orgCtx, err := s.resolveOrgContext(projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	articles, err := s.kb.ListArticles(ctx, orgCtx.ProjectID)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: list articles: %w", err)
 	}
@@ -744,22 +826,34 @@ func (s *Server) localListArticles(ctx context.Context) (map[string]interface{},
 }
 
 // localGetArticle serves wormhole.kb.get from the local SQLite replica.
-// Args: {"article_id": "xxx"} (optional — if omitted returns all).
+// Args: {"article_id": "xxx" (optional), "project_id": "yyy" (optional in single-org, required in multi-org)}.
+// If article_id omitted returns all articles.
 func (s *Server) localGetArticle(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
-	if len(args) == 0 {
-		// fallback: list all
-		return s.localListArticles(ctx)
-	}
-	var argMap map[string]string
-	if err := json.Unmarshal(args, &argMap); err != nil {
-		return nil, fmt.Errorf("localapi: get article: invalid args: %w", err)
-	}
-	articleID, ok := argMap["article_id"]
-	if !ok || articleID == "" {
-		return s.localListArticles(ctx)
+	var argMap map[string]interface{}
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &argMap); err != nil {
+			return nil, fmt.Errorf("localapi: get article: invalid args: %w", err)
+		}
 	}
 
-	a, err := s.kb.GetArticle(ctx, s.projectID, articleID)
+	// Extract project_id and resolve org context (multi-org aware)
+	projectID := s.projectID // fallback to configured project in single-org mode
+	if projectIDVal, ok := argMap["project_id"].(string); ok && projectIDVal != "" {
+		projectID = projectIDVal
+	}
+
+	orgCtx, err := s.resolveOrgContext(projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	articleID, _ := argMap["article_id"].(string)
+	if articleID == "" {
+		// fallback: list all articles in this project
+		return s.localListArticles(ctx, args)
+	}
+
+	a, err := s.kb.GetArticle(ctx, orgCtx.ProjectID, articleID)
 	if errors.Is(err, localstore.ErrArticleNotFound) {
 		return nil, fmt.Errorf("localapi: article not found")
 	}
@@ -783,7 +877,7 @@ func (s *Server) localGetArticle(ctx context.Context, args json.RawMessage) (map
 // =============================================================================
 
 // handleAgentRegister registers an agent with the scheduler and eventbus.
-// Args: {"agent_id": "x", "capabilities": ["code", "review"]}
+// Args: {"agent_id": "x", "capabilities": ["code", "review"], "project_id": "xxx" (optional in single-org, required in multi-org)}
 func (s *Server) handleAgentRegister(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
 	if s.scheduler == nil {
 		return nil, fmt.Errorf("localapi: agent register: scheduler not available")
@@ -801,6 +895,17 @@ func (s *Server) handleAgentRegister(ctx context.Context, args json.RawMessage) 
 		return nil, fmt.Errorf("localapi: agent register: missing agent_id")
 	}
 
+	// Extract project_id and resolve org context (multi-org aware)
+	projectID := s.projectID // fallback to configured project in single-org mode
+	if projectIDVal, ok := argMap["project_id"].(string); ok && projectIDVal != "" {
+		projectID = projectIDVal
+	}
+
+	orgCtx, err := s.resolveOrgContext(projectID)
+	if err != nil {
+		return nil, err
+	}
+
 	caps := []string{}
 	if rawCaps, ok := argMap["capabilities"]; ok {
 		if capsList, ok := rawCaps.([]interface{}); ok {
@@ -812,7 +917,7 @@ func (s *Server) handleAgentRegister(ctx context.Context, args json.RawMessage) 
 		}
 	}
 
-	agent, err := s.scheduler.RegisterAgent(agentID, s.projectID, caps)
+	agent, err := s.scheduler.RegisterAgent(agentID, orgCtx.ProjectID, caps)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: agent register: %w", err)
 	}
@@ -823,11 +928,11 @@ func (s *Server) handleAgentRegister(ctx context.Context, args json.RawMessage) 
 	payload, _ := json.Marshal(map[string]interface{}{
 		"agent":        agent.AgentID,
 		"status":       string(scheduler.StatusOnline),
-		"namespace":    s.projectID,
+		"namespace":    orgCtx.ProjectID,
 		"capabilities": agent.Capabilities,
 	})
 	if s.eventbus != nil {
-		s.eventbus.Publish(ctx, s.projectID, "presence.online", "", agent.AgentID, payload)
+		s.eventbus.Publish(ctx, orgCtx.ProjectID, "presence.online", "", agent.AgentID, payload)
 	}
 
 	return map[string]interface{}{
@@ -839,7 +944,7 @@ func (s *Server) handleAgentRegister(ctx context.Context, args json.RawMessage) 
 }
 
 // handleAgentPresence updates an agent's presence status.
-// Args: {"agent_id": "x", "status": "busy"}
+// Args: {"agent_id": "x", "status": "busy", "project_id": "xxx" (optional in single-org, required in multi-org)}
 func (s *Server) handleAgentPresence(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
 	if s.scheduler == nil {
 		return nil, fmt.Errorf("localapi: agent presence: scheduler not available")
@@ -858,7 +963,18 @@ func (s *Server) handleAgentPresence(ctx context.Context, args json.RawMessage) 
 		return nil, fmt.Errorf("localapi: agent presence: missing agent_id or status")
 	}
 
-	err := s.scheduler.UpdatePresence(agentID, scheduler.AgentStatus(statusStr))
+	// Extract project_id and resolve org context (multi-org aware)
+	projectID := s.projectID // fallback to configured project in single-org mode
+	if projectIDVal, ok := argMap["project_id"].(string); ok && projectIDVal != "" {
+		projectID = projectIDVal
+	}
+
+	orgCtx, err := s.resolveOrgContext(projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	err = s.scheduler.UpdatePresence(agentID, scheduler.AgentStatus(statusStr))
 	if err != nil {
 		return nil, fmt.Errorf("localapi: agent presence: %w", err)
 	}
@@ -868,7 +984,7 @@ func (s *Server) handleAgentPresence(ctx context.Context, args json.RawMessage) 
 		"status": statusStr,
 	})
 	if s.eventbus != nil {
-		s.eventbus.Publish(ctx, s.projectID, "presence."+statusStr, "", agentID, payload)
+		s.eventbus.Publish(ctx, orgCtx.ProjectID, "presence."+statusStr, "", agentID, payload)
 	}
 
 	return map[string]interface{}{
@@ -878,22 +994,44 @@ func (s *Server) handleAgentPresence(ctx context.Context, args json.RawMessage) 
 }
 
 // handleAgentList returns all registered agents.
-func (s *Server) handleAgentList(ctx context.Context) (map[string]interface{}, error) {
+// Args: {"project_id": "xxx" (optional in single-org, required in multi-org)} — filters agents in this project.
+func (s *Server) handleAgentList(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
 	if s.scheduler == nil {
 		return nil, fmt.Errorf("localapi: agent list: scheduler not available")
 	}
 
-	agents := s.scheduler.ListAgents()
-	out := make([]interface{}, len(agents))
-	for i, a := range agents {
-		out[i] = map[string]interface{}{
-			"agent_id":     a.AgentID,
-			"namespace_id": a.NamespaceID,
-			"capabilities": a.Capabilities,
-			"status":       string(a.Status),
+	var argMap map[string]interface{}
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &argMap); err != nil {
+			return nil, fmt.Errorf("localapi: agent list: invalid args: %w", err)
 		}
 	}
-	return map[string]interface{}{"agents": out}, nil
+
+	// Extract project_id and resolve org context (multi-org aware)
+	projectID := s.projectID // fallback to configured project in single-org mode
+	if projectIDVal, ok := argMap["project_id"].(string); ok && projectIDVal != "" {
+		projectID = projectIDVal
+	}
+
+	orgCtx, err := s.resolveOrgContext(projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	agents := s.scheduler.ListAgents()
+	// Filter agents to this project only
+	var filtered []interface{}
+	for _, a := range agents {
+		if a.NamespaceID == orgCtx.ProjectID {
+			filtered = append(filtered, map[string]interface{}{
+				"agent_id":     a.AgentID,
+				"namespace_id": a.NamespaceID,
+				"capabilities": a.Capabilities,
+				"status":       string(a.Status),
+			})
+		}
+	}
+	return map[string]interface{}{"agents": filtered}, nil
 }
 
 // handleTaskRoute creates a task in localstore (the one true task ID and
@@ -901,7 +1039,7 @@ func (s *Server) handleAgentList(ctx context.Context) (map[string]interface{}, e
 // to a locally-registered agent via the scheduler's capability matching. The
 // routing decision is recorded as an ownership change (TaskRepo.Assign), not
 // a status transition (Findings 1/2).
-// Args: {"capability": "code", "title": "x", "description": "y"}
+// Args: {"capability": "code", "title": "x", "description": "y", "project_id": "xxx" (optional in single-org, required in multi-org)}
 func (s *Server) handleTaskRoute(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
 	if s.scheduler == nil {
 		return nil, fmt.Errorf("localapi: task route: scheduler not available")
@@ -921,9 +1059,20 @@ func (s *Server) handleTaskRoute(ctx context.Context, args json.RawMessage) (map
 		return nil, fmt.Errorf("localapi: task route: missing capability")
 	}
 
+	// Extract project_id and resolve org context (multi-org aware)
+	projectID := s.projectID // fallback to configured project in single-org mode
+	if projectIDVal, ok := argMap["project_id"].(string); ok && projectIDVal != "" {
+		projectID = projectIDVal
+	}
+
+	orgCtx, err := s.resolveOrgContext(projectID)
+	if err != nil {
+		return nil, err
+	}
+
 	// Create the task in localstore FIRST: its UUID is the one true task ID
 	// (Finding 1). A creation failure is fatal to the request, not swallowed.
-	createdTask, err := s.tr.CreateTask(ctx, s.projectID, title, desc, nil, 0, nil)
+	createdTask, err := s.tr.CreateTask(ctx, orgCtx.ProjectID, title, desc, nil, 0, nil)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: task route: create: %w", err)
 	}
@@ -931,7 +1080,7 @@ func (s *Server) handleTaskRoute(ctx context.Context, args json.RawMessage) (map
 	// The scheduler is used purely for capability matching / agent selection,
 	// keyed by the localstore-generated task ID — it does not mint its own ID
 	// or track a competing status (Finding 2).
-	if _, err := s.scheduler.RegisterTask(s.projectID, capability, createdTask.ID); err != nil {
+	if _, err := s.scheduler.RegisterTask(orgCtx.ProjectID, capability, createdTask.ID); err != nil {
 		return nil, fmt.Errorf("localapi: task route: register: %w", err)
 	}
 
@@ -939,7 +1088,7 @@ func (s *Server) handleTaskRoute(ctx context.Context, args json.RawMessage) (map
 	if err != nil {
 		return map[string]interface{}{
 			"task_id":      createdTask.ID,
-			"namespace_id": s.projectID,
+			"namespace_id": orgCtx.ProjectID,
 			"capability":   capability,
 			"title":        title,
 			"description":  desc,
@@ -953,14 +1102,14 @@ func (s *Server) handleTaskRoute(ctx context.Context, args json.RawMessage) (map
 	// internal/core/tasks.Store.Assign — this is what makes the task's owner
 	// visible via wormhole.task.get/list, and what a future status transition
 	// (wormhole.task.update_status) will build on.
-	assignedTask, err := s.tr.Assign(ctx, s.projectID, createdTask.ID, agent.AgentID)
+	assignedTask, err := s.tr.Assign(ctx, orgCtx.ProjectID, createdTask.ID, agent.AgentID)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: task route: assign: %w", err)
 	}
 
 	return map[string]interface{}{
 		"task_id":      assignedTask.ID,
-		"namespace_id": s.projectID,
+		"namespace_id": orgCtx.ProjectID,
 		"capability":   capability,
 		"title":        title,
 		"description":  desc,
@@ -1050,9 +1199,10 @@ func (s *Server) handleChannelSubscribe(ctx context.Context, conn net.Conn, args
 // handleTaskCreate serves wormhole.task.create: creates a task locally and
 // enqueues it for sync.
 // Args: {"title": "y", "description": "z", "priority": 0,
+//        "project_id": "xxx" (optional in single-org, required in multi-org),
 //        "parent_task_id": "..." (optional), "due_by": "RFC3339..." (optional)}
 // namespace_id, if present in args, is ignored — namespace is always resolved
-// from the socket's bound project (s.projectID), never from the request.
+// from project_id (with multi-org bindings in P5+), never from the request.
 func (s *Server) handleTaskCreate(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
 	if s.qr == nil {
 		return nil, fmt.Errorf("localapi: task create: sync queue not available")
@@ -1065,11 +1215,21 @@ func (s *Server) handleTaskCreate(ctx context.Context, args json.RawMessage) (ma
 		}
 	}
 
-	namespaceID := s.projectID
 	title, _ := argMap["title"].(string)
 	description, _ := argMap["description"].(string)
-	if namespaceID == "" || title == "" {
-		return nil, fmt.Errorf("localapi: task create: missing namespace_id or title")
+	if title == "" {
+		return nil, fmt.Errorf("localapi: task create: missing title")
+	}
+
+	// Extract project_id and resolve org context (multi-org aware)
+	projectID := s.projectID // fallback to configured project in single-org mode
+	if projectIDVal, ok := argMap["project_id"].(string); ok && projectIDVal != "" {
+		projectID = projectIDVal
+	}
+
+	orgCtx, err := s.resolveOrgContext(projectID)
+	if err != nil {
+		return nil, err
 	}
 
 	priority := 0
@@ -1089,7 +1249,7 @@ func (s *Server) handleTaskCreate(ctx context.Context, args json.RawMessage) (ma
 		}
 	}
 
-	task, err := s.tr.CreateTask(ctx, namespaceID, title, description, parentTaskID, priority, dueBy)
+	task, err := s.tr.CreateTask(ctx, orgCtx.ProjectID, title, description, parentTaskID, priority, dueBy)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: task create: %w", err)
 	}
@@ -1112,7 +1272,7 @@ func (s *Server) handleTaskCreate(ctx context.Context, args json.RawMessage) (ma
 	if err != nil {
 		return nil, fmt.Errorf("localapi: task create: marshal payload: %w", err)
 	}
-	if _, err := s.qr.Enqueue(ctx, namespaceID, "task", task.ID, "create", payload, 0); err != nil {
+	if _, err := s.qr.Enqueue(ctx, orgCtx.ProjectID, "task", task.ID, "create", payload, task.Priority); err != nil {
 		return nil, fmt.Errorf("localapi: task create: enqueue sync: %w", err)
 	}
 
@@ -1122,9 +1282,10 @@ func (s *Server) handleTaskCreate(ctx context.Context, args json.RawMessage) (ma
 // handleKBWrite serves wormhole.kb.write: writes a KB article locally and
 // enqueues it for sync.
 // Args: {"agent_id": "y", "title": "z", "body": "...",
+//        "project_id": "xxx" (optional in single-org, required in multi-org),
 //        "frontmatter": {...} (optional)}
 // namespace_id, if present in args, is ignored — namespace is always resolved
-// from the socket's bound project (s.projectID), never from the request.
+// from project_id (with multi-org bindings in P5+), never from the request.
 func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
 	if s.qr == nil {
 		return nil, fmt.Errorf("localapi: kb write: sync queue not available")
@@ -1137,12 +1298,22 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 		}
 	}
 
-	namespaceID := s.projectID
 	agentID, _ := argMap["agent_id"].(string)
 	title, _ := argMap["title"].(string)
 	body, _ := argMap["body"].(string)
-	if namespaceID == "" || title == "" {
-		return nil, fmt.Errorf("localapi: kb write: missing namespace_id or title")
+	if title == "" {
+		return nil, fmt.Errorf("localapi: kb write: missing title")
+	}
+
+	// Extract project_id and resolve org context (multi-org aware)
+	projectID := s.projectID // fallback to configured project in single-org mode
+	if projectIDVal, ok := argMap["project_id"].(string); ok && projectIDVal != "" {
+		projectID = projectIDVal
+	}
+
+	orgCtx, err := s.resolveOrgContext(projectID)
+	if err != nil {
+		return nil, err
 	}
 
 	var frontmatter json.RawMessage
@@ -1152,7 +1323,7 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 		}
 	}
 
-	article, err := s.kb.WriteArticle(ctx, namespaceID, agentID, title, body, frontmatter)
+	article, err := s.kb.WriteArticle(ctx, orgCtx.ProjectID, agentID, title, body, frontmatter)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: kb write: %w", err)
 	}
@@ -1172,7 +1343,10 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 	if err != nil {
 		return nil, fmt.Errorf("localapi: kb write: marshal payload: %w", err)
 	}
-	if _, err := s.qr.Enqueue(ctx, namespaceID, "kb_article", article.ID, "create", payload, 0); err != nil {
+	// KB articles have no priority concept (internal/core/kb has no Priority
+	// field, unlike tasks) — 0 here is the correct default, not a placeholder
+	// for a value that should have been threaded through.
+	if _, err := s.qr.Enqueue(ctx, orgCtx.ProjectID, "kb", article.ID, "create", payload, 0); err != nil {
 		return nil, fmt.Errorf("localapi: kb write: enqueue sync: %w", err)
 	}
 
@@ -1182,10 +1356,11 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 // handleChannelPost serves wormhole.channel.post: publishes a durable event
 // to a channel locally and enqueues it for sync.
 // Args: {"channel_id": "y", "agent_id": "z",
-//        "event_type": "discovery.logged", "payload": {...} (optional),
-//        "note": "..." (optional)}
+//        "event_type": "discovery.logged",
+//        "project_id": "xxx" (optional in single-org, required in multi-org),
+//        "payload": {...} (optional), "note": "..." (optional)}
 // namespace_id, if present in args, is ignored — namespace is always resolved
-// from the socket's bound project (s.projectID), never from the request.
+// from project_id (with multi-org bindings in P5+), never from the request.
 func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
 	if s.qr == nil {
 		return nil, fmt.Errorf("localapi: channel post: sync queue not available")
@@ -1198,12 +1373,22 @@ func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (m
 		}
 	}
 
-	namespaceID := s.projectID
 	channelID, _ := argMap["channel_id"].(string)
 	agentID, _ := argMap["agent_id"].(string)
 	eventType, _ := argMap["event_type"].(string)
-	if namespaceID == "" || channelID == "" || eventType == "" {
-		return nil, fmt.Errorf("localapi: channel post: missing namespace_id, channel_id, or event_type")
+	if channelID == "" || eventType == "" {
+		return nil, fmt.Errorf("localapi: channel post: missing channel_id or event_type")
+	}
+
+	// Extract project_id and resolve org context (multi-org aware)
+	projectID := s.projectID // fallback to configured project in single-org mode
+	if projectIDVal, ok := argMap["project_id"].(string); ok && projectIDVal != "" {
+		projectID = projectIDVal
+	}
+
+	orgCtx, err := s.resolveOrgContext(projectID)
+	if err != nil {
+		return nil, err
 	}
 
 	var eventPayload json.RawMessage
@@ -1218,7 +1403,7 @@ func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (m
 		note = &n
 	}
 
-	ev, err := s.er.PublishEvent(ctx, namespaceID, channelID, agentID, eventType, eventPayload, note)
+	ev, err := s.er.PublishEvent(ctx, orgCtx.ProjectID, channelID, agentID, eventType, eventPayload, note)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: channel post: %w", err)
 	}
@@ -1238,7 +1423,10 @@ func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (m
 	if err != nil {
 		return nil, fmt.Errorf("localapi: channel post: marshal payload: %w", err)
 	}
-	if _, err := s.qr.Enqueue(ctx, namespaceID, "event", ev.ID, "create", payload, 0); err != nil {
+	// Events have no priority concept (internal/core/events has no Priority
+	// field, unlike tasks) — 0 here is the correct default, not a placeholder
+	// for a value that should have been threaded through.
+	if _, err := s.qr.Enqueue(ctx, orgCtx.ProjectID, "event", ev.ID, "create", payload, 0); err != nil {
 		return nil, fmt.Errorf("localapi: channel post: enqueue sync: %w", err)
 	}
 
