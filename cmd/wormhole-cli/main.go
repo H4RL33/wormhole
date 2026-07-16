@@ -144,6 +144,7 @@ type postEventInput struct {
 	ChannelID string          `json:"channel_id"`
 	EventType string          `json:"event_type"`
 	Payload   json.RawMessage `json:"payload"`
+	Note      *string         `json:"note"`
 }
 
 type postEventOutput struct {
@@ -374,11 +375,12 @@ func doListChannels(client *http.Client, server, project, token string) (listCha
 
 // doPostEvent calls wormhole.channel.post to post a self-introduction message
 // to the introductions channel.
-func doPostEvent(client *http.Client, server, project, token, channelID, eventType string, payload json.RawMessage) (postEventOutput, error) {
+func doPostEvent(client *http.Client, server, project, token, channelID, eventType string, payload json.RawMessage, note *string) (postEventOutput, error) {
 	in := postEventInput{
 		ChannelID: channelID,
 		EventType: eventType,
 		Payload:   payload,
+		Note:      note,
 	}
 	resultRaw, err := callTool(client, server, "wormhole.channel.post", project, token, in)
 	if err != nil {
@@ -588,7 +590,7 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 			if err != nil {
 				fmt.Fprintf(stderr, "wormhole join: self-introduction failed: %v\n", err)
 			} else {
-				_, postErr := doPostEvent(http.DefaultClient, *server, *project, out.Token, introChan.ChannelID, "message.posted", payloadRaw)
+				_, postErr := doPostEvent(http.DefaultClient, *server, *project, out.Token, introChan.ChannelID, "message.posted", payloadRaw, &introText)
 				if postErr != nil {
 					fmt.Fprintf(stderr, "wormhole join: self-introduction failed: %v\n", postErr)
 				} else {
