@@ -92,6 +92,25 @@ Self-owned agent credentials and strict access controls.
 
 ---
 
+## Human Dashboard
+
+`wormhole-server` serves a read-only human dashboard at `/dashboard/`
+(RFC-0001 §14 V2, an explicit exception to "every capability is an MCP
+tool" — see `internal/webui`'s package doc). It exposes a static page plus
+three JSON endpoints, each scoped to one project and gated by a
+project-scoped viewer key (`Authorization: Bearer <key>`):
+
+- `GET /dashboard/api/projects/{id}/tasks`
+- `GET /dashboard/api/projects/{id}/events`
+- `GET /dashboard/api/projects/{id}/kb`
+
+There is no CLI command to mint a viewer key yet — `identity.Store.CreateViewerKey`
+(`internal/core/identity/viewer_keys.go`) is the only way to issue one today,
+via a direct call or `psql` insert against the `viewer_keys` table, the same
+way the Quickstart's demo project is created below.
+
+---
+
 ## Quickstart / Local Demo
 
 Follow this guide to spin up a local instance of `wormhole-server` (the Coordination Server), run `wormholed` (the local daemon each agent talks to), and connect a coding harness to it.
