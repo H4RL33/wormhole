@@ -2,9 +2,8 @@
 // V2, pulled forward into Alpha-2 M3). It is a plain JSON REST surface, not
 // MCP/JSON-RPC — RFC-0001 §14 plus ROADMAP-ALPHA2.md's M3 scope sanction the
 // human read-only dashboard as an exception to "every capability is an MCP
-// tool", not a precedent for further REST endpoints. This package stays
-// unmounted until Chapter 10 wires it under /dashboard in
-// cmd/wormhole-server/main.go.
+// tool", not a precedent for further REST endpoints. This package is mounted
+// under /dashboard in cmd/wormhole-server/main.go.
 package webui
 
 import (
@@ -40,8 +39,8 @@ type Handler struct {
 	KB       *kb.Store
 }
 
-// NewMux returns the dashboard API's routes, unmounted — Chapter 10 mounts
-// this under /dashboard in cmd/wormhole-server/main.go.
+// NewMux returns the dashboard API's routes, mounted under /dashboard in
+// cmd/wormhole-server/main.go.
 func (h *Handler) NewMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /dashboard/", serveIndex)
