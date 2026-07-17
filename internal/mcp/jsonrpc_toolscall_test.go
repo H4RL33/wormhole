@@ -160,6 +160,99 @@ func TestHandleToolsCall_ToolHandlerErrorIsIsError(t *testing.T) {
 	}
 }
 
+// TestHandleToolsCall_ForwardsAuthResolvedProjectID is a regression test for
+// the dispatch bug diagnosed in Task 7's E2E test
+// (cmd/wormholed/e2e_stdio_bridge_test.go's TestE2E_StdioBridgeToPostgres):
+// HandleToolsCall must forward scope.ProjectID (the auth-resolved project)
+// to tool.Handler, not the raw client-supplied project_id from
+// extractProjectID. The sync engine (internal/runtime/sync) never sends
+// project_id on its tool calls — it authenticates via bearer token only and
+// relies on dispatch to resolve the real project — so this test mirrors that
+// shape: a RequiresAuth tool called with arguments that omit project_id
+// entirely.
+func TestHandleToolsCall_ForwardsAuthResolvedProjectID(t *testing.T) {
+	identityStore := testIdentityStore(t)
+	eventsStore := testEventsStore(t)
+	registry := NewRegistry()
+	registry.Register(RegisterAgentTool(identityStore, eventsStore, testRolesStore(t), testKBStore(t)))
+
+	projectID := mustCreateProject(t, "toolscall-project-id-forward")
+
+	registerArgs, _ := json.Marshal(RegisterAgentInput{
+		Permissions: []string{"event.publish"},
+		Owner:       "harley",
+		Model:       "claude",
+	})
+	registerParams, _ := json.Marshal(toolsCallParams{Name: "wormhole.agent.register", Arguments: registerArgs})
+
+	registerResult, rpcErr := HandleToolsCall(context.Background(), registry, identityStore, "", withProjectID(t, registerParams, projectID))
+	if rpcErr != nil {
+		t.Fatalf("register rpcErr: got %+v, want nil", rpcErr)
+	}
+	registerRes, ok := registerResult.(toolCallResult)
+	if !ok || registerRes.IsError {
+		t.Fatalf("register result: got %+v", registerResult)
+	}
+	var registerOut RegisterAgentOutput
+	if err := json.Unmarshal([]byte(registerRes.Content[0].Text), &registerOut); err != nil {
+		t.Fatalf("unmarshal register output: %v", err)
+	}
+
+	var receivedProjectID string
+	var receivedScope *identity.AuthenticatedScope
+	registry.Register(Tool{
+		Name:         "test.needs.auth.projectid",
+		RequiresAuth: true,
+		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
+			receivedProjectID = projectID
+			receivedScope = scope
+			return map[string]string{"ok": "yes"}, nil
+		},
+	})
+
+	// Arguments omit project_id entirely, mirroring how the sync engine's
+	// tool calls never send it (internal/runtime/sync.Engine sends only
+	// namespace_id) — auth resolves the project from the bearer token alone.
+	callParams, _ := json.Marshal(toolsCallParams{Name: "test.needs.auth.projectid", Arguments: json.RawMessage(`{}`)})
+
+	result, rpcErr := HandleToolsCall(context.Background(), registry, identityStore, "Bearer "+registerOut.Token, callParams)
+	if rpcErr != nil {
+		t.Fatalf("rpcErr: got %+v, want nil", rpcErr)
+	}
+	res, ok := result.(toolCallResult)
+	if !ok || res.IsError {
+		t.Fatalf("result: got %+v", result)
+	}
+
+	if receivedScope == nil {
+		t.Fatalf("handler received nil scope for RequiresAuth=true tool")
+	}
+	if receivedProjectID != receivedScope.ProjectID {
+		t.Fatalf("projectID handed to handler: got %q, want auth-resolved scope.ProjectID %q", receivedProjectID, receivedScope.ProjectID)
+	}
+	if receivedProjectID != projectID {
+		t.Fatalf("projectID handed to handler: got %q, want the real project %q (client sent no project_id)", receivedProjectID, projectID)
+	}
+}
+
+// withProjectID merges project_id into an existing tools/call params blob's
+// arguments field (RegisterAgentTool's own auth-free registration call still
+// needs project_id supplied explicitly, per its handler contract).
+func withProjectID(t *testing.T, rawParams json.RawMessage, projectID string) json.RawMessage {
+	t.Helper()
+	var params toolsCallParams
+	if err := json.Unmarshal(rawParams, &params); err != nil {
+		t.Fatalf("withProjectID: decode params: %v", err)
+	}
+	merged := mergeProjectID(t, params.Arguments, projectID)
+	params.Arguments = merged
+	out, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("withProjectID: encode params: %v", err)
+	}
+	return out
+}
+
 func TestHandleToolsCall_RealToolEndToEnd(t *testing.T) {
 	store := testIdentityStore(t)
 	eventsStore := testEventsStore(t)

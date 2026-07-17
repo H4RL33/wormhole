@@ -269,7 +269,15 @@ func HandleToolsCall(ctx context.Context, registry *Registry, identityStore *ide
 		return nil, &RPCError{Code: RPCInvalidParams, Message: err.Error()}
 	}
 
+	// handlerProjectID starts as the raw client-supplied value (used only
+	// for the WhoAmI scoping check below) and is replaced with the
+	// auth-resolved scope.ProjectID once auth succeeds — every Tool.Handler
+	// treats its projectID parameter as already-authenticated (task.go,
+	// channel.go, kb.go compare a body field against it; sync.go's doc
+	// comments say so explicitly), so dispatch must hand it the resolved
+	// value, not the possibly-empty client-supplied one.
 	var scope *identity.AuthenticatedScope
+	handlerProjectID := projectID
 	if tool.RequiresAuth {
 		token := bearerToken(authHeader)
 		if token == "" {
@@ -283,9 +291,10 @@ func HandleToolsCall(ctx context.Context, registry *Registry, identityStore *ide
 			return nil, &RPCError{Code: RPCInternalError, Message: "auth resolution failed"}
 		}
 		scope = &resolved
+		handlerProjectID = scope.ProjectID
 	}
 
-	result, err := tool.Handler(ctx, scope, projectID, params.Arguments)
+	result, err := tool.Handler(ctx, scope, handlerProjectID, params.Arguments)
 	if err != nil {
 		return toolCallResult{
 			Content: []toolCallResultContent{{Type: "text", Text: err.Error()}},
