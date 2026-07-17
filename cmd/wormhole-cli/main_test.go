@@ -1081,6 +1081,102 @@ func TestRunConnect_SocketUnreachable_ReturnsError(t *testing.T) {
 	}
 }
 
+// TestRunConnect_StdioBinaryNotFound_ClaudeTarget_PrintsError confirms that
+// when wormhole-mcp-stdio is not in PATH and target is "claude" (default),
+// runConnect returns exit code 1 and prints the claude-specific manual fallback message.
+func TestRunConnect_StdioBinaryNotFound_ClaudeTarget_PrintsError(t *testing.T) {
+	fakeWormholedSocket(t) // make socket reachable, so registration + socket check pass
+	// Deliberately NOT calling fakeStdioBinary(t), so LookPath fails
+
+	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
+		t.Fatal("connect must not call wormhole.kb.search if stdio binary is not found")
+		return searchArticlesOutput{}, nil
+	})
+	defer srv.Close()
+
+	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"connect",
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--permissions", "task.read",
+		"--token-file", tokenFile,
+	}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit code: got %d, want 1", code)
+	}
+
+	// Registration and socket check must have succeeded; only stdio binary resolution failed
+	if _, err := os.Stat(tokenFile); err != nil {
+		t.Fatalf("credentials file should have been written even though stdio binary was missing: %v", err)
+	}
+
+	errMsg := stderr.String()
+	// Check for the claude-target error message (line 770)
+	if !strings.Contains(errMsg, "not found in PATH") {
+		t.Fatalf("stderr should mention binary not found: %q", errMsg)
+	}
+	if !strings.Contains(errMsg, "claude mcp add") {
+		t.Fatalf("stderr should show claude manual fallback command (claude mcp add): %q", errMsg)
+	}
+	if !strings.Contains(errMsg, "--") {
+		t.Fatalf("stderr should show stdio indicator (--): %q", errMsg)
+	}
+	// Ensure it's the default connector name
+	if !strings.Contains(errMsg, "wormhole") {
+		t.Fatalf("stderr should reference default connector name 'wormhole': %q", errMsg)
+	}
+}
+
+// TestRunConnect_StdioBinaryNotFound_OpenCodeTarget_PrintsError confirms that
+// when wormhole-mcp-stdio is not in PATH and target is "opencode",
+// runConnect returns exit code 1 and prints the opencode-specific manual fallback message.
+func TestRunConnect_StdioBinaryNotFound_OpenCodeTarget_PrintsError(t *testing.T) {
+	fakeWormholedSocket(t) // make socket reachable, so registration + socket check pass
+	// Deliberately NOT calling fakeStdioBinary(t), so LookPath fails
+
+	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
+		t.Fatal("connect must not call wormhole.kb.search if stdio binary is not found")
+		return searchArticlesOutput{}, nil
+	})
+	defer srv.Close()
+
+	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"connect",
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--permissions", "task.read",
+		"--target", "opencode",
+		"--token-file", tokenFile,
+	}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit code: got %d, want 1", code)
+	}
+
+	// Registration and socket check must have succeeded; only stdio binary resolution failed
+	if _, err := os.Stat(tokenFile); err != nil {
+		t.Fatalf("credentials file should have been written even though stdio binary was missing: %v", err)
+	}
+
+	errMsg := stderr.String()
+	// Check for the opencode-target error message (line 768)
+	if !strings.Contains(errMsg, "not found in PATH") {
+		t.Fatalf("stderr should mention binary not found: %q", errMsg)
+	}
+	if !strings.Contains(errMsg, "add mcp config") {
+		t.Fatalf("stderr should show opencode manual fallback command (add mcp config): %q", errMsg)
+	}
+	if !strings.Contains(errMsg, "type:\"local\"") {
+		t.Fatalf("stderr should reference MCP type local config: %q", errMsg)
+	}
+	if !strings.Contains(errMsg, "command:") {
+		t.Fatalf("stderr should reference command config key: %q", errMsg)
+	}
+}
+
 // TestRunJoin_DefaultProfile_DerivedFromProjectAndRole confirms Chapter 8:
 // with neither --token-file nor --profile given, join writes into
 // ~/.wormhole/credentials/<project>__<role>.json instead of the old fixed
