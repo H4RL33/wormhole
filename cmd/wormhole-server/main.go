@@ -68,6 +68,7 @@ func main() {
 		Tasks:    tasksStore,
 		Events:   eventsStore,
 		KB:       kbStore,
+		AdminKey: cfg.AdminKey,
 	}
 	mux.Handle("/dashboard/", webuiHandler.NewMux())
 
