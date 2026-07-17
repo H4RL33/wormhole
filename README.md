@@ -211,6 +211,7 @@ The `wormhole-cli connect` command requires `wormhole-mcp-stdio` on `$PATH`. Run
 wormhole-cli connect \
   --server http://localhost:8080 \
   --project 00000000-0000-0000-0000-000000000001 \
+  --profile default \
   --owner "demo-owner" \
   --model "claude-sonnet-5" \
   --permissions "task.create,kb.write" \
@@ -225,6 +226,7 @@ The `connect` command first creates the agent identity and writes credentials to
 wormhole-cli connect \
   --server http://localhost:8080 \
   --project 00000000-0000-0000-0000-000000000001 \
+  --profile default \
   --owner "demo-owner" \
   --model "opencode" \
   --permissions "task.create,kb.write" \
@@ -259,11 +261,12 @@ Leave it running in its own terminal/session; every command below talks to it.
 wormhole-cli join \
   --server http://localhost:8080 \
   --project 00000000-0000-0000-0000-000000000001 \
+  --profile default \
   --owner "demo-owner" \
   --model "claude-sonnet-5" \
   --capabilities "code_edit,run_tests" \
   --repositories "github.com/H4RL33/wormhole" \
-  --roles "developer" \
+  --roles "contributor" \
   --permissions "task.create,kb.write"
 ```
 
