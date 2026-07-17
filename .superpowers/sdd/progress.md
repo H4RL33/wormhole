@@ -151,3 +151,11 @@ to issue #20). No schema/migration changes, fully backward compatible
 Issue #20 (wormholed as primary MCP endpoint) COMPLETE. Branch
 `wormholed-mcp-endpoint` ready to merge, pending human decision on
 merge/PR strategy (superpowers:finishing-a-development-branch).
+Task 1: complete (commits febb384..96f249d, review clean after 1 fix round; note: implementer/fixer initially worked in main checkout by mistake, salvaged via cherry-pick, main reset clean)
+Task 2: complete (commit 96f249d..1226696, review clean)
+Task 3: complete (commit 1226696..288330e, review clean)
+Task 4: complete (commit 288330e..46291b7, review Approved with minor nits: no HTTP client timeout on wormhole-cli's request, pre-existing pattern elsewhere in main.go, not a regression, not blocking. go build/go test ./cmd/wormhole-cli/... confirmed green independently.)
+Task 5: complete (commit 46291b7..5fe2a42, doc-only README update, diff verified verbatim against plan, no other section touched)
+Task 6: complete (verification-only, no commit). go build ./... && go vet ./... && go test ./... all green, no known flake hit this run.
+
+Viewer key issuance plan (docs/superpowers/plans/2026-08-10-viewer-key-issuance.md) COMPLETE. All 6 tasks done, base febb384..5fe2a42. Branch worktree-viewer-key-issuance ready for merge, pending human decision (superpowers:finishing-a-development-branch).

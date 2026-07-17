@@ -1,108 +1,286 @@
-# Task 4 (issue #20 subtask 4): Retarget `wormhole connect` at the stdio bridge
+### Task 4: `wormhole-cli viewer-key create`
 
-Repo: this git worktree (branch `wormholed-mcp-endpoint`). Read
-`docs/architecture.md` before touching code — it is required reading and
-states module-boundary/layering rules for this codebase.
+**Files:**
+- Create: `cmd/wormhole-cli/viewer_key.go`
+- Create: `cmd/wormhole-cli/viewer_key_test.go`
+- Modify: `cmd/wormhole-cli/main.go` (dispatch + usage text)
 
-## Context
+**Interfaces:**
+- Consumes: `POST /dashboard/api/projects/{id}/viewer-keys` (Task 2/3) — request `{"label": string}` with `X-Admin-Key` header, response `{"id","project_id","label","viewer_key"}` on 201, `{"error": string}` on non-2xx.
+- Produces: `runViewerKeyCreate(args []string, stdout, stderr io.Writer) int`, dispatched from `run`'s switch in `main.go` on `args[0] == "viewer-key"` with subcommand `"create"`.
 
-Subtasks 1-3 are done and merged into this branch:
-- Subtask 2 gave `wormholed`'s Unix socket (`internal/runtime/localapi`) a
-  real MCP JSON-RPC surface (`initialize`, `tools/list`, `tools/call`,
-  `notifications/initialized`), newline-delimited framing, no auth (local
-  same-user process trust, RFC-0003 OQ4 default — no bearer token concept
-  exists at this layer).
-- Subtask 3 added `cmd/wormhole-mcp-stdio`, a thin binary with **no CLI
-  flags and no auth wiring**. It dials wormholed's socket (derived via its
-  own `wormholedSocketPath()`, `cmd/wormhole-mcp-stdio/main.go:70-76`) and
-  bridges Content-Length-framed stdio MCP traffic to/from it. A harness
-  spawns it as a subprocess with zero arguments.
+- [ ] **Step 1: Write the failing test**
 
-`cmd/wormhole-cli/main.go`'s `runConnect` (starts ~line 665) currently
-wires Claude Code and OpenCode's MCP client straight at the Coordination
-Server's HTTP `/mcp` endpoint with a bearer token (`mcpURL := ... + "/mcp"`,
-then `claude mcp add --transport http ... -H "Authorization: Bearer ..."`,
-and the OpenCode branch writes a `"type": "remote"` config entry with a
-`headers.Authorization` bearer token). This is exactly the bypass issue #20
-describes — it must instead point both harnesses at the local
-`wormhole-mcp-stdio` binary, which talks to `wormholed`, not the
-Coordination Server, directly.
+Create `cmd/wormhole-cli/viewer_key_test.go`:
 
-`wormholedSocketPath()` already exists in `cmd/wormhole-cli/main.go`
-(lines 257-267) — reuse it, don't duplicate it again in this file.
+```go
+package main
 
-## Required changes, all in `cmd/wormhole-cli/main.go`
+import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"testing"
+)
 
-1. **New flag on `runConnect`'s flag set**: `stdioBin := fs.String("stdio-bin", "wormhole-mcp-stdio", "path to the wormhole-mcp-stdio bridge binary")`, following the exact same pattern as the existing `claudeBin` flag on the line above/below it in the flag block.
+func TestRunViewerKeyCreate_MissingRequiredFlags(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runViewerKeyCreate([]string{}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit code: got %d, want 2", code)
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("--server")) {
+		t.Fatalf("stderr should mention --server, got: %s", stderr.String())
+	}
+}
 
-2. **Before wiring either target, verify `wormholed` is reachable**: dial
-   `wormholedSocketPath()` with `net.DialTimeout("unix", wormholedSocketPath(), 2*time.Second)` (same timeout constant `doRegisterViaSocket` already uses elsewhere in this file — check its import block, `net` and `time` are already imported). If the dial fails, do **not** fall back to the direct-Coordination-Server path — print a clear error to `stderr` and return `1`:
-   ```
-   wormhole connect: wormholed not running (dial %s: %v) — start wormholed before running connect
-   ```
-   (substitute the actual socket path and dial error). Close the probe connection immediately on success; this step is a reachability check only, it does not reuse the connection for anything else.
+func TestRunViewerKeyCreate_NoAdminKeyAnywhere(t *testing.T) {
+	os.Unsetenv("WORMHOLE_ADMIN_KEY")
+	var stdout, stderr bytes.Buffer
+	code := runViewerKeyCreate([]string{
+		"--server", "http://example.invalid",
+		"--project", "proj-1",
+		"--label", "test viewer",
+	}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit code: got %d, want 2 (no admin key from flag or env)", code)
+	}
+}
 
-3. **Claude branch** (currently the `if *target == "opencode" {...}` / else block that shells out to `claude mcp add`): replace the HTTP wiring with stdio wiring.
-   - Resolve the stdio bridge binary the same way `claudeBin` is resolved today: `exec.LookPath(*stdioBin)`. If not found, print to stderr the manual instructions and return `1`, mirroring the existing `claudeBin`-not-found branch's shape:
-     ```
-     wormhole connect: %q not found in PATH — wire the connector manually:
-       claude mcp add %s -- %s
-     ```
-     (connector name, then the resolved-or-literal stdio binary name — use `*stdioBin` verbatim here since `LookPath` failed).
-   - On success, replace the existing `addCmd := exec.Command(*claudeBin, "mcp", "add", "--transport", "http", *connectorName, mcpURL, "-H", "Authorization: Bearer "+out.Token)` line with:
-     `exec.Command(*claudeBin, "mcp", "add", *connectorName, "--", resolvedStdioBinPath)`
-     where `resolvedStdioBinPath` is the absolute path `exec.LookPath` returned. (`claude mcp add <name> -- <command>` defaults to stdio transport — confirmed via `claude mcp add --help`; no `--transport` flag needed, no `-H` header, no URL.)
-   - The `removeCmd := exec.Command(*claudeBin, "mcp", "remove", *connectorName, "-s", "local")` line stays unchanged (best-effort remove, same as today).
-   - Update the final success message (`fmt.Fprintf(stdout, "Connector %q registered with %s ...")`) to reference the stdio bridge instead of `mcpURL`, e.g. `"Connector %q registered (stdio via %s).\n"` with the connector name and resolved binary path.
-   - Delete the now-unused `mcpURL := strings.TrimRight(*server, "/") + "/mcp"` line entirely — nothing needs it once neither branch depends on it. (Confirm nothing else in `runConnect` still references `mcpURL` before deleting; if something does, keep it but only for that other use.)
+func TestRunViewerKeyCreate_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/dashboard/api/projects/proj-1/viewer-keys" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("X-Admin-Key"); got != "sekrit" {
+			t.Fatalf("X-Admin-Key: got %q, want %q", got, "sekrit")
+		}
+		var body struct{ Label string `json:"label"` }
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body.Label != "test viewer" {
+			t.Fatalf("label: got %q, want %q", body.Label, "test viewer")
+		}
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{
+			"id": "vk-1", "project_id": "proj-1", "label": body.Label, "viewer_key": "raw-key-abc",
+		})
+	}))
+	defer srv.Close()
 
-4. **`runConnectOpenCode`** (currently takes `mcpURL, token string` params and writes a `"type": "remote"` / `url` / `headers.Authorization` config entry): change its signature to take the resolved stdio binary path instead of `mcpURL`/`token` (drop the `token` parameter entirely — nothing to authenticate locally), and write:
-   ```go
-   mcp[connectorName] = map[string]any{
-       "type":    "local",
-       "command": []string{resolvedStdioBinPath},
-       "enabled": true,
-   }
-   ```
-   (Per opencode.ai's documented schema: local MCP servers use `type: "local"` + a `command` string array; no `url`/`headers` fields apply to that type.) Update the call site in `runConnect` that invokes `runConnectOpenCode(...)` to match the new signature — it should also go through the same `exec.LookPath(*stdioBin)` resolution step described in point 3 before calling into `runConnectOpenCode` (both target branches need the resolved binary path; do the `LookPath` once, before the `if *target == "opencode"` branch, and pass the result into whichever branch runs — the not-found error message differs slightly by target since Claude's manual fallback shows a `claude mcp add` command and OpenCode's should show something equivalent, e.g. printing the JSON config snippet the user would need to add by hand, but do not over-engineer this — a one-line "not found in PATH" message naming the binary is sufficient if a target-specific fallback command is awkward to construct for OpenCode).
+	var stdout, stderr bytes.Buffer
+	code := runViewerKeyCreate([]string{
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--label", "test viewer",
+		"--admin-key", "sekrit",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0, stderr: %s", code, stderr.String())
+	}
+	if !bytes.Contains(stdout.Bytes(), []byte("raw-key-abc")) {
+		t.Fatalf("stdout should contain the raw viewer key, got: %s", stdout.String())
+	}
+}
 
-## What NOT to change
+func TestRunViewerKeyCreate_AdminKeyFromEnv(t *testing.T) {
+	t.Setenv("WORMHOLE_ADMIN_KEY", "env-secret")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Admin-Key"); got != "env-secret" {
+			t.Fatalf("X-Admin-Key: got %q, want %q", got, "env-secret")
+		}
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{
+			"id": "vk-2", "project_id": "proj-1", "label": "x", "viewer_key": "raw-key-xyz",
+		})
+	}))
+	defer srv.Close()
 
-- `runJoin`, `doRegister`, `doRegisterViaSocket`, `writeCredentials`,
-  credential-writing logic in `runConnect` (the `Passport created.` /
-  `agent_id=...` / `credentials written to ...` block) — all unchanged.
-  `wormhole connect` still registers via the Coordination Server and writes
-  local credentials; only the *harness wiring* (the MCP connector
-  registration) changes to point at the stdio bridge instead of the HTTP
-  endpoint.
-- `internal/runtime/localapi`, `cmd/wormhole-mcp-stdio` — both already
-  correct from subtasks 2/3, out of scope here.
-- No new top-level packages. No auth token added to the stdio bridge or the
-  socket (RFC-0003 OQ4: same-user process trust, no change here).
+	var stdout, stderr bytes.Buffer
+	code := runViewerKeyCreate([]string{
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--label", "x",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0, stderr: %s", code, stderr.String())
+	}
+}
 
-## Tests
+func TestRunViewerKeyCreate_ServerError_PrintsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid admin key"})
+	}))
+	defer srv.Close()
 
-Existing tests for `runConnect`/`runConnectOpenCode` (search
-`cmd/wormhole-cli/main_test.go` for `TestRunConnect` /
-`TestRunConnectOpenCode` or similar) currently assert against the HTTP/
-bearer-token wiring (`claude mcp add --transport http`, `mcp[name]["url"]`,
-`mcp[name]["headers"]`). These need to be **rewritten**, not just patched,
-to assert the new stdio wiring instead:
-- Claude-target tests: assert the `claude` subprocess is invoked with
-  `mcp`, `add`, `<connector-name>`, `--`, `<stdio-bin-path>` (however the
-  test currently fakes/records subprocess invocation — follow that existing
-  pattern).
-- OpenCode-target tests: assert the written JSON config has
-  `mcp.<name>.type == "local"` and `mcp.<name>.command == [<stdio-bin-path>]`,
-  and no `url`/`headers` keys.
-- Add a new test: `runConnect` returns `1` and prints a clear error when
-  wormholed's socket isn't reachable (no listener at the derived socket
-  path) — for both targets, or just once if the reachability check happens
-  before the target branch (it does, per point 2 above).
-- Follow TDD: write/adjust the failing tests first, then make them pass.
-  Use `superpowers:test-driven-development` if you want the full skill
-  loaded, otherwise just follow red-green-refactor.
+	var stdout, stderr bytes.Buffer
+	code := runViewerKeyCreate([]string{
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--label", "x",
+		"--admin-key", "wrong",
+	}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit code: got %d, want 1", code)
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("invalid admin key")) {
+		t.Fatalf("stderr should contain server error message, got: %s", stderr.String())
+	}
+}
+```
 
-Run `go build ./...` and `go test ./cmd/wormhole-cli/...` before reporting
-done. Report DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED per the
-implementer contract.
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `go test ./cmd/wormhole-cli/... -run TestRunViewerKeyCreate -v`
+Expected: FAIL to compile — `runViewerKeyCreate` doesn't exist yet.
+
+- [ ] **Step 3: Implement**
+
+Create `cmd/wormhole-cli/viewer_key.go`:
+
+```go
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+)
+
+// createViewerKeyRequest/Response mirror internal/webui/admin.go's wire
+// shapes for POST /dashboard/api/projects/{id}/viewer-keys.
+type createViewerKeyRequest struct {
+	Label string `json:"label"`
+}
+
+type createViewerKeyResponse struct {
+	ID        string `json:"id"`
+	ProjectID string `json:"project_id"`
+	Label     string `json:"label"`
+	ViewerKey string `json:"viewer_key"`
+}
+
+// runViewerKeyCreate implements `wormhole-cli viewer-key create`: it POSTs
+// to wormhole-server's admin-gated viewer-key endpoint and prints the raw
+// key once. There is no MCP tool for this (RFC-0001 §14's dashboard is a
+// REST-only carve-out) and no agent token is involved — auth is a shared
+// operator secret (WORMHOLE_ADMIN_KEY), a deliberate stopgap (issue #23)
+// ahead of real human identity/auth (issue #22).
+func runViewerKeyCreate(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("viewer-key create", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	server := fs.String("server", "", "Wormhole server base URL (required)")
+	project := fs.String("project", "", "project ID to issue the viewer key for (required)")
+	label := fs.String("label", "", "human-readable label for this viewer key (required)")
+	adminKey := fs.String("admin-key", "", "dashboard admin key (default: $WORMHOLE_ADMIN_KEY)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *server == "" || *project == "" || *label == "" {
+		fmt.Fprintln(stderr, "wormhole viewer-key create: --server, --project, and --label are required")
+		fs.Usage()
+		return 2
+	}
+
+	key := *adminKey
+	if key == "" {
+		key = os.Getenv("WORMHOLE_ADMIN_KEY")
+	}
+	if key == "" {
+		fmt.Fprintln(stderr, "wormhole viewer-key create: no admin key: pass --admin-key or set $WORMHOLE_ADMIN_KEY")
+		return 2
+	}
+
+	reqBody, err := json.Marshal(createViewerKeyRequest{Label: *label})
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole viewer-key create: %v\n", err)
+		return 1
+	}
+
+	url := *server + "/dashboard/api/projects/" + *project + "/viewer-keys"
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(reqBody))
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole viewer-key create: %v\n", err)
+		return 1
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Admin-Key", key)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole viewer-key create: %v\n", err)
+		return 1
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		var errBody struct {
+			Error string `json:"error"`
+		}
+		json.NewDecoder(resp.Body).Decode(&errBody)
+		if errBody.Error != "" {
+			fmt.Fprintf(stderr, "wormhole viewer-key create: server: %s\n", errBody.Error)
+		} else {
+			fmt.Fprintf(stderr, "wormhole viewer-key create: server returned status %d\n", resp.StatusCode)
+		}
+		return 1
+	}
+
+	var out createViewerKeyResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		fmt.Fprintf(stderr, "wormhole viewer-key create: decode response: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "Viewer key created (id=%s, project=%s).\n", out.ID, out.ProjectID)
+	fmt.Fprintf(stdout, "viewer_key=%s\n", out.ViewerKey)
+	fmt.Fprintln(stdout, "This key is shown once. Give it to the human who will use the dashboard,")
+	fmt.Fprintln(stdout, "as the Authorization: Bearer value at /dashboard/.")
+	return 0
+}
+```
+
+In `cmd/wormhole-cli/main.go`, add dispatch in `run`'s switch statement:
+
+```go
+	case "viewer-key":
+		if len(args) < 2 || args[1] != "create" {
+			fmt.Fprintln(stderr, "wormhole viewer-key: only \"create\" is supported\n\nusage: wormhole viewer-key create [flags]")
+			return 2
+		}
+		return runViewerKeyCreate(args[2:], stdout, stderr)
+```
+
+placed as a new `case` alongside the existing `"join"`, `"connect"`, `"whoami"`, `"profile"` cases. Update `usage()`'s returned string to add a line:
+
+```
+  viewer-key create   mint a dashboard viewer key for a project (requires an admin key)
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `go test ./cmd/wormhole-cli/... -run TestRunViewerKeyCreate -v`
+Expected: PASS (all 5 tests).
+
+- [ ] **Step 5: Run full CLI package tests to check no regression**
+
+Run: `go test ./cmd/wormhole-cli/... -v`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add cmd/wormhole-cli/viewer_key.go cmd/wormhole-cli/viewer_key_test.go cmd/wormhole-cli/main.go
+git commit -m "feat(cli): add wormhole-cli viewer-key create"
+```
+
+---
+

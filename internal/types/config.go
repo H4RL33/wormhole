@@ -13,6 +13,7 @@ type Config struct {
 	KBMinLinksDecision  int
 	KBMinLinksPolicy    int
 	KBMinLinksProcedure int
+	AdminKey            string
 }
 
 func LoadConfig() Config {
@@ -54,6 +55,7 @@ func LoadConfig() Config {
 		KBMinLinksDecision:  minLinksDecision,
 		KBMinLinksPolicy:    minLinksPolicy,
 		KBMinLinksProcedure: minLinksProcedure,
+		AdminKey:            getEnv("WORMHOLE_ADMIN_KEY", ""),
 	}
 }
 
