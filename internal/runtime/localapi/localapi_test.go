@@ -154,6 +154,73 @@ func TestServer_CloseWithoutCancelReturnsNil(t *testing.T) {
 	}
 }
 
+// TestServer_ServeReturnsPromptlyWithOpenConnection reproduces issue #20's
+// shutdown deadlock (regression from subtask 2's move to a persistent
+// per-connection MCP session): a client dials the socket and leaves the
+// connection open without sending anything further (mirroring a handle
+// goroutine parked in reader.ReadBytes('\n')). Cancelling Serve's ctx must
+// still make Serve return within a short bound — it must not wait forever
+// on that still-open connection. Uses a bounded channel-based wait
+// (t.Fatal on timeout), not an unbounded <-done, so a regression fails the
+// test instead of hanging the suite.
+func TestServer_ServeReturnsPromptlyWithOpenConnection(t *testing.T) {
+	coord := fakeCoordServer(t)
+	defer coord.Close()
+	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
+	if err != nil {
+		t.Fatalf("localstore.Open: %v", err)
+	}
+	defer store.Close()
+
+	socketPath := filepath.Join(t.TempDir(), "wormholed.sock")
+	er := localstore.NewEventRepo(store.DB())
+	tr := localstore.NewTaskRepo(store.DB(), er)
+	srv, err := New(socketPath, coord.URL, "test-token", "project-1", store, tr, er, localstore.NewKBRepo(store.DB()), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- srv.Serve(ctx)
+	}()
+
+	// Wait for the listener to come up, then dial and hold the connection
+	// open without writing anything more — this leaves a handle goroutine
+	// parked in ReadBytes('\n'), exactly like the goroutine dump in the
+	// issue #20 brief.
+	var conn net.Conn
+	for i := 0; i < 50; i++ {
+		c, dialErr := net.Dial("unix", socketPath)
+		if dialErr == nil {
+			conn = c
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if conn == nil {
+		t.Fatal("failed to dial socket")
+	}
+	defer conn.Close()
+
+	// Give handle a moment to actually start blocking in ReadBytes.
+	time.Sleep(50 * time.Millisecond)
+
+	cancel()
+
+	select {
+	case err := <-serveErr:
+		if err != nil {
+			t.Fatalf("Serve returned non-nil error after ctx cancel: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return within 2s of ctx cancel: a handle goroutine is still blocked on its open connection (issue #20 shutdown deadlock)")
+	}
+}
+
 func TestServer_UnknownTool(t *testing.T) {
 	coord := fakeCoordServer(t)
 	defer coord.Close()
@@ -473,3 +540,86 @@ func TestServer_LocalKBGetMissingArticleID(t *testing.T) {
 		t.Fatalf("expected 0 articles, got %d", len(articles))
 	}
 }
+
+// TestServer_CloseForceClosesIdleConnections proves that calling Close()
+// forces all idle open connections to be closed server-side (fixing issue #20's
+// connection leak). Opens an idle connection, calls Close() (not ctx cancel),
+// then asserts the server-side closed the connection by checking that a
+// client-side read attempt returns EOF (connection closed by server),
+// not a timeout (connection still open).
+func TestServer_CloseForceClosesIdleConnections(t *testing.T) {
+	coord := fakeCoordServer(t)
+	defer coord.Close()
+	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
+	if err != nil {
+		t.Fatalf("localstore.Open: %v", err)
+	}
+	defer store.Close()
+
+	socketPath := filepath.Join(t.TempDir(), "wormholed.sock")
+	er := localstore.NewEventRepo(store.DB())
+	tr := localstore.NewTaskRepo(store.DB(), er)
+	srv, err := New(socketPath, coord.URL, "test-token", "project-1", store, tr, er, localstore.NewKBRepo(store.DB()), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	go srv.Serve(ctx)
+
+	// Wait for the listener to come up, then dial and hold the connection
+	// open without writing anything — this leaves a handle goroutine parked
+	// in ReadBytes('\n'), exactly the scenario that leaks without the fix.
+	var conn net.Conn
+	for i := 0; i < 50; i++ {
+		c, dialErr := net.Dial("unix", socketPath)
+		if dialErr == nil {
+			conn = c
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if conn == nil {
+		t.Fatal("failed to dial socket")
+	}
+
+	// Give handle a moment to actually start blocking in ReadBytes.
+	time.Sleep(50 * time.Millisecond)
+
+	// Call Close() directly (not via ctx cancel). This should force-close
+	// all open connections.
+	if err := srv.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Give the connection time to actually be closed on the server side.
+	time.Sleep(50 * time.Millisecond)
+
+	// Now attempt a read on the client-side connection. If the server
+	// properly force-closed the connection, this should return io.EOF.
+	// If the connection is still open server-side (the bug), this read will
+	// block indefinitely (or until deadline expires, which we also test for).
+	conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+	buf := make([]byte, 1)
+	n, err := conn.Read(buf)
+
+	// Connection should be closed by server, returning EOF.
+	// If we get a timeout error, the connection is still open (leak not fixed).
+	if err == nil {
+		t.Fatalf("expected read to fail after Close, got n=%d", n)
+	}
+
+	// io.EOF means connection was closed by the server (good).
+	// io.ErrUnexpectedEOF is also acceptable (connection reset).
+	// net.ErrClosed is also acceptable (connection closed locally).
+	// But a timeout error means the connection is still open (bad - leak).
+	netErr, isNetError := err.(net.Error)
+	if isNetError && netErr.Timeout() {
+		t.Fatalf("read timed out after Close() — connection still open, issue #20 leak not fixed")
+	}
+
+	conn.Close()
+}
+

@@ -121,6 +121,10 @@ type Server struct {
 	closeErr  error
 	shutdown  atomic.Bool
 
+	// conns tracks open connections for force-close on shutdown (issue #20).
+	// Registered by handle() at startup, deregistered via defer at exit.
+	conns sync.Map // map[net.Conn]struct{}
+
 	// registry is the local MCP tool registry (mcp.go), built once at
 	// construction time from the Server that will service every
 	// connection's tools/call dispatch (design doc §5 subtask 2).
@@ -262,10 +266,20 @@ func (s *Server) resolveOrgContext(projectID string) (OrgContext, error) {
 // multiple times, and safe to call independently of ctx cancellation (i.e.
 // without ever cancelling the ctx passed to Serve): either path marks
 // shutdown as intentional so Serve returns nil instead of an accept error.
+// Forces all open connections to close (issue #20).
 func (s *Server) Close() error {
 	s.closeOnce.Do(func() {
 		s.shutdown.Store(true)
 		s.closeErr = s.listener.Close()
+
+		// Force-close all tracked open connections to prevent handle goroutines
+		// from leaking on shutdown. Iterate conns and close each one (issue #20).
+		s.conns.Range(func(key, value interface{}) bool {
+			if conn, ok := key.(net.Conn); ok {
+				conn.Close()
+			}
+			return true
+		})
 	})
 	return s.closeErr
 }
@@ -301,7 +315,13 @@ func (s *Server) Serve(ctx context.Context) error {
 // (initialized) and write serialization (writeMu) that one-shot dispatch
 // never needed.
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
-	defer conn.Close()
+	// Register connection for tracking (issue #20: force-close on shutdown).
+	s.conns.Store(conn, struct{}{})
+	defer func() {
+		s.conns.Delete(conn)
+		conn.Close()
+	}()
+
 	sess := &mcpSession{}
 	reader := bufio.NewReader(conn)
 	for {
