@@ -168,6 +168,14 @@ Leave it running in its own terminal/session; every command below talks to it.
 go install ./cmd/wormhole-cli
 ```
 
+Install the MCP stdio bridge binary:
+
+```bash
+go install ./cmd/wormhole-mcp-stdio
+```
+
+The `wormhole-cli connect` command requires `wormhole-mcp-stdio` on `$PATH` and requires `wormholed` (step 5) to already be running; it dials wormholed's local socket before registering the connector and fails if that dial fails.
+
 **Claude Code:**
 
 ```bash
@@ -180,7 +188,7 @@ wormhole-cli connect \
   --target claude
 ```
 
-This shells out to the `claude` CLI (`claude mcp add/remove`) to register the connector. Run `/mcp` inside Claude Code afterward to reconnect.
+The `connect` command first confirms `wormholed` is reachable on its local socket, then resolves `wormhole-mcp-stdio` on `$PATH`, then runs `claude mcp remove <name> -s local` (best-effort) followed by `claude mcp add <name> -- <path-to-wormhole-mcp-stdio>`. Claude Code is wired to spawn the stdio bridge binary as its MCP server; it does not talk to wormholed's socket directly. Run `/mcp` inside Claude Code afterward to reconnect.
 
 **OpenCode:**
 
