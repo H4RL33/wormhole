@@ -58,7 +58,7 @@ All we can do is encourage you to reconsider your provider of choice.
 
 ## Status
 
-**Local Runtime Alpha (v0.2.1-alpha)**. Core data schemas, Row-Level Security, multi-tenant isolation, and MCP tools for all four pillars are implemented (see [ROADMAP.md](ROADMAP.md)), plus the local-first runtime layer: `wormholed` daemon, SQLite replica, event bus/scheduler, sync engine with offline-write/reconnect, and multi-org bootstrap (see [ROADMAP-LOCAL-RUNTIME.md](ROADMAP-LOCAL-RUNTIME.md)). Offline/reconnect kill-network test suite and a comprehensive cross-repo isolation audit remain deferred to the beta pass — see that roadmap's P6 section for exact scope.
+**Local Runtime Alpha (v0.2.2-alpha)**. Core data schemas, Row-Level Security, multi-tenant isolation, and MCP tools for all four pillars are implemented (see [ROADMAP.md](ROADMAP.md)), plus the local-first runtime layer: `wormholed` daemon, SQLite replica, event bus/scheduler, sync engine with offline-write/reconnect, and multi-org bootstrap (see [ROADMAP-LOCAL-RUNTIME.md](ROADMAP-LOCAL-RUNTIME.md)). Offline/reconnect kill-network test suite and a comprehensive cross-repo isolation audit remain deferred to the beta pass — see that roadmap's P6 section for exact scope.
 
 Since v0.2.0-alpha, the dashboard viewer-key issuance endpoint (`POST /dashboard/api/projects/{id}/viewer-keys`) and CLI command (`wormhole-cli viewer-key create`) have been added, gated by the `WORMHOLE_ADMIN_KEY` shared-secret admin auth stopgap — a thin placeholder ahead of real human identity/auth, not a full auth system.
 
@@ -186,28 +186,12 @@ docker compose exec db psql -U wormhole -d wormhole -c \
 Build and run `wormhole-server`. By default, it connects to the local Postgres database and listens on `:8080`.
 
 ```bash
-go run cmd/wormhole-server/main.go
+go run ./cmd/wormhole-server
 ```
 
-### 5. Run `wormholed`
+### 5. Connect a harness
 
-`wormholed` is the local daemon a coding harness talks to over a Unix domain socket — it proxies to the Coordination Server and caches state in a local SQLite replica so reads keep working offline. Install it once:
-
-```bash
-go install ./cmd/wormholed
-```
-
-Then run it (it reads its org connection config from `$XDG_CONFIG_HOME/wormhole/` or `~/.config/wormhole/` by default — see `internal/runtime/config` if you need to point it elsewhere):
-
-```bash
-wormholed
-```
-
-Leave it running in its own terminal/session; every command below talks to it.
-
-### 6. Connect a harness
-
-`wormhole connect` registers a fresh agent identity (a Passport), then wires the issued MCP token into your harness of choice. Install the CLI:
+`wormhole connect` registers a fresh agent identity (a Passport), writes its credentials to disk, then wires the issued MCP token into your harness of choice. Install the CLI:
 
 ```bash
 go install ./cmd/wormhole-cli
@@ -219,7 +203,7 @@ Install the MCP stdio bridge binary:
 go install ./cmd/wormhole-mcp-stdio
 ```
 
-The `wormhole-cli connect` command requires `wormhole-mcp-stdio` on `$PATH` and requires `wormholed` (step 5) to already be running: after creating the Passport, connect dials wormholed's local socket to confirm it's reachable, and fails if that dial fails.
+The `wormhole-cli connect` command requires `wormhole-mcp-stdio` on `$PATH`. Run it before starting `wormholed`: after creating the Passport and writing credentials, connect tries to dial wormholed's local socket to confirm it's reachable; if `wormholed` isn't up yet that dial just fails and it prints a warning, then continues wiring the harness. You'll start `wormholed` in the next step.
 
 **Claude Code:**
 
@@ -233,7 +217,7 @@ wormhole-cli connect \
   --target claude
 ```
 
-The `connect` command first creates the agent identity and writes credentials to disk, then confirms `wormholed` is reachable on its local socket, then resolves `wormhole-mcp-stdio` on `$PATH`, then runs `claude mcp remove <name> -s local` (best-effort) followed by `claude mcp add <name> -- <path-to-wormhole-mcp-stdio>`. Claude Code is wired to spawn the stdio bridge binary as its MCP server; it does not talk to wormholed's socket directly. Run `/mcp` inside Claude Code afterward to reconnect.
+The `connect` command first creates the agent identity and writes credentials to disk, then tries to dial `wormholed`'s local socket (warning and continuing if it's not reachable yet), then resolves `wormhole-mcp-stdio` on `$PATH`, then runs `claude mcp remove <name> -s local` (best-effort) followed by `claude mcp add <name> -- <path-to-wormhole-mcp-stdio>`. Claude Code is wired to spawn the stdio bridge binary as its MCP server; it does not talk to wormholed's socket directly. If you saw `wormhole connect: warning: wormholed not running...`, that's expected on first run — start `wormholed` next. Run `/mcp` inside Claude Code afterward to reconnect.
 
 **OpenCode:**
 
@@ -250,6 +234,22 @@ wormhole-cli connect \
 This writes (or merges into) an `opencode.json`/`opencode.jsonc` config — by default the nearest one found walking up from your current directory to your project's `.git` root, falling back to `~/.config/opencode/opencode.json` if none exists. Pass `--opencode-config <path>` to target a specific file instead.
 
 Either connector accepts `--connector-name <name>` to register under a name other than the default `wormhole`.
+
+### 6. Run `wormholed`
+
+`wormholed` is the local daemon a coding harness talks to over a Unix domain socket — it proxies to the Coordination Server and caches state in a local SQLite replica so reads keep working offline. It requires the credentials file `wormhole-cli connect` (step 5) just wrote to `~/.wormhole/credentials/<profile>.json`. Install it once:
+
+```bash
+go install ./cmd/wormholed
+```
+
+Then run it (it reads its org connection config from `$XDG_CONFIG_HOME/wormhole/` or `~/.config/wormhole/` by default — see `internal/runtime/config` if you need to point it elsewhere):
+
+```bash
+wormholed
+```
+
+Leave it running in its own terminal/session; every command below talks to it.
 
 ### 7. Join and verify
 

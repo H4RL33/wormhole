@@ -758,14 +758,17 @@ func runConnect(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "agent_id=%s passport_id=%s project=%s\n", out.AgentID, out.PassportID, *project)
 	fmt.Fprintf(stdout, "credentials written to %s\n", path)
 
-	// Check wormholed socket reachability before wiring to stdio bridge
+	// Check wormholed socket reachability before wiring to stdio bridge.
+	// Not fatal: credentials are already written above, and the harness
+	// wiring below (claude mcp add / opencode config) doesn't require
+	// wormholed to be up yet — it only needs to be running by the time the
+	// harness actually invokes the stdio bridge.
 	socketPath := wormholedSocketPath()
-	conn, dialErr := net.DialTimeout("unix", socketPath, 2*time.Second)
-	if dialErr != nil {
-		fmt.Fprintf(stderr, "wormhole connect: wormholed not running (dial %s: %v) — start wormholed before running connect\n", socketPath, dialErr)
-		return 1
+	if conn, dialErr := net.DialTimeout("unix", socketPath, 2*time.Second); dialErr != nil {
+		fmt.Fprintf(stderr, "wormhole connect: warning: wormholed not running (dial %s: %v) — start wormholed before using the harness\n", socketPath, dialErr)
+	} else {
+		conn.Close()
 	}
-	conn.Close()
 
 	// Resolve stdio binary path
 	resolvedStdioBinPath, lookErr := exec.LookPath(*stdioBin)

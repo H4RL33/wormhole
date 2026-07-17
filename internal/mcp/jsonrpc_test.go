@@ -22,7 +22,7 @@ func TestHandleInitialize(t *testing.T) {
 	if !reflect.DeepEqual(init.Capabilities, wantCaps) {
 		t.Errorf("Capabilities = %#v, want %#v", init.Capabilities, wantCaps)
 	}
-	wantInfo := map[string]string{"name": "wormhole", "version": "0.2.1-alpha"}
+	wantInfo := map[string]string{"name": "wormhole", "version": "0.2.2-alpha"}
 	if !reflect.DeepEqual(init.ServerInfo, wantInfo) {
 		t.Errorf("ServerInfo = %#v, want %#v", init.ServerInfo, wantInfo)
 	}

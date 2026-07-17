@@ -1044,14 +1044,16 @@ func TestRunConnect_ClaudeBinaryNotFound_PrintsManualFallback(t *testing.T) {
 	}
 }
 
-func TestRunConnect_SocketUnreachable_ReturnsError(t *testing.T) {
+func TestRunConnect_SocketUnreachable_WarnsButSucceeds(t *testing.T) {
+	fakeStdioBinary(t) // add stdio binary to PATH
+
 	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
-		t.Fatal("connect must not call wormhole.kb.search if socket is unreachable")
+		t.Fatal("connect must not call wormhole.kb.search")
 		return searchArticlesOutput{}, nil
 	})
 	defer srv.Close()
 
-	claudeBin, _ := fakeClaudeScript(t)
+	claudeBin, logPath := fakeClaudeScript(t)
 	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
 	var stdout, stderr bytes.Buffer
 	// Use a nonexistent socket path via env var override
@@ -1065,19 +1067,28 @@ func TestRunConnect_SocketUnreachable_ReturnsError(t *testing.T) {
 		"--token-file", tokenFile,
 		"--claude-bin", claudeBin,
 	}, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("exit code: got %d, want 1 when socket unreachable", code)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
 	}
 	errMsg := stderr.String()
 	if !strings.Contains(errMsg, "wormholed not running") {
 		t.Fatalf("stderr should mention wormholed not running: %q", errMsg)
 	}
-	if !strings.Contains(errMsg, "start wormholed") {
-		t.Fatalf("stderr should prompt to start wormholed: %q", errMsg)
-	}
-	// Credentials ARE written before socket check (step 1 succeeds, then step 2 fails on socket check)
+	// Credentials ARE written despite socket being unreachable
 	if _, err := os.Stat(tokenFile); err != nil {
 		t.Fatalf("credentials file should be written even when socket is unreachable: %v", err)
+	}
+	// Harness wiring should still proceed and succeed
+	out := stdout.String()
+	if !strings.Contains(out, "Connector \"wormhole\" registered") {
+		t.Fatalf("stdout missing connector registered message: %q", out)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read fake claude call log: %v", err)
+	}
+	if !strings.Contains(string(logData), "mcp add wormhole -- ") {
+		t.Fatalf("expected stdio wiring (mcp add wormhole -- ...) but got: %q", string(logData))
 	}
 }
 
