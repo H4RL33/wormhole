@@ -207,6 +207,8 @@ The `wormhole-cli connect` command requires `wormhole-mcp-stdio` on `$PATH`. Run
 
 **Claude Code:**
 
+Run `wormhole-cli connect` from the directory you'll actually launch Claude Code from (typically your project's repo root), not from wherever `go install` put the binaries: Claude Code's `-s local` MCP scoping ties the registration to the working directory `connect` was run in.
+
 ```bash
 wormhole-cli connect \
   --server http://localhost:8080 \
