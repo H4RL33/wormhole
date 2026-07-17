@@ -30,6 +30,16 @@ loop. None blocked their originating day; tracked here so they aren't lost. Sour
   path), not JSON, so this is lower priority than it first looked (flagged Day 19
   Task 1 review, refined by Day 19 final review).
 
+## Future work
+
+- **Mid-session model switching not tracked** — Agent Identity's `Model` field
+  (RFC-0001 §8.4) is a point-in-time snapshot from `join`/`connect`
+  registration; a harness-side model switch (e.g. Claude Code `/model`)
+  mid-session doesn't update it. RFC-0001's `Sessions` field would be the
+  natural home for per-session model tracking, but no `Sessions` entity
+  exists yet (schema/storage work, not scoped here — flagged during CLI
+  consolidation design, `docs/superpowers/specs/2026-07-18-cli-consolidation-design.md`).
+
 ## Test coverage gaps
 
 - **`internal/core/kb`** — `GetArticle_CrossProjectIsolation` lacks the sanity

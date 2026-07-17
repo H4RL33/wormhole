@@ -2,7 +2,7 @@
 
 **Status:** Approved
 **Date:** 2026-07-18
-**Piece:** D of 4 (onboarding-failure remediation). Sequenced first because it fixes the CLI surface an agent actually sees before A (skill-share content) teaches how to use it. B (seed article expansion) and C (friendly project names) are separate, smaller follow-ups, not covered here.
+**Piece:** D of 5 (onboarding-failure remediation). Sequenced first because it fixes the CLI surface an agent actually sees before A (skill-share content) teaches how to use it. Setup-ergonomics (default-server config, flag derivation, interactive wizard) is a separate follow-up spec, sequenced directly after D. B (seed article expansion) and C (friendly project names) come after that.
 
 ## Problem
 
@@ -34,6 +34,10 @@ wormhole mcp                   (new — replaces wormhole-mcp-stdio; stdio<->wor
 
 `usage()` gains an `mcp` line. All other subcommand handlers move unchanged.
 
+## Model attribution
+
+`--model` on `join`/`connect` stops requiring an explicit value from the caller: the calling agent fills it in from its own harness-provided identity (e.g. "claude-sonnet-5", injected into its system prompt by the harness) rather than the flag being left blank or guessed. `--model` remains available as an explicit override for custom-endpoint deployments (`ANTHROPIC_MODEL`-style) or harnesses with no self-identifying signal. No schema or storage change — the identity's `Model` field stays a point-in-time snapshot captured at registration, same as today. Mid-session model switches aren't tracked (noted in `docs/TODO.md`, not built here).
+
 ## Tests
 
 - `cmd/wormhole-cli`'s existing tests (`main_test.go`, `main_join_socket_test.go`, `connect_opencode_test.go`, `profiles_test.go`, `viewer_key_test.go`) move into `cmd/wormhole` with package name updated, no logic changes.
@@ -52,6 +56,8 @@ Clean break: `cmd/wormhole-cli/` and `cmd/wormhole-mcp-stdio/` are deleted outri
 ## Out of scope
 
 - Piece A: skill-share/onboarding content teaching correct tool usage.
+- Setup-ergonomics: default-server config, owner/capabilities/roles derivation, harness auto-detect, interactive setup wizard — own spec, sequenced right after this one.
 - Piece B: seeded KB article expansion at project creation.
 - Piece C: friendly (alphanumeric) project names replacing long codes.
 - Any change to `wormholed` or `wormhole-server` behavior.
+- Sessions entity / mid-session model-switch tracking (`docs/TODO.md`).
