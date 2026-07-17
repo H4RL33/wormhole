@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
@@ -8,10 +10,129 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
+
+// Local MCP types (duplicated from internal/runtime/localapi for test use).
+type mcpRpcRequest struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id,omitempty"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
+}
+
+type mcpRpcResponse struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id,omitempty"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Error   *mcpRpcError    `json:"error,omitempty"`
+}
+
+type mcpRpcError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+type mcpToolsCallParams struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
+type mcpToolCallResultContent struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type mcpToolCallResult struct {
+	Content []mcpToolCallResultContent `json:"content"`
+	IsError bool                       `json:"isError,omitempty"`
+}
+
+// mcpToolResponse mirrors the MCP response for test convenience.
+type mcpToolResponse struct {
+	Result json.RawMessage
+	Error  string
+}
+
+// mcpInitialize sends initialize and notifications/initialized handshake.
+func mcpInitialize(t *testing.T, conn net.Conn, reader *bufio.Reader) {
+	t.Helper()
+
+	req := mcpRpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "initialize", Params: json.RawMessage(`{}`)}
+	reqRaw, _ := json.Marshal(req)
+	if _, err := conn.Write(append(reqRaw, '\n')); err != nil {
+		t.Fatalf("write initialize: %v", err)
+	}
+
+	line, err := reader.ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("read initialize response: %v", err)
+	}
+	var resp mcpRpcResponse
+	if err := json.Unmarshal(bytes.TrimSpace(line), &resp); err != nil {
+		t.Fatalf("decode initialize response: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("initialize error: %+v", resp.Error)
+	}
+
+	notif := mcpRpcRequest{JSONRPC: "2.0", Method: "notifications/initialized"}
+	notifRaw, _ := json.Marshal(notif)
+	if _, err := conn.Write(append(notifRaw, '\n')); err != nil {
+		t.Fatalf("write notifications/initialized: %v", err)
+	}
+}
+
+// mcpCallTool sends a tools/call request and returns the result.
+func mcpCallTool(t *testing.T, conn net.Conn, reader *bufio.Reader, id int, tool string, args map[string]interface{}) mcpToolResponse {
+	t.Helper()
+
+	var argsRaw json.RawMessage
+	if args != nil {
+		b, _ := json.Marshal(args)
+		argsRaw = b
+	} else {
+		argsRaw = json.RawMessage(`{}`)
+	}
+
+	params := mcpToolsCallParams{Name: tool, Arguments: argsRaw}
+	paramsRaw, _ := json.Marshal(params)
+	idRaw, _ := json.Marshal(id)
+	req := mcpRpcRequest{JSONRPC: "2.0", ID: idRaw, Method: "tools/call", Params: paramsRaw}
+	reqRaw, _ := json.Marshal(req)
+	if _, err := conn.Write(append(reqRaw, '\n')); err != nil {
+		t.Fatalf("write tools/call: %v", err)
+	}
+
+	line, err := reader.ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("read tools/call response: %v", err)
+	}
+	var resp mcpRpcResponse
+	if err := json.Unmarshal(bytes.TrimSpace(line), &resp); err != nil {
+		t.Fatalf("decode tools/call response: %v", err)
+	}
+	if resp.Error != nil {
+		return mcpToolResponse{Error: resp.Error.Message}
+	}
+
+	var result mcpToolCallResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("decode tools/call result: %v", err)
+	}
+	if result.IsError {
+		text := ""
+		if len(result.Content) > 0 {
+			text = result.Content[0].Text
+		}
+		return mcpToolResponse{Error: text}
+	}
+	if len(result.Content) == 0 {
+		return mcpToolResponse{}
+	}
+	return mcpToolResponse{Result: json.RawMessage(result.Content[0].Text)}
+}
 
 func TestRun_EndToEndWhoAmI(t *testing.T) {
 	coord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -19,13 +140,7 @@ func TestRun_EndToEndWhoAmI(t *testing.T) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		type rpcRequest struct {
-			JSONRPC string          `json:"jsonrpc"`
-			ID      json.RawMessage `json:"id,omitempty"`
-			Method  string          `json:"method"`
-			Params  json.RawMessage `json:"params,omitempty"`
-		}
-		var req rpcRequest
+		var req mcpRpcRequest
 		json.NewDecoder(r.Body).Decode(&req)
 		out := map[string]any{
 			"agent_id": "agent-1", "owner": "harley", "model": "claude-sonnet-5",
@@ -76,17 +191,10 @@ func TestRun_EndToEndWhoAmI(t *testing.T) {
 	}
 	defer conn.Close()
 
-	reqRaw, _ := json.Marshal(map[string]string{"tool": "wormhole.agent.whoami"})
-	conn.Write(append(reqRaw, '\n'))
+	reader := bufio.NewReader(conn)
+	mcpInitialize(t, conn, reader)
 
-	var resp struct {
-		Result json.RawMessage `json:"result"`
-		Error  string          `json:"error"`
-	}
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		cancel()
-		t.Fatalf("decode response: %v", err)
-	}
+	resp := mcpCallTool(t, conn, reader, 2, "wormhole.agent.whoami", nil)
 	if resp.Error != "" {
 		cancel()
 		t.Fatalf("got error: %s", resp.Error)
@@ -161,25 +269,16 @@ func TestRun_AgentRegisterReachesSchedulerAndEventBus(t *testing.T) {
 	}
 	defer conn.Close()
 
-	argsRaw, _ := json.Marshal(map[string]any{"agent_id": "agent-1", "capabilities": []string{"code"}})
-	reqRaw, _ := json.Marshal(map[string]any{"tool": "wormhole.agent.register", "args": json.RawMessage(argsRaw)})
-	conn.Write(append(reqRaw, '\n'))
+	reader := bufio.NewReader(conn)
+	mcpInitialize(t, conn, reader)
 
-	var resp struct {
-		Result json.RawMessage `json:"result"`
-		Error  string          `json:"error"`
-	}
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		cancel()
-		t.Fatalf("decode response: %v", err)
-	}
+	resp := mcpCallTool(t, conn, reader, 2, "wormhole.agent.register", map[string]interface{}{
+		"agent_id":     "agent-1",
+		"capabilities": []string{"code"},
+	})
 	if resp.Error != "" {
 		cancel()
 		t.Fatalf("wormhole.agent.register returned error: %s", resp.Error)
-	}
-	if strings.Contains(resp.Error, "scheduler not available") {
-		cancel()
-		t.Fatalf("scheduler unreachable from Run: %s", resp.Error)
 	}
 
 	cancel()
