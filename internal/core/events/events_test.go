@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 
 	"github.com/H4RL33/wormhole/internal/types"
@@ -107,6 +108,35 @@ func TestCreateChannel_Success(t *testing.T) {
 	}
 }
 
+// TestCreateChannelWithID_PreservesClientID confirms CreateChannelWithID
+// inserts the row under the caller-supplied id instead of letting Postgres
+// assign a fresh gen_random_uuid() default (see sync.go's
+// IncrementalPushTool, which needs the server-side row to be findable by the
+// client's own local channel id).
+func TestCreateChannelWithID_PreservesClientID(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "create-channel-with-id")
+	wantID := uuid.NewString()
+
+	channel, err := s.CreateChannelWithID(ctx, wantID, projectID, "general")
+	if err != nil {
+		t.Fatalf("CreateChannelWithID: %v", err)
+	}
+
+	if channel.ID != wantID {
+		t.Errorf("channel.ID = %q, want %q", channel.ID, wantID)
+	}
+
+	var gotID string
+	if err := s.db.QueryRow(`SELECT id FROM channels WHERE id = $1 AND project_id = $2`, wantID, projectID).Scan(&gotID); err != nil {
+		t.Fatalf("SELECT channel by client id: %v", err)
+	}
+	if gotID != wantID {
+		t.Errorf("SELECT returned id %q, want %q", gotID, wantID)
+	}
+}
+
 func TestListChannels_Scoping(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -192,6 +222,42 @@ func TestPublishEvent_Success(t *testing.T) {
 	}
 	if event.CreatedAt.IsZero() {
 		t.Error("event.CreatedAt is zero")
+	}
+}
+
+// TestPublishEventWithID_PreservesClientID confirms PublishEventWithID
+// inserts the row under the caller-supplied id instead of letting Postgres
+// assign a fresh gen_random_uuid() default (see sync.go's
+// IncrementalPushTool, which needs the server-side row to be findable by the
+// client's own local event id).
+func TestPublishEventWithID_PreservesClientID(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "publish-event-with-id")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+	channel, err := s.CreateChannel(ctx, projectID, "events-channel-with-id")
+	if err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+	wantID := uuid.NewString()
+
+	payload := json.RawMessage(`{"status":"success"}`)
+	event, err := s.PublishEventWithID(ctx, wantID, projectID, channel.ID, agentID, "task.status_changed", payload, nil)
+	if err != nil {
+		t.Fatalf("PublishEventWithID: %v", err)
+	}
+
+	if event.ID != wantID {
+		t.Errorf("event.ID = %q, want %q", event.ID, wantID)
+	}
+
+	var gotID string
+	if err := s.db.QueryRow(`SELECT id FROM events WHERE id = $1 AND project_id = $2`, wantID, projectID).Scan(&gotID); err != nil {
+		t.Fatalf("SELECT event by client id: %v", err)
+	}
+	if gotID != wantID {
+		t.Errorf("SELECT returned id %q, want %q", gotID, wantID)
 	}
 }
 

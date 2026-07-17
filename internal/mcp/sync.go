@@ -455,7 +455,7 @@ func IncrementalPushTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore
 						applyErr = fmt.Errorf("decode task payload: %w", err)
 						break
 					}
-					_, applyErr = tasksStore.Create(ctx, projectID, payload.Title, payload.Description, payload.ParentTaskID, payload.Priority, payload.DueBy)
+					_, applyErr = tasksStore.CreateWithID(ctx, item.EntityID, projectID, payload.Title, payload.Description, payload.ParentTaskID, payload.Priority, payload.DueBy)
 				case "kb":
 					var payload syncKBCreatePayload
 					if err := json.Unmarshal(item.Payload, &payload); err != nil {
@@ -466,21 +466,21 @@ func IncrementalPushTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore
 					if len(frontmatter) == 0 {
 						frontmatter = json.RawMessage(`{}`)
 					}
-					_, applyErr = kbStore.WriteArticle(ctx, projectID, callerAgentID, payload.Title, payload.Body, frontmatter, payload.Links, payload.Force)
+					_, applyErr = kbStore.WriteArticleWithID(ctx, item.EntityID, projectID, callerAgentID, payload.Title, payload.Body, frontmatter, payload.Links, payload.Force)
 				case "channel":
 					var payload syncChannelCreatePayload
 					if err := json.Unmarshal(item.Payload, &payload); err != nil {
 						applyErr = fmt.Errorf("decode channel payload: %w", err)
 						break
 					}
-					_, applyErr = eventsStore.CreateChannel(ctx, projectID, payload.Name)
+					_, applyErr = eventsStore.CreateChannelWithID(ctx, item.EntityID, projectID, payload.Name)
 				case "event":
 					var payload syncEventCreatePayload
 					if err := json.Unmarshal(item.Payload, &payload); err != nil {
 						applyErr = fmt.Errorf("decode event payload: %w", err)
 						break
 					}
-					_, applyErr = eventsStore.PublishEvent(ctx, projectID, payload.ChannelID, callerAgentID, payload.EventType, payload.Payload, payload.Note)
+					_, applyErr = eventsStore.PublishEventWithID(ctx, item.EntityID, projectID, payload.ChannelID, callerAgentID, payload.EventType, payload.Payload, payload.Note)
 				default:
 					applyErr = fmt.Errorf("unsupported entity_type %q", item.EntityType)
 				}

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 func TestIncrementalPushTool_AppliesTaskCreate(t *testing.T) {
@@ -18,6 +20,11 @@ func TestIncrementalPushTool_AppliesTaskCreate(t *testing.T) {
 		Description: "d",
 		Priority:    1,
 	})
+	// clientID is the client's own local-first task id (a real UUID, as a
+	// local SQLite-backed store would generate — see architecture.md §1 and
+	// RFC-0003 §7.2). incremental_push must preserve it: this is the id the
+	// wormholed client will look the row up by afterward.
+	clientID := uuid.NewString()
 	in := IncrementalPushInput{
 		NamespaceID: projectID,
 		Version:     SyncProtocolVersion,
@@ -27,7 +34,7 @@ func TestIncrementalPushTool_AppliesTaskCreate(t *testing.T) {
 			Operation  string          `json:"operation"`
 			Payload    json.RawMessage `json:"payload"`
 		}{
-			{EntityType: "task", EntityID: "client-generated-id", Operation: "create", Payload: payload},
+			{EntityType: "task", EntityID: clientID, Operation: "create", Payload: payload},
 		},
 	}
 	arguments := mustMarshal(t, in)
@@ -46,13 +53,19 @@ func TestIncrementalPushTool_AppliesTaskCreate(t *testing.T) {
 	if len(out.Applied) != 1 || out.Applied[0].Error != "" {
 		t.Fatalf("Applied: got %+v, want one item with no error", out.Applied)
 	}
-	if out.Applied[0].ID != "client-generated-id" || out.Applied[0].Type != "task" {
+	if out.Applied[0].ID != clientID || out.Applied[0].Type != "task" {
 		t.Fatalf("Applied[0]: got %+v", out.Applied[0])
 	}
 
 	list, err := tasksStore.List(context.Background(), projectID, nil)
 	if err != nil || len(list) != 1 || list[0].Title != "pushed task" || list[0].Description != "d" || list[0].Priority != 1 {
 		t.Fatalf("push was not applied to server store: list=%+v err=%v", list, err)
+	}
+	// The row must be findable server-side by the client's own local id
+	// (the bug this task fixes): Postgres must not have assigned a
+	// different id than the one the client sent.
+	if list[0].ID != clientID {
+		t.Fatalf("server-side task id = %q, want client id %q (client entity id was not preserved)", list[0].ID, clientID)
 	}
 }
 
@@ -62,6 +75,7 @@ func TestIncrementalPushTool_PartialFailureDoesNotAbortBatch(t *testing.T) {
 	projectID := mustCreateProject(t, "mcp-sync-push-partial")
 
 	goodPayload, _ := json.Marshal(syncTaskCreatePayload{Title: "good task", Description: "d", Priority: 1})
+	goodID := uuid.NewString()
 	in := IncrementalPushInput{
 		NamespaceID: projectID,
 		Version:     SyncProtocolVersion,
@@ -72,7 +86,7 @@ func TestIncrementalPushTool_PartialFailureDoesNotAbortBatch(t *testing.T) {
 			Payload    json.RawMessage `json:"payload"`
 		}{
 			{EntityType: "widget", EntityID: "bad-item", Operation: "create", Payload: json.RawMessage(`{}`)},
-			{EntityType: "task", EntityID: "good-item", Operation: "create", Payload: goodPayload},
+			{EntityType: "task", EntityID: goodID, Operation: "create", Payload: goodPayload},
 		},
 	}
 	arguments := mustMarshal(t, in)
@@ -91,7 +105,7 @@ func TestIncrementalPushTool_PartialFailureDoesNotAbortBatch(t *testing.T) {
 	if out.Applied[0].ID != "bad-item" || out.Applied[0].Error == "" {
 		t.Fatalf("Applied[0] (bad item): got %+v, want a non-empty Error", out.Applied[0])
 	}
-	if out.Applied[1].ID != "good-item" || out.Applied[1].Error != "" {
+	if out.Applied[1].ID != goodID || out.Applied[1].Error != "" {
 		t.Fatalf("Applied[1] (good item): got %+v, want empty Error", out.Applied[1])
 	}
 
@@ -107,6 +121,7 @@ func TestIncrementalPushTool_RejectsNonCreateOperation(t *testing.T) {
 	projectID := mustCreateProject(t, "mcp-sync-push-non-create")
 
 	goodPayload, _ := json.Marshal(syncTaskCreatePayload{Title: "good task", Description: "d", Priority: 1})
+	goodID := uuid.NewString()
 	in := IncrementalPushInput{
 		NamespaceID: projectID,
 		Version:     SyncProtocolVersion,
@@ -118,7 +133,7 @@ func TestIncrementalPushTool_RejectsNonCreateOperation(t *testing.T) {
 		}{
 			{EntityType: "task", EntityID: "update-item", Operation: "update", Payload: goodPayload},
 			{EntityType: "kb", EntityID: "delete-item", Operation: "delete", Payload: json.RawMessage(`{}`)},
-			{EntityType: "task", EntityID: "good-item", Operation: "create", Payload: goodPayload},
+			{EntityType: "task", EntityID: goodID, Operation: "create", Payload: goodPayload},
 		},
 	}
 	arguments := mustMarshal(t, in)
@@ -149,7 +164,7 @@ func TestIncrementalPushTool_RejectsNonCreateOperation(t *testing.T) {
 		t.Fatalf("Applied[1].Error: got %q, want %q", out.Applied[1].Error, `unsupported operation "delete"`)
 	}
 	// Third item: "create" operation should succeed
-	if out.Applied[2].ID != "good-item" || out.Applied[2].Error != "" {
+	if out.Applied[2].ID != goodID || out.Applied[2].Error != "" {
 		t.Fatalf("Applied[2] (good item): got %+v, want empty Error", out.Applied[2])
 	}
 

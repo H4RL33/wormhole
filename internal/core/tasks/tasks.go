@@ -68,8 +68,29 @@ func NewStore(db *sql.DB, eventsStore *events.Store) *Store {
 
 const taskColumns = `id, project_id, parent_task_id, title, description, owner_agent_id, status, priority, due_by, created_at, updated_at`
 
-// Create inserts a new task, always starting at status "todo".
+// Create inserts a new task, always starting at status "todo", letting
+// Postgres assign the id (gen_random_uuid() default).
 func (s *Store) Create(ctx context.Context, projectID, title, description string, parentTaskID *string, priority int, dueBy *time.Time) (Task, error) {
+	return s.createWithOptionalID(ctx, "", projectID, title, description, parentTaskID, priority, dueBy)
+}
+
+// CreateWithID inserts a new task under the caller-supplied id instead of
+// letting Postgres assign one. This exists for wormhole.sync.incremental_push
+// (RFC-0003 §8.2), which must preserve the client's local-first task id so
+// the server-side row is findable by the id the client already has; ordinary
+// task creation (wormhole.task.create) has no local id to preserve and keeps
+// calling Create.
+func (s *Store) CreateWithID(ctx context.Context, id, projectID, title, description string, parentTaskID *string, priority int, dueBy *time.Time) (Task, error) {
+	return s.createWithOptionalID(ctx, id, projectID, title, description, parentTaskID, priority, dueBy)
+}
+
+// createWithOptionalID is the shared transaction/validation core of Create
+// and CreateWithID. An empty id lets the INSERT column list omit id, so
+// Postgres's gen_random_uuid() default fires; a non-empty id is included in
+// the column list and args, so the row is inserted under that exact id (and
+// a duplicate id surfaces as a normal primary-key unique-violation error,
+// same as any other store error today).
+func (s *Store) createWithOptionalID(ctx context.Context, id, projectID, title, description string, parentTaskID *string, priority int, dueBy *time.Time) (Task, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Task{}, fmt.Errorf("tasks: create: begin tx: %w", err)
@@ -91,11 +112,20 @@ func (s *Store) Create(ctx context.Context, projectID, title, description string
 		}
 	}
 
-	row := tx.QueryRowContext(ctx,
-		`INSERT INTO tasks (project_id, parent_task_id, title, description, priority, due_by) VALUES ($1, $2, $3, $4, $5, $6)
-		 RETURNING `+taskColumns,
-		projectID, parentTaskID, title, description, priority, dueBy,
-	)
+	var row *sql.Row
+	if id == "" {
+		row = tx.QueryRowContext(ctx,
+			`INSERT INTO tasks (project_id, parent_task_id, title, description, priority, due_by) VALUES ($1, $2, $3, $4, $5, $6)
+			 RETURNING `+taskColumns,
+			projectID, parentTaskID, title, description, priority, dueBy,
+		)
+	} else {
+		row = tx.QueryRowContext(ctx,
+			`INSERT INTO tasks (id, project_id, parent_task_id, title, description, priority, due_by) VALUES ($1, $2, $3, $4, $5, $6, $7)
+			 RETURNING `+taskColumns,
+			id, projectID, parentTaskID, title, description, priority, dueBy,
+		)
+	}
 	task, err := scanTask(row)
 	if err != nil {
 		return Task{}, fmt.Errorf("tasks: create: %w", err)

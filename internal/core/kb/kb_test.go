@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 
 	"github.com/H4RL33/wormhole/internal/types"
@@ -121,6 +122,37 @@ func TestWriteArticle_SuccessNoLinks(t *testing.T) {
 	}
 	if embeddingIsNull {
 		t.Error("expected embedding column to be populated, got NULL")
+	}
+}
+
+// TestWriteArticleWithID_PreservesClientID confirms WriteArticleWithID
+// inserts the row under the caller-supplied id instead of letting Postgres
+// assign a fresh gen_random_uuid() default (see sync.go's
+// IncrementalPushTool, which needs the server-side row to be findable by the
+// client's own local article id).
+func TestWriteArticleWithID_PreservesClientID(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "kb-write-with-id")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+	wantID := uuid.NewString()
+
+	article, err := s.WriteArticleWithID(ctx, wantID, projectID, agentID, "how to deploy", "run the deploy script", nil, nil, false)
+	if err != nil {
+		t.Fatalf("WriteArticleWithID: %v", err)
+	}
+
+	if article.ID != wantID {
+		t.Errorf("article.ID = %q, want %q", article.ID, wantID)
+	}
+
+	var gotID string
+	if err := s.db.QueryRow(`SELECT id FROM kb_articles WHERE id = $1 AND project_id = $2`, wantID, projectID).Scan(&gotID); err != nil {
+		t.Fatalf("SELECT article by client id: %v", err)
+	}
+	if gotID != wantID {
+		t.Errorf("SELECT returned id %q, want %q", gotID, wantID)
 	}
 }
 

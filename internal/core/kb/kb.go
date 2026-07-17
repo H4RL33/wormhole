@@ -202,7 +202,31 @@ const articleColumns = `id, project_id, title, body, frontmatter, author_agent_i
 // (RFC-0001 §9 wormhole.kb.write(title, body, links[])). If any link target
 // does not exist in-project, the whole write rolls back: no partial article
 // with dangling links is ever left behind.
+// WriteArticle inserts a new article, letting Postgres assign the id
+// (gen_random_uuid() default).
 func (s *Store) WriteArticle(ctx context.Context, projectID, agentID, title, body string, frontmatter json.RawMessage, linkTargetIDs []string, force bool) (Article, error) {
+	return s.writeArticleWithOptionalID(ctx, "", projectID, agentID, title, body, frontmatter, linkTargetIDs, force)
+}
+
+// WriteArticleWithID inserts a new article under the caller-supplied id
+// instead of letting Postgres assign one. This exists for
+// wormhole.sync.incremental_push (RFC-0003 §8.2), which must preserve the
+// client's local-first article id so the server-side row is findable by the
+// id the client already has; ordinary article writes (wormhole.kb.write)
+// have no local id to preserve and keep calling WriteArticle.
+func (s *Store) WriteArticleWithID(ctx context.Context, id, projectID, agentID, title, body string, frontmatter json.RawMessage, linkTargetIDs []string, force bool) (Article, error) {
+	return s.writeArticleWithOptionalID(ctx, id, projectID, agentID, title, body, frontmatter, linkTargetIDs, force)
+}
+
+// writeArticleWithOptionalID is the shared transaction/validation core of
+// WriteArticle and WriteArticleWithID (dedup, conciseness, required-links
+// checks, and link-target insertion are unchanged and unaffected by id).
+// An empty id lets the INSERT column list omit id, so Postgres's
+// gen_random_uuid() default fires; a non-empty id is included in the column
+// list and args, so the row is inserted under that exact id (a duplicate id
+// surfaces as a normal primary-key unique-violation error, same as any
+// other store error today).
+func (s *Store) writeArticleWithOptionalID(ctx context.Context, id, projectID, agentID, title, body string, frontmatter json.RawMessage, linkTargetIDs []string, force bool) (Article, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Article{}, fmt.Errorf("kb: write article: begin tx: %w", err)
@@ -319,12 +343,22 @@ func (s *Store) WriteArticle(ctx context.Context, projectID, agentID, title, bod
 		}
 	}
 
-	row := tx.QueryRowContext(ctx,
-		`INSERT INTO kb_articles (project_id, title, body, frontmatter, author_agent_id, embedding)
-		 VALUES ($1, $2, $3, $4, $5, $6::vector)
-		 RETURNING `+articleColumns,
-		projectID, title, body, frontmatter, agentID, formatVectorLiteral(embedding),
-	)
+	var row *sql.Row
+	if id == "" {
+		row = tx.QueryRowContext(ctx,
+			`INSERT INTO kb_articles (project_id, title, body, frontmatter, author_agent_id, embedding)
+			 VALUES ($1, $2, $3, $4, $5, $6::vector)
+			 RETURNING `+articleColumns,
+			projectID, title, body, frontmatter, agentID, formatVectorLiteral(embedding),
+		)
+	} else {
+		row = tx.QueryRowContext(ctx,
+			`INSERT INTO kb_articles (id, project_id, title, body, frontmatter, author_agent_id, embedding)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7::vector)
+			 RETURNING `+articleColumns,
+			id, projectID, title, body, frontmatter, agentID, formatVectorLiteral(embedding),
+		)
+	}
 
 	var article Article
 	err = row.Scan(&article.ID, &article.ProjectID, &article.Title, &article.Body, &article.Frontmatter, &article.AuthorAgentID, &article.CreatedAt, &article.UpdatedAt)

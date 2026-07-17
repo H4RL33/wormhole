@@ -53,7 +53,30 @@ func NewStore(db *sql.DB) *Store {
 const channelColumns = `id, project_id, name, created_at`
 const eventColumns = `id, project_id, channel_id, agent_id, event_type, payload, note, created_at`
 
+// CreateChannel inserts a new channel, letting Postgres assign the id
+// (gen_random_uuid() default).
 func (s *Store) CreateChannel(ctx context.Context, projectID, name string) (Channel, error) {
+	return s.createChannelWithOptionalID(ctx, "", projectID, name)
+}
+
+// CreateChannelWithID inserts a new channel under the caller-supplied id
+// instead of letting Postgres assign one. This exists for
+// wormhole.sync.incremental_push (RFC-0003 §8.2), which must preserve the
+// client's local-first channel id so the server-side row is findable by the
+// id the client already has; ordinary channel creation
+// (wormhole.channel.create) has no local id to preserve and keeps calling
+// CreateChannel.
+func (s *Store) CreateChannelWithID(ctx context.Context, id, projectID, name string) (Channel, error) {
+	return s.createChannelWithOptionalID(ctx, id, projectID, name)
+}
+
+// createChannelWithOptionalID is the shared transaction core of
+// CreateChannel and CreateChannelWithID. An empty id lets the INSERT column
+// list omit id, so Postgres's gen_random_uuid() default fires; a non-empty
+// id is included in the column list and args, so the row is inserted under
+// that exact id (a duplicate id surfaces as a normal primary-key
+// unique-violation error, same as any other store error today).
+func (s *Store) createChannelWithOptionalID(ctx context.Context, id, projectID, name string) (Channel, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Channel{}, fmt.Errorf("events: create channel: begin tx: %w", err)
@@ -64,10 +87,18 @@ func (s *Store) CreateChannel(ctx context.Context, projectID, name string) (Chan
 		return Channel{}, fmt.Errorf("events: create channel: set project id: %w", err)
 	}
 
-	row := tx.QueryRowContext(ctx,
-		`INSERT INTO channels (project_id, name) VALUES ($1, $2) RETURNING `+channelColumns,
-		projectID, name,
-	)
+	var row *sql.Row
+	if id == "" {
+		row = tx.QueryRowContext(ctx,
+			`INSERT INTO channels (project_id, name) VALUES ($1, $2) RETURNING `+channelColumns,
+			projectID, name,
+		)
+	} else {
+		row = tx.QueryRowContext(ctx,
+			`INSERT INTO channels (id, project_id, name) VALUES ($1, $2, $3) RETURNING `+channelColumns,
+			id, projectID, name,
+		)
+	}
 	var channel Channel
 	err = row.Scan(&channel.ID, &channel.ProjectID, &channel.Name, &channel.CreatedAt)
 	if err != nil {
@@ -148,6 +179,8 @@ func (s *Store) GetChannel(ctx context.Context, projectID, channelID string) (Ch
 	return channel, nil
 }
 
+// PublishEvent inserts a new event, letting Postgres assign the id
+// (gen_random_uuid() default).
 func (s *Store) PublishEvent(ctx context.Context, projectID, channelID, agentID, eventType string, payload json.RawMessage, note *string) (Event, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -159,7 +192,37 @@ func (s *Store) PublishEvent(ctx context.Context, projectID, channelID, agentID,
 		return Event{}, fmt.Errorf("events: publish event: set project id: %w", err)
 	}
 
-	event, err := s.PublishEventInTx(ctx, tx, projectID, channelID, agentID, eventType, payload, note)
+	event, err := s.publishEventInTxWithOptionalID(ctx, tx, "", projectID, channelID, agentID, eventType, payload, note)
+	if err != nil {
+		return Event{}, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Event{}, fmt.Errorf("events: publish event: commit: %w", err)
+	}
+	return event, nil
+}
+
+// PublishEventWithID inserts a new event under the caller-supplied id
+// instead of letting Postgres assign one. This exists for
+// wormhole.sync.incremental_push (RFC-0003 §8.2), which must preserve the
+// client's local-first event id so the server-side row is findable by the
+// id the client already has; ordinary event publishing
+// (wormhole.event.publish and internal callers like
+// tasks.Store.UpdateStatus via PublishEventInTx) has no local id to
+// preserve and keeps calling PublishEvent / PublishEventInTx.
+func (s *Store) PublishEventWithID(ctx context.Context, id, projectID, channelID, agentID, eventType string, payload json.RawMessage, note *string) (Event, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Event{}, fmt.Errorf("events: publish event: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, "SELECT set_config('wormhole.project_id', $1, true)", projectID); err != nil {
+		return Event{}, fmt.Errorf("events: publish event: set project id: %w", err)
+	}
+
+	event, err := s.publishEventInTxWithOptionalID(ctx, tx, id, projectID, channelID, agentID, eventType, payload, note)
 	if err != nil {
 		return Event{}, err
 	}
@@ -176,7 +239,22 @@ func (s *Store) PublishEvent(ctx context.Context, projectID, channelID, agentID,
 // tx's lifecycle (commit/rollback) and must have already set
 // wormhole.project_id on it. See RFC-0001 §8.2 and architecture.md §9.1: the
 // status update and its event insert must succeed or fail together.
+//
+// This signature is unchanged (id is always server-generated here) so
+// existing callers like tasks.Store.UpdateStatus need no changes; the id
+// parameterization needed for sync lives in publishEventInTxWithOptionalID
+// below.
 func (s *Store) PublishEventInTx(ctx context.Context, tx *sql.Tx, projectID, channelID, agentID, eventType string, payload json.RawMessage, note *string) (Event, error) {
+	return s.publishEventInTxWithOptionalID(ctx, tx, "", projectID, channelID, agentID, eventType, payload, note)
+}
+
+// publishEventInTxWithOptionalID is the shared validation/insert core of
+// PublishEvent, PublishEventWithID, and PublishEventInTx. An empty id lets
+// the INSERT column list omit id, so Postgres's gen_random_uuid() default
+// fires; a non-empty id is included in the column list and args, so the row
+// is inserted under that exact id (a duplicate id surfaces as a normal
+// primary-key unique-violation error, same as any other store error today).
+func (s *Store) publishEventInTxWithOptionalID(ctx context.Context, tx *sql.Tx, id, projectID, channelID, agentID, eventType string, payload json.RawMessage, note *string) (Event, error) {
 	if !AllowedEventTypes[eventType] {
 		return Event{}, fmt.Errorf("events: unknown event_type %q, valid types: task.status_changed, review.requested, build.failed, discovery.logged, message.posted: %w", eventType, ErrInvalidEventType)
 	}
@@ -205,12 +283,22 @@ func (s *Store) PublishEventInTx(ctx context.Context, tx *sql.Tx, projectID, cha
 		return Event{}, fmt.Errorf("events: publish event: channel lookup: %w", err)
 	}
 
-	row := tx.QueryRowContext(ctx,
-		`INSERT INTO events (project_id, channel_id, agent_id, event_type, payload, note)
-		 VALUES ($1, $2, $3, $4, $5, $6)
-		 RETURNING `+eventColumns,
-		projectID, channelID, agentID, eventType, payload, note,
-	)
+	var row *sql.Row
+	if id == "" {
+		row = tx.QueryRowContext(ctx,
+			`INSERT INTO events (project_id, channel_id, agent_id, event_type, payload, note)
+			 VALUES ($1, $2, $3, $4, $5, $6)
+			 RETURNING `+eventColumns,
+			projectID, channelID, agentID, eventType, payload, note,
+		)
+	} else {
+		row = tx.QueryRowContext(ctx,
+			`INSERT INTO events (id, project_id, channel_id, agent_id, event_type, payload, note)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)
+			 RETURNING `+eventColumns,
+			id, projectID, channelID, agentID, eventType, payload, note,
+		)
+	}
 
 	var event Event
 	err = row.Scan(&event.ID, &event.ProjectID, &event.ChannelID, &event.AgentID, &event.EventType, &event.Payload, &event.Note, &event.CreatedAt)

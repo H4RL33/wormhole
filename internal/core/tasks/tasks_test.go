@@ -10,6 +10,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 
 	"github.com/H4RL33/wormhole/internal/core/events"
@@ -121,6 +122,36 @@ func TestCreate_ReturnsPopulatedTask(t *testing.T) {
 	}
 	if task.DueBy != nil {
 		t.Errorf("Task.DueBy = %v, want nil", task.DueBy)
+	}
+}
+
+// TestCreateWithID_PreservesClientID confirms CreateWithID inserts the row
+// under the caller-supplied id instead of letting Postgres assign a fresh
+// gen_random_uuid() default (see sync.go's IncrementalPushTool, which needs
+// the server-side row to be findable by the client's own local task id).
+func TestCreateWithID_PreservesClientID(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "create-with-id-task")
+	wantID := uuid.NewString()
+
+	task, err := s.CreateWithID(ctx, wantID, projectID, "Write docs", "long description", nil, 3, nil)
+	if err != nil {
+		t.Fatalf("CreateWithID: %v", err)
+	}
+
+	if task.ID != wantID {
+		t.Errorf("task.ID = %q, want %q", task.ID, wantID)
+	}
+
+	// Confirm the row is actually findable server-side by the client id via
+	// a direct SELECT, not just via the returned struct.
+	var gotID string
+	if err := s.db.QueryRow(`SELECT id FROM tasks WHERE id = $1 AND project_id = $2`, wantID, projectID).Scan(&gotID); err != nil {
+		t.Fatalf("SELECT task by client id: %v", err)
+	}
+	if gotID != wantID {
+		t.Errorf("SELECT returned id %q, want %q", gotID, wantID)
 	}
 }
 
