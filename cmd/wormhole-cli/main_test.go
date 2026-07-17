@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -812,7 +813,68 @@ func fakeClaudeScript(t *testing.T) (scriptPath, logPath string) {
 	return scriptPath, logPath
 }
 
+// fakeStdioBinary writes a simple executable script that just exits 0,
+// and adds it to PATH via a temporary directory. Returns the binary path
+// and the parent directory (for PATH manipulation if needed).
+func fakeStdioBinary(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	binPath := filepath.Join(dir, "wormhole-mcp-stdio")
+	script := "#!/bin/sh\nexit 0\n"
+	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake stdio binary: %v", err)
+	}
+	// Add to PATH
+	oldPath := os.Getenv("PATH")
+	os.Setenv("PATH", dir+":"+oldPath)
+	t.Cleanup(func() {
+		os.Setenv("PATH", oldPath)
+	})
+	return binPath
+}
+
+// fakeWormholedSocket creates a listening Unix socket at a custom location
+// (via XDG_RUNTIME_DIR override) that accepts connections. This allows tests
+// to make the socket reachability check pass without running the actual
+// wormholed daemon. The socket is closed when t.Cleanup runs.
+func fakeWormholedSocket(t *testing.T) (runtimeDir string) {
+	t.Helper()
+	tempDir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", tempDir)
+
+	socketDir := filepath.Join(tempDir, "wormhole")
+	if err := os.Mkdir(socketDir, 0o700); err != nil {
+		t.Fatalf("create wormhole socket dir: %v", err)
+	}
+	socketPath := filepath.Join(socketDir, "wormholed.sock")
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("create fake wormholed socket: %v", err)
+	}
+
+	// Accept connections in background (for socket reachability check)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+
+	t.Cleanup(func() {
+		listener.Close()
+	})
+
+	return tempDir
+}
+
 func TestRunConnect_Success_RegistersAndWiresConnector(t *testing.T) {
+	fakeWormholedSocket(t) // make socket reachable
+	fakeStdioBinary(t)     // add stdio binary to PATH
+
 	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
 		t.Fatal("connect must not call wormhole.kb.search")
 		return searchArticlesOutput{}, nil
@@ -859,9 +921,12 @@ func TestRunConnect_Success_RegistersAndWiresConnector(t *testing.T) {
 	if !strings.Contains(lines[0], "mcp remove wormhole -s local") {
 		t.Fatalf("first invocation: got %q, want it to contain %q", lines[0], "mcp remove wormhole -s local")
 	}
-	wantAdd := "mcp add --transport http wormhole " + srv.URL + "/mcp -H Authorization: Bearer sekrit-token"
-	if !strings.Contains(lines[1], wantAdd) {
-		t.Fatalf("second invocation: got %q, want it to contain %q", lines[1], wantAdd)
+	// NEW: assert stdio wiring (mcp add <name> -- <binary_path>)
+	if !strings.Contains(lines[1], "mcp add wormhole -- ") {
+		t.Fatalf("second invocation: got %q, want it to contain stdio args (mcp add wormhole -- ...)", lines[1])
+	}
+	if !strings.Contains(lines[1], "wormhole-mcp-stdio") {
+		t.Fatalf("second invocation should reference wormhole-mcp-stdio binary: got %q", lines[1])
 	}
 
 	out := stdout.String()
@@ -873,6 +938,9 @@ func TestRunConnect_Success_RegistersAndWiresConnector(t *testing.T) {
 }
 
 func TestRunConnect_CustomConnectorName(t *testing.T) {
+	fakeWormholedSocket(t) // make socket reachable
+	fakeStdioBinary(t)     // add stdio binary to PATH
+
 	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
 		t.Fatal("connect must not call wormhole.kb.search")
 		return searchArticlesOutput{}, nil
@@ -901,6 +969,10 @@ func TestRunConnect_CustomConnectorName(t *testing.T) {
 	}
 	if !strings.Contains(string(logData), "wh-staging") {
 		t.Fatalf("fake claude call log missing custom connector name: %q", logData)
+	}
+	// NEW: assert stdio wiring
+	if !strings.Contains(string(logData), "mcp add wh-staging -- ") {
+		t.Fatalf("expected stdio wiring (mcp add wh-staging -- ...) but got: %q", string(logData))
 	}
 }
 
@@ -936,6 +1008,8 @@ func TestRunConnect_RegisterFailure_NeverInvokesClaude(t *testing.T) {
 }
 
 func TestRunConnect_ClaudeBinaryNotFound_PrintsManualFallback(t *testing.T) {
+	fakeWormholedSocket(t) // make socket reachable
+
 	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
 		t.Fatal("connect must not call wormhole.kb.search")
 		return searchArticlesOutput{}, nil
@@ -956,8 +1030,53 @@ func TestRunConnect_ClaudeBinaryNotFound_PrintsManualFallback(t *testing.T) {
 	if _, err := os.Stat(tokenFile); err != nil {
 		t.Fatalf("credentials file should have been written even though claude binary was missing: %v", err)
 	}
-	if !strings.Contains(stderr.String(), "sekrit-token") {
-		t.Fatalf("stderr missing manual-fallback command with token: %q", stderr.String())
+	// NEW: assert updated message (stdio bridge, not bearer token)
+	errMsg := stderr.String()
+	if !strings.Contains(errMsg, "not found in PATH") {
+		t.Fatalf("stderr should mention binary not found: %q", errMsg)
+	}
+	if !strings.Contains(errMsg, "claude mcp add") {
+		t.Fatalf("stderr should show manual fallback command: %q", errMsg)
+	}
+	if !strings.Contains(errMsg, "--") {
+		t.Fatalf("stderr should show stdio indicator (--): %q", errMsg)
+	}
+}
+
+func TestRunConnect_SocketUnreachable_ReturnsError(t *testing.T) {
+	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
+		t.Fatal("connect must not call wormhole.kb.search if socket is unreachable")
+		return searchArticlesOutput{}, nil
+	})
+	defer srv.Close()
+
+	claudeBin, _ := fakeClaudeScript(t)
+	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
+	var stdout, stderr bytes.Buffer
+	// Use a nonexistent socket path via env var override
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir()) // empty dir, socket won't exist
+
+	code := run([]string{
+		"connect",
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--permissions", "task.read",
+		"--token-file", tokenFile,
+		"--claude-bin", claudeBin,
+	}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit code: got %d, want 1 when socket unreachable", code)
+	}
+	errMsg := stderr.String()
+	if !strings.Contains(errMsg, "wormholed not running") {
+		t.Fatalf("stderr should mention wormholed not running: %q", errMsg)
+	}
+	if !strings.Contains(errMsg, "start wormholed") {
+		t.Fatalf("stderr should prompt to start wormholed: %q", errMsg)
+	}
+	// Credentials ARE written before socket check (step 1 succeeds, then step 2 fails on socket check)
+	if _, err := os.Stat(tokenFile); err != nil {
+		t.Fatalf("credentials file should be written even when socket is unreachable: %v", err)
 	}
 }
 
@@ -1091,6 +1210,9 @@ func TestRunJoin_ExplicitProfile_RejectsUnsafeName(t *testing.T) {
 // --role flag) derives its default profile key using the "default" role
 // placeholder.
 func TestRunConnect_DefaultProfile_DerivedFromProject(t *testing.T) {
+	fakeWormholedSocket(t) // make socket reachable
+	fakeStdioBinary(t)     // add stdio binary to PATH
+
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -1238,6 +1360,132 @@ func TestRun_ProfileCommand_UnknownSubcommand_PrintsUsage(t *testing.T) {
 	code := run([]string{"profile", "bogus"}, &stdout, &stderr)
 	if code != 2 {
 		t.Fatalf("exit code: got %d, want 2", code)
+	}
+}
+
+func TestRunConnect_OpenCode_Success_WritesLocalConfig(t *testing.T) {
+	fakeWormholedSocket(t) // make socket reachable
+	fakeStdioBinary(t)     // add stdio binary to PATH
+
+	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
+		t.Fatal("connect must not call wormhole.kb.search")
+		return searchArticlesOutput{}, nil
+	})
+	defer srv.Close()
+
+	configDir := t.TempDir()
+	configPath := filepath.Join(configDir, "opencode.json")
+	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"connect",
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--owner", "harley",
+		"--model", "claude-code",
+		"--permissions", "task.read",
+		"--token-file", tokenFile,
+		"--target", "opencode",
+		"--opencode-config", configPath,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read opencode config: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+
+	mcp, ok := cfg["mcp"].(map[string]any)
+	if !ok {
+		t.Fatalf("config missing mcp section: %+v", cfg)
+	}
+	wormhole, ok := mcp["wormhole"].(map[string]any)
+	if !ok {
+		t.Fatalf("config mcp missing wormhole entry: %+v", mcp)
+	}
+
+	// NEW: assert local type and command array
+	if connType, ok := wormhole["type"]; !ok || connType != "local" {
+		t.Fatalf("wormhole type: got %v, want \"local\"", connType)
+	}
+	if cmd, ok := wormhole["command"].([]any); !ok || len(cmd) != 1 {
+		t.Fatalf("wormhole command: got %v, want []any with 1 element", cmd)
+	}
+	if cmdStr, ok := wormhole["command"].([]any)[0].(string); !ok || !strings.Contains(cmdStr, "wormhole-mcp-stdio") {
+		t.Fatalf("wormhole command[0] should contain binary path: got %v", wormhole["command"].([]any)[0])
+	}
+
+	// Assert no url or headers fields in local config
+	if _, hasURL := wormhole["url"]; hasURL {
+		t.Fatalf("local config should not have url field: %+v", wormhole)
+	}
+	if _, hasHeaders := wormhole["headers"]; hasHeaders {
+		t.Fatalf("local config should not have headers field: %+v", wormhole)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Passport created.") {
+		t.Fatalf("stdout missing 'Passport created.': %q", out)
+	}
+}
+
+func TestRunConnect_OpenCode_CustomConnectorName(t *testing.T) {
+	fakeWormholedSocket(t) // make socket reachable
+	fakeStdioBinary(t)     // add stdio binary to PATH
+
+	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
+		t.Fatal("connect must not call wormhole.kb.search")
+		return searchArticlesOutput{}, nil
+	})
+	defer srv.Close()
+
+	configDir := t.TempDir()
+	configPath := filepath.Join(configDir, "opencode.json")
+	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"connect",
+		"--server", srv.URL,
+		"--project", "proj-1",
+		"--permissions", "task.read",
+		"--token-file", tokenFile,
+		"--target", "opencode",
+		"--opencode-config", configPath,
+		"--connector-name", "wh-staging",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read opencode config: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+
+	mcp, ok := cfg["mcp"].(map[string]any)
+	if !ok {
+		t.Fatalf("config missing mcp section: %+v", cfg)
+	}
+	staging, ok := mcp["wh-staging"].(map[string]any)
+	if !ok {
+		t.Fatalf("config mcp missing wh-staging entry: %+v", mcp)
+	}
+
+	if connType, ok := staging["type"]; !ok || connType != "local" {
+		t.Fatalf("wh-staging type: got %v, want \"local\"", connType)
+	}
+	if _, hasURL := staging["url"]; hasURL {
+		t.Fatalf("local config should not have url field: %+v", staging)
 	}
 }
 

@@ -3,18 +3,79 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
+// fakeWormholedSocket creates a listening Unix socket at a custom location
+// (via XDG_RUNTIME_DIR override) that accepts connections. This allows tests
+// to make the socket reachability check pass without running the actual
+// wormholed daemon. The socket is closed when t.Cleanup runs.
+func fakeWormholedSocketForOpenCode(t *testing.T) (runtimeDir string) {
+	t.Helper()
+	tempDir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", tempDir)
+
+	socketDir := filepath.Join(tempDir, "wormhole")
+	if err := os.Mkdir(socketDir, 0o700); err != nil {
+		t.Fatalf("create wormhole socket dir: %v", err)
+	}
+	socketPath := filepath.Join(socketDir, "wormholed.sock")
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("create fake wormholed socket: %v", err)
+	}
+
+	// Accept connections in background (for socket reachability check)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+
+	t.Cleanup(func() {
+		listener.Close()
+	})
+
+	return tempDir
+}
+
+// fakeStdioBinaryForOpenCode writes a simple executable script that just exits 0,
+// and adds it to PATH via a temporary directory.
+func fakeStdioBinaryForOpenCode(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	binPath := filepath.Join(dir, "wormhole-mcp-stdio")
+	script := "#!/bin/sh\nexit 0\n"
+	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake stdio binary: %v", err)
+	}
+	// Add to PATH
+	oldPath := os.Getenv("PATH")
+	os.Setenv("PATH", dir+":"+oldPath)
+	t.Cleanup(func() {
+		os.Setenv("PATH", oldPath)
+	})
+	return binPath
+}
+
 // TestRunConnect_OpenCodeTarget_CreatesFreshConfig confirms `wormhole connect
 // --target opencode` writes a brand-new OpenCode config file (parent dirs
 // created as needed) with the $schema key set and the connector's MCP entry
 // under mcp.<connector-name>, using the confirmed opencode.ai/config.json
-// schema (type: "remote", url, enabled, headers.Authorization).
+// schema (type: "local", command array, enabled).
 func TestRunConnect_OpenCodeTarget_CreatesFreshConfig(t *testing.T) {
+	fakeWormholedSocketForOpenCode(t)  // make socket reachable
+	fakeStdioBinaryForOpenCode(t)      // add stdio binary to PATH
+
 	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
 		t.Fatal("connect must not call wormhole.kb.search")
 		return searchArticlesOutput{}, nil
@@ -56,21 +117,29 @@ func TestRunConnect_OpenCodeTarget_CreatesFreshConfig(t *testing.T) {
 	if !ok {
 		t.Fatalf("mcp.wormhole entry missing or wrong type: %v", mcp["wormhole"])
 	}
-	if entry["type"] != "remote" {
-		t.Fatalf("mcp.wormhole.type: got %v, want remote", entry["type"])
+	if entry["type"] != "local" {
+		t.Fatalf("mcp.wormhole.type: got %v, want local", entry["type"])
 	}
-	if entry["url"] != srv.URL+"/mcp" {
-		t.Fatalf("mcp.wormhole.url: got %v, want %v", entry["url"], srv.URL+"/mcp")
+	// Assert command array with wormhole-mcp-stdio binary
+	cmd, ok := entry["command"].([]any)
+	if !ok {
+		t.Fatalf("mcp.wormhole.command missing or wrong type: %v", entry["command"])
+	}
+	if len(cmd) != 1 {
+		t.Fatalf("mcp.wormhole.command: got %d elements, want 1", len(cmd))
+	}
+	if !strings.Contains(cmd[0].(string), "wormhole-mcp-stdio") {
+		t.Fatalf("mcp.wormhole.command[0] should reference wormhole-mcp-stdio: got %v", cmd[0])
 	}
 	if entry["enabled"] != true {
 		t.Fatalf("mcp.wormhole.enabled: got %v, want true", entry["enabled"])
 	}
-	headers, ok := entry["headers"].(map[string]any)
-	if !ok {
-		t.Fatalf("mcp.wormhole.headers missing or wrong type: %v", entry["headers"])
+	// Assert no url or headers fields
+	if _, hasURL := entry["url"]; hasURL {
+		t.Fatalf("local config should not have url field: %v", entry)
 	}
-	if headers["Authorization"] != "Bearer sekrit-token" {
-		t.Fatalf("mcp.wormhole.headers.Authorization: got %v, want Bearer sekrit-token", headers["Authorization"])
+	if _, hasHeaders := entry["headers"]; hasHeaders {
+		t.Fatalf("local config should not have headers field: %v", entry)
 	}
 
 	if !strings.Contains(stdout.String(), "wormhole") || !strings.Contains(stdout.String(), configPath) {
@@ -83,6 +152,9 @@ func TestRunConnect_OpenCodeTarget_CreatesFreshConfig(t *testing.T) {
 // merge untouched, and an existing $schema is left exactly as found (not
 // overwritten with the opencode.ai default).
 func TestRunConnect_OpenCodeTarget_MergesExistingConfig(t *testing.T) {
+	fakeWormholedSocketForOpenCode(t)  // make socket reachable
+	fakeStdioBinaryForOpenCode(t)      // add stdio binary to PATH
+
 	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
 		t.Fatal("connect must not call wormhole.kb.search")
 		return searchArticlesOutput{}, nil
@@ -148,8 +220,8 @@ func TestRunConnect_OpenCodeTarget_MergesExistingConfig(t *testing.T) {
 	if !ok {
 		t.Fatalf("mcp.wormhole entry should have been added: %v", mcp["wormhole"])
 	}
-	if wormhole["type"] != "remote" {
-		t.Fatalf("mcp.wormhole.type: got %v, want remote", wormhole["type"])
+	if wormhole["type"] != "local" {
+		t.Fatalf("mcp.wormhole.type: got %v, want local", wormhole["type"])
 	}
 }
 
@@ -157,6 +229,9 @@ func TestRunConnect_OpenCodeTarget_MergesExistingConfig(t *testing.T) {
 // is used as the mcp.<name> key for the OpenCode path too, matching how
 // Claude's connector name is used positionally.
 func TestRunConnect_OpenCodeTarget_CustomConnectorName(t *testing.T) {
+	fakeWormholedSocketForOpenCode(t)  // make socket reachable
+	fakeStdioBinaryForOpenCode(t)      // add stdio binary to PATH
+
 	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
 		t.Fatal("connect must not call wormhole.kb.search")
 		return searchArticlesOutput{}, nil
@@ -198,10 +273,13 @@ func TestRunConnect_OpenCodeTarget_CustomConnectorName(t *testing.T) {
 }
 
 // TestRunConnect_OpenCodeTarget_ProtectsConfigFilePermissions confirms the
-// OpenCode config file (which contains a live Bearer token) is written with
+// OpenCode config file (which would contain sensitive config) is written with
 // owner-only permissions (0o600), and the parent directory is created with
 // owner-only access (0o700).
 func TestRunConnect_OpenCodeTarget_ProtectsConfigFilePermissions(t *testing.T) {
+	fakeWormholedSocketForOpenCode(t)  // make socket reachable
+	fakeStdioBinaryForOpenCode(t)      // add stdio binary to PATH
+
 	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
 		t.Fatal("connect must not call wormhole.kb.search")
 		return searchArticlesOutput{}, nil
