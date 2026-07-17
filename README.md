@@ -104,11 +104,34 @@ project-scoped viewer key (`Authorization: Bearer <key>`):
 - `GET /dashboard/api/projects/{id}/events`
 - `GET /dashboard/api/projects/{id}/kb`
 
-There is no CLI command to mint a viewer key yet — `identity.Store.CreateViewerKey`
-(`internal/core/identity/viewer_keys.go`) is the only way to issue one today,
-via a direct Go call or a `psql` insert into the `viewer_keys` table using the
-SHA-256 hex hash of your chosen key (the table stores `key_hash`, never the
-raw key — the same hashing `CreateViewerKey` does).
+To issue a viewer key, `wormhole-server` needs an admin key configured:
+
+```bash
+export WORMHOLE_ADMIN_KEY="choose-a-long-random-secret"
+```
+
+Set this before starting `wormhole-server` (step 4 above) — it's read once at
+startup. With that set, mint a viewer key:
+
+```bash
+wormhole-cli viewer-key create \
+  --server http://localhost:8080 \
+  --project 00000000-0000-0000-0000-000000000001 \
+  --label "harley's laptop"
+```
+
+`--admin-key` can be passed explicitly instead of `$WORMHOLE_ADMIN_KEY` if the
+CLI is running somewhere that doesn't share the server's environment. The
+command prints the raw key once — give it to the human who'll use the
+dashboard, as their `Authorization: Bearer <key>` value:
+
+```bash
+curl -H "Authorization: Bearer <viewer_key>" \
+  http://localhost:8080/dashboard/api/projects/00000000-0000-0000-0000-000000000001/tasks
+```
+
+This admin-key gate is a deliberate stopgap, not real human authentication —
+there's no per-human identity or audit trail yet (tracked separately).
 
 ---
 
