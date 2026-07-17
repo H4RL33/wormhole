@@ -1009,6 +1009,7 @@ func TestRunConnect_RegisterFailure_NeverInvokesClaude(t *testing.T) {
 
 func TestRunConnect_ClaudeBinaryNotFound_PrintsManualFallback(t *testing.T) {
 	fakeWormholedSocket(t) // make socket reachable
+	fakeStdioBinary(t)     // add stdio binary to PATH
 
 	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
 		t.Fatal("connect must not call wormhole.kb.search")
