@@ -662,7 +662,7 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 // wormhole.agent.register call as `wormhole join` (via the same
 // doRegister/writeCredentials helpers), then wires the issued token into
 // Claude Code's MCP connector config by shelling out to the `claude` CLI
-// (`claude mcp remove` then `claude mcp add -H`). Unlike `join`, it does
+// (`claude mcp remove` then `claude mcp add <name> -- <wormhole-mcp-stdio path>`). Unlike `join`, it does
 // not run the KB-sync/self-introduction/task-summary steps — those are
 // join's concern for an already-connected identity, not connect's concern
 // of wiring up the transport.
