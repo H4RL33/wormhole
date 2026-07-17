@@ -279,7 +279,7 @@ func handleInitialize() any {
 	return initializeResult{
 		ProtocolVersion: "2025-11-25",
 		Capabilities:    map[string]any{"tools": map[string]any{}},
-		ServerInfo:      map[string]string{"name": "wormholed", "version": "0.2.0-alpha"},
+		ServerInfo:      map[string]string{"name": "wormholed", "version": "0.2.1-alpha"},
 	}
 }
 

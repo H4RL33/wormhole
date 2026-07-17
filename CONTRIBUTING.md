@@ -1,6 +1,6 @@
 # Contributing to Wormhole
 
-Thank you for your interest in contributing to Wormhole! We are currently in **v0.2.0-alpha** and moving quickly. To keep the codebase robust, secure, and maintainable, all contributions must strictly adhere to the guidelines below.
+Thank you for your interest in contributing to Wormhole! We are currently in **v0.2.1-alpha** and moving quickly. To keep the codebase robust, secure, and maintainable, all contributions must strictly adhere to the guidelines below.
 
 ---
 
