@@ -1,19 +1,23 @@
-// Command wormhole-mcp-stdio is a pure framing translator between the MCP
-// stdio transport (Content-Length-prefixed framing, the LSP convention) and
-// wormholed's local Unix domain socket (newline-delimited JSON-RPC 2.0, per
+// Command wormhole-mcp-stdio is a plain bidirectional relay between the MCP
+// stdio transport and wormholed's local Unix domain socket. Both sides speak
+// the same framing -- newline-delimited JSON-RPC 2.0, one message per line,
+// no embedded newlines (MCP stdio transport spec,
+// https://modelcontextprotocol.io/specification/2025-06-18/basic/transports;
+// wormholed socket side per
 // docs/superpowers/plans/2026-07-16-wormholed-mcp-endpoint-design.md §2,
-// §5 subtask 3). It carries no MCP semantics of its own -- initialize,
+// §5 subtask 3) -- so this binary performs no framing translation, only
+// copying. It carries no MCP semantics of its own -- initialize,
 // tools/list, tools/call, and notification handling all live in wormholed
 // on the other end of the socket (internal/runtime/localapi/mcp.go). This
-// binary only finds message boundaries and re-frames them.
+// binary only finds message (line) boundaries and forwards them.
 //
 // Usage: wormhole-mcp-stdio
 //
 // A harness (Claude Code, OpenCode, or any MCP stdio client) spawns this as
-// a subprocess and talks MCP stdio framing to its stdin/stdout; this
-// process dials wormholed's socket and relays every message in both
-// directions until either side disconnects or the process receives
-// SIGINT/SIGTERM.
+// a subprocess and writes/reads newline-delimited JSON-RPC on its
+// stdin/stdout; this process dials wormholed's socket and relays every
+// message in both directions until either side disconnects or the process
+// receives SIGINT/SIGTERM.
 package main
 
 import (
@@ -26,7 +30,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -51,8 +54,9 @@ func main() {
 	}
 }
 
-// wormholedSocketPath derives wormholed's local API socket path. Duplicated
-// from cmd/wormhole-cli/main.go's wormholedSocketPath (main.go:257-267)
+// wormholedSocketPath derives wormholed's local API socket path (no framing
+// logic here -- see bridge, stdinToSocket, socketToStdout for the relay).
+// Duplicated from cmd/wormhole-cli/main.go's wormholedSocketPath (main.go:257-267)
 // rather than imported/shared, matching the design doc's (§4, §5 subtask 3)
 // duplication posture: internal/runtime/* and cmd/* boundaries in this repo
 // already duplicate this exact derivation once (wormhole-cli), and adding a
@@ -76,11 +80,11 @@ func wormholedSocketPath() string {
 }
 
 // bridge relays MCP JSON-RPC messages in both directions between a stdio
-// MCP client (stdin/stdout, Content-Length-prefixed framing) and wormholed's
-// socket (conn, newline-delimited JSON-RPC framing). It performs no
-// interpretation of message contents -- only framing translation -- so all
-// MCP semantics (initialize, tools/list, tools/call, notifications) remain
-// wormholed's responsibility on the other end of conn.
+// MCP client (stdin/stdout) and wormholed's socket (conn). Both sides use
+// the same newline-delimited JSON-RPC framing, so this is a straight copy
+// with no re-framing. It performs no interpretation of message contents, so
+// all MCP semantics (initialize, tools/list, tools/call, notifications)
+// remain wormholed's responsibility on the other end of conn.
 //
 // Two goroutines do the actual copying: one drains stdin -> conn, the other
 // drains conn -> stdout. Shutdown is synchronized the same way
@@ -113,10 +117,10 @@ func bridge(ctx context.Context, stdin io.Reader, stdout io.Writer, conn net.Con
 		defer wg.Done()
 		err := stdinToSocket(stdin, conn)
 		if err != nil && err != io.EOF {
-			// A genuine framing error (malformed Content-Length, truncated
-			// body, transport error) on this side means the session can't
-			// continue -- tear down the shared connection so the other
-			// goroutine, likely blocked reading conn, doesn't hang forever.
+			// A genuine transport error on this side means the session
+			// can't continue -- tear down the shared connection so the
+			// other goroutine, likely blocked reading conn, doesn't hang
+			// forever.
 			forceClose()
 		}
 		errs <- err
@@ -140,28 +144,36 @@ func bridge(ctx context.Context, stdin io.Reader, stdout io.Writer, conn net.Con
 	return first
 }
 
-// stdinToSocket reads successive Content-Length-framed MCP messages off r,
-// strips the framing, and writes each message's raw JSON body followed by a
-// newline to conn -- matching wormholed's newline-delimited socket framing
-// (internal/runtime/localapi/localapi.go's handle(), which reads with
-// bufio.Reader.ReadBytes('\n')). Returns io.EOF on a clean end of input,
-// any other error on a malformed frame or write failure.
+// stdinToSocket reads successive newline-delimited JSON-RPC messages off r
+// and writes each one straight to conn with a trailing newline, matching
+// wormholed's socket framing (internal/runtime/localapi/localapi.go's
+// handle(), which reads with bufio.Reader.ReadBytes('\n')). Returns io.EOF
+// on a clean end of input (r closes exactly on a line boundary), any other
+// error -- including a non-nil, non-EOF error wrapping io.EOF when r closes
+// mid-line, since a truncated final message is not a clean shutdown -- on a
+// read or write failure.
 func stdinToSocket(r io.Reader, conn net.Conn) error {
 	br := bufio.NewReader(r)
 	for {
-		body, err := readContentLengthFrame(br)
-		if err != nil {
-			return err
+		line, err := br.ReadString('\n')
+		if err == io.EOF && len(line) > 0 {
+			return fmt.Errorf("wormhole-mcp-stdio: stdin closed mid-message (no trailing newline)")
 		}
-		if _, err := conn.Write(append(body, '\n')); err != nil {
+		if body := strings.TrimRight(line, "\r\n"); len(body) > 0 {
+			if _, werr := conn.Write([]byte(body + "\n")); werr != nil {
+				return werr
+			}
+		}
+		if err != nil {
 			return err
 		}
 	}
 }
 
 // socketToStdout reads successive newline-delimited JSON-RPC messages off
-// conn and writes each one to w wrapped in Content-Length framing, the MCP
-// stdio transport's convention. This is the direction that carries both
+// conn and writes each one straight to w with a trailing newline -- no
+// re-framing, since the MCP stdio transport uses the same newline-delimited
+// framing as wormholed's socket. This is the direction that carries both
 // tools/call responses and unsolicited server-to-client notifications
 // (design doc §1, §2) -- it does not wait for or pair against anything
 // written by stdinToSocket, since wormholed may push a notification (e.g.
@@ -170,12 +182,11 @@ func socketToStdout(conn net.Conn, w io.Writer) error {
 	reader := bufio.NewReader(conn)
 	for {
 		line, err := reader.ReadBytes('\n')
+		if err == io.EOF && len(line) > 0 {
+			return fmt.Errorf("wormhole-mcp-stdio: socket closed mid-message (no trailing newline)")
+		}
 		if body := bytes.TrimRight(line, "\r\n"); len(body) > 0 {
-			frame := fmt.Sprintf("Content-Length: %d\r\n\r\n", len(body))
-			if _, werr := w.Write([]byte(frame)); werr != nil {
-				return werr
-			}
-			if _, werr := w.Write(body); werr != nil {
+			if _, werr := w.Write(append(body, '\n')); werr != nil {
 				return werr
 			}
 		}
@@ -183,47 +194,4 @@ func socketToStdout(conn net.Conn, w io.Writer) error {
 			return err
 		}
 	}
-}
-
-// readContentLengthFrame reads one Content-Length-prefixed MCP stdio
-// message: a block of "Header: value\r\n" lines terminated by a blank line,
-// followed by exactly Content-Length bytes of message body. Unknown headers
-// (e.g. Content-Type, which the MCP stdio spec permits) are read and
-// ignored. Returns io.EOF if the stream ends cleanly before any header
-// bytes are read (a clean shutdown, not an error); any other error
-// (malformed/non-numeric Content-Length, missing Content-Length header, a
-// truncated body) is returned as-is so the caller can distinguish it from a
-// clean end of input.
-func readContentLengthFrame(r *bufio.Reader) ([]byte, error) {
-	contentLength := -1
-	for {
-		line, err := r.ReadString('\n')
-		if err != nil {
-			return nil, err
-		}
-		line = strings.TrimRight(line, "\r\n")
-		if line == "" {
-			break
-		}
-		name, value, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
-		}
-		if !strings.EqualFold(strings.TrimSpace(name), "Content-Length") {
-			continue // e.g. Content-Type: ignored, this bridge doesn't interpret bodies
-		}
-		n, convErr := strconv.Atoi(strings.TrimSpace(value))
-		if convErr != nil {
-			return nil, fmt.Errorf("wormhole-mcp-stdio: malformed Content-Length header %q: %w", line, convErr)
-		}
-		contentLength = n
-	}
-	if contentLength < 0 {
-		return nil, fmt.Errorf("wormhole-mcp-stdio: message frame missing Content-Length header")
-	}
-	body := make([]byte, contentLength)
-	if _, err := io.ReadFull(r, body); err != nil {
-		return nil, err
-	}
-	return body, nil
 }

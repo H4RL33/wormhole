@@ -14,44 +14,6 @@ import (
 	"time"
 )
 
-// frameContentLength wraps body in the Content-Length-prefixed framing used
-// by the MCP stdio transport (LSP convention): "Content-Length: N\r\n\r\n<body>".
-func frameContentLength(body string) string {
-	return fmt.Sprintf("Content-Length: %d\r\n\r\n%s", len(body), body)
-}
-
-// readTestFrame reads exactly one Content-Length-framed message from r and
-// returns its body, mirroring what a real MCP stdio client does when
-// reading the bridge's stdout. (Named distinctly from main.go's
-// readContentLengthFrame, which has a different signature -- this is test
-// harness code emulating the client side, not the bridge under test.)
-func readTestFrame(r *bufio.Reader) (string, error) {
-	var contentLength int
-	for {
-		line, err := r.ReadString('\n')
-		if err != nil {
-			return "", err
-		}
-		line = strings.TrimRight(line, "\r\n")
-		if line == "" {
-			break // blank line ends the header block
-		}
-		const prefix = "Content-Length:"
-		if strings.HasPrefix(line, prefix) {
-			var n int
-			if _, err := fmt.Sscanf(strings.TrimSpace(line[len(prefix):]), "%d", &n); err != nil {
-				return "", fmt.Errorf("malformed Content-Length header %q: %w", line, err)
-			}
-			contentLength = n
-		}
-	}
-	body := make([]byte, contentLength)
-	if _, err := io.ReadFull(r, body); err != nil {
-		return "", err
-	}
-	return string(body), nil
-}
-
 // startFakeSocket stands up a fake wormholed Unix domain socket in a temp
 // dir and returns the listener. It implements no MCP semantics itself --
 // callers drive the accepted connection directly, matching the real
@@ -100,10 +62,10 @@ func waitForStdout(t *testing.T, stdout *syncBuffer, substr string, timeout time
 	return ""
 }
 
-// TestBridge_StdinToSocket feeds a Content-Length-framed initialize request
-// on stdin and asserts it round-trips through the fake socket (arrives
-// newline-delimited) and the fake socket's newline-delimited response comes
-// back out Content-Length-framed on stdout.
+// TestBridge_StdinToSocket writes a newline-delimited JSON request directly
+// to stdin and asserts it arrives on the fake socket unchanged (still
+// newline-terminated), then writes a newline-delimited JSON response from
+// the fake socket and asserts it arrives on stdout unchanged.
 func TestBridge_StdinToSocket(t *testing.T) {
 	ln := startFakeSocket(t)
 	clientConn, serverConn := dialFakeSocket(t, ln)
@@ -123,15 +85,15 @@ func TestBridge_StdinToSocket(t *testing.T) {
 
 	reqBody := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`
 	go func() {
-		io.WriteString(stdinW, frameContentLength(reqBody))
+		io.WriteString(stdinW, reqBody+"\n")
 	}()
 
 	serverReader := bufio.NewReader(serverConn)
-	line, err := serverReader.ReadBytes('\n')
+	line, err := serverReader.ReadString('\n')
 	if err != nil {
 		t.Fatalf("read request line from socket: %v", err)
 	}
-	got := strings.TrimSpace(string(line))
+	got := strings.TrimSpace(line)
 	if got != reqBody {
 		t.Fatalf("socket received %q, want %q", got, reqBody)
 	}
@@ -142,13 +104,9 @@ func TestBridge_StdinToSocket(t *testing.T) {
 	}
 
 	stdoutStr := waitForStdout(t, stdout, respBody, 2*time.Second)
-	stdoutReader := bufio.NewReader(strings.NewReader(stdoutStr))
-	frameBody, err := readTestFrame(stdoutReader)
-	if err != nil {
-		t.Fatalf("read Content-Length frame from stdout: %v\nstdout was: %q", err, stdoutStr)
-	}
-	if frameBody != respBody {
-		t.Fatalf("stdout frame body = %q, want %q", frameBody, respBody)
+	got = strings.TrimSpace(stdoutStr)
+	if got != respBody {
+		t.Fatalf("stdout = %q, want %q", got, respBody)
 	}
 
 	stdinW.Close()
@@ -158,7 +116,7 @@ func TestBridge_StdinToSocket(t *testing.T) {
 
 // TestBridge_UnsolicitedNotification asserts that a message the fake socket
 // server writes without any corresponding stdin request (e.g. an MCP
-// notification pushed by wormholed) still arrives Content-Length-framed on
+// notification pushed by wormholed) still arrives newline-delimited on
 // stdout -- the bridge must not require request/response pairing.
 func TestBridge_UnsolicitedNotification(t *testing.T) {
 	ln := startFakeSocket(t)
@@ -183,13 +141,9 @@ func TestBridge_UnsolicitedNotification(t *testing.T) {
 	}
 
 	stdoutStr := waitForStdout(t, stdout, notif, 2*time.Second)
-	stdoutReader := bufio.NewReader(strings.NewReader(stdoutStr))
-	frameBody, err := readTestFrame(stdoutReader)
-	if err != nil {
-		t.Fatalf("read Content-Length frame from stdout: %v\nstdout was: %q", err, stdoutStr)
-	}
-	if frameBody != notif {
-		t.Fatalf("stdout frame body = %q, want %q", frameBody, notif)
+	got := strings.TrimSpace(stdoutStr)
+	if got != notif {
+		t.Fatalf("stdout = %q, want %q", got, notif)
 	}
 
 	stdinW.Close()
@@ -197,18 +151,19 @@ func TestBridge_UnsolicitedNotification(t *testing.T) {
 	<-done
 }
 
-// TestBridge_MalformedContentLength asserts a truncated/malformed
-// Content-Length header on stdin is handled without panicking or hanging
-// forever -- bridge must return (possibly with an error) rather than block.
-func TestBridge_MalformedContentLength(t *testing.T) {
+// TestBridge_PartialLineOnStdinEOF asserts that stdin closing mid-write --
+// a partial line with no trailing newline, then EOF -- doesn't hang or
+// panic bridge. There's no framing header to validate anymore, so the
+// relevant edge case for line-based reading is a truncated final line
+// rather than a malformed header.
+func TestBridge_PartialLineOnStdinEOF(t *testing.T) {
 	ln := startFakeSocket(t)
 	clientConn, serverConn := dialFakeSocket(t, ln)
 	defer clientConn.Close()
 	defer serverConn.Close()
 
-	// Malformed header: "Content-Length: notanumber" followed by the
-	// blank-line separator and no body at all, then EOF.
-	stdin := strings.NewReader("Content-Length: notanumber\r\n\r\n")
+	// No trailing newline: stdin ends mid-message.
+	stdin := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize"`)
 	stdout := &syncBuffer{}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -231,7 +186,7 @@ func TestBridge_MalformedContentLength(t *testing.T) {
 		_ = err
 	case <-time.After(2 * time.Second):
 		cancel()
-		t.Fatal("bridge hung on malformed Content-Length header")
+		t.Fatal("bridge hung on partial line / stdin EOF")
 	}
 }
 

@@ -121,7 +121,7 @@ Response `result`:
 {
   "protocolVersion": "2025-11-25",
   "capabilities": { "tools": {} },
-  "serverInfo": { "name": "wormhole", "version": "0.2.3-alpha" }
+  "serverInfo": { "name": "wormhole", "version": "0.2.4-alpha" }
 }
 ```
 
