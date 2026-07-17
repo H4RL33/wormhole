@@ -37,6 +37,7 @@ type Handler struct {
 	Tasks    *tasks.Store
 	Events   *events.Store
 	KB       *kb.Store
+	AdminKey string
 }
 
 // NewMux returns the dashboard API's routes, mounted under /dashboard in
@@ -47,6 +48,7 @@ func (h *Handler) NewMux() *http.ServeMux {
 	mux.HandleFunc("GET /dashboard/api/projects/{id}/tasks", h.withViewerAuth(h.listTasks))
 	mux.HandleFunc("GET /dashboard/api/projects/{id}/events", h.withViewerAuth(h.listEvents))
 	mux.HandleFunc("GET /dashboard/api/projects/{id}/kb", h.withViewerAuth(h.listKB))
+	mux.HandleFunc("POST /dashboard/api/projects/{id}/viewer-keys", h.withAdminKey(h.createViewerKey))
 	return mux
 }
 
