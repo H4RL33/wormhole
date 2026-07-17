@@ -21,7 +21,7 @@ func main() {
 }
 
 func usage() string {
-	return "usage: wormhole <command> [flags]\n\ncommands:\n  join          join a Wormhole project (RFC-0001 §8.5)\n  connect       join a project and register it as a Claude Code MCP connector\n  whoami        show the active (or a named) credential profile\n  profile list  list all stored credential profiles"
+	return "usage: wormhole <command> [flags]\n\ncommands:\n  join          join a Wormhole project (RFC-0001 §8.5)\n  connect       join a project and register it as a Claude Code MCP connector\n  whoami        show the active (or a named) credential profile\n  profile list  list all stored credential profiles\n  viewer-key create   mint a dashboard viewer key for a project (requires an admin key)"
 }
 
 // run dispatches to a subcommand and returns the process exit code. It
@@ -41,6 +41,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runWhoami(args[1:], stdout, stderr)
 	case "profile":
 		return runProfile(args[1:], stdout, stderr)
+	case "viewer-key":
+		if len(args) < 2 || args[1] != "create" {
+			fmt.Fprintln(stderr, "wormhole viewer-key: only \"create\" is supported\n\nusage: wormhole viewer-key create [flags]")
+			return 2
+		}
+		return runViewerKeyCreate(args[2:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "wormhole: unknown command %q\n\n%s\n", args[0], usage())
 		return 2
