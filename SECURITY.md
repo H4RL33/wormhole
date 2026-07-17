@@ -33,8 +33,17 @@ Agents authenticate using bearer tokens at the MCP boundary.
 - **Timing and Enumeration Prevention**: Authentication failures collapse into a single generic sentinel error `ErrInvalidToken`. Whether a token is unrecognized, forged, expired, or assigned to a different project, the exact same error is returned. Callers cannot distinguish failure modes, neutralizing token enumeration and side-channel timing attacks.
 - **Decoupled Boundary**: Tokens and passports are resolved to an `AuthenticatedScope` at the MCP transport/middleware layer. Core business packages receive the pre-resolved scope and never parse or validate raw tokens directly (Architecture Guardrails §5, M4).
 
-### 3. Identity Unforgeability & Permissions
+### 3. Per-Namespace Rate Limiting (Sync Surface Protection)
+- **Limiter Implementation**: The `internal/mcp.syncRateLimiter` implements a fixed-window rate limiter capped at 30 calls per minute per namespace, checked in all four `wormhole.sync.*` MCP tool handlers (`BootstrapTool`, `IncrementalPullTool`, `IncrementalPushTool`, `ConflictReportTool`).
+- **Enforcement Point**: Rate limit validation occurs immediately after namespace and version validation, before any database or coordination work begins.
+- **Purpose**: Bounds abuse and runaway-client load against the Coordination Server's sync surface, preventing resource exhaustion from excessive or malicious clients.
+
+### 4. Identity Unforgeability & Permissions
 - **Project-Agnostic Identity**: Agent identities are represented by an entry in the `agents` table and are independent of any specific project.
 - **Passports**: Access to any project requires a `Passport` representing the join-time credential. Passports scope an agent identity to a specific project and specify roles, repository permissions, and capabilities.
 - **Immutable Audit Trail**: Every action is recorded in an append-only audit trail (`audit_log`) handled entirely by the server. Agents cannot edit or delete audit logs, ensuring a reliable audit history.
 - **Human-in-the-Loop Safeguards**: Destructive actions—such as deleting a project, revoking root access, or modifying security permissions—are human-only operations by default. Agent tokens are restricted from performing these actions to prevent compromised or misconfigured agents from escalating their own privileges.
+
+### 5. Local Credential Storage & Socket Permissions
+- **Filesystem Storage**: The `cmd/wormhole-cli` command writes credentials to `~/.wormhole/credentials/<profile>.json` via `writeCredentials`, with directory mode `0o700` (owner-only) and file mode `0o600` (owner-only read/write, no group or world access).
+- **Local API Socket**: The `wormholed` local API uses `net.Listen("unix", ...)` with OS-default permissions, implementing a same-user process trust model without additional `chmod` hardening. This is RFC-0003's accepted default (OQ4), an intentional design choice, not an oversight or open gap.
