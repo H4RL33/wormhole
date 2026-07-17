@@ -106,8 +106,9 @@ project-scoped viewer key (`Authorization: Bearer <key>`):
 
 There is no CLI command to mint a viewer key yet — `identity.Store.CreateViewerKey`
 (`internal/core/identity/viewer_keys.go`) is the only way to issue one today,
-via a direct call or `psql` insert against the `viewer_keys` table, the same
-way the Quickstart's demo project is created below.
+via a direct Go call or a `psql` insert into the `viewer_keys` table using the
+SHA-256 hex hash of your chosen key (the table stores `key_hash`, never the
+raw key — the same hashing `CreateViewerKey` does).
 
 ---
 
