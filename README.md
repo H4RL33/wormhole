@@ -174,7 +174,7 @@ Install the MCP stdio bridge binary:
 go install ./cmd/wormhole-mcp-stdio
 ```
 
-The `wormhole-cli connect` command requires `wormhole-mcp-stdio` on `$PATH` and requires `wormholed` (step 5) to already be running; it dials wormholed's local socket before registering the connector and fails if that dial fails.
+The `wormhole-cli connect` command requires `wormhole-mcp-stdio` on `$PATH` and requires `wormholed` (step 5) to already be running: after creating the Passport, connect dials wormholed's local socket to confirm it's reachable, and fails if that dial fails.
 
 **Claude Code:**
 
@@ -188,7 +188,7 @@ wormhole-cli connect \
   --target claude
 ```
 
-The `connect` command first confirms `wormholed` is reachable on its local socket, then resolves `wormhole-mcp-stdio` on `$PATH`, then runs `claude mcp remove <name> -s local` (best-effort) followed by `claude mcp add <name> -- <path-to-wormhole-mcp-stdio>`. Claude Code is wired to spawn the stdio bridge binary as its MCP server; it does not talk to wormholed's socket directly. Run `/mcp` inside Claude Code afterward to reconnect.
+The `connect` command first creates the agent identity and writes credentials to disk, then confirms `wormholed` is reachable on its local socket, then resolves `wormhole-mcp-stdio` on `$PATH`, then runs `claude mcp remove <name> -s local` (best-effort) followed by `claude mcp add <name> -- <path-to-wormhole-mcp-stdio>`. Claude Code is wired to spawn the stdio bridge binary as its MCP server; it does not talk to wormholed's socket directly. Run `/mcp` inside Claude Code afterward to reconnect.
 
 **OpenCode:**
 
