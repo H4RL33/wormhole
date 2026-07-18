@@ -12,70 +12,15 @@ Working **Wormhole** only. Unrelated systems in training/memory (other "agent me
 
 ---
 
-## 2. Project Ground Truth (authoritative, don't deviate)
-
-Wormhole = **persistent organisational infrastructure, built for AI agents first, humans second.** Gives agentic coding teams durable, model-agnostic memory surviving model/machine switches, lost session context. Two governing docs:
-
-- **RFC-0001: Wormhole Core** — event bus, task graph, knowledge graph, identity/permissions, all via MCP.
-- **RFC-0002: Wormhole Governance** — Constitution (versioned org policy), Congress (turn-based agent/human debate), built atop Core primitives.
-
-**`docs/architecture.md` is required reading before touching any code.** Authored by Fable 5 specifically to keep lower-capability implementation models aligned on this codebase — it derives from the RFCs, states module boundaries, layering pattern (`internal/core/identity` as reference shape), DB/MCP/testing rules, and an ambiguity-resolution ladder. Authority order: RFC-0001 > RFC-0002 > `docs/architecture.md` > existing code. Every implementer subagent dispatch (any model tier) must be pointed at it.
-
-### 2.1 One-line mental model
-
-**Code versioned by Git. Orgs versioned by Wormhole.** Git remembers software. Wormhole remembers decisions, knowledge, tasks, identities, optionally procedure. Never stores/mirrors code, only pointers (commit SHAs, PR URLs) + commentary.
-
-### 2.2 Core Principles (RFC-0001 §5) — non-negotiable
-
-1. Agents primary users; humans supervise, not micromanage. Default UI/UX, API ergonomics to model efficiency, not human scrolling comfort.
-2. Git sole source of truth for code. Never propose Wormhole storing/diffing/hosting code.
-3. Structured events over NL chatter. Typed objects first (`task.status_changed`, `build.failed`, `discovery.logged`); free text secondary `note` field only.
-4. Shared knowledge persistent, searchable, model-agnostic. Nothing lives only in one vendor's context or one machine's disk.
-5. Everything via MCP. Not exposed as MCP tool = not part of platform, full stop.
-
-### 2.3 Four pillars (RFC-0001 §8)
-
-- **Communication** — Event Bus, typed events on channels.
-- **Coordination** — Task Graph: Project → Task → Subtask, owner/status/priority/links; transitions emit events.
-- **Knowledge Base** — atomic, linked, semantic-searchable KB articles, server-side checks (dedup, conciseness, required links). Graph, not wiki.
-- **Identity & Permissions** — agents self-owned identities, Passport (credential on `wormhole join`), scoped roles/permissions, append-only audit trail.
-
-Git Integration (§8.6), Joining (§8.5, `wormhole join`) = supporting flows, not pillars.
-
-### 2.4 Explicit non-goals (RFC-0001 §4.2, RFC-0002 §3.2)
-
-- Not Jira/Linear/Asana replacement — humans get read/observe, not competing UI.
-- Not general chat platform. No human-to-human messaging, rich media, social feed.
-- Not git host. No code review UI vs GitHub/GitLab.
-- Not fully autonomous self-amending policy system. Governance keeps human final approval (`wormhole.governance.decide` human-only). Never let agent identity adopt own Constitution changes.
-- Not live synchronous debate tool. Congress turn-based, async (bounded turns, default 5/proposal), not chat meeting.
-
-### 2.5 Deployment/scope reality-check
-
-- MVP (§12) narrow: agent identities, joining, channels, tasks, KB, MCP interface. Git integration beyond manual link, governance, human UI, plugin system all **not** in MVP.
-- Self-hostable day one, single Postgres + pgvector target. Managed cloud = hosting layer on identical code, not capability upsell.
-- Governance opt-in **per project**, zero new storage primitives: proposal = task, debate turn = event, adoption writes KB article.
-
-### 2.6 Glossary (precise terms, no invented synonyms)
+## 2. Glossary (precise terms, no invented synonyms)
 
 Agent, Event, Channel, Task graph, KB article, Passport, Joining, Constitution, Congress. Undefined term needed — say so, don't coin vocab.
 
----
-
-## 3. Factual Accuracy and Self-Verification Protocol
-
-Before any factual claim on Wormhole architecture/scope/API/roadmap:
-
-1. **Locate source.** Claim (tool name, storage choice, goal/non-goal, lifecycle step) must trace to RFC-0001, RFC-0002, or this conversation. Can't locate — don't assert.
-2. **Flag inference.** Extrapolating beyond RFCs — say "RFC doesn't specify; here's reasonable extension," not guess-as-fact.
-3. **Core vs Governance separate**, independently adoptable. Core ships fully useful with zero governance. Never call governance-only concept (Constitution, Congress, proposal lifecycle) Core; never assume governance enabled unless told.
-4. **Re-read before contradicting.** About to conflict earlier statement or RFCs — stop, reconcile, don't silently overwrite.
-5. **No hallucinated API shape.** MCP interfaces (§9 RFC-0001, §7 RFC-0002) marked "indicative." Say "indicative, not finalised" when decision hinges on exact signatures.
-6. **Open questions stay open** (RFC-0001 §15, RFC-0002 §9). Say RFC leaves it open, don't invent resolution.
+**Authority order:** RFC-0001 > RFC-0002 > `docs/implementation-rules.md` > existing code.
 
 ---
 
-## 4. Context Grounding (anti-hallucination, anti-drift)
+## 3. Context Grounding (anti-hallucination, anti-drift)
 
 - Silently check: question about Wormhole Core, Governance, or outside both? Outside both (unrelated lib, other Harley project, general programming) — answer on own terms, don't bolt on Wormhole terms/patterns.
 - No current implementation state in context — say so, ask for file/module rather than assume codebase matches RFC verbatim. RFCs = intended design; implementation may diverge.
@@ -83,7 +28,7 @@ Before any factual claim on Wormhole architecture/scope/API/roadmap:
 
 ---
 
-## 5. Topic Drift Detection Protocol
+## 4. Topic Drift Detection Protocol
 
 Before finalising response, check internally:
 
@@ -95,7 +40,7 @@ Before finalising response, check internally:
 
 ---
 
-## 6. Communication Style
+## 5. Communication Style
 
 - Direct, precise, zero filler. No "Great question!", no unearned enthusiasm, no apologising for accuracy.
 - Peer engineer in design review, not tutorial. Assume competence, don't over-explain unless asked.
@@ -106,7 +51,7 @@ Before finalising response, check internally:
 
 ---
 
-## 7. Pre-Response Checklist
+## 6. Pre-Response Checklist
 
 Run silently before sending:
 
@@ -119,10 +64,22 @@ Run silently before sending:
 
 ---
 
-## 8. Execution Mode: Subagent-Driven Development, Always
+## 7. Execution Mode: Smart Dispatch + Subagent-Driven Development
 
-Every change in this repo, no matter how small (typo, one-line fix, single config value), goes through `superpowers:subagent-driven-development`. No exceptions for "smallest change" — the point is keeping main-thread context clear across a long-running 24-day build, not judging task size.
+For code changes in this repo:
 
-- Dispatch implementation work to Haiku-tier subagents by default.
-- Escalate to Sonnet only for periodic checks: reviewing subagent output, resolving ambiguity, architectural calls the RFC doesn't settle.
-- Main thread orchestrates and reviews; it does not do the edit itself, even for a one-liner.
+**Small, localized changes (direct edit):** typo, config flag, single-file test, doc-only update. Route directly (no subagent spawn) if ≤100 lines, single file, no RFC ambiguity, no cross-pillar implications. See `docs/implementation-rules.md §1` for decision table + examples.
+
+**Complex or cross-cutting changes:** multi-file, RFC ambiguity, cross-pillar, new patterns. Route through `superpowers:subagent-driven-development` for isolation + oversight.
+
+Every change must satisfy rules in `docs/implementation-rules.md`.
+
+---
+
+## 8. Local Skills and Subagents
+
+Wormhole contains custom agent workflows, scripts, and instructions defined locally.
+
+- Before starting feature work, planning, or executing tasks, search and read the local `.agents` directory.
+- All custom skills are stored under `.agents/skills/`. Read the corresponding `SKILL.md` before using a skill.
+- Custom subagents and plugins are defined under `.agents/agents/` and `.agents/plugins/`. Look in these directories to understand available subagents and their capabilities.
