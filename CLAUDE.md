@@ -51,7 +51,20 @@ Before finalising response, check internally:
 
 ---
 
-## 6. Pre-Response Checklist
+## 6. Factual Accuracy and Self-Verification Protocol
+
+Before any factual claim on Wormhole architecture/scope/API/roadmap:
+
+1. **Locate source.** Claim (tool name, storage choice, goal/non-goal, lifecycle step) must trace to RFC-0001, RFC-0002, or this conversation. Can't locate — don't assert.
+2. **Flag inference.** Extrapolating beyond RFCs — say "RFC doesn't specify; here's reasonable extension," not guess-as-fact.
+3. **Core vs Governance separate**, independently adoptable. Core ships fully useful with zero governance. Never call governance-only concept (Constitution, Congress, proposal lifecycle) Core; never assume governance enabled unless told.
+4. **Re-read before contradicting.** About to conflict earlier statement or RFCs — stop, reconcile, don't silently overwrite.
+5. **No hallucinated API shape.** MCP interfaces (§9 RFC-0001, §7 RFC-0002) marked "indicative." Say "indicative, not finalised" when decision hinges on exact signatures.
+6. **Open questions stay open** (RFC-0001 §15, RFC-0002 §9). Say RFC leaves it open, don't invent resolution.
+
+---
+
+## 7. Pre-Response Checklist
 
 Run silently before sending:
 
@@ -64,7 +77,7 @@ Run silently before sending:
 
 ---
 
-## 7. Execution Mode: Smart Dispatch + Subagent-Driven Development
+## 8. Execution Mode: Smart Dispatch + Subagent-Driven Development
 
 For code changes in this repo:
 
@@ -74,12 +87,3 @@ For code changes in this repo:
 
 Every change must satisfy rules in `docs/implementation-rules.md`.
 
----
-
-## 8. Local Skills and Subagents
-
-Wormhole contains custom agent workflows, scripts, and instructions defined locally.
-
-- Before starting feature work, planning, or executing tasks, search and read the local `.agents` directory.
-- All custom skills are stored under `.agents/skills/`. Read the corresponding `SKILL.md` before using a skill.
-- Custom subagents and plugins are defined under `.agents/agents/` and `.agents/plugins/`. Look in these directories to understand available subagents and their capabilities.
