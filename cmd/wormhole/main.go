@@ -395,15 +395,6 @@ func callTool(client *http.Client, server, tool, projectID, token string, args a
 	return json.RawMessage(result.Content[0].Text), nil
 }
 
-// wormholedSocketPath derives wormholed's local API socket path
-func wormholedSocketPath() string {
-	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
-	if runtimeDir == "" {
-		runtimeDir = filepath.Join(os.TempDir(), "wormhole-runtime")
-	}
-	return filepath.Join(runtimeDir, "wormhole", "wormholed.sock")
-}
-
 // doRegisterViaSocket attempts wormhole.agent.register through wormholed's local socket
 func doRegisterViaSocket(socketPath, project string, in registerAgentInput) (out registerAgentOutput, reachable bool, err error) {
 	conn, dialErr := net.DialTimeout("unix", socketPath, 2*time.Second)
