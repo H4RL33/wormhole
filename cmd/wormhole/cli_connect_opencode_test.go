@@ -62,16 +62,19 @@ func TestRunConnect_OpenCodeTarget_CreatesFreshConfig(t *testing.T) {
 	if entry["type"] != "local" {
 		t.Fatalf("mcp.wormhole.type: got %v, want local", entry["type"])
 	}
-	// Assert command array with wormhole-mcp-stdio binary
+	// Assert command array with wormhole binary and mcp subcommand
 	cmd, ok := entry["command"].([]any)
 	if !ok {
 		t.Fatalf("mcp.wormhole.command missing or wrong type: %v", entry["command"])
 	}
-	if len(cmd) != 1 {
-		t.Fatalf("mcp.wormhole.command: got %d elements, want 1", len(cmd))
+	if len(cmd) != 2 {
+		t.Fatalf("mcp.wormhole.command: got %d elements, want 2", len(cmd))
 	}
-	if !strings.Contains(cmd[0].(string), "wormhole-mcp-stdio") {
-		t.Fatalf("mcp.wormhole.command[0] should reference wormhole-mcp-stdio: got %v", cmd[0])
+	if !strings.Contains(cmd[0].(string), "wormhole") {
+		t.Fatalf("mcp.wormhole.command[0] should reference wormhole: got %v", cmd[0])
+	}
+	if cmd[1].(string) != "mcp" {
+		t.Fatalf("mcp.wormhole.command[1] should be 'mcp': got %v", cmd[1])
 	}
 	if entry["enabled"] != true {
 		t.Fatalf("mcp.wormhole.enabled: got %v, want true", entry["enabled"])

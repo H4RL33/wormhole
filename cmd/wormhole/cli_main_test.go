@@ -819,10 +819,10 @@ func fakeClaudeScript(t *testing.T) (scriptPath, logPath string) {
 func fakeStdioBinary(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	binPath := filepath.Join(dir, "wormhole-mcp-stdio")
+	binPath := filepath.Join(dir, "wormhole")
 	script := "#!/bin/sh\nexit 0\n"
 	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake stdio binary: %v", err)
+		t.Fatalf("write fake wormhole binary: %v", err)
 	}
 	// Add to PATH
 	oldPath := os.Getenv("PATH")
@@ -921,12 +921,12 @@ func TestRunConnect_Success_RegistersAndWiresConnector(t *testing.T) {
 	if !strings.Contains(lines[0], "mcp remove wormhole -s local") {
 		t.Fatalf("first invocation: got %q, want it to contain %q", lines[0], "mcp remove wormhole -s local")
 	}
-	// NEW: assert stdio wiring (mcp add <name> -- <binary_path>)
+	// NEW: assert stdio wiring with merged binary and mcp subcommand (mcp add <name> -- <binary_path> mcp)
 	if !strings.Contains(lines[1], "mcp add wormhole -- ") {
 		t.Fatalf("second invocation: got %q, want it to contain stdio args (mcp add wormhole -- ...)", lines[1])
 	}
-	if !strings.Contains(lines[1], "wormhole-mcp-stdio") {
-		t.Fatalf("second invocation should reference wormhole-mcp-stdio binary: got %q", lines[1])
+	if !strings.Contains(lines[1], "wormhole") || !strings.Contains(lines[1], "mcp") {
+		t.Fatalf("second invocation should reference wormhole binary with mcp subcommand: got %q", lines[1])
 	}
 
 	out := stdout.String()
@@ -970,9 +970,12 @@ func TestRunConnect_CustomConnectorName(t *testing.T) {
 	if !strings.Contains(string(logData), "wh-staging") {
 		t.Fatalf("fake claude call log missing custom connector name: %q", logData)
 	}
-	// NEW: assert stdio wiring
+	// NEW: assert stdio wiring with mcp subcommand
 	if !strings.Contains(string(logData), "mcp add wh-staging -- ") {
 		t.Fatalf("expected stdio wiring (mcp add wh-staging -- ...) but got: %q", string(logData))
+	}
+	if !strings.Contains(string(logData), "mcp") {
+		t.Fatalf("expected mcp subcommand in wiring but got: %q", string(logData))
 	}
 }
 
@@ -1089,6 +1092,9 @@ func TestRunConnect_SocketUnreachable_WarnsButSucceeds(t *testing.T) {
 	}
 	if !strings.Contains(string(logData), "mcp add wormhole -- ") {
 		t.Fatalf("expected stdio wiring (mcp add wormhole -- ...) but got: %q", string(logData))
+	}
+	if !strings.Contains(string(logData), "mcp") {
+		t.Fatalf("expected mcp subcommand in wiring but got: %q", string(logData))
 	}
 }
 
@@ -1518,15 +1524,18 @@ func TestRunConnect_OpenCode_Success_WritesLocalConfig(t *testing.T) {
 		t.Fatalf("config mcp missing wormhole entry: %+v", mcp)
 	}
 
-	// NEW: assert local type and command array
+	// NEW: assert local type and command array with wormhole and mcp subcommand
 	if connType, ok := wormhole["type"]; !ok || connType != "local" {
 		t.Fatalf("wormhole type: got %v, want \"local\"", connType)
 	}
-	if cmd, ok := wormhole["command"].([]any); !ok || len(cmd) != 1 {
-		t.Fatalf("wormhole command: got %v, want []any with 1 element", cmd)
+	if cmd, ok := wormhole["command"].([]any); !ok || len(cmd) != 2 {
+		t.Fatalf("wormhole command: got %v, want []any with 2 elements", cmd)
 	}
-	if cmdStr, ok := wormhole["command"].([]any)[0].(string); !ok || !strings.Contains(cmdStr, "wormhole-mcp-stdio") {
+	if cmdStr, ok := wormhole["command"].([]any)[0].(string); !ok || !strings.Contains(cmdStr, "wormhole") {
 		t.Fatalf("wormhole command[0] should contain binary path: got %v", wormhole["command"].([]any)[0])
+	}
+	if subCmd, ok := wormhole["command"].([]any)[1].(string); !ok || subCmd != "mcp" {
+		t.Fatalf("wormhole command[1] should be 'mcp': got %v", wormhole["command"].([]any)[1])
 	}
 
 	// Assert no url or headers fields in local config

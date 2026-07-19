@@ -766,7 +766,7 @@ func runConnect(args []string, stdout, stderr io.Writer) int {
 	profile := fs.String("profile", "", "profile name to store credentials under (default: derived from --project, e.g. proj-1__default)")
 	connectorName := fs.String("connector-name", "wormhole", "name to register the MCP connector under (claude mcp add/remove)")
 	claudeBin := fs.String("claude-bin", "claude", "path to the claude CLI binary")
-	stdioBin := fs.String("stdio-bin", "wormhole-mcp-stdio", "path to the wormhole-mcp-stdio bridge binary")
+	stdioBin := fs.String("stdio-bin", "wormhole", "path to the wormhole binary")
 	target := fs.String("target", "claude", "connector target: \"claude\" or \"opencode\"")
 	openCodeConfig := fs.String("opencode-config", "", "path to the OpenCode config file (default: nearest opencode.json/.jsonc walking up to .git, else $HOME/.config/opencode/opencode.json)")
 	if err := fs.Parse(args); err != nil {
@@ -844,9 +844,9 @@ func runConnect(args []string, stdout, stderr io.Writer) int {
 	resolvedStdioBinPath, lookErr := exec.LookPath(*stdioBin)
 	if lookErr != nil {
 		if *target == "opencode" {
-			fmt.Fprintf(stderr, "wormhole connect: %q not found in PATH — wire the connector manually: add mcp config with type:\"local\" and command:[\"%s\"]\n", *stdioBin, *stdioBin)
+			fmt.Fprintf(stderr, "wormhole connect: %q not found in PATH — wire the connector manually: add mcp config with type:\"local\" and command:[\"%s\", \"mcp\"]\n", *stdioBin, *stdioBin)
 		} else {
-			fmt.Fprintf(stderr, "wormhole connect: %q not found in PATH — wire the connector manually:\n  claude mcp add %s -- %s\n", *stdioBin, *connectorName, *stdioBin)
+			fmt.Fprintf(stderr, "wormhole connect: %q not found in PATH — wire the connector manually:\n  claude mcp add %s -- %s mcp\n", *stdioBin, *connectorName, *stdioBin)
 		}
 		return 1
 	}
@@ -856,14 +856,14 @@ func runConnect(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if _, lookErr := exec.LookPath(*claudeBin); lookErr != nil {
-		fmt.Fprintf(stderr, "wormhole connect: %q not found in PATH — wire the connector manually:\n  claude mcp add %s -- %s\n", *claudeBin, *connectorName, *stdioBin)
+		fmt.Fprintf(stderr, "wormhole connect: %q not found in PATH — wire the connector manually:\n  claude mcp add %s -- %s mcp\n", *claudeBin, *connectorName, *stdioBin)
 		return 1
 	}
 
 	removeCmd := exec.Command(*claudeBin, "mcp", "remove", *connectorName, "-s", "local")
 	removeCmd.Run()
 
-	addCmd := exec.Command(*claudeBin, "mcp", "add", *connectorName, "--", resolvedStdioBinPath)
+	addCmd := exec.Command(*claudeBin, "mcp", "add", *connectorName, "--", resolvedStdioBinPath, "mcp")
 	addCmd.Stdout = stdout
 	addCmd.Stderr = stderr
 	if err := addCmd.Run(); err != nil {
@@ -871,7 +871,7 @@ func runConnect(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "Connector %q registered (stdio via %s).\n", *connectorName, resolvedStdioBinPath)
+	fmt.Fprintf(stdout, "Connector %q registered (stdio via %s mcp).\n", *connectorName, resolvedStdioBinPath)
 	return 0
 }
 
@@ -909,7 +909,7 @@ func runConnectOpenCode(explicitPath, connectorName, resolvedStdioBinPath string
 	}
 	mcp[connectorName] = map[string]any{
 		"type":    "local",
-		"command": []string{resolvedStdioBinPath},
+		"command": []string{resolvedStdioBinPath, "mcp"},
 		"enabled": true,
 	}
 	cfg["mcp"] = mcp
