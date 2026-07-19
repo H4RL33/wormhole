@@ -1150,7 +1150,3 @@ func runViewerKey(args []string, stdout, stderr io.Writer) int {
 	return runViewerKeyCreate(args[1:], stdout, stderr)
 }
 
-func runMCP(args []string, stdout, stderr io.Writer) int {
-	fmt.Fprintf(stderr, "mcp: not yet implemented\n")
-	return 1
-}
