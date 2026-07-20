@@ -12,6 +12,9 @@
 # Agent tooling cache (plugin/skill source, not project content)
 /.agents/
 
+# Git worktrees
+.worktrees/
+
 # OS/editor
 .DS_Store
 *.swp
