@@ -15,6 +15,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/H4RL33/wormhole/internal/config"
 )
 
 func main() {
@@ -593,11 +595,31 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *server == "" || *project == "" {
-		fmt.Fprintln(stderr, "wormhole join: --server and --project are required")
-		fs.Usage()
-		return 2
+
+	// Load configs
+	localCfg, _ := config.LoadLocal()
+	globalCfg, _ := config.LoadGlobal()
+
+	// Resolve with precedence
+	resolvedServer, err := config.ResolveServer(*server, localCfg, globalCfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole join: server: %v\n", err)
+		return 1
 	}
+
+	resolvedProject, err := config.ResolveProject(*project, localCfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole join: project: %v\n", err)
+		return 1
+	}
+
+	resolvedOwner, err := config.ResolveOwner(*owner, localCfg, globalCfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole join: owner: %v\n", err)
+		return 1
+	}
+
+	resolvedRepositories, _ := config.ResolveRepositories(*repositories)
 
 	splitOrNil := func(s string) []string {
 		if s == "" {
@@ -612,30 +634,38 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 		return strings.Split(s, ",")
 	}
 
+	// --model: use harness self-report if flag empty
+	resolvedModel := *model
+	if resolvedModel == "" {
+		resolvedModel = os.Getenv("WORMHOLE_MODEL") // harness injects this
+	}
+
+	reposList := splitOrNil(resolvedRepositories)
+
 	in := registerAgentInput{
 		Permissions:  splitOrEmpty(*permissions),
-		Owner:        *owner,
-		Model:        *model,
+		Owner:        resolvedOwner,
+		Model:        resolvedModel,
 		Capabilities: splitOrNil(*capabilities),
-		Repositories: splitOrNil(*repositories),
+		Repositories: reposList,
 		Roles:        splitOrNil(*roles),
 		Role:         *role,
 	}
 
-	path, err := resolveCredentialsPath(*tokenFile, *profile, *project, *role)
+	path, err := resolveCredentialsPath(*tokenFile, *profile, resolvedProject, *role)
 	if err != nil {
 		fmt.Fprintf(stderr, "wormhole join: %v\n", err)
 		return 1
 	}
 
-	out, viaSocket, sockErr := doRegisterViaSocket(wormholedSocketPath(), *project, in)
+	out, viaSocket, sockErr := doRegisterViaSocket(wormholedSocketPath(), resolvedProject, in)
 	if viaSocket && sockErr != nil {
 		fmt.Fprintf(stderr, "wormhole join: %v\n", sockErr)
 		return 1
 	}
 	if !viaSocket {
 		var err error
-		out, err = doRegister(http.DefaultClient, *server, *project, in)
+		out, err = doRegister(http.DefaultClient, resolvedServer, resolvedProject, in)
 		if err != nil {
 			fmt.Fprintf(stderr, "wormhole join: %v\n", err)
 			return 1
@@ -643,8 +673,8 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 	}
 
 	creds := credentials{
-		Server:     *server,
-		ProjectID:  *project,
+		Server:     resolvedServer,
+		ProjectID:  resolvedProject,
 		AgentID:    out.AgentID,
 		PassportID: out.PassportID,
 		Token:      out.Token,
@@ -657,17 +687,17 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 	}
 
 	fmt.Fprintln(stdout, "Passport created.")
-	fmt.Fprintf(stdout, "agent_id=%s passport_id=%s project=%s\n", out.AgentID, out.PassportID, *project)
+	fmt.Fprintf(stdout, "agent_id=%s passport_id=%s project=%s\n", out.AgentID, out.PassportID, resolvedProject)
 	fmt.Fprintf(stdout, "credentials written to %s\n", path)
 
 	kbQuery := *context
 	if kbQuery == "" {
 		parts := []string{}
-		if *owner != "" {
-			parts = append(parts, *owner)
+		if resolvedOwner != "" {
+			parts = append(parts, resolvedOwner)
 		}
-		if *model != "" {
-			parts = append(parts, *model)
+		if resolvedModel != "" {
+			parts = append(parts, resolvedModel)
 		}
 		parts = append(parts, in.Capabilities...)
 		parts = append(parts, in.Roles...)
@@ -676,7 +706,7 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 	if kbQuery == "" {
 		fmt.Fprintln(stdout, "Synchronising knowledge graph... skipped (no --context, capabilities, roles, owner, or model to build a query from)")
 	} else {
-		searchOut, searchErr := doSearch(http.DefaultClient, *server, *project, out.Token, kbQuery, *kbLimit)
+		searchOut, searchErr := doSearch(http.DefaultClient, resolvedServer, resolvedProject, out.Token, kbQuery, *kbLimit)
 		if searchErr != nil {
 			fmt.Fprintf(stderr, "wormhole join: KB sync failed: %v\n", searchErr)
 		} else {
@@ -687,7 +717,7 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	channelsOut, chanErr := doListChannels(http.DefaultClient, *server, *project, out.Token)
+	channelsOut, chanErr := doListChannels(http.DefaultClient, resolvedServer, resolvedProject, out.Token)
 	if chanErr != nil {
 		fmt.Fprintf(stderr, "wormhole join: self-introduction failed: %v\n", chanErr)
 	} else {
@@ -721,7 +751,7 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 			if err != nil {
 				fmt.Fprintf(stderr, "wormhole join: self-introduction failed: %v\n", err)
 			} else {
-				_, postErr := doPostEvent(http.DefaultClient, *server, *project, out.Token, introChan.ChannelID, "message.posted", payloadRaw, &introText)
+				_, postErr := doPostEvent(http.DefaultClient, resolvedServer, resolvedProject, out.Token, introChan.ChannelID, "message.posted", payloadRaw, &introText)
 				if postErr != nil {
 					fmt.Fprintf(stderr, "wormhole join: self-introduction failed: %v\n", postErr)
 				} else {
@@ -731,7 +761,7 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	tasksOut, tasksErr := doListTasks(http.DefaultClient, *server, *project, out.Token)
+	tasksOut, tasksErr := doListTasks(http.DefaultClient, resolvedServer, resolvedProject, out.Token)
 	if tasksErr != nil {
 		fmt.Fprintf(stderr, "wormhole join: task list failed: %v\n", tasksErr)
 	} else {
@@ -772,16 +802,31 @@ func runConnect(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *server == "" || *project == "" {
-		fmt.Fprintln(stderr, "wormhole connect: --server and --project are required")
-		fs.Usage()
-		return 2
+
+	// Load configs
+	localCfg, _ := config.LoadLocal()
+	globalCfg, _ := config.LoadGlobal()
+
+	// Resolve with precedence
+	resolvedServer, err := config.ResolveServer(*server, localCfg, globalCfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole connect: server: %v\n", err)
+		return 1
 	}
-	if *target != "claude" && *target != "opencode" {
-		fmt.Fprintf(stderr, "wormhole connect: --target: unknown value %q (must be \"claude\" or \"opencode\")\n", *target)
-		fs.Usage()
-		return 2
+
+	resolvedProject, err := config.ResolveProject(*project, localCfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole connect: project: %v\n", err)
+		return 1
 	}
+
+	resolvedOwner, err := config.ResolveOwner(*owner, localCfg, globalCfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole connect: owner: %v\n", err)
+		return 1
+	}
+
+	resolvedRepositories, _ := config.ResolveRepositories(*repositories)
 
 	splitOrNil := func(s string) []string {
 		if s == "" {
@@ -796,30 +841,38 @@ func runConnect(args []string, stdout, stderr io.Writer) int {
 		return strings.Split(s, ",")
 	}
 
+	// --model: use harness self-report if flag empty
+	resolvedModel := *model
+	if resolvedModel == "" {
+		resolvedModel = os.Getenv("WORMHOLE_MODEL")
+	}
+
+	reposList := splitOrNil(resolvedRepositories)
+
 	in := registerAgentInput{
 		Permissions:  splitOrEmpty(*permissions),
-		Owner:        *owner,
-		Model:        *model,
+		Owner:        resolvedOwner,
+		Model:        resolvedModel,
 		Capabilities: splitOrNil(*capabilities),
-		Repositories: splitOrNil(*repositories),
+		Repositories: reposList,
 		Roles:        splitOrNil(*roles),
 	}
 
-	path, err := resolveCredentialsPath(*tokenFile, *profile, *project, "")
+	path, err := resolveCredentialsPath(*tokenFile, *profile, resolvedProject, "")
 	if err != nil {
 		fmt.Fprintf(stderr, "wormhole connect: %v\n", err)
 		return 1
 	}
 
-	out, err := doRegister(http.DefaultClient, *server, *project, in)
+	out, err := doRegister(http.DefaultClient, resolvedServer, resolvedProject, in)
 	if err != nil {
 		fmt.Fprintf(stderr, "wormhole connect: %v\n", err)
 		return 1
 	}
 
 	creds := credentials{
-		Server:     *server,
-		ProjectID:  *project,
+		Server:     resolvedServer,
+		ProjectID:  resolvedProject,
 		AgentID:    out.AgentID,
 		PassportID: out.PassportID,
 		Token:      out.Token,
@@ -831,7 +884,7 @@ func runConnect(args []string, stdout, stderr io.Writer) int {
 	}
 
 	fmt.Fprintln(stdout, "Passport created.")
-	fmt.Fprintf(stdout, "agent_id=%s passport_id=%s project=%s\n", out.AgentID, out.PassportID, *project)
+	fmt.Fprintf(stdout, "agent_id=%s passport_id=%s project=%s\n", out.AgentID, out.PassportID, resolvedProject)
 	fmt.Fprintf(stdout, "credentials written to %s\n", path)
 
 	socketPath := wormholedSocketPath()
