@@ -161,6 +161,14 @@ func RegisterAgentTool(store *identity.Store, eventsStore *events.Store, rolesSt
 				}
 				in.Permissions = unionAppend(in.Permissions, template.PermissionBundle)
 				in.Roles = unionAppend(in.Roles, []string{in.Role})
+
+				// Merge default capabilities and roles from template
+				if len(in.Capabilities) == 0 && len(template.DefaultCapabilities) > 0 {
+					in.Capabilities = template.DefaultCapabilities
+				}
+				if len(in.Roles) == 1 && len(template.DefaultRoles) > 0 {
+					in.Roles = unionAppend(in.Roles, template.DefaultRoles)
+				}
 			}
 			agent, passport, token, err := store.Register(ctx, projectID, in.Permissions, in.Owner, in.Model, in.Capabilities, in.Repositories, in.Roles)
 			if err != nil {

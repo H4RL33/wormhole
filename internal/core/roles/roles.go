@@ -17,10 +17,12 @@ import (
 var ErrTemplateNotFound = errors.New("roles: template not found")
 
 type Template struct {
-	Name             string
-	PermissionBundle []string
-	DefaultTaskView  json.RawMessage
-	CreatedAt        time.Time
+	Name                  string
+	PermissionBundle      []string
+	DefaultCapabilities   []string
+	DefaultRoles          []string
+	DefaultTaskView       json.RawMessage
+	CreatedAt             time.Time
 }
 
 type Store struct {
@@ -36,15 +38,17 @@ func NewStore(db *sql.DB) *Store {
 func (s *Store) GetTemplate(ctx context.Context, name string) (Template, error) {
 	var t Template
 	var permBundle []byte
+	var defaultCaps []byte
+	var defaultRoles []byte
 	var defaultView []byte
 
 	err := s.db.QueryRowContext(
 		ctx,
-		`SELECT name, permission_bundle, default_task_view, created_at
+		`SELECT name, permission_bundle, default_capabilities, default_roles, default_task_view, created_at
 		 FROM role_templates
 		 WHERE name = $1`,
 		name,
-	).Scan(&t.Name, &permBundle, &defaultView, &t.CreatedAt)
+	).Scan(&t.Name, &permBundle, &defaultCaps, &defaultRoles, &defaultView, &t.CreatedAt)
 
 	if err == sql.ErrNoRows {
 		return Template{}, ErrTemplateNotFound
@@ -56,6 +60,16 @@ func (s *Store) GetTemplate(ctx context.Context, name string) (Template, error) 
 	// Unmarshal permission bundle from JSONB.
 	if err := json.Unmarshal(permBundle, &t.PermissionBundle); err != nil {
 		return Template{}, fmt.Errorf("roles: unmarshal permission bundle: %w", err)
+	}
+
+	// Unmarshal default capabilities.
+	if err := json.Unmarshal(defaultCaps, &t.DefaultCapabilities); err != nil {
+		return Template{}, fmt.Errorf("roles: unmarshal default capabilities: %w", err)
+	}
+
+	// Unmarshal default roles.
+	if err := json.Unmarshal(defaultRoles, &t.DefaultRoles); err != nil {
+		return Template{}, fmt.Errorf("roles: unmarshal default roles: %w", err)
 	}
 
 	// DefaultTaskView remains raw JSON to match the spec (free-form JSONB,
@@ -70,7 +84,7 @@ func (s *Store) GetTemplate(ctx context.Context, name string) (Template, error) 
 func (s *Store) ListTemplates(ctx context.Context) ([]Template, error) {
 	rows, err := s.db.QueryContext(
 		ctx,
-		`SELECT name, permission_bundle, default_task_view, created_at
+		`SELECT name, permission_bundle, default_capabilities, default_roles, default_task_view, created_at
 		 FROM role_templates
 		 ORDER BY name ASC`,
 	)
@@ -83,15 +97,27 @@ func (s *Store) ListTemplates(ctx context.Context) ([]Template, error) {
 	for rows.Next() {
 		var t Template
 		var permBundle []byte
+		var defaultCaps []byte
+		var defaultRoles []byte
 		var defaultView []byte
 
-		if err := rows.Scan(&t.Name, &permBundle, &defaultView, &t.CreatedAt); err != nil {
+		if err := rows.Scan(&t.Name, &permBundle, &defaultCaps, &defaultRoles, &defaultView, &t.CreatedAt); err != nil {
 			return nil, fmt.Errorf("roles: scan row: %w", err)
 		}
 
 		// Unmarshal permission bundle.
 		if err := json.Unmarshal(permBundle, &t.PermissionBundle); err != nil {
 			return nil, fmt.Errorf("roles: unmarshal permission bundle: %w", err)
+		}
+
+		// Unmarshal default capabilities.
+		if err := json.Unmarshal(defaultCaps, &t.DefaultCapabilities); err != nil {
+			return nil, fmt.Errorf("roles: unmarshal default capabilities: %w", err)
+		}
+
+		// Unmarshal default roles.
+		if err := json.Unmarshal(defaultRoles, &t.DefaultRoles); err != nil {
+			return nil, fmt.Errorf("roles: unmarshal default roles: %w", err)
 		}
 
 		// DefaultTaskView remains raw.
