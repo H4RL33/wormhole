@@ -33,6 +33,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	cmd := args[0]
 	switch cmd {
+	case "init":
+		return runInit(args[1:], stdout, stderr)
 	case "join":
 		return runJoin(args[1:], stdout, stderr)
 	case "connect":
@@ -59,6 +61,7 @@ func usage(w io.Writer) {
 	fmt.Fprintf(w, `wormhole - agent memory portal
 
 usage:
+  wormhole init                          interactive setup wizard
   wormhole join [flags]                  register this agent at a project
   wormhole connect [flags]               wire harnesses to credentials
   wormhole whoami [flags]                show this agent's identity
