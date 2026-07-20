@@ -132,3 +132,29 @@ Explicit `[[link]]`-style linking, graph not folder tree (RFC §8.3).
 - `created_at`
 
 Pointers only, per RFC §8.6 — never mirrors code.
+
+## role_templates
+
+Stores role definitions and their default capabilities, roles, and permissions. Used during agent registration to auto-fill Passport fields when a role is specified.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| role | varchar(255) | primary key; e.g., "backend-engineer", "frontend-engineer" |
+| default_capabilities | text[] | capabilities assigned by default to agents with this role; e.g., ["read", "write"] |
+| default_roles | text[] | roles assigned by default (e.g., ["agent"]); typically at least one role is required |
+| permissions | jsonb | permissions (e.g., `{"kb": "read-write", "kb_feedback": "read-write"}`) |
+
+Example row:
+
+```json
+{
+  "role": "backend-engineer",
+  "default_capabilities": ["read", "write"],
+  "default_roles": ["agent"],
+  "permissions": { "kb": "read-write", "kb_feedback": "read-write", "tasks": "create" }
+}
+```
+
+When `wormhole join --role backend-engineer` is run (without explicit `--capabilities` or `--roles` flags),
+the agent inherits `default_capabilities` and `default_roles` from the template, reducing flag verbosity
+for common roles. Explicit flags always override template defaults.

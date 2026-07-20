@@ -1,0 +1,11 @@
+# Local Wormhole configuration
+# Committed to repo; safe for all contributors to see.
+
+# Project ID (required for this repository)
+project = "proj-xxxxxxxxx"
+
+# Role template (optional; defaults to no role)
+# role = "backend-engineer"
+
+# Server override for this project (optional; uses global default if unset)
+# server = "https://wormhole.example.com"

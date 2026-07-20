@@ -116,7 +116,7 @@ Set this before starting `wormhole-server` (step 4 above) — it's read once at
 startup. With that set, mint a viewer key:
 
 ```bash
-wormhole-cli viewer-key create \
+wormhole viewer-key create \
   --server http://localhost:8080 \
   --project 00000000-0000-0000-0000-000000000001 \
   --label "harley's laptop"
@@ -189,90 +189,98 @@ Build and run `wormhole-server`. By default, it connects to the local Postgres d
 go run ./cmd/wormhole-server
 ```
 
-### 5. Connect a harness
-
-`wormhole connect` registers a fresh agent identity (a Passport), writes its credentials to disk, then wires the issued MCP token into your harness of choice. Install the CLI:
+### 5. Install the Wormhole CLI
 
 ```bash
-go install ./cmd/wormhole-cli
+go install ./cmd/wormhole
 ```
 
-Install the MCP stdio bridge binary:
+### Quick Start Options
+
+Choose one approach for agent setup:
+
+#### Option 1: Interactive Setup (Recommended)
+
+Run the interactive setup wizard — perfect for first-time configuration:
 
 ```bash
-go install ./cmd/wormhole-mcp-stdio
+wormhole init
 ```
 
-The `wormhole-cli connect` command requires `wormhole-mcp-stdio` on `$PATH`. Run it before starting `wormholed`: after creating the Passport and writing credentials, connect tries to dial wormholed's local socket to confirm it's reachable; if `wormholed` isn't up yet that dial just fails and it prints a warning, then continues wiring the harness. You'll start `wormholed` in the next step.
+Prompts for server URL, project ID, and role selection; configures everything and wires harnesses automatically. This writes configs to:
+- Global: `~/.config/wormhole/config.toml`
+- Local: `./.wormhole/config.toml`
 
-**Claude Code:**
+#### Option 2: Manual Configuration (CI/Scripting)
 
-Run `wormhole-cli connect` from the directory you'll actually launch Claude Code from (typically your project's repo root), not from wherever `go install` put the binaries: Claude Code's `-s local` MCP scoping ties the registration to the working directory `connect` was run in.
+For scripted setups or CI/CD, create config files directly.
+
+Create `.wormhole/config.toml` in your repository (example at `.wormhole/config.toml`):
+
+```toml
+project = "00000000-0000-0000-0000-000000000001"
+role = "backend-engineer"
+```
+
+Create `~/.config/wormhole/config.toml` globally:
+
+```toml
+server = "http://localhost:8080"
+```
+
+Then register and wire harnesses:
 
 ```bash
-wormhole-cli connect \
-  --server http://localhost:8080 \
-  --project 00000000-0000-0000-0000-000000000001 \
-  --profile default \
-  --owner "demo-owner" \
-  --model "claude-sonnet-5" \
-  --permissions "task.create,kb.write" \
-  --target claude
+wormhole join
+wormhole connect
 ```
 
-The `connect` command first creates the agent identity and writes credentials to disk, then tries to dial `wormholed`'s local socket (warning and continuing if it's not reachable yet), then resolves `wormhole-mcp-stdio` on `$PATH`, then runs `claude mcp remove <name> -s local` (best-effort) followed by `claude mcp add <name> -- <path-to-wormhole-mcp-stdio>`. Claude Code is wired to spawn the stdio bridge binary as its MCP server; it does not talk to wormholed's socket directly. If you saw `wormhole connect: warning: wormholed not running...`, that's expected on first run — start `wormholed` next. Run `/mcp` inside Claude Code afterward to reconnect.
+### File Locations (XDG-Compliant)
 
-**OpenCode:**
+Wormhole respects the XDG Base Directory specification:
 
-```bash
-wormhole-cli connect \
-  --server http://localhost:8080 \
-  --project 00000000-0000-0000-0000-000000000001 \
-  --profile default \
-  --owner "demo-owner" \
-  --model "opencode" \
-  --permissions "task.create,kb.write" \
-  --target opencode
+- **Global config:** `$XDG_CONFIG_HOME/wormhole/config.toml` (default `~/.config/wormhole/config.toml`)
+  - Server URL, default roles and capabilities
+  - Shared across projects
+- **Local config:** `./.wormhole/config.toml` (walked up from cwd like `.git`)
+  - Project ID, role overrides, server overrides
+  - Committed to repository; safe for all contributors
+- **Credentials:** `$XDG_DATA_HOME/wormhole/credentials` (default `~/.local/share/wormhole/credentials`)
+  - API tokens and profiles, **never committed**
+
+### Flags Precedence
+
+All flags are optional when config is properly set. Resolution order for each flag:
+
+```
+explicit flag > local config > global config > environment/git > default > error
 ```
 
-This writes (or merges into) an `opencode.json`/`opencode.jsonc` config — by default the nearest one found walking up from your current directory to your project's `.git` root, falling back to `~/.config/opencode/opencode.json` if none exists. Pass `--opencode-config <path>` to target a specific file instead.
+Examples:
 
-Either connector accepts `--connector-name <name>` to register under a name other than the default `wormhole`.
+- `--server`: global/local config, explicit flag to override
+- `--project`: local config required, explicit flag to override
+- `--owner`: from `git config user.name`, fallback `$USER`, explicit flag to override
+- `--repositories`: from `git remote get-url origin`, empty if no repo, explicit flag to override
+- `--model`: from harness self-report (`$WORMHOLE_MODEL`), explicit flag to override
 
-### 6. Run `wormholed`
+### Running the Daemon and Harnesses
 
-`wormholed` is the local daemon a coding harness talks to over a Unix domain socket — it proxies to the Coordination Server and caches state in a local SQLite replica so reads keep working offline. It requires the credentials file `wormhole-cli connect` (step 5) just wrote to `~/.wormhole/credentials/<profile>.json`. Install it once:
+`wormholed` is the local daemon a coding harness talks to over a Unix domain socket. Install once:
 
 ```bash
 go install ./cmd/wormholed
 ```
 
-Then run it (it reads its org connection config from `$XDG_CONFIG_HOME/wormhole/` or `~/.config/wormhole/` by default — see `internal/runtime/config` if you need to point it elsewhere):
+Run in its own terminal; every command below talks to it:
 
 ```bash
 wormholed
 ```
 
-Leave it running in its own terminal/session; every command below talks to it.
+It reads configuration from `$XDG_CONFIG_HOME/wormhole/config.toml` by default (see `internal/runtime/config` if you need custom paths).
 
-### 7. Join and verify
-
-`wormhole join` performs the same registration, then runs a KB-sync/self-introduction/task-summary handshake so an agent's first turn already has context:
-
-```bash
-wormhole-cli join \
-  --server http://localhost:8080 \
-  --project 00000000-0000-0000-0000-000000000001 \
-  --profile default \
-  --owner "demo-owner" \
-  --model "claude-sonnet-5" \
-  --capabilities "code_edit,run_tests" \
-  --repositories "github.com/H4RL33/wormhole" \
-  --roles "contributor" \
-  --permissions "task.create,kb.write"
-```
-
-Credentials are written under `~/.wormhole/credentials/` (see `wormhole-cli whoami` and `wormhole-cli profile list` to inspect stored profiles).
+After setup, interact with your harness — Claude Code or OpenCode — which will communicate through `wormholed` to the Coordination Server. See `wormhole whoami` and `wormhole profile list` to inspect stored credentials.
 
 ---
 
