@@ -3,7 +3,9 @@ package config
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"os/user"
+	"strings"
 )
 
 type ResolveInput struct {
@@ -93,11 +95,22 @@ func ResolveServer(flagValue string, localConfig, globalConfig Config) (string, 
 	return Resolve(input, true) // required
 }
 
-// Stub functions; implement in Task 11
+// gitConfigUserName shells to git config user.name
 func gitConfigUserName() (string, error) {
-	return "", fmt.Errorf("not implemented")
+	cmd := exec.Command("git", "config", "user.name")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
+// gitRemoteGetURL shells to git remote get-url <remote>
 func gitRemoteGetURL(remote string) (string, error) {
-	return "", fmt.Errorf("not implemented")
+	cmd := exec.Command("git", "remote", "get-url", remote)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }

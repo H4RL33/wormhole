@@ -59,3 +59,26 @@ func TestResolvePrecedence(t *testing.T) {
 		})
 	}
 }
+
+func TestGitConfigUserName(t *testing.T) {
+	// Only runs if git is available and we're in a repo
+	name, err := gitConfigUserName()
+	if err != nil {
+		t.Logf("skipping git config test (not in repo or git not available): %v", err)
+		return
+	}
+	if name == "" {
+		t.Errorf("expected non-empty name from git config")
+	}
+}
+
+func TestGitRemoteGetURL(t *testing.T) {
+	url, err := gitRemoteGetURL("origin")
+	if err != nil {
+		t.Logf("skipping git remote test (no origin remote): %v", err)
+		return
+	}
+	if url == "" {
+		t.Errorf("expected non-empty URL from git remote")
+	}
+}
