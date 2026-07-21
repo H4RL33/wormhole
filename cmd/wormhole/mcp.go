@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -71,13 +72,11 @@ func bridge(stdin io.Reader, stdout io.Writer, conn net.Conn) error {
 	go func() {
 		defer wg.Done()
 		err := stdinToSocket(stdin, conn)
-		if err != nil && err != io.EOF {
-			// A genuine transport error on this side means the session
-			// can't continue -- tear down the shared connection so the
-			// other goroutine, likely blocked reading conn, doesn't hang
-			// forever.
-			forceClose()
-		}
+		// Once stdin ends -- cleanly (EOF) or on a transport error -- the
+		// client can send no further requests, so the session is over. Tear
+		// down the shared connection so socketToStdout, otherwise blocked
+		// reading conn, doesn't hang forever.
+		forceClose()
 		errs <- err
 	}()
 
@@ -92,7 +91,9 @@ func bridge(stdin io.Reader, stdout io.Writer, conn net.Conn) error {
 
 	var first error
 	for err := range errs {
-		if err != nil && err != io.EOF && first == nil {
+		// net.ErrClosed is the expected result of our own forceClose tearing
+		// down conn to unblock the reader; it is not a session error.
+		if err != nil && err != io.EOF && !errors.Is(err, net.ErrClosed) && first == nil {
 			first = err
 		}
 	}
