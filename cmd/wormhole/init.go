@@ -33,7 +33,13 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 	}
 	configPath := filepath.Join(cwd, ".wormhole", "config.toml")
 
-	reader := bufio.NewReader(os.Stdin)
+	return initWizard(os.Stdin, stdout, stderr, configPath)
+}
+
+// initWizard runs the interactive prompts and writes config to configPath.
+// Split from runInit so it can be driven with an arbitrary stdin in tests.
+func initWizard(stdin io.Reader, stdout, stderr io.Writer, configPath string) int {
+	reader := bufio.NewReader(stdin)
 
 	// Guard against clobbering an existing config
 	if _, err := os.Stat(configPath); err == nil {
