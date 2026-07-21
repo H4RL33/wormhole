@@ -27,10 +27,11 @@ type CreateChannelOutput struct {
 // CreateChannelTool wires wormhole.channel.create.
 func CreateChannelTool(store *events.Store) Tool {
 	return Tool{
-		Name:             "wormhole.channel.create",
-		Description:      "Creates a new event channel within the project.",
-		RequiresAuth:     true,
-		ArgumentsExample: CreateChannelInput{},
+		Name:               "wormhole.channel.create",
+		Description:        "Creates a new event channel within the project.",
+		RequiresAuth:       true,
+		RequiredPermission: "channel.create",
+		ArgumentsExample:   CreateChannelInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in CreateChannelInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
@@ -75,10 +76,11 @@ type PostEventOutput struct {
 // passed as agentID to the store so the event is attributed correctly.
 func PostEventTool(store *events.Store) Tool {
 	return Tool{
-		Name:             "wormhole.channel.post",
-		Description:      "Publishes an event to a project channel. The calling agent is recorded as the author.",
-		RequiresAuth:     true,
-		ArgumentsExample: PostEventInput{},
+		Name:               "wormhole.channel.post",
+		Description:        "Publishes an event to a project channel. The calling agent is recorded as the author.",
+		RequiresAuth:       true,
+		RequiredPermission: "channel.post",
+		ArgumentsExample:   PostEventInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in PostEventInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
@@ -121,10 +123,11 @@ type ListChannelsOutput struct {
 // ListChannelsTool wires wormhole.channel.list.
 func ListChannelsTool(store *events.Store) Tool {
 	return Tool{
-		Name:             "wormhole.channel.list",
-		Description:      "Lists the event channels within the project.",
-		RequiresAuth:     true,
-		ArgumentsExample: ListChannelsInput{},
+		Name:               "wormhole.channel.list",
+		Description:        "Lists the event channels within the project.",
+		RequiresAuth:       true,
+		RequiredPermission: "channel.list",
+		ArgumentsExample:   ListChannelsInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			channelList, err := store.ListChannels(ctx, projectID)
 			if err != nil {
@@ -172,10 +175,11 @@ type SubscribeChannelOutput struct {
 // offset=0 when those fields are absent or zero in the input.
 func SubscribeChannelTool(store *events.Store) Tool {
 	return Tool{
-		Name:             "wormhole.channel.subscribe",
-		Description:      "Returns a page of events from a project channel, ordered oldest-first.",
-		RequiresAuth:     true,
-		ArgumentsExample: SubscribeChannelInput{},
+		Name:               "wormhole.channel.subscribe",
+		Description:        "Returns a page of events from a project channel, ordered oldest-first.",
+		RequiresAuth:       true,
+		RequiredPermission: "channel.subscribe",
+		ArgumentsExample:   SubscribeChannelInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in SubscribeChannelInput
 			if err := json.Unmarshal(arguments, &in); err != nil {

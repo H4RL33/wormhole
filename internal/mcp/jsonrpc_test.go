@@ -28,10 +28,11 @@ func TestHandleInitialize(t *testing.T) {
 	}
 }
 
-// buildFullRegistry registers all 16 real tools with nil/zero-value stores.
+// buildFullRegistry registers all 20 real tools with nil/zero-value stores.
 // Handlers are never invoked in this test file, only the Tool{} descriptors
-// (Name, Description, ArgumentsExample) are read, so nil store pointers are
-// safe here.
+// (Name, Description, ArgumentsExample, RequiresAuth, RequiredPermission)
+// are read, so nil store pointers are safe here. Mirrors the registration
+// list in cmd/wormhole-server/main.go.
 func buildFullRegistry() *Registry {
 	registry := NewRegistry()
 	registry.Register(RegisterAgentTool(nil, nil, nil, nil))
@@ -50,6 +51,10 @@ func buildFullRegistry() *Registry {
 	registry.Register(GetArticleLinksTool(nil))
 	registry.Register(LinkCommitTool(nil))
 	registry.Register(RequestReviewTool(nil))
+	registry.Register(BootstrapTool(nil, nil, nil, nil))
+	registry.Register(IncrementalPullTool(nil, nil, nil, nil))
+	registry.Register(IncrementalPushTool(nil, nil, nil, nil))
+	registry.Register(ConflictReportTool(nil, nil, nil, nil))
 	return registry
 }
 
@@ -66,8 +71,8 @@ func TestHandleToolsList_AllToolsPresent(t *testing.T) {
 		t.Fatalf("tools field is %T, want []toolListEntry", m["tools"])
 	}
 
-	if len(entries) != 16 {
-		t.Fatalf("got %d tools, want 16", len(entries))
+	if len(entries) != 20 {
+		t.Fatalf("got %d tools, want 20", len(entries))
 	}
 
 	wantNames := []string{
@@ -87,6 +92,10 @@ func TestHandleToolsList_AllToolsPresent(t *testing.T) {
 		"wormhole.kb.get_links",
 		"wormhole.git.link_commit",
 		"wormhole.git.request_review",
+		"wormhole.sync.bootstrap",
+		"wormhole.sync.incremental_pull",
+		"wormhole.sync.incremental_push",
+		"wormhole.sync.conflict_report",
 	}
 
 	got := map[string]bool{}

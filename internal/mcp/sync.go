@@ -63,7 +63,6 @@ func (r *syncRateLimiter) allow(namespaceID string, now time.Time) bool {
 	return true
 }
 
-
 // validateNamespace enforces RFC-0003 §7.2 cross-namespace isolation: the
 // client-supplied namespace_id is never trusted on its own for
 // authorization. projectID is the value the MCP dispatch layer already
@@ -160,10 +159,13 @@ func articleToSummary(article kb.Article) ArticleSummary {
 // RFC-0003 §8.1: one-time bulk pull of complete working environment.
 func BootstrapTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, limiter *syncRateLimiter) Tool {
 	return Tool{
-		Name:             "wormhole.sync.bootstrap",
-		Description:      "One-time bulk pull of org configuration, project manifests, initial KB, tasks, and policies on org enrolment (RFC-0003 §8.1)",
-		RequiresAuth:     true,
-		ArgumentsExample: BootstrapInput{},
+		Name:         "wormhole.sync.bootstrap",
+		Description:  "One-time bulk pull of org configuration, project manifests, initial KB, tasks, and policies on org enrolment (RFC-0003 §8.1)",
+		RequiresAuth: true,
+		// Auth-only: wormholed<->Coordination-Server transport of the
+		// agent's own data, not a discretionary agent capability.
+		RequiredPermission: "",
+		ArgumentsExample:   BootstrapInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in BootstrapInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
@@ -236,10 +238,13 @@ type IncrementalPullOutput struct {
 // RFC-0003 §8.2: steady-state incremental pull of changed entities.
 func IncrementalPullTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, limiter *syncRateLimiter) Tool {
 	return Tool{
-		Name:             "wormhole.sync.incremental_pull",
-		Description:      "Incremental pull of entity changes since last sync (RFC-0003 §8.2)",
-		RequiresAuth:     true,
-		ArgumentsExample: IncrementalPullInput{},
+		Name:         "wormhole.sync.incremental_pull",
+		Description:  "Incremental pull of entity changes since last sync (RFC-0003 §8.2)",
+		RequiresAuth: true,
+		// Auth-only: wormholed<->Coordination-Server transport of the
+		// agent's own data, not a discretionary agent capability.
+		RequiredPermission: "",
+		ArgumentsExample:   IncrementalPullInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in IncrementalPullInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
@@ -387,10 +392,13 @@ type syncEventCreatePayload struct {
 // RFC-0003 §8.2: wormholed pushes batched local changes to the server.
 func IncrementalPushTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, limiter *syncRateLimiter) Tool {
 	return Tool{
-		Name:             "wormhole.sync.incremental_push",
-		Description:      "Incremental push of batched local changes to the server (RFC-0003 §8.2)",
-		RequiresAuth:     true,
-		ArgumentsExample: IncrementalPushInput{},
+		Name:         "wormhole.sync.incremental_push",
+		Description:  "Incremental push of batched local changes to the server (RFC-0003 §8.2)",
+		RequiresAuth: true,
+		// Auth-only: wormholed<->Coordination-Server transport of the
+		// agent's own data, not a discretionary agent capability.
+		RequiredPermission: "",
+		ArgumentsExample:   IncrementalPushInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in IncrementalPushInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
@@ -539,10 +547,13 @@ type syncConflictAuditPayload struct {
 // "sync.conflict_resolved" event, Global Constraints — no new audit table).
 func ConflictReportTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, limiter *syncRateLimiter) Tool {
 	return Tool{
-		Name:             "wormhole.sync.conflict_report",
-		Description:      "Report and resolve sync conflicts using last-write-wins; server timestamp is authoritative (RFC-0003 §8.3)",
-		RequiresAuth:     true,
-		ArgumentsExample: ConflictReportInput{},
+		Name:         "wormhole.sync.conflict_report",
+		Description:  "Report and resolve sync conflicts using last-write-wins; server timestamp is authoritative (RFC-0003 §8.3)",
+		RequiresAuth: true,
+		// Auth-only: wormholed<->Coordination-Server transport of the
+		// agent's own data, not a discretionary agent capability.
+		RequiredPermission: "",
+		ArgumentsExample:   ConflictReportInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in ConflictReportInput
 			if err := json.Unmarshal(arguments, &in); err != nil {

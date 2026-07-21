@@ -209,10 +209,13 @@ type WhoAmIOutput struct {
 // middleware (architecture.md M4) is the entire answer.
 func WhoAmITool() Tool {
 	return Tool{
-		Name:             "wormhole.agent.whoami",
-		Description:      "Returns the identity and authorization scope resolved from the caller's bearer token.",
-		RequiresAuth:     true,
-		ArgumentsExample: nil,
+		Name:         "wormhole.agent.whoami",
+		Description:  "Returns the identity and authorization scope resolved from the caller's bearer token.",
+		RequiresAuth: true,
+		// Auth-only: self-identification must not require a specific
+		// permission (gating whoami would be circular).
+		RequiredPermission: "",
+		ArgumentsExample:   nil,
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			return WhoAmIOutput{
 				AgentID:      scope.Agent.ID,
