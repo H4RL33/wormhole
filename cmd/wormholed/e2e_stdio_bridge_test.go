@@ -1,19 +1,18 @@
 // e2e_stdio_bridge_test.go
 // Issue #20 subtask 6: proves the full transport chain a real MCP client
 // (Claude Code or any other stdio-speaking harness) actually uses --
-// stdio bridge subprocess (cmd/wormhole-mcp-stdio) -> wormholed's Unix
-// socket -> wormholed's MCP dispatch -> local SQLite write + sync enqueue
-// -> sync engine push -> real Coordination Server -> real Postgres.
+// stdio bridge subprocess (`wormhole mcp`, cmd/wormhole/mcp.go) ->
+// wormholed's Unix socket -> wormholed's MCP dispatch -> local SQLite write
+// + sync enqueue -> sync engine push -> real Coordination Server -> real
+// Postgres.
 //
 // Every existing test in this repo (wormholed_test.go's
 // TestRun_EndToEndWhoAmI, p7_e2e_integration_test.go's TestP7_*) dials
 // wormholed's socket directly, bypassing the stdio bridge entirely. That
-// bypass is exactly the gap this subtask exists to close, so Leg 3 below
-// deliberately does NOT reuse wormholed_test.go's newline-delimited
-// mcpInitialize/mcpCallTool helpers -- it speaks the stdio transport's
-// Content-Length framing over the subprocess's stdin/stdout pipes, which
-// is what a real harness (and cmd/wormhole-mcp-stdio on the other end)
-// actually speaks.
+// bypass is exactly the gap this subtask exists to close: Leg 3 below drives
+// the real `wormhole mcp` subprocess over its stdin/stdout pipes (the leg a
+// real harness talks to), speaking the bridge's newline-delimited JSON-RPC
+// framing.
 package main
 
 import (
@@ -254,15 +253,14 @@ func e2eStartCoordServer(t *testing.T, db *sql.DB) (srvURL, projectID, agentID, 
 
 // -----------------------------------------------------------------------
 // Leg 3: the stdio transport. This is the piece no existing test exercises.
-// It speaks Content-Length-framed MCP directly against the built
-// cmd/wormhole-mcp-stdio subprocess's stdin/stdout -- matching that
-// binary's own readContentLengthFrame (cmd/wormhole-mcp-stdio/main.go)
-// wire format ("Content-Length: %d\r\n\r\n<body>", no header besides
-// Content-Length required, body has no trailing newline requirement).
-// wormholed_test.go's mcpInitialize/mcpCallTool helpers are NOT reused
-// here: those write "<json>\n" straight onto a raw net.Conn, which is
-// wormholed's *socket* framing, not the stdio transport's framing a real
-// harness or cmd/wormhole-mcp-stdio speaks on its own stdin/stdout.
+// It speaks newline-delimited JSON-RPC directly against the built
+// `wormhole mcp` subprocess's stdin/stdout -- matching that bridge's own
+// framing (cmd/wormhole/mcp.go stdinToSocket/socketToStdout: one JSON
+// object per line, terminated by \n, no length header).
+// wormholed_test.go's mcpInitialize/mcpCallTool helpers happen to use the
+// same newline framing, but against a raw net.Conn to wormholed's socket;
+// this test drives it through the real `wormhole mcp` subprocess's
+// stdin/stdout instead, the leg a real harness talks to.
 // -----------------------------------------------------------------------
 
 var (
@@ -271,12 +269,14 @@ var (
 	stdioBridgeBinErr  error
 )
 
-// e2eBuildStdioBridgeBinary builds cmd/wormhole-mcp-stdio once per test
-// binary run and returns the path to the resulting executable. No existing
-// "go build a sibling binary for a subprocess test" helper exists anywhere
-// in this repo (checked: no `_test.go` file anywhere invokes exec.Command
-// with "go", "build"), so this is a new small helper local to this test
-// file, not a new package.
+// e2eBuildStdioBridgeBinary builds the wormhole CLI once per test binary
+// run and returns the path to the resulting executable. The stdio bridge is
+// the `wormhole mcp` subcommand (cmd/wormhole/mcp.go); it was previously a
+// standalone cmd/wormhole-mcp-stdio binary. No existing "go build a sibling
+// binary for a subprocess test" helper exists anywhere in this repo
+// (checked: no `_test.go` file anywhere invokes exec.Command with "go",
+// "build"), so this is a new small helper local to this test file, not a
+// new package.
 func e2eBuildStdioBridgeBinary(t *testing.T) string {
 	t.Helper()
 	stdioBridgeBinOnce.Do(func() {
@@ -285,12 +285,12 @@ func e2eBuildStdioBridgeBinary(t *testing.T) string {
 			stdioBridgeBinErr = fmt.Errorf("mkdir temp: %w", err)
 			return
 		}
-		binPath := filepath.Join(dir, "wormhole-mcp-stdio")
-		cmd := exec.Command("go", "build", "-o", binPath, "./cmd/wormhole-mcp-stdio")
+		binPath := filepath.Join(dir, "wormhole")
+		cmd := exec.Command("go", "build", "-o", binPath, "./cmd/wormhole")
 		cmd.Dir = repoRootForTest(t)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			stdioBridgeBinErr = fmt.Errorf("go build cmd/wormhole-mcp-stdio: %w\n%s", err, out)
+			stdioBridgeBinErr = fmt.Errorf("go build cmd/wormhole: %w\n%s", err, out)
 			return
 		}
 		stdioBridgeBinPath = binPath
@@ -311,8 +311,8 @@ func repoRootForTest(t *testing.T) string {
 	return filepath.Join(wd, "..", "..")
 }
 
-// e2eStdioClient wraps a running cmd/wormhole-mcp-stdio subprocess and
-// speaks real Content-Length-framed MCP over its stdin/stdout pipes.
+// e2eStdioClient wraps a running `wormhole mcp` subprocess and speaks
+// newline-delimited JSON-RPC over its stdin/stdout pipes.
 type e2eStdioClient struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
@@ -320,62 +320,36 @@ type e2eStdioClient struct {
 	nextID int
 }
 
-// writeContentLengthFrame is this test's own client-side encoder for the
-// MCP stdio transport's wire format -- deliberately not reusing anything
-// from wormholed_test.go, since that file's helpers write newline-delimited
-// JSON onto a raw socket connection, a different wire format entirely.
-func writeContentLengthFrame(w io.Writer, body []byte) error {
-	frame := fmt.Sprintf("Content-Length: %d\r\n\r\n", len(body))
-	if _, err := io.WriteString(w, frame); err != nil {
+// writeNewlineFrame is this test's client-side encoder for the MCP stdio
+// transport's wire format. The `wormhole mcp` bridge (cmd/wormhole/mcp.go)
+// relays newline-delimited JSON-RPC in both directions (stdinToSocket /
+// socketToStdout), so each message is a single JSON object terminated by a
+// newline, with no length header. The body itself must not contain a raw
+// newline; encoding/json.Marshal never emits one, so a single trailing \n
+// unambiguously frames the message.
+func writeNewlineFrame(w io.Writer, body []byte) error {
+	if _, err := w.Write(body); err != nil {
 		return err
 	}
-	_, err := w.Write(body)
+	_, err := io.WriteString(w, "\n")
 	return err
 }
 
-// readContentLengthFrame is this test's own client-side decoder, matching
-// cmd/wormhole-mcp-stdio/main.go's readContentLengthFrame wire format
-// (header block terminated by a blank line, then exactly Content-Length
-// body bytes). Reimplemented here rather than imported, since the
-// production function is unexported in package main of a different binary.
-func readContentLengthFrame(r *bufio.Reader) ([]byte, error) {
-	contentLength := -1
-	for {
-		line, err := r.ReadString('\n')
-		if err != nil {
-			return nil, err
-		}
-		line = strings.TrimRight(line, "\r\n")
-		if line == "" {
-			break
-		}
-		name, value, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
-		}
-		if !strings.EqualFold(strings.TrimSpace(name), "Content-Length") {
-			continue
-		}
-		n, convErr := strconv.Atoi(strings.TrimSpace(value))
-		if convErr != nil {
-			return nil, fmt.Errorf("malformed Content-Length header %q: %w", line, convErr)
-		}
-		contentLength = n
-	}
-	if contentLength < 0 {
-		return nil, fmt.Errorf("message frame missing Content-Length header")
-	}
-	body := make([]byte, contentLength)
-	if _, err := io.ReadFull(r, body); err != nil {
+// readNewlineFrame is this test's client-side decoder, matching the bridge's
+// socketToStdout framing (one JSON-RPC message per line). It reads up to and
+// including the next newline and returns the trimmed body.
+func readNewlineFrame(r *bufio.Reader) ([]byte, error) {
+	line, err := r.ReadBytes('\n')
+	if err != nil && len(line) == 0 {
 		return nil, err
 	}
-	return body, nil
+	return []byte(strings.TrimRight(string(line), "\r\n")), nil
 }
 
 func e2eStartStdioBridge(t *testing.T, binPath, runDir string) *e2eStdioClient {
 	t.Helper()
 
-	cmd := exec.Command(binPath)
+	cmd := exec.Command(binPath, "mcp")
 	cmd.Env = append(os.Environ(), "XDG_RUNTIME_DIR="+runDir)
 	cmd.Stderr = os.Stderr
 
@@ -388,7 +362,7 @@ func e2eStartStdioBridge(t *testing.T, binPath, runDir string) *e2eStdioClient {
 		t.Fatalf("stdout pipe: %v", err)
 	}
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("start wormhole-mcp-stdio: %v", err)
+		t.Fatalf("start wormhole mcp: %v", err)
 	}
 
 	c := &e2eStdioClient{cmd: cmd, stdin: stdin, stdout: bufio.NewReader(stdout)}
@@ -419,7 +393,7 @@ type e2eStdioRPCResponse struct {
 	Error   *e2eStdioRPCError `json:"error,omitempty"`
 }
 
-// send writes a Content-Length-framed JSON-RPC request/notification to the
+// send writes a newline-framed JSON-RPC request/notification to the
 // subprocess's stdin.
 func (c *e2eStdioClient) send(t *testing.T, method string, params json.RawMessage, withID bool) json.RawMessage {
 	t.Helper()
@@ -434,18 +408,18 @@ func (c *e2eStdioClient) send(t *testing.T, method string, params json.RawMessag
 	if err != nil {
 		t.Fatalf("marshal %s request: %v", method, err)
 	}
-	if err := writeContentLengthFrame(c.stdin, body); err != nil {
+	if err := writeNewlineFrame(c.stdin, body); err != nil {
 		t.Fatalf("write %s frame: %v", method, err)
 	}
 	return id
 }
 
-// call sends a Content-Length-framed request and reads back the matching
-// Content-Length-framed response.
+// call sends a newline-framed request and reads back the matching
+// newline-framed response.
 func (c *e2eStdioClient) call(t *testing.T, method string, params json.RawMessage) e2eStdioRPCResponse {
 	t.Helper()
 	c.send(t, method, params, true)
-	body, err := readContentLengthFrame(c.stdout)
+	body, err := readNewlineFrame(c.stdout)
 	if err != nil {
 		t.Fatalf("read %s response frame: %v", method, err)
 	}
@@ -456,7 +430,7 @@ func (c *e2eStdioClient) call(t *testing.T, method string, params json.RawMessag
 	return resp
 }
 
-// notify sends a Content-Length-framed notification (no response expected).
+// notify sends a newline-framed notification (no response expected).
 func (c *e2eStdioClient) notify(t *testing.T, method string) {
 	t.Helper()
 	c.send(t, method, nil, false)
@@ -530,7 +504,7 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 
 	binPath := e2eBuildStdioBridgeBinary(t)
 	if stdioBridgeBinErr != nil {
-		t.Fatalf("build wormhole-mcp-stdio: %v", stdioBridgeBinErr)
+		t.Fatalf("build wormhole mcp bridge: %v", stdioBridgeBinErr)
 	}
 
 	// --- Leg 1: real Coordination Server, real Postgres. ---
@@ -586,7 +560,7 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 	// --- Leg 3: the real transport. Spawn the stdio bridge subprocess
 	// with XDG_RUNTIME_DIR pointed at the same runDir wormholed used, so
 	// its own wormholedSocketPath() resolves to the same socket. Speak
-	// genuine Content-Length-framed MCP over its stdin/stdout. ---
+	// genuine newline-delimited JSON-RPC over its stdin/stdout. ---
 	client := e2eStartStdioBridge(t, binPath, runDir)
 	client.initialize(t)
 
