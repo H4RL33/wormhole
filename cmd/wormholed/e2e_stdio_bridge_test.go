@@ -235,7 +235,7 @@ func e2eStartCoordServer(t *testing.T, db *sql.DB) (srvURL, projectID, agentID, 
 	projectID = e2eMustCreateProject(t, db, "e2e-stdio-bridge-project")
 
 	registerResultRaw := e2eCallTool(t, srv.URL, "wormhole.agent.register", projectID, "", mcp.RegisterAgentInput{
-		Permissions:  []string{"task.create", "event.publish", "kb.write"},
+		Permissions:  []string{"task.create", "event.publish", "kb.write", "task.list"},
 		Owner:        "harley",
 		Model:        "claude",
 		Capabilities: []string{"code_review"},

@@ -180,7 +180,7 @@ func TestMcp_WriteArticle_DedupViolation(t *testing.T) {
 	store := testKBStore(t)
 	identityStore := testIdentityStore(t)
 	projectID := mustCreateProject(t, "mcp-kb-dedup-violation")
-	_, token := mustRegisterAgent(t, projectID)
+	_, token := mustRegisterAgentWithPerms(t, projectID, []string{"kb.write"})
 
 	registry := NewRegistry()
 	registry.Register(WriteArticleTool(store))
@@ -239,7 +239,7 @@ func TestMcp_WriteArticle_ConcisenessViolation(t *testing.T) {
 	store := kb.NewStore(db, kb.StubEmbedder{}, 0.85, 10, 1, 1, 1)
 	identityStore := testIdentityStore(t)
 	projectID := mustCreateProject(t, "mcp-kb-conciseness-violation")
-	_, token := mustRegisterAgent(t, projectID)
+	_, token := mustRegisterAgentWithPerms(t, projectID, []string{"kb.write"})
 
 	registry := NewRegistry()
 	registry.Register(WriteArticleTool(store))
@@ -291,7 +291,7 @@ func TestMcp_WriteArticle_ConcisenessBypass(t *testing.T) {
 	store := kb.NewStore(db, kb.StubEmbedder{}, 0.85, 10, 1, 1, 1)
 	identityStore := testIdentityStore(t)
 	projectID := mustCreateProject(t, "mcp-kb-conciseness-bypass")
-	_, token := mustRegisterAgent(t, projectID)
+	_, token := mustRegisterAgentWithPerms(t, projectID, []string{"kb.write"})
 
 	registry := NewRegistry()
 	registry.Register(WriteArticleTool(store))
@@ -311,7 +311,7 @@ func TestMcp_WriteArticle_ConcisenessUTF8(t *testing.T) {
 	store := kb.NewStore(db, kb.StubEmbedder{}, 0.85, 5, 1, 1, 1)
 	identityStore := testIdentityStore(t)
 	projectID := mustCreateProject(t, "mcp-kb-conciseness-utf8")
-	_, token := mustRegisterAgent(t, projectID)
+	_, token := mustRegisterAgentWithPerms(t, projectID, []string{"kb.write"})
 
 	registry := NewRegistry()
 	registry.Register(WriteArticleTool(store))
@@ -372,7 +372,7 @@ func TestMcp_WriteArticle_RequiredLinksViolation(t *testing.T) {
 	store := testKBStore(t)
 	identityStore := testIdentityStore(t)
 	projectID := mustCreateProject(t, "mcp-kb-req-links-violation")
-	_, token := mustRegisterAgent(t, projectID)
+	_, token := mustRegisterAgentWithPerms(t, projectID, []string{"kb.write"})
 
 	registry := NewRegistry()
 	registry.Register(WriteArticleTool(store))
@@ -457,7 +457,7 @@ func TestMcp_GetArticle_HappyPath(t *testing.T) {
 	store := testKBStore(t)
 	identityStore := testIdentityStore(t)
 	projectID := mustCreateProject(t, "mcp-kb-get-article")
-	_, token := mustRegisterAgent(t, projectID)
+	_, token := mustRegisterAgentWithPerms(t, projectID, []string{"kb.write", "kb.get"})
 
 	registry := NewRegistry()
 	registry.Register(WriteArticleTool(store))
@@ -510,7 +510,7 @@ func TestMcp_GetArticleLinks_HappyPath(t *testing.T) {
 	store := testKBStore(t)
 	identityStore := testIdentityStore(t)
 	projectID := mustCreateProject(t, "mcp-kb-get-links")
-	_, token := mustRegisterAgent(t, projectID)
+	_, token := mustRegisterAgentWithPerms(t, projectID, []string{"kb.write", "kb.get_links"})
 
 	registry := NewRegistry()
 	registry.Register(WriteArticleTool(store))

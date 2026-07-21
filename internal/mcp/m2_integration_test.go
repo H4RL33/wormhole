@@ -31,7 +31,7 @@ func TestM2_TaskLifecycleEventsOnChannel(t *testing.T) {
 
 	projectID := mustCreateProject(t, "m2-task-lifecycle-events")
 
-	registerArgs, _ := json.Marshal(RegisterAgentInput{Permissions: []string{"event.publish"}, Owner: "harley", Model: "claude"})
+	registerArgs, _ := json.Marshal(RegisterAgentInput{Permissions: []string{"event.publish", "channel.create", "channel.subscribe", "task.create", "task.assign", "task.update_status"}, Owner: "harley", Model: "claude"})
 	registerResult := mustToolResult(t, srv, "", "wormhole.agent.register", projectID, registerArgs)
 	var registerOut RegisterAgentOutput
 	json.Unmarshal(registerResult, &registerOut)

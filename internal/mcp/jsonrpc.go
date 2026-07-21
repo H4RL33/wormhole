@@ -50,6 +50,11 @@ const (
 	RPCMethodNotFound = -32601
 	RPCInvalidParams  = -32602
 	RPCInternalError  = -32603
+
+	// RPCPermissionDenied signals the caller authenticated successfully but
+	// the tool requires a permission its Passport does not grant
+	// (RFC-0001 §8.4). Distinct from -32001 (invalid/expired token).
+	RPCPermissionDenied = -32002
 )
 
 // initializeResult is the wormhole.mcp initialize response result shape,
@@ -292,6 +297,17 @@ func HandleToolsCall(ctx context.Context, registry *Registry, identityStore *ide
 		}
 		scope = &resolved
 		handlerProjectID = scope.ProjectID
+	}
+
+	if tool.RequiresAuth && tool.RequiredPermission != "" && !scope.HasPermission(tool.RequiredPermission) {
+		// Persist the attempt so humans have a record of what an agent
+		// reached for beyond its grant. Audit-write failure must not turn a
+		// clean permission-denied into a 500, so its error is discarded.
+		_, _ = identityStore.RecordAction(ctx, scope.Agent.ID, scope.ProjectID, "permission.denied:"+tool.Name)
+		return nil, &RPCError{
+			Code:    RPCPermissionDenied,
+			Message: "permission denied: requires " + tool.RequiredPermission,
+		}
 	}
 
 	result, err := tool.Handler(ctx, scope, handlerProjectID, params.Arguments)

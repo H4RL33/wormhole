@@ -411,7 +411,7 @@ func TestMCP_LoadSmokeTest(t *testing.T) {
 
 			// 1. Register agent
 			status, rpcResp, err := makeMCPCall(t, srv.URL, "wormhole.agent.register", projectID, "", RegisterAgentInput{
-				Permissions:  []string{"event.publish", "task.create", "task.list", "kb.write", "kb.search"},
+				Permissions:  []string{"event.publish", "task.create", "task.list", "kb.write", "kb.search", "channel.list", "channel.post"},
 				Owner:        owner,
 				Model:        model,
 				Capabilities: []string{"testing"},

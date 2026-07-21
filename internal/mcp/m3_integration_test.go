@@ -25,7 +25,7 @@ func TestM3_KBWriteSearchComplianceLoop(t *testing.T) {
 	store := kb.NewStore(db, kb.StubEmbedder{}, 0.85, 120, 1, 1, 1)
 	identityStore := testIdentityStore(t)
 	projectID := mustCreateProject(t, "m3-kb-write-search-compliance")
-	_, token := mustRegisterAgent(t, projectID)
+	_, token := mustRegisterAgentWithPerms(t, projectID, []string{"kb.write", "kb.search"})
 
 	registry := NewRegistry()
 	registry.Register(WriteArticleTool(store))

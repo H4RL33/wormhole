@@ -39,6 +39,22 @@ func mustRegisterAgent(t *testing.T, projectID string) (agentID string, token st
 	return agent.ID, tok
 }
 
+// mustRegisterAgentWithPerms is mustRegisterAgent with a caller-chosen
+// permission set, for tests that drive tools through the real HTTP/JSON-RPC
+// path (HandleToolsCall) rather than calling tool.Handler directly — those
+// need the token to actually carry each gated tool's Tool.RequiredPermission
+// (Task 3, github.com/H4RL33/wormhole/issues/21) or the call is denied with
+// -32002.
+func mustRegisterAgentWithPerms(t *testing.T, projectID string, perms []string) (agentID string, token string) {
+	t.Helper()
+	store := testIdentityStore(t)
+	agent, _, tok, err := store.Register(context.Background(), projectID, perms, "harley", "claude", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("register agent: %v", err)
+	}
+	return agent.ID, tok
+}
+
 // mustBuildScope constructs a minimal AuthenticatedScope for handler tests that
 // need scope.Agent.ID (e.g. PostEventTool) without a full HTTP round-trip.
 func mustBuildScope(agentID, projectID string) *identity.AuthenticatedScope {

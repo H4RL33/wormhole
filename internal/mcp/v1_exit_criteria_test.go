@@ -40,7 +40,7 @@ func TestE2E_V1ExitCriteria(t *testing.T) {
 
 	// 1. Register a fresh agent identity
 	status, rpcResp, err := makeMCPCall(t, srv.URL, "wormhole.agent.register", projectID, "", RegisterAgentInput{
-		Permissions:  []string{"event.publish", "task.create", "task.assign", "task.update_status", "kb.write", "kb.search"},
+		Permissions:  []string{"event.publish", "task.create", "task.assign", "task.update_status", "kb.write", "kb.search", "channel.list", "channel.post"},
 		Owner:        "exit-agent",
 		Model:        "gpt-4",
 		Capabilities: []string{"exit_validation"},

@@ -210,7 +210,7 @@ func TestM3_MCPSeededStateReflectedInDashboard(t *testing.T) {
 
 	// Step 1: register an agent via /mcp. No auth required for this tool.
 	registerResultRaw := m3CallTool(t, srv.URL, "wormhole.agent.register", projectID, "", mcp.RegisterAgentInput{
-		Permissions:  []string{"task.create", "event.publish", "kb.write"},
+		Permissions:  []string{"task.create", "event.publish", "kb.write", "channel.create", "channel.post"},
 		Owner:        "harley",
 		Model:        "claude",
 		Capabilities: []string{"code_review"},

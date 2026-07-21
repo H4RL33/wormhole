@@ -201,7 +201,7 @@ func TestE2E_CreateAssignUpdateStatus(t *testing.T) {
 		t.Fatalf("create channel: %v", err)
 	}
 
-	registerArgs, _ := json.Marshal(RegisterAgentInput{Permissions: []string{"event.publish"}, Owner: "harley", Model: "claude"})
+	registerArgs, _ := json.Marshal(RegisterAgentInput{Permissions: []string{"event.publish", "task.create", "task.assign", "task.update_status", "task.list"}, Owner: "harley", Model: "claude"})
 	registerResult := mustToolResult(t, srv, "", "wormhole.agent.register", projectID, registerArgs)
 	var registerOut RegisterAgentOutput
 	json.Unmarshal(registerResult, &registerOut)
@@ -275,7 +275,7 @@ func TestListTasksTool_DefaultsToCallerRoleView(t *testing.T) {
 	projectID := mustCreateProject(t, "list-tasks-role-view")
 
 	registerArgs, _ := json.Marshal(RegisterAgentInput{
-		Permissions: []string{"task.read", "task.write"},
+		Permissions: []string{"task.read", "task.write", "task.create", "task.assign", "task.list"},
 		Owner:       "harley",
 		Model:       "claude",
 		Role:        "backend-engineer",
@@ -305,7 +305,7 @@ func TestListTasksTool_DefaultsToCallerRoleView(t *testing.T) {
 	// Second agent's task, unowned by the first agent -> excluded by
 	// "assignee": "self".
 	registerArgs2, _ := json.Marshal(RegisterAgentInput{
-		Permissions: []string{"task.read", "task.write"},
+		Permissions: []string{"task.read", "task.write", "task.create", "task.assign"},
 		Owner:       "harley",
 		Model:       "claude",
 	})
@@ -346,7 +346,7 @@ func TestListTasksTool_ExplicitRoleOverridesCallerRole(t *testing.T) {
 	projectID := mustCreateProject(t, "list-tasks-explicit-role")
 
 	registerArgs, _ := json.Marshal(RegisterAgentInput{
-		Permissions: []string{"task.read", "task.write"},
+		Permissions: []string{"task.read", "task.write", "task.create", "task.list"},
 		Owner:       "harley",
 		Model:       "claude",
 		Role:        "backend-engineer",
@@ -393,7 +393,7 @@ func TestListTasksTool_UnknownRoleRejected(t *testing.T) {
 
 	projectID := mustCreateProject(t, "list-tasks-unknown-role")
 
-	registerArgs, _ := json.Marshal(RegisterAgentInput{Permissions: []string{"task.read"}, Owner: "harley", Model: "claude"})
+	registerArgs, _ := json.Marshal(RegisterAgentInput{Permissions: []string{"task.read", "task.list"}, Owner: "harley", Model: "claude"})
 	registerResult := mustToolResult(t, srv, "", "wormhole.agent.register", projectID, registerArgs)
 	var registerOut RegisterAgentOutput
 	json.Unmarshal(registerResult, &registerOut)
