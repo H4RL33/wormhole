@@ -910,6 +910,7 @@ func TestRunConnect_Success_RegistersAndWiresConnector(t *testing.T) {
 		"--permissions", "task.read",
 		"--token-file", tokenFile,
 		"--claude-bin", claudeBin,
+		"--target", "claude",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
@@ -975,6 +976,7 @@ func TestRunConnect_CustomConnectorName(t *testing.T) {
 		"--token-file", tokenFile,
 		"--claude-bin", claudeBin,
 		"--connector-name", "wh-staging",
+		"--target", "claude",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
@@ -1042,6 +1044,7 @@ func TestRunConnect_ClaudeBinaryNotFound_PrintsManualFallback(t *testing.T) {
 	code := run([]string{
 		"connect", "--server", srv.URL, "--project", "proj-1", "--permissions", "task.read",
 		"--token-file", tokenFile, "--claude-bin", "definitely-not-a-real-binary-xyz",
+		"--target", "claude",
 	}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code: got %d, want 1", code)
@@ -1086,6 +1089,7 @@ func TestRunConnect_SocketUnreachable_WarnsButSucceeds(t *testing.T) {
 		"--permissions", "task.read",
 		"--token-file", tokenFile,
 		"--claude-bin", claudeBin,
+		"--target", "claude",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
@@ -1136,6 +1140,7 @@ func TestRunConnect_StdioBinaryNotFound_ClaudeTarget_PrintsError(t *testing.T) {
 		"--project", "proj-1",
 		"--permissions", "task.read",
 		"--token-file", tokenFile,
+		"--target", "claude",
 	}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code: got %d, want 1", code)
@@ -1370,6 +1375,7 @@ func TestRunConnect_DefaultProfile_DerivedFromProject(t *testing.T) {
 		"--project", "proj-1",
 		"--owner", "harley",
 		"--claude-bin", claudeBin,
+		"--target", "claude",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())

@@ -909,37 +909,70 @@ func runConnect(args []string, stdout, stderr io.Writer) int {
 		conn.Close()
 	}
 
-	resolvedStdioBinPath, lookErr := exec.LookPath(*stdioBin)
-	if lookErr != nil {
-		if *target == "opencode" {
-			fmt.Fprintf(stderr, "wormhole connect: %q not found in PATH — wire the connector manually: add mcp config with type:\"local\" and command:[\"%s\", \"mcp\"]\n", *stdioBin, *stdioBin)
-		} else {
-			fmt.Fprintf(stderr, "wormhole connect: %q not found in PATH — wire the connector manually:\n  claude mcp add %s -- %s mcp\n", *stdioBin, *connectorName, *stdioBin)
+	// Dispatch on whether --target was explicitly provided:
+	//   explicit -> single-target inline wiring (deprecated, but still supported)
+	//   unset    -> auto-detect and wire every harness present
+	targetSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "target" {
+			targetSet = true
 		}
+	})
+
+	if targetSet {
+		resolvedStdioBinPath, lookErr := exec.LookPath(*stdioBin)
+		if lookErr != nil {
+			if *target == "opencode" {
+				fmt.Fprintf(stderr, "wormhole connect: %q not found in PATH — wire the connector manually: add mcp config with type:\"local\" and command:[\"%s\", \"mcp\"]\n", *stdioBin, *stdioBin)
+			} else {
+				fmt.Fprintf(stderr, "wormhole connect: %q not found in PATH — wire the connector manually:\n  claude mcp add %s -- %s mcp\n", *stdioBin, *connectorName, *stdioBin)
+			}
+			return 1
+		}
+
+		if *target == "opencode" {
+			return runConnectOpenCode(*openCodeConfig, *connectorName, resolvedStdioBinPath, stdout, stderr)
+		}
+
+		if _, lookErr := exec.LookPath(*claudeBin); lookErr != nil {
+			fmt.Fprintf(stderr, "wormhole connect: %q not found in PATH — wire the connector manually:\n  claude mcp add %s -- %s mcp\n", *claudeBin, *connectorName, *stdioBin)
+			return 1
+		}
+
+		removeCmd := exec.Command(*claudeBin, "mcp", "remove", *connectorName, "-s", "local")
+		removeCmd.Run()
+
+		addCmd := exec.Command(*claudeBin, "mcp", "add", *connectorName, "--", resolvedStdioBinPath, "mcp")
+		addCmd.Stdout = stdout
+		addCmd.Stderr = stderr
+		if err := addCmd.Run(); err != nil {
+			fmt.Fprintf(stderr, "wormhole connect: claude mcp add failed: %v\n", err)
+			return 1
+		}
+
+		fmt.Fprintf(stdout, "Connector %q registered (stdio via %s mcp).\n", *connectorName, resolvedStdioBinPath)
+		return 0
+	}
+
+	// No --target: auto-detect every present harness and wire each one.
+	harnesses, _ := detectHarnesses()
+	if len(harnesses) == 0 {
+		fmt.Fprintln(stderr, "wormhole connect: no harnesses detected (install the claude CLI, or add an opencode.json to this project)")
 		return 1
 	}
-
-	if *target == "opencode" {
-		return runConnectOpenCode(*openCodeConfig, *connectorName, resolvedStdioBinPath, stdout, stderr)
+	wired := 0
+	for _, h := range harnesses {
+		if err := wireHarness(h, resolvedServer, resolvedProject); err != nil {
+			fmt.Fprintf(stderr, "wormhole connect: %s not wired: %v\n", h.Name, err)
+			continue
+		}
+		wired++
+		fmt.Fprintf(stdout, "Connector wired for %s (%s).\n", h.Name, h.Path)
 	}
-
-	if _, lookErr := exec.LookPath(*claudeBin); lookErr != nil {
-		fmt.Fprintf(stderr, "wormhole connect: %q not found in PATH — wire the connector manually:\n  claude mcp add %s -- %s mcp\n", *claudeBin, *connectorName, *stdioBin)
+	if wired == 0 {
+		fmt.Fprintln(stderr, "wormhole connect: no harnesses could be wired")
 		return 1
 	}
-
-	removeCmd := exec.Command(*claudeBin, "mcp", "remove", *connectorName, "-s", "local")
-	removeCmd.Run()
-
-	addCmd := exec.Command(*claudeBin, "mcp", "add", *connectorName, "--", resolvedStdioBinPath, "mcp")
-	addCmd.Stdout = stdout
-	addCmd.Stderr = stderr
-	if err := addCmd.Run(); err != nil {
-		fmt.Fprintf(stderr, "wormhole connect: claude mcp add failed: %v\n", err)
-		return 1
-	}
-
-	fmt.Fprintf(stdout, "Connector %q registered (stdio via %s mcp).\n", *connectorName, resolvedStdioBinPath)
 	return 0
 }
 
@@ -956,15 +989,26 @@ func runConnectOpenCode(explicitPath, connectorName, resolvedStdioBinPath string
 		return 1
 	}
 
+	if err := wireOpenCodeConfig(configPath, connectorName, resolvedStdioBinPath); err != nil {
+		fmt.Fprintf(stderr, "wormhole connect: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "Connector %q written to wormhole config in %s.\n", connectorName, configPath)
+	return 0
+}
+
+// wireOpenCodeConfig merges an MCP connector entry into an OpenCode config file
+// at configPath, preserving any existing keys. Shared by the explicit
+// --target opencode path and auto-detection so both wire OpenCode identically.
+func wireOpenCodeConfig(configPath, connectorName, stdioBinPath string) error {
 	cfg := map[string]any{}
 	if data, readErr := os.ReadFile(configPath); readErr == nil {
 		if jsonErr := json.Unmarshal(data, &cfg); jsonErr != nil {
-			fmt.Fprintf(stderr, "wormhole connect: parse existing %s: %v\n", configPath, jsonErr)
-			return 1
+			return fmt.Errorf("parse existing %s: %w", configPath, jsonErr)
 		}
 	} else if !os.IsNotExist(readErr) {
-		fmt.Fprintf(stderr, "wormhole connect: read %s: %v\n", configPath, readErr)
-		return 1
+		return fmt.Errorf("read %s: %w", configPath, readErr)
 	}
 
 	if _, ok := cfg["$schema"]; !ok {
@@ -977,27 +1021,22 @@ func runConnectOpenCode(explicitPath, connectorName, resolvedStdioBinPath string
 	}
 	mcp[connectorName] = map[string]any{
 		"type":    "local",
-		"command": []string{resolvedStdioBinPath, "mcp"},
+		"command": []string{stdioBinPath, "mcp"},
 		"enabled": true,
 	}
 	cfg["mcp"] = mcp
 
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
-		fmt.Fprintf(stderr, "wormhole connect: create config directory: %v\n", err)
-		return 1
+		return fmt.Errorf("create config directory: %w", err)
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		fmt.Fprintf(stderr, "wormhole connect: encode config: %v\n", err)
-		return 1
+		return fmt.Errorf("encode config: %w", err)
 	}
 	if err := os.WriteFile(configPath, data, 0o600); err != nil {
-		fmt.Fprintf(stderr, "wormhole connect: write %s: %v\n", configPath, err)
-		return 1
+		return fmt.Errorf("write %s: %w", configPath, err)
 	}
-
-	fmt.Fprintf(stdout, "Connector %q written to wormhole config in %s.\n", connectorName, configPath)
-	return 0
+	return nil
 }
 
 // resolveOpenCodeConfigPath decides which OpenCode config file to write

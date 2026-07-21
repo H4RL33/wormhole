@@ -92,9 +92,12 @@ func wireClaudeMCP(claudePath, server, project string) error {
 	return nil
 }
 
-// wireOpenCodeMCP wires OpenCode by updating opencode.json config
+// wireOpenCodeMCP wires OpenCode by merging an MCP connector entry into its
+// config file, using the same logic as the explicit --target opencode path.
 func wireOpenCodeMCP(configPath, server, project string) error {
-	// OpenCode wiring is handled by runConnectOpenCode, which already exists
-	// This function is a placeholder for future direct wiring if needed
-	return nil
+	stdioBin, err := exec.LookPath("wormhole")
+	if err != nil {
+		return fmt.Errorf("wormhole binary not found: %w", err)
+	}
+	return wireOpenCodeConfig(configPath, "wormhole", stdioBin)
 }

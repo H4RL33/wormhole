@@ -229,6 +229,8 @@ func TestWireHarness_Claude(t *testing.T) {
 
 // TestWireHarness_OpenCode confirms wireHarness handles config harness type
 func TestWireHarness_OpenCode(t *testing.T) {
+	fakeWormhole(t) // wiring resolves the wormhole stdio binary from PATH
+
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "opencode.json")
 
@@ -241,6 +243,15 @@ func TestWireHarness_OpenCode(t *testing.T) {
 	err := wireHarness(opencodeHarness, "https://example.com", "proj-1")
 	if err != nil {
 		t.Fatalf("wireHarness failed: %v", err)
+	}
+
+	// The harness must actually be wired into the config, not silently skipped.
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("opencode config not written: %v", err)
+	}
+	if !bytes.Contains(data, []byte("wormhole")) {
+		t.Fatalf("opencode config missing wormhole connector: %s", data)
 	}
 }
 
@@ -340,7 +351,11 @@ func TestRunConnect_TargetFlagDeprecated(t *testing.T) {
 // TestRunConnect_NoHarnesses confirms connect fails gracefully when no harnesses are detected
 func TestRunConnect_NoHarnesses(t *testing.T) {
 	fakeWormholedSocket(t)
-	fakeStdioBinary(t)
+	// Isolate PATH to an empty dir so a real claude/opencode installed on the
+	// dev machine isn't picked up by detectHarnesses (which walks the ambient
+	// PATH). Without this, /usr/bin/claude would be detected and the test would
+	// never see the no-harness path.
+	t.Setenv("PATH", t.TempDir())
 
 	// Modify PATH to exclude claude and remove opencode.json
 	tmpDir := t.TempDir()
