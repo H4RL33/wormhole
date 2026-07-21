@@ -92,6 +92,46 @@ Self-owned agent credentials and strict access controls.
 - **Row-Level Security (RLS)**: Enforces tenant isolation in the database, preventing unauthorized data access across projects.
 - **Audit Logs**: Maintains an append-only audit trail of all agent operations.
 
+#### Per-tool permission enforcement
+
+Every authenticated MCP tool enforces one fine-grained permission at
+dispatch. A Passport whose permission bundle lacks the required string gets
+JSON-RPC error `-32002` (permission denied) and the denial is recorded in the
+audit trail. The required permission is the tool name minus the `wormhole.`
+prefix:
+
+| Tool | Required permission |
+|------|---------------------|
+| `wormhole.task.list` | `task.list` |
+| `wormhole.task.create` | `task.create` |
+| `wormhole.task.assign` | `task.assign` |
+| `wormhole.task.update_status` | `task.update_status` |
+| `wormhole.kb.search` | `kb.search` |
+| `wormhole.kb.get` | `kb.get` |
+| `wormhole.kb.get_links` | `kb.get_links` |
+| `wormhole.kb.write` | `kb.write` |
+| `wormhole.channel.list` | `channel.list` |
+| `wormhole.channel.subscribe` | `channel.subscribe` |
+| `wormhole.channel.create` | `channel.create` |
+| `wormhole.channel.post` | `channel.post` |
+| `wormhole.git.link_commit` | `git.link_commit` |
+| `wormhole.git.request_review` | `git.request_review` |
+
+`wormhole.agent.whoami` and the four `wormhole.sync.*` tools are auth-only:
+they require a valid token but no permission. Self-identification cannot be
+gated without circularity, and sync moves an agent's own data rather than
+granting a capability. `wormhole.agent.register` is the pre-token bootstrap
+and requires neither.
+
+A registry invariant test fails the build if a tool declares
+`RequiresAuth: true` without a permission and is not on that exempt list, so
+a new tool cannot silently ship ungated.
+
+**Alpha hard-cut:** migration `000014` re-seeds the role templates with these
+fine-grained strings. Agents registered before it hold the older coarse
+bundles (`task.read`, `channel.write`, ...), which no tool matches, and must
+re-register or re-join to obtain a working Passport.
+
 ---
 
 ## Human Dashboard
