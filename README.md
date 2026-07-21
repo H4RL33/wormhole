@@ -123,9 +123,11 @@ gated without circularity, and sync moves an agent's own data rather than
 granting a capability. `wormhole.agent.register` is the pre-token bootstrap
 and requires neither.
 
-A registry invariant test fails the build if a tool declares
-`RequiresAuth: true` without a permission and is not on that exempt list, so
-a new tool cannot silently ship ungated.
+A registry invariant test fails the build if any tool it sees declares
+`RequiresAuth: true` without a permission and is not on that exempt list.
+(The test iterates a hand-maintained registry; a gated tool must be wired
+into that list to be checked, so keep the test registry in sync with
+`cmd/wormhole-server/main.go`.)
 
 **Alpha hard-cut:** migration `000014` re-seeds the role templates with these
 fine-grained strings. Agents registered before it hold the older coarse

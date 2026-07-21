@@ -151,7 +151,7 @@ func m3CallTool(t *testing.T, srvURL, tool, projectID, token string, args any) j
 // open: that test seeds state by calling core store methods directly
 // (tasksStore.Create, etc.) — it never proves the MCP write path and the
 // dashboard read path agree. This test builds the exact production
-// topology (all 16 registry.Register(mcp.*Tool(...)) calls from
+// topology (the 16 non-sync registry.Register(mcp.*Tool(...)) calls from
 // cmd/wormhole-server/main.go, plus /mcp and /dashboard/ mounted on one
 // mux/httptest.Server) and asserts each dashboard route reflects exactly
 // the row created through the corresponding MCP tool call, matched by id.
@@ -165,9 +165,10 @@ func TestM3_MCPSeededStateReflectedInDashboard(t *testing.T) {
 	rolesStore := roles.NewStore(db)
 
 	// Replicates cmd/wormhole-server/main.go's registry construction
-	// exactly: all 16 registry.Register(mcp.*Tool(...)) calls, in the same
-	// order, so this test exercises the real production tool surface, not
-	// a subset.
+	// exactly: the 16 non-sync registry.Register(mcp.*Tool(...)) calls, in
+	// the same order, so this test exercises the real production tool
+	// surface the dashboard reads from (the 4 sync tools write no
+	// dashboard-visible state and are intentionally omitted).
 	registry := mcp.NewRegistry()
 	registry.Register(mcp.RegisterAgentTool(identityStore, eventsStore, rolesStore, kbStore))
 	registry.Register(mcp.WhoAmITool())
