@@ -231,6 +231,10 @@ Build and run `wormhole-server`. By default, it connects to the local Postgres d
 go run ./cmd/wormhole-server
 ```
 
+To produce standalone binaries instead, run `make build`. All three binaries
+(`wormhole`, `wormholed`, `wormhole-server`) are written to `dist/`, which is
+gitignored. `make clean` removes it.
+
 ### 5. Install the Wormhole CLI
 
 ```bash
