@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/H4RL33/wormhole/internal/config"
@@ -14,7 +15,7 @@ import (
 // runInit implements wormhole init: interactive setup wizard to create .wormhole/config.toml
 func runInit(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
-		fmt.Fprintf(stderr, "wormhole init: no flags supported\n")
+		fmt.Fprintf(stderr, "wormhole init: takes no arguments\n")
 		return 2
 	}
 
@@ -24,7 +25,25 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Determine local config path: current directory's .wormhole/config.toml
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole init: get current directory: %v\n", err)
+		return 1
+	}
+	configPath := filepath.Join(cwd, ".wormhole", "config.toml")
+
 	reader := bufio.NewReader(os.Stdin)
+
+	// Guard against clobbering an existing config
+	if _, err := os.Stat(configPath); err == nil {
+		fmt.Fprintf(stdout, "%s already exists. Overwrite? [y/N]: ", configPath)
+		confirm, _ := reader.ReadString('\n')
+		if strings.ToLower(strings.TrimSpace(confirm)) != "y" {
+			fmt.Fprintf(stdout, "Aborted.\n")
+			return 1
+		}
+	}
 
 	// Welcome
 	fmt.Fprintf(stdout, "wormhole: interactive setup wizard\n\n")
@@ -32,12 +51,9 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "(leave blank to skip a field)\n\n")
 
 	// Prompt for server
-	fmt.Fprintf(stdout, "Wormhole server URL [https://wormhole.example.com]: ")
+	fmt.Fprintf(stdout, "Wormhole server URL []: ")
 	serverInput, _ := reader.ReadString('\n')
 	server := strings.TrimSpace(serverInput)
-	if server == "" {
-		server = "https://wormhole.example.com"
-	}
 
 	// Prompt for project
 	fmt.Fprintf(stdout, "Project ID []: ")
@@ -58,16 +74,6 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		Project: project,
 		Role:    role,
 	}
-
-	// Determine local config path
-	// Create in current directory's .wormhole/config.toml
-	cwd, err := os.Getwd()
-	if err != nil {
-		fmt.Fprintf(stderr, "wormhole init: get current directory: %v\n", err)
-		return 1
-	}
-
-	configPath := cwd + "/.wormhole/config.toml"
 
 	// Save config
 	if err := cfg.Save(configPath); err != nil {
