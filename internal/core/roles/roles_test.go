@@ -134,27 +134,27 @@ func TestGetTemplate_AllSeededRoles(t *testing.T) {
 	}{
 		{
 			"backend-engineer",
-			[]string{"task.read", "task.write", "kb.read", "kb.write", "channel.read", "channel.write"},
+			[]string{"task.list", "task.create", "task.update_status", "kb.search", "kb.get", "kb.get_links", "kb.write", "channel.list", "channel.subscribe", "channel.create", "channel.post", "git.link_commit", "git.request_review"},
 		},
 		{
 			"frontend-engineer",
-			[]string{"task.read", "task.write", "kb.read", "kb.write", "channel.read", "channel.write"},
+			[]string{"task.list", "task.create", "task.update_status", "kb.search", "kb.get", "kb.get_links", "kb.write", "channel.list", "channel.subscribe", "channel.create", "channel.post", "git.link_commit", "git.request_review"},
 		},
 		{
 			"project-manager",
-			[]string{"task.read", "task.write", "kb.read", "kb.write", "channel.read", "channel.write", "task.assign"},
+			[]string{"task.list", "task.create", "task.update_status", "kb.search", "kb.get", "kb.get_links", "kb.write", "channel.list", "channel.subscribe", "channel.create", "channel.post", "task.assign"},
 		},
 		{
 			"contributor",
-			[]string{"task.read", "task.write", "kb.read", "kb.write", "channel.read", "channel.write"},
+			[]string{"task.list", "task.create", "task.update_status", "kb.search", "kb.get", "kb.get_links", "kb.write", "channel.list", "channel.subscribe", "channel.create", "channel.post", "git.link_commit", "git.request_review"},
 		},
 		{
 			"reviewer",
-			[]string{"task.read", "kb.read", "kb.write", "channel.read", "channel.write"},
+			[]string{"task.list", "kb.search", "kb.get", "kb.get_links", "kb.write", "channel.list", "channel.subscribe", "channel.create", "channel.post"},
 		},
 		{
 			"maintainer",
-			[]string{"task.read", "task.write", "kb.read", "kb.write", "channel.read", "channel.write", "task.assign"},
+			[]string{"task.list", "task.create", "task.update_status", "kb.search", "kb.get", "kb.get_links", "kb.write", "channel.list", "channel.subscribe", "channel.create", "channel.post", "task.assign", "git.link_commit", "git.request_review"},
 		},
 	}
 
@@ -167,6 +167,15 @@ func TestGetTemplate_AllSeededRoles(t *testing.T) {
 
 			if !reflect.DeepEqual(got.PermissionBundle, tc.expectedPerms) {
 				t.Errorf("PermissionBundle = %v, want %v", got.PermissionBundle, tc.expectedPerms)
+			}
+
+			// Migration 000014 replaced the coarse 000010 bundles wholesale;
+			// any survivor means the re-seed missed this row.
+			for _, p := range got.PermissionBundle {
+				switch p {
+				case "task.read", "task.write", "kb.read", "channel.read", "channel.write":
+					t.Errorf("%s: coarse permission %q survived re-seed", tc.name, p)
+				}
 			}
 		})
 	}
