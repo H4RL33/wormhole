@@ -697,9 +697,13 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 
 	kbQuery := *context
 	if kbQuery == "" {
+		// Build the semantic-sync query only from explicitly supplied signals.
+		// Use the raw --owner flag, not resolvedOwner: the latter falls back to
+		// git user.name/$USER, which is the developer's identity (semantic noise)
+		// and would keep an otherwise-empty join from correctly skipping the sync.
 		parts := []string{}
-		if resolvedOwner != "" {
-			parts = append(parts, resolvedOwner)
+		if *owner != "" {
+			parts = append(parts, *owner)
 		}
 		if resolvedModel != "" {
 			parts = append(parts, resolvedModel)
