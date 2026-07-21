@@ -58,6 +58,22 @@ type AuthenticatedScope struct {
 	Roles []string
 }
 
+// HasPermission reports whether this scope's Passport grants the named
+// permission. Exact string match against the resolved permission set; no
+// wildcards or hierarchy (RFC-0001 §8.4 permissions are a flat action list).
+// Empty name never matches.
+func (s AuthenticatedScope) HasPermission(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, p := range s.Permissions {
+		if p == name {
+			return true
+		}
+	}
+	return false
+}
+
 // Passport is the portable, project-scoped identity record an agent
 // presents when joining a project: its declared repository scope and
 // resolved roles (RFC-0001 §8.4, §8.5).
