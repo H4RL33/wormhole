@@ -13,6 +13,17 @@ import (
 	"time"
 )
 
+// isolateConfig points the CLI at an empty working directory and an empty
+// global config home, so config resolution (LocalConfigPath walks up from cwd;
+// GlobalConfigPath reads $XDG_CONFIG_HOME) can't pick up the repo's committed
+// .wormhole/config.toml or the developer's real global config.
+func isolateConfig(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "empty-config-home"))
+}
+
 func TestRun_NoArgs_PrintsUsage(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run(nil, &stdout, &stderr)
@@ -36,24 +47,30 @@ func TestRun_UnknownCommand(t *testing.T) {
 }
 
 func TestRunJoin_MissingRequiredFlags(t *testing.T) {
+	// Isolate from the repo's committed .wormhole/config.toml and any global
+	// config so server/project genuinely fail to resolve.
+	isolateConfig(t)
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"join"}, &stdout, &stderr)
 	if code != 2 {
 		t.Fatalf("exit code: got %d, want 2", code)
 	}
-	if !strings.Contains(stderr.String(), "--server and --project are required") {
-		t.Fatalf("stderr missing required-flags text: %q", stderr.String())
+	if !strings.Contains(stderr.String(), "wormhole join: server:") {
+		t.Fatalf("stderr missing unresolved-server text: %q", stderr.String())
 	}
 }
 
 func TestRunJoin_MissingProjectOnly(t *testing.T) {
+	// Isolate from the repo's committed .wormhole/config.toml so --project
+	// stays unresolved despite --server being supplied.
+	isolateConfig(t)
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"join", "--server", "http://localhost:8080"}, &stdout, &stderr)
 	if code != 2 {
 		t.Fatalf("exit code: got %d, want 2", code)
 	}
-	if !strings.Contains(stderr.String(), "--server and --project are required") {
-		t.Fatalf("stderr missing required-flags text: %q", stderr.String())
+	if !strings.Contains(stderr.String(), "wormhole join: project:") {
+		t.Fatalf("stderr missing unresolved-project text: %q", stderr.String())
 	}
 }
 

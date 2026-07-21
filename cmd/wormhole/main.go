@@ -28,7 +28,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// Dispatch table: join, connect, whoami, profile, viewer-key, mcp
 	if len(args) == 0 {
 		usage(stderr)
-		return 1
+		return 2
 	}
 
 	cmd := args[0]
@@ -51,16 +51,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 		usage(stdout)
 		return 0
 	default:
-		fmt.Fprintf(stderr, "unknown command: %s\n", cmd)
+		fmt.Fprintf(stderr, "unknown command %q\n", cmd)
 		usage(stderr)
-		return 1
+		return 2
 	}
 }
 
 func usage(w io.Writer) {
 	fmt.Fprintf(w, `wormhole - agent memory portal
 
-usage:
+usage: wormhole <command> [flags]
+
+commands:
   wormhole init                          interactive setup wizard
   wormhole join [flags]                  register this agent at a project
   wormhole connect [flags]               wire harnesses to credentials
@@ -607,19 +609,19 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 	resolvedServer, err := config.ResolveServer(*server, localCfg, globalCfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "wormhole join: server: %v\n", err)
-		return 1
+		return 2
 	}
 
 	resolvedProject, err := config.ResolveProject(*project, localCfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "wormhole join: project: %v\n", err)
-		return 1
+		return 2
 	}
 
 	resolvedOwner, err := config.ResolveOwner(*owner, localCfg, globalCfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "wormhole join: owner: %v\n", err)
-		return 1
+		return 2
 	}
 
 	resolvedRepositories, _ := config.ResolveRepositories(*repositories)
@@ -811,22 +813,28 @@ func runConnect(args []string, stdout, stderr io.Writer) int {
 	globalCfg, _ := config.LoadGlobal()
 
 	// Resolve with precedence
+	// Validate --target before any resolution work so a typo fails fast.
+	if *target != "claude" && *target != "opencode" {
+		fmt.Fprintf(stderr, "wormhole connect: --target must be \"claude\" or \"opencode\", got %q\n", *target)
+		return 2
+	}
+
 	resolvedServer, err := config.ResolveServer(*server, localCfg, globalCfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "wormhole connect: server: %v\n", err)
-		return 1
+		return 2
 	}
 
 	resolvedProject, err := config.ResolveProject(*project, localCfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "wormhole connect: project: %v\n", err)
-		return 1
+		return 2
 	}
 
 	resolvedOwner, err := config.ResolveOwner(*owner, localCfg, globalCfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "wormhole connect: owner: %v\n", err)
-		return 1
+		return 2
 	}
 
 	resolvedRepositories, _ := config.ResolveRepositories(*repositories)
