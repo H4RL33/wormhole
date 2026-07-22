@@ -59,6 +59,36 @@ func (s *Store) CreateChannel(ctx context.Context, projectID, name string) (Chan
 	return s.createChannelWithOptionalID(ctx, "", projectID, name)
 }
 
+// EnsureChannel atomically creates a project channel or returns the existing
+// channel with the same name. It is reserved for fixed bootstrap channels;
+// ordinary CreateChannel calls still surface duplicate-name errors.
+func (s *Store) EnsureChannel(ctx context.Context, projectID, name string) (Channel, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Channel{}, fmt.Errorf("events: ensure channel: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, "SELECT set_config('wormhole.project_id', $1, true)", projectID); err != nil {
+		return Channel{}, fmt.Errorf("events: ensure channel: set project id: %w", err)
+	}
+
+	var channel Channel
+	err = tx.QueryRowContext(ctx,
+		`INSERT INTO channels (project_id, name) VALUES ($1, $2)
+		 ON CONFLICT (project_id, name) DO UPDATE SET name = EXCLUDED.name
+		 RETURNING `+channelColumns,
+		projectID, name,
+	).Scan(&channel.ID, &channel.ProjectID, &channel.Name, &channel.CreatedAt)
+	if err != nil {
+		return Channel{}, fmt.Errorf("events: ensure channel: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Channel{}, fmt.Errorf("events: ensure channel: commit: %w", err)
+	}
+	return channel, nil
+}
+
 // CreateChannelWithID inserts a new channel under the caller-supplied id
 // instead of letting Postgres assign one. This exists for
 // wormhole.sync.incremental_push (RFC-0003 §8.2), which must preserve the

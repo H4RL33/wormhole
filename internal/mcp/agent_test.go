@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/H4RL33/wormhole/internal/core/identity"
@@ -95,6 +97,94 @@ func TestRegisterAgentTool_BootstrapsDefaultChannelsOnce(t *testing.T) {
 	}
 	if len(channels) != 2 {
 		t.Fatalf("channel count after second register: got %d, want 2 (no duplicates), got %+v", len(channels), channels)
+	}
+}
+
+func TestRegisterAgentTool_ConcurrentBootstrapIsIdempotent(t *testing.T) {
+	identityStore := testIdentityStore(t)
+	eventsStore := testEventsStore(t)
+	kbStore := testKBStore(t)
+	tool := RegisterAgentTool(identityStore, eventsStore, testRolesStore(t), kbStore)
+	projectID := mustCreateProject(t, "mcp-register-concurrent-bootstrap")
+
+	const registrations = 20
+	start := make(chan struct{})
+	errs := make(chan error, registrations)
+	var wg sync.WaitGroup
+	for i := 0; i < registrations; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			arguments, err := json.Marshal(RegisterAgentInput{
+				Permissions: []string{"event.publish"},
+				Owner:       fmt.Sprintf("concurrent-agent-%d", i),
+				Model:       "claude",
+			})
+			if err != nil {
+				errs <- err
+				return
+			}
+			_, err = tool.Handler(context.Background(), nil, projectID, arguments)
+			errs <- err
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent registration: %v", err)
+		}
+	}
+
+	db := testDB(t)
+	var channelCount int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM channels WHERE project_id = $1 AND name IN ('introductions', 'general')`,
+		projectID,
+	).Scan(&channelCount); err != nil {
+		t.Fatalf("count default channels: %v", err)
+	}
+	if channelCount != len(defaultChannelNames) {
+		t.Fatalf("default channel count = %d, want %d", channelCount, len(defaultChannelNames))
+	}
+
+	var onboardingCount int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM kb_articles WHERE project_id = $1 AND title = $2`,
+		projectID, onboardingArticleTitle,
+	).Scan(&onboardingCount); err != nil {
+		t.Fatalf("count onboarding articles: %v", err)
+	}
+	if onboardingCount != 1 {
+		t.Fatalf("onboarding article count = %d, want 1", onboardingCount)
+	}
+}
+
+func TestBootstrapMarkerDoesNotConstrainOrdinaryArticleTitles(t *testing.T) {
+	projectID := mustCreateProject(t, "ordinary-duplicate-kb-titles")
+	agentID, _ := mustRegisterAgent(t, projectID)
+	store := testKBStore(t)
+	for i := 0; i < 2; i++ {
+		if _, err := store.WriteArticle(
+			context.Background(), projectID, agentID, onboardingArticleTitle,
+			fmt.Sprintf("ordinary article body %d", i), nil, nil, true,
+		); err != nil {
+			t.Fatalf("write ordinary article %d with duplicate title: %v", i, err)
+		}
+	}
+
+	db := testDB(t)
+	var count int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM kb_articles WHERE project_id = $1 AND title = $2 AND bootstrap_key IS NULL`,
+		projectID, onboardingArticleTitle,
+	).Scan(&count); err != nil {
+		t.Fatalf("count ordinary duplicate-title articles: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("ordinary duplicate-title article count = %d, want 2", count)
 	}
 }
 

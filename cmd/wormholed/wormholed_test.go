@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	stdsync "sync"
 	"sync/atomic"
 	"testing"
@@ -67,6 +68,101 @@ type runningTestDaemon struct {
 	cancel   context.CancelFunc
 	errCh    chan error
 	stopOnce stdsync.Once
+}
+
+func configureSecurityTestDaemon(t *testing.T) (string, syncEngineFactory) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	runDir := filepath.Join(home, "run")
+	t.Setenv("XDG_RUNTIME_DIR", runDir)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	credDir := filepath.Join(home, ".wormhole", "credentials")
+	if err := os.MkdirAll(credDir, 0o700); err != nil {
+		t.Fatalf("create credentials directory: %v", err)
+	}
+	credData, err := json.Marshal(map[string]string{
+		"server": "http://127.0.0.1:1", "project_id": "project-1", "agent_id": "agent-1", "token": "test-token",
+	})
+	if err != nil {
+		t.Fatalf("marshal credentials: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(credDir, "default.json"), credData, 0o600); err != nil {
+		t.Fatalf("write credentials: %v", err)
+	}
+	events := []string{}
+	factory := func(string, string, string, *runtimesync.QueueRepo, *runtimesync.AuditRepo, *localstore.TaskRepo, *localstore.KBRepo, runtimesync.Config) (syncEngine, error) {
+		return &fakeGroupEngine{name: "security-test", events: &events}, nil
+	}
+	return filepath.Join(runDir, "wormhole", "wormholed.sock"), factory
+}
+
+func TestRun_StalePathSocketReplaced(t *testing.T) {
+	socketPath, factory := configureSecurityTestDaemon(t)
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
+		t.Fatalf("create socket directory: %v", err)
+	}
+	addr, err := net.ResolveUnixAddr("unix", socketPath)
+	if err != nil {
+		t.Fatalf("resolve socket address: %v", err)
+	}
+	stale, err := net.ListenUnix("unix", addr)
+	if err != nil {
+		t.Fatalf("create stale socket: %v", err)
+	}
+	stale.SetUnlinkOnClose(false)
+	if err := stale.Close(); err != nil {
+		t.Fatalf("close stale socket: %v", err)
+	}
+
+	runner := func(ctx context.Context, profileName string) error {
+		return runWithSyncEngineFactory(ctx, profileName, factory)
+	}
+	daemon := startTestDaemonWithRunner(t, "default", socketPath, runner)
+	info, err := os.Lstat(socketPath)
+	if err != nil {
+		t.Fatalf("lstat replacement socket: %v", err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("replacement path mode = %v, want socket", info.Mode())
+	}
+	daemon.stop(t)
+}
+
+func TestRun_StalePathRegularFileRejectedWithoutRemoval(t *testing.T) {
+	socketPath, factory := configureSecurityTestDaemon(t)
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
+		t.Fatalf("create socket directory: %v", err)
+	}
+	const contents = "do not remove"
+	if err := os.WriteFile(socketPath, []byte(contents), 0o600); err != nil {
+		t.Fatalf("write stale-path sentinel: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- runWithSyncEngineFactory(ctx, "default", factory) }()
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "not a socket") {
+			t.Fatalf("Run error = %v, want non-socket stale-path rejection", err)
+		}
+	case <-time.After(time.Second):
+		cancel()
+		select {
+		case <-errCh:
+		case <-time.After(time.Second):
+		}
+		t.Fatal("Run did not reject a regular file at the socket path")
+	}
+	got, err := os.ReadFile(socketPath)
+	if err != nil {
+		t.Fatalf("read preserved stale-path sentinel: %v", err)
+	}
+	if string(got) != contents {
+		t.Fatalf("stale-path sentinel = %q, want %q", got, contents)
+	}
 }
 
 func startTestDaemon(t *testing.T, profileName, socketPath string) *runningTestDaemon {

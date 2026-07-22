@@ -167,6 +167,23 @@ func Run(ctx context.Context, profileName string) error {
 	return runWithSyncEngineFactory(ctx, profileName, defaultSyncEngineFactory)
 }
 
+func removeStaleSocket(socketPath string) error {
+	info, err := os.Lstat(socketPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("wormholed: inspect stale socket path: %w", err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("wormholed: stale socket path %s is not a socket", socketPath)
+	}
+	if err := os.Remove(socketPath); err != nil {
+		return fmt.Errorf("wormholed: remove stale socket: %w", err)
+	}
+	return nil
+}
+
 func runWithSyncEngineFactory(ctx context.Context, profileName string, factory syncEngineFactory) error {
 	cfg, err := config.Load(profileName)
 	if err != nil {
@@ -176,9 +193,12 @@ func runWithSyncEngineFactory(ctx context.Context, profileName string, factory s
 	if err := os.MkdirAll(filepath.Dir(cfg.SocketPath), 0o700); err != nil {
 		return fmt.Errorf("wormholed: create socket directory: %w", err)
 	}
-	// A stale socket file from a previous unclean shutdown would make
-	// net.Listen fail with "address already in use"; remove it first.
-	_ = os.Remove(cfg.SocketPath)
+	// A stale Unix socket from an unclean shutdown is replaceable. Every
+	// other file type is rejected and preserved: this path may contain user
+	// data, and Lstat deliberately does not follow symlinks.
+	if err := removeStaleSocket(cfg.SocketPath); err != nil {
+		return err
+	}
 
 	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o700); err != nil {
 		return fmt.Errorf("wormholed: create data directory: %w", err)

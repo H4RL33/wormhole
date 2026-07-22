@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,6 +37,17 @@ import (
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/runtime/scheduler"
 	syncpkg "github.com/H4RL33/wormhole/internal/runtime/sync"
+)
+
+const (
+	// maxFrameBytes bounds one newline-delimited JSON-RPC message, including
+	// its trailing newline. Eight bounded readers therefore retain at most
+	// roughly 8 MiB for inbound frames.
+	maxFrameBytes = 1 << 20
+	// maxActiveConnections is intentionally small: wormholed is a per-user
+	// local daemon, and eight persistent harness sessions cover normal local
+	// concurrency while bounding handler and frame-buffer resources.
+	maxActiveConnections = 8
 )
 
 type rpcRequest struct {
@@ -119,6 +131,7 @@ type Server struct {
 	closeOnce sync.Once
 	closeErr  error
 	shutdown  atomic.Bool
+	handlers  chan struct{}
 
 	// conns tracks open connections for force-close on shutdown (issue #20).
 	// Registered by handle() at startup, deregistered via defer at exit.
@@ -133,20 +146,8 @@ type Server struct {
 // New binds the Unix domain socket at socketPath. Callers must call Serve
 // to start accepting connections, and Close to release the socket.
 // Single-org mode (P1-P4).
-//
-// Socket permissions (RFC-0003 OQ4, §7.2, P6 hardening): net.Listen("unix", path)
-// creates a socket file with OS-default permissions (typically 0755 on most Unix variants).
-// This means the socket is world-accessible by path. Access control relies on
-// file-system-level permissions and the assumption that only the owning user's
-// processes will dial it (RFC-0003 OQ4 conservative default: "same-user process trust
-// assumed... unless a concrete threat model says otherwise; multi-user machine sharing
-// a single wormholed is out of scope for v1").
-//
-// Production deployments concerned with multi-user isolation should implement
-// stricter socket permissions (chmod 0700 after creation) or use an additional
-// local authentication layer — currently out of scope per RFC-0003 OQ4.
 func New(socketPath, coordServerURL, token, projectID string, store *localstore.Store, tr *localstore.TaskRepo, er *localstore.EventRepo, kb *localstore.KBRepo, qr *syncpkg.QueueRepo) (*Server, error) {
-	ln, err := net.Listen("unix", socketPath)
+	ln, err := listenLocalSocket(socketPath)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: listen on %s: %w", socketPath, err)
 	}
@@ -163,6 +164,7 @@ func New(socketPath, coordServerURL, token, projectID string, store *localstore.
 		er:          er,
 		kb:          kb,
 		qr:          qr,
+		handlers:    make(chan struct{}, maxActiveConnections),
 	}
 	srv.registry = newLocalRegistry(srv)
 	return srv, nil
@@ -171,9 +173,9 @@ func New(socketPath, coordServerURL, token, projectID string, store *localstore.
 // NewWithRuntime binds the Unix domain socket at socketPath and wires eventbus
 // + scheduler (P3). Callers must call Serve to start accepting connections,
 // and Close to release the socket.
-// Socket permissions: see New() for RFC-0003 OQ4 assumptions and P6 hardening notes.
+// The socket is restricted to the owning user immediately after listen.
 func NewWithRuntime(socketPath, coordServerURL, token, projectID string, store *localstore.Store, tr *localstore.TaskRepo, er *localstore.EventRepo, kb *localstore.KBRepo, eb *eventbus.EventBus, sched *scheduler.Scheduler, qr *syncpkg.QueueRepo) (*Server, error) {
-	ln, err := net.Listen("unix", socketPath)
+	ln, err := listenLocalSocket(socketPath)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: listen on %s: %w", socketPath, err)
 	}
@@ -192,6 +194,7 @@ func NewWithRuntime(socketPath, coordServerURL, token, projectID string, store *
 		qr:          qr,
 		eventbus:    eb,
 		scheduler:   sched,
+		handlers:    make(chan struct{}, maxActiveConnections),
 	}
 	srv.registry = newLocalRegistry(srv)
 	return srv, nil
@@ -200,12 +203,12 @@ func NewWithRuntime(socketPath, coordServerURL, token, projectID string, store *
 // NewMultiOrg binds the Unix domain socket and configures multi-org support (P5+, RFC-0003 §7.1).
 // Orgs is a map of org_name → Org credentials. Bindings map project contexts to org names.
 // Callers must call Serve to start accepting connections, and Close to release the socket.
-// Socket permissions: see New() for RFC-0003 OQ4 assumptions and P6 hardening notes.
+// The socket is restricted to the owning user immediately after listen.
 func NewMultiOrg(socketPath string, orgs map[string]config.Org, bindings []config.ProjectBinding, store *localstore.Store, tr *localstore.TaskRepo, er *localstore.EventRepo, kb *localstore.KBRepo, eb *eventbus.EventBus, sched *scheduler.Scheduler, qr *syncpkg.QueueRepo) (*Server, error) {
 	if len(orgs) == 0 {
 		return nil, fmt.Errorf("localapi: NewMultiOrg: no orgs provided")
 	}
-	ln, err := net.Listen("unix", socketPath)
+	ln, err := listenLocalSocket(socketPath)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: listen on %s: %w", socketPath, err)
 	}
@@ -223,9 +226,22 @@ func NewMultiOrg(socketPath string, orgs map[string]config.Org, bindings []confi
 		qr:         qr,
 		eventbus:   eb,
 		scheduler:  sched,
+		handlers:   make(chan struct{}, maxActiveConnections),
 	}
 	srv.registry = newLocalRegistry(srv)
 	return srv, nil
+}
+
+func listenLocalSocket(socketPath string) (net.Listener, error) {
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(socketPath, 0o600); err != nil {
+		_ = ln.Close()
+		return nil, fmt.Errorf("chmod socket %s: %w", socketPath, err)
+	}
+	return ln, nil
 }
 
 // resolveOrgContext returns the org/creds/projectID for a request (P5 multi-org).
@@ -302,7 +318,15 @@ func (s *Server) Serve(ctx context.Context) error {
 			}
 			return fmt.Errorf("localapi: accept: %w", err)
 		}
-		go s.handle(ctx, conn)
+		select {
+		case s.handlers <- struct{}{}:
+			go func() {
+				defer func() { <-s.handlers }()
+				s.handle(ctx, conn)
+			}()
+		default:
+			_ = conn.Close()
+		}
 	}
 }
 
@@ -322,9 +346,19 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	}()
 
 	sess := &mcpSession{}
-	reader := bufio.NewReader(conn)
+	reader := bufio.NewReaderSize(conn, maxFrameBytes)
 	for {
-		line, err := reader.ReadBytes('\n')
+		line, err := reader.ReadSlice('\n')
+		if errors.Is(err, bufio.ErrBufferFull) || len(line) > maxFrameBytes {
+			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", Error: &rpcError{Code: rpcParseError, Message: "frame exceeds maximum size"}})
+			return
+		}
+		if err != nil {
+			if len(bytes.TrimSpace(line)) > 0 {
+				writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", Error: &rpcError{Code: rpcParseError, Message: "frame must end with a newline"}})
+			}
+			return
+		}
 		if len(bytes.TrimSpace(line)) > 0 {
 			req, decodeErr := decodeMCPLine(line)
 			if decodeErr != nil {
@@ -332,9 +366,6 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 			} else {
 				s.dispatchMCPMessage(ctx, sess, conn, s.registry, req)
 			}
-		}
-		if err != nil {
-			return // EOF or read error: connection done.
 		}
 	}
 }

@@ -204,7 +204,17 @@ const articleColumns = `id, project_id, title, body, frontmatter, author_agent_i
 // WriteArticle inserts a new article, letting Postgres assign the id
 // (gen_random_uuid() default).
 func (s *Store) WriteArticle(ctx context.Context, projectID, agentID, title, body string, frontmatter json.RawMessage, linkTargetIDs []string, force bool) (Article, error) {
-	return s.writeArticleWithOptionalID(ctx, "", projectID, agentID, title, body, frontmatter, linkTargetIDs, force)
+	return s.writeArticleWithOptionalID(ctx, "", "", projectID, agentID, title, body, frontmatter, linkTargetIDs, force)
+}
+
+// EnsureBootstrapArticle atomically creates a fixed system article or returns
+// the existing article carrying bootstrapKey. Ordinary articles never set this
+// nullable marker, so their titles remain unconstrained.
+func (s *Store) EnsureBootstrapArticle(ctx context.Context, projectID, agentID, bootstrapKey, title, body string, frontmatter json.RawMessage) (Article, error) {
+	if bootstrapKey == "" {
+		return Article{}, fmt.Errorf("kb: ensure bootstrap article: empty bootstrap key")
+	}
+	return s.writeArticleWithOptionalID(ctx, "", bootstrapKey, projectID, agentID, title, body, frontmatter, nil, true)
 }
 
 // WriteArticleWithID inserts a new article under the caller-supplied id
@@ -214,7 +224,7 @@ func (s *Store) WriteArticle(ctx context.Context, projectID, agentID, title, bod
 // id the client already has; ordinary article writes (wormhole.kb.write)
 // have no local id to preserve and keep calling WriteArticle.
 func (s *Store) WriteArticleWithID(ctx context.Context, id, projectID, agentID, title, body string, frontmatter json.RawMessage, linkTargetIDs []string, force bool) (Article, error) {
-	return s.writeArticleWithOptionalID(ctx, id, projectID, agentID, title, body, frontmatter, linkTargetIDs, force)
+	return s.writeArticleWithOptionalID(ctx, id, "", projectID, agentID, title, body, frontmatter, linkTargetIDs, force)
 }
 
 // writeArticleWithOptionalID is the shared transaction/validation core of
@@ -225,7 +235,7 @@ func (s *Store) WriteArticleWithID(ctx context.Context, id, projectID, agentID, 
 // list and args, so the row is inserted under that exact id (a duplicate id
 // surfaces as a normal primary-key unique-violation error, same as any
 // other store error today).
-func (s *Store) writeArticleWithOptionalID(ctx context.Context, id, projectID, agentID, title, body string, frontmatter json.RawMessage, linkTargetIDs []string, force bool) (Article, error) {
+func (s *Store) writeArticleWithOptionalID(ctx context.Context, id, bootstrapKey, projectID, agentID, title, body string, frontmatter json.RawMessage, linkTargetIDs []string, force bool) (Article, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Article{}, fmt.Errorf("kb: write article: begin tx: %w", err)
@@ -343,7 +353,16 @@ func (s *Store) writeArticleWithOptionalID(ctx context.Context, id, projectID, a
 	}
 
 	var row *sql.Row
-	if id == "" {
+	if bootstrapKey != "" {
+		row = tx.QueryRowContext(ctx,
+			`INSERT INTO kb_articles (project_id, title, body, frontmatter, author_agent_id, embedding, bootstrap_key)
+			 VALUES ($1, $2, $3, $4, $5, $6::vector, $7)
+			 ON CONFLICT (project_id, bootstrap_key) WHERE bootstrap_key IS NOT NULL
+			 DO UPDATE SET bootstrap_key = EXCLUDED.bootstrap_key
+			 RETURNING `+articleColumns,
+			projectID, title, body, frontmatter, agentID, formatVectorLiteral(embedding), bootstrapKey,
+		)
+	} else if id == "" {
 		row = tx.QueryRowContext(ctx,
 			`INSERT INTO kb_articles (project_id, title, body, frontmatter, author_agent_id, embedding)
 			 VALUES ($1, $2, $3, $4, $5, $6::vector)

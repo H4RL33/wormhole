@@ -2,17 +2,292 @@
 package localapi
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 )
+
+const (
+	testMaxFrameBytes        = 1 << 20
+	testMaxActiveConnections = 8
+)
+
+func trackedConnectionCount(srv *Server) int {
+	count := 0
+	srv.conns.Range(func(_, _ any) bool {
+		count++
+		return true
+	})
+	return count
+}
+
+func waitForTrackedConnectionCount(t *testing.T, srv *Server, want int) {
+	t.Helper()
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if got := trackedConnectionCount(srv); got == want {
+			return
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("tracked connection count = %d, want %d", trackedConnectionCount(srv), want)
+		case <-ticker.C:
+		}
+	}
+}
+
+func TestServer_FrameExactlyOneMiBSucceeds(t *testing.T) {
+	_, socketPath := newMCPTestServer(t)
+	conn := dialLocalSocket(t, socketPath)
+	defer conn.Close()
+
+	reqRaw, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "initialize", Params: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatalf("marshal initialize: %v", err)
+	}
+	frame := make([]byte, 0, testMaxFrameBytes)
+	frame = append(frame, reqRaw...)
+	frame = append(frame, bytes.Repeat([]byte{' '}, testMaxFrameBytes-len(reqRaw)-1)...)
+	frame = append(frame, '\n')
+	if len(frame) != testMaxFrameBytes {
+		t.Fatalf("frame length = %d, want %d", len(frame), testMaxFrameBytes)
+	}
+	if _, err := conn.Write(frame); err != nil {
+		t.Fatalf("write exact-limit frame: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	line, err := bufio.NewReader(conn).ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("read exact-limit response: %v", err)
+	}
+	var resp rpcResponse
+	if err := json.Unmarshal(bytes.TrimSpace(line), &resp); err != nil {
+		t.Fatalf("decode exact-limit response: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("exact-limit frame returned error: %+v", resp.Error)
+	}
+}
+
+func TestServer_FrameOverOneMiBUnterminatedReturnsBoundedError(t *testing.T) {
+	srv, socketPath := newMCPTestServer(t)
+	conn := dialLocalSocket(t, socketPath)
+	defer conn.Close()
+
+	frame := bytes.Repeat([]byte{'x'}, testMaxFrameBytes+1)
+	if _, err := conn.Write(frame); err != nil {
+		t.Fatalf("write oversized frame: %v", err)
+	}
+	unixConn, ok := conn.(*net.UnixConn)
+	if !ok {
+		t.Fatalf("connection type = %T, want *net.UnixConn", conn)
+	}
+	if err := unixConn.CloseWrite(); err != nil {
+		t.Fatalf("close write side: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	line, err := bufio.NewReader(conn).ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("read oversized-frame response: %v", err)
+	}
+	if len(line) > 512 {
+		t.Fatalf("oversized-frame response length = %d, want <= 512", len(line))
+	}
+	var resp rpcResponse
+	if err := json.Unmarshal(bytes.TrimSpace(line), &resp); err != nil {
+		t.Fatalf("decode oversized-frame response: %v", err)
+	}
+	if resp.Error == nil || resp.Error.Code != rpcParseError || !strings.Contains(resp.Error.Message, "frame exceeds maximum size") {
+		t.Fatalf("oversized-frame error = %+v, want bounded parse error", resp.Error)
+	}
+	waitForTrackedConnectionCount(t, srv, 0)
+}
+
+func TestServer_FrameAtOneMiBWithoutNewlineReturnsPromptError(t *testing.T) {
+	_, socketPath := newMCPTestServer(t)
+	conn := dialLocalSocket(t, socketPath)
+	defer conn.Close()
+	if _, err := conn.Write(bytes.Repeat([]byte{'x'}, testMaxFrameBytes)); err != nil {
+		t.Fatalf("write unterminated frame: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	line, err := bufio.NewReader(conn).ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("read unterminated-frame response: %v", err)
+	}
+	var resp rpcResponse
+	if err := json.Unmarshal(bytes.TrimSpace(line), &resp); err != nil {
+		t.Fatalf("decode unterminated-frame response: %v", err)
+	}
+	if resp.Error == nil || !strings.Contains(resp.Error.Message, "frame exceeds maximum size") {
+		t.Fatalf("unterminated-frame error = %+v, want prompt size error", resp.Error)
+	}
+}
+
+func TestServer_ConnectionLimitClosesExcessConnection(t *testing.T) {
+	srv, socketPath := newMCPTestServer(t)
+	connections := make([]net.Conn, 0, testMaxActiveConnections)
+	defer func() {
+		for _, conn := range connections {
+			_ = conn.Close()
+		}
+	}()
+	for i := 0; i < testMaxActiveConnections; i++ {
+		connections = append(connections, dialLocalSocket(t, socketPath))
+	}
+	waitForTrackedConnectionCount(t, srv, testMaxActiveConnections)
+
+	excess := dialLocalSocket(t, socketPath)
+	defer excess.Close()
+	if err := excess.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set excess read deadline: %v", err)
+	}
+	buf := make([]byte, 1)
+	if _, err := excess.Read(buf); err == nil {
+		t.Fatal("excess connection remained open")
+	} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		t.Fatal("excess connection was not closed within the bound")
+	}
+}
+
+func TestServer_SocketModeIsOwnerOnly(t *testing.T) {
+	_, socketPath := newMCPTestServer(t)
+	info, err := os.Stat(socketPath)
+	if err != nil {
+		t.Fatalf("stat socket: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("socket mode = %#o, want 0600", got)
+	}
+}
+
+func TestServer_LogsNeverContainBearerToken(t *testing.T) {
+	const token = "secret-bearer-token-that-must-not-be-logged"
+	coord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "server failure", http.StatusInternalServerError)
+	}))
+	defer coord.Close()
+	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
+	if err != nil {
+		t.Fatalf("localstore.Open: %v", err)
+	}
+	defer store.Close()
+	er := localstore.NewEventRepo(store.DB())
+	socketPath := filepath.Join(t.TempDir(), "wormholed.sock")
+	srv, err := New(socketPath, coord.URL, token, "project-1", store, localstore.NewTaskRepo(store.DB(), er), er, localstore.NewKBRepo(store.DB()), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go srv.Serve(ctx)
+	defer srv.Close()
+
+	var logs bytes.Buffer
+	oldWriter := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(oldWriter)
+
+	conn := dialLocalSocket(t, socketPath)
+	reader := bufio.NewReader(conn)
+	if _, err := conn.Write([]byte("not-json\n")); err != nil {
+		t.Fatalf("write malformed frame: %v", err)
+	}
+	if _, err := reader.ReadBytes('\n'); err != nil {
+		t.Fatalf("read malformed response: %v", err)
+	}
+	mcpInitialize(t, conn, reader)
+	resp := mcpCallTool(t, conn, reader, 2, "wormhole.agent.whoami", nil)
+	_ = conn.Close()
+	if resp.Error == "" {
+		t.Fatal("coordination server failure unexpectedly succeeded")
+	}
+	if strings.Contains(logs.String(), token) {
+		t.Fatalf("logs contain bearer token: %q", logs.String())
+	}
+}
+
+func TestServer_ShutdownCancelsActiveRequest(t *testing.T) {
+	requestStarted := make(chan struct{})
+	requestCanceled := make(chan struct{})
+	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
+	if err != nil {
+		t.Fatalf("localstore.Open: %v", err)
+	}
+	defer store.Close()
+	er := localstore.NewEventRepo(store.DB())
+	socketPath := filepath.Join(t.TempDir(), "wormholed.sock")
+	srv, err := New(socketPath, "", "test-token", "project-1", store, localstore.NewTaskRepo(store.DB(), er), er, localstore.NewKBRepo(store.DB()), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	const blockingTool = "wormhole.test.blocking"
+	srv.registry.tools[blockingTool] = localTool{
+		Name: blockingTool,
+		Handler: func(ctx context.Context, _ json.RawMessage) (any, error) {
+			close(requestStarted)
+			<-ctx.Done()
+			close(requestCanceled)
+			return nil, ctx.Err()
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- srv.Serve(ctx) }()
+	defer srv.Close()
+
+	conn := dialLocalSocket(t, socketPath)
+	reader := bufio.NewReader(conn)
+	mcpInitialize(t, conn, reader)
+	params, _ := json.Marshal(toolsCallParams{Name: blockingTool, Arguments: json.RawMessage(`{}`)})
+	call, _ := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("2"), Method: "tools/call", Params: params})
+	if _, err := conn.Write(append(call, '\n')); err != nil {
+		t.Fatalf("write active request: %v", err)
+	}
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("active request did not reach local handler")
+	}
+
+	cancel()
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Fatalf("Serve after cancel: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not stop within the bound")
+	}
+	select {
+	case <-requestCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("active local request was not canceled")
+	}
+	_ = conn.Close()
+	waitForTrackedConnectionCount(t, srv, 0)
+}
 
 // fakeCoordServer stands in for the Coordination Server's /mcp endpoint
 // (docs/mcp-protocol.md §2-§4.1): decodes a tools/call JSON-RPC request,

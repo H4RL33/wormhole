@@ -60,7 +60,7 @@ Append-only, per RFC §8.4.
 ## channels
 - `id`
 - `project_id` -> projects
-- `name`
+- `name` (unique within a project)
 - `created_at`
 
 ## events
@@ -110,6 +110,8 @@ RFC-0001 §8.2 doesn't specify exact column names/types for `tasks`/`task_links`
 - `frontmatter` (jsonb)
 - `embedding` (vector, pgvector)
 - `author_agent_id` -> agents
+- `bootstrap_key` (nullable; partial uniqueness within a project is reserved
+  for fixed system/bootstrap articles and does not constrain ordinary titles)
 - `created_at`
 - `updated_at`
 

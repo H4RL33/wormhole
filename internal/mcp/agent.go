@@ -18,25 +18,10 @@ import (
 // agent registers into it (RFC-0001 §8.5 joining flow).
 var defaultChannelNames = []string{"introductions", "general"}
 
-// ensureDefaultChannels creates any of defaultChannelNames missing from the
-// project. It lists existing channels first and only creates names that are
-// absent, since events.Store.CreateChannel has no unique constraint on
-// (project_id, name) and would otherwise duplicate channels on every
-// registration into the same project.
+// ensureDefaultChannels atomically creates each fixed channel if absent.
 func ensureDefaultChannels(ctx context.Context, store *events.Store, projectID string) error {
-	existing, err := store.ListChannels(ctx, projectID)
-	if err != nil {
-		return fmt.Errorf("ensure default channels: list channels: %w", err)
-	}
-	have := make(map[string]bool, len(existing))
-	for _, c := range existing {
-		have[c.Name] = true
-	}
 	for _, name := range defaultChannelNames {
-		if have[name] {
-			continue
-		}
-		if _, err := store.CreateChannel(ctx, projectID, name); err != nil {
+		if _, err := store.EnsureChannel(ctx, projectID, name); err != nil {
 			return fmt.Errorf("ensure default channels: create channel %q: %w", name, err)
 		}
 	}
@@ -47,6 +32,8 @@ func ensureDefaultChannels(ctx context.Context, store *events.Store, projectID s
 // onboarding article and to check for its existence idempotently — kept
 // as a named constant so Task 3's test and this seeding logic can't drift.
 const onboardingArticleTitle = "How This Project Works"
+
+const onboardingArticleBootstrapKey = "project-onboarding"
 
 // onboardingArticleBody is seeded once per project, on the first agent
 // registration into it (see design note above Task 3 in the plan: there
@@ -60,24 +47,10 @@ const onboardingArticleBody = `This project uses Wormhole's MCP tool surface for
 
 **The channel is the changelog:** ` + "`wormhole.channel.subscribe`" + ` returns a project's full event history — read it to see what other agents have done and how they've used these values in practice, the same way you'd read git log to learn a team's commit conventions.`
 
-// ensureOnboardingArticle writes the fixed onboarding KB article for
-// projectID if it doesn't already have one, authored by authorAgentID.
-// Idempotent: lists existing articles and checks title match first, so
-// concurrent/repeated registrations into the same project never duplicate
-// it. Errors here are the caller's decision whether to fail registration
-// or log-and-continue (RegisterAgentTool below chooses log-and-continue,
-// mirroring ensureDefaultChannels' existing best-effort treatment).
+// ensureOnboardingArticle atomically creates the fixed onboarding KB article
+// for projectID if its dedicated bootstrap marker is absent.
 func ensureOnboardingArticle(ctx context.Context, kbStore *kb.Store, projectID, authorAgentID string) error {
-	existing, err := kbStore.ListArticles(ctx, projectID)
-	if err != nil {
-		return fmt.Errorf("ensure onboarding article: list articles: %w", err)
-	}
-	for _, a := range existing {
-		if a.Title == onboardingArticleTitle {
-			return nil
-		}
-	}
-	if _, err := kbStore.WriteArticle(ctx, projectID, authorAgentID, onboardingArticleTitle, onboardingArticleBody, nil, nil, true); err != nil {
+	if _, err := kbStore.EnsureBootstrapArticle(ctx, projectID, authorAgentID, onboardingArticleBootstrapKey, onboardingArticleTitle, onboardingArticleBody, nil); err != nil {
 		return fmt.Errorf("ensure onboarding article: write: %w", err)
 	}
 	return nil
