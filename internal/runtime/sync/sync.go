@@ -27,7 +27,7 @@ type Engine struct {
 	taskRepo              *localstore.TaskRepo
 	kbRepo                *localstore.KBRepo
 	mu                    sync.Mutex
-	lastSyncTime          time.Time
+	lastSyncCursor        string
 	batchInterval         time.Duration
 	batchSize             int
 	latencyCheckInterval  time.Duration
@@ -227,9 +227,9 @@ func (e *Engine) pushBatch(ctx context.Context) error {
 		key := acknowledgementKey{entityType: entry.EntityType, entityID: entry.EntityID}
 		if acknowledgements[key].Error == "" {
 			if err := e.queueRepo.MarkDelivered(ctx, e.namespaceID, entry.ID); err != nil {
-				// If marking fails, the entry will be retried on the next cycle.
-				// Do not fail the entire batch.
-				_ = err
+				// Earlier rows remain delivered; this row and all later rows remain
+				// pending so the next cycle can retry without hiding local data loss.
+				return fmt.Errorf("sync: push batch: mark queue entry %q delivered: %w", entry.ID, err)
 			}
 		}
 	}
@@ -308,8 +308,8 @@ func (e *Engine) PullIncremental(ctx context.Context) error {
 		"namespace_id": e.namespaceID,
 		"version":      SyncProtocolVersion,
 	}
-	if !e.lastSyncTime.IsZero() {
-		args["last_sync"] = e.lastSyncTime.UTC().Format(time.RFC3339)
+	if e.lastSyncCursor != "" {
+		args["last_sync"] = e.lastSyncCursor
 	}
 	result, err := e.callSyncToolWithResult(ctx, "wormhole.sync.incremental_pull", args)
 	if err != nil {
@@ -320,7 +320,7 @@ func (e *Engine) PullIncremental(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("sync: pull incremental: decode result: %w", err)
 	}
-	cursor, err := time.Parse(time.RFC3339, pullResult.Timestamp)
+	_, err = time.Parse(time.RFC3339, pullResult.Timestamp)
 	if err != nil {
 		return fmt.Errorf("sync: pull incremental: decode timestamp %q: %w", pullResult.Timestamp, err)
 	}
@@ -347,7 +347,7 @@ func (e *Engine) PullIncremental(ctx context.Context) error {
 		}
 	}
 
-	e.lastSyncTime = cursor
+	e.lastSyncCursor = pullResult.Timestamp
 	return nil
 }
 

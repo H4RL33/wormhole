@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -761,16 +762,84 @@ func TestPushBatchDoesNotAdvancePullCursor(t *testing.T) {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	engine := mustNewEngine(t, "http://localhost:8080", qRepo, aRepo, nil, nil, DefaultConfig())
-	wantCursor := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
-	engine.lastSyncTime = wantCursor
+	wantCursor := "2026-07-22T10:00:00Z"
+	engine.lastSyncCursor = wantCursor
 	engine.testCallSyncToolWithResultFn = func(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
 		return pushResult(1, []map[string]interface{}{{"id": "task-1", "type": "task", "error": ""}}), nil
 	}
 	if err := engine.pushBatch(ctx); err != nil {
 		t.Fatalf("pushBatch: %v", err)
 	}
-	if got := engine.lastSyncTime; !got.Equal(wantCursor) {
+	if got := engine.lastSyncCursor; got != wantCursor {
 		t.Fatalf("pull cursor after push = %s, want %s", got, wantCursor)
+	}
+}
+
+func TestPushBatchReturnsMarkDeliveredCancellation(t *testing.T) {
+	qRepo, aRepo := setupTestRepos(t)
+	defer qRepo.db.Close()
+	if _, err := qRepo.Enqueue(context.Background(), "ns-1", "task", "task-1", "create", json.RawMessage(`{"title":"one"}`), 0); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	engine := mustNewEngine(t, "http://localhost:8080", qRepo, aRepo, nil, nil, DefaultConfig())
+	ctx, cancel := context.WithCancel(context.Background())
+	engine.testCallSyncToolWithResultFn = func(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
+		cancel()
+		return pushResult(1, []map[string]interface{}{{"id": "task-1", "type": "task", "error": ""}}), nil
+	}
+
+	err := engine.pushBatch(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("pushBatch error = %v, want wrapped context.Canceled", err)
+	}
+	pending, err := qRepo.ListPending(context.Background(), "ns-1", 10)
+	if err != nil {
+		t.Fatalf("ListPending: %v", err)
+	}
+	if len(pending) != 1 || pending[0].EntityID != "task-1" {
+		t.Fatalf("pending after persistence cancellation = %#v, want task-1", pending)
+	}
+}
+
+func TestPushBatchPreservesEarlierDeliveryOnLaterPersistenceError(t *testing.T) {
+	qRepo, aRepo := setupTestRepos(t)
+	defer qRepo.db.Close()
+	ctx := context.Background()
+	if _, err := qRepo.Enqueue(ctx, "ns-1", "task", "task-1", "create", json.RawMessage(`{"title":"one"}`), 2); err != nil {
+		t.Fatalf("Enqueue task-1: %v", err)
+	}
+	if _, err := qRepo.Enqueue(ctx, "ns-1", "task", "task-2", "create", json.RawMessage(`{"title":"two"}`), 1); err != nil {
+		t.Fatalf("Enqueue task-2: %v", err)
+	}
+	if _, err := qRepo.db.Exec(`
+		CREATE TRIGGER fail_task_2_delivery
+		BEFORE UPDATE OF delivered_at ON sync_queue
+		WHEN OLD.entity_id = 'task-2'
+		BEGIN
+			SELECT RAISE(ABORT, 'forced mark failure');
+		END;
+	`); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+
+	engine := mustNewEngine(t, "http://localhost:8080", qRepo, aRepo, nil, nil, DefaultConfig())
+	engine.testCallSyncToolWithResultFn = func(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
+		return pushResult(2, []map[string]interface{}{
+			{"id": "task-1", "type": "task", "error": ""},
+			{"id": "task-2", "type": "task", "error": ""},
+		}), nil
+	}
+
+	err := engine.pushBatch(ctx)
+	if err == nil || !strings.Contains(err.Error(), "forced mark failure") {
+		t.Fatalf("pushBatch error = %v, want forced mark failure", err)
+	}
+	pending, err := qRepo.ListPending(ctx, "ns-1", 10)
+	if err != nil {
+		t.Fatalf("ListPending: %v", err)
+	}
+	if len(pending) != 1 || pending[0].EntityID != "task-2" {
+		t.Fatalf("pending after partial persistence = %#v, want only task-2", pending)
 	}
 }
 

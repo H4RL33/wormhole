@@ -203,6 +203,32 @@ func TestPullIncrementalUsesLastSuccessfulCursor(t *testing.T) {
 	}
 }
 
+func TestPullIncrementalResendsRawCursorByteForByte(t *testing.T) {
+	qRepo, aRepo := setupTestRepos(t)
+	defer qRepo.db.Close()
+	engine := mustNewEngine(t, "http://localhost:8080", qRepo, aRepo, nil, nil, DefaultConfig())
+
+	const rawTimestamp = "2026-07-22T10:00:00.123456789+05:30"
+	call := 0
+	engine.testCallSyncToolWithResultFn = func(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
+		call++
+		if call == 1 {
+			return incrementalPullResult(rawTimestamp, nil), nil
+		}
+		if got := args["last_sync"]; got != rawTimestamp {
+			t.Fatalf("last_sync = %#v, want raw server timestamp %q", got, rawTimestamp)
+		}
+		return incrementalPullResult("2026-07-22T10:00:05Z", nil), nil
+	}
+
+	if err := engine.PullIncremental(context.Background()); err != nil {
+		t.Fatalf("first PullIncremental: %v", err)
+	}
+	if err := engine.PullIncremental(context.Background()); err != nil {
+		t.Fatalf("second PullIncremental: %v", err)
+	}
+}
+
 func TestPullIncrementalFailureDoesNotAdvanceCursor(t *testing.T) {
 	const firstTimestamp = "2026-07-22T10:00:00Z"
 	const failedTimestamp = "2026-07-22T10:00:05Z"
