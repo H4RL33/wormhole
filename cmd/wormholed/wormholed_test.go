@@ -5,13 +5,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	stdsync "sync"
 	"testing"
 	"time"
+
+	"github.com/H4RL33/wormhole/internal/runtime/config"
+	"github.com/H4RL33/wormhole/internal/runtime/localstore"
+	runtimesync "github.com/H4RL33/wormhole/internal/runtime/sync"
 )
 
 // Local MCP types (duplicated from internal/runtime/localapi for test use).
@@ -53,6 +59,301 @@ type mcpToolCallResult struct {
 type mcpToolResponse struct {
 	Result json.RawMessage
 	Error  string
+}
+
+type runningTestDaemon struct {
+	cancel   context.CancelFunc
+	errCh    chan error
+	stopOnce stdsync.Once
+}
+
+func startTestDaemon(t *testing.T, profileName, socketPath string) *runningTestDaemon {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	d := &runningTestDaemon{cancel: cancel, errCh: make(chan error, 1)}
+	go func() { d.errCh <- Run(ctx, profileName) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		conn, err := net.Dial("unix", socketPath)
+		if err == nil {
+			_ = conn.Close()
+			break
+		}
+		select {
+		case runErr := <-d.errCh:
+			cancel()
+			t.Fatalf("Run returned before socket became ready: %v", runErr)
+		default:
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("wormholed socket did not become ready at %s", socketPath)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Cleanup(func() { d.stop(t) })
+	return d
+}
+
+func (d *runningTestDaemon) stop(t *testing.T) {
+	t.Helper()
+	d.stopOnce.Do(func() {
+		d.cancel()
+		select {
+		case err := <-d.errCh:
+			if err != nil {
+				t.Errorf("Run returned after cancellation: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("Run did not stop within 5 seconds")
+		}
+	})
+}
+
+func waitForCondition(t *testing.T, timeout time.Duration, description string, condition func() (bool, error)) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		ok, err := condition()
+		if err != nil {
+			t.Fatalf("wait for %s: %v", description, err)
+		}
+		if ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", description)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+type isolatedPush struct {
+	NamespaceID string
+	Title       string
+}
+
+type isolatedCoordServer struct {
+	server *httptest.Server
+	token  string
+	mu     stdsync.Mutex
+	accept bool
+	tokens []string
+	tools  []string
+	pushes []isolatedPush
+}
+
+func newIsolatedCoordServer(t *testing.T, token string) *isolatedCoordServer {
+	t.Helper()
+	s := &isolatedCoordServer{token: token}
+	s.server = httptest.NewServer(http.HandlerFunc(s.serveHTTP))
+	t.Cleanup(s.server.Close)
+	return s
+}
+
+func (s *isolatedCoordServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	var req mcpRpcRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var params mcpToolsCallParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	auth := r.Header.Get("Authorization")
+	s.mu.Lock()
+	s.tokens = append(s.tokens, auth)
+	s.tools = append(s.tools, params.Name)
+	s.mu.Unlock()
+	if auth != "Bearer "+s.token {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var result any
+	switch params.Name {
+	case "wormhole.sync.bootstrap":
+		result = map[string]any{
+			"org_config": map[string]any{}, "project_list": []string{},
+			"task_list": []any{}, "kb_list": []any{},
+			"timestamp": time.Now().UTC().Format(time.RFC3339), "version": 1,
+		}
+	case "wormhole.sync.incremental_pull":
+		result = map[string]any{
+			"updates": []any{}, "timestamp": time.Now().UTC().Format(time.RFC3339), "version": 1,
+		}
+	case "wormhole.sync.incremental_push":
+		var in struct {
+			NamespaceID string `json:"namespace_id"`
+			Items       []struct {
+				EntityType string `json:"entity_type"`
+				EntityID   string `json:"entity_id"`
+				Payload    struct {
+					Title string `json:"title"`
+				} `json:"payload"`
+			} `json:"items"`
+		}
+		if err := json.Unmarshal(params.Arguments, &in); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		s.mu.Lock()
+		accept := s.accept
+		if accept {
+			for _, item := range in.Items {
+				s.pushes = append(s.pushes, isolatedPush{NamespaceID: in.NamespaceID, Title: item.Payload.Title})
+			}
+		}
+		s.mu.Unlock()
+		if !accept {
+			writeToolRPCResponse(w, req.ID, nil, "temporarily offline")
+			return
+		}
+		applied := make([]map[string]any, 0, len(in.Items))
+		for _, item := range in.Items {
+			applied = append(applied, map[string]any{"id": item.EntityID, "type": item.EntityType, "error": ""})
+		}
+		result = map[string]any{
+			"items_received": len(in.Items), "applied": applied,
+			"timestamp": time.Now().UTC().Format(time.RFC3339), "version": 1,
+		}
+	default:
+		http.Error(w, fmt.Sprintf("unexpected tool %q", params.Name), http.StatusNotFound)
+		return
+	}
+	writeToolRPCResponse(w, req.ID, result, "")
+}
+
+func writeToolRPCResponse(w http.ResponseWriter, id json.RawMessage, result any, toolErr string) {
+	contentText, _ := json.Marshal(result)
+	toolResult := map[string]any{
+		"content": []map[string]string{{"type": "text", "text": string(contentText)}},
+	}
+	if toolErr != "" {
+		toolResult["isError"] = true
+		toolResult["content"] = []map[string]string{{"type": "text", "text": toolErr}}
+	}
+	resultRaw, _ := json.Marshal(toolResult)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"jsonrpc": "2.0", "id": id, "result": json.RawMessage(resultRaw),
+	})
+}
+
+func (s *isolatedCoordServer) setAccept(accept bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.accept = accept
+}
+
+func (s *isolatedCoordServer) snapshot() ([]string, []string, []isolatedPush) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.tokens...), append([]string(nil), s.tools...), append([]isolatedPush(nil), s.pushes...)
+}
+
+type fakeGroupEngine struct {
+	name         string
+	bootstrapErr error
+	events       *[]string
+	stopCalls    int
+}
+
+func (e *fakeGroupEngine) Bootstrap(context.Context) error {
+	*e.events = append(*e.events, "bootstrap "+e.name)
+	return e.bootstrapErr
+}
+
+func (e *fakeGroupEngine) Start(context.Context) {
+	*e.events = append(*e.events, "start "+e.name)
+}
+
+func (e *fakeGroupEngine) Stop() {
+	e.stopCalls++
+	*e.events = append(*e.events, "stop "+e.name)
+}
+
+func TestSyncGroupStopsStartedEnginesOnBootstrapFailure(t *testing.T) {
+	events := []string{}
+	first := &fakeGroupEngine{name: "first", events: &events}
+	second := &fakeGroupEngine{name: "second", events: &events, bootstrapErr: fmt.Errorf("bootstrap failed")}
+	third := &fakeGroupEngine{name: "third", events: &events}
+	group := &syncGroup{engines: []syncEngine{first, second, third}}
+
+	err := group.Start(context.Background())
+	if err == nil {
+		t.Fatal("syncGroup.Start returned nil, want bootstrap error")
+	}
+	want := []string{"bootstrap first", "start first", "bootstrap second", "stop first"}
+	if fmt.Sprint(events) != fmt.Sprint(want) {
+		t.Fatalf("lifecycle events = %v, want %v", events, want)
+	}
+	if first.stopCalls != 1 || second.stopCalls != 0 || third.stopCalls != 0 {
+		t.Fatalf("stop calls = (%d, %d, %d), want (1, 0, 0)", first.stopCalls, second.stopCalls, third.stopCalls)
+	}
+}
+
+func TestSyncGroupStopIsIdempotent(t *testing.T) {
+	events := []string{}
+	first := &fakeGroupEngine{name: "first", events: &events}
+	second := &fakeGroupEngine{name: "second", events: &events}
+	group := &syncGroup{engines: []syncEngine{first, second}}
+	if err := group.Start(context.Background()); err != nil {
+		t.Fatalf("syncGroup.Start: %v", err)
+	}
+	group.Stop()
+	group.Stop()
+	if first.stopCalls != 1 || second.stopCalls != 1 {
+		t.Fatalf("stop calls = (%d, %d), want (1, 1)", first.stopCalls, second.stopCalls)
+	}
+}
+
+func TestNewMultiOrgSyncGroupValidatesBindings(t *testing.T) {
+	store, err := localstore.Open(filepath.Join(t.TempDir(), "bindings.db"))
+	if err != nil {
+		t.Fatalf("open local store: %v", err)
+	}
+	defer store.Close()
+	queue := runtimesync.NewQueueRepo(store.DB())
+	audit := runtimesync.NewAuditRepo(store.DB())
+	taskRepo := localstore.NewTaskRepo(store.DB(), localstore.NewEventRepo(store.DB()))
+	kbRepo := localstore.NewKBRepo(store.DB())
+	orgs := map[string]config.Org{
+		"org-a": {Name: "org-a", Credentials: config.Credentials{Server: "https://a.example", ProjectID: "project-1", Token: "token-a"}},
+		"org-b": {Name: "org-b", Credentials: config.Credentials{Server: "https://b.example", ProjectID: "project-1", Token: "token-b"}},
+		"alias": {Name: "alias", Credentials: config.Credentials{Server: "https://a.example", ProjectID: "project-1", Token: "token-a"}},
+	}
+
+	tests := []struct {
+		name     string
+		bindings []config.ProjectBinding
+		wantErr  string
+		wantLen  int
+	}{
+		{name: "missing org", bindings: []config.ProjectBinding{{ProjectID: "project-1", OrgName: "missing"}}, wantErr: "not found"},
+		{name: "conflicting project", bindings: []config.ProjectBinding{{ProjectID: "project-1", OrgName: "org-a"}, {ProjectID: "project-1", OrgName: "org-b"}}, wantErr: "conflicting"},
+		{name: "identical tuple deduplicated", bindings: []config.ProjectBinding{{ProjectID: "project-1", OrgName: "org-a"}, {ProjectID: "project-1", OrgName: "alias"}}, wantLen: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			group, err := newMultiOrgSyncGroup(orgs, tc.bindings, queue, audit, taskRepo, kbRepo, runtimesync.DefaultConfig())
+			if tc.wantErr != "" {
+				if err == nil || !bytes.Contains([]byte(err.Error()), []byte(tc.wantErr)) {
+					t.Fatalf("error = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("newMultiOrgSyncGroup: %v", err)
+			}
+			if len(group.engines) != tc.wantLen {
+				t.Fatalf("engine count = %d, want %d", len(group.engines), tc.wantLen)
+			}
+		})
+	}
 }
 
 // mcpInitialize sends initialize and notifications/initialized handshake.
@@ -227,8 +528,16 @@ func TestRun_EndToEndWhoAmI(t *testing.T) {
 // credential profile should resolve to single-org NewWithRuntime wiring.
 func TestRun_AgentRegisterReachesSchedulerAndEventBus(t *testing.T) {
 	coord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "result": json.RawMessage(`{}`)})
+		var req mcpRpcRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeToolRPCResponse(w, req.ID, map[string]any{
+			"org_config": map[string]any{}, "project_list": []string{},
+			"task_list": []any{}, "kb_list": []any{},
+			"timestamp": time.Now().UTC().Format(time.RFC3339), "version": 1,
+		}, "")
 	}))
 	defer coord.Close()
 
@@ -289,5 +598,137 @@ func TestRun_AgentRegisterReachesSchedulerAndEventBus(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not shut down after context cancel")
+	}
+}
+
+func TestRun_MultiOrgSyncIsolation(t *testing.T) {
+	const (
+		projectA = "project-org-a"
+		projectB = "project-org-b"
+		tokenA   = "token-org-a"
+		tokenB   = "token-org-b"
+		titleA   = "only org A receives this task"
+		titleB   = "only org B receives this task"
+	)
+	coordA := newIsolatedCoordServer(t, tokenA)
+	coordB := newIsolatedCoordServer(t, tokenB)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	runDir := filepath.Join(home, "run")
+	t.Setenv("XDG_RUNTIME_DIR", runDir)
+	dataDir := filepath.Join(home, "data")
+	t.Setenv("XDG_DATA_HOME", dataDir)
+	credDir := filepath.Join(home, ".wormhole", "credentials")
+	if err := os.MkdirAll(credDir, 0o700); err != nil {
+		t.Fatalf("create credentials directory: %v", err)
+	}
+	for _, profile := range []struct {
+		name, server, project, token string
+	}{
+		{name: "org-a", server: coordA.server.URL, project: projectA, token: tokenA},
+		{name: "org-b", server: coordB.server.URL, project: projectB, token: tokenB},
+	} {
+		data, err := json.Marshal(map[string]string{
+			"server": profile.server, "project_id": profile.project,
+			"agent_id": "agent-" + profile.name, "token": profile.token,
+		})
+		if err != nil {
+			t.Fatalf("marshal %s credentials: %v", profile.name, err)
+		}
+		if err := os.WriteFile(filepath.Join(credDir, profile.name+".json"), data, 0o600); err != nil {
+			t.Fatalf("write %s credentials: %v", profile.name, err)
+		}
+	}
+
+	socketPath := filepath.Join(runDir, "wormhole", "wormholed.sock")
+	firstRun := startTestDaemon(t, "org-a", socketPath)
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial first daemon: %v", err)
+	}
+	reader := bufio.NewReader(conn)
+	mcpInitialize(t, conn, reader)
+	for i, tc := range []struct {
+		project, title string
+	}{{project: projectA, title: titleA}, {project: projectB, title: titleB}} {
+		resp := mcpCallTool(t, conn, reader, i+2, "wormhole.task.create", map[string]interface{}{
+			"project_id": tc.project, "title": tc.title, "description": "multi-org queue isolation", "priority": 0,
+		})
+		if resp.Error != "" {
+			_ = conn.Close()
+			t.Fatalf("create task for %s: %s", tc.project, resp.Error)
+		}
+	}
+	_ = conn.Close()
+	firstRun.stop(t)
+
+	dbPath := filepath.Join(dataDir, "wormhole", "wormholed.db")
+	inspectionStore, err := localstore.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open persisted local store: %v", err)
+	}
+	defer inspectionStore.Close()
+	queue := runtimesync.NewQueueRepo(inspectionStore.DB())
+	if _, err := inspectionStore.DB().ExecContext(context.Background(), `UPDATE sync_queue SET priority = 2 WHERE delivered_at IS NULL`); err != nil {
+		t.Fatalf("promote persisted queue rows for fast retry: %v", err)
+	}
+	for _, projectID := range []string{projectA, projectB} {
+		pending, err := queue.ListPending(context.Background(), projectID, 10)
+		if err != nil {
+			t.Fatalf("list %s pending queue after restart boundary: %v", projectID, err)
+		}
+		if len(pending) != 1 {
+			t.Fatalf("%s pending queue length = %d, want 1", projectID, len(pending))
+		}
+	}
+
+	coordA.setAccept(true)
+	secondRun := startTestDaemon(t, "org-a", socketPath)
+	waitForCondition(t, 5*time.Second, "org A queue to drain", func() (bool, error) {
+		pending, err := queue.ListPending(context.Background(), projectA, 10)
+		return len(pending) == 0, err
+	})
+	pendingB, err := queue.ListPending(context.Background(), projectB, 10)
+	if err != nil {
+		t.Fatalf("list org B queue while org A drains: %v", err)
+	}
+	if len(pendingB) != 1 {
+		t.Fatalf("org B queue length while endpoint B is offline = %d, want 1", len(pendingB))
+	}
+
+	coordB.setAccept(true)
+	waitForCondition(t, 5*time.Second, "org B queue to drain independently", func() (bool, error) {
+		pending, err := queue.ListPending(context.Background(), projectB, 10)
+		return len(pending) == 0, err
+	})
+	secondRun.stop(t)
+
+	for name, snapshot := range map[string]struct {
+		token   string
+		project string
+		title   string
+		server  *isolatedCoordServer
+	}{
+		"org A": {token: tokenA, project: projectA, title: titleA, server: coordA},
+		"org B": {token: tokenB, project: projectB, title: titleB, server: coordB},
+	} {
+		tokens, tools, pushes := snapshot.server.snapshot()
+		if len(tokens) == 0 {
+			t.Fatalf("%s endpoint received no authenticated sync calls", name)
+		}
+		for _, token := range tokens {
+			if token != "Bearer "+snapshot.token {
+				t.Errorf("%s endpoint token = %q, want its own bearer token", name, token)
+			}
+		}
+		if len(pushes) == 0 {
+			t.Fatalf("%s accepted no pushes, tools = %v", name, tools)
+		}
+		for _, push := range pushes {
+			if push.NamespaceID != snapshot.project || push.Title != snapshot.title {
+				t.Errorf("%s accepted push = %+v, want only namespace %q title %q", name, push, snapshot.project, snapshot.title)
+			}
+		}
 	}
 }

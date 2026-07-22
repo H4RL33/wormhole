@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	stdsync "sync"
 
 	"github.com/H4RL33/wormhole/internal/runtime/config"
 	"github.com/H4RL33/wormhole/internal/runtime/eventbus"
@@ -17,6 +18,82 @@ import (
 	"github.com/H4RL33/wormhole/internal/runtime/scheduler"
 	"github.com/H4RL33/wormhole/internal/runtime/sync"
 )
+
+type syncEngine interface {
+	Bootstrap(context.Context) error
+	Start(context.Context)
+	Stop()
+}
+
+// syncGroup owns the lifecycle of every per-binding sync engine in this
+// wormholed process (RFC-0003 §7.1, §8.1, §8.2).
+type syncGroup struct {
+	engines   []syncEngine
+	startOnce stdsync.Once
+	stopOnce  stdsync.Once
+	startErr  error
+}
+
+func (g *syncGroup) Start(ctx context.Context) error {
+	g.startOnce.Do(func() {
+		started := 0
+		for i, engine := range g.engines {
+			if err := engine.Bootstrap(ctx); err != nil {
+				for j := started - 1; j >= 0; j-- {
+					g.engines[j].Stop()
+				}
+				g.startErr = fmt.Errorf("sync group: bootstrap engine %d: %w", i, err)
+				return
+			}
+			engine.Start(ctx)
+			started++
+		}
+	})
+	return g.startErr
+}
+
+func (g *syncGroup) Stop() {
+	g.stopOnce.Do(func() {
+		for i := len(g.engines) - 1; i >= 0; i-- {
+			g.engines[i].Stop()
+		}
+	})
+}
+
+type syncBindingKey struct {
+	server    string
+	projectID string
+	token     string
+}
+
+func newMultiOrgSyncGroup(orgs map[string]config.Org, bindings []config.ProjectBinding, queueRepo *sync.QueueRepo, auditRepo *sync.AuditRepo, taskRepo *localstore.TaskRepo, kbRepo *localstore.KBRepo, syncCfg sync.Config) (*syncGroup, error) {
+	group := &syncGroup{}
+	projectBindings := make(map[string]syncBindingKey, len(bindings))
+	engines := make(map[syncBindingKey]struct{}, len(bindings))
+	for _, binding := range bindings {
+		org, ok := orgs[binding.OrgName]
+		if !ok {
+			return nil, fmt.Errorf("wormholed: org %q for project binding %q not found", binding.OrgName, binding.ProjectID)
+		}
+		key := syncBindingKey{
+			server: org.Credentials.Server, projectID: binding.ProjectID, token: org.Credentials.Token,
+		}
+		if existing, ok := projectBindings[binding.ProjectID]; ok && existing != key {
+			return nil, fmt.Errorf("wormholed: conflicting project bindings for %q", binding.ProjectID)
+		}
+		projectBindings[binding.ProjectID] = key
+		if _, ok := engines[key]; ok {
+			continue
+		}
+		engine, err := sync.New(key.server, key.token, key.projectID, queueRepo, auditRepo, taskRepo, kbRepo, syncCfg)
+		if err != nil {
+			return nil, fmt.Errorf("wormholed: configure sync engine for project %q: %w", binding.ProjectID, err)
+		}
+		group.engines = append(group.engines, engine)
+		engines[key] = struct{}{}
+	}
+	return group, nil
+}
 
 func Run(ctx context.Context, profileName string) error {
 	cfg, err := config.Load(profileName)
@@ -45,16 +122,34 @@ func Run(ctx context.Context, profileName string) error {
 	tr := localstore.NewTaskRepo(store.DB(), er)
 	kb := localstore.NewKBRepo(store.DB())
 
-	// Initialize sync engine repositories and engine (RFC-0003 §8.2). tr/kb
-	// are the local-apply targets for Bootstrap/PullIncremental so a synced
-	// task/KB article actually lands in this daemon's SQLite replica.
+	// Initialize sync repositories shared by the per-binding engines. Queue
+	// operations remain namespace-scoped inside QueueRepo.
 	queueRepo := sync.NewQueueRepo(store.DB())
 	auditRepo := sync.NewAuditRepo(store.DB())
 	syncCfg := sync.DefaultConfig()
-	syncEngine, err := sync.New(cfg.Credentials.Server, cfg.Credentials.Token, cfg.Credentials.ProjectID, queueRepo, auditRepo, tr, kb, syncCfg)
-	if err != nil {
-		return fmt.Errorf("wormholed: configure sync engine: %w", err)
+
+	// P5: prefer multi-org wiring when more than one credential profile is
+	// present. Single-profile deployments retain the resolved Load(profile)
+	// credentials and exactly one engine.
+	multiCfg, multiErr := config.LoadMultiOrg()
+	useMultiOrg := multiErr == nil && len(multiCfg.Orgs) > 1
+	var syncEngines *syncGroup
+	if useMultiOrg {
+		syncEngines, err = newMultiOrgSyncGroup(multiCfg.Orgs, multiCfg.Bindings, queueRepo, auditRepo, tr, kb, syncCfg)
+	} else {
+		engine, engineErr := sync.New(cfg.Credentials.Server, cfg.Credentials.Token, cfg.Credentials.ProjectID, queueRepo, auditRepo, tr, kb, syncCfg)
+		if engineErr != nil {
+			return fmt.Errorf("wormholed: configure sync engine: %w", engineErr)
+		}
+		syncEngines = &syncGroup{engines: []syncEngine{engine}}
 	}
+	if err != nil {
+		return err
+	}
+	if err := syncEngines.Start(ctx); err != nil {
+		return fmt.Errorf("wormholed: start sync engines: %w", err)
+	}
+	defer syncEngines.Stop()
 
 	// P3: eventbus + scheduler are always constructed so agent registration,
 	// presence, task routing, and subscriptions (wormhole.agent.register,
@@ -62,12 +157,8 @@ func Run(ctx context.Context, profileName string) error {
 	eb := eventbus.NewEventBus()
 	sched := scheduler.NewScheduler()
 
-	// P5: prefer multi-org wiring when more than one credential profile is
-	// present under ~/.wormhole/credentials/ — a single profile stays on the
-	// single-org path so existing single-profile deployments (and cfg's
-	// already-resolved Credentials) are unaffected.
 	var srv *localapi.Server
-	if multiCfg, mErr := config.LoadMultiOrg(); mErr == nil && len(multiCfg.Orgs) > 1 {
+	if useMultiOrg {
 		srv, err = localapi.NewMultiOrg(cfg.SocketPath, multiCfg.Orgs, multiCfg.Bindings, store, tr, er, kb, eb, sched, queueRepo)
 	} else {
 		srv, err = localapi.NewWithRuntime(cfg.SocketPath, cfg.Credentials.Server, cfg.Credentials.Token, cfg.Credentials.ProjectID, store, tr, er, kb, eb, sched, queueRepo)
@@ -76,10 +167,6 @@ func Run(ctx context.Context, profileName string) error {
 		return fmt.Errorf("wormholed: start local api: %w", err)
 	}
 	defer srv.Close()
-
-	// Start the background sync loop (RFC-0003 §8.2: incremental push/pull cycle).
-	syncEngine.Start(ctx)
-	defer syncEngine.Stop()
 
 	return srv.Serve(ctx)
 }
