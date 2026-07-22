@@ -9,6 +9,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      WORMHOLE_DATABASE_URL: postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable
+      WORMHOLE_INTEGRATION_REQUIRED: "1"
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -37,17 +40,35 @@ jobs:
       - name: Run migrations up
         run: migrate -path migrations -database "postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable" up
 
+      - name: Check formatting
+        run: make fmt-check
+
       - name: Build
-        run: go build ./...
+        run: make build
+
+      - name: Cross-build unsupported wormholed target
+        run: |
+          GOOS=darwin GOARCH=arm64 go build -o /tmp/wormholed-darwin ./cmd/wormholed
+          GOOS=darwin GOARCH=arm64 go test -c -o /tmp/wormholed-darwin.test ./cmd/wormholed
 
       - name: Vet
-        run: go vet ./...
+        run: make vet
 
-      - name: Test
-        env:
-          WORMHOLE_INTEGRATION_REQUIRED: "1"
-          WORMHOLE_DATABASE_URL: postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable
-        run: go test ./...
+      - name: Integration tests
+        run: make integration
+
+      - name: Race tests
+        run: make race
+
+      - name: Coverage
+        run: make coverage
+
+      - name: Upload coverage profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
 
       - name: Verify migrations down
         run: migrate -path migrations -database "postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable" down -all

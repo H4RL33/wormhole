@@ -18,10 +18,10 @@ import (
 // TestServer_AgentRegister_NoAgentID_ProxiesJoinToCoordinationServer proves
 // RFC-0003 §8.1's "wormhole join... now targets wormholed" requirement:
 // a wormhole.agent.register call with no agent_id (the join/passport-creation
-// shape cmd/wormhole-cli sends — owner/model/capabilities/roles/permissions,
+// shape cmd/wormhole sends — owner/model/capabilities/roles/permissions,
 // RFC-0001 §9) is proxied to the Coordination Server's real
 // wormhole.agent.register and returns the issued Passport, unauthenticated
-// (matching cmd/wormhole-cli's doRegister, which sends no bearer token for
+// (matching cmd/wormhole's doRegister, which sends no bearer token for
 // this call).
 func TestServer_AgentRegister_NoAgentID_ProxiesJoinToCoordinationServer(t *testing.T) {
 	coord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

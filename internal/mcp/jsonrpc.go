@@ -50,6 +50,11 @@ const (
 	RPCMethodNotFound = -32601
 	RPCInvalidParams  = -32602
 	RPCInternalError  = -32603
+
+	// RPCPermissionDenied signals the caller authenticated successfully but
+	// the tool requires a permission its Passport does not grant
+	// (RFC-0001 §8.4). Distinct from -32001 (invalid/expired token).
+	RPCPermissionDenied = -32002
 )
 
 // initializeResult is the wormhole.mcp initialize response result shape,
@@ -86,10 +91,9 @@ type toolListEntry struct {
 
 // HandleToolsList implements the JSON-RPC "tools/list" method. Schemas are
 // derived from each Tool.ArgumentsExample via reflection — no per-tool
-// schema is hand-written (docs/mcp-protocol.md §4, ROADMAP-ALPHA2.md
-// Chapter 2). Every tool's inputSchema gets a required project_id string
-// property except wormhole.agent.whoami, which is project-agnostic per
-// RFC-0001 §9.
+// schema is hand-written (docs/mcp-protocol.md §4). Every tool's inputSchema
+// gets a required project_id string property except wormhole.agent.whoami,
+// which is project-agnostic per RFC-0001 §9.
 func HandleToolsList(registry *Registry) any {
 	tools := registry.List()
 	entries := make([]toolListEntry, 0, len(tools))
@@ -137,8 +141,8 @@ func buildInputSchema(tool Tool) map[string]any {
 // reflectStructSchema walks t's exported fields and builds JSON Schema
 // properties + the required-field list. A field is required unless its
 // json tag carries ",omitempty" or its Go type is a pointer — this is a
-// mechanical rule (docs/mcp-protocol.md doesn't specify per-field
-// optionality; see ROADMAP-ALPHA2.md Chapter 2 plan Global Constraints).
+// mechanical rule; the protocol intentionally does not specify per-field
+// optionality.
 func reflectStructSchema(t reflect.Type) (map[string]any, []string) {
 	properties := map[string]any{}
 	required := []string{}
@@ -199,8 +203,7 @@ func parseJSONTag(tag, fieldName string) (string, bool) {
 }
 
 // jsonSchemaForType maps a Go field type to a JSON Schema type object,
-// per the mechanical mapping in ROADMAP-ALPHA2.md Chapter 2 plan Global
-// Constraints. time.Time and json.RawMessage are special-cased by name
+// time.Time and json.RawMessage are special-cased by name
 // since reflect sees them as struct/[]byte respectively.
 func jsonSchemaForType(t reflect.Type) map[string]any {
 	switch {
@@ -294,6 +297,17 @@ func HandleToolsCall(ctx context.Context, registry *Registry, identityStore *ide
 		handlerProjectID = scope.ProjectID
 	}
 
+	if tool.RequiresAuth && tool.RequiredPermission != "" && !scope.HasPermission(tool.RequiredPermission) {
+		// Persist the attempt so humans have a record of what an agent
+		// reached for beyond its grant. Audit-write failure must not turn a
+		// clean permission-denied into a 500, so its error is discarded.
+		_, _ = identityStore.RecordAction(ctx, scope.Agent.ID, scope.ProjectID, "permission.denied:"+tool.Name)
+		return nil, &RPCError{
+			Code:    RPCPermissionDenied,
+			Message: "permission denied: requires " + tool.RequiredPermission,
+		}
+	}
+
 	result, err := tool.Handler(ctx, scope, handlerProjectID, params.Arguments)
 	if err != nil {
 		return toolCallResult{
@@ -340,8 +354,7 @@ func bearerToken(header string) string {
 // NewMCPHandler builds the single /mcp Streamable HTTP endpoint
 // (docs/mcp-protocol.md §2): POST carries JSON-RPC requests/notifications,
 // GET is reserved for a server-push SSE stream this server doesn't
-// implement yet (405, per §2 — no current consumer, docs/architecture.md
-// §0.5 smallest correct diff).
+// implement yet (405, per docs/mcp-protocol.md §2 — no current consumer).
 func NewMCPHandler(registry *Registry, identityStore *identity.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

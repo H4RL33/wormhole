@@ -231,3 +231,29 @@ func (s *Scheduler) AssignedAgent(taskID string) (string, error) {
 	}
 	return "", fmt.Errorf("scheduler: unknown task %q", taskID)
 }
+
+// RemoveTask forgets taskID from the in-memory routing view. It is idempotent
+// so callers can use it as compensation whenever a durable route transaction
+// fails after scheduler registration.
+func (s *Scheduler) RemoveTask(taskID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	kept := s.tasks[:0]
+	for _, task := range s.tasks {
+		if task.ID != taskID {
+			kept = append(kept, task)
+		}
+	}
+	for i := len(kept); i < len(s.tasks); i++ {
+		s.tasks[i] = nil
+	}
+	s.tasks = kept
+}
+
+// TaskCount reports the number of tasks held in the routing view.
+func (s *Scheduler) TaskCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.tasks)
+}

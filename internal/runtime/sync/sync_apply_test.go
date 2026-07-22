@@ -7,6 +7,7 @@ package sync
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -121,7 +122,7 @@ func TestBootstrap_AppliesServerTasksAndKBToLocalStore(t *testing.T) {
 	defer srv.Close()
 
 	_, qRepo, aRepo, taskRepo, kbRepo := newApplyTestRepos(t)
-	engine := New(srv.URL, "token", "ns-1", qRepo, aRepo, taskRepo, kbRepo, DefaultConfig())
+	engine := mustNewEngine(t, srv.URL, qRepo, aRepo, taskRepo, kbRepo, DefaultConfig())
 
 	ctx := context.Background()
 	if err := engine.Bootstrap(ctx); err != nil {
@@ -153,7 +154,7 @@ func TestPullIncremental_AppliesServerUpdatesToLocalStore(t *testing.T) {
 	defer srv.Close()
 
 	_, qRepo, aRepo, taskRepo, kbRepo := newApplyTestRepos(t)
-	engine := New(srv.URL, "token", "ns-1", qRepo, aRepo, taskRepo, kbRepo, DefaultConfig())
+	engine := mustNewEngine(t, srv.URL, qRepo, aRepo, taskRepo, kbRepo, DefaultConfig())
 
 	ctx := context.Background()
 	if err := engine.PullIncremental(ctx); err != nil {
@@ -165,5 +166,134 @@ func TestPullIncremental_AppliesServerUpdatesToLocalStore(t *testing.T) {
 	}
 	if _, err := kbRepo.GetArticle(ctx, "ns-1", "kb-1"); err != nil {
 		t.Fatalf("GetArticle after PullIncremental: %v", err)
+	}
+}
+
+func TestPullIncrementalUsesLastSuccessfulCursor(t *testing.T) {
+	qRepo, aRepo := setupTestRepos(t)
+	defer qRepo.db.Close()
+	engine := mustNewEngine(t, "http://localhost:8080", qRepo, aRepo, nil, nil, DefaultConfig())
+
+	const firstTimestamp = "2026-07-22T10:00:00Z"
+	const secondTimestamp = "2026-07-22T10:00:05Z"
+	call := 0
+	engine.testCallSyncToolWithResultFn = func(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
+		call++
+		switch call {
+		case 1:
+			if got, ok := args["last_sync"]; ok {
+				t.Fatalf("first cursor = %#v, want omitted", got)
+			}
+			return incrementalPullResult(firstTimestamp, nil), nil
+		case 2:
+			if got, ok := args["last_sync"]; !ok || got != firstTimestamp {
+				t.Fatalf("second cursor = %#v, want %q", got, firstTimestamp)
+			}
+			return incrementalPullResult(secondTimestamp, nil), nil
+		default:
+			return nil, errors.New("unexpected pull")
+		}
+	}
+
+	if err := engine.PullIncremental(context.Background()); err != nil {
+		t.Fatalf("first PullIncremental: %v", err)
+	}
+	if err := engine.PullIncremental(context.Background()); err != nil {
+		t.Fatalf("second PullIncremental: %v", err)
+	}
+}
+
+func TestPullIncrementalResendsRawCursorByteForByte(t *testing.T) {
+	qRepo, aRepo := setupTestRepos(t)
+	defer qRepo.db.Close()
+	engine := mustNewEngine(t, "http://localhost:8080", qRepo, aRepo, nil, nil, DefaultConfig())
+
+	const rawTimestamp = "2026-07-22T10:00:00.123456789+05:30"
+	call := 0
+	engine.testCallSyncToolWithResultFn = func(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
+		call++
+		if call == 1 {
+			return incrementalPullResult(rawTimestamp, nil), nil
+		}
+		if got := args["last_sync"]; got != rawTimestamp {
+			t.Fatalf("last_sync = %#v, want raw server timestamp %q", got, rawTimestamp)
+		}
+		return incrementalPullResult("2026-07-22T10:00:05Z", nil), nil
+	}
+
+	if err := engine.PullIncremental(context.Background()); err != nil {
+		t.Fatalf("first PullIncremental: %v", err)
+	}
+	if err := engine.PullIncremental(context.Background()); err != nil {
+		t.Fatalf("second PullIncremental: %v", err)
+	}
+}
+
+func TestPullIncrementalFailureDoesNotAdvanceCursor(t *testing.T) {
+	const firstTimestamp = "2026-07-22T10:00:00Z"
+	const failedTimestamp = "2026-07-22T10:00:05Z"
+
+	taskData, err := json.Marshal(taskSummaryWire{
+		TaskID: "task-1", Title: "server task", Status: "todo",
+	})
+	if err != nil {
+		t.Fatalf("marshal task: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		failure    interface{}
+		failureErr error
+	}{
+		{name: "server", failureErr: errors.New("server unavailable")},
+		{name: "decode", failure: map[string]interface{}{"updates": "not-an-array", "timestamp": failedTimestamp}},
+		{name: "apply", failure: incrementalPullResult(failedTimestamp, []syncUpdateEnvelopeWire{{Type: "task", Data: taskData}})},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			qRepo, aRepo := setupTestRepos(t)
+			defer qRepo.db.Close()
+			engine := mustNewEngine(t, "http://localhost:8080", qRepo, aRepo, nil, nil, DefaultConfig())
+
+			call := 0
+			engine.testCallSyncToolWithResultFn = func(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
+				call++
+				switch call {
+				case 1:
+					return incrementalPullResult(firstTimestamp, nil), nil
+				case 2:
+					return tt.failure, tt.failureErr
+				case 3:
+					if got, ok := args["last_sync"]; !ok || got != firstTimestamp {
+						t.Fatalf("cursor after failed pull = %#v, want %q", got, firstTimestamp)
+					}
+					return incrementalPullResult(failedTimestamp, nil), nil
+				default:
+					return nil, errors.New("unexpected pull")
+				}
+			}
+
+			if err := engine.PullIncremental(context.Background()); err != nil {
+				t.Fatalf("initial PullIncremental: %v", err)
+			}
+			if err := engine.PullIncremental(context.Background()); err == nil {
+				t.Fatal("failed PullIncremental returned nil error")
+			}
+			if err := engine.PullIncremental(context.Background()); err != nil {
+				t.Fatalf("retry PullIncremental: %v", err)
+			}
+		})
+	}
+}
+
+func incrementalPullResult(timestamp string, updates []syncUpdateEnvelopeWire) map[string]interface{} {
+	if updates == nil {
+		updates = []syncUpdateEnvelopeWire{}
+	}
+	return map[string]interface{}{
+		"updates":   updates,
+		"timestamp": timestamp,
+		"version":   1,
 	}
 }

@@ -5,9 +5,179 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
+
+func TestUpsertTask_CrossNamespaceIDCollisionRejected(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(filepath.Join(dir, "wormholed.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	tr := NewTaskRepo(store.db, NewEventRepo(store.db))
+	const (
+		nsA      = "namespace-a"
+		nsB      = "namespace-b"
+		taskID   = "shared-id"
+		original = "task in namespace A"
+		updated  = "updated task in namespace A"
+	)
+	originalParent := "original-parent"
+	originalOwner := "original-owner"
+	originalDueBy := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	collisionParent := "collision-parent"
+	collisionOwner := "collision-owner"
+	collisionDueBy := time.Date(2027, time.February, 3, 4, 5, 6, 0, time.UTC)
+	updatedParent := "updated-parent"
+	updatedOwner := "updated-owner"
+	updatedDueBy := time.Date(2028, time.March, 4, 5, 6, 7, 0, time.UTC)
+
+	originalTask, err := tr.UpsertTask(ctx, nsA, taskID, original, "original description", &originalParent, &originalOwner, "todo", 1, &originalDueBy)
+	if err != nil {
+		t.Fatalf("UpsertTask(nsA): %v", err)
+	}
+
+	_, err = tr.UpsertTask(ctx, nsB, taskID, "task in namespace B", "collision description", &collisionParent, &collisionOwner, "done", 99, &collisionDueBy)
+	if !errors.Is(err, ErrNamespaceCollision) {
+		t.Fatalf("upsert collision error = %v, want ErrNamespaceCollision", err)
+	}
+
+	gotA, err := tr.GetTask(ctx, nsA, taskID)
+	if err != nil {
+		t.Fatalf("GetTask(nsA): %v", err)
+	}
+	assertTaskEqual(t, gotA, originalTask)
+	if _, err := tr.GetTask(ctx, nsB, taskID); !errors.Is(err, ErrTaskNotFound) {
+		t.Fatalf("GetTask(nsB): got %v, want ErrTaskNotFound", err)
+	}
+
+	gotA, err = tr.UpsertTask(ctx, nsA, taskID, updated, "updated description", &updatedParent, &updatedOwner, "wip", 3, &updatedDueBy)
+	if err != nil {
+		t.Fatalf("UpsertTask same namespace: %v", err)
+	}
+	wantUpdatedTask := originalTask
+	wantUpdatedTask.ParentTaskID = &updatedParent
+	wantUpdatedTask.Title = updated
+	wantUpdatedTask.Description = "updated description"
+	wantUpdatedTask.OwnerAgentID = &updatedOwner
+	wantUpdatedTask.Status = "wip"
+	wantUpdatedTask.Priority = 3
+	wantUpdatedTask.DueBy = &updatedDueBy
+	wantUpdatedTask.UpdatedAt = gotA.UpdatedAt
+	assertTaskEqual(t, gotA, wantUpdatedTask)
+
+	storedUpdatedTask, err := tr.GetTask(ctx, nsA, taskID)
+	if err != nil {
+		t.Fatalf("GetTask(nsA) after same-namespace update: %v", err)
+	}
+	assertTaskEqual(t, storedUpdatedTask, wantUpdatedTask)
+}
+
+func TestUpsertArticle_CrossNamespaceIDCollisionRejected(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(filepath.Join(dir, "wormholed.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	kb := NewKBRepo(store.db)
+	const (
+		nsA       = "namespace-a"
+		nsB       = "namespace-b"
+		articleID = "shared-id"
+		original  = "article in namespace A"
+		updated   = "updated article in namespace A"
+	)
+	originalCreatedAt := time.Date(2026, time.April, 5, 6, 7, 8, 0, time.UTC)
+	originalUpdatedAt := time.Date(2026, time.May, 6, 7, 8, 9, 0, time.UTC)
+	collisionCreatedAt := time.Date(2027, time.June, 7, 8, 9, 10, 0, time.UTC)
+	collisionUpdatedAt := time.Date(2027, time.July, 8, 9, 10, 11, 0, time.UTC)
+	updatedCreatedAt := time.Date(2028, time.August, 9, 10, 11, 12, 0, time.UTC)
+	updatedUpdatedAt := time.Date(2028, time.September, 10, 11, 12, 13, 0, time.UTC)
+
+	originalArticle, err := kb.UpsertArticle(ctx, nsA, articleID, original, "original body", json.RawMessage(`{"type":"decision","version":1}`), "agent-a", originalCreatedAt, originalUpdatedAt)
+	if err != nil {
+		t.Fatalf("UpsertArticle(nsA): %v", err)
+	}
+
+	_, err = kb.UpsertArticle(ctx, nsB, articleID, "article in namespace B", "collision body", json.RawMessage(`{"type":"policy","version":2}`), "agent-b", collisionCreatedAt, collisionUpdatedAt)
+	if !errors.Is(err, ErrNamespaceCollision) {
+		t.Fatalf("upsert collision error = %v, want ErrNamespaceCollision", err)
+	}
+
+	gotA, err := kb.GetArticle(ctx, nsA, articleID)
+	if err != nil {
+		t.Fatalf("GetArticle(nsA): %v", err)
+	}
+	assertKBArticleEqual(t, gotA, originalArticle)
+	if _, err := kb.GetArticle(ctx, nsB, articleID); !errors.Is(err, ErrArticleNotFound) {
+		t.Fatalf("GetArticle(nsB): got %v, want ErrArticleNotFound", err)
+	}
+
+	gotA, err = kb.UpsertArticle(ctx, nsA, articleID, updated, "updated body", json.RawMessage(`{"type":"decision","version":3}`), "agent-c", updatedCreatedAt, updatedUpdatedAt)
+	if err != nil {
+		t.Fatalf("UpsertArticle same namespace: %v", err)
+	}
+	wantUpdatedArticle := KBArticle{
+		ID:            articleID,
+		NamespaceID:   nsA,
+		Title:         updated,
+		Body:          "updated body",
+		Frontmatter:   json.RawMessage(`{"type":"decision","version":3}`),
+		AuthorAgentID: "agent-c",
+		CreatedAt:     updatedCreatedAt,
+		UpdatedAt:     updatedUpdatedAt,
+	}
+	assertKBArticleEqual(t, gotA, wantUpdatedArticle)
+
+	storedUpdatedArticle, err := kb.GetArticle(ctx, nsA, articleID)
+	if err != nil {
+		t.Fatalf("GetArticle(nsA) after same-namespace update: %v", err)
+	}
+	assertKBArticleEqual(t, storedUpdatedArticle, wantUpdatedArticle)
+}
+
+func TestUpsertTask_PreservesDueByWithMonotonicClock(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(filepath.Join(dir, "wormholed.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	tr := NewTaskRepo(store.db, NewEventRepo(store.db))
+	dueBy := time.Now().Add(time.Hour)
+
+	got, err := tr.UpsertTask(ctx, "namespace-a", "task-id", "task", "description", nil, nil, "todo", 1, &dueBy)
+	if err != nil {
+		t.Fatalf("UpsertTask: %v", err)
+	}
+	if got.DueBy == nil || !got.DueBy.Equal(dueBy) {
+		t.Errorf("UpsertTask().DueBy = %v, want %v", got.DueBy, dueBy)
+	}
+}
+
+func assertTaskEqual(t *testing.T, got, want Task) {
+	t.Helper()
+	if got.ID != want.ID || got.NamespaceID != want.NamespaceID || got.Title != want.Title || got.Description != want.Description || got.Status != want.Status || got.Priority != want.Priority || !reflect.DeepEqual(got.ParentTaskID, want.ParentTaskID) || !reflect.DeepEqual(got.OwnerAgentID, want.OwnerAgentID) || !reflect.DeepEqual(got.DueBy, want.DueBy) || !got.CreatedAt.Equal(want.CreatedAt) || !got.UpdatedAt.Equal(want.UpdatedAt) {
+		t.Errorf("task = %+v, want %+v", got, want)
+	}
+}
+
+func assertKBArticleEqual(t *testing.T, got, want KBArticle) {
+	t.Helper()
+	if got.ID != want.ID || got.NamespaceID != want.NamespaceID || got.Title != want.Title || got.Body != want.Body || !reflect.DeepEqual(got.Frontmatter, want.Frontmatter) || got.AuthorAgentID != want.AuthorAgentID || !got.CreatedAt.Equal(want.CreatedAt) || !got.UpdatedAt.Equal(want.UpdatedAt) {
+		t.Errorf("article = %+v, want %+v", got, want)
+	}
+}
 
 // TestTaskCrossNamespaceRejection verifies that tasks are isolated by namespace.
 // RFC-0003 §7.2 — mandatory cross-namespace rejection test.

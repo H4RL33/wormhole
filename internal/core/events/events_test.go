@@ -34,6 +34,28 @@ func testStore(t *testing.T) *Store {
 	return NewStore(db)
 }
 
+// lockRLSFixture serializes the role/ACL lifecycle shared by restricted-role
+// integration tests across package processes. PostgreSQL stores table grants
+// in one catalog tuple per table, so concurrent GRANT/REVOKE statements for
+// different roles can otherwise fail with "tuple concurrently updated".
+func lockRLSFixture(t *testing.T, db *sql.DB) {
+	t.Helper()
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("open RLS fixture lock connection: %v", err)
+	}
+	if _, err := conn.ExecContext(context.Background(), `SELECT pg_advisory_lock(867530913)`); err != nil {
+		conn.Close()
+		t.Fatalf("acquire RLS fixture lock: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock(867530913)`); err != nil {
+			t.Logf("release RLS fixture lock: %v", err)
+		}
+		conn.Close()
+	})
+}
+
 func createProject(t *testing.T, s *Store, name string) string {
 	t.Helper()
 	var id string
@@ -105,6 +127,33 @@ func TestCreateChannel_Success(t *testing.T) {
 	}
 	if got.ID != channel.ID || got.Name != channel.Name {
 		t.Errorf("GetChannel returned %+v, want %+v", got, channel)
+	}
+}
+
+func TestEnsureChannelIsIdempotentPerProject(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectA := createProject(t, s, "ensure-channel-a")
+	projectB := createProject(t, s, "ensure-channel-b")
+
+	first, err := s.EnsureChannel(ctx, projectA, "onboarding")
+	if err != nil {
+		t.Fatalf("first EnsureChannel: %v", err)
+	}
+	second, err := s.EnsureChannel(ctx, projectA, "onboarding")
+	if err != nil {
+		t.Fatalf("second EnsureChannel: %v", err)
+	}
+	if second.ID != first.ID || second.ProjectID != projectA || second.Name != "onboarding" {
+		t.Fatalf("same-project EnsureChannel result = %+v, want existing %+v", second, first)
+	}
+
+	otherProject, err := s.EnsureChannel(ctx, projectB, "onboarding")
+	if err != nil {
+		t.Fatalf("EnsureChannel(second project): %v", err)
+	}
+	if otherProject.ID == first.ID || otherProject.ProjectID != projectB {
+		t.Fatalf("cross-project EnsureChannel result = %+v, want distinct project channel", otherProject)
 	}
 }
 
@@ -388,6 +437,7 @@ func TestListEvents_Scoping(t *testing.T) {
 
 func TestRLSIsolation(t *testing.T) {
 	ownerStore := testStore(t)
+	lockRLSFixture(t, ownerStore.db)
 
 	roleName := "events_rls_test_user"
 	rolePassword := "events_rls_test_password"

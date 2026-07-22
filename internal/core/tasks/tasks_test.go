@@ -37,6 +37,28 @@ func testStore(t *testing.T) *Store {
 	return NewStore(db, events.NewStore(db))
 }
 
+// lockRLSFixture serializes the role/ACL lifecycle shared by restricted-role
+// integration tests across package processes. PostgreSQL stores table grants
+// in one catalog tuple per table, so concurrent GRANT/REVOKE statements for
+// different roles can otherwise fail with "tuple concurrently updated".
+func lockRLSFixture(t *testing.T, db *sql.DB) {
+	t.Helper()
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("open RLS fixture lock connection: %v", err)
+	}
+	if _, err := conn.ExecContext(context.Background(), `SELECT pg_advisory_lock(867530913)`); err != nil {
+		conn.Close()
+		t.Fatalf("acquire RLS fixture lock: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock(867530913)`); err != nil {
+			t.Logf("release RLS fixture lock: %v", err)
+		}
+		conn.Close()
+	})
+}
+
 // createChannel creates an events channel in projectID and returns its ID,
 // for use as the required channelID argument to UpdateStatus.
 func createChannel(t *testing.T, s *Store, projectID, name string) string {
@@ -155,6 +177,57 @@ func TestCreateWithID_PreservesClientID(t *testing.T) {
 	}
 }
 
+func TestCreateWithIDAndOwner_CreatesAssignedTaskAtomically(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "create-with-id-and-owner")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+	wantID := uuid.NewString()
+
+	task, err := s.CreateWithIDAndOwner(ctx, wantID, projectID, "Routed task", "assigned at create", nil, &agentID, 2, nil)
+	if err != nil {
+		t.Fatalf("CreateWithIDAndOwner: %v", err)
+	}
+	if task.ID != wantID {
+		t.Fatalf("task.ID = %q, want %q", task.ID, wantID)
+	}
+	if task.OwnerAgentID == nil || *task.OwnerAgentID != agentID {
+		t.Fatalf("task.OwnerAgentID = %v, want %q", task.OwnerAgentID, agentID)
+	}
+
+	var gotOwner string
+	if err := s.db.QueryRow(`SELECT owner_agent_id FROM tasks WHERE id = $1 AND project_id = $2`, wantID, projectID).Scan(&gotOwner); err != nil {
+		t.Fatalf("select assigned task: %v", err)
+	}
+	if gotOwner != agentID {
+		t.Fatalf("stored owner_agent_id = %q, want %q", gotOwner, agentID)
+	}
+}
+
+func TestCreateWithIDAndOwner_CrossProjectOwnerLeavesNoTask(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectA := createProject(t, s, "create-owner-project-a")
+	projectB := createProject(t, s, "create-owner-project-b")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectB)
+	wantID := uuid.NewString()
+
+	_, err := s.CreateWithIDAndOwner(ctx, wantID, projectA, "Must roll back", "", nil, &agentID, 0, nil)
+	if !errors.Is(err, ErrPassportNotFound) {
+		t.Fatalf("CreateWithIDAndOwner error = %v, want ErrPassportNotFound", err)
+	}
+
+	var count int
+	if err := s.db.QueryRow(`SELECT count(*) FROM tasks WHERE id = $1`, wantID).Scan(&count); err != nil {
+		t.Fatalf("count rejected task: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("cross-project owner failure left %d task row(s), want 0", count)
+	}
+}
+
 func TestCreate_WithParentTask(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -199,6 +272,42 @@ func TestAssign_SetsOwner(t *testing.T) {
 	}
 	if *got.OwnerAgentID != agentID {
 		t.Errorf("Assign: OwnerAgentID = %q, want %q", *got.OwnerAgentID, agentID)
+	}
+}
+
+func TestAssign_RejectsUnregisteredOwnerWithoutChangingTask(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "assign-unregistered-owner")
+	task, err := s.Create(ctx, projectID, "Must remain unassigned", "", nil, 0, nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	_, err = s.Assign(ctx, projectID, task.ID, "00000000-0000-0000-0000-000000000000")
+	if !errors.Is(err, ErrPassportNotFound) {
+		t.Fatalf("Assign(unregistered owner) error = %v, want ErrPassportNotFound", err)
+	}
+
+	var owner sql.NullString
+	if err := s.db.QueryRowContext(ctx, `SELECT owner_agent_id FROM tasks WHERE id = $1`, task.ID).Scan(&owner); err != nil {
+		t.Fatalf("query task owner after rejected assignment: %v", err)
+	}
+	if owner.Valid {
+		t.Fatalf("owner after rejected assignment = %q, want NULL", owner.String)
+	}
+}
+
+func TestAssign_UnknownTaskReturnsNotFoundAfterOwnerValidation(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "assign-unknown-task")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+
+	_, err := s.Assign(ctx, projectID, "00000000-0000-0000-0000-000000000000", agentID)
+	if !errors.Is(err, ErrTaskNotFound) {
+		t.Fatalf("Assign(unknown task) error = %v, want ErrTaskNotFound", err)
 	}
 }
 
@@ -394,8 +503,40 @@ func TestUpdateStatus_UnknownTaskReturnsNotFound(t *testing.T) {
 	}
 }
 
+func TestUpdateStatus_RollsBackWhenEventActorHasNoPassport(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "status-event-actor-scope")
+	task, err := s.Create(ctx, projectID, "Do not transition without event", "", nil, 0, nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	channelID := createChannel(t, s, projectID, "status-events")
+
+	_, err = s.UpdateStatus(ctx, projectID, task.ID, "wip", channelID, "00000000-0000-0000-0000-000000000000")
+	if !errors.Is(err, events.ErrPassportNotFound) {
+		t.Fatalf("UpdateStatus without actor passport error = %v, want events.ErrPassportNotFound", err)
+	}
+
+	var status string
+	if err := s.db.QueryRowContext(ctx, `SELECT status FROM tasks WHERE id = $1`, task.ID).Scan(&status); err != nil {
+		t.Fatalf("query task after rejected transition: %v", err)
+	}
+	if status != "todo" {
+		t.Fatalf("status after rejected transition = %q, want todo", status)
+	}
+	var eventCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM events WHERE channel_id = $1`, channelID).Scan(&eventCount); err != nil {
+		t.Fatalf("count events after rejected transition: %v", err)
+	}
+	if eventCount != 0 {
+		t.Fatalf("event count after rejected transition = %d, want 0", eventCount)
+	}
+}
+
 func TestRLSIsolation(t *testing.T) {
 	ownerStore := testStore(t)
+	lockRLSFixture(t, ownerStore.db)
 
 	roleName := "rls_test_user"
 	rolePassword := "rls_test_password"
@@ -527,6 +668,7 @@ func TestRLSIsolation(t *testing.T) {
 
 func TestRLSProjectBoundaries(t *testing.T) {
 	ownerStore := testStore(t)
+	lockRLSFixture(t, ownerStore.db)
 
 	roleName := "rls_boundary_test_user"
 	rolePassword := "rls_boundary_test_password"

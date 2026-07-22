@@ -13,7 +13,7 @@ import (
 // Handler executes one MCP tool call. scope is nil when the tool's
 // RequiresAuth is false; otherwise it is the AuthenticatedScope the auth
 // middleware already resolved from the caller's bearer token
-// (docs/architecture.md M4 — handlers never see a raw token). projectID is
+// (docs/implementation-rules.md §7 M4 — handlers never see a raw token). projectID is
 // always populated from the call envelope, independent of auth, since
 // project-scoped bootstrap calls (e.g. registration) need it before any
 // token exists.
@@ -25,6 +25,13 @@ type Tool struct {
 	Name         string `json:"name"`
 	Description  string `json:"description"`
 	RequiresAuth bool   `json:"requires_auth"`
+	// RequiredPermission is the fine-grained permission string a caller's
+	// AuthenticatedScope must carry to invoke this tool (RFC-0001 §8.4). It
+	// is the tool Name minus the "wormhole." prefix. Empty means "any
+	// authenticated caller" and is used only for self-identification
+	// (whoami) and wormholed transport (sync.*). Meaningful only when
+	// RequiresAuth is true.
+	RequiredPermission string `json:"required_permission,omitempty"`
 	// ArgumentsExample is a zero-value instance of the tool's argument
 	// struct (e.g. CreateTaskInput{}), used by tools/list's schema
 	// generator to reflect field names/types/json tags without any

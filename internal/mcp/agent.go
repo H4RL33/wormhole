@@ -2,10 +2,10 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/core/events"
@@ -18,25 +18,10 @@ import (
 // agent registers into it (RFC-0001 §8.5 joining flow).
 var defaultChannelNames = []string{"introductions", "general"}
 
-// ensureDefaultChannels creates any of defaultChannelNames missing from the
-// project. It lists existing channels first and only creates names that are
-// absent, since events.Store.CreateChannel has no unique constraint on
-// (project_id, name) and would otherwise duplicate channels on every
-// registration into the same project.
-func ensureDefaultChannels(ctx context.Context, store *events.Store, projectID string) error {
-	existing, err := store.ListChannels(ctx, projectID)
-	if err != nil {
-		return fmt.Errorf("ensure default channels: list channels: %w", err)
-	}
-	have := make(map[string]bool, len(existing))
-	for _, c := range existing {
-		have[c.Name] = true
-	}
+// ensureDefaultChannels atomically creates each fixed channel if absent.
+func ensureDefaultChannelsInTx(ctx context.Context, tx *sql.Tx, store *events.Store, projectID string) error {
 	for _, name := range defaultChannelNames {
-		if have[name] {
-			continue
-		}
-		if _, err := store.CreateChannel(ctx, projectID, name); err != nil {
+		if _, err := store.EnsureChannelInTx(ctx, tx, projectID, name); err != nil {
 			return fmt.Errorf("ensure default channels: create channel %q: %w", name, err)
 		}
 	}
@@ -47,6 +32,8 @@ func ensureDefaultChannels(ctx context.Context, store *events.Store, projectID s
 // onboarding article and to check for its existence idempotently — kept
 // as a named constant so Task 3's test and this seeding logic can't drift.
 const onboardingArticleTitle = "How This Project Works"
+
+const onboardingArticleBootstrapKey = "project-onboarding"
 
 // onboardingArticleBody is seeded once per project, on the first agent
 // registration into it (see design note above Task 3 in the plan: there
@@ -60,24 +47,10 @@ const onboardingArticleBody = `This project uses Wormhole's MCP tool surface for
 
 **The channel is the changelog:** ` + "`wormhole.channel.subscribe`" + ` returns a project's full event history — read it to see what other agents have done and how they've used these values in practice, the same way you'd read git log to learn a team's commit conventions.`
 
-// ensureOnboardingArticle writes the fixed onboarding KB article for
-// projectID if it doesn't already have one, authored by authorAgentID.
-// Idempotent: lists existing articles and checks title match first, so
-// concurrent/repeated registrations into the same project never duplicate
-// it. Errors here are the caller's decision whether to fail registration
-// or log-and-continue (RegisterAgentTool below chooses log-and-continue,
-// mirroring ensureDefaultChannels' existing best-effort treatment).
-func ensureOnboardingArticle(ctx context.Context, kbStore *kb.Store, projectID, authorAgentID string) error {
-	existing, err := kbStore.ListArticles(ctx, projectID)
-	if err != nil {
-		return fmt.Errorf("ensure onboarding article: list articles: %w", err)
-	}
-	for _, a := range existing {
-		if a.Title == onboardingArticleTitle {
-			return nil
-		}
-	}
-	if _, err := kbStore.WriteArticle(ctx, projectID, authorAgentID, onboardingArticleTitle, onboardingArticleBody, nil, nil, true); err != nil {
+// ensureOnboardingArticle atomically creates the fixed onboarding KB article
+// for projectID if its dedicated bootstrap marker is absent.
+func ensureOnboardingArticleInTx(ctx context.Context, tx *sql.Tx, kbStore *kb.Store, projectID, authorAgentID string) error {
+	if _, err := kbStore.EnsureBootstrapArticleInTx(ctx, tx, projectID, authorAgentID, onboardingArticleBootstrapKey, onboardingArticleTitle, onboardingArticleBody, nil); err != nil {
 		return fmt.Errorf("ensure onboarding article: write: %w", err)
 	}
 	return nil
@@ -170,15 +143,24 @@ func RegisterAgentTool(store *identity.Store, eventsStore *events.Store, rolesSt
 					in.Roles = unionAppend(in.Roles, template.DefaultRoles)
 				}
 			}
-			agent, passport, token, err := store.Register(ctx, projectID, in.Permissions, in.Owner, in.Model, in.Capabilities, in.Repositories, in.Roles)
+			tx, err := store.BeginProjectTx(ctx, projectID)
 			if err != nil {
 				return nil, fmt.Errorf("mcp: wormhole.agent.register: %w", err)
 			}
-			if err := ensureDefaultChannels(ctx, eventsStore, projectID); err != nil {
-				log.Printf("mcp: wormhole.agent.register: default channel bootstrap failed: %v", err)
+			defer tx.Rollback()
+
+			agent, passport, token, err := store.RegisterInTx(ctx, tx, projectID, in.Permissions, in.Owner, in.Model, in.Capabilities, in.Repositories, in.Roles)
+			if err != nil {
+				return nil, fmt.Errorf("mcp: wormhole.agent.register: %w", err)
 			}
-			if err := ensureOnboardingArticle(ctx, kbStore, projectID, agent.ID); err != nil {
-				log.Printf("mcp: wormhole.agent.register: onboarding article bootstrap failed: %v", err)
+			if err := ensureDefaultChannelsInTx(ctx, tx, eventsStore, projectID); err != nil {
+				return nil, fmt.Errorf("mcp: wormhole.agent.register: default channel bootstrap: %w", err)
+			}
+			if err := ensureOnboardingArticleInTx(ctx, tx, kbStore, projectID, agent.ID); err != nil {
+				return nil, fmt.Errorf("mcp: wormhole.agent.register: onboarding article bootstrap: %w", err)
+			}
+			if err := tx.Commit(); err != nil {
+				return nil, fmt.Errorf("mcp: wormhole.agent.register: commit bootstrap transaction: %w", err)
 			}
 			return RegisterAgentOutput{
 				AgentID:      agent.ID,
@@ -209,10 +191,13 @@ type WhoAmIOutput struct {
 // middleware (architecture.md M4) is the entire answer.
 func WhoAmITool() Tool {
 	return Tool{
-		Name:             "wormhole.agent.whoami",
-		Description:      "Returns the identity and authorization scope resolved from the caller's bearer token.",
-		RequiresAuth:     true,
-		ArgumentsExample: nil,
+		Name:         "wormhole.agent.whoami",
+		Description:  "Returns the identity and authorization scope resolved from the caller's bearer token.",
+		RequiresAuth: true,
+		// Auth-only: self-identification must not require a specific
+		// permission (gating whoami would be circular).
+		RequiredPermission: "",
+		ArgumentsExample:   nil,
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			return WhoAmIOutput{
 				AgentID:      scope.Agent.ID,

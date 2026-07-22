@@ -220,3 +220,48 @@ func TestConcurrentPublishSubscribe(t *testing.T) {
 		t.Fatal("publish loop deadlocked")
 	}
 }
+
+func TestSubscriptionDoneClosesWithSubscription(t *testing.T) {
+	bus := NewEventBus()
+	sub, err := bus.Subscribe("ns-1", "", "", "")
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	select {
+	case <-sub.Done():
+		t.Fatal("Done closed before subscription was closed")
+	default:
+	}
+
+	sub.Close()
+	select {
+	case <-sub.Done():
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Done did not close with subscription")
+	}
+
+	// Close is documented as idempotent and must not panic on a second call.
+	sub.Close()
+}
+
+func TestPublishHonorsCanceledContextWhenSubscriberBufferIsFull(t *testing.T) {
+	bus := NewEventBus()
+	sub, err := bus.Subscribe("ns-1", "", "", "")
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer sub.Close()
+
+	for i := 0; i < cap(sub.ch); i++ {
+		bus.Publish(context.Background(), "ns-1", "", "", "", []byte(`{"queued":true}`))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	bus.Publish(ctx, "ns-1", "", "", "", []byte(`{"must_not_arrive":true}`))
+
+	if got := len(sub.ch); got != cap(sub.ch) {
+		t.Fatalf("buffer length after canceled publish: got %d, want %d", got, cap(sub.ch))
+	}
+}

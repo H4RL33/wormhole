@@ -33,10 +33,11 @@ type LinkCommitOutput struct {
 // is recorded as the link's author.
 func LinkCommitTool(store *git.Store) Tool {
 	return Tool{
-		Name:             "wormhole.git.link_commit",
-		Description:      "Records a manual pointer from a task to a commit. Wormhole never stores or mirrors code, only the pointer and a summary.",
-		RequiresAuth:     true,
-		ArgumentsExample: LinkCommitInput{},
+		Name:               "wormhole.git.link_commit",
+		Description:        "Records a manual pointer from a task to a commit. Wormhole never stores or mirrors code, only the pointer and a summary.",
+		RequiresAuth:       true,
+		RequiredPermission: "git.link_commit",
+		ArgumentsExample:   LinkCommitInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in LinkCommitInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
@@ -89,10 +90,11 @@ type RequestReviewOutput struct {
 // task_id per RFC-0001 §9's signature.
 func RequestReviewTool(store *git.Store) Tool {
 	return Tool{
-		Name:             "wormhole.git.request_review",
-		Description:      "Records a manual review request pointer for a repo and PR URL, with no task association.",
-		RequiresAuth:     true,
-		ArgumentsExample: RequestReviewInput{},
+		Name:               "wormhole.git.request_review",
+		Description:        "Records a manual review request pointer for a repo and PR URL, with no task association.",
+		RequiresAuth:       true,
+		RequiredPermission: "git.request_review",
+		ArgumentsExample:   RequestReviewInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in RequestReviewInput
 			if err := json.Unmarshal(arguments, &in); err != nil {

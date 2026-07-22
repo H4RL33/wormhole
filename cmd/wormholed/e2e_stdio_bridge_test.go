@@ -1,19 +1,18 @@
 // e2e_stdio_bridge_test.go
 // Issue #20 subtask 6: proves the full transport chain a real MCP client
 // (Claude Code or any other stdio-speaking harness) actually uses --
-// stdio bridge subprocess (cmd/wormhole-mcp-stdio) -> wormholed's Unix
-// socket -> wormholed's MCP dispatch -> local SQLite write + sync enqueue
-// -> sync engine push -> real Coordination Server -> real Postgres.
+// stdio bridge subprocess (`wormhole mcp`, cmd/wormhole/mcp.go) ->
+// wormholed's Unix socket -> wormholed's MCP dispatch -> local SQLite write
+// + sync enqueue -> sync engine push -> real Coordination Server -> real
+// Postgres.
 //
 // Every existing test in this repo (wormholed_test.go's
 // TestRun_EndToEndWhoAmI, p7_e2e_integration_test.go's TestP7_*) dials
 // wormholed's socket directly, bypassing the stdio bridge entirely. That
-// bypass is exactly the gap this subtask exists to close, so Leg 3 below
-// deliberately does NOT reuse wormholed_test.go's newline-delimited
-// mcpInitialize/mcpCallTool helpers -- it speaks the stdio transport's
-// Content-Length framing over the subprocess's stdin/stdout pipes, which
-// is what a real harness (and cmd/wormhole-mcp-stdio on the other end)
-// actually speaks.
+// bypass is exactly the gap this subtask exists to close: Leg 3 below drives
+// the real `wormhole mcp` subprocess over its stdin/stdout pipes (the leg a
+// real harness talks to), speaking the bridge's newline-delimited JSON-RPC
+// framing.
 package main
 
 import (
@@ -22,6 +21,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,6 +32,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -44,6 +46,7 @@ import (
 	"github.com/H4RL33/wormhole/internal/core/roles"
 	"github.com/H4RL33/wormhole/internal/core/tasks"
 	"github.com/H4RL33/wormhole/internal/mcp"
+	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/types"
 )
 
@@ -236,7 +239,7 @@ func e2eStartCoordServer(t *testing.T, db *sql.DB) (srvURL, projectID, agentID, 
 	projectID = e2eMustCreateProject(t, db, "e2e-stdio-bridge-project")
 
 	registerResultRaw := e2eCallTool(t, srv.URL, "wormhole.agent.register", projectID, "", mcp.RegisterAgentInput{
-		Permissions:  []string{"task.create", "event.publish", "kb.write"},
+		Permissions:  []string{"task.create", "task.assign", "task.list", "kb.write", "channel.create", "channel.post"},
 		Owner:        "harley",
 		Model:        "claude",
 		Capabilities: []string{"code_review"},
@@ -254,15 +257,14 @@ func e2eStartCoordServer(t *testing.T, db *sql.DB) (srvURL, projectID, agentID, 
 
 // -----------------------------------------------------------------------
 // Leg 3: the stdio transport. This is the piece no existing test exercises.
-// It speaks Content-Length-framed MCP directly against the built
-// cmd/wormhole-mcp-stdio subprocess's stdin/stdout -- matching that
-// binary's own readContentLengthFrame (cmd/wormhole-mcp-stdio/main.go)
-// wire format ("Content-Length: %d\r\n\r\n<body>", no header besides
-// Content-Length required, body has no trailing newline requirement).
-// wormholed_test.go's mcpInitialize/mcpCallTool helpers are NOT reused
-// here: those write "<json>\n" straight onto a raw net.Conn, which is
-// wormholed's *socket* framing, not the stdio transport's framing a real
-// harness or cmd/wormhole-mcp-stdio speaks on its own stdin/stdout.
+// It speaks newline-delimited JSON-RPC directly against the built
+// `wormhole mcp` subprocess's stdin/stdout -- matching that bridge's own
+// framing (cmd/wormhole/mcp.go stdinToSocket/socketToStdout: one JSON
+// object per line, terminated by \n, no length header).
+// wormholed_test.go's mcpInitialize/mcpCallTool helpers happen to use the
+// same newline framing, but against a raw net.Conn to wormholed's socket;
+// this test drives it through the real `wormhole mcp` subprocess's
+// stdin/stdout instead, the leg a real harness talks to.
 // -----------------------------------------------------------------------
 
 var (
@@ -271,12 +273,14 @@ var (
 	stdioBridgeBinErr  error
 )
 
-// e2eBuildStdioBridgeBinary builds cmd/wormhole-mcp-stdio once per test
-// binary run and returns the path to the resulting executable. No existing
-// "go build a sibling binary for a subprocess test" helper exists anywhere
-// in this repo (checked: no `_test.go` file anywhere invokes exec.Command
-// with "go", "build"), so this is a new small helper local to this test
-// file, not a new package.
+// e2eBuildStdioBridgeBinary builds the wormhole CLI once per test binary
+// run and returns the path to the resulting executable. The stdio bridge is
+// the `wormhole mcp` subcommand (cmd/wormhole/mcp.go); it was previously a
+// standalone cmd/wormhole-mcp-stdio binary. No existing "go build a sibling
+// binary for a subprocess test" helper exists anywhere in this repo
+// (checked: no `_test.go` file anywhere invokes exec.Command with "go",
+// "build"), so this is a new small helper local to this test file, not a
+// new package.
 func e2eBuildStdioBridgeBinary(t *testing.T) string {
 	t.Helper()
 	stdioBridgeBinOnce.Do(func() {
@@ -285,12 +289,12 @@ func e2eBuildStdioBridgeBinary(t *testing.T) string {
 			stdioBridgeBinErr = fmt.Errorf("mkdir temp: %w", err)
 			return
 		}
-		binPath := filepath.Join(dir, "wormhole-mcp-stdio")
-		cmd := exec.Command("go", "build", "-o", binPath, "./cmd/wormhole-mcp-stdio")
+		binPath := filepath.Join(dir, "wormhole")
+		cmd := exec.Command("go", "build", "-o", binPath, "./cmd/wormhole")
 		cmd.Dir = repoRootForTest(t)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			stdioBridgeBinErr = fmt.Errorf("go build cmd/wormhole-mcp-stdio: %w\n%s", err, out)
+			stdioBridgeBinErr = fmt.Errorf("go build cmd/wormhole: %w\n%s", err, out)
 			return
 		}
 		stdioBridgeBinPath = binPath
@@ -311,8 +315,8 @@ func repoRootForTest(t *testing.T) string {
 	return filepath.Join(wd, "..", "..")
 }
 
-// e2eStdioClient wraps a running cmd/wormhole-mcp-stdio subprocess and
-// speaks real Content-Length-framed MCP over its stdin/stdout pipes.
+// e2eStdioClient wraps a running `wormhole mcp` subprocess and speaks
+// newline-delimited JSON-RPC over its stdin/stdout pipes.
 type e2eStdioClient struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
@@ -320,62 +324,36 @@ type e2eStdioClient struct {
 	nextID int
 }
 
-// writeContentLengthFrame is this test's own client-side encoder for the
-// MCP stdio transport's wire format -- deliberately not reusing anything
-// from wormholed_test.go, since that file's helpers write newline-delimited
-// JSON onto a raw socket connection, a different wire format entirely.
-func writeContentLengthFrame(w io.Writer, body []byte) error {
-	frame := fmt.Sprintf("Content-Length: %d\r\n\r\n", len(body))
-	if _, err := io.WriteString(w, frame); err != nil {
+// writeNewlineFrame is this test's client-side encoder for the MCP stdio
+// transport's wire format. The `wormhole mcp` bridge (cmd/wormhole/mcp.go)
+// relays newline-delimited JSON-RPC in both directions (stdinToSocket /
+// socketToStdout), so each message is a single JSON object terminated by a
+// newline, with no length header. The body itself must not contain a raw
+// newline; encoding/json.Marshal never emits one, so a single trailing \n
+// unambiguously frames the message.
+func writeNewlineFrame(w io.Writer, body []byte) error {
+	if _, err := w.Write(body); err != nil {
 		return err
 	}
-	_, err := w.Write(body)
+	_, err := io.WriteString(w, "\n")
 	return err
 }
 
-// readContentLengthFrame is this test's own client-side decoder, matching
-// cmd/wormhole-mcp-stdio/main.go's readContentLengthFrame wire format
-// (header block terminated by a blank line, then exactly Content-Length
-// body bytes). Reimplemented here rather than imported, since the
-// production function is unexported in package main of a different binary.
-func readContentLengthFrame(r *bufio.Reader) ([]byte, error) {
-	contentLength := -1
-	for {
-		line, err := r.ReadString('\n')
-		if err != nil {
-			return nil, err
-		}
-		line = strings.TrimRight(line, "\r\n")
-		if line == "" {
-			break
-		}
-		name, value, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
-		}
-		if !strings.EqualFold(strings.TrimSpace(name), "Content-Length") {
-			continue
-		}
-		n, convErr := strconv.Atoi(strings.TrimSpace(value))
-		if convErr != nil {
-			return nil, fmt.Errorf("malformed Content-Length header %q: %w", line, convErr)
-		}
-		contentLength = n
-	}
-	if contentLength < 0 {
-		return nil, fmt.Errorf("message frame missing Content-Length header")
-	}
-	body := make([]byte, contentLength)
-	if _, err := io.ReadFull(r, body); err != nil {
+// readNewlineFrame is this test's client-side decoder, matching the bridge's
+// socketToStdout framing (one JSON-RPC message per line). It reads up to and
+// including the next newline and returns the trimmed body.
+func readNewlineFrame(r *bufio.Reader) ([]byte, error) {
+	line, err := r.ReadBytes('\n')
+	if err != nil && len(line) == 0 {
 		return nil, err
 	}
-	return body, nil
+	return []byte(strings.TrimRight(string(line), "\r\n")), nil
 }
 
 func e2eStartStdioBridge(t *testing.T, binPath, runDir string) *e2eStdioClient {
 	t.Helper()
 
-	cmd := exec.Command(binPath)
+	cmd := exec.Command(binPath, "mcp")
 	cmd.Env = append(os.Environ(), "XDG_RUNTIME_DIR="+runDir)
 	cmd.Stderr = os.Stderr
 
@@ -388,7 +366,7 @@ func e2eStartStdioBridge(t *testing.T, binPath, runDir string) *e2eStdioClient {
 		t.Fatalf("stdout pipe: %v", err)
 	}
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("start wormhole-mcp-stdio: %v", err)
+		t.Fatalf("start wormhole mcp: %v", err)
 	}
 
 	c := &e2eStdioClient{cmd: cmd, stdin: stdin, stdout: bufio.NewReader(stdout)}
@@ -413,13 +391,13 @@ type e2eStdioRPCError struct {
 }
 
 type e2eStdioRPCResponse struct {
-	JSONRPC string           `json:"jsonrpc"`
-	ID      json.RawMessage  `json:"id,omitempty"`
-	Result  json.RawMessage  `json:"result,omitempty"`
+	JSONRPC string            `json:"jsonrpc"`
+	ID      json.RawMessage   `json:"id,omitempty"`
+	Result  json.RawMessage   `json:"result,omitempty"`
 	Error   *e2eStdioRPCError `json:"error,omitempty"`
 }
 
-// send writes a Content-Length-framed JSON-RPC request/notification to the
+// send writes a newline-framed JSON-RPC request/notification to the
 // subprocess's stdin.
 func (c *e2eStdioClient) send(t *testing.T, method string, params json.RawMessage, withID bool) json.RawMessage {
 	t.Helper()
@@ -434,18 +412,18 @@ func (c *e2eStdioClient) send(t *testing.T, method string, params json.RawMessag
 	if err != nil {
 		t.Fatalf("marshal %s request: %v", method, err)
 	}
-	if err := writeContentLengthFrame(c.stdin, body); err != nil {
+	if err := writeNewlineFrame(c.stdin, body); err != nil {
 		t.Fatalf("write %s frame: %v", method, err)
 	}
 	return id
 }
 
-// call sends a Content-Length-framed request and reads back the matching
-// Content-Length-framed response.
+// call sends a newline-framed request and reads back the matching
+// newline-framed response.
 func (c *e2eStdioClient) call(t *testing.T, method string, params json.RawMessage) e2eStdioRPCResponse {
 	t.Helper()
 	c.send(t, method, params, true)
-	body, err := readContentLengthFrame(c.stdout)
+	body, err := readNewlineFrame(c.stdout)
 	if err != nil {
 		t.Fatalf("read %s response frame: %v", method, err)
 	}
@@ -456,7 +434,7 @@ func (c *e2eStdioClient) call(t *testing.T, method string, params json.RawMessag
 	return resp
 }
 
-// notify sends a Content-Length-framed notification (no response expected).
+// notify sends a newline-framed notification (no response expected).
 func (c *e2eStdioClient) notify(t *testing.T, method string) {
 	t.Helper()
 	c.send(t, method, nil, false)
@@ -530,11 +508,40 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 
 	binPath := e2eBuildStdioBridgeBinary(t)
 	if stdioBridgeBinErr != nil {
-		t.Fatalf("build wormhole-mcp-stdio: %v", stdioBridgeBinErr)
+		t.Fatalf("build wormhole mcp bridge: %v", stdioBridgeBinErr)
 	}
 
 	// --- Leg 1: real Coordination Server, real Postgres. ---
-	coordURL, projectID, _, token := e2eStartCoordServer(t, db)
+	coordURL, projectID, agentID, token := e2eStartCoordServer(t, db)
+	var coordOnline atomic.Bool
+	coordOnline.Store(true)
+	coordProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !coordOnline.Load() {
+			http.Error(w, "coordination server offline", http.StatusServiceUnavailable)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		upstream, err := http.NewRequestWithContext(r.Context(), r.Method, coordURL+r.URL.Path, bytes.NewReader(body))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		upstream.Header = r.Header.Clone()
+		resp, err := http.DefaultClient.Do(upstream)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		w.WriteHeader(resp.StatusCode)
+		responseBody, _ := io.ReadAll(resp.Body)
+		_, _ = w.Write(responseBody)
+	}))
+	defer coordProxy.Close()
 
 	// --- Leg 2: real wormholed, in-process (mirrors
 	// TestRun_EndToEndWhoAmI's env-var setup exactly). ---
@@ -550,7 +557,7 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 		t.Fatalf("mkdir credentials dir: %v", err)
 	}
 	credData, err := json.Marshal(map[string]string{
-		"server": coordURL, "project_id": projectID, "agent_id": "e2e-agent", "token": token,
+		"server": coordProxy.URL, "project_id": projectID, "agent_id": "e2e-agent", "token": token,
 	})
 	if err != nil {
 		t.Fatalf("marshal credentials: %v", err)
@@ -559,36 +566,32 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 		t.Fatalf("write credentials: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() { errCh <- Run(ctx, "default") }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-errCh:
-		case <-time.After(5 * time.Second):
-			t.Log("wormholed did not shut down within 5s of cancel")
-		}
-	})
-
 	socketPath := filepath.Join(runDir, "wormhole", "wormholed.sock")
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, err := os.Stat(socketPath); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("wormholed socket did not appear at %s within deadline", socketPath)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	daemon := startTestDaemon(t, "default", socketPath)
+	defer daemon.stop(t)
 
 	// --- Leg 3: the real transport. Spawn the stdio bridge subprocess
 	// with XDG_RUNTIME_DIR pointed at the same runDir wormholed used, so
 	// its own wormholedSocketPath() resolves to the same socket. Speak
-	// genuine Content-Length-framed MCP over its stdin/stdout. ---
+	// genuine newline-delimited JSON-RPC over its stdin/stdout. ---
 	client := e2eStartStdioBridge(t, binPath, runDir)
 	client.initialize(t)
+	listResp := client.call(t, "tools/list", json.RawMessage(`{}`))
+	if listResp.Error != nil {
+		t.Fatalf("tools/list error: %+v", listResp.Error)
+	}
+	if !bytes.Contains(listResp.Result, []byte(`"wormhole.task.create"`)) || !bytes.Contains(listResp.Result, []byte(`"wormhole.channel.create"`)) {
+		t.Fatalf("tools/list missing durable write tools: %s", listResp.Result)
+	}
+	if _, errMsg := client.callTool(t, "wormhole.agent.whoami", nil); errMsg != "" {
+		t.Fatalf("warm authenticated local scope: %s", errMsg)
+	}
+	if _, errMsg := client.callTool(t, "wormhole.agent.register", map[string]interface{}{
+		"agent_id": agentID, "capabilities": []string{"code"},
+	}); errMsg != "" {
+		t.Fatalf("register local route agent: %s", errMsg)
+	}
+	coordOnline.Store(false)
 
 	// Create a task through the full chain. Local-first writes never
 	// block on Coordination Server reachability (confirmed by reading
@@ -620,6 +623,117 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 	if taskOut.Status != "todo" {
 		t.Fatalf("task status = %q, want todo", taskOut.Status)
 	}
+	localReadRaw, errMsg := client.callTool(t, "wormhole.task.get", map[string]interface{}{"task_id": taskOut.ID})
+	if errMsg != "" {
+		t.Fatalf("local wormhole.task.get returned error: %s", errMsg)
+	}
+	if !bytes.Contains(localReadRaw, []byte(taskTitle)) {
+		t.Fatalf("local task readback = %s, want title %q", localReadRaw, taskTitle)
+	}
+	var preRestartCount int
+	if err := db.QueryRow(`SELECT count(*) FROM tasks WHERE id = $1`, taskOut.ID).Scan(&preRestartCount); err != nil {
+		t.Fatalf("count offline task before restart: %v", err)
+	}
+	if preRestartCount != 0 {
+		t.Fatalf("offline task reached Postgres before reconnect: count=%d", preRestartCount)
+	}
+	routeRaw, errMsg := client.callTool(t, "wormhole.task.route", map[string]interface{}{
+		"capability": "code",
+		"title":      "e2e routed owner fidelity",
+	})
+	if errMsg != "" {
+		t.Fatalf("wormhole.task.route returned error: %s", errMsg)
+	}
+	var routeOut struct {
+		TaskID     string `json:"task_id"`
+		AssignedTo string `json:"assigned_to"`
+		Status     string `json:"status"`
+	}
+	if err := json.Unmarshal(routeRaw, &routeOut); err != nil {
+		t.Fatalf("decode routed task result %s: %v", routeRaw, err)
+	}
+	if routeOut.TaskID == "" || routeOut.AssignedTo != agentID || routeOut.Status != "todo" {
+		t.Fatalf("routed task result = %+v, want assigned_to=%s status=todo", routeOut, agentID)
+	}
+	kbRaw, errMsg := client.callTool(t, "wormhole.kb.write", map[string]interface{}{
+		"agent_id": agentID, "title": "e2e native JSON article", "body": "native frontmatter survives sync",
+		"frontmatter": map[string]interface{}{"kind": "runbook", "nested": map[string]interface{}{"version": 2}},
+	})
+	if errMsg != "" {
+		t.Fatalf("wormhole.kb.write returned error: %s", errMsg)
+	}
+	var kbOut struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(kbRaw, &kbOut); err != nil || kbOut.ID == "" {
+		t.Fatalf("decode KB result %s: %v", kbRaw, err)
+	}
+	channelRaw, errMsg := client.callTool(t, "wormhole.channel.create", map[string]interface{}{"name": "e2e-native-json"})
+	if errMsg != "" {
+		t.Fatalf("wormhole.channel.create returned error: %s", errMsg)
+	}
+	var channelOut struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(channelRaw, &channelOut); err != nil || channelOut.ID == "" {
+		t.Fatalf("decode channel result %s: %v", channelRaw, err)
+	}
+	eventRaw, errMsg := client.callTool(t, "wormhole.channel.post", map[string]interface{}{
+		"channel_id": channelOut.ID, "agent_id": agentID, "event_type": "discovery.logged",
+		"payload": map[string]interface{}{"found": true, "nested": map[string]interface{}{"count": 3}},
+	})
+	if errMsg != "" {
+		t.Fatalf("wormhole.channel.post returned error: %s", errMsg)
+	}
+	var eventOut struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(eventRaw, &eventOut); err != nil || eventOut.ID == "" {
+		t.Fatalf("decode event result %s: %v", eventRaw, err)
+	}
+
+	daemon.stop(t)
+	bridgeExited := make(chan error, 1)
+	go func() { bridgeExited <- client.cmd.Wait() }()
+	select {
+	case err := <-bridgeExited:
+		if err != nil {
+			t.Fatalf("original stdio bridge after daemon shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("original stdio bridge did not exit after daemon shutdown")
+	}
+
+	// Simulate the exact overwrite risk this test guards against: remove the
+	// local owner after routing while leaving the durable queue payload intact.
+	// Only a server push that applies owner_agent_id followed by a server pull
+	// can restore it.
+	localStore, err := localstore.Open(filepath.Join(dataDir, "wormhole", "wormholed.db"))
+	if err != nil {
+		t.Fatalf("open local store between daemon runs: %v", err)
+	}
+	result, err := localStore.DB().Exec(`UPDATE tasks SET owner_agent_id = NULL WHERE id = ? AND namespace_id = ?`, routeOut.TaskID, projectID)
+	if err != nil {
+		localStore.Close()
+		t.Fatalf("clear routed owner before reconnect: %v", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		localStore.Close()
+		t.Fatalf("clear routed owner affected %d row(s), err=%v, want 1", affected, err)
+	}
+	if err := localStore.Close(); err != nil {
+		t.Fatalf("close local store between daemon runs: %v", err)
+	}
+
+	coordOnline.Store(true)
+	restarted := startTestDaemon(t, "default", socketPath)
+	defer restarted.stop(t)
+	reconnectedClient := e2eStartStdioBridge(t, binPath, runDir)
+	reconnectedClient.initialize(t)
+	restartedReadRaw, restartedErr := reconnectedClient.callTool(t, "wormhole.task.get", map[string]interface{}{"task_id": taskOut.ID})
+	if restartedErr != "" || !bytes.Contains(restartedReadRaw, []byte(taskTitle)) {
+		t.Fatalf("local task after daemon/bridge restart = %s error=%q", restartedReadRaw, restartedErr)
+	}
 
 	// --- Offline-write -> reconnect -> sync (P7 path), now through the
 	// real transport: poll the real Coordination Server's own Postgres
@@ -629,22 +743,69 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 	// write to the real Coordination Server, which persisted it to real
 	// Postgres. ---
 	var gotTitle string
-	pollDeadline := time.Now().Add(20 * time.Second)
-	for {
+	waitForCondition(t, 20*time.Second, "stdio task to sync into Postgres", func() (bool, error) {
 		err := db.QueryRow(`SELECT title FROM tasks WHERE id = $1 AND project_id = $2`, taskOut.ID, projectID).Scan(&gotTitle)
-		if err == nil {
-			break
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
 		}
-		if err != sql.ErrNoRows {
-			t.Fatalf("query task %s from Postgres: %v", taskOut.ID, err)
-		}
-		if time.Now().After(pollDeadline) {
-			t.Fatalf("task %s did not appear in Postgres via sync within deadline", taskOut.ID)
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+		return err == nil, err
+	})
 	if gotTitle != taskTitle {
 		t.Fatalf("task title in Postgres = %q, want %q", gotTitle, taskTitle)
+	}
+	var routedServerOwner sql.NullString
+	waitForCondition(t, 20*time.Second, "routed owner to sync into Postgres", func() (bool, error) {
+		err := db.QueryRow(`SELECT owner_agent_id FROM tasks WHERE id = $1 AND project_id = $2`, routeOut.TaskID, projectID).Scan(&routedServerOwner)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return routedServerOwner.Valid && routedServerOwner.String == agentID, nil
+	})
+	waitForCondition(t, 20*time.Second, "routed owner to return through incremental pull", func() (bool, error) {
+		raw, toolErr := reconnectedClient.callTool(t, "wormhole.task.get", map[string]interface{}{"task_id": routeOut.TaskID})
+		if toolErr != "" {
+			return false, fmt.Errorf("task.get: %s", toolErr)
+		}
+		var task struct {
+			OwnerAgentID *string `json:"owner_agent_id"`
+		}
+		if err := json.Unmarshal(raw, &task); err != nil {
+			return false, err
+		}
+		return task.OwnerAgentID != nil && *task.OwnerAgentID == agentID, nil
+	})
+	var kbJSON, eventJSON []byte
+	waitForCondition(t, 20*time.Second, "native event JSON to sync into Postgres", func() (bool, error) {
+		if err := db.QueryRow(`SELECT payload FROM events WHERE id = $1 AND project_id = $2`, eventOut.ID, projectID).Scan(&eventJSON); errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		} else if err != nil {
+			return false, err
+		}
+		return true, nil
+	})
+	waitForCondition(t, 20*time.Second, "native KB JSON to sync into Postgres", func() (bool, error) {
+		if err := db.QueryRow(`SELECT frontmatter FROM kb_articles WHERE id = $1 AND project_id = $2`, kbOut.ID, projectID).Scan(&kbJSON); errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		} else if err != nil {
+			return false, err
+		}
+		return true, nil
+	})
+	var gotKB, gotEvent map[string]interface{}
+	if err := json.Unmarshal(kbJSON, &gotKB); err != nil {
+		t.Fatalf("Postgres KB frontmatter is not an object: %s: %v", kbJSON, err)
+	}
+	if err := json.Unmarshal(eventJSON, &gotEvent); err != nil {
+		t.Fatalf("Postgres event payload is not an object: %s: %v", eventJSON, err)
+	}
+	if gotKB["kind"] != "runbook" {
+		t.Fatalf("Postgres KB frontmatter = %#v", gotKB)
+	}
+	if gotEvent["found"] != true {
+		t.Fatalf("Postgres event payload = %#v", gotEvent)
 	}
 
 	// Secondary confirmation the task is visible through the Coordination
@@ -657,13 +818,124 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 		t.Fatalf("decode task list result: %v", err)
 	}
 	found := false
+	routedFound := false
 	for _, task := range listOut.Tasks {
 		if task.TaskID == taskOut.ID {
 			found = true
-			break
+		}
+		if task.TaskID == routeOut.TaskID && task.OwnerAgentID != nil && *task.OwnerAgentID == agentID {
+			routedFound = true
 		}
 	}
 	if !found {
 		t.Fatalf("wormhole.task.list on Coordination Server did not include synced task %s: %+v", taskOut.ID, listOut.Tasks)
+	}
+	if !routedFound {
+		t.Fatalf("wormhole.task.list did not preserve routed owner for task %s: %+v", routeOut.TaskID, listOut.Tasks)
+	}
+}
+
+func TestE2E_StdioBridgeProtocolAndSignalBoundaries(t *testing.T) {
+	binPath := e2eBuildStdioBridgeBinary(t)
+	if stdioBridgeBinErr != nil {
+		t.Fatalf("build wormhole mcp bridge: %v", stdioBridgeBinErr)
+	}
+	socketPath, factory := configureSecurityTestDaemon(t)
+	runner := func(ctx context.Context, profileName string) error {
+		return runWithSyncEngineFactory(ctx, profileName, factory)
+	}
+	daemon := startTestDaemonWithRunner(t, "default", socketPath, runner)
+	defer daemon.stop(t)
+	runDir := os.Getenv("XDG_RUNTIME_DIR")
+
+	t.Run("partial JSON and oversized input", func(t *testing.T) {
+		client := e2eStartStdioBridge(t, binPath, runDir)
+		client.initialize(t)
+		req, _ := json.Marshal(e2eStdioRPCRequest{JSONRPC: "2.0", ID: json.RawMessage("91"), Method: "tools/list", Params: json.RawMessage(`{}`)})
+		mid := len(req) / 2
+		if _, err := client.stdin.Write(req[:mid]); err != nil {
+			t.Fatalf("write first partial request segment: %v", err)
+		}
+		if _, err := client.stdin.Write(req[mid:]); err != nil {
+			t.Fatalf("write second partial request segment: %v", err)
+		}
+		if _, err := io.WriteString(client.stdin, "\n"); err != nil {
+			t.Fatalf("terminate partial request: %v", err)
+		}
+		body, err := readNewlineFrame(client.stdout)
+		if err != nil {
+			t.Fatalf("read partial request response: %v", err)
+		}
+		var resp e2eStdioRPCResponse
+		if err := json.Unmarshal(body, &resp); err != nil || resp.Error != nil {
+			t.Fatalf("partial request response = %s decode=%v rpc=%+v", body, err, resp.Error)
+		}
+
+		oversized := bytes.Repeat([]byte("x"), (1<<20)+1)
+		if err := writeNewlineFrame(client.stdin, oversized); err != nil {
+			t.Fatalf("write oversized stdio input: %v", err)
+		}
+		body, err = readNewlineFrame(client.stdout)
+		if err != nil {
+			t.Fatalf("read oversized response: %v", err)
+		}
+		if err := json.Unmarshal(body, &resp); err != nil || resp.Error == nil || resp.Error.Code != -32700 {
+			t.Fatalf("oversized response = %s decode=%v rpc=%+v", body, err, resp.Error)
+		}
+	})
+
+	t.Run("concurrent clients", func(t *testing.T) {
+		clients := make([]*e2eStdioClient, 4)
+		for i := range clients {
+			clients[i] = e2eStartStdioBridge(t, binPath, runDir)
+			clients[i].initialize(t)
+		}
+		errs := make(chan error, len(clients))
+		for i, client := range clients {
+			go func(id int, c *e2eStdioClient) {
+				req, _ := json.Marshal(e2eStdioRPCRequest{JSONRPC: "2.0", ID: json.RawMessage(strconv.Itoa(100 + id)), Method: "tools/list", Params: json.RawMessage(`{}`)})
+				if err := writeNewlineFrame(c.stdin, req); err != nil {
+					errs <- err
+					return
+				}
+				body, err := readNewlineFrame(c.stdout)
+				if err == nil {
+					var resp e2eStdioRPCResponse
+					err = json.Unmarshal(body, &resp)
+					if err == nil && resp.Error != nil {
+						err = fmt.Errorf("rpc error: %+v", resp.Error)
+					}
+				}
+				errs <- err
+			}(i, client)
+		}
+		for range clients {
+			if err := <-errs; err != nil {
+				t.Fatalf("concurrent stdio client: %v", err)
+			}
+		}
+	})
+
+	for _, signal := range []os.Signal{os.Interrupt, syscall.SIGTERM} {
+		t.Run(signal.String(), func(t *testing.T) {
+			client := e2eStartStdioBridge(t, binPath, runDir)
+			client.initialize(t)
+			if _, err := io.WriteString(client.stdin, `{"jsonrpc":"2.0"`); err != nil {
+				t.Fatalf("write in-flight partial request: %v", err)
+			}
+			if err := client.cmd.Process.Signal(signal); err != nil {
+				t.Fatalf("signal stdio bridge: %v", err)
+			}
+			exited := make(chan error, 1)
+			go func() { exited <- client.cmd.Wait() }()
+			select {
+			case err := <-exited:
+				if err != nil {
+					t.Fatalf("stdio bridge signal exit: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("stdio bridge did not exit after signal with request in flight")
+			}
+		})
 	}
 }

@@ -1,62 +1,109 @@
 # Claude Code Connector Setup
 
-Connects a Claude Code session to a running Wormhole server over the MCP Streamable HTTP
-transport (`docs/mcp-protocol.md`).
+Claude Code connects to the local Wormhole runtime, not directly to the Coordination
+Server:
 
-## 1. Start the server
+```text
+Claude Code -> wormhole mcp -> wormholed Unix socket -> wormholed -> Coordination Server
+```
+
+The `wormhole mcp` command is a stdio bridge. It relays MCP JSON-RPC messages between
+Claude Code and the local daemon without interpreting the requests.
+
+## 1. Start the Coordination Server
+
+Set up Postgres and migrations as described in the [quickstart](../README.md#quickstart),
+then start the Coordination Server:
 
 ```bash
 go run ./cmd/wormhole-server
 ```
 
-Defaults to `:8080` (override with `WORMHOLE_LISTEN_ADDR`). Requires a reachable Postgres
-instance (`WORMHOLE_DATABASE_URL`, see `internal/types/config.go`).
+Install the CLI and daemon binaries if `wormhole` and `wormholed` are not already on
+your `PATH`:
 
-## 2. Join the project and obtain a token
-
-`wormhole join` calls `wormhole.agent.register` (no auth required) and writes the issued
-bearer token to `~/.wormhole/credentials.json` (or `--token-file <path>`):
+`wormholed` currently requires Linux. Windows users must perform the daemon and
+connector steps inside WSL; native macOS and Windows daemon execution is not
+supported.
 
 ```bash
-go run ./cmd/wormhole-cli join \
+go install ./cmd/wormhole ./cmd/wormholed
+```
+
+## 2. Create a credential profile
+
+Create a Passport with `wormhole join`. With the daemon not yet running, `join` registers
+through the Coordination Server and writes the profile that `wormholed` will read:
+
+```bash
+wormhole join \
   --server http://localhost:8080 \
   --project <project-id> \
   --owner <your-name> \
   --model claude-code \
-  --permissions task.create,task.read,kb.write,kb.read,channel.read,channel.post
+  --permissions task.list,kb.search,channel.list,channel.post \
+  --profile claude-code
 ```
 
-This also runs the rest of the join flow (RFC-0001 §8.5): a KB sync search, a self-introduction
-post to the `#introductions` channel, and an open-task summary. The token in the credentials
-file is what a live MCP client authenticates with — the connector step below doesn't read
-`~/.wormhole/credentials.json` for you; carry the token manually into Claude Code's config.
+The profile is `~/.wormhole/credentials/claude-code.json`. Newly created credential
+directories request mode `0700`, and newly created profile files request mode `0600`.
+Writing an existing directory or file does not automatically tighten its mode; verify and
+restrict the existing profile path before use. The file contains the raw bearer token needed
+by `wormholed`. Do not commit or share it.
 
-## 3. Register the connector in Claude Code
+`wormhole connect` is an alternative for a new setup: it issues a Passport, writes a
+credential profile, and wires a detected Claude Code installation in one command. Use it
+instead of the `join` command above when you want that combined setup:
 
 ```bash
-claude mcp add --transport http wormhole http://localhost:8080/mcp
+wormhole connect \
+  --server http://localhost:8080 \
+  --project <project-id> \
+  --permissions task.list,kb.search,channel.list,channel.post \
+  --profile claude-code \
+  --target claude
 ```
 
-If your server requires bearer auth for the tools you intend to call, supply the token issued
-in step 2 as an `Authorization: Bearer <token>` header via Claude Code's connector auth config
-(`wormhole.agent.register` itself is unauthenticated, but every other tool requires the token).
+## 3. Start the local daemon
 
-## 4. Verify
+Run `wormholed` in a separate terminal after its credential profile exists:
 
-- `claude mcp list` should show `wormhole` as connected.
-- Ask Claude Code to list Wormhole tools — it should enumerate all registered tools (from
-  `tools/list`, `internal/mcp/jsonrpc.go`'s `HandleToolsList`).
-- Ask it to call `wormhole.task.list` for your project — it should round-trip a real answer
-  from the live server, not a mock.
+```bash
+wormholed claude-code
+```
+
+The positional profile name must match `claude-code` in
+`~/.wormhole/credentials/claude-code.json`. `wormholed` then listens on
+`$XDG_RUNTIME_DIR/wormhole/wormholed.sock`, or
+`$TMPDIR/wormhole-runtime/wormhole/wormholed.sock` when `XDG_RUNTIME_DIR` is unset.
+
+## 4. Register Claude Code
+
+If you used `wormhole connect`, it registers the Claude connector for you. To register it
+manually, run the exact local stdio command:
+
+```bash
+claude mcp add wormhole -- wormhole mcp
+```
+
+This command starts the stdio bridge when Claude Code opens the connector; it does not
+embed a server URL or bearer token in Claude Code configuration.
+
+## 5. Verify
+
+- Run `wormhole profile list` and confirm the expected profile is present.
+- Run `claude mcp list` and confirm `wormhole` is listed.
+- In Claude Code, ask it to list Wormhole tools, then call `wormhole.task.list` for the
+  configured project. The request should reach `wormholed` and return local runtime data.
 
 ## Troubleshooting
 
-- **`404` or connection refused calling any tool:** confirm the server is running and the
-  connector URL ends in `/mcp` (not `/mcp/tools/call` — that path was removed in Chapter 3).
-- **`-32001 invalid or expired token`:** the bearer token wasn't supplied, doesn't match an
-  issued passport, or has expired — re-run `wormhole join` to issue a fresh one.
-- **`GET /mcp` returns `405`:** expected. This server doesn't implement the SSE server-push
-  stream (`docs/mcp-protocol.md` §2) — no current consumer needs it in alpha 2 scope.
-- **Tool call returns a result with `isError: true` instead of failing the RPC call:** this is
-  the tool's own handler rejecting the input (e.g. invalid task status), not a transport
-  problem — read the `content[0].text` message (`docs/mcp-protocol.md` §3.1).
+- **`wormhole mcp: dial wormholed socket ...`:** start `wormholed` and confirm it uses the
+  same `XDG_RUNTIME_DIR` as Claude Code.
+- **`wormholed` cannot find credentials:** create or inspect the profile with `wormhole join`
+  and `wormhole profile list`; the daemon reads `~/.wormhole/credentials/<profile>.json`.
+- **`claude mcp list` does not show `wormhole`:** rerun `wormhole connect` with
+  `--target claude`, or register the exact `claude mcp add wormhole -- wormhole mcp` command
+  above. Confirm both `claude` and `wormhole` are on `PATH`.
+- **Tool calls do not reflect server state:** confirm the Coordination Server is running and
+  that `wormholed` can reach the server recorded in its credential profile.

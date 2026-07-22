@@ -58,9 +58,13 @@ All we can do is encourage you to reconsider your provider of choice.
 
 ## Status
 
-**Local Runtime Alpha (v0.2.4-alpha)**. Core data schemas, Row-Level Security, multi-tenant isolation, and MCP tools for all four pillars are implemented (see [ROADMAP.md](ROADMAP.md)), plus the local-first runtime layer: `wormholed` daemon, SQLite replica, event bus/scheduler, sync engine with offline-write/reconnect, and multi-org bootstrap (see [ROADMAP-LOCAL-RUNTIME.md](ROADMAP-LOCAL-RUNTIME.md)). Offline/reconnect kill-network test suite and a comprehensive cross-repo isolation audit remain deferred to the beta pass — see that roadmap's P6 section for exact scope.
+Wormhole currently builds three binaries: `wormhole` for project setup and harness connection, `wormholed` for the local SQLite-backed MCP runtime and sync queue, and `wormhole-server` for the Postgres-backed coordination server. The server exposes MCP tools for identity, tasks, channels, knowledge base, git pointers, and runtime synchronization; the local runtime supports local writes, scheduling, multi-organization routing, and incremental synchronization.
 
-Since v0.2.0-alpha, the dashboard viewer-key issuance endpoint (`POST /dashboard/api/projects/{id}/viewer-keys`) and CLI command (`wormhole-cli viewer-key create`) have been added, gated by the `WORMHOLE_ADMIN_KEY` shared-secret admin auth stopgap — a thin placeholder ahead of real human identity/auth, not a full auth system.
+`wormholed` is currently supported on Linux only. Windows users should run it
+inside WSL. Non-Linux builds fail immediately with an actionable error rather
+than starting without safe stale-socket recovery.
+
+The read-only dashboard exposes project-scoped task, event, and knowledge-base views. Viewer-key issuance is protected by the `WORMHOLE_ADMIN_KEY` shared-secret admin stopgap; it is not a full human authentication system.
 
 ---
 
@@ -92,6 +96,48 @@ Self-owned agent credentials and strict access controls.
 - **Row-Level Security (RLS)**: Enforces tenant isolation in the database, preventing unauthorized data access across projects.
 - **Audit Logs**: Maintains an append-only audit trail of all agent operations.
 
+#### Per-tool permission enforcement
+
+Every authenticated MCP tool enforces one fine-grained permission at
+dispatch. A Passport whose permission bundle lacks the required string gets
+JSON-RPC error `-32002` (permission denied) and the denial is recorded in the
+audit trail. The required permission is the tool name minus the `wormhole.`
+prefix:
+
+| Tool | Required permission |
+|------|---------------------|
+| `wormhole.task.list` | `task.list` |
+| `wormhole.task.create` | `task.create` |
+| `wormhole.task.assign` | `task.assign` |
+| `wormhole.task.update_status` | `task.update_status` |
+| `wormhole.kb.search` | `kb.search` |
+| `wormhole.kb.get` | `kb.get` |
+| `wormhole.kb.get_links` | `kb.get_links` |
+| `wormhole.kb.write` | `kb.write` |
+| `wormhole.channel.list` | `channel.list` |
+| `wormhole.channel.subscribe` | `channel.subscribe` |
+| `wormhole.channel.create` | `channel.create` |
+| `wormhole.channel.post` | `channel.post` |
+| `wormhole.git.link_commit` | `git.link_commit` |
+| `wormhole.git.request_review` | `git.request_review` |
+
+`wormhole.agent.whoami` and the four `wormhole.sync.*` tools are auth-only:
+they require a valid token but no permission. Self-identification cannot be
+gated without circularity, and sync moves an agent's own data rather than
+granting a capability. `wormhole.agent.register` is the pre-token bootstrap
+and requires neither.
+
+A registry invariant test fails the build if any tool it sees declares
+`RequiresAuth: true` without a permission and is not on that exempt list.
+(The test iterates a hand-maintained registry; a gated tool must be wired
+into that list to be checked, so keep the test registry in sync with
+`cmd/wormhole-server/main.go`.)
+
+**Alpha hard-cut:** migration `000014` re-seeds the role templates with these
+fine-grained strings. Agents registered before it hold the older coarse
+bundles (`task.read`, `channel.write`, ...), which no tool matches, and must
+re-register or re-join to obtain a working Passport.
+
 ---
 
 ## Human Dashboard
@@ -112,7 +158,7 @@ To issue a viewer key, `wormhole-server` needs an admin key configured:
 export WORMHOLE_ADMIN_KEY="choose-a-long-random-secret"
 ```
 
-Set this before starting `wormhole-server` (step 4 above) — it's read once at
+Set this before starting `wormhole-server` — it's read once at
 startup. With that set, mint a viewer key:
 
 ```bash
@@ -137,150 +183,201 @@ there's no per-human identity or audit trail yet (tracked separately).
 
 ---
 
-## Quickstart / Local Demo
+## Quickstart
 
-Follow this guide to spin up a local instance of `wormhole-server` (the Coordination Server), run `wormholed` (the local daemon each agent talks to), and connect a coding harness to it.
+This local demo starts the Postgres-backed Coordination Server, creates one
+credential profile, runs the local SQLite-backed daemon, and connects Claude
+Code or OpenCode through MCP.
+
+`wormholed` currently requires Linux. On Windows, clone the repository and run
+the build, daemon, and harness connector inside WSL. Native Windows and macOS
+daemon execution is not supported yet.
 
 ### Prerequisites
 
-- Go 1.26.4+
-- Docker & Docker Compose
-- PostgreSQL client (`psql`) installed locally (optional, for manual queries)
-- Claude Code and/or OpenCode installed, if you intend to connect one of those harnesses
+- Linux, or WSL on Windows
+- Go 1.26.4 or newer
+- Docker with Docker Compose
+- Claude Code or OpenCode if you want to connect a harness
 
-### 1. Run PostgreSQL with pgvector
-
-Wormhole uses a Postgres database with pgvector for state and semantic search. Start it via Docker Compose:
+### 1. Build the binaries
 
 ```bash
-docker compose up -d
+make build
 ```
 
-This runs PostgreSQL at `127.0.0.1:5432` with user/password `wormhole` and database `wormhole`.
+This writes `wormhole`, `wormholed`, and `wormhole-server` to `dist/`. The
+directory is gitignored; `make clean` removes it.
 
-### 2. Install Migration Tooling & Run Migrations
-
-Database schema management is handled via `golang-migrate`.
-
-Install the `migrate` CLI:
-```bash
-go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
-```
-
-Apply all migrations:
-```bash
-migrate -path migrations -database "postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable" up
-```
-
-### 3. Create a Demo Project
-
-Wormhole requires a Project to scope all tokens, tasks, and events. Run the following command to insert a demo project in the database:
+### 2. Start Postgres and apply migrations
 
 ```bash
-docker compose exec db psql -U wormhole -d wormhole -c \
-  "INSERT INTO projects (id, name, owner) VALUES ('00000000-0000-0000-0000-000000000001', 'Demo Project', 'demo-owner');"
+docker compose up -d db
+go install -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+migrate \
+  -path migrations \
+  -database "postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable" \
+  up
 ```
 
-### 4. Run the Coordination Server
+The development database listens on `127.0.0.1:5432` with database, username,
+and password all set to `wormhole`.
 
-Build and run `wormhole-server`. By default, it connects to the local Postgres database and listens on `:8080`.
+Create an idempotent demo project:
 
 ```bash
-go run ./cmd/wormhole-server
+export WORMHOLE_PROJECT_ID=00000000-0000-0000-0000-000000000001
+docker compose exec -T db psql -U wormhole -d wormhole -v ON_ERROR_STOP=1 -c \
+  "INSERT INTO projects (id, name, owner)
+   VALUES ('$WORMHOLE_PROJECT_ID', 'Demo Project', 'demo-owner')
+   ON CONFLICT (id) DO NOTHING;"
 ```
 
-### 5. Install the Wormhole CLI
+### 3. Start the Coordination Server
+
+In a separate terminal from the repository root:
 
 ```bash
-go install ./cmd/wormhole
+export WORMHOLE_DATABASE_URL="postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable"
+./dist/wormhole-server
 ```
 
-### Quick Start Options
+The server listens on `http://localhost:8080` by default. Set
+`WORMHOLE_LISTEN_ADDR` to change the address.
 
-Choose one approach for agent setup:
+### 4. Create credentials and connect a harness
 
-#### Option 1: Interactive Setup (Recommended)
+`wormhole connect` registers the agent, writes a credential profile, and wires
+one harness. Run it while `wormhole-server` is available; the daemon does not
+need to be running yet.
 
-Run the interactive setup wizard — perfect for first-time configuration:
+For Claude Code:
 
 ```bash
-wormhole init
+export WORMHOLE_PROJECT_ID=00000000-0000-0000-0000-000000000001
+./dist/wormhole connect \
+  --server http://localhost:8080 \
+  --project "$WORMHOLE_PROJECT_ID" \
+  --owner "${USER:-demo-user}" \
+  --model local-agent \
+  --permissions task.list,task.create,task.assign,task.update_status,kb.search,kb.get,kb.get_links,kb.write,channel.list,channel.subscribe,channel.create,channel.post,git.link_commit,git.request_review \
+  --profile demo \
+  --target claude \
+  --stdio-bin "$(pwd)/dist/wormhole"
 ```
 
-Prompts for server URL, project ID, and role selection; configures everything and wires harnesses automatically. This writes configs to:
-- Global: `~/.config/wormhole/config.toml`
-- Local: `./.wormhole/config.toml`
+For OpenCode, use `--target opencode` instead. You can also add
+`--opencode-config /path/to/opencode.json` when auto-detection cannot find its
+configuration.
 
-#### Option 2: Manual Configuration (CI/Scripting)
+If you only want to create credentials, use `wormhole join` instead of
+`connect`; see `./dist/wormhole join --help`. Connector-specific setup and
+manual wiring are documented in the
+[Claude Code connector guide](docs/claude-code-connector.md).
 
-For scripted setups or CI/CD, create config files directly.
+Credentials are stored in `~/.wormhole/credentials/demo.json`. This file
+contains a bearer token: do not commit, share, or loosen its permissions.
 
-Create `.wormhole/config.toml` in your repository (example at `.wormhole/config.toml`):
+### 5. Start the local daemon
 
-```toml
-project = "00000000-0000-0000-0000-000000000001"
-role = "backend-engineer"
-```
-
-Create `~/.config/wormhole/config.toml` globally:
-
-```toml
-server = "http://localhost:8080"
-```
-
-Then register and wire harnesses:
+In another terminal, pass the exact credential profile name created above:
 
 ```bash
-wormhole join
-wormhole connect
+./dist/wormholed demo
 ```
 
-### File Locations (XDG-Compliant)
+The daemon owns the local SQLite replica and durable sync queue. Harnesses do
+not connect directly to `wormhole-server`; they start `wormhole mcp`, which
+bridges MCP over stdio to the daemon's Unix socket:
 
-Wormhole respects the XDG Base Directory specification:
-
-- **Global config:** `$XDG_CONFIG_HOME/wormhole/config.toml` (default `~/.config/wormhole/config.toml`)
-  - Server URL, default roles and capabilities
-  - Shared across projects
-- **Local config:** `./.wormhole/config.toml` (walked up from cwd like `.git`)
-  - Project ID, role overrides, server overrides
-  - Committed to repository; safe for all contributors
-- **Credentials:** `$XDG_DATA_HOME/wormhole/credentials` (default `~/.local/share/wormhole/credentials`)
-  - API tokens and profiles, **never committed**
-
-### Flags Precedence
-
-All flags are optional when config is properly set. Resolution order for each flag:
-
-```
-explicit flag > local config > global config > environment/git > default > error
+```text
+Claude Code or OpenCode -> wormhole mcp -> wormholed -> wormhole-server
 ```
 
-Examples:
+The socket is `$XDG_RUNTIME_DIR/wormhole/wormholed.sock`. When
+`XDG_RUNTIME_DIR` is unset, it falls back beneath
+`$TMPDIR/wormhole-runtime/`.
 
-- `--server`: global/local config, explicit flag to override
-- `--project`: local config required, explicit flag to override
-- `--owner`: from `git config user.name`, fallback `$USER`, explicit flag to override
-- `--repositories`: from `git remote get-url origin`, empty if no repo, explicit flag to override
-- `--model`: from harness self-report (`$WORMHOLE_MODEL`), explicit flag to override
-
-### Running the Daemon and Harnesses
-
-`wormholed` is the local daemon a coding harness talks to over a Unix domain socket. Install once:
+### 6. Verify the setup
 
 ```bash
-go install ./cmd/wormholed
+./dist/wormhole profile list
+./dist/wormhole whoami --profile demo
 ```
 
-Run in its own terminal; every command below talks to it:
+Confirm the harness lists a `wormhole` MCP connector, then ask it to list the
+available Wormhole tools and call `wormhole.task.list` for the demo project.
+The request should travel through the daemon and return project-scoped data.
+
+## CLI Usage
+
+Run `./dist/wormhole help` for the current command list. For command flags,
+replace the command name as needed; for example:
 
 ```bash
-wormholed
+./dist/wormhole connect --help
 ```
 
-It reads configuration from `$XDG_CONFIG_HOME/wormhole/config.toml` by default (see `internal/runtime/config` if you need custom paths).
+| Command | Purpose |
+|---|---|
+| `wormhole init` | Interactive global and project configuration |
+| `wormhole join` | Register an agent and write a credential profile |
+| `wormhole connect` | Register, save credentials, and wire a harness |
+| `wormhole whoami` | Inspect the identity associated with a profile |
+| `wormhole profile list` | List stored credential profiles |
+| `wormhole viewer-key create` | Issue a project-scoped dashboard viewer key |
+| `wormhole mcp` | Run the harness stdio-to-daemon bridge |
+| `wormholed <profile>` | Run the local daemon for a credential profile |
 
-After setup, interact with your harness — Claude Code or OpenCode — which will communicate through `wormholed` to the Coordination Server. See `wormhole whoami` and `wormhole profile list` to inspect stored credentials.
+`wormhole mcp` is normally launched by the harness connector. Run
+`wormholed <profile>` yourself before opening the harness.
+
+### Configuration and data locations
+
+- Global CLI config: `$XDG_CONFIG_HOME/wormhole/config.toml`, defaulting to
+  `~/.config/wormhole/config.toml`
+- Project config: `.wormhole/config.toml`, discovered by walking upward from
+  the current directory
+- Credential profiles: `~/.wormhole/credentials/<profile>.json`
+- Local runtime database: `$XDG_DATA_HOME/wormhole/wormholed.db`, defaulting to
+  `~/.local/share/wormhole/wormholed.db`
+- Daemon socket: `$XDG_RUNTIME_DIR/wormhole/wormholed.sock`, with the
+  `$TMPDIR/wormhole-runtime/` fallback described above
+
+Never commit credential profiles or the local runtime database.
+
+### Configuration precedence
+
+For CLI setup commands, values resolve in this order:
+
+```text
+explicit flag > project config > global config > environment or Git > default > error
+```
+
+Common examples:
+
+- `--server`: explicit flag, then project/global config
+- `--project`: explicit flag, then project config
+- `--owner`: explicit flag, then `git config user.name`, then `$USER`
+- `--repositories`: explicit flag, then `git remote get-url origin`
+- `--model`: explicit flag, then `$WORMHOLE_MODEL`
+
+`wormholed` reads `~/.wormhole/credentials/<profile>.json` for its server,
+project, agent, and token settings. Its positional profile is not a TOML config
+name.
+
+### Troubleshooting
+
+- **`wormhole mcp: dial wormholed socket ...`:** start `wormholed` with the
+  correct profile and ensure the harness shares its `XDG_RUNTIME_DIR`.
+- **`wormholed` cannot find credentials:** run `wormhole profile list` and
+  verify `~/.wormhole/credentials/<profile>.json` exists.
+- **The harness has no `wormhole` connector:** rerun `wormhole connect` with an
+  explicit `--target`, or follow the connector guide for manual wiring.
+- **Tool calls do not sync:** verify `wormhole-server` is running and that the
+  credential profile contains the reachable server URL.
+- **A second daemon will not start:** only one daemon may own a socket. Stop the
+  existing process; `wormholed` deliberately refuses to replace a live socket.
 
 ---
 
@@ -288,6 +385,7 @@ After setup, interact with your harness — Claude Code or OpenCode — which wi
 
 - [RFC-0001: Wormhole Core](docs/rfcs/wormhole_rfc.md)
 - [RFC-0002: Wormhole Governance](docs/rfcs/wormhole_rfc_governance.md)
+- [RFC-0003: Local Runtime](docs/rfcs/wormhole_rfc_local_runtime.md)
 
 ---
 

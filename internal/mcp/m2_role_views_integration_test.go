@@ -6,10 +6,10 @@ import (
 	"testing"
 )
 
-// TestM2_ThreeRolesDistinctPermissionsAndViews is M2's exit-bar test named
-// directly in ROADMAP-ALPHA2.md Chapter 7: register three agents under
+// TestM2_ThreeRolesDistinctPermissionsAndViews verifies that registering
+// three agents under
 // distinct role templates (manager/backend/frontend) in one project,
-// confirm each passport carries a distinct permission bundle (Chapter 6),
+// confirm each passport carries a distinct permission bundle,
 // and confirm wormhole.task.list's default view differs per role
 // (Chapter 7) — the concrete demonstration that M2's role system produces
 // observably different behavior per role, not just distinct stored tags.
@@ -31,7 +31,14 @@ func TestM2_ThreeRolesDistinctPermissionsAndViews(t *testing.T) {
 
 	register := func(role string) RegisterAgentOutput {
 		t.Helper()
-		args, _ := json.Marshal(RegisterAgentInput{Owner: "harley", Model: "claude", Role: role})
+		// Role bundles (migration 000010) grant coarse "task.write"/"task.read"
+		// strings; wormhole.task.create/list gate on the fine-grained
+		// "task.create"/"task.list" strings (Task 2, HasPermission is
+		// exact-match per Task 1). Grant those explicitly alongside the role
+		// so every agent here can exercise create/list regardless of role —
+		// task.assign stays role-bundle-only so the distinctness assertion
+		// below still means what it says.
+		args, _ := json.Marshal(RegisterAgentInput{Owner: "harley", Model: "claude", Role: role, Permissions: []string{"task.create", "task.list"}})
 		raw := mustToolResult(t, srv, "", "wormhole.agent.register", projectID, args)
 		var out RegisterAgentOutput
 		json.Unmarshal(raw, &out)
@@ -83,12 +90,16 @@ func TestM2_ThreeRolesDistinctPermissionsAndViews(t *testing.T) {
 	backendTaskRaw := callToolAs(backend.Token, "wormhole.task.create", CreateTaskInput{Title: "backend work", Priority: 1})
 	var backendTask CreateTaskOutput
 	json.Unmarshal(backendTaskRaw, &backendTask)
-	callToolAs(backend.Token, "wormhole.task.assign", AssignTaskInput{TaskID: backendTask.TaskID, OwnerAgentID: backend.AgentID})
+	// backend/frontend deliberately lack task.assign (asserted above), so the
+	// assignment is performed by the manager, who holds it — mirrors the
+	// role model rather than granting backend/frontend a permission the test
+	// just proved they don't have.
+	callToolAs(manager.Token, "wormhole.task.assign", AssignTaskInput{TaskID: backendTask.TaskID, OwnerAgentID: backend.AgentID})
 
 	frontendTaskRaw := callToolAs(frontend.Token, "wormhole.task.create", CreateTaskInput{Title: "frontend work", Priority: 1})
 	var frontendTask CreateTaskOutput
 	json.Unmarshal(frontendTaskRaw, &frontendTask)
-	callToolAs(frontend.Token, "wormhole.task.assign", AssignTaskInput{TaskID: frontendTask.TaskID, OwnerAgentID: frontend.AgentID})
+	callToolAs(manager.Token, "wormhole.task.assign", AssignTaskInput{TaskID: frontendTask.TaskID, OwnerAgentID: frontend.AgentID})
 
 	listAs := func(token string) ListTasksOutput {
 		t.Helper()

@@ -24,16 +24,18 @@ func TestCheckLatencySensitive_HighPriorityPushesImmediately(t *testing.T) {
 		atomic.AddInt32(&pushCalls, 1)
 		resultData := map[string]interface{}{
 			"items_received": 1,
-			"applied":        []interface{}{},
-			"timestamp":      time.Now().UTC().Format(time.RFC3339),
-			"version":        1,
+			"applied": []map[string]interface{}{
+				{"id": "task-1", "type": "task", "error": ""},
+			},
+			"timestamp": time.Now().UTC().Format(time.RFC3339),
+			"version":   1,
 		}
 		writeFakeToolResult(w, resultData)
 	}))
 	defer srv.Close()
 
 	cfg := DefaultConfig()
-	engine := New(srv.URL, "token", "ns-1", qRepo, aRepo, nil, nil, cfg)
+	engine := mustNewEngine(t, srv.URL, qRepo, aRepo, nil, nil, cfg)
 
 	ctx := context.Background()
 	payload := json.RawMessage(`{"title":"urgent"}`)
@@ -69,13 +71,17 @@ func TestCheckLatencySensitive_LowPriorityDoesNotPush(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&pushCalls, 1)
 		writeFakeToolResult(w, map[string]interface{}{
-			"items_received": 1, "applied": []interface{}{}, "timestamp": time.Now().UTC().Format(time.RFC3339), "version": 1,
+			"items_received": 1,
+			"applied": []map[string]interface{}{
+				{"id": "task-1", "type": "task", "error": ""},
+			},
+			"timestamp": time.Now().UTC().Format(time.RFC3339), "version": 1,
 		})
 	}))
 	defer srv.Close()
 
 	cfg := DefaultConfig()
-	engine := New(srv.URL, "token", "ns-1", qRepo, aRepo, nil, nil, cfg)
+	engine := mustNewEngine(t, srv.URL, qRepo, aRepo, nil, nil, cfg)
 
 	ctx := context.Background()
 	payload := json.RawMessage(`{"title":"routine"}`)

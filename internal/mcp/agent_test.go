@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/H4RL33/wormhole/internal/core/identity"
@@ -95,6 +97,222 @@ func TestRegisterAgentTool_BootstrapsDefaultChannelsOnce(t *testing.T) {
 	}
 	if len(channels) != 2 {
 		t.Fatalf("channel count after second register: got %d, want 2 (no duplicates), got %+v", len(channels), channels)
+	}
+}
+
+func TestRegisterAgentTool_ConcurrentBootstrapIsIdempotent(t *testing.T) {
+	identityStore := testIdentityStore(t)
+	eventsStore := testEventsStore(t)
+	kbStore := testKBStore(t)
+	tool := RegisterAgentTool(identityStore, eventsStore, testRolesStore(t), kbStore)
+	projectID := mustCreateProject(t, "mcp-register-concurrent-bootstrap")
+
+	const registrations = 20
+	start := make(chan struct{})
+	errs := make(chan error, registrations)
+	var wg sync.WaitGroup
+	for i := 0; i < registrations; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			arguments, err := json.Marshal(RegisterAgentInput{
+				Permissions: []string{"event.publish"},
+				Owner:       fmt.Sprintf("concurrent-agent-%d", i),
+				Model:       "claude",
+			})
+			if err != nil {
+				errs <- err
+				return
+			}
+			_, err = tool.Handler(context.Background(), nil, projectID, arguments)
+			errs <- err
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent registration: %v", err)
+		}
+	}
+
+	db := testDB(t)
+	var channelCount int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM channels WHERE project_id = $1 AND name IN ('introductions', 'general')`,
+		projectID,
+	).Scan(&channelCount); err != nil {
+		t.Fatalf("count default channels: %v", err)
+	}
+	if channelCount != len(defaultChannelNames) {
+		t.Fatalf("default channel count = %d, want %d", channelCount, len(defaultChannelNames))
+	}
+
+	var onboardingCount int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM kb_articles WHERE project_id = $1 AND title = $2`,
+		projectID, onboardingArticleTitle,
+	).Scan(&onboardingCount); err != nil {
+		t.Fatalf("count onboarding articles: %v", err)
+	}
+	if onboardingCount != 1 {
+		t.Fatalf("onboarding article count = %d, want 1", onboardingCount)
+	}
+}
+
+func TestBootstrapMarkerDoesNotConstrainOrdinaryArticleTitles(t *testing.T) {
+	projectID := mustCreateProject(t, "ordinary-duplicate-kb-titles")
+	agentID, _ := mustRegisterAgent(t, projectID)
+	store := testKBStore(t)
+	for i := 0; i < 2; i++ {
+		if _, err := store.WriteArticle(
+			context.Background(), projectID, agentID, onboardingArticleTitle,
+			fmt.Sprintf("ordinary article body %d", i), nil, nil, true,
+		); err != nil {
+			t.Fatalf("write ordinary article %d with duplicate title: %v", i, err)
+		}
+	}
+
+	db := testDB(t)
+	var count int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM kb_articles WHERE project_id = $1 AND title = $2 AND bootstrap_key IS NULL`,
+		projectID, onboardingArticleTitle,
+	).Scan(&count); err != nil {
+		t.Fatalf("count ordinary duplicate-title articles: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("ordinary duplicate-title article count = %d, want 2", count)
+	}
+}
+
+func TestRegisterAgentTool_BootstrapFailurePropagatesAndRetryIsIdempotent(t *testing.T) {
+	args, _ := json.Marshal(RegisterAgentInput{
+		Permissions: []string{"event.publish"},
+		Owner:       "bootstrap-retry-agent",
+		Model:       "claude",
+	})
+
+	t.Run("default channels", func(t *testing.T) {
+		projectID := mustCreateProject(t, "bootstrap-channel-failure-retry")
+		stopRejectingChannels := rejectChannelInsertsForProject(t, projectID)
+		failingTool := RegisterAgentTool(testIdentityStore(t), testEventsStore(t), testRolesStore(t), testKBStore(t))
+		if _, err := failingTool.Handler(context.Background(), nil, projectID, args); err == nil || !strings.Contains(err.Error(), "default channel bootstrap") {
+			t.Fatalf("registration error = %v, want default-channel bootstrap failure", err)
+		}
+		assertRegistrationCount(t, projectID, "bootstrap-retry-agent", 0)
+
+		stopRejectingChannels()
+		retryTool := RegisterAgentTool(testIdentityStore(t), testEventsStore(t), testRolesStore(t), testKBStore(t))
+		if _, err := retryTool.Handler(context.Background(), nil, projectID, args); err != nil {
+			t.Fatalf("registration retry: %v", err)
+		}
+		assertFixedBootstrapCounts(t, projectID)
+		assertRegistrationCount(t, projectID, "bootstrap-retry-agent", 1)
+	})
+
+	t.Run("onboarding article", func(t *testing.T) {
+		projectID := mustCreateProject(t, "bootstrap-article-failure-retry")
+		failingKB := kb.NewStore(testDB(t), failingEmbedder{err: errors.New("forced onboarding embedding failure")}, 0.85, 2000, 1, 1, 1)
+		failingTool := RegisterAgentTool(testIdentityStore(t), testEventsStore(t), testRolesStore(t), failingKB)
+		if _, err := failingTool.Handler(context.Background(), nil, projectID, args); err == nil || !strings.Contains(err.Error(), "onboarding article bootstrap") {
+			t.Fatalf("registration error = %v, want onboarding bootstrap failure", err)
+		}
+		assertRegistrationCount(t, projectID, "bootstrap-retry-agent", 0)
+
+		retryTool := RegisterAgentTool(testIdentityStore(t), testEventsStore(t), testRolesStore(t), testKBStore(t))
+		if _, err := retryTool.Handler(context.Background(), nil, projectID, args); err != nil {
+			t.Fatalf("registration retry: %v", err)
+		}
+		assertFixedBootstrapCounts(t, projectID)
+		assertRegistrationCount(t, projectID, "bootstrap-retry-agent", 1)
+	})
+}
+
+type failingEmbedder struct {
+	err error
+}
+
+func (e failingEmbedder) Embed(context.Context, string) ([]float32, error) {
+	return nil, e.err
+}
+
+func rejectChannelInsertsForProject(t *testing.T, projectID string) func() {
+	t.Helper()
+	db := testDB(t)
+	suffix := strings.ReplaceAll(projectID, "-", "")
+	functionName := "mcp_reject_channel_" + suffix
+	triggerName := "mcp_reject_channel_" + suffix
+	if _, err := db.Exec(fmt.Sprintf(`
+		CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			RAISE EXCEPTION 'forced default channel bootstrap failure';
+		END
+		$$`, functionName)); err != nil {
+		t.Fatalf("create rejecting channel function: %v", err)
+	}
+	if _, err := db.Exec(fmt.Sprintf(`
+		CREATE TRIGGER %s
+		BEFORE INSERT ON channels
+		FOR EACH ROW WHEN (NEW.project_id = '%s'::uuid)
+		EXECUTE FUNCTION %s()`, triggerName, projectID, functionName)); err != nil {
+		_, _ = db.Exec("DROP FUNCTION " + functionName + "()")
+		t.Fatalf("create rejecting channel trigger: %v", err)
+	}
+	var once sync.Once
+	cleanup := func() {
+		once.Do(func() {
+			if _, err := db.Exec("DROP TRIGGER " + triggerName + " ON channels"); err != nil {
+				t.Errorf("drop rejecting channel trigger: %v", err)
+			}
+			if _, err := db.Exec("DROP FUNCTION " + functionName + "()"); err != nil {
+				t.Errorf("drop rejecting channel function: %v", err)
+			}
+		})
+	}
+	t.Cleanup(cleanup)
+	return cleanup
+}
+
+func assertRegistrationCount(t *testing.T, projectID, owner string, want int) {
+	t.Helper()
+	db := testDB(t)
+	var got int
+	if err := db.QueryRowContext(context.Background(), `
+		SELECT count(*)
+		FROM agents a
+		JOIN passports p ON p.agent_id = a.id
+		WHERE p.project_id = $1 AND a.owner = $2`, projectID, owner,
+	).Scan(&got); err != nil {
+		t.Fatalf("count registrations: %v", err)
+	}
+	if got != want {
+		t.Fatalf("registration count = %d, want %d", got, want)
+	}
+}
+
+func assertFixedBootstrapCounts(t *testing.T, projectID string) {
+	t.Helper()
+	db := testDB(t)
+	var channels int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM channels WHERE project_id = $1 AND name IN ('introductions', 'general')`, projectID,
+	).Scan(&channels); err != nil {
+		t.Fatalf("count fixed channels: %v", err)
+	}
+	if channels != 2 {
+		t.Fatalf("fixed channel count = %d, want 2", channels)
+	}
+	var articles int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM kb_articles WHERE project_id = $1 AND bootstrap_key = $2`, projectID, onboardingArticleBootstrapKey,
+	).Scan(&articles); err != nil {
+		t.Fatalf("count onboarding articles: %v", err)
+	}
+	if articles != 1 {
+		t.Fatalf("onboarding article count = %d, want 1", articles)
 	}
 }
 
@@ -190,12 +408,19 @@ func permsSuperset(got, want []string) bool {
 	return true
 }
 
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 // TestRegisterAgentTool_Handler_KnownRole verifies that a known --role
 // template resolves: the passport's roles tag includes the template name,
 // and the issued token's granted permissions are a superset of the
-// template's seeded permission bundle (Chapter 5 migration:
-// backend-engineer -> task.read, task.write, kb.read, kb.write,
-// channel.read, channel.write).
+// template's seeded permission bundle (migration 000014).
 func TestRegisterAgentTool_Handler_KnownRole(t *testing.T) {
 	store := testIdentityStore(t)
 	eventsStore := testEventsStore(t)
@@ -236,9 +461,19 @@ func TestRegisterAgentTool_Handler_KnownRole(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WhoAmI: %v", err)
 	}
-	wantBundle := []string{"task.read", "task.write", "kb.read", "kb.write", "channel.read", "channel.write"}
+	wantBundle := []string{
+		"task.list", "task.create", "task.update_status",
+		"kb.search", "kb.get", "kb.get_links", "kb.write",
+		"channel.list", "channel.subscribe", "channel.create", "channel.post",
+		"git.link_commit", "git.request_review",
+	}
 	if !permsSuperset(scope.Permissions, wantBundle) {
 		t.Fatalf("Permissions: got %v, want superset of %v", scope.Permissions, wantBundle)
+	}
+	for _, coarseAlias := range []string{"task.read", "task.write", "kb.read", "channel.read", "channel.write"} {
+		if contains(scope.Permissions, coarseAlias) {
+			t.Fatalf("Permissions: got %v, want no coarse alias %q", scope.Permissions, coarseAlias)
+		}
 	}
 }
 
@@ -274,9 +509,20 @@ func TestRegisterAgentTool_Handler_KnownRole_UnionsExplicitPermissions(t *testin
 	if err != nil {
 		t.Fatalf("WhoAmI: %v", err)
 	}
-	wantAll := []string{"task.assign", "task.read", "task.write", "kb.read", "kb.write", "channel.read", "channel.write"}
+	wantAll := []string{
+		"task.assign",
+		"task.list", "task.create", "task.update_status",
+		"kb.search", "kb.get", "kb.get_links", "kb.write",
+		"channel.list", "channel.subscribe", "channel.create", "channel.post",
+		"git.link_commit", "git.request_review",
+	}
 	if !permsSuperset(scope.Permissions, wantAll) {
 		t.Fatalf("Permissions: got %v, want superset of %v", scope.Permissions, wantAll)
+	}
+	for _, coarseAlias := range []string{"task.read", "task.write", "kb.read", "channel.read", "channel.write"} {
+		if contains(scope.Permissions, coarseAlias) {
+			t.Fatalf("Permissions: got %v, want no coarse alias %q", scope.Permissions, coarseAlias)
+		}
 	}
 }
 

@@ -137,8 +137,7 @@ type Embedder interface {
 // wormhole.kb.write / wormhole.kb.search pipeline real and testable end to
 // end (populated embedding column, working pgvector distance ranking)
 // without committing to an external embedding API or a new Go dependency
-// before that choice is made (docs/superpowers/plans/2026-07-20-day14-kb-embeddings-search.md,
-// "Embedding provider decision"; RFC-0001 §15 open question). The real
+// before that choice is made (RFC-0001 §15 open question). The real
 // provider is deferred to a later day.
 //
 // Algorithm: sha256 the input text, take the first 16 bytes of the digest,
@@ -174,24 +173,24 @@ func formatVectorLiteral(vec []float32) string {
 }
 
 type Store struct {
-	db                  *sql.DB
-	embedder            Embedder
-	dedupThreshold      float64
-	maxBodyLength       int
-	minLinksDecision    int
-	minLinksPolicy      int
-	minLinksProcedure   int
+	db                *sql.DB
+	embedder          Embedder
+	dedupThreshold    float64
+	maxBodyLength     int
+	minLinksDecision  int
+	minLinksPolicy    int
+	minLinksProcedure int
 }
 
 func NewStore(db *sql.DB, embedder Embedder, dedupThreshold float64, maxBodyLength int, minLinksDecision, minLinksPolicy, minLinksProcedure int) *Store {
 	return &Store{
-		db:                  db,
-		embedder:            embedder,
-		dedupThreshold:      dedupThreshold,
-		maxBodyLength:       maxBodyLength,
-		minLinksDecision:    minLinksDecision,
-		minLinksPolicy:      minLinksPolicy,
-		minLinksProcedure:   minLinksProcedure,
+		db:                db,
+		embedder:          embedder,
+		dedupThreshold:    dedupThreshold,
+		maxBodyLength:     maxBodyLength,
+		minLinksDecision:  minLinksDecision,
+		minLinksPolicy:    minLinksPolicy,
+		minLinksProcedure: minLinksProcedure,
 	}
 }
 
@@ -205,7 +204,27 @@ const articleColumns = `id, project_id, title, body, frontmatter, author_agent_i
 // WriteArticle inserts a new article, letting Postgres assign the id
 // (gen_random_uuid() default).
 func (s *Store) WriteArticle(ctx context.Context, projectID, agentID, title, body string, frontmatter json.RawMessage, linkTargetIDs []string, force bool) (Article, error) {
-	return s.writeArticleWithOptionalID(ctx, "", projectID, agentID, title, body, frontmatter, linkTargetIDs, force)
+	return s.writeArticleWithOptionalID(ctx, "", "", projectID, agentID, title, body, frontmatter, linkTargetIDs, force)
+}
+
+// EnsureBootstrapArticle atomically creates a fixed system article or returns
+// the existing article carrying bootstrapKey. Ordinary articles never set this
+// nullable marker, so their titles remain unconstrained.
+func (s *Store) EnsureBootstrapArticle(ctx context.Context, projectID, agentID, bootstrapKey, title, body string, frontmatter json.RawMessage) (Article, error) {
+	if bootstrapKey == "" {
+		return Article{}, fmt.Errorf("kb: ensure bootstrap article: empty bootstrap key")
+	}
+	return s.writeArticleWithOptionalID(ctx, "", bootstrapKey, projectID, agentID, title, body, frontmatter, nil, true)
+}
+
+// EnsureBootstrapArticleInTx is the transaction-scoped core of
+// EnsureBootstrapArticle. The caller owns tx's lifecycle and must have set
+// wormhole.project_id.
+func (s *Store) EnsureBootstrapArticleInTx(ctx context.Context, tx *sql.Tx, projectID, agentID, bootstrapKey, title, body string, frontmatter json.RawMessage) (Article, error) {
+	if bootstrapKey == "" {
+		return Article{}, fmt.Errorf("kb: ensure bootstrap article: empty bootstrap key")
+	}
+	return s.writeArticleInTxWithOptionalID(ctx, tx, "", bootstrapKey, projectID, agentID, title, body, frontmatter, nil, true)
 }
 
 // WriteArticleWithID inserts a new article under the caller-supplied id
@@ -215,7 +234,7 @@ func (s *Store) WriteArticle(ctx context.Context, projectID, agentID, title, bod
 // id the client already has; ordinary article writes (wormhole.kb.write)
 // have no local id to preserve and keep calling WriteArticle.
 func (s *Store) WriteArticleWithID(ctx context.Context, id, projectID, agentID, title, body string, frontmatter json.RawMessage, linkTargetIDs []string, force bool) (Article, error) {
-	return s.writeArticleWithOptionalID(ctx, id, projectID, agentID, title, body, frontmatter, linkTargetIDs, force)
+	return s.writeArticleWithOptionalID(ctx, id, "", projectID, agentID, title, body, frontmatter, linkTargetIDs, force)
 }
 
 // writeArticleWithOptionalID is the shared transaction/validation core of
@@ -226,7 +245,7 @@ func (s *Store) WriteArticleWithID(ctx context.Context, id, projectID, agentID, 
 // list and args, so the row is inserted under that exact id (a duplicate id
 // surfaces as a normal primary-key unique-violation error, same as any
 // other store error today).
-func (s *Store) writeArticleWithOptionalID(ctx context.Context, id, projectID, agentID, title, body string, frontmatter json.RawMessage, linkTargetIDs []string, force bool) (Article, error) {
+func (s *Store) writeArticleWithOptionalID(ctx context.Context, id, bootstrapKey, projectID, agentID, title, body string, frontmatter json.RawMessage, linkTargetIDs []string, force bool) (Article, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Article{}, fmt.Errorf("kb: write article: begin tx: %w", err)
@@ -237,9 +256,20 @@ func (s *Store) writeArticleWithOptionalID(ctx context.Context, id, projectID, a
 		return Article{}, fmt.Errorf("kb: write article: set project id: %w", err)
 	}
 
+	article, err := s.writeArticleInTxWithOptionalID(ctx, tx, id, bootstrapKey, projectID, agentID, title, body, frontmatter, linkTargetIDs, force)
+	if err != nil {
+		return Article{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Article{}, fmt.Errorf("kb: write article: commit: %w", err)
+	}
+	return article, nil
+}
+
+func (s *Store) writeArticleInTxWithOptionalID(ctx context.Context, tx *sql.Tx, id, bootstrapKey, projectID, agentID, title, body string, frontmatter json.RawMessage, linkTargetIDs []string, force bool) (Article, error) {
 	// Verify agent has a passport for this project.
 	var dummy int
-	err = tx.QueryRowContext(ctx, "SELECT 1 FROM passports WHERE agent_id = $1 AND project_id = $2", agentID, projectID).Scan(&dummy)
+	err := tx.QueryRowContext(ctx, "SELECT 1 FROM passports WHERE agent_id = $1 AND project_id = $2", agentID, projectID).Scan(&dummy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Article{}, fmt.Errorf("kb: write article: agent not registered or has no passport for this project: %w", ErrPassportNotFound)
 	} else if err != nil {
@@ -344,7 +374,16 @@ func (s *Store) writeArticleWithOptionalID(ctx context.Context, id, projectID, a
 	}
 
 	var row *sql.Row
-	if id == "" {
+	if bootstrapKey != "" {
+		row = tx.QueryRowContext(ctx,
+			`INSERT INTO kb_articles (project_id, title, body, frontmatter, author_agent_id, embedding, bootstrap_key)
+			 VALUES ($1, $2, $3, $4, $5, $6::vector, $7)
+			 ON CONFLICT (project_id, bootstrap_key) WHERE bootstrap_key IS NOT NULL
+			 DO UPDATE SET bootstrap_key = EXCLUDED.bootstrap_key
+			 RETURNING `+articleColumns,
+			projectID, title, body, frontmatter, agentID, formatVectorLiteral(embedding), bootstrapKey,
+		)
+	} else if id == "" {
 		row = tx.QueryRowContext(ctx,
 			`INSERT INTO kb_articles (project_id, title, body, frontmatter, author_agent_id, embedding)
 			 VALUES ($1, $2, $3, $4, $5, $6::vector)
@@ -382,9 +421,6 @@ func (s *Store) writeArticleWithOptionalID(ctx context.Context, id, projectID, a
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return Article{}, fmt.Errorf("kb: write article: commit: %w", err)
-	}
 	return article, nil
 }
 
@@ -608,4 +644,3 @@ func (s *Store) ListArticles(ctx context.Context, projectID string) ([]Article, 
 
 	return articles, nil
 }
-

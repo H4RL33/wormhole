@@ -75,3 +75,36 @@ func TestTool_JSONSerialization(t *testing.T) {
 		t.Errorf("handler field should not be serialized")
 	}
 }
+
+// TestRegistry_EveryAuthedToolDeclaresPermission guards against a future
+// tool shipping authenticated-but-ungated. Every RequiresAuth tool must
+// carry a non-empty RequiredPermission, except the deliberate auth-only
+// exemptions (self-identification and wormholed transport).
+func TestRegistry_EveryAuthedToolDeclaresPermission(t *testing.T) {
+	exempt := map[string]bool{
+		"wormhole.agent.whoami":          true,
+		"wormhole.sync.bootstrap":        true,
+		"wormhole.sync.incremental_pull": true,
+		"wormhole.sync.incremental_push": true,
+		"wormhole.sync.conflict_report":  true,
+	}
+
+	registry := buildFullRegistry()
+	for _, tool := range registry.List() {
+		if !tool.RequiresAuth {
+			if tool.RequiredPermission != "" {
+				t.Errorf("%s: RequiresAuth=false but RequiredPermission=%q; unauthenticated tools cannot gate on a permission", tool.Name, tool.RequiredPermission)
+			}
+			continue
+		}
+		if exempt[tool.Name] {
+			if tool.RequiredPermission != "" {
+				t.Errorf("%s: exempt tool must have empty RequiredPermission, got %q", tool.Name, tool.RequiredPermission)
+			}
+			continue
+		}
+		if tool.RequiredPermission == "" {
+			t.Errorf("%s: authenticated tool must declare a RequiredPermission", tool.Name)
+		}
+	}
+}

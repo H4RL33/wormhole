@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -92,6 +93,45 @@ func TestLoad_FallsBackToHomeWhenXDGUnset(t *testing.T) {
 	}
 }
 
+func TestLoad_ReportsHomeReadAndDecodeErrors(t *testing.T) {
+	t.Run("home unavailable", func(t *testing.T) {
+		t.Setenv("HOME", "")
+		_, err := Load("default")
+		if err == nil || !strings.Contains(err.Error(), "resolve home directory") {
+			t.Fatalf("Load: got err %v, want home resolution error", err)
+		}
+	})
+
+	t.Run("credentials unreadable", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		path := filepath.Join(home, ".wormhole", "credentials", "default.json")
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatalf("mkdir credential path: %v", err)
+		}
+		_, err := Load("default")
+		if err == nil || !strings.Contains(err.Error(), "read credentials") {
+			t.Fatalf("Load: got err %v, want read credentials error", err)
+		}
+	})
+
+	t.Run("credentials malformed", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		dir := filepath.Join(home, ".wormhole", "credentials")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("mkdir credentials: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "default.json"), []byte("{"), 0o600); err != nil {
+			t.Fatalf("write malformed credentials: %v", err)
+		}
+		_, err := Load("default")
+		if err == nil || !strings.Contains(err.Error(), "decode credentials") {
+			t.Fatalf("Load: got err %v, want decode credentials error", err)
+		}
+	})
+}
+
 func writeFakeCredentialsWithProjectID(t *testing.T, home, profile string, projectID string) {
 	t.Helper()
 	dir := filepath.Join(home, ".wormhole", "credentials")
@@ -172,4 +212,84 @@ func TestLoadMultiOrg_PopulatesBindings(t *testing.T) {
 	if cfg.DBPath != filepath.Join(home, "data", "wormhole", "wormholed.db") {
 		t.Fatalf("got db path %q", cfg.DBPath)
 	}
+}
+
+func TestLoadMultiOrg_FiltersInvalidEntriesAndUsesFallbackPaths(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	t.Setenv("XDG_DATA_HOME", "")
+	credDir := filepath.Join(home, ".wormhole", "credentials")
+	if err := os.MkdirAll(filepath.Join(credDir, "nested.json"), 0o700); err != nil {
+		t.Fatalf("mkdir ignored directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(credDir, "notes.txt"), []byte("ignored"), 0o600); err != nil {
+		t.Fatalf("write ignored file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(credDir, "...json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("write invalid-name profile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(credDir, "malformed.json"), []byte("{"), 0o600); err != nil {
+		t.Fatalf("write malformed profile: %v", err)
+	}
+	if err := os.Symlink(credDir, filepath.Join(credDir, "unreadable.json")); err != nil {
+		t.Fatalf("symlink unreadable profile: %v", err)
+	}
+	writeFakeCredentialsWithProjectID(t, home, "valid", "project-valid")
+
+	cfg, err := LoadMultiOrg()
+	if err != nil {
+		t.Fatalf("LoadMultiOrg: %v", err)
+	}
+	if len(cfg.Orgs) != 1 || cfg.Orgs["valid"].Credentials.ProjectID != "project-valid" {
+		t.Fatalf("filtered orgs: got %+v", cfg.Orgs)
+	}
+	if cfg.SocketPath != filepath.Join(os.TempDir(), "wormhole-runtime", "wormhole", "wormholed.sock") {
+		t.Fatalf("fallback socket path: got %q", cfg.SocketPath)
+	}
+	if cfg.DBPath != filepath.Join(home, ".local", "share", "wormhole", "wormholed.db") {
+		t.Fatalf("fallback db path: got %q", cfg.DBPath)
+	}
+}
+
+func TestLoadMultiOrg_ReportsDirectoryAndProfileErrors(t *testing.T) {
+	t.Run("home unavailable", func(t *testing.T) {
+		t.Setenv("HOME", "")
+		_, err := LoadMultiOrg()
+		if err == nil || !strings.Contains(err.Error(), "resolve home directory") {
+			t.Fatalf("LoadMultiOrg: got err %v, want home resolution error", err)
+		}
+	})
+
+	t.Run("credentials path is not a directory", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		path := filepath.Join(home, ".wormhole", "credentials")
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatalf("mkdir parent: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("file"), 0o600); err != nil {
+			t.Fatalf("write credentials path: %v", err)
+		}
+		_, err := LoadMultiOrg()
+		if err == nil || !strings.Contains(err.Error(), "list credentials directory") {
+			t.Fatalf("LoadMultiOrg: got err %v, want list error", err)
+		}
+	})
+
+	t.Run("no valid profiles", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		dir := filepath.Join(home, ".wormhole", "credentials")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("mkdir credentials: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "malformed.json"), []byte("{"), 0o600); err != nil {
+			t.Fatalf("write malformed profile: %v", err)
+		}
+		_, err := LoadMultiOrg()
+		if !errors.Is(err, ErrNoCredentials) {
+			t.Fatalf("LoadMultiOrg: got err %v, want ErrNoCredentials", err)
+		}
+	})
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/types"
@@ -15,6 +16,10 @@ import (
 // ErrTaskNotFound is returned when a task lookup has no matching row in the
 // requested namespace.
 var ErrTaskNotFound = errors.New("localstore/task: not found")
+
+// ErrNamespaceCollision is returned when a sync upsert attempts to reuse an
+// ID already owned by another namespace.
+var ErrNamespaceCollision = errors.New("localstore: namespace collision")
 
 // validTaskStatuses enumerates the legal task statuses (RFC-0001 §8.2).
 var validTaskStatuses = map[string]bool{
@@ -66,6 +71,20 @@ func (r *TaskRepo) CreateTask(ctx context.Context, namespaceID, title, descripti
 	}
 	defer tx.Rollback()
 
+	task, err := r.CreateTaskTx(ctx, tx, namespaceID, title, description, parentTaskID, priority, dueBy)
+	if err != nil {
+		return Task{}, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Task{}, fmt.Errorf("localstore/task: create: commit: %w", err)
+	}
+	return task, nil
+}
+
+// CreateTaskTx inserts a task using tx so callers can atomically enqueue the
+// corresponding sync item before committing the durable local write.
+func (r *TaskRepo) CreateTaskTx(ctx context.Context, tx *sql.Tx, namespaceID, title, description string, parentTaskID *string, priority int, dueBy *time.Time) (Task, error) {
 	taskID := uuid.New().String()
 	row := tx.QueryRowContext(ctx,
 		`INSERT INTO tasks (id, namespace_id, parent_task_id, title, description, priority, due_by) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -75,10 +94,6 @@ func (r *TaskRepo) CreateTask(ctx context.Context, namespaceID, title, descripti
 	task, err := scanTask(row)
 	if err != nil {
 		return Task{}, fmt.Errorf("localstore/task: create: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return Task{}, fmt.Errorf("localstore/task: create: commit: %w", err)
 	}
 	return task, nil
 }
@@ -226,6 +241,20 @@ func (r *TaskRepo) Assign(ctx context.Context, namespaceID, taskID, ownerAgentID
 	}
 	defer tx.Rollback()
 
+	task, err := r.AssignTx(ctx, tx, namespaceID, taskID, ownerAgentID)
+	if err != nil {
+		return Task{}, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Task{}, fmt.Errorf("localstore/task: assign: commit: %w", err)
+	}
+	return task, nil
+}
+
+// AssignTx records task ownership using tx so routing can atomically persist
+// the assigned task and its outbound sync entry.
+func (r *TaskRepo) AssignTx(ctx context.Context, tx *sql.Tx, namespaceID, taskID, ownerAgentID string) (Task, error) {
 	row := tx.QueryRowContext(ctx,
 		`UPDATE tasks SET owner_agent_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND namespace_id = ?
 		 RETURNING id, namespace_id, parent_task_id, title, description, owner_agent_id, status, priority, due_by, created_at, updated_at`,
@@ -237,10 +266,6 @@ func (r *TaskRepo) Assign(ctx context.Context, namespaceID, taskID, ownerAgentID
 	}
 	if err != nil {
 		return Task{}, fmt.Errorf("localstore/task: assign: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return Task{}, fmt.Errorf("localstore/task: assign: commit: %w", err)
 	}
 	return task, nil
 }
@@ -263,11 +288,19 @@ func (r *TaskRepo) UpsertTask(ctx context.Context, namespaceID, taskID, title, d
 	}
 	defer tx.Rollback()
 
+	var collision int
+	err = tx.QueryRowContext(ctx, `SELECT 1 FROM tasks WHERE id = ? AND namespace_id <> ?`, taskID, namespaceID).Scan(&collision)
+	if err == nil {
+		return Task{}, ErrNamespaceCollision
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return Task{}, fmt.Errorf("localstore/task: upsert: namespace lookup: %w", err)
+	}
+
 	row := tx.QueryRowContext(ctx,
 		`INSERT INTO tasks (id, namespace_id, parent_task_id, title, description, owner_agent_id, status, priority, due_by)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
-			namespace_id = excluded.namespace_id,
 			parent_task_id = excluded.parent_task_id,
 			title = excluded.title,
 			description = excluded.description,
@@ -318,8 +351,7 @@ func scanTaskRows(row interface {
 	Scan(...interface{}) error
 }) (Task, error) {
 	var task Task
-	var parentTaskID, ownerAgentID sql.NullString
-	var dueBy sql.NullTime
+	var parentTaskID, ownerAgentID, dueBy sql.NullString
 	var status string
 
 	err := row.Scan(
@@ -337,7 +369,12 @@ func scanTaskRows(row interface {
 		task.OwnerAgentID = &ownerAgentID.String
 	}
 	if dueBy.Valid {
-		task.DueBy = &dueBy.Time
+		dueByValue, _, _ := strings.Cut(dueBy.String, " m=")
+		parsedDueBy, err := time.Parse("2006-01-02 15:04:05.999999999 -0700 MST", dueByValue)
+		if err != nil {
+			return Task{}, fmt.Errorf("parse due_by: %w", err)
+		}
+		task.DueBy = &parsedDueBy
 	}
 	return task, nil
 }

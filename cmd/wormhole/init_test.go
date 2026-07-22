@@ -23,6 +23,17 @@ func TestRunInitRejectsArgs(t *testing.T) {
 	}
 }
 
+func TestRunInitRequiresInteractiveTerminal(t *testing.T) {
+	var out, errOut bytes.Buffer
+	code := runInit(nil, &out, &errOut)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 outside a terminal", code)
+	}
+	if !strings.Contains(errOut.String(), "stdin is not a TTY") {
+		t.Fatalf("stderr = %q, want non-TTY guidance", errOut.String())
+	}
+}
+
 // initWizard writes a config from the prompted values when none exists yet.
 func TestInitWizardFreshWrite(t *testing.T) {
 	dir := t.TempDir()

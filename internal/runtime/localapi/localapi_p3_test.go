@@ -10,12 +10,14 @@ import (
 	"encoding/json"
 	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/runtime/eventbus"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/runtime/scheduler"
+	syncpkg "github.com/H4RL33/wormhole/internal/runtime/sync"
 )
 
 // dialLocalSocket dials socketPath with retry. Transport-agnostic (design
@@ -47,6 +49,100 @@ func sendRequest(t *testing.T, socketPath string, tool string, args map[string]i
 	reader := bufio.NewReader(conn)
 	mcpInitialize(t, conn, reader)
 	return mcpCallTool(t, conn, reader, 2, tool, args)
+}
+
+func newTaskRouteTestRuntime(t *testing.T, projectID string) (*Server, *localstore.Store, *scheduler.Scheduler, *syncpkg.QueueRepo, string) {
+	t.Helper()
+	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
+	if err != nil {
+		t.Fatalf("open route store: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	if err := store.CacheWhoAmI(context.Background(), localstore.WhoAmICache{AgentID: "route-agent", ProjectID: projectID, Permissions: []string{"task.create", "task.assign"}, CachedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("cache route scope: %v", err)
+	}
+	er := localstore.NewEventRepo(store.DB())
+	sched := scheduler.NewScheduler()
+	queue := syncpkg.NewQueueRepo(store.DB())
+	socketPath := filepath.Join(t.TempDir(), "task-route.sock")
+	srv, err := NewWithRuntime(socketPath, "", "", projectID, store,
+		localstore.NewTaskRepo(store.DB(), er), er, localstore.NewKBRepo(store.DB()), eventbus.NewEventBus(), sched, queue)
+	if err != nil {
+		t.Fatalf("new route server: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go srv.Serve(ctx)
+	t.Cleanup(func() { cancel(); srv.Close() })
+	return srv, store, sched, queue, socketPath
+}
+
+func assertNoDurableRouteState(t *testing.T, store *localstore.Store, queue *syncpkg.QueueRepo, projectID string) {
+	t.Helper()
+	var tasks int
+	if err := store.DB().QueryRow(`SELECT count(*) FROM tasks`).Scan(&tasks); err != nil {
+		t.Fatalf("count routed tasks: %v", err)
+	}
+	if tasks != 0 {
+		t.Fatalf("failed route left %d durable task(s)", tasks)
+	}
+	pending, err := queue.ListPending(context.Background(), projectID, 10)
+	if err != nil {
+		t.Fatalf("list route queue: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("failed route left queue entries: %+v", pending)
+	}
+}
+
+func TestLocalAgentAndRouteHandlersRejectUnavailableOrInvalidRequests(t *testing.T) {
+	noRuntime, _ := newMCPTestServer(t)
+	ctx := context.Background()
+	for _, tt := range []struct {
+		name string
+		call func() error
+	}{
+		{"register", func() error {
+			_, err := noRuntime.handleAgentRegister(ctx, json.RawMessage(`{"agent_id":"agent"}`))
+			return err
+		}},
+		{"presence", func() error {
+			_, err := noRuntime.handleAgentPresence(ctx, json.RawMessage(`{"agent_id":"agent","status":"online"}`))
+			return err
+		}},
+		{"list", func() error { _, err := noRuntime.handleAgentList(ctx, nil); return err }},
+		{"route", func() error {
+			_, err := noRuntime.handleTaskRoute(ctx, json.RawMessage(`{"capability":"code"}`))
+			return err
+		}},
+	} {
+		t.Run(tt.name+" requires runtime", func(t *testing.T) {
+			if err := tt.call(); err == nil || !strings.Contains(err.Error(), "not available") {
+				t.Fatalf("handler error = %v, want unavailable runtime", err)
+			}
+		})
+	}
+
+	srv, store, _, queue, _ := newTaskRouteTestRuntime(t, "project-1")
+	for _, tt := range []struct {
+		name string
+		call func() error
+		want string
+	}{
+		{"register malformed", func() error { _, err := srv.handleAgentRegister(ctx, json.RawMessage(`{`)); return err }, "invalid args"},
+		{"register missing id", func() error { _, err := srv.handleAgentRegister(ctx, nil); return err }, "missing agent_id"},
+		{"presence malformed", func() error { _, err := srv.handleAgentPresence(ctx, json.RawMessage(`{`)); return err }, "invalid args"},
+		{"presence missing fields", func() error { _, err := srv.handleAgentPresence(ctx, nil); return err }, "missing agent_id"},
+		{"list malformed", func() error { _, err := srv.handleAgentList(ctx, json.RawMessage(`{`)); return err }, "invalid args"},
+		{"route malformed", func() error { _, err := srv.handleTaskRoute(ctx, json.RawMessage(`{`)); return err }, "invalid args"},
+		{"route missing capability", func() error { _, err := srv.handleTaskRoute(ctx, nil); return err }, "missing capability"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.call(); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("handler error = %v, want %q", err, tt.want)
+			}
+			assertNoDurableRouteState(t, store, queue, "project-1")
+		})
+	}
 }
 
 // TestTwoAgentsPresenceWithoutCoordinationServer proves two agents on the same
@@ -165,6 +261,9 @@ func TestTaskRoutedWithoutCoordinationServer(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer store.Close()
+	if err := store.CacheWhoAmI(context.Background(), localstore.WhoAmICache{AgentID: "task-agent", ProjectID: "project-1", Permissions: []string{"task.create", "task.assign"}, CachedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("cache task-route scope: %v", err)
+	}
 
 	bus := eventbus.NewEventBus()
 	sched := scheduler.NewScheduler()
@@ -172,9 +271,10 @@ func TestTaskRoutedWithoutCoordinationServer(t *testing.T) {
 	// No fake coordination server — this test must work entirely without one.
 	socketPath := filepath.Join(t.TempDir(), "p3-task.sock")
 	er := localstore.NewEventRepo(store.DB())
+	queue := syncpkg.NewQueueRepo(store.DB())
 	srv, err := NewWithRuntime(socketPath, "", "", "project-1",
 		store, localstore.NewTaskRepo(store.DB(), er), er,
-		localstore.NewKBRepo(store.DB()), bus, sched, nil)
+		localstore.NewKBRepo(store.DB()), bus, sched, queue)
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
@@ -264,6 +364,93 @@ func TestTaskRoutedWithoutCoordinationServer(t *testing.T) {
 	}
 	if !hasCode {
 		t.Errorf("assigned agent %s missing 'code' capability", assignedTo)
+	}
+
+	pending, err := queue.ListPending(context.Background(), "project-1", 10)
+	if err != nil {
+		t.Fatalf("list route queue: %v", err)
+	}
+	if len(pending) != 1 || pending[0].EntityType != "task" || pending[0].Operation != "create" || pending[0].EntityID != taskID {
+		t.Fatalf("route queue = %+v, want one task/create entry for %s", pending, taskID)
+	}
+	var queued map[string]interface{}
+	if err := json.Unmarshal(pending[0].Payload, &queued); err != nil {
+		t.Fatalf("decode route queue payload: %v", err)
+	}
+	if queued["id"] != taskID || queued["owner_agent_id"] != assignedTo {
+		t.Fatalf("route queue payload = %#v, want id=%s owner=%s", queued, taskID, assignedTo)
+	}
+	if got := sched.TaskCount(); got != 1 {
+		t.Fatalf("scheduler task count = %d, want 1", got)
+	}
+}
+
+func TestTaskRouteRegistrationFailureLeavesNoDurableState(t *testing.T) {
+	_, store, sched, queue, socketPath := newTaskRouteTestRuntime(t, "")
+	resp := sendRequest(t, socketPath, "wormhole.task.route", map[string]interface{}{"capability": "code", "title": "must roll back"})
+	if resp.Error == "" {
+		t.Fatal("task.route registration failure returned success")
+	}
+	assertNoDurableRouteState(t, store, queue, "")
+	if got := sched.TaskCount(); got != 0 {
+		t.Fatalf("registration failure left %d scheduler task(s)", got)
+	}
+}
+
+func TestTaskRouteNoMatchLeavesNoDurableState(t *testing.T) {
+	_, store, sched, queue, socketPath := newTaskRouteTestRuntime(t, "project-1")
+	resp := sendRequest(t, socketPath, "wormhole.task.route", map[string]interface{}{"capability": "code", "title": "no eligible agent"})
+	if resp.Error == "" {
+		t.Fatal("task.route assignment failure returned success")
+	}
+	assertNoDurableRouteState(t, store, queue, "project-1")
+	if got := sched.TaskCount(); got != 0 {
+		t.Fatalf("assignment failure left %d scheduler task(s)", got)
+	}
+}
+
+func TestTaskRouteRequiresTaskAssignPermission(t *testing.T) {
+	srv, store, sched, queue, socketPath := newTaskRouteTestRuntime(t, "project-1")
+	srv.SetAuthorizationAgent("project-1", "route-agent")
+	if _, err := store.DB().Exec(`UPDATE whoami_cache SET permissions = '["task.create"]' WHERE agent_id = 'route-agent' AND project_id = 'project-1'`); err != nil {
+		t.Fatalf("restrict route permissions: %v", err)
+	}
+	if err := store.CacheWhoAmI(context.Background(), localstore.WhoAmICache{
+		AgentID: "stale-route-admin", ProjectID: "project-1",
+		Permissions: []string{"task.create", "task.assign"},
+		CachedAt:    time.Now().UTC().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("cache stale route admin: %v", err)
+	}
+	if _, err := sched.RegisterAgent("route-agent", "project-1", []string{"code"}); err != nil {
+		t.Fatalf("register route agent: %v", err)
+	}
+
+	resp := sendRequest(t, socketPath, "wormhole.task.route", map[string]interface{}{"capability": "code", "title": "assignment denied"})
+	if resp.Error == "" || !strings.Contains(resp.Error, "permission denied: requires task.assign") {
+		t.Fatalf("task.route error = %q, want task.assign denial", resp.Error)
+	}
+	assertNoDurableRouteState(t, store, queue, "project-1")
+	if got := sched.TaskCount(); got != 0 {
+		t.Fatalf("permission denial left %d scheduler task(s)", got)
+	}
+}
+
+func TestTaskRouteQueueFailureRollsBackDurableState(t *testing.T) {
+	_, store, sched, queue, socketPath := newTaskRouteTestRuntime(t, "project-1")
+	if _, err := sched.RegisterAgent("route-agent", "project-1", []string{"code"}); err != nil {
+		t.Fatalf("register route agent: %v", err)
+	}
+	if _, err := store.DB().Exec(`CREATE TRIGGER fail_route_queue BEFORE INSERT ON sync_queue BEGIN SELECT RAISE(FAIL, 'injected route queue failure'); END`); err != nil {
+		t.Fatalf("create route queue trigger: %v", err)
+	}
+	resp := sendRequest(t, socketPath, "wormhole.task.route", map[string]interface{}{"capability": "code", "title": "queue must be atomic"})
+	if resp.Error == "" || !strings.Contains(resp.Error, "injected route queue failure") {
+		t.Fatalf("task.route queue failure = %q, want injected error", resp.Error)
+	}
+	assertNoDurableRouteState(t, store, queue, "project-1")
+	if got := sched.TaskCount(); got != 0 {
+		t.Fatalf("queue failure left %d scheduler task(s)", got)
 	}
 }
 

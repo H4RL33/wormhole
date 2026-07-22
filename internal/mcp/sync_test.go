@@ -7,7 +7,40 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/H4RL33/wormhole/internal/core/identity"
+	"github.com/H4RL33/wormhole/internal/core/tasks"
 )
+
+func TestIncrementalPushTool_DeniesSameProjectItemWithoutActionPermission(t *testing.T) {
+	tasksStore := testTasksStore(t)
+	tool := IncrementalPushTool(tasksStore, testKBStore(t), testEventsStore(t), NewSyncRateLimiter(30, time.Minute))
+	projectID := mustCreateProject(t, "mcp-sync-push-permission-denied")
+	clientID := uuid.NewString()
+	payload, _ := json.Marshal(syncTaskCreatePayload{Title: "must not land"})
+	in := IncrementalPushInput{NamespaceID: projectID, Version: SyncProtocolVersion, Items: []struct {
+		EntityType string          `json:"entity_type"`
+		EntityID   string          `json:"entity_id"`
+		Operation  string          `json:"operation"`
+		Payload    json.RawMessage `json:"payload"`
+	}{{EntityType: "task", EntityID: clientID, Operation: "create", Payload: payload}}}
+	scope := &identity.AuthenticatedScope{ProjectID: projectID, Permissions: []string{"task.list"}}
+	result, err := tool.Handler(context.Background(), scope, projectID, mustMarshal(t, in))
+	if err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+	out := result.(IncrementalPushOutput)
+	if len(out.Applied) != 1 || out.Applied[0].Error != "permission denied: requires task.create" {
+		t.Fatalf("Applied = %+v, want same-project permission denial", out.Applied)
+	}
+	rows, err := tasksStore.List(context.Background(), projectID, nil)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("permission-denied item was persisted: %+v", rows)
+	}
+}
 
 func TestIncrementalPushTool_AppliesTaskCreate(t *testing.T) {
 	tasksStore := testTasksStore(t)
@@ -39,7 +72,8 @@ func TestIncrementalPushTool_AppliesTaskCreate(t *testing.T) {
 	}
 	arguments := mustMarshal(t, in)
 
-	result, err := tool.Handler(context.Background(), nil, projectID, arguments)
+	scope := &identity.AuthenticatedScope{ProjectID: projectID, Permissions: []string{"task.create"}}
+	result, err := tool.Handler(context.Background(), scope, projectID, arguments)
 	if err != nil {
 		t.Fatalf("Handler: %v", err)
 	}
@@ -66,6 +100,130 @@ func TestIncrementalPushTool_AppliesTaskCreate(t *testing.T) {
 	// different id than the one the client sent.
 	if list[0].ID != clientID {
 		t.Fatalf("server-side task id = %q, want client id %q (client entity id was not preserved)", list[0].ID, clientID)
+	}
+}
+
+func TestIncrementalPushTool_AppliesRoutedTaskOwner(t *testing.T) {
+	tasksStore := testTasksStore(t)
+	tool := IncrementalPushTool(tasksStore, testKBStore(t), testEventsStore(t), NewSyncRateLimiter(30, time.Minute))
+	projectID := mustCreateProject(t, "mcp-sync-push-routed-owner")
+	ownerID, _ := mustRegisterAgent(t, projectID)
+	clientID := uuid.NewString()
+	payload, _ := json.Marshal(syncTaskCreatePayload{
+		Title:        "routed task",
+		Status:       "todo",
+		OwnerAgentID: &ownerID,
+	})
+	in := IncrementalPushInput{NamespaceID: projectID, Version: SyncProtocolVersion, Items: []struct {
+		EntityType string          `json:"entity_type"`
+		EntityID   string          `json:"entity_id"`
+		Operation  string          `json:"operation"`
+		Payload    json.RawMessage `json:"payload"`
+	}{{EntityType: "task", EntityID: clientID, Operation: "create", Payload: payload}}}
+	scope := &identity.AuthenticatedScope{ProjectID: projectID, Permissions: []string{"task.create", "task.assign"}}
+
+	result, err := tool.Handler(context.Background(), scope, projectID, mustMarshal(t, in))
+	if err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+	out := result.(IncrementalPushOutput)
+	if len(out.Applied) != 1 || out.Applied[0].Error != "" {
+		t.Fatalf("Applied = %+v, want routed task success", out.Applied)
+	}
+	rows, err := tasksStore.List(context.Background(), projectID, nil)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("List = %+v, %v, want one task", rows, err)
+	}
+	if rows[0].ID != clientID || rows[0].OwnerAgentID == nil || *rows[0].OwnerAgentID != ownerID {
+		t.Fatalf("stored routed task = %+v, want id=%s owner=%s", rows[0], clientID, ownerID)
+	}
+}
+
+func TestIncrementalPushTool_RoutedOwnerRequiresTaskAssign(t *testing.T) {
+	tasksStore := testTasksStore(t)
+	tool := IncrementalPushTool(tasksStore, testKBStore(t), testEventsStore(t), NewSyncRateLimiter(30, time.Minute))
+	projectID := mustCreateProject(t, "mcp-sync-push-routed-owner-permission")
+	ownerID, _ := mustRegisterAgent(t, projectID)
+	payload, _ := json.Marshal(syncTaskCreatePayload{Title: "denied route", Status: "todo", OwnerAgentID: &ownerID})
+	in := IncrementalPushInput{NamespaceID: projectID, Version: SyncProtocolVersion, Items: []struct {
+		EntityType string          `json:"entity_type"`
+		EntityID   string          `json:"entity_id"`
+		Operation  string          `json:"operation"`
+		Payload    json.RawMessage `json:"payload"`
+	}{{EntityType: "task", EntityID: uuid.NewString(), Operation: "create", Payload: payload}}}
+	scope := &identity.AuthenticatedScope{ProjectID: projectID, Permissions: []string{"task.create"}}
+
+	result, err := tool.Handler(context.Background(), scope, projectID, mustMarshal(t, in))
+	if err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+	out := result.(IncrementalPushOutput)
+	if len(out.Applied) != 1 || out.Applied[0].Error != "permission denied: requires task.assign" {
+		t.Fatalf("Applied = %+v, want task.assign denial", out.Applied)
+	}
+	assertNoTasksForProject(t, tasksStore, projectID)
+}
+
+func TestIncrementalPushTool_RejectsCrossProjectRoutedOwner(t *testing.T) {
+	tasksStore := testTasksStore(t)
+	tool := IncrementalPushTool(tasksStore, testKBStore(t), testEventsStore(t), NewSyncRateLimiter(30, time.Minute))
+	projectA := mustCreateProject(t, "mcp-sync-push-owner-project-a")
+	projectB := mustCreateProject(t, "mcp-sync-push-owner-project-b")
+	ownerID, _ := mustRegisterAgent(t, projectB)
+	payload, _ := json.Marshal(syncTaskCreatePayload{Title: "cross-project route", Status: "todo", OwnerAgentID: &ownerID})
+	in := IncrementalPushInput{NamespaceID: projectA, Version: SyncProtocolVersion, Items: []struct {
+		EntityType string          `json:"entity_type"`
+		EntityID   string          `json:"entity_id"`
+		Operation  string          `json:"operation"`
+		Payload    json.RawMessage `json:"payload"`
+	}{{EntityType: "task", EntityID: uuid.NewString(), Operation: "create", Payload: payload}}}
+	scope := &identity.AuthenticatedScope{ProjectID: projectA, Permissions: []string{"task.create", "task.assign"}}
+
+	result, err := tool.Handler(context.Background(), scope, projectA, mustMarshal(t, in))
+	if err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+	out := result.(IncrementalPushOutput)
+	if len(out.Applied) != 1 || out.Applied[0].Error == "" {
+		t.Fatalf("Applied = %+v, want cross-project owner error", out.Applied)
+	}
+	assertNoTasksForProject(t, tasksStore, projectA)
+}
+
+func TestIncrementalPushTool_RejectsNonTodoTaskCreateStatus(t *testing.T) {
+	tasksStore := testTasksStore(t)
+	tool := IncrementalPushTool(tasksStore, testKBStore(t), testEventsStore(t), NewSyncRateLimiter(30, time.Minute))
+	projectID := mustCreateProject(t, "mcp-sync-push-task-status")
+	payload, _ := json.Marshal(syncTaskCreatePayload{Title: "invalid status", Status: "wip"})
+	in := IncrementalPushInput{NamespaceID: projectID, Version: SyncProtocolVersion, Items: []struct {
+		EntityType string          `json:"entity_type"`
+		EntityID   string          `json:"entity_id"`
+		Operation  string          `json:"operation"`
+		Payload    json.RawMessage `json:"payload"`
+	}{{EntityType: "task", EntityID: uuid.NewString(), Operation: "create", Payload: payload}}}
+	scope := &identity.AuthenticatedScope{ProjectID: projectID, Permissions: []string{"task.create"}}
+
+	result, err := tool.Handler(context.Background(), scope, projectID, mustMarshal(t, in))
+	if err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+	out := result.(IncrementalPushOutput)
+	if len(out.Applied) != 1 || out.Applied[0].Error != `task create status must be "todo"` {
+		t.Fatalf("Applied = %+v, want non-todo status error", out.Applied)
+	}
+	assertNoTasksForProject(t, tasksStore, projectID)
+}
+
+func assertNoTasksForProject(t *testing.T, store interface {
+	List(context.Context, string, *string) ([]tasks.Task, error)
+}, projectID string) {
+	t.Helper()
+	rows, err := store.List(context.Background(), projectID, nil)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("rejected push persisted tasks: %+v", rows)
 	}
 }
 

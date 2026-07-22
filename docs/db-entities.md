@@ -2,7 +2,11 @@
 
 No SQL yet — entities and relations only, per RFC-0001 §7.1 (indicative storage shape), §8 (pillars), §13 (multi-tenancy).
 
-All tables carry `project_id` for row-level scoping (RFC §13) except `projects` and `agents` itself (an agent identity can span projects via role grants).
+All tenant tables use row-level project scoping (RFC §13). Child tables carry
+`project_id`; the `projects` root scopes on `id`. `agents` is
+project-agnostic because an agent identity can span projects via Passports;
+`role_templates` is global configuration applied during registration. Those
+are the only application tables without tenant RLS.
 
 ## projects
 - `id`
@@ -30,7 +34,8 @@ Agent identity is project-agnostic; project-scoped access comes through `permiss
 ## permissions
 - `id`
 - `passport_id` -> passports
-- `action` (post_channel / create_task / write_kb / modify_permissions / ...)
+- `action` (`task.create` / `channel.post` / `kb.write` / other exact
+  `Tool.RequiredPermission` values)
 - `granted` (bool)
 
 ## viewer_keys
@@ -59,7 +64,7 @@ Append-only, per RFC §8.4.
 ## channels
 - `id`
 - `project_id` -> projects
-- `name`
+- `name` (unique within a project)
 - `created_at`
 
 ## events
@@ -109,6 +114,8 @@ RFC-0001 §8.2 doesn't specify exact column names/types for `tasks`/`task_links`
 - `frontmatter` (jsonb)
 - `embedding` (vector, pgvector)
 - `author_agent_id` -> agents
+- `bootstrap_key` (nullable; partial uniqueness within a project is reserved
+  for fixed system/bootstrap articles and does not constrain ordinary titles)
 - `created_at`
 - `updated_at`
 
@@ -136,6 +143,8 @@ Pointers only, per RFC §8.6 — never mirrors code.
 ## role_templates
 
 Stores role definitions and their default capabilities, roles, and permissions. Used during agent registration to auto-fill Passport fields when a role is specified.
+This is a global configuration table, not tenant data, so it intentionally has
+no `project_id` or RLS policy.
 
 | Column | Type | Notes |
 |--------|------|-------|

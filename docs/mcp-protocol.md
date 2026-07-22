@@ -1,34 +1,30 @@
-# Wormhole MCP Protocol — Transport & Auth (Chapter 1 decision)
+# Wormhole MCP Protocol — Transport & Auth
 
-**Status:** Design decision, Chapter 1 of `ROADMAP-ALPHA2.md` M1. Implemented by Chapters 2-4.
-**Inference flag (RFC-0001 §9):** the MCP tool surface is "indicative, not finalised." Tool
-*names* below are fixed by the RFC's naming grammar; the JSON-RPC envelope, field placement,
-and error-code mapping are this document's inference, made because no RFC text or existing
-code fully specifies them (ambiguity ladder, `docs/architecture.md` §0.4, rung 6 — decided
-here rather than escalated, since the decision is local to the transport layer and does not
-touch a pillar's data model or the open questions listed in RFC-0001 §15).
+**Implementation status (RFC-0001 §9):** the MCP tool surface is "indicative, not finalised."
+Tool *names* below are fixed by the RFC's naming grammar. The JSON-RPC envelope, field
+placement, and error-code mapping document the transport contract implemented today. Future
+transport changes that remain undecided after consulting the RFC and existing code must follow
+the ambiguity ladder in `docs/implementation-rules.md` §2.4.
 
-## 1. Why this replaces the current shape
+## 1. Transport contract
 
-`internal/mcp/server.go` today exposes a bespoke JSON/HTTP pair: `POST /mcp/tools` (list) and
-`POST /mcp/tools/call` (invoke), with a custom `CallRequest{Tool, ProjectID, Arguments}` /
-`CallResponse{Result, Error}` envelope. No real MCP client — Claude Code included — can attach
-to this; it does not speak the MCP wire protocol. `ROADMAP-ALPHA2.md`'s scope-decision flags
-call this out as the reason M1 exists and comes first. This document is the design this repo
-freezes and Chapters 2-4 build against; there is no back-compat shim (project is pre-1.0).
+`wormhole-server` exposes a single JSON-RPC 2.0 MCP endpoint at `/mcp`. The contract below
+keeps the server compatible with standard MCP clients, including Claude Code, without a
+custom tool-call envelope.
 
 ## 2. Transport: Streamable HTTP, single `/mcp` endpoint
 
 - One HTTP route, `/mcp`, replacing both `/mcp/tools` and `/mcp/tools/call`.
 - `POST /mcp`: client-to-server JSON-RPC 2.0 requests and notifications, one JSON-RPC message
-  per HTTP request body (batching not required for alpha 2 — Wormhole has no server-initiated
+  per HTTP request body (batching is not currently required — Wormhole has no server-initiated
   requests yet, so batched responses add complexity with no consumer).
 - `GET /mcp`: reserved for the server-to-client SSE stream the Streamable HTTP transport spec
   defines for server-initiated messages. Wormhole has no server-initiated MCP messages in
-  alpha 2 scope (no sampling requests, no server notifications) — Chapter 2 implements this
-  route to return `405 Method Not Allowed` rather than a real SSE stream, and that limitation
-  is stated in `docs/claude-code-connector.md` (Chapter 4). Building a real SSE stream for
-  zero current consumers would violate `docs/architecture.md` §0.5 (smallest correct diff).
+  the current implementation (no sampling requests, no server notifications), so this route
+  returns `405 Method Not Allowed`. The Claude Code connector uses the local `wormhole mcp`
+  stdio bridge and does not depend on a server-to-client SSE stream. Building a real SSE
+  stream for zero current consumers would violate the smallest-correct-diff rule in
+  `docs/implementation-rules.md` §2.5.
 - Every request and response body is `Content-Type: application/json`.
 
 HTTP status codes carry only transport-level meaning, never RPC-level outcome: every
@@ -79,8 +75,8 @@ returns HTTP `202 Accepted` with an empty body.
 
 ### 3.1 Error code mapping
 
-Standard JSON-RPC 2.0 codes, used exactly as the spec defines them (Chapter 2/3 must not invent
-new negative codes in this range):
+Standard JSON-RPC 2.0 codes, used exactly as the spec defines them (new negative codes must not
+be invented in this range):
 
 | Code | Meaning | Wormhole trigger |
 |---|---|---|
@@ -100,8 +96,7 @@ that is a transport-boundary failure, not a tool-logic failure.
 
 ## 4. Methods
 
-Three methods, matching M1's roadmap scope exactly (Chapter 1 decides these three; no others
-are added or implied):
+Three methods are supported:
 
 ### `initialize`
 
@@ -125,11 +120,8 @@ Response `result`:
 }
 ```
 
-`protocolVersion` pin: `2025-11-25` is the current published stable MCP specification revision,
-verified at Chapter 2 implementation time (2026-07-09). `2025-03-26` was the last known revision
-when this document was first written (Chapter 1) and has since been superseded. A `2026-07-28`
-revision exists as a release candidate at verification time but is not yet a published stable
-spec, so it is not used here. Re-verify before any future protocol bump.
+`protocolVersion` is pinned to the MCP revision implemented by this server. Re-verify the stable
+MCP specification before any protocol-version bump.
 
 Server capabilities are `{"tools": {}}` only — no `resources`, `prompts`, `sampling`, or
 `logging` capability objects, since Wormhole exposes only tools (RFC-0001 §5.5: every
@@ -152,8 +144,8 @@ Response `result`:
 }
 ```
 
-Auto-derived from the existing `Registry` (Chapter 2 requirement — no manual duplication of the
-16 registered tools' schemas). Each tool's `inputSchema` MUST include `project_id` as a required
+Auto-derived from the existing `Registry`; tool schemas are not manually duplicated. Each tool's
+`inputSchema` MUST include `project_id` as a required
 string property (see §4.3 below) unless the tool is project-agnostic (`wormhole.agent.whoami`
 takes no project_id per RFC-0001 §9).
 
@@ -180,8 +172,8 @@ protocol shape). Decision: **`project_id` moves inside `arguments`**, as a requi
 every project-scoped tool's `inputSchema`, populated by the calling client exactly like any
 other argument. This is the only option compatible with an unmodified standard MCP client
 (Claude Code) — a custom sibling field is not something a real MCP client would ever send.
-Chapter 2's `tools/list` auto-derivation and Chapter 3's `tools/call` handler must read
-`project_id` out of `arguments`, not off a transport envelope field.
+The `tools/list` schema generator and `tools/call` handler read `project_id` from `arguments`,
+not from a transport-envelope field.
 
 ## 5. Auth carry-over
 
@@ -190,30 +182,26 @@ format, same `identityStore.WhoAmI(ctx, projectID, token)` resolution, same
 `AuthenticatedScope` result type consumed by `tool.Handler`. What moves is *where* the token is
 read from:
 
-- Today: `bearerToken(r.Header.Get("Authorization"))` is called directly inside
-  `NewCallHandler`, once per `/mcp/tools/call` request, only when `tool.RequiresAuth`.
-  Unchanged.
-- After Chapter 3: the same `bearerToken()` helper and `Authorization: Bearer <token>` header
-  read happen inside the new JSON-RPC `tools/call` method handler, at the same point in the
-  control flow (after resolving `tool.RequiresAuth` from the registry, before invoking
-  `tool.Handler`). `initialize` and `tools/list` never require auth — listing tool schemas is
-  not a scoped operation, matching today's `/mcp/tools` (list) endpoint having no auth check.
+- `bearerToken(r.Header.Get("Authorization"))` is read by the JSON-RPC `tools/call` handler
+  after it resolves `tool.RequiresAuth` from the registry and before it invokes `tool.Handler`.
+  `initialize` and `tools/list` never require auth because listing tool schemas is not a scoped
+  operation.
 - Auth failure on a `tools/call` request is a JSON-RPC error, not a tool-result `isError`:
   missing token → `{"code": -32602, "message": "missing bearer token"}`; invalid/expired token
   (`identity.ErrInvalidToken`) → a new code in the server-error range, `{"code": -32001,
   "message": "invalid or expired token"}` (JSON-RPC reserves -32000 to -32099 for
   implementation-defined server errors; -32001 is arbitrary within that range, chosen for no
   reason beyond being the first free slot — flagged as arbitrary, not RFC-derived).
-- No new auth mechanism, no OAuth, no session cookies. `docs/architecture.md` §5 M4's rule
-  (auth resolved once, at the MCP boundary, before core packages see anything) is unchanged by
-  the transport migration.
+- No new auth mechanism, OAuth flow, or session cookies. Authentication is resolved once at the
+  MCP boundary before core packages receive the request, as required by
+  `docs/implementation-rules.md` §4.
 
-## 6. What Chapter 1 explicitly does not decide
+## 6. Deliberately unspecified
 
 - Whether request batching (JSON-RPC batch arrays) is ever needed — deferred; not used because
   no current caller needs it (see §2).
 - The real SSE server-push stream on `GET /mcp` — stubbed to `405` per §2, revisit only if a
-  future roadmap chapter adds a server-initiated MCP message type.
-- Any MCP SDK / library choice for Chapter 2's implementation (hand-rolled JSON-RPC types vs. an
-  existing Go MCP SDK) — that is Chapter 2's decision, constrained by `docs/architecture.md` R4
-  (new external dependency needs explicit human sign-off).
+  future server-initiated MCP message type requires it.
+- Any MCP SDK or library choice (hand-rolled JSON-RPC types versus an existing Go MCP SDK) — a
+  new external dependency requires explicit human sign-off under
+  `docs/implementation-rules.md` §4 R4.

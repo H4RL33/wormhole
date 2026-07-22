@@ -11,8 +11,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -227,7 +230,7 @@ func TestMCP_ToolsListBeforeInitializeRejected(t *testing.T) {
 }
 
 // TestMCP_ToolsList_AllToolsWithSchemas proves tools/list dynamically
-// enumerates all 15 tools with project_id required in every schema except
+// enumerates all tools with project_id required in every schema except
 // wormhole.agent.whoami (design doc §1).
 func TestMCP_ToolsList_AllToolsWithSchemas(t *testing.T) {
 	_, socketPath := newMCPTestServer(t)
@@ -264,6 +267,7 @@ func TestMCP_ToolsList_AllToolsWithSchemas(t *testing.T) {
 	wantTools := []string{
 		"wormhole.agent.whoami", "wormhole.task.list", "wormhole.task.get",
 		"wormhole.task.create", "wormhole.task.route", "wormhole.channel.list",
+		"wormhole.channel.create",
 		"wormhole.channel.events", "wormhole.channel.post", "wormhole.channel.subscribe",
 		"wormhole.kb.list", "wormhole.kb.get", "wormhole.kb.write",
 		"wormhole.agent.register", "wormhole.agent.presence", "wormhole.agent.list",
@@ -428,5 +432,116 @@ func TestMCP_ChannelSubscribe_DeliversNotifications(t *testing.T) {
 	}
 	if payload["agent"] != "agent-y" {
 		t.Fatalf("notification payload agent = %v, want agent-y", payload["agent"])
+	}
+}
+
+func TestLocalMCPSchemaAndResponseHelpersDescribeWireTypes(t *testing.T) {
+	type schemaArgs struct {
+		When    time.Time       `json:"when"`
+		Payload json.RawMessage `json:"payload"`
+		Count   int             `json:"count"`
+		Active  bool            `json:"active,omitempty"`
+		Names   []string        `json:"names"`
+		Mode    string          `json:"mode" enum:"fast,safe"`
+		Ignore  string          `json:"-"`
+	}
+
+	properties, required := reflectStructSchema(reflect.TypeOf(schemaArgs{}))
+	for _, name := range []string{"when", "payload", "count", "active", "names", "mode"} {
+		if _, ok := properties[name]; !ok {
+			t.Fatalf("schema missing property %q: %#v", name, properties)
+		}
+	}
+	if _, ok := properties["Ignore"]; ok {
+		t.Fatalf("schema included ignored property: %#v", properties)
+	}
+	when := properties["when"].(map[string]any)
+	payload := properties["payload"].(map[string]any)
+	count := properties["count"].(map[string]any)
+	active := properties["active"].(map[string]any)
+	names := properties["names"].(map[string]any)
+	mode := properties["mode"].(map[string]any)
+	if when["format"] != "date-time" || payload["type"] != "object" || count["type"] != "integer" || active["type"] != "boolean" || names["type"] != "array" {
+		t.Fatalf("schema types = %#v", properties)
+	}
+	if got := mode["enum"]; !reflect.DeepEqual(got, []any{"fast", "safe"}) {
+		t.Fatalf("mode enum = %#v", got)
+	}
+	if reflect.DeepEqual(required, []string{"when", "payload", "count", "names", "mode"}) == false {
+		t.Fatalf("required = %#v", required)
+	}
+	if got := marshalResult(func() {}); got != nil {
+		t.Fatalf("marshalResult(unmarshalable) = %s, want nil", got)
+	}
+}
+
+func TestWriteMCPNotificationUsesNotificationEnvelope(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- writeMCPNotification(server, &mcpSession{}, "notifications/wormhole.event", json.RawMessage(`{"kind":"update"}`))
+	}()
+	line, err := bufio.NewReader(client).ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("read notification: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("write notification: %v", err)
+	}
+	var note rpcRequest
+	if err := json.Unmarshal(bytes.TrimSpace(line), &note); err != nil {
+		t.Fatalf("decode notification: %v", err)
+	}
+	if note.JSONRPC != "2.0" || note.Method != "notifications/wormhole.event" || len(note.ID) != 0 || string(note.Params) != `{"kind":"update"}` {
+		t.Fatalf("notification = %+v", note)
+	}
+}
+
+func TestHandleToolsCallKeepsProtocolAndHandlerFailuresDistinct(t *testing.T) {
+	srv, _ := newMCPTestServer(t)
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+	sess := &mcpSession{initialized: true}
+
+	if _, rpcErr := srv.handleToolsCall(context.Background(), sess, server, newLocalRegistry(srv), json.RawMessage(`{`)); rpcErr == nil || rpcErr.Code != rpcInvalidParams {
+		t.Fatalf("malformed params rpc error = %+v, want invalid params", rpcErr)
+	}
+	unknown, _ := json.Marshal(toolsCallParams{Name: "wormhole.unknown", Arguments: json.RawMessage(`{}`)})
+	if _, rpcErr := srv.handleToolsCall(context.Background(), sess, server, newLocalRegistry(srv), unknown); rpcErr == nil || rpcErr.Code != rpcInvalidParams {
+		t.Fatalf("unknown tool rpc error = %+v, want invalid params", rpcErr)
+	}
+
+	registry := &localRegistry{tools: map[string]localTool{}, order: []string{"error", "bad-result"}}
+	registry.tools["error"] = localTool{Name: "error", Handler: func(context.Context, json.RawMessage) (any, error) { return nil, fmt.Errorf("expected handler error") }}
+	registry.tools["bad-result"] = localTool{Name: "bad-result", Handler: func(context.Context, json.RawMessage) (any, error) { return func() {}, nil }}
+	for _, tt := range []struct {
+		name     string
+		wantRPC  int
+		wantTool bool
+	}{
+		{"error", 0, true},
+		{"bad-result", rpcInternalError, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			raw, _ := json.Marshal(toolsCallParams{Name: tt.name, Arguments: json.RawMessage(`{}`)})
+			result, rpcErr := srv.handleToolsCall(context.Background(), sess, server, registry, raw)
+			if tt.wantRPC != 0 {
+				if rpcErr == nil || rpcErr.Code != tt.wantRPC {
+					t.Fatalf("rpc error = %+v, want %d", rpcErr, tt.wantRPC)
+				}
+				return
+			}
+			if rpcErr != nil {
+				t.Fatalf("unexpected rpc error: %+v", rpcErr)
+			}
+			toolResult, ok := result.(toolCallResult)
+			if !ok || !toolResult.IsError || len(toolResult.Content) != 1 || !strings.Contains(toolResult.Content[0].Text, "expected handler error") {
+				t.Fatalf("tool result = %#v", result)
+			}
+		})
 	}
 }

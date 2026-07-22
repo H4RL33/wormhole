@@ -1,6 +1,10 @@
 # Build artifacts
+/dist/
+# Bare `go build ./cmd/x` drops binaries in the repo root; ignore each in
+# case anyone skips `make build`.
+/wormhole
+/wormholed
 /wormhole-server
-/wormhole-cli
 *.exe
 *.test
 *.out

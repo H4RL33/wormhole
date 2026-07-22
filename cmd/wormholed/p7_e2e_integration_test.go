@@ -4,16 +4,23 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	stdsync "sync"
 	"testing"
 	"time"
 
+	"github.com/H4RL33/wormhole/internal/mcp"
 	"github.com/H4RL33/wormhole/internal/runtime/config"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/runtime/sync"
@@ -55,11 +62,11 @@ func testFakeCoordServer(t *testing.T) *httptest.Server {
 		switch params.Name {
 		case "wormhole.agent.whoami":
 			resultData = map[string]interface{}{
-				"agent_id":      "test-agent",
-				"owner":         "harley",
-				"model":         "claude-sonnet-5",
+				"agent_id":     "test-agent",
+				"owner":        "harley",
+				"model":        "claude-sonnet-5",
 				"capabilities": []string{"code"},
-				"project_id":    "project-1",
+				"project_id":   "project-1",
 				"permissions":  []string{"task.create"},
 			}
 
@@ -86,8 +93,15 @@ func testFakeCoordServer(t *testing.T) *httptest.Server {
 			}
 			resultData = map[string]interface{}{
 				"items_received": len(pushArgs.Items),
-				"timestamp":      time.Now().UTC().Format(time.RFC3339),
-				"version":        1,
+				"applied": func() []map[string]interface{} {
+					applied := make([]map[string]interface{}, 0, len(pushArgs.Items))
+					for _, item := range pushArgs.Items {
+						applied = append(applied, map[string]interface{}{"id": item.EntityID, "type": item.EntityType, "error": ""})
+					}
+					return applied
+				}(),
+				"timestamp": time.Now().UTC().Format(time.RFC3339),
+				"version":   1,
 			}
 
 		case "wormhole.sync.incremental_pull":
@@ -452,8 +466,15 @@ func statefulCoordServer(t *testing.T) *httptest.Server {
 			mu.Unlock()
 			resultData = map[string]interface{}{
 				"items_received": len(pushArgs.Items),
-				"timestamp":      time.Now().UTC().Format(time.RFC3339),
-				"version":        1,
+				"applied": func() []map[string]interface{} {
+					applied := make([]map[string]interface{}, 0, len(pushArgs.Items))
+					for _, item := range pushArgs.Items {
+						applied = append(applied, map[string]interface{}{"id": item.EntityID, "type": item.EntityType, "error": ""})
+					}
+					return applied
+				}(),
+				"timestamp": time.Now().UTC().Format(time.RFC3339),
+				"version":   1,
 			}
 
 		case "wormhole.sync.bootstrap":
@@ -513,8 +534,12 @@ func TestP7_MultiDaemonSync(t *testing.T) {
 	auditA := sync.NewAuditRepo(storeA.DB())
 	taskRepoA := localstore.NewTaskRepo(storeA.DB(), localstore.NewEventRepo(storeA.DB()))
 	kbRepoA := localstore.NewKBRepo(storeA.DB())
-	fastCfg := sync.Config{BatchInterval: 20 * time.Millisecond, BatchSize: 50}
-	engineA := sync.New(coordSrv.URL, "test-token", "project-1", queueA, auditA, taskRepoA, kbRepoA, fastCfg)
+	fastCfg := sync.DefaultConfig()
+	fastCfg.BatchInterval = 20 * time.Millisecond
+	engineA, err := sync.New(coordSrv.URL, "test-token", "project-1", queueA, auditA, taskRepoA, kbRepoA, fastCfg)
+	if err != nil {
+		t.Fatalf("New engine A: %v", err)
+	}
 
 	task, err := taskRepoA.CreateTask(ctx, "project-1", "Daemon A task", "written offline", nil, 1, nil)
 	if err != nil {
@@ -560,7 +585,10 @@ func TestP7_MultiDaemonSync(t *testing.T) {
 	auditB := sync.NewAuditRepo(storeB.DB())
 	taskRepoB := localstore.NewTaskRepo(storeB.DB(), localstore.NewEventRepo(storeB.DB()))
 	kbRepoB := localstore.NewKBRepo(storeB.DB())
-	engineB := sync.New(coordSrv.URL, "test-token", "project-1", queueB, auditB, taskRepoB, kbRepoB, sync.DefaultConfig())
+	engineB, err := sync.New(coordSrv.URL, "test-token", "project-1", queueB, auditB, taskRepoB, kbRepoB, sync.DefaultConfig())
+	if err != nil {
+		t.Fatalf("New engine B: %v", err)
+	}
 
 	if err := engineB.Bootstrap(ctx); err != nil {
 		t.Fatalf("Bootstrap on daemon B: %v", err)
@@ -572,5 +600,244 @@ func TestP7_MultiDaemonSync(t *testing.T) {
 	}
 	if gotOnB.Title != "Daemon A task" {
 		t.Errorf("daemon B task title = %q, want %q", gotOnB.Title, "Daemon A task")
+	}
+}
+
+func TestRun_BootstrapAndConverges(t *testing.T) {
+	db := e2eTestDB(t)
+	coordURL, projectID, agentID, token := e2eStartCoordServer(t, db)
+	bootstrapSeen := make(chan struct{})
+	var bootstrapOnce stdsync.Once
+	coordProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		var rpcReq mcpRpcRequest
+		var params mcpToolsCallParams
+		if json.Unmarshal(body, &rpcReq) == nil && json.Unmarshal(rpcReq.Params, &params) == nil && params.Name == "wormhole.sync.bootstrap" {
+			bootstrapOnce.Do(func() { close(bootstrapSeen) })
+		}
+		upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, coordURL+r.URL.Path, bytes.NewReader(body))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		upstreamReq.Header = r.Header.Clone()
+		resp, err := http.DefaultClient.Do(upstreamReq)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+	}))
+	defer coordProxy.Close()
+
+	seedTaskRaw := e2eCallTool(t, coordURL, "wormhole.task.create", projectID, token, mcp.CreateTaskInput{
+		Title: "bootstrap task", Description: "present before wormholed starts", Priority: 1,
+	})
+	var seedTask mcp.CreateTaskOutput
+	if err := json.Unmarshal(seedTaskRaw, &seedTask); err != nil {
+		t.Fatalf("decode seeded task: %v", err)
+	}
+	seedArticleRaw := e2eCallTool(t, coordURL, "wormhole.kb.write", projectID, token, mcp.WriteArticleInput{
+		Title: "bootstrap article", Body: "present before wormholed starts", Frontmatter: json.RawMessage(`{}`), Force: true,
+	})
+	var seedArticle mcp.WriteArticleOutput
+	if err := json.Unmarshal(seedArticleRaw, &seedArticle); err != nil {
+		t.Fatalf("decode seeded article: %v", err)
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	runDir := filepath.Join(home, "run")
+	t.Setenv("XDG_RUNTIME_DIR", runDir)
+	dataDir := filepath.Join(home, "data")
+	t.Setenv("XDG_DATA_HOME", dataDir)
+	credDir := filepath.Join(home, ".wormhole", "credentials")
+	if err := os.MkdirAll(credDir, 0o700); err != nil {
+		t.Fatalf("create credentials directory: %v", err)
+	}
+	credData, err := json.Marshal(map[string]string{
+		"server": coordProxy.URL, "project_id": projectID, "agent_id": agentID, "token": token,
+	})
+	if err != nil {
+		t.Fatalf("marshal credentials: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(credDir, "default.json"), credData, 0o600); err != nil {
+		t.Fatalf("write credentials: %v", err)
+	}
+
+	socketPath := filepath.Join(runDir, "wormhole", "wormholed.sock")
+	daemon := startTestDaemon(t, "default", socketPath)
+	select {
+	case <-bootstrapSeen:
+	case <-time.After(5 * time.Second):
+		t.Fatal("production Run did not call wormhole.sync.bootstrap")
+	}
+	dbPath := filepath.Join(dataDir, "wormhole", "wormholed.db")
+	waitForCondition(t, 5*time.Second, "local SQLite database creation", func() (bool, error) {
+		_, err := os.Stat(dbPath)
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return err == nil, err
+	})
+	localStore, err := localstore.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open daemon SQLite replica: %v", err)
+	}
+	defer localStore.Close()
+	taskRepo := localstore.NewTaskRepo(localStore.DB(), localstore.NewEventRepo(localStore.DB()))
+	kbRepo := localstore.NewKBRepo(localStore.DB())
+	waitForCondition(t, 5*time.Second, "bootstrap task and KB article in SQLite", func() (bool, error) {
+		_, taskErr := taskRepo.GetTask(context.Background(), projectID, seedTask.TaskID)
+		if taskErr != nil && !errors.Is(taskErr, localstore.ErrTaskNotFound) {
+			return false, taskErr
+		}
+		_, articleErr := kbRepo.GetArticle(context.Background(), projectID, seedArticle.ArticleID)
+		if articleErr != nil && !errors.Is(articleErr, localstore.ErrArticleNotFound) {
+			return false, articleErr
+		}
+		return taskErr == nil && articleErr == nil, nil
+	})
+
+	updatedTaskRaw := e2eCallTool(t, coordURL, "wormhole.task.create", projectID, token, mcp.CreateTaskInput{
+		Title: "periodic pull task", Description: "created after bootstrap", Priority: 1,
+	})
+	var updatedTask mcp.CreateTaskOutput
+	if err := json.Unmarshal(updatedTaskRaw, &updatedTask); err != nil {
+		t.Fatalf("decode post-bootstrap task: %v", err)
+	}
+	waitForCondition(t, 10*time.Second, "periodic pull convergence in SQLite", func() (bool, error) {
+		_, err := taskRepo.GetTask(context.Background(), projectID, updatedTask.TaskID)
+		if errors.Is(err, localstore.ErrTaskNotFound) {
+			return false, nil
+		}
+		return err == nil, err
+	})
+	daemon.stop(t)
+}
+
+func TestRun_TwoProjectBindingsPersistWithTokenAndNamespaceIsolation(t *testing.T) {
+	db := e2eTestDB(t)
+	coordURL, projectA, agentA, tokenA := e2eStartCoordServer(t, db)
+	projectB := e2eMustCreateProject(t, db, "two-binding-project-b")
+	registerBRaw := e2eCallTool(t, coordURL, "wormhole.agent.register", projectB, "", mcp.RegisterAgentInput{
+		Permissions: []string{"task.create", "task.list"}, Owner: "org-b", Model: "test",
+	})
+	var registerB mcp.RegisterAgentOutput
+	if err := json.Unmarshal(registerBRaw, &registerB); err != nil {
+		t.Fatalf("decode project B registration: %v", err)
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	runDir, err := os.MkdirTemp("", "wh-t6-bind-")
+	if err != nil {
+		t.Fatalf("create short runtime directory: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(runDir) })
+	t.Setenv("XDG_RUNTIME_DIR", runDir)
+	dataDir := filepath.Join(home, "data")
+	t.Setenv("XDG_DATA_HOME", dataDir)
+	credDir := filepath.Join(home, ".wormhole", "credentials")
+	if err := os.MkdirAll(credDir, 0o700); err != nil {
+		t.Fatalf("create credentials directory: %v", err)
+	}
+	for _, profile := range []struct {
+		name, projectID, agentID, token string
+	}{
+		{name: "org-a", projectID: projectA, agentID: agentA, token: tokenA},
+		{name: "org-b", projectID: projectB, agentID: registerB.AgentID, token: registerB.Token},
+	} {
+		data, err := json.Marshal(map[string]string{"server": coordURL, "project_id": profile.projectID, "agent_id": profile.agentID, "token": profile.token})
+		if err != nil {
+			t.Fatalf("marshal %s credentials: %v", profile.name, err)
+		}
+		if err := os.WriteFile(filepath.Join(credDir, profile.name+".json"), data, 0o600); err != nil {
+			t.Fatalf("write %s credentials: %v", profile.name, err)
+		}
+	}
+
+	socketPath := filepath.Join(runDir, "wormhole", "wormholed.sock")
+	daemon := startTestDaemon(t, "org-a", socketPath)
+	defer daemon.stop(t)
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial daemon: %v", err)
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	mcpInitialize(t, conn, reader)
+
+	created := map[string]string{}
+	for i, tc := range []struct{ projectID, title string }{{projectA, "persisted only in project A"}, {projectB, "persisted only in project B"}} {
+		resp := mcpCallTool(t, conn, reader, i+2, "wormhole.task.create", map[string]interface{}{"project_id": tc.projectID, "title": tc.title, "priority": 2})
+		if resp.Error != "" {
+			t.Fatalf("create task in %s: %s", tc.projectID, resp.Error)
+		}
+		var out struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(resp.Result, &out); err != nil || out.ID == "" {
+			t.Fatalf("decode create task in %s: id=%q err=%v", tc.projectID, out.ID, err)
+		}
+		created[tc.projectID] = out.ID
+	}
+
+	for projectID, taskID := range created {
+		waitForCondition(t, 10*time.Second, "task persistence for "+projectID, func() (bool, error) {
+			var gotProject string
+			err := db.QueryRow(`SELECT project_id FROM tasks WHERE id = $1`, taskID).Scan(&gotProject)
+			if errors.Is(err, sql.ErrNoRows) {
+				return false, nil
+			}
+			return gotProject == projectID, err
+		})
+	}
+
+	localStore, err := localstore.Open(filepath.Join(dataDir, "wormhole", "wormholed.db"))
+	if err != nil {
+		t.Fatalf("open shared local store: %v", err)
+	}
+	defer localStore.Close()
+	taskRepo := localstore.NewTaskRepo(localStore.DB(), localstore.NewEventRepo(localStore.DB()))
+	if _, err := taskRepo.GetTask(context.Background(), projectB, created[projectA]); !errors.Is(err, localstore.ErrTaskNotFound) {
+		t.Fatalf("project A task visible in project B namespace: %v", err)
+	}
+	if _, err := taskRepo.GetTask(context.Background(), projectA, created[projectB]); !errors.Is(err, localstore.ErrTaskNotFound) {
+		t.Fatalf("project B task visible in project A namespace: %v", err)
+	}
+
+	assertCoordTokenRejectedForProject(t, coordURL, tokenA, projectB)
+	assertCoordTokenRejectedForProject(t, coordURL, registerB.Token, projectA)
+}
+
+func assertCoordTokenRejectedForProject(t *testing.T, coordURL, token, projectID string) {
+	t.Helper()
+	args, _ := json.Marshal(map[string]string{"project_id": projectID})
+	params, _ := json.Marshal(e2eToolsCallParams{Name: "wormhole.agent.whoami", Arguments: args})
+	body, _ := json.Marshal(mcp.RPCRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "tools/call", Params: params})
+	req, err := http.NewRequest(http.MethodPost, coordURL+"/mcp", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("build cross-project auth request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("cross-project auth request: %v", err)
+	}
+	defer resp.Body.Close()
+	var rpcResp mcp.RPCResponse
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		t.Fatalf("decode cross-project auth response: %v", err)
+	}
+	if rpcResp.Error == nil || rpcResp.Error.Code != -32001 {
+		t.Fatalf("cross-project token response error = %+v, want invalid token", rpcResp.Error)
 	}
 }

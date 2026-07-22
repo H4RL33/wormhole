@@ -34,6 +34,28 @@ func testStore(t *testing.T) *Store {
 	return NewStore(db, StubEmbedder{}, 0.85, 2000, 1, 1, 1)
 }
 
+// lockRLSFixture serializes the role/ACL lifecycle shared by restricted-role
+// integration tests across package processes. PostgreSQL stores table grants
+// in one catalog tuple per table, so concurrent GRANT/REVOKE statements for
+// different roles can otherwise fail with "tuple concurrently updated".
+func lockRLSFixture(t *testing.T, db *sql.DB) {
+	t.Helper()
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("open RLS fixture lock connection: %v", err)
+	}
+	if _, err := conn.ExecContext(context.Background(), `SELECT pg_advisory_lock(867530913)`); err != nil {
+		conn.Close()
+		t.Fatalf("acquire RLS fixture lock: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock(867530913)`); err != nil {
+			t.Logf("release RLS fixture lock: %v", err)
+		}
+		conn.Close()
+	})
+}
+
 func createProject(t *testing.T, s *Store, name string) string {
 	t.Helper()
 	var id string
@@ -122,6 +144,41 @@ func TestWriteArticle_SuccessNoLinks(t *testing.T) {
 	}
 	if embeddingIsNull {
 		t.Error("expected embedding column to be populated, got NULL")
+	}
+}
+
+func TestEnsureBootstrapArticleIsIdempotentAndProjectScoped(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectA := createProject(t, s, "ensure-bootstrap-a")
+	projectB := createProject(t, s, "ensure-bootstrap-b")
+	agentA := createAgent(t, s)
+	agentB := createAgent(t, s)
+	createPassport(t, s, agentA, projectA)
+	createPassport(t, s, agentB, projectB)
+
+	if _, err := s.EnsureBootstrapArticle(ctx, projectA, agentA, "", "Onboarding", "The bootstrap article documents the project onboarding contract.", json.RawMessage(`{}`)); err == nil || !strings.Contains(err.Error(), "empty bootstrap key") {
+		t.Fatalf("EnsureBootstrapArticle empty key error = %v, want empty bootstrap key", err)
+	}
+
+	first, err := s.EnsureBootstrapArticle(ctx, projectA, agentA, "onboarding", "Onboarding", "The bootstrap article documents the project onboarding contract.", json.RawMessage(`{"kind":"system"}`))
+	if err != nil {
+		t.Fatalf("first EnsureBootstrapArticle: %v", err)
+	}
+	second, err := s.EnsureBootstrapArticle(ctx, projectA, agentA, "onboarding", "Replacement title is ignored", "The existing bootstrap article remains the authoritative record.", json.RawMessage(`{"kind":"system"}`))
+	if err != nil {
+		t.Fatalf("second EnsureBootstrapArticle: %v", err)
+	}
+	if second.ID != first.ID || second.ProjectID != projectA {
+		t.Fatalf("same-project bootstrap result = %+v, want existing %+v", second, first)
+	}
+
+	otherProject, err := s.EnsureBootstrapArticle(ctx, projectB, agentB, "onboarding", "Onboarding", "The bootstrap article documents the isolated project onboarding contract.", json.RawMessage(`{"kind":"system"}`))
+	if err != nil {
+		t.Fatalf("EnsureBootstrapArticle(second project): %v", err)
+	}
+	if otherProject.ID == first.ID || otherProject.ProjectID != projectB {
+		t.Fatalf("cross-project bootstrap result = %+v, want distinct project article", otherProject)
 	}
 }
 
@@ -235,6 +292,7 @@ func TestWriteArticle_PassportRequired(t *testing.T) {
 // project B's context is set.
 func TestWriteArticle_CrossProjectIsolation(t *testing.T) {
 	ownerStore := testStore(t)
+	lockRLSFixture(t, ownerStore.db)
 	ctx := context.Background()
 
 	roleName := "kb_rls_test_user"
@@ -505,6 +563,7 @@ func TestSearchArticles_ExcludeNullEmbedding(t *testing.T) {
 
 func TestSearchArticles_CrossProjectIsolation(t *testing.T) {
 	ownerStore := testStore(t)
+	lockRLSFixture(t, ownerStore.db)
 	ctx := context.Background()
 
 	roleName := "kb_search_rls_test_user"
@@ -991,8 +1050,6 @@ func TestWriteArticle_RequiredLinksNormal(t *testing.T) {
 	}
 }
 
-
-
 func TestGetArticle_HappyPath(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -1051,6 +1108,7 @@ func TestGetArticle_NotFound(t *testing.T) {
 // context and expects ErrArticleNotFound (RLS hides project A's row).
 func TestGetArticle_CrossProjectIsolation(t *testing.T) {
 	ownerStore := testStore(t)
+	lockRLSFixture(t, ownerStore.db)
 	ctx := context.Background()
 
 	roleName := "kb_get_rls_test_user"
@@ -1210,6 +1268,7 @@ func TestGetArticleLinks_ArticleNotFound(t *testing.T) {
 // JOIN respect RLS). Uses a restricted (non-owner) role so RLS is enforced.
 func TestGetArticleLinks_CrossProjectIsolation(t *testing.T) {
 	ownerStore := testStore(t)
+	lockRLSFixture(t, ownerStore.db)
 	ctx := context.Background()
 
 	roleName := "kb_get_links_rls_test_user"

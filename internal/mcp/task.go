@@ -33,10 +33,11 @@ type CreateTaskOutput struct {
 // CreateTaskTool wires wormhole.task.create (RFC-0001 §8.2, Task Graph).
 func CreateTaskTool(store *tasks.Store) Tool {
 	return Tool{
-		Name:             "wormhole.task.create",
-		Description:      "Creates a new task in the project's task graph, starting at status \"todo\".",
-		RequiresAuth:     true,
-		ArgumentsExample: CreateTaskInput{},
+		Name:               "wormhole.task.create",
+		Description:        "Creates a new task in the project's task graph, starting at status \"todo\".",
+		RequiresAuth:       true,
+		RequiredPermission: "task.create",
+		ArgumentsExample:   CreateTaskInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in CreateTaskInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
@@ -74,10 +75,11 @@ type AssignTaskOutput struct {
 // AssignTaskTool wires wormhole.task.assign (RFC-0001 §8.2, Task Graph).
 func AssignTaskTool(store *tasks.Store) Tool {
 	return Tool{
-		Name:             "wormhole.task.assign",
-		Description:      "Assigns a task to an agent by setting its owner_agent_id.",
-		RequiresAuth:     true,
-		ArgumentsExample: AssignTaskInput{},
+		Name:               "wormhole.task.assign",
+		Description:        "Assigns a task to an agent by setting its owner_agent_id.",
+		RequiresAuth:       true,
+		RequiredPermission: "task.assign",
+		ArgumentsExample:   AssignTaskInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in AssignTaskInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
@@ -195,10 +197,11 @@ func applyRoleTaskView(taskList []tasks.Task, view roleTaskView, explicitStatus 
 // ListTasksTool wires wormhole.task.list (RFC-0001 §8.2, Task Graph).
 func ListTasksTool(store *tasks.Store, rolesStore *roles.Store) Tool {
 	return Tool{
-		Name:             "wormhole.task.list",
-		Description:      "Lists a project's tasks, optionally filtered by status and/or a role template's default view.",
-		RequiresAuth:     true,
-		ArgumentsExample: ListTasksInput{},
+		Name:               "wormhole.task.list",
+		Description:        "Lists a project's tasks, optionally filtered by status and/or a role template's default view.",
+		RequiresAuth:       true,
+		RequiredPermission: "task.list",
+		ArgumentsExample:   ListTasksInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in ListTasksInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
@@ -275,10 +278,11 @@ type UpdateTaskStatusOutput struct {
 // update.
 func UpdateTaskStatusTool(store *tasks.Store) Tool {
 	return Tool{
-		Name:             "wormhole.task.update_status",
-		Description:      "Transitions a task to a new status, rejecting any transition not in the valid state machine, and emits a task.status_changed event onto channel_id.",
-		RequiresAuth:     true,
-		ArgumentsExample: UpdateTaskStatusInput{},
+		Name:               "wormhole.task.update_status",
+		Description:        "Transitions a task to a new status, rejecting any transition not in the valid state machine, and emits a task.status_changed event onto channel_id.",
+		RequiresAuth:       true,
+		RequiredPermission: "task.update_status",
+		ArgumentsExample:   UpdateTaskStatusInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in UpdateTaskStatusInput
 			if err := json.Unmarshal(arguments, &in); err != nil {

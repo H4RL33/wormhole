@@ -65,32 +65,27 @@ func bridge(stdin io.Reader, stdout io.Writer, conn net.Conn) error {
 	var closeOnce sync.Once
 	forceClose := func() { closeOnce.Do(func() { conn.Close() }) }
 
-	var wg sync.WaitGroup
 	errs := make(chan error, 2)
 
-	wg.Add(1)
 	go func() {
-		defer wg.Done()
-		err := stdinToSocket(stdin, conn)
-		// Once stdin ends -- cleanly (EOF) or on a transport error -- the
-		// client can send no further requests, so the session is over. Tear
-		// down the shared connection so socketToStdout, otherwise blocked
-		// reading conn, doesn't hang forever.
-		forceClose()
-		errs <- err
+		errs <- stdinToSocket(stdin, conn)
 	}()
 
-	wg.Add(1)
 	go func() {
-		defer wg.Done()
 		errs <- socketToStdout(conn, stdout)
 	}()
 
-	wg.Wait()
-	close(errs)
-
+	// Either half ending terminates the session. Closing conn releases the
+	// socket reader/writer; closing a closable stdin (os.Stdin in production)
+	// releases a bridge blocked waiting for another client frame after the
+	// daemon has disappeared.
+	firstResult := <-errs
+	forceClose()
+	if closer, ok := stdin.(io.Closer); ok {
+		_ = closer.Close()
+	}
 	var first error
-	for err := range errs {
+	for _, err := range []error{firstResult} {
 		// net.ErrClosed is the expected result of our own forceClose tearing
 		// down conn to unblock the reader; it is not a session error.
 		if err != nil && err != io.EOF && !errors.Is(err, net.ErrClosed) && first == nil {

@@ -27,9 +27,7 @@ const SyncProtocolVersion = 1
 const SyncAuditChannelID = "wormhole-sync-audit"
 
 // syncRateLimiter enforces a simple fixed-window per-namespace request cap
-// on wormhole.sync.* handlers (P6 minimal hardening — RFC-0003 §10; this
-// was explicitly deferred to the beta pass in ROADMAP-LOCAL-RUNTIME.md and
-// is now closed for the alpha tag).
+// on wormhole.sync.* handlers (P6 minimal hardening — RFC-0003 §10).
 type syncRateLimiter struct {
 	mu     sync.Mutex
 	limit  int
@@ -62,7 +60,6 @@ func (r *syncRateLimiter) allow(namespaceID string, now time.Time) bool {
 	r.hits[namespaceID] = append(kept, now)
 	return true
 }
-
 
 // validateNamespace enforces RFC-0003 §7.2 cross-namespace isolation: the
 // client-supplied namespace_id is never trusted on its own for
@@ -160,10 +157,13 @@ func articleToSummary(article kb.Article) ArticleSummary {
 // RFC-0003 §8.1: one-time bulk pull of complete working environment.
 func BootstrapTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, limiter *syncRateLimiter) Tool {
 	return Tool{
-		Name:             "wormhole.sync.bootstrap",
-		Description:      "One-time bulk pull of org configuration, project manifests, initial KB, tasks, and policies on org enrolment (RFC-0003 §8.1)",
-		RequiresAuth:     true,
-		ArgumentsExample: BootstrapInput{},
+		Name:         "wormhole.sync.bootstrap",
+		Description:  "One-time bulk pull of org configuration, project manifests, initial KB, tasks, and policies on org enrolment (RFC-0003 §8.1)",
+		RequiresAuth: true,
+		// Auth-only: wormholed<->Coordination-Server transport of the
+		// agent's own data, not a discretionary agent capability.
+		RequiredPermission: "",
+		ArgumentsExample:   BootstrapInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in BootstrapInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
@@ -236,10 +236,13 @@ type IncrementalPullOutput struct {
 // RFC-0003 §8.2: steady-state incremental pull of changed entities.
 func IncrementalPullTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, limiter *syncRateLimiter) Tool {
 	return Tool{
-		Name:             "wormhole.sync.incremental_pull",
-		Description:      "Incremental pull of entity changes since last sync (RFC-0003 §8.2)",
-		RequiresAuth:     true,
-		ArgumentsExample: IncrementalPullInput{},
+		Name:         "wormhole.sync.incremental_pull",
+		Description:  "Incremental pull of entity changes since last sync (RFC-0003 §8.2)",
+		RequiresAuth: true,
+		// Auth-only: wormholed<->Coordination-Server transport of the
+		// agent's own data, not a discretionary agent capability.
+		RequiredPermission: "",
+		ArgumentsExample:   IncrementalPullInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in IncrementalPullInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
@@ -354,6 +357,8 @@ type syncTaskCreatePayload struct {
 	Title        string     `json:"title"`
 	Description  string     `json:"description"`
 	ParentTaskID *string    `json:"parent_task_id"`
+	OwnerAgentID *string    `json:"owner_agent_id"`
+	Status       string     `json:"status"`
 	Priority     int        `json:"priority"`
 	DueBy        *time.Time `json:"due_by"`
 }
@@ -387,10 +392,13 @@ type syncEventCreatePayload struct {
 // RFC-0003 §8.2: wormholed pushes batched local changes to the server.
 func IncrementalPushTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, limiter *syncRateLimiter) Tool {
 	return Tool{
-		Name:             "wormhole.sync.incremental_push",
-		Description:      "Incremental push of batched local changes to the server (RFC-0003 §8.2)",
-		RequiresAuth:     true,
-		ArgumentsExample: IncrementalPushInput{},
+		Name:         "wormhole.sync.incremental_push",
+		Description:  "Incremental push of batched local changes to the server (RFC-0003 §8.2)",
+		RequiresAuth: true,
+		// Auth-only: wormholed<->Coordination-Server transport of the
+		// agent's own data, not a discretionary agent capability.
+		RequiredPermission: "",
+		ArgumentsExample:   IncrementalPushInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in IncrementalPushInput
 			if err := json.Unmarshal(arguments, &in); err != nil {
@@ -447,6 +455,16 @@ func IncrementalPushTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore
 					continue
 				}
 
+				requiredPermission := map[string]string{
+					"task": "task.create", "kb": "kb.write",
+					"channel": "channel.create", "event": "channel.post",
+				}[item.EntityType]
+				if scope != nil && requiredPermission != "" && !scope.HasPermission(requiredPermission) {
+					result.Error = "permission denied: requires " + requiredPermission
+					applied = append(applied, result)
+					continue
+				}
+
 				var applyErr error
 				switch item.EntityType {
 				case "task":
@@ -455,7 +473,15 @@ func IncrementalPushTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore
 						applyErr = fmt.Errorf("decode task payload: %w", err)
 						break
 					}
-					_, applyErr = tasksStore.CreateWithID(ctx, item.EntityID, projectID, payload.Title, payload.Description, payload.ParentTaskID, payload.Priority, payload.DueBy)
+					if payload.Status != "" && payload.Status != "todo" {
+						applyErr = fmt.Errorf(`task create status must be "todo"`)
+						break
+					}
+					if payload.OwnerAgentID != nil && scope != nil && !scope.HasPermission("task.assign") {
+						applyErr = fmt.Errorf("permission denied: requires task.assign")
+						break
+					}
+					_, applyErr = tasksStore.CreateWithIDAndOwner(ctx, item.EntityID, projectID, payload.Title, payload.Description, payload.ParentTaskID, payload.OwnerAgentID, payload.Priority, payload.DueBy)
 				case "kb":
 					var payload syncKBCreatePayload
 					if err := json.Unmarshal(item.Payload, &payload); err != nil {
@@ -539,10 +565,13 @@ type syncConflictAuditPayload struct {
 // "sync.conflict_resolved" event, Global Constraints — no new audit table).
 func ConflictReportTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, limiter *syncRateLimiter) Tool {
 	return Tool{
-		Name:             "wormhole.sync.conflict_report",
-		Description:      "Report and resolve sync conflicts using last-write-wins; server timestamp is authoritative (RFC-0003 §8.3)",
-		RequiresAuth:     true,
-		ArgumentsExample: ConflictReportInput{},
+		Name:         "wormhole.sync.conflict_report",
+		Description:  "Report and resolve sync conflicts using last-write-wins; server timestamp is authoritative (RFC-0003 §8.3)",
+		RequiresAuth: true,
+		// Auth-only: wormholed<->Coordination-Server transport of the
+		// agent's own data, not a discretionary agent capability.
+		RequiredPermission: "",
+		ArgumentsExample:   ConflictReportInput{},
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			var in ConflictReportInput
 			if err := json.Unmarshal(arguments, &in); err != nil {

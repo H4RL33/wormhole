@@ -71,7 +71,7 @@ const taskColumns = `id, project_id, parent_task_id, title, description, owner_a
 // Create inserts a new task, always starting at status "todo", letting
 // Postgres assign the id (gen_random_uuid() default).
 func (s *Store) Create(ctx context.Context, projectID, title, description string, parentTaskID *string, priority int, dueBy *time.Time) (Task, error) {
-	return s.createWithOptionalID(ctx, "", projectID, title, description, parentTaskID, priority, dueBy)
+	return s.createWithOptionalID(ctx, "", projectID, title, description, parentTaskID, nil, priority, dueBy)
 }
 
 // CreateWithID inserts a new task under the caller-supplied id instead of
@@ -81,16 +81,21 @@ func (s *Store) Create(ctx context.Context, projectID, title, description string
 // task creation (wormhole.task.create) has no local id to preserve and keeps
 // calling Create.
 func (s *Store) CreateWithID(ctx context.Context, id, projectID, title, description string, parentTaskID *string, priority int, dueBy *time.Time) (Task, error) {
-	return s.createWithOptionalID(ctx, id, projectID, title, description, parentTaskID, priority, dueBy)
+	return s.createWithOptionalID(ctx, id, projectID, title, description, parentTaskID, nil, priority, dueBy)
+}
+
+// CreateWithIDAndOwner inserts a local-first routed task under the caller's id
+// and records its selected owner in the same project-scoped transaction. The
+// owner must hold a passport for projectID; validation failure leaves no task.
+func (s *Store) CreateWithIDAndOwner(ctx context.Context, id, projectID, title, description string, parentTaskID, ownerAgentID *string, priority int, dueBy *time.Time) (Task, error) {
+	return s.createWithOptionalID(ctx, id, projectID, title, description, parentTaskID, ownerAgentID, priority, dueBy)
 }
 
 // createWithOptionalID is the shared transaction/validation core of Create
-// and CreateWithID. An empty id lets the INSERT column list omit id, so
-// Postgres's gen_random_uuid() default fires; a non-empty id is included in
-// the column list and args, so the row is inserted under that exact id (and
-// a duplicate id surfaces as a normal primary-key unique-violation error,
-// same as any other store error today).
-func (s *Store) createWithOptionalID(ctx context.Context, id, projectID, title, description string, parentTaskID *string, priority int, dueBy *time.Time) (Task, error) {
+// variants. An empty id lets Postgres's gen_random_uuid() default fire; a
+// non-empty id is inserted exactly. An optional owner is passport-validated
+// before insertion and written in that same transaction.
+func (s *Store) createWithOptionalID(ctx context.Context, id, projectID, title, description string, parentTaskID, ownerAgentID *string, priority int, dueBy *time.Time) (Task, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Task{}, fmt.Errorf("tasks: create: begin tx: %w", err)
@@ -111,19 +116,28 @@ func (s *Store) createWithOptionalID(ctx context.Context, id, projectID, title, 
 			return Task{}, fmt.Errorf("tasks: create: parent task lookup: %w", err)
 		}
 	}
+	if ownerAgentID != nil {
+		var dummy int
+		err := tx.QueryRowContext(ctx, "SELECT 1 FROM passports WHERE agent_id = $1 AND project_id = $2", *ownerAgentID, projectID).Scan(&dummy)
+		if errors.Is(err, sql.ErrNoRows) {
+			return Task{}, fmt.Errorf("tasks: create: agent not registered or has no passport for this project: %w", ErrPassportNotFound)
+		} else if err != nil {
+			return Task{}, fmt.Errorf("tasks: create: passport lookup: %w", err)
+		}
+	}
 
 	var row *sql.Row
 	if id == "" {
 		row = tx.QueryRowContext(ctx,
-			`INSERT INTO tasks (project_id, parent_task_id, title, description, priority, due_by) VALUES ($1, $2, $3, $4, $5, $6)
+			`INSERT INTO tasks (project_id, parent_task_id, title, description, owner_agent_id, priority, due_by) VALUES ($1, $2, $3, $4, $5, $6, $7)
 			 RETURNING `+taskColumns,
-			projectID, parentTaskID, title, description, priority, dueBy,
+			projectID, parentTaskID, title, description, ownerAgentID, priority, dueBy,
 		)
 	} else {
 		row = tx.QueryRowContext(ctx,
-			`INSERT INTO tasks (id, project_id, parent_task_id, title, description, priority, due_by) VALUES ($1, $2, $3, $4, $5, $6, $7)
+			`INSERT INTO tasks (id, project_id, parent_task_id, title, description, owner_agent_id, priority, due_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 			 RETURNING `+taskColumns,
-			id, projectID, parentTaskID, title, description, priority, dueBy,
+			id, projectID, parentTaskID, title, description, ownerAgentID, priority, dueBy,
 		)
 	}
 	task, err := scanTask(row)

@@ -13,8 +13,9 @@ import (
 
 func TestLoggingMiddleware_LogsMethodPathStatus(t *testing.T) {
 	var buf bytes.Buffer
+	originalOutput := log.Writer()
 	log.SetOutput(&buf)
-	defer log.SetOutput(nil)
+	t.Cleanup(func() { log.SetOutput(originalOutput) })
 
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
@@ -38,8 +39,9 @@ func TestLoggingMiddleware_LogsMethodPathStatus(t *testing.T) {
 
 func TestLoggingMiddleware_LogsJSONRPCMethodForMCP(t *testing.T) {
 	var buf bytes.Buffer
+	originalOutput := log.Writer()
 	log.SetOutput(&buf)
-	defer log.SetOutput(nil)
+	t.Cleanup(func() { log.SetOutput(originalOutput) })
 
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -68,8 +70,9 @@ func TestLoggingMiddleware_LogsJSONRPCMethodForMCP(t *testing.T) {
 
 func TestLoggingMiddleware_LogsToolNameForToolsCall(t *testing.T) {
 	var buf bytes.Buffer
+	originalOutput := log.Writer()
 	log.SetOutput(&buf)
-	defer log.SetOutput(nil)
+	t.Cleanup(func() { log.SetOutput(originalOutput) })
 
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

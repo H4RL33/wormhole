@@ -21,9 +21,9 @@ import (
 
 // m3ToolsCallParams/m3ToolCallResult mirror internal/mcp's unexported
 // toolsCallParams/toolCallResult (internal/mcp/jsonrpc.go lines ~220-234)
-// and cmd/wormhole-cli/main.go's local mirror of the same shapes — this
+// and cmd/wormhole's local mirror of the same shapes — this
 // file cannot import either (unexported in internal/mcp; a different
-// package's local type in wormhole-cli), so it keeps its own copy with
+// package's local type in cmd/wormhole), so it keeps its own copy with
 // matching field names/JSON tags for consistency across the codebase's
 // (now three) independent client implementations.
 type m3ToolsCallParams struct {
@@ -151,7 +151,7 @@ func m3CallTool(t *testing.T, srvURL, tool, projectID, token string, args any) j
 // open: that test seeds state by calling core store methods directly
 // (tasksStore.Create, etc.) — it never proves the MCP write path and the
 // dashboard read path agree. This test builds the exact production
-// topology (all 16 registry.Register(mcp.*Tool(...)) calls from
+// topology (the 16 non-sync registry.Register(mcp.*Tool(...)) calls from
 // cmd/wormhole-server/main.go, plus /mcp and /dashboard/ mounted on one
 // mux/httptest.Server) and asserts each dashboard route reflects exactly
 // the row created through the corresponding MCP tool call, matched by id.
@@ -165,9 +165,10 @@ func TestM3_MCPSeededStateReflectedInDashboard(t *testing.T) {
 	rolesStore := roles.NewStore(db)
 
 	// Replicates cmd/wormhole-server/main.go's registry construction
-	// exactly: all 16 registry.Register(mcp.*Tool(...)) calls, in the same
-	// order, so this test exercises the real production tool surface, not
-	// a subset.
+	// exactly: the 16 non-sync registry.Register(mcp.*Tool(...)) calls, in
+	// the same order, so this test exercises the real production tool
+	// surface the dashboard reads from (the 4 sync tools write no
+	// dashboard-visible state and are intentionally omitted).
 	registry := mcp.NewRegistry()
 	registry.Register(mcp.RegisterAgentTool(identityStore, eventsStore, rolesStore, kbStore))
 	registry.Register(mcp.WhoAmITool())
@@ -210,7 +211,7 @@ func TestM3_MCPSeededStateReflectedInDashboard(t *testing.T) {
 
 	// Step 1: register an agent via /mcp. No auth required for this tool.
 	registerResultRaw := m3CallTool(t, srv.URL, "wormhole.agent.register", projectID, "", mcp.RegisterAgentInput{
-		Permissions:  []string{"task.create", "event.publish", "kb.write"},
+		Permissions:  []string{"task.create", "event.publish", "kb.write", "channel.create", "channel.post"},
 		Owner:        "harley",
 		Model:        "claude",
 		Capabilities: []string{"code_review"},

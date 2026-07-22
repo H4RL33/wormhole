@@ -1628,4 +1628,3 @@ func TestRunConnect_OpenCode_CustomConnectorName(t *testing.T) {
 		t.Fatalf("local config should not have url field: %+v", staging)
 	}
 }
-

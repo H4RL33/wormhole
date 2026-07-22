@@ -1,6 +1,5 @@
 // mcp.go implements wormholed's local socket MCP JSON-RPC 2.0 surface
-// (RFC-0003 §6.1, docs/superpowers/plans/2026-07-16-wormholed-mcp-endpoint-
-// design.md §1/§5 subtask 2). It replaces the P1-era bespoke
+// (RFC-0003 §6.1). It replaces the P1-era bespoke
 // {tool,args}->{result,error} one-shot protocol (localRequest/localResponse,
 // now deleted) with initialize / notifications/initialized / tools/list /
 // tools/call over a persistent, newline-delimited-JSON connection.
@@ -8,8 +7,8 @@
 // localTool/localRegistry mirror internal/mcp.Tool/internal/mcp.Registry's
 // shape, and buildInputSchema/reflectStructSchema/jsonSchemaForType/
 // parseJSONTag are copied (not imported) from internal/mcp/jsonrpc.go:106-225
-// — localapi cannot import internal/mcp (RFC-0003 §6.3, docs/architecture.md
-// LR1: internal/runtime/* and internal/mcp are separate trees). This is a
+// — localapi cannot import internal/mcp (RFC-0003 §6.3 and
+// docs/implementation-rules.md §4.1 LR1). This is a
 // deliberate duplication, same posture as rpcRequest/rpcResponse/
 // toolsCallParams/toolCallResult already declared in localapi.go.
 package localapi
@@ -41,19 +40,18 @@ const (
 	rpcServerNotInitialized = -32002
 )
 
-// localToolHandler is a local tool's dispatch signature: no
-// *identity.AuthenticatedScope parameter, unlike internal/mcp.Handler —
-// localapi has no auth middleware today (RFC-0003 OQ4's same-user-process-
-// trust default). Adding one is a separate escalation, not a side effect of
-// this change.
+// localToolHandler is a local tool's dispatch signature. Authentication is
+// enforced once in handleToolsCall from localTool.RequiredPermission before
+// the handler is invoked.
 type localToolHandler func(ctx context.Context, args json.RawMessage) (any, error)
 
 // localTool mirrors internal/mcp.Tool's shape for the local socket surface.
 type localTool struct {
-	Name             string
-	Description      string
-	ArgumentsExample any
-	Handler          localToolHandler
+	Name               string
+	Description        string
+	ArgumentsExample   any
+	RequiredPermission string
+	Handler            localToolHandler
 }
 
 // localRegistry holds every tool wormholed's local socket serves, plus
@@ -64,47 +62,50 @@ type localRegistry struct {
 	order []string
 }
 
-// newLocalRegistry constructs and registers all 15 tools localapi's old
+// newLocalRegistry constructs and registers the local MCP tools formerly
 // switch-based handle() dispatched by name, each wrapping the corresponding
 // existing method (s.proxyWhoAmI, s.localListTasks, etc.) with a thin
 // adapter closure. None of the wrapped methods change internally — only how
 // they're invoked changes (design doc §5 subtask 2).
 func newLocalRegistry(s *Server) *localRegistry {
 	r := &localRegistry{tools: map[string]localTool{}}
-	reg := func(name, description string, example any, handler localToolHandler) {
-		r.tools[name] = localTool{Name: name, Description: description, ArgumentsExample: example, Handler: handler}
+	reg := func(name, description string, example any, permission string, handler localToolHandler) {
+		r.tools[name] = localTool{Name: name, Description: description, ArgumentsExample: example, RequiredPermission: permission, Handler: handler}
 		r.order = append(r.order, name)
 	}
 
-	reg("wormhole.agent.whoami", "Return the calling agent's identity, capabilities, and permissions.", whoAmIArgs{}, func(ctx context.Context, _ json.RawMessage) (any, error) {
+	reg("wormhole.agent.whoami", "Return the calling agent's identity, capabilities, and permissions.", whoAmIArgs{}, "", func(ctx context.Context, _ json.RawMessage) (any, error) {
 		return s.proxyWhoAmI(ctx)
 	})
 
-	reg("wormhole.task.list", "List tasks in the local task graph replica, optionally filtered by status.", listTasksArgs{}, func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.task.list", "List tasks in the local task graph replica, optionally filtered by status.", listTasksArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localListTasks(ctx, args)
 	})
 
-	reg("wormhole.task.get", "Get a single task by ID from the local task graph replica.", getTaskArgs{}, func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.task.get", "Get a single task by ID from the local task graph replica.", getTaskArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localGetTask(ctx, args)
 	})
 
-	reg("wormhole.task.create", "Create a task locally and enqueue it for sync to the Coordination Server.", createTaskArgs{}, func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.task.create", "Create a task locally and enqueue it for sync to the Coordination Server.", createTaskArgs{}, "task.create", func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleTaskCreate(ctx, args)
 	})
 
-	reg("wormhole.task.route", "Create a task and route it to a locally-registered agent by capability match.", taskRouteArgs{}, func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.task.route", "Create a task and route it to a locally-registered agent by capability match.", taskRouteArgs{}, "task.create", func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleTaskRoute(ctx, args)
 	})
 
-	reg("wormhole.channel.list", "List channels in the local event bus replica.", channelListArgs{}, func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.channel.list", "List channels in the local event bus replica.", channelListArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localListChannels(ctx, args)
 	})
+	reg("wormhole.channel.create", "Create a channel locally and enqueue it for sync.", channelCreateArgs{}, "channel.create", func(ctx context.Context, args json.RawMessage) (any, error) {
+		return s.handleChannelCreate(ctx, args)
+	})
 
-	reg("wormhole.channel.events", "List recent events on channels in the local event bus replica.", channelEventsArgs{}, func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.channel.events", "List recent events on channels in the local event bus replica.", channelEventsArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localListChannelEvents(ctx, args)
 	})
 
-	reg("wormhole.channel.post", "Publish a durable event to a channel locally and enqueue it for sync.", channelPostArgs{}, func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.channel.post", "Publish a durable event to a channel locally and enqueue it for sync.", channelPostArgs{}, "channel.post", func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleChannelPost(ctx, args)
 	})
 
@@ -112,17 +113,17 @@ func newLocalRegistry(s *Server) *localRegistry {
 	// special-cased in handleToolsCall because event delivery happens as
 	// server-initiated MCP notifications after the initial ack, not a
 	// single (result, error) return (design doc §1 tools/call, §5).
-	reg("wormhole.channel.subscribe", "Subscribe to events on this connection; matching events are delivered as notifications/wormhole.event messages until the subscription ends.", channelSubscribeArgs{}, nil)
+	reg("wormhole.channel.subscribe", "Subscribe to events on this connection; matching events are delivered as notifications/wormhole.event messages until the subscription ends.", channelSubscribeArgs{}, "", nil)
 
-	reg("wormhole.kb.list", "List KB articles in the local knowledge base replica.", kbListArgs{}, func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.kb.list", "List KB articles in the local knowledge base replica.", kbListArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localListArticles(ctx, args)
 	})
 
-	reg("wormhole.kb.get", "Get a KB article by ID, or list all articles if article_id is omitted.", kbGetArgs{}, func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.kb.get", "Get a KB article by ID, or list all articles if article_id is omitted.", kbGetArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localGetArticle(ctx, args)
 	})
 
-	reg("wormhole.kb.write", "Write a KB article locally and enqueue it for sync.", kbWriteArgs{}, func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.kb.write", "Write a KB article locally and enqueue it for sync.", kbWriteArgs{}, "kb.write", func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleKBWrite(ctx, args)
 	})
 
@@ -131,18 +132,18 @@ func newLocalRegistry(s *Server) *localRegistry {
 	// Server; presence-registration args (agent_id + capabilities) go to
 	// the local scheduler. Dispatch by shape, same as the old switch case
 	// (isJoinRegisterArgs, localapi.go).
-	reg("wormhole.agent.register", "Register an agent: join/passport creation (proxied to the Coordination Server) or local presence registration, dispatched by argument shape.", agentRegisterArgs{}, func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.agent.register", "Register an agent: join/passport creation (proxied to the Coordination Server) or local presence registration, dispatched by argument shape.", agentRegisterArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
 		if isJoinRegisterArgs(args) {
 			return s.proxyRegister(ctx, args)
 		}
 		return s.handleAgentRegister(ctx, args)
 	})
 
-	reg("wormhole.agent.presence", "Update a locally-registered agent's presence status.", agentPresenceArgs{}, func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.agent.presence", "Update a locally-registered agent's presence status.", agentPresenceArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleAgentPresence(ctx, args)
 	})
 
-	reg("wormhole.agent.list", "List agents registered with the local scheduler.", agentListArgs{}, func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.agent.list", "List agents registered with the local scheduler.", agentListArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleAgentList(ctx, args)
 	})
 
@@ -185,6 +186,10 @@ type createTaskArgs struct {
 	Priority     int    `json:"priority,omitempty"`
 	ParentTaskID string `json:"parent_task_id,omitempty"`
 	DueBy        string `json:"due_by,omitempty"`
+}
+
+type channelCreateArgs struct {
+	Name string `json:"name"`
 }
 
 type taskRouteArgs struct {
@@ -427,10 +432,14 @@ func (s *Server) handleToolsCall(ctx context.Context, sess *mcpSession, conn net
 	if !ok {
 		return nil, &rpcError{Code: rpcInvalidParams, Message: "unknown tool: " + params.Name}
 	}
+	if err := s.authorizeLocalTool(ctx, tool, params.Arguments); err != nil {
+		return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
+	}
 
 	if params.Name == "wormhole.channel.subscribe" {
 		ack, err := s.handleChannelSubscribeMCP(ctx, sess, conn, params.Arguments)
 		if err != nil {
+			s.logError("tool "+params.Name, err)
 			return toolCallResult{
 				Content: []toolCallResultContent{{Type: "text", Text: err.Error()}},
 				IsError: true,
@@ -442,6 +451,7 @@ func (s *Server) handleToolsCall(ctx context.Context, sess *mcpSession, conn net
 
 	result, err := tool.Handler(ctx, params.Arguments)
 	if err != nil {
+		s.logError("tool "+params.Name, err)
 		return toolCallResult{
 			Content: []toolCallResultContent{{Type: "text", Text: err.Error()}},
 			IsError: true,
