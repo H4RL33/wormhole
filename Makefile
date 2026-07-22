@@ -5,7 +5,7 @@
 DIST := dist
 BINARIES := wormhole wormholed wormhole-server
 
-.PHONY: all build clean test vet $(BINARIES)
+.PHONY: all build clean test vet check integration coverage race fmt-check $(BINARIES)
 
 all: build
 
@@ -16,6 +16,21 @@ $(BINARIES):
 
 test:
 	go test ./...
+
+fmt-check:
+	@test -z "$$(gofmt -l $$(find . -name '*.go' -not -path './dist/*'))"
+
+race:
+	WORMHOLE_INTEGRATION_REQUIRED=1 go test -race ./...
+
+integration:
+	WORMHOLE_INTEGRATION_REQUIRED=1 go test ./...
+
+coverage:
+	WORMHOLE_INTEGRATION_REQUIRED=1 go test -coverpkg=./... -covermode=atomic -coverprofile=coverage.out ./...
+	./.github/scripts/coverage-check.sh coverage.out docs/testing-coverage-exceptions.md
+
+check: fmt-check build vet integration race coverage
 
 vet:
 	go vet ./...

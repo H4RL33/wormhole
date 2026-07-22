@@ -190,12 +190,19 @@ func permsSuperset(got, want []string) bool {
 	return true
 }
 
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 // TestRegisterAgentTool_Handler_KnownRole verifies that a known --role
 // template resolves: the passport's roles tag includes the template name,
 // and the issued token's granted permissions are a superset of the
-// template's seeded permission bundle (Chapter 5 migration:
-// backend-engineer -> task.read, task.write, kb.read, kb.write,
-// channel.read, channel.write).
+// template's seeded permission bundle (migration 000014).
 func TestRegisterAgentTool_Handler_KnownRole(t *testing.T) {
 	store := testIdentityStore(t)
 	eventsStore := testEventsStore(t)
@@ -236,9 +243,19 @@ func TestRegisterAgentTool_Handler_KnownRole(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WhoAmI: %v", err)
 	}
-	wantBundle := []string{"task.read", "task.write", "kb.read", "kb.write", "channel.read", "channel.write"}
+	wantBundle := []string{
+		"task.list", "task.create", "task.update_status",
+		"kb.search", "kb.get", "kb.get_links", "kb.write",
+		"channel.list", "channel.subscribe", "channel.create", "channel.post",
+		"git.link_commit", "git.request_review",
+	}
 	if !permsSuperset(scope.Permissions, wantBundle) {
 		t.Fatalf("Permissions: got %v, want superset of %v", scope.Permissions, wantBundle)
+	}
+	for _, coarseAlias := range []string{"task.read", "task.write", "kb.read", "channel.read", "channel.write"} {
+		if contains(scope.Permissions, coarseAlias) {
+			t.Fatalf("Permissions: got %v, want no coarse alias %q", scope.Permissions, coarseAlias)
+		}
 	}
 }
 
@@ -274,9 +291,20 @@ func TestRegisterAgentTool_Handler_KnownRole_UnionsExplicitPermissions(t *testin
 	if err != nil {
 		t.Fatalf("WhoAmI: %v", err)
 	}
-	wantAll := []string{"task.assign", "task.read", "task.write", "kb.read", "kb.write", "channel.read", "channel.write"}
+	wantAll := []string{
+		"task.assign",
+		"task.list", "task.create", "task.update_status",
+		"kb.search", "kb.get", "kb.get_links", "kb.write",
+		"channel.list", "channel.subscribe", "channel.create", "channel.post",
+		"git.link_commit", "git.request_review",
+	}
 	if !permsSuperset(scope.Permissions, wantAll) {
 		t.Fatalf("Permissions: got %v, want superset of %v", scope.Permissions, wantAll)
+	}
+	for _, coarseAlias := range []string{"task.read", "task.write", "kb.read", "channel.read", "channel.write"} {
+		if contains(scope.Permissions, coarseAlias) {
+			t.Fatalf("Permissions: got %v, want no coarse alias %q", scope.Permissions, coarseAlias)
+		}
 	}
 }
 
