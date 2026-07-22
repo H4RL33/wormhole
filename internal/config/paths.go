@@ -35,13 +35,3 @@ func LocalConfigPath() string {
 	}
 	return ""
 }
-
-// CredentialsDir returns $XDG_DATA_HOME/wormhole/credentials, falling back to ~/.local/share/wormhole/credentials.
-func CredentialsDir() string {
-	dataHome := os.Getenv("XDG_DATA_HOME")
-	if dataHome == "" {
-		home, _ := os.UserHomeDir()
-		dataHome = filepath.Join(home, ".local", "share")
-	}
-	return filepath.Join(dataHome, "wormhole", "credentials")
-}

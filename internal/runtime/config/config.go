@@ -22,7 +22,7 @@ var ErrCredentialsNotFound = errors.New("config: credentials not found")
 
 // ErrInvalidProfileName is returned when the profile name passed to Load
 // could escape ~/.wormhole/credentials/ (path separators, ".." traversal,
-// empty string) — mirrors cmd/wormhole/profiles.go's
+// empty string) — mirrors cmd/wormhole/main.go's
 // validateProfileName, since profileName here also originates as a
 // command-line argument (os.Args[1] in cmd/wormholed/main.go).
 var ErrInvalidProfileName = errors.New("config: invalid profile name")
@@ -32,7 +32,7 @@ var ErrNoCredentials = errors.New("config: no credential profiles found")
 
 // validateProfileName rejects a profile name that could escape the
 // credentials directory when joined into a file path. Mirrors
-// cmd/wormhole/profiles.go's validateProfileName rules exactly.
+// cmd/wormhole/main.go's validateProfileName rules exactly.
 func validateProfileName(name string) error {
 	if name == "" {
 		return fmt.Errorf("%w: %q: must not be empty", ErrInvalidProfileName, name)

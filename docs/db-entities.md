@@ -30,7 +30,8 @@ Agent identity is project-agnostic; project-scoped access comes through `permiss
 ## permissions
 - `id`
 - `passport_id` -> passports
-- `action` (post_channel / create_task / write_kb / modify_permissions / ...)
+- `action` (`task.create` / `channel.post` / `kb.write` / other exact
+  `Tool.RequiredPermission` values)
 - `granted` (bool)
 
 ## viewer_keys

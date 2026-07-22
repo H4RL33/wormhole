@@ -91,9 +91,9 @@ type toolListEntry struct {
 
 // HandleToolsList implements the JSON-RPC "tools/list" method. Schemas are
 // derived from each Tool.ArgumentsExample via reflection — no per-tool
-// schema is hand-written (docs/mcp-protocol.md §5). Every tool's inputSchema gets a required project_id string
-// property except wormhole.agent.whoami, which is project-agnostic per
-// RFC-0001 §9.
+// schema is hand-written (docs/mcp-protocol.md §4). Every tool's inputSchema
+// gets a required project_id string property except wormhole.agent.whoami,
+// which is project-agnostic per RFC-0001 §9.
 func HandleToolsList(registry *Registry) any {
 	tools := registry.List()
 	entries := make([]toolListEntry, 0, len(tools))

@@ -8,10 +8,9 @@ code. Current repo builds local runtime, coordination server, and CLI.
 
 ## Authority Order
 
-`docs/rfcs/wormhole_rfc.md` (RFC-0001) >
-`docs/rfcs/wormhole_rfc_governance.md` (RFC-0002) >
-`docs/rfcs/wormhole_rfc_local_runtime.md` (RFC-0003) >
-`docs/implementation-rules.md` > existing code.
+Authority order: RFC-0001, with RFC-0003 overriding it only where RFC-0003
+explicitly amends local-runtime or transport assumptions; RFC-0002 governs optional
+Governance; `docs/implementation-rules.md`; existing code.
 
 RFC tool shapes are indicative unless code freezes them. Governance is optional and
 must not leak into Core code.

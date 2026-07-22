@@ -1,9 +1,11 @@
 # Wormhole Implementation Rules & Dispatch Heuristic
 
 **Audience:** implementation agents (any model tier) making changes to this repo.
-**Authority order:** RFC-0001 as amended by RFC-0003 > RFC-0002 > this document > existing
-code. This document derives from the RFCs and current code; if it conflicts with an RFC,
-the RFC wins and this file has a bug — flag it, don't silently pick one.
+Authority order: RFC-0001, with RFC-0003 overriding it only where RFC-0003
+explicitly amends local-runtime or transport assumptions; RFC-0002 governs optional
+Governance; `docs/implementation-rules.md`; existing code.
+This document derives from the RFCs and current code; if it conflicts with an RFC, the RFC
+wins and this file has a bug — flag it, don't silently pick one.
 
 This is a *constraint document*, not a tutorial. Every section states rules. If a task
 requires breaking a rule here, stop and escalate to the orchestrating agent or human;
@@ -243,9 +245,10 @@ the same layering pattern and isolation discipline.
   Need another cross-core import? Escalate; do not add it.
 - R3: `internal/types` imports nothing outside stdlib. It is the bottom of the graph.
 - R4: No new top-level packages or external Go dependencies without explicit human
-  sign-off. The locked module graph contains the direct dependencies `github.com/lib/pq`
-  and `modernc.org/sqlite`, plus the indirect dependencies recorded in `go.mod`/`go.sum`.
-  `golang-migrate` remains external schema tooling rather than a linked Go module.
+  sign-off. Source code directly imports `github.com/BurntSushi/toml`,
+  `github.com/lib/pq`, and `modernc.org/sqlite`; the complete locked module graph is
+  recorded in `go.mod`/`go.sum`. `golang-migrate` remains external schema tooling rather
+  than a linked Go module.
 - R5: The Coordination Server has one datastore: Postgres + pgvector. RFC-0003 separately
   requires `wormholed`'s local SQLite replica and durable sync queue; that SQLite database
   is not a Coordination Server datastore. Do not add Redis, NATS, another datastore, or
@@ -315,9 +318,10 @@ the same layering pattern and isolation discipline.
   fixed; exact request/response schemas get designed at implementation time and frozen
   in `internal/mcp`. When a schema decision isn't obvious, propose it in the PR/task
   notes rather than inventing silently.
-- M2: Naming grammar is `wormhole.<pillar-noun>.<verb>`. Pillars: `agent`, `channel`,
-  `task`, `kb`, `git`. No new pillar prefixes; `wormhole.governance.*` is RFC-0002 and
-  out of scope.
+- M2: Naming grammar is `wormhole.<pillar-noun>.<verb>`. Core pillars are `agent`,
+  `channel`, `task`, `kb`, and `git`; RFC-0003 also ratifies `sync` for runtime-to-server
+  operations. No other pillar prefixes; `wormhole.governance.*` is RFC-0002 and out of
+  scope.
 - M3: Every capability ships as an MCP tool or it doesn't exist (RFC-0001 §5.5).
   No REST-only endpoints for platform write capabilities. `/healthz` and similar
   operational endpoints are exceptions, as is the current read-only human dashboard
@@ -326,13 +330,14 @@ the same layering pattern and isolation discipline.
 - M4: Auth happens at the MCP boundary (`internal/mcp` middleware resolves bearer token
   via `identity.Store.WhoAmI`, yielding `AuthenticatedScope`), then core packages
   receive the already-resolved scope. Core packages never re-parse tokens.
-- M5: Permission checks use the `AuthenticatedScope.Permissions` list against action
-  names matching the `permissions.action` vocabulary (`post_channel`, `create_task`,
-  `write_kb`, `modify_permissions`, ...). Extending that vocabulary requires updating
-  `docs/db-entities.md` too.
-- M6: Destructive actions (delete project, revoke all access, `modify_permissions`)
-  are human-only by default (RFC-0001 §13). Never wire a code path that lets an agent
-  identity perform them.
+- M5: Every authenticated capability-gated tool declares `Tool.RequiredPermission`.
+  Current values match the tool name without the `wormhole.` prefix (for example,
+  `task.create`, `channel.post`, and `kb.write`). Deliberate auth-only exceptions declare
+  an empty permission. When adding a tool, update the registry invariant, role-template
+  migration, and permission documentation together.
+- M6: Destructive or policy actions such as deleting a project, revoking all access, or
+  changing permissions are human-only by default (RFC-0001 §13). Never wire a code path
+  that lets an agent identity perform them.
 
 ---
 
