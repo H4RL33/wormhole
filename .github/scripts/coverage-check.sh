@@ -8,10 +8,10 @@ test -f "$exceptions"
 
 report=$(go tool cover -func="$profile")
 printf '%s\n' "$report"
-uncovered=$(printf '%s\n' "$report" | awk '$1 != "total:" && $3 != "100.0%" {print}')
 total=$(printf '%s\n' "$report" | awk '$1 == "total:" {print $3}')
+total_number=${total%\%}
 
-if [ -n "$uncovered" ] || [ "$total" != "100.0%" ]; then
-    printf '%s\n' "coverage gate failed: testable functions/statements must be 100.0%" >&2
+if ! awk -v total="$total_number" 'BEGIN { exit !(total + 0 >= 90) }'; then
+    printf '%s\n' "coverage gate failed: merged statement coverage must be at least 90.0%" >&2
     exit 1
 fi

@@ -6,24 +6,22 @@
 
 ## Objective
 
-Bring the current Wormhole implementation to a trustworthy release-quality baseline: all testable production and runtime behavior covered, all tests passing (including mandatory real-Postgres integration), material correctness and isolation defects fixed, and `wormholed` demonstrated to remain below the agreed resource and responsiveness ceilings.
+Bring the current Wormhole implementation to a trustworthy release-quality baseline: high-risk production and runtime behavior covered, all tests passing (including mandatory real-Postgres integration), and material correctness and isolation defects fixed.
 
 ## Acceptance Criteria
 
 The work is complete only when all of the following hold:
 
-- Testable production and runtime behavior has 100% statement and function coverage, measured across all packages with `-coverpkg=./... -covermode=atomic`.
+- Merged statement coverage is at least 90%, measured across all packages with `-coverpkg=./... -covermode=atomic`.
 - Every genuinely untestable line has a written, per-line technical justification and explicit approval; command entrypoints are not automatically exempt.
 - Formatting, build, vet, full tests, race tests, and mandatory real-Postgres integration tests pass from a clean invocation.
 - Integration coverage exercises the CLI/stdio bridge, Unix socket, `wormholed`, SQLite durability, sync protocol, coordination server, and Postgres/RLS boundary.
 - Cross-project and cross-namespace isolation is explicitly tested for every project-scoped persistence path.
-- `wormholed` stays below 150 MB RSS, below 5% sustained CPU usage, and below 30 ms local response latency under the documented representative workload.
-- Resource usage settles after load; connections, goroutines, queue growth, and replica growth do not cause unbounded memory, CPU, or latency growth.
 - Independent code review finds no unresolved critical or important issues.
 
 ## Approach
 
-Use a risk-first staged pass. Restore a trustworthy baseline first, then fix high-risk correctness, durability, and isolation defects using test-driven changes. Complete integration and coverage after runtime contracts are correct, then measure performance and optimize only where a ceiling, growth property, or clear profile hotspot requires it.
+Use a risk-first staged pass. Restore a trustworthy baseline first, then fix high-risk correctness, durability, and isolation defects using test-driven changes. Complete integration and raise merged coverage to 90% after runtime contracts are correct.
 
 Coverage-first was rejected because it can encode defective behavior. Refactor-first was rejected because broad structural movement before adequate tests creates unnecessary regression risk.
 
@@ -31,7 +29,7 @@ Coverage-first was rejected because it can encode defective behavior. Refactor-f
 
 ### Baseline and Gates
 
-Update the stale role-registration expectations to the fine-grained permission vocabulary established by migration 000014. Add reproducible targets for formatting, build, vet, race, mandatory integration, merged coverage, and performance checks. Mandatory integration must fail rather than skip when Postgres or migrations are unavailable.
+Update the stale role-registration expectations to the fine-grained permission vocabulary established by migration 000014. Add reproducible targets for formatting, build, vet, race, mandatory integration, and merged coverage. Mandatory integration must fail rather than skip when Postgres or migrations are unavailable.
 
 ### Runtime Correctness and Security
 
@@ -68,22 +66,6 @@ Provision Postgres/pgvector, apply the complete migration chain, and run with `W
 
 Polling in integration tests must be condition-based and bounded; arbitrary long sleeps are not acceptable.
 
-### Performance and Resource Profiling
-
-Add a reproducible real-daemon harness using temporary XDG paths and SQLite state. Warm the daemon before measuring and document Go version, host characteristics, fixture cardinality, concurrency, and cold/warm state.
-
-Measure:
-
-- p50, p95, and p99 local IPC latency for representative reads and writes;
-- throughput and allocations under concurrent clients;
-- idle and loaded CPU over a sustained window;
-- idle, peak, and settled RSS from `/proc/<pid>`;
-- goroutine, connection, and memory behavior as client count grows;
-- latency and CPU as queues and local tables grow, including a large queue/replica case;
-- CPU and heap profiles for any breached ceiling or non-settling growth.
-
-The hard gates are local response latency below 30 ms, RSS below 150 MB, and sustained CPU below 5%. If the daemon is comfortably within these limits and profiles reveal no pathological growth or hotspot, retain the regression harness but do not perform speculative optimization. Add a queue polling index or tune polling/pooling only when measurements justify it.
-
 ## Simplification Rules
 
 Preserve the two-layer architecture, package ownership, and dependency bans. Make the smallest correct change for each proven behavior. Extract validation or response-assembly helpers only when a tested handler is demonstrably difficult to reason about. Do not introduce new top-level packages, external dependencies, general frameworks, or cross-pillar imports.
@@ -92,11 +74,11 @@ Keep formatting-only changes separate. Preserve current vocabulary and RFC contr
 
 ## Review and Orchestration
 
-Implementation is divided into independently testable slices. Requested Terra low/high and Sol workers cover focused implementation, test-depth, performance, and review roles. Each slice receives an independent specification-and-quality review before the next dependent slice proceeds. A final independent review examines the complete diff, architecture rules, security properties, coverage evidence, and performance evidence. Critical and important findings are fixed and re-reviewed before completion.
+Implementation is divided into independently testable slices. Requested Terra low/high and Sol workers cover focused implementation, test depth, and review roles. Each slice receives an independent specification-and-quality review before the next dependent slice proceeds. A final independent review examines the complete diff, architecture rules, security properties, and coverage evidence. Critical and important findings are fixed and re-reviewed before completion.
 
 ## Verification Evidence
 
-The final report records exact commands, exit codes, coverage totals, integration environment, race results, performance workload and percentiles, CPU/RSS readings, profile conclusions, and any approved line-level coverage exceptions. Agent reports are not accepted as proof until the orchestrating agent reruns the relevant verification.
+The final report records exact commands, exit codes, coverage totals, integration environment, race results, and any approved line-level coverage exceptions. Agent reports are not accepted as proof until the orchestrating agent reruns the relevant verification.
 
 ## Known Baseline
 

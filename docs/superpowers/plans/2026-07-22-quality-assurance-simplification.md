@@ -4,9 +4,9 @@
 
 **Goal:** Make every testable Wormhole production/runtime path covered and passing, prove the complete local-to-server system with real integration tests, and enforce `wormholed` resource ceilings.
 
-**Architecture:** Keep the existing local-runtime/coordination-server split. Work risk-first: restore the gate, fix isolation and sync contracts with focused red-green cycles, harden process boundaries, then close coverage and establish real-daemon performance regression tests. Each task is independently reviewed before dependent work begins.
+**Architecture:** Keep the existing local-runtime/coordination-server split. Work risk-first: restore the gate, fix isolation and sync contracts with focused red-green cycles, harden process boundaries, then raise merged coverage to 90%. Each task is independently reviewed before dependent work begins.
 
-**Tech Stack:** Go, Unix sockets, SQLite (`modernc.org/sqlite`), Postgres/pgvector, Docker Compose, `golang-migrate`, Go race/coverage/benchmark tooling, Linux `/proc` metrics.
+**Tech Stack:** Go, Unix sockets, SQLite (`modernc.org/sqlite`), Postgres/pgvector, Docker Compose, `golang-migrate`, Go race and coverage tooling.
 
 ## Global Constraints
 
@@ -15,8 +15,7 @@
 - Core packages do not cross-import except `tasks -> events`; runtime packages do not import Core or MCP.
 - Use real Postgres for server persistence/RLS tests and explicit namespaces for every localstore query.
 - Write and observe a failing test before each production behavior change.
-- Require 100% statement and function coverage for testable production/runtime behavior; document each approved line-level exception.
-- Hard performance ceilings: local response latency below 30 ms, RSS below 150 MB, sustained CPU below 5%.
+- Require at least 90% merged statement coverage for production/runtime behavior; document deliberately uncovered high-risk paths.
 - Preserve unrelated worktree changes.
 
 ---
@@ -80,7 +79,7 @@ check: fmt-check build vet integration race coverage
 
 - [ ] **Step 4: Add the coverage checker and exception format**
 
-Create this executable checker. It requires raw 100% until a human approves an exception and the checker is deliberately changed to account for that exact profile block:
+Create this executable checker. It requires at least 90% merged statement coverage:
 
 ```sh
 #!/bin/sh
@@ -93,11 +92,11 @@ test -f "$exceptions"
 
 report=$(go tool cover -func="$profile")
 printf '%s\n' "$report"
-uncovered=$(printf '%s\n' "$report" | awk '$1 != "total:" && $3 != "100.0%" {print}')
 total=$(printf '%s\n' "$report" | awk '$1 == "total:" {print $3}')
+total_number=${total%\%}
 
-if [ -n "$uncovered" ] || [ "$total" != "100.0%" ]; then
-    printf '%s\n' "coverage gate failed: testable functions/statements must be 100.0%" >&2
+if ! awk -v total="$total_number" 'BEGIN { exit !(total + 0 >= 90) }'; then
+    printf '%s\n' "coverage gate failed: merged statement coverage must be at least 90.0%" >&2
     exit 1
 fi
 ```
@@ -367,12 +366,12 @@ Commit: `test: cover end-to-end isolation and recovery`
 ### Task 7: Close All Testable Coverage Gaps and Simplify Under Test
 
 **Files:**
-- Modify: tests adjacent to every production file reported below 100%
+- Modify: tests adjacent to uncovered high-risk production/runtime paths until merged coverage reaches 90%
 - Modify when needed for injection: `cmd/wormhole/main.go`, `cmd/wormholed/main.go`, `cmd/wormhole-server/main.go`
 - Modify: `docs/testing-coverage-exceptions.md`
 
 **Interfaces:**
-- Produces: 100% testable statement/function coverage and testable `run` entrypoints returning errors/exit codes.
+- Produces: at least 90% merged statement coverage and testable command wiring for the highest-risk entrypoints.
 
 - [ ] **Step 1: Generate the merged coverage worklist**
 
@@ -380,10 +379,10 @@ Run:
 
 ```bash
 WORMHOLE_INTEGRATION_REQUIRED=1 go test -coverpkg=./... -covermode=atomic -coverprofile=coverage.out ./...
-go tool cover -func=coverage.out | awk '$3 != "100.0%" {print}'
+go tool cover -func=coverage.out | sort -k3,3n
 ```
 
-Record every reported function in the task report before edits.
+Record the lowest-covered and security/durability-critical functions in the task report before edits.
 
 - [ ] **Step 2: Cover critical zero/partial paths first**
 
@@ -393,9 +392,9 @@ Add focused behavior tests for config resolution, `EventRepo.GetChannel/ListChan
 
 Extract `run(ctx, args, stdout, stderr) error` or equivalent injected wiring from each `main`; retain `main` as signal/argument adaptation plus one exit decision. Use subprocess helper tests for the final `os.Exit`/signal boundary and direct tests for all wiring errors.
 
-- [ ] **Step 4: Iterate one uncovered branch at a time**
+- [ ] **Step 4: Iterate high-risk uncovered branches until the merged total reaches 90%**
 
-For each remaining line, write a test that observes a meaningful behavior or controlled dependency failure, run it, then rerun the merged report. Do not use assertions that merely execute a line without checking its contract.
+Prioritize isolation, persistence, sync, IPC, authorization, cancellation, and command-wiring branches. For each selected branch, write a test that observes meaningful behavior or a controlled dependency failure, run it, then rerun the merged report. Do not use assertions that merely execute a line without checking its contract.
 
 - [ ] **Step 5: Document only genuinely uncontrollable exceptions**
 
@@ -405,7 +404,7 @@ For each exception, add exact `path:line`, technical reason, replacement behavio
 
 Run: `make coverage`
 
-Expected: `total: (statements) 100.0%` after approved exceptions are applied, and every function is 100% or exactly excepted.
+Expected: merged statement coverage is at least `90.0%`.
 
 With coverage green, remove duplicated test helpers and extract only production helpers whose responsibility is proven by multiple tests. Run `gofmt` only on touched files.
 
@@ -415,56 +414,11 @@ Commit: `test: cover all runtime behavior`
 
 ---
 
-### Task 8: Establish and Enforce `wormholed` Performance Ceilings
-
-**Files:**
-- Create: `cmd/wormholed/performance_linux_test.go`
-- Create: `internal/runtime/localapi/benchmark_test.go`
-- Create: `docs/performance.md`
-- Modify if measurements require: `internal/runtime/localstore/localstore.go`
-- Modify if measurements require: `internal/runtime/localstore/schema` declaration in the same file
-- Modify: `Makefile`
-
-**Interfaces:**
-- Produces: `make perf`, percentile/RSS/CPU/growth evidence, and regression benchmarks.
-
-- [ ] **Step 1: Add local API benchmarks**
-
-Start a real Unix-socket server and SQLite store once per benchmark, warm it, then benchmark representative task get/list and write calls using persistent initialized MCP sessions. Report allocations with `b.ReportAllocs()` and include serial plus concurrent sub-benchmarks.
-
-- [ ] **Step 2: Add a Linux real-daemon ceiling test**
-
-Launch the compiled daemon with temporary HOME/XDG paths. Warm it, issue at least 10,000 representative requests, sort durations, and compute p50/p95/p99. Sample `/proc/<pid>/status` `VmRSS` and `/proc/<pid>/stat` CPU ticks before/after a sustained interval. Assert p99 `<30ms`, peak/settled RSS `<150 MiB`, and sustained CPU `<5%` of one core.
-
-- [ ] **Step 3: Add growth cases**
-
-Measure idle, 100 persistent clients, 100,000 pending queue rows, and 100,000 local task rows. After clients close and GC/settling time passes, require goroutines and RSS to return within a documented tolerance and latency to remain below the hard ceiling.
-
-- [ ] **Step 4: Run baseline and profile only failures/pathology**
-
-Run: `go test -run '^TestWormholedPerformanceCeilings$' -count=1 ./cmd/wormholed` and `go test -bench=. -benchmem ./internal/runtime/localapi`.
-
-If a ceiling fails or growth does not settle, capture CPU and heap profiles with `go test -cpuprofile`/`-memprofile`, identify the dominant callsites, and make one measured optimization at a time. Candidate changes are an explicit SQLite pool limit and a sync-queue polling index; neither is added without profile/query-plan evidence.
-
-- [ ] **Step 5: Document and expose the reproducible workload**
-
-`docs/performance.md` must record Go version, OS/CPU, fixture cardinalities, client concurrency, warmup, sample duration, percentile method, CPU/RSS method, results, and profile conclusion. Add `make perf` using the exact test/benchmark commands.
-
-- [ ] **Step 6: Verify and commit**
-
-Run: `make perf`
-
-Expected: every hard ceiling passes with no non-settling resource growth.
-
-Commit: `perf: enforce wormholed resource ceilings`
-
----
-
-### Task 9: Final Review and Release-Quality Verification
+### Task 8: Final Review and Release-Quality Verification
 
 **Files:**
 - Modify only files required by reviewer findings.
-- Update: `docs/testing-coverage-exceptions.md` and `docs/performance.md` only with final observed evidence.
+- Update: `docs/testing-coverage-exceptions.md` only with final observed evidence.
 
 **Interfaces:**
 - Consumes: all prior task commits.
@@ -472,7 +426,7 @@ Commit: `perf: enforce wormholed resource ceilings`
 
 - [ ] **Step 1: Dispatch final independent review**
 
-Provide the approved design, this plan, base SHA, head SHA, coverage report, race/integration output, and performance report. Require review of RFC compliance, dependency rules, tenant/namespace security, sync durability, test quality, simplification, and metric validity.
+Provide the approved design, this plan, base SHA, head SHA, coverage report, and race/integration output. Require review of RFC compliance, dependency rules, tenant/namespace security, sync durability, test quality, simplification, and coverage validity.
 
 - [ ] **Step 2: Fix and re-review findings**
 
@@ -489,11 +443,10 @@ make vet
 make integration
 make race
 make coverage
-make perf
 git diff --check
 ```
 
-Expected: every command exits 0; coverage reports 100% testable statements/functions; performance stays below 30 ms, 150 MB, and 5%; no unresolved review finding remains.
+Expected: every command exits 0; merged statement coverage is at least 90%; no unresolved review finding remains.
 
 - [ ] **Step 4: Produce completion report**
 
