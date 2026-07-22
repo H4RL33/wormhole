@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/types"
@@ -267,13 +268,13 @@ func (r *TaskRepo) UpsertTask(ctx context.Context, namespaceID, taskID, title, d
 	}
 	defer tx.Rollback()
 
-	var existingNamespaceID string
-	err = tx.QueryRowContext(ctx, `SELECT namespace_id FROM tasks WHERE id = ?`, taskID).Scan(&existingNamespaceID)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return Task{}, fmt.Errorf("localstore/task: upsert: namespace lookup: %w", err)
-	}
-	if err == nil && existingNamespaceID != namespaceID {
+	var collision int
+	err = tx.QueryRowContext(ctx, `SELECT 1 FROM tasks WHERE id = ? AND namespace_id <> ?`, taskID, namespaceID).Scan(&collision)
+	if err == nil {
 		return Task{}, ErrNamespaceCollision
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return Task{}, fmt.Errorf("localstore/task: upsert: namespace lookup: %w", err)
 	}
 
 	row := tx.QueryRowContext(ctx,
@@ -330,8 +331,7 @@ func scanTaskRows(row interface {
 	Scan(...interface{}) error
 }) (Task, error) {
 	var task Task
-	var parentTaskID, ownerAgentID sql.NullString
-	var dueBy sql.NullTime
+	var parentTaskID, ownerAgentID, dueBy sql.NullString
 	var status string
 
 	err := row.Scan(
@@ -349,7 +349,12 @@ func scanTaskRows(row interface {
 		task.OwnerAgentID = &ownerAgentID.String
 	}
 	if dueBy.Valid {
-		task.DueBy = &dueBy.Time
+		dueByValue, _, _ := strings.Cut(dueBy.String, " m=")
+		parsedDueBy, err := time.Parse("2006-01-02 15:04:05.999999999 -0700 MST", dueByValue)
+		if err != nil {
+			return Task{}, fmt.Errorf("parse due_by: %w", err)
+		}
+		task.DueBy = &parsedDueBy
 	}
 	return task, nil
 }
