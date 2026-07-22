@@ -37,7 +37,7 @@ wormhole join \
   --project <project-id> \
   --owner <your-name> \
   --model claude-code \
-  --permissions task.create,task.read,kb.write,kb.read,channel.read,channel.post \
+  --permissions task.list,kb.search,channel.list,channel.post \
   --profile claude-code
 ```
 
@@ -53,6 +53,7 @@ instead of the `join` command above when you want that combined setup:
 wormhole connect \
   --server http://localhost:8080 \
   --project <project-id> \
+  --permissions task.list,kb.search,channel.list,channel.post \
   --profile claude-code \
   --target claude
 ```
@@ -62,10 +63,11 @@ wormhole connect \
 Run `wormholed` in a separate terminal after its credential profile exists:
 
 ```bash
-wormholed
+wormholed claude-code
 ```
 
-It loads credential profiles from `~/.wormhole/credentials/` and listens on
+The positional profile name must match `claude-code` in
+`~/.wormhole/credentials/claude-code.json`. `wormholed` then listens on
 `$XDG_RUNTIME_DIR/wormhole/wormholed.sock`, or
 `$TMPDIR/wormhole-runtime/wormhole/wormholed.sock` when `XDG_RUNTIME_DIR` is unset.
 
