@@ -241,6 +241,20 @@ func (r *TaskRepo) Assign(ctx context.Context, namespaceID, taskID, ownerAgentID
 	}
 	defer tx.Rollback()
 
+	task, err := r.AssignTx(ctx, tx, namespaceID, taskID, ownerAgentID)
+	if err != nil {
+		return Task{}, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Task{}, fmt.Errorf("localstore/task: assign: commit: %w", err)
+	}
+	return task, nil
+}
+
+// AssignTx records task ownership using tx so routing can atomically persist
+// the assigned task and its outbound sync entry.
+func (r *TaskRepo) AssignTx(ctx context.Context, tx *sql.Tx, namespaceID, taskID, ownerAgentID string) (Task, error) {
 	row := tx.QueryRowContext(ctx,
 		`UPDATE tasks SET owner_agent_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND namespace_id = ?
 		 RETURNING id, namespace_id, parent_task_id, title, description, owner_agent_id, status, priority, due_by, created_at, updated_at`,
@@ -252,10 +266,6 @@ func (r *TaskRepo) Assign(ctx context.Context, namespaceID, taskID, ownerAgentID
 	}
 	if err != nil {
 		return Task{}, fmt.Errorf("localstore/task: assign: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return Task{}, fmt.Errorf("localstore/task: assign: commit: %w", err)
 	}
 	return task, nil
 }

@@ -15,15 +15,15 @@ import (
 const rlsFixtureLockKey = 867530913
 
 type rlsMatrixFixture struct {
-	projectA  string
-	projectB  string
-	agentID   string
-	agentID2  string
-	passportA string
-	taskA     string
-	channelA  string
-	articleA  string
-	articleA2 string
+	projectA   string
+	projectB   string
+	agentID    string
+	agentID2   string
+	passportA  string
+	taskA      string
+	channelA   string
+	articleA   string
+	articleA2  string
 	viewerKeyA string
 }
 

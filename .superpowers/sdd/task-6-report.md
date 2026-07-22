@@ -105,6 +105,15 @@ the existing standalone APIs. Added coverage proves:
 - local `wormhole.channel.create` is listed and syncable like the other durable
   write tools.
 
+`task.route` now keeps task creation, owner assignment, and its canonical
+`task/create` queue entry in the same SQLite transaction. Scheduler registration
+and capability assignment happen before commit; an idempotent deferred removal
+compensates assignment, repository, enqueue, and commit failures after the
+in-memory task is registered. Registration failure, no eligible agent, and an
+injected post-registration queue failure all leave zero durable tasks, queue
+entries, and scheduler tasks. A successful route leaves exactly one assigned
+task and one matching pending queue entry.
+
 Every durable local tool declares its action permission (`task.create`,
 `kb.write`, `channel.create`, or `channel.post`); scheduler-backed `task.route`
 also requires `task.create`. The local MCP boundary checks
@@ -161,6 +170,12 @@ PASS
 go test ./internal/runtime/localapi -run 'TestLocalDurableWrites_' -count=20
 PASS
 
+go test ./internal/runtime/localapi -run 'TestTaskRoute|TestTaskRouted' -count=1
+PASS
+
+go test -race ./internal/runtime/localapi ./internal/runtime/localstore ./internal/runtime/scheduler -count=1
+PASS: no race reports
+
 WORMHOLE_INTEGRATION_REQUIRED=1 go test ./cmd/wormholed -run 'TestE2E_StdioBridgeToPostgres|TestRun_TwoProjectBindingsPersistWithTokenAndNamespaceIsolation' -count=2
 PASS
 
@@ -207,6 +222,8 @@ PASS
 - `internal/runtime/localstore/localstore_test.go`
 - `internal/runtime/localstore/kb_repo.go`
 - `internal/runtime/localstore/task_repo.go`
+- `internal/runtime/scheduler/scheduler.go`
+- `internal/runtime/scheduler/scheduler_test.go`
 - `internal/runtime/sync/queue_repo.go`
 - `migrations/000016_project_reference_isolation.up.sql`
 - `migrations/000016_project_reference_isolation.down.sql`
@@ -226,9 +243,9 @@ PASS
   restricted role uses the shared key; future role-mutating integration
   fixtures must do the same.
 - This task covers the explicit durable MCP write tools (`task.create`,
-  `kb.write`, `channel.create`, `channel.post`). The scheduler-oriented
-  `task.route` workflow retains its existing separate scheduling/assignment
-  semantics and was not redesigned here.
+  `kb.write`, `channel.create`, `channel.post`) plus scheduler-backed
+  `task.route`; routing retains local capability matching while sharing the
+  same entity/queue durability invariant.
 - No Task 7 coverage-percentage work was included.
 - Linux-only daemon support and the Windows-via-WSL boundary remain explicit
   in both `README.md` and `docs/claude-code-connector.md`.

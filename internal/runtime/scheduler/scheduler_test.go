@@ -80,6 +80,27 @@ func TestRegisterTask(t *testing.T) {
 	}
 }
 
+func TestRemoveTaskIsIdempotentAndScopedToID(t *testing.T) {
+	sched := NewScheduler()
+	if _, err := sched.RegisterTask("ns-1", "code", "task-1"); err != nil {
+		t.Fatalf("RegisterTask(task-1): %v", err)
+	}
+	if _, err := sched.RegisterTask("ns-1", "review", "task-2"); err != nil {
+		t.Fatalf("RegisterTask(task-2): %v", err)
+	}
+	sched.RemoveTask("task-1")
+	sched.RemoveTask("task-1")
+	if got := sched.TaskCount(); got != 1 {
+		t.Fatalf("TaskCount after idempotent removal = %d, want 1", got)
+	}
+	if _, err := sched.AssignedAgent("task-1"); err == nil {
+		t.Fatal("removed task remains registered")
+	}
+	if _, err := sched.AssignedAgent("task-2"); err != nil {
+		t.Fatalf("unrelated task removed: %v", err)
+	}
+}
+
 func TestRegisterTaskEmptyFields(t *testing.T) {
 	sched := NewScheduler()
 

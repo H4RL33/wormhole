@@ -1145,6 +1145,9 @@ func (s *Server) handleTaskRoute(ctx context.Context, args json.RawMessage) (map
 	if s.scheduler == nil {
 		return nil, fmt.Errorf("localapi: task route: scheduler not available")
 	}
+	if s.qr == nil {
+		return nil, fmt.Errorf("localapi: task route: sync queue not available")
+	}
 
 	var argMap map[string]interface{}
 	if len(args) > 0 {
@@ -1171,9 +1174,15 @@ func (s *Server) handleTaskRoute(ctx context.Context, args json.RawMessage) (map
 		return nil, err
 	}
 
-	// Create the task in localstore FIRST: its UUID is the one true task ID
-	// (Finding 1). A creation failure is fatal to the request, not swallowed.
-	createdTask, err := s.tr.CreateTask(ctx, orgCtx.ProjectID, title, desc, nil, 0, nil)
+	tx, err := s.beginLocalWrite(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: task route: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Create the task inside the same transaction as ownership and enqueue.
+	// Its UUID remains the one true ID used by both scheduler and sync queue.
+	createdTask, err := s.tr.CreateTaskTx(ctx, tx, orgCtx.ProjectID, title, desc, nil, 0, nil)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: task route: create: %w", err)
 	}
@@ -1184,29 +1193,51 @@ func (s *Server) handleTaskRoute(ctx context.Context, args json.RawMessage) (map
 	if _, err := s.scheduler.RegisterTask(orgCtx.ProjectID, capability, createdTask.ID); err != nil {
 		return nil, fmt.Errorf("localapi: task route: register: %w", err)
 	}
+	schedulerTaskActive := true
+	defer func() {
+		if schedulerTaskActive {
+			s.scheduler.RemoveTask(createdTask.ID)
+		}
+	}()
 
 	agent, err := s.scheduler.AssignTask(createdTask.ID)
 	if err != nil {
-		return map[string]interface{}{
-			"task_id":      createdTask.ID,
-			"namespace_id": orgCtx.ProjectID,
-			"capability":   capability,
-			"title":        title,
-			"description":  desc,
-			"status":       createdTask.Status,
-			"assigned_to":  "",
-			"error":        err.Error(),
-		}, nil
+		return nil, fmt.Errorf("localapi: task route: assign scheduler: %w", err)
 	}
 
 	// Record the routing decision as an ownership change, mirroring
 	// internal/core/tasks.Store.Assign — this is what makes the task's owner
 	// visible via wormhole.task.get/list, and what a future status transition
 	// (wormhole.task.update_status) will build on.
-	assignedTask, err := s.tr.Assign(ctx, orgCtx.ProjectID, createdTask.ID, agent.AgentID)
+	assignedTask, err := s.tr.AssignTx(ctx, tx, orgCtx.ProjectID, createdTask.ID, agent.AgentID)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: task route: assign: %w", err)
 	}
+
+	queuePayload := map[string]interface{}{
+		"id":             assignedTask.ID,
+		"namespace_id":   assignedTask.NamespaceID,
+		"title":          assignedTask.Title,
+		"description":    assignedTask.Description,
+		"status":         assignedTask.Status,
+		"priority":       assignedTask.Priority,
+		"owner_agent_id": assignedTask.OwnerAgentID,
+		"parent_task_id": assignedTask.ParentTaskID,
+		"due_by":         assignedTask.DueBy,
+		"created_at":     assignedTask.CreatedAt,
+		"updated_at":     assignedTask.UpdatedAt,
+	}
+	payload, err := json.Marshal(queuePayload)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: task route: marshal payload: %w", err)
+	}
+	if _, err := s.qr.EnqueueTx(ctx, tx, orgCtx.ProjectID, "task", assignedTask.ID, "create", payload, assignedTask.Priority); err != nil {
+		return nil, fmt.Errorf("localapi: task route: enqueue sync: %w", err)
+	}
+	if err := s.commitLocalWrite(tx); err != nil {
+		return nil, fmt.Errorf("localapi: task route: commit: %w", err)
+	}
+	schedulerTaskActive = false
 
 	return map[string]interface{}{
 		"task_id":      assignedTask.ID,
