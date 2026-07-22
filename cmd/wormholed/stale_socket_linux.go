@@ -18,9 +18,9 @@ const renameNoReplaceFlag = 1
 // was checked. A replacement is restored with RENAME_NOREPLACE and is never
 // unlinked. The private directory closes the check/unlink race under RFC-0003
 // OQ4's same-user trust model.
-func quarantineAndRemoveSocket(socketPath string, expected os.FileInfo, beforeQuarantine func()) error {
-	if beforeQuarantine != nil {
-		beforeQuarantine()
+func quarantineAndRemoveSocket(socketPath string, expected os.FileInfo, hooks staleSocketRemovalHooks) error {
+	if hooks.beforeQuarantine != nil {
+		hooks.beforeQuarantine()
 	}
 
 	quarantineDir, err := os.MkdirTemp(filepath.Dir(socketPath), ".wormholed-stale-")
@@ -37,6 +37,9 @@ func quarantineAndRemoveSocket(socketPath string, expected os.FileInfo, beforeQu
 
 	if err := os.Rename(socketPath, quarantinePath); err != nil {
 		return fmt.Errorf("wormholed: socket changed during stale-socket removal: %w", err)
+	}
+	if hooks.afterQuarantine != nil {
+		hooks.afterQuarantine(quarantinePath)
 	}
 	moved, err := os.Lstat(quarantinePath)
 	if err != nil {

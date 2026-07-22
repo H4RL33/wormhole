@@ -15,6 +15,7 @@ import (
 	"strings"
 	stdsync "sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -320,6 +321,52 @@ func TestRemoveStaleSocket_InodeSwapPreservesReplacement(t *testing.T) {
 			}
 			tt.assert(t, path)
 		})
+	}
+}
+
+func TestRemoveStaleSocket_PostQuarantineCollisionPreservesBothPaths(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wormholed.sock")
+	addr, err := net.ResolveUnixAddr("unix", path)
+	if err != nil {
+		t.Fatalf("resolve stale socket: %v", err)
+	}
+	stale, err := net.ListenUnix("unix", addr)
+	if err != nil {
+		t.Fatalf("create stale socket: %v", err)
+	}
+	stale.SetUnlinkOnClose(false)
+	if err := stale.Close(); err != nil {
+		t.Fatalf("close stale socket: %v", err)
+	}
+
+	var quarantinePath string
+	err = removeStaleSocketWithHooks(path, staleSocketRemovalHooks{
+		beforeQuarantine: func() {
+			if err := os.Remove(path); err != nil {
+				t.Fatalf("remove checked socket: %v", err)
+			}
+			if err := os.WriteFile(path, []byte("displaced"), 0o600); err != nil {
+				t.Fatalf("write displaced replacement: %v", err)
+			}
+		},
+		afterQuarantine: func(movedPath string) {
+			quarantinePath = movedPath
+			if err := os.WriteFile(path, []byte("newer"), 0o600); err != nil {
+				t.Fatalf("write newer public path: %v", err)
+			}
+		},
+	})
+	if !errors.Is(err, syscall.EEXIST) {
+		t.Fatalf("removeStaleSocketWithHooks error = %v, want EEXIST restoration collision", err)
+	}
+	if quarantinePath == "" || !strings.Contains(err.Error(), quarantinePath) {
+		t.Fatalf("error %q does not report quarantine path %q", err, quarantinePath)
+	}
+	if got, readErr := os.ReadFile(path); readErr != nil || string(got) != "newer" {
+		t.Fatalf("public path = %q, %v; want newer", got, readErr)
+	}
+	if got, readErr := os.ReadFile(quarantinePath); readErr != nil || string(got) != "displaced" {
+		t.Fatalf("quarantined path = %q, %v; want displaced", got, readErr)
 	}
 }
 

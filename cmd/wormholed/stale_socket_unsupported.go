@@ -8,6 +8,6 @@ import (
 	"runtime"
 )
 
-func quarantineAndRemoveSocket(socketPath string, _ os.FileInfo, _ func()) error {
-	return fmt.Errorf("wormholed: safe stale-socket removal is unsupported on %s/%s; refusing to remove %s", runtime.GOOS, runtime.GOARCH, socketPath)
+func quarantineAndRemoveSocket(socketPath string, _ os.FileInfo, _ staleSocketRemovalHooks) error {
+	return fmt.Errorf("wormholed: safe stale-socket removal is unsupported on %s/%s; refusing to remove %s; verify it is stale, remove it manually, and restart on Linux", runtime.GOOS, runtime.GOARCH, socketPath)
 }

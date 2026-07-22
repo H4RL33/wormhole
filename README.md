@@ -60,6 +60,10 @@ All we can do is encourage you to reconsider your provider of choice.
 
 Wormhole currently builds three binaries: `wormhole` for project setup and harness connection, `wormholed` for the local SQLite-backed MCP runtime and sync queue, and `wormhole-server` for the Postgres-backed coordination server. The server exposes MCP tools for identity, tasks, channels, knowledge base, git pointers, and runtime synchronization; the local runtime supports local writes, scheduling, multi-organization routing, and incremental synchronization.
 
+`wormholed` is currently supported on Linux only. Windows users should run it
+inside WSL. Non-Linux builds fail immediately with an actionable error rather
+than starting without safe stale-socket recovery.
+
 The read-only dashboard exposes project-scoped task, event, and knowledge-base views. Viewer-key issuance is protected by the `WORMHOLE_ADMIN_KEY` shared-secret admin stopgap; it is not a full human authentication system.
 
 ---
@@ -316,6 +320,8 @@ Examples:
 ### Running the Daemon and Harnesses
 
 `wormholed` is the local daemon a coding harness talks to over a Unix domain socket. Install once:
+
+The daemon currently requires Linux. On Windows, install and run it inside WSL.
 
 ```bash
 go install ./cmd/wormholed

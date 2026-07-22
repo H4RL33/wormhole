@@ -167,14 +167,26 @@ func newMultiOrgSyncGroup(orgs map[string]config.Org, bindings []config.ProjectB
 }
 
 func Run(ctx context.Context, profileName string) error {
+	if err := ensureSupportedPlatform(); err != nil {
+		return err
+	}
 	return runWithSyncEngineFactory(ctx, profileName, defaultSyncEngineFactory)
 }
 
+type staleSocketRemovalHooks struct {
+	beforeQuarantine func()
+	afterQuarantine  func(string)
+}
+
 func removeStaleSocket(socketPath string) error {
-	return removeStaleSocketWithHook(socketPath, nil)
+	return removeStaleSocketWithHooks(socketPath, staleSocketRemovalHooks{})
 }
 
 func removeStaleSocketWithHook(socketPath string, beforeQuarantine func()) error {
+	return removeStaleSocketWithHooks(socketPath, staleSocketRemovalHooks{beforeQuarantine: beforeQuarantine})
+}
+
+func removeStaleSocketWithHooks(socketPath string, hooks staleSocketRemovalHooks) error {
 	info, err := os.Lstat(socketPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -193,7 +205,7 @@ func removeStaleSocketWithHook(socketPath string, beforeQuarantine func()) error
 	if !errors.Is(dialErr, syscall.ECONNREFUSED) {
 		return fmt.Errorf("wormholed: cannot prove socket %s is stale: %w", socketPath, dialErr)
 	}
-	return quarantineAndRemoveSocket(socketPath, info, beforeQuarantine)
+	return quarantineAndRemoveSocket(socketPath, info, hooks)
 }
 
 func runWithSyncEngineFactory(ctx context.Context, profileName string, factory syncEngineFactory) error {

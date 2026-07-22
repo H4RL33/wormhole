@@ -105,6 +105,11 @@ type OrgContext struct {
 	ProjectID string             // project within this org
 }
 
+type connectionState struct {
+	conn   net.Conn
+	cancel context.CancelFunc
+}
+
 // Server is wormholed's local API socket server (RFC-0003 §6.1).
 // P1 shipped whoami; P2 adds local-servable reads for tasks, events, and KB.
 // P3 adds eventbus, scheduler, and subscription support.
@@ -143,8 +148,9 @@ type Server struct {
 	handlerWG   sync.WaitGroup
 
 	// conns tracks open connections for force-close on shutdown (issue #20).
-	// Connections are registered before their handler goroutine starts.
-	conns sync.Map // map[net.Conn]struct{}
+	// Connections and their contexts are registered before their handler
+	// goroutine starts.
+	conns sync.Map // map[net.Conn]*connectionState
 
 	// testBeforeHandlerStart is a deterministic test barrier between admission
 	// and handler execution. Production servers leave it nil.
@@ -332,9 +338,10 @@ func (s *Server) Close() error {
 
 		// Force-close all tracked open connections to prevent handle goroutines
 		// from leaking on shutdown. Iterate conns and close each one (issue #20).
-		s.conns.Range(func(key, _ interface{}) bool {
-			if conn, ok := key.(net.Conn); ok {
-				_ = conn.Close()
+		s.conns.Range(func(_, value interface{}) bool {
+			if state, ok := value.(*connectionState); ok {
+				state.cancel()
+				_ = state.conn.Close()
 			}
 			return true
 		})
@@ -385,23 +392,24 @@ func (s *Server) Serve(ctx context.Context) error {
 				_ = conn.Close()
 				continue
 			}
-			s.conns.Store(conn, struct{}{})
+			handlerCtx, cancelHandler := context.WithCancel(ctx)
+			state := &connectionState{conn: conn, cancel: cancelHandler}
+			s.conns.Store(conn, state)
 			s.handlerWG.Add(1)
 			s.admissionMu.Unlock()
-			go func() {
+			go func(state *connectionState, handlerCtx context.Context) {
 				defer func() { <-s.handlers }()
 				defer s.handlerWG.Done()
 				defer func() {
-					s.conns.Delete(conn)
-					_ = conn.Close()
+					state.cancel()
+					s.conns.Delete(state.conn)
+					_ = state.conn.Close()
 				}()
 				if s.testBeforeHandlerStart != nil {
 					s.testBeforeHandlerStart()
 				}
-				handlerCtx, cancelHandler := context.WithCancel(ctx)
-				defer cancelHandler()
-				s.handle(handlerCtx, conn)
-			}()
+				s.handle(handlerCtx, state.conn)
+			}(state, handlerCtx)
 		default:
 			_ = conn.Close()
 		}

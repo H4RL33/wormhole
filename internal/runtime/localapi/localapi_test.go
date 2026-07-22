@@ -211,10 +211,14 @@ func TestListenLocalSocket_ChmodFailureCleansSocket(t *testing.T) {
 func TestServer_LogsNeverContainBearerToken(t *testing.T) {
 	const token = "secret-bearer-token-that-must-not-be-logged"
 	coord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Errorf("Authorization = %q, want configured bearer token", got)
+		}
 		var req rpcRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
+		w.WriteHeader(http.StatusUnauthorized)
 		_ = json.NewEncoder(w).Encode(rpcResponse{
 			JSONRPC: "2.0",
 			ID:      req.ID,
@@ -351,6 +355,76 @@ func TestServer_ShutdownCancelsActiveRequest(t *testing.T) {
 		t.Fatal("active local request was not canceled")
 	}
 	_ = conn.Close()
+	waitForTrackedConnectionCount(t, srv, 0)
+}
+
+func TestServer_CloseCancelsActiveRequestWithoutContextCancel(t *testing.T) {
+	requestStarted := make(chan struct{})
+	requestCanceled := make(chan struct{})
+	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
+	if err != nil {
+		t.Fatalf("localstore.Open: %v", err)
+	}
+	defer store.Close()
+	er := localstore.NewEventRepo(store.DB())
+	socketPath := filepath.Join(t.TempDir(), "wormholed.sock")
+	srv, err := New(socketPath, "", "test-token", "project-1", store, localstore.NewTaskRepo(store.DB(), er), er, localstore.NewKBRepo(store.DB()), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	const blockingTool = "wormhole.test.direct-close-blocking"
+	srv.registry.tools[blockingTool] = localTool{
+		Name: blockingTool,
+		Handler: func(ctx context.Context, _ json.RawMessage) (any, error) {
+			close(requestStarted)
+			<-ctx.Done()
+			close(requestCanceled)
+			return nil, ctx.Err()
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- srv.Serve(ctx) }()
+
+	conn := dialLocalSocket(t, socketPath)
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	mcpInitialize(t, conn, reader)
+	params, _ := json.Marshal(toolsCallParams{Name: blockingTool, Arguments: json.RawMessage(`{}`)})
+	call, _ := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("2"), Method: "tools/call", Params: params})
+	if _, err := conn.Write(append(call, '\n')); err != nil {
+		t.Fatalf("write active request: %v", err)
+	}
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("active request did not reach local handler")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- srv.Close() }()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close with active request: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return within the shutdown bound")
+	}
+	select {
+	case <-requestCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("direct Close did not cancel active tool handler")
+	}
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Fatalf("Serve after direct Close: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not return after direct Close")
+	}
 	waitForTrackedConnectionCount(t, srv, 0)
 }
 

@@ -46,6 +46,11 @@ jobs:
       - name: Build
         run: make build
 
+      - name: Cross-build unsupported wormholed target
+        run: |
+          GOOS=darwin GOARCH=arm64 go build -o /tmp/wormholed-darwin ./cmd/wormholed
+          GOOS=darwin GOARCH=arm64 go test -c -o /tmp/wormholed-darwin.test ./cmd/wormholed
+
       - name: Vet
         run: make vet
 

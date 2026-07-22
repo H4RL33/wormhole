@@ -22,6 +22,10 @@ go run ./cmd/wormhole-server
 Install the CLI and daemon binaries if `wormhole` and `wormholed` are not already on
 your `PATH`:
 
+`wormholed` currently requires Linux. Windows users must perform the daemon and
+connector steps inside WSL; native macOS and Windows daemon execution is not
+supported.
+
 ```bash
 go install ./cmd/wormhole ./cmd/wormholed
 ```
