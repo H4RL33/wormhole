@@ -1139,6 +1139,10 @@ func runProfileList(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(stderr, "wormhole profile list: takes no arguments")
+		return 2
+	}
 
 	dir, err := profilesDir()
 	if err != nil {

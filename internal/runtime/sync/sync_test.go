@@ -82,6 +82,93 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
+func TestCallSyncToolDelegatesToResultCall(t *testing.T) {
+	qRepo, aRepo := setupTestRepos(t)
+	defer qRepo.db.Close()
+
+	engine := mustNewEngine(t, "http://localhost:8080", qRepo, aRepo, nil, nil, DefaultConfig())
+	called := false
+	engine.testCallSyncToolWithResultFn = func(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
+		called = true
+		if toolName != "wormhole.sync.incremental_push" {
+			t.Fatalf("tool name = %q", toolName)
+		}
+		if args["namespace_id"] != "ns-1" {
+			t.Fatalf("arguments = %#v", args)
+		}
+		return map[string]interface{}{"ok": true}, nil
+	}
+
+	if err := engine.callSyncTool(context.Background(), "wormhole.sync.incremental_push", map[string]interface{}{"namespace_id": "ns-1"}); err != nil {
+		t.Fatalf("callSyncTool: %v", err)
+	}
+	if !called {
+		t.Fatal("callSyncTool did not delegate to callSyncToolWithResult")
+	}
+
+	wantErr := errors.New("coordination unavailable")
+	engine.testCallSyncToolWithResultFn = func(context.Context, string, map[string]interface{}) (interface{}, error) {
+		return nil, wantErr
+	}
+	if err := engine.callSyncTool(context.Background(), "wormhole.sync.incremental_push", nil); !errors.Is(err, wantErr) {
+		t.Fatalf("callSyncTool error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestEngineReportConflictPersistsAuthoritativeResolution(t *testing.T) {
+	qRepo, aRepo := setupTestRepos(t)
+	defer qRepo.db.Close()
+
+	engine := mustNewEngine(t, "http://localhost:8080", qRepo, aRepo, nil, nil, DefaultConfig())
+	engine.testCallSyncToolWithResultFn = func(_ context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
+		if toolName != "wormhole.sync.conflict_report" {
+			t.Fatalf("tool name = %q, want conflict report", toolName)
+		}
+		if got := args["namespace_id"]; got != "ns-1" {
+			t.Fatalf("namespace_id = %#v, want ns-1", got)
+		}
+		if got := args["version"]; got != 1 {
+			t.Fatalf("version = %#v, want 1", got)
+		}
+		if args["entity_type"] != "task" || args["entity_id"] != "task-1" || args["server_value"] != "server" || args["local_value"] != "local" {
+			t.Fatalf("conflict arguments = %#v", args)
+		}
+		return map[string]interface{}{"resolved_value": "server"}, nil
+	}
+
+	if err := engine.ReportConflict(context.Background(), "task", "task-1", "last_write_wins", "server", "local"); err != nil {
+		t.Fatalf("ReportConflict: %v", err)
+	}
+	audit, err := aRepo.ListAudit(context.Background(), "ns-1", 10)
+	if err != nil {
+		t.Fatalf("ListAudit: %v", err)
+	}
+	if len(audit) != 1 {
+		t.Fatalf("audit entries = %d, want 1", len(audit))
+	}
+	if audit[0].ResolvedValue == nil || *audit[0].ResolvedValue != "server" {
+		t.Fatalf("resolved audit value = %v, want server", audit[0].ResolvedValue)
+	}
+	if audit[0].ResolvedBy == nil || *audit[0].ResolvedBy != "last_write_wins" {
+		t.Fatalf("resolved by = %v, want last_write_wins", audit[0].ResolvedBy)
+	}
+
+	wantErr := errors.New("coordination unavailable")
+	engine.testCallSyncToolWithResultFn = func(context.Context, string, map[string]interface{}) (interface{}, error) {
+		return nil, wantErr
+	}
+	if err := engine.ReportConflict(context.Background(), "task", "task-2", "last_write_wins", "server", "local"); !errors.Is(err, wantErr) {
+		t.Fatalf("ReportConflict error = %v, want %v", err, wantErr)
+	}
+	audit, err = aRepo.ListAudit(context.Background(), "ns-1", 10)
+	if err != nil {
+		t.Fatalf("ListAudit after failed report: %v", err)
+	}
+	if len(audit) != 1 {
+		t.Fatalf("failed report wrote audit entries = %d, want 1", len(audit))
+	}
+}
+
 func TestNewRejectsInvalidConfig(t *testing.T) {
 	qRepo, aRepo := setupTestRepos(t)
 	defer qRepo.db.Close()

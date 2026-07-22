@@ -162,6 +162,16 @@ func TestAssignTaskNoMatch(t *testing.T) {
 	}
 }
 
+func TestAssignTaskUnknownDoesNotCreateSchedulerState(t *testing.T) {
+	sched := NewScheduler()
+	if _, err := sched.AssignTask("missing-task"); err == nil {
+		t.Fatal("AssignTask accepted an unregistered task")
+	}
+	if got := sched.TaskCount(); got != 0 {
+		t.Fatalf("TaskCount after unknown assignment = %d, want 0", got)
+	}
+}
+
 func TestAssignTaskNamespaceMismatch(t *testing.T) {
 	sched := NewScheduler()
 

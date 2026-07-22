@@ -171,6 +171,180 @@ func TestLocalKBWrite_EnqueuesForSync(t *testing.T) {
 	}
 }
 
+func TestLocalKBGetReadsOnlyTheResolvedProject(t *testing.T) {
+	srv, _, _, kb, _, cleanup := newTestServerWithQueue(t)
+	defer cleanup()
+
+	article, err := kb.WriteArticle(context.Background(), "ns-1", "agent-1", "local runbook", "read from sqlite", json.RawMessage(`{"kind":"runbook"}`))
+	if err != nil {
+		t.Fatalf("WriteArticle: %v", err)
+	}
+	if _, err := kb.WriteArticle(context.Background(), "other-project", "agent-2", "other", "must stay isolated", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("WriteArticle(other project): %v", err)
+	}
+
+	resp := dialAndCall(t, srv, "wormhole.kb.get", map[string]interface{}{"article_id": article.ID})
+	if resp.Error != nil {
+		t.Fatalf("kb.get existing article: %v", resp.Error)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("decode kb.get result: %v", err)
+	}
+	if got["id"] != article.ID || got["title"] != "local runbook" || got["body"] != "read from sqlite" {
+		t.Fatalf("kb.get result = %#v", got)
+	}
+
+	resp = dialAndCall(t, srv, "wormhole.kb.get", map[string]interface{}{"article_id": "missing"})
+	if resp.Error == nil || !strings.Contains(resp.Error.Error(), "article not found") {
+		t.Fatalf("kb.get missing error = %v, want article not found", resp.Error)
+	}
+
+	if _, err := srv.localGetArticle(context.Background(), json.RawMessage(`{"article_id":`)); err == nil || !strings.Contains(err.Error(), "invalid args") {
+		t.Fatalf("localGetArticle malformed args error = %v, want invalid args", err)
+	}
+}
+
+func TestLocalReadHandlersReturnDurableReplicaState(t *testing.T) {
+	srv, tasks, events, kb, _, cleanup := newTestServerWithQueue(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	task, err := tasks.CreateTask(ctx, "ns-1", "local task", "durable", nil, 3, nil)
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	channelID, err := events.CreateChannel(ctx, "ns-1", "general")
+	if err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+	if _, err := events.PublishEvent(ctx, "ns-1", channelID, "agent-1", "discovery.logged", json.RawMessage(`{"found":"test coverage"}`), nil); err != nil {
+		t.Fatalf("PublishEvent: %v", err)
+	}
+	article, err := kb.WriteArticle(ctx, "ns-1", "agent-1", "local article", "durable replica", json.RawMessage(`{"kind":"note"}`))
+	if err != nil {
+		t.Fatalf("WriteArticle: %v", err)
+	}
+
+	for _, tt := range []struct {
+		name string
+		call func() (map[string]interface{}, error)
+		key  string
+		want string
+	}{
+		{"list tasks", func() (map[string]interface{}, error) {
+			return srv.localListTasks(ctx, json.RawMessage(`{"status":"todo"}`))
+		}, "tasks", task.ID},
+		{"get task", func() (map[string]interface{}, error) {
+			return srv.localGetTask(ctx, json.RawMessage(`{"task_id":"`+task.ID+`"}`))
+		}, "id", task.ID},
+		{"list channels", func() (map[string]interface{}, error) { return srv.localListChannels(ctx, nil) }, "channels", channelID},
+		{"list channel events", func() (map[string]interface{}, error) { return srv.localListChannelEvents(ctx, nil) }, "events", channelID},
+		{"list articles", func() (map[string]interface{}, error) { return srv.localListArticles(ctx, nil) }, "articles", article.ID},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := tt.call()
+			if err != nil {
+				t.Fatalf("handler: %v", err)
+			}
+			if tt.key == "id" {
+				if out[tt.key] != tt.want {
+					t.Fatalf("handler result = %#v, want id %q", out, tt.want)
+				}
+				return
+			}
+			items, ok := out[tt.key].([]interface{})
+			if !ok || len(items) != 1 {
+				t.Fatalf("handler result %q = %#v, want one item", tt.key, out[tt.key])
+			}
+			item, ok := items[0].(map[string]interface{})
+			if !ok || (item["id"] != tt.want && item["channel_id"] != tt.want) {
+				t.Fatalf("handler item = %#v, want %q", items[0], tt.want)
+			}
+		})
+	}
+
+	for _, tt := range []struct {
+		name string
+		call func() error
+	}{
+		{"get task missing id", func() error { _, err := srv.localGetTask(ctx, nil); return err }},
+		{"get task malformed args", func() error { _, err := srv.localGetTask(ctx, json.RawMessage(`{`)); return err }},
+		{"list tasks malformed args", func() error { _, err := srv.localListTasks(ctx, json.RawMessage(`{`)); return err }},
+		{"list channels malformed args", func() error { _, err := srv.localListChannels(ctx, json.RawMessage(`{`)); return err }},
+		{"list events malformed args", func() error { _, err := srv.localListChannelEvents(ctx, json.RawMessage(`{`)); return err }},
+		{"list articles malformed args", func() error { _, err := srv.localListArticles(ctx, json.RawMessage(`{`)); return err }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.call(); err == nil || !strings.Contains(err.Error(), "invalid args") && !strings.Contains(err.Error(), "missing task_id") {
+				t.Fatalf("handler error = %v, want validated argument error", err)
+			}
+		})
+	}
+}
+
+func TestLocalWriteHandlersRejectInvalidInputBeforePersistence(t *testing.T) {
+	srv, _, _, _, queue, cleanup := newTestServerWithQueue(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	for _, tt := range []struct {
+		name string
+		call func(json.RawMessage) error
+		args json.RawMessage
+		want string
+	}{
+		{"task malformed", func(args json.RawMessage) error { _, err := srv.handleTaskCreate(ctx, args); return err }, json.RawMessage(`{`), "invalid args"},
+		{"task missing title", func(args json.RawMessage) error { _, err := srv.handleTaskCreate(ctx, args); return err }, json.RawMessage(`{}`), "missing title"},
+		{"kb malformed", func(args json.RawMessage) error { _, err := srv.handleKBWrite(ctx, args); return err }, json.RawMessage(`{`), "invalid args"},
+		{"kb missing title", func(args json.RawMessage) error { _, err := srv.handleKBWrite(ctx, args); return err }, json.RawMessage(`{}`), "missing title"},
+		{"event malformed", func(args json.RawMessage) error { _, err := srv.handleChannelPost(ctx, args); return err }, json.RawMessage(`{`), "invalid args"},
+		{"event missing fields", func(args json.RawMessage) error { _, err := srv.handleChannelPost(ctx, args); return err }, json.RawMessage(`{}`), "missing channel_id"},
+		{"channel malformed", func(args json.RawMessage) error { _, err := srv.handleChannelCreate(ctx, args); return err }, json.RawMessage(`{`), "invalid args"},
+		{"channel missing name", func(args json.RawMessage) error { _, err := srv.handleChannelCreate(ctx, args); return err }, json.RawMessage(`{}`), "missing name"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.call(tt.args); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("handler error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+
+	withoutQueue := &Server{}
+	for _, tt := range []struct {
+		name string
+		call func() error
+	}{
+		{"task", func() error {
+			_, err := withoutQueue.handleTaskCreate(ctx, json.RawMessage(`{"title":"no queue"}`))
+			return err
+		}},
+		{"kb", func() error {
+			_, err := withoutQueue.handleKBWrite(ctx, json.RawMessage(`{"title":"no queue"}`))
+			return err
+		}},
+		{"event", func() error {
+			_, err := withoutQueue.handleChannelPost(ctx, json.RawMessage(`{"channel_id":"x","event_type":"test"}`))
+			return err
+		}},
+		{"channel", func() error {
+			_, err := withoutQueue.handleChannelCreate(ctx, json.RawMessage(`{"name":"no queue"}`))
+			return err
+		}},
+	} {
+		t.Run(tt.name+" missing queue", func(t *testing.T) {
+			if err := tt.call(); err == nil || !strings.Contains(err.Error(), "sync queue not available") {
+				t.Fatalf("handler error = %v, want sync queue unavailable", err)
+			}
+		})
+	}
+
+	pending, err := queue.ListPending(ctx, "ns-1", 10)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("invalid requests reached the queue: pending=%+v err=%v", pending, err)
+	}
+}
+
 func TestLocalChannelPost_EnqueuesForSync(t *testing.T) {
 	srv, _, er, _, qr, cleanup := newTestServerWithQueue(t)
 	defer cleanup()

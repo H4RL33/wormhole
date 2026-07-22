@@ -275,6 +275,42 @@ func TestAssign_SetsOwner(t *testing.T) {
 	}
 }
 
+func TestAssign_RejectsUnregisteredOwnerWithoutChangingTask(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "assign-unregistered-owner")
+	task, err := s.Create(ctx, projectID, "Must remain unassigned", "", nil, 0, nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	_, err = s.Assign(ctx, projectID, task.ID, "00000000-0000-0000-0000-000000000000")
+	if !errors.Is(err, ErrPassportNotFound) {
+		t.Fatalf("Assign(unregistered owner) error = %v, want ErrPassportNotFound", err)
+	}
+
+	var owner sql.NullString
+	if err := s.db.QueryRowContext(ctx, `SELECT owner_agent_id FROM tasks WHERE id = $1`, task.ID).Scan(&owner); err != nil {
+		t.Fatalf("query task owner after rejected assignment: %v", err)
+	}
+	if owner.Valid {
+		t.Fatalf("owner after rejected assignment = %q, want NULL", owner.String)
+	}
+}
+
+func TestAssign_UnknownTaskReturnsNotFoundAfterOwnerValidation(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "assign-unknown-task")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+
+	_, err := s.Assign(ctx, projectID, "00000000-0000-0000-0000-000000000000", agentID)
+	if !errors.Is(err, ErrTaskNotFound) {
+		t.Fatalf("Assign(unknown task) error = %v, want ErrTaskNotFound", err)
+	}
+}
+
 func TestList_FiltersByProjectAndStatus(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -464,6 +500,37 @@ func TestUpdateStatus_UnknownTaskReturnsNotFound(t *testing.T) {
 	_, err := s.UpdateStatus(ctx, projectID, "00000000-0000-0000-0000-000000000000", "wip", channelID, agentID)
 	if !errors.Is(err, ErrTaskNotFound) {
 		t.Errorf("UpdateStatus(unknown task) error = %v, want ErrTaskNotFound", err)
+	}
+}
+
+func TestUpdateStatus_RollsBackWhenEventActorHasNoPassport(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "status-event-actor-scope")
+	task, err := s.Create(ctx, projectID, "Do not transition without event", "", nil, 0, nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	channelID := createChannel(t, s, projectID, "status-events")
+
+	_, err = s.UpdateStatus(ctx, projectID, task.ID, "wip", channelID, "00000000-0000-0000-0000-000000000000")
+	if !errors.Is(err, events.ErrPassportNotFound) {
+		t.Fatalf("UpdateStatus without actor passport error = %v, want events.ErrPassportNotFound", err)
+	}
+
+	var status string
+	if err := s.db.QueryRowContext(ctx, `SELECT status FROM tasks WHERE id = $1`, task.ID).Scan(&status); err != nil {
+		t.Fatalf("query task after rejected transition: %v", err)
+	}
+	if status != "todo" {
+		t.Fatalf("status after rejected transition = %q, want todo", status)
+	}
+	var eventCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM events WHERE channel_id = $1`, channelID).Scan(&eventCount); err != nil {
+		t.Fatalf("count events after rejected transition: %v", err)
+	}
+	if eventCount != 0 {
+		t.Fatalf("event count after rejected transition = %d, want 0", eventCount)
 	}
 }
 

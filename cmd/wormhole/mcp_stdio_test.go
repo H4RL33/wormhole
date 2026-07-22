@@ -196,3 +196,23 @@ func (b *syncBuffer) String() string {
 	defer b.mu.Unlock()
 	return b.buf.String()
 }
+
+func TestRunMCPRejectsFlagsAndUnavailableDaemon(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runMCP([]string{"--unsupported"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("runMCP(flags) code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "no flags supported") {
+		t.Fatalf("runMCP(flags) stderr = %q", stderr.String())
+	}
+
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMCP(nil, &stdout, &stderr); code != 1 {
+		t.Fatalf("runMCP(unavailable daemon) code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "dial wormholed socket") {
+		t.Fatalf("runMCP(unavailable daemon) stderr = %q", stderr.String())
+	}
+}

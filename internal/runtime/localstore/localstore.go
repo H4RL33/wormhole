@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -116,7 +118,7 @@ type Store struct {
 // Open creates (if needed) and opens the SQLite file at path, applying the
 // schema. Callers must Close the returned Store.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("localstore: open %s: %w", path, err)
 	}
@@ -129,6 +131,15 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("localstore: migrate whoami cache: %w", err)
 	}
 	return &Store{db: db}, nil
+}
+
+func sqliteDSN(path string) string {
+	u := &url.URL{Scheme: "file", Path: path, OmitHost: true}
+	query := u.Query()
+	query.Add("_pragma", "busy_timeout(5000)")
+	query.Add("_pragma", "journal_mode(WAL)")
+	u.RawQuery = query.Encode()
+	return u.String()
 }
 
 func migrateWhoAmICacheProjectKey(db *sql.DB) error {
@@ -206,6 +217,7 @@ func (s *Store) CacheWhoAmI(ctx context.Context, c WhoAmICache) error {
 	if err != nil {
 		return fmt.Errorf("localstore: marshal permissions: %w", err)
 	}
+	c.CachedAt = c.CachedAt.UTC()
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO whoami_cache (agent_id, owner, model, capabilities, project_id, permissions, cached_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -225,25 +237,16 @@ func (s *Store) CacheWhoAmI(ctx context.Context, c WhoAmICache) error {
 
 // GetCachedWhoAmI returns the cached identity for agentID, or ErrNotFound.
 func (s *Store) GetCachedWhoAmI(ctx context.Context, agentID string) (WhoAmICache, error) {
-	var c WhoAmICache
-	var capsJSON, permsJSON string
-	err := s.db.QueryRowContext(ctx, `
+	c, err := scanWhoAmICache(s.db.QueryRowContext(ctx, `
 		SELECT agent_id, owner, model, capabilities, project_id, permissions, cached_at
 		FROM whoami_cache WHERE agent_id = ? ORDER BY cached_at DESC LIMIT 1
-	`, agentID).Scan(&c.AgentID, &c.Owner, &c.Model, &capsJSON, &c.ProjectID, &permsJSON, &c.CachedAt)
+	`, agentID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return WhoAmICache{}, ErrNotFound
 	}
 	if err != nil {
 		return WhoAmICache{}, fmt.Errorf("localstore: get cached whoami for %s: %w", agentID, err)
 	}
-	if err := json.Unmarshal([]byte(capsJSON), &c.Capabilities); err != nil {
-		return WhoAmICache{}, fmt.Errorf("localstore: unmarshal capabilities: %w", err)
-	}
-	if err := json.Unmarshal([]byte(permsJSON), &c.Permissions); err != nil {
-		return WhoAmICache{}, fmt.Errorf("localstore: unmarshal permissions: %w", err)
-	}
-	c.CachedAt = c.CachedAt.UTC()
 	return c, nil
 }
 
@@ -252,26 +255,17 @@ func (s *Store) GetCachedWhoAmI(ctx context.Context, agentID string) (WhoAmICach
 // lookup because every local tools/call supplies a project scope, while the
 // single-org daemon configuration historically did not retain an agent id.
 func (s *Store) GetCachedWhoAmIForProject(ctx context.Context, projectID string) (WhoAmICache, error) {
-	var c WhoAmICache
-	var capsJSON, permsJSON string
-	err := s.db.QueryRowContext(ctx, `
+	c, err := scanWhoAmICache(s.db.QueryRowContext(ctx, `
 		SELECT agent_id, owner, model, capabilities, project_id, permissions, cached_at
 		FROM whoami_cache WHERE project_id = ?
 		ORDER BY cached_at DESC LIMIT 1
-	`, projectID).Scan(&c.AgentID, &c.Owner, &c.Model, &capsJSON, &c.ProjectID, &permsJSON, &c.CachedAt)
+	`, projectID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return WhoAmICache{}, ErrNotFound
 	}
 	if err != nil {
 		return WhoAmICache{}, fmt.Errorf("localstore: get cached whoami for project %s: %w", projectID, err)
 	}
-	if err := json.Unmarshal([]byte(capsJSON), &c.Capabilities); err != nil {
-		return WhoAmICache{}, fmt.Errorf("localstore: unmarshal capabilities: %w", err)
-	}
-	if err := json.Unmarshal([]byte(permsJSON), &c.Permissions); err != nil {
-		return WhoAmICache{}, fmt.Errorf("localstore: unmarshal permissions: %w", err)
-	}
-	c.CachedAt = c.CachedAt.UTC()
 	return c, nil
 }
 
@@ -280,25 +274,43 @@ func (s *Store) GetCachedWhoAmIForProject(ctx context.Context, projectID string)
 // project-only lookup so a stale identity cannot lend permissions to a
 // replacement credential for the same tenant.
 func (s *Store) GetCachedWhoAmIForAgentProject(ctx context.Context, agentID, projectID string) (WhoAmICache, error) {
-	var c WhoAmICache
-	var capsJSON, permsJSON string
-	err := s.db.QueryRowContext(ctx, `
+	c, err := scanWhoAmICache(s.db.QueryRowContext(ctx, `
 		SELECT agent_id, owner, model, capabilities, project_id, permissions, cached_at
 		FROM whoami_cache WHERE agent_id = ? AND project_id = ?
-	`, agentID, projectID).Scan(&c.AgentID, &c.Owner, &c.Model, &capsJSON, &c.ProjectID, &permsJSON, &c.CachedAt)
+	`, agentID, projectID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return WhoAmICache{}, ErrNotFound
 	}
 	if err != nil {
 		return WhoAmICache{}, fmt.Errorf("localstore: get cached whoami for agent %s project %s: %w", agentID, projectID, err)
 	}
+	return c, nil
+}
+
+func scanWhoAmICache(row interface{ Scan(...any) error }) (WhoAmICache, error) {
+	var c WhoAmICache
+	var capsJSON, permsJSON, cachedAt string
+	if err := row.Scan(&c.AgentID, &c.Owner, &c.Model, &capsJSON, &c.ProjectID, &permsJSON, &cachedAt); err != nil {
+		return WhoAmICache{}, err
+	}
 	if err := json.Unmarshal([]byte(capsJSON), &c.Capabilities); err != nil {
-		return WhoAmICache{}, fmt.Errorf("localstore: unmarshal capabilities: %w", err)
+		return WhoAmICache{}, fmt.Errorf("unmarshal capabilities: %w", err)
 	}
 	if err := json.Unmarshal([]byte(permsJSON), &c.Permissions); err != nil {
-		return WhoAmICache{}, fmt.Errorf("localstore: unmarshal permissions: %w", err)
+		return WhoAmICache{}, fmt.Errorf("unmarshal permissions: %w", err)
 	}
-	c.CachedAt = c.CachedAt.UTC()
+	parsed, err := time.Parse(time.RFC3339Nano, cachedAt)
+	if err != nil {
+		fields := strings.Fields(cachedAt)
+		if len(fields) < 3 {
+			return WhoAmICache{}, fmt.Errorf("parse cached_at: %w", err)
+		}
+		parsed, err = time.Parse("2006-01-02 15:04:05 -0700", strings.Join(fields[:3], " "))
+		if err != nil {
+			return WhoAmICache{}, fmt.Errorf("parse cached_at: %w", err)
+		}
+	}
+	c.CachedAt = parsed.UTC()
 	return c, nil
 }
 

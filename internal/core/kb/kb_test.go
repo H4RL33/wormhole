@@ -147,6 +147,41 @@ func TestWriteArticle_SuccessNoLinks(t *testing.T) {
 	}
 }
 
+func TestEnsureBootstrapArticleIsIdempotentAndProjectScoped(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectA := createProject(t, s, "ensure-bootstrap-a")
+	projectB := createProject(t, s, "ensure-bootstrap-b")
+	agentA := createAgent(t, s)
+	agentB := createAgent(t, s)
+	createPassport(t, s, agentA, projectA)
+	createPassport(t, s, agentB, projectB)
+
+	if _, err := s.EnsureBootstrapArticle(ctx, projectA, agentA, "", "Onboarding", "The bootstrap article documents the project onboarding contract.", json.RawMessage(`{}`)); err == nil || !strings.Contains(err.Error(), "empty bootstrap key") {
+		t.Fatalf("EnsureBootstrapArticle empty key error = %v, want empty bootstrap key", err)
+	}
+
+	first, err := s.EnsureBootstrapArticle(ctx, projectA, agentA, "onboarding", "Onboarding", "The bootstrap article documents the project onboarding contract.", json.RawMessage(`{"kind":"system"}`))
+	if err != nil {
+		t.Fatalf("first EnsureBootstrapArticle: %v", err)
+	}
+	second, err := s.EnsureBootstrapArticle(ctx, projectA, agentA, "onboarding", "Replacement title is ignored", "The existing bootstrap article remains the authoritative record.", json.RawMessage(`{"kind":"system"}`))
+	if err != nil {
+		t.Fatalf("second EnsureBootstrapArticle: %v", err)
+	}
+	if second.ID != first.ID || second.ProjectID != projectA {
+		t.Fatalf("same-project bootstrap result = %+v, want existing %+v", second, first)
+	}
+
+	otherProject, err := s.EnsureBootstrapArticle(ctx, projectB, agentB, "onboarding", "Onboarding", "The bootstrap article documents the isolated project onboarding contract.", json.RawMessage(`{"kind":"system"}`))
+	if err != nil {
+		t.Fatalf("EnsureBootstrapArticle(second project): %v", err)
+	}
+	if otherProject.ID == first.ID || otherProject.ProjectID != projectB {
+		t.Fatalf("cross-project bootstrap result = %+v, want distinct project article", otherProject)
+	}
+}
+
 // TestWriteArticleWithID_PreservesClientID confirms WriteArticleWithID
 // inserts the row under the caller-supplied id instead of letting Postgres
 // assign a fresh gen_random_uuid() default (see sync.go's

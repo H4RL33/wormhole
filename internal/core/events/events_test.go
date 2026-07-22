@@ -130,6 +130,33 @@ func TestCreateChannel_Success(t *testing.T) {
 	}
 }
 
+func TestEnsureChannelIsIdempotentPerProject(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectA := createProject(t, s, "ensure-channel-a")
+	projectB := createProject(t, s, "ensure-channel-b")
+
+	first, err := s.EnsureChannel(ctx, projectA, "onboarding")
+	if err != nil {
+		t.Fatalf("first EnsureChannel: %v", err)
+	}
+	second, err := s.EnsureChannel(ctx, projectA, "onboarding")
+	if err != nil {
+		t.Fatalf("second EnsureChannel: %v", err)
+	}
+	if second.ID != first.ID || second.ProjectID != projectA || second.Name != "onboarding" {
+		t.Fatalf("same-project EnsureChannel result = %+v, want existing %+v", second, first)
+	}
+
+	otherProject, err := s.EnsureChannel(ctx, projectB, "onboarding")
+	if err != nil {
+		t.Fatalf("EnsureChannel(second project): %v", err)
+	}
+	if otherProject.ID == first.ID || otherProject.ProjectID != projectB {
+		t.Fatalf("cross-project EnsureChannel result = %+v, want distinct project channel", otherProject)
+	}
+}
+
 // TestCreateChannelWithID_PreservesClientID confirms CreateChannelWithID
 // inserts the row under the caller-supplied id instead of letting Postgres
 // assign a fresh gen_random_uuid() default (see sync.go's

@@ -459,6 +459,60 @@ func TestIssuePassport_DuplicateRejected(t *testing.T) {
 	}
 }
 
+// TestIssuePassport_StandaloneRoundTrip covers the public, non-registration
+// passport path: it must retain the declared repository and role scope and
+// record the issuance in the append-only audit trail.
+func TestIssuePassport_StandaloneRoundTrip(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectA := createProject(t, s, "standalone-passport-a")
+	projectB := createProject(t, s, "standalone-passport-b")
+
+	agent, _, _, err := s.Register(ctx, projectA, []string{"kb.read"}, "harley", "claude", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	cleanupAgent(t, s, agent.ID)
+
+	got, err := s.IssuePassport(ctx, agent.ID, projectB, []string{"github.com/H4RL33/wormhole"}, []string{"reviewer"})
+	if err != nil {
+		t.Fatalf("IssuePassport: %v", err)
+	}
+	if got.AgentID != agent.ID || got.ProjectID != projectB {
+		t.Fatalf("IssuePassport scope = agent %q project %q, want agent %q project %q", got.AgentID, got.ProjectID, agent.ID, projectB)
+	}
+	if !reflect.DeepEqual(got.Repositories, []string{"github.com/H4RL33/wormhole"}) || !reflect.DeepEqual(got.Roles, []string{"reviewer"}) {
+		t.Fatalf("IssuePassport scope = repositories %v roles %v, want declared values", got.Repositories, got.Roles)
+	}
+
+	entries, err := s.ListAuditTrail(ctx, agent.ID, projectB)
+	if err != nil {
+		t.Fatalf("ListAuditTrail: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Action != ActionPassportIssued {
+		t.Fatalf("project-B audit entries = %+v, want one %q entry", entries, ActionPassportIssued)
+	}
+}
+
+func TestIssuePassport_RequiresAgentAndProjectScope(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "passport-scope")
+
+	for _, tt := range []struct {
+		name, agentID, projectID string
+	}{
+		{name: "empty agent", projectID: projectID},
+		{name: "empty project", agentID: "00000000-0000-0000-0000-000000000000"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := s.IssuePassport(ctx, tt.agentID, tt.projectID, nil, nil); !errors.Is(err, ErrInvalidScope) {
+				t.Fatalf("IssuePassport(%q, %q) error = %v, want ErrInvalidScope", tt.agentID, tt.projectID, err)
+			}
+		})
+	}
+}
+
 // TestRegister_RecordsAuditTrail: registering an agent must leave an
 // append-only audit trail entry for the registration itself, the passport
 // issuance, and the token issuance (RFC-0001 §8.4 Audit Trail).
@@ -519,6 +573,27 @@ func TestIssueToken_RecordsAuditTrail(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].Action != ActionTokenIssued {
 		t.Fatalf("ListAuditTrail(projectB) = %+v, want single %q entry", entries, ActionTokenIssued)
+	}
+}
+
+func TestIssueToken_RequiresCompleteScope(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "token-scope")
+
+	for _, tt := range []struct {
+		name, agentID, projectID string
+		permissions              []string
+	}{
+		{name: "empty agent", projectID: projectID, permissions: []string{}},
+		{name: "empty project", agentID: "00000000-0000-0000-0000-000000000000", permissions: []string{}},
+		{name: "nil permissions", agentID: "00000000-0000-0000-0000-000000000000", projectID: projectID},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := s.IssueToken(ctx, tt.agentID, tt.projectID, tt.permissions); !errors.Is(err, ErrInvalidScope) {
+				t.Fatalf("IssueToken error = %v, want ErrInvalidScope", err)
+			}
+		})
 	}
 }
 

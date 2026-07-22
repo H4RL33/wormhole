@@ -1,6 +1,8 @@
 package main
 
 import (
+	"database/sql"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -17,12 +19,29 @@ import (
 	"github.com/H4RL33/wormhole/internal/webui"
 )
 
-func main() {
-	cfg := types.LoadConfig()
+var runServerMain = runServer
 
-	db, err := storage.Open(cfg)
+func main() {
+	if err := runServerMain(types.LoadConfig(), func(server *http.Server) error {
+		return server.ListenAndServe()
+	}); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// runServer assembles the HTTP server and delegates its lifetime to serve.
+// Keeping the process-global log.Fatal boundary in main makes the wiring
+// observable under tests without changing the production listener contract.
+func runServer(cfg types.Config, serve func(*http.Server) error) error {
+	return runServerWithOpen(cfg, storage.Open, serve)
+}
+
+// runServerWithOpen separates database acquisition from HTTP composition so
+// startup failures are observable without needing a live Postgres instance.
+func runServerWithOpen(cfg types.Config, openDB func(types.Config) (*sql.DB, error), serve func(*http.Server) error) error {
+	db, err := openDB(cfg)
 	if err != nil {
-		log.Fatalf("open database: %v", err)
+		return fmt.Errorf("open database: %w", err)
 	}
 	defer db.Close()
 
@@ -81,7 +100,5 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	if err := server.ListenAndServe(); err != nil {
-		log.Fatal(err)
-	}
+	return serve(server)
 }

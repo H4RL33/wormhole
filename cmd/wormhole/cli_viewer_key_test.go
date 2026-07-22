@@ -117,3 +117,23 @@ func TestRunViewerKeyCreate_ServerError_PrintsError(t *testing.T) {
 		t.Fatalf("stderr should contain server error message, got: %s", stderr.String())
 	}
 }
+
+func TestRunViewerKeyDispatchesOnlyCreate(t *testing.T) {
+	for _, args := range [][]string{nil, {"delete"}} {
+		var stdout, stderr bytes.Buffer
+		if code := runViewerKey(args, &stdout, &stderr); code != 2 {
+			t.Fatalf("runViewerKey(%q) code = %d, want 2", args, code)
+		}
+		if !bytes.Contains(stderr.Bytes(), []byte("only \"create\" is supported")) {
+			t.Fatalf("runViewerKey(%q) stderr = %q", args, stderr.String())
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runViewerKey([]string{"create"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("runViewerKey(create) code = %d, want delegated required-flag error", code)
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("--server")) {
+		t.Fatalf("runViewerKey(create) stderr = %q, want create usage", stderr.String())
+	}
+}

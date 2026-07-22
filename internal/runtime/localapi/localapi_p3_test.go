@@ -94,6 +94,57 @@ func assertNoDurableRouteState(t *testing.T, store *localstore.Store, queue *syn
 	}
 }
 
+func TestLocalAgentAndRouteHandlersRejectUnavailableOrInvalidRequests(t *testing.T) {
+	noRuntime, _ := newMCPTestServer(t)
+	ctx := context.Background()
+	for _, tt := range []struct {
+		name string
+		call func() error
+	}{
+		{"register", func() error {
+			_, err := noRuntime.handleAgentRegister(ctx, json.RawMessage(`{"agent_id":"agent"}`))
+			return err
+		}},
+		{"presence", func() error {
+			_, err := noRuntime.handleAgentPresence(ctx, json.RawMessage(`{"agent_id":"agent","status":"online"}`))
+			return err
+		}},
+		{"list", func() error { _, err := noRuntime.handleAgentList(ctx, nil); return err }},
+		{"route", func() error {
+			_, err := noRuntime.handleTaskRoute(ctx, json.RawMessage(`{"capability":"code"}`))
+			return err
+		}},
+	} {
+		t.Run(tt.name+" requires runtime", func(t *testing.T) {
+			if err := tt.call(); err == nil || !strings.Contains(err.Error(), "not available") {
+				t.Fatalf("handler error = %v, want unavailable runtime", err)
+			}
+		})
+	}
+
+	srv, store, _, queue, _ := newTaskRouteTestRuntime(t, "project-1")
+	for _, tt := range []struct {
+		name string
+		call func() error
+		want string
+	}{
+		{"register malformed", func() error { _, err := srv.handleAgentRegister(ctx, json.RawMessage(`{`)); return err }, "invalid args"},
+		{"register missing id", func() error { _, err := srv.handleAgentRegister(ctx, nil); return err }, "missing agent_id"},
+		{"presence malformed", func() error { _, err := srv.handleAgentPresence(ctx, json.RawMessage(`{`)); return err }, "invalid args"},
+		{"presence missing fields", func() error { _, err := srv.handleAgentPresence(ctx, nil); return err }, "missing agent_id"},
+		{"list malformed", func() error { _, err := srv.handleAgentList(ctx, json.RawMessage(`{`)); return err }, "invalid args"},
+		{"route malformed", func() error { _, err := srv.handleTaskRoute(ctx, json.RawMessage(`{`)); return err }, "invalid args"},
+		{"route missing capability", func() error { _, err := srv.handleTaskRoute(ctx, nil); return err }, "missing capability"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.call(); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("handler error = %v, want %q", err, tt.want)
+			}
+			assertNoDurableRouteState(t, store, queue, "project-1")
+		})
+	}
+}
+
 // TestTwoAgentsPresenceWithoutCoordinationServer proves two agents on the same
 // machine see each other's presence without contacting the Coordination Server.
 func TestTwoAgentsPresenceWithoutCoordinationServer(t *testing.T) {
