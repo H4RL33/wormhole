@@ -1,6 +1,6 @@
 // Package localstore is wormholed's durable local state (RFC-0003 §6.3,
 // §7.2). It follows the Store-struct/sentinel-error/wrapped-error shape
-// established by internal/core/identity (docs/architecture.md §3), adapted
+// established by internal/core/identity (docs/implementation-rules.md §5), adapted
 // for SQLite: no transactions needed yet (single-statement writes only,
 // P1 scope), schema applied on Open rather than via golang-migrate (that
 // tooling targets the Coordination Server's Postgres only).

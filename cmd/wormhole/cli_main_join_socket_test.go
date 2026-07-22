@@ -1,4 +1,4 @@
-// cmd/wormhole-cli/main_join_socket_test.go
+// Tests the socket-based join registration path.
 package main
 
 import (
@@ -19,8 +19,7 @@ import (
 // wormholedSocketPath() would derive under XDG_RUNTIME_DIR (set by the
 // caller via t.Setenv before calling this), and speaks the real MCP
 // handshake (initialize -> notifications/initialized -> tools/call) that
-// doRegisterViaSocket now uses (RFC-0003 §8.1 join proxy, design doc:
-// docs/superpowers/plans/2026-07-16-wormholed-mcp-endpoint-design.md).
+// doRegisterViaSocket now uses (RFC-0003 §8.1 join proxy).
 // Answers exactly one wormhole.agent.register tools/call with a canned
 // result. Returns the socket path.
 func fakeWormholed(t *testing.T, out registerAgentOutput) string {

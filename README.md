@@ -281,9 +281,10 @@ wormhole join
 wormhole connect
 ```
 
-### File Locations (XDG-Compliant)
+### File Locations
 
-Wormhole respects the XDG Base Directory specification:
+Wormhole uses XDG locations for configuration and runtime data. Credential profiles use
+a fixed owner-home location:
 
 - **Global config:** `$XDG_CONFIG_HOME/wormhole/config.toml` (default `~/.config/wormhole/config.toml`)
   - Server URL, default roles and capabilities
@@ -291,8 +292,10 @@ Wormhole respects the XDG Base Directory specification:
 - **Local config:** `./.wormhole/config.toml` (walked up from cwd like `.git`)
   - Project ID, role overrides, server overrides
   - Committed to repository; safe for all contributors
-- **Credentials:** `$XDG_DATA_HOME/wormhole/credentials` (default `~/.local/share/wormhole/credentials`)
+- **Credentials:** `~/.wormhole/credentials/<profile>.json`
   - API tokens and profiles, **never committed**
+- **Runtime database:** `$XDG_DATA_HOME/wormhole/wormholed.db` (default `~/.local/share/wormhole/wormholed.db`)
+  - Local SQLite replica and durable sync queue
 
 ### Flags Precedence
 

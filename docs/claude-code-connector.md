@@ -41,9 +41,11 @@ wormhole join \
   --profile claude-code
 ```
 
-The profile is `~/.wormhole/credentials/claude-code.json`. Credential directories are
-created with mode `0700` and profile files with mode `0600`; the file contains the raw
-bearer token needed by `wormholed`. Do not commit or share it.
+The profile is `~/.wormhole/credentials/claude-code.json`. Newly created credential
+directories request mode `0700`, and newly created profile files request mode `0600`.
+Writing an existing directory or file does not automatically tighten its mode; verify and
+restrict the existing profile path before use. The file contains the raw bearer token needed
+by `wormholed`. Do not commit or share it.
 
 `wormhole connect` is an alternative for a new setup: it issues a Passport, writes a
 credential profile, and wires a detected Claude Code installation in one command. Use it

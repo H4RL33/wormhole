@@ -1,9 +1,8 @@
 // Package localapi is wormholed's local API: a Unix-domain-socket server
 // coding harnesses connect to (RFC-0003 §6.1), speaking real MCP JSON-RPC
 // 2.0 (initialize / notifications/initialized / tools/list / tools/call)
-// over a persistent, newline-delimited-JSON connection per client (design
-// doc: docs/superpowers/plans/2026-07-16-wormholed-mcp-endpoint-design.md,
-// issue #20 subtask 2). This replaced P1's one-shot {tool,args}->
+// over a persistent, newline-delimited-JSON connection per client. This
+// replaced P1's one-shot {tool,args}->
 // {result,error} bespoke protocol (localRequest/localResponse, now
 // deleted) — see mcp.go for the tool registry, schema reflection, and
 // per-message dispatch (dispatchMCPMessage) that implement the MCP surface
@@ -14,7 +13,7 @@
 // Server (and, as of this MCP surface, for wormholed's own local socket
 // too — see mcp.go). localapi cannot import internal/mcp (RFC-0003 §6.3
 // keeps internal/runtime/* and internal/mcp separate trees), so the wire
-// contract is duplicated here, same as cmd/wormhole-cli/main.go already
+// contract is duplicated here, same as cmd/wormhole already
 // does for the same reason.
 package localapi
 
@@ -341,7 +340,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 }
 
 // isJoinRegisterArgs reports whether a wormhole.agent.register call's args
-// are the join/passport-creation shape (RFC-0001 §9, cmd/wormhole-cli's
+// are the join/passport-creation shape (RFC-0001 §9, cmd/wormhole's
 // registerAgentInput: owner/model/capabilities/roles/permissions, no
 // agent_id) rather than P3's local presence-registration shape (agent_id +
 // capabilities). See the switch case in handle for why this dispatches on
@@ -359,10 +358,10 @@ func isJoinRegisterArgs(args json.RawMessage) bool {
 }
 
 // proxyRegister forwards a join-shaped wormhole.agent.register call to the
-// Coordination Server, unauthenticated (matching cmd/wormhole-cli's
+// Coordination Server, unauthenticated (matching cmd/wormhole's
 // doRegister, which sends no bearer token for this call — a Passport
 // doesn't exist yet). project_id is expected to already be present in args
-// (cmd/wormhole-cli's callTool folds it in before sending), so this simply
+// (cmd/wormhole's callTool folds it in before sending), so this simply
 // forwards the args as given; no local caching, matching this call's write
 // (not cacheable read) semantics.
 func (s *Server) proxyRegister(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {

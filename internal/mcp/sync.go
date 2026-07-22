@@ -27,9 +27,7 @@ const SyncProtocolVersion = 1
 const SyncAuditChannelID = "wormhole-sync-audit"
 
 // syncRateLimiter enforces a simple fixed-window per-namespace request cap
-// on wormhole.sync.* handlers (P6 minimal hardening — RFC-0003 §10; this
-// was explicitly deferred to the beta pass in ROADMAP-LOCAL-RUNTIME.md and
-// is now closed for the alpha tag).
+// on wormhole.sync.* handlers (P6 minimal hardening — RFC-0003 §10).
 type syncRateLimiter struct {
 	mu     sync.Mutex
 	limit  int

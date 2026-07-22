@@ -41,8 +41,9 @@ pointers. No code copies in Wormhole.
 - `internal/webui`: read-oriented human dashboard.
 - `internal/core/*` never imports `internal/mcp`; core-to-core imports are banned except
   `tasks` to `events` for status events.
-- `internal/runtime/*` never imports `internal/core/*` or `internal/mcp`. Only
-  `localapi` may import other runtime packages.
+- `internal/runtime/*` never imports `internal/core/*` or `internal/mcp`. `localapi`
+  may import all sibling runtime packages because it wires them together; other runtime
+  packages must not import `localapi`.
 - `internal/types` imports stdlib only. No new top-level package or external dependency
   without human approval. No ORM, global singleton, `init()` registration, or control-flow
   `panic`.

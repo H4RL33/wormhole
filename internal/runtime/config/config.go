@@ -1,10 +1,10 @@
 // Package config resolves wormholed's local paths and reads the credential
-// profile wormhole-cli already wrote (RFC-0003 §6.1). It duplicates the
-// minimal credentials JSON shape from cmd/wormhole-cli/main.go rather than
+// profile `wormhole join` already wrote (RFC-0003 §6.1). It duplicates the
+// minimal credentials JSON shape from cmd/wormhole rather than
 // importing it: main packages are not importable, and this matches the
-// existing wire-shape-duplication precedent at the cmd/wormhole-cli module
-// boundary (docs/architecture.md §2). wormholed does not write this file
-// in P1 — only reads what wormhole-cli's `wormhole join` already produced.
+// existing wire-shape-duplication precedent at the cmd/wormhole module
+// boundary. wormholed does not write this file — it only reads what
+// `wormhole join` already produced.
 package config
 
 import (
@@ -22,7 +22,7 @@ var ErrCredentialsNotFound = errors.New("config: credentials not found")
 
 // ErrInvalidProfileName is returned when the profile name passed to Load
 // could escape ~/.wormhole/credentials/ (path separators, ".." traversal,
-// empty string) — mirrors cmd/wormhole-cli/profiles.go's
+// empty string) — mirrors cmd/wormhole/profiles.go's
 // validateProfileName, since profileName here also originates as a
 // command-line argument (os.Args[1] in cmd/wormholed/main.go).
 var ErrInvalidProfileName = errors.New("config: invalid profile name")
@@ -32,7 +32,7 @@ var ErrNoCredentials = errors.New("config: no credential profiles found")
 
 // validateProfileName rejects a profile name that could escape the
 // credentials directory when joined into a file path. Mirrors
-// cmd/wormhole-cli/profiles.go's validateProfileName rules exactly.
+// cmd/wormhole/profiles.go's validateProfileName rules exactly.
 func validateProfileName(name string) error {
 	if name == "" {
 		return fmt.Errorf("%w: %q: must not be empty", ErrInvalidProfileName, name)
@@ -46,7 +46,7 @@ func validateProfileName(name string) error {
 	return nil
 }
 
-// Credentials mirrors the fields of cmd/wormhole-cli's credentials struct
+// Credentials mirrors the fields of cmd/wormhole's credentials struct
 // that wormholed needs to proxy calls to the Coordination Server.
 type Credentials struct {
 	Server    string `json:"server"`

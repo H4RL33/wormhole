@@ -21,9 +21,10 @@ custom tool-call envelope.
 - `GET /mcp`: reserved for the server-to-client SSE stream the Streamable HTTP transport spec
   defines for server-initiated messages. Wormhole has no server-initiated MCP messages in
   the current implementation (no sampling requests, no server notifications), so this route
-  returns `405 Method Not Allowed`; that limitation is stated in
-  `docs/claude-code-connector.md`. Building a real SSE stream for zero current consumers would
-  violate the smallest-correct-diff rule in `docs/implementation-rules.md` §2.5.
+  returns `405 Method Not Allowed`. The Claude Code connector uses the local `wormhole mcp`
+  stdio bridge and does not depend on a server-to-client SSE stream. Building a real SSE
+  stream for zero current consumers would violate the smallest-correct-diff rule in
+  `docs/implementation-rules.md` §2.5.
 - Every request and response body is `Content-Type: application/json`.
 
 HTTP status codes carry only transport-level meaning, never RPC-level outcome: every

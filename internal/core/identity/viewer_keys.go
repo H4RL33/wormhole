@@ -12,7 +12,7 @@ import (
 // ErrInvalidViewerKey is returned by ResolveViewerKey for any key that doesn't
 // match a stored hash for the requested project — forged, unknown, or a real
 // key presented against a project it wasn't issued for all collapse to this
-// one error (docs/architecture.md §3.4: security-relevant lookups must not let
+// one error (docs/implementation-rules.md §5: security-relevant lookups must not let
 // a caller distinguish failure modes).
 var ErrInvalidViewerKey = errors.New("identity: invalid viewer key")
 

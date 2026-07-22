@@ -6,10 +6,10 @@ import (
 	"testing"
 )
 
-// TestM2_ThreeRolesDistinctPermissionsAndViews is M2's exit-bar test named
-// directly in ROADMAP-ALPHA2.md Chapter 7: register three agents under
+// TestM2_ThreeRolesDistinctPermissionsAndViews verifies that registering
+// three agents under
 // distinct role templates (manager/backend/frontend) in one project,
-// confirm each passport carries a distinct permission bundle (Chapter 6),
+// confirm each passport carries a distinct permission bundle,
 // and confirm wormhole.task.list's default view differs per role
 // (Chapter 7) — the concrete demonstration that M2's role system produces
 // observably different behavior per role, not just distinct stored tags.

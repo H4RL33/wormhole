@@ -1,9 +1,9 @@
 # Wormhole Implementation Rules & Dispatch Heuristic
 
 **Audience:** implementation agents (any model tier) making changes to this repo.
-**Authority order:** RFC-0001 > RFC-0002 > this document > existing code. This document
-derives from the RFCs and the code as of Day 3; if it conflicts with an RFC, the RFC wins
-and this file has a bug — flag it, don't silently pick one.
+**Authority order:** RFC-0001 as amended by RFC-0003 > RFC-0002 > this document > existing
+code. This document derives from the RFCs and current code; if it conflicts with an RFC,
+the RFC wins and this file has a bug — flag it, don't silently pick one.
 
 This is a *constraint document*, not a tutorial. Every section states rules. If a task
 requires breaking a rule here, stop and escalate to the orchestrating agent or human;
@@ -74,7 +74,7 @@ The RFCs are short; reading the real text costs less than one wrong assumption.
 For any construct you're about to write (a store method, a migration, an error, a test),
 ask: *"Where does this repo already do something shaped like this?"* Find it, open it,
 and match it — naming, error style, transaction shape, comment density. The correct
-implementation of almost every alpha task is *"the identity package's pattern, applied to
+implementation of almost every Core task is *"the identity package's pattern, applied to
 a new entity."* If you find **no** precedent, that's a signal, not a licence: it means the
 construct is new to the repo, and new constructs need a sanity check against §4's rules and
 §10's tripwires before you invent one.
@@ -163,9 +163,10 @@ Coding harnesses talk only to `wormholed` over local IPC (MCP tools); `wormholed
 incrementally with the Coordination Server. The platform exposes four pillars — Event Bus,
 Task Graph, Knowledge Base, Identity & Permissions — exclusively through MCP. Git stays
 the sole source of truth for code; Wormhole stores pointers (commit SHAs, PR URLs) and
-commentary only. There is no message broker, no second coordination datastore, no web UI
-in scope. Governance (Constitution, Congress; RFC-0002) is optional and must not leak
-into Core code.
+commentary only. There is no message broker or second coordination datastore. The current
+read-only human dashboard is the narrow RFC-0001 §14 V2 exception to MCP-only product
+capabilities; no broader human application is in scope. Governance (Constitution, Congress;
+RFC-0002) is optional and must not leak into Core code.
 
 ```
 Coding harnesses (Claude Code, OpenCode, Goose, ...)
@@ -186,7 +187,7 @@ Coordination Server (cmd/wormhole-server)
         │  internal/mcp (tool registry + auth boundary)
         │  internal/core/* (identity, tasks, events, kb, permissions)
         ▼
-Postgres + pgvector (single external dependency)
+Postgres + pgvector (single Coordination Server datastore)
 ```
 
 ---
@@ -195,8 +196,9 @@ Postgres + pgvector (single external dependency)
 
 | Package | Owns | May import |
 |---|---|---|
-| `cmd/wormhole-server` | Process wiring: config, HTTP server, registry construction | `internal/mcp`, `internal/storage`, `internal/types` |
-| `cmd/wormhole-cli` | CLI entrypoint (`wormhole join` etc.) | `internal/types`, client-side code only |
+| `cmd/wormhole-server` | Process wiring: config, HTTP server, registry construction | `internal/core/*`, `internal/mcp`, `internal/storage`, `internal/types`, `internal/webui` |
+| `cmd/wormhole` | CLI entrypoint (`wormhole join` etc.) | `internal/config`, client-side code, stdlib |
+| `internal/config` | CLI global/project TOML configuration | stdlib, BurntSushi TOML |
 | `internal/mcp` | MCP tool descriptors, registry, request/response schemas, auth middleware | `internal/core/*`, `internal/types` |
 | `internal/core/identity` | Agents, tokens, passports, whoami, audit trail | `internal/types`, stdlib |
 | `internal/core/tasks` | Task graph: CRUD, status machine, task links | `internal/types`, `internal/core/events` (to emit transition events) |
@@ -204,8 +206,10 @@ Postgres + pgvector (single external dependency)
 | `internal/core/kb` | KB articles, links, embeddings, compliance checks, semantic search | `internal/types`, stdlib |
 | `internal/core/permissions` | Permission resolution/enforcement helpers | `internal/types`, stdlib |
 | `internal/core/git` | Git integration pointers: commit links, review requests (manual-link only, RFC-0001 §8.6) | `internal/types`, stdlib |
+| `internal/core/roles` | Immutable role templates and default task views | stdlib |
 | `internal/storage` | DB connection only (`Open`) | `internal/types`, `lib/pq` |
 | `internal/types` | Config, shared plain types | stdlib only |
+| `internal/webui` | Read-only dashboard and viewer/admin-key HTTP boundary | `internal/core/*`, stdlib |
 
 ### 4.1 Local Runtime Module Map (RFC-0003 §6.3)
 
@@ -217,11 +221,11 @@ the same layering pattern and isolation discipline.
 |---|---|---|
 | `cmd/wormholed` | Process wiring: config load, localstore, localapi, sync engine, graceful shutdown | `internal/runtime/*`, `internal/types` |
 | `internal/runtime/config` | XDG-compliant local paths, org connection config, project bindings (RFC-0003 §7.1, §8.1) | `internal/types`, stdlib |
-| `internal/runtime/localstore` | SQLite-backed repositories for tasks, events, KB, namespaced per project (RFC-0003 §7.2) | `internal/types`, stdlib, sqlite3 driver |
-| `internal/runtime/localapi` | Local IPC server (Unix domain socket), tool registry, request routing, org context resolution (RFC-0003 §6.1) | `internal/runtime/localstore`, `internal/runtime/eventbus`, `internal/runtime/scheduler`, `internal/types`, stdlib |
+| `internal/runtime/localstore` | SQLite-backed repositories for tasks, events, KB, namespaced per project (RFC-0003 §7.2) | `internal/types`, stdlib, modernc SQLite driver |
+| `internal/runtime/localapi` | Local IPC server (Unix domain socket), tool registry, request routing, org context resolution (RFC-0003 §6.1) | All sibling `internal/runtime/*` packages, `internal/types`, stdlib |
 | `internal/runtime/eventbus` | In-memory pub/sub for ephemeral events (presence, heartbeats); never persists (RFC-0003 §8.2) | `internal/types`, stdlib |
-| `internal/runtime/scheduler` | Agent registration, presence tracking, capability matching, local task routing (RFC-0003 design brief) | `internal/types`, stdlib |
-| `internal/runtime/sync` | Outbound queue (durable, SQLite-backed), bootstrap/incremental pull/push clients, conflict audit logging (RFC-0003 §8.2, §8.3) | `internal/types`, stdlib, sqlite3 driver |
+| `internal/runtime/scheduler` | Agent registration, presence tracking, capability matching, local task routing (RFC-0003 §6.3) | `internal/types`, stdlib |
+| `internal/runtime/sync` | Outbound queue (durable, SQLite-backed), bootstrap/incremental pull/push clients, conflict audit logging (RFC-0003 §8.2, §8.3) | `internal/runtime/localstore`, `internal/types`, stdlib |
 
 **Local runtime hard dependency rules (RFC-0003 §6.3):**
 
@@ -231,18 +235,22 @@ the same layering pattern and isolation discipline.
 - LR4: Ephemeral events (presence, heartbeats) are eventbus-only; durable events (task/KB changes) go through localstore. Never persist ephemeral state.
 - LR5: Sync queue is SQLite-backed and restart-surviving (RFC-0003 G4). Local writes become durable before sync is attempted; sync never blocks local writes.
 
-**Hard dependency rules (Coordination Server, unchanged):**
+**Hard dependency rules (Coordination Server):**
 
 - R1: `internal/core/*` packages never import `internal/mcp`. Flow is one-way: mcp → core.
 - R2: `internal/core/*` packages never import each other, with one sanctioned exception:
   `tasks` → `events`, because task status transitions emit events (RFC-0001 §8.2).
   Need another cross-core import? Escalate; do not add it.
 - R3: `internal/types` imports nothing outside stdlib. It is the bottom of the graph.
-- R4: No new top-level packages, no new external Go dependencies, without explicit
-  human sign-off. Current dependency budget: `lib/pq`, golang-migrate (tooling), and
-  whatever MCP SDK gets frozen when the real MCP transport lands. That's it.
-- R5: One database. No Redis, no NATS, no SQLite cache, no second service. RFC-0001 §7.1
-  leaves streams open as a *future* option; the alpha answer is "Postgres table, poll".
+- R4: No new top-level packages or external Go dependencies without explicit human
+  sign-off. The locked module graph contains the direct dependencies `github.com/lib/pq`
+  and `modernc.org/sqlite`, plus the indirect dependencies recorded in `go.mod`/`go.sum`.
+  `golang-migrate` remains external schema tooling rather than a linked Go module.
+- R5: The Coordination Server has one datastore: Postgres + pgvector. RFC-0003 separately
+  requires `wormholed`'s local SQLite replica and durable sync queue; that SQLite database
+  is not a Coordination Server datastore. Do not add Redis, NATS, another datastore, or
+  another storage service without explicit human approval. RFC-0001 §7.1 leaves streams
+  open as a future option; the current Coordination Server answer is "Postgres table, poll".
 
 ---
 
@@ -311,8 +319,10 @@ the same layering pattern and isolation discipline.
   `task`, `kb`, `git`. No new pillar prefixes; `wormhole.governance.*` is RFC-0002 and
   out of scope.
 - M3: Every capability ships as an MCP tool or it doesn't exist (RFC-0001 §5.5).
-  No REST-only endpoints for platform features. `/healthz` and similar operational
-  endpoints are the only exception.
+  No REST-only endpoints for platform write capabilities. `/healthz` and similar
+  operational endpoints are exceptions, as is the current read-only human dashboard
+  projection ratified by RFC-0001 §14 V2. Do not extend that exception into a parallel
+  write API.
 - M4: Auth happens at the MCP boundary (`internal/mcp` middleware resolves bearer token
   via `identity.Store.WhoAmI`, yielding `AuthenticatedScope`), then core packages
   receive the already-resolved scope. Core packages never re-parse tokens.
@@ -334,7 +344,7 @@ the same layering pattern and isolation discipline.
   `message.posted`), typed `payload` jsonb per type, optional free-text `note`.
   `message.posted` is the escape hatch; do not add prose-first event types.
 - New event types are an escalation, not a local decision.
-- Delivery model for alpha: poll. Do not build push/streaming infrastructure
+- Current delivery model: poll. Do not build push/streaming infrastructure
   (open question, RFC-0001 §15).
 
 ### Tasks
@@ -388,7 +398,8 @@ the same layering pattern and isolation discipline.
 
 - Storing, diffing, or mirroring code contents.
 - Any RFC-0002 concept in Core code paths (Constitution, Congress, proposals, stances).
-- A second datastore, message broker, or background worker process.
+- A new Coordination Server datastore, message broker, or background worker process beyond
+  RFC-0003's existing local runtime and sync loop.
 - A human-facing UI beyond a minimal read-only surface.
 - Human-to-human messaging, rich media, presence.
 - Resolving an RFC open question (§15 Core, §9 Governance) as a side effect of an

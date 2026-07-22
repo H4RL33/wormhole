@@ -8,7 +8,6 @@
 | Author | Harley |
 | Date | 2026-07-13 |
 | Supersedes | Nothing directly; amends RFC-0001 transport assumptions (see §4) |
-| Derived from | `WORMHOLED-NEW-APPROACH.md` (design brief) |
 | Related | [RFC-0001: Wormhole Core](wormhole_rfc.md), [RFC-0002: Wormhole Governance](wormhole_rfc_governance.md) |
 
 ---
@@ -31,7 +30,7 @@ Three gaps this RFC closes:
 
 1. **Availability.** Single Postgres + single server means a server outage halts every agent globally, not just the ones touching the down project.
 2. **Latency.** Agent workloads are call-heavy (many small MCP calls per session). Round-tripping every call to a remote server is the wrong default when most reads are servable from a local replica.
-3. **Multi-org / multi-server.** RFC-0001 has no concept of one machine, one user, participating in more than one organisation or coordination server at once. The local runtime doc (`WORMHOLED-NEW-APPROACH.md`) treats this as first-class.
+3. **Multi-org / multi-server.** RFC-0001 has no concept of one machine, one user, participating in more than one organisation or coordination server at once. This RFC makes that capability first-class through explicit project bindings and per-organisation credentials.
 
 This is a genuine architecture pivot, not an incremental feature. It roughly doubles system complexity (sync engine, two storage engines, two isolation models) in exchange for offline capability, lower latency, and multi-org support. That trade is judged worth it because RFC-0001's own target user (many agents, many machines, intermittent connectivity, multiple orgs) requires it — a single-org-always-online deployment would not need this pivot, and should not attempt it.
 
@@ -99,7 +98,7 @@ A single `wormholed` may hold concurrent connections to multiple Coordination Se
 
 ### 6.1 `wormholed` (new)
 
-Long-running user-level system service (conceptually parallel to an ssh-agent or local database daemon — RFC-0001's own comparison class). Responsibilities, matching `WORMHOLED-NEW-APPROACH.md` verbatim:
+Long-running user-level system service (conceptually parallel to an ssh-agent or local database daemon — RFC-0001's own comparison class). Its responsibilities are:
 
 Identity management, authentication, local scheduling, local event bus, local API, synchronisation, presence, task routing, knowledge replication, artifact management, storage, configuration, security enforcement.
 
@@ -135,7 +134,7 @@ Local-daemon-side code, entirely new, living outside `internal/core/*` (which st
 New relationships beyond RFC-0001's agent/Passport model:
 
 - A `wormholed` instance is not itself an identity; it is a host for zero or more (agent, org, project) Passport bindings.
-- **Project binding**: explicit, not inferred. `wormholed` routes an incoming harness MCP call to a specific (org, project, identity) tuple based on configured bindings, never an implicit default (matches design brief's "Project Bindings" section).
+- **Project binding**: explicit, not inferred. `wormholed` routes an incoming harness MCP call to a specific (org, project, identity) tuple based on configured bindings, never an implicit default.
 - **Namespace**: isolation boundary for organisation/project/knowledge/tasks/artifacts/identity, both server- and runtime-side.
 
 ### 7.2 Isolation enforcement — the real gap
@@ -146,7 +145,7 @@ This is weaker than RLS in one specific way: a bug in repository code can leak a
 
 ### 7.3 Credentials vs identity records
 
-Per the design brief: identity *records* (who an agent is, its org memberships) are recoverable; *credentials* (raw Passport tokens, keys) are not redistributed on recovery and must be regenerated instead. The Coordination Server's Postgres store and `wormholed`'s SQLite store do not persist raw Passport tokens; the server stores token hashes. However, `wormholed` must read a raw bearer token from the permission-restricted credential profile at `~/.wormhole/credentials/<profile>.json`. That file is created with mode `0600` in a mode-`0700` directory. A lost or wiped machine recovers through coordination-server re-issuance, not credential replication.
+Identity *records* (who an agent is, its org memberships) are recoverable; *credentials* (raw Passport tokens, keys) are not redistributed on recovery and must be regenerated instead. The Coordination Server's Postgres store and `wormholed`'s SQLite store do not persist raw Passport tokens; the server stores token hashes. However, `wormholed` must read a raw bearer token from the credential profile at `~/.wormhole/credentials/<profile>.json`. The CLI requests mode `0600` for a newly created profile file and mode `0700` for a newly created parent directory; it does not automatically tighten existing path modes, which users must verify. A lost or wiped machine recovers through coordination-server re-issuance, not credential replication.
 
 ---
 
@@ -162,8 +161,8 @@ Bootstrap pulls a complete working environment before the runtime switches to in
 
 - Local writes become durable in SQLite first (G4). Sync is a separate, asynchronous step — never blocking a local write's success on network reachability.
 - Outbound queue in `internal/runtime/sync` persists across restarts and network interruptions (SQLite-backed, not in-memory-only).
-- Delivery classes mirror the design brief's event categories: ephemeral events never sync; durable events (task/KB changes) queue and sync reliably; persistent state syncs via the incremental pull/push cycle.
-- Batching: time/queue-size/priority-based, with an explicit bypass for latency-sensitive event classes (matches design brief; exact thresholds are tunable configuration, not hardcoded).
+- Delivery classes are explicit: ephemeral events never sync; durable events (task/KB changes) queue and sync reliably; persistent state syncs via the incremental pull/push cycle.
+- Batching is time-, queue-size-, and priority-based, with an explicit bypass for latency-sensitive event classes; exact thresholds are tunable configuration, not hardcoded.
 
 ### 8.3 Conflict handling (v1 answer)
 
@@ -177,23 +176,23 @@ Carried forward explicitly, not resolved here (per the ambiguity ladder in `docs
 
 - OQ1: Conflict resolution beyond last-write-wins (CRDTs, operational transforms) — deferred, NG1.
 - OQ2: Exact `wormhole.sync.*` request/response schemas — indicative only, frozen at implementation time like all other MCP schemas (RFC-0001 M1).
-- OQ3: Cross-runtime discovery mechanics for multi-user collaboration (design brief mentions it as a Coordination Server responsibility, no protocol specified).
+- OQ3: Cross-runtime discovery mechanics for multi-user collaboration — a Coordination Server responsibility (§6.2), but no protocol is specified.
 - OQ4: Local IPC authentication model — same-user process trust assumed as the conservative default (no additional local auth token) unless a concrete threat model says otherwise; multi-user machine sharing a single `wormholed` is out of scope for v1.
 - OQ5: Version skew handling between `wormholed` and Coordination Server (protocol versioning strategy) — not specified; flagged as needed before any multi-version deployment.
-- OQ6: Tool/manifest distribution enforcement — server distributes declarative manifests (§ Tool Distribution in design brief); how `wormholed` validates/sandboxes what it installs locally is unspecified.
+- OQ6: Tool/manifest distribution enforcement — bootstrap distributes approved integration manifests (§8.1), but how `wormholed` validates or sandboxes what it installs locally is unspecified.
 
 ---
 
 ## 10. Security Considerations
 
-- The Coordination Server's Postgres store and `wormholed`'s SQLite store do not persist raw Passport tokens; the server stores token hashes. The permission-restricted `~/.wormhole/credentials/<profile>.json` file necessarily contains the raw bearer token used by `wormholed`. Raw tokens are not logged or exposed through the local API.
-- Local API (Unix socket/named pipe) trusts OS-level file permissions for access control (OQ4); no additional bearer-token layer in v1.
+- The Coordination Server's Postgres store and `wormholed`'s SQLite store do not persist raw Passport tokens; the server stores token hashes. The raw-token profile at `~/.wormhole/credentials/<profile>.json` must be kept permission-restricted. Raw tokens are not logged. Registration is the deliberate exception to the usual local API exposure rule: `proxyRegister` returns a newly issued raw token once over the local socket so the CLI can write the credential profile. Any process able to connect to that socket can invoke registration and receive its one-time token response.
+- The local API (Unix socket/named pipe) has no additional bearer-token layer in v1. Its intended same-user trust boundary depends on OS filesystem permissions for the socket path and parent directory (OQ4); users must restrict those paths accordingly.
 - Multi-org isolation is application-enforced, not database-enforced, in `wormholed` (§7.2) — the single biggest security-relevant departure from the coordination server's RLS guarantee, and the top implementation review priority for any `internal/runtime/localstore` change.
-- Sync channel (`wormholed` ↔ Coordination Server) is authenticated per-org (existing Passport-derived credential), encrypted in transit; no new auth primitive introduced beyond what RFC-0001 §8.4 already defines for Passports.
+- The sync channel (`wormholed` ↔ Coordination Server) is authenticated per organisation with the existing Passport-derived bearer token; no new auth primitive is introduced beyond RFC-0001 §8.4. Transport encryption exists only when the configured Coordination Server URL uses HTTPS. The current implementation accepts HTTP URLs and sends the bearer token in the `Authorization` header, so deployments must require HTTPS for every non-loopback Coordination Server. Plain HTTP is suitable only for loopback development.
 
 ---
 
-## 11. Non-Goals Recap (verbatim from design brief, ratified)
+## 11. Non-Goals Recap
 
 Advanced scheduling algorithms, distributed consensus, CRDTs, complex permission inheritance, autonomous planning, language-model orchestration inside the runtime, global optimisation, full peer-to-peer operation. Priority is a robust, extensible foundation — not solving every long-term concern in v1.
 
@@ -213,7 +212,6 @@ Advanced scheduling algorithms, distributed consensus, CRDTs, complex permission
 
 ## 13. References
 
-- `WORMHOLED-NEW-APPROACH.md` — source design brief for this RFC.
 - [RFC-0001: Wormhole Core](wormhole_rfc.md)
 - [RFC-0002: Wormhole Governance](wormhole_rfc_governance.md)
 - [`docs/implementation-rules.md`](../implementation-rules.md) — implementation guardrails.

@@ -13,7 +13,7 @@ import (
 // Handler executes one MCP tool call. scope is nil when the tool's
 // RequiresAuth is false; otherwise it is the AuthenticatedScope the auth
 // middleware already resolved from the caller's bearer token
-// (docs/architecture.md M4 — handlers never see a raw token). projectID is
+// (docs/implementation-rules.md §7 M4 — handlers never see a raw token). projectID is
 // always populated from the call envelope, independent of auth, since
 // project-scoped bootstrap calls (e.g. registration) need it before any
 // token exists.

@@ -21,9 +21,9 @@ import (
 
 // m3ToolsCallParams/m3ToolCallResult mirror internal/mcp's unexported
 // toolsCallParams/toolCallResult (internal/mcp/jsonrpc.go lines ~220-234)
-// and cmd/wormhole-cli/main.go's local mirror of the same shapes — this
+// and cmd/wormhole's local mirror of the same shapes — this
 // file cannot import either (unexported in internal/mcp; a different
-// package's local type in wormhole-cli), so it keeps its own copy with
+// package's local type in cmd/wormhole), so it keeps its own copy with
 // matching field names/JSON tags for consistency across the codebase's
 // (now three) independent client implementations.
 type m3ToolsCallParams struct {

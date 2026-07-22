@@ -32,8 +32,7 @@ var ErrInvalidScope = errors.New("identity: invalid scope")
 var ErrPassportExists = errors.New("identity: passport already issued for this agent and project")
 
 // tokenTTL is an inferred alpha default — neither RFC-0001 nor RFC-0002
-// specifies a token lifetime. See Global Constraints in
-// docs/superpowers/plans/2026-07-11-day5-mcp-wiring.md.
+// specifies a token lifetime.
 const tokenTTL = 30 * 24 * time.Hour
 
 type Agent struct {

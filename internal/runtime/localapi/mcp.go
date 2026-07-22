@@ -1,6 +1,5 @@
 // mcp.go implements wormholed's local socket MCP JSON-RPC 2.0 surface
-// (RFC-0003 §6.1, docs/superpowers/plans/2026-07-16-wormholed-mcp-endpoint-
-// design.md §1/§5 subtask 2). It replaces the P1-era bespoke
+// (RFC-0003 §6.1). It replaces the P1-era bespoke
 // {tool,args}->{result,error} one-shot protocol (localRequest/localResponse,
 // now deleted) with initialize / notifications/initialized / tools/list /
 // tools/call over a persistent, newline-delimited-JSON connection.
@@ -8,8 +7,8 @@
 // localTool/localRegistry mirror internal/mcp.Tool/internal/mcp.Registry's
 // shape, and buildInputSchema/reflectStructSchema/jsonSchemaForType/
 // parseJSONTag are copied (not imported) from internal/mcp/jsonrpc.go:106-225
-// — localapi cannot import internal/mcp (RFC-0003 §6.3, docs/architecture.md
-// LR1: internal/runtime/* and internal/mcp are separate trees). This is a
+// — localapi cannot import internal/mcp (RFC-0003 §6.3 and
+// docs/implementation-rules.md §4.1 LR1). This is a
 // deliberate duplication, same posture as rpcRequest/rpcResponse/
 // toolsCallParams/toolCallResult already declared in localapi.go.
 package localapi

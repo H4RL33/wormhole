@@ -137,8 +137,7 @@ type Embedder interface {
 // wormhole.kb.write / wormhole.kb.search pipeline real and testable end to
 // end (populated embedding column, working pgvector distance ranking)
 // without committing to an external embedding API or a new Go dependency
-// before that choice is made (docs/superpowers/plans/2026-07-20-day14-kb-embeddings-search.md,
-// "Embedding provider decision"; RFC-0001 §15 open question). The real
+// before that choice is made (RFC-0001 §15 open question). The real
 // provider is deferred to a later day.
 //
 // Algorithm: sha256 the input text, take the first 16 bytes of the digest,
@@ -608,4 +607,3 @@ func (s *Store) ListArticles(ctx context.Context, projectID string) ([]Article, 
 
 	return articles, nil
 }
-
