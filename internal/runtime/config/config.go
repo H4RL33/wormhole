@@ -70,8 +70,8 @@ type ProjectBinding struct {
 
 // Config is wormholed's resolved local configuration for one run.
 type Config struct {
-	SocketPath string
-	DBPath     string
+	SocketPath  string
+	DBPath      string
 	Credentials Credentials
 }
 
@@ -79,8 +79,8 @@ type Config struct {
 type MultiOrgConfig struct {
 	SocketPath string
 	DBPath     string
-	Orgs       map[string]Org        // org_name → Org credentials
-	Bindings   []ProjectBinding      // harness project → (org, project) mappings
+	Orgs       map[string]Org   // org_name → Org credentials
+	Bindings   []ProjectBinding // harness project → (org, project) mappings
 }
 
 // Load resolves paths and reads the named credential profile.

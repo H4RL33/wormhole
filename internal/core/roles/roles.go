@@ -17,12 +17,12 @@ import (
 var ErrTemplateNotFound = errors.New("roles: template not found")
 
 type Template struct {
-	Name                  string
-	PermissionBundle      []string
-	DefaultCapabilities   []string
-	DefaultRoles          []string
-	DefaultTaskView       json.RawMessage
-	CreatedAt             time.Time
+	Name                string
+	PermissionBundle    []string
+	DefaultCapabilities []string
+	DefaultRoles        []string
+	DefaultTaskView     json.RawMessage
+	CreatedAt           time.Time
 }
 
 type Store struct {

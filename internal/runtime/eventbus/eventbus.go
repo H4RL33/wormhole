@@ -16,7 +16,7 @@ type Subscription struct {
 	ID        string
 	ch        chan []byte // raw JSON bytes matching the event shape
 	done      chan struct{}
-	closeOnce sync.Once     // guards closing ch and done
+	closeOnce sync.Once // guards closing ch and done
 }
 
 // Close unsubscribes and releases the underlying channel. Safe to call multiple
@@ -41,7 +41,7 @@ func (s *Subscription) Events() <-chan []byte {
 // EventBus is an in-memory pub/sub hub for ephemeral events. It is safe for
 // concurrent use.
 type EventBus struct {
-	mu         sync.RWMutex
+	mu          sync.RWMutex
 	subscribers map[string][]*Subscription // key = namespace or event type (see Subscribe)
 	nextID      int
 }

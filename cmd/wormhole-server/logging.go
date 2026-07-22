@@ -28,7 +28,7 @@ func (r *statusRecorder) WriteHeader(status int) {
 // reaches the real handler, which does its own full validation and error
 // reporting; this is best-effort observability, not a second validator.
 type rpcLogProbe struct {
-	Method string `json:"method"`
+	Method string          `json:"method"`
 	Params json.RawMessage `json:"params"`
 }
 

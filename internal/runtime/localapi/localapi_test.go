@@ -622,4 +622,3 @@ func TestServer_CloseForceClosesIdleConnections(t *testing.T) {
 
 	conn.Close()
 }
-

@@ -1247,4 +1247,3 @@ func runViewerKey(args []string, stdout, stderr io.Writer) int {
 	}
 	return runViewerKeyCreate(args[1:], stdout, stderr)
 }
-

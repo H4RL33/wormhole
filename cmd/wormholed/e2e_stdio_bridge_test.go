@@ -387,9 +387,9 @@ type e2eStdioRPCError struct {
 }
 
 type e2eStdioRPCResponse struct {
-	JSONRPC string           `json:"jsonrpc"`
-	ID      json.RawMessage  `json:"id,omitempty"`
-	Result  json.RawMessage  `json:"result,omitempty"`
+	JSONRPC string            `json:"jsonrpc"`
+	ID      json.RawMessage   `json:"id,omitempty"`
+	Result  json.RawMessage   `json:"result,omitempty"`
 	Error   *e2eStdioRPCError `json:"error,omitempty"`
 }
 

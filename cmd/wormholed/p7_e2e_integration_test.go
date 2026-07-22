@@ -55,11 +55,11 @@ func testFakeCoordServer(t *testing.T) *httptest.Server {
 		switch params.Name {
 		case "wormhole.agent.whoami":
 			resultData = map[string]interface{}{
-				"agent_id":      "test-agent",
-				"owner":         "harley",
-				"model":         "claude-sonnet-5",
+				"agent_id":     "test-agent",
+				"owner":        "harley",
+				"model":        "claude-sonnet-5",
 				"capabilities": []string{"code"},
-				"project_id":    "project-1",
+				"project_id":   "project-1",
 				"permissions":  []string{"task.create"},
 			}
 

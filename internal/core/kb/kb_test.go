@@ -991,8 +991,6 @@ func TestWriteArticle_RequiredLinksNormal(t *testing.T) {
 	}
 }
 
-
-
 func TestGetArticle_HappyPath(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

@@ -33,16 +33,16 @@ type QueueEntry struct {
 
 // AuditEntry represents one conflict resolution or sync operation audit log entry (RFC-0003 §8.3).
 type AuditEntry struct {
-	ID             string
-	NamespaceID    string
-	EntityType     string
-	EntityID       string
-	ConflictType   *string
-	ServerValue    *string
-	LocalValue     *string
-	ResolvedValue  *string
-	ResolvedBy     *string
-	CreatedAt      time.Time
+	ID            string
+	NamespaceID   string
+	EntityType    string
+	EntityID      string
+	ConflictType  *string
+	ServerValue   *string
+	LocalValue    *string
+	ResolvedValue *string
+	ResolvedBy    *string
+	CreatedAt     time.Time
 }
 
 // QueueRepo provides a SQLite-backed sync queue repository (RFC-0003 §8.2).

@@ -173,24 +173,24 @@ func formatVectorLiteral(vec []float32) string {
 }
 
 type Store struct {
-	db                  *sql.DB
-	embedder            Embedder
-	dedupThreshold      float64
-	maxBodyLength       int
-	minLinksDecision    int
-	minLinksPolicy      int
-	minLinksProcedure   int
+	db                *sql.DB
+	embedder          Embedder
+	dedupThreshold    float64
+	maxBodyLength     int
+	minLinksDecision  int
+	minLinksPolicy    int
+	minLinksProcedure int
 }
 
 func NewStore(db *sql.DB, embedder Embedder, dedupThreshold float64, maxBodyLength int, minLinksDecision, minLinksPolicy, minLinksProcedure int) *Store {
 	return &Store{
-		db:                  db,
-		embedder:            embedder,
-		dedupThreshold:      dedupThreshold,
-		maxBodyLength:       maxBodyLength,
-		minLinksDecision:    minLinksDecision,
-		minLinksPolicy:      minLinksPolicy,
-		minLinksProcedure:   minLinksProcedure,
+		db:                db,
+		embedder:          embedder,
+		dedupThreshold:    dedupThreshold,
+		maxBodyLength:     maxBodyLength,
+		minLinksDecision:  minLinksDecision,
+		minLinksPolicy:    minLinksPolicy,
+		minLinksProcedure: minLinksProcedure,
 	}
 }
 

@@ -41,7 +41,9 @@ func TestRunViewerKeyCreate_Success(t *testing.T) {
 		if got := r.Header.Get("X-Admin-Key"); got != "sekrit" {
 			t.Fatalf("X-Admin-Key: got %q, want %q", got, "sekrit")
 		}
-		var body struct{ Label string `json:"label"` }
+		var body struct {
+			Label string `json:"label"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode body: %v", err)
 		}
