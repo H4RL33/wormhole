@@ -51,7 +51,10 @@ func Run(ctx context.Context, profileName string) error {
 	queueRepo := sync.NewQueueRepo(store.DB())
 	auditRepo := sync.NewAuditRepo(store.DB())
 	syncCfg := sync.DefaultConfig()
-	syncEngine := sync.New(cfg.Credentials.Server, cfg.Credentials.Token, cfg.Credentials.ProjectID, queueRepo, auditRepo, tr, kb, syncCfg)
+	syncEngine, err := sync.New(cfg.Credentials.Server, cfg.Credentials.Token, cfg.Credentials.ProjectID, queueRepo, auditRepo, tr, kb, syncCfg)
+	if err != nil {
+		return fmt.Errorf("wormholed: configure sync engine: %w", err)
+	}
 
 	// P3: eventbus + scheduler are always constructed so agent registration,
 	// presence, task routing, and subscriptions (wormhole.agent.register,

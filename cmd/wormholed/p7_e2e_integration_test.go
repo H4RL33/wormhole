@@ -86,8 +86,15 @@ func testFakeCoordServer(t *testing.T) *httptest.Server {
 			}
 			resultData = map[string]interface{}{
 				"items_received": len(pushArgs.Items),
-				"timestamp":      time.Now().UTC().Format(time.RFC3339),
-				"version":        1,
+				"applied": func() []map[string]interface{} {
+					applied := make([]map[string]interface{}, 0, len(pushArgs.Items))
+					for _, item := range pushArgs.Items {
+						applied = append(applied, map[string]interface{}{"id": item.EntityID, "type": item.EntityType, "error": ""})
+					}
+					return applied
+				}(),
+				"timestamp": time.Now().UTC().Format(time.RFC3339),
+				"version":   1,
 			}
 
 		case "wormhole.sync.incremental_pull":
@@ -452,8 +459,15 @@ func statefulCoordServer(t *testing.T) *httptest.Server {
 			mu.Unlock()
 			resultData = map[string]interface{}{
 				"items_received": len(pushArgs.Items),
-				"timestamp":      time.Now().UTC().Format(time.RFC3339),
-				"version":        1,
+				"applied": func() []map[string]interface{} {
+					applied := make([]map[string]interface{}, 0, len(pushArgs.Items))
+					for _, item := range pushArgs.Items {
+						applied = append(applied, map[string]interface{}{"id": item.EntityID, "type": item.EntityType, "error": ""})
+					}
+					return applied
+				}(),
+				"timestamp": time.Now().UTC().Format(time.RFC3339),
+				"version":   1,
 			}
 
 		case "wormhole.sync.bootstrap":
@@ -513,8 +527,12 @@ func TestP7_MultiDaemonSync(t *testing.T) {
 	auditA := sync.NewAuditRepo(storeA.DB())
 	taskRepoA := localstore.NewTaskRepo(storeA.DB(), localstore.NewEventRepo(storeA.DB()))
 	kbRepoA := localstore.NewKBRepo(storeA.DB())
-	fastCfg := sync.Config{BatchInterval: 20 * time.Millisecond, BatchSize: 50}
-	engineA := sync.New(coordSrv.URL, "test-token", "project-1", queueA, auditA, taskRepoA, kbRepoA, fastCfg)
+	fastCfg := sync.DefaultConfig()
+	fastCfg.BatchInterval = 20 * time.Millisecond
+	engineA, err := sync.New(coordSrv.URL, "test-token", "project-1", queueA, auditA, taskRepoA, kbRepoA, fastCfg)
+	if err != nil {
+		t.Fatalf("New engine A: %v", err)
+	}
 
 	task, err := taskRepoA.CreateTask(ctx, "project-1", "Daemon A task", "written offline", nil, 1, nil)
 	if err != nil {
@@ -560,7 +578,10 @@ func TestP7_MultiDaemonSync(t *testing.T) {
 	auditB := sync.NewAuditRepo(storeB.DB())
 	taskRepoB := localstore.NewTaskRepo(storeB.DB(), localstore.NewEventRepo(storeB.DB()))
 	kbRepoB := localstore.NewKBRepo(storeB.DB())
-	engineB := sync.New(coordSrv.URL, "test-token", "project-1", queueB, auditB, taskRepoB, kbRepoB, sync.DefaultConfig())
+	engineB, err := sync.New(coordSrv.URL, "test-token", "project-1", queueB, auditB, taskRepoB, kbRepoB, sync.DefaultConfig())
+	if err != nil {
+		t.Fatalf("New engine B: %v", err)
+	}
 
 	if err := engineB.Bootstrap(ctx); err != nil {
 		t.Fatalf("Bootstrap on daemon B: %v", err)

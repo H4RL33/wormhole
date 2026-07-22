@@ -31,8 +31,13 @@ type Engine struct {
 	batchInterval         time.Duration
 	batchSize             int
 	latencyCheckInterval  time.Duration
+	pullInterval          time.Duration
 	highPriorityThreshold int
-	shutdown              chan struct{}
+	startOnce             sync.Once
+	stopOnce              sync.Once
+	lifecycleMu           sync.Mutex
+	cancel                context.CancelFunc
+	stopped               bool
 	wg                    sync.WaitGroup
 	// testCallSyncToolWithResultFn is for testing only: if set, overrides callSyncToolWithResult.
 	testCallSyncToolWithResultFn func(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error)
@@ -43,17 +48,19 @@ type Config struct {
 	BatchInterval         time.Duration // time-based batching threshold
 	BatchSize             int           // queue-size batching threshold
 	LatencyCheckInterval  time.Duration // how often to check for high-priority entries needing an immediate push
+	PullInterval          time.Duration // how often to pull server-side changes
 	HighPriorityThreshold int           // queue entries with Priority >= this bypass BatchInterval
 }
 
 // DefaultConfig returns conservative batching defaults: 5 sec interval, 50
-// item batch, high-priority entries (priority >= 2) checked every 500ms
-// instead of waiting the full 5 sec.
+// item batch, 5 sec pull interval, and high-priority entries (priority >= 2)
+// checked every 500ms instead of waiting the full 5 sec.
 func DefaultConfig() Config {
 	return Config{
 		BatchInterval:         5 * time.Second,
 		BatchSize:             50,
 		LatencyCheckInterval:  500 * time.Millisecond,
+		PullInterval:          5 * time.Second,
 		HighPriorityThreshold: 2,
 	}
 }
@@ -63,11 +70,20 @@ func DefaultConfig() Config {
 // §8.1/§8.2); either may be nil for callers that only exercise push (e.g.
 // existing unit tests here), in which case a pull response with a non-empty
 // task_list/kb_list is an error rather than a silent no-op.
-func New(coordServerURL, token, namespaceID string, queueRepo *QueueRepo, auditRepo *AuditRepo, taskRepo *localstore.TaskRepo, kbRepo *localstore.KBRepo, cfg Config) *Engine {
-	latencyCheckInterval := cfg.LatencyCheckInterval
-	if latencyCheckInterval <= 0 {
-		latencyCheckInterval = DefaultConfig().LatencyCheckInterval
+func New(coordServerURL, token, namespaceID string, queueRepo *QueueRepo, auditRepo *AuditRepo, taskRepo *localstore.TaskRepo, kbRepo *localstore.KBRepo, cfg Config) (*Engine, error) {
+	if cfg.BatchInterval <= 0 {
+		return nil, errors.New("sync: invalid config: BatchInterval must be greater than zero")
 	}
+	if cfg.BatchSize <= 0 {
+		return nil, errors.New("sync: invalid config: BatchSize must be greater than zero")
+	}
+	if cfg.LatencyCheckInterval <= 0 {
+		return nil, errors.New("sync: invalid config: LatencyCheckInterval must be greater than zero")
+	}
+	if cfg.PullInterval <= 0 {
+		return nil, errors.New("sync: invalid config: PullInterval must be greater than zero")
+	}
+
 	return &Engine{
 		httpClient:            &http.Client{Timeout: 30 * time.Second},
 		coordServer:           coordServerURL,
@@ -79,22 +95,40 @@ func New(coordServerURL, token, namespaceID string, queueRepo *QueueRepo, auditR
 		kbRepo:                kbRepo,
 		batchInterval:         cfg.BatchInterval,
 		batchSize:             cfg.BatchSize,
-		latencyCheckInterval:  latencyCheckInterval,
+		latencyCheckInterval:  cfg.LatencyCheckInterval,
+		pullInterval:          cfg.PullInterval,
 		highPriorityThreshold: cfg.HighPriorityThreshold,
-		shutdown:              make(chan struct{}),
-	}
+	}, nil
 }
 
 // Start begins the background sync loop. Callers must call Stop to cleanly shut down.
 func (e *Engine) Start(ctx context.Context) {
-	e.wg.Add(1)
-	go e.syncLoop(ctx)
+	e.startOnce.Do(func() {
+		e.lifecycleMu.Lock()
+		defer e.lifecycleMu.Unlock()
+		if e.stopped {
+			return
+		}
+
+		loopCtx, cancel := context.WithCancel(ctx)
+		e.cancel = cancel
+		e.wg.Add(1)
+		go e.syncLoop(loopCtx)
+	})
 }
 
 // Stop stops the background sync loop and waits for it to finish.
 func (e *Engine) Stop() {
-	close(e.shutdown)
-	e.wg.Wait()
+	e.stopOnce.Do(func() {
+		e.lifecycleMu.Lock()
+		e.stopped = true
+		cancel := e.cancel
+		e.lifecycleMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		e.wg.Wait()
+	})
 }
 
 // syncLoop periodically evaluates pending work and pushes batches to the server.
@@ -107,12 +141,12 @@ func (e *Engine) syncLoop(ctx context.Context) {
 
 	latencyTicker := time.NewTicker(e.latencyCheckInterval)
 	defer latencyTicker.Stop()
+	pullTicker := time.NewTicker(e.pullInterval)
+	defer pullTicker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			return
-		case <-e.shutdown:
 			return
 		case <-ticker.C:
 			// Time-based batch trigger: push any pending work.
@@ -123,6 +157,10 @@ func (e *Engine) syncLoop(ctx context.Context) {
 			}
 		case <-latencyTicker.C:
 			if err := e.checkLatencySensitive(ctx); err != nil {
+				_ = err
+			}
+		case <-pullTicker.C:
+			if err := e.PullIncremental(ctx); err != nil {
 				_ = err
 			}
 		}
@@ -179,17 +217,15 @@ func (e *Engine) pushBatch(ctx context.Context) error {
 		return fmt.Errorf("sync: push batch: decode result: %w", err)
 	}
 
-	// Build a set of entity IDs that had non-empty Error in the response.
-	failedEntityIDs := make(map[string]bool)
-	for _, applied := range pushResult.Applied {
-		if applied.Error != "" {
-			failedEntityIDs[applied.ID] = true
-		}
+	acknowledgements, err := validatePushAcknowledgements(entries, pushResult)
+	if err != nil {
+		return fmt.Errorf("sync: push batch: invalid acknowledgement: %w", err)
 	}
 
 	// Mark only successful entries as delivered. Failed entries remain in the queue for retry.
 	for _, entry := range entries {
-		if !failedEntityIDs[entry.EntityID] {
+		key := acknowledgementKey{entityType: entry.EntityType, entityID: entry.EntityID}
+		if acknowledgements[key].Error == "" {
 			if err := e.queueRepo.MarkDelivered(ctx, e.namespaceID, entry.ID); err != nil {
 				// If marking fails, the entry will be retried on the next cycle.
 				// Do not fail the entire batch.
@@ -198,8 +234,46 @@ func (e *Engine) pushBatch(ctx context.Context) error {
 		}
 	}
 
-	e.lastSyncTime = time.Now().UTC()
 	return nil
+}
+
+type acknowledgementKey struct {
+	entityType string
+	entityID   string
+}
+
+func validatePushAcknowledgements(entries []QueueEntry, result incrementalPushResultWire) (map[acknowledgementKey]appliedItemWire, error) {
+	if result.ItemsReceived != len(entries) {
+		return nil, fmt.Errorf("items_received = %d, want %d", result.ItemsReceived, len(entries))
+	}
+
+	expected := make(map[acknowledgementKey]int, len(entries))
+	for _, entry := range entries {
+		key := acknowledgementKey{entityType: entry.EntityType, entityID: entry.EntityID}
+		expected[key]++
+		if expected[key] != 1 {
+			return nil, fmt.Errorf("sent pair (%q, %q) is not unique", key.entityType, key.entityID)
+		}
+	}
+
+	acknowledgements := make(map[acknowledgementKey]appliedItemWire, len(result.Applied))
+	for _, applied := range result.Applied {
+		key := acknowledgementKey{entityType: applied.Type, entityID: applied.ID}
+		if expected[key] != 1 {
+			return nil, fmt.Errorf("unknown pair (%q, %q)", key.entityType, key.entityID)
+		}
+		if _, duplicate := acknowledgements[key]; duplicate {
+			return nil, fmt.Errorf("duplicate pair (%q, %q)", key.entityType, key.entityID)
+		}
+		acknowledgements[key] = applied
+	}
+
+	for key := range expected {
+		if _, ok := acknowledgements[key]; !ok {
+			return nil, fmt.Errorf("missing pair (%q, %q)", key.entityType, key.entityID)
+		}
+	}
+	return acknowledgements, nil
 }
 
 // checkLatencySensitive peeks the highest-priority pending entry and, if it
@@ -230,19 +304,27 @@ func (e *Engine) PullIncremental(ctx context.Context) error {
 	// Call wormhole.sync.incremental_pull on the coordination server.
 	// Include protocol version per RFC-0003 §9 OQ5 (P6 hardening).
 	const SyncProtocolVersion = 1
-	result, err := e.callSyncToolWithResult(ctx, "wormhole.sync.incremental_pull", map[string]interface{}{
+	args := map[string]interface{}{
 		"namespace_id": e.namespaceID,
 		"version":      SyncProtocolVersion,
-	})
+	}
+	if !e.lastSyncTime.IsZero() {
+		args["last_sync"] = e.lastSyncTime.UTC().Format(time.RFC3339)
+	}
+	result, err := e.callSyncToolWithResult(ctx, "wormhole.sync.incremental_pull", args)
 	if err != nil {
 		return fmt.Errorf("sync: pull incremental: call server: %w", err)
 	}
 
-	updates, err := decodeIncrementalPullResult(result)
+	pullResult, err := decodeIncrementalPullResult(result)
 	if err != nil {
 		return fmt.Errorf("sync: pull incremental: decode result: %w", err)
 	}
-	for _, u := range updates {
+	cursor, err := time.Parse(time.RFC3339, pullResult.Timestamp)
+	if err != nil {
+		return fmt.Errorf("sync: pull incremental: decode timestamp %q: %w", pullResult.Timestamp, err)
+	}
+	for _, u := range pullResult.Updates {
 		switch u.Type {
 		case "task":
 			var task taskSummaryWire
@@ -265,6 +347,7 @@ func (e *Engine) PullIncremental(ctx context.Context) error {
 		}
 	}
 
+	e.lastSyncTime = cursor
 	return nil
 }
 
@@ -344,7 +427,9 @@ type syncUpdateEnvelopeWire struct {
 
 // incrementalPullResultWire mirrors internal/mcp.IncrementalPullOutput's JSON shape.
 type incrementalPullResultWire struct {
-	Updates []syncUpdateEnvelopeWire `json:"updates"`
+	Updates   []syncUpdateEnvelopeWire `json:"updates"`
+	Timestamp string                   `json:"timestamp"`
+	Version   int                      `json:"version"`
 }
 
 // appliedItemWire mirrors internal/mcp.AppliedItem's JSON shape for decoding
@@ -384,16 +469,16 @@ func decodeBootstrapResult(result interface{}) (bootstrapResultWire, error) {
 
 // decodeIncrementalPullResult is decodeBootstrapResult's counterpart for
 // wormhole.sync.incremental_pull's result shape.
-func decodeIncrementalPullResult(result interface{}) ([]syncUpdateEnvelopeWire, error) {
+func decodeIncrementalPullResult(result interface{}) (incrementalPullResultWire, error) {
 	var out incrementalPullResultWire
 	raw, err := json.Marshal(result)
 	if err != nil {
-		return nil, fmt.Errorf("marshal: %w", err)
+		return out, fmt.Errorf("marshal: %w", err)
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
+		return out, fmt.Errorf("unmarshal: %w", err)
 	}
-	return out.Updates, nil
+	return out, nil
 }
 
 // decodeIncrementalPushResult re-marshals the generic interface{} that
