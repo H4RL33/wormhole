@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -447,6 +448,28 @@ func TestSyncGroupStopIsIdempotent(t *testing.T) {
 	group.Stop()
 	if first.stopCalls != 1 || second.stopCalls != 1 {
 		t.Fatalf("stop calls = (%d, %d), want (1, 1)", first.stopCalls, second.stopCalls)
+	}
+}
+
+func TestSyncGroupStartAfterSuccessfulStopReturnsTerminalErrorWithoutWork(t *testing.T) {
+	events := []string{}
+	engine := &fakeGroupEngine{name: "only", events: &events}
+	group := &syncGroup{engines: []syncEngine{engine}}
+	if err := group.Start(context.Background()); err != nil {
+		t.Fatalf("initial Start: %v", err)
+	}
+	group.Stop()
+	eventsBefore := append([]string(nil), events...)
+	startCallsBefore := engine.startCalls
+
+	if err := group.Start(context.Background()); !errors.Is(err, errSyncGroupStopped) {
+		t.Fatalf("Start after Stop error = %v, want errSyncGroupStopped", err)
+	}
+	if engine.startCalls != startCallsBefore {
+		t.Fatalf("Start calls after terminal Start = %d, want unchanged %d", engine.startCalls, startCallsBefore)
+	}
+	if fmt.Sprint(events) != fmt.Sprint(eventsBefore) {
+		t.Fatalf("events after terminal Start = %v, want unchanged %v", events, eventsBefore)
 	}
 }
 

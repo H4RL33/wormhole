@@ -51,6 +51,12 @@ func (g *syncGroup) Start(ctx context.Context) error {
 	g.startOnce.Do(func() {
 		g.startErr = g.start(ctx)
 	})
+	g.mu.Lock()
+	stopped := g.stopped
+	g.mu.Unlock()
+	if stopped {
+		return errSyncGroupStopped
+	}
 	return g.startErr
 }
 
