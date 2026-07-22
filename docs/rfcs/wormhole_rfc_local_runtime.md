@@ -146,7 +146,7 @@ This is weaker than RLS in one specific way: a bug in repository code can leak a
 
 ### 7.3 Credentials vs identity records
 
-Per the design brief: identity *records* (who an agent is, its org memberships) are recoverable; *credentials* (raw Passport tokens, keys) are not redistributed on recovery — regenerated instead. `wormholed` local storage may hold live credentials (hashed at rest, matching `docs/implementation-rules.md` §5 rule 6) but a lost/wiped machine recovers via re-issuance through the coordination server, not credential replication.
+Per the design brief: identity *records* (who an agent is, its org memberships) are recoverable; *credentials* (raw Passport tokens, keys) are not redistributed on recovery and must be regenerated instead. The Coordination Server's Postgres store and `wormholed`'s SQLite store do not persist raw Passport tokens; the server stores token hashes. However, `wormholed` must read a raw bearer token from the permission-restricted credential profile at `~/.wormhole/credentials/<profile>.json`. That file is created with mode `0600` in a mode-`0700` directory. A lost or wiped machine recovers through coordination-server re-issuance, not credential replication.
 
 ---
 
@@ -186,7 +186,7 @@ Carried forward explicitly, not resolved here (per the ambiguity ladder in `docs
 
 ## 10. Security Considerations
 
-- Local storage holds hashed credentials only, matching `docs/implementation-rules.md` §5 rule 6 — no raw token ever written to SQLite, logged, or exposed over the local API.
+- The Coordination Server's Postgres store and `wormholed`'s SQLite store do not persist raw Passport tokens; the server stores token hashes. The permission-restricted `~/.wormhole/credentials/<profile>.json` file necessarily contains the raw bearer token used by `wormholed`. Raw tokens are not logged or exposed through the local API.
 - Local API (Unix socket/named pipe) trusts OS-level file permissions for access control (OQ4); no additional bearer-token layer in v1.
 - Multi-org isolation is application-enforced, not database-enforced, in `wormholed` (§7.2) — the single biggest security-relevant departure from the coordination server's RLS guarantee, and the top implementation review priority for any `internal/runtime/localstore` change.
 - Sync channel (`wormholed` ↔ Coordination Server) is authenticated per-org (existing Passport-derived credential), encrypted in transit; no new auth primitive introduced beyond what RFC-0001 §8.4 already defines for Passports.

@@ -1,11 +1,10 @@
 # Wormhole MCP Protocol — Transport & Auth
 
-**Inference flag (RFC-0001 §9):** the MCP tool surface is "indicative, not finalised." Tool
-*names* below are fixed by the RFC's naming grammar; the JSON-RPC envelope, field placement,
-and error-code mapping are this document's inference, made because no RFC text or existing
-code fully specifies them (ambiguity ladder, `docs/implementation-rules.md` §2.4, rung 6 — decided
-here rather than escalated, since the decision is local to the transport layer and does not
-touch a pillar's data model or the open questions listed in RFC-0001 §15).
+**Implementation status (RFC-0001 §9):** the MCP tool surface is "indicative, not finalised."
+Tool *names* below are fixed by the RFC's naming grammar. The JSON-RPC envelope, field
+placement, and error-code mapping document the transport contract implemented today. Future
+transport changes that remain undecided after consulting the RFC and existing code must follow
+the ambiguity ladder in `docs/implementation-rules.md` §2.4.
 
 ## 1. Transport contract
 
