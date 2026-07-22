@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,35 +26,96 @@ type syncEngine interface {
 	Stop()
 }
 
+type syncEngineFactory func(string, string, string, *sync.QueueRepo, *sync.AuditRepo, *localstore.TaskRepo, *localstore.KBRepo, sync.Config) (syncEngine, error)
+
+func defaultSyncEngineFactory(server, token, projectID string, queueRepo *sync.QueueRepo, auditRepo *sync.AuditRepo, taskRepo *localstore.TaskRepo, kbRepo *localstore.KBRepo, cfg sync.Config) (syncEngine, error) {
+	return sync.New(server, token, projectID, queueRepo, auditRepo, taskRepo, kbRepo, cfg)
+}
+
+var errSyncGroupStopped = errors.New("sync group: stopped")
+
 // syncGroup owns the lifecycle of every per-binding sync engine in this
 // wormholed process (RFC-0003 §7.1, §8.1, §8.2).
 type syncGroup struct {
-	engines   []syncEngine
-	startOnce stdsync.Once
-	stopOnce  stdsync.Once
-	startErr  error
+	engines            []syncEngine
+	startOnce          stdsync.Once
+	stopOnce           stdsync.Once
+	mu                 stdsync.Mutex
+	stopped            bool
+	cancel             context.CancelFunc
+	startErr           error
+	testAfterBootstrap func()
 }
 
 func (g *syncGroup) Start(ctx context.Context) error {
 	g.startOnce.Do(func() {
-		started := 0
-		for i, engine := range g.engines {
-			if err := engine.Bootstrap(ctx); err != nil {
-				for j := started - 1; j >= 0; j-- {
-					g.engines[j].Stop()
-				}
-				g.startErr = fmt.Errorf("sync group: bootstrap engine %d: %w", i, err)
-				return
-			}
-			engine.Start(ctx)
-			started++
-		}
+		g.startErr = g.start(ctx)
 	})
 	return g.startErr
 }
 
+func (g *syncGroup) start(ctx context.Context) error {
+	groupCtx, cancel := context.WithCancel(ctx)
+	g.mu.Lock()
+	if g.stopped {
+		g.mu.Unlock()
+		cancel()
+		return errSyncGroupStopped
+	}
+	g.cancel = cancel
+	g.mu.Unlock()
+
+	bootstrapFailed := true
+	defer func() {
+		if bootstrapFailed {
+			cancel()
+			g.mu.Lock()
+			g.cancel = nil
+			g.mu.Unlock()
+		}
+	}()
+	for i, engine := range g.engines {
+		if err := groupCtx.Err(); err != nil {
+			return fmt.Errorf("sync group: bootstrap canceled before engine %d: %w", i, err)
+		}
+		if err := engine.Bootstrap(groupCtx); err != nil {
+			return fmt.Errorf("sync group: bootstrap engine %d: %w", i, err)
+		}
+	}
+	if err := groupCtx.Err(); err != nil {
+		return fmt.Errorf("sync group: bootstrap canceled: %w", err)
+	}
+	if g.testAfterBootstrap != nil {
+		g.testAfterBootstrap()
+	}
+
+	// This lock is the bootstrap-to-start barrier. Stop either marks the
+	// group terminal before this point (so no engine starts), or waits until
+	// every authorized Start call returns before canceling/stopping them.
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.stopped {
+		return errSyncGroupStopped
+	}
+	if err := groupCtx.Err(); err != nil {
+		return fmt.Errorf("sync group: start canceled: %w", err)
+	}
+	for _, engine := range g.engines {
+		engine.Start(groupCtx)
+	}
+	bootstrapFailed = false
+	return nil
+}
+
 func (g *syncGroup) Stop() {
 	g.stopOnce.Do(func() {
+		g.mu.Lock()
+		g.stopped = true
+		cancel := g.cancel
+		g.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
 		for i := len(g.engines) - 1; i >= 0; i-- {
 			g.engines[i].Stop()
 		}
@@ -66,7 +128,7 @@ type syncBindingKey struct {
 	token     string
 }
 
-func newMultiOrgSyncGroup(orgs map[string]config.Org, bindings []config.ProjectBinding, queueRepo *sync.QueueRepo, auditRepo *sync.AuditRepo, taskRepo *localstore.TaskRepo, kbRepo *localstore.KBRepo, syncCfg sync.Config) (*syncGroup, error) {
+func newMultiOrgSyncGroup(orgs map[string]config.Org, bindings []config.ProjectBinding, queueRepo *sync.QueueRepo, auditRepo *sync.AuditRepo, taskRepo *localstore.TaskRepo, kbRepo *localstore.KBRepo, syncCfg sync.Config, factory syncEngineFactory) (*syncGroup, error) {
 	group := &syncGroup{}
 	projectBindings := make(map[string]syncBindingKey, len(bindings))
 	engines := make(map[syncBindingKey]struct{}, len(bindings))
@@ -85,7 +147,7 @@ func newMultiOrgSyncGroup(orgs map[string]config.Org, bindings []config.ProjectB
 		if _, ok := engines[key]; ok {
 			continue
 		}
-		engine, err := sync.New(key.server, key.token, key.projectID, queueRepo, auditRepo, taskRepo, kbRepo, syncCfg)
+		engine, err := factory(key.server, key.token, key.projectID, queueRepo, auditRepo, taskRepo, kbRepo, syncCfg)
 		if err != nil {
 			return nil, fmt.Errorf("wormholed: configure sync engine for project %q: %w", binding.ProjectID, err)
 		}
@@ -96,6 +158,10 @@ func newMultiOrgSyncGroup(orgs map[string]config.Org, bindings []config.ProjectB
 }
 
 func Run(ctx context.Context, profileName string) error {
+	return runWithSyncEngineFactory(ctx, profileName, defaultSyncEngineFactory)
+}
+
+func runWithSyncEngineFactory(ctx context.Context, profileName string, factory syncEngineFactory) error {
 	cfg, err := config.Load(profileName)
 	if err != nil {
 		return fmt.Errorf("wormholed: load config: %w", err)
@@ -135,9 +201,9 @@ func Run(ctx context.Context, profileName string) error {
 	useMultiOrg := multiErr == nil && len(multiCfg.Orgs) > 1
 	var syncEngines *syncGroup
 	if useMultiOrg {
-		syncEngines, err = newMultiOrgSyncGroup(multiCfg.Orgs, multiCfg.Bindings, queueRepo, auditRepo, tr, kb, syncCfg)
+		syncEngines, err = newMultiOrgSyncGroup(multiCfg.Orgs, multiCfg.Bindings, queueRepo, auditRepo, tr, kb, syncCfg, factory)
 	} else {
-		engine, engineErr := sync.New(cfg.Credentials.Server, cfg.Credentials.Token, cfg.Credentials.ProjectID, queueRepo, auditRepo, tr, kb, syncCfg)
+		engine, engineErr := factory(cfg.Credentials.Server, cfg.Credentials.Token, cfg.Credentials.ProjectID, queueRepo, auditRepo, tr, kb, syncCfg)
 		if engineErr != nil {
 			return fmt.Errorf("wormholed: configure sync engine: %w", engineErr)
 		}

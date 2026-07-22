@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	stdsync "sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -69,9 +70,14 @@ type runningTestDaemon struct {
 
 func startTestDaemon(t *testing.T, profileName, socketPath string) *runningTestDaemon {
 	t.Helper()
+	return startTestDaemonWithRunner(t, profileName, socketPath, Run)
+}
+
+func startTestDaemonWithRunner(t *testing.T, profileName, socketPath string, runner func(context.Context, string) error) *runningTestDaemon {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	d := &runningTestDaemon{cancel: cancel, errCh: make(chan error, 1)}
-	go func() { d.errCh <- Run(ctx, profileName) }()
+	go func() { d.errCh <- runner(ctx, profileName) }()
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -259,6 +265,7 @@ type fakeGroupEngine struct {
 	name         string
 	bootstrapErr error
 	events       *[]string
+	startCalls   int
 	stopCalls    int
 }
 
@@ -268,6 +275,7 @@ func (e *fakeGroupEngine) Bootstrap(context.Context) error {
 }
 
 func (e *fakeGroupEngine) Start(context.Context) {
+	e.startCalls++
 	*e.events = append(*e.events, "start "+e.name)
 }
 
@@ -276,7 +284,7 @@ func (e *fakeGroupEngine) Stop() {
 	*e.events = append(*e.events, "stop "+e.name)
 }
 
-func TestSyncGroupStopsStartedEnginesOnBootstrapFailure(t *testing.T) {
+func TestSyncGroupBootstrapBarrierStartsNoneOnAnyFailure(t *testing.T) {
 	events := []string{}
 	first := &fakeGroupEngine{name: "first", events: &events}
 	second := &fakeGroupEngine{name: "second", events: &events, bootstrapErr: fmt.Errorf("bootstrap failed")}
@@ -287,12 +295,143 @@ func TestSyncGroupStopsStartedEnginesOnBootstrapFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("syncGroup.Start returned nil, want bootstrap error")
 	}
-	want := []string{"bootstrap first", "start first", "bootstrap second", "stop first"}
+	want := []string{"bootstrap first", "bootstrap second"}
 	if fmt.Sprint(events) != fmt.Sprint(want) {
 		t.Fatalf("lifecycle events = %v, want %v", events, want)
 	}
-	if first.stopCalls != 1 || second.stopCalls != 0 || third.stopCalls != 0 {
-		t.Fatalf("stop calls = (%d, %d, %d), want (1, 0, 0)", first.stopCalls, second.stopCalls, third.stopCalls)
+	if first.startCalls != 0 || second.startCalls != 0 || third.startCalls != 0 {
+		t.Fatalf("start calls = (%d, %d, %d), want no engine started", first.startCalls, second.startCalls, third.startCalls)
+	}
+}
+
+func TestSyncGroupBootstrapsEveryEngineBeforeStartingAny(t *testing.T) {
+	events := []string{}
+	first := &fakeGroupEngine{name: "first", events: &events}
+	second := &fakeGroupEngine{name: "second", events: &events}
+	group := &syncGroup{engines: []syncEngine{first, second}}
+	if err := group.Start(context.Background()); err != nil {
+		t.Fatalf("syncGroup.Start: %v", err)
+	}
+	want := []string{"bootstrap first", "bootstrap second", "start first", "start second"}
+	if fmt.Sprint(events) != fmt.Sprint(want) {
+		t.Fatalf("lifecycle events = %v, want %v", events, want)
+	}
+}
+
+type blockingBootstrapEngine struct {
+	entered    chan struct{}
+	startCalls atomic.Int32
+	stopCalls  atomic.Int32
+}
+
+type engineLifecycleCounts struct {
+	mu          stdsync.Mutex
+	constructed map[string]int
+	bootstraps  map[string]int
+	starts      map[string]int
+}
+
+func newEngineLifecycleCounts() *engineLifecycleCounts {
+	return &engineLifecycleCounts{
+		constructed: make(map[string]int), bootstraps: make(map[string]int), starts: make(map[string]int),
+	}
+}
+
+func (c *engineLifecycleCounts) increment(counter map[string]int, projectID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	counter[projectID]++
+}
+
+func (c *engineLifecycleCounts) project(projectID string) (constructed, bootstraps, starts int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.constructed[projectID], c.bootstraps[projectID], c.starts[projectID]
+}
+
+type countingSyncEngine struct {
+	syncEngine
+	projectID string
+	counts    *engineLifecycleCounts
+}
+
+func (e *countingSyncEngine) Bootstrap(ctx context.Context) error {
+	e.counts.increment(e.counts.bootstraps, e.projectID)
+	return e.syncEngine.Bootstrap(ctx)
+}
+
+func (e *countingSyncEngine) Start(ctx context.Context) {
+	e.counts.increment(e.counts.starts, e.projectID)
+	e.syncEngine.Start(ctx)
+}
+
+func countingEngineFactory(counts *engineLifecycleCounts) syncEngineFactory {
+	return func(server, token, projectID string, queue *runtimesync.QueueRepo, audit *runtimesync.AuditRepo, tasks *localstore.TaskRepo, articles *localstore.KBRepo, cfg runtimesync.Config) (syncEngine, error) {
+		engine, err := runtimesync.New(server, token, projectID, queue, audit, tasks, articles, cfg)
+		if err != nil {
+			return nil, err
+		}
+		counts.increment(counts.constructed, projectID)
+		return &countingSyncEngine{syncEngine: engine, projectID: projectID, counts: counts}, nil
+	}
+}
+
+func (e *blockingBootstrapEngine) Bootstrap(ctx context.Context) error {
+	close(e.entered)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (e *blockingBootstrapEngine) Start(context.Context) { e.startCalls.Add(1) }
+func (e *blockingBootstrapEngine) Stop()                 { e.stopCalls.Add(1) }
+
+func TestSyncGroupStopDuringBootstrapCancelsAndPreventsStart(t *testing.T) {
+	engine := &blockingBootstrapEngine{entered: make(chan struct{})}
+	group := &syncGroup{engines: []syncEngine{engine}}
+	errCh := make(chan error, 1)
+	go func() { errCh <- group.Start(context.Background()) }()
+	<-engine.entered
+	group.Stop()
+	if err := <-errCh; err == nil {
+		t.Fatal("Start returned nil after Stop canceled bootstrap")
+	}
+	if got := engine.startCalls.Load(); got != 0 {
+		t.Fatalf("Start calls = %d, want 0", got)
+	}
+	if got := engine.stopCalls.Load(); got != 1 {
+		t.Fatalf("Stop calls = %d, want 1", got)
+	}
+}
+
+func TestSyncGroupStopAfterBootstrapPreventsStart(t *testing.T) {
+	events := []string{}
+	engine := &fakeGroupEngine{name: "only", events: &events}
+	reached := make(chan struct{})
+	release := make(chan struct{})
+	group := &syncGroup{
+		engines: []syncEngine{engine},
+		testAfterBootstrap: func() {
+			close(reached)
+			<-release
+		},
+	}
+	errCh := make(chan error, 1)
+	go func() { errCh <- group.Start(context.Background()) }()
+	<-reached
+	group.Stop()
+	close(release)
+	if err := <-errCh; err == nil {
+		t.Fatal("Start returned nil after terminal Stop")
+	}
+	if engine.startCalls != 0 {
+		t.Fatalf("Start calls = %d, want 0", engine.startCalls)
+	}
+
+	if err := group.Start(context.Background()); err == nil {
+		t.Fatal("later Start returned nil after terminal Stop")
+	}
+	if engine.startCalls != 0 {
+		t.Fatalf("later Start calls = %d, want 0", engine.startCalls)
 	}
 }
 
@@ -339,7 +478,7 @@ func TestNewMultiOrgSyncGroupValidatesBindings(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			group, err := newMultiOrgSyncGroup(orgs, tc.bindings, queue, audit, taskRepo, kbRepo, runtimesync.DefaultConfig())
+			group, err := newMultiOrgSyncGroup(orgs, tc.bindings, queue, audit, taskRepo, kbRepo, runtimesync.DefaultConfig(), defaultSyncEngineFactory)
 			if tc.wantErr != "" {
 				if err == nil || !bytes.Contains([]byte(err.Error()), []byte(tc.wantErr)) {
 					t.Fatalf("error = %v, want containing %q", err, tc.wantErr)
@@ -612,6 +751,10 @@ func TestRun_MultiOrgSyncIsolation(t *testing.T) {
 	)
 	coordA := newIsolatedCoordServer(t, tokenA)
 	coordB := newIsolatedCoordServer(t, tokenB)
+	engineCounts := newEngineLifecycleCounts()
+	runner := func(ctx context.Context, profileName string) error {
+		return runWithSyncEngineFactory(ctx, profileName, countingEngineFactory(engineCounts))
+	}
 
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -642,7 +785,7 @@ func TestRun_MultiOrgSyncIsolation(t *testing.T) {
 	}
 
 	socketPath := filepath.Join(runDir, "wormhole", "wormholed.sock")
-	firstRun := startTestDaemon(t, "org-a", socketPath)
+	firstRun := startTestDaemonWithRunner(t, "org-a", socketPath, runner)
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
 		t.Fatalf("dial first daemon: %v", err)
@@ -662,6 +805,12 @@ func TestRun_MultiOrgSyncIsolation(t *testing.T) {
 	}
 	_ = conn.Close()
 	firstRun.stop(t)
+	for _, projectID := range []string{projectA, projectB} {
+		constructed, bootstraps, starts := engineCounts.project(projectID)
+		if constructed != 1 || bootstraps != 1 || starts != 1 {
+			t.Fatalf("first run %s engine counts = constructed:%d bootstrap:%d start:%d, want 1/1/1", projectID, constructed, bootstraps, starts)
+		}
+	}
 
 	dbPath := filepath.Join(dataDir, "wormhole", "wormholed.db")
 	inspectionStore, err := localstore.Open(dbPath)
@@ -684,7 +833,7 @@ func TestRun_MultiOrgSyncIsolation(t *testing.T) {
 	}
 
 	coordA.setAccept(true)
-	secondRun := startTestDaemon(t, "org-a", socketPath)
+	secondRun := startTestDaemonWithRunner(t, "org-a", socketPath, runner)
 	waitForCondition(t, 5*time.Second, "org A queue to drain", func() (bool, error) {
 		pending, err := queue.ListPending(context.Background(), projectA, 10)
 		return len(pending) == 0, err
@@ -703,6 +852,12 @@ func TestRun_MultiOrgSyncIsolation(t *testing.T) {
 		return len(pending) == 0, err
 	})
 	secondRun.stop(t)
+	for _, projectID := range []string{projectA, projectB} {
+		constructed, bootstraps, starts := engineCounts.project(projectID)
+		if constructed != 2 || bootstraps != 2 || starts != 2 {
+			t.Fatalf("two runs %s engine counts = constructed:%d bootstrap:%d start:%d, want 2/2/2", projectID, constructed, bootstraps, starts)
+		}
+	}
 
 	for name, snapshot := range map[string]struct {
 		token   string
@@ -721,6 +876,15 @@ func TestRun_MultiOrgSyncIsolation(t *testing.T) {
 			if token != "Bearer "+snapshot.token {
 				t.Errorf("%s endpoint token = %q, want its own bearer token", name, token)
 			}
+		}
+		bootstrapCalls := 0
+		for _, tool := range tools {
+			if tool == "wormhole.sync.bootstrap" {
+				bootstrapCalls++
+			}
+		}
+		if bootstrapCalls != 2 {
+			t.Errorf("%s bootstrap calls = %d, want exactly 2 across two daemon runs (tools=%v)", name, bootstrapCalls, tools)
 		}
 		if len(pushes) == 0 {
 			t.Fatalf("%s accepted no pushes, tools = %v", name, tools)
