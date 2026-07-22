@@ -63,7 +63,7 @@ type localRegistry struct {
 	order []string
 }
 
-// newLocalRegistry constructs and registers all 15 tools localapi's old
+// newLocalRegistry constructs and registers the local MCP tools formerly
 // switch-based handle() dispatched by name, each wrapping the corresponding
 // existing method (s.proxyWhoAmI, s.localListTasks, etc.) with a thin
 // adapter closure. None of the wrapped methods change internally — only how
@@ -97,6 +97,9 @@ func newLocalRegistry(s *Server) *localRegistry {
 
 	reg("wormhole.channel.list", "List channels in the local event bus replica.", channelListArgs{}, func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localListChannels(ctx, args)
+	})
+	reg("wormhole.channel.create", "Create a channel locally and enqueue it for sync.", channelCreateArgs{}, func(ctx context.Context, args json.RawMessage) (any, error) {
+		return s.handleChannelCreate(ctx, args)
 	})
 
 	reg("wormhole.channel.events", "List recent events on channels in the local event bus replica.", channelEventsArgs{}, func(ctx context.Context, args json.RawMessage) (any, error) {
@@ -184,6 +187,10 @@ type createTaskArgs struct {
 	Priority     int    `json:"priority,omitempty"`
 	ParentTaskID string `json:"parent_task_id,omitempty"`
 	DueBy        string `json:"due_by,omitempty"`
+}
+
+type channelCreateArgs struct {
+	Name string `json:"name"`
 }
 
 type taskRouteArgs struct {

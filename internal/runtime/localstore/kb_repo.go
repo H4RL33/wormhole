@@ -52,10 +52,23 @@ func (r *KBRepo) WriteArticle(ctx context.Context, namespaceID, agentID, title, 
 	}
 	defer tx.Rollback()
 
+	article, err := r.WriteArticleTx(ctx, tx, namespaceID, agentID, title, body, frontmatter)
+	if err != nil {
+		return KBArticle{}, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return KBArticle{}, fmt.Errorf("localstore/kb: write: commit: %w", err)
+	}
+	return article, nil
+}
+
+// WriteArticleTx inserts an article using tx so the local row and outbound
+// queue entry can share one SQLite commit.
+func (r *KBRepo) WriteArticleTx(ctx context.Context, tx *sql.Tx, namespaceID, agentID, title, body string, frontmatter json.RawMessage) (KBArticle, error) {
 	if len(frontmatter) == 0 {
 		frontmatter = json.RawMessage(`{}`)
 	}
-
 	articleID := uuid.New().String()
 	row := tx.QueryRowContext(ctx,
 		`INSERT INTO kb_articles (id, namespace_id, title, body, frontmatter, author_agent_id)
@@ -66,10 +79,6 @@ func (r *KBRepo) WriteArticle(ctx context.Context, namespaceID, agentID, title, 
 	article, err := scanKBArticle(row)
 	if err != nil {
 		return KBArticle{}, fmt.Errorf("localstore/kb: write: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return KBArticle{}, fmt.Errorf("localstore/kb: write: commit: %w", err)
 	}
 	return article, nil
 }

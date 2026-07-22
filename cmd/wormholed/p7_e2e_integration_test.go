@@ -4,8 +4,10 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -718,4 +720,124 @@ func TestRun_BootstrapAndConverges(t *testing.T) {
 		return err == nil, err
 	})
 	daemon.stop(t)
+}
+
+func TestRun_TwoProjectBindingsPersistWithTokenAndNamespaceIsolation(t *testing.T) {
+	db := e2eTestDB(t)
+	coordURL, projectA, agentA, tokenA := e2eStartCoordServer(t, db)
+	projectB := e2eMustCreateProject(t, db, "two-binding-project-b")
+	registerBRaw := e2eCallTool(t, coordURL, "wormhole.agent.register", projectB, "", mcp.RegisterAgentInput{
+		Permissions: []string{"task.create", "task.list"}, Owner: "org-b", Model: "test",
+	})
+	var registerB mcp.RegisterAgentOutput
+	if err := json.Unmarshal(registerBRaw, &registerB); err != nil {
+		t.Fatalf("decode project B registration: %v", err)
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	runDir, err := os.MkdirTemp("", "wh-t6-bind-")
+	if err != nil {
+		t.Fatalf("create short runtime directory: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(runDir) })
+	t.Setenv("XDG_RUNTIME_DIR", runDir)
+	dataDir := filepath.Join(home, "data")
+	t.Setenv("XDG_DATA_HOME", dataDir)
+	credDir := filepath.Join(home, ".wormhole", "credentials")
+	if err := os.MkdirAll(credDir, 0o700); err != nil {
+		t.Fatalf("create credentials directory: %v", err)
+	}
+	for _, profile := range []struct {
+		name, projectID, agentID, token string
+	}{
+		{name: "org-a", projectID: projectA, agentID: agentA, token: tokenA},
+		{name: "org-b", projectID: projectB, agentID: registerB.AgentID, token: registerB.Token},
+	} {
+		data, err := json.Marshal(map[string]string{"server": coordURL, "project_id": profile.projectID, "agent_id": profile.agentID, "token": profile.token})
+		if err != nil {
+			t.Fatalf("marshal %s credentials: %v", profile.name, err)
+		}
+		if err := os.WriteFile(filepath.Join(credDir, profile.name+".json"), data, 0o600); err != nil {
+			t.Fatalf("write %s credentials: %v", profile.name, err)
+		}
+	}
+
+	socketPath := filepath.Join(runDir, "wormhole", "wormholed.sock")
+	daemon := startTestDaemon(t, "org-a", socketPath)
+	defer daemon.stop(t)
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial daemon: %v", err)
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	mcpInitialize(t, conn, reader)
+
+	created := map[string]string{}
+	for i, tc := range []struct{ projectID, title string }{{projectA, "persisted only in project A"}, {projectB, "persisted only in project B"}} {
+		resp := mcpCallTool(t, conn, reader, i+2, "wormhole.task.create", map[string]interface{}{"project_id": tc.projectID, "title": tc.title, "priority": 2})
+		if resp.Error != "" {
+			t.Fatalf("create task in %s: %s", tc.projectID, resp.Error)
+		}
+		var out struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(resp.Result, &out); err != nil || out.ID == "" {
+			t.Fatalf("decode create task in %s: id=%q err=%v", tc.projectID, out.ID, err)
+		}
+		created[tc.projectID] = out.ID
+	}
+
+	for projectID, taskID := range created {
+		waitForCondition(t, 10*time.Second, "task persistence for "+projectID, func() (bool, error) {
+			var gotProject string
+			err := db.QueryRow(`SELECT project_id FROM tasks WHERE id = $1`, taskID).Scan(&gotProject)
+			if errors.Is(err, sql.ErrNoRows) {
+				return false, nil
+			}
+			return gotProject == projectID, err
+		})
+	}
+
+	localStore, err := localstore.Open(filepath.Join(dataDir, "wormhole", "wormholed.db"))
+	if err != nil {
+		t.Fatalf("open shared local store: %v", err)
+	}
+	defer localStore.Close()
+	taskRepo := localstore.NewTaskRepo(localStore.DB(), localstore.NewEventRepo(localStore.DB()))
+	if _, err := taskRepo.GetTask(context.Background(), projectB, created[projectA]); !errors.Is(err, localstore.ErrTaskNotFound) {
+		t.Fatalf("project A task visible in project B namespace: %v", err)
+	}
+	if _, err := taskRepo.GetTask(context.Background(), projectA, created[projectB]); !errors.Is(err, localstore.ErrTaskNotFound) {
+		t.Fatalf("project B task visible in project A namespace: %v", err)
+	}
+
+	assertCoordTokenRejectedForProject(t, coordURL, tokenA, projectB)
+	assertCoordTokenRejectedForProject(t, coordURL, registerB.Token, projectA)
+}
+
+func assertCoordTokenRejectedForProject(t *testing.T, coordURL, token, projectID string) {
+	t.Helper()
+	args, _ := json.Marshal(map[string]string{"project_id": projectID})
+	params, _ := json.Marshal(e2eToolsCallParams{Name: "wormhole.agent.whoami", Arguments: args})
+	body, _ := json.Marshal(mcp.RPCRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "tools/call", Params: params})
+	req, err := http.NewRequest(http.MethodPost, coordURL+"/mcp", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("build cross-project auth request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("cross-project auth request: %v", err)
+	}
+	defer resp.Body.Close()
+	var rpcResp mcp.RPCResponse
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		t.Fatalf("decode cross-project auth response: %v", err)
+	}
+	if rpcResp.Error == nil || rpcResp.Error.Code != -32001 {
+		t.Fatalf("cross-project token response error = %+v, want invalid token", rpcResp.Error)
+	}
 }

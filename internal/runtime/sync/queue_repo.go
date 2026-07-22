@@ -68,6 +68,20 @@ func NewAuditRepo(db *sql.DB) *AuditRepo {
 // Enqueue inserts a new outbound sync work item, scoped to namespaceID.
 // Operation must be one of "create", "update", "delete".
 func (r *QueueRepo) Enqueue(ctx context.Context, namespaceID, entityType, entityID, operation string, payload json.RawMessage, priority int) (QueueEntry, error) {
+	return r.enqueue(ctx, r.db, namespaceID, entityType, entityID, operation, payload, priority)
+}
+
+// EnqueueTx inserts an outbound item using tx so a local entity write and
+// its queue entry can become durable in the same commit.
+func (r *QueueRepo) EnqueueTx(ctx context.Context, tx *sql.Tx, namespaceID, entityType, entityID, operation string, payload json.RawMessage, priority int) (QueueEntry, error) {
+	return r.enqueue(ctx, tx, namespaceID, entityType, entityID, operation, payload, priority)
+}
+
+type queueExecer interface {
+	ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
+}
+
+func (r *QueueRepo) enqueue(ctx context.Context, execer queueExecer, namespaceID, entityType, entityID, operation string, payload json.RawMessage, priority int) (QueueEntry, error) {
 	if operation != "create" && operation != "update" && operation != "delete" {
 		return QueueEntry{}, fmt.Errorf("sync/queue: invalid operation %q", operation)
 	}
@@ -75,7 +89,7 @@ func (r *QueueRepo) Enqueue(ctx context.Context, namespaceID, entityType, entity
 	id := uuid.New().String()
 	now := time.Now().UTC()
 
-	_, err := r.db.ExecContext(ctx, `
+	_, err := execer.ExecContext(ctx, `
 		INSERT INTO sync_queue (id, namespace_id, entity_type, entity_id, operation, payload, priority, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, id, namespaceID, entityType, entityID, operation, string(payload), priority, now, now)

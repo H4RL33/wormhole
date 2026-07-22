@@ -21,6 +21,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -31,6 +32,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -509,6 +512,34 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 
 	// --- Leg 1: real Coordination Server, real Postgres. ---
 	coordURL, projectID, _, token := e2eStartCoordServer(t, db)
+	var coordOnline atomic.Bool
+	coordOnline.Store(true)
+	coordProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !coordOnline.Load() {
+			http.Error(w, "coordination server offline", http.StatusServiceUnavailable)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		upstream, err := http.NewRequestWithContext(r.Context(), r.Method, coordURL+r.URL.Path, bytes.NewReader(body))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		upstream.Header = r.Header.Clone()
+		resp, err := http.DefaultClient.Do(upstream)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+	}))
+	defer coordProxy.Close()
 
 	// --- Leg 2: real wormholed, in-process (mirrors
 	// TestRun_EndToEndWhoAmI's env-var setup exactly). ---
@@ -524,7 +555,7 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 		t.Fatalf("mkdir credentials dir: %v", err)
 	}
 	credData, err := json.Marshal(map[string]string{
-		"server": coordURL, "project_id": projectID, "agent_id": "e2e-agent", "token": token,
+		"server": coordProxy.URL, "project_id": projectID, "agent_id": "e2e-agent", "token": token,
 	})
 	if err != nil {
 		t.Fatalf("marshal credentials: %v", err)
@@ -533,29 +564,9 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 		t.Fatalf("write credentials: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() { errCh <- Run(ctx, "default") }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-errCh:
-		case <-time.After(5 * time.Second):
-			t.Log("wormholed did not shut down within 5s of cancel")
-		}
-	})
-
 	socketPath := filepath.Join(runDir, "wormhole", "wormholed.sock")
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, err := os.Stat(socketPath); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("wormholed socket did not appear at %s within deadline", socketPath)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	daemon := startTestDaemon(t, "default", socketPath)
+	defer daemon.stop(t)
 
 	// --- Leg 3: the real transport. Spawn the stdio bridge subprocess
 	// with XDG_RUNTIME_DIR pointed at the same runDir wormholed used, so
@@ -563,6 +574,14 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 	// genuine newline-delimited JSON-RPC over its stdin/stdout. ---
 	client := e2eStartStdioBridge(t, binPath, runDir)
 	client.initialize(t)
+	listResp := client.call(t, "tools/list", json.RawMessage(`{}`))
+	if listResp.Error != nil {
+		t.Fatalf("tools/list error: %+v", listResp.Error)
+	}
+	if !bytes.Contains(listResp.Result, []byte(`"wormhole.task.create"`)) || !bytes.Contains(listResp.Result, []byte(`"wormhole.channel.create"`)) {
+		t.Fatalf("tools/list missing durable write tools: %s", listResp.Result)
+	}
+	coordOnline.Store(false)
 
 	// Create a task through the full chain. Local-first writes never
 	// block on Coordination Server reachability (confirmed by reading
@@ -594,6 +613,30 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 	if taskOut.Status != "todo" {
 		t.Fatalf("task status = %q, want todo", taskOut.Status)
 	}
+	localReadRaw, errMsg := client.callTool(t, "wormhole.task.get", map[string]interface{}{"task_id": taskOut.ID})
+	if errMsg != "" {
+		t.Fatalf("local wormhole.task.get returned error: %s", errMsg)
+	}
+	if !bytes.Contains(localReadRaw, []byte(taskTitle)) {
+		t.Fatalf("local task readback = %s, want title %q", localReadRaw, taskTitle)
+	}
+	var preRestartCount int
+	if err := db.QueryRow(`SELECT count(*) FROM tasks WHERE id = $1`, taskOut.ID).Scan(&preRestartCount); err != nil {
+		t.Fatalf("count offline task before restart: %v", err)
+	}
+	if preRestartCount != 0 {
+		t.Fatalf("offline task reached Postgres before reconnect: count=%d", preRestartCount)
+	}
+	daemon.stop(t)
+	coordOnline.Store(true)
+	restarted := startTestDaemon(t, "default", socketPath)
+	defer restarted.stop(t)
+	reconnectedClient := e2eStartStdioBridge(t, binPath, runDir)
+	reconnectedClient.initialize(t)
+	restartedReadRaw, restartedErr := reconnectedClient.callTool(t, "wormhole.task.get", map[string]interface{}{"task_id": taskOut.ID})
+	if restartedErr != "" || !bytes.Contains(restartedReadRaw, []byte(taskTitle)) {
+		t.Fatalf("local task after daemon/bridge restart = %s error=%q", restartedReadRaw, restartedErr)
+	}
 
 	// --- Offline-write -> reconnect -> sync (P7 path), now through the
 	// real transport: poll the real Coordination Server's own Postgres
@@ -603,20 +646,13 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 	// write to the real Coordination Server, which persisted it to real
 	// Postgres. ---
 	var gotTitle string
-	pollDeadline := time.Now().Add(20 * time.Second)
-	for {
+	waitForCondition(t, 20*time.Second, "stdio task to sync into Postgres", func() (bool, error) {
 		err := db.QueryRow(`SELECT title FROM tasks WHERE id = $1 AND project_id = $2`, taskOut.ID, projectID).Scan(&gotTitle)
-		if err == nil {
-			break
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
 		}
-		if err != sql.ErrNoRows {
-			t.Fatalf("query task %s from Postgres: %v", taskOut.ID, err)
-		}
-		if time.Now().After(pollDeadline) {
-			t.Fatalf("task %s did not appear in Postgres via sync within deadline", taskOut.ID)
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+		return err == nil, err
+	})
 	if gotTitle != taskTitle {
 		t.Fatalf("task title in Postgres = %q, want %q", gotTitle, taskTitle)
 	}
@@ -639,5 +675,110 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("wormhole.task.list on Coordination Server did not include synced task %s: %+v", taskOut.ID, listOut.Tasks)
+	}
+}
+
+func TestE2E_StdioBridgeProtocolAndSignalBoundaries(t *testing.T) {
+	binPath := e2eBuildStdioBridgeBinary(t)
+	if stdioBridgeBinErr != nil {
+		t.Fatalf("build wormhole mcp bridge: %v", stdioBridgeBinErr)
+	}
+	socketPath, factory := configureSecurityTestDaemon(t)
+	runner := func(ctx context.Context, profileName string) error {
+		return runWithSyncEngineFactory(ctx, profileName, factory)
+	}
+	daemon := startTestDaemonWithRunner(t, "default", socketPath, runner)
+	defer daemon.stop(t)
+	runDir := os.Getenv("XDG_RUNTIME_DIR")
+
+	t.Run("partial JSON and oversized input", func(t *testing.T) {
+		client := e2eStartStdioBridge(t, binPath, runDir)
+		client.initialize(t)
+		req, _ := json.Marshal(e2eStdioRPCRequest{JSONRPC: "2.0", ID: json.RawMessage("91"), Method: "tools/list", Params: json.RawMessage(`{}`)})
+		mid := len(req) / 2
+		if _, err := client.stdin.Write(req[:mid]); err != nil {
+			t.Fatalf("write first partial request segment: %v", err)
+		}
+		if _, err := client.stdin.Write(req[mid:]); err != nil {
+			t.Fatalf("write second partial request segment: %v", err)
+		}
+		if _, err := io.WriteString(client.stdin, "\n"); err != nil {
+			t.Fatalf("terminate partial request: %v", err)
+		}
+		body, err := readNewlineFrame(client.stdout)
+		if err != nil {
+			t.Fatalf("read partial request response: %v", err)
+		}
+		var resp e2eStdioRPCResponse
+		if err := json.Unmarshal(body, &resp); err != nil || resp.Error != nil {
+			t.Fatalf("partial request response = %s decode=%v rpc=%+v", body, err, resp.Error)
+		}
+
+		oversized := bytes.Repeat([]byte("x"), (1<<20)+1)
+		if err := writeNewlineFrame(client.stdin, oversized); err != nil {
+			t.Fatalf("write oversized stdio input: %v", err)
+		}
+		body, err = readNewlineFrame(client.stdout)
+		if err != nil {
+			t.Fatalf("read oversized response: %v", err)
+		}
+		if err := json.Unmarshal(body, &resp); err != nil || resp.Error == nil || resp.Error.Code != -32700 {
+			t.Fatalf("oversized response = %s decode=%v rpc=%+v", body, err, resp.Error)
+		}
+	})
+
+	t.Run("concurrent clients", func(t *testing.T) {
+		clients := make([]*e2eStdioClient, 4)
+		for i := range clients {
+			clients[i] = e2eStartStdioBridge(t, binPath, runDir)
+			clients[i].initialize(t)
+		}
+		errs := make(chan error, len(clients))
+		for i, client := range clients {
+			go func(id int, c *e2eStdioClient) {
+				req, _ := json.Marshal(e2eStdioRPCRequest{JSONRPC: "2.0", ID: json.RawMessage(strconv.Itoa(100 + id)), Method: "tools/list", Params: json.RawMessage(`{}`)})
+				if err := writeNewlineFrame(c.stdin, req); err != nil {
+					errs <- err
+					return
+				}
+				body, err := readNewlineFrame(c.stdout)
+				if err == nil {
+					var resp e2eStdioRPCResponse
+					err = json.Unmarshal(body, &resp)
+					if err == nil && resp.Error != nil {
+						err = fmt.Errorf("rpc error: %+v", resp.Error)
+					}
+				}
+				errs <- err
+			}(i, client)
+		}
+		for range clients {
+			if err := <-errs; err != nil {
+				t.Fatalf("concurrent stdio client: %v", err)
+			}
+		}
+	})
+
+	for _, signal := range []os.Signal{os.Interrupt, syscall.SIGTERM} {
+		t.Run(signal.String(), func(t *testing.T) {
+			client := e2eStartStdioBridge(t, binPath, runDir)
+			client.initialize(t)
+			if _, err := io.WriteString(client.stdin, `{"jsonrpc":"2.0"`); err != nil {
+				t.Fatalf("write in-flight partial request: %v", err)
+			}
+			if err := client.cmd.Process.Signal(signal); err != nil {
+				t.Fatalf("signal stdio bridge: %v", err)
+			}
+			exited := make(chan error, 1)
+			go func() { exited <- client.cmd.Wait() }()
+			select {
+			case err := <-exited:
+				if err != nil {
+					t.Fatalf("stdio bridge signal exit: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("stdio bridge did not exit after signal with request in flight")
+			}
+		})
 	}
 }

@@ -227,7 +227,7 @@ func TestMCP_ToolsListBeforeInitializeRejected(t *testing.T) {
 }
 
 // TestMCP_ToolsList_AllToolsWithSchemas proves tools/list dynamically
-// enumerates all 15 tools with project_id required in every schema except
+// enumerates all tools with project_id required in every schema except
 // wormhole.agent.whoami (design doc §1).
 func TestMCP_ToolsList_AllToolsWithSchemas(t *testing.T) {
 	_, socketPath := newMCPTestServer(t)
@@ -264,6 +264,7 @@ func TestMCP_ToolsList_AllToolsWithSchemas(t *testing.T) {
 	wantTools := []string{
 		"wormhole.agent.whoami", "wormhole.task.list", "wormhole.task.get",
 		"wormhole.task.create", "wormhole.task.route", "wormhole.channel.list",
+		"wormhole.channel.create",
 		"wormhole.channel.events", "wormhole.channel.post", "wormhole.channel.subscribe",
 		"wormhole.kb.list", "wormhole.kb.get", "wormhole.kb.write",
 		"wormhole.agent.register", "wormhole.agent.presence", "wormhole.agent.list",

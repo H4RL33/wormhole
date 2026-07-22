@@ -2,7 +2,9 @@
 
 No SQL yet — entities and relations only, per RFC-0001 §7.1 (indicative storage shape), §8 (pillars), §13 (multi-tenancy).
 
-All tables carry `project_id` for row-level scoping (RFC §13) except `projects` and `agents` itself (an agent identity can span projects via role grants).
+All tenant tables use row-level project scoping (RFC §13). Child tables carry
+`project_id`; the `projects` root scopes on `id`. Only `agents` is
+project-agnostic because an agent identity can span projects via Passports.
 
 ## projects
 - `id`

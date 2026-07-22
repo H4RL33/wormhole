@@ -21,6 +21,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -155,6 +156,9 @@ type Server struct {
 	// testBeforeHandlerStart is a deterministic test barrier between admission
 	// and handler execution. Production servers leave it nil.
 	testBeforeHandlerStart func()
+	// testCommitLocalWrite injects commit failures for atomic durable-write
+	// tests. Production servers leave it nil and call tx.Commit directly.
+	testCommitLocalWrite func(*sql.Tx) error
 
 	// registry is the local MCP tool registry (mcp.go), built once at
 	// construction time from the Server that will service every
@@ -865,6 +869,20 @@ func (s *Server) localGetArticle(ctx context.Context, args json.RawMessage) (map
 // P3 tools — agent registration, presence, listing, task routing, subscriptions
 // =============================================================================
 
+func (s *Server) beginLocalWrite(ctx context.Context) (*sql.Tx, error) {
+	if s.store == nil {
+		return nil, fmt.Errorf("localapi: local store not available")
+	}
+	return s.store.DB().BeginTx(ctx, nil)
+}
+
+func (s *Server) commitLocalWrite(tx *sql.Tx) error {
+	if s.testCommitLocalWrite != nil {
+		return s.testCommitLocalWrite(tx)
+	}
+	return tx.Commit()
+}
+
 // handleAgentRegister registers an agent with the scheduler and eventbus.
 // Args: {"agent_id": "x", "capabilities": ["code", "review"], "project_id": "xxx" (optional in single-org, required in multi-org)}
 func (s *Server) handleAgentRegister(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
@@ -1183,7 +1201,13 @@ func (s *Server) handleTaskCreate(ctx context.Context, args json.RawMessage) (ma
 		}
 	}
 
-	task, err := s.tr.CreateTask(ctx, orgCtx.ProjectID, title, description, parentTaskID, priority, dueBy)
+	tx, err := s.beginLocalWrite(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: task create: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	task, err := s.tr.CreateTaskTx(ctx, tx, orgCtx.ProjectID, title, description, parentTaskID, priority, dueBy)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: task create: %w", err)
 	}
@@ -1206,8 +1230,11 @@ func (s *Server) handleTaskCreate(ctx context.Context, args json.RawMessage) (ma
 	if err != nil {
 		return nil, fmt.Errorf("localapi: task create: marshal payload: %w", err)
 	}
-	if _, err := s.qr.Enqueue(ctx, orgCtx.ProjectID, "task", task.ID, "create", payload, task.Priority); err != nil {
+	if _, err := s.qr.EnqueueTx(ctx, tx, orgCtx.ProjectID, "task", task.ID, "create", payload, task.Priority); err != nil {
 		return nil, fmt.Errorf("localapi: task create: enqueue sync: %w", err)
+	}
+	if err := s.commitLocalWrite(tx); err != nil {
+		return nil, fmt.Errorf("localapi: task create: commit: %w", err)
 	}
 
 	return out, nil
@@ -1259,7 +1286,13 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 		}
 	}
 
-	article, err := s.kb.WriteArticle(ctx, orgCtx.ProjectID, agentID, title, body, frontmatter)
+	tx, err := s.beginLocalWrite(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: kb write: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	article, err := s.kb.WriteArticleTx(ctx, tx, orgCtx.ProjectID, agentID, title, body, frontmatter)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: kb write: %w", err)
 	}
@@ -1282,8 +1315,11 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 	// KB articles have no priority concept (internal/core/kb has no Priority
 	// field, unlike tasks) — 0 here is the correct default, not a placeholder
 	// for a value that should have been threaded through.
-	if _, err := s.qr.Enqueue(ctx, orgCtx.ProjectID, "kb", article.ID, "create", payload, 0); err != nil {
+	if _, err := s.qr.EnqueueTx(ctx, tx, orgCtx.ProjectID, "kb", article.ID, "create", payload, 0); err != nil {
 		return nil, fmt.Errorf("localapi: kb write: enqueue sync: %w", err)
+	}
+	if err := s.commitLocalWrite(tx); err != nil {
+		return nil, fmt.Errorf("localapi: kb write: commit: %w", err)
 	}
 
 	return out, nil
@@ -1341,7 +1377,13 @@ func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (m
 		note = &n
 	}
 
-	ev, err := s.er.PublishEvent(ctx, orgCtx.ProjectID, channelID, agentID, eventType, eventPayload, note)
+	tx, err := s.beginLocalWrite(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: channel post: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	ev, err := s.er.PublishEventTx(ctx, tx, orgCtx.ProjectID, channelID, agentID, eventType, eventPayload, note)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: channel post: %w", err)
 	}
@@ -1364,9 +1406,57 @@ func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (m
 	// Events have no priority concept (internal/core/events has no Priority
 	// field, unlike tasks) — 0 here is the correct default, not a placeholder
 	// for a value that should have been threaded through.
-	if _, err := s.qr.Enqueue(ctx, orgCtx.ProjectID, "event", ev.ID, "create", payload, 0); err != nil {
+	if _, err := s.qr.EnqueueTx(ctx, tx, orgCtx.ProjectID, "event", ev.ID, "create", payload, 0); err != nil {
 		return nil, fmt.Errorf("localapi: channel post: enqueue sync: %w", err)
 	}
+	if err := s.commitLocalWrite(tx); err != nil {
+		return nil, fmt.Errorf("localapi: channel post: commit: %w", err)
+	}
 
+	return out, nil
+}
+
+// handleChannelCreate creates a durable local channel and queues it for
+// server synchronization in the same SQLite transaction.
+func (s *Server) handleChannelCreate(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if s.qr == nil {
+		return nil, fmt.Errorf("localapi: channel create: sync queue not available")
+	}
+	var argMap map[string]interface{}
+	if err := json.Unmarshal(args, &argMap); err != nil {
+		return nil, fmt.Errorf("localapi: channel create: invalid args: %w", err)
+	}
+	name, _ := argMap["name"].(string)
+	if name == "" {
+		return nil, fmt.Errorf("localapi: channel create: missing name")
+	}
+	projectID := s.projectID
+	if value, ok := argMap["project_id"].(string); ok && value != "" {
+		projectID = value
+	}
+	orgCtx, err := s.resolveOrgContext(projectID)
+	if err != nil {
+		return nil, err
+	}
+	tx, err := s.beginLocalWrite(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: channel create: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+	channelID, err := s.er.CreateChannelTx(ctx, tx, orgCtx.ProjectID, name)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: channel create: %w", err)
+	}
+	out := map[string]interface{}{"id": channelID, "namespace_id": orgCtx.ProjectID, "name": name}
+	payload, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: channel create: marshal payload: %w", err)
+	}
+	if _, err := s.qr.EnqueueTx(ctx, tx, orgCtx.ProjectID, "channel", channelID, "create", payload, 0); err != nil {
+		return nil, fmt.Errorf("localapi: channel create: enqueue sync: %w", err)
+	}
+	if err := s.commitLocalWrite(tx); err != nil {
+		return nil, fmt.Errorf("localapi: channel create: commit: %w", err)
+	}
 	return out, nil
 }

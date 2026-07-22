@@ -34,6 +34,28 @@ func testStore(t *testing.T) *Store {
 	return NewStore(db)
 }
 
+// lockRLSFixture serializes the role/ACL lifecycle shared by restricted-role
+// integration tests across package processes. PostgreSQL stores table grants
+// in one catalog tuple per table, so concurrent GRANT/REVOKE statements for
+// different roles can otherwise fail with "tuple concurrently updated".
+func lockRLSFixture(t *testing.T, db *sql.DB) {
+	t.Helper()
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("open RLS fixture lock connection: %v", err)
+	}
+	if _, err := conn.ExecContext(context.Background(), `SELECT pg_advisory_lock(867530913)`); err != nil {
+		conn.Close()
+		t.Fatalf("acquire RLS fixture lock: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock(867530913)`); err != nil {
+			t.Logf("release RLS fixture lock: %v", err)
+		}
+		conn.Close()
+	})
+}
+
 func createProject(t *testing.T, s *Store, name string) string {
 	t.Helper()
 	var id string
@@ -388,6 +410,7 @@ func TestListEvents_Scoping(t *testing.T) {
 
 func TestRLSIsolation(t *testing.T) {
 	ownerStore := testStore(t)
+	lockRLSFixture(t, ownerStore.db)
 
 	roleName := "events_rls_test_user"
 	rolePassword := "events_rls_test_password"

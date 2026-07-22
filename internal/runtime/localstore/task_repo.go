@@ -71,6 +71,20 @@ func (r *TaskRepo) CreateTask(ctx context.Context, namespaceID, title, descripti
 	}
 	defer tx.Rollback()
 
+	task, err := r.CreateTaskTx(ctx, tx, namespaceID, title, description, parentTaskID, priority, dueBy)
+	if err != nil {
+		return Task{}, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Task{}, fmt.Errorf("localstore/task: create: commit: %w", err)
+	}
+	return task, nil
+}
+
+// CreateTaskTx inserts a task using tx so callers can atomically enqueue the
+// corresponding sync item before committing the durable local write.
+func (r *TaskRepo) CreateTaskTx(ctx context.Context, tx *sql.Tx, namespaceID, title, description string, parentTaskID *string, priority int, dueBy *time.Time) (Task, error) {
 	taskID := uuid.New().String()
 	row := tx.QueryRowContext(ctx,
 		`INSERT INTO tasks (id, namespace_id, parent_task_id, title, description, priority, due_by) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -80,10 +94,6 @@ func (r *TaskRepo) CreateTask(ctx context.Context, namespaceID, title, descripti
 	task, err := scanTask(row)
 	if err != nil {
 		return Task{}, fmt.Errorf("localstore/task: create: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return Task{}, fmt.Errorf("localstore/task: create: commit: %w", err)
 	}
 	return task, nil
 }

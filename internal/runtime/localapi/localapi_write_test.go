@@ -11,9 +11,11 @@ package localapi
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
@@ -181,6 +183,169 @@ func TestLocalChannelPost_EnqueuesForSync(t *testing.T) {
 	pending, err := qr.ListPending(context.Background(), "ns-1", 10)
 	if err != nil || len(pending) != 1 || pending[0].EntityID != eventID || pending[0].Operation != "create" {
 		t.Fatalf("expected event enqueued for sync, got pending=%+v err=%v", pending, err)
+	}
+}
+
+func TestLocalDurableWrites_RollBackWhenQueueInsertFails(t *testing.T) {
+	for _, tt := range durableWriteCases() {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _, er, _, _, cleanup := newTestServerWithQueue(t)
+			defer cleanup()
+			if _, err := srv.store.DB().Exec(`
+				CREATE TRIGGER fail_sync_queue_insert
+				BEFORE INSERT ON sync_queue
+				BEGIN
+					SELECT RAISE(FAIL, 'injected queue failure');
+				END`); err != nil {
+				t.Fatalf("create queue failure trigger: %v", err)
+			}
+
+			resp := dialAndCall(t, srv, tt.tool, tt.args(t, er))
+			if resp.Error == nil {
+				t.Fatal("write succeeded despite injected queue failure")
+			}
+			if !strings.Contains(resp.Error.Error(), "injected queue failure") {
+				t.Fatalf("write failed before queue injection: %v", resp.Error)
+			}
+
+			var count int
+			query := "SELECT count(*) FROM " + tt.table + " WHERE " + tt.whereSQL
+			if err := srv.store.DB().QueryRow(query, tt.whereArgs...).Scan(&count); err != nil {
+				t.Fatalf("count durable rows: %v", err)
+			}
+			if count != 0 {
+				t.Fatalf("failed response left %d silently unsyncable %s row(s)", count, tt.name)
+			}
+		})
+	}
+}
+
+func TestLocalDurableWrites_RollBackWhenCommitFails(t *testing.T) {
+	tests := durableWriteCases()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _, er, _, qr, cleanup := newTestServerWithQueue(t)
+			defer cleanup()
+			srv.testCommitLocalWrite = func(*sql.Tx) error { return errors.New("injected commit failure") }
+
+			resp := dialAndCall(t, srv, tt.tool, tt.args(t, er))
+			if resp.Error == nil || !strings.Contains(resp.Error.Error(), "injected commit failure") {
+				t.Fatalf("response error = %v, want injected commit failure", resp.Error)
+			}
+
+			var count int
+			if err := srv.store.DB().QueryRow("SELECT count(*) FROM "+tt.table+" WHERE "+tt.whereSQL, tt.whereArgs...).Scan(&count); err != nil {
+				t.Fatalf("count durable rows: %v", err)
+			}
+			if count != 0 {
+				t.Fatalf("failed commit left %d %s row(s)", count, tt.name)
+			}
+			pending, err := qr.ListPending(context.Background(), "ns-1", 10)
+			if err != nil || len(pending) != 0 {
+				t.Fatalf("failed commit left queue entries: pending=%+v err=%v", pending, err)
+			}
+		})
+	}
+}
+
+func TestLocalDurableWrites_SuccessSurvivesRestartWithPendingQueue(t *testing.T) {
+	for _, tt := range durableWriteCases() {
+		t.Run(tt.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "wormholed.db")
+			srv, er, cleanup := newTestServerAtPath(t, dbPath)
+			resp := dialAndCall(t, srv, tt.tool, tt.args(t, er))
+			if resp.Error != nil {
+				t.Fatalf("write: %v", resp.Error)
+			}
+			var out map[string]interface{}
+			if err := json.Unmarshal(resp.Result, &out); err != nil {
+				t.Fatalf("decode result: %v", err)
+			}
+			entityID, _ := out["id"].(string)
+			if entityID == "" {
+				t.Fatal("write returned empty entity id")
+			}
+			cleanup()
+
+			store, err := localstore.Open(dbPath)
+			if err != nil {
+				t.Fatalf("reopen localstore: %v", err)
+			}
+			defer store.Close()
+			var count int
+			if err := store.DB().QueryRow("SELECT count(*) FROM "+tt.table+" WHERE id = ? AND namespace_id = ?", entityID, "ns-1").Scan(&count); err != nil {
+				t.Fatalf("read durable row after restart: %v", err)
+			}
+			if count != 1 {
+				t.Fatalf("durable row count after restart = %d, want 1", count)
+			}
+			pending, err := sync.NewQueueRepo(store.DB()).ListPending(context.Background(), "ns-1", 10)
+			if err != nil {
+				t.Fatalf("list queue after restart: %v", err)
+			}
+			found := false
+			for _, item := range pending {
+				if item.EntityID == entityID && item.EntityType == tt.entityType {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("pending queue after restart missing %s %s: %+v", tt.entityType, entityID, pending)
+			}
+		})
+	}
+}
+
+type durableWriteCase struct {
+	name       string
+	tool       string
+	table      string
+	entityType string
+	args       func(t *testing.T, er *localstore.EventRepo) map[string]interface{}
+	whereSQL   string
+	whereArgs  []interface{}
+}
+
+func durableWriteCases() []durableWriteCase {
+	return []durableWriteCase{
+		{name: "task", tool: "wormhole.task.create", table: "tasks", entityType: "task", args: func(_ *testing.T, _ *localstore.EventRepo) map[string]interface{} {
+			return map[string]interface{}{"title": "commit-failure-task"}
+		}, whereSQL: "title = ?", whereArgs: []interface{}{"commit-failure-task"}},
+		{name: "kb", tool: "wormhole.kb.write", table: "kb_articles", entityType: "kb", args: func(_ *testing.T, _ *localstore.EventRepo) map[string]interface{} {
+			return map[string]interface{}{"agent_id": "agent-1", "title": "commit-failure-kb", "body": "body"}
+		}, whereSQL: "title = ?", whereArgs: []interface{}{"commit-failure-kb"}},
+		{name: "channel", tool: "wormhole.channel.create", table: "channels", entityType: "channel", args: func(_ *testing.T, _ *localstore.EventRepo) map[string]interface{} {
+			return map[string]interface{}{"name": "commit-failure-channel"}
+		}, whereSQL: "name = ?", whereArgs: []interface{}{"commit-failure-channel"}},
+		{name: "event", tool: "wormhole.channel.post", table: "events", entityType: "event", args: func(t *testing.T, er *localstore.EventRepo) map[string]interface{} {
+			channelID, err := er.CreateChannel(context.Background(), "ns-1", "commit-failure-event-channel")
+			if err != nil {
+				t.Fatalf("CreateChannel: %v", err)
+			}
+			return map[string]interface{}{"channel_id": channelID, "agent_id": "agent-1", "event_type": "message.posted"}
+		}, whereSQL: "event_type = ?", whereArgs: []interface{}{"message.posted"}},
+	}
+}
+
+func newTestServerAtPath(t *testing.T, dbPath string) (*Server, *localstore.EventRepo, func()) {
+	t.Helper()
+	store, err := localstore.Open(dbPath)
+	if err != nil {
+		t.Fatalf("localstore.Open: %v", err)
+	}
+	er := localstore.NewEventRepo(store.DB())
+	srv, err := New(filepath.Join(t.TempDir(), "wormholed.sock"), "", "", "ns-1", store,
+		localstore.NewTaskRepo(store.DB(), er), er, localstore.NewKBRepo(store.DB()), sync.NewQueueRepo(store.DB()))
+	if err != nil {
+		store.Close()
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go srv.Serve(ctx)
+	return srv, er, func() {
+		cancel()
+		srv.Close()
+		store.Close()
 	}
 }
 

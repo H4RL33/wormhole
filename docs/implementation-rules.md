@@ -294,10 +294,12 @@ the same layering pattern and isolation discipline.
   actually revert. Never edit an already-committed migration; add a new one.
 - D2: Entity shapes come from `docs/db-entities.md`. Deviating from it means updating
   that file in the same change, with the reason.
-- D3: Every project-scoped table (everything except `projects` and `agents`) gets:
-  a `project_id uuid NOT NULL REFERENCES projects(id)` column, an index on it,
-  `ENABLE ROW LEVEL SECURITY`, and a policy of the established form:
-  `USING (project_id = current_setting('wormhole.project_id', true)::uuid)`.
+- D3: Every project-scoped table (everything except project-agnostic `agents`) gets
+  RLS. The `projects` root scopes on its `id`; child tables get a
+  `project_id uuid NOT NULL REFERENCES projects(id)` column and an index on it.
+  Every scoped table gets `ENABLE ROW LEVEL SECURITY` and a policy comparing
+  its scope column (`projects.id` or child `project_id`) to
+  `current_setting('wormhole.project_id', true)::uuid`.
   This is the multi-tenancy guarantee (RFC-0001 §13); it is not optional per table.
 - D4: Conventions already in force: `uuid` PKs via `gen_random_uuid()` (pgcrypto),
   `timestamptz NOT NULL DEFAULT now()` timestamps, `text` not `varchar`, `jsonb` with

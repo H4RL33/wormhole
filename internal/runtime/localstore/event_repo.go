@@ -45,6 +45,19 @@ func (r *EventRepo) CreateChannel(ctx context.Context, namespaceID, name string)
 	}
 	defer tx.Rollback()
 
+	id, err := r.CreateChannelTx(ctx, tx, namespaceID, name)
+	if err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("localstore/event: create channel: commit: %w", err)
+	}
+	return id, nil
+}
+
+// CreateChannelTx inserts a channel using tx so creation and enqueue are one
+// durable operation.
+func (r *EventRepo) CreateChannelTx(ctx context.Context, tx *sql.Tx, namespaceID, name string) (string, error) {
 	channelID := uuid.New().String()
 	row := tx.QueryRowContext(ctx,
 		`INSERT INTO channels (id, namespace_id, name) VALUES (?, ?, ?) RETURNING id`,
@@ -53,9 +66,6 @@ func (r *EventRepo) CreateChannel(ctx context.Context, namespaceID, name string)
 	var id string
 	if err := row.Scan(&id); err != nil {
 		return "", fmt.Errorf("localstore/event: create channel: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return "", fmt.Errorf("localstore/event: create channel: commit: %w", err)
 	}
 	return id, nil
 }
@@ -127,7 +137,7 @@ func (r *EventRepo) PublishEvent(ctx context.Context, namespaceID, channelID, ag
 	}
 	defer tx.Rollback()
 
-	event, err := r.publishEventInTx(ctx, tx, namespaceID, channelID, agentID, eventType, payload, note)
+	event, err := r.PublishEventTx(ctx, tx, namespaceID, channelID, agentID, eventType, payload, note)
 	if err != nil {
 		return DurableEvent{}, err
 	}
@@ -135,6 +145,12 @@ func (r *EventRepo) PublishEvent(ctx context.Context, namespaceID, channelID, ag
 		return DurableEvent{}, fmt.Errorf("localstore/event: publish: commit: %w", err)
 	}
 	return event, nil
+}
+
+// PublishEventTx inserts a durable event using tx so publication and enqueue
+// commit atomically.
+func (r *EventRepo) PublishEventTx(ctx context.Context, tx *sql.Tx, namespaceID, channelID, agentID, eventType string, payload json.RawMessage, note *string) (DurableEvent, error) {
+	return r.publishEventInTx(ctx, tx, namespaceID, channelID, agentID, eventType, payload, note)
 }
 
 // publishEventInTx inserts a durable event within an existing transaction.
