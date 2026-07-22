@@ -654,14 +654,21 @@ func (s *Server) WarmAuthorizationScopes(ctx context.Context) error {
 // requested project, which keeps already-enrolled agents functional offline;
 // incremental_push independently rechecks every queued item server-side.
 func (s *Server) authorizeLocalTool(ctx context.Context, tool localTool, args json.RawMessage) error {
-	if tool.RequiredPermission == "" {
+	return s.authorizeLocalPermission(ctx, tool.RequiredPermission, args)
+}
+
+// authorizeLocalPermission checks one action against the exact cached
+// agent-and-project scope selected by the request. Handlers that perform more
+// than their registered primary action use this for their additional gates.
+func (s *Server) authorizeLocalPermission(ctx context.Context, requiredPermission string, args json.RawMessage) error {
+	if requiredPermission == "" {
 		return nil
 	}
 	projectID := s.projectID
 	var argMap map[string]interface{}
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &argMap); err != nil {
-			return fmt.Errorf("localapi: authorize %s: invalid args: %w", tool.Name, err)
+			return fmt.Errorf("localapi: authorize %s: invalid args: %w", requiredPermission, err)
 		}
 		if supplied, ok := argMap["project_id"].(string); ok && supplied != "" {
 			projectID = supplied
@@ -684,14 +691,14 @@ func (s *Server) authorizeLocalTool(ctx context.Context, tool localTool, args js
 		if errors.Is(err, localstore.ErrNotFound) {
 			return fmt.Errorf("permission denied: no authenticated scope cached for project %s; call wormhole.agent.whoami while online", orgCtx.ProjectID)
 		}
-		return fmt.Errorf("localapi: authorize %s: %w", tool.Name, err)
+		return fmt.Errorf("localapi: authorize %s: %w", requiredPermission, err)
 	}
 	for _, permission := range cached.Permissions {
-		if permission == tool.RequiredPermission {
+		if permission == requiredPermission {
 			return nil
 		}
 	}
-	return fmt.Errorf("permission denied: requires %s", tool.RequiredPermission)
+	return fmt.Errorf("permission denied: requires %s", requiredPermission)
 }
 
 // localListTasks serves wormhole.task.list from the local SQLite replica.
@@ -1171,6 +1178,9 @@ func (s *Server) handleTaskRoute(ctx context.Context, args json.RawMessage) (map
 
 	orgCtx, err := s.resolveOrgContext(projectID)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.authorizeLocalPermission(ctx, "task.assign", args); err != nil {
 		return nil, err
 	}
 

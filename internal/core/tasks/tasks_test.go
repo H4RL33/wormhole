@@ -177,6 +177,57 @@ func TestCreateWithID_PreservesClientID(t *testing.T) {
 	}
 }
 
+func TestCreateWithIDAndOwner_CreatesAssignedTaskAtomically(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "create-with-id-and-owner")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectID)
+	wantID := uuid.NewString()
+
+	task, err := s.CreateWithIDAndOwner(ctx, wantID, projectID, "Routed task", "assigned at create", nil, &agentID, 2, nil)
+	if err != nil {
+		t.Fatalf("CreateWithIDAndOwner: %v", err)
+	}
+	if task.ID != wantID {
+		t.Fatalf("task.ID = %q, want %q", task.ID, wantID)
+	}
+	if task.OwnerAgentID == nil || *task.OwnerAgentID != agentID {
+		t.Fatalf("task.OwnerAgentID = %v, want %q", task.OwnerAgentID, agentID)
+	}
+
+	var gotOwner string
+	if err := s.db.QueryRow(`SELECT owner_agent_id FROM tasks WHERE id = $1 AND project_id = $2`, wantID, projectID).Scan(&gotOwner); err != nil {
+		t.Fatalf("select assigned task: %v", err)
+	}
+	if gotOwner != agentID {
+		t.Fatalf("stored owner_agent_id = %q, want %q", gotOwner, agentID)
+	}
+}
+
+func TestCreateWithIDAndOwner_CrossProjectOwnerLeavesNoTask(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectA := createProject(t, s, "create-owner-project-a")
+	projectB := createProject(t, s, "create-owner-project-b")
+	agentID := createAgent(t, s)
+	createPassport(t, s, agentID, projectB)
+	wantID := uuid.NewString()
+
+	_, err := s.CreateWithIDAndOwner(ctx, wantID, projectA, "Must roll back", "", nil, &agentID, 0, nil)
+	if !errors.Is(err, ErrPassportNotFound) {
+		t.Fatalf("CreateWithIDAndOwner error = %v, want ErrPassportNotFound", err)
+	}
+
+	var count int
+	if err := s.db.QueryRow(`SELECT count(*) FROM tasks WHERE id = $1`, wantID).Scan(&count); err != nil {
+		t.Fatalf("count rejected task: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("cross-project owner failure left %d task row(s), want 0", count)
+	}
+}
+
 func TestCreate_WithParentTask(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

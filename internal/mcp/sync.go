@@ -357,6 +357,8 @@ type syncTaskCreatePayload struct {
 	Title        string     `json:"title"`
 	Description  string     `json:"description"`
 	ParentTaskID *string    `json:"parent_task_id"`
+	OwnerAgentID *string    `json:"owner_agent_id"`
+	Status       string     `json:"status"`
 	Priority     int        `json:"priority"`
 	DueBy        *time.Time `json:"due_by"`
 }
@@ -471,7 +473,15 @@ func IncrementalPushTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore
 						applyErr = fmt.Errorf("decode task payload: %w", err)
 						break
 					}
-					_, applyErr = tasksStore.CreateWithID(ctx, item.EntityID, projectID, payload.Title, payload.Description, payload.ParentTaskID, payload.Priority, payload.DueBy)
+					if payload.Status != "" && payload.Status != "todo" {
+						applyErr = fmt.Errorf(`task create status must be "todo"`)
+						break
+					}
+					if payload.OwnerAgentID != nil && scope != nil && !scope.HasPermission("task.assign") {
+						applyErr = fmt.Errorf("permission denied: requires task.assign")
+						break
+					}
+					_, applyErr = tasksStore.CreateWithIDAndOwner(ctx, item.EntityID, projectID, payload.Title, payload.Description, payload.ParentTaskID, payload.OwnerAgentID, payload.Priority, payload.DueBy)
 				case "kb":
 					var payload syncKBCreatePayload
 					if err := json.Unmarshal(item.Payload, &payload); err != nil {

@@ -58,7 +58,7 @@ func newTaskRouteTestRuntime(t *testing.T, projectID string) (*Server, *localsto
 		t.Fatalf("open route store: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
-	if err := store.CacheWhoAmI(context.Background(), localstore.WhoAmICache{AgentID: "route-agent", ProjectID: projectID, Permissions: []string{"task.create"}, CachedAt: time.Now().UTC()}); err != nil {
+	if err := store.CacheWhoAmI(context.Background(), localstore.WhoAmICache{AgentID: "route-agent", ProjectID: projectID, Permissions: []string{"task.create", "task.assign"}, CachedAt: time.Now().UTC()}); err != nil {
 		t.Fatalf("cache route scope: %v", err)
 	}
 	er := localstore.NewEventRepo(store.DB())
@@ -210,7 +210,7 @@ func TestTaskRoutedWithoutCoordinationServer(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer store.Close()
-	if err := store.CacheWhoAmI(context.Background(), localstore.WhoAmICache{AgentID: "task-agent", ProjectID: "project-1", Permissions: []string{"task.create"}, CachedAt: time.Now().UTC()}); err != nil {
+	if err := store.CacheWhoAmI(context.Background(), localstore.WhoAmICache{AgentID: "task-agent", ProjectID: "project-1", Permissions: []string{"task.create", "task.assign"}, CachedAt: time.Now().UTC()}); err != nil {
 		t.Fatalf("cache task-route scope: %v", err)
 	}
 
@@ -355,6 +355,33 @@ func TestTaskRouteNoMatchLeavesNoDurableState(t *testing.T) {
 	assertNoDurableRouteState(t, store, queue, "project-1")
 	if got := sched.TaskCount(); got != 0 {
 		t.Fatalf("assignment failure left %d scheduler task(s)", got)
+	}
+}
+
+func TestTaskRouteRequiresTaskAssignPermission(t *testing.T) {
+	srv, store, sched, queue, socketPath := newTaskRouteTestRuntime(t, "project-1")
+	srv.SetAuthorizationAgent("project-1", "route-agent")
+	if _, err := store.DB().Exec(`UPDATE whoami_cache SET permissions = '["task.create"]' WHERE agent_id = 'route-agent' AND project_id = 'project-1'`); err != nil {
+		t.Fatalf("restrict route permissions: %v", err)
+	}
+	if err := store.CacheWhoAmI(context.Background(), localstore.WhoAmICache{
+		AgentID: "stale-route-admin", ProjectID: "project-1",
+		Permissions: []string{"task.create", "task.assign"},
+		CachedAt:    time.Now().UTC().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("cache stale route admin: %v", err)
+	}
+	if _, err := sched.RegisterAgent("route-agent", "project-1", []string{"code"}); err != nil {
+		t.Fatalf("register route agent: %v", err)
+	}
+
+	resp := sendRequest(t, socketPath, "wormhole.task.route", map[string]interface{}{"capability": "code", "title": "assignment denied"})
+	if resp.Error == "" || !strings.Contains(resp.Error, "permission denied: requires task.assign") {
+		t.Fatalf("task.route error = %q, want task.assign denial", resp.Error)
+	}
+	assertNoDurableRouteState(t, store, queue, "project-1")
+	if got := sched.TaskCount(); got != 0 {
+		t.Fatalf("permission denial left %d scheduler task(s)", got)
 	}
 }
 

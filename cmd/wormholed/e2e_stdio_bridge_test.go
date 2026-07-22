@@ -46,6 +46,7 @@ import (
 	"github.com/H4RL33/wormhole/internal/core/roles"
 	"github.com/H4RL33/wormhole/internal/core/tasks"
 	"github.com/H4RL33/wormhole/internal/mcp"
+	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/types"
 )
 
@@ -238,7 +239,7 @@ func e2eStartCoordServer(t *testing.T, db *sql.DB) (srvURL, projectID, agentID, 
 	projectID = e2eMustCreateProject(t, db, "e2e-stdio-bridge-project")
 
 	registerResultRaw := e2eCallTool(t, srv.URL, "wormhole.agent.register", projectID, "", mcp.RegisterAgentInput{
-		Permissions:  []string{"task.create", "task.list", "kb.write", "channel.create", "channel.post"},
+		Permissions:  []string{"task.create", "task.assign", "task.list", "kb.write", "channel.create", "channel.post"},
 		Owner:        "harley",
 		Model:        "claude",
 		Capabilities: []string{"code_review"},
@@ -585,6 +586,11 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 	if _, errMsg := client.callTool(t, "wormhole.agent.whoami", nil); errMsg != "" {
 		t.Fatalf("warm authenticated local scope: %s", errMsg)
 	}
+	if _, errMsg := client.callTool(t, "wormhole.agent.register", map[string]interface{}{
+		"agent_id": agentID, "capabilities": []string{"code"},
+	}); errMsg != "" {
+		t.Fatalf("register local route agent: %s", errMsg)
+	}
 	coordOnline.Store(false)
 
 	// Create a task through the full chain. Local-first writes never
@@ -630,6 +636,24 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 	}
 	if preRestartCount != 0 {
 		t.Fatalf("offline task reached Postgres before reconnect: count=%d", preRestartCount)
+	}
+	routeRaw, errMsg := client.callTool(t, "wormhole.task.route", map[string]interface{}{
+		"capability": "code",
+		"title":      "e2e routed owner fidelity",
+	})
+	if errMsg != "" {
+		t.Fatalf("wormhole.task.route returned error: %s", errMsg)
+	}
+	var routeOut struct {
+		TaskID     string `json:"task_id"`
+		AssignedTo string `json:"assigned_to"`
+		Status     string `json:"status"`
+	}
+	if err := json.Unmarshal(routeRaw, &routeOut); err != nil {
+		t.Fatalf("decode routed task result %s: %v", routeRaw, err)
+	}
+	if routeOut.TaskID == "" || routeOut.AssignedTo != agentID || routeOut.Status != "todo" {
+		t.Fatalf("routed task result = %+v, want assigned_to=%s status=todo", routeOut, agentID)
 	}
 	kbRaw, errMsg := client.callTool(t, "wormhole.kb.write", map[string]interface{}{
 		"agent_id": agentID, "title": "e2e native JSON article", "body": "native frontmatter survives sync",
@@ -679,6 +703,28 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("original stdio bridge did not exit after daemon shutdown")
 	}
+
+	// Simulate the exact overwrite risk this test guards against: remove the
+	// local owner after routing while leaving the durable queue payload intact.
+	// Only a server push that applies owner_agent_id followed by a server pull
+	// can restore it.
+	localStore, err := localstore.Open(filepath.Join(dataDir, "wormhole", "wormholed.db"))
+	if err != nil {
+		t.Fatalf("open local store between daemon runs: %v", err)
+	}
+	result, err := localStore.DB().Exec(`UPDATE tasks SET owner_agent_id = NULL WHERE id = ? AND namespace_id = ?`, routeOut.TaskID, projectID)
+	if err != nil {
+		localStore.Close()
+		t.Fatalf("clear routed owner before reconnect: %v", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		localStore.Close()
+		t.Fatalf("clear routed owner affected %d row(s), err=%v, want 1", affected, err)
+	}
+	if err := localStore.Close(); err != nil {
+		t.Fatalf("close local store between daemon runs: %v", err)
+	}
+
 	coordOnline.Store(true)
 	restarted := startTestDaemon(t, "default", socketPath)
 	defer restarted.stop(t)
@@ -707,6 +753,30 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 	if gotTitle != taskTitle {
 		t.Fatalf("task title in Postgres = %q, want %q", gotTitle, taskTitle)
 	}
+	var routedServerOwner sql.NullString
+	waitForCondition(t, 20*time.Second, "routed owner to sync into Postgres", func() (bool, error) {
+		err := db.QueryRow(`SELECT owner_agent_id FROM tasks WHERE id = $1 AND project_id = $2`, routeOut.TaskID, projectID).Scan(&routedServerOwner)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return routedServerOwner.Valid && routedServerOwner.String == agentID, nil
+	})
+	waitForCondition(t, 20*time.Second, "routed owner to return through incremental pull", func() (bool, error) {
+		raw, toolErr := reconnectedClient.callTool(t, "wormhole.task.get", map[string]interface{}{"task_id": routeOut.TaskID})
+		if toolErr != "" {
+			return false, fmt.Errorf("task.get: %s", toolErr)
+		}
+		var task struct {
+			OwnerAgentID *string `json:"owner_agent_id"`
+		}
+		if err := json.Unmarshal(raw, &task); err != nil {
+			return false, err
+		}
+		return task.OwnerAgentID != nil && *task.OwnerAgentID == agentID, nil
+	})
 	var kbJSON, eventJSON []byte
 	waitForCondition(t, 20*time.Second, "native event JSON to sync into Postgres", func() (bool, error) {
 		if err := db.QueryRow(`SELECT payload FROM events WHERE id = $1 AND project_id = $2`, eventOut.ID, projectID).Scan(&eventJSON); errors.Is(err, sql.ErrNoRows) {
@@ -748,14 +818,20 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 		t.Fatalf("decode task list result: %v", err)
 	}
 	found := false
+	routedFound := false
 	for _, task := range listOut.Tasks {
 		if task.TaskID == taskOut.ID {
 			found = true
-			break
+		}
+		if task.TaskID == routeOut.TaskID && task.OwnerAgentID != nil && *task.OwnerAgentID == agentID {
+			routedFound = true
 		}
 	}
 	if !found {
 		t.Fatalf("wormhole.task.list on Coordination Server did not include synced task %s: %+v", taskOut.ID, listOut.Tasks)
+	}
+	if !routedFound {
+		t.Fatalf("wormhole.task.list did not preserve routed owner for task %s: %+v", routeOut.TaskID, listOut.Tasks)
 	}
 }
 

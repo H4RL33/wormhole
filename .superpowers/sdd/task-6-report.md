@@ -59,6 +59,19 @@ KB article, channel, and event row respectively after the handler had returned
 an error. This is intentionally described as pre-commit rollback coverage, not
 as a simulated SQLite storage-engine commit failure.
 
+### Routed-owner sync fidelity
+
+The canonical `task.route` queue payload contained `owner_agent_id`, but
+`syncTaskCreatePayload` did not decode it and incremental push called the
+unassigned `CreateWithID` path. Postgres therefore stored `NULL`; the next
+authoritative pull legitimately upserted that `NULL` back into SQLite and
+erased the local scheduler's routing decision.
+
+The new TDD cases first failed to compile for the missing atomic store method
+and payload fields. With only `task.create` in the exact cached local scope,
+the route-permission test also failed because routing succeeded instead of
+returning `permission denied: requires task.assign`.
+
 ## GREEN implementation
 
 ### Parallel-safe Postgres fixtures
@@ -116,7 +129,7 @@ task and one matching pending queue entry.
 
 Every durable local tool declares its action permission (`task.create`,
 `kb.write`, `channel.create`, or `channel.post`); scheduler-backed `task.route`
-also requires `task.create`. The local MCP boundary checks
+requires both `task.create` and `task.assign`. The local MCP boundary checks
 the authenticated project scope cached during online startup, preserving
 authorized offline writes while failing closed when a scope or permission is
 absent. Production authorization selects the exact configured agent-and-project
@@ -126,6 +139,18 @@ permissions to replacement credentials. The SQLite cache now keys identities by
 key. The server independently
 rechecks the corresponding permission for every incremental-push item, so a
 stale or tampered local queue cannot bypass current server authorization.
+
+Incremental push now decodes routed ownership and task-create status. An owned
+task item requires both permissions; the server then validates its owner
+passport and optional parent under the authenticated project GUC and inserts
+the client ID, task fields, and owner in one Postgres transaction. A missing or
+cross-project owner/parent leaves zero task rows. Unowned task pushes keep the
+existing `task.create`-only contract.
+
+Create status may be absent or `todo`; other values are rejected rather than
+acknowledged and discarded. The envelope ID, authenticated project, and server
+timestamps remain authoritative. Owner was the only legitimate routed create
+field missing from the server apply path.
 
 KB frontmatter and event payloads remain native JSON objects through local
 responses and queue entries. Unit tests assert decoded object types, and the
@@ -140,6 +165,13 @@ SQLite persistence, daemon restart, new bridge reconnect, queue drain,
 Postgres native-JSON readback, and Coordination Server MCP readback. A second
 subprocess test covers split JSON writes, oversized input, four concurrent
 bridge clients, and SIGINT/SIGTERM while a partial request is in flight.
+
+The same full-transport test now registers the real passport agent with the
+local scheduler, routes an offline task, stops the daemon, and deliberately
+clears only the SQLite owner while preserving the queue payload. On reconnect
+it proves incremental push stores the selected owner in Postgres, incremental
+pull restores that owner locally, and the Coordination Server task list
+exposes the same owner.
 
 The two-binding integration uses one real Coordination Server/Postgres and one
 production daemon with two credential profiles. Both tasks persist under their
@@ -176,6 +208,15 @@ PASS
 go test -race ./internal/runtime/localapi ./internal/runtime/localstore ./internal/runtime/scheduler -count=1
 PASS: no race reports
 
+WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/tasks ./internal/mcp ./internal/runtime/localapi ./cmd/wormholed -count=1
+PASS: tasks 0.542s, mcp 4.917s, localapi 0.594s, wormholed 12.186s
+
+WORMHOLE_INTEGRATION_REQUIRED=1 go test -race ./internal/core/tasks ./internal/mcp ./internal/runtime/localapi ./cmd/wormholed -count=1
+PASS: tasks 1.798s, mcp 8.764s, localapi 2.615s, wormholed 13.572s; no race reports
+
+WORMHOLE_INTEGRATION_REQUIRED=1 go test ./cmd/wormholed -run TestE2E_StdioBridgeToPostgres -count=1
+PASS: route -> push -> Postgres owner -> pull -> SQLite owner
+
 WORMHOLE_INTEGRATION_REQUIRED=1 go test ./cmd/wormholed -run 'TestE2E_StdioBridgeToPostgres|TestRun_TwoProjectBindingsPersistWithTokenAndNamespaceIsolation' -count=2
 PASS
 
@@ -204,9 +245,12 @@ PASS
 - `cmd/wormholed/p7_e2e_integration_test.go`
 - `docs/db-entities.md`
 - `docs/implementation-rules.md`
+- `docs/superpowers/plans/2026-07-22-task-route-server-owner-fidelity.md`
+- `docs/superpowers/specs/2026-07-22-task-route-server-owner-fidelity-design.md`
 - `internal/core/events/events_test.go`
 - `internal/core/git/git_test.go`
 - `internal/core/kb/kb_test.go`
+- `internal/core/tasks/tasks.go`
 - `internal/core/tasks/tasks_test.go`
 - `internal/core/identity/identity.go`
 - `internal/core/identity/identity_test.go`
@@ -214,6 +258,7 @@ PASS
 - `internal/mcp/sync.go`
 - `internal/mcp/sync_test.go`
 - `internal/runtime/localapi/localapi.go`
+- `internal/runtime/localapi/localapi_p3_test.go`
 - `internal/runtime/localapi/localapi_write_test.go`
 - `internal/runtime/localapi/mcp.go`
 - `internal/runtime/localapi/mcp_test.go`
