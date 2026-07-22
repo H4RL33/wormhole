@@ -190,11 +190,19 @@ func (r *KBRepo) UpsertArticle(ctx context.Context, namespaceID, articleID, titl
 		frontmatter = json.RawMessage(`{}`)
 	}
 
+	var existingNamespaceID string
+	err = tx.QueryRowContext(ctx, `SELECT namespace_id FROM kb_articles WHERE id = ?`, articleID).Scan(&existingNamespaceID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return KBArticle{}, fmt.Errorf("localstore/kb: upsert: namespace lookup: %w", err)
+	}
+	if err == nil && existingNamespaceID != namespaceID {
+		return KBArticle{}, ErrNamespaceCollision
+	}
+
 	row := tx.QueryRowContext(ctx,
 		`INSERT INTO kb_articles (id, namespace_id, title, body, frontmatter, author_agent_id, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
-			namespace_id = excluded.namespace_id,
 			title = excluded.title,
 			body = excluded.body,
 			frontmatter = excluded.frontmatter,

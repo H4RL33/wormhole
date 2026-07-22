@@ -16,6 +16,10 @@ import (
 // requested namespace.
 var ErrTaskNotFound = errors.New("localstore/task: not found")
 
+// ErrNamespaceCollision is returned when a sync upsert attempts to reuse an
+// ID already owned by another namespace.
+var ErrNamespaceCollision = errors.New("localstore: namespace collision")
+
 // validTaskStatuses enumerates the legal task statuses (RFC-0001 §8.2).
 var validTaskStatuses = map[string]bool{
 	"todo":    true,
@@ -263,11 +267,19 @@ func (r *TaskRepo) UpsertTask(ctx context.Context, namespaceID, taskID, title, d
 	}
 	defer tx.Rollback()
 
+	var existingNamespaceID string
+	err = tx.QueryRowContext(ctx, `SELECT namespace_id FROM tasks WHERE id = ?`, taskID).Scan(&existingNamespaceID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return Task{}, fmt.Errorf("localstore/task: upsert: namespace lookup: %w", err)
+	}
+	if err == nil && existingNamespaceID != namespaceID {
+		return Task{}, ErrNamespaceCollision
+	}
+
 	row := tx.QueryRowContext(ctx,
 		`INSERT INTO tasks (id, namespace_id, parent_task_id, title, description, owner_agent_id, status, priority, due_by)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
-			namespace_id = excluded.namespace_id,
 			parent_task_id = excluded.parent_task_id,
 			title = excluded.title,
 			description = excluded.description,

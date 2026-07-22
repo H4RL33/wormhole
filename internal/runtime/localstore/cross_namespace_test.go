@@ -9,6 +9,101 @@ import (
 	"time"
 )
 
+func TestUpsertTask_CrossNamespaceIDCollisionRejected(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(filepath.Join(dir, "wormholed.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	tr := NewTaskRepo(store.db, NewEventRepo(store.db))
+	const (
+		nsA      = "namespace-a"
+		nsB      = "namespace-b"
+		taskID   = "shared-id"
+		original = "task in namespace A"
+		updated  = "updated task in namespace A"
+	)
+
+	if _, err := tr.UpsertTask(ctx, nsA, taskID, original, "original", nil, nil, "todo", 1, nil); err != nil {
+		t.Fatalf("UpsertTask(nsA): %v", err)
+	}
+
+	_, err = tr.UpsertTask(ctx, nsB, taskID, "task in namespace B", "collision", nil, nil, "todo", 2, nil)
+	if !errors.Is(err, ErrNamespaceCollision) {
+		t.Fatalf("upsert collision error = %v, want ErrNamespaceCollision", err)
+	}
+
+	gotA, err := tr.GetTask(ctx, nsA, taskID)
+	if err != nil {
+		t.Fatalf("GetTask(nsA): %v", err)
+	}
+	if gotA.Title != original {
+		t.Errorf("GetTask(nsA).Title = %q, want %q", gotA.Title, original)
+	}
+	if _, err := tr.GetTask(ctx, nsB, taskID); !errors.Is(err, ErrTaskNotFound) {
+		t.Fatalf("GetTask(nsB): got %v, want ErrTaskNotFound", err)
+	}
+
+	gotA, err = tr.UpsertTask(ctx, nsA, taskID, updated, "updated", nil, nil, "wip", 3, nil)
+	if err != nil {
+		t.Fatalf("UpsertTask same namespace: %v", err)
+	}
+	if gotA.Title != updated {
+		t.Errorf("UpsertTask same namespace title = %q, want %q", gotA.Title, updated)
+	}
+}
+
+func TestUpsertArticle_CrossNamespaceIDCollisionRejected(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(filepath.Join(dir, "wormholed.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	kb := NewKBRepo(store.db)
+	const (
+		nsA       = "namespace-a"
+		nsB       = "namespace-b"
+		articleID = "shared-id"
+		original  = "article in namespace A"
+		updated   = "updated article in namespace A"
+	)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	if _, err := kb.UpsertArticle(ctx, nsA, articleID, original, "original", json.RawMessage(`{"type":"decision"}`), "agent-a", now, now); err != nil {
+		t.Fatalf("UpsertArticle(nsA): %v", err)
+	}
+
+	_, err = kb.UpsertArticle(ctx, nsB, articleID, "article in namespace B", "collision", json.RawMessage(`{"type":"policy"}`), "agent-b", now, now)
+	if !errors.Is(err, ErrNamespaceCollision) {
+		t.Fatalf("upsert collision error = %v, want ErrNamespaceCollision", err)
+	}
+
+	gotA, err := kb.GetArticle(ctx, nsA, articleID)
+	if err != nil {
+		t.Fatalf("GetArticle(nsA): %v", err)
+	}
+	if gotA.Title != original {
+		t.Errorf("GetArticle(nsA).Title = %q, want %q", gotA.Title, original)
+	}
+	if _, err := kb.GetArticle(ctx, nsB, articleID); !errors.Is(err, ErrArticleNotFound) {
+		t.Fatalf("GetArticle(nsB): got %v, want ErrArticleNotFound", err)
+	}
+
+	gotA, err = kb.UpsertArticle(ctx, nsA, articleID, updated, "updated", json.RawMessage(`{"type":"decision"}`), "agent-a", now, now)
+	if err != nil {
+		t.Fatalf("UpsertArticle same namespace: %v", err)
+	}
+	if gotA.Title != updated {
+		t.Errorf("UpsertArticle same namespace title = %q, want %q", gotA.Title, updated)
+	}
+}
+
 // TestTaskCrossNamespaceRejection verifies that tasks are isolated by namespace.
 // RFC-0003 §7.2 — mandatory cross-namespace rejection test.
 func TestTaskCrossNamespaceRejection(t *testing.T) {
