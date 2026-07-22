@@ -64,7 +64,7 @@ RFC-0001 §5.5 ("Everything via MCP") and §9 (indicative MCP interface) assumed
 
 - The MCP tool surface (names, grammar `wormhole.<pillar-noun>.<verb>`, schemas) is unchanged and still the sole platform surface — G5/M3 hold.
 - What changes: the process terminating harness MCP connections is now `wormholed`, not the coordination server. The coordination server still exposes an MCP-shaped surface, but its clients are `wormholed` instances (and human/admin tooling), not coding harnesses directly.
-- One new pillar prefix is introduced: `wormhole.sync.*`, for runtime-to-server synchronization operations (bootstrap pull, incremental push/pull, conflict reporting). `docs/architecture.md` M2 requires escalation before adding a pillar prefix — this RFC is that escalation, and the addition is ratified here.
+- One new pillar prefix is introduced: `wormhole.sync.*`, for runtime-to-server synchronization operations (bootstrap pull, incremental push/pull, conflict reporting). This RFC ratifies that addition.
 - All other RFC-0001 pillar rules (event categories, task state machine, KB compliance checks, identity/passport model) apply unchanged to data as it lives in the coordination server, and apply *analogously* to the local replica, with isolation enforcement details in §7.
 
 RFC-0001 itself is not being rewritten. Where this RFC is silent, RFC-0001 governs.
@@ -107,13 +107,13 @@ Explicitly **not** a reasoning component: no LLM calls, deterministic behavior o
 
 ### 6.2 Coordination Server (retrofit of `wormhole-server`)
 
-Everything in `internal/core/*` today (identity, tasks, events, kb, permissions, git) keeps its current shape and dependency rules (`docs/architecture.md` §2-§3) — this RFC does not touch those packages' internals. What changes is who calls them: `internal/mcp` now authenticates and serves `wormholed` sync sessions as its primary client class, in addition to (or instead of, over time) direct harness sessions.
+Everything in `internal/core/*` today (identity, tasks, events, kb, permissions, git) keeps its current shape and dependency rules (`docs/implementation-rules.md` §§4-5) — this RFC does not touch those packages' internals. What changes is who calls them: `internal/mcp` now authenticates and serves `wormholed` sync sessions as its primary client class, in addition to (or instead of, over time) direct harness sessions.
 
 New server-side responsibilities: org onboarding lifecycle, bootstrap manifests (§8), policy/manifest distribution, cross-runtime discovery for multi-user collaboration.
 
 ### 6.3 New package tree: `internal/runtime/*`
 
-Local-daemon-side code, entirely new, living outside `internal/core/*` (which stays coordination-server-only). Proposed shape, following the identity-package layering pattern (`docs/architecture.md` §3) adapted for SQLite:
+Local-daemon-side code, entirely new, living outside `internal/core/*` (which stays coordination-server-only). Proposed shape, following the identity-package layering pattern (`docs/implementation-rules.md` §5) adapted for SQLite:
 
 | Package | Owns |
 |---|---|
@@ -140,13 +140,13 @@ New relationships beyond RFC-0001's agent/Passport model:
 
 ### 7.2 Isolation enforcement — the real gap
 
-RFC-0001 §13 and `docs/architecture.md` D3 enforce project isolation via Postgres Row-Level Security. **SQLite has no RLS.** Local isolation must be enforced in the `internal/runtime/localstore` repository layer itself: every query is namespace-scoped by construction (namespace/org/project ID is a mandatory parameter on every repository method, never optional, never inferred from ambient state), not by a database-level policy.
+RFC-0001 §13 enforces project isolation via Postgres Row-Level Security. **SQLite has no RLS.** Local isolation must be enforced in the `internal/runtime/localstore` repository layer itself: every query is namespace-scoped by construction (namespace/org/project ID is a mandatory parameter on every repository method, never optional, never inferred from ambient state), not by a database-level policy, as required by `docs/implementation-rules.md` §4.1 LR3.
 
-This is weaker than RLS in one specific way: a bug in repository code can leak across namespaces with no second line of defense, where Postgres RLS would catch it even if the WHERE clause were wrong. Mitigation is process, not architecture: every `localstore` repository ships an explicit cross-namespace rejection test (mirroring T3), and code review treats a missing namespace parameter as a security bug, not a style issue. This is stated here as an accepted, documented risk, not resolved by database enforcement — flagged per `docs/architecture.md` §0.4 rung 5 discipline.
+This is weaker than RLS in one specific way: a bug in repository code can leak across namespaces with no second line of defense, where Postgres RLS would catch it even if the WHERE clause were wrong. Mitigation is process, not architecture: every `localstore` repository ships an explicit cross-namespace rejection test (mirroring T3), and code review treats a missing namespace parameter as a security bug, not a style issue. This is stated here as an accepted, documented risk, not resolved by database enforcement — flagged per the ambiguity-ladder discipline in `docs/implementation-rules.md` §2.4 rung 5.
 
 ### 7.3 Credentials vs identity records
 
-Per the design brief: identity *records* (who an agent is, its org memberships) are recoverable; *credentials* (raw Passport tokens, keys) are not redistributed on recovery — regenerated instead. `wormholed` local storage may hold live credentials (hashed at rest, matching `docs/architecture.md` §3 rule 6) but a lost/wiped machine recovers via re-issuance through the coordination server, not credential replication.
+Per the design brief: identity *records* (who an agent is, its org memberships) are recoverable; *credentials* (raw Passport tokens, keys) are not redistributed on recovery — regenerated instead. `wormholed` local storage may hold live credentials (hashed at rest, matching `docs/implementation-rules.md` §5 rule 6) but a lost/wiped machine recovers via re-issuance through the coordination server, not credential replication.
 
 ---
 
@@ -163,7 +163,7 @@ Bootstrap pulls a complete working environment before the runtime switches to in
 - Local writes become durable in SQLite first (G4). Sync is a separate, asynchronous step — never blocking a local write's success on network reachability.
 - Outbound queue in `internal/runtime/sync` persists across restarts and network interruptions (SQLite-backed, not in-memory-only).
 - Delivery classes mirror the design brief's event categories: ephemeral events never sync; durable events (task/KB changes) queue and sync reliably; persistent state syncs via the incremental pull/push cycle.
-- Batching: time/queue-size/priority-based, with an explicit bypass for latency-sensitive event classes (matches design brief; exact thresholds are tunable config, not hardcoded — same discipline as `docs/architecture.md`'s KB dedup-threshold precedent).
+- Batching: time/queue-size/priority-based, with an explicit bypass for latency-sensitive event classes (matches design brief; exact thresholds are tunable configuration, not hardcoded).
 
 ### 8.3 Conflict handling (v1 answer)
 
@@ -173,7 +173,7 @@ Last-write-wins per row/field, coordination-server-timestamp authoritative, ever
 
 ## 9. Open Questions
 
-Carried forward explicitly, not resolved here (per `docs/architecture.md` §0.4 rung 5 discipline — conservative default stated, marked open):
+Carried forward explicitly, not resolved here (per the ambiguity ladder in `docs/implementation-rules.md` §2.4 rung 5 — conservative default stated, marked open):
 
 - OQ1: Conflict resolution beyond last-write-wins (CRDTs, operational transforms) — deferred, NG1.
 - OQ2: Exact `wormhole.sync.*` request/response schemas — indicative only, frozen at implementation time like all other MCP schemas (RFC-0001 M1).
@@ -186,7 +186,7 @@ Carried forward explicitly, not resolved here (per `docs/architecture.md` §0.4 
 
 ## 10. Security Considerations
 
-- Local storage holds hashed credentials only, same rule as `docs/architecture.md` §3.6 — no raw token ever written to SQLite, logged, or exposed over the local API.
+- Local storage holds hashed credentials only, matching `docs/implementation-rules.md` §5 rule 6 — no raw token ever written to SQLite, logged, or exposed over the local API.
 - Local API (Unix socket/named pipe) trusts OS-level file permissions for access control (OQ4); no additional bearer-token layer in v1.
 - Multi-org isolation is application-enforced, not database-enforced, in `wormholed` (§7.2) — the single biggest security-relevant departure from the coordination server's RLS guarantee, and the top implementation review priority for any `internal/runtime/localstore` change.
 - Sync channel (`wormholed` ↔ Coordination Server) is authenticated per-org (existing Passport-derived credential), encrypted in transit; no new auth primitive introduced beyond what RFC-0001 §8.4 already defines for Passports.
@@ -216,4 +216,4 @@ Advanced scheduling algorithms, distributed consensus, CRDTs, complex permission
 - `WORMHOLED-NEW-APPROACH.md` — source design brief for this RFC.
 - [RFC-0001: Wormhole Core](wormhole_rfc.md)
 - [RFC-0002: Wormhole Governance](wormhole_rfc_governance.md)
-- `docs/architecture.md` — implementation guardrails; will need a companion revision once this RFC is adopted, scoped separately from this document.
+- [`docs/implementation-rules.md`](../implementation-rules.md) — implementation guardrails.

@@ -14,7 +14,7 @@ Every modification must respect the codebase boundaries and layering principles:
 4. **R4: Dependencies**: Do not introduce new top-level packages or add external third-party Go dependencies without explicit human approval.
 5. **R5: Single datastore**: Wormhole runs entirely on Go and PostgreSQL + pgvector. No caching layers (Redis), message brokers (NATS), or other datastores may be added.
 
-For detailed rules on the codebase structure, review [docs/architecture.md](docs/architecture.md).
+For detailed rules on the codebase structure, review [docs/implementation-rules.md](docs/implementation-rules.md).
 
 ---
 

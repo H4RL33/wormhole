@@ -58,9 +58,9 @@ All we can do is encourage you to reconsider your provider of choice.
 
 ## Status
 
-**Local Runtime Alpha (v0.2.4-alpha)**. Core data schemas, Row-Level Security, multi-tenant isolation, and MCP tools for all four pillars are implemented (see [ROADMAP.md](ROADMAP.md)), plus the local-first runtime layer: `wormholed` daemon, SQLite replica, event bus/scheduler, sync engine with offline-write/reconnect, and multi-org bootstrap (see [ROADMAP-LOCAL-RUNTIME.md](ROADMAP-LOCAL-RUNTIME.md)). Offline/reconnect kill-network test suite and a comprehensive cross-repo isolation audit remain deferred to the beta pass — see that roadmap's P6 section for exact scope.
+Wormhole currently builds three binaries: `wormhole` for project setup and harness connection, `wormholed` for the local SQLite-backed MCP runtime and sync queue, and `wormhole-server` for the Postgres-backed coordination server. The server exposes MCP tools for identity, tasks, channels, knowledge base, git pointers, and runtime synchronization; the local runtime supports local writes, scheduling, multi-organization routing, and incremental synchronization.
 
-Since v0.2.0-alpha, the dashboard viewer-key issuance endpoint (`POST /dashboard/api/projects/{id}/viewer-keys`) and CLI command (`wormhole-cli viewer-key create`) have been added, gated by the `WORMHOLE_ADMIN_KEY` shared-secret admin auth stopgap — a thin placeholder ahead of real human identity/auth, not a full auth system.
+The read-only dashboard exposes project-scoped task, event, and knowledge-base views. Viewer-key issuance is protected by the `WORMHOLE_ADMIN_KEY` shared-secret admin stopgap; it is not a full human authentication system.
 
 ---
 
@@ -334,6 +334,7 @@ After setup, interact with your harness — Claude Code or OpenCode — which wi
 
 - [RFC-0001: Wormhole Core](docs/rfcs/wormhole_rfc.md)
 - [RFC-0002: Wormhole Governance](docs/rfcs/wormhole_rfc_governance.md)
+- [RFC-0003: Local Runtime](docs/rfcs/wormhole_rfc_local_runtime.md)
 
 ---
 
