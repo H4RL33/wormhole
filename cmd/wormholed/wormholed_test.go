@@ -484,6 +484,15 @@ func (s *isolatedCoordServer) serveHTTP(w http.ResponseWriter, r *http.Request) 
 
 	var result any
 	switch params.Name {
+	case "wormhole.agent.whoami":
+		var args struct {
+			ProjectID string `json:"project_id"`
+		}
+		if err := json.Unmarshal(params.Arguments, &args); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		result = map[string]any{"agent_id": "isolated-agent", "owner": "test", "model": "test", "capabilities": []string{}, "project_id": args.ProjectID, "permissions": []string{"task.create"}}
 	case "wormhole.sync.bootstrap":
 		result = map[string]any{
 			"org_config": map[string]any{}, "project_list": []string{},

@@ -152,13 +152,16 @@ type Server struct {
 	// Connections and their contexts are registered before their handler
 	// goroutine starts.
 	conns sync.Map // map[net.Conn]*connectionState
+	// authorizationAgents binds each project to the agent id in the active
+	// credential profile, preventing stale cache rows from authorizing it.
+	authorizationAgents sync.Map // map[projectID]agentID
 
 	// testBeforeHandlerStart is a deterministic test barrier between admission
 	// and handler execution. Production servers leave it nil.
 	testBeforeHandlerStart func()
-	// testCommitLocalWrite injects commit failures for atomic durable-write
-	// tests. Production servers leave it nil and call tx.Commit directly.
-	testCommitLocalWrite func(*sql.Tx) error
+	// testBeforeLocalWriteCommit injects a pre-commit abort for atomic-write
+	// rollback tests. It does not claim to simulate a storage-engine commit failure.
+	testBeforeLocalWriteCommit func(*sql.Tx) error
 
 	// registry is the local MCP tool registry (mcp.go), built once at
 	// construction time from the Server that will service every
@@ -541,7 +544,15 @@ func (s *Server) proxyRegister(ctx context.Context, args json.RawMessage) (json.
 // locally on success (RFC-0003 G4: local durability, best-effort here —
 // a cache-write failure does not fail the caller's request).
 func (s *Server) proxyWhoAmI(ctx context.Context) (whoAmIOutput, error) {
-	argsRaw, _ := json.Marshal(map[string]string{"project_id": s.projectID})
+	orgCtx, err := s.resolveOrgContext(s.projectID)
+	if err != nil {
+		return whoAmIOutput{}, err
+	}
+	return s.fetchAndCacheWhoAmI(ctx, orgCtx)
+}
+
+func (s *Server) fetchAndCacheWhoAmI(ctx context.Context, orgCtx OrgContext) (whoAmIOutput, error) {
+	argsRaw, _ := json.Marshal(map[string]string{"project_id": orgCtx.ProjectID})
 	paramsRaw, err := json.Marshal(toolsCallParams{Name: "wormhole.agent.whoami", Arguments: argsRaw})
 	if err != nil {
 		return whoAmIOutput{}, fmt.Errorf("localapi: marshal params: %w", err)
@@ -551,12 +562,12 @@ func (s *Server) proxyWhoAmI(ctx context.Context) (whoAmIOutput, error) {
 		return whoAmIOutput{}, fmt.Errorf("localapi: marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.coordServer, "/")+"/mcp", bytes.NewReader(reqBody))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(orgCtx.Creds.Server, "/")+"/mcp", bytes.NewReader(reqBody))
 	if err != nil {
 		return whoAmIOutput{}, fmt.Errorf("localapi: build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+s.token)
+	httpReq.Header.Set("Authorization", "Bearer "+orgCtx.Creds.Token)
 
 	resp, err := s.httpClient.Do(httpReq)
 	if err != nil {
@@ -598,8 +609,89 @@ func (s *Server) proxyWhoAmI(ctx context.Context) (whoAmIOutput, error) {
 		CachedAt:     time.Now().UTC(),
 	})
 	_ = cacheErr // best-effort: cache-write failure must not fail the caller's request (P1 scope)
+	s.authorizationAgents.Store(out.ProjectID, out.AgentID)
 
 	return out, nil
+}
+
+// SetAuthorizationAgent records the credential identity expected for a
+// project before the first local tools/call is served.
+func (s *Server) SetAuthorizationAgent(projectID, agentID string) {
+	if projectID != "" && agentID != "" {
+		s.authorizationAgents.Store(projectID, agentID)
+	}
+}
+
+// WarmAuthorizationScopes refreshes the offline authorization cache for each
+// configured project while the daemon is already online for sync bootstrap.
+// Individual failures are returned after all bindings have been attempted;
+// callers may continue serving, in which case uncached privileged calls fail
+// closed at the local MCP boundary.
+func (s *Server) WarmAuthorizationScopes(ctx context.Context) error {
+	if !s.isMultiOrg {
+		_, err := s.fetchAndCacheWhoAmI(ctx, OrgContext{OrgName: "default", Creds: config.Credentials{Server: s.coordServer, Token: s.token}, ProjectID: s.projectID})
+		return err
+	}
+	var failures []string
+	for _, binding := range s.bindings {
+		orgCtx, err := s.resolveOrgContext(binding.ProjectID)
+		if err == nil {
+			_, err = s.fetchAndCacheWhoAmI(ctx, orgCtx)
+		}
+		if err != nil {
+			failures = append(failures, binding.ProjectID+": "+err.Error())
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("localapi: warm authorization scopes: %s", strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+// authorizeLocalTool enforces the same per-action permission contract as the
+// Coordination Server before a local MCP handler can read or mutate replica
+// state. The daemon uses the last authenticated whoami scope cached for the
+// requested project, which keeps already-enrolled agents functional offline;
+// incremental_push independently rechecks every queued item server-side.
+func (s *Server) authorizeLocalTool(ctx context.Context, tool localTool, args json.RawMessage) error {
+	if tool.RequiredPermission == "" {
+		return nil
+	}
+	projectID := s.projectID
+	var argMap map[string]interface{}
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &argMap); err != nil {
+			return fmt.Errorf("localapi: authorize %s: invalid args: %w", tool.Name, err)
+		}
+		if supplied, ok := argMap["project_id"].(string); ok && supplied != "" {
+			projectID = supplied
+		}
+	}
+	orgCtx, err := s.resolveOrgContext(projectID)
+	if err != nil {
+		return err
+	}
+	var cached localstore.WhoAmICache
+	if expectedAgent, ok := s.authorizationAgents.Load(orgCtx.ProjectID); ok {
+		cached, err = s.store.GetCachedWhoAmIForAgentProject(ctx, expectedAgent.(string), orgCtx.ProjectID)
+	} else {
+		// Direct embedded users of localapi that do not configure credentials
+		// retain the project-only lookup; production wormholed always sets the
+		// exact credential identity before Serve.
+		cached, err = s.store.GetCachedWhoAmIForProject(ctx, orgCtx.ProjectID)
+	}
+	if err != nil {
+		if errors.Is(err, localstore.ErrNotFound) {
+			return fmt.Errorf("permission denied: no authenticated scope cached for project %s; call wormhole.agent.whoami while online", orgCtx.ProjectID)
+		}
+		return fmt.Errorf("localapi: authorize %s: %w", tool.Name, err)
+	}
+	for _, permission := range cached.Permissions {
+		if permission == tool.RequiredPermission {
+			return nil
+		}
+	}
+	return fmt.Errorf("permission denied: requires %s", tool.RequiredPermission)
 }
 
 // localListTasks serves wormhole.task.list from the local SQLite replica.
@@ -769,7 +861,7 @@ func (s *Server) localListChannelEvents(ctx context.Context, args json.RawMessag
 			"channel_id": ev.ChannelID,
 			"agent_id":   ev.AgentID,
 			"event_type": ev.EventType,
-			"payload":    string(ev.Payload),
+			"payload":    json.RawMessage(ev.Payload),
 			"note":       ev.Note,
 			"created_at": ev.CreatedAt,
 		}
@@ -809,7 +901,7 @@ func (s *Server) localListArticles(ctx context.Context, args json.RawMessage) (m
 			"id":              a.ID,
 			"title":           a.Title,
 			"body":            a.Body,
-			"frontmatter":     string(a.Frontmatter),
+			"frontmatter":     json.RawMessage(a.Frontmatter),
 			"author_agent_id": a.AuthorAgentID,
 			"created_at":      a.CreatedAt,
 			"updated_at":      a.UpdatedAt,
@@ -858,7 +950,7 @@ func (s *Server) localGetArticle(ctx context.Context, args json.RawMessage) (map
 		"id":              a.ID,
 		"title":           a.Title,
 		"body":            a.Body,
-		"frontmatter":     string(a.Frontmatter),
+		"frontmatter":     json.RawMessage(a.Frontmatter),
 		"author_agent_id": a.AuthorAgentID,
 		"created_at":      a.CreatedAt,
 		"updated_at":      a.UpdatedAt,
@@ -877,8 +969,10 @@ func (s *Server) beginLocalWrite(ctx context.Context) (*sql.Tx, error) {
 }
 
 func (s *Server) commitLocalWrite(tx *sql.Tx) error {
-	if s.testCommitLocalWrite != nil {
-		return s.testCommitLocalWrite(tx)
+	if s.testBeforeLocalWriteCommit != nil {
+		if err := s.testBeforeLocalWriteCommit(tx); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -1302,7 +1396,7 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 		"namespace_id":    article.NamespaceID,
 		"title":           article.Title,
 		"body":            article.Body,
-		"frontmatter":     string(article.Frontmatter),
+		"frontmatter":     json.RawMessage(article.Frontmatter),
 		"author_agent_id": article.AuthorAgentID,
 		"created_at":      article.CreatedAt,
 		"updated_at":      article.UpdatedAt,
@@ -1394,7 +1488,7 @@ func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (m
 		"channel_id":   ev.ChannelID,
 		"agent_id":     ev.AgentID,
 		"event_type":   ev.EventType,
-		"payload":      string(ev.Payload),
+		"payload":      json.RawMessage(ev.Payload),
 		"note":         ev.Note,
 		"created_at":   ev.CreatedAt,
 	}

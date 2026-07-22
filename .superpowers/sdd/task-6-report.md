@@ -54,9 +54,10 @@ A real SQLite trigger injected queue insertion failure. Before the fix,
 durable entity row without a queue entry. The channel case also proved the
 local `wormhole.channel.create` durable path was missing.
 
-Commit-failure injection against the pre-fix commit ordering then left one
-task, KB article, channel, and event row respectively after the handler had
-returned an error.
+Pre-commit abort injection against the pre-fix ordering then left one task,
+KB article, channel, and event row respectively after the handler had returned
+an error. This is intentionally described as pre-commit rollback coverage, not
+as a simulated SQLite storage-engine commit failure.
 
 ## GREEN implementation
 
@@ -71,6 +72,8 @@ parallel.
 
 Migration `000016_project_reference_isolation`:
 
+- runs a fail-closed legacy-reference preflight with named offending
+  relationships and an explicit repair-or-delete remediation hint;
 - enables RLS on the `projects` tenant root, scoped by `projects.id`;
 - adds composite `(id, project_id)` reference keys;
 - enforces same-project passport/permission, task hierarchy/link, channel/event,
@@ -80,7 +83,14 @@ Migration `000016_project_reference_isolation`:
 The table-driven restricted-role test covers no context, project A, and project
 B for SELECT, INSERT, UPDATE, and DELETE across `projects`, `passports`,
 `permissions`, `agent_tokens`, `audit_log`, `tasks`, `task_links`, `channels`,
-`events`, `git_links`, `kb_articles`, and `kb_links`.
+`events`, `git_links`, `kb_articles`, `kb_links`, and `viewer_keys`. The project
+INSERT case deletes and reinserts the known project A UUID inside a rolled-back
+transaction, proving that an ID matching the tenant GUC is accepted.
+
+Registration now begins through `identity.Store.BeginProjectTx`, so
+`wormhole.project_id` is set before `RegisterInTx` writes passports, permissions,
+tokens, and audit rows. A real restricted-role test executes the production
+`Register` operation successfully under RLS.
 
 ### Local durability
 
@@ -89,20 +99,38 @@ entity row and outbound queue entry. Repository transaction variants preserve
 the existing standalone APIs. Added coverage proves:
 
 - queue insertion failure rolls back both sides;
-- injected commit failure rolls back both sides;
+- an injected pre-commit abort rolls back both sides;
 - a successful response survives store close/reopen with both the entity and
   pending queue entry;
 - local `wormhole.channel.create` is listed and syncable like the other durable
   write tools.
 
+Every durable local tool declares its action permission (`task.create`,
+`kb.write`, `channel.create`, or `channel.post`); scheduler-backed `task.route`
+also requires `task.create`. The local MCP boundary checks
+the authenticated project scope cached during online startup, preserving
+authorized offline writes while failing closed when a scope or permission is
+absent. Production authorization selects the exact configured agent-and-project
+cache row, so a stale higher-privilege identity for the same tenant cannot lend
+permissions to replacement credentials. The SQLite cache now keys identities by
+`(agent_id, project_id)`, with a safe in-place upgrade from the older agent-only
+key. The server independently
+rechecks the corresponding permission for every incremental-push item, so a
+stale or tampered local queue cannot bypass current server authorization.
+
+KB frontmatter and event payloads remain native JSON objects through local
+responses and queue entries. Unit tests assert decoded object types, and the
+real stdio integration reads both JSONB values back from Postgres.
+
 ### Full path and multi-project integration
 
 The real stdio bridge test now covers initialize, initialized notification,
-tools/list, offline local task write/read, daemon shutdown, SQLite persistence,
-daemon restart, new bridge reconnect, queue drain, Postgres readback, and
-Coordination Server MCP readback. A second subprocess test covers split JSON
-writes, oversized input, four concurrent bridge clients, and SIGINT/SIGTERM
-while a partial request is in flight.
+tools/list, offline local task/KB/channel/event writes, daemon shutdown, an
+assertion that the original bridge process exits when its socket side ends,
+SQLite persistence, daemon restart, new bridge reconnect, queue drain,
+Postgres native-JSON readback, and Coordination Server MCP readback. A second
+subprocess test covers split JSON writes, oversized input, four concurrent
+bridge clients, and SIGINT/SIGTERM while a partial request is in flight.
 
 The two-binding integration uses one real Coordination Server/Postgres and one
 production daemon with two credential profiles. Both tasks persist under their
@@ -124,16 +152,22 @@ PASS: all packages; no race reports; no integration skips
 WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git ./internal/core/tasks ./internal/core/kb ./internal/core/events -count=30
 PASS: git 6.239s, tasks 19.875s, kb 33.058s, events 16.053s
 
-WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/mcp -run 'TestRestrictedRole(RLS|Rejects)' -count=10
+WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/mcp -run 'TestRestrictedRole(RLSOperationMatrix|RejectsCrossProjectForeignReferences)' -count=3
+PASS
+
+WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/identity -run TestRegister_SetsProjectContextBeforeRestrictedRoleWrites -count=3
 PASS
 
 go test ./internal/runtime/localapi -run 'TestLocalDurableWrites_' -count=20
 PASS
 
-WORMHOLE_INTEGRATION_REQUIRED=1 go test ./cmd/wormholed -run 'TestE2E_StdioBridge(ToPostgres|ProtocolAndSignalBoundaries)|TestRun_TwoProjectBindingsPersistWithTokenAndNamespaceIsolation' -count=3
+WORMHOLE_INTEGRATION_REQUIRED=1 go test ./cmd/wormholed -run 'TestE2E_StdioBridgeToPostgres|TestRun_TwoProjectBindingsPersistWithTokenAndNamespaceIsolation' -count=2
 PASS
 
-000016 down -> up -> focused RLS matrix
+000016 down -> insert legacy cross-project permission -> up
+PASS: refused with named relationship and remediation hint
+
+delete invalid fixture -> 000016 up -> focused RLS matrix
 PASS
 
 make build
@@ -150,6 +184,8 @@ PASS
 
 - `.superpowers/sdd/task-6-report.md`
 - `cmd/wormholed/e2e_stdio_bridge_test.go`
+- `cmd/wormholed/wormholed.go`
+- `cmd/wormholed/wormholed_test.go`
 - `cmd/wormholed/p7_e2e_integration_test.go`
 - `docs/db-entities.md`
 - `docs/implementation-rules.md`
@@ -157,12 +193,18 @@ PASS
 - `internal/core/git/git_test.go`
 - `internal/core/kb/kb_test.go`
 - `internal/core/tasks/tasks_test.go`
+- `internal/core/identity/identity.go`
+- `internal/core/identity/identity_test.go`
 - `internal/mcp/rls_integration_test.go`
+- `internal/mcp/sync.go`
+- `internal/mcp/sync_test.go`
 - `internal/runtime/localapi/localapi.go`
 - `internal/runtime/localapi/localapi_write_test.go`
 - `internal/runtime/localapi/mcp.go`
 - `internal/runtime/localapi/mcp_test.go`
 - `internal/runtime/localstore/event_repo.go`
+- `internal/runtime/localstore/localstore.go`
+- `internal/runtime/localstore/localstore_test.go`
 - `internal/runtime/localstore/kb_repo.go`
 - `internal/runtime/localstore/task_repo.go`
 - `internal/runtime/sync/queue_repo.go`
@@ -175,6 +217,11 @@ PASS
   sketch exemption because Task 6 explicitly requires project-root isolation
   and RFC-0001 §13 forbids cross-tenant project data retrieval. Both documents
   now state the corrected invariant.
+- `000016` exists only on this unmerged, unreleased Task 6 branch. Its
+  diagnostic preflight must execute before the constraints in that same
+  migration, so placing it in `000017` would be ineffective. If branch history
+  policy requires immutable per-commit migrations, the Task 6 commits must be
+  squashed before merge; no deployed migration has been rewritten.
 - Advisory locking is cooperative. Every current test that creates or grants a
   restricted role uses the shared key; future role-mutating integration
   fixtures must do the same.
@@ -183,3 +230,5 @@ PASS
   `task.route` workflow retains its existing separate scheduling/assignment
   semantics and was not redesigned here.
 - No Task 7 coverage-percentage work was included.
+- Linux-only daemon support and the Windows-via-WSL boundary remain explicit
+  in both `README.md` and `docs/claude-code-connector.md`.

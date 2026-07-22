@@ -283,6 +283,20 @@ func runWithSyncEngineFactory(ctx context.Context, profileName string, factory s
 		return fmt.Errorf("wormholed: start local api: %w", err)
 	}
 	defer srv.Close()
+	if useMultiOrg {
+		for _, binding := range multiCfg.Bindings {
+			if org, ok := multiCfg.Orgs[binding.OrgName]; ok {
+				srv.SetAuthorizationAgent(binding.ProjectID, org.Credentials.AgentID)
+			}
+		}
+	} else {
+		srv.SetAuthorizationAgent(cfg.Credentials.ProjectID, cfg.Credentials.AgentID)
+	}
+	// Sync bootstrap proves the coordination endpoints are reachable. Refresh
+	// per-project permissions now so durable local writes remain authorized
+	// when the daemon later operates offline. A failed refresh leaves that
+	// project fail-closed at tools/call rather than preventing read-only use.
+	_ = srv.WarmAuthorizationScopes(ctx)
 
 	return srv.Serve(ctx)
 }

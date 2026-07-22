@@ -3,8 +3,10 @@
 No SQL yet — entities and relations only, per RFC-0001 §7.1 (indicative storage shape), §8 (pillars), §13 (multi-tenancy).
 
 All tenant tables use row-level project scoping (RFC §13). Child tables carry
-`project_id`; the `projects` root scopes on `id`. Only `agents` is
-project-agnostic because an agent identity can span projects via Passports.
+`project_id`; the `projects` root scopes on `id`. `agents` is
+project-agnostic because an agent identity can span projects via Passports;
+`role_templates` is global configuration applied during registration. Those
+are the only application tables without tenant RLS.
 
 ## projects
 - `id`
@@ -141,6 +143,8 @@ Pointers only, per RFC §8.6 — never mirrors code.
 ## role_templates
 
 Stores role definitions and their default capabilities, roles, and permissions. Used during agent registration to auto-fill Passport fields when a role is specified.
+This is a global configuration table, not tenant data, so it intentionally has
+no `project_id` or RLS policy.
 
 | Column | Type | Notes |
 |--------|------|-------|

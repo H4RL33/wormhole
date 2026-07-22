@@ -24,6 +24,7 @@ type rlsMatrixFixture struct {
 	channelA  string
 	articleA  string
 	articleA2 string
+	viewerKeyA string
 }
 
 type rlsTableCase struct {
@@ -52,6 +53,7 @@ func TestRestrictedRoleRLSOperationMatrix(t *testing.T) {
 		{name: "git_links", rowID: mustRowID(t, owner, `SELECT id FROM git_links WHERE project_id = $1`, fx.projectA), updateSQL: `UPDATE git_links SET summary = summary WHERE id = $1`, insertSQL: `INSERT INTO git_links (project_id, task_id, repo, commit_sha, summary, agent_id) VALUES ($1, $2, 'matrix/repo', gen_random_uuid()::text, 'matrix', $3)`, insertArg: []any{fx.projectA, fx.taskA, fx.agentID}},
 		{name: "kb_articles", rowID: fx.articleA, updateSQL: `UPDATE kb_articles SET title = title WHERE id = $1`, insertSQL: `INSERT INTO kb_articles (project_id, title, body, author_agent_id) VALUES ($1, 'matrix', 'matrix', $2)`, insertArg: []any{fx.projectA, fx.agentID}},
 		{name: "kb_links", rowID: mustRowID(t, owner, `SELECT id FROM kb_links WHERE project_id = $1`, fx.projectA), updateSQL: `UPDATE kb_links SET created_at = created_at WHERE id = $1`, insertSQL: `INSERT INTO kb_links (project_id, from_article_id, to_article_id) VALUES ($1, $2, $3)`, insertArg: []any{fx.projectA, fx.articleA, fx.articleA2}},
+		{name: "viewer_keys", rowID: fx.viewerKeyA, updateSQL: `UPDATE viewer_keys SET label = label WHERE id = $1`, insertSQL: `INSERT INTO viewer_keys (project_id, label, key_hash) VALUES ($1, 'matrix', gen_random_uuid()::text)`, insertArg: []any{fx.projectA}},
 	}
 
 	for _, tc := range cases {
@@ -72,6 +74,8 @@ func TestRestrictedRoleRLSOperationMatrix(t *testing.T) {
 			assertRLSInsert(t, restricted, "", tc.insertSQL, tc.insertArg, false)
 			if tc.name != "projects" {
 				assertRLSInsert(t, restricted, fx.projectA, tc.insertSQL, tc.insertArg, true)
+			} else {
+				assertProjectReplacementInsert(t, restricted, fx.projectA)
 			}
 			assertRLSInsert(t, restricted, fx.projectB, tc.insertSQL, tc.insertArg, false)
 		})
@@ -177,6 +181,7 @@ func seedRLSMatrix(t *testing.T, db *sql.DB) rlsMatrixFixture {
 	mustScan(t, db, `INSERT INTO kb_articles (project_id, title, body, author_agent_id) VALUES ($1, 'matrix-a', 'seed', $2) RETURNING id`, &fx.articleA, fx.projectA, fx.agentID)
 	mustScan(t, db, `INSERT INTO kb_articles (project_id, title, body, author_agent_id) VALUES ($1, 'matrix-a2', 'seed', $2) RETURNING id`, &fx.articleA2, fx.projectA, fx.agentID)
 	mustExec(t, db, `INSERT INTO kb_links (project_id, from_article_id, to_article_id) VALUES ($1, $2, $3)`, fx.projectA, fx.articleA, fx.articleA2)
+	mustScan(t, db, `INSERT INTO viewer_keys (project_id, label, key_hash) VALUES ($1, 'matrix-key', gen_random_uuid()::text) RETURNING id`, &fx.viewerKeyA, fx.projectA)
 	t.Cleanup(func() {
 		_, _ = db.Exec(`DELETE FROM agents WHERE id IN ($1, $2)`, fx.agentID, fx.agentID2)
 		_, _ = db.Exec(`DELETE FROM projects WHERE id IN ($1, $2)`, fx.projectA, fx.projectB)
@@ -239,6 +244,18 @@ func assertRLSInsert(t *testing.T, db *sql.DB, projectID, query string, args []a
 	}
 	if !wantSuccess && err == nil {
 		t.Fatalf("RLS insert unexpectedly succeeded (context %q)", projectID)
+	}
+}
+
+func assertProjectReplacementInsert(t *testing.T, db *sql.DB, projectID string) {
+	t.Helper()
+	tx := beginRestrictedTx(t, db, projectID)
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(context.Background(), `DELETE FROM projects WHERE id = $1`, projectID); err != nil {
+		t.Fatalf("delete project before matching-id insert: %v", err)
+	}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO projects (id, name, owner) VALUES ($1, 'matrix-project-reinsert', 'matrix')`, projectID); err != nil {
+		t.Fatalf("RLS project insert with id matching tenant GUC: %v", err)
 	}
 }
 

@@ -453,6 +453,16 @@ func IncrementalPushTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore
 					continue
 				}
 
+				requiredPermission := map[string]string{
+					"task": "task.create", "kb": "kb.write",
+					"channel": "channel.create", "event": "channel.post",
+				}[item.EntityType]
+				if scope != nil && requiredPermission != "" && !scope.HasPermission(requiredPermission) {
+					result.Error = "permission denied: requires " + requiredPermission
+					applied = append(applied, result)
+					continue
+				}
+
 				var applyErr error
 				switch item.EntityType {
 				case "task":

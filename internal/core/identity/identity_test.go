@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net/url"
 	"os"
 	"reflect"
 	"testing"
@@ -134,6 +135,57 @@ func TestRegister_RequiresProjectAndExplicitPermissions(t *testing.T) {
 	if _, _, _, err := s.Register(ctx, projectID, nil, "harley", "codex", nil, nil, nil); !errors.Is(err, ErrInvalidScope) {
 		t.Errorf("Register(nil permissions) error = %v, want ErrInvalidScope", err)
 	}
+}
+
+func TestRegister_SetsProjectContextBeforeRestrictedRoleWrites(t *testing.T) {
+	ownerStore := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, ownerStore, "restricted-register")
+	lockConn, err := ownerStore.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("open fixture lock: %v", err)
+	}
+	if _, err := lockConn.ExecContext(ctx, `SELECT pg_advisory_lock(867530913)`); err != nil {
+		t.Fatalf("lock fixture: %v", err)
+	}
+	const role = "wormhole_identity_register_test"
+	t.Cleanup(func() {
+		_, _ = ownerStore.db.Exec(`REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM ` + role)
+		_, _ = ownerStore.db.Exec(`REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM ` + role)
+		_, _ = ownerStore.db.Exec(`DROP ROLE IF EXISTS ` + role)
+		_, _ = lockConn.ExecContext(ctx, `SELECT pg_advisory_unlock(867530913)`)
+		lockConn.Close()
+	})
+	_, _ = ownerStore.db.Exec(`DROP ROLE IF EXISTS ` + role)
+	if _, err := ownerStore.db.Exec(`CREATE ROLE ` + role + ` LOGIN PASSWORD 'wormhole_identity_register_test'`); err != nil {
+		t.Fatalf("create role: %v", err)
+	}
+	if _, err := ownerStore.db.Exec(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ` + role); err != nil {
+		t.Fatalf("grant tables: %v", err)
+	}
+	if _, err := ownerStore.db.Exec(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ` + role); err != nil {
+		t.Fatalf("grant sequences: %v", err)
+	}
+
+	cfg := types.LoadConfig()
+	u, err := url.Parse(cfg.DatabaseURL)
+	if err != nil {
+		t.Fatalf("parse database URL: %v", err)
+	}
+	u.User = url.UserPassword(role, "wormhole_identity_register_test")
+	restrictedDB, err := sql.Open("postgres", u.String())
+	if err != nil {
+		t.Fatalf("open restricted db: %v", err)
+	}
+	defer restrictedDB.Close()
+	if err := restrictedDB.PingContext(ctx); err != nil {
+		t.Fatalf("ping restricted db: %v", err)
+	}
+	agent, _, _, err := NewStore(restrictedDB).Register(ctx, projectID, []string{"task.create"}, "restricted", "test", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("restricted Register: %v", err)
+	}
+	cleanupAgent(t, ownerStore, agent.ID)
 }
 
 // TestWhoAmI_ForgedTokenRejected is the RFC-0001 §13 unforgeability claim:

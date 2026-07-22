@@ -165,6 +165,9 @@ func TestTaskRoutedWithoutCoordinationServer(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer store.Close()
+	if err := store.CacheWhoAmI(context.Background(), localstore.WhoAmICache{AgentID: "task-agent", ProjectID: "project-1", Permissions: []string{"task.create"}, CachedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("cache task-route scope: %v", err)
+	}
 
 	bus := eventbus.NewEventBus()
 	sched := scheduler.NewScheduler()

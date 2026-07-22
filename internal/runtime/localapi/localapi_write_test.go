@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/runtime/sync"
@@ -32,6 +33,14 @@ func newTestServerWithQueue(t *testing.T) (srv *Server, tr *localstore.TaskRepo,
 	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
 	if err != nil {
 		t.Fatalf("localstore.Open: %v", err)
+	}
+	if err := store.CacheWhoAmI(context.Background(), localstore.WhoAmICache{
+		AgentID: "agent-1", ProjectID: "ns-1",
+		Permissions: []string{"task.create", "task.list", "kb.write", "kb.search", "kb.get", "channel.create", "channel.post", "channel.list", "channel.subscribe"},
+		CachedAt:    time.Now().UTC(),
+	}); err != nil {
+		store.Close()
+		t.Fatalf("cache authenticated scope: %v", err)
 	}
 
 	er = localstore.NewEventRepo(store.DB())
@@ -132,6 +141,7 @@ func TestLocalKBWrite_EnqueuesForSync(t *testing.T) {
 		"agent_id":     "agent-1",
 		"title":        "how to close alpha gaps",
 		"body":         "enqueue every local write",
+		"frontmatter":  map[string]interface{}{"kind": "runbook", "version": float64(2)},
 	})
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
@@ -151,6 +161,13 @@ func TestLocalKBWrite_EnqueuesForSync(t *testing.T) {
 	pending, err := qr.ListPending(context.Background(), "ns-1", 10)
 	if err != nil || len(pending) != 1 || pending[0].EntityID != articleID || pending[0].Operation != "create" || pending[0].EntityType != "kb" {
 		t.Fatalf("expected article enqueued for sync with entity_type=kb, got pending=%+v err=%v", pending, err)
+	}
+	var queued map[string]interface{}
+	if err := json.Unmarshal(pending[0].Payload, &queued); err != nil {
+		t.Fatalf("decode queued KB payload: %v", err)
+	}
+	if _, ok := queued["frontmatter"].(map[string]interface{}); !ok {
+		t.Fatalf("queued frontmatter type = %T, want JSON object: %#v", queued["frontmatter"], queued["frontmatter"])
 	}
 }
 
@@ -183,6 +200,49 @@ func TestLocalChannelPost_EnqueuesForSync(t *testing.T) {
 	pending, err := qr.ListPending(context.Background(), "ns-1", 10)
 	if err != nil || len(pending) != 1 || pending[0].EntityID != eventID || pending[0].Operation != "create" {
 		t.Fatalf("expected event enqueued for sync, got pending=%+v err=%v", pending, err)
+	}
+	var queued map[string]interface{}
+	if err := json.Unmarshal(pending[0].Payload, &queued); err != nil {
+		t.Fatalf("decode queued event payload: %v", err)
+	}
+	if _, ok := queued["payload"].(map[string]interface{}); !ok {
+		t.Fatalf("queued event payload type = %T, want JSON object: %#v", queued["payload"], queued["payload"])
+	}
+}
+
+func TestLocalDurableWrites_RequireSameProjectActionPermission(t *testing.T) {
+	srv, _, er, _, qr, cleanup := newTestServerWithQueue(t)
+	defer cleanup()
+	if _, err := srv.store.DB().Exec(`UPDATE whoami_cache SET permissions = '[]' WHERE project_id = 'ns-1'`); err != nil {
+		t.Fatalf("restrict cached permissions: %v", err)
+	}
+	srv.SetAuthorizationAgent("ns-1", "agent-1")
+	if err := srv.store.CacheWhoAmI(context.Background(), localstore.WhoAmICache{AgentID: "stale-admin", ProjectID: "ns-1", Permissions: []string{"task.create", "kb.write", "channel.create", "channel.post"}, CachedAt: time.Now().UTC().Add(time.Hour)}); err != nil {
+		t.Fatalf("cache stale higher-privilege identity: %v", err)
+	}
+	channelID, err := er.CreateChannel(context.Background(), "ns-1", "denied")
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	for _, tt := range []struct {
+		name, tool string
+		args       map[string]interface{}
+	}{
+		{name: "kb", tool: "wormhole.kb.write", args: map[string]interface{}{"title": "denied", "agent_id": "agent-1"}},
+		{name: "channel create", tool: "wormhole.channel.create", args: map[string]interface{}{"name": "denied-new"}},
+		{name: "event", tool: "wormhole.channel.post", args: map[string]interface{}{"channel_id": channelID, "agent_id": "agent-1", "event_type": "denied", "payload": map[string]interface{}{"x": true}}},
+		{name: "task route", tool: "wormhole.task.route", args: map[string]interface{}{"capability": "code", "title": "denied route"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := dialAndCall(t, srv, tt.tool, tt.args)
+			if resp.Error == nil || !strings.Contains(resp.Error.Error(), "permission denied") {
+				t.Fatalf("response error = %v, want permission denied", resp.Error)
+			}
+		})
+	}
+	pending, err := qr.ListPending(context.Background(), "ns-1", 10)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("denied same-project actions reached queue: pending=%+v err=%v", pending, err)
 	}
 }
 
@@ -220,17 +280,17 @@ func TestLocalDurableWrites_RollBackWhenQueueInsertFails(t *testing.T) {
 	}
 }
 
-func TestLocalDurableWrites_RollBackWhenCommitFails(t *testing.T) {
+func TestLocalDurableWrites_RollBackWhenAbortedBeforeCommit(t *testing.T) {
 	tests := durableWriteCases()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			srv, _, er, _, qr, cleanup := newTestServerWithQueue(t)
 			defer cleanup()
-			srv.testCommitLocalWrite = func(*sql.Tx) error { return errors.New("injected commit failure") }
+			srv.testBeforeLocalWriteCommit = func(*sql.Tx) error { return errors.New("injected pre-commit abort") }
 
 			resp := dialAndCall(t, srv, tt.tool, tt.args(t, er))
-			if resp.Error == nil || !strings.Contains(resp.Error.Error(), "injected commit failure") {
-				t.Fatalf("response error = %v, want injected commit failure", resp.Error)
+			if resp.Error == nil || !strings.Contains(resp.Error.Error(), "injected pre-commit abort") {
+				t.Fatalf("response error = %v, want injected pre-commit abort", resp.Error)
 			}
 
 			var count int
@@ -332,6 +392,10 @@ func newTestServerAtPath(t *testing.T, dbPath string) (*Server, *localstore.Even
 	store, err := localstore.Open(dbPath)
 	if err != nil {
 		t.Fatalf("localstore.Open: %v", err)
+	}
+	if err := store.CacheWhoAmI(context.Background(), localstore.WhoAmICache{AgentID: "agent-1", ProjectID: "ns-1", Permissions: []string{"task.create", "kb.write", "channel.create", "channel.post"}, CachedAt: time.Now().UTC()}); err != nil {
+		store.Close()
+		t.Fatalf("cache authenticated scope: %v", err)
 	}
 	er := localstore.NewEventRepo(store.DB())
 	srv, err := New(filepath.Join(t.TempDir(), "wormholed.sock"), "", "", "ns-1", store,

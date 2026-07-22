@@ -238,7 +238,7 @@ func e2eStartCoordServer(t *testing.T, db *sql.DB) (srvURL, projectID, agentID, 
 	projectID = e2eMustCreateProject(t, db, "e2e-stdio-bridge-project")
 
 	registerResultRaw := e2eCallTool(t, srv.URL, "wormhole.agent.register", projectID, "", mcp.RegisterAgentInput{
-		Permissions:  []string{"task.create", "event.publish", "kb.write", "task.list"},
+		Permissions:  []string{"task.create", "task.list", "kb.write", "channel.create", "channel.post"},
 		Owner:        "harley",
 		Model:        "claude",
 		Capabilities: []string{"code_review"},
@@ -511,7 +511,7 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 	}
 
 	// --- Leg 1: real Coordination Server, real Postgres. ---
-	coordURL, projectID, _, token := e2eStartCoordServer(t, db)
+	coordURL, projectID, agentID, token := e2eStartCoordServer(t, db)
 	var coordOnline atomic.Bool
 	coordOnline.Store(true)
 	coordProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -537,7 +537,8 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 		}
 		defer resp.Body.Close()
 		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
+		responseBody, _ := io.ReadAll(resp.Body)
+		_, _ = w.Write(responseBody)
 	}))
 	defer coordProxy.Close()
 
@@ -580,6 +581,9 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 	}
 	if !bytes.Contains(listResp.Result, []byte(`"wormhole.task.create"`)) || !bytes.Contains(listResp.Result, []byte(`"wormhole.channel.create"`)) {
 		t.Fatalf("tools/list missing durable write tools: %s", listResp.Result)
+	}
+	if _, errMsg := client.callTool(t, "wormhole.agent.whoami", nil); errMsg != "" {
+		t.Fatalf("warm authenticated local scope: %s", errMsg)
 	}
 	coordOnline.Store(false)
 
@@ -627,7 +631,54 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 	if preRestartCount != 0 {
 		t.Fatalf("offline task reached Postgres before reconnect: count=%d", preRestartCount)
 	}
+	kbRaw, errMsg := client.callTool(t, "wormhole.kb.write", map[string]interface{}{
+		"agent_id": agentID, "title": "e2e native JSON article", "body": "native frontmatter survives sync",
+		"frontmatter": map[string]interface{}{"kind": "runbook", "nested": map[string]interface{}{"version": 2}},
+	})
+	if errMsg != "" {
+		t.Fatalf("wormhole.kb.write returned error: %s", errMsg)
+	}
+	var kbOut struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(kbRaw, &kbOut); err != nil || kbOut.ID == "" {
+		t.Fatalf("decode KB result %s: %v", kbRaw, err)
+	}
+	channelRaw, errMsg := client.callTool(t, "wormhole.channel.create", map[string]interface{}{"name": "e2e-native-json"})
+	if errMsg != "" {
+		t.Fatalf("wormhole.channel.create returned error: %s", errMsg)
+	}
+	var channelOut struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(channelRaw, &channelOut); err != nil || channelOut.ID == "" {
+		t.Fatalf("decode channel result %s: %v", channelRaw, err)
+	}
+	eventRaw, errMsg := client.callTool(t, "wormhole.channel.post", map[string]interface{}{
+		"channel_id": channelOut.ID, "agent_id": agentID, "event_type": "discovery.logged",
+		"payload": map[string]interface{}{"found": true, "nested": map[string]interface{}{"count": 3}},
+	})
+	if errMsg != "" {
+		t.Fatalf("wormhole.channel.post returned error: %s", errMsg)
+	}
+	var eventOut struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(eventRaw, &eventOut); err != nil || eventOut.ID == "" {
+		t.Fatalf("decode event result %s: %v", eventRaw, err)
+	}
+
 	daemon.stop(t)
+	bridgeExited := make(chan error, 1)
+	go func() { bridgeExited <- client.cmd.Wait() }()
+	select {
+	case err := <-bridgeExited:
+		if err != nil {
+			t.Fatalf("original stdio bridge after daemon shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("original stdio bridge did not exit after daemon shutdown")
+	}
 	coordOnline.Store(true)
 	restarted := startTestDaemon(t, "default", socketPath)
 	defer restarted.stop(t)
@@ -655,6 +706,36 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 	})
 	if gotTitle != taskTitle {
 		t.Fatalf("task title in Postgres = %q, want %q", gotTitle, taskTitle)
+	}
+	var kbJSON, eventJSON []byte
+	waitForCondition(t, 20*time.Second, "native event JSON to sync into Postgres", func() (bool, error) {
+		if err := db.QueryRow(`SELECT payload FROM events WHERE id = $1 AND project_id = $2`, eventOut.ID, projectID).Scan(&eventJSON); errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		} else if err != nil {
+			return false, err
+		}
+		return true, nil
+	})
+	waitForCondition(t, 20*time.Second, "native KB JSON to sync into Postgres", func() (bool, error) {
+		if err := db.QueryRow(`SELECT frontmatter FROM kb_articles WHERE id = $1 AND project_id = $2`, kbOut.ID, projectID).Scan(&kbJSON); errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		} else if err != nil {
+			return false, err
+		}
+		return true, nil
+	})
+	var gotKB, gotEvent map[string]interface{}
+	if err := json.Unmarshal(kbJSON, &gotKB); err != nil {
+		t.Fatalf("Postgres KB frontmatter is not an object: %s: %v", kbJSON, err)
+	}
+	if err := json.Unmarshal(eventJSON, &gotEvent); err != nil {
+		t.Fatalf("Postgres event payload is not an object: %s: %v", eventJSON, err)
+	}
+	if gotKB["kind"] != "runbook" {
+		t.Fatalf("Postgres KB frontmatter = %#v", gotKB)
+	}
+	if gotEvent["found"] != true {
+		t.Fatalf("Postgres event payload = %#v", gotEvent)
 	}
 
 	// Secondary confirmation the task is visible through the Coordination

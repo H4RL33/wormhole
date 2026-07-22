@@ -134,9 +134,9 @@ func (s *Store) BeginProjectTx(ctx context.Context, projectID string) (*sql.Tx, 
 // exactly once — only its SHA-256 hash is persisted, so the raw value can
 // never be recovered from storage.
 func (s *Store) Register(ctx context.Context, projectID string, permissions []string, owner, model string, capabilities, repositories, roles []string) (Agent, Passport, string, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.BeginProjectTx(ctx, projectID)
 	if err != nil {
-		return Agent{}, Passport{}, "", fmt.Errorf("identity: begin tx: %w", err)
+		return Agent{}, Passport{}, "", err
 	}
 	defer tx.Rollback()
 

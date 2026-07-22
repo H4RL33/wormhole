@@ -22,13 +22,14 @@ var ErrNotFound = errors.New("localstore: not found")
 
 const schema = `
 CREATE TABLE IF NOT EXISTS whoami_cache (
-	agent_id     TEXT PRIMARY KEY,
+	agent_id     TEXT NOT NULL,
 	owner        TEXT NOT NULL,
 	model        TEXT NOT NULL,
 	capabilities TEXT NOT NULL DEFAULT '[]',
 	project_id   TEXT NOT NULL,
 	permissions  TEXT NOT NULL DEFAULT '[]',
-	cached_at    TIMESTAMP NOT NULL
+	cached_at    TIMESTAMP NOT NULL,
+	PRIMARY KEY (agent_id, project_id)
 );
 
 CREATE TABLE IF NOT EXISTS tasks (
@@ -123,7 +124,53 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("localstore: apply schema: %w", err)
 	}
+	if err := migrateWhoAmICacheProjectKey(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("localstore: migrate whoami cache: %w", err)
+	}
 	return &Store{db: db}, nil
+}
+
+func migrateWhoAmICacheProjectKey(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(whoami_cache)`)
+	if err != nil {
+		return err
+	}
+	primaryColumns := 0
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if pk > 0 {
+			primaryColumns++
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if primaryColumns != 1 {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{
+		`ALTER TABLE whoami_cache RENAME TO whoami_cache_legacy`,
+		`CREATE TABLE whoami_cache (agent_id TEXT NOT NULL, owner TEXT NOT NULL, model TEXT NOT NULL, capabilities TEXT NOT NULL DEFAULT '[]', project_id TEXT NOT NULL, permissions TEXT NOT NULL DEFAULT '[]', cached_at TIMESTAMP NOT NULL, PRIMARY KEY (agent_id, project_id))`,
+		`INSERT INTO whoami_cache SELECT agent_id, owner, model, capabilities, project_id, permissions, cached_at FROM whoami_cache_legacy`,
+		`DROP TABLE whoami_cache_legacy`,
+	} {
+		if _, err := tx.Exec(statement); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // Close releases the underlying database handle.
@@ -162,7 +209,7 @@ func (s *Store) CacheWhoAmI(ctx context.Context, c WhoAmICache) error {
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO whoami_cache (agent_id, owner, model, capabilities, project_id, permissions, cached_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(agent_id) DO UPDATE SET
+		ON CONFLICT(agent_id, project_id) DO UPDATE SET
 			owner = excluded.owner,
 			model = excluded.model,
 			capabilities = excluded.capabilities,
@@ -182,13 +229,68 @@ func (s *Store) GetCachedWhoAmI(ctx context.Context, agentID string) (WhoAmICach
 	var capsJSON, permsJSON string
 	err := s.db.QueryRowContext(ctx, `
 		SELECT agent_id, owner, model, capabilities, project_id, permissions, cached_at
-		FROM whoami_cache WHERE agent_id = ?
+		FROM whoami_cache WHERE agent_id = ? ORDER BY cached_at DESC LIMIT 1
 	`, agentID).Scan(&c.AgentID, &c.Owner, &c.Model, &capsJSON, &c.ProjectID, &permsJSON, &c.CachedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return WhoAmICache{}, ErrNotFound
 	}
 	if err != nil {
 		return WhoAmICache{}, fmt.Errorf("localstore: get cached whoami for %s: %w", agentID, err)
+	}
+	if err := json.Unmarshal([]byte(capsJSON), &c.Capabilities); err != nil {
+		return WhoAmICache{}, fmt.Errorf("localstore: unmarshal capabilities: %w", err)
+	}
+	if err := json.Unmarshal([]byte(permsJSON), &c.Permissions); err != nil {
+		return WhoAmICache{}, fmt.Errorf("localstore: unmarshal permissions: %w", err)
+	}
+	c.CachedAt = c.CachedAt.UTC()
+	return c, nil
+}
+
+// GetCachedWhoAmIForProject returns the most recently cached authenticated
+// identity for projectID. The local MCP boundary uses this project-scoped
+// lookup because every local tools/call supplies a project scope, while the
+// single-org daemon configuration historically did not retain an agent id.
+func (s *Store) GetCachedWhoAmIForProject(ctx context.Context, projectID string) (WhoAmICache, error) {
+	var c WhoAmICache
+	var capsJSON, permsJSON string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT agent_id, owner, model, capabilities, project_id, permissions, cached_at
+		FROM whoami_cache WHERE project_id = ?
+		ORDER BY cached_at DESC LIMIT 1
+	`, projectID).Scan(&c.AgentID, &c.Owner, &c.Model, &capsJSON, &c.ProjectID, &permsJSON, &c.CachedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return WhoAmICache{}, ErrNotFound
+	}
+	if err != nil {
+		return WhoAmICache{}, fmt.Errorf("localstore: get cached whoami for project %s: %w", projectID, err)
+	}
+	if err := json.Unmarshal([]byte(capsJSON), &c.Capabilities); err != nil {
+		return WhoAmICache{}, fmt.Errorf("localstore: unmarshal capabilities: %w", err)
+	}
+	if err := json.Unmarshal([]byte(permsJSON), &c.Permissions); err != nil {
+		return WhoAmICache{}, fmt.Errorf("localstore: unmarshal permissions: %w", err)
+	}
+	c.CachedAt = c.CachedAt.UTC()
+	return c, nil
+}
+
+// GetCachedWhoAmIForAgentProject returns the cached scope for the exact
+// credential identity and project. Authorization must prefer this over a
+// project-only lookup so a stale identity cannot lend permissions to a
+// replacement credential for the same tenant.
+func (s *Store) GetCachedWhoAmIForAgentProject(ctx context.Context, agentID, projectID string) (WhoAmICache, error) {
+	var c WhoAmICache
+	var capsJSON, permsJSON string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT agent_id, owner, model, capabilities, project_id, permissions, cached_at
+		FROM whoami_cache WHERE agent_id = ? AND project_id = ?
+	`, agentID, projectID).Scan(&c.AgentID, &c.Owner, &c.Model, &capsJSON, &c.ProjectID, &permsJSON, &c.CachedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return WhoAmICache{}, ErrNotFound
+	}
+	if err != nil {
+		return WhoAmICache{}, fmt.Errorf("localstore: get cached whoami for agent %s project %s: %w", agentID, projectID, err)
 	}
 	if err := json.Unmarshal([]byte(capsJSON), &c.Capabilities); err != nil {
 		return WhoAmICache{}, fmt.Errorf("localstore: unmarshal capabilities: %w", err)

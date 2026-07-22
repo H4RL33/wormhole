@@ -7,7 +7,39 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/H4RL33/wormhole/internal/core/identity"
 )
+
+func TestIncrementalPushTool_DeniesSameProjectItemWithoutActionPermission(t *testing.T) {
+	tasksStore := testTasksStore(t)
+	tool := IncrementalPushTool(tasksStore, testKBStore(t), testEventsStore(t), NewSyncRateLimiter(30, time.Minute))
+	projectID := mustCreateProject(t, "mcp-sync-push-permission-denied")
+	clientID := uuid.NewString()
+	payload, _ := json.Marshal(syncTaskCreatePayload{Title: "must not land"})
+	in := IncrementalPushInput{NamespaceID: projectID, Version: SyncProtocolVersion, Items: []struct {
+		EntityType string          `json:"entity_type"`
+		EntityID   string          `json:"entity_id"`
+		Operation  string          `json:"operation"`
+		Payload    json.RawMessage `json:"payload"`
+	}{{EntityType: "task", EntityID: clientID, Operation: "create", Payload: payload}}}
+	scope := &identity.AuthenticatedScope{ProjectID: projectID, Permissions: []string{"task.list"}}
+	result, err := tool.Handler(context.Background(), scope, projectID, mustMarshal(t, in))
+	if err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+	out := result.(IncrementalPushOutput)
+	if len(out.Applied) != 1 || out.Applied[0].Error != "permission denied: requires task.create" {
+		t.Fatalf("Applied = %+v, want same-project permission denial", out.Applied)
+	}
+	rows, err := tasksStore.List(context.Background(), projectID, nil)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("permission-denied item was persisted: %+v", rows)
+	}
+}
 
 func TestIncrementalPushTool_AppliesTaskCreate(t *testing.T) {
 	tasksStore := testTasksStore(t)
