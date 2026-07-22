@@ -12,7 +12,7 @@ Claude Code and the local daemon without interpreting the requests.
 
 ## 1. Start the Coordination Server
 
-Set up Postgres and migrations as described in the [local demo](../README.md#quickstart--local-demo),
+Set up Postgres and migrations as described in the [quickstart](../README.md#quickstart),
 then start the Coordination Server:
 
 ```bash
