@@ -165,6 +165,164 @@ func TestRun_StalePathRegularFileRejectedWithoutRemoval(t *testing.T) {
 	}
 }
 
+func TestRemoveStaleSocket_ActiveDaemonPreserved(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "active.sock")
+	addr, err := net.ResolveUnixAddr("unix", socketPath)
+	if err != nil {
+		t.Fatalf("resolve socket address: %v", err)
+	}
+	listener, err := net.ListenUnix("unix", addr)
+	if err != nil {
+		t.Fatalf("listen active socket: %v", err)
+	}
+	defer listener.Close()
+
+	err = removeStaleSocket(socketPath)
+	if err == nil || !strings.Contains(err.Error(), "active daemon") {
+		t.Fatalf("removeStaleSocket error = %v, want active-daemon rejection", err)
+	}
+	info, err := os.Lstat(socketPath)
+	if err != nil {
+		t.Fatalf("active socket was removed: %v", err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("active path mode = %v, want socket", info.Mode())
+	}
+	conn, err := net.DialTimeout("unix", socketPath, time.Second)
+	if err != nil {
+		t.Fatalf("dial preserved active socket: %v", err)
+	}
+	_ = conn.Close()
+}
+
+func TestRemoveStaleSocket_NonSocketsPreserved(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*testing.T, string)
+		mode  os.FileMode
+	}{
+		{
+			name: "symlink",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				target := filepath.Join(filepath.Dir(path), "target")
+				if err := os.WriteFile(target, []byte("target"), 0o600); err != nil {
+					t.Fatalf("write symlink target: %v", err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatalf("create symlink: %v", err)
+				}
+			},
+			mode: os.ModeSymlink,
+		},
+		{
+			name: "directory",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatalf("create directory: %v", err)
+				}
+			},
+			mode: os.ModeDir,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "wormholed.sock")
+			tt.setup(t, path)
+			if err := removeStaleSocket(path); err == nil || !strings.Contains(err.Error(), "not a socket") {
+				t.Fatalf("removeStaleSocket error = %v, want non-socket rejection", err)
+			}
+			info, err := os.Lstat(path)
+			if err != nil {
+				t.Fatalf("replacement was removed: %v", err)
+			}
+			if info.Mode()&tt.mode == 0 {
+				t.Fatalf("preserved path mode = %v, want %v", info.Mode(), tt.mode)
+			}
+		})
+	}
+}
+
+func TestRemoveStaleSocket_InodeSwapPreservesReplacement(t *testing.T) {
+	tests := []struct {
+		name    string
+		replace func(*testing.T, string)
+		assert  func(*testing.T, string)
+	}{
+		{
+			name: "regular file",
+			replace: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte("replacement"), 0o600); err != nil {
+					t.Fatalf("write replacement: %v", err)
+				}
+			},
+			assert: func(t *testing.T, path string) {
+				t.Helper()
+				got, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatalf("read replacement: %v", err)
+				}
+				if string(got) != "replacement" {
+					t.Fatalf("replacement contents = %q", got)
+				}
+			},
+		},
+		{
+			name: "symlink",
+			replace: func(t *testing.T, path string) {
+				t.Helper()
+				target := filepath.Join(filepath.Dir(path), "target")
+				if err := os.WriteFile(target, []byte("target"), 0o600); err != nil {
+					t.Fatalf("write target: %v", err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatalf("create replacement symlink: %v", err)
+				}
+			},
+			assert: func(t *testing.T, path string) {
+				t.Helper()
+				info, err := os.Lstat(path)
+				if err != nil {
+					t.Fatalf("lstat replacement symlink: %v", err)
+				}
+				if info.Mode()&os.ModeSymlink == 0 {
+					t.Fatalf("replacement mode = %v, want symlink", info.Mode())
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "wormholed.sock")
+			addr, err := net.ResolveUnixAddr("unix", path)
+			if err != nil {
+				t.Fatalf("resolve stale socket: %v", err)
+			}
+			stale, err := net.ListenUnix("unix", addr)
+			if err != nil {
+				t.Fatalf("create stale socket: %v", err)
+			}
+			stale.SetUnlinkOnClose(false)
+			if err := stale.Close(); err != nil {
+				t.Fatalf("close stale socket: %v", err)
+			}
+
+			err = removeStaleSocketWithHook(path, func() {
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("replace: remove checked socket: %v", err)
+				}
+				tt.replace(t, path)
+			})
+			if err == nil || !strings.Contains(err.Error(), "changed during stale-socket removal") {
+				t.Fatalf("removeStaleSocketWithHook error = %v, want inode-change rejection", err)
+			}
+			tt.assert(t, path)
+		})
+	}
+}
+
 func startTestDaemon(t *testing.T, profileName, socketPath string) *runningTestDaemon {
 	t.Helper()
 	return startTestDaemonWithRunner(t, profileName, socketPath, Run)

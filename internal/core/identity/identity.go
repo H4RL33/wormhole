@@ -111,11 +111,49 @@ func NewStore(db *sql.DB) *Store {
 	return &Store{db: db}
 }
 
+// BeginProjectTx starts a transaction with the project RLS context set. It is
+// used by MCP workflows that must coordinate writes across isolated Core stores;
+// the caller owns commit and rollback.
+func (s *Store) BeginProjectTx(ctx context.Context, projectID string) (*sql.Tx, error) {
+	if projectID == "" {
+		return nil, ErrInvalidScope
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("identity: begin project tx: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "SELECT set_config('wormhole.project_id', $1, true)", projectID); err != nil {
+		_ = tx.Rollback()
+		return nil, fmt.Errorf("identity: begin project tx: set project id: %w", err)
+	}
+	return tx, nil
+}
+
 // Register creates a new agent identity, issues its passport for
 // projectID, and issues a bearer token for it. The raw token is returned
 // exactly once — only its SHA-256 hash is persisted, so the raw value can
 // never be recovered from storage.
 func (s *Store) Register(ctx context.Context, projectID string, permissions []string, owner, model string, capabilities, repositories, roles []string) (Agent, Passport, string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Agent{}, Passport{}, "", fmt.Errorf("identity: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	agent, passport, rawToken, err := s.RegisterInTx(ctx, tx, projectID, permissions, owner, model, capabilities, repositories, roles)
+	if err != nil {
+		return Agent{}, Passport{}, "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return Agent{}, Passport{}, "", fmt.Errorf("identity: commit: %w", err)
+	}
+	return agent, passport, rawToken, nil
+}
+
+// RegisterInTx is the transaction-scoped core of Register. It creates the
+// identity, passport, token, and audit entries but leaves commit/rollback to
+// the caller so registration bootstrap records can share the same transaction.
+func (s *Store) RegisterInTx(ctx context.Context, tx *sql.Tx, projectID string, permissions []string, owner, model string, capabilities, repositories, roles []string) (Agent, Passport, string, error) {
 	if projectID == "" || permissions == nil {
 		return Agent{}, Passport{}, "", ErrInvalidScope
 	}
@@ -131,12 +169,6 @@ func (s *Store) Register(ctx context.Context, projectID string, permissions []st
 	if err != nil {
 		return Agent{}, Passport{}, "", err
 	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return Agent{}, Passport{}, "", fmt.Errorf("identity: begin tx: %w", err)
-	}
-	defer tx.Rollback()
 
 	var agent Agent
 	var capsRaw []byte
@@ -172,10 +204,6 @@ func (s *Store) Register(ctx context.Context, projectID string, permissions []st
 	}
 	if _, err := recordAction(ctx, tx, agent.ID, projectID, ActionTokenIssued); err != nil {
 		return Agent{}, Passport{}, "", fmt.Errorf("identity: record audit entry: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return Agent{}, Passport{}, "", fmt.Errorf("identity: commit: %w", err)
 	}
 
 	if err := json.Unmarshal(capsRaw, &agent.Capabilities); err != nil {

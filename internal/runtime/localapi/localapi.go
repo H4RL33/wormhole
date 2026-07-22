@@ -24,9 +24,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -48,6 +50,9 @@ const (
 	// local daemon, and eight persistent harness sessions cover normal local
 	// concurrency while bounding handler and frame-buffer resources.
 	maxActiveConnections = 8
+	// handlerShutdownTimeout bounds graceful shutdown if a handler does not
+	// observe cancellation after its connection is closed.
+	handlerShutdownTimeout = time.Second
 )
 
 type rpcRequest struct {
@@ -132,10 +137,18 @@ type Server struct {
 	closeErr  error
 	shutdown  atomic.Bool
 	handlers  chan struct{}
+	// admissionMu makes handler registration atomic with shutdown. handlerWG
+	// is only incremented while admissionMu is held and shutdown is false.
+	admissionMu sync.Mutex
+	handlerWG   sync.WaitGroup
 
 	// conns tracks open connections for force-close on shutdown (issue #20).
-	// Registered by handle() at startup, deregistered via defer at exit.
+	// Connections are registered before their handler goroutine starts.
 	conns sync.Map // map[net.Conn]struct{}
+
+	// testBeforeHandlerStart is a deterministic test barrier between admission
+	// and handler execution. Production servers leave it nil.
+	testBeforeHandlerStart func()
 
 	// registry is the local MCP tool registry (mcp.go), built once at
 	// construction time from the Server that will service every
@@ -233,15 +246,44 @@ func NewMultiOrg(socketPath string, orgs map[string]config.Org, bindings []confi
 }
 
 func listenLocalSocket(socketPath string) (net.Listener, error) {
+	return listenLocalSocketWithChmod(socketPath, os.Chmod)
+}
+
+func listenLocalSocketWithChmod(socketPath string, chmod func(string, os.FileMode) error) (net.Listener, error) {
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(socketPath, 0o600); err != nil {
+	if err := chmod(socketPath, 0o600); err != nil {
 		_ = ln.Close()
 		return nil, fmt.Errorf("chmod socket %s: %w", socketPath, err)
 	}
 	return ln, nil
+}
+
+func (s *Server) logError(operation string, err error) {
+	if err == nil {
+		return
+	}
+	message := err.Error()
+	secretSet := make(map[string]struct{}, len(s.orgs)+1)
+	if s.token != "" {
+		secretSet[s.token] = struct{}{}
+	}
+	for _, org := range s.orgs {
+		if org.Credentials.Token != "" {
+			secretSet[org.Credentials.Token] = struct{}{}
+		}
+	}
+	secrets := make([]string, 0, len(secretSet))
+	for secret := range secretSet {
+		secrets = append(secrets, secret)
+	}
+	sort.Slice(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
+	for _, secret := range secrets {
+		message = strings.ReplaceAll(message, secret, "[REDACTED]")
+	}
+	log.Printf("localapi: %s: %s", operation, message)
 }
 
 // resolveOrgContext returns the org/creds/projectID for a request (P5 multi-org).
@@ -284,17 +326,30 @@ func (s *Server) resolveOrgContext(projectID string) (OrgContext, error) {
 // Forces all open connections to close (issue #20).
 func (s *Server) Close() error {
 	s.closeOnce.Do(func() {
+		s.admissionMu.Lock()
 		s.shutdown.Store(true)
 		s.closeErr = s.listener.Close()
 
 		// Force-close all tracked open connections to prevent handle goroutines
 		// from leaking on shutdown. Iterate conns and close each one (issue #20).
-		s.conns.Range(func(key, value interface{}) bool {
+		s.conns.Range(func(key, _ interface{}) bool {
 			if conn, ok := key.(net.Conn); ok {
-				conn.Close()
+				_ = conn.Close()
 			}
 			return true
 		})
+		s.admissionMu.Unlock()
+
+		handlersDone := make(chan struct{})
+		go func() {
+			s.handlerWG.Wait()
+			close(handlersDone)
+		}()
+		select {
+		case <-handlersDone:
+		case <-time.After(handlerShutdownTimeout):
+			s.closeErr = errors.Join(s.closeErr, fmt.Errorf("localapi: timed out waiting for handlers to stop"))
+		}
 	})
 	return s.closeErr
 }
@@ -314,15 +369,38 @@ func (s *Server) Serve(ctx context.Context) error {
 		conn, err := s.listener.Accept()
 		if err != nil {
 			if ctx.Err() != nil || s.shutdown.Load() {
+				if closeErr := s.Close(); closeErr != nil {
+					return closeErr
+				}
 				return nil
 			}
 			return fmt.Errorf("localapi: accept: %w", err)
 		}
 		select {
 		case s.handlers <- struct{}{}:
+			s.admissionMu.Lock()
+			if s.shutdown.Load() {
+				s.admissionMu.Unlock()
+				<-s.handlers
+				_ = conn.Close()
+				continue
+			}
+			s.conns.Store(conn, struct{}{})
+			s.handlerWG.Add(1)
+			s.admissionMu.Unlock()
 			go func() {
 				defer func() { <-s.handlers }()
-				s.handle(ctx, conn)
+				defer s.handlerWG.Done()
+				defer func() {
+					s.conns.Delete(conn)
+					_ = conn.Close()
+				}()
+				if s.testBeforeHandlerStart != nil {
+					s.testBeforeHandlerStart()
+				}
+				handlerCtx, cancelHandler := context.WithCancel(ctx)
+				defer cancelHandler()
+				s.handle(handlerCtx, conn)
 			}()
 		default:
 			_ = conn.Close()
@@ -338,13 +416,6 @@ func (s *Server) Serve(ctx context.Context) error {
 // (initialized) and write serialization (writeMu) that one-shot dispatch
 // never needed.
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
-	// Register connection for tracking (issue #20: force-close on shutdown).
-	s.conns.Store(conn, struct{}{})
-	defer func() {
-		s.conns.Delete(conn)
-		conn.Close()
-	}()
-
 	sess := &mcpSession{}
 	reader := bufio.NewReaderSize(conn, maxFrameBytes)
 	for {
@@ -362,6 +433,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		if len(bytes.TrimSpace(line)) > 0 {
 			req, decodeErr := decodeMCPLine(line)
 			if decodeErr != nil {
+				s.logError("decode JSON-RPC frame", decodeErr)
 				writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", Error: &rpcError{Code: rpcParseError, Message: fmt.Sprintf("parse error: %v", decodeErr)}})
 			} else {
 				s.dispatchMCPMessage(ctx, sess, conn, s.registry, req)

@@ -2,10 +2,10 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/core/events"
@@ -19,9 +19,9 @@ import (
 var defaultChannelNames = []string{"introductions", "general"}
 
 // ensureDefaultChannels atomically creates each fixed channel if absent.
-func ensureDefaultChannels(ctx context.Context, store *events.Store, projectID string) error {
+func ensureDefaultChannelsInTx(ctx context.Context, tx *sql.Tx, store *events.Store, projectID string) error {
 	for _, name := range defaultChannelNames {
-		if _, err := store.EnsureChannel(ctx, projectID, name); err != nil {
+		if _, err := store.EnsureChannelInTx(ctx, tx, projectID, name); err != nil {
 			return fmt.Errorf("ensure default channels: create channel %q: %w", name, err)
 		}
 	}
@@ -49,8 +49,8 @@ const onboardingArticleBody = `This project uses Wormhole's MCP tool surface for
 
 // ensureOnboardingArticle atomically creates the fixed onboarding KB article
 // for projectID if its dedicated bootstrap marker is absent.
-func ensureOnboardingArticle(ctx context.Context, kbStore *kb.Store, projectID, authorAgentID string) error {
-	if _, err := kbStore.EnsureBootstrapArticle(ctx, projectID, authorAgentID, onboardingArticleBootstrapKey, onboardingArticleTitle, onboardingArticleBody, nil); err != nil {
+func ensureOnboardingArticleInTx(ctx context.Context, tx *sql.Tx, kbStore *kb.Store, projectID, authorAgentID string) error {
+	if _, err := kbStore.EnsureBootstrapArticleInTx(ctx, tx, projectID, authorAgentID, onboardingArticleBootstrapKey, onboardingArticleTitle, onboardingArticleBody, nil); err != nil {
 		return fmt.Errorf("ensure onboarding article: write: %w", err)
 	}
 	return nil
@@ -143,15 +143,24 @@ func RegisterAgentTool(store *identity.Store, eventsStore *events.Store, rolesSt
 					in.Roles = unionAppend(in.Roles, template.DefaultRoles)
 				}
 			}
-			agent, passport, token, err := store.Register(ctx, projectID, in.Permissions, in.Owner, in.Model, in.Capabilities, in.Repositories, in.Roles)
+			tx, err := store.BeginProjectTx(ctx, projectID)
 			if err != nil {
 				return nil, fmt.Errorf("mcp: wormhole.agent.register: %w", err)
 			}
-			if err := ensureDefaultChannels(ctx, eventsStore, projectID); err != nil {
-				log.Printf("mcp: wormhole.agent.register: default channel bootstrap failed: %v", err)
+			defer tx.Rollback()
+
+			agent, passport, token, err := store.RegisterInTx(ctx, tx, projectID, in.Permissions, in.Owner, in.Model, in.Capabilities, in.Repositories, in.Roles)
+			if err != nil {
+				return nil, fmt.Errorf("mcp: wormhole.agent.register: %w", err)
 			}
-			if err := ensureOnboardingArticle(ctx, kbStore, projectID, agent.ID); err != nil {
-				log.Printf("mcp: wormhole.agent.register: onboarding article bootstrap failed: %v", err)
+			if err := ensureDefaultChannelsInTx(ctx, tx, eventsStore, projectID); err != nil {
+				return nil, fmt.Errorf("mcp: wormhole.agent.register: default channel bootstrap: %w", err)
+			}
+			if err := ensureOnboardingArticleInTx(ctx, tx, kbStore, projectID, agent.ID); err != nil {
+				return nil, fmt.Errorf("mcp: wormhole.agent.register: onboarding article bootstrap: %w", err)
+			}
+			if err := tx.Commit(); err != nil {
+				return nil, fmt.Errorf("mcp: wormhole.agent.register: commit bootstrap transaction: %w", err)
 			}
 			return RegisterAgentOutput{
 				AgentID:      agent.ID,

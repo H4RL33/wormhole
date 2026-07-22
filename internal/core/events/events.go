@@ -73,8 +73,21 @@ func (s *Store) EnsureChannel(ctx context.Context, projectID, name string) (Chan
 		return Channel{}, fmt.Errorf("events: ensure channel: set project id: %w", err)
 	}
 
+	channel, err := s.EnsureChannelInTx(ctx, tx, projectID, name)
+	if err != nil {
+		return Channel{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Channel{}, fmt.Errorf("events: ensure channel: commit: %w", err)
+	}
+	return channel, nil
+}
+
+// EnsureChannelInTx is the transaction-scoped core of EnsureChannel. The
+// caller owns tx's lifecycle and must have set wormhole.project_id.
+func (s *Store) EnsureChannelInTx(ctx context.Context, tx *sql.Tx, projectID, name string) (Channel, error) {
 	var channel Channel
-	err = tx.QueryRowContext(ctx,
+	err := tx.QueryRowContext(ctx,
 		`INSERT INTO channels (project_id, name) VALUES ($1, $2)
 		 ON CONFLICT (project_id, name) DO UPDATE SET name = EXCLUDED.name
 		 RETURNING `+channelColumns,
@@ -82,9 +95,6 @@ func (s *Store) EnsureChannel(ctx context.Context, projectID, name string) (Chan
 	).Scan(&channel.ID, &channel.ProjectID, &channel.Name, &channel.CreatedAt)
 	if err != nil {
 		return Channel{}, fmt.Errorf("events: ensure channel: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return Channel{}, fmt.Errorf("events: ensure channel: commit: %w", err)
 	}
 	return channel, nil
 }

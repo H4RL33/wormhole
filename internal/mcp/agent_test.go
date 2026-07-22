@@ -188,6 +188,134 @@ func TestBootstrapMarkerDoesNotConstrainOrdinaryArticleTitles(t *testing.T) {
 	}
 }
 
+func TestRegisterAgentTool_BootstrapFailurePropagatesAndRetryIsIdempotent(t *testing.T) {
+	args, _ := json.Marshal(RegisterAgentInput{
+		Permissions: []string{"event.publish"},
+		Owner:       "bootstrap-retry-agent",
+		Model:       "claude",
+	})
+
+	t.Run("default channels", func(t *testing.T) {
+		projectID := mustCreateProject(t, "bootstrap-channel-failure-retry")
+		stopRejectingChannels := rejectChannelInsertsForProject(t, projectID)
+		failingTool := RegisterAgentTool(testIdentityStore(t), testEventsStore(t), testRolesStore(t), testKBStore(t))
+		if _, err := failingTool.Handler(context.Background(), nil, projectID, args); err == nil || !strings.Contains(err.Error(), "default channel bootstrap") {
+			t.Fatalf("registration error = %v, want default-channel bootstrap failure", err)
+		}
+		assertRegistrationCount(t, projectID, "bootstrap-retry-agent", 0)
+
+		stopRejectingChannels()
+		retryTool := RegisterAgentTool(testIdentityStore(t), testEventsStore(t), testRolesStore(t), testKBStore(t))
+		if _, err := retryTool.Handler(context.Background(), nil, projectID, args); err != nil {
+			t.Fatalf("registration retry: %v", err)
+		}
+		assertFixedBootstrapCounts(t, projectID)
+		assertRegistrationCount(t, projectID, "bootstrap-retry-agent", 1)
+	})
+
+	t.Run("onboarding article", func(t *testing.T) {
+		projectID := mustCreateProject(t, "bootstrap-article-failure-retry")
+		failingKB := kb.NewStore(testDB(t), failingEmbedder{err: errors.New("forced onboarding embedding failure")}, 0.85, 2000, 1, 1, 1)
+		failingTool := RegisterAgentTool(testIdentityStore(t), testEventsStore(t), testRolesStore(t), failingKB)
+		if _, err := failingTool.Handler(context.Background(), nil, projectID, args); err == nil || !strings.Contains(err.Error(), "onboarding article bootstrap") {
+			t.Fatalf("registration error = %v, want onboarding bootstrap failure", err)
+		}
+		assertRegistrationCount(t, projectID, "bootstrap-retry-agent", 0)
+
+		retryTool := RegisterAgentTool(testIdentityStore(t), testEventsStore(t), testRolesStore(t), testKBStore(t))
+		if _, err := retryTool.Handler(context.Background(), nil, projectID, args); err != nil {
+			t.Fatalf("registration retry: %v", err)
+		}
+		assertFixedBootstrapCounts(t, projectID)
+		assertRegistrationCount(t, projectID, "bootstrap-retry-agent", 1)
+	})
+}
+
+type failingEmbedder struct {
+	err error
+}
+
+func (e failingEmbedder) Embed(context.Context, string) ([]float32, error) {
+	return nil, e.err
+}
+
+func rejectChannelInsertsForProject(t *testing.T, projectID string) func() {
+	t.Helper()
+	db := testDB(t)
+	suffix := strings.ReplaceAll(projectID, "-", "")
+	functionName := "mcp_reject_channel_" + suffix
+	triggerName := "mcp_reject_channel_" + suffix
+	if _, err := db.Exec(fmt.Sprintf(`
+		CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			RAISE EXCEPTION 'forced default channel bootstrap failure';
+		END
+		$$`, functionName)); err != nil {
+		t.Fatalf("create rejecting channel function: %v", err)
+	}
+	if _, err := db.Exec(fmt.Sprintf(`
+		CREATE TRIGGER %s
+		BEFORE INSERT ON channels
+		FOR EACH ROW WHEN (NEW.project_id = '%s'::uuid)
+		EXECUTE FUNCTION %s()`, triggerName, projectID, functionName)); err != nil {
+		_, _ = db.Exec("DROP FUNCTION " + functionName + "()")
+		t.Fatalf("create rejecting channel trigger: %v", err)
+	}
+	var once sync.Once
+	cleanup := func() {
+		once.Do(func() {
+			if _, err := db.Exec("DROP TRIGGER " + triggerName + " ON channels"); err != nil {
+				t.Errorf("drop rejecting channel trigger: %v", err)
+			}
+			if _, err := db.Exec("DROP FUNCTION " + functionName + "()"); err != nil {
+				t.Errorf("drop rejecting channel function: %v", err)
+			}
+		})
+	}
+	t.Cleanup(cleanup)
+	return cleanup
+}
+
+func assertRegistrationCount(t *testing.T, projectID, owner string, want int) {
+	t.Helper()
+	db := testDB(t)
+	var got int
+	if err := db.QueryRowContext(context.Background(), `
+		SELECT count(*)
+		FROM agents a
+		JOIN passports p ON p.agent_id = a.id
+		WHERE p.project_id = $1 AND a.owner = $2`, projectID, owner,
+	).Scan(&got); err != nil {
+		t.Fatalf("count registrations: %v", err)
+	}
+	if got != want {
+		t.Fatalf("registration count = %d, want %d", got, want)
+	}
+}
+
+func assertFixedBootstrapCounts(t *testing.T, projectID string) {
+	t.Helper()
+	db := testDB(t)
+	var channels int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM channels WHERE project_id = $1 AND name IN ('introductions', 'general')`, projectID,
+	).Scan(&channels); err != nil {
+		t.Fatalf("count fixed channels: %v", err)
+	}
+	if channels != 2 {
+		t.Fatalf("fixed channel count = %d, want 2", channels)
+	}
+	var articles int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM kb_articles WHERE project_id = $1 AND bootstrap_key = $2`, projectID, onboardingArticleBootstrapKey,
+	).Scan(&articles); err != nil {
+		t.Fatalf("count onboarding articles: %v", err)
+	}
+	if articles != 1 {
+		t.Fatalf("onboarding article count = %d, want 1", articles)
+	}
+}
+
 // mustCreateProject inserts a project directly (identity.Store has no
 // project-creation method — projects are out of this task's scope) and
 // registers cleanup. Mirrors identity_test.go's createProject.

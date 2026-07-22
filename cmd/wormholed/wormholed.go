@@ -8,9 +8,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	stdsync "sync"
+	"syscall"
+	"time"
 
 	"github.com/H4RL33/wormhole/internal/runtime/config"
 	"github.com/H4RL33/wormhole/internal/runtime/eventbus"
@@ -168,6 +171,10 @@ func Run(ctx context.Context, profileName string) error {
 }
 
 func removeStaleSocket(socketPath string) error {
+	return removeStaleSocketWithHook(socketPath, nil)
+}
+
+func removeStaleSocketWithHook(socketPath string, beforeQuarantine func()) error {
 	info, err := os.Lstat(socketPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -178,10 +185,15 @@ func removeStaleSocket(socketPath string) error {
 	if info.Mode()&os.ModeSocket == 0 {
 		return fmt.Errorf("wormholed: stale socket path %s is not a socket", socketPath)
 	}
-	if err := os.Remove(socketPath); err != nil {
-		return fmt.Errorf("wormholed: remove stale socket: %w", err)
+	conn, dialErr := net.DialTimeout("unix", socketPath, 250*time.Millisecond)
+	if dialErr == nil {
+		_ = conn.Close()
+		return fmt.Errorf("wormholed: active daemon is already listening on %s", socketPath)
 	}
-	return nil
+	if !errors.Is(dialErr, syscall.ECONNREFUSED) {
+		return fmt.Errorf("wormholed: cannot prove socket %s is stale: %w", socketPath, dialErr)
+	}
+	return quarantineAndRemoveSocket(socketPath, info, beforeQuarantine)
 }
 
 func runWithSyncEngineFactory(ctx context.Context, profileName string, factory syncEngineFactory) error {

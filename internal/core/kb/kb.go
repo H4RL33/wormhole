@@ -217,6 +217,16 @@ func (s *Store) EnsureBootstrapArticle(ctx context.Context, projectID, agentID, 
 	return s.writeArticleWithOptionalID(ctx, "", bootstrapKey, projectID, agentID, title, body, frontmatter, nil, true)
 }
 
+// EnsureBootstrapArticleInTx is the transaction-scoped core of
+// EnsureBootstrapArticle. The caller owns tx's lifecycle and must have set
+// wormhole.project_id.
+func (s *Store) EnsureBootstrapArticleInTx(ctx context.Context, tx *sql.Tx, projectID, agentID, bootstrapKey, title, body string, frontmatter json.RawMessage) (Article, error) {
+	if bootstrapKey == "" {
+		return Article{}, fmt.Errorf("kb: ensure bootstrap article: empty bootstrap key")
+	}
+	return s.writeArticleInTxWithOptionalID(ctx, tx, "", bootstrapKey, projectID, agentID, title, body, frontmatter, nil, true)
+}
+
 // WriteArticleWithID inserts a new article under the caller-supplied id
 // instead of letting Postgres assign one. This exists for
 // wormhole.sync.incremental_push (RFC-0003 §8.2), which must preserve the
@@ -246,9 +256,20 @@ func (s *Store) writeArticleWithOptionalID(ctx context.Context, id, bootstrapKey
 		return Article{}, fmt.Errorf("kb: write article: set project id: %w", err)
 	}
 
+	article, err := s.writeArticleInTxWithOptionalID(ctx, tx, id, bootstrapKey, projectID, agentID, title, body, frontmatter, linkTargetIDs, force)
+	if err != nil {
+		return Article{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Article{}, fmt.Errorf("kb: write article: commit: %w", err)
+	}
+	return article, nil
+}
+
+func (s *Store) writeArticleInTxWithOptionalID(ctx context.Context, tx *sql.Tx, id, bootstrapKey, projectID, agentID, title, body string, frontmatter json.RawMessage, linkTargetIDs []string, force bool) (Article, error) {
 	// Verify agent has a passport for this project.
 	var dummy int
-	err = tx.QueryRowContext(ctx, "SELECT 1 FROM passports WHERE agent_id = $1 AND project_id = $2", agentID, projectID).Scan(&dummy)
+	err := tx.QueryRowContext(ctx, "SELECT 1 FROM passports WHERE agent_id = $1 AND project_id = $2", agentID, projectID).Scan(&dummy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Article{}, fmt.Errorf("kb: write article: agent not registered or has no passport for this project: %w", ErrPassportNotFound)
 	} else if err != nil {
@@ -400,9 +421,6 @@ func (s *Store) writeArticleWithOptionalID(ctx context.Context, id, bootstrapKey
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return Article{}, fmt.Errorf("kb: write article: commit: %w", err)
-	}
 	return article, nil
 }
 

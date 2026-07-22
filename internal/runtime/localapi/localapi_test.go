@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -16,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/H4RL33/wormhole/internal/runtime/config"
+	"github.com/H4RL33/wormhole/internal/runtime/eventbus"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 )
 
@@ -120,6 +124,10 @@ func TestServer_FrameOverOneMiBUnterminatedReturnsBoundedError(t *testing.T) {
 		t.Fatalf("oversized-frame error = %+v, want bounded parse error", resp.Error)
 	}
 	waitForTrackedConnectionCount(t, srv, 0)
+
+	fresh := dialLocalSocket(t, socketPath)
+	defer fresh.Close()
+	mcpInitialize(t, fresh, bufio.NewReader(fresh))
 }
 
 func TestServer_FrameAtOneMiBWithoutNewlineReturnsPromptError(t *testing.T) {
@@ -182,10 +190,36 @@ func TestServer_SocketModeIsOwnerOnly(t *testing.T) {
 	}
 }
 
+func TestListenLocalSocket_ChmodFailureCleansSocket(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "wormholed.sock")
+	chmodErr := errors.New("chmod denied")
+	ln, err := listenLocalSocketWithChmod(socketPath, func(string, os.FileMode) error {
+		return chmodErr
+	})
+	if ln != nil {
+		_ = ln.Close()
+		t.Fatal("listenLocalSocketWithChmod returned a listener after chmod failure")
+	}
+	if !errors.Is(err, chmodErr) {
+		t.Fatalf("error = %v, want wrapped chmod failure", err)
+	}
+	if _, statErr := os.Lstat(socketPath); !os.IsNotExist(statErr) {
+		t.Fatalf("socket path survived chmod failure: %v", statErr)
+	}
+}
+
 func TestServer_LogsNeverContainBearerToken(t *testing.T) {
 	const token = "secret-bearer-token-that-must-not-be-logged"
-	coord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "server failure", http.StatusInternalServerError)
+	coord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req rpcRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(rpcResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error:   &rpcError{Code: rpcInternalError, Message: "upstream rejected Bearer " + token},
+		})
 	}))
 	defer coord.Close()
 	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
@@ -223,8 +257,39 @@ func TestServer_LogsNeverContainBearerToken(t *testing.T) {
 	if resp.Error == "" {
 		t.Fatal("coordination server failure unexpectedly succeeded")
 	}
-	if strings.Contains(logs.String(), token) {
-		t.Fatalf("logs contain bearer token: %q", logs.String())
+	gotLogs := logs.String()
+	if gotLogs == "" {
+		t.Fatal("malformed frame and tool failure produced no diagnostic logs")
+	}
+	if strings.Contains(gotLogs, token) {
+		t.Fatalf("logs contain bearer token: %q", gotLogs)
+	}
+	if !strings.Contains(gotLogs, "[REDACTED]") {
+		t.Fatalf("logs do not show redaction at the error boundary: %q", gotLogs)
+	}
+}
+
+func TestServer_LogErrorRedactsOverlappingMultiOrgTokens(t *testing.T) {
+	const (
+		shortToken = "shared-secret"
+		longToken  = "shared-secret-with-suffix"
+	)
+	srv := &Server{orgs: map[string]config.Org{
+		"short": {Credentials: config.Credentials{Token: shortToken}},
+		"long":  {Credentials: config.Credentials{Token: longToken}},
+	}}
+	var logs bytes.Buffer
+	oldWriter := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(oldWriter)
+
+	srv.logError("overlap test", fmt.Errorf("short=%s long=%s", shortToken, longToken))
+	gotLogs := logs.String()
+	if strings.Contains(gotLogs, shortToken) || strings.Contains(gotLogs, longToken) || strings.Contains(gotLogs, "with-suffix") {
+		t.Fatalf("logs leaked an overlapping bearer token or suffix: %q", gotLogs)
+	}
+	if got := strings.Count(gotLogs, "[REDACTED]"); got != 2 {
+		t.Fatalf("redaction count = %d, want 2 in %q", got, gotLogs)
 	}
 }
 
@@ -287,6 +352,127 @@ func TestServer_ShutdownCancelsActiveRequest(t *testing.T) {
 	}
 	_ = conn.Close()
 	waitForTrackedConnectionCount(t, srv, 0)
+}
+
+func TestServer_ShutdownAfterAdmissionBeforeHandlerStart(t *testing.T) {
+	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
+	if err != nil {
+		t.Fatalf("localstore.Open: %v", err)
+	}
+	defer store.Close()
+	er := localstore.NewEventRepo(store.DB())
+	socketPath := filepath.Join(t.TempDir(), "wormholed.sock")
+	srv, err := New(socketPath, "", "test-token", "project-1", store, localstore.NewTaskRepo(store.DB(), er), er, localstore.NewKBRepo(store.DB()), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	admitted := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(releaseHandler)
+		}
+		_ = srv.Close()
+	}()
+	srv.testBeforeHandlerStart = func() {
+		close(admitted)
+		<-releaseHandler
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- srv.Serve(ctx) }()
+
+	conn := dialLocalSocket(t, socketPath)
+	defer conn.Close()
+	select {
+	case <-admitted:
+	case <-time.After(time.Second):
+		t.Fatal("connection was not admitted before the handler barrier")
+	}
+
+	cancel()
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	buf := make([]byte, 1)
+	if _, err := conn.Read(buf); err == nil {
+		t.Fatal("admitted connection remained open during shutdown")
+	} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		t.Fatal("shutdown missed the admitted connection before handler startup")
+	}
+
+	select {
+	case err := <-serveDone:
+		t.Fatalf("Serve returned before admitted handler exited: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseHandler)
+	released = true
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Fatalf("Serve after release: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not wait for and finish the admitted handler")
+	}
+	waitForTrackedConnectionCount(t, srv, 0)
+}
+
+func TestServer_CloseWithoutContextCancelReleasesSubscription(t *testing.T) {
+	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
+	if err != nil {
+		t.Fatalf("localstore.Open: %v", err)
+	}
+	defer store.Close()
+	er := localstore.NewEventRepo(store.DB())
+	eb := eventbus.NewEventBus()
+	socketPath := filepath.Join(t.TempDir(), "wormholed.sock")
+	srv, err := NewWithRuntime(socketPath, "", "test-token", "project-1", store, localstore.NewTaskRepo(store.DB(), er), er, localstore.NewKBRepo(store.DB()), eb, nil, nil)
+	if err != nil {
+		t.Fatalf("NewWithRuntime: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- srv.Serve(ctx) }()
+
+	conn := dialLocalSocket(t, socketPath)
+	reader := bufio.NewReader(conn)
+	mcpInitialize(t, conn, reader)
+	resp := mcpCallTool(t, conn, reader, 2, "wormhole.channel.subscribe", map[string]interface{}{"namespace": "project-1"})
+	if resp.Error != "" {
+		t.Fatalf("subscribe: %s", resp.Error)
+	}
+	if got := eb.SubscriberCount(); got != 1 {
+		t.Fatalf("subscriber count before Close = %d, want 1", got)
+	}
+
+	if err := srv.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Fatalf("Serve after Close: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not return after Close")
+	}
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	for eb.SubscriberCount() != 0 {
+		select {
+		case <-deadline.C:
+			t.Fatalf("subscriber count after Close = %d, want 0", eb.SubscriberCount())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	_ = conn.Close()
 }
 
 // fakeCoordServer stands in for the Coordination Server's /mcp endpoint

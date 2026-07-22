@@ -430,6 +430,7 @@ func (s *Server) handleToolsCall(ctx context.Context, sess *mcpSession, conn net
 	if params.Name == "wormhole.channel.subscribe" {
 		ack, err := s.handleChannelSubscribeMCP(ctx, sess, conn, params.Arguments)
 		if err != nil {
+			s.logError("tool "+params.Name, err)
 			return toolCallResult{
 				Content: []toolCallResultContent{{Type: "text", Text: err.Error()}},
 				IsError: true,
@@ -441,6 +442,7 @@ func (s *Server) handleToolsCall(ctx context.Context, sess *mcpSession, conn net
 
 	result, err := tool.Handler(ctx, params.Arguments)
 	if err != nil {
+		s.logError("tool "+params.Name, err)
 		return toolCallResult{
 			Content: []toolCallResultContent{{Type: "text", Text: err.Error()}},
 			IsError: true,
