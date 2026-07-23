@@ -47,6 +47,18 @@ jobs:
           "$REHEARSAL_VERSION"
           "$GITHUB_OUTPUT"
 
+  ci:
+    name: Required CI
+    uses: ./.github/workflows/ci.yml
+
+  security:
+    name: Required security
+    uses: ./.github/workflows/security.yml
+
+  migrations:
+    name: Required migrations
+    uses: ./.github/workflows/migrations.yml
+
   artifacts:
     name: Build release artifacts
     needs: validate
@@ -168,7 +180,7 @@ jobs:
       vars.WORMHOLE_RELEASE_ENABLED == 'true' &&
       needs.validate.outputs.publish == 'true' &&
       needs.validate.outputs.release-enabled == 'true'
-    needs: [validate, artifacts]
+    needs: [validate, artifacts, ci, security, migrations]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     environment: release

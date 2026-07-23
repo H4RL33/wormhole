@@ -6,6 +6,15 @@ test -f "$workflow"
 
 grep -Fq 'workflow_dispatch:' "$workflow"
 grep -Fq "tags: ['v*']" "$workflow"
+for required_workflow in ci security migrations; do
+	grep -Fq 'workflow_call:' ".github/workflows/$required_workflow.yml"
+	grep -Fq "uses: ./.github/workflows/$required_workflow.yml" "$workflow"
+done
+publish_image_block=$(
+	sed -n '/^  publish-image:/,/^  publish-release:/p' "$workflow"
+)
+printf '%s\n' "$publish_image_block" |
+	grep -Fq 'needs: [validate, artifacts, ci, security, migrations]'
 grep -Fq "github.event_name == 'push'" "$workflow"
 grep -Fq 'environment: release' "$workflow"
 grep -Fq 'ghcr.io/h4rl33/wormhole-fabric' "$workflow"
