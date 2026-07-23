@@ -55,10 +55,66 @@ also signed and attested. Consumers should verify the checksum manifest, keyless
 Sigstore signature/certificate, SBOM, and applicable GitHub attestation before
 trusting a release.
 
+Download every release asset into one empty directory, keep the published
+basenames unchanged, and verify from that directory. Bind keyless verification
+to this repository's release workflow and GitHub's Actions OIDC issuer:
+
+```sh
+release_tag=v0.0.0-alpha
+version=${release_tag#v}
+certificate_identity="https://github.com/H4RL33/wormhole/.github/workflows/release.yml@refs/tags/$release_tag"
+certificate_oidc_issuer="https://token.actions.githubusercontent.com"
+
+sha256sum -c SHA256SUMS
+
+for artifact in \
+  SHA256SUMS \
+  "wormhole-${version}-linux-amd64.tar.gz" \
+  "wormhole-${version}-linux-arm64.tar.gz" \
+  wormhole-amd64.spdx.json \
+  wormhole-arm64.spdx.json
+do
+  cosign verify-blob \
+    --certificate "${artifact}.pem" \
+    --signature "${artifact}.sig" \
+    --certificate-identity "$certificate_identity" \
+    --certificate-oidc-issuer "$certificate_oidc_issuer" \
+    "$artifact"
+done
+
+for artifact in \
+  "wormhole-${version}-linux-amd64.tar.gz" \
+  "wormhole-${version}-linux-arm64.tar.gz"
+do
+  gh attestation verify "$artifact" \
+    --repo H4RL33/wormhole \
+    --cert-identity "$certificate_identity" \
+    --cert-oidc-issuer "$certificate_oidc_issuer"
+done
+```
+
+Verify the Fabric image by immutable digest, not by tag alone:
+
+```sh
+image=ghcr.io/h4rl33/wormhole-fabric
+digest=$(
+  docker buildx imagetools inspect "$image:$version" \
+    --format '{{.Manifest.Digest}}'
+)
+cosign verify "$image@$digest" \
+  --certificate-identity "$certificate_identity" \
+  --certificate-oidc-issuer "$certificate_oidc_issuer"
+gh attestation verify "oci://$image@$digest" \
+  --repo H4RL33/wormhole \
+  --cert-identity "$certificate_identity" \
+  --cert-oidc-issuer "$certificate_oidc_issuer"
+```
+
 The GitHub Release is created last. A failure before Fabric manifest promotion
 leaves no public version image tag. After that promotion, a later artifact
-signing, attestation, tag-verification, or GitHub Release failure can leave the
-signed and attested public version image without a GitHub Release.
+signing, signature or provenance verification, attestation, tag-verification,
+or GitHub Release failure can leave the signed and attested public version image
+without a GitHub Release.
 
 ## GHCR staging-tag retention
 

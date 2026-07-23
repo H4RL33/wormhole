@@ -22,6 +22,23 @@ grep -Fq '.github/scripts/release-metadata.sh' "$workflow"
 grep -Fq '.github/scripts/verify-release-tag.sh' "$workflow"
 grep -Fq '.github/scripts/verify-artifact-transfer.sh' "$workflow"
 grep -Fq '.github/scripts/publish-github-release.sh' "$workflow"
+test "$(grep -c 'CERTIFICATE_IDENTITY: https://github.com/${{ github.workflow_ref }}' \
+	"$workflow")" -eq 2
+test "$(grep -c 'OIDC_ISSUER: https://token.actions.githubusercontent.com' \
+	"$workflow")" -eq 2
+test "$(grep -c 'cosign-release: v2.5.2' "$workflow")" -eq 2
+test "$(grep -cF -- '--certificate-identity "$CERTIFICATE_IDENTITY"' \
+	"$workflow")" -eq 2
+test "$(grep -cF -- '--certificate-oidc-issuer "$OIDC_ISSUER"' \
+	"$workflow")" -eq 2
+test "$(grep -cF -- '--cert-identity "$CERTIFICATE_IDENTITY"' \
+	"$workflow")" -eq 2
+test "$(grep -cF -- '--cert-oidc-issuer "$OIDC_ISSUER"' \
+	"$workflow")" -eq 2
+for attestation_id in attest-image attest-amd64 attest-arm64; do
+	grep -Fq "id: $attestation_id" "$workflow"
+	grep -Fq "steps.$attestation_id.outputs.bundle-path" "$workflow"
+done
 # shellcheck disable=SC2016 # Literal workflow expression.
 grep -Fq 'WORMHOLE_RELEASE_ENABLED: ${{ vars.WORMHOLE_RELEASE_ENABLED }}' \
 	"$workflow"
@@ -76,11 +93,29 @@ manifest_sign_line=$(
 	# shellcheck disable=SC2016 # Literal workflow shell source.
 	grep -nF 'cosign sign --yes "$IMAGE@$DIGEST"' "$workflow" | cut -d: -f1
 )
+manifest_signature_verify_line=$(
+	# shellcheck disable=SC2016 # Literal workflow shell source.
+	grep -nF 'cosign verify "$IMAGE@$DIGEST"' "$workflow" | cut -d: -f1
+)
 manifest_attest_line=$(
 	# shellcheck disable=SC2016 # Literal workflow expression.
 	grep -nF 'subject-digest: ${{ steps.image.outputs.digest }}' "$workflow" |
 		cut -d: -f1
 )
+image_attestation_verify_line=$(
+	# shellcheck disable=SC2016 # Literal workflow shell source.
+	grep -nF 'gh attestation verify "oci://$IMAGE@$DIGEST"' "$workflow" |
+		cut -d: -f1
+)
+artifact_signature_verify_line=$(
+	grep -nF 'cosign verify-blob' "$workflow" | cut -d: -f1
+)
+artifact_attestation_verify_line=$(
+	# shellcheck disable=SC2016 # Literal workflow shell source.
+	grep -nF 'gh attestation verify "$artifact"' "$workflow" | cut -d: -f1
+)
+amd64_attest_line=$(grep -nF 'id: attest-amd64' "$workflow" | cut -d: -f1)
+arm64_attest_line=$(grep -nF 'id: attest-arm64' "$workflow" | cut -d: -f1)
 test "$(printf '%s\n' "$build_line" | wc -l)" -eq 1
 test "$build_line" -lt "$local_health_line"
 test "$local_health_line" -lt "$pre_push_check"
@@ -89,11 +124,17 @@ test "$push_line" -lt "$health_line"
 test "$health_line" -lt "$pre_temporary_manifest_check"
 test "$pre_temporary_manifest_check" -lt "$temporary_manifest_line"
 test "$temporary_manifest_line" -lt "$manifest_sign_line"
-test "$manifest_sign_line" -lt "$manifest_attest_line"
-test "$manifest_attest_line" -lt "$pre_promotion_check"
+test "$manifest_sign_line" -lt "$manifest_signature_verify_line"
+test "$manifest_signature_verify_line" -lt "$manifest_attest_line"
+test "$manifest_attest_line" -lt "$image_attestation_verify_line"
+test "$image_attestation_verify_line" -lt "$pre_promotion_check"
 test "$pre_promotion_check" -lt "$promotion_line"
 test "$prefer_carbon_copy_line" -lt "$promotion_line"
 test "$pre_sign_check" -lt "$sign_line"
+test "$sign_line" -lt "$artifact_signature_verify_line"
+test "$artifact_signature_verify_line" -lt "$amd64_attest_line"
+test "$amd64_attest_line" -lt "$arm64_attest_line"
+test "$arm64_attest_line" -lt "$artifact_attestation_verify_line"
 grep -Fq -- '--load' "$workflow"
 grep -Fq 'Staging tag retention policy:' "$workflow"
 if grep -Eq 'packages:[[:space:]]*delete|gh api .*--method DELETE' "$workflow"; then
@@ -139,3 +180,15 @@ test "$publish_lines" -eq 5
 release_line=$(grep -n 'publish-github-release.sh' "$workflow" | tail -n 1 | cut -d: -f1)
 last_step_line=$(grep -n '^      - name:' "$workflow" | tail -n 1 | cut -d: -f1)
 test "$release_line" -gt "$last_step_line"
+test "$artifact_attestation_verify_line" -lt "$release_line"
+
+release_docs=docs/releasing.md
+grep -Fq 'sha256sum -c SHA256SUMS' "$release_docs"
+grep -Fq 'certificate_identity="https://github.com/H4RL33/wormhole/.github/workflows/release.yml@refs/tags/$release_tag"' \
+	"$release_docs"
+grep -Fq 'certificate_oidc_issuer="https://token.actions.githubusercontent.com"' \
+	"$release_docs"
+grep -Fq 'cosign verify-blob' "$release_docs"
+grep -Fq 'gh attestation verify "$artifact"' "$release_docs"
+grep -Fq 'cosign verify "$image@$digest"' "$release_docs"
+grep -Fq 'gh attestation verify "oci://$image@$digest"' "$release_docs"

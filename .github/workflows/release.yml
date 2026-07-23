@@ -189,6 +189,9 @@ jobs:
       packages: write
       id-token: write
       attestations: write
+    env:
+      CERTIFICATE_IDENTITY: https://github.com/${{ github.workflow_ref }}
+      OIDC_ISSUER: https://token.actions.githubusercontent.com
     outputs:
       digest: ${{ steps.image.outputs.digest }}
     steps:
@@ -292,17 +295,41 @@ jobs:
           test "$registry_digest" = "$digest"
           printf 'digest=%s\n' "$digest" >>"$GITHUB_OUTPUT"
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: v2.5.2
       - name: Sign Fabric manifest
         env:
           DIGEST: ${{ steps.image.outputs.digest }}
           IMAGE: ghcr.io/h4rl33/wormhole-fabric
         run: cosign sign --yes "$IMAGE@$DIGEST"
+      - name: Verify Fabric manifest signature
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+          IMAGE: ghcr.io/h4rl33/wormhole-fabric
+        run: |
+          cosign verify "$IMAGE@$DIGEST" \
+            --certificate-identity "$CERTIFICATE_IDENTITY" \
+            --certificate-oidc-issuer "$OIDC_ISSUER" >/dev/null
       - name: Attest Fabric provenance
+        id: attest-image
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-name: ghcr.io/h4rl33/wormhole-fabric
           subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true
+      - name: Verify Fabric provenance bundle
+        env:
+          ATTESTATION_BUNDLE: ${{ steps.attest-image.outputs.bundle-path }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ghcr.io/h4rl33/wormhole-fabric
+        run: |
+          test -f "$ATTESTATION_BUNDLE"
+          gh attestation verify "oci://$IMAGE@$DIGEST" \
+            --bundle "$ATTESTATION_BUNDLE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --cert-identity "$CERTIFICATE_IDENTITY" \
+            --cert-oidc-issuer "$OIDC_ISSUER" >/dev/null
       - name: Recheck tag and promote signed Fabric manifest last
         env:
           DIGEST: ${{ steps.image.outputs.digest }}
@@ -341,6 +368,9 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+    env:
+      CERTIFICATE_IDENTITY: https://github.com/${{ github.workflow_ref }}
+      OIDC_ISSUER: https://token.actions.githubusercontent.com
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -368,6 +398,8 @@ jobs:
           "$SBOM_ARM64_SHA"
           "$MANIFEST_SHA"
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: v2.5.2
       - name: Recheck remote tag and sign verified artifacts
         env:
           EXPECTED_COMMIT: ${{ needs.validate.outputs.tag-commit }}
@@ -383,14 +415,53 @@ jobs:
               --output-certificate "${artifact}.pem" \
               "$artifact"
           done
+      - name: Verify release artifact signatures
+        run: |
+          for artifact in \
+            dist/release/SHA256SUMS \
+            dist/release/*.tar.gz \
+            dist/release/*.spdx.json
+          do
+            cosign verify-blob \
+              --certificate "${artifact}.pem" \
+              --signature "${artifact}.sig" \
+              --certificate-identity "$CERTIFICATE_IDENTITY" \
+              --certificate-oidc-issuer "$OIDC_ISSUER" \
+              "$artifact" >/dev/null
+          done
       - name: Attest amd64 archive provenance
+        id: attest-amd64
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: dist/release/wormhole-${{ needs.validate.outputs.version }}-linux-amd64.tar.gz
       - name: Attest arm64 archive provenance
+        id: attest-arm64
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: dist/release/wormhole-${{ needs.validate.outputs.version }}-linux-arm64.tar.gz
+      - name: Verify release artifact provenance bundles
+        env:
+          AMD64_BUNDLE: ${{ steps.attest-amd64.outputs.bundle-path }}
+          ARM64_BUNDLE: ${{ steps.attest-arm64.outputs.bundle-path }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          verify_attestation() {
+            artifact=$1
+            bundle=$2
+            test -f "$bundle"
+            gh attestation verify "$artifact" \
+              --bundle "$bundle" \
+              --repo "$GITHUB_REPOSITORY" \
+              --cert-identity "$CERTIFICATE_IDENTITY" \
+              --cert-oidc-issuer "$OIDC_ISSUER" >/dev/null
+          }
+          verify_attestation \
+            "dist/release/wormhole-${VERSION}-linux-amd64.tar.gz" \
+            "$AMD64_BUNDLE"
+          verify_attestation \
+            "dist/release/wormhole-${VERSION}-linux-arm64.tar.gz" \
+            "$ARM64_BUNDLE"
       - name: Create GitHub release last
         env:
           EXPECTED_COMMIT: ${{ needs.validate.outputs.tag-commit }}

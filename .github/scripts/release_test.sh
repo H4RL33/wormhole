@@ -15,6 +15,7 @@ epoch=1700000000
 tool_dir=$test_root/tools
 first=$test_root/first
 second=$test_root/second
+first_relative=${first#"$repo_root"/}
 mkdir -p "$test_root"
 
 "$repo_root/.github/scripts/install-syft.sh" "$tool_dir"
@@ -36,7 +37,7 @@ fi
 (
 	umask 077
 	WORMHOLE_SYFT_BIN=$syft SOURCE_DATE_EPOCH=$epoch \
-		"$repo_root/.github/scripts/build-release.sh" "$version" "$first"
+		"$repo_root/.github/scripts/build-release.sh" "$version" "$first_relative"
 )
 (
 	umask 002
@@ -56,6 +57,12 @@ for output in "$first" "$second"; do
 		test "$(stat -c %a "$output/$name")" = 644
 	done
 done
+
+(cd "$first" && sha256sum -c SHA256SUMS)
+if awk '$2 ~ /\// { found = 1 } END { exit !found }' "$first/SHA256SUMS"; then
+	printf 'release checksum manifest contains non-portable paths\n' >&2
+	exit 1
+fi
 
 for arch in amd64 arm64; do
 	archive="wormhole-${version}-linux-${arch}.tar.gz"
@@ -119,7 +126,6 @@ EOF
 	done
 done
 
-(cd "$first" && sha256sum -c SHA256SUMS)
 cmp "$first/SHA256SUMS" "$second/SHA256SUMS"
 "$test_root/extract-amd64/wormhole-${version}-linux-amd64/wormhole" --help |
 	grep -Fq "version: $version"

@@ -292,16 +292,10 @@ for arch in $release_arches; do
 	chmod 0644 "$sbom"
 done
 
-checksum_prefix=
-case "$output_arg" in
-	/*) ;;
-	*) checksum_prefix=${output_dir#"$repo_root"/}/ ;;
-esac
 : >"$output_dir/SHA256SUMS"
 release_checksum_subject_names "$version" | while IFS= read -r file; do
 	hash=$(sha256sum "$output_dir/$file" | cut -d' ' -f1)
-	printf '%s  %s%s\n' "$hash" "$checksum_prefix" "$file" \
-		>>"$output_dir/SHA256SUMS"
+	printf '%s  %s\n' "$hash" "$file" >>"$output_dir/SHA256SUMS"
 done
 chmod 0644 "$output_dir/SHA256SUMS"
 
