@@ -40,38 +40,8 @@ func TestHandleInitializeReportsConfiguredVersion(t *testing.T) {
 	}
 }
 
-// buildFullRegistry registers all 20 real tools with nil/zero-value stores.
-// Handlers are never invoked in this test file, only the Tool{} descriptors
-// (Name, Description, ArgumentsExample, RequiresAuth, RequiredPermission)
-// are read, so nil store pointers are safe here. Mirrors the registration
-// list in cmd/fabric/main.go.
-func buildFullRegistry() *Registry {
-	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(nil, nil, nil, nil))
-	registry.Register(WhoAmITool())
-	registry.Register(CreateTaskTool(nil))
-	registry.Register(AssignTaskTool(nil))
-	registry.Register(ListTasksTool(nil, nil))
-	registry.Register(UpdateTaskStatusTool(nil))
-	registry.Register(CreateChannelTool(nil))
-	registry.Register(PostEventTool(nil))
-	registry.Register(ListChannelsTool(nil))
-	registry.Register(SubscribeChannelTool(nil))
-	registry.Register(WriteArticleTool(nil))
-	registry.Register(SearchArticlesTool(nil))
-	registry.Register(GetArticleTool(nil))
-	registry.Register(GetArticleLinksTool(nil))
-	registry.Register(LinkCommitTool(nil))
-	registry.Register(RequestReviewTool(nil))
-	registry.Register(BootstrapTool(nil, nil, nil, nil))
-	registry.Register(IncrementalPullTool(nil, nil, nil, nil))
-	registry.Register(IncrementalPushTool(nil, nil, nil, nil))
-	registry.Register(ConflictReportTool(nil, nil, nil, nil))
-	return registry
-}
-
 func TestHandleToolsList_AllToolsPresent(t *testing.T) {
-	registry := buildFullRegistry()
+	registry := NewFabricRegistry(FabricRegistryDependencies{})
 
 	result := HandleToolsList(registry)
 	m, ok := result.(map[string]any)
@@ -122,7 +92,7 @@ func TestHandleToolsList_AllToolsPresent(t *testing.T) {
 }
 
 func TestHandleToolsList_ProjectIDRequiredExceptWhoAmI(t *testing.T) {
-	registry := buildFullRegistry()
+	registry := NewFabricRegistry(FabricRegistryDependencies{})
 
 	result := HandleToolsList(registry).(map[string]any)
 	entries := result["tools"].([]toolListEntry)

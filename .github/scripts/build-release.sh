@@ -2,8 +2,68 @@
 set -eu
 umask 022
 
+release_arches='amd64 arm64'
+release_binaries='wormhole gatewayd fabric'
+
+validate_version() {
+	case "$1" in
+		"" | *[!A-Za-z0-9._-]*)
+			printf 'build-release: invalid version %s\n' "$1" >&2
+			exit 2
+			;;
+	esac
+	if test "${#1}" -gt 64; then
+		printf 'build-release: version must not exceed 64 characters\n' >&2
+		exit 2
+	fi
+}
+
+release_archive_name() {
+	printf 'wormhole-%s-linux-%s.tar.gz\n' "$1" "$2"
+}
+
+release_spdx_name() {
+	printf 'wormhole-%s.spdx.json\n' "$1"
+}
+
+release_checksum_subject_names() {
+	for contract_arch in $release_arches; do
+		release_archive_name "$1" "$contract_arch"
+	done
+	for contract_arch in $release_arches; do
+		release_spdx_name "$contract_arch"
+	done
+}
+
+release_artifact_names() {
+	printf '%s\n' SHA256SUMS
+	release_checksum_subject_names "$1"
+}
+
+print_release_contract() {
+	for contract_binary in $release_binaries; do
+		printf 'binary\t%s\n' "$contract_binary"
+	done
+	for contract_arch in $release_arches; do
+		printf 'platform\tlinux/%s\n' "$contract_arch"
+		printf 'archive\t%s\n' \
+			"$(release_archive_name "$1" "$contract_arch")"
+		printf 'spdx_sbom\t%s\n' \
+			"$(release_spdx_name "$contract_arch")"
+	done
+	printf 'checksum\tSHA256SUMS\n'
+}
+
+if test "$#" -eq 2 && test "$1" = "--print-contract"; then
+	version=$2
+	validate_version "$version"
+	print_release_contract "$version"
+	exit 0
+fi
+
 if test "$#" -ne 2; then
 	printf 'usage: %s VERSION OUTPUT_DIR\n' "$0" >&2
+	printf '       %s --print-contract VERSION\n' "$0" >&2
 	exit 2
 fi
 
@@ -11,16 +71,7 @@ version=$1
 output_arg=$2
 epoch=${SOURCE_DATE_EPOCH:-}
 
-case "$version" in
-	"" | *[!A-Za-z0-9._-]*)
-		printf 'build-release: invalid version %s\n' "$version" >&2
-		exit 2
-		;;
-esac
-if test "${#version}" -gt 64; then
-	printf 'build-release: version must not exceed 64 characters\n' >&2
-	exit 2
-fi
+validate_version "$version"
 case "$epoch" in
 	"" | *[!0-9]*)
 		printf 'build-release: SOURCE_DATE_EPOCH must be a non-negative integer\n' >&2
@@ -75,13 +126,7 @@ mkdir -p "$canonical_output"
 output_dir=$(cd "$canonical_output" && pwd -P)
 chmod 0755 "$output_dir"
 
-known_names="
-SHA256SUMS
-wormhole-${version}-linux-amd64.tar.gz
-wormhole-${version}-linux-arm64.tar.gz
-wormhole-amd64.spdx.json
-wormhole-arm64.spdx.json
-"
+known_names=$(release_artifact_names "$version")
 for entry in "$output_dir"/* "$output_dir"/.[!.]* "$output_dir"/..?*; do
 	if ! test -e "$entry" && ! test -L "$entry"; then
 		continue
@@ -98,13 +143,7 @@ for entry in "$output_dir"/* "$output_dir"/.[!.]* "$output_dir"/..?*; do
 		exit 2
 	fi
 done
-for name in \
-	SHA256SUMS \
-	"wormhole-${version}-linux-amd64.tar.gz" \
-	"wormhole-${version}-linux-arm64.tar.gz" \
-	wormhole-amd64.spdx.json \
-	wormhole-arm64.spdx.json
-do
+release_artifact_names "$version" | while IFS= read -r name; do
 	path=$output_dir/$name
 	if test -e "$path"; then
 		rm -f -- "$path"
@@ -159,15 +198,15 @@ fi
 created=$(date -u -d "@$epoch" '+%Y-%m-%dT%H:%M:%SZ')
 
 cd "$repo_root"
-for arch in amd64 arm64; do
+for arch in $release_arches; do
 	base=wormhole-${version}-linux-${arch}
 	stage=$build_dir/stage/$base
-	archive_name=$base.tar.gz
+	archive_name=$(release_archive_name "$version" "$arch")
 	archive=$output_dir/$archive_name
 	mkdir -p "$stage"
 	chmod 0755 "$build_dir/stage" "$stage"
 
-	for binary in wormhole gatewayd fabric; do
+	for binary in $release_binaries; do
 		CGO_ENABLED=0 GOOS=linux GOARCH=$arch \
 			go build -mod=readonly -trimpath -buildvcs=false \
 			-ldflags "-s -w -X main.version=$version" \
@@ -197,7 +236,7 @@ for arch in amd64 arm64; do
 		-C "$extract_dir" --strip-components=1
 
 	raw_sbom=$build_dir/$arch.raw.spdx.json
-	sbom=$output_dir/wormhole-${arch}.spdx.json
+	sbom=$output_dir/$(release_spdx_name "$arch")
 	SYFT_CHECK_FOR_APP_UPDATE=false \
 	SYFT_FILE_METADATA_SELECTION=all \
 	SYFT_FILE_METADATA_DIGESTS=sha256 \
@@ -259,12 +298,7 @@ case "$output_arg" in
 	*) checksum_prefix=${output_dir#"$repo_root"/}/ ;;
 esac
 : >"$output_dir/SHA256SUMS"
-for file in \
-	"wormhole-${version}-linux-amd64.tar.gz" \
-	"wormhole-${version}-linux-arm64.tar.gz" \
-	wormhole-amd64.spdx.json \
-	wormhole-arm64.spdx.json
-do
+release_checksum_subject_names "$version" | while IFS= read -r file; do
 	hash=$(sha256sum "$output_dir/$file" | cut -d' ' -f1)
 	printf '%s  %s%s\n' "$hash" "$checksum_prefix" "$file" \
 		>>"$output_dir/SHA256SUMS"

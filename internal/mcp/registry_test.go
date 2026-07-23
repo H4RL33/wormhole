@@ -89,7 +89,7 @@ func TestRegistry_EveryAuthedToolDeclaresPermission(t *testing.T) {
 		"wormhole.sync.conflict_report":  true,
 	}
 
-	registry := buildFullRegistry()
+	registry := NewFabricRegistry(FabricRegistryDependencies{})
 	for _, tool := range registry.List() {
 		if !tool.RequiresAuth {
 			if tool.RequiredPermission != "" {

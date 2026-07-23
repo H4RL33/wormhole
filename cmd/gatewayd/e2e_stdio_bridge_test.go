@@ -207,29 +207,14 @@ func e2eStartCoordServer(t *testing.T, db *sql.DB) (srvURL, projectID, agentID, 
 	kbStore := kb.NewStore(db, kb.StubEmbedder{}, 0.85, 4000, 1, 1, 1)
 	rolesStore := roles.NewStore(db)
 
-	syncRateLimiter := mcp.NewSyncRateLimiter(30, time.Minute)
-
-	registry := mcp.NewRegistry()
-	registry.Register(mcp.RegisterAgentTool(identityStore, eventsStore, rolesStore, kbStore))
-	registry.Register(mcp.WhoAmITool())
-	registry.Register(mcp.CreateTaskTool(tasksStore))
-	registry.Register(mcp.AssignTaskTool(tasksStore))
-	registry.Register(mcp.ListTasksTool(tasksStore, rolesStore))
-	registry.Register(mcp.UpdateTaskStatusTool(tasksStore))
-	registry.Register(mcp.CreateChannelTool(eventsStore))
-	registry.Register(mcp.PostEventTool(eventsStore))
-	registry.Register(mcp.SubscribeChannelTool(eventsStore))
-	registry.Register(mcp.ListChannelsTool(eventsStore))
-	registry.Register(mcp.LinkCommitTool(gitStore))
-	registry.Register(mcp.RequestReviewTool(gitStore))
-	registry.Register(mcp.WriteArticleTool(kbStore))
-	registry.Register(mcp.SearchArticlesTool(kbStore))
-	registry.Register(mcp.GetArticleTool(kbStore))
-	registry.Register(mcp.GetArticleLinksTool(kbStore))
-	registry.Register(mcp.BootstrapTool(tasksStore, kbStore, eventsStore, syncRateLimiter))
-	registry.Register(mcp.IncrementalPullTool(tasksStore, kbStore, eventsStore, syncRateLimiter))
-	registry.Register(mcp.IncrementalPushTool(tasksStore, kbStore, eventsStore, syncRateLimiter))
-	registry.Register(mcp.ConflictReportTool(tasksStore, kbStore, eventsStore, syncRateLimiter))
+	registry := mcp.NewFabricRegistry(mcp.FabricRegistryDependencies{
+		Identity: identityStore,
+		Events:   eventsStore,
+		Tasks:    tasksStore,
+		Git:      gitStore,
+		KB:       kbStore,
+		Roles:    rolesStore,
+	})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mcp", mcp.NewMCPHandler(registry, identityStore))

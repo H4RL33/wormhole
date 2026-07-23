@@ -164,28 +164,14 @@ func TestM3_MCPSeededStateReflectedInDashboard(t *testing.T) {
 	kbStore := kb.NewStore(db, kb.StubEmbedder{}, 0.85, 4000, 1, 1, 1)
 	rolesStore := roles.NewStore(db)
 
-	// Replicates cmd/fabric/main.go's registry construction
-	// exactly: the 16 non-sync registry.Register(mcp.*Tool(...)) calls, in
-	// the same order, so this test exercises the real production tool
-	// surface the dashboard reads from (the 4 sync tools write no
-	// dashboard-visible state and are intentionally omitted).
-	registry := mcp.NewRegistry()
-	registry.Register(mcp.RegisterAgentTool(identityStore, eventsStore, rolesStore, kbStore))
-	registry.Register(mcp.WhoAmITool())
-	registry.Register(mcp.CreateTaskTool(tasksStore))
-	registry.Register(mcp.AssignTaskTool(tasksStore))
-	registry.Register(mcp.ListTasksTool(tasksStore, rolesStore))
-	registry.Register(mcp.UpdateTaskStatusTool(tasksStore))
-	registry.Register(mcp.CreateChannelTool(eventsStore))
-	registry.Register(mcp.PostEventTool(eventsStore))
-	registry.Register(mcp.SubscribeChannelTool(eventsStore))
-	registry.Register(mcp.ListChannelsTool(eventsStore))
-	registry.Register(mcp.LinkCommitTool(gitStore))
-	registry.Register(mcp.RequestReviewTool(gitStore))
-	registry.Register(mcp.WriteArticleTool(kbStore))
-	registry.Register(mcp.SearchArticlesTool(kbStore))
-	registry.Register(mcp.GetArticleTool(kbStore))
-	registry.Register(mcp.GetArticleLinksTool(kbStore))
+	registry := mcp.NewFabricRegistry(mcp.FabricRegistryDependencies{
+		Identity: identityStore,
+		Events:   eventsStore,
+		Tasks:    tasksStore,
+		Git:      gitStore,
+		KB:       kbStore,
+		Roles:    rolesStore,
+	})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {

@@ -444,6 +444,118 @@
       ],
       "project_config_format": "toml"
     },
+    "configuration_precedence": [
+      {
+        "name": "config.resolve.required",
+        "commands": [],
+        "sources": [
+          "flag",
+          "project_config",
+          "global_config",
+          "environment",
+          "default",
+          "error"
+        ]
+      },
+      {
+        "name": "connect.opencode_config",
+        "commands": [
+          "connect"
+        ],
+        "sources": [
+          "flag",
+          "project_file",
+          "global_default",
+          "error"
+        ]
+      },
+      {
+        "name": "join_connect.credential_path",
+        "commands": [
+          "connect",
+          "join"
+        ],
+        "sources": [
+          "token_file_flag",
+          "profile_flag",
+          "derived_default",
+          "error"
+        ]
+      },
+      {
+        "name": "join_connect.model",
+        "commands": [
+          "connect",
+          "join"
+        ],
+        "sources": [
+          "flag",
+          "WORMHOLE_MODEL",
+          "empty_default"
+        ]
+      },
+      {
+        "name": "join_connect.owner",
+        "commands": [
+          "connect",
+          "join"
+        ],
+        "sources": [
+          "flag",
+          "git_user_name",
+          "os_user",
+          "error"
+        ]
+      },
+      {
+        "name": "join_connect.project",
+        "commands": [
+          "connect",
+          "join"
+        ],
+        "sources": [
+          "flag",
+          "project_config",
+          "error"
+        ]
+      },
+      {
+        "name": "join_connect.repositories",
+        "commands": [
+          "connect",
+          "join"
+        ],
+        "sources": [
+          "flag",
+          "git_origin",
+          "empty_default"
+        ]
+      },
+      {
+        "name": "join_connect.server",
+        "commands": [
+          "connect",
+          "join"
+        ],
+        "sources": [
+          "flag",
+          "project_config",
+          "global_config",
+          "error"
+        ]
+      },
+      {
+        "name": "viewer-key.create.admin_key",
+        "commands": [
+          "viewer-key create"
+        ],
+        "sources": [
+          "flag",
+          "WORMHOLE_ADMIN_KEY",
+          "error"
+        ]
+      }
+    ],
     "exit_behavior": {
       "help": 0,
       "missing_command": 2,
@@ -487,6 +599,37 @@
       "tools/call",
       "tools/list"
     ],
+    "initialize": {
+      "envelope_fields": [
+        "id",
+        "jsonrpc",
+        "result"
+      ],
+      "result_fields": [
+        "capabilities",
+        "protocolVersion",
+        "serverInfo"
+      ],
+      "capabilities": {
+        "tools": {}
+      },
+      "server_info": {
+        "name": "gatewayd",
+        "version": "configured"
+      }
+    },
+    "lifecycle": {
+      "required_sequence": [
+        "initialize",
+        "notifications/initialized"
+      ],
+      "gated_methods": [
+        "tools/call",
+        "tools/list"
+      ],
+      "not_initialized_error_code": -32002,
+      "notification_response": "none"
+    },
     "server_notifications": [
       {
         "method": "notifications/wormhole.event",
@@ -495,7 +638,24 @@
           "method",
           "params"
         ],
-        "params": "event-payload"
+        "params_variants": [
+          {
+            "name": "agent_registered",
+            "fields": [
+              "agent",
+              "capabilities",
+              "namespace",
+              "status"
+            ]
+          },
+          {
+            "name": "presence_updated",
+            "fields": [
+              "agent",
+              "status"
+            ]
+          }
+        ]
       }
     ]
   },
@@ -567,10 +727,49 @@
         ]
       },
       {
+        "name": "bootstrap_request",
+        "fields": [
+          "namespace_id",
+          "version"
+        ]
+      },
+      {
         "name": "bootstrap_response",
         "fields": [
           "kb_list",
-          "task_list"
+          "org_config",
+          "project_list",
+          "task_list",
+          "timestamp",
+          "version"
+        ]
+      },
+      {
+        "name": "conflict_report_request",
+        "fields": [
+          "conflict_type",
+          "entity_id",
+          "entity_type",
+          "local_value",
+          "namespace_id",
+          "server_value",
+          "version"
+        ]
+      },
+      {
+        "name": "conflict_report_response",
+        "fields": [
+          "resolution_method",
+          "resolved_value",
+          "version"
+        ]
+      },
+      {
+        "name": "incremental_pull_request",
+        "fields": [
+          "last_sync",
+          "namespace_id",
+          "version"
         ]
       },
       {
@@ -589,12 +788,77 @@
         ]
       },
       {
+        "name": "incremental_push_item",
+        "fields": [
+          "entity_id",
+          "entity_type",
+          "operation",
+          "payload"
+        ]
+      },
+      {
+        "name": "incremental_push_request",
+        "fields": [
+          "items",
+          "namespace_id",
+          "version"
+        ]
+      },
+      {
         "name": "incremental_push_response",
         "fields": [
           "applied",
           "items_received",
           "timestamp",
           "version"
+        ]
+      },
+      {
+        "name": "sync_channel_create_payload",
+        "fields": [
+          "name"
+        ]
+      },
+      {
+        "name": "sync_conflict_audit_payload",
+        "fields": [
+          "conflict_type",
+          "entity_id",
+          "entity_type",
+          "losing_value",
+          "resolution_method",
+          "winning_value"
+        ]
+      },
+      {
+        "name": "sync_event_create_payload",
+        "fields": [
+          "channel_id",
+          "event_type",
+          "note",
+          "payload"
+        ]
+      },
+      {
+        "name": "sync_kb_create_payload",
+        "fields": [
+          "body",
+          "force",
+          "frontmatter",
+          "links",
+          "title"
+        ]
+      },
+      {
+        "name": "sync_task_create_payload",
+        "fields": [
+          "description",
+          "due_by",
+          "owner_agent_id",
+          "parent_task_id",
+          "priority",
+          "status",
+          "title"
         ]
       },
       {
@@ -612,35 +876,220 @@
       }
     ]
   },
-  "migrations": [
-    "000001_init_schema",
-    "000002_agent_tokens",
-    "000003_audit_trail",
-    "000004_audit_log_seq",
-    "000005_agent_tokens_expiry",
-    "000006_task_graph",
-    "000007_event_channels",
-    "000008_git_links",
-    "000009_kb_articles",
-    "000010_role_templates",
-    "000011_viewer_keys",
-    "000012_sync_conflict_event_type",
-    "000013_role_templates_defaults",
-    "000014_role_templates_fine_grained",
-    "000015_bootstrap_idempotency",
-    "000016_project_reference_isolation",
-    "000017_audit_log_force_rls"
-  ],
+  "migrations": {
+    "baseline": {
+      "tag": "v0.2.4-alpha",
+      "version": 12
+    },
+    "current_version": 17,
+    "empty_version": 0,
+    "entries": [
+      {
+        "down_empty": false,
+        "down_file": "migrations/000001_init_schema.down.sql",
+        "name": "init_schema",
+        "up_empty": false,
+        "up_file": "migrations/000001_init_schema.up.sql",
+        "version": 1
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000002_agent_tokens.down.sql",
+        "name": "agent_tokens",
+        "up_empty": false,
+        "up_file": "migrations/000002_agent_tokens.up.sql",
+        "version": 2
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000003_audit_trail.down.sql",
+        "name": "audit_trail",
+        "up_empty": false,
+        "up_file": "migrations/000003_audit_trail.up.sql",
+        "version": 3
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000004_audit_log_seq.down.sql",
+        "name": "audit_log_seq",
+        "up_empty": false,
+        "up_file": "migrations/000004_audit_log_seq.up.sql",
+        "version": 4
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000005_agent_tokens_expiry.down.sql",
+        "name": "agent_tokens_expiry",
+        "up_empty": false,
+        "up_file": "migrations/000005_agent_tokens_expiry.up.sql",
+        "version": 5
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000006_task_graph.down.sql",
+        "name": "task_graph",
+        "up_empty": false,
+        "up_file": "migrations/000006_task_graph.up.sql",
+        "version": 6
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000007_event_channels.down.sql",
+        "name": "event_channels",
+        "up_empty": false,
+        "up_file": "migrations/000007_event_channels.up.sql",
+        "version": 7
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000008_git_links.down.sql",
+        "name": "git_links",
+        "up_empty": false,
+        "up_file": "migrations/000008_git_links.up.sql",
+        "version": 8
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000009_kb_articles.down.sql",
+        "name": "kb_articles",
+        "up_empty": false,
+        "up_file": "migrations/000009_kb_articles.up.sql",
+        "version": 9
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000010_role_templates.down.sql",
+        "name": "role_templates",
+        "up_empty": false,
+        "up_file": "migrations/000010_role_templates.up.sql",
+        "version": 10
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000011_viewer_keys.down.sql",
+        "name": "viewer_keys",
+        "up_empty": false,
+        "up_file": "migrations/000011_viewer_keys.up.sql",
+        "version": 11
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000012_sync_conflict_event_type.down.sql",
+        "name": "sync_conflict_event_type",
+        "up_empty": false,
+        "up_file": "migrations/000012_sync_conflict_event_type.up.sql",
+        "version": 12
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000013_role_templates_defaults.down.sql",
+        "name": "role_templates_defaults",
+        "up_empty": false,
+        "up_file": "migrations/000013_role_templates_defaults.up.sql",
+        "version": 13
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000014_role_templates_fine_grained.down.sql",
+        "name": "role_templates_fine_grained",
+        "up_empty": false,
+        "up_file": "migrations/000014_role_templates_fine_grained.up.sql",
+        "version": 14
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000015_bootstrap_idempotency.down.sql",
+        "name": "bootstrap_idempotency",
+        "up_empty": false,
+        "up_file": "migrations/000015_bootstrap_idempotency.up.sql",
+        "version": 15
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000016_project_reference_isolation.down.sql",
+        "name": "project_reference_isolation",
+        "up_empty": false,
+        "up_file": "migrations/000016_project_reference_isolation.up.sql",
+        "version": 16
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000017_audit_log_force_rls.down.sql",
+        "name": "audit_log_force_rls",
+        "up_empty": false,
+        "up_file": "migrations/000017_audit_log_force_rls.up.sql",
+        "version": 17
+      }
+    ],
+    "verification_paths": [
+      {
+        "command": "up",
+        "from_tag": "v0.2.4-alpha",
+        "from_version": 12,
+        "name": "alpha_upgrade",
+        "source": ".github/scripts/test-alpha-upgrade.sh",
+        "to_version": 17
+      },
+      {
+        "command": "down -all",
+        "from_version": 17,
+        "name": "current_down",
+        "source": ".github/workflows/migrations.yml",
+        "to_version": 0
+      },
+      {
+        "command": "up",
+        "from_version": 0,
+        "name": "empty_up",
+        "source": ".github/workflows/migrations.yml",
+        "to_version": 17
+      }
+    ]
+  },
   "artifacts": {
+    "archives": [
+      "wormhole-{version}-linux-amd64.tar.gz",
+      "wormhole-{version}-linux-arm64.tar.gz"
+    ],
     "binaries": [
       "fabric",
       "gatewayd",
       "wormhole"
     ],
+    "checksum_manifest": "SHA256SUMS",
     "fabric_image": "ghcr.io/h4rl33/wormhole-fabric",
+    "fabric_image_platforms": [
+      "linux/amd64",
+      "linux/arm64"
+    ],
+    "published_files": [
+      "SHA256SUMS",
+      "SHA256SUMS.pem",
+      "SHA256SUMS.sig",
+      "wormhole-amd64.spdx.json",
+      "wormhole-amd64.spdx.json.pem",
+      "wormhole-amd64.spdx.json.sig",
+      "wormhole-arm64.spdx.json",
+      "wormhole-arm64.spdx.json.pem",
+      "wormhole-arm64.spdx.json.sig",
+      "wormhole-{version}-linux-amd64.tar.gz",
+      "wormhole-{version}-linux-amd64.tar.gz.pem",
+      "wormhole-{version}-linux-amd64.tar.gz.sig",
+      "wormhole-{version}-linux-arm64.tar.gz",
+      "wormhole-{version}-linux-arm64.tar.gz.pem",
+      "wormhole-{version}-linux-arm64.tar.gz.sig"
+    ],
     "release_platforms": [
       "linux/amd64",
       "linux/arm64"
+    ],
+    "signing_suffixes": [
+      ".pem",
+      ".sig"
+    ],
+    "spdx_sboms": [
+      "wormhole-amd64.spdx.json",
+      "wormhole-arm64.spdx.json"
     ]
   }
 }

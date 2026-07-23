@@ -35,6 +35,9 @@ func TestAlphaContractSyncProtocol(t *testing.T) {
 	if manifest.Mode != "alpha-inventory" {
 		t.Fatalf("mode = %q, want alpha-inventory", manifest.Mode)
 	}
+	if SyncProtocolVersion != manifest.SyncProtocol.Version {
+		t.Fatalf("Gateway SyncProtocolVersion = %d, manifest = %d", SyncProtocolVersion, manifest.SyncProtocol.Version)
+	}
 
 	queueRepo, auditRepo := setupTestRepos(t)
 	defer queueRepo.db.Close()
@@ -45,18 +48,25 @@ func TestAlphaContractSyncProtocol(t *testing.T) {
 		calls[name] = append(calls[name], args)
 		switch name {
 		case "wormhole.sync.bootstrap":
-			return map[string]interface{}{"task_list": []interface{}{}, "kb_list": []interface{}{}}, nil
+			return map[string]interface{}{
+				"org_config":   map[string]interface{}{},
+				"project_list": []interface{}{},
+				"task_list":    []interface{}{},
+				"kb_list":      []interface{}{},
+				"timestamp":    "2026-07-23T00:00:00Z",
+				"version":      manifest.SyncProtocol.Version,
+			}, nil
 		case "wormhole.sync.incremental_pull":
-			return map[string]interface{}{"updates": []interface{}{}, "timestamp": "2026-07-23T00:00:00Z", "version": 1}, nil
+			return map[string]interface{}{"updates": []interface{}{}, "timestamp": "2026-07-23T00:00:00Z", "version": manifest.SyncProtocol.Version}, nil
 		case "wormhole.sync.incremental_push":
 			return map[string]interface{}{
 				"items_received": 1,
 				"applied":        []map[string]interface{}{{"id": "task-contract", "type": "task"}},
 				"timestamp":      "2026-07-23T00:00:00Z",
-				"version":        1,
+				"version":        manifest.SyncProtocol.Version,
 			}, nil
 		case "wormhole.sync.conflict_report":
-			return map[string]interface{}{"resolved_value": "server", "resolution_method": "last_write_wins", "version": 1}, nil
+			return map[string]interface{}{"resolved_value": "server", "resolution_method": "last_write_wins", "version": manifest.SyncProtocol.Version}, nil
 		default:
 			t.Fatalf("unexpected sync method %q", name)
 			return nil, nil
@@ -119,7 +129,7 @@ func TestAlphaContractSyncProtocol(t *testing.T) {
 		t.Fatalf("sync methods = %#v, manifest = %#v", actualMethods, manifest.SyncProtocol.Methods)
 	}
 
-	actualWireTypes := []alphaWireType{
+	gatewayWireTypes := []alphaWireType{
 		{Name: "applied_item", Fields: jsonFieldNames(t, appliedItemWire{})},
 		{Name: "article_summary", Fields: jsonFieldNames(t, articleSummaryWire{})},
 		{Name: "bootstrap_response", Fields: jsonFieldNames(t, bootstrapResultWire{})},
@@ -128,9 +138,14 @@ func TestAlphaContractSyncProtocol(t *testing.T) {
 		{Name: "incremental_push_response", Fields: jsonFieldNames(t, incrementalPushResultWire{})},
 		{Name: "task_summary", Fields: jsonFieldNames(t, taskSummaryWire{})},
 	}
-	sort.Slice(actualWireTypes, func(i, j int) bool { return actualWireTypes[i].Name < actualWireTypes[j].Name })
-	if !reflect.DeepEqual(actualWireTypes, manifest.SyncProtocol.WireTypes) {
-		t.Fatalf("sync wire types = %#v, manifest = %#v", actualWireTypes, manifest.SyncProtocol.WireTypes)
+	manifestWireTypes := make(map[string][]string, len(manifest.SyncProtocol.WireTypes))
+	for _, wireType := range manifest.SyncProtocol.WireTypes {
+		manifestWireTypes[wireType.Name] = wireType.Fields
+	}
+	for _, wireType := range gatewayWireTypes {
+		if !reflect.DeepEqual(wireType.Fields, manifestWireTypes[wireType.Name]) {
+			t.Errorf("Gateway %s fields = %v, manifest = %v", wireType.Name, wireType.Fields, manifestWireTypes[wireType.Name])
+		}
 	}
 }
 

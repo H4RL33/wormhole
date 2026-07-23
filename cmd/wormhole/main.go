@@ -274,6 +274,20 @@ func resolveCredentialsPath(tokenFile, profile, project, role string) (string, e
 	return filepath.Join(dir, defaultProfileName(project, role)+".json"), nil
 }
 
+func resolveModel(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	return os.Getenv("WORMHOLE_MODEL")
+}
+
+func resolveAdminKey(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	return os.Getenv("WORMHOLE_ADMIN_KEY")
+}
+
 // readCredentials loads and decodes one credentials JSON file
 func readCredentials(path string) (credentials, error) {
 	data, err := os.ReadFile(path)
@@ -644,10 +658,7 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// --model: use harness self-report if flag empty
-	resolvedModel := *model
-	if resolvedModel == "" {
-		resolvedModel = os.Getenv("WORMHOLE_MODEL") // harness injects this
-	}
+	resolvedModel := resolveModel(*model)
 
 	reposList := splitOrNil(resolvedRepositories)
 
@@ -861,10 +872,7 @@ func runConnect(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// --model: use harness self-report if flag empty
-	resolvedModel := *model
-	if resolvedModel == "" {
-		resolvedModel = os.Getenv("WORMHOLE_MODEL")
-	}
+	resolvedModel := resolveModel(*model)
 
 	reposList := splitOrNil(resolvedRepositories)
 
@@ -1190,10 +1198,7 @@ func runViewerKeyCreate(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	key := *adminKey
-	if key == "" {
-		key = os.Getenv("WORMHOLE_ADMIN_KEY")
-	}
+	key := resolveAdminKey(*adminKey)
 	if key == "" {
 		fmt.Fprintln(stderr, "wormhole viewer-key create: no admin key: pass --admin-key or set $WORMHOLE_ADMIN_KEY")
 		return 2

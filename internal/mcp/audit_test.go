@@ -7,43 +7,29 @@ import (
 )
 
 func TestMCPAudit_ToolSurfaceCompleteness(t *testing.T) {
-	r := NewRegistry()
-
-	// Register all tools using dummy stores
-	r.Register(RegisterAgentTool(nil, nil, nil, nil))
-	r.Register(WhoAmITool())
-	r.Register(CreateTaskTool(nil))
-	r.Register(AssignTaskTool(nil))
-	r.Register(ListTasksTool(nil, nil))
-	r.Register(UpdateTaskStatusTool(nil))
-	r.Register(CreateChannelTool(nil))
-	r.Register(PostEventTool(nil))
-	r.Register(SubscribeChannelTool(nil))
-	r.Register(ListChannelsTool(nil))
-	r.Register(LinkCommitTool(nil))
-	r.Register(RequestReviewTool(nil))
-	r.Register(WriteArticleTool(nil))
-	r.Register(SearchArticlesTool(nil))
-	r.Register(GetArticleTool(nil))
-	r.Register(GetArticleLinksTool(nil))
+	r := NewFabricRegistry(FabricRegistryDependencies{})
 
 	expectedTools := map[string]bool{
-		"wormhole.agent.register":     false, // RequiresAuth: false
-		"wormhole.agent.whoami":       true,
-		"wormhole.channel.create":     true,
-		"wormhole.channel.post":       true,
-		"wormhole.channel.subscribe":  true,
-		"wormhole.channel.list":       true,
-		"wormhole.task.create":        true,
-		"wormhole.task.assign":        true,
-		"wormhole.task.update_status": true,
-		"wormhole.task.list":          true,
-		"wormhole.kb.search":          true,
-		"wormhole.kb.write":           true,
-		"wormhole.kb.get":             true,
-		"wormhole.kb.get_links":       true,
-		"wormhole.git.link_commit":    true,
-		"wormhole.git.request_review": true,
+		"wormhole.agent.register":        false, // RequiresAuth: false
+		"wormhole.agent.whoami":          true,
+		"wormhole.channel.create":        true,
+		"wormhole.channel.post":          true,
+		"wormhole.channel.subscribe":     true,
+		"wormhole.channel.list":          true,
+		"wormhole.task.create":           true,
+		"wormhole.task.assign":           true,
+		"wormhole.task.update_status":    true,
+		"wormhole.task.list":             true,
+		"wormhole.kb.search":             true,
+		"wormhole.kb.write":              true,
+		"wormhole.kb.get":                true,
+		"wormhole.kb.get_links":          true,
+		"wormhole.git.link_commit":       true,
+		"wormhole.git.request_review":    true,
+		"wormhole.sync.bootstrap":        true,
+		"wormhole.sync.conflict_report":  true,
+		"wormhole.sync.incremental_pull": true,
+		"wormhole.sync.incremental_push": true,
 	}
 
 	for name, requiresAuth := range expectedTools {

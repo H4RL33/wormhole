@@ -20,7 +20,8 @@ run_suite() {
 	for package in \
 		./internal/mcp \
 		./cmd/wormhole \
-		./internal/runtime/sync
+		./internal/runtime/sync \
+		./internal/runtime/localapi
 	do
 		raw=$tmp_dir/$run_name.$(printf '%s' "$package" | tr '/.' '__').raw
 		if ! go test -count=1 "$package" >"$raw" 2>&1; then

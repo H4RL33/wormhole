@@ -15,6 +15,11 @@ import (
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 )
 
+// SyncProtocolVersion is the Gateway-side version sent on every Fabric sync
+// request. It intentionally duplicates internal/mcp.SyncProtocolVersion
+// because runtime packages cannot import internal/mcp.
+const SyncProtocolVersion = 1
+
 // Engine orchestrates the local sync lifecycle: bootstrap, incremental push/pull,
 // and batching (RFC-0003 §8). It holds per-org state including queue and audit repos.
 type Engine struct {
@@ -199,7 +204,6 @@ func (e *Engine) pushBatch(ctx context.Context) error {
 	// Call wormhole.sync.incremental_push on the coordination server.
 	// Include protocol version per RFC-0003 §9 OQ5 (P6 hardening).
 	// Use callSyncToolWithResult to get the response body for per-item error checking.
-	const SyncProtocolVersion = 1
 	result, err := e.callSyncToolWithResult(ctx, "wormhole.sync.incremental_push", map[string]interface{}{
 		"namespace_id": e.namespaceID,
 		"version":      SyncProtocolVersion,
@@ -303,7 +307,6 @@ func (e *Engine) PullIncremental(ctx context.Context) error {
 
 	// Call wormhole.sync.incremental_pull on the coordination server.
 	// Include protocol version per RFC-0003 §9 OQ5 (P6 hardening).
-	const SyncProtocolVersion = 1
 	args := map[string]interface{}{
 		"namespace_id": e.namespaceID,
 		"version":      SyncProtocolVersion,
@@ -359,7 +362,6 @@ func (e *Engine) Bootstrap(ctx context.Context) error {
 
 	// Call wormhole.sync.bootstrap on the coordination server.
 	// Include protocol version per RFC-0003 §9 OQ5 (P6 hardening).
-	const SyncProtocolVersion = 1
 	result, err := e.callSyncToolWithResult(ctx, "wormhole.sync.bootstrap", map[string]interface{}{
 		"namespace_id": e.namespaceID,
 		"version":      SyncProtocolVersion,
@@ -415,8 +417,12 @@ type articleSummaryWire struct {
 
 // bootstrapResultWire mirrors internal/mcp.BootstrapOutput's JSON shape.
 type bootstrapResultWire struct {
-	TaskList []taskSummaryWire    `json:"task_list"`
-	KBList   []articleSummaryWire `json:"kb_list"`
+	OrgConfig   json.RawMessage      `json:"org_config"`
+	ProjectList []string             `json:"project_list"`
+	TaskList    []taskSummaryWire    `json:"task_list"`
+	KBList      []articleSummaryWire `json:"kb_list"`
+	Timestamp   string               `json:"timestamp"`
+	Version     int                  `json:"version"`
 }
 
 // syncUpdateEnvelopeWire mirrors internal/mcp's syncUpdateEnvelope.
@@ -625,7 +631,6 @@ func (e *Engine) ReportConflict(ctx context.Context, entityType, entityID, confl
 
 	// Call wormhole.sync.conflict_report on the coordination server.
 	// Include protocol version per RFC-0003 §9 OQ5 (P6 hardening).
-	const SyncProtocolVersion = 1
 	result, err := e.callSyncToolWithResult(ctx, "wormhole.sync.conflict_report", map[string]interface{}{
 		"namespace_id":  e.namespaceID,
 		"version":       SyncProtocolVersion,
