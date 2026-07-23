@@ -114,10 +114,17 @@
                 {
                   "name": "repositories",
                   "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 {
@@ -129,10 +136,17 @@
                 {
                   "name": "roles",
                   "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 {
@@ -176,10 +190,17 @@
                 {
                   "name": "capabilities",
                   "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 {
@@ -197,10 +218,17 @@
                 {
                   "name": "permissions",
                   "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 {
@@ -316,43 +344,50 @@
                 {
                   "name": "channels",
                   "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "properties": [
-                        {
-                          "name": "channel_id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "created_at",
-                          "schema": {
-                            "type": "string",
-                            "format": "date-time"
-                          }
-                        },
-                        {
-                          "name": "name",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "project_id",
-                          "schema": {
-                            "type": "string"
-                          }
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "channel_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "created_at",
+                              "schema": {
+                                "type": "string",
+                                "format": "date-time"
+                              }
+                            },
+                            {
+                              "name": "name",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "project_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            }
+                          ],
+                          "required": [
+                            "channel_id",
+                            "created_at",
+                            "name",
+                            "project_id"
+                          ]
                         }
-                      ],
-                      "required": [
-                        "channel_id",
-                        "created_at",
-                        "name",
-                        "project_id"
-                      ]
-                    }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 }
               ],
@@ -515,69 +550,76 @@
                 {
                   "name": "events",
                   "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "properties": [
-                        {
-                          "name": "agent_id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "channel_id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "created_at",
-                          "schema": {
-                            "type": "string",
-                            "format": "date-time"
-                          }
-                        },
-                        {
-                          "name": "event_id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "event_type",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "note",
-                          "schema": {
-                            "anyOf": [
-                              {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "agent_id",
+                              "schema": {
                                 "type": "string"
-                              },
-                              {
-                                "type": "null"
                               }
-                            ]
-                          }
-                        },
-                        {
-                          "name": "payload",
-                          "schema": {}
+                            },
+                            {
+                              "name": "channel_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "created_at",
+                              "schema": {
+                                "type": "string",
+                                "format": "date-time"
+                              }
+                            },
+                            {
+                              "name": "event_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "event_type",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "note",
+                              "schema": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "name": "payload",
+                              "schema": {}
+                            }
+                          ],
+                          "required": [
+                            "agent_id",
+                            "channel_id",
+                            "created_at",
+                            "event_id",
+                            "event_type",
+                            "note",
+                            "payload"
+                          ]
                         }
-                      ],
-                      "required": [
-                        "agent_id",
-                        "channel_id",
-                        "created_at",
-                        "event_id",
-                        "event_type",
-                        "note",
-                        "payload"
-                      ]
-                    }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 }
               ],
@@ -925,69 +967,76 @@
                 {
                   "name": "links",
                   "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "properties": [
-                        {
-                          "name": "article_id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "author_agent_id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "body",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "created_at",
-                          "schema": {
-                            "type": "string",
-                            "format": "date-time"
-                          }
-                        },
-                        {
-                          "name": "frontmatter",
-                          "schema": {}
-                        },
-                        {
-                          "name": "project_id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "title",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "updated_at",
-                          "schema": {
-                            "type": "string",
-                            "format": "date-time"
-                          }
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "article_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "author_agent_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "body",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "created_at",
+                              "schema": {
+                                "type": "string",
+                                "format": "date-time"
+                              }
+                            },
+                            {
+                              "name": "frontmatter",
+                              "schema": {}
+                            },
+                            {
+                              "name": "project_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "title",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "updated_at",
+                              "schema": {
+                                "type": "string",
+                                "format": "date-time"
+                              }
+                            }
+                          ],
+                          "required": [
+                            "article_id",
+                            "author_agent_id",
+                            "body",
+                            "created_at",
+                            "project_id",
+                            "title",
+                            "updated_at"
+                          ]
                         }
-                      ],
-                      "required": [
-                        "article_id",
-                        "author_agent_id",
-                        "body",
-                        "created_at",
-                        "project_id",
-                        "title",
-                        "updated_at"
-                      ]
-                    }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 }
               ],
@@ -1039,69 +1088,76 @@
                 {
                   "name": "articles",
                   "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "properties": [
-                        {
-                          "name": "article_id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "author_agent_id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "body",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "created_at",
-                          "schema": {
-                            "type": "string",
-                            "format": "date-time"
-                          }
-                        },
-                        {
-                          "name": "frontmatter",
-                          "schema": {}
-                        },
-                        {
-                          "name": "project_id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "title",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "updated_at",
-                          "schema": {
-                            "type": "string",
-                            "format": "date-time"
-                          }
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "article_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "author_agent_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "body",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "created_at",
+                              "schema": {
+                                "type": "string",
+                                "format": "date-time"
+                              }
+                            },
+                            {
+                              "name": "frontmatter",
+                              "schema": {}
+                            },
+                            {
+                              "name": "project_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "title",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "updated_at",
+                              "schema": {
+                                "type": "string",
+                                "format": "date-time"
+                              }
+                            }
+                          ],
+                          "required": [
+                            "article_id",
+                            "author_agent_id",
+                            "body",
+                            "created_at",
+                            "project_id",
+                            "title",
+                            "updated_at"
+                          ]
                         }
-                      ],
-                      "required": [
-                        "article_id",
-                        "author_agent_id",
-                        "body",
-                        "created_at",
-                        "project_id",
-                        "title",
-                        "updated_at"
-                      ]
-                    }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 }
               ],
@@ -1248,69 +1304,76 @@
                 {
                   "name": "kb_list",
                   "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "properties": [
-                        {
-                          "name": "article_id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "author_agent_id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "body",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "created_at",
-                          "schema": {
-                            "type": "string",
-                            "format": "date-time"
-                          }
-                        },
-                        {
-                          "name": "frontmatter",
-                          "schema": {}
-                        },
-                        {
-                          "name": "project_id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "title",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "updated_at",
-                          "schema": {
-                            "type": "string",
-                            "format": "date-time"
-                          }
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "article_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "author_agent_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "body",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "created_at",
+                              "schema": {
+                                "type": "string",
+                                "format": "date-time"
+                              }
+                            },
+                            {
+                              "name": "frontmatter",
+                              "schema": {}
+                            },
+                            {
+                              "name": "project_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "title",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "updated_at",
+                              "schema": {
+                                "type": "string",
+                                "format": "date-time"
+                              }
+                            }
+                          ],
+                          "required": [
+                            "article_id",
+                            "author_agent_id",
+                            "body",
+                            "created_at",
+                            "project_id",
+                            "title",
+                            "updated_at"
+                          ]
                         }
-                      ],
-                      "required": [
-                        "article_id",
-                        "author_agent_id",
-                        "body",
-                        "created_at",
-                        "project_id",
-                        "title",
-                        "updated_at"
-                      ]
-                    }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 {
@@ -1320,101 +1383,115 @@
                 {
                   "name": "project_list",
                   "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 {
                   "name": "task_list",
                   "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "properties": [
-                        {
-                          "name": "description",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "due_by",
-                          "schema": {
-                            "anyOf": [
-                              {
-                                "type": "string",
-                                "format": "date-time"
-                              },
-                              {
-                                "type": "null"
-                              }
-                            ]
-                          }
-                        },
-                        {
-                          "name": "owner_agent_id",
-                          "schema": {
-                            "anyOf": [
-                              {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "description",
+                              "schema": {
                                 "type": "string"
-                              },
-                              {
-                                "type": "null"
                               }
-                            ]
-                          }
-                        },
-                        {
-                          "name": "parent_task_id",
-                          "schema": {
-                            "anyOf": [
-                              {
+                            },
+                            {
+                              "name": "due_by",
+                              "schema": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "format": "date-time"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "name": "owner_agent_id",
+                              "schema": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "name": "parent_task_id",
+                              "schema": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "name": "priority",
+                              "schema": {
+                                "type": "integer"
+                              }
+                            },
+                            {
+                              "name": "status",
+                              "schema": {
                                 "type": "string"
-                              },
-                              {
-                                "type": "null"
                               }
-                            ]
-                          }
-                        },
-                        {
-                          "name": "priority",
-                          "schema": {
-                            "type": "integer"
-                          }
-                        },
-                        {
-                          "name": "status",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "task_id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "title",
-                          "schema": {
-                            "type": "string"
-                          }
+                            },
+                            {
+                              "name": "task_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "title",
+                              "schema": {
+                                "type": "string"
+                              }
+                            }
+                          ],
+                          "required": [
+                            "description",
+                            "due_by",
+                            "owner_agent_id",
+                            "parent_task_id",
+                            "priority",
+                            "status",
+                            "task_id",
+                            "title"
+                          ]
                         }
-                      ],
-                      "required": [
-                        "description",
-                        "due_by",
-                        "owner_agent_id",
-                        "parent_task_id",
-                        "priority",
-                        "status",
-                        "task_id",
-                        "title"
-                      ]
-                    }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 {
@@ -1596,8 +1673,15 @@
                 {
                   "name": "updates",
                   "schema": {
-                    "type": "array",
-                    "items": {}
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {}
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 {
@@ -1697,34 +1781,41 @@
                 {
                   "name": "applied",
                   "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "properties": [
-                        {
-                          "name": "error",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "type",
-                          "schema": {
-                            "type": "string"
-                          }
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "error",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "type",
+                              "schema": {
+                                "type": "string"
+                              }
+                            }
+                          ],
+                          "required": [
+                            "id",
+                            "type"
+                          ]
                         }
-                      ],
-                      "required": [
-                        "id",
-                        "type"
-                      ]
-                    }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 {
@@ -1947,92 +2038,99 @@
                 {
                   "name": "tasks",
                   "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "properties": [
-                        {
-                          "name": "description",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "due_by",
-                          "schema": {
-                            "anyOf": [
-                              {
-                                "type": "string",
-                                "format": "date-time"
-                              },
-                              {
-                                "type": "null"
-                              }
-                            ]
-                          }
-                        },
-                        {
-                          "name": "owner_agent_id",
-                          "schema": {
-                            "anyOf": [
-                              {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "description",
+                              "schema": {
                                 "type": "string"
-                              },
-                              {
-                                "type": "null"
                               }
-                            ]
-                          }
-                        },
-                        {
-                          "name": "parent_task_id",
-                          "schema": {
-                            "anyOf": [
-                              {
+                            },
+                            {
+                              "name": "due_by",
+                              "schema": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "format": "date-time"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "name": "owner_agent_id",
+                              "schema": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "name": "parent_task_id",
+                              "schema": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "name": "priority",
+                              "schema": {
+                                "type": "integer"
+                              }
+                            },
+                            {
+                              "name": "status",
+                              "schema": {
                                 "type": "string"
-                              },
-                              {
-                                "type": "null"
                               }
-                            ]
-                          }
-                        },
-                        {
-                          "name": "priority",
-                          "schema": {
-                            "type": "integer"
-                          }
-                        },
-                        {
-                          "name": "status",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "task_id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "title",
-                          "schema": {
-                            "type": "string"
-                          }
+                            },
+                            {
+                              "name": "task_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "title",
+                              "schema": {
+                                "type": "string"
+                              }
+                            }
+                          ],
+                          "required": [
+                            "description",
+                            "due_by",
+                            "owner_agent_id",
+                            "parent_task_id",
+                            "priority",
+                            "status",
+                            "task_id",
+                            "title"
+                          ]
                         }
-                      ],
-                      "required": [
-                        "description",
-                        "due_by",
-                        "owner_agent_id",
-                        "parent_task_id",
-                        "priority",
-                        "status",
-                        "task_id",
-                        "title"
-                      ]
-                    }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 }
               ],
@@ -2148,45 +2246,59 @@
                 {
                   "name": "agents",
                   "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "properties": [
-                        {
-                          "name": "agent_id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "capabilities",
-                          "schema": {
-                            "type": "array",
-                            "items": {
-                              "type": "string"
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "agent_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "capabilities",
+                              "schema": {
+                                "anyOf": [
+                                  {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "name": "namespace_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "status",
+                              "schema": {
+                                "type": "string"
+                              }
                             }
-                          }
-                        },
-                        {
-                          "name": "namespace_id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "status",
-                          "schema": {
-                            "type": "string"
-                          }
+                          ],
+                          "required": [
+                            "agent_id",
+                            "capabilities",
+                            "namespace_id",
+                            "status"
+                          ]
                         }
-                      ],
-                      "required": [
-                        "agent_id",
-                        "capabilities",
-                        "namespace_id",
-                        "status"
-                      ]
-                    }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 }
               ],
@@ -2420,10 +2532,17 @@
                 {
                   "name": "repositories",
                   "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 {
@@ -2435,10 +2554,17 @@
                 {
                   "name": "roles",
                   "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 {
@@ -2472,10 +2598,17 @@
                 {
                   "name": "capabilities",
                   "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 {
@@ -2527,10 +2660,17 @@
                 {
                   "name": "capabilities",
                   "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 {
@@ -2548,10 +2688,17 @@
                 {
                   "name": "permissions",
                   "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 {
@@ -2669,69 +2816,76 @@
                 {
                   "name": "events",
                   "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "properties": [
-                        {
-                          "name": "agent_id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "channel_id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "created_at",
-                          "schema": {
-                            "type": "string",
-                            "format": "date-time"
-                          }
-                        },
-                        {
-                          "name": "event_type",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "note",
-                          "schema": {
-                            "anyOf": [
-                              {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "agent_id",
+                              "schema": {
                                 "type": "string"
-                              },
-                              {
-                                "type": "null"
                               }
-                            ]
-                          }
-                        },
-                        {
-                          "name": "payload",
-                          "schema": {}
+                            },
+                            {
+                              "name": "channel_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "created_at",
+                              "schema": {
+                                "type": "string",
+                                "format": "date-time"
+                              }
+                            },
+                            {
+                              "name": "event_type",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "note",
+                              "schema": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "name": "payload",
+                              "schema": {}
+                            }
+                          ],
+                          "required": [
+                            "agent_id",
+                            "channel_id",
+                            "created_at",
+                            "event_type",
+                            "id",
+                            "note",
+                            "payload"
+                          ]
                         }
-                      ],
-                      "required": [
-                        "agent_id",
-                        "channel_id",
-                        "created_at",
-                        "event_type",
-                        "id",
-                        "note",
-                        "payload"
-                      ]
-                    }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 }
               ],
@@ -2773,28 +2927,35 @@
                 {
                   "name": "channels",
                   "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "properties": [
-                        {
-                          "name": "id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "name",
-                          "schema": {
-                            "type": "string"
-                          }
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "name",
+                              "schema": {
+                                "type": "string"
+                              }
+                            }
+                          ],
+                          "required": [
+                            "id",
+                            "name"
+                          ]
                         }
-                      ],
-                      "required": [
-                        "id",
-                        "name"
-                      ]
-                    }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 }
               ],
@@ -3124,63 +3285,70 @@
                 {
                   "name": "articles",
                   "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "properties": [
-                        {
-                          "name": "author_agent_id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "body",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "created_at",
-                          "schema": {
-                            "type": "string",
-                            "format": "date-time"
-                          }
-                        },
-                        {
-                          "name": "frontmatter",
-                          "schema": {}
-                        },
-                        {
-                          "name": "id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "title",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "updated_at",
-                          "schema": {
-                            "type": "string",
-                            "format": "date-time"
-                          }
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "author_agent_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "body",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "created_at",
+                              "schema": {
+                                "type": "string",
+                                "format": "date-time"
+                              }
+                            },
+                            {
+                              "name": "frontmatter",
+                              "schema": {}
+                            },
+                            {
+                              "name": "id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "title",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "updated_at",
+                              "schema": {
+                                "type": "string",
+                                "format": "date-time"
+                              }
+                            }
+                          ],
+                          "required": [
+                            "author_agent_id",
+                            "body",
+                            "created_at",
+                            "frontmatter",
+                            "id",
+                            "title",
+                            "updated_at"
+                          ]
                         }
-                      ],
-                      "required": [
-                        "author_agent_id",
-                        "body",
-                        "created_at",
-                        "frontmatter",
-                        "id",
-                        "title",
-                        "updated_at"
-                      ]
-                    }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 }
               ],
@@ -3222,63 +3390,70 @@
                 {
                   "name": "articles",
                   "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "properties": [
-                        {
-                          "name": "author_agent_id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "body",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "created_at",
-                          "schema": {
-                            "type": "string",
-                            "format": "date-time"
-                          }
-                        },
-                        {
-                          "name": "frontmatter",
-                          "schema": {}
-                        },
-                        {
-                          "name": "id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "title",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "updated_at",
-                          "schema": {
-                            "type": "string",
-                            "format": "date-time"
-                          }
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "author_agent_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "body",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "created_at",
+                              "schema": {
+                                "type": "string",
+                                "format": "date-time"
+                              }
+                            },
+                            {
+                              "name": "frontmatter",
+                              "schema": {}
+                            },
+                            {
+                              "name": "id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "title",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "updated_at",
+                              "schema": {
+                                "type": "string",
+                                "format": "date-time"
+                              }
+                            }
+                          ],
+                          "required": [
+                            "author_agent_id",
+                            "body",
+                            "created_at",
+                            "frontmatter",
+                            "id",
+                            "title",
+                            "updated_at"
+                          ]
                         }
-                      ],
-                      "required": [
-                        "author_agent_id",
-                        "body",
-                        "created_at",
-                        "frontmatter",
-                        "id",
-                        "title",
-                        "updated_at"
-                      ]
-                    }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 }
               ],
@@ -3747,108 +3922,115 @@
                 {
                   "name": "tasks",
                   "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "properties": [
-                        {
-                          "name": "created_at",
-                          "schema": {
-                            "type": "string",
-                            "format": "date-time"
-                          }
-                        },
-                        {
-                          "name": "description",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "due_by",
-                          "schema": {
-                            "anyOf": [
-                              {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "created_at",
+                              "schema": {
                                 "type": "string",
                                 "format": "date-time"
-                              },
-                              {
-                                "type": "null"
                               }
-                            ]
-                          }
-                        },
-                        {
-                          "name": "id",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "owner_agent_id",
-                          "schema": {
-                            "anyOf": [
-                              {
+                            },
+                            {
+                              "name": "description",
+                              "schema": {
                                 "type": "string"
-                              },
-                              {
-                                "type": "null"
                               }
-                            ]
-                          }
-                        },
-                        {
-                          "name": "parent_task_id",
-                          "schema": {
-                            "anyOf": [
-                              {
+                            },
+                            {
+                              "name": "due_by",
+                              "schema": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "format": "date-time"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "name": "id",
+                              "schema": {
                                 "type": "string"
-                              },
-                              {
-                                "type": "null"
                               }
-                            ]
-                          }
-                        },
-                        {
-                          "name": "priority",
-                          "schema": {
-                            "type": "integer"
-                          }
-                        },
-                        {
-                          "name": "status",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "title",
-                          "schema": {
-                            "type": "string"
-                          }
-                        },
-                        {
-                          "name": "updated_at",
-                          "schema": {
-                            "type": "string",
-                            "format": "date-time"
-                          }
+                            },
+                            {
+                              "name": "owner_agent_id",
+                              "schema": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "name": "parent_task_id",
+                              "schema": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "name": "priority",
+                              "schema": {
+                                "type": "integer"
+                              }
+                            },
+                            {
+                              "name": "status",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "title",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "updated_at",
+                              "schema": {
+                                "type": "string",
+                                "format": "date-time"
+                              }
+                            }
+                          ],
+                          "required": [
+                            "created_at",
+                            "description",
+                            "due_by",
+                            "id",
+                            "owner_agent_id",
+                            "parent_task_id",
+                            "priority",
+                            "status",
+                            "title",
+                            "updated_at"
+                          ]
                         }
-                      ],
-                      "required": [
-                        "created_at",
-                        "description",
-                        "due_by",
-                        "id",
-                        "owner_agent_id",
-                        "parent_task_id",
-                        "priority",
-                        "status",
-                        "title",
-                        "updated_at"
-                      ]
-                    }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 }
               ],

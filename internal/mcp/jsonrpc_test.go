@@ -218,6 +218,10 @@ func TestJSONResponseSchemaMatchesEncodingSemantics(t *testing.T) {
 	type response struct {
 		RequiredPointer *string         `json:"required_pointer"`
 		OptionalPointer *string         `json:"optional_pointer,omitempty"`
+		RequiredSlice   []string        `json:"required_slice"`
+		OptionalSlice   []string        `json:"optional_slice,omitempty"`
+		RequiredMap     map[string]int  `json:"required_map"`
+		OptionalMap     map[string]int  `json:"optional_map,omitempty"`
 		Payload         json.RawMessage `json:"payload"`
 		OptionalPayload json.RawMessage `json:"optional_payload,omitempty"`
 	}
@@ -226,12 +230,12 @@ func TestJSONResponseSchemaMatchesEncodingSemantics(t *testing.T) {
 	properties := schema["properties"].(map[string]any)
 	required := schema["required"].([]string)
 
-	for _, name := range []string{"required_pointer", "payload"} {
+	for _, name := range []string{"required_pointer", "required_slice", "required_map", "payload"} {
 		if !containsStr(required, name) {
 			t.Errorf("required = %v, want %q", required, name)
 		}
 	}
-	for _, name := range []string{"optional_pointer", "optional_payload"} {
+	for _, name := range []string{"optional_pointer", "optional_slice", "optional_map", "optional_payload"} {
 		if containsStr(required, name) {
 			t.Errorf("required = %v, want %q optional", required, name)
 		}
@@ -248,6 +252,28 @@ func TestJSONResponseSchemaMatchesEncodingSemantics(t *testing.T) {
 	}
 	if _, nullable := optionalPointer["anyOf"]; nullable {
 		t.Errorf("optional pointer schema = %#v, want no null union", optionalPointer)
+	}
+	for name, wantType := range map[string]string{
+		"required_slice": "array",
+		"required_map":   "object",
+	} {
+		property := properties[name].(map[string]any)
+		alternatives, ok := property["anyOf"].([]map[string]any)
+		if !ok || len(alternatives) != 2 || alternatives[0]["type"] != wantType || alternatives[1]["type"] != "null" {
+			t.Errorf("%s schema = %#v, want %s|null", name, property, wantType)
+		}
+	}
+	for name, wantType := range map[string]string{
+		"optional_slice": "array",
+		"optional_map":   "object",
+	} {
+		property := properties[name].(map[string]any)
+		if property["type"] != wantType {
+			t.Errorf("%s schema = %#v, want optional %s", name, property, wantType)
+		}
+		if _, nullable := property["anyOf"]; nullable {
+			t.Errorf("%s schema = %#v, want no null union", name, property)
+		}
 	}
 	for _, name := range []string{"payload", "optional_payload"} {
 		if got := properties[name].(map[string]any); len(got) != 0 {

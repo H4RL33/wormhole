@@ -235,17 +235,24 @@ func jsonSchemaForType(t reflect.Type) map[string]any {
 }
 
 // jsonResponseSchemaForType derives the encoded JSON shape of a successful
-// response. Response presence differs from request optionality: only
-// omitempty removes a struct field, while a non-omitempty nil pointer is
-// emitted as null.
+// response. Pointers, slices, and maps can encode as null when nil.
 func jsonResponseSchemaForType(t reflect.Type) map[string]any {
-	if t.Kind() == reflect.Ptr {
+	schema := jsonPresentResponseSchemaForType(t)
+	if t != reflect.TypeOf(json.RawMessage{}) &&
+		(t.Kind() == reflect.Ptr || t.Kind() == reflect.Slice || t.Kind() == reflect.Map) {
 		return map[string]any{"anyOf": []map[string]any{
-			jsonResponseSchemaForType(t.Elem()),
+			schema,
 			{"type": "null"},
 		}}
 	}
+	return schema
+}
 
+// jsonPresentResponseSchemaForType derives the shape after encoding/json has
+// decided an omitempty field is present. The top-level value therefore cannot
+// be a nil slice/map or nil pointer, though nested values remain independently
+// nullable.
+func jsonPresentResponseSchemaForType(t reflect.Type) map[string]any {
 	switch {
 	case t == reflect.TypeOf(time.Time{}):
 		return map[string]any{"type": "string", "format": "date-time"}
@@ -254,6 +261,8 @@ func jsonResponseSchemaForType(t reflect.Type) map[string]any {
 	}
 
 	switch t.Kind() {
+	case reflect.Ptr:
+		return jsonResponseSchemaForType(t.Elem())
 	case reflect.String:
 		return map[string]any{"type": "string"}
 	case reflect.Bool:
@@ -262,6 +271,8 @@ func jsonResponseSchemaForType(t reflect.Type) map[string]any {
 		return map[string]any{"type": "integer"}
 	case reflect.Slice:
 		return map[string]any{"type": "array", "items": jsonResponseSchemaForType(t.Elem())}
+	case reflect.Map:
+		return map[string]any{"type": "object"}
 	case reflect.Struct:
 		properties, required := reflectResponseStructSchema(t)
 		return map[string]any{"type": "object", "properties": properties, "required": required}
@@ -281,11 +292,10 @@ func reflectResponseStructSchema(t reflect.Type) (map[string]any, []string) {
 			continue
 		}
 
-		schemaType := field.Type
-		if omitempty && schemaType.Kind() == reflect.Ptr {
-			schemaType = schemaType.Elem()
+		schema := jsonResponseSchemaForType(field.Type)
+		if omitempty {
+			schema = jsonPresentResponseSchemaForType(field.Type)
 		}
-		schema := jsonResponseSchemaForType(schemaType)
 		if enumTag := field.Tag.Get("enum"); enumTag != "" {
 			values := strings.Split(enumTag, ",")
 			enumValues := make([]any, len(values))
