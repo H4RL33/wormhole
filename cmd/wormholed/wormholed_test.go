@@ -196,6 +196,53 @@ func TestRemoveStaleSocket_ActiveDaemonPreserved(t *testing.T) {
 	_ = conn.Close()
 }
 
+func TestRemoveStaleSocket_ReplacementAfterInitialInspectionPreserved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wormholed.sock")
+	addr, err := net.ResolveUnixAddr("unix", path)
+	if err != nil {
+		t.Fatalf("resolve stale socket: %v", err)
+	}
+	stale, err := net.ListenUnix("unix", addr)
+	if err != nil {
+		t.Fatalf("create stale socket: %v", err)
+	}
+	stale.SetUnlinkOnClose(false)
+	if err := stale.Close(); err != nil {
+		t.Fatalf("close stale socket: %v", err)
+	}
+
+	var replacement os.FileInfo
+	err = removeStaleSocketWithHooks(path, staleSocketRemovalHooks{
+		afterInitialInspection: func() {
+			if err := os.Remove(path); err != nil {
+				t.Fatalf("remove initially inspected socket: %v", err)
+			}
+			replacementListener, err := net.ListenUnix("unix", addr)
+			if err != nil {
+				t.Fatalf("create replacement socket: %v", err)
+			}
+			replacementListener.SetUnlinkOnClose(false)
+			if err := replacementListener.Close(); err != nil {
+				t.Fatalf("close replacement socket: %v", err)
+			}
+			replacement, err = os.Lstat(path)
+			if err != nil {
+				t.Fatalf("lstat replacement socket: %v", err)
+			}
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "changed during stale-socket removal") {
+		t.Fatalf("removeStaleSocketWithHooks error = %v, want replacement rejection", err)
+	}
+	preserved, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("lstat preserved replacement: %v", err)
+	}
+	if !os.SameFile(replacement, preserved) {
+		t.Fatal("replacement created after initial inspection was not preserved")
+	}
+}
+
 func TestRemoveStaleSocket_NonSocketsPreserved(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -363,19 +410,24 @@ func TestRemoveStaleSocket_InodeSwapPreservesReplacement(t *testing.T) {
 				t.Fatalf("lstat checked socket: %v", err)
 			}
 
-			err = removeStaleSocketWithHook(path, func() {
-				if err := os.Remove(path); err != nil {
-					t.Fatalf("replace: remove checked socket: %v", err)
-				}
-				requireOpenFileIdentity(t, checked)
-				tt.replace(t, path)
-				replacement, err := os.Lstat(path)
-				if err != nil {
-					t.Fatalf("lstat replacement: %v", err)
-				}
-				if os.SameFile(checked, replacement) {
-					t.Fatal("checked socket inode was released and reused")
-				}
+			err = removeStaleSocketWithHooks(path, staleSocketRemovalHooks{
+				beforeQuarantine: func() {
+					if err := os.Remove(path); err != nil {
+						t.Fatalf("replace: remove checked socket: %v", err)
+					}
+					requireOpenFileIdentity(t, checked)
+					tt.replace(t, path)
+					replacement, err := os.Lstat(path)
+					if err != nil {
+						t.Fatalf("lstat replacement: %v", err)
+					}
+					if os.SameFile(checked, replacement) {
+						t.Fatal("checked socket inode was released and reused")
+					}
+				},
+				afterQuarantine: func(string) {
+					requireOpenFileIdentity(t, checked)
+				},
 			})
 			if err == nil || !strings.Contains(err.Error(), "changed during stale-socket removal") {
 				t.Fatalf("removeStaleSocketWithHook error = %v, want inode-change rejection", err)
@@ -424,6 +476,7 @@ func TestRemoveStaleSocket_PostQuarantineCollisionPreservesBothPaths(t *testing.
 		},
 		afterQuarantine: func(movedPath string) {
 			quarantinePath = movedPath
+			requireOpenFileIdentity(t, checked)
 			if err := os.WriteFile(path, []byte("newer"), 0o600); err != nil {
 				t.Fatalf("write newer public path: %v", err)
 			}

@@ -21,7 +21,6 @@ import (
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/runtime/scheduler"
 	"github.com/H4RL33/wormhole/internal/runtime/sync"
-	"golang.org/x/sys/unix"
 )
 
 type syncEngine interface {
@@ -175,8 +174,15 @@ func Run(ctx context.Context, profileName string) error {
 }
 
 type staleSocketRemovalHooks struct {
-	beforeQuarantine func()
-	afterQuarantine  func(string)
+	afterInitialInspection func()
+	beforeQuarantine       func()
+	afterQuarantine        func(string)
+}
+
+type staleSocketIdentity struct {
+	dev   uint64
+	ino   uint64
+	close func()
 }
 
 func removeStaleSocket(socketPath string) error {
@@ -188,25 +194,17 @@ func removeStaleSocketWithHook(socketPath string, beforeQuarantine func()) error
 }
 
 func removeStaleSocketWithHooks(socketPath string, hooks staleSocketRemovalHooks) error {
-	info, err := os.Lstat(socketPath)
+	expected, err := openStaleSocketIdentity(socketPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("wormholed: inspect stale socket path: %w", err)
+		return err
 	}
-	if info.Mode()&os.ModeSocket == 0 {
-		return fmt.Errorf("wormholed: stale socket path %s is not a socket", socketPath)
-	}
-	fd, err := unix.Open(socketPath, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return fmt.Errorf("wormholed: open stale socket path: %w", err)
-	}
-	defer unix.Close(fd)
+	defer expected.close()
 
-	var expected unix.Stat_t
-	if err := unix.Fstat(fd, &expected); err != nil {
-		return fmt.Errorf("wormholed: stat stale socket descriptor: %w", err)
+	if hooks.afterInitialInspection != nil {
+		hooks.afterInitialInspection()
 	}
 	conn, dialErr := net.DialTimeout("unix", socketPath, 250*time.Millisecond)
 	if dialErr == nil {
@@ -216,7 +214,7 @@ func removeStaleSocketWithHooks(socketPath string, hooks staleSocketRemovalHooks
 	if !errors.Is(dialErr, syscall.ECONNREFUSED) {
 		return fmt.Errorf("wormholed: cannot prove socket %s is stale: %w", socketPath, dialErr)
 	}
-	return quarantineAndRemoveSocket(socketPath, expected.Dev, expected.Ino, hooks)
+	return quarantineAndRemoveSocket(socketPath, expected.dev, expected.ino, hooks)
 }
 
 func runWithSyncEngineFactory(ctx context.Context, profileName string, factory syncEngineFactory) error {

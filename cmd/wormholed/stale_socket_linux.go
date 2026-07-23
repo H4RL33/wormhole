@@ -15,6 +15,30 @@ import (
 
 const renameNoReplaceFlag = 1
 
+func openStaleSocketIdentity(socketPath string) (staleSocketIdentity, error) {
+	fd, err := unix.Open(socketPath, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return staleSocketIdentity{}, fmt.Errorf("wormholed: open stale socket path: %w", err)
+	}
+
+	var expected unix.Stat_t
+	if err := unix.Fstat(fd, &expected); err != nil {
+		_ = unix.Close(fd)
+		return staleSocketIdentity{}, fmt.Errorf("wormholed: stat stale socket descriptor: %w", err)
+	}
+	if expected.Mode&unix.S_IFMT != unix.S_IFSOCK {
+		_ = unix.Close(fd)
+		return staleSocketIdentity{}, fmt.Errorf("wormholed: stale socket path %s is not a socket", socketPath)
+	}
+	return staleSocketIdentity{
+		dev: uint64(expected.Dev),
+		ino: expected.Ino,
+		close: func() {
+			_ = unix.Close(fd)
+		},
+	}, nil
+}
+
 // quarantineAndRemoveSocket atomically moves the current path into a private
 // same-directory quarantine before comparing its inode with the socket that
 // was checked. A replacement is restored with RENAME_NOREPLACE and is never
