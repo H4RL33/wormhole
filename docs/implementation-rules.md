@@ -95,10 +95,10 @@ first rung that answers the question:
 2. **`docs/db-entities.md`** for anything entity-shaped.
 3. **Existing code.** Does the repo already embody an answer? Match it.
 4. **This document's rules.** Do §4–§7 constrain it to one option?
-5. **RFC "open questions" (§15 Core / §9 Governance).** Is it listed there? Then it is
-   *deliberately* undecided. Do not resolve it. Pick the most conservative reading
-   (strictest scoping, per-project isolation, poll not push), state in your output that
-   you did so and why, and flag it.
+5. **RFC Decision Registers (§15 Core / §9 Governance / §9 Local Runtime).** If the
+   entry is decided, follow it. If it is listed under **Open**, do not resolve it:
+   pick the most conservative behavior consistent with the settled decisions,
+   state what you did and why, and flag it.
 6. **None of the above** → stop and escalate with a concrete question and your
    recommended answer. "Should `task.assign` accept a human owner? RFC §8.2 says owner
    is 'agent or human' but the agents table has no human rows — I recommend X because Y"
@@ -252,8 +252,10 @@ the same layering pattern and isolation discipline.
 - R5: The Coordination Server has one datastore: Postgres + pgvector. RFC-0003 separately
   requires `wormholed`'s local SQLite replica and durable sync queue; that SQLite database
   is not a Coordination Server datastore. Do not add Redis, NATS, another datastore, or
-  another storage service without explicit human approval. RFC-0001 §7.1 leaves streams
-  open as a future option; the current Coordination Server answer is "Postgres table, poll".
+  another storage service without explicit human approval. RFC-0001 §15 decides that
+  durable Coordination Server change discovery is "Postgres table, polled by
+  `wormholed`". Harnesses consume local SQLite/runtime state; ephemeral local
+  notifications and the in-memory eventbus remain permitted under LR4.
 
 ---
 
@@ -352,8 +354,12 @@ the same layering pattern and isolation discipline.
   `message.posted`), typed `payload` jsonb per type, optional free-text `note`.
   `message.posted` is the escape hatch; do not add prose-first event types.
 - New event types are an escalation, not a local decision.
-- Current delivery model: poll. Do not build push/streaming infrastructure
-  (open question, RFC-0001 §15).
+- Durable Coordination Server change discovery uses Postgres-backed polling by
+  `wormholed` (RFC-0001 §15). Harnesses consume local SQLite/runtime state over
+  MCP IPC. Ephemeral local notifications and the in-memory eventbus are
+  permitted for wake-ups, presence, and heartbeats, but never as a second
+  durable coordination datastore. Do not add server-side push/streaming
+  infrastructure or another durable delivery service.
 
 ### Tasks
 - Hierarchy is Project → Task → Subtask via `parent_task_id`. Status enum exactly
@@ -366,11 +372,12 @@ the same layering pattern and isolation discipline.
 - Atomic articles: one fact/decision/procedure each. Markdown body + jsonb frontmatter.
 - Compliance checks run **server-side** on write (RFC-0001 §13): semantic dedup against
   existing embeddings, length ceiling, required links where applicable. Rejection style
-  is soft-reject-with-rewrite-suggestion, not hard block (RFC-0001 §15 leans this way;
+  is soft-reject-with-rewrite-suggestion, not hard block (decided by RFC-0001 §15;
   exact thresholds are tunable config, not hardcoded constants).
 - Linking via `kb_links` rows (graph), never folder/path hierarchy.
-- Search is semantic (pgvector similarity), project-scoped. Cross-project KB visibility
-  is an open question (RFC-0001 §15) — default to strict per-project until decided.
+- Search is semantic (pgvector similarity) and strictly project-scoped (decided
+  by RFC-0001 §15). A multi-project runtime keeps separate namespaces and never
+  constructs an implicit merged KB.
 
 ### Identity
 - Agent identity is project-agnostic; project access flows through passports +
@@ -410,8 +417,8 @@ the same layering pattern and isolation discipline.
   RFC-0003's existing local runtime and sync loop.
 - A human-facing UI beyond a minimal read-only surface.
 - Human-to-human messaging, rich media, presence.
-- Resolving an RFC open question (§15 Core, §9 Governance) as a side effect of an
-  implementation choice.
+- Resolving an RFC Decision Register entry listed under **Open** as a side
+  effect of an implementation choice.
 - New vocabulary: event types, permission actions, statuses, or glossary terms not in
   the RFCs or `docs/db-entities.md`.
 - Agent-invocable destructive or policy-level actions.
@@ -466,7 +473,8 @@ flag it.
 **Right shape:** threshold in `types.Config` with a documented default; over-threshold
 write returns a structured soft rejection carrying the closest existing article and a
 merge/rewrite suggestion; completion report states "default 0.85 chosen arbitrarily,
-needs empirical tuning per RFC §15" — the open question stays visibly open.
+needs empirical tuning." RFC-0001 §15 settles soft rejection and keeps thresholds
+tunable; choosing a default does not reopen the architecture.
 
 ### 11.3 "Cross-project task listing test fails after my change"
 

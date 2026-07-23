@@ -1,6 +1,11 @@
 # Knowledge Base Schema Draft
 
-Atomic knowledge articles linked explicitly as a graph, per RFC-0001 §8.3. Compliance checks run server-side on write; exact thresholds are config tunable, not hardcoded, and are deferred to the implementation task that wires `wormhole.kb.write`.
+Atomic knowledge articles linked explicitly as a graph, per RFC-0001 §8.3. KB
+reads and writes are strictly project-scoped per the RFC-0001 §15 Decision
+Register; a multi-project runtime keeps separate namespaces rather than an
+implicit merged KB. Compliance checks run server-side on write and soft-reject
+with structured rewrite suggestions. Exact thresholds remain tunable
+configuration rather than architecture.
 
 ## kb_articles
 
@@ -32,7 +37,12 @@ Every KB article contribution is subject to server-side checks per RFC-0001 §8.
 - **Conciseness.** Articles exceeding a length ceiling are rejected with a rewrite prompt, not silently accepted.
 - **Required links.** Depending on article type (declarative policy, architectural decision, procedure), outbound links to related articles may be required; missing links trigger a soft rejection with link suggestions.
 
-All three checks follow a soft-reject-with-rewrite-suggestion model, not hard blocks: the agent receives a structured rejection carrying the closest conflicting articles or link recommendations and can revise and resubmit. Exact thresholds (similarity ceiling, length ceiling, required link counts per article type) are RFC-0001 §15 open question territory and are deferred to the implementation task that wires `wormhole.kb.write`, not decided in this draft. They will be tunable config constants, not hardcoded.
+All three checks follow the soft-reject-with-rewrite-suggestion model decided
+in the RFC-0001 §15 Decision Register, not hard blocks: the agent receives a
+structured rejection carrying the closest conflicting articles or link
+recommendations and can revise and resubmit. Exact thresholds (similarity
+ceiling, length ceiling, required link counts per article type) are tunable
+config constants, not hardcoded architectural choices.
 
 ## RFC-0001 §8.3 Scope Note
 
