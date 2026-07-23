@@ -40,8 +40,8 @@ gh issue list --repo H4RL33/wormhole --state open --limit 200 \
 - **#1:** Repository layout, compose stack, server entrypoint, and MCP transport
   are present, and the focused repository tests pass.
 - **#2:** Registration, Passport, token, resolved permission, `whoami`, and audit
-  paths are implemented and tested. Close the milestone while retaining #33 as
-  the narrower database-enforcement follow-up.
+  paths are implemented and tested. Its narrower database-enforcement follow-up,
+  #33, is now completed and closed.
 - **#4:** The current production registry contains the complete RFC-0001 §9
   surface. Close the milestone while retaining #32 for the test/production
   registry invariant.
