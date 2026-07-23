@@ -30,7 +30,9 @@ run_suite() {
 			cat "$raw" >&2
 			return 1
 		fi
-		sed -E 's/[[:space:]]+[0-9]+(\.[0-9]+)?s$/ <elapsed>/' \
+		sed -E \
+			-e '/^go: downloading /d' \
+			-e 's/[[:space:]]+[0-9]+(\.[0-9]+)?s$/ <elapsed>/' \
 			"$raw" >>"$normalized"
 	done
 }

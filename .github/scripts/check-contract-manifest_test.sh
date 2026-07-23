@@ -18,6 +18,10 @@ mkdir -p "$fake_bin"
 cat >"$fake_bin/go" <<'EOF'
 #!/bin/sh
 set -eu
+if ! test -e "$CONTRACT_CHECK_STATE"; then
+	: >"$CONTRACT_CHECK_STATE"
+	printf 'go: downloading example.invalid/contract v0.0.0\n'
+fi
 {
 	printf '%s' "$1"
 	shift
@@ -32,6 +36,7 @@ chmod 0755 "$fake_bin/go"
 
 PATH=$fake_bin:$PATH \
 	CONTRACT_CHECK_CALL_LOG=$call_log \
+	CONTRACT_CHECK_STATE=$tmp_dir/go-state \
 	sh "$checker" >"$output"
 grep -Fxq 'Contract inventory is deterministic and unchanged.' "$output"
 
