@@ -51,6 +51,7 @@ type localTool struct {
 	Description        string
 	ArgumentsExample   any
 	RequiredPermission string
+	ResultExamples     map[string]any
 	Handler            localToolHandler
 }
 
@@ -69,43 +70,50 @@ type localRegistry struct {
 // they're invoked changes (design doc §5 subtask 2).
 func newLocalRegistry(s *Server) *localRegistry {
 	r := &localRegistry{tools: map[string]localTool{}}
-	reg := func(name, description string, example any, permission string, handler localToolHandler) {
-		r.tools[name] = localTool{Name: name, Description: description, ArgumentsExample: example, RequiredPermission: permission, Handler: handler}
+	reg := func(name, description string, example any, permission string, results map[string]any, handler localToolHandler) {
+		r.tools[name] = localTool{
+			Name:               name,
+			Description:        description,
+			ArgumentsExample:   example,
+			RequiredPermission: permission,
+			ResultExamples:     results,
+			Handler:            handler,
+		}
 		r.order = append(r.order, name)
 	}
 
-	reg("wormhole.agent.whoami", "Return the calling agent's identity, capabilities, and permissions.", whoAmIArgs{}, "", func(ctx context.Context, _ json.RawMessage) (any, error) {
+	reg("wormhole.agent.whoami", "Return the calling agent's identity, capabilities, and permissions.", whoAmIArgs{}, "", singleResult(whoAmIOutput{}), func(ctx context.Context, _ json.RawMessage) (any, error) {
 		return s.proxyWhoAmI(ctx)
 	})
 
-	reg("wormhole.task.list", "List tasks in the local task graph replica, optionally filtered by status.", listTasksArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.task.list", "List tasks in the local task graph replica, optionally filtered by status.", listTasksArgs{}, "", singleResult(localTaskListResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localListTasks(ctx, args)
 	})
 
-	reg("wormhole.task.get", "Get a single task by ID from the local task graph replica.", getTaskArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.task.get", "Get a single task by ID from the local task graph replica.", getTaskArgs{}, "", singleResult(localTaskResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localGetTask(ctx, args)
 	})
 
-	reg("wormhole.task.create", "Create a task locally and enqueue it for sync to the Coordination Server.", createTaskArgs{}, "task.create", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.task.create", "Create a task locally and enqueue it for sync to the Coordination Server.", createTaskArgs{}, "task.create", singleResult(localTaskWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleTaskCreate(ctx, args)
 	})
 
-	reg("wormhole.task.route", "Create a task and route it to a locally-registered agent by capability match.", taskRouteArgs{}, "task.create", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.task.route", "Create a task and route it to a locally-registered agent by capability match.", taskRouteArgs{}, "task.create", singleResult(localTaskRouteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleTaskRoute(ctx, args)
 	})
 
-	reg("wormhole.channel.list", "List channels in the local event bus replica.", channelListArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.channel.list", "List channels in the local event bus replica.", channelListArgs{}, "", singleResult(localChannelListResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localListChannels(ctx, args)
 	})
-	reg("wormhole.channel.create", "Create a channel locally and enqueue it for sync.", channelCreateArgs{}, "channel.create", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.channel.create", "Create a channel locally and enqueue it for sync.", channelCreateArgs{}, "channel.create", singleResult(localChannelWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleChannelCreate(ctx, args)
 	})
 
-	reg("wormhole.channel.events", "List recent events on channels in the local event bus replica.", channelEventsArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.channel.events", "List recent events on channels in the local event bus replica.", channelEventsArgs{}, "", singleResult(localEventListResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localListChannelEvents(ctx, args)
 	})
 
-	reg("wormhole.channel.post", "Publish a durable event to a channel locally and enqueue it for sync.", channelPostArgs{}, "channel.post", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.channel.post", "Publish a durable event to a channel locally and enqueue it for sync.", channelPostArgs{}, "channel.post", singleResult(localEventWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleChannelPost(ctx, args)
 	})
 
@@ -113,17 +121,20 @@ func newLocalRegistry(s *Server) *localRegistry {
 	// special-cased in handleToolsCall because event delivery happens as
 	// server-initiated MCP notifications after the initial ack, not a
 	// single (result, error) return (design doc §1 tools/call, §5).
-	reg("wormhole.channel.subscribe", "Subscribe to events on this connection; matching events are delivered as notifications/wormhole.event messages until the subscription ends.", channelSubscribeArgs{}, "", nil)
+	reg("wormhole.channel.subscribe", "Subscribe to events on this connection; matching events are delivered as notifications/wormhole.event messages until the subscription ends.", channelSubscribeArgs{}, "", singleResult(localSubscriptionResult{}), nil)
 
-	reg("wormhole.kb.list", "List KB articles in the local knowledge base replica.", kbListArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.kb.list", "List KB articles in the local knowledge base replica.", kbListArgs{}, "", singleResult(localArticleListResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localListArticles(ctx, args)
 	})
 
-	reg("wormhole.kb.get", "Get a KB article by ID, or list all articles if article_id is omitted.", kbGetArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.kb.get", "Get a KB article by ID, or list all articles if article_id is omitted.", kbGetArgs{}, "", map[string]any{
+		"article": localArticleResult{},
+		"list":    localArticleListResult{},
+	}, func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localGetArticle(ctx, args)
 	})
 
-	reg("wormhole.kb.write", "Write a KB article locally and enqueue it for sync.", kbWriteArgs{}, "kb.write", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.kb.write", "Write a KB article locally and enqueue it for sync.", kbWriteArgs{}, "kb.write", singleResult(localArticleWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleKBWrite(ctx, args)
 	})
 
@@ -132,22 +143,29 @@ func newLocalRegistry(s *Server) *localRegistry {
 	// Server; presence-registration args (agent_id + capabilities) go to
 	// the local scheduler. Dispatch by shape, same as the old switch case
 	// (isJoinRegisterArgs, localapi.go).
-	reg("wormhole.agent.register", "Register an agent: join/passport creation (proxied to the Coordination Server) or local presence registration, dispatched by argument shape.", agentRegisterArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.agent.register", "Register an agent: join/passport creation (proxied to the Coordination Server) or local presence registration, dispatched by argument shape.", agentRegisterArgs{}, "", map[string]any{
+		"join":     localJoinResult{},
+		"presence": localAgentResult{},
+	}, func(ctx context.Context, args json.RawMessage) (any, error) {
 		if isJoinRegisterArgs(args) {
 			return s.proxyRegister(ctx, args)
 		}
 		return s.handleAgentRegister(ctx, args)
 	})
 
-	reg("wormhole.agent.presence", "Update a locally-registered agent's presence status.", agentPresenceArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.agent.presence", "Update a locally-registered agent's presence status.", agentPresenceArgs{}, "", singleResult(localPresenceResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleAgentPresence(ctx, args)
 	})
 
-	reg("wormhole.agent.list", "List agents registered with the local scheduler.", agentListArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.agent.list", "List agents registered with the local scheduler.", agentListArgs{}, "", singleResult(localAgentListResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleAgentList(ctx, args)
 	})
 
 	return r
+}
+
+func singleResult(example any) map[string]any {
+	return map[string]any{"default": example}
 }
 
 // List returns every registered tool in registration order.
@@ -254,6 +272,151 @@ type agentPresenceArgs struct {
 }
 
 type agentListArgs struct{}
+
+// Result-shape structs are the canonical successful-response examples held by
+// localRegistry. Handlers predate the descriptor registry and return equivalent
+// maps; keeping the examples beside the registrations avoids a second
+// hand-maintained tool inventory while preserving those handler APIs.
+type localTaskResult struct {
+	ID           string     `json:"id"`
+	Title        string     `json:"title"`
+	Description  string     `json:"description"`
+	Status       string     `json:"status"`
+	Priority     int        `json:"priority"`
+	OwnerAgentID *string    `json:"owner_agent_id"`
+	ParentTaskID *string    `json:"parent_task_id"`
+	DueBy        *time.Time `json:"due_by"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
+type localTaskListResult struct {
+	Tasks []localTaskResult `json:"tasks"`
+}
+
+type localTaskWriteResult struct {
+	ID           string     `json:"id"`
+	NamespaceID  string     `json:"namespace_id"`
+	Title        string     `json:"title"`
+	Description  string     `json:"description"`
+	Status       string     `json:"status"`
+	Priority     int        `json:"priority"`
+	OwnerAgentID *string    `json:"owner_agent_id"`
+	ParentTaskID *string    `json:"parent_task_id"`
+	DueBy        *time.Time `json:"due_by"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
+type localTaskRouteResult struct {
+	TaskID      string `json:"task_id"`
+	NamespaceID string `json:"namespace_id"`
+	Capability  string `json:"capability"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+	AssignedTo  string `json:"assigned_to"`
+	AgentStatus string `json:"agent_status"`
+}
+
+type localChannelResult struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type localChannelListResult struct {
+	Channels []localChannelResult `json:"channels"`
+}
+
+type localChannelWriteResult struct {
+	ID          string `json:"id"`
+	NamespaceID string `json:"namespace_id"`
+	Name        string `json:"name"`
+}
+
+type localEventResult struct {
+	ID        string          `json:"id"`
+	ChannelID string          `json:"channel_id"`
+	AgentID   string          `json:"agent_id"`
+	EventType string          `json:"event_type"`
+	Payload   json.RawMessage `json:"payload"`
+	Note      *string         `json:"note"`
+	CreatedAt time.Time       `json:"created_at"`
+}
+
+type localEventListResult struct {
+	Events []localEventResult `json:"events"`
+}
+
+type localEventWriteResult struct {
+	ID          string          `json:"id"`
+	NamespaceID string          `json:"namespace_id"`
+	ChannelID   string          `json:"channel_id"`
+	AgentID     string          `json:"agent_id"`
+	EventType   string          `json:"event_type"`
+	Payload     json.RawMessage `json:"payload"`
+	Note        *string         `json:"note"`
+	CreatedAt   time.Time       `json:"created_at"`
+}
+
+type localSubscriptionResult struct {
+	SubscriptionID string `json:"subscription_id"`
+	Namespace      string `json:"namespace"`
+	EventType      string `json:"event_type"`
+	Capability     string `json:"capability"`
+	AgentID        string `json:"agent_id"`
+}
+
+type localArticleResult struct {
+	ID            string          `json:"id"`
+	Title         string          `json:"title"`
+	Body          string          `json:"body"`
+	Frontmatter   json.RawMessage `json:"frontmatter"`
+	AuthorAgentID string          `json:"author_agent_id"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
+}
+
+type localArticleListResult struct {
+	Articles []localArticleResult `json:"articles"`
+}
+
+type localArticleWriteResult struct {
+	ID            string          `json:"id"`
+	NamespaceID   string          `json:"namespace_id"`
+	Title         string          `json:"title"`
+	Body          string          `json:"body"`
+	Frontmatter   json.RawMessage `json:"frontmatter"`
+	AuthorAgentID string          `json:"author_agent_id"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
+}
+
+type localAgentResult struct {
+	AgentID      string   `json:"agent_id"`
+	NamespaceID  string   `json:"namespace_id"`
+	Capabilities []string `json:"capabilities"`
+	Status       string   `json:"status"`
+}
+
+type localPresenceResult struct {
+	AgentID string `json:"agent_id"`
+	Status  string `json:"status"`
+}
+
+type localAgentListResult struct {
+	Agents []localAgentResult `json:"agents"`
+}
+
+type localJoinResult struct {
+	AgentID      string    `json:"agent_id"`
+	PassportID   string    `json:"passport_id"`
+	Token        string    `json:"token"`
+	Repositories []string  `json:"repositories"`
+	Roles        []string  `json:"roles"`
+	IssuedAt     time.Time `json:"issued_at"`
+	Role         string    `json:"role,omitempty"`
+}
 
 // mcpSession is per-connection state a persistent MCP session requires that
 // the old one-shot protocol never carried: whether initialize +
@@ -414,6 +577,9 @@ func jsonSchemaForType(t reflect.Type) map[string]any {
 		return map[string]any{"type": "integer"}
 	case reflect.Slice:
 		return map[string]any{"type": "array", "items": jsonSchemaForType(t.Elem())}
+	case reflect.Struct:
+		properties, required := reflectStructSchema(t)
+		return map[string]any{"type": "object", "properties": properties, "required": required}
 	default:
 		return map[string]any{"type": "object"}
 	}

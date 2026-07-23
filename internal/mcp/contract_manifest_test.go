@@ -10,30 +10,40 @@ import (
 )
 
 type alphaMCPContract struct {
-	Mode         string            `json:"mode"`
-	MCPTools     []alphaMCPTool    `json:"mcp_tools"`
-	SyncProtocol alphaSyncProtocol `json:"sync_protocol"`
+	Mode         string              `json:"mode"`
+	MCPTools     alphaMCPInventories `json:"mcp_tools"`
+	SyncProtocol alphaSyncProtocol   `json:"sync_protocol"`
 }
 
-type alphaMCPTool struct {
-	Name               string           `json:"name"`
-	RequiresAuth       bool             `json:"requires_auth"`
-	RequiredPermission string           `json:"required_permission"`
-	InputSchema        alphaInputSchema `json:"input_schema"`
+type alphaMCPInventories struct {
+	Fabric []alphaFabricMCPTool `json:"fabric"`
 }
 
-type alphaInputSchema struct {
+type alphaFabricMCPTool struct {
+	Name               string          `json:"name"`
+	RequiresAuth       bool            `json:"requires_auth"`
+	RequiredPermission string          `json:"required_permission"`
+	RequestSchema      alphaSchema     `json:"request_schema"`
+	ResponseSchemas    []alphaResponse `json:"response_schemas"`
+}
+
+type alphaResponse struct {
+	Variant string      `json:"variant"`
+	Schema  alphaSchema `json:"schema"`
+}
+
+type alphaSchema struct {
 	Type       string                `json:"type"`
-	Properties []alphaSchemaProperty `json:"properties"`
-	Required   []string              `json:"required"`
+	Format     string                `json:"format,omitempty"`
+	Enum       []string              `json:"enum,omitempty"`
+	Properties []alphaSchemaProperty `json:"properties,omitempty"`
+	Required   []string              `json:"required,omitempty"`
+	Items      *alphaSchema          `json:"items,omitempty"`
 }
 
 type alphaSchemaProperty struct {
-	Name   string   `json:"name"`
-	Type   string   `json:"type"`
-	Items  string   `json:"items,omitempty"`
-	Format string   `json:"format,omitempty"`
-	Enum   []string `json:"enum,omitempty"`
+	Name   string      `json:"name"`
+	Schema alphaSchema `json:"schema"`
 }
 
 type alphaSyncProtocol struct {
@@ -52,23 +62,29 @@ func TestAlphaContractMCPRegistry(t *testing.T) {
 		t.Fatalf("mode = %q, want alpha-inventory", manifest.Mode)
 	}
 
+	actual := fabricMCPContract(t)
+	if !reflect.DeepEqual(actual, manifest.MCPTools.Fabric) {
+		got, _ := json.MarshalIndent(actual, "", "  ")
+		want, _ := json.MarshalIndent(manifest.MCPTools.Fabric, "", "  ")
+		t.Fatalf("Fabric MCP contract drifted\nactual:\n%s\nmanifest:\n%s", got, want)
+	}
+}
+
+func fabricMCPContract(t *testing.T) []alphaFabricMCPTool {
+	t.Helper()
 	registry := NewFabricRegistry(FabricRegistryDependencies{})
-	actual := make([]alphaMCPTool, 0, len(registry.List()))
+	actual := make([]alphaFabricMCPTool, 0, len(registry.List()))
 	for _, tool := range registry.List() {
-		actual = append(actual, alphaMCPTool{
+		actual = append(actual, alphaFabricMCPTool{
 			Name:               tool.Name,
 			RequiresAuth:       tool.RequiresAuth,
 			RequiredPermission: tool.RequiredPermission,
-			InputSchema:        toolSchemaSnapshot(t, buildInputSchema(tool)),
+			RequestSchema:      schemaSnapshot(t, buildInputSchema(tool)),
+			ResponseSchemas:    responseSchemaSnapshots(t, tool.ResultExamples),
 		})
 	}
 	sort.Slice(actual, func(i, j int) bool { return actual[i].Name < actual[j].Name })
-
-	if !reflect.DeepEqual(actual, manifest.MCPTools) {
-		got, _ := json.MarshalIndent(actual, "", "  ")
-		want, _ := json.MarshalIndent(manifest.MCPTools, "", "  ")
-		t.Fatalf("MCP contract drifted\nactual:\n%s\nmanifest:\n%s", got, want)
-	}
+	return actual
 }
 
 func TestAlphaContractFabricSyncProtocol(t *testing.T) {
@@ -122,50 +138,107 @@ func readAlphaMCPContract(t *testing.T) alphaMCPContract {
 	return manifest
 }
 
-func toolSchemaSnapshot(t *testing.T, schema map[string]any) alphaInputSchema {
+func responseSchemaSnapshots(t *testing.T, examples map[string]any) []alphaResponse {
 	t.Helper()
-	snapshot := alphaInputSchema{
-		Type:       schema["type"].(string),
-		Properties: []alphaSchemaProperty{},
-		Required:   []string{},
+	if len(examples) == 0 {
+		t.Fatal("tool descriptor has no response examples")
 	}
-	properties, ok := schema["properties"].(map[string]any)
-	if !ok {
-		t.Fatalf("schema properties = %T", schema["properties"])
+	variants := make([]string, 0, len(examples))
+	for variant := range examples {
+		variants = append(variants, variant)
 	}
-	for name, rawProperty := range properties {
-		propertyMap, ok := rawProperty.(map[string]any)
-		if !ok {
-			t.Fatalf("schema property %s = %T", name, rawProperty)
+	sort.Strings(variants)
+	snapshots := make([]alphaResponse, 0, len(variants))
+	for _, variant := range variants {
+		exampleType := reflect.TypeOf(examples[variant])
+		if exampleType == nil {
+			t.Fatalf("response variant %q has nil example", variant)
 		}
-		property := alphaSchemaProperty{Name: name, Type: propertyMap["type"].(string)}
-		if rawItems, ok := propertyMap["items"]; ok {
-			property.Items = rawItems.(map[string]any)["type"].(string)
-		}
-		if rawFormat, ok := propertyMap["format"]; ok {
-			property.Format = rawFormat.(string)
-		}
-		if rawEnum, ok := propertyMap["enum"]; ok {
-			switch values := rawEnum.(type) {
-			case []string:
-				property.Enum = append(property.Enum, values...)
-			case []any:
-				for _, value := range values {
-					property.Enum = append(property.Enum, value.(string))
+		snapshots = append(snapshots, alphaResponse{
+			Variant: variant,
+			Schema:  schemaSnapshot(t, jsonSchemaForType(exampleType)),
+		})
+	}
+	return snapshots
+}
+
+func schemaSnapshot(t *testing.T, schema map[string]any) alphaSchema {
+	t.Helper()
+	snapshot := alphaSchema{Type: schemaType(t, schema)}
+	if format, ok := schema["format"].(string); ok {
+		snapshot.Format = format
+	}
+	if rawEnum, ok := schema["enum"]; ok {
+		switch values := rawEnum.(type) {
+		case []string:
+			snapshot.Enum = append(snapshot.Enum, values...)
+		case []any:
+			for _, value := range values {
+				item, ok := value.(string)
+				if !ok {
+					t.Fatalf("schema enum item = %T", value)
 				}
-			default:
-				t.Fatalf("schema property %s enum = %T", name, rawEnum)
+				snapshot.Enum = append(snapshot.Enum, item)
 			}
-			sort.Strings(property.Enum)
+		default:
+			t.Fatalf("schema enum = %T", rawEnum)
 		}
-		snapshot.Properties = append(snapshot.Properties, property)
+		sort.Strings(snapshot.Enum)
 	}
-	sort.Slice(snapshot.Properties, func(i, j int) bool {
-		return snapshot.Properties[i].Name < snapshot.Properties[j].Name
-	})
-	snapshot.Required = append(snapshot.Required, schema["required"].([]string)...)
-	sort.Strings(snapshot.Required)
+	if rawItems, ok := schema["items"]; ok {
+		items, ok := rawItems.(map[string]any)
+		if !ok {
+			t.Fatalf("schema items = %T", rawItems)
+		}
+		itemSnapshot := schemaSnapshot(t, items)
+		snapshot.Items = &itemSnapshot
+	}
+	if rawProperties, ok := schema["properties"]; ok {
+		properties, ok := rawProperties.(map[string]any)
+		if !ok {
+			t.Fatalf("schema properties = %T", rawProperties)
+		}
+		for name, rawProperty := range properties {
+			propertyMap, ok := rawProperty.(map[string]any)
+			if !ok {
+				t.Fatalf("schema property %s = %T", name, rawProperty)
+			}
+			snapshot.Properties = append(snapshot.Properties, alphaSchemaProperty{
+				Name:   name,
+				Schema: schemaSnapshot(t, propertyMap),
+			})
+		}
+		sort.Slice(snapshot.Properties, func(i, j int) bool {
+			return snapshot.Properties[i].Name < snapshot.Properties[j].Name
+		})
+	}
+	if rawRequired, ok := schema["required"]; ok {
+		switch values := rawRequired.(type) {
+		case []string:
+			snapshot.Required = append(snapshot.Required, values...)
+		case []any:
+			for _, value := range values {
+				item, ok := value.(string)
+				if !ok {
+					t.Fatalf("schema required item = %T", value)
+				}
+				snapshot.Required = append(snapshot.Required, item)
+			}
+		default:
+			t.Fatalf("schema required = %T", rawRequired)
+		}
+		sort.Strings(snapshot.Required)
+	}
 	return snapshot
+}
+
+func schemaType(t *testing.T, schema map[string]any) string {
+	t.Helper()
+	value, ok := schema["type"].(string)
+	if !ok {
+		t.Fatalf("schema type = %T", schema["type"])
+	}
+	return value
 }
 
 func jsonFieldNames(t *testing.T, valueType reflect.Type) []string {

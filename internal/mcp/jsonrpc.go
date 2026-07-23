@@ -226,6 +226,9 @@ func jsonSchemaForType(t reflect.Type) map[string]any {
 		return map[string]any{"type": "integer"}
 	case reflect.Slice:
 		return map[string]any{"type": "array", "items": jsonSchemaForType(t.Elem())}
+	case reflect.Struct:
+		properties, required := reflectStructSchema(t)
+		return map[string]any{"type": "object", "properties": properties, "required": required}
 	default:
 		return map[string]any{"type": "object"}
 	}

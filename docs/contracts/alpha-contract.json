@@ -1,335 +1,3730 @@
 {
   "mode": "alpha-inventory",
-  "mcp_tools": [
-    {
-      "name": "wormhole.agent.register",
-      "requires_auth": false,
-      "required_permission": "",
-      "input_schema": {
-        "type": "object",
-        "properties": [
-          {"name": "capabilities", "type": "array", "items": "string"},
-          {"name": "model", "type": "string"},
-          {"name": "name", "type": "string"},
-          {"name": "owner", "type": "string"},
-          {"name": "permissions", "type": "array", "items": "string"},
-          {"name": "project_id", "type": "string"},
-          {"name": "repositories", "type": "array", "items": "string"},
-          {"name": "role", "type": "string"},
-          {"name": "roles", "type": "array", "items": "string"}
-        ],
-        "required": [
-          "capabilities",
-          "model",
-          "owner",
-          "permissions",
-          "project_id",
-          "repositories",
-          "roles"
+  "mcp_tools": {
+    "fabric": [
+      {
+        "name": "wormhole.agent.register",
+        "requires_auth": false,
+        "required_permission": "",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "capabilities",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "name": "model",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "name",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "owner",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "permissions",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "repositories",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "name": "role",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "roles",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          ],
+          "required": [
+            "capabilities",
+            "model",
+            "owner",
+            "permissions",
+            "project_id",
+            "repositories",
+            "roles"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "issued_at",
+                  "schema": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                {
+                  "name": "passport_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "repositories",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                {
+                  "name": "role",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "roles",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                {
+                  "name": "token",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "agent_id",
+                "issued_at",
+                "passport_id",
+                "repositories",
+                "roles",
+                "token"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.agent.whoami",
+        "requires_auth": true,
+        "required_permission": "",
+        "request_schema": {
+          "type": "object"
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "capabilities",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                {
+                  "name": "model",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "owner",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "permissions",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                {
+                  "name": "project_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "agent_id",
+                "capabilities",
+                "model",
+                "owner",
+                "permissions",
+                "project_id"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.channel.create",
+        "requires_auth": true,
+        "required_permission": "channel.create",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "name",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "name",
+            "project_id"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "channel_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "created_at",
+                  "schema": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                {
+                  "name": "name",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "project_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "channel_id",
+                "created_at",
+                "name",
+                "project_id"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.channel.list",
+        "requires_auth": true,
+        "required_permission": "channel.list",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "project_id"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "channels",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": [
+                        {
+                          "name": "channel_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "created_at",
+                          "schema": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        {
+                          "name": "name",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "project_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        }
+                      ],
+                      "required": [
+                        "channel_id",
+                        "created_at",
+                        "name",
+                        "project_id"
+                      ]
+                    }
+                  }
+                }
+              ],
+              "required": [
+                "channels"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.channel.post",
+        "requires_auth": true,
+        "required_permission": "channel.post",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "channel_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "event_type",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "build.failed",
+                  "discovery.logged",
+                  "message.posted",
+                  "review.requested",
+                  "task.status_changed"
+                ]
+              }
+            },
+            {
+              "name": "note",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "payload",
+              "schema": {
+                "type": "object"
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "channel_id",
+            "event_type",
+            "payload",
+            "project_id"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "channel_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "created_at",
+                  "schema": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                {
+                  "name": "event_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "event_type",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "project_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "agent_id",
+                "channel_id",
+                "created_at",
+                "event_id",
+                "event_type",
+                "project_id"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.channel.subscribe",
+        "requires_auth": true,
+        "required_permission": "channel.subscribe",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "channel_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "limit",
+              "schema": {
+                "type": "integer"
+              }
+            },
+            {
+              "name": "offset",
+              "schema": {
+                "type": "integer"
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "channel_id",
+            "project_id"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "events",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": [
+                        {
+                          "name": "agent_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "channel_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "created_at",
+                          "schema": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        {
+                          "name": "event_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "event_type",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "note",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "payload",
+                          "schema": {
+                            "type": "object"
+                          }
+                        }
+                      ],
+                      "required": [
+                        "agent_id",
+                        "channel_id",
+                        "created_at",
+                        "event_id",
+                        "event_type",
+                        "payload"
+                      ]
+                    }
+                  }
+                }
+              ],
+              "required": [
+                "events"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.git.link_commit",
+        "requires_auth": true,
+        "required_permission": "git.link_commit",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "commit_sha",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "repo",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "summary",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "task_id",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "commit_sha",
+            "project_id",
+            "repo",
+            "summary",
+            "task_id"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "commit_sha",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "created_at",
+                  "schema": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                {
+                  "name": "git_link_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "project_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "repo",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "summary",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "task_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "commit_sha",
+                "created_at",
+                "git_link_id",
+                "project_id",
+                "repo",
+                "summary",
+                "task_id"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.git.request_review",
+        "requires_auth": true,
+        "required_permission": "git.request_review",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "pr_url",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "repo",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "summary",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "pr_url",
+            "project_id",
+            "repo",
+            "summary"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "created_at",
+                  "schema": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                {
+                  "name": "git_link_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "pr_url",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "project_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "repo",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "summary",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "created_at",
+                "git_link_id",
+                "pr_url",
+                "project_id",
+                "repo",
+                "summary"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.kb.get",
+        "requires_auth": true,
+        "required_permission": "kb.get",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "article_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "article_id",
+            "project_id"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "article_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "author_agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "body",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "created_at",
+                  "schema": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                {
+                  "name": "frontmatter",
+                  "schema": {
+                    "type": "object"
+                  }
+                },
+                {
+                  "name": "project_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "title",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "updated_at",
+                  "schema": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                }
+              ],
+              "required": [
+                "article_id",
+                "author_agent_id",
+                "body",
+                "created_at",
+                "project_id",
+                "title",
+                "updated_at"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.kb.get_links",
+        "requires_auth": true,
+        "required_permission": "kb.get_links",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "article_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "article_id",
+            "project_id"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "article_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "links",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": [
+                        {
+                          "name": "article_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "author_agent_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "body",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "created_at",
+                          "schema": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        {
+                          "name": "frontmatter",
+                          "schema": {
+                            "type": "object"
+                          }
+                        },
+                        {
+                          "name": "project_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "title",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "updated_at",
+                          "schema": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        }
+                      ],
+                      "required": [
+                        "article_id",
+                        "author_agent_id",
+                        "body",
+                        "created_at",
+                        "project_id",
+                        "title",
+                        "updated_at"
+                      ]
+                    }
+                  }
+                }
+              ],
+              "required": [
+                "article_id",
+                "links"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.kb.search",
+        "requires_auth": true,
+        "required_permission": "kb.search",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "limit",
+              "schema": {
+                "type": "integer"
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "query",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "project_id",
+            "query"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "articles",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": [
+                        {
+                          "name": "article_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "author_agent_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "body",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "created_at",
+                          "schema": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        {
+                          "name": "frontmatter",
+                          "schema": {
+                            "type": "object"
+                          }
+                        },
+                        {
+                          "name": "project_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "title",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "updated_at",
+                          "schema": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        }
+                      ],
+                      "required": [
+                        "article_id",
+                        "author_agent_id",
+                        "body",
+                        "created_at",
+                        "project_id",
+                        "title",
+                        "updated_at"
+                      ]
+                    }
+                  }
+                }
+              ],
+              "required": [
+                "articles"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.kb.write",
+        "requires_auth": true,
+        "required_permission": "kb.write",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "body",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "force",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "frontmatter",
+              "schema": {
+                "type": "object"
+              }
+            },
+            {
+              "name": "links",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "title",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "body",
+            "force",
+            "links",
+            "project_id",
+            "title"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "article_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "created_at",
+                  "schema": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                {
+                  "name": "project_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "title",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "article_id",
+                "created_at",
+                "project_id",
+                "title"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.sync.bootstrap",
+        "requires_auth": true,
+        "required_permission": "",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "namespace_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "version",
+              "schema": {
+                "type": "integer"
+              }
+            }
+          ],
+          "required": [
+            "namespace_id",
+            "project_id",
+            "version"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "kb_list",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": [
+                        {
+                          "name": "article_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "author_agent_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "body",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "created_at",
+                          "schema": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        {
+                          "name": "frontmatter",
+                          "schema": {
+                            "type": "object"
+                          }
+                        },
+                        {
+                          "name": "project_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "title",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "updated_at",
+                          "schema": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        }
+                      ],
+                      "required": [
+                        "article_id",
+                        "author_agent_id",
+                        "body",
+                        "created_at",
+                        "project_id",
+                        "title",
+                        "updated_at"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "name": "org_config",
+                  "schema": {
+                    "type": "object"
+                  }
+                },
+                {
+                  "name": "project_list",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                {
+                  "name": "task_list",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": [
+                        {
+                          "name": "description",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "due_by",
+                          "schema": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        {
+                          "name": "owner_agent_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "parent_task_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "priority",
+                          "schema": {
+                            "type": "integer"
+                          }
+                        },
+                        {
+                          "name": "status",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "task_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "title",
+                          "schema": {
+                            "type": "string"
+                          }
+                        }
+                      ],
+                      "required": [
+                        "description",
+                        "priority",
+                        "status",
+                        "task_id",
+                        "title"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "name": "timestamp",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "version",
+                  "schema": {
+                    "type": "integer"
+                  }
+                }
+              ],
+              "required": [
+                "kb_list",
+                "org_config",
+                "project_list",
+                "task_list",
+                "timestamp",
+                "version"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.sync.conflict_report",
+        "requires_auth": true,
+        "required_permission": "",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "conflict_type",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "entity_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "entity_type",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "local_value",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "namespace_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "server_value",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "version",
+              "schema": {
+                "type": "integer"
+              }
+            }
+          ],
+          "required": [
+            "conflict_type",
+            "entity_id",
+            "entity_type",
+            "local_value",
+            "namespace_id",
+            "project_id",
+            "server_value",
+            "version"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "resolution_method",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "resolved_value",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "version",
+                  "schema": {
+                    "type": "integer"
+                  }
+                }
+              ],
+              "required": [
+                "resolution_method",
+                "resolved_value",
+                "version"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.sync.incremental_pull",
+        "requires_auth": true,
+        "required_permission": "",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "last_sync",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "namespace_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "version",
+              "schema": {
+                "type": "integer"
+              }
+            }
+          ],
+          "required": [
+            "namespace_id",
+            "project_id",
+            "version"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "timestamp",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "updates",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    }
+                  }
+                },
+                {
+                  "name": "version",
+                  "schema": {
+                    "type": "integer"
+                  }
+                }
+              ],
+              "required": [
+                "timestamp",
+                "updates",
+                "version"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.sync.incremental_push",
+        "requires_auth": true,
+        "required_permission": "",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "items",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": [
+                    {
+                      "name": "entity_id",
+                      "schema": {
+                        "type": "string"
+                      }
+                    },
+                    {
+                      "name": "entity_type",
+                      "schema": {
+                        "type": "string"
+                      }
+                    },
+                    {
+                      "name": "operation",
+                      "schema": {
+                        "type": "string"
+                      }
+                    },
+                    {
+                      "name": "payload",
+                      "schema": {
+                        "type": "object"
+                      }
+                    }
+                  ],
+                  "required": [
+                    "entity_id",
+                    "entity_type",
+                    "operation",
+                    "payload"
+                  ]
+                }
+              }
+            },
+            {
+              "name": "namespace_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "version",
+              "schema": {
+                "type": "integer"
+              }
+            }
+          ],
+          "required": [
+            "items",
+            "namespace_id",
+            "project_id",
+            "version"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "applied",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": [
+                        {
+                          "name": "error",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "type",
+                          "schema": {
+                            "type": "string"
+                          }
+                        }
+                      ],
+                      "required": [
+                        "id",
+                        "type"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "name": "items_received",
+                  "schema": {
+                    "type": "integer"
+                  }
+                },
+                {
+                  "name": "timestamp",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "version",
+                  "schema": {
+                    "type": "integer"
+                  }
+                }
+              ],
+              "required": [
+                "applied",
+                "items_received",
+                "timestamp",
+                "version"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.task.assign",
+        "requires_auth": true,
+        "required_permission": "task.assign",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "owner_agent_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "task_id",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "owner_agent_id",
+            "project_id",
+            "task_id"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "owner_agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "status",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "task_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "owner_agent_id",
+                "status",
+                "task_id"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.task.create",
+        "requires_auth": true,
+        "required_permission": "task.create",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "description",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "due_by",
+              "schema": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            {
+              "name": "parent_task_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "priority",
+              "schema": {
+                "type": "integer"
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "title",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "description",
+            "priority",
+            "project_id",
+            "title"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "project_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "status",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "task_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "project_id",
+                "status",
+                "task_id"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.task.list",
+        "requires_auth": true,
+        "required_permission": "task.list",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "role",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "status",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "project_id"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "tasks",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": [
+                        {
+                          "name": "description",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "due_by",
+                          "schema": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        {
+                          "name": "owner_agent_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "parent_task_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "priority",
+                          "schema": {
+                            "type": "integer"
+                          }
+                        },
+                        {
+                          "name": "status",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "task_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "title",
+                          "schema": {
+                            "type": "string"
+                          }
+                        }
+                      ],
+                      "required": [
+                        "description",
+                        "priority",
+                        "status",
+                        "task_id",
+                        "title"
+                      ]
+                    }
+                  }
+                }
+              ],
+              "required": [
+                "tasks"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.task.update_status",
+        "requires_auth": true,
+        "required_permission": "task.update_status",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "channel_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "new_status",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "blocked",
+                  "done",
+                  "todo",
+                  "wip"
+                ]
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "task_id",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "channel_id",
+            "new_status",
+            "project_id",
+            "task_id"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "status",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "task_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "status",
+                "task_id"
+              ]
+            }
+          }
         ]
       }
-    },
-    {
-      "name": "wormhole.agent.whoami",
-      "requires_auth": true,
-      "required_permission": "",
-      "input_schema": {
-        "type": "object",
-        "properties": [],
-        "required": []
-      }
-    },
-    {
-      "name": "wormhole.channel.create",
-      "requires_auth": true,
-      "required_permission": "channel.create",
-      "input_schema": {
-        "type": "object",
-        "properties": [
-          {"name": "name", "type": "string"},
-          {"name": "project_id", "type": "string"}
-        ],
-        "required": ["name", "project_id"]
-      }
-    },
-    {
-      "name": "wormhole.channel.list",
-      "requires_auth": true,
-      "required_permission": "channel.list",
-      "input_schema": {
-        "type": "object",
-        "properties": [
-          {"name": "project_id", "type": "string"}
-        ],
-        "required": ["project_id"]
-      }
-    },
-    {
-      "name": "wormhole.channel.post",
-      "requires_auth": true,
-      "required_permission": "channel.post",
-      "input_schema": {
-        "type": "object",
-        "properties": [
-          {"name": "channel_id", "type": "string"},
+    ],
+    "gateway": [
+      {
+        "name": "wormhole.agent.list",
+        "required_permission": "",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "project_id"
+          ]
+        },
+        "response_schemas": [
           {
-            "name": "event_type",
-            "type": "string",
-            "enum": [
-              "build.failed",
-              "discovery.logged",
-              "message.posted",
-              "review.requested",
-              "task.status_changed"
-            ]
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "agents",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": [
+                        {
+                          "name": "agent_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "capabilities",
+                          "schema": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        {
+                          "name": "namespace_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "status",
+                          "schema": {
+                            "type": "string"
+                          }
+                        }
+                      ],
+                      "required": [
+                        "agent_id",
+                        "capabilities",
+                        "namespace_id",
+                        "status"
+                      ]
+                    }
+                  }
+                }
+              ],
+              "required": [
+                "agents"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.agent.presence",
+        "required_permission": "",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "agent_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "status",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "agent_id",
+            "project_id",
+            "status"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "status",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "agent_id",
+                "status"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.agent.register",
+        "required_permission": "",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "agent_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "capabilities",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "name": "model",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "owner",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "permissions",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "repositories",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "name": "role",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "roles",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          ],
+          "required": [
+            "project_id"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "join",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "issued_at",
+                  "schema": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                {
+                  "name": "passport_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "repositories",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                {
+                  "name": "role",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "roles",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                {
+                  "name": "token",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "agent_id",
+                "issued_at",
+                "passport_id",
+                "repositories",
+                "roles",
+                "token"
+              ]
+            }
           },
-          {"name": "note", "type": "string"},
-          {"name": "payload", "type": "object"},
-          {"name": "project_id", "type": "string"}
-        ],
-        "required": ["channel_id", "event_type", "payload", "project_id"]
-      }
-    },
-    {
-      "name": "wormhole.channel.subscribe",
-      "requires_auth": true,
-      "required_permission": "channel.subscribe",
-      "input_schema": {
-        "type": "object",
-        "properties": [
-          {"name": "channel_id", "type": "string"},
-          {"name": "limit", "type": "integer"},
-          {"name": "offset", "type": "integer"},
-          {"name": "project_id", "type": "string"}
-        ],
-        "required": ["channel_id", "project_id"]
-      }
-    },
-    {
-      "name": "wormhole.git.link_commit",
-      "requires_auth": true,
-      "required_permission": "git.link_commit",
-      "input_schema": {
-        "type": "object",
-        "properties": [
-          {"name": "commit_sha", "type": "string"},
-          {"name": "project_id", "type": "string"},
-          {"name": "repo", "type": "string"},
-          {"name": "summary", "type": "string"},
-          {"name": "task_id", "type": "string"}
-        ],
-        "required": ["commit_sha", "project_id", "repo", "summary", "task_id"]
-      }
-    },
-    {
-      "name": "wormhole.git.request_review",
-      "requires_auth": true,
-      "required_permission": "git.request_review",
-      "input_schema": {
-        "type": "object",
-        "properties": [
-          {"name": "pr_url", "type": "string"},
-          {"name": "project_id", "type": "string"},
-          {"name": "repo", "type": "string"},
-          {"name": "summary", "type": "string"}
-        ],
-        "required": ["pr_url", "project_id", "repo", "summary"]
-      }
-    },
-    {
-      "name": "wormhole.kb.get",
-      "requires_auth": true,
-      "required_permission": "kb.get",
-      "input_schema": {
-        "type": "object",
-        "properties": [
-          {"name": "article_id", "type": "string"},
-          {"name": "project_id", "type": "string"}
-        ],
-        "required": ["article_id", "project_id"]
-      }
-    },
-    {
-      "name": "wormhole.kb.get_links",
-      "requires_auth": true,
-      "required_permission": "kb.get_links",
-      "input_schema": {
-        "type": "object",
-        "properties": [
-          {"name": "article_id", "type": "string"},
-          {"name": "project_id", "type": "string"}
-        ],
-        "required": ["article_id", "project_id"]
-      }
-    },
-    {
-      "name": "wormhole.kb.search",
-      "requires_auth": true,
-      "required_permission": "kb.search",
-      "input_schema": {
-        "type": "object",
-        "properties": [
-          {"name": "limit", "type": "integer"},
-          {"name": "project_id", "type": "string"},
-          {"name": "query", "type": "string"}
-        ],
-        "required": ["project_id", "query"]
-      }
-    },
-    {
-      "name": "wormhole.kb.write",
-      "requires_auth": true,
-      "required_permission": "kb.write",
-      "input_schema": {
-        "type": "object",
-        "properties": [
-          {"name": "body", "type": "string"},
-          {"name": "force", "type": "boolean"},
-          {"name": "frontmatter", "type": "object"},
-          {"name": "links", "type": "array", "items": "string"},
-          {"name": "project_id", "type": "string"},
-          {"name": "title", "type": "string"}
-        ],
-        "required": ["body", "force", "links", "project_id", "title"]
-      }
-    },
-    {
-      "name": "wormhole.sync.bootstrap",
-      "requires_auth": true,
-      "required_permission": "",
-      "input_schema": {
-        "type": "object",
-        "properties": [
-          {"name": "namespace_id", "type": "string"},
-          {"name": "project_id", "type": "string"},
-          {"name": "version", "type": "integer"}
-        ],
-        "required": ["namespace_id", "project_id", "version"]
-      }
-    },
-    {
-      "name": "wormhole.sync.conflict_report",
-      "requires_auth": true,
-      "required_permission": "",
-      "input_schema": {
-        "type": "object",
-        "properties": [
-          {"name": "conflict_type", "type": "string"},
-          {"name": "entity_id", "type": "string"},
-          {"name": "entity_type", "type": "string"},
-          {"name": "local_value", "type": "string"},
-          {"name": "namespace_id", "type": "string"},
-          {"name": "project_id", "type": "string"},
-          {"name": "server_value", "type": "string"},
-          {"name": "version", "type": "integer"}
-        ],
-        "required": [
-          "conflict_type",
-          "entity_id",
-          "entity_type",
-          "local_value",
-          "namespace_id",
-          "project_id",
-          "server_value",
-          "version"
+          {
+            "variant": "presence",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "capabilities",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                {
+                  "name": "namespace_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "status",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "agent_id",
+                "capabilities",
+                "namespace_id",
+                "status"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.agent.whoami",
+        "required_permission": "",
+        "request_schema": {
+          "type": "object"
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "capabilities",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                {
+                  "name": "model",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "owner",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "permissions",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                {
+                  "name": "project_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "agent_id",
+                "capabilities",
+                "model",
+                "owner",
+                "permissions",
+                "project_id"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.channel.create",
+        "required_permission": "channel.create",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "name",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "name",
+            "project_id"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "name",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "namespace_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "id",
+                "name",
+                "namespace_id"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.channel.events",
+        "required_permission": "",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "project_id"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "events",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": [
+                        {
+                          "name": "agent_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "channel_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "created_at",
+                          "schema": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        {
+                          "name": "event_type",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "note",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "payload",
+                          "schema": {
+                            "type": "object"
+                          }
+                        }
+                      ],
+                      "required": [
+                        "agent_id",
+                        "channel_id",
+                        "created_at",
+                        "event_type",
+                        "id",
+                        "payload"
+                      ]
+                    }
+                  }
+                }
+              ],
+              "required": [
+                "events"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.channel.list",
+        "required_permission": "",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "project_id"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "channels",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": [
+                        {
+                          "name": "id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "name",
+                          "schema": {
+                            "type": "string"
+                          }
+                        }
+                      ],
+                      "required": [
+                        "id",
+                        "name"
+                      ]
+                    }
+                  }
+                }
+              ],
+              "required": [
+                "channels"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.channel.post",
+        "required_permission": "channel.post",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "agent_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "channel_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "event_type",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "note",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "payload",
+              "schema": {
+                "type": "object"
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "channel_id",
+            "event_type",
+            "project_id"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "channel_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "created_at",
+                  "schema": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                {
+                  "name": "event_type",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "namespace_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "note",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "payload",
+                  "schema": {
+                    "type": "object"
+                  }
+                }
+              ],
+              "required": [
+                "agent_id",
+                "channel_id",
+                "created_at",
+                "event_type",
+                "id",
+                "namespace_id",
+                "payload"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.channel.subscribe",
+        "required_permission": "",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "agent_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "capability",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "event_type",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "namespace",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "project_id"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "capability",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "event_type",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "namespace",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "subscription_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "agent_id",
+                "capability",
+                "event_type",
+                "namespace",
+                "subscription_id"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.kb.get",
+        "required_permission": "",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "article_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "project_id"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "article",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "author_agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "body",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "created_at",
+                  "schema": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                {
+                  "name": "frontmatter",
+                  "schema": {
+                    "type": "object"
+                  }
+                },
+                {
+                  "name": "id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "title",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "updated_at",
+                  "schema": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                }
+              ],
+              "required": [
+                "author_agent_id",
+                "body",
+                "created_at",
+                "frontmatter",
+                "id",
+                "title",
+                "updated_at"
+              ]
+            }
+          },
+          {
+            "variant": "list",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "articles",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": [
+                        {
+                          "name": "author_agent_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "body",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "created_at",
+                          "schema": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        {
+                          "name": "frontmatter",
+                          "schema": {
+                            "type": "object"
+                          }
+                        },
+                        {
+                          "name": "id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "title",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "updated_at",
+                          "schema": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        }
+                      ],
+                      "required": [
+                        "author_agent_id",
+                        "body",
+                        "created_at",
+                        "frontmatter",
+                        "id",
+                        "title",
+                        "updated_at"
+                      ]
+                    }
+                  }
+                }
+              ],
+              "required": [
+                "articles"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.kb.list",
+        "required_permission": "",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "project_id"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "articles",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": [
+                        {
+                          "name": "author_agent_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "body",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "created_at",
+                          "schema": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        {
+                          "name": "frontmatter",
+                          "schema": {
+                            "type": "object"
+                          }
+                        },
+                        {
+                          "name": "id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "title",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "updated_at",
+                          "schema": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        }
+                      ],
+                      "required": [
+                        "author_agent_id",
+                        "body",
+                        "created_at",
+                        "frontmatter",
+                        "id",
+                        "title",
+                        "updated_at"
+                      ]
+                    }
+                  }
+                }
+              ],
+              "required": [
+                "articles"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.kb.write",
+        "required_permission": "kb.write",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "agent_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "body",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "frontmatter",
+              "schema": {
+                "type": "object"
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "title",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "project_id",
+            "title"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "author_agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "body",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "created_at",
+                  "schema": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                {
+                  "name": "frontmatter",
+                  "schema": {
+                    "type": "object"
+                  }
+                },
+                {
+                  "name": "id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "namespace_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "title",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "updated_at",
+                  "schema": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                }
+              ],
+              "required": [
+                "author_agent_id",
+                "body",
+                "created_at",
+                "frontmatter",
+                "id",
+                "namespace_id",
+                "title",
+                "updated_at"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.task.create",
+        "required_permission": "task.create",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "description",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "due_by",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "parent_task_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "priority",
+              "schema": {
+                "type": "integer"
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "title",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "project_id",
+            "title"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "created_at",
+                  "schema": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                {
+                  "name": "description",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "due_by",
+                  "schema": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                {
+                  "name": "id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "namespace_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "owner_agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "parent_task_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "priority",
+                  "schema": {
+                    "type": "integer"
+                  }
+                },
+                {
+                  "name": "status",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "title",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "updated_at",
+                  "schema": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                }
+              ],
+              "required": [
+                "created_at",
+                "description",
+                "id",
+                "namespace_id",
+                "priority",
+                "status",
+                "title",
+                "updated_at"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.task.get",
+        "required_permission": "",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "task_id",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "project_id",
+            "task_id"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "created_at",
+                  "schema": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                {
+                  "name": "description",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "due_by",
+                  "schema": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                {
+                  "name": "id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "owner_agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "parent_task_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "priority",
+                  "schema": {
+                    "type": "integer"
+                  }
+                },
+                {
+                  "name": "status",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "title",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "updated_at",
+                  "schema": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                }
+              ],
+              "required": [
+                "created_at",
+                "description",
+                "id",
+                "priority",
+                "status",
+                "title",
+                "updated_at"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.task.list",
+        "required_permission": "",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "status",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "project_id"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "tasks",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": [
+                        {
+                          "name": "created_at",
+                          "schema": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        {
+                          "name": "description",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "due_by",
+                          "schema": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        {
+                          "name": "id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "owner_agent_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "parent_task_id",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "priority",
+                          "schema": {
+                            "type": "integer"
+                          }
+                        },
+                        {
+                          "name": "status",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "title",
+                          "schema": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "name": "updated_at",
+                          "schema": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        }
+                      ],
+                      "required": [
+                        "created_at",
+                        "description",
+                        "id",
+                        "priority",
+                        "status",
+                        "title",
+                        "updated_at"
+                      ]
+                    }
+                  }
+                }
+              ],
+              "required": [
+                "tasks"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.task.route",
+        "required_permission": "task.create",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "capability",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "description",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "title",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "required": [
+            "capability",
+            "project_id"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "agent_status",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "assigned_to",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "capability",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "description",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "namespace_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "status",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "task_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "title",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "agent_status",
+                "assigned_to",
+                "capability",
+                "description",
+                "namespace_id",
+                "status",
+                "task_id",
+                "title"
+              ]
+            }
+          }
         ]
       }
-    },
-    {
-      "name": "wormhole.sync.incremental_pull",
-      "requires_auth": true,
-      "required_permission": "",
-      "input_schema": {
-        "type": "object",
-        "properties": [
-          {"name": "last_sync", "type": "string"},
-          {"name": "namespace_id", "type": "string"},
-          {"name": "project_id", "type": "string"},
-          {"name": "version", "type": "integer"}
-        ],
-        "required": ["namespace_id", "project_id", "version"]
-      }
-    },
-    {
-      "name": "wormhole.sync.incremental_push",
-      "requires_auth": true,
-      "required_permission": "",
-      "input_schema": {
-        "type": "object",
-        "properties": [
-          {"name": "items", "type": "array", "items": "object"},
-          {"name": "namespace_id", "type": "string"},
-          {"name": "project_id", "type": "string"},
-          {"name": "version", "type": "integer"}
-        ],
-        "required": ["items", "namespace_id", "project_id", "version"]
-      }
-    },
-    {
-      "name": "wormhole.task.assign",
-      "requires_auth": true,
-      "required_permission": "task.assign",
-      "input_schema": {
-        "type": "object",
-        "properties": [
-          {"name": "owner_agent_id", "type": "string"},
-          {"name": "project_id", "type": "string"},
-          {"name": "task_id", "type": "string"}
-        ],
-        "required": ["owner_agent_id", "project_id", "task_id"]
-      }
-    },
-    {
-      "name": "wormhole.task.create",
-      "requires_auth": true,
-      "required_permission": "task.create",
-      "input_schema": {
-        "type": "object",
-        "properties": [
-          {"name": "description", "type": "string"},
-          {"name": "due_by", "type": "string", "format": "date-time"},
-          {"name": "parent_task_id", "type": "string"},
-          {"name": "priority", "type": "integer"},
-          {"name": "project_id", "type": "string"},
-          {"name": "title", "type": "string"}
-        ],
-        "required": ["description", "priority", "project_id", "title"]
-      }
-    },
-    {
-      "name": "wormhole.task.list",
-      "requires_auth": true,
-      "required_permission": "task.list",
-      "input_schema": {
-        "type": "object",
-        "properties": [
-          {"name": "project_id", "type": "string"},
-          {"name": "role", "type": "string"},
-          {"name": "status", "type": "string"}
-        ],
-        "required": ["project_id"]
-      }
-    },
-    {
-      "name": "wormhole.task.update_status",
-      "requires_auth": true,
-      "required_permission": "task.update_status",
-      "input_schema": {
-        "type": "object",
-        "properties": [
-          {"name": "channel_id", "type": "string"},
-          {
-            "name": "new_status",
-            "type": "string",
-            "enum": ["blocked", "done", "todo", "wip"]
-          },
-          {"name": "project_id", "type": "string"},
-          {"name": "task_id", "type": "string"}
-        ],
-        "required": ["channel_id", "new_status", "project_id", "task_id"]
-      }
-    }
-  ],
+    ]
+  },
   "cli": {
     "commands": [
       {
