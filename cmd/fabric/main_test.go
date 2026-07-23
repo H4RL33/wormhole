@@ -3,11 +3,11 @@ package main
 import (
 	"database/sql"
 	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
-	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +18,7 @@ func TestServerMainHelperProcess(t *testing.T) {
 	if os.Getenv("WORMHOLE_SERVER_MAIN_HELPER") != "1" {
 		return
 	}
+	log.SetFlags(0)
 	runServerMain = func(types.Config, func(*http.Server) error) error {
 		return errors.New("injected database failure")
 	}
@@ -36,8 +37,8 @@ func TestServerMainExitsOneWhenWiringFails(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
 		t.Fatalf("server main error = %v, want exit status 1", err)
 	}
-	if !strings.Contains(string(output), "fabric: injected database failure") {
-		t.Fatalf("server main output = %q, want wiring error", output)
+	if got, want := string(output), "fabric: injected database failure\n"; got != want {
+		t.Fatalf("server main output = %q, want %q", got, want)
 	}
 }
 
@@ -52,6 +53,9 @@ func TestRunServerWithOpenReturnsDatabaseFailureBeforeServing(t *testing.T) {
 	})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("runServerWithOpen error = %v, want %v", err, wantErr)
+	}
+	if got, want := err.Error(), "open database: database unavailable"; got != want {
+		t.Fatalf("runServerWithOpen error text = %q, want %q", got, want)
 	}
 	if served {
 		t.Fatal("runServerWithOpen called serve after database open failed")

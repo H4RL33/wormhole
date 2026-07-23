@@ -8,5 +8,5 @@ import (
 )
 
 func ensureSupportedPlatform() error {
-	return fmt.Errorf("gatewayd: unsupported platform %s/%s: gatewayd currently requires Linux; Windows users should run it in WSL", runtime.GOOS, runtime.GOARCH)
+	return fmt.Errorf("unsupported platform %s/%s: gatewayd currently requires Linux; Windows users should run it in WSL", runtime.GOOS, runtime.GOARCH)
 }

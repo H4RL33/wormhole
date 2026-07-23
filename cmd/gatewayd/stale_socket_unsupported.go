@@ -14,7 +14,7 @@ func openStaleSocketIdentity(socketPath string) (staleSocketIdentity, error) {
 		return staleSocketIdentity{}, err
 	}
 	if info.Mode()&os.ModeSocket == 0 {
-		return staleSocketIdentity{}, fmt.Errorf("gatewayd: stale socket path %s is not a socket", socketPath)
+		return staleSocketIdentity{}, fmt.Errorf("stale socket path %s is not a socket", socketPath)
 	}
 	return staleSocketIdentity{}, unsupportedStaleSocketRemovalError(socketPath)
 }
@@ -24,5 +24,5 @@ func quarantineAndRemoveSocket(socketPath string, _, _ uint64, _ staleSocketRemo
 }
 
 func unsupportedStaleSocketRemovalError(socketPath string) error {
-	return fmt.Errorf("gatewayd: safe stale-socket removal is unsupported on %s/%s; refusing to remove %s; verify it is stale, remove it manually, and restart on Linux", runtime.GOOS, runtime.GOARCH, socketPath)
+	return fmt.Errorf("safe stale-socket removal is unsupported on %s/%s; refusing to remove %s; verify it is stale, remove it manually, and restart on Linux", runtime.GOOS, runtime.GOARCH, socketPath)
 }

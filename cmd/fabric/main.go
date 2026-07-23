@@ -41,7 +41,7 @@ func runServer(cfg types.Config, serve func(*http.Server) error) error {
 func runServerWithOpen(cfg types.Config, openDB func(types.Config) (*sql.DB, error), serve func(*http.Server) error) error {
 	db, err := openDB(cfg)
 	if err != nil {
-		return fmt.Errorf("fabric: open database: %w", err)
+		return fmt.Errorf("open database: %w", err)
 	}
 	defer db.Close()
 

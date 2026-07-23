@@ -144,13 +144,13 @@ func newMultiOrgSyncGroup(orgs map[string]config.Org, bindings []config.ProjectB
 	for _, binding := range bindings {
 		org, ok := orgs[binding.OrgName]
 		if !ok {
-			return nil, fmt.Errorf("gatewayd: org %q for project binding %q not found", binding.OrgName, binding.ProjectID)
+			return nil, fmt.Errorf("org %q for project binding %q not found", binding.OrgName, binding.ProjectID)
 		}
 		key := syncBindingKey{
 			server: org.Credentials.Server, projectID: binding.ProjectID, token: org.Credentials.Token,
 		}
 		if existing, ok := projectBindings[binding.ProjectID]; ok && existing != key {
-			return nil, fmt.Errorf("gatewayd: conflicting project bindings for %q", binding.ProjectID)
+			return nil, fmt.Errorf("conflicting project bindings for %q", binding.ProjectID)
 		}
 		projectBindings[binding.ProjectID] = key
 		if _, ok := engines[key]; ok {
@@ -158,7 +158,7 @@ func newMultiOrgSyncGroup(orgs map[string]config.Org, bindings []config.ProjectB
 		}
 		engine, err := factory(key.server, key.token, key.projectID, queueRepo, auditRepo, taskRepo, kbRepo, syncCfg)
 		if err != nil {
-			return nil, fmt.Errorf("gatewayd: configure sync engine for project %q: %w", binding.ProjectID, err)
+			return nil, fmt.Errorf("configure sync engine for project %q: %w", binding.ProjectID, err)
 		}
 		group.engines = append(group.engines, engine)
 		engines[key] = struct{}{}
@@ -209,10 +209,10 @@ func removeStaleSocketWithHooks(socketPath string, hooks staleSocketRemovalHooks
 	conn, dialErr := net.DialTimeout("unix", socketPath, 250*time.Millisecond)
 	if dialErr == nil {
 		_ = conn.Close()
-		return fmt.Errorf("gatewayd: active daemon is already listening on %s", socketPath)
+		return fmt.Errorf("active daemon is already listening on %s", socketPath)
 	}
 	if !errors.Is(dialErr, syscall.ECONNREFUSED) {
-		return fmt.Errorf("gatewayd: cannot prove socket %s is stale: %w", socketPath, dialErr)
+		return fmt.Errorf("cannot prove socket %s is stale: %w", socketPath, dialErr)
 	}
 	return quarantineAndRemoveSocket(socketPath, expected.dev, expected.ino, hooks)
 }
@@ -220,11 +220,11 @@ func removeStaleSocketWithHooks(socketPath string, hooks staleSocketRemovalHooks
 func runWithSyncEngineFactory(ctx context.Context, profileName string, factory syncEngineFactory) error {
 	cfg, err := config.Load(profileName)
 	if err != nil {
-		return fmt.Errorf("gatewayd: load config: %w", err)
+		return fmt.Errorf("load config: %w", err)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(cfg.SocketPath), 0o700); err != nil {
-		return fmt.Errorf("gatewayd: create socket directory: %w", err)
+		return fmt.Errorf("create socket directory: %w", err)
 	}
 	// A stale Unix socket from an unclean shutdown is replaceable. Every
 	// other file type is rejected and preserved: this path may contain user
@@ -234,12 +234,12 @@ func runWithSyncEngineFactory(ctx context.Context, profileName string, factory s
 	}
 
 	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o700); err != nil {
-		return fmt.Errorf("gatewayd: create data directory: %w", err)
+		return fmt.Errorf("create data directory: %w", err)
 	}
 
 	store, err := localstore.Open(cfg.DBPath)
 	if err != nil {
-		return fmt.Errorf("gatewayd: open local store: %w", err)
+		return fmt.Errorf("open local store: %w", err)
 	}
 	defer store.Close()
 
@@ -264,7 +264,7 @@ func runWithSyncEngineFactory(ctx context.Context, profileName string, factory s
 	} else {
 		engine, engineErr := factory(cfg.Credentials.Server, cfg.Credentials.Token, cfg.Credentials.ProjectID, queueRepo, auditRepo, tr, kb, syncCfg)
 		if engineErr != nil {
-			return fmt.Errorf("gatewayd: configure sync engine: %w", engineErr)
+			return fmt.Errorf("configure sync engine: %w", engineErr)
 		}
 		syncEngines = &syncGroup{engines: []syncEngine{engine}}
 	}
@@ -272,7 +272,7 @@ func runWithSyncEngineFactory(ctx context.Context, profileName string, factory s
 		return err
 	}
 	if err := syncEngines.Start(ctx); err != nil {
-		return fmt.Errorf("gatewayd: start sync engines: %w", err)
+		return fmt.Errorf("start sync engines: %w", err)
 	}
 	defer syncEngines.Stop()
 
@@ -289,7 +289,7 @@ func runWithSyncEngineFactory(ctx context.Context, profileName string, factory s
 		srv, err = localapi.NewWithRuntime(cfg.SocketPath, cfg.Credentials.Server, cfg.Credentials.Token, cfg.Credentials.ProjectID, store, tr, er, kb, eb, sched, queueRepo)
 	}
 	if err != nil {
-		return fmt.Errorf("gatewayd: start local api: %w", err)
+		return fmt.Errorf("start local api: %w", err)
 	}
 	defer srv.Close()
 	if useMultiOrg {

@@ -1,153 +1,87 @@
-# Task 2 report — preserve local namespace ownership
+# Task 2 Report: Gateway and Fabric Hard Rename
 
 ## Status
 
-Implemented and verified. The sync local-apply upserts now reject an ID already
-owned by another namespace, preserving the existing row and its namespace.
+Implemented the alpha hard rename on `production-readiness`:
 
-## Files changed
+- moved `cmd/wormholed/` to `cmd/gatewayd/` and `cmd/wormhole-server/` to `cmd/fabric/` with `git mv`;
+- renamed the former daemon implementation and test source files to `gatewayd.go` and `gatewayd_test.go`;
+- restricted build output to `dist/wormhole`, `dist/gatewayd`, and `dist/fabric`, with a `naming-check` hard-cut assertion;
+- changed local MCP initialization server info to `gatewayd` at version `0.2.4-alpha`, covered by a test-first assertion;
+- updated executable-facing error and log prefixes, semantic source comments, tests, CI, documentation, and examples to Gateway/Fabric terminology;
+- retained `WORMHOLE_*`, `~/.wormhole`, `wormholed.sock`, and `wormholed.db` unchanged; no old executable alias is produced.
 
-- `internal/runtime/localstore/task_repo.go`
-- `internal/runtime/localstore/kb_repo.go`
-- `internal/runtime/localstore/cross_namespace_test.go`
+Historical RFC and issue-reconciliation records remain intentionally unchanged, as required.
 
-## Decisions
+## TDD Evidence
 
-- Added the package sentinel `ErrNamespaceCollision` with the required text.
-- Both upserts query the existing row's `namespace_id` inside their write
-  transaction before writing. A different namespace returns the sentinel.
-- Removed `namespace_id = excluded.namespace_id` from both conflict-update
-  clauses, making namespace ownership immutable while retaining same-namespace
-  updates.
-- Added task and KB regression cases: collision returns the sentinel, namespace
-  A remains unchanged, namespace B cannot retrieve the ID, and same-namespace
-  updates succeed.
+1. Added the MCP `serverInfo` assertion expecting `{"name":"gatewayd","version":"0.2.4-alpha"}` and `naming-check` before implementing the rename.
+2. `go test ./internal/runtime/localapi` failed as expected because initialization still reported `wormholed`.
+3. `make build naming-check` failed as expected because `dist/gatewayd` and `dist/fabric` did not exist.
+4. After implementation, focused command-package tests and the full gate suite passed.
 
-## RED
+## Verification
 
-The first test-only change intentionally referenced the new sentinel before it
-existed. The exact requested command therefore failed to compile, confirming
-the missing public error interface:
+Passed:
 
 ```text
-go test ./internal/runtime/localstore -run 'TestUpsert(Task|Article)_CrossNamespaceIDCollisionRejected' -count=1
+go test ./cmd/gatewayd ./cmd/fabric ./cmd/wormhole
+make clean
+make build
+make naming-check
+make fmt-check
+make vet
+make integration
+make race
+make coverage
 ```
 
-Decisive output before production changes:
+The exact old-command scan specified in the task reports only intentionally preserved historical statements in `docs/rfcs/**` and `docs/github-open-issue-reconciliation.md`. Re-running the scan with those immutable historical records excluded returns no matches. `git diff --check` also passed.
+
+## Self-Review
+
+- Confirmed `make build` produces only the three required executables and `naming-check` rejects both old artifact names.
+- Confirmed no tracked Go comments, test names, or executable-facing messages retain the old executable names.
+- Confirmed all remaining non-historical occurrences are the explicitly preserved socket/database paths or the negative hard-cut assertions.
+- A read-only review identified one remaining test-helper identifier, `WORMHOLED_MAIN_HELPER`; it was renamed to `GATEWAYD_MAIN_HELPER`, then every gate above was rerun.
+- Preserved the pre-existing, user-owned `.superpowers/sdd/progress.md` modification without staging it.
+
+## Concern
+
+The immutable historical RFC and issue-reconciliation records prevent the task's literal `rg` command from returning zero matches. This is an intentional consequence of the instruction not to alter approved design and historical issue documentation; the scoped semantic scan is clean.
+
+## Commit
+
+`baa527a4363991dbe0a6471624bd0e5763978eb4 refactor: rename Gateway and Fabric binaries`
+
+## Review Remediation: Prefix Boundaries and Wiki Alignment
+
+- Updated the Wiki overview to say `Fabric supplies` and aligned the SQLite and
+  PostgreSQL labels beneath Gateway and Fabric.
+- Kept executable prefixes exclusively at the Fabric `main` and Gateway
+  `runMain` process boundaries. Internal startup errors retain their diagnostic
+  context and `%w` causes without embedding a second executable prefix.
+
+### RED
+
+The new exact-output regressions failed before the production changes:
 
 ```text
-# github.com/H4RL33/wormhole/internal/runtime/localstore [github.com/H4RL33/wormhole/internal/runtime/localstore.test]
-internal/runtime/localstore/cross_namespace_test.go:35:21: undefined: ErrNamespaceCollision
-internal/runtime/localstore/cross_namespace_test.go:83:21: undefined: ErrNamespaceCollision
-FAIL	github.com/H4RL33/wormhole/internal/runtime/localstore [build failed]
+go test ./cmd/fabric ./cmd/gatewayd -run 'TestRunServerWithOpenReturnsDatabaseFailureBeforeServing|TestRunMainReportsConfigFailureWithOneGatewayPrefix' -count=1
+--- FAIL: TestRunServerWithOpenReturnsDatabaseFailureBeforeServing
+runServerWithOpen error text = "fabric: open database: database unavailable", want "open database: database unavailable"
+--- FAIL: TestRunMainReportsConfigFailureWithOneGatewayPrefix
+runMain error text = "gatewayd: load config: ...", want "load config: ..."
 FAIL
 ```
 
-To demonstrate the original runtime defect as well, I reran that exact test
-against the pre-fix `2c79aba` task and KB repository files through a temporary
-Go overlay. The overlay provided a test-only `ErrNamespaceCollision` so the
-test could compile without adding production behavior. The decisive output
-shows both cross-namespace upserts returned `nil` instead of rejecting the
-collision:
+### GREEN
 
 ```text
---- FAIL: TestUpsertTask_CrossNamespaceIDCollisionRejected (0.00s)
-    cross_namespace_test.go:38: upsert collision error = <nil>, want ErrNamespaceCollision
---- FAIL: TestUpsertArticle_CrossNamespaceIDCollisionRejected (0.00s)
-    cross_namespace_test.go:86: upsert collision error = <nil>, want ErrNamespaceCollision
-FAIL
-FAIL	github.com/H4RL33/wormhole/internal/runtime/localstore	0.009s
-FAIL
+go test ./cmd/fabric ./cmd/gatewayd -run 'Test(ServerMainExitsOneWhenWiringFails|RunServerWithOpenReturnsDatabaseFailureBeforeServing|RunMainReportsConfigFailureWithOneGatewayPrefix)' -count=1
+ok github.com/H4RL33/wormhole/cmd/fabric
+ok github.com/H4RL33/wormhole/cmd/gatewayd
 ```
 
-## GREEN / verification
-
-Focused regression command:
-
-```text
-go test ./internal/runtime/localstore -run 'TestUpsert(Task|Article)_CrossNamespaceIDCollisionRejected' -count=1
-ok  	github.com/H4RL33/wormhole/internal/runtime/localstore	0.009s
-```
-
-Required race suite:
-
-```text
-go test -race ./internal/runtime/localstore -count=1
-ok  	github.com/H4RL33/wormhole/internal/runtime/localstore	1.302s
-```
-
-Required dependent suites:
-
-```text
-go test ./internal/runtime/sync ./internal/runtime/localapi -count=1
-ok  	github.com/H4RL33/wormhole/internal/runtime/sync	4.006s
-ok  	github.com/H4RL33/wormhole/internal/runtime/localapi	0.401s
-```
-
-`git diff --check` also exited successfully.
-
-## Concerns
-
-None for the requested scope. The existing `.superpowers/sdd/progress.md`
-modification was left untouched as instructed.
-
-## Review remediation (namespace scoping and complete record assertions)
-
-### Files changed
-
-- `internal/runtime/localstore/task_repo.go`
-- `internal/runtime/localstore/kb_repo.go`
-- `internal/runtime/localstore/cross_namespace_test.go`
-
-### Changes
-
-- Changed both collision probes to query only for a conflicting owner with
-  `WHERE id = ? AND namespace_id <> ?`, binding the requested namespace in
-  the existing write transaction as required by RFC-0003 §7.2/LR3.
-- Strengthened task collision coverage to preserve and compare every stored
-  field (including namespace, description, parent/owner pointers, status,
-  priority, due date, and timestamps) and to verify all same-namespace
-  mutable updates plus retained namespace.
-- Strengthened KB coverage to preserve and compare title, body, frontmatter,
-  author, namespace, and timestamps, using distinct attempted collision
-  values and complete same-namespace update assertions.
-- The due-date assertions exposed that SQLite stores `due_by` (`TEXT`) as a
-  Go time string. `scanTaskRows` now parses that value, including the
-  driver's optional monotonic-clock suffix; a regression test covers it.
-
-### Commands and results
-
-The new monotonic-clock due-date regression was RED before the parser change:
-
-```text
-go test ./internal/runtime/localstore -run TestUpsertTask_PreservesDueByWithMonotonicClock -count=1
---- FAIL: TestUpsertTask_PreservesDueByWithMonotonicClock (0.00s)
-    cross_namespace_test.go:161: UpsertTask: localstore/task: upsert: parse due_by: parsing time "... m=+...": extra text: " m=+..."
-FAIL
-FAIL	github.com/H4RL33/wormhole/internal/runtime/localstore	0.006s
-FAIL
-```
-
-Final focused collision and due-date regression coverage:
-
-```text
-go test ./internal/runtime/localstore -run 'TestUpsert(Task|Article)_CrossNamespaceIDCollisionRejected|TestUpsertTask_PreservesDueByWithMonotonicClock' -count=1
-ok  	github.com/H4RL33/wormhole/internal/runtime/localstore	0.012s
-```
-
-Required race suite:
-
-```text
-go test -race ./internal/runtime/localstore -count=1
-ok  	github.com/H4RL33/wormhole/internal/runtime/localstore	1.316s
-```
-
-Required dependent suites:
-
-```text
-go test ./internal/runtime/sync ./internal/runtime/localapi -count=1
-ok  	github.com/H4RL33/wormhole/internal/runtime/sync	3.971s
-ok  	github.com/H4RL33/wormhole/internal/runtime/localapi	0.399s
-```
-
-`git diff --check` exited successfully.
+The source-prefix audit now finds `fabric:` only at Fabric's `main` boundary
+and `gatewayd:` only at Gateway's `runMain` boundary (plus test assertions).

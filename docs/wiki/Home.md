@@ -21,14 +21,14 @@ experimental multi-agent systems.
 
 ```text
 MCP harness -> wormhole mcp -> Gateway -> Fabric
-                                  |                 |
-                              SQLite          PostgreSQL
+                                  |         |
+                               SQLite   PostgreSQL
 ```
 
 Every machine runs one local `gatewayd` daemon. Harnesses call the Gateway
 through `wormhole mcp`; they never call Fabric directly.
-Local writes become durable in SQLite before synchronization. The Coordination
-Fabric supplies authenticated, project-scoped authority across people,
+Local writes become durable in SQLite before synchronization. Fabric supplies
+authenticated, project-scoped authority across people,
 machines, and runtimes.
 
 Git remains the source of truth for code. Wormhole stores tasks, events,

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -121,5 +122,26 @@ func TestRunMainSelectsProfileAndReportsFailures(t *testing.T) {
 				t.Fatalf("stderr = %q, want daemon error", stderr.String())
 			}
 		})
+	}
+}
+
+func TestRunMainReportsConfigFailureWithOneGatewayPrefix(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	var stderr bytes.Buffer
+	err := runMain(context.Background(), nil, &stderr, func(ctx context.Context, profile string) error {
+		return runWithSyncEngineFactory(ctx, profile, nil)
+	})
+	credentialPath := filepath.Join(home, ".wormhole", "credentials", "default.json")
+	wantErr := "load config: config: credentials not found: profile \"default\" at " + credentialPath
+	if err == nil {
+		t.Fatal("runMain error = nil, want config load failure")
+	}
+	if got := err.Error(); got != wantErr {
+		t.Fatalf("runMain error text = %q, want %q", got, wantErr)
+	}
+	if got, want := stderr.String(), "gatewayd: "+wantErr+"\n"; got != want {
+		t.Fatalf("runMain stderr = %q, want %q", got, want)
 	}
 }
