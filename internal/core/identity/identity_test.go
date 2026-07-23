@@ -620,6 +620,35 @@ func TestListAuditTrail_ScopedToProject(t *testing.T) {
 	}
 }
 
+func TestStandaloneAuditOperationsAreScopedToProject(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectA := createProject(t, s, "standalone-audit-a")
+	projectB := createProject(t, s, "standalone-audit-b")
+
+	agent, _, _, err := s.Register(ctx, projectA, []string{}, "owner", "model", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	cleanupAgent(t, s, agent.ID)
+
+	entry, err := s.RecordAction(ctx, agent.ID, projectA, "coverage.checked")
+	if err != nil {
+		t.Fatalf("RecordAction: %v", err)
+	}
+	entriesA, err := s.ListAuditTrail(ctx, agent.ID, projectA)
+	if err != nil {
+		t.Fatalf("ListAuditTrail(projectA): %v", err)
+	}
+	entriesB, err := s.ListAuditTrail(ctx, agent.ID, projectB)
+	if err != nil {
+		t.Fatalf("ListAuditTrail(projectB): %v", err)
+	}
+	if entry.ProjectID != projectA || len(entriesA) == 0 || len(entriesB) != 0 {
+		t.Fatalf("standalone audit scope: entry=%+v projectA=%+v projectB=%+v", entry, entriesA, entriesB)
+	}
+}
+
 // TestWhoAmI_ExpiredTokenRejected covers the expiry half of RFC-0001 §13's
 // unforgeable-identity guarantee: a token past its expires_at must be
 // rejected the same way a forged one is (ErrInvalidToken, no distinct

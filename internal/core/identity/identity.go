@@ -244,7 +244,23 @@ func (s *Store) IssuePassport(ctx context.Context, agentID, projectID string, re
 
 // RecordAction appends one entry to agentID's audit trail for projectID.
 func (s *Store) RecordAction(ctx context.Context, agentID, projectID, action string) (AuditEntry, error) {
-	return recordAction(ctx, s.db, agentID, projectID, action)
+	if projectID == "" {
+		return AuditEntry{}, ErrInvalidScope
+	}
+	tx, err := s.BeginProjectTx(ctx, projectID)
+	if err != nil {
+		return AuditEntry{}, err
+	}
+	defer tx.Rollback()
+
+	entry, err := recordAction(ctx, tx, agentID, projectID, action)
+	if err != nil {
+		return AuditEntry{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return AuditEntry{}, fmt.Errorf("identity: commit audit entry: %w", err)
+	}
+	return entry, nil
 }
 
 func recordAction(ctx context.Context, db dbtx, agentID, projectID, action string) (AuditEntry, error) {
@@ -263,7 +279,16 @@ func recordAction(ctx context.Context, db dbtx, agentID, projectID, action strin
 // ListAuditTrail returns agentID's audit trail for projectID, oldest
 // first.
 func (s *Store) ListAuditTrail(ctx context.Context, agentID, projectID string) ([]AuditEntry, error) {
-	rows, err := s.db.QueryContext(ctx,
+	if projectID == "" {
+		return nil, ErrInvalidScope
+	}
+	tx, err := s.BeginProjectTx(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx,
 		`SELECT id, agent_id, project_id, action, created_at, seq
 		 FROM audit_log
 		 WHERE agent_id = $1 AND project_id = $2
@@ -273,7 +298,6 @@ func (s *Store) ListAuditTrail(ctx context.Context, agentID, projectID string) (
 	if err != nil {
 		return nil, fmt.Errorf("identity: list audit trail: %w", err)
 	}
-	defer rows.Close()
 
 	entries := []AuditEntry{}
 	for rows.Next() {
@@ -285,6 +309,12 @@ func (s *Store) ListAuditTrail(ctx context.Context, agentID, projectID string) (
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("identity: iterate audit trail: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("identity: close audit trail rows: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("identity: commit audit trail read: %w", err)
 	}
 	return entries, nil
 }

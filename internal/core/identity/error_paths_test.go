@@ -68,6 +68,18 @@ func TestIdentityReadsPropagateCanceledContext(t *testing.T) {
 	}
 }
 
+func TestStandaloneAuditOperationsRequireProjectScope(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	if _, err := s.RecordAction(ctx, uuid.NewString(), "", "coverage.rejected"); !errors.Is(err, ErrInvalidScope) {
+		t.Fatalf("RecordAction empty project error = %v, want ErrInvalidScope", err)
+	}
+	if _, err := s.ListAuditTrail(ctx, uuid.NewString(), ""); !errors.Is(err, ErrInvalidScope) {
+		t.Fatalf("ListAuditTrail empty project error = %v, want ErrInvalidScope", err)
+	}
+}
+
 func TestIssuePassportUnknownAgentRollsBackAudit(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
