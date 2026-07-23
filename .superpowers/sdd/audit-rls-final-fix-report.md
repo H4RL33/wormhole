@@ -8,9 +8,9 @@ Review base: `6fd9b75`
 ## Status
 
 The corrective code, tests, and issue-ledger wording are complete and verified.
-GitHub issue #33 was confirmed reopened before the corrective work. Its final
-comment URL, closed state, and corrective commit IDs are recorded in the final
-section after the required commit-first issue workflow.
+GitHub issue #33 was confirmed reopened before the corrective work, then
+received the corrective evidence comment and was closed as completed only
+after the verified corrective commit.
 
 ## Root cause and production correction
 
@@ -214,6 +214,28 @@ deliberately out of scope and open in #36.
 
 ## Commit and GitHub issue evidence
 
-Pending the commit-first issue workflow. This section will be finalized with
-the corrective commit(s), #33 comment URL, and confirmed closed/completed
-state.
+Corrective commit:
+
+```text
+48e4c490d3574e739e979ec3684ce5d9cced82ca
+fix(identity): scope issue audit transactions
+```
+
+The GitHub connector successfully read #33 but returned
+`403 Resource not accessible by integration` for the authorized comment write.
+The repository workflow's authenticated `gh` fallback was therefore used.
+
+Corrective evidence comment:
+
+<https://github.com/H4RL33/wormhole/issues/33#issuecomment-5058675899>
+
+Final state proof:
+
+```text
+#33: CLOSED, stateReason=COMPLETED, labels=[]
+#36: OPEN, labels=[]
+#22: OPEN, labels=[]
+#23: OPEN, labels=[]
+```
+
+No issue other than #33 was mutated, and no label was changed.
