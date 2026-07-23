@@ -119,6 +119,7 @@ type Server struct {
 	listener   net.Listener
 	socketPath string
 	httpClient *http.Client
+	version    string
 
 	// Single-org mode (P1-P4 backward compatibility)
 	coordServer string
@@ -167,6 +168,12 @@ type Server struct {
 	// construction time from the Server that will service every
 	// connection's tools/call dispatch (design doc §5 subtask 2).
 	registry *localRegistry
+}
+
+// SetVersion sets the linker-injected Gateway version reported by MCP
+// initialize responses. Empty versions retain the development default.
+func (s *Server) SetVersion(version string) {
+	s.version = version
 }
 
 // New binds the Unix domain socket at socketPath. Callers must call Serve

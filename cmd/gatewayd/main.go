@@ -9,7 +9,13 @@ import (
 	"syscall"
 )
 
+var version = "dev"
+
 var runDaemonMain = Run
+
+func gatewayVersion() string {
+	return version
+}
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

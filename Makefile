@@ -5,7 +5,7 @@
 DIST := dist
 BINARIES := wormhole gatewayd fabric
 
-.PHONY: all build clean test vet check integration coverage race fmt-check naming-check $(BINARIES)
+.PHONY: all build clean test vet check integration coverage race fmt-check naming-check release-rehearsal release-test $(BINARIES)
 
 all: build
 
@@ -36,6 +36,14 @@ integration:
 coverage:
 	WORMHOLE_INTEGRATION_REQUIRED=1 go test -coverpkg=./... -covermode=atomic -coverprofile=coverage.out ./...
 	./.github/scripts/coverage-check.sh coverage.out docs/testing-coverage-exceptions.md
+
+release-test:
+	.github/scripts/release_test.sh
+
+release-rehearsal:
+	SOURCE_DATE_EPOCH=$$(git show -s --format=%ct HEAD) \
+	  .github/scripts/build-release.sh 0.0.0-alpha.rehearsal dist/release
+	.github/scripts/verify-release.sh dist/release
 
 check: fmt-check build vet integration race coverage
 

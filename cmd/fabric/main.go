@@ -19,6 +19,8 @@ import (
 	"github.com/H4RL33/wormhole/internal/webui"
 )
 
+var version = "dev"
+
 var runServerMain = runServer
 
 func main() {
@@ -34,6 +36,10 @@ func main() {
 // observable under tests without changing the production listener contract.
 func runServer(cfg types.Config, serve func(*http.Server) error) error {
 	return runServerWithOpen(cfg, storage.Open, serve)
+}
+
+func fabricMCPHandler(registry *mcp.Registry, identityStore *identity.Store) http.HandlerFunc {
+	return mcp.NewMCPHandlerWithVersion(registry, identityStore, version)
 }
 
 // runServerWithOpen separates database acquisition from HTTP composition so
@@ -78,9 +84,9 @@ func runServerWithOpen(cfg types.Config, openDB func(types.Config) (*sql.DB, err
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(http.StatusNoContent)
 	})
-	mux.HandleFunc("/mcp", mcp.NewMCPHandler(registry, identityStore))
+	mux.HandleFunc("/mcp", fabricMCPHandler(registry, identityStore))
 
 	webuiHandler := &webui.Handler{
 		Identity: identityStore,

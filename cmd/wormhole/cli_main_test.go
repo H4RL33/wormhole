@@ -35,6 +35,24 @@ func TestRun_NoArgs_PrintsUsage(t *testing.T) {
 	}
 }
 
+func TestLinkedVersionAppearsInHelp(t *testing.T) {
+	want := os.Getenv("WORMHOLE_EXPECT_LINKED_VERSION")
+	if want == "" {
+		want = "dev"
+	}
+	if version != want {
+		t.Fatalf("linked version = %q, want %q", version, want)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--help"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("help exit code = %d, want 0; stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "version: "+want) {
+		t.Fatalf("help = %q, want linked version %q", stdout.String(), want)
+	}
+}
+
 func TestRun_UnknownCommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"bogus"}, &stdout, &stderr)

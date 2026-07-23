@@ -1,0 +1,21 @@
+FROM golang:1.26.4-bookworm@sha256:b305420a68d0f229d91eb3b3ed9e519fcf2cf5461da4bef997bf927e8c0bfd2b AS build
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
+    go build -mod=readonly -trimpath -buildvcs=false \
+    -ldflags "-s -w -X main.version=${VERSION}" \
+    -o /out/fabric ./cmd/fabric
+
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:f5b485ea962d9bd1186b2f6b3a061191539b905b82ec395de78cbfae51f20e35
+COPY --from=build --chown=nonroot:nonroot /out/fabric /fabric
+
+EXPOSE 8080
+USER nonroot:nonroot
+ENTRYPOINT ["/fabric"]

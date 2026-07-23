@@ -9,7 +9,7 @@ import (
 )
 
 func TestHandleInitialize(t *testing.T) {
-	result := HandleInitialize()
+	result := HandleInitialize("0.2.4-alpha")
 	init, ok := result.(initializeResult)
 	if !ok {
 		t.Fatalf("HandleInitialize() returned %T, want initializeResult", result)
@@ -25,6 +25,18 @@ func TestHandleInitialize(t *testing.T) {
 	wantInfo := map[string]string{"name": "wormhole", "version": "0.2.4-alpha"}
 	if !reflect.DeepEqual(init.ServerInfo, wantInfo) {
 		t.Errorf("ServerInfo = %#v, want %#v", init.ServerInfo, wantInfo)
+	}
+}
+
+func TestHandleInitializeReportsConfiguredVersion(t *testing.T) {
+	result := HandleInitialize("9.8.7-test")
+	init, ok := result.(initializeResult)
+	if !ok {
+		t.Fatalf("HandleInitialize() returned %T, want initializeResult", result)
+	}
+	wantInfo := map[string]string{"name": "wormhole", "version": "9.8.7-test"}
+	if !reflect.DeepEqual(init.ServerInfo, wantInfo) {
+		t.Fatalf("ServerInfo = %#v, want %#v", init.ServerInfo, wantInfo)
 	}
 }
 

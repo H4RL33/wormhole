@@ -292,6 +292,7 @@ func runWithSyncEngineFactory(ctx context.Context, profileName string, factory s
 		return fmt.Errorf("start local api: %w", err)
 	}
 	defer srv.Close()
+	srv.SetVersion(gatewayVersion())
 	if useMultiOrg {
 		for _, binding := range multiCfg.Bindings {
 			if org, ok := multiCfg.Orgs[binding.OrgName]; ok {

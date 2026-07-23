@@ -64,7 +64,7 @@ func mcpInitialize(t *testing.T, conn net.Conn, reader *bufio.Reader) {
 	if err := json.Unmarshal(resp.Result, &initialized); err != nil {
 		t.Fatalf("decode initialize result: %v", err)
 	}
-	wantInfo := map[string]string{"name": "gatewayd", "version": "0.2.4-alpha"}
+	wantInfo := map[string]string{"name": "gatewayd", "version": "dev"}
 	if !reflect.DeepEqual(initialized.ServerInfo, wantInfo) {
 		t.Fatalf("initialize serverInfo = %#v, want %#v", initialized.ServerInfo, wantInfo)
 	}
@@ -76,6 +76,18 @@ func mcpInitialize(t *testing.T, conn net.Conn, reader *bufio.Reader) {
 	}
 	if _, err := conn.Write(append(notifRaw, '\n')); err != nil {
 		t.Fatalf("write notifications/initialized: %v", err)
+	}
+}
+
+func TestHandleInitializeReportsConfiguredVersion(t *testing.T) {
+	result := handleInitialize("9.8.7-test")
+	initialized, ok := result.(initializeResult)
+	if !ok {
+		t.Fatalf("handleInitialize returned %T, want initializeResult", result)
+	}
+	wantInfo := map[string]string{"name": "gatewayd", "version": "9.8.7-test"}
+	if !reflect.DeepEqual(initialized.ServerInfo, wantInfo) {
+		t.Fatalf("initialize serverInfo = %#v, want %#v", initialized.ServerInfo, wantInfo)
 	}
 }
 

@@ -280,11 +280,15 @@ type initializeResult struct {
 
 // handleInitialize implements "initialize". No auth: listing server
 // capabilities is not a scoped operation (design doc §1).
-func handleInitialize() any {
+func handleInitialize(serverVersion ...string) any {
+	version := "dev"
+	if len(serverVersion) > 0 && serverVersion[0] != "" {
+		version = serverVersion[0]
+	}
 	return initializeResult{
 		ProtocolVersion: "2025-11-25",
 		Capabilities:    map[string]any{"tools": map[string]any{}},
-		ServerInfo:      map[string]string{"name": "gatewayd", "version": "0.2.4-alpha"},
+		ServerInfo:      map[string]string{"name": "gatewayd", "version": version},
 	}
 }
 
@@ -550,7 +554,7 @@ func (s *Server) dispatchMCPMessage(ctx context.Context, sess *mcpSession, conn 
 
 	switch req.Method {
 	case "initialize":
-		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: marshalResult(handleInitialize())})
+		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: marshalResult(handleInitialize(s.version))})
 
 	case "notifications/initialized":
 		// No response is ever produced for a notification.

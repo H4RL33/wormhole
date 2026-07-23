@@ -19,6 +19,8 @@ import (
 	"github.com/H4RL33/wormhole/internal/config"
 )
 
+var version = "dev"
+
 func main() {
 	exit := run(os.Args[1:], os.Stdout, os.Stderr)
 	os.Exit(exit)
@@ -60,6 +62,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 func usage(w io.Writer) {
 	fmt.Fprintf(w, `wormhole - agent memory portal
 
+version: %s
+
 usage: wormhole <command> [flags]
 
 commands:
@@ -72,7 +76,7 @@ commands:
   wormhole mcp                           stdio↔socket bridge for MCP harness (no flags)
   wormhole help                          show this message
 
-`)
+`, version)
 }
 
 // Type definitions (mirrored from internal/mcp for client-side use)

@@ -73,11 +73,15 @@ type initializeResult struct {
 // HandleInitialize implements the JSON-RPC "initialize" method
 // (docs/mcp-protocol.md §4). No auth: listing server capabilities is not a
 // scoped operation.
-func HandleInitialize() any {
+func HandleInitialize(serverVersion ...string) any {
+	version := "dev"
+	if len(serverVersion) > 0 && serverVersion[0] != "" {
+		version = serverVersion[0]
+	}
 	return initializeResult{
 		ProtocolVersion: "2025-11-25",
 		Capabilities:    map[string]any{"tools": map[string]any{}},
-		ServerInfo:      map[string]string{"name": "wormhole", "version": "0.2.4-alpha"},
+		ServerInfo:      map[string]string{"name": "wormhole", "version": version},
 	}
 }
 
@@ -356,6 +360,12 @@ func bearerToken(header string) string {
 // GET is reserved for a server-push SSE stream this server doesn't
 // implement yet (405, per docs/mcp-protocol.md §2 — no current consumer).
 func NewMCPHandler(registry *Registry, identityStore *identity.Store) http.HandlerFunc {
+	return NewMCPHandlerWithVersion(registry, identityStore, "dev")
+}
+
+// NewMCPHandlerWithVersion builds the /mcp handler with linker-injected
+// server version metadata for initialize responses.
+func NewMCPHandlerWithVersion(registry *Registry, identityStore *identity.Store, serverVersion string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -391,7 +401,7 @@ func NewMCPHandler(registry *Registry, identityStore *identity.Store) http.Handl
 		var rpcErr *RPCError
 		switch req.Method {
 		case "initialize":
-			result = HandleInitialize()
+			result = HandleInitialize(serverVersion)
 		case "tools/list":
 			result = HandleToolsList(registry)
 		case "tools/call":

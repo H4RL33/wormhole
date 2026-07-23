@@ -2,17 +2,48 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/H4RL33/wormhole/internal/mcp"
 	"github.com/H4RL33/wormhole/internal/types"
 )
+
+func TestLinkedVersionAppearsInServerMetadata(t *testing.T) {
+	want := os.Getenv("WORMHOLE_EXPECT_LINKED_VERSION")
+	if want == "" {
+		want = "dev"
+	}
+	if version != want {
+		t.Fatalf("linked version = %q, want %q", version, want)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`,
+	))
+	response := httptest.NewRecorder()
+	fabricMCPHandler(mcp.NewRegistry(), nil).ServeHTTP(response, request)
+
+	var envelope struct {
+		Result struct {
+			ServerInfo map[string]string `json:"serverInfo"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode initialize response: %v", err)
+	}
+	if got := envelope.Result.ServerInfo["version"]; got != want {
+		t.Fatalf("Fabric metadata version = %q, want %q", got, want)
+	}
+}
 
 func TestServerMainHelperProcess(t *testing.T) {
 	if os.Getenv("WORMHOLE_SERVER_MAIN_HELPER") != "1" {
@@ -82,8 +113,12 @@ func TestRunServerBuildsBoundedMCPAndDashboardMux(t *testing.T) {
 		} {
 			response := httptest.NewRecorder()
 			server.Handler.ServeHTTP(response, request)
-			if response.Code != http.StatusOK {
-				t.Fatalf("%s status = %d, want 200", request.URL.Path, response.Code)
+			wantStatus := http.StatusOK
+			if request.URL.Path == "/healthz" {
+				wantStatus = http.StatusNoContent
+			}
+			if response.Code != wantStatus {
+				t.Fatalf("%s status = %d, want %d", request.URL.Path, response.Code, wantStatus)
 			}
 		}
 		return wantErr

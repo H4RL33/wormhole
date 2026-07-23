@@ -1,0 +1,241 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version used for this non-publishing rehearsal
+        required: true
+        default: 0.0.0-alpha.rehearsal
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release source
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      publish: ${{ steps.metadata.outputs.publish }}
+      version: ${{ steps.metadata.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Resolve immutable release metadata
+        id: metadata
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REHEARSAL_VERSION: ${{ inputs.version }}
+        run: |
+          if test "$EVENT_NAME" = push; then
+            test "$GITHUB_REF_TYPE" = tag
+            test "$(git cat-file -t "$GITHUB_REF_NAME")" = tag
+            printf '%s\n' "$GITHUB_REF_NAME" |
+              grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-alpha|-beta\.[0-9]+)?$'
+            version=${GITHUB_REF_NAME#v}
+            publish=true
+          else
+            version=$REHEARSAL_VERSION
+            publish=false
+          fi
+          case "$version" in
+            ""|*[!A-Za-z0-9._-]*)
+              printf 'invalid release version: %s\n' "$version" >&2
+              exit 1
+              ;;
+          esac
+          printf 'publish=%s\nversion=%s\n' "$publish" "$version" >>"$GITHUB_OUTPUT"
+
+  artifacts:
+    name: Artifacts (${{ matrix.arch }})
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Build deterministic archives
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD) \
+            .github/scripts/build-release.sh "$VERSION" dist/release
+          for arch in amd64 arm64; do
+            if test "$arch" != "${{ matrix.arch }}"; then
+              rm "dist/release/wormhole-${VERSION}-linux-${arch}.tar.gz"
+            fi
+          done
+          rm dist/release/SHA256SUMS dist/release/*.spdx.json
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@f8bdd1d8ac5e901a77a92f111440fdb1b593736b # v0.20.6
+        with:
+          path: dist/release
+          format: spdx-json
+          output-file: dist/release/wormhole-${{ matrix.arch }}.spdx.json
+          upload-artifact: false
+      - name: Upload release inputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            dist/release/wormhole-${{ needs.validate.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
+            dist/release/wormhole-${{ matrix.arch }}.spdx.json
+
+  images:
+    name: Fabric image (${{ matrix.arch }})
+    needs: [validate, artifacts]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist/release
+      - name: Create checksum manifest
+        run: |
+          cd dist/release
+          sha256sum \
+            wormhole-${{ needs.validate.outputs.version }}-linux-amd64.tar.gz \
+            wormhole-${{ needs.validate.outputs.version }}-linux-arm64.tar.gz \
+            wormhole-amd64.spdx.json \
+            wormhole-arm64.spdx.json >SHA256SUMS
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build local Fabric image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile.fabric
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          push: false
+          tags: wormhole-fabric:${{ github.run_id }}-${{ matrix.arch }}
+          build-args: VERSION=${{ needs.validate.outputs.version }}
+      - name: Verify artifacts and Fabric health
+        env:
+          WORMHOLE_FABRIC_IMAGE: wormhole-fabric:${{ github.run_id }}-${{ matrix.arch }}
+        run: .github/scripts/verify-release.sh dist/release
+
+  publish-image:
+    name: Publish Fabric image
+    if: >-
+      github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/tags/v') &&
+      needs.validate.outputs.publish == 'true'
+    needs: [validate, images]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Push verified multi-architecture manifest
+        id: image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile.fabric
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/h4rl33/wormhole-fabric:${{ needs.validate.outputs.version }}
+          build-args: VERSION=${{ needs.validate.outputs.version }}
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - name: Sign Fabric manifest
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+          IMAGE: ghcr.io/h4rl33/wormhole-fabric
+        run: cosign sign --yes "$IMAGE@$DIGEST"
+      - name: Attest Fabric provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-name: ghcr.io/h4rl33/wormhole-fabric
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+
+  publish-release:
+    name: Publish GitHub release
+    if: >-
+      github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/tags/v') &&
+      needs.validate.outputs.publish == 'true'
+    needs: [validate, artifacts, images, publish-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist/release
+      - name: Recreate and verify checksum manifest
+        run: |
+          cd dist/release
+          sha256sum \
+            wormhole-${{ needs.validate.outputs.version }}-linux-amd64.tar.gz \
+            wormhole-${{ needs.validate.outputs.version }}-linux-arm64.tar.gz \
+            wormhole-amd64.spdx.json \
+            wormhole-arm64.spdx.json >SHA256SUMS
+          cd ../..
+          .github/scripts/verify-release.sh dist/release
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - name: Sign release artifacts
+        run: |
+          for artifact in dist/release/*; do
+            cosign sign-blob --yes \
+              --output-signature "${artifact}.sig" \
+              --output-certificate "${artifact}.pem" \
+              "$artifact"
+          done
+      - name: Attest amd64 archive provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: dist/release/wormhole-${{ needs.validate.outputs.version }}-linux-amd64.tar.gz
+      - name: Attest arm64 archive provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: dist/release/wormhole-${{ needs.validate.outputs.version }}-linux-arm64.tar.gz
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" dist/release/*
+          --verify-tag --generate-notes --title "$GITHUB_REF_NAME"

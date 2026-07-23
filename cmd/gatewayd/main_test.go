@@ -96,6 +96,19 @@ func TestDaemonMainExitsOneWhenStartupFails(t *testing.T) {
 	}
 }
 
+func TestLinkedVersionFeedsGatewayMetadata(t *testing.T) {
+	want := os.Getenv("WORMHOLE_EXPECT_LINKED_VERSION")
+	if want == "" {
+		want = "dev"
+	}
+	if version != want {
+		t.Fatalf("linked version = %q, want %q", version, want)
+	}
+	if got := gatewayVersion(); got != want {
+		t.Fatalf("gateway metadata version = %q, want %q", got, want)
+	}
+}
+
 func TestRunMainSelectsProfileAndReportsFailures(t *testing.T) {
 	for _, tt := range []struct {
 		name        string
