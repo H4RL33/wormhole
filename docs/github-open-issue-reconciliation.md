@@ -55,6 +55,7 @@ gh issue list --repo H4RL33/wormhole --state open --limit 200 \
   daemon ownership of the full lifecycle remains #24.
 - **#21:** `HandleToolsCall` enforces every declared production permission before
   handler dispatch, with positive, negative, and audit regression coverage.
+
 ## Keep open
 
 - **#3:** Add the missing durable identity-session entity or amend the issue and

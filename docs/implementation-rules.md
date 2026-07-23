@@ -91,7 +91,10 @@ defined before a second implementation exists.
 Ambiguity is normal; guessing is the failure. Resolve in this exact order, stopping at the
 first rung that answers the question:
 
-1. **RFC text.** Does RFC-0001/0002 state it? Then it's decided; do that.
+1. **RFC text.** Does RFC-0001 state it, does RFC-0002 state it for optional
+   Governance, or does RFC-0003 explicitly amend a local-runtime or transport
+   assumption? Then it is decided; follow that authority. RFC-0003 does not
+   otherwise supersede RFC-0001.
 2. **`docs/db-entities.md`** for anything entity-shaped.
 3. **Existing code.** Does the repo already embody an answer? Match it.
 4. **This document's rules.** Do §4–§7 constrain it to one option?
