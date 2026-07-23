@@ -38,6 +38,35 @@ func TestIdentityOperationsPropagateCanceledContext(t *testing.T) {
 	}
 }
 
+func TestIssueOperationsPreserveBeginTransactionErrorContext(t *testing.T) {
+	s := testStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	operations := map[string]func() error{
+		"issue passport": func() error {
+			_, err := s.IssuePassport(ctx, uuid.NewString(), uuid.NewString(), nil, nil)
+			return err
+		},
+		"issue token": func() error {
+			_, err := s.IssueToken(ctx, uuid.NewString(), uuid.NewString(), []string{})
+			return err
+		},
+	}
+
+	for name, operation := range operations {
+		t.Run(name, func(t *testing.T) {
+			err := operation()
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("error = %v, want context.Canceled", err)
+			}
+			if !strings.HasPrefix(err.Error(), "identity: begin tx:") {
+				t.Fatalf("error = %q, want identity: begin tx prefix", err)
+			}
+		})
+	}
+}
+
 func TestRegisterInTxPropagatesCanceledContext(t *testing.T) {
 	s := testStore(t)
 	projectID := createProject(t, s, "register-in-tx-canceled")

@@ -221,7 +221,7 @@ func (s *Store) IssuePassport(ctx context.Context, agentID, projectID string, re
 	if agentID == "" || projectID == "" {
 		return Passport{}, ErrInvalidScope
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.BeginProjectTx(ctx, projectID)
 	if err != nil {
 		return Passport{}, fmt.Errorf("identity: begin tx: %w", err)
 	}
@@ -378,7 +378,7 @@ func (s *Store) IssueToken(ctx context.Context, agentID, projectID string, permi
 		return "", err
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.BeginProjectTx(ctx, projectID)
 	if err != nil {
 		return "", fmt.Errorf("identity: begin tx: %w", err)
 	}

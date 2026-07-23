@@ -10,6 +10,7 @@ import (
 
 	"github.com/lib/pq"
 
+	"github.com/H4RL33/wormhole/internal/core/identity"
 	"github.com/H4RL33/wormhole/internal/types"
 )
 
@@ -216,6 +217,59 @@ func TestAuditLogForcedRLSAppliesToOrdinaryTableOwner(t *testing.T) {
 	}
 }
 
+func TestRestrictedRoleStoreIssueOperationsSetProjectContext(t *testing.T) {
+	ctx := context.Background()
+	owner := testDB(t)
+	restricted := newRestrictedRLSDB(t, owner)
+	fx := seedRLSMatrix(t, owner)
+
+	transferTableOwnership(t, owner, "passports", "wormhole_rls_matrix")
+	transferTableOwnership(t, owner, "agent_tokens", "wormhole_rls_matrix")
+	store := identity.NewStore(restricted)
+
+	t.Run("IssuePassport", func(t *testing.T) {
+		passport, err := store.IssuePassport(
+			ctx,
+			fx.agentID2,
+			fx.projectA,
+			[]string{"github.com/H4RL33/wormhole"},
+			[]string{"reviewer"},
+		)
+		if err != nil {
+			t.Fatalf("IssuePassport through restricted store: %v", err)
+		}
+		if passport.AgentID != fx.agentID2 || passport.ProjectID != fx.projectA {
+			t.Fatalf("IssuePassport scope = agent %q project %q", passport.AgentID, passport.ProjectID)
+		}
+
+		entries, err := store.ListAuditTrail(ctx, fx.agentID2, fx.projectA)
+		if err != nil {
+			t.Fatalf("ListAuditTrail after IssuePassport: %v", err)
+		}
+		if len(entries) != 1 || entries[0].Action != identity.ActionPassportIssued {
+			t.Fatalf("IssuePassport audit entries = %+v", entries)
+		}
+	})
+
+	t.Run("IssueToken", func(t *testing.T) {
+		token, err := store.IssueToken(ctx, fx.agentID2, fx.projectB, []string{"kb.read"})
+		if err != nil {
+			t.Fatalf("IssueToken through restricted store: %v", err)
+		}
+		if token == "" {
+			t.Fatal("IssueToken returned an empty token")
+		}
+
+		entries, err := store.ListAuditTrail(ctx, fx.agentID2, fx.projectB)
+		if err != nil {
+			t.Fatalf("ListAuditTrail after IssueToken: %v", err)
+		}
+		if len(entries) != 1 || entries[0].Action != identity.ActionTokenIssued {
+			t.Fatalf("IssueToken audit entries = %+v", entries)
+		}
+	})
+}
+
 func TestRestrictedRoleRLSOperationMatrix(t *testing.T) {
 	owner := testDB(t)
 	restricted := newRestrictedRLSDB(t, owner)
@@ -357,6 +411,38 @@ func newRestrictedRLSDB(t *testing.T, owner *sql.DB) *sql.DB {
 	}
 	t.Cleanup(func() { db.Close() })
 	return db
+}
+
+func transferTableOwnership(t *testing.T, db *sql.DB, table, role string) {
+	t.Helper()
+	ctx := context.Background()
+
+	var originalOwner string
+	if err := db.QueryRowContext(ctx, `
+		SELECT pg_get_userbyid(relowner)
+		  FROM pg_class
+		 WHERE oid = $1::regclass
+	`, table).Scan(&originalOwner); err != nil {
+		t.Fatalf("query %s owner: %v", table, err)
+	}
+
+	quotedTable := pq.QuoteIdentifier(table)
+	if _, err := db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s OWNER TO %s`,
+		quotedTable,
+		pq.QuoteIdentifier(role),
+	)); err != nil {
+		t.Fatalf("transfer %s ownership to %s: %v", table, role, err)
+	}
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(context.Background(), fmt.Sprintf(
+			`ALTER TABLE %s OWNER TO %s`,
+			quotedTable,
+			pq.QuoteIdentifier(originalOwner),
+		)); err != nil {
+			t.Errorf("restore %s owner to %s: %v", table, originalOwner, err)
+		}
+	})
 }
 
 func seedRLSMatrix(t *testing.T, db *sql.DB) rlsMatrixFixture {

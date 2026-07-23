@@ -17,7 +17,7 @@ gh issue list --repo H4RL33/wormhole --state open --limit 200 \
 | Issue | Opened | Recommendation | Evidence |
 |---|---|---|---|
 | [#1: Project bootstrap](https://github.com/H4RL33/wormhole/issues/1) | 2026-07-07 | Close | `go.mod`, `docker-compose.yml`, `cmd/wormhole-server/main.go`, and `internal/mcp/jsonrpc.go` provide the requested repository, database, server, and MCP foundations. |
-| [#2: Identity model](https://github.com/H4RL33/wormhole/issues/2) | 2026-07-07 | Close | `internal/core/identity/identity.go` implements registration, Passport and token issuance, `WhoAmI`, permissions, and append-only audit entries; `internal/core/identity/identity_test.go` exercises those paths. Audit RLS hardening remains separately tracked by #33. |
+| [#2: Identity model](https://github.com/H4RL33/wormhole/issues/2) | 2026-07-07 | Close | `internal/core/identity/identity.go` implements registration, Passport and token issuance, `WhoAmI`, permissions, and append-only audit entries; `internal/core/identity/identity_test.go` exercises those paths. Audit RLS hardening was completed by #33 after correcting every standalone identity transaction that accesses `audit_log`; the broader beta audit remains #36. |
 | [#3: Database schema](https://github.com/H4RL33/wormhole/issues/3) | 2026-07-07 | Keep open | Migrations define every entity named by the issue except `sessions`: there is no `CREATE TABLE sessions` migration, although `docs/db-entities.md` and RFC-0001 §8.4 still include identity sessions. |
 | [#4: MCP server](https://github.com/H4RL33/wormhole/issues/4) | 2026-07-07 | Close | `cmd/wormhole-server/main.go` registers every RFC-0001 §9 identity, communication, task, KB, and git tool; `internal/mcp/jsonrpc_test.go` verifies the current surface. The registry single-source hardening gap is separately tracked by #32. |
 | [#5: Task CRUD](https://github.com/H4RL33/wormhole/issues/5) | 2026-07-07 | Close | `internal/core/tasks/tasks.go` implements create, assign, list, the status state machine, and transactional `task.status_changed` emission; `internal/mcp/task_test.go` and `internal/core/tasks/tasks_test.go` pass. |
@@ -31,7 +31,7 @@ gh issue list --repo H4RL33/wormhole --state open --limit 200 \
 | [#23: Retrofit viewer-key issuance auth from shared operator secret to real human auth](https://github.com/H4RL33/wormhole/issues/23) | 2026-07-17 | Keep open | `internal/webui/admin.go` still authenticates `X-Admin-Key` against one configured `WORMHOLE_ADMIN_KEY`; there is no per-human issuer identity or audit attribution. This remains dependent on #22. |
 | [#24: wormhole-cli connect / wormholed bootstrap deadlock is patched, not RFC-0003 compliant](https://github.com/H4RL33/wormhole/issues/24) | 2026-07-17 | Keep open | `doRegisterViaSocket`, `proxyRegister`, and `TestRunJoin_WormholedRunning_UsesLocalSocket` prove only that daemon registration proxying works. `cmd/wormhole/main.go` still persists credentials and makes the follow-on KB, channel, and task Coordination Server calls itself. The issue requires a daemon-owned Authentication → Enrolment → Bootstrap → Synchronisation lifecycle and a complete lifecycle test. |
 | [#32: Harden MCP permission invariant: single source registry for tests](https://github.com/H4RL33/wormhole/issues/32) | 2026-07-21 | Keep open | `cmd/wormhole-server/main.go`, `internal/mcp/jsonrpc_test.go`, `cmd/wormhole-server/m3_integration_test.go`, and `cmd/wormholed/e2e_stdio_bridge_test.go` still hand-maintain independent registration lists. `TestRegistry_EveryAuthedToolDeclaresPermission` therefore does not prove the production set. |
-| [#33: audit_log RLS is inert: wormhole.project_id GUC never set in identity package](https://github.com/H4RL33/wormhole/issues/33) | 2026-07-21 | Close | `RecordAction` and `ListAuditTrail` now use project-scoped transactions; migration 000017 adds policy `WITH CHECK` and forces `audit_log` RLS; focused restricted-role integration tests prove cross-project audit read/write rejection and ordinary-owner enforcement. |
+| [#33: audit_log RLS is inert: wormhole.project_id GUC never set in identity package](https://github.com/H4RL33/wormhole/issues/33) | 2026-07-21 | Close | Every standalone identity path that accesses `audit_log` (`IssuePassport`, `IssueToken`, `RecordAction`, and `ListAuditTrail`) now uses a project-scoped transaction; migration 000017 adds policy `WITH CHECK` and forces `audit_log` RLS; focused restricted-role integration tests prove the Store paths, cross-project audit read/write rejection, and ordinary-owner enforcement. |
 | [#35: Enforce sync response protocol versions in wormholed](https://github.com/H4RL33/wormhole/issues/35) | 2026-07-23 | Keep open | RFC-0003 §9 requires exact response version `1`. In `internal/runtime/sync/sync.go`, `bootstrapResultWire` has no version, pull/push versions are decoded but not checked, and `ReportConflict` extracts only `resolved_value` before applying/logging results. |
 | [#36: Beta: audit database roles and RLS across tenant tables](https://github.com/H4RL33/wormhole/issues/36) | 2026-07-23 | Keep open | Beta hardening follow-up for production roles and ownership, superuser/BYPASSRLS exposure, tenant-table FORCE RLS coverage, project-context setup, cross-project integration coverage, and least-privilege deployment documentation. |
 
@@ -41,7 +41,8 @@ gh issue list --repo H4RL33/wormhole --state open --limit 200 \
   are present, and the focused repository tests pass.
 - **#2:** Registration, Passport, token, resolved permission, `whoami`, and audit
   paths are implemented and tested. Its narrower database-enforcement follow-up,
-  #33, is now completed and closed.
+  #33, is now completed and closed after the standalone Passport and token
+  transaction correction. The broader beta audit remains #36.
 - **#4:** The current production registry contains the complete RFC-0001 §9
   surface. Close the milestone while retaining #32 for the test/production
   registry invariant.
@@ -56,10 +57,11 @@ gh issue list --repo H4RL33/wormhole --state open --limit 200 \
   daemon ownership of the full lifecycle remains #24.
 - **#21:** `HandleToolsCall` enforces every declared production permission before
   handler dispatch, with positive, negative, and audit regression coverage.
-- **#33:** `RecordAction` and `ListAuditTrail` are project-scoped; migration
-  000017 adds `WITH CHECK` and forces `audit_log` RLS; focused restricted-role
-  integration tests prove cross-project audit read/write rejection and ordinary
-  table-owner enforcement.
+- **#33:** `IssuePassport`, `IssueToken`, `RecordAction`, and `ListAuditTrail`
+  are project-scoped; migration 000017 adds `WITH CHECK` and forces `audit_log`
+  RLS; focused restricted-role integration tests prove the Store paths,
+  cross-project audit read/write rejection, and ordinary table-owner
+  enforcement. The broader beta role and tenant-table audit remains #36.
 
 ## Keep open
 
@@ -98,8 +100,9 @@ gh issue list --repo H4RL33/wormhole --state open --limit 200 \
 
 - Close: **#1, #2, #4, #5, #6, #7, #9, #21, #33**.
 - Keep open: **#3, #8, #10, #22, #23, #24, #32, #35, #36**.
-- Preserve the narrower follow-up relationships in closure comments: **#2 → #33**,
-  **#4 → #32**, **#7 → #8**, **#9 → #10**, and **#23 depends on #22**.
+- Preserve the narrower follow-up relationships in closure comments: **#2 → #33**
+  (completed; broader beta audit remains **#36**), **#4 → #32**, **#7 → #8**,
+  **#9 → #10**, and **#23 depends on #22**.
 - Keep **#24** open as its own RFC-0003 lifecycle-compliance issue; do not
   supersede or fold it into **#10**.
 - Make no issue, label, milestone, or release changes as part of this
