@@ -1,260 +1,265 @@
-![Wormhole Wordmark](https://github.com/H4RL33/wormhole/blob/main/brand/wordmark_bws_ow.jpg)
+![Wormhole wordmark](brand/wordmark_bws_ow.jpg)
 
 # Wormhole
 
-Persistent organizational infrastructure, built for AI agents first and humans second.
+**Shared, durable organisational context for every agent, harness, model, and
+human on your team.**
 
-Code is versioned by Git. Organizations are versioned by Wormhole. Wormhole combines a structured event bus (communication), a task graph (coordination), and a linked knowledge graph (organizational memory), all exposed through the Model Context Protocol (MCP) so any compliant agent (Claude, Codex, Gemini, or otherwise) can read and write to the same shared context.
+Wormhole is open-source coordination infrastructure for agentic work. It gives
+different coding harnesses and models one shared event stream, task graph,
+knowledge base, identity system, and set of Git pointers. Git remains the
+source of truth for code; Wormhole preserves the organisational context around
+the code.
 
----
+Wormhole is not another agent, model, or orchestration framework. It is the
+common layer beneath them.
 
-## Philosophy & Goals
+## Mission
 
-### Who is Wormhole for?
+Wormhole exists to make agentic harnesses and models from any provider work as
+one.
 
-Wormhole can be deployed by anyone, and even a solo developer can see improvements to their agents' work as the models can rely less on their own context windows and can save important information to the Wormhole instance.
+Its primary mission is **total interoperability**: a task started in one
+harness, continued by another model, and reviewed by a third should retain the
+same identity, history, decisions, and organisational memory.
 
-Furthermore, for solo developers who use multiple models, Wormhole can alleviate the usual pains of instructing new agents to gather context about a codebase.
+Its second mission is to bridge the gap between humans and agents while
+preserving human control. Agents can coordinate and act through explicit
+permissions, durable audit trails, and project-scoped identities; humans retain
+authority over destructive actions, policy, credentials, and deployment.
 
-For SMEs, Wormhole becomes something far greater; it allows your developers' agents from across your organisation to communicate and collaborate in real-time, elevating agents from developer-accelerators and per-developer tools to native members of your team.
+Its third mission is exploratory: to push the boundaries of what agents can do
+together and venture into new ground with innovative, experimental systems.
+Wormhole is a practical tool today and a platform for discovering better forms
+of human-agent and agent-agent collaboration tomorrow.
 
-### Goals for Wormhole
+## What Wormhole provides
 
-Wormhole is built based on one observation:
+- **Shared organisational memory** — atomic, linked knowledge articles available
+  across sessions, models, and machines.
+- **Structured coordination** — typed events, channels, tasks, dependencies,
+  ownership, and status transitions.
+- **Portable agent identity** — project-scoped Passports, explicit permissions,
+  roles, and append-only audit records.
+- **Local-first operation** — a per-user daemon with a SQLite replica and
+  durable outbound sync queue.
+- **Multi-device collaboration** — a Coordination Server that reconciles
+  runtimes through project-scoped PostgreSQL state.
+- **Provider neutrality** — interoperability is defined by open protocols and
+  harness capabilities, not by the model vendor.
+- **Git-native boundaries** — Wormhole stores commit SHAs, PR URLs, and
+  commentary; it never copies or replaces repository code.
 
-LLMs are becoming incredibly good at coding, compared to just a few years ago where a simple shell script could have errors; many are now able to create full-stack applications with just a few turns.
+The platform contract is the
+[Model Context Protocol](https://modelcontextprotocol.io/). Any compatible
+harness can use Wormhole directly or through a community connector.
 
-The Wormhole project believes that agents are now reaching bottlenecks elsewhere in the layer around the model. Models themselves are stateless, you shoot vectors in and you get vectors out, therefore the model itself should be interchangeable - like a car engine, an I4 could be swapped for a V8 if the chassis permits (and the supporting systems can handle it).
+## Architecture
 
-This is why Wormhole is model-agnostic, leading to the entire app being used through MCP, an open and widely-adopted standard. The value of Wormhole comes not from the models that plug into it, but from the layer itself.
+```text
+Claude Code, OpenCode, or another MCP harness
+                     |
+              wormhole mcp
+           stdio-to-socket bridge
+                     |
+                 wormholed
+       local MCP API + SQLite replica
+          durable local sync queue
+                     |
+          wormhole.sync.* over HTTP(S)
+                     |
+            wormhole-server
+       coordination + PostgreSQL/pgvector
+```
 
-Wormhole aims to share the workload of a model, acting as a foundation layer for it to operate off of. We believe that models are reaching the upper limit of vertical scaling, and that new frontlines for agentic research are emerging.
+Harnesses talk only to the local `wormholed` daemon. The daemon makes local
+writes durable before attempting network synchronization. The Coordination
+Server provides the authority required across users and machines: enrollment,
+project-scoped identity, shared discovery, conflict authority, and durable
+multi-runtime coordination.
 
-### The Social Good
+Wormhole builds three binaries:
 
-We are not oblivious to the sentiment towards generative AI, the environmental impact, the financial situation, and the concerns around proprietary black-box models.
-
-Part of the goal of Wormhole is to alleviate the workload of agentic coders, allowing them to gather context more efficiently, and produce better quality output in fewer turns and to improve the output of lower-parameter models and SLMs.
-
-We don't believe that smaller models are less-capable, we believe that they just need a holding-hand that larger models simply scale-out.
-
-Open-source, open-weight models will always be our first-class citizens, proprietary models we will support simply because we cannot be oblivious to their out-of-box better output, however we will not officially support models that we believe on a case-by-case basis come from providers that harm society.
-
-To that extent, we officially provide connectors for harnesses that do not lock an agent to a single proprietary model provider by design — currently Claude Code and OpenCode. We will not officially support connectors whose entire purpose is wiring up a specific provider we've chosen not to endorse (e.g. a "Gemini connector" or "OpenAI connector" as such), though nothing stops a harness-level connector like OpenCode's from being pointed at any model the user chooses — that choice is the user's, not Wormhole's to gate.
-
-#### Being Open-Source
-
-Wormhole will always remain open-source, as we believe that all products in the AI-space should be.
-
-Because of that, it is relatively trivial to create third-party connectors to other platforms.
-
-We state that we will never officially support the aforementioned providers, however it would be impossible for us to stop the development of community connectors for these platforms; so simply, if one was made, go ahead and use it.
-
-Furthermore, we reiterate that Wormhole is built on-top of the MCP, which is an open protocol and model-agnostic (all the model needs is the ability to use tools).
-
-All we can do is encourage you to reconsider your provider of choice.
-
----
+| Binary | Role |
+|---|---|
+| `wormhole` | Setup, profiles, harness connection, and MCP stdio bridge |
+| `wormholed` | Per-user local runtime, SQLite replica, local MCP API, and sync queue |
+| `wormhole-server` | Coordination Server backed by PostgreSQL and pgvector |
 
 ## Status
 
-Wormhole currently builds three binaries: `wormhole` for project setup and harness connection, `wormholed` for the local SQLite-backed MCP runtime and sync queue, and `wormhole-server` for the Postgres-backed coordination server. The server exposes MCP tools for identity, tasks, channels, knowledge base, git pointers, and runtime synchronization; the local runtime supports local writes, scheduling, multi-organization routing, and incremental synchronization.
+Wormhole is alpha software under active development.
 
-`wormholed` is currently supported on Linux only. Windows users should run it
-inside WSL. Non-Linux builds fail immediately with an actionable error rather
-than starting without safe stale-socket recovery.
+- `wormholed` is currently supported on Linux. Windows users should use WSL.
+- Claude Code and OpenCode have first-party connection flows.
+- Other MCP-capable harnesses can use `wormhole mcp` or community connectors.
+- The current production embedder is a non-semantic development stub.
+- First-time enrollment and the current daemon startup bootstrap require a
+  reachable Coordination Server.
+- True serverless initialization and startup from an offline replica are
+  tracked in [issue #37](https://github.com/H4RL33/wormhole/issues/37).
 
-The read-only dashboard exposes project-scoped task, event, and knowledge-base views. Viewer-key issuance is protected by the `WORMHOLE_ADMIN_KEY` shared-secret admin stopgap; it is not a full human authentication system.
+Interfaces may change before a stable release. Do not expose an alpha
+Coordination Server directly to the public internet without reviewing the
+[security policy](SECURITY.md).
 
----
+## Get started
 
-## The Four Pillars
+Choose the path that matches how you want to use Wormhole.
 
-Wormhole's design is structured around four fundamental pillars:
+### Single device and offline-capable operation
 
-### 1. Communication (Event Bus)
-A structured event log containing typed events on channels.
-- **Typed Payloads**: Operations emit structured JSON events (`task.status_changed`, `review.requested`, `build.failed`, `discovery.logged`, `message.posted`) rather than unstructured free-text chatter.
-- **Persistence**: Channels act as persistent logs enabling asynchronous communication between agents.
+Use this path when one machine and its local agents need to share an existing
+Wormhole project. Once enrolled and bootstrapped, harness calls go through
+`wormholed`, local state lives in SQLite, and local writes enter a
+restart-surviving queue.
 
-### 2. Coordination (Task Graph)
-A robust project management graph designed for agentic task execution.
-- **Task Hierarchy**: Organizes work into `Project -> Task -> Subtask` relationships.
-- **Atomic State Transitions**: Status transitions (`todo`, `wip`, `blocked`, `done`) follow a strict state machine validation and atomically emit `task.status_changed` events on the bus.
-- **Task Linking**: Relates tasks to KB articles, commits, pull requests, and events via explicit links.
+> **Current limitation:** first-time enrollment and the startup bootstrap still
+> require a reachable Coordination Server. A fresh, permanently serverless
+> namespace cannot be created yet. Issue
+> [#37](https://github.com/H4RL33/wormhole/issues/37) tracks that gap.
 
-### 3. Knowledge Base
-An atomic, linked semantic-searchable graph of organizational memory.
-- **Atomic Articles**: Each article represents a single decision, procedure, or factual note, containing markdown content and JSON frontmatter.
-- **Graph Structure**: Links articles explicitly (`kb_links`), bypassing traditional hierarchical folder structures.
-- **Server-Side Validation**: Enforces length constraints, link presence, and runs semantic similarity checks (using pgvector embeddings) to prevent duplicate content.
+Prerequisites:
 
-### 4. Identity & Permissions
-Self-owned agent credentials and strict access controls.
-- **Passports**: Scopes project-agnostic agent identities to specific projects, detailing roles, repository boundaries, and capabilities.
-- **Token Auth**: Secures access via SHA-256 hashed API tokens at the MCP boundary.
-- **Row-Level Security (RLS)**: Enforces tenant isolation in the database, preventing unauthorized data access across projects.
-- **Audit Logs**: Maintains an append-only audit trail of all agent operations.
+- Go 1.24 or newer
+- Linux, or Windows through WSL
+- an existing credential profile created with `wormhole join` or
+  `wormhole connect`
 
-#### Per-tool permission enforcement
-
-Every authenticated MCP tool enforces one fine-grained permission at
-dispatch. A Passport whose permission bundle lacks the required string gets
-JSON-RPC error `-32002` (permission denied) and the denial is recorded in the
-audit trail. The required permission is the tool name minus the `wormhole.`
-prefix:
-
-| Tool | Required permission |
-|------|---------------------|
-| `wormhole.task.list` | `task.list` |
-| `wormhole.task.create` | `task.create` |
-| `wormhole.task.assign` | `task.assign` |
-| `wormhole.task.update_status` | `task.update_status` |
-| `wormhole.kb.search` | `kb.search` |
-| `wormhole.kb.get` | `kb.get` |
-| `wormhole.kb.get_links` | `kb.get_links` |
-| `wormhole.kb.write` | `kb.write` |
-| `wormhole.channel.list` | `channel.list` |
-| `wormhole.channel.subscribe` | `channel.subscribe` |
-| `wormhole.channel.create` | `channel.create` |
-| `wormhole.channel.post` | `channel.post` |
-| `wormhole.git.link_commit` | `git.link_commit` |
-| `wormhole.git.request_review` | `git.request_review` |
-
-`wormhole.agent.whoami` and the four `wormhole.sync.*` tools are auth-only:
-they require a valid token but no permission. Self-identification cannot be
-gated without circularity, and sync moves an agent's own data rather than
-granting a capability. `wormhole.agent.register` is the pre-token bootstrap
-and requires neither.
-
-A registry invariant test fails the build if any tool it sees declares
-`RequiresAuth: true` without a permission and is not on that exempt list.
-(The test iterates a hand-maintained registry; a gated tool must be wired
-into that list to be checked, so keep the test registry in sync with
-`cmd/wormhole-server/main.go`.)
-
-**Alpha hard-cut:** migration `000014` re-seeds the role templates with these
-fine-grained strings. Agents registered before it hold the older coarse
-bundles (`task.read`, `channel.write`, ...), which no tool matches, and must
-re-register or re-join to obtain a working Passport.
-
----
-
-## Human Dashboard
-
-`wormhole-server` serves a read-only human dashboard at `/dashboard/`
-(RFC-0001 §14 V2, an explicit exception to "every capability is an MCP
-tool" — see `internal/webui`'s package doc). It exposes a static page plus
-three JSON endpoints, each scoped to one project and gated by a
-project-scoped viewer key (`Authorization: Bearer <key>`):
-
-- `GET /dashboard/api/projects/{id}/tasks`
-- `GET /dashboard/api/projects/{id}/events`
-- `GET /dashboard/api/projects/{id}/kb`
-
-To issue a viewer key, `wormhole-server` needs an admin key configured:
+Build the CLI and daemon:
 
 ```bash
-export WORMHOLE_ADMIN_KEY="choose-a-long-random-secret"
-```
-
-Set this before starting `wormhole-server` — it's read once at
-startup. With that set, mint a viewer key:
-
-```bash
-wormhole viewer-key create \
-  --server http://localhost:8080 \
-  --project 00000000-0000-0000-0000-000000000001 \
-  --label "harley's laptop"
-```
-
-`--admin-key` can be passed explicitly instead of `$WORMHOLE_ADMIN_KEY` if the
-CLI is running somewhere that doesn't share the server's environment. The
-command prints the raw key once — give it to the human who'll use the
-dashboard, as their `Authorization: Bearer <key>` value:
-
-```bash
-curl -H "Authorization: Bearer <viewer_key>" \
-  http://localhost:8080/dashboard/api/projects/00000000-0000-0000-0000-000000000001/tasks
-```
-
-This admin-key gate is a deliberate stopgap, not real human authentication —
-there's no per-human identity or audit trail yet (tracked separately).
-
----
-
-## Quickstart
-
-This local demo starts the Postgres-backed Coordination Server, creates one
-credential profile, runs the local SQLite-backed daemon, and connects Claude
-Code or OpenCode through MCP.
-
-`wormholed` currently requires Linux. On Windows, clone the repository and run
-the build, daemon, and harness connector inside WSL. Native Windows and macOS
-daemon execution is not supported yet.
-
-### Prerequisites
-
-- Linux, or WSL on Windows
-- Go 1.26.4 or newer
-- Docker with Docker Compose
-- Claude Code or OpenCode if you want to connect a harness
-
-### 1. Build the binaries
-
-```bash
+git clone https://github.com/H4RL33/wormhole.git
+cd wormhole
 make build
 ```
 
-This writes `wormhole`, `wormholed`, and `wormhole-server` to `dist/`. The
-directory is gitignored; `make clean` removes it.
+Inspect available profiles and start the local runtime:
 
-### 2. Start Postgres and apply migrations
+```bash
+./dist/wormhole profile list
+./dist/wormholed demo
+```
+
+In another terminal, verify the profile:
+
+```bash
+./dist/wormhole whoami --profile demo
+```
+
+Connect an MCP harness to the local bridge. For Claude Code:
+
+```bash
+./dist/wormhole connect \
+  --server https://your-coordination-server.example \
+  --project YOUR_PROJECT_UUID \
+  --owner "${USER:-local-user}" \
+  --model your-model \
+  --permissions task.list,task.create,task.update_status,kb.search,kb.get,kb.write,channel.list,channel.subscribe,channel.post \
+  --profile demo \
+  --target claude \
+  --stdio-bin "$(pwd)/dist/wormhole"
+```
+
+Use `--target opencode` for OpenCode. The harness launches `wormhole mcp`,
+which bridges stdio to the daemon socket; it does not call the Coordination
+Server directly.
+
+After the daemon has bootstrapped, its SQLite replica and durable queue are the
+local source for work. Network interruptions do not make queued data
+disappear. Current startup still requires the bootstrap endpoint, so restart
+the daemon while the Coordination Server is reachable until #37 is resolved.
+
+Local paths:
+
+- Credentials: `~/.wormhole/credentials/<profile>.json`
+- SQLite replica: `$XDG_DATA_HOME/wormhole/wormholed.db`, or
+  `~/.local/share/wormhole/wormholed.db`
+- Daemon socket: `$XDG_RUNTIME_DIR/wormhole/wormholed.sock`, or the
+  `$TMPDIR/wormhole-runtime/` fallback
+
+Credential profiles contain bearer tokens. Never commit or share them.
+
+### Multi-device and team coordination
+
+Use this path when multiple machines, people, or runtimes need to share the
+same project state. Each machine still talks to its own `wormholed`; the
+Coordination Server is the authenticated meeting point between them.
+
+Prerequisites:
+
+- Go 1.24 or newer
+- Docker with Compose
+- [`golang-migrate`](https://github.com/golang-migrate/migrate)
+- Linux or WSL for every machine running `wormholed`
+
+#### 1. Build Wormhole
+
+```bash
+git clone https://github.com/H4RL33/wormhole.git
+cd wormhole
+make build
+```
+
+#### 2. Start PostgreSQL and apply migrations
 
 ```bash
 docker compose up -d db
-go install -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+
 migrate \
   -path migrations \
   -database "postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable" \
   up
 ```
 
-The development database listens on `127.0.0.1:5432` with database, username,
-and password all set to `wormhole`.
+The Compose database listens on `127.0.0.1:5432` with development-only
+credentials: database, username, and password are all `wormhole`.
 
-Create an idempotent demo project:
+Create a project:
 
 ```bash
 export WORMHOLE_PROJECT_ID=00000000-0000-0000-0000-000000000001
+
 docker compose exec -T db psql -U wormhole -d wormhole -v ON_ERROR_STOP=1 -c \
   "INSERT INTO projects (id, name, owner)
    VALUES ('$WORMHOLE_PROJECT_ID', 'Demo Project', 'demo-owner')
    ON CONFLICT (id) DO NOTHING;"
 ```
 
-### 3. Start the Coordination Server
-
-In a separate terminal from the repository root:
+#### 3. Start the Coordination Server
 
 ```bash
 export WORMHOLE_DATABASE_URL="postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable"
 ./dist/wormhole-server
 ```
 
-The server listens on `http://localhost:8080` by default. Set
-`WORMHOLE_LISTEN_ADDR` to change the address.
+The default listener is `http://localhost:8080`. Set
+`WORMHOLE_LISTEN_ADDR` to change it. Use HTTPS for any non-loopback
+deployment; bearer tokens must never cross an unencrypted network.
 
-### 4. Create credentials and connect a harness
+The Coordination Server:
 
-`wormhole connect` registers the agent, writes a credential profile, and wires
-one harness. Run it while `wormhole-server` is available; the daemon does not
-need to be running yet.
+- enrolls agents and issues project-scoped credentials;
+- stores authoritative shared state in PostgreSQL;
+- accepts incremental pushes from local runtimes;
+- serves bootstrap and incremental pulls;
+- enforces permissions and project isolation at the MCP boundary;
+- provides conflict authority and durable audit history across runtimes.
 
-For Claude Code:
+It is not the harness endpoint. Every harness still connects to its local
+daemon:
+
+```text
+Harness A -> wormholed A --\
+                            -> Coordination Server -> PostgreSQL
+Harness B -> wormholed B --/
+```
+
+#### 4. Enroll and connect each machine
+
+On each device, while the Coordination Server is reachable:
 
 ```bash
-export WORMHOLE_PROJECT_ID=00000000-0000-0000-0000-000000000001
 ./dist/wormhole connect \
   --server http://localhost:8080 \
   --project "$WORMHOLE_PROJECT_ID" \
@@ -266,61 +271,39 @@ export WORMHOLE_PROJECT_ID=00000000-0000-0000-0000-000000000001
   --stdio-bin "$(pwd)/dist/wormhole"
 ```
 
-For OpenCode, use `--target opencode` instead. You can also add
-`--opencode-config /path/to/opencode.json` when auto-detection cannot find its
-configuration.
-
-If you only want to create credentials, use `wormhole join` instead of
-`connect`; see `./dist/wormhole join --help`. Connector-specific setup and
-manual wiring are documented in the
-[Claude Code connector guide](docs/claude-code-connector.md).
-
-Credentials are stored in `~/.wormhole/credentials/demo.json`. This file
-contains a bearer token: do not commit, share, or loosen its permissions.
-
-### 5. Start the local daemon
-
-In another terminal, pass the exact credential profile name created above:
+Then start that device's daemon:
 
 ```bash
 ./dist/wormholed demo
 ```
 
-The daemon owns the local SQLite replica and durable sync queue. Harnesses do
-not connect directly to `wormhole-server`; they start `wormhole mcp`, which
-bridges MCP over stdio to the daemon's Unix socket:
+Repeat with a distinct owner/model/profile on each machine as appropriate.
+Use `--target opencode` for OpenCode.
 
-```text
-Claude Code or OpenCode -> wormhole mcp -> wormholed -> wormhole-server
-```
-
-The socket is `$XDG_RUNTIME_DIR/wormhole/wormholed.sock`. When
-`XDG_RUNTIME_DIR` is unset, it falls back beneath
-`$TMPDIR/wormhole-runtime/`.
-
-### 6. Verify the setup
+#### 5. Verify the path
 
 ```bash
 ./dist/wormhole profile list
 ./dist/wormhole whoami --profile demo
 ```
 
-Confirm the harness lists a `wormhole` MCP connector, then ask it to list the
-available Wormhole tools and call `wormhole.task.list` for the demo project.
-The request should travel through the daemon and return project-scoped data.
+Ask the connected harness to list Wormhole tools and call
+`wormhole.task.list`. The request should travel through its local daemon; state
+written on one runtime becomes available to the others through incremental
+synchronization.
 
-## CLI Usage
+## CLI
 
-Run `./dist/wormhole help` for the current command list. For command flags,
-replace the command name as needed; for example:
+Run:
 
 ```bash
-./dist/wormhole connect --help
+./dist/wormhole help
+./dist/wormhole <command> --help
 ```
 
 | Command | Purpose |
 |---|---|
-| `wormhole init` | Interactive global and project configuration |
+| `wormhole init` | Create project configuration interactively |
 | `wormhole join` | Register an agent and write a credential profile |
 | `wormhole connect` | Register, save credentials, and wire a harness |
 | `wormhole whoami` | Inspect the identity associated with a profile |
@@ -329,74 +312,67 @@ replace the command name as needed; for example:
 | `wormhole mcp` | Run the harness stdio-to-daemon bridge |
 | `wormholed <profile>` | Run the local daemon for a credential profile |
 
-`wormhole mcp` is normally launched by the harness connector. Run
-`wormholed <profile>` yourself before opening the harness.
-
-### Configuration and data locations
-
-- Global CLI config: `$XDG_CONFIG_HOME/wormhole/config.toml`, defaulting to
-  `~/.config/wormhole/config.toml`
-- Project config: `.wormhole/config.toml`, discovered by walking upward from
-  the current directory
-- Credential profiles: `~/.wormhole/credentials/<profile>.json`
-- Local runtime database: `$XDG_DATA_HOME/wormhole/wormholed.db`, defaulting to
-  `~/.local/share/wormhole/wormholed.db`
-- Daemon socket: `$XDG_RUNTIME_DIR/wormhole/wormholed.sock`, with the
-  `$TMPDIR/wormhole-runtime/` fallback described above
-
-Never commit credential profiles or the local runtime database.
-
-### Configuration precedence
-
-For CLI setup commands, values resolve in this order:
+Configuration precedence for setup commands:
 
 ```text
 explicit flag > project config > global config > environment or Git > default > error
 ```
 
-Common examples:
+The detailed [CLI Guide](https://github.com/H4RL33/wormhole/wiki/CLI-Guide)
+covers flags, profiles, paths, and connection patterns.
 
-- `--server`: explicit flag, then project/global config
-- `--project`: explicit flag, then project config
-- `--owner`: explicit flag, then `git config user.name`, then `$USER`
-- `--repositories`: explicit flag, then `git remote get-url origin`
-- `--model`: explicit flag, then `$WORMHOLE_MODEL`
+## Human control and security
 
-`wormholed` reads `~/.wormhole/credentials/<profile>.json` for its server,
-project, agent, and token settings. Its positional profile is not a TOML config
-name.
+Wormhole treats human authority as an architectural boundary:
 
-### Troubleshooting
+- identities and permissions are explicit and project-scoped;
+- credentials are hashed server-side and restricted on local disk;
+- destructive or policy-changing actions remain human-controlled;
+- PostgreSQL RLS and mandatory namespace parameters protect tenant boundaries;
+- audit records are append-only;
+- Git remains the sole source of truth for code.
 
-- **`wormhole mcp: dial wormholed socket ...`:** start `wormholed` with the
-  correct profile and ensure the harness shares its `XDG_RUNTIME_DIR`.
-- **`wormholed` cannot find credentials:** run `wormhole profile list` and
-  verify `~/.wormhole/credentials/<profile>.json` exists.
-- **The harness has no `wormhole` connector:** rerun `wormhole connect` with an
-  explicit `--target`, or follow the connector guide for manual wiring.
-- **Tool calls do not sync:** verify `wormhole-server` is running and that the
-  credential profile contains the reachable server URL.
-- **A second daemon will not start:** only one daemon may own a socket. Stop the
-  existing process; `wormholed` deliberately refuses to replace a live socket.
+Read the canonical [Security Policy](SECURITY.md) before deployment. The Wiki's
+[Security Model](https://github.com/H4RL33/wormhole/wiki/Security-Model) is an
+approachable guide, not a replacement for the repository policy.
 
----
+Security vulnerabilities should be reported privately through GitHub Private
+Vulnerability Reporting or `security@wormhole.systems`, never through a public
+issue.
 
-## Design Documents
+## Documentation
 
-- [RFC-0001: Wormhole Core](docs/rfcs/wormhole_rfc.md)
-- [RFC-0002: Wormhole Governance](docs/rfcs/wormhole_rfc_governance.md)
+- [GitHub Wiki](https://github.com/H4RL33/wormhole/wiki)
+- [CLI Guide](https://github.com/H4RL33/wormhole/wiki/CLI-Guide)
+- [Security Model](https://github.com/H4RL33/wormhole/wiki/Security-Model)
+- [Architecture and implementation rules](docs/implementation-rules.md)
+- [MCP protocol](docs/mcp-protocol.md)
+- [Data entities](docs/db-entities.md)
+- [RFC-0001: Core](docs/rfcs/wormhole_rfc.md)
+- [RFC-0002: Governance](docs/rfcs/wormhole_rfc_governance.md)
 - [RFC-0003: Local Runtime](docs/rfcs/wormhole_rfc_local_runtime.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security Policy](SECURITY.md)
 
----
+Repository files are canonical. Wiki pages provide a friendlier navigation
+layer and link back to their source material.
 
-## Stack
+## Development
 
-- **Backend**: Go (Standard Library `net/http`)
-- **Database**: PostgreSQL (v16) + `pgvector`
-- **Interface**: Model Context Protocol (MCP)
+```bash
+make build
+make vet
+make test
+```
 
----
+For required PostgreSQL integration coverage:
+
+```bash
+WORMHOLE_INTEGRATION_REQUIRED=1 go test ./...
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 ## License
 
-See [LICENSE](LICENSE).
+Wormhole is released under the [MIT License](LICENSE).
