@@ -1,0 +1,475 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version used for this non-publishing rehearsal
+        required: true
+        default: 0.0.0-alpha.rehearsal
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release source
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      publish: ${{ steps.metadata.outputs.publish }}
+      prerelease: ${{ steps.metadata.outputs.prerelease }}
+      release-enabled: ${{ steps.metadata.outputs.release_enabled }}
+      version: ${{ steps.metadata.outputs.version }}
+      tag-object: ${{ steps.metadata.outputs.tag_object }}
+      tag-commit: ${{ steps.metadata.outputs.tag_commit }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Resolve immutable release metadata
+        id: metadata
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REHEARSAL_VERSION: ${{ inputs.version }}
+          WORMHOLE_RELEASE_ENABLED: ${{ vars.WORMHOLE_RELEASE_ENABLED }}
+        run: >-
+          .github/scripts/release-metadata.sh
+          "$EVENT_NAME"
+          "$GITHUB_REF_NAME"
+          "$REHEARSAL_VERSION"
+          "$GITHUB_OUTPUT"
+
+  ci:
+    name: Required CI
+    uses: ./.github/workflows/ci.yml
+
+  security:
+    name: Required security
+    uses: ./.github/workflows/security.yml
+
+  migrations:
+    name: Required migrations
+    uses: ./.github/workflows/migrations.yml
+
+  artifacts:
+    name: Build release artifacts
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      archive-amd64-sha256: ${{ steps.digests.outputs.archive_amd64_sha256 }}
+      archive-arm64-sha256: ${{ steps.digests.outputs.archive_arm64_sha256 }}
+      sbom-amd64-sha256: ${{ steps.digests.outputs.sbom_amd64_sha256 }}
+      sbom-arm64-sha256: ${{ steps.digests.outputs.sbom_arm64_sha256 }}
+      manifest-sha256: ${{ steps.digests.outputs.manifest_sha256 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Install pinned Syft
+        run: .github/scripts/install-syft.sh "$RUNNER_TEMP/syft"
+      - name: Build deterministic archives and extracted-tree SBOMs
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          WORMHOLE_SYFT_BIN: ${{ runner.temp }}/syft/syft
+        run: |
+          SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD) \
+            .github/scripts/build-release.sh "$VERSION" dist/release
+      - name: Verify release artifacts
+        run: .github/scripts/verify-release-artifacts.sh dist/release
+      - name: Record independent producer digests
+        id: digests
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          archive_amd64_sha256=$(
+            sha256sum "dist/release/wormhole-${VERSION}-linux-amd64.tar.gz" |
+              cut -d' ' -f1
+          )
+          archive_arm64_sha256=$(
+            sha256sum "dist/release/wormhole-${VERSION}-linux-arm64.tar.gz" |
+              cut -d' ' -f1
+          )
+          sbom_amd64_sha256=$(
+            sha256sum dist/release/wormhole-amd64.spdx.json |
+              cut -d' ' -f1
+          )
+          sbom_arm64_sha256=$(
+            sha256sum dist/release/wormhole-arm64.spdx.json |
+              cut -d' ' -f1
+          )
+          manifest_sha256=$(
+            sha256sum dist/release/SHA256SUMS | cut -d' ' -f1
+          )
+          {
+            printf 'archive_amd64_sha256=%s\n' "$archive_amd64_sha256"
+            printf 'archive_arm64_sha256=%s\n' "$archive_arm64_sha256"
+            printf 'sbom_amd64_sha256=%s\n' "$sbom_amd64_sha256"
+            printf 'sbom_arm64_sha256=%s\n' "$sbom_arm64_sha256"
+            printf 'manifest_sha256=%s\n' "$manifest_sha256"
+          } >>"$GITHUB_OUTPUT"
+      - name: Upload producer artifacts
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-inputs
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            dist/release/SHA256SUMS
+            dist/release/wormhole-${{ needs.validate.outputs.version }}-linux-amd64.tar.gz
+            dist/release/wormhole-${{ needs.validate.outputs.version }}-linux-arm64.tar.gz
+            dist/release/wormhole-amd64.spdx.json
+            dist/release/wormhole-arm64.spdx.json
+
+  rehearse-images:
+    name: Rehearse Fabric image (${{ matrix.arch }})
+    if: needs.validate.outputs.publish == 'false'
+    needs: [validate, artifacts]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up pinned QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          image: docker.io/tonistiigi/binfmt:qemu-v10.2.3-68@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          platforms: arm64
+      - name: Set up pinned Buildx and BuildKit
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          version: v0.35.0
+          driver-opts: image=docker.io/moby/buildkit:v0.31.2@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec
+      - name: Build rehearsal image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile.fabric
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          push: false
+          provenance: false
+          tags: wormhole-fabric:${{ github.run_id }}-${{ matrix.arch }}
+          build-args: VERSION=${{ needs.validate.outputs.version }}
+      - name: Verify rehearsal image health
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: wormhole-fabric:${{ github.run_id }}-${{ matrix.arch }}
+        run: |
+          printf '%s\n' "$DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'
+          .github/scripts/verify-fabric-image.sh "$IMAGE"
+
+  publish-image:
+    name: Publish verified Fabric manifest
+    if: >-
+      github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/tags/v') &&
+      vars.WORMHOLE_RELEASE_ENABLED == 'true' &&
+      needs.validate.outputs.publish == 'true' &&
+      needs.validate.outputs.release-enabled == 'true'
+    needs: [validate, artifacts, ci, security, migrations]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      CERTIFICATE_IDENTITY: https://github.com/${{ github.workflow_ref }}
+      OIDC_ISSUER: https://token.actions.githubusercontent.com
+    outputs:
+      digest: ${{ steps.image.outputs.digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Set up pinned QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          image: docker.io/tonistiigi/binfmt:qemu-v10.2.3-68@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          platforms: arm64
+      - name: Set up pinned Buildx and BuildKit
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          version: v0.35.0
+          driver-opts: image=docker.io/moby/buildkit:v0.31.2@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build, push, and health-test exact architecture digests
+        id: image
+        env:
+          EXPECTED_COMMIT: ${{ needs.validate.outputs.tag-commit }}
+          EXPECTED_TAG_OBJECT: ${{ needs.validate.outputs.tag-object }}
+          IMAGE: ghcr.io/h4rl33/wormhole-fabric
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          if docker buildx imagetools inspect "$IMAGE:$VERSION" \
+            >/dev/null 2>&1
+          then
+            printf 'refusing to overwrite existing image tag %s:%s\n' \
+              "$IMAGE" "$VERSION" >&2
+            exit 1
+          fi
+
+          digest_file=$RUNNER_TEMP/fabric-digests
+          : >"$digest_file"
+          for arch in amd64 arm64; do
+            staging_tag=$IMAGE:staging-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${arch}
+            docker buildx build \
+              --file Dockerfile.fabric \
+              --platform "linux/$arch" \
+              --build-arg "VERSION=$VERSION" \
+              --provenance=false \
+              --load \
+              --tag "$staging_tag" \
+              .
+            .github/scripts/verify-fabric-image.sh "$staging_tag"
+            .github/scripts/verify-release-tag.sh \
+              "$GITHUB_REF_NAME" \
+              "$EXPECTED_TAG_OBJECT" \
+              "$EXPECTED_COMMIT"
+            docker push "$staging_tag"
+            digest=$(
+              docker buildx imagetools inspect "$staging_tag" \
+                --format '{{.Manifest.Digest}}'
+            )
+            printf '%s\n' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'
+            .github/scripts/verify-fabric-image.sh "$IMAGE@$digest"
+            printf '%s=%s\n' "$arch" "$digest" >>"$digest_file"
+          done
+
+          amd64_digest=$(awk -F= '$1 == "amd64" { print $2 }' "$digest_file")
+          arm64_digest=$(awk -F= '$1 == "arm64" { print $2 }' "$digest_file")
+          temporary_manifest=$IMAGE:staging-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-manifest
+          # Staging tag retention policy: retain architecture and manifest
+          # staging tags for as long as the public version exists. GHCR
+          # deletion is digest-scoped, so deleting them automatically could
+          # remove manifests referenced by the public multi-architecture tag.
+          .github/scripts/verify-release-tag.sh \
+            "$GITHUB_REF_NAME" \
+            "$EXPECTED_TAG_OBJECT" \
+            "$EXPECTED_COMMIT"
+          docker buildx imagetools create \
+            --tag "$temporary_manifest" \
+            "$IMAGE@$amd64_digest" \
+            "$IMAGE@$arm64_digest"
+
+          manifest=$RUNNER_TEMP/fabric-manifest.json
+          docker buildx imagetools inspect "$temporary_manifest" --raw \
+            >"$manifest"
+          jq -e \
+            --arg amd64 "$amd64_digest" \
+            --arg arm64 "$arm64_digest" \
+            '(.manifests | length == 2) and
+             any(.manifests[];
+               .digest == $amd64 and .platform.os == "linux" and
+               .platform.architecture == "amd64") and
+             any(.manifests[];
+               .digest == $arm64 and .platform.os == "linux" and
+               .platform.architecture == "arm64")' \
+            "$manifest" >/dev/null
+          digest=sha256:$(sha256sum "$manifest" | cut -d' ' -f1)
+          registry_digest=$(
+            docker buildx imagetools inspect "$temporary_manifest" \
+              --format '{{.Manifest.Digest}}'
+          )
+          test "$registry_digest" = "$digest"
+          printf 'digest=%s\n' "$digest" >>"$GITHUB_OUTPUT"
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: v2.5.2
+      - name: Sign Fabric manifest
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+          IMAGE: ghcr.io/h4rl33/wormhole-fabric
+        run: cosign sign --yes "$IMAGE@$DIGEST"
+      - name: Verify Fabric manifest signature
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+          IMAGE: ghcr.io/h4rl33/wormhole-fabric
+        run: |
+          cosign verify "$IMAGE@$DIGEST" \
+            --certificate-identity "$CERTIFICATE_IDENTITY" \
+            --certificate-oidc-issuer "$OIDC_ISSUER" >/dev/null
+      - name: Attest Fabric provenance
+        id: attest-image
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-name: ghcr.io/h4rl33/wormhole-fabric
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+      - name: Verify Fabric provenance bundle
+        env:
+          ATTESTATION_BUNDLE: ${{ steps.attest-image.outputs.bundle-path }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ghcr.io/h4rl33/wormhole-fabric
+        run: |
+          test -f "$ATTESTATION_BUNDLE"
+          gh attestation verify "oci://$IMAGE@$DIGEST" \
+            --bundle "$ATTESTATION_BUNDLE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --cert-identity "$CERTIFICATE_IDENTITY" \
+            --cert-oidc-issuer "$OIDC_ISSUER" >/dev/null
+      - name: Recheck tag and promote signed Fabric manifest last
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+          EXPECTED_COMMIT: ${{ needs.validate.outputs.tag-commit }}
+          EXPECTED_TAG_OBJECT: ${{ needs.validate.outputs.tag-object }}
+          IMAGE: ghcr.io/h4rl33/wormhole-fabric
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          .github/scripts/verify-release-tag.sh \
+            "$GITHUB_REF_NAME" \
+            "$EXPECTED_TAG_OBJECT" \
+            "$EXPECTED_COMMIT"
+          docker buildx imagetools create \
+            --prefer-index=false \
+            --tag "$IMAGE:$VERSION" \
+            "$IMAGE@$DIGEST"
+          promoted_digest=$(
+            docker buildx imagetools inspect "$IMAGE:$VERSION" \
+              --format '{{.Manifest.Digest}}'
+          )
+          test "$promoted_digest" = "$DIGEST"
+
+  publish-release:
+    name: Publish GitHub release
+    if: >-
+      github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/tags/v') &&
+      vars.WORMHOLE_RELEASE_ENABLED == 'true' &&
+      needs.validate.outputs.publish == 'true' &&
+      needs.validate.outputs.release-enabled == 'true'
+    needs: [validate, artifacts, publish-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      CERTIFICATE_IDENTITY: https://github.com/${{ github.workflow_ref }}
+      OIDC_ISSUER: https://token.actions.githubusercontent.com
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Download producer artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-inputs
+          path: dist/release
+      - name: Verify independent producer digests before privileged use
+        env:
+          ARCHIVE_AMD64_SHA: ${{ needs.artifacts.outputs['archive-amd64-sha256'] }}
+          ARCHIVE_ARM64_SHA: ${{ needs.artifacts.outputs['archive-arm64-sha256'] }}
+          MANIFEST_SHA: ${{ needs.artifacts.outputs['manifest-sha256'] }}
+          SBOM_AMD64_SHA: ${{ needs.artifacts.outputs['sbom-amd64-sha256'] }}
+          SBOM_ARM64_SHA: ${{ needs.artifacts.outputs['sbom-arm64-sha256'] }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: >-
+          .github/scripts/verify-artifact-transfer.sh
+          "$VERSION"
+          dist/release
+          "$ARCHIVE_AMD64_SHA"
+          "$ARCHIVE_ARM64_SHA"
+          "$SBOM_AMD64_SHA"
+          "$SBOM_ARM64_SHA"
+          "$MANIFEST_SHA"
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: v2.5.2
+      - name: Recheck remote tag and sign verified artifacts
+        env:
+          EXPECTED_COMMIT: ${{ needs.validate.outputs.tag-commit }}
+          EXPECTED_TAG_OBJECT: ${{ needs.validate.outputs.tag-object }}
+        run: |
+          .github/scripts/verify-release-tag.sh \
+            "$GITHUB_REF_NAME" \
+            "$EXPECTED_TAG_OBJECT" \
+            "$EXPECTED_COMMIT"
+          for artifact in dist/release/*; do
+            cosign sign-blob --yes \
+              --output-signature "${artifact}.sig" \
+              --output-certificate "${artifact}.pem" \
+              "$artifact"
+          done
+      - name: Verify release artifact signatures
+        run: |
+          for artifact in \
+            dist/release/SHA256SUMS \
+            dist/release/*.tar.gz \
+            dist/release/*.spdx.json
+          do
+            cosign verify-blob \
+              --certificate "${artifact}.pem" \
+              --signature "${artifact}.sig" \
+              --certificate-identity "$CERTIFICATE_IDENTITY" \
+              --certificate-oidc-issuer "$OIDC_ISSUER" \
+              "$artifact" >/dev/null
+          done
+      - name: Attest amd64 archive provenance
+        id: attest-amd64
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: dist/release/wormhole-${{ needs.validate.outputs.version }}-linux-amd64.tar.gz
+      - name: Attest arm64 archive provenance
+        id: attest-arm64
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: dist/release/wormhole-${{ needs.validate.outputs.version }}-linux-arm64.tar.gz
+      - name: Verify release artifact provenance bundles
+        env:
+          AMD64_BUNDLE: ${{ steps.attest-amd64.outputs.bundle-path }}
+          ARM64_BUNDLE: ${{ steps.attest-arm64.outputs.bundle-path }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          verify_attestation() {
+            artifact=$1
+            bundle=$2
+            test -f "$bundle"
+            gh attestation verify "$artifact" \
+              --bundle "$bundle" \
+              --repo "$GITHUB_REPOSITORY" \
+              --cert-identity "$CERTIFICATE_IDENTITY" \
+              --cert-oidc-issuer "$OIDC_ISSUER" >/dev/null
+          }
+          verify_attestation \
+            "dist/release/wormhole-${VERSION}-linux-amd64.tar.gz" \
+            "$AMD64_BUNDLE"
+          verify_attestation \
+            "dist/release/wormhole-${VERSION}-linux-arm64.tar.gz" \
+            "$ARM64_BUNDLE"
+      - name: Create GitHub release last
+        env:
+          EXPECTED_COMMIT: ${{ needs.validate.outputs.tag-commit }}
+          EXPECTED_TAG_OBJECT: ${{ needs.validate.outputs.tag-object }}
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          .github/scripts/publish-github-release.sh
+          "$GITHUB_REF_NAME"
+          "$EXPECTED_TAG_OBJECT"
+          "$EXPECTED_COMMIT"
+          dist/release

@@ -11,6 +11,26 @@ If you discover a security vulnerability in Wormhole, please do not open a publi
 
 We aim to acknowledge and investigate all legitimate reports within 48 hours and work with you to coordinate a patch and public advisory.
 
+## Delivery controls
+
+The repository has release and CI workflow definitions, but this document does
+not assert that hosted branch rules, GitHub security settings, or the `release`
+environment have been configured or verified. Those controls require a separate
+API read-back audit before they are treated as active.
+
+The intended merge gates are `Contract Inventory`, `Static`, `Build`,
+`Integration`, `Race`, `Coverage`, `Migrations`, `Vulnerability`, `Secret Scan`,
+and `Action Pins`. `Dependency Review` is a pull-request-only check and is not a
+push-required context. An emergency repository-owner bypass is exceptional and
+must be followed by a human-owned GitHub issue recording the reason, impact,
+verification debt, and corrective action.
+
+Publication is fail-closed: the workflow can publish only from an annotated
+`v*` tag, after `release` environment approval, and only when the repository
+variable `WORMHOLE_RELEASE_ENABLED` is exactly the lowercase string `true`.
+Manual dispatch is a rehearsal and never publishes. See
+[the release policy](docs/releasing.md).
+
 ---
 
 ## Security Model & Boundary Isolation
@@ -46,4 +66,4 @@ Agents authenticate using bearer tokens at the MCP boundary.
 
 ### 5. Local Credential Storage & Socket Permissions
 - **Filesystem Storage**: The `cmd/wormhole` command writes credentials to `~/.wormhole/credentials/<profile>.json` via `writeCredentials`. Newly created directories request mode `0o700` (owner-only), and newly created files request mode `0o600` (owner-only read/write). Existing directories and files are not automatically tightened, so users must verify and restrict an existing profile path before relying on those modes.
-- **Local API Socket**: The Linux-only `wormholed` local API uses `net.Listen("unix", ...)`, immediately restricts the socket to mode `0o600`, and retains RFC-0003 OQ4's same-user trust model without an additional local bearer token. Startup removes a stale socket only after a liveness probe and inode-stable quarantine check; live listeners and replacement paths are preserved. Non-Linux builds refuse to start because equivalent stale-socket recovery is not yet supported. Registration returns the caller's newly issued raw token once over this socket, so users must also keep its parent directory owner-only.
+- **Local API Socket**: The Linux-only `gatewayd` local API uses `net.Listen("unix", ...)`, immediately restricts the socket to mode `0o600`, and retains RFC-0003 OQ4's same-user trust model without an additional local bearer token. Startup removes a stale socket only after a liveness probe and inode-stable quarantine check; live listeners and replacement paths are preserved. Non-Linux builds refuse to start because equivalent stale-socket recovery is not yet supported. Registration returns the caller's newly issued raw token once over this socket, so users must also keep its parent directory owner-only.

@@ -1,4 +1,4 @@
-// Package sync implements wormholed's synchronisation engine (RFC-0003 §6.3, §8).
+// Package sync implements Gateway's synchronisation engine (RFC-0003 §6.3, §8).
 // It manages a durable outbound queue, bootstrap client, incremental push/pull cycle,
 // and conflict handling with last-write-wins and audit logging.
 package sync

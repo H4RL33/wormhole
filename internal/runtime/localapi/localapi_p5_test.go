@@ -637,9 +637,9 @@ func TestMultiOrgHandlerIsolation(t *testing.T) {
 func TestBootstrapLifecycle(t *testing.T) {
 	t.Logf("bootstrap lifecycle test (P5/P6): full flow with Coordination Server retry pending P6")
 	// Steps:
-	// 1. Authentication: wormhole-cli calls wormholed with server/credentials
-	// 2. Enrolment: wormholed registers with Coordination Server (via agent.register or sync.bootstrap)
-	// 3. Bootstrap: wormholed pulls initial org config, KB, tasks via wormhole.sync.bootstrap
+	// 1. Authentication: wormhole CLI calls Gateway with server/credentials
+	// 2. Enrolment: Gateway registers with Fabric (via agent.register or sync.bootstrap)
+	// 3. Bootstrap: Gateway pulls initial org config, KB, tasks via wormhole.sync.bootstrap
 	// 4. Synchronisation: incremental sync via wormhole.sync.* tools
 	// 5. Normal operation: local reads/writes, async sync to server
 }

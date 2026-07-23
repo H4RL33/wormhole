@@ -29,7 +29,7 @@ type Tool struct {
 	// AuthenticatedScope must carry to invoke this tool (RFC-0001 §8.4). It
 	// is the tool Name minus the "wormhole." prefix. Empty means "any
 	// authenticated caller" and is used only for self-identification
-	// (whoami) and wormholed transport (sync.*). Meaningful only when
+	// (whoami) and Gateway transport (sync.*). Meaningful only when
 	// RequiresAuth is true.
 	RequiredPermission string `json:"required_permission,omitempty"`
 	// ArgumentsExample is a zero-value instance of the tool's argument
@@ -37,8 +37,12 @@ type Tool struct {
 	// generator to reflect field names/types/json tags without any
 	// hand-written per-tool schema literal. Nil for tools that take no
 	// arguments (e.g. wormhole.agent.whoami).
-	ArgumentsExample any     `json:"-"`
-	Handler          Handler `json:"-"`
+	ArgumentsExample any `json:"-"`
+	// ResultExamples maps each named successful-result variant to a zero-value
+	// instance of its canonical response type. Contract inventory uses these
+	// examples to derive response schemas without a second tool-name registry.
+	ResultExamples map[string]any `json:"-"`
+	Handler        Handler        `json:"-"`
 }
 
 // Registry holds the set of MCP tools this server exposes. Empty at boot

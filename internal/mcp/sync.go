@@ -153,14 +153,14 @@ func articleToSummary(article kb.Article) ArticleSummary {
 	}
 }
 
-// BootstrapTool wires wormhole.sync.bootstrap. This is called by wormholed on org enrolment.
+// BootstrapTool wires wormhole.sync.bootstrap. Gateway calls it on org enrolment.
 // RFC-0003 §8.1: one-time bulk pull of complete working environment.
 func BootstrapTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, limiter *syncRateLimiter) Tool {
 	return Tool{
 		Name:         "wormhole.sync.bootstrap",
 		Description:  "One-time bulk pull of org configuration, project manifests, initial KB, tasks, and policies on org enrolment (RFC-0003 §8.1)",
 		RequiresAuth: true,
-		// Auth-only: wormholed<->Coordination-Server transport of the
+		// Auth-only: Gateway<->Fabric transport of the
 		// agent's own data, not a discretionary agent capability.
 		RequiredPermission: "",
 		ArgumentsExample:   BootstrapInput{},
@@ -239,7 +239,7 @@ func IncrementalPullTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore
 		Name:         "wormhole.sync.incremental_pull",
 		Description:  "Incremental pull of entity changes since last sync (RFC-0003 §8.2)",
 		RequiresAuth: true,
-		// Auth-only: wormholed<->Coordination-Server transport of the
+		// Auth-only: Gateway<->Fabric transport of the
 		// agent's own data, not a discretionary agent capability.
 		RequiredPermission: "",
 		ArgumentsExample:   IncrementalPullInput{},
@@ -389,13 +389,13 @@ type syncEventCreatePayload struct {
 }
 
 // IncrementalPushTool wires wormhole.sync.incremental_push.
-// RFC-0003 §8.2: wormholed pushes batched local changes to the server.
+// RFC-0003 §8.2: Gateway pushes batched local changes to Fabric.
 func IncrementalPushTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, limiter *syncRateLimiter) Tool {
 	return Tool{
 		Name:         "wormhole.sync.incremental_push",
 		Description:  "Incremental push of batched local changes to the server (RFC-0003 §8.2)",
 		RequiresAuth: true,
-		// Auth-only: wormholed<->Coordination-Server transport of the
+		// Auth-only: Gateway<->Fabric transport of the
 		// agent's own data, not a discretionary agent capability.
 		RequiredPermission: "",
 		ArgumentsExample:   IncrementalPushInput{},
@@ -568,7 +568,7 @@ func ConflictReportTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore 
 		Name:         "wormhole.sync.conflict_report",
 		Description:  "Report and resolve sync conflicts using last-write-wins; server timestamp is authoritative (RFC-0003 §8.3)",
 		RequiresAuth: true,
-		// Auth-only: wormholed<->Coordination-Server transport of the
+		// Auth-only: Gateway<->Fabric transport of the
 		// agent's own data, not a discretionary agent capability.
 		RequiredPermission: "",
 		ArgumentsExample:   ConflictReportInput{},

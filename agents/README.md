@@ -17,16 +17,16 @@ must not leak into Core code.
 
 ## Two-Layer Architecture
 
-Harnesses call `wormholed` by local MCP IPC. `wormholed` writes local SQLite first, then
-syncs incrementally with `wormhole-server`. The server owns authoritative Postgres plus
+Harnesses call `gatewayd` (Gateway) by local MCP IPC. Gateway writes local SQLite first, then
+syncs incrementally with `fabric` (Fabric). Fabric owns authoritative Postgres plus
 pgvector state. Core pillars: event bus, task graph, KB, identity and permissions, git
 pointers. No code copies in Wormhole.
 
 ## Binaries
 
 - `wormhole`: join, configure, connect harnesses, and bridge stdio MCP.
-- `wormholed`: per-user local daemon, Unix socket API, SQLite replica, sync queue.
-- `wormhole-server`: coordination server, HTTP MCP boundary, Postgres-backed Core.
+- `gatewayd`: Gateway, the per-user local daemon, Unix socket API, SQLite replica, sync queue.
+- `fabric`: Fabric, the coordination server, HTTP MCP boundary, Postgres-backed Core.
 
 ## Package Ownership and Dependency Bans
 
@@ -64,7 +64,7 @@ pointers. No code copies in Wormhole.
 
 MCP is the platform contract. Core names use `wormhole.<pillar>.<verb>` for agent,
 channel, task, KB, and git operations. `wormhole.sync.*` is runtime-to-server sync.
-Harnesses use local `wormholed`; do not add a direct remote harness path. Keep auth and
+Harnesses use local Gateway; do not add a direct remote harness path. Keep auth and
 permission enforcement at the MCP boundary.
 
 ## Development Protocol
@@ -97,6 +97,22 @@ and may skip when it is unavailable unless `WORMHOLE_INTEGRATION_REQUIRED=1`.
   `$TMPDIR/wormhole-runtime/wormhole/wormholed.sock`.
 - Runtime SQLite: `$XDG_DATA_HOME/wormhole/wormholed.db`, else
   `~/.local/share/wormhole/wormholed.db`.
+
+`wormholed.sock` and `wormholed.db` are retained local-state filenames, not
+legacy executable aliases. Invoke `gatewayd`, never a former daemon name.
+
+## Delivery and Compatibility Policy
+
+The intended required CI contexts are `Contract Inventory`, `Static`, `Build`,
+`Integration`, `Race`, `Coverage`, `Migrations`, `Vulnerability`, `Secret Scan`,
+and `Action Pins`; `Dependency Review` is pull-request-only. Do not represent
+these as hosted protections until their GitHub configuration has been read back
+and verified. An emergency owner bypass requires a follow-up issue with reason,
+impact, verification debt, and corrective action.
+
+`docs/releasing.md` distinguishes non-publishing rehearsals from guarded tag
+publication. `docs/compatibility.md` records the current `alpha-inventory`
+policy; no beta compatibility promise exists.
 
 ## Live-Doc Map
 

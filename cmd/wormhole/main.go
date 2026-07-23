@@ -19,6 +19,8 @@ import (
 	"github.com/H4RL33/wormhole/internal/config"
 )
 
+var version = "dev"
+
 func main() {
 	exit := run(os.Args[1:], os.Stdout, os.Stderr)
 	os.Exit(exit)
@@ -60,6 +62,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 func usage(w io.Writer) {
 	fmt.Fprintf(w, `wormhole - agent memory portal
 
+version: %s
+
 usage: wormhole <command> [flags]
 
 commands:
@@ -72,7 +76,7 @@ commands:
   wormhole mcp                           stdio↔socket bridge for MCP harness (no flags)
   wormhole help                          show this message
 
-`)
+`, version)
 }
 
 // Type definitions (mirrored from internal/mcp for client-side use)
@@ -270,6 +274,20 @@ func resolveCredentialsPath(tokenFile, profile, project, role string) (string, e
 	return filepath.Join(dir, defaultProfileName(project, role)+".json"), nil
 }
 
+func resolveModel(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	return os.Getenv("WORMHOLE_MODEL")
+}
+
+func resolveAdminKey(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	return os.Getenv("WORMHOLE_ADMIN_KEY")
+}
+
 // readCredentials loads and decodes one credentials JSON file
 func readCredentials(path string) (credentials, error) {
 	data, err := os.ReadFile(path)
@@ -402,7 +420,7 @@ func callTool(client *http.Client, server, tool, projectID, token string, args a
 	return json.RawMessage(result.Content[0].Text), nil
 }
 
-// doRegisterViaSocket attempts wormhole.agent.register through wormholed's local socket
+// doRegisterViaSocket attempts wormhole.agent.register through Gateway's local socket.
 func doRegisterViaSocket(socketPath, project string, in registerAgentInput) (out registerAgentOutput, reachable bool, err error) {
 	conn, dialErr := net.DialTimeout("unix", socketPath, 2*time.Second)
 	if dialErr != nil {
@@ -417,11 +435,11 @@ func doRegisterViaSocket(socketPath, project string, in registerAgentInput) (out
 		return registerAgentOutput{}, true, fmt.Errorf("marshal initialize request: %w", err)
 	}
 	if _, err := conn.Write(append(initReq, '\n')); err != nil {
-		return registerAgentOutput{}, true, fmt.Errorf("write initialize to wormholed socket: %w", err)
+		return registerAgentOutput{}, true, fmt.Errorf("write initialize to gatewayd socket: %w", err)
 	}
 	initLine, err := reader.ReadBytes('\n')
 	if err != nil {
-		return registerAgentOutput{}, true, fmt.Errorf("read initialize response from wormholed socket: %w", err)
+		return registerAgentOutput{}, true, fmt.Errorf("read initialize response from gatewayd socket: %w", err)
 	}
 	var initResp rpcResponse
 	if err := json.Unmarshal(bytes.TrimSpace(initLine), &initResp); err != nil {
@@ -436,7 +454,7 @@ func doRegisterViaSocket(socketPath, project string, in registerAgentInput) (out
 		return registerAgentOutput{}, true, fmt.Errorf("marshal notifications/initialized: %w", err)
 	}
 	if _, err := conn.Write(append(initializedNotif, '\n')); err != nil {
-		return registerAgentOutput{}, true, fmt.Errorf("write notifications/initialized to wormholed socket: %w", err)
+		return registerAgentOutput{}, true, fmt.Errorf("write notifications/initialized to gatewayd socket: %w", err)
 	}
 
 	argsRaw, err := json.Marshal(in)
@@ -462,12 +480,12 @@ func doRegisterViaSocket(socketPath, project string, in registerAgentInput) (out
 		return registerAgentOutput{}, true, fmt.Errorf("marshal tools/call request: %w", err)
 	}
 	if _, err := conn.Write(append(callReq, '\n')); err != nil {
-		return registerAgentOutput{}, true, fmt.Errorf("write tools/call to wormholed socket: %w", err)
+		return registerAgentOutput{}, true, fmt.Errorf("write tools/call to gatewayd socket: %w", err)
 	}
 
 	callLine, err := reader.ReadBytes('\n')
 	if err != nil {
-		return registerAgentOutput{}, true, fmt.Errorf("read tools/call response from wormholed socket: %w", err)
+		return registerAgentOutput{}, true, fmt.Errorf("read tools/call response from gatewayd socket: %w", err)
 	}
 	var callResp rpcResponse
 	if err := json.Unmarshal(bytes.TrimSpace(callLine), &callResp); err != nil {
@@ -482,7 +500,7 @@ func doRegisterViaSocket(socketPath, project string, in registerAgentInput) (out
 		return registerAgentOutput{}, true, fmt.Errorf("decode tools/call result: %w", err)
 	}
 	if len(result.Content) == 0 {
-		return registerAgentOutput{}, true, fmt.Errorf("empty register result from wormholed")
+		return registerAgentOutput{}, true, fmt.Errorf("empty register result from gatewayd")
 	}
 	if result.IsError {
 		return registerAgentOutput{}, true, fmt.Errorf("%s", result.Content[0].Text)
@@ -640,10 +658,7 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// --model: use harness self-report if flag empty
-	resolvedModel := *model
-	if resolvedModel == "" {
-		resolvedModel = os.Getenv("WORMHOLE_MODEL") // harness injects this
-	}
+	resolvedModel := resolveModel(*model)
 
 	reposList := splitOrNil(resolvedRepositories)
 
@@ -663,7 +678,7 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	out, viaSocket, sockErr := doRegisterViaSocket(wormholedSocketPath(), resolvedProject, in)
+	out, viaSocket, sockErr := doRegisterViaSocket(gatewaySocketPath(), resolvedProject, in)
 	if viaSocket && sockErr != nil {
 		fmt.Fprintf(stderr, "wormhole join: %v\n", sockErr)
 		return 1
@@ -857,10 +872,7 @@ func runConnect(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// --model: use harness self-report if flag empty
-	resolvedModel := *model
-	if resolvedModel == "" {
-		resolvedModel = os.Getenv("WORMHOLE_MODEL")
-	}
+	resolvedModel := resolveModel(*model)
 
 	reposList := splitOrNil(resolvedRepositories)
 
@@ -902,9 +914,9 @@ func runConnect(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "agent_id=%s passport_id=%s project=%s\n", out.AgentID, out.PassportID, resolvedProject)
 	fmt.Fprintf(stdout, "credentials written to %s\n", path)
 
-	socketPath := wormholedSocketPath()
+	socketPath := gatewaySocketPath()
 	if conn, dialErr := net.DialTimeout("unix", socketPath, 2*time.Second); dialErr != nil {
-		fmt.Fprintf(stderr, "wormhole connect: warning: wormholed not running (dial %s: %v) — start wormholed before using the harness\n", socketPath, dialErr)
+		fmt.Fprintf(stderr, "wormhole connect: warning: gatewayd not running (dial %s: %v) — start gatewayd before using the harness\n", socketPath, dialErr)
 	} else {
 		conn.Close()
 	}
@@ -1186,10 +1198,7 @@ func runViewerKeyCreate(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	key := *adminKey
-	if key == "" {
-		key = os.Getenv("WORMHOLE_ADMIN_KEY")
-	}
+	key := resolveAdminKey(*adminKey)
 	if key == "" {
 		fmt.Fprintln(stderr, "wormhole viewer-key create: no admin key: pass --admin-key or set $WORMHOLE_ADMIN_KEY")
 		return 2

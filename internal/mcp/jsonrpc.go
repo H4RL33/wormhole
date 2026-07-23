@@ -73,11 +73,15 @@ type initializeResult struct {
 // HandleInitialize implements the JSON-RPC "initialize" method
 // (docs/mcp-protocol.md §4). No auth: listing server capabilities is not a
 // scoped operation.
-func HandleInitialize() any {
+func HandleInitialize(serverVersion ...string) any {
+	version := "dev"
+	if len(serverVersion) > 0 && serverVersion[0] != "" {
+		version = serverVersion[0]
+	}
 	return initializeResult{
 		ProtocolVersion: "2025-11-25",
 		Capabilities:    map[string]any{"tools": map[string]any{}},
-		ServerInfo:      map[string]string{"name": "wormhole", "version": "0.2.4-alpha"},
+		ServerInfo:      map[string]string{"name": "wormhole", "version": version},
 	}
 }
 
@@ -210,7 +214,7 @@ func jsonSchemaForType(t reflect.Type) map[string]any {
 	case t == reflect.TypeOf(time.Time{}):
 		return map[string]any{"type": "string", "format": "date-time"}
 	case t == reflect.TypeOf(json.RawMessage{}):
-		return map[string]any{"type": "object"}
+		return map[string]any{}
 	}
 
 	switch t.Kind() {
@@ -222,9 +226,91 @@ func jsonSchemaForType(t reflect.Type) map[string]any {
 		return map[string]any{"type": "integer"}
 	case reflect.Slice:
 		return map[string]any{"type": "array", "items": jsonSchemaForType(t.Elem())}
+	case reflect.Struct:
+		properties, required := reflectStructSchema(t)
+		return map[string]any{"type": "object", "properties": properties, "required": required}
 	default:
 		return map[string]any{"type": "object"}
 	}
+}
+
+// jsonResponseSchemaForType derives the encoded JSON shape of a successful
+// response. Pointers, slices, and maps can encode as null when nil.
+func jsonResponseSchemaForType(t reflect.Type) map[string]any {
+	schema := jsonPresentResponseSchemaForType(t)
+	if t != reflect.TypeOf(json.RawMessage{}) &&
+		(t.Kind() == reflect.Ptr || t.Kind() == reflect.Slice || t.Kind() == reflect.Map) {
+		return map[string]any{"anyOf": []map[string]any{
+			schema,
+			{"type": "null"},
+		}}
+	}
+	return schema
+}
+
+// jsonPresentResponseSchemaForType derives the shape after encoding/json has
+// decided an omitempty field is present. The top-level value therefore cannot
+// be a nil slice/map or nil pointer, though nested values remain independently
+// nullable.
+func jsonPresentResponseSchemaForType(t reflect.Type) map[string]any {
+	switch {
+	case t == reflect.TypeOf(time.Time{}):
+		return map[string]any{"type": "string", "format": "date-time"}
+	case t == reflect.TypeOf(json.RawMessage{}):
+		return map[string]any{}
+	}
+
+	switch t.Kind() {
+	case reflect.Ptr:
+		return jsonResponseSchemaForType(t.Elem())
+	case reflect.String:
+		return map[string]any{"type": "string"}
+	case reflect.Bool:
+		return map[string]any{"type": "boolean"}
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return map[string]any{"type": "integer"}
+	case reflect.Slice:
+		return map[string]any{"type": "array", "items": jsonResponseSchemaForType(t.Elem())}
+	case reflect.Map:
+		return map[string]any{"type": "object"}
+	case reflect.Struct:
+		properties, required := reflectResponseStructSchema(t)
+		return map[string]any{"type": "object", "properties": properties, "required": required}
+	default:
+		return map[string]any{"type": "object"}
+	}
+}
+
+func reflectResponseStructSchema(t reflect.Type) (map[string]any, []string) {
+	properties := map[string]any{}
+	required := []string{}
+
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		name, omitempty := parseJSONTag(field.Tag.Get("json"), field.Name)
+		if name == "-" {
+			continue
+		}
+
+		schema := jsonResponseSchemaForType(field.Type)
+		if omitempty {
+			schema = jsonPresentResponseSchemaForType(field.Type)
+		}
+		if enumTag := field.Tag.Get("enum"); enumTag != "" {
+			values := strings.Split(enumTag, ",")
+			enumValues := make([]any, len(values))
+			for i, v := range values {
+				enumValues[i] = v
+			}
+			schema["enum"] = enumValues
+		}
+		properties[name] = schema
+		if !omitempty {
+			required = append(required, name)
+		}
+	}
+
+	return properties, required
 }
 
 // toolsCallParams is the tools/call method's params shape
@@ -356,6 +442,12 @@ func bearerToken(header string) string {
 // GET is reserved for a server-push SSE stream this server doesn't
 // implement yet (405, per docs/mcp-protocol.md §2 — no current consumer).
 func NewMCPHandler(registry *Registry, identityStore *identity.Store) http.HandlerFunc {
+	return NewMCPHandlerWithVersion(registry, identityStore, "dev")
+}
+
+// NewMCPHandlerWithVersion builds the /mcp handler with linker-injected
+// server version metadata for initialize responses.
+func NewMCPHandlerWithVersion(registry *Registry, identityStore *identity.Store, serverVersion string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -391,7 +483,7 @@ func NewMCPHandler(registry *Registry, identityStore *identity.Store) http.Handl
 		var rpcErr *RPCError
 		switch req.Method {
 		case "initialize":
-			result = HandleInitialize()
+			result = HandleInitialize(serverVersion)
 		case "tools/list":
 			result = HandleToolsList(registry)
 		case "tools/call":

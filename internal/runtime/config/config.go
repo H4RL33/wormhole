@@ -1,9 +1,9 @@
-// Package config resolves wormholed's local paths and reads the credential
+// Package config resolves Gateway's local paths and reads the credential
 // profile `wormhole join` already wrote (RFC-0003 §6.1). It duplicates the
 // minimal credentials JSON shape from cmd/wormhole rather than
 // importing it: main packages are not importable, and this matches the
 // existing wire-shape-duplication precedent at the cmd/wormhole module
-// boundary. wormholed does not write this file — it only reads what
+// boundary. Gateway does not write this file — it only reads what
 // `wormhole join` already produced.
 package config
 
@@ -24,7 +24,7 @@ var ErrCredentialsNotFound = errors.New("config: credentials not found")
 // could escape ~/.wormhole/credentials/ (path separators, ".." traversal,
 // empty string) — mirrors cmd/wormhole/main.go's
 // validateProfileName, since profileName here also originates as a
-// command-line argument (os.Args[1] in cmd/wormholed/main.go).
+// command-line argument (os.Args[1] in cmd/gatewayd/main.go).
 var ErrInvalidProfileName = errors.New("config: invalid profile name")
 
 // ErrNoCredentials is returned when LoadMultiOrg finds no credential profiles.
@@ -47,7 +47,7 @@ func validateProfileName(name string) error {
 }
 
 // Credentials mirrors the fields of cmd/wormhole's credentials struct
-// that wormholed needs to proxy calls to the Coordination Server.
+// that Gateway needs to proxy calls to Fabric.
 type Credentials struct {
 	Server    string `json:"server"`
 	ProjectID string `json:"project_id"`
@@ -68,14 +68,14 @@ type ProjectBinding struct {
 	OrgName   string // which org to use for this project
 }
 
-// Config is wormholed's resolved local configuration for one run.
+// Config is Gateway's resolved local configuration for one run.
 type Config struct {
 	SocketPath  string
 	DBPath      string
 	Credentials Credentials
 }
 
-// MultiOrgConfig is wormholed's configuration for multi-org support (P5+).
+// MultiOrgConfig is Gateway's configuration for multi-org support (P5+).
 type MultiOrgConfig struct {
 	SocketPath string
 	DBPath     string
@@ -124,7 +124,7 @@ func Load(profileName string) (Config, error) {
 }
 
 // LoadMultiOrg reads all credential profiles from ~/.wormhole/credentials/
-// and returns them as an org map. Supports multi-org wormholed (RFC-0003 §7.1, P5).
+// and returns them as an org map. Supports multi-org Gateway (RFC-0003 §7.1, P5).
 // Returns ErrNoCredentials if no profiles are found.
 // RFC-0003 §7.1 requires explicit project bindings: each org's ProjectID (if non-empty)
 // is automatically bound to that org, with no implicit default.

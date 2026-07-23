@@ -271,7 +271,7 @@ func TestWireHarness_InvalidType(t *testing.T) {
 
 // TestRunConnect_AutoDetectsHarnesses confirms connect auto-detects and wires all harnesses
 func TestRunConnect_AutoDetectsHarnesses(t *testing.T) {
-	fakeWormholedSocket(t)
+	fakeGatewaySocket(t)
 	fakeClaude(t)
 	fakeWormhole(t)
 	fakeStdioBinary(t)
@@ -321,7 +321,7 @@ func TestRunConnect_AutoDetectsHarnesses(t *testing.T) {
 
 // TestRunConnect_TargetFlagDeprecated confirms --target flag still works but is deprecated
 func TestRunConnect_TargetFlagDeprecated(t *testing.T) {
-	fakeWormholedSocket(t)
+	fakeGatewaySocket(t)
 	fakeClaude(t)
 	fakeWormhole(t)
 	fakeStdioBinary(t)
@@ -350,7 +350,7 @@ func TestRunConnect_TargetFlagDeprecated(t *testing.T) {
 
 // TestRunConnect_NoHarnesses confirms connect fails gracefully when no harnesses are detected
 func TestRunConnect_NoHarnesses(t *testing.T) {
-	fakeWormholedSocket(t)
+	fakeGatewaySocket(t)
 	// Isolate PATH to an empty dir so a real claude/opencode installed on the
 	// dev machine isn't picked up by detectHarnesses (which walks the ambient
 	// PATH). Without this, /usr/bin/claude would be detected and the test would

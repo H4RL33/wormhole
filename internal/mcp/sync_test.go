@@ -56,7 +56,7 @@ func TestIncrementalPushTool_AppliesTaskCreate(t *testing.T) {
 	// clientID is the client's own local-first task id (a real UUID, as a
 	// local SQLite-backed store would generate — see architecture.md §1 and
 	// RFC-0003 §7.2). incremental_push must preserve it: this is the id the
-	// wormholed client will look the row up by afterward.
+	// Gateway client will look the row up afterward.
 	clientID := uuid.NewString()
 	in := IncrementalPushInput{
 		NamespaceID: projectID,

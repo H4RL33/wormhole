@@ -15,14 +15,14 @@ import (
 	"time"
 )
 
-// fakeWormholed starts a fake wormholed local socket at the path
-// wormholedSocketPath() would derive under XDG_RUNTIME_DIR (set by the
+// fakeGateway starts a fake Gateway local socket at the path
+// gatewaySocketPath() would derive under XDG_RUNTIME_DIR (set by the
 // caller via t.Setenv before calling this), and speaks the real MCP
 // handshake (initialize -> notifications/initialized -> tools/call) that
 // doRegisterViaSocket now uses (RFC-0003 §8.1 join proxy).
 // Answers exactly one wormhole.agent.register tools/call with a canned
 // result. Returns the socket path.
-func fakeWormholed(t *testing.T, out registerAgentOutput) string {
+func fakeGateway(t *testing.T, out registerAgentOutput) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "runtime")
 	t.Setenv("XDG_RUNTIME_DIR", dir)
@@ -98,14 +98,14 @@ func fakeWormholed(t *testing.T, out registerAgentOutput) string {
 	return socketPath
 }
 
-// TestRunJoin_WormholedRunning_UsesLocalSocket proves RFC-0003 §8.1: when
-// wormholed's local socket is reachable, `wormhole join` registers through
-// it instead of calling the Coordination Server's wormhole.agent.register
+// TestRunJoin_GatewayRunning_UsesLocalSocket proves RFC-0003 §8.1: when
+// Gateway's local socket is reachable, `wormhole join` registers through it
+// instead of calling Fabric's wormhole.agent.register
 // directly. The httptest server below fails the test if wormhole.agent.register
 // is called on it, proving the socket path was used exclusively for step 1.
-func TestRunJoin_WormholedRunning_UsesLocalSocket(t *testing.T) {
+func TestRunJoin_GatewayRunning_UsesLocalSocket(t *testing.T) {
 	issuedAt := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
-	fakeWormholed(t, registerAgentOutput{
+	fakeGateway(t, registerAgentOutput{
 		AgentID:    "agent-socket",
 		PassportID: "passport-socket",
 		Token:      "socket-token",
@@ -122,7 +122,7 @@ func TestRunJoin_WormholedRunning_UsesLocalSocket(t *testing.T) {
 			t.Fatalf("decode params: %v", err)
 		}
 		if params.Name == "wormhole.agent.register" {
-			t.Fatal("wormhole.agent.register called directly on Coordination Server; should have gone through wormholed's local socket")
+			t.Fatal("wormhole.agent.register called directly on Fabric; should have gone through Gateway's local socket")
 		}
 		switch params.Name {
 		case "wormhole.kb.search":
@@ -182,11 +182,11 @@ func TestRunJoin_WormholedRunning_UsesLocalSocket(t *testing.T) {
 	}
 }
 
-// TestRunJoin_WormholedNotRunning_FallsBackToDirectServer proves RFC-0003
-// doesn't mandate wormholed's availability (§3.2 NG2/§6.1 pattern): with no
+// TestRunJoin_GatewayNotRunning_FallsBackToDirectServer proves RFC-0003
+// doesn't mandate Gateway availability (§3.2 NG2/§6.1 pattern): with no
 // socket reachable at the derived XDG path, join falls back to the existing
 // direct-to-Coordination-Server path, unchanged.
-func TestRunJoin_WormholedNotRunning_FallsBackToDirectServer(t *testing.T) {
+func TestRunJoin_GatewayNotRunning_FallsBackToDirectServer(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "runtime"))
 
 	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {

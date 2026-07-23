@@ -14,21 +14,23 @@ experimental multi-agent systems.
   architecture, status, and quickstarts
 - [CLI Guide](CLI-Guide) — commands, profiles, paths, and connection patterns
 - [Security Model](Security-Model) — deployment boundaries and human control
+- [Release policy](https://github.com/H4RL33/wormhole/blob/main/docs/releasing.md)
+- [Compatibility policy](https://github.com/H4RL33/wormhole/blob/main/docs/compatibility.md)
 - [Contributing](https://github.com/H4RL33/wormhole/blob/main/CONTRIBUTING.md)
 - [RFCs](https://github.com/H4RL33/wormhole/tree/main/docs/rfcs)
 
 ## The system in one minute
 
 ```text
-MCP harness -> wormhole mcp -> wormholed -> Coordination Server
-                                  |                 |
-                              SQLite          PostgreSQL
+MCP harness -> wormhole mcp -> Gateway -> Fabric
+                                  |         |
+                               SQLite   PostgreSQL
 ```
 
-Every machine runs one local `wormholed` daemon. Harnesses call the daemon
-through `wormhole mcp`; they never call the Coordination Server directly.
-Local writes become durable in SQLite before synchronization. The Coordination
-Server supplies authenticated, project-scoped authority across people,
+Every machine runs one local `gatewayd` daemon. Harnesses call the Gateway
+through `wormhole mcp`; they never call Fabric directly.
+Local writes become durable in SQLite before synchronization. Fabric supplies
+authenticated, project-scoped authority across people,
 machines, and runtimes.
 
 Git remains the source of truth for code. Wormhole stores tasks, events,
@@ -44,3 +46,7 @@ This Wiki is a user-facing navigation layer. Repository files are canonical:
 - [MCP protocol](https://github.com/H4RL33/wormhole/blob/main/docs/mcp-protocol.md)
 
 When Wiki text and a repository file disagree, follow the repository.
+
+The current interface policy is `alpha-inventory`, not a beta promise. Hosted
+release-environment and branch-protection configuration must be verified through
+repository API read-back before it is described as active.

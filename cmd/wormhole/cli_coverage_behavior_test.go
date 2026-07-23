@@ -255,7 +255,7 @@ func TestFlagParsersRejectUnknownFlags(t *testing.T) {
 
 func TestSocketHelpersCoverFallbackAndReadFailures(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", "")
-	if got := wormholedSocketPath(); !strings.HasSuffix(got, filepath.Join("wormhole-runtime", "wormhole", "wormholed.sock")) {
+	if got := gatewaySocketPath(); !strings.HasSuffix(got, filepath.Join("wormhole-runtime", "wormhole", "wormholed.sock")) {
 		t.Fatalf("fallback socket path = %q", got)
 	}
 

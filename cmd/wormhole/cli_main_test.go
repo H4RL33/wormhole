@@ -35,6 +35,24 @@ func TestRun_NoArgs_PrintsUsage(t *testing.T) {
 	}
 }
 
+func TestLinkedVersionAppearsInHelp(t *testing.T) {
+	want := os.Getenv("WORMHOLE_EXPECT_LINKED_VERSION")
+	if want == "" {
+		want = "dev"
+	}
+	if version != want {
+		t.Fatalf("linked version = %q, want %q", version, want)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--help"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("help exit code = %d, want 0; stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "version: "+want) {
+		t.Fatalf("help = %q, want linked version %q", stdout.String(), want)
+	}
+}
+
 func TestRun_UnknownCommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"bogus"}, &stdout, &stderr)
@@ -850,11 +868,11 @@ func fakeStdioBinary(t *testing.T) string {
 	return binPath
 }
 
-// fakeWormholedSocket creates a listening Unix socket at a custom location
+// fakeGatewaySocket creates a listening Unix socket at a custom location
 // (via XDG_RUNTIME_DIR override) that accepts connections. This allows tests
 // to make the socket reachability check pass without running the actual
-// wormholed daemon. The socket is closed when t.Cleanup runs.
-func fakeWormholedSocket(t *testing.T) (runtimeDir string) {
+// Gateway daemon. The socket is closed when t.Cleanup runs.
+func fakeGatewaySocket(t *testing.T) (runtimeDir string) {
 	t.Helper()
 	tempDir := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", tempDir)
@@ -867,7 +885,7 @@ func fakeWormholedSocket(t *testing.T) (runtimeDir string) {
 
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
-		t.Fatalf("create fake wormholed socket: %v", err)
+		t.Fatalf("create fake gateway socket: %v", err)
 	}
 
 	// Accept connections in background (for socket reachability check)
@@ -889,8 +907,8 @@ func fakeWormholedSocket(t *testing.T) (runtimeDir string) {
 }
 
 func TestRunConnect_Success_RegistersAndWiresConnector(t *testing.T) {
-	fakeWormholedSocket(t) // make socket reachable
-	fakeStdioBinary(t)     // add stdio binary to PATH
+	fakeGatewaySocket(t) // make socket reachable
+	fakeStdioBinary(t)   // add stdio binary to PATH
 
 	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
 		t.Fatal("connect must not call wormhole.kb.search")
@@ -956,8 +974,8 @@ func TestRunConnect_Success_RegistersAndWiresConnector(t *testing.T) {
 }
 
 func TestRunConnect_CustomConnectorName(t *testing.T) {
-	fakeWormholedSocket(t) // make socket reachable
-	fakeStdioBinary(t)     // add stdio binary to PATH
+	fakeGatewaySocket(t) // make socket reachable
+	fakeStdioBinary(t)   // add stdio binary to PATH
 
 	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
 		t.Fatal("connect must not call wormhole.kb.search")
@@ -1030,8 +1048,8 @@ func TestRunConnect_RegisterFailure_NeverInvokesClaude(t *testing.T) {
 }
 
 func TestRunConnect_ClaudeBinaryNotFound_PrintsManualFallback(t *testing.T) {
-	fakeWormholedSocket(t) // make socket reachable
-	fakeStdioBinary(t)     // add stdio binary to PATH
+	fakeGatewaySocket(t) // make socket reachable
+	fakeStdioBinary(t)   // add stdio binary to PATH
 
 	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
 		t.Fatal("connect must not call wormhole.kb.search")
@@ -1095,8 +1113,8 @@ func TestRunConnect_SocketUnreachable_WarnsButSucceeds(t *testing.T) {
 		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
 	}
 	errMsg := stderr.String()
-	if !strings.Contains(errMsg, "wormholed not running") {
-		t.Fatalf("stderr should mention wormholed not running: %q", errMsg)
+	if !strings.Contains(errMsg, "gatewayd not running") {
+		t.Fatalf("stderr should mention gatewayd not running: %q", errMsg)
 	}
 	// Credentials ARE written despite socket being unreachable
 	if _, err := os.Stat(tokenFile); err != nil {
@@ -1123,7 +1141,7 @@ func TestRunConnect_SocketUnreachable_WarnsButSucceeds(t *testing.T) {
 // when wormhole-mcp-stdio is not in PATH and target is "claude" (default),
 // runConnect returns exit code 1 and prints the claude-specific manual fallback message.
 func TestRunConnect_StdioBinaryNotFound_ClaudeTarget_PrintsError(t *testing.T) {
-	fakeWormholedSocket(t) // make socket reachable, so registration + socket check pass
+	fakeGatewaySocket(t) // make socket reachable, so registration + socket check pass
 	// Deliberately NOT calling fakeStdioBinary(t), so LookPath fails
 
 	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
@@ -1172,7 +1190,7 @@ func TestRunConnect_StdioBinaryNotFound_ClaudeTarget_PrintsError(t *testing.T) {
 // when wormhole-mcp-stdio is not in PATH and target is "opencode",
 // runConnect returns exit code 1 and prints the opencode-specific manual fallback message.
 func TestRunConnect_StdioBinaryNotFound_OpenCodeTarget_PrintsError(t *testing.T) {
-	fakeWormholedSocket(t) // make socket reachable, so registration + socket check pass
+	fakeGatewaySocket(t) // make socket reachable, so registration + socket check pass
 	// Deliberately NOT calling fakeStdioBinary(t), so LookPath fails
 
 	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
@@ -1346,8 +1364,8 @@ func TestRunJoin_ExplicitProfile_RejectsUnsafeName(t *testing.T) {
 // --role flag) derives its default profile key using the "default" role
 // placeholder.
 func TestRunConnect_DefaultProfile_DerivedFromProject(t *testing.T) {
-	fakeWormholedSocket(t) // make socket reachable
-	fakeStdioBinary(t)     // add stdio binary to PATH
+	fakeGatewaySocket(t) // make socket reachable
+	fakeStdioBinary(t)   // add stdio binary to PATH
 
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1501,8 +1519,8 @@ func TestRun_ProfileCommand_UnknownSubcommand_PrintsUsage(t *testing.T) {
 }
 
 func TestRunConnect_OpenCode_Success_WritesLocalConfig(t *testing.T) {
-	fakeWormholedSocket(t) // make socket reachable
-	fakeStdioBinary(t)     // add stdio binary to PATH
+	fakeGatewaySocket(t) // make socket reachable
+	fakeStdioBinary(t)   // add stdio binary to PATH
 
 	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
 		t.Fatal("connect must not call wormhole.kb.search")
@@ -1576,8 +1594,8 @@ func TestRunConnect_OpenCode_Success_WritesLocalConfig(t *testing.T) {
 }
 
 func TestRunConnect_OpenCode_CustomConnectorName(t *testing.T) {
-	fakeWormholedSocket(t) // make socket reachable
-	fakeStdioBinary(t)     // add stdio binary to PATH
+	fakeGatewaySocket(t) // make socket reachable
+	fakeStdioBinary(t)   // add stdio binary to PATH
 
 	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
 		t.Fatal("connect must not call wormhole.kb.search")

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -15,7 +16,7 @@ import (
 )
 
 func TestDaemonMainHelperProcess(t *testing.T) {
-	switch os.Getenv("WORMHOLED_MAIN_HELPER") {
+	switch os.Getenv("GATEWAYD_MAIN_HELPER") {
 	case "":
 		return
 	case "signal":
@@ -36,7 +37,7 @@ func TestDaemonMainHelperProcess(t *testing.T) {
 
 func TestDaemonMainExitsCleanlyOnSIGTERM(t *testing.T) {
 	command := exec.Command(os.Args[0], "-test.run=^TestDaemonMainHelperProcess$")
-	command.Env = append(os.Environ(), "WORMHOLED_MAIN_HELPER=signal")
+	command.Env = append(os.Environ(), "GATEWAYD_MAIN_HELPER=signal")
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		t.Fatalf("daemon stdout pipe: %v", err)
@@ -81,7 +82,7 @@ func TestDaemonMainExitsCleanlyOnSIGTERM(t *testing.T) {
 
 func TestDaemonMainExitsOneWhenStartupFails(t *testing.T) {
 	command := exec.Command(os.Args[0], "-test.run=^TestDaemonMainHelperProcess$")
-	command.Env = append(os.Environ(), "WORMHOLED_MAIN_HELPER=1")
+	command.Env = append(os.Environ(), "GATEWAYD_MAIN_HELPER=1")
 	output, err := command.CombinedOutput()
 	if err == nil {
 		t.Fatal("daemon main exited successfully, want status 1")
@@ -90,8 +91,21 @@ func TestDaemonMainExitsOneWhenStartupFails(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
 		t.Fatalf("daemon main error = %v, want exit status 1", err)
 	}
-	if !strings.Contains(string(output), "wormholed: injected daemon startup failure") {
+	if !strings.Contains(string(output), "gatewayd: injected daemon startup failure") {
 		t.Fatalf("daemon main output = %q, want startup error", output)
+	}
+}
+
+func TestLinkedVersionFeedsGatewayMetadata(t *testing.T) {
+	want := os.Getenv("WORMHOLE_EXPECT_LINKED_VERSION")
+	if want == "" {
+		want = "dev"
+	}
+	if version != want {
+		t.Fatalf("linked version = %q, want %q", version, want)
+	}
+	if got := gatewayVersion(); got != want {
+		t.Fatalf("gateway metadata version = %q, want %q", got, want)
 	}
 }
 
@@ -117,9 +131,30 @@ func TestRunMainSelectsProfileAndReportsFailures(t *testing.T) {
 			if !errors.Is(err, tt.runErr) {
 				t.Fatalf("runMain error = %v, want %v", err, tt.runErr)
 			}
-			if tt.runErr != nil && !bytes.Contains(stderr.Bytes(), []byte("wormholed: bad config")) {
+			if tt.runErr != nil && !bytes.Contains(stderr.Bytes(), []byte("gatewayd: bad config")) {
 				t.Fatalf("stderr = %q, want daemon error", stderr.String())
 			}
 		})
+	}
+}
+
+func TestRunMainReportsConfigFailureWithOneGatewayPrefix(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	var stderr bytes.Buffer
+	err := runMain(context.Background(), nil, &stderr, func(ctx context.Context, profile string) error {
+		return runWithSyncEngineFactory(ctx, profile, nil)
+	})
+	credentialPath := filepath.Join(home, ".wormhole", "credentials", "default.json")
+	wantErr := "load config: config: credentials not found: profile \"default\" at " + credentialPath
+	if err == nil {
+		t.Fatal("runMain error = nil, want config load failure")
+	}
+	if got := err.Error(); got != wantErr {
+		t.Fatalf("runMain error text = %q, want %q", got, wantErr)
+	}
+	if got, want := stderr.String(), "gatewayd: "+wantErr+"\n"; got != want {
+		t.Fatalf("runMain stderr = %q, want %q", got, want)
 	}
 }

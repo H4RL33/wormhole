@@ -13,10 +13,10 @@ import (
 	"time"
 )
 
-// startFakeSocket stands up a fake wormholed Unix domain socket in a temp
+// startFakeSocket stands up a fake Gateway Unix domain socket in a temp
 // dir and returns the listener. It implements no MCP semantics itself --
 // callers drive the accepted connection directly, matching the real
-// wormholed socket's newline-delimited JSON-RPC framing (design doc §2)
+// Gateway socket's newline-delimited JSON-RPC framing (design doc §2)
 // without needing the real localapi.Server.
 func startFakeSocket(t *testing.T) net.Listener {
 	t.Helper()
@@ -111,7 +111,7 @@ func TestBridge_StdinToSocket(t *testing.T) {
 
 // TestBridge_UnsolicitedNotification asserts that a message the fake socket
 // server writes without any corresponding stdin request (e.g. an MCP
-// notification pushed by wormholed) still arrives newline-delimited on
+// notification pushed by Gateway) still arrives newline-delimited on
 // stdout -- the bridge must not require request/response pairing.
 func TestBridge_UnsolicitedNotification(t *testing.T) {
 	ln := startFakeSocket(t)
@@ -212,7 +212,7 @@ func TestRunMCPRejectsFlagsAndUnavailableDaemon(t *testing.T) {
 	if code := runMCP(nil, &stdout, &stderr); code != 1 {
 		t.Fatalf("runMCP(unavailable daemon) code = %d, want 1", code)
 	}
-	if !strings.Contains(stderr.String(), "dial wormholed socket") {
+	if !strings.Contains(stderr.String(), "dial gatewayd socket") {
 		t.Fatalf("runMCP(unavailable daemon) stderr = %q", stderr.String())
 	}
 }

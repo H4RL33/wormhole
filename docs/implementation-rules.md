@@ -29,7 +29,7 @@ do not improvise.
 | Change | Route | Reasoning |
 |---|---|---|
 | Fix typo in docs/kb-schema.md | Direct | Single file, <5 lines, doc only |
-| Add config flag to cmd/wormholed | Direct | Single file, <20 lines, operational |
+| Add config flag to cmd/gatewayd | Direct | Single file, <20 lines, operational |
 | Implement `wormhole.task.update_status` | Subagent | RFC §8.2: transitions must emit events; crosses tasks + events pillars; needs transaction pattern |
 | Add integration test to identity_test.go | Direct | Single file, testing only, no RFC ambiguity |
 | Refactor internal/core/* | Subagent | Multi-file, uncertain precedent, cross-pillar |
@@ -162,10 +162,10 @@ unverified, because ___", stated exactly that way.
 
 ## 3. System in One Paragraph
 
-Wormhole is a two-layer system (RFC-0003): a per-user local runtime (`wormholed`) with a
-SQLite replica plus a Coordination Server (`wormhole-server`) with a Postgres database.
-Coding harnesses talk only to `wormholed` over local IPC (MCP tools); `wormholed` syncs
-incrementally with the Coordination Server. The platform exposes four pillars — Event Bus,
+Wormhole is a two-layer system (RFC-0003): a per-user Gateway (`gatewayd`) with a
+SQLite replica plus Fabric (`fabric`) with a Postgres database. Coding harnesses talk only to
+Gateway over local IPC (MCP tools); Gateway syncs incrementally with Fabric. The platform
+exposes four pillars — Event Bus,
 Task Graph, Knowledge Base, Identity & Permissions — exclusively through MCP. Git stays
 the sole source of truth for code; Wormhole stores pointers (commit SHAs, PR URLs) and
 commentary only. There is no message broker or second coordination datastore. The current
@@ -177,7 +177,7 @@ RFC-0002) is optional and must not leak into Core code.
 Coding harnesses (Claude Code, OpenCode, Goose, ...)
         │  MCP tools, local IPC only
         ▼
-wormholed (per-user daemon, RFC-0003 §5)
+Gateway (gatewayd, per-user daemon, RFC-0003 §5)
         │  internal/runtime/* packages: local API, SQLite store, sync engine, scheduler
         │
         ├─► localapi (MCP tool registry + org routing)
@@ -188,7 +188,7 @@ wormholed (per-user daemon, RFC-0003 §5)
         │
         ▼  wormhole.sync.* tools over HTTP
         │
-Coordination Server (cmd/wormhole-server)
+Fabric (cmd/fabric)
         │  internal/mcp (tool registry + auth boundary)
         │  internal/core/* (identity, tasks, events, kb, permissions)
         ▼
@@ -201,7 +201,7 @@ Postgres + pgvector (single Coordination Server datastore)
 
 | Package | Owns | May import |
 |---|---|---|
-| `cmd/wormhole-server` | Process wiring: config, HTTP server, registry construction | `internal/core/*`, `internal/mcp`, `internal/storage`, `internal/types`, `internal/webui` |
+| `cmd/fabric` | Process wiring: config, HTTP server, registry construction | `internal/core/*`, `internal/mcp`, `internal/storage`, `internal/types`, `internal/webui` |
 | `cmd/wormhole` | CLI entrypoint (`wormhole join` etc.) | `internal/config`, client-side code, stdlib |
 | `internal/config` | CLI global/project TOML configuration | stdlib, BurntSushi TOML |
 | `internal/mcp` | MCP tool descriptors, registry, request/response schemas, auth middleware | `internal/core/*`, `internal/types` |
@@ -218,13 +218,13 @@ Postgres + pgvector (single Coordination Server datastore)
 
 ### 4.1 Local Runtime Module Map (RFC-0003 §6.3)
 
-The local-first runtime (`wormholed`) uses `internal/runtime/*` packages, separate from and
-parallel to `internal/core/*` (which stays coordination-server-only). Local packages follow
+The local-first Gateway (`gatewayd`) uses `internal/runtime/*` packages, separate from and
+parallel to `internal/core/*` (which stays Fabric-only). Local packages follow
 the same layering pattern and isolation discipline.
 
 | Package | Owns | May import |
 |---|---|---|
-| `cmd/wormholed` | Process wiring: config load, localstore, localapi, sync engine, graceful shutdown | `internal/runtime/*`, `internal/types` |
+| `cmd/gatewayd` | Process wiring: config load, localstore, localapi, sync engine, graceful shutdown | `internal/runtime/*`, `internal/types` |
 | `internal/runtime/config` | XDG-compliant local paths, org connection config, project bindings (RFC-0003 §7.1, §8.1) | `internal/types`, stdlib |
 | `internal/runtime/localstore` | SQLite-backed repositories for tasks, events, KB, namespaced per project (RFC-0003 §7.2) | `internal/types`, stdlib, modernc SQLite driver |
 | `internal/runtime/localapi` | Local IPC server (Unix domain socket), tool registry, request routing, org context resolution (RFC-0003 §6.1) | All sibling `internal/runtime/*` packages, `internal/types`, stdlib |
@@ -253,11 +253,11 @@ the same layering pattern and isolation discipline.
   recorded in `go.mod`/`go.sum`. `golang-migrate` remains external schema tooling rather
   than a linked Go module.
 - R5: The Coordination Server has one datastore: Postgres + pgvector. RFC-0003 separately
-  requires `wormholed`'s local SQLite replica and durable sync queue; that SQLite database
-  is not a Coordination Server datastore. Do not add Redis, NATS, another datastore, or
+  requires Gateway's local SQLite replica and durable sync queue; that SQLite database
+  is not a Fabric datastore. Do not add Redis, NATS, another datastore, or
   another storage service without explicit human approval. RFC-0001 §15 decides that
-  durable Coordination Server change discovery is "Postgres table, polled by
-  `wormholed`". Harnesses consume local SQLite/runtime state; ephemeral local
+  durable Fabric change discovery is "Postgres table, polled by Gateway". Harnesses consume
+  local SQLite/runtime state; ephemeral local
   notifications and the in-memory eventbus remain permitted under LR4.
 
 ---
@@ -357,8 +357,8 @@ the same layering pattern and isolation discipline.
   `message.posted`), typed `payload` jsonb per type, optional free-text `note`.
   `message.posted` is the escape hatch; do not add prose-first event types.
 - New event types are an escalation, not a local decision.
-- Durable Coordination Server change discovery uses Postgres-backed polling by
-  `wormholed` (RFC-0001 §15). Harnesses consume local SQLite/runtime state over
+- Durable Fabric change discovery uses Postgres-backed polling by Gateway
+  (RFC-0001 §15). Harnesses consume local SQLite/runtime state over
   MCP IPC. Ephemeral local notifications and the in-memory eventbus are
   permitted for wake-ups, presence, and heartbeats, but never as a second
   durable coordination datastore. Do not add server-side push/streaming
@@ -409,6 +409,10 @@ the same layering pattern and isolation discipline.
   new project-scoped table or query lands.
 - T4: Do not claim done without `go build ./...`, `go vet ./...`, and `go test ./...`
   passing, run and output observed.
+
+Release and compatibility policy live in `docs/releasing.md` and
+`docs/compatibility.md`. Those documents describe repository workflow behavior;
+do not infer that external GitHub controls are active without an API read-back.
 
 ---
 

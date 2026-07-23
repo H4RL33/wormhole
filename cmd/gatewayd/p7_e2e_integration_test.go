@@ -156,7 +156,7 @@ type localResponse struct {
 	Error  string          `json:"error,omitempty"`
 }
 
-// callLocalTool dials the wormholed socket, sends a request, and reads the response.
+// callLocalTool dials the Gateway socket, sends a request, and reads the response.
 func callLocalTool(t *testing.T, socketPath string, tool string, args interface{}) localResponse {
 	t.Helper()
 
@@ -185,7 +185,7 @@ func callLocalTool(t *testing.T, socketPath string, tool string, args interface{
 }
 
 // TestP7_LocalFirstLoop demonstrates the full local-first offline→reconnect→sync loop:
-// 1. Create a wormholed with real socket and SQLite store
+// 1. Create a Gateway with a real socket and SQLite store.
 // 2. Write a task locally (will be queued for sync)
 // 3. Verify task exists in local store
 // 4. Call sync to push to server
@@ -218,11 +218,11 @@ func TestP7_LocalFirstLoop(t *testing.T) {
 	}
 	defer store.Close()
 
-	// Start wormholed daemon in background
+	// Start Gateway daemon in background.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Wire up wormholed components manually (matching cmd/wormholed/wormholed.go)
+	// Wire up Gateway components manually (matching its command implementation).
 	queueRepo := sync.NewQueueRepo(store.DB())
 	_ = sync.NewAuditRepo(store.DB()) // auditRepo would be used by syncEngine
 
@@ -509,7 +509,7 @@ func statefulCoordServer(t *testing.T) *httptest.Server {
 	}))
 }
 
-// TestP7_MultiDaemonSync simulates two wormholed instances against one
+// TestP7_MultiDaemonSync simulates two Gateway instances against one
 // shared (fake) coordination server: daemon A writes a task locally and
 // pushes it; daemon B, which never saw the write directly, calls Bootstrap
 // and must end up with that task in its own SQLite replica. This exercises
@@ -637,14 +637,14 @@ func TestRun_BootstrapAndConverges(t *testing.T) {
 	defer coordProxy.Close()
 
 	seedTaskRaw := e2eCallTool(t, coordURL, "wormhole.task.create", projectID, token, mcp.CreateTaskInput{
-		Title: "bootstrap task", Description: "present before wormholed starts", Priority: 1,
+		Title: "bootstrap task", Description: "present before gatewayd starts", Priority: 1,
 	})
 	var seedTask mcp.CreateTaskOutput
 	if err := json.Unmarshal(seedTaskRaw, &seedTask); err != nil {
 		t.Fatalf("decode seeded task: %v", err)
 	}
 	seedArticleRaw := e2eCallTool(t, coordURL, "wormhole.kb.write", projectID, token, mcp.WriteArticleInput{
-		Title: "bootstrap article", Body: "present before wormholed starts", Frontmatter: json.RawMessage(`{}`), Force: true,
+		Title: "bootstrap article", Body: "present before gatewayd starts", Frontmatter: json.RawMessage(`{}`), Force: true,
 	})
 	var seedArticle mcp.WriteArticleOutput
 	if err := json.Unmarshal(seedArticleRaw, &seedArticle); err != nil {

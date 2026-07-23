@@ -1,14 +1,76 @@
 name: CI
 
 on:
+  workflow_call:
   push:
     branches: [main]
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  test:
+  contract-inventory:
+    name: Contract Inventory
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Test contract inventory checker
+        run: sh .github/scripts/check-contract-manifest_test.sh
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Check alpha contract inventory
+        run: sh .github/scripts/check-contract-manifest.sh
+
+  static:
+    name: Static
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Test required workflow contracts
+        run: sh .github/scripts/required_workflows_test.sh
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Validate workflow configuration
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+      - name: Check formatting
+        run: make fmt-check
+      - name: Vet
+        run: make vet
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: make build
+      - name: Test release cross-build contract
+        run: sh .github/scripts/cross-build-release_test.sh
+      - name: Cross-build supported release targets
+        run: sh .github/scripts/cross-build-release.sh dist/cross-build
+      - name: Check gatewayd Darwin portability
+        run: |
+          GOOS=darwin GOARCH=arm64 go build -o /tmp/gatewayd-darwin ./cmd/gatewayd
+          GOOS=darwin GOARCH=arm64 go test -c -o /tmp/gatewayd-darwin.test ./cmd/gatewayd
+
+  integration:
+    name: Integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       WORMHOLE_DATABASE_URL: postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable
       WORMHOLE_INTEGRATION_REQUIRED: "1"
@@ -26,49 +88,86 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
-
       - name: Install golang-migrate
-        run: go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
-
-      - name: Run migrations up
-        run: migrate -path migrations -database "postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable" up
-
-      - name: Check formatting
-        run: make fmt-check
-
-      - name: Build
-        run: make build
-
-      - name: Cross-build unsupported wormholed target
-        run: |
-          GOOS=darwin GOARCH=arm64 go build -o /tmp/wormholed-darwin ./cmd/wormholed
-          GOOS=darwin GOARCH=arm64 go test -c -o /tmp/wormholed-darwin.test ./cmd/wormholed
-
-      - name: Vet
-        run: make vet
-
+        run: go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.18.3
+      - name: Run migrations
+        run: migrate -path migrations -database "$WORMHOLE_DATABASE_URL" up
       - name: Integration tests
         run: make integration
 
+  race:
+    name: Race
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      WORMHOLE_DATABASE_URL: postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable
+      WORMHOLE_INTEGRATION_REQUIRED: "1"
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: wormhole
+          POSTGRES_PASSWORD: wormhole
+          POSTGRES_DB: wormhole
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Install golang-migrate
+        run: go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.18.3
+      - name: Run migrations
+        run: migrate -path migrations -database "$WORMHOLE_DATABASE_URL" up
       - name: Race tests
         run: make race
 
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      WORMHOLE_DATABASE_URL: postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable
+      WORMHOLE_INTEGRATION_REQUIRED: "1"
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: wormhole
+          POSTGRES_PASSWORD: wormhole
+          POSTGRES_DB: wormhole
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Install golang-migrate
+        run: go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.18.3
+      - name: Run migrations
+        run: migrate -path migrations -database "$WORMHOLE_DATABASE_URL" up
       - name: Coverage
         run: make coverage
-
       - name: Upload coverage profile
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage
           path: coverage.out
-
-      - name: Verify migrations down
-        run: migrate -path migrations -database "postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable" down -all

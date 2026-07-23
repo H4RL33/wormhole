@@ -19,13 +19,15 @@ import (
 	"github.com/H4RL33/wormhole/internal/webui"
 )
 
+var version = "dev"
+
 var runServerMain = runServer
 
 func main() {
 	if err := runServerMain(types.LoadConfig(), func(server *http.Server) error {
 		return server.ListenAndServe()
 	}); err != nil {
-		log.Fatal(err)
+		log.Fatalf("fabric: %v", err)
 	}
 }
 
@@ -34,6 +36,10 @@ func main() {
 // observable under tests without changing the production listener contract.
 func runServer(cfg types.Config, serve func(*http.Server) error) error {
 	return runServerWithOpen(cfg, storage.Open, serve)
+}
+
+func fabricMCPHandler(registry *mcp.Registry, identityStore *identity.Store) http.HandlerFunc {
+	return mcp.NewMCPHandlerWithVersion(registry, identityStore, version)
 }
 
 // runServerWithOpen separates database acquisition from HTTP composition so
@@ -52,35 +58,20 @@ func runServerWithOpen(cfg types.Config, openDB func(types.Config) (*sql.DB, err
 	kbStore := kb.NewStore(db, kb.StubEmbedder{}, cfg.KBDedupThreshold, cfg.KBMaxBodyLength, cfg.KBMinLinksDecision, cfg.KBMinLinksPolicy, cfg.KBMinLinksProcedure)
 	rolesStore := roles.NewStore(db)
 
-	syncRateLimiter := mcp.NewSyncRateLimiter(30, time.Minute)
-
-	registry := mcp.NewRegistry()
-	registry.Register(mcp.RegisterAgentTool(identityStore, eventsStore, rolesStore, kbStore))
-	registry.Register(mcp.WhoAmITool())
-	registry.Register(mcp.CreateTaskTool(tasksStore))
-	registry.Register(mcp.AssignTaskTool(tasksStore))
-	registry.Register(mcp.ListTasksTool(tasksStore, rolesStore))
-	registry.Register(mcp.UpdateTaskStatusTool(tasksStore))
-	registry.Register(mcp.CreateChannelTool(eventsStore))
-	registry.Register(mcp.PostEventTool(eventsStore))
-	registry.Register(mcp.SubscribeChannelTool(eventsStore))
-	registry.Register(mcp.ListChannelsTool(eventsStore))
-	registry.Register(mcp.LinkCommitTool(gitStore))
-	registry.Register(mcp.RequestReviewTool(gitStore))
-	registry.Register(mcp.WriteArticleTool(kbStore))
-	registry.Register(mcp.SearchArticlesTool(kbStore))
-	registry.Register(mcp.GetArticleTool(kbStore))
-	registry.Register(mcp.GetArticleLinksTool(kbStore))
-	registry.Register(mcp.BootstrapTool(tasksStore, kbStore, eventsStore, syncRateLimiter))
-	registry.Register(mcp.IncrementalPullTool(tasksStore, kbStore, eventsStore, syncRateLimiter))
-	registry.Register(mcp.IncrementalPushTool(tasksStore, kbStore, eventsStore, syncRateLimiter))
-	registry.Register(mcp.ConflictReportTool(tasksStore, kbStore, eventsStore, syncRateLimiter))
+	registry := mcp.NewFabricRegistry(mcp.FabricRegistryDependencies{
+		Identity: identityStore,
+		Events:   eventsStore,
+		Tasks:    tasksStore,
+		Git:      gitStore,
+		KB:       kbStore,
+		Roles:    rolesStore,
+	})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(http.StatusNoContent)
 	})
-	mux.HandleFunc("/mcp", mcp.NewMCPHandler(registry, identityStore))
+	mux.HandleFunc("/mcp", fabricMCPHandler(registry, identityStore))
 
 	webuiHandler := &webui.Handler{
 		Identity: identityStore,
@@ -91,7 +82,7 @@ func runServerWithOpen(cfg types.Config, openDB func(types.Config) (*sql.DB, err
 	}
 	mux.Handle("/dashboard/", webuiHandler.NewMux())
 
-	log.Printf("wormhole-server listening on %s", cfg.ListenAddr)
+	log.Printf("fabric listening on %s", cfg.ListenAddr)
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           loggingMiddleware(mux),

@@ -16,7 +16,7 @@ import (
 )
 
 // TestServer_AgentRegister_NoAgentID_ProxiesJoinToCoordinationServer proves
-// RFC-0003 §8.1's "wormhole join... now targets wormholed" requirement:
+// RFC-0003 §8.1's "wormhole join... now targets Gateway" requirement:
 // a wormhole.agent.register call with no agent_id (the join/passport-creation
 // shape cmd/wormhole sends — owner/model/capabilities/roles/permissions,
 // RFC-0001 §9) is proxied to the Coordination Server's real

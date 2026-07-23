@@ -9,7 +9,7 @@ import (
 )
 
 func TestHandleInitialize(t *testing.T) {
-	result := HandleInitialize()
+	result := HandleInitialize("0.2.4-alpha")
 	init, ok := result.(initializeResult)
 	if !ok {
 		t.Fatalf("HandleInitialize() returned %T, want initializeResult", result)
@@ -28,38 +28,20 @@ func TestHandleInitialize(t *testing.T) {
 	}
 }
 
-// buildFullRegistry registers all 20 real tools with nil/zero-value stores.
-// Handlers are never invoked in this test file, only the Tool{} descriptors
-// (Name, Description, ArgumentsExample, RequiresAuth, RequiredPermission)
-// are read, so nil store pointers are safe here. Mirrors the registration
-// list in cmd/wormhole-server/main.go.
-func buildFullRegistry() *Registry {
-	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(nil, nil, nil, nil))
-	registry.Register(WhoAmITool())
-	registry.Register(CreateTaskTool(nil))
-	registry.Register(AssignTaskTool(nil))
-	registry.Register(ListTasksTool(nil, nil))
-	registry.Register(UpdateTaskStatusTool(nil))
-	registry.Register(CreateChannelTool(nil))
-	registry.Register(PostEventTool(nil))
-	registry.Register(ListChannelsTool(nil))
-	registry.Register(SubscribeChannelTool(nil))
-	registry.Register(WriteArticleTool(nil))
-	registry.Register(SearchArticlesTool(nil))
-	registry.Register(GetArticleTool(nil))
-	registry.Register(GetArticleLinksTool(nil))
-	registry.Register(LinkCommitTool(nil))
-	registry.Register(RequestReviewTool(nil))
-	registry.Register(BootstrapTool(nil, nil, nil, nil))
-	registry.Register(IncrementalPullTool(nil, nil, nil, nil))
-	registry.Register(IncrementalPushTool(nil, nil, nil, nil))
-	registry.Register(ConflictReportTool(nil, nil, nil, nil))
-	return registry
+func TestHandleInitializeReportsConfiguredVersion(t *testing.T) {
+	result := HandleInitialize("9.8.7-test")
+	init, ok := result.(initializeResult)
+	if !ok {
+		t.Fatalf("HandleInitialize() returned %T, want initializeResult", result)
+	}
+	wantInfo := map[string]string{"name": "wormhole", "version": "9.8.7-test"}
+	if !reflect.DeepEqual(init.ServerInfo, wantInfo) {
+		t.Fatalf("ServerInfo = %#v, want %#v", init.ServerInfo, wantInfo)
+	}
 }
 
 func TestHandleToolsList_AllToolsPresent(t *testing.T) {
-	registry := buildFullRegistry()
+	registry := NewFabricRegistry(FabricRegistryDependencies{})
 
 	result := HandleToolsList(registry)
 	m, ok := result.(map[string]any)
@@ -110,7 +92,7 @@ func TestHandleToolsList_AllToolsPresent(t *testing.T) {
 }
 
 func TestHandleToolsList_ProjectIDRequiredExceptWhoAmI(t *testing.T) {
-	registry := buildFullRegistry()
+	registry := NewFabricRegistry(FabricRegistryDependencies{})
 
 	result := HandleToolsList(registry).(map[string]any)
 	entries := result["tools"].([]toolListEntry)
@@ -226,9 +208,77 @@ func TestJSONSchemaForType_TimeAndRawMessage(t *testing.T) {
 	}
 
 	got = jsonSchemaForType(reflect.TypeOf(json.RawMessage{}))
-	want = map[string]any{"type": "object"}
+	want = map[string]any{}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("jsonSchemaForType(json.RawMessage) = %#v, want %#v", got, want)
+	}
+}
+
+func TestJSONResponseSchemaMatchesEncodingSemantics(t *testing.T) {
+	type response struct {
+		RequiredPointer *string         `json:"required_pointer"`
+		OptionalPointer *string         `json:"optional_pointer,omitempty"`
+		RequiredSlice   []string        `json:"required_slice"`
+		OptionalSlice   []string        `json:"optional_slice,omitempty"`
+		RequiredMap     map[string]int  `json:"required_map"`
+		OptionalMap     map[string]int  `json:"optional_map,omitempty"`
+		Payload         json.RawMessage `json:"payload"`
+		OptionalPayload json.RawMessage `json:"optional_payload,omitempty"`
+	}
+
+	schema := jsonResponseSchemaForType(reflect.TypeOf(response{}))
+	properties := schema["properties"].(map[string]any)
+	required := schema["required"].([]string)
+
+	for _, name := range []string{"required_pointer", "required_slice", "required_map", "payload"} {
+		if !containsStr(required, name) {
+			t.Errorf("required = %v, want %q", required, name)
+		}
+	}
+	for _, name := range []string{"optional_pointer", "optional_slice", "optional_map", "optional_payload"} {
+		if containsStr(required, name) {
+			t.Errorf("required = %v, want %q optional", required, name)
+		}
+	}
+
+	requiredPointer := properties["required_pointer"].(map[string]any)
+	wantNullableString := []map[string]any{{"type": "string"}, {"type": "null"}}
+	if got := requiredPointer["anyOf"]; !reflect.DeepEqual(got, wantNullableString) {
+		t.Errorf("required pointer schema = %#v, want anyOf %v", requiredPointer, wantNullableString)
+	}
+	optionalPointer := properties["optional_pointer"].(map[string]any)
+	if optionalPointer["type"] != "string" {
+		t.Errorf("optional pointer schema = %#v, want optional string", optionalPointer)
+	}
+	if _, nullable := optionalPointer["anyOf"]; nullable {
+		t.Errorf("optional pointer schema = %#v, want no null union", optionalPointer)
+	}
+	for name, wantType := range map[string]string{
+		"required_slice": "array",
+		"required_map":   "object",
+	} {
+		property := properties[name].(map[string]any)
+		alternatives, ok := property["anyOf"].([]map[string]any)
+		if !ok || len(alternatives) != 2 || alternatives[0]["type"] != wantType || alternatives[1]["type"] != "null" {
+			t.Errorf("%s schema = %#v, want %s|null", name, property, wantType)
+		}
+	}
+	for name, wantType := range map[string]string{
+		"optional_slice": "array",
+		"optional_map":   "object",
+	} {
+		property := properties[name].(map[string]any)
+		if property["type"] != wantType {
+			t.Errorf("%s schema = %#v, want optional %s", name, property, wantType)
+		}
+		if _, nullable := property["anyOf"]; nullable {
+			t.Errorf("%s schema = %#v, want no null union", name, property)
+		}
+	}
+	for _, name := range []string{"payload", "optional_payload"} {
+		if got := properties[name].(map[string]any); len(got) != 0 {
+			t.Errorf("%s schema = %#v, want unconstrained JSON", name, got)
+		}
 	}
 }
 

@@ -1,4 +1,4 @@
-// Package localapi is wormholed's local API: a Unix-domain-socket server
+// Package localapi is Gateway's local API: a Unix-domain-socket server
 // coding harnesses connect to (RFC-0003 §6.1), speaking real MCP JSON-RPC
 // 2.0 (initialize / notifications/initialized / tools/list / tools/call)
 // over a persistent, newline-delimited-JSON connection per client. This
@@ -10,7 +10,7 @@
 //
 // rpcRequest/rpcResponse/toolsCallParams/toolCallResult/whoAmIOutput mirror
 // internal/mcp's JSON-RPC 2.0 wire shapes for talking to the Coordination
-// Server (and, as of this MCP surface, for wormholed's own local socket
+// Server (and, as of this MCP surface, for Gateway's own local socket
 // too — see mcp.go). localapi cannot import internal/mcp (RFC-0003 §6.3
 // keeps internal/runtime/* and internal/mcp separate trees), so the wire
 // contract is duplicated here, same as cmd/wormhole already
@@ -47,7 +47,7 @@ const (
 	// its trailing newline. Eight bounded readers therefore retain at most
 	// roughly 8 MiB for inbound frames.
 	maxFrameBytes = 1 << 20
-	// maxActiveConnections is intentionally small: wormholed is a per-user
+	// maxActiveConnections is intentionally small: Gateway is a per-user
 	// local daemon, and eight persistent harness sessions cover normal local
 	// concurrency while bounding handler and frame-buffer resources.
 	maxActiveConnections = 8
@@ -111,7 +111,7 @@ type connectionState struct {
 	cancel context.CancelFunc
 }
 
-// Server is wormholed's local API socket server (RFC-0003 §6.1).
+// Server is Gateway's local API socket server (RFC-0003 §6.1).
 // P1 shipped whoami; P2 adds local-servable reads for tasks, events, and KB.
 // P3 adds eventbus, scheduler, and subscription support.
 // P5 adds multi-org support (RFC-0003 §7.1, §8.1).
@@ -119,6 +119,7 @@ type Server struct {
 	listener   net.Listener
 	socketPath string
 	httpClient *http.Client
+	version    string
 
 	// Single-org mode (P1-P4 backward compatibility)
 	coordServer string
@@ -167,6 +168,12 @@ type Server struct {
 	// construction time from the Server that will service every
 	// connection's tools/call dispatch (design doc §5 subtask 2).
 	registry *localRegistry
+}
+
+// SetVersion sets the linker-injected Gateway version reported by MCP
+// initialize responses. Empty versions retain the development default.
+func (s *Server) SetVersion(version string) {
+	s.version = version
 }
 
 // New binds the Unix domain socket at socketPath. Callers must call Serve
@@ -654,12 +661,16 @@ func (s *Server) WarmAuthorizationScopes(ctx context.Context) error {
 // requested project, which keeps already-enrolled agents functional offline;
 // incremental_push independently rechecks every queued item server-side.
 func (s *Server) authorizeLocalTool(ctx context.Context, tool localTool, args json.RawMessage) error {
-	return s.authorizeLocalPermission(ctx, tool.RequiredPermission, args)
+	for _, requiredPermission := range tool.RequiredPermissions {
+		if err := s.authorizeLocalPermission(ctx, requiredPermission, args); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // authorizeLocalPermission checks one action against the exact cached
-// agent-and-project scope selected by the request. Handlers that perform more
-// than their registered primary action use this for their additional gates.
+// agent-and-project scope selected by the request.
 func (s *Server) authorizeLocalPermission(ctx context.Context, requiredPermission string, args json.RawMessage) error {
 	if requiredPermission == "" {
 		return nil
@@ -683,7 +694,7 @@ func (s *Server) authorizeLocalPermission(ctx context.Context, requiredPermissio
 		cached, err = s.store.GetCachedWhoAmIForAgentProject(ctx, expectedAgent.(string), orgCtx.ProjectID)
 	} else {
 		// Direct embedded users of localapi that do not configure credentials
-		// retain the project-only lookup; production wormholed always sets the
+		// retain the project-only lookup; production Gateway always sets the
 		// exact credential identity before Serve.
 		cached, err = s.store.GetCachedWhoAmIForProject(ctx, orgCtx.ProjectID)
 	}
@@ -1178,9 +1189,6 @@ func (s *Server) handleTaskRoute(ctx context.Context, args json.RawMessage) (map
 
 	orgCtx, err := s.resolveOrgContext(projectID)
 	if err != nil {
-		return nil, err
-	}
-	if err := s.authorizeLocalPermission(ctx, "task.assign", args); err != nil {
 		return nil, err
 	}
 

@@ -1,0 +1,52 @@
+name: Migrations
+
+on:
+  workflow_call:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: migrations-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  migrations:
+    name: Migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      WORMHOLE_DATABASE_URL: postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: wormhole
+          POSTGRES_PASSWORD: wormhole
+          POSTGRES_DB: wormhole
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Install golang-migrate
+        run: go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.18.3
+      - name: Verify empty-database migrations
+        run: |
+          migrate -path migrations -database "$WORMHOLE_DATABASE_URL" up
+          migrate -path migrations -database "$WORMHOLE_DATABASE_URL" down -all
+      - name: Verify alpha upgrade
+        run: .github/scripts/test-alpha-upgrade.sh

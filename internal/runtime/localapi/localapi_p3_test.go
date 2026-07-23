@@ -409,30 +409,45 @@ func TestTaskRouteNoMatchLeavesNoDurableState(t *testing.T) {
 	}
 }
 
-func TestTaskRouteRequiresTaskAssignPermission(t *testing.T) {
-	srv, store, sched, queue, socketPath := newTaskRouteTestRuntime(t, "project-1")
-	srv.SetAuthorizationAgent("project-1", "route-agent")
-	if _, err := store.DB().Exec(`UPDATE whoami_cache SET permissions = '["task.create"]' WHERE agent_id = 'route-agent' AND project_id = 'project-1'`); err != nil {
-		t.Fatalf("restrict route permissions: %v", err)
-	}
-	if err := store.CacheWhoAmI(context.Background(), localstore.WhoAmICache{
-		AgentID: "stale-route-admin", ProjectID: "project-1",
-		Permissions: []string{"task.create", "task.assign"},
-		CachedAt:    time.Now().UTC().Add(time.Hour),
-	}); err != nil {
-		t.Fatalf("cache stale route admin: %v", err)
-	}
-	if _, err := sched.RegisterAgent("route-agent", "project-1", []string{"code"}); err != nil {
-		t.Fatalf("register route agent: %v", err)
-	}
+func TestTaskRouteRequiresEveryDeclaredPermission(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		permissions string
+		wantDenied  string
+	}{
+		{name: "task create", permissions: `["task.assign"]`, wantDenied: "task.create"},
+		{name: "task assign", permissions: `["task.create"]`, wantDenied: "task.assign"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, store, sched, queue, socketPath := newTaskRouteTestRuntime(t, "project-1")
+			srv.SetAuthorizationAgent("project-1", "route-agent")
+			if _, err := store.DB().Exec(
+				`UPDATE whoami_cache SET permissions = ? WHERE agent_id = 'route-agent' AND project_id = 'project-1'`,
+				tt.permissions,
+			); err != nil {
+				t.Fatalf("restrict route permissions: %v", err)
+			}
+			if err := store.CacheWhoAmI(context.Background(), localstore.WhoAmICache{
+				AgentID: "stale-route-admin", ProjectID: "project-1",
+				Permissions: []string{"task.create", "task.assign"},
+				CachedAt:    time.Now().UTC().Add(time.Hour),
+			}); err != nil {
+				t.Fatalf("cache stale route admin: %v", err)
+			}
+			if _, err := sched.RegisterAgent("route-agent", "project-1", []string{"code"}); err != nil {
+				t.Fatalf("register route agent: %v", err)
+			}
 
-	resp := sendRequest(t, socketPath, "wormhole.task.route", map[string]interface{}{"capability": "code", "title": "assignment denied"})
-	if resp.Error == "" || !strings.Contains(resp.Error, "permission denied: requires task.assign") {
-		t.Fatalf("task.route error = %q, want task.assign denial", resp.Error)
-	}
-	assertNoDurableRouteState(t, store, queue, "project-1")
-	if got := sched.TaskCount(); got != 0 {
-		t.Fatalf("permission denial left %d scheduler task(s)", got)
+			resp := sendRequest(t, socketPath, "wormhole.task.route", map[string]interface{}{"capability": "code", "title": "route denied"})
+			want := "permission denied: requires " + tt.wantDenied
+			if resp.Error == "" || !strings.Contains(resp.Error, want) {
+				t.Fatalf("task.route error = %q, want %q", resp.Error, want)
+			}
+			assertNoDurableRouteState(t, store, queue, "project-1")
+			if got := sched.TaskCount(); got != 0 {
+				t.Fatalf("permission denial left %d scheduler task(s)", got)
+			}
+		})
 	}
 }
 

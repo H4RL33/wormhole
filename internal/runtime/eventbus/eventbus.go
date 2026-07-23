@@ -1,4 +1,4 @@
-// Package eventbus provides wormholed's in-memory pub/sub for ephemeral events
+// Package eventbus provides Gateway's in-memory pub/sub for ephemeral events
 // (RFC-0003 §6.1, design brief "Local Event Bus"). Ephemeral events stay in
 // memory only — presence signals, heartbeats, temporary status. They never touch
 // localstore (those persist via the durable event tier).

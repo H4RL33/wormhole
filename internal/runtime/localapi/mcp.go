@@ -1,16 +1,14 @@
-// mcp.go implements wormholed's local socket MCP JSON-RPC 2.0 surface
+// mcp.go implements Gateway's local socket MCP JSON-RPC 2.0 surface
 // (RFC-0003 §6.1). It replaces the P1-era bespoke
 // {tool,args}->{result,error} one-shot protocol (localRequest/localResponse,
 // now deleted) with initialize / notifications/initialized / tools/list /
 // tools/call over a persistent, newline-delimited-JSON connection.
 //
 // localTool/localRegistry mirror internal/mcp.Tool/internal/mcp.Registry's
-// shape, and buildInputSchema/reflectStructSchema/jsonSchemaForType/
-// parseJSONTag are copied (not imported) from internal/mcp/jsonrpc.go:106-225
-// — localapi cannot import internal/mcp (RFC-0003 §6.3 and
-// docs/implementation-rules.md §4.1 LR1). This is a
-// deliberate duplication, same posture as rpcRequest/rpcResponse/
-// toolsCallParams/toolCallResult already declared in localapi.go.
+// shape. The request/response schema reflection helpers are copied rather
+// than imported from internal/mcp because localapi cannot import that package
+// (RFC-0003 §6.3 and docs/implementation-rules.md §4.1 LR1). This is a
+// deliberate duplication, like the JSON-RPC envelope types in localapi.go.
 package localapi
 
 import (
@@ -20,6 +18,7 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -41,20 +40,26 @@ const (
 )
 
 // localToolHandler is a local tool's dispatch signature. Authentication is
-// enforced once in handleToolsCall from localTool.RequiredPermission before
+// enforced once in handleToolsCall from localTool.RequiredPermissions before
 // the handler is invoked.
 type localToolHandler func(ctx context.Context, args json.RawMessage) (any, error)
 
-// localTool mirrors internal/mcp.Tool's shape for the local socket surface.
-type localTool struct {
-	Name               string
-	Description        string
-	ArgumentsExample   any
-	RequiredPermission string
-	Handler            localToolHandler
+type localArgumentVariant struct {
+	Example     any
+	AnyRequired [][]string
 }
 
-// localRegistry holds every tool wormholed's local socket serves, plus
+// localTool mirrors internal/mcp.Tool's shape for the local socket surface.
+type localTool struct {
+	Name                string
+	Description         string
+	ArgumentExamples    map[string]localArgumentVariant
+	RequiredPermissions []string
+	ResultExamples      map[string]any
+	Handler             localToolHandler
+}
+
+// localRegistry holds every tool Gateway's local socket serves, plus
 // registration order so tools/list output is deterministic (map iteration
 // order is not).
 type localRegistry struct {
@@ -69,43 +74,60 @@ type localRegistry struct {
 // they're invoked changes (design doc §5 subtask 2).
 func newLocalRegistry(s *Server) *localRegistry {
 	r := &localRegistry{tools: map[string]localTool{}}
-	reg := func(name, description string, example any, permission string, handler localToolHandler) {
-		r.tools[name] = localTool{Name: name, Description: description, ArgumentsExample: example, RequiredPermission: permission, Handler: handler}
+	registerVariants := func(name, description string, examples map[string]localArgumentVariant, permissions []string, results map[string]any, handler localToolHandler) {
+		if permissions == nil {
+			permissions = []string{}
+		}
+		r.tools[name] = localTool{
+			Name:                name,
+			Description:         description,
+			ArgumentExamples:    examples,
+			RequiredPermissions: permissions,
+			ResultExamples:      results,
+			Handler:             handler,
+		}
 		r.order = append(r.order, name)
 	}
+	reg := func(name, description string, example any, permission string, results map[string]any, handler localToolHandler) {
+		permissions := []string{}
+		if permission != "" {
+			permissions = append(permissions, permission)
+		}
+		registerVariants(name, description, singleArgument(example), permissions, results, handler)
+	}
 
-	reg("wormhole.agent.whoami", "Return the calling agent's identity, capabilities, and permissions.", whoAmIArgs{}, "", func(ctx context.Context, _ json.RawMessage) (any, error) {
+	reg("wormhole.agent.whoami", "Return the calling agent's identity, capabilities, and permissions.", whoAmIArgs{}, "", singleResult(whoAmIOutput{}), func(ctx context.Context, _ json.RawMessage) (any, error) {
 		return s.proxyWhoAmI(ctx)
 	})
 
-	reg("wormhole.task.list", "List tasks in the local task graph replica, optionally filtered by status.", listTasksArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.task.list", "List tasks in the local task graph replica, optionally filtered by status.", listTasksArgs{}, "", singleResult(localTaskListResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localListTasks(ctx, args)
 	})
 
-	reg("wormhole.task.get", "Get a single task by ID from the local task graph replica.", getTaskArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.task.get", "Get a single task by ID from the local task graph replica.", getTaskArgs{}, "", singleResult(localTaskResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localGetTask(ctx, args)
 	})
 
-	reg("wormhole.task.create", "Create a task locally and enqueue it for sync to the Coordination Server.", createTaskArgs{}, "task.create", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.task.create", "Create a task locally and enqueue it for sync to the Coordination Server.", createTaskArgs{}, "task.create", singleResult(localTaskWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleTaskCreate(ctx, args)
 	})
 
-	reg("wormhole.task.route", "Create a task and route it to a locally-registered agent by capability match.", taskRouteArgs{}, "task.create", func(ctx context.Context, args json.RawMessage) (any, error) {
+	registerVariants("wormhole.task.route", "Create a task and route it to a locally-registered agent by capability match.", singleArgument(taskRouteArgs{}), []string{"task.create", "task.assign"}, singleResult(localTaskRouteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleTaskRoute(ctx, args)
 	})
 
-	reg("wormhole.channel.list", "List channels in the local event bus replica.", channelListArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.channel.list", "List channels in the local event bus replica.", channelListArgs{}, "", singleResult(localChannelListResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localListChannels(ctx, args)
 	})
-	reg("wormhole.channel.create", "Create a channel locally and enqueue it for sync.", channelCreateArgs{}, "channel.create", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.channel.create", "Create a channel locally and enqueue it for sync.", channelCreateArgs{}, "channel.create", singleResult(localChannelWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleChannelCreate(ctx, args)
 	})
 
-	reg("wormhole.channel.events", "List recent events on channels in the local event bus replica.", channelEventsArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.channel.events", "List recent events on channels in the local event bus replica.", channelEventsArgs{}, "", singleResult(localEventListResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localListChannelEvents(ctx, args)
 	})
 
-	reg("wormhole.channel.post", "Publish a durable event to a channel locally and enqueue it for sync.", channelPostArgs{}, "channel.post", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.channel.post", "Publish a durable event to a channel locally and enqueue it for sync.", channelPostArgs{}, "channel.post", singleResult(localEventWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleChannelPost(ctx, args)
 	})
 
@@ -113,17 +135,20 @@ func newLocalRegistry(s *Server) *localRegistry {
 	// special-cased in handleToolsCall because event delivery happens as
 	// server-initiated MCP notifications after the initial ack, not a
 	// single (result, error) return (design doc §1 tools/call, §5).
-	reg("wormhole.channel.subscribe", "Subscribe to events on this connection; matching events are delivered as notifications/wormhole.event messages until the subscription ends.", channelSubscribeArgs{}, "", nil)
+	reg("wormhole.channel.subscribe", "Subscribe to events on this connection; matching events are delivered as notifications/wormhole.event messages until the subscription ends.", channelSubscribeArgs{}, "", singleResult(localSubscriptionResult{}), nil)
 
-	reg("wormhole.kb.list", "List KB articles in the local knowledge base replica.", kbListArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.kb.list", "List KB articles in the local knowledge base replica.", kbListArgs{}, "", singleResult(localArticleListResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localListArticles(ctx, args)
 	})
 
-	reg("wormhole.kb.get", "Get a KB article by ID, or list all articles if article_id is omitted.", kbGetArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.kb.get", "Get a KB article by ID, or list all articles if article_id is omitted.", kbGetArgs{}, "", map[string]any{
+		"article": localArticleResult{},
+		"list":    localArticleListResult{},
+	}, func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localGetArticle(ctx, args)
 	})
 
-	reg("wormhole.kb.write", "Write a KB article locally and enqueue it for sync.", kbWriteArgs{}, "kb.write", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.kb.write", "Write a KB article locally and enqueue it for sync.", kbWriteArgs{}, "kb.write", singleResult(localArticleWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleKBWrite(ctx, args)
 	})
 
@@ -132,22 +157,39 @@ func newLocalRegistry(s *Server) *localRegistry {
 	// Server; presence-registration args (agent_id + capabilities) go to
 	// the local scheduler. Dispatch by shape, same as the old switch case
 	// (isJoinRegisterArgs, localapi.go).
-	reg("wormhole.agent.register", "Register an agent: join/passport creation (proxied to the Coordination Server) or local presence registration, dispatched by argument shape.", agentRegisterArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
+	registerVariants("wormhole.agent.register", "Register an agent: join/passport creation (proxied to the Coordination Server) or local presence registration, dispatched by argument shape.", map[string]localArgumentVariant{
+		"join": {
+			Example:     agentJoinRegisterArgs{},
+			AnyRequired: [][]string{{"owner"}, {"name"}},
+		},
+		"presence": {Example: agentLocalRegisterArgs{}},
+	}, nil, map[string]any{
+		"join":     localJoinResult{},
+		"presence": localAgentResult{},
+	}, func(ctx context.Context, args json.RawMessage) (any, error) {
 		if isJoinRegisterArgs(args) {
 			return s.proxyRegister(ctx, args)
 		}
 		return s.handleAgentRegister(ctx, args)
 	})
 
-	reg("wormhole.agent.presence", "Update a locally-registered agent's presence status.", agentPresenceArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.agent.presence", "Update a locally-registered agent's presence status.", agentPresenceArgs{}, "", singleResult(localPresenceResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleAgentPresence(ctx, args)
 	})
 
-	reg("wormhole.agent.list", "List agents registered with the local scheduler.", agentListArgs{}, "", func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.agent.list", "List agents registered with the local scheduler.", agentListArgs{}, "", singleResult(localAgentListResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleAgentList(ctx, args)
 	})
 
 	return r
+}
+
+func singleArgument(example any) map[string]localArgumentVariant {
+	return map[string]localArgumentVariant{"default": {Example: example}}
+}
+
+func singleResult(example any) map[string]any {
+	return map[string]any{"default": example}
 }
 
 // List returns every registered tool in registration order.
@@ -230,22 +272,25 @@ type kbWriteArgs struct {
 	Frontmatter json.RawMessage `json:"frontmatter,omitempty"`
 }
 
-// agentRegisterArgs advertises the union of both wormhole.agent.register
-// shapes (join/passport and local presence) — every field is optional in
-// the schema since only one shape's fields are actually required at
-// runtime, and JSON Schema has no clean way to express "one of these two
-// shapes" without oneOf complexity this design already declined to add for
-// project_id (§1). Runtime dispatch (isJoinRegisterArgs) still enforces the
-// real shape-specific requirements.
-type agentRegisterArgs struct {
-	AgentID      string   `json:"agent_id,omitempty"`
-	Capabilities []string `json:"capabilities,omitempty"`
+// agentJoinRegisterArgs mirrors Fabric's accepted registration input,
+// including name as the backward-compatible alias for owner.
+type agentJoinRegisterArgs struct {
+	Name         string   `json:"name,omitempty"`
+	Permissions  []string `json:"permissions"`
 	Owner        string   `json:"owner,omitempty"`
-	Model        string   `json:"model,omitempty"`
-	Repositories []string `json:"repositories,omitempty"`
-	Roles        []string `json:"roles,omitempty"`
+	Model        string   `json:"model"`
+	Capabilities []string `json:"capabilities"`
+	Repositories []string `json:"repositories"`
+	Roles        []string `json:"roles"`
 	Role         string   `json:"role,omitempty"`
-	Permissions  []string `json:"permissions,omitempty"`
+}
+
+// agentLocalRegisterArgs is the local scheduler-presence registration shape.
+// Capabilities are optional because handleAgentRegister accepts an omitted
+// list and registers the agent with no declared capabilities.
+type agentLocalRegisterArgs struct {
+	AgentID      string   `json:"agent_id"`
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 type agentPresenceArgs struct {
@@ -254,6 +299,151 @@ type agentPresenceArgs struct {
 }
 
 type agentListArgs struct{}
+
+// Result-shape structs are the canonical successful-response examples held by
+// localRegistry. Handlers predate the descriptor registry and return equivalent
+// maps; keeping the examples beside the registrations avoids a second
+// hand-maintained tool inventory while preserving those handler APIs.
+type localTaskResult struct {
+	ID           string     `json:"id"`
+	Title        string     `json:"title"`
+	Description  string     `json:"description"`
+	Status       string     `json:"status"`
+	Priority     int        `json:"priority"`
+	OwnerAgentID *string    `json:"owner_agent_id"`
+	ParentTaskID *string    `json:"parent_task_id"`
+	DueBy        *time.Time `json:"due_by"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
+type localTaskListResult struct {
+	Tasks []localTaskResult `json:"tasks"`
+}
+
+type localTaskWriteResult struct {
+	ID           string     `json:"id"`
+	NamespaceID  string     `json:"namespace_id"`
+	Title        string     `json:"title"`
+	Description  string     `json:"description"`
+	Status       string     `json:"status"`
+	Priority     int        `json:"priority"`
+	OwnerAgentID *string    `json:"owner_agent_id"`
+	ParentTaskID *string    `json:"parent_task_id"`
+	DueBy        *time.Time `json:"due_by"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
+type localTaskRouteResult struct {
+	TaskID      string `json:"task_id"`
+	NamespaceID string `json:"namespace_id"`
+	Capability  string `json:"capability"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+	AssignedTo  string `json:"assigned_to"`
+	AgentStatus string `json:"agent_status"`
+}
+
+type localChannelResult struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type localChannelListResult struct {
+	Channels []localChannelResult `json:"channels"`
+}
+
+type localChannelWriteResult struct {
+	ID          string `json:"id"`
+	NamespaceID string `json:"namespace_id"`
+	Name        string `json:"name"`
+}
+
+type localEventResult struct {
+	ID        string          `json:"id"`
+	ChannelID string          `json:"channel_id"`
+	AgentID   string          `json:"agent_id"`
+	EventType string          `json:"event_type"`
+	Payload   json.RawMessage `json:"payload"`
+	Note      *string         `json:"note"`
+	CreatedAt time.Time       `json:"created_at"`
+}
+
+type localEventListResult struct {
+	Events []localEventResult `json:"events"`
+}
+
+type localEventWriteResult struct {
+	ID          string          `json:"id"`
+	NamespaceID string          `json:"namespace_id"`
+	ChannelID   string          `json:"channel_id"`
+	AgentID     string          `json:"agent_id"`
+	EventType   string          `json:"event_type"`
+	Payload     json.RawMessage `json:"payload"`
+	Note        *string         `json:"note"`
+	CreatedAt   time.Time       `json:"created_at"`
+}
+
+type localSubscriptionResult struct {
+	SubscriptionID string `json:"subscription_id"`
+	Namespace      string `json:"namespace"`
+	EventType      string `json:"event_type"`
+	Capability     string `json:"capability"`
+	AgentID        string `json:"agent_id"`
+}
+
+type localArticleResult struct {
+	ID            string          `json:"id"`
+	Title         string          `json:"title"`
+	Body          string          `json:"body"`
+	Frontmatter   json.RawMessage `json:"frontmatter"`
+	AuthorAgentID string          `json:"author_agent_id"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
+}
+
+type localArticleListResult struct {
+	Articles []localArticleResult `json:"articles"`
+}
+
+type localArticleWriteResult struct {
+	ID            string          `json:"id"`
+	NamespaceID   string          `json:"namespace_id"`
+	Title         string          `json:"title"`
+	Body          string          `json:"body"`
+	Frontmatter   json.RawMessage `json:"frontmatter"`
+	AuthorAgentID string          `json:"author_agent_id"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
+}
+
+type localAgentResult struct {
+	AgentID      string   `json:"agent_id"`
+	NamespaceID  string   `json:"namespace_id"`
+	Capabilities []string `json:"capabilities"`
+	Status       string   `json:"status"`
+}
+
+type localPresenceResult struct {
+	AgentID string `json:"agent_id"`
+	Status  string `json:"status"`
+}
+
+type localAgentListResult struct {
+	Agents []localAgentResult `json:"agents"`
+}
+
+type localJoinResult struct {
+	AgentID      string    `json:"agent_id"`
+	PassportID   string    `json:"passport_id"`
+	Token        string    `json:"token"`
+	Repositories []string  `json:"repositories"`
+	Roles        []string  `json:"roles"`
+	IssuedAt     time.Time `json:"issued_at"`
+	Role         string    `json:"role,omitempty"`
+}
 
 // mcpSession is per-connection state a persistent MCP session requires that
 // the old one-shot protocol never carried: whether initialize +
@@ -270,7 +460,7 @@ type mcpSession struct {
 
 // initializeResult is the "initialize" response result shape (design doc
 // §1), identical in spirit to internal/mcp/jsonrpc.go's initializeResult
-// but with serverInfo.name = "wormholed" — this is the local daemon
+// but with serverInfo.name = "gatewayd" — this is the local daemon
 // identifying itself, not the Coordination Server.
 type initializeResult struct {
 	ProtocolVersion string            `json:"protocolVersion"`
@@ -280,11 +470,15 @@ type initializeResult struct {
 
 // handleInitialize implements "initialize". No auth: listing server
 // capabilities is not a scoped operation (design doc §1).
-func handleInitialize() any {
+func handleInitialize(serverVersion ...string) any {
+	version := "dev"
+	if len(serverVersion) > 0 && serverVersion[0] != "" {
+		version = serverVersion[0]
+	}
 	return initializeResult{
 		ProtocolVersion: "2025-11-25",
 		Capabilities:    map[string]any{"tools": map[string]any{}},
-		ServerInfo:      map[string]string{"name": "wormholed", "version": "0.2.4-alpha"},
+		ServerInfo:      map[string]string{"name": "gatewayd", "version": version},
 	}
 }
 
@@ -296,7 +490,7 @@ type toolListEntry struct {
 }
 
 // handleToolsList implements "tools/list": schemas are derived from each
-// tool's ArgumentsExample via reflection, matching design doc §1/§5.
+// tool's ArgumentExamples via reflection, matching design doc §1/§5.
 func handleToolsList(reg *localRegistry) any {
 	tools := reg.List()
 	entries := make([]toolListEntry, 0, len(tools))
@@ -310,28 +504,58 @@ func handleToolsList(reg *localRegistry) any {
 	return map[string]any{"tools": entries}
 }
 
-// buildInputSchema reflects on tool.ArgumentsExample to produce a JSON
-// Schema object (properties + required), then injects project_id as a
-// required string property unless the tool is project-agnostic
-// (wormhole.agent.whoami — design doc §1).
+// buildInputSchema returns the one canonical request schema for ordinary
+// tools and an anyOf union for tools with multiple accepted request variants.
 func buildInputSchema(t localTool) map[string]any {
-	properties := map[string]any{}
-	required := []string{}
-
-	if t.ArgumentsExample != nil {
-		properties, required = reflectStructSchema(reflect.TypeOf(t.ArgumentsExample))
+	schemas := buildInputSchemas(t)
+	variants := make([]string, 0, len(schemas))
+	for variant := range schemas {
+		variants = append(variants, variant)
 	}
-
-	if t.Name != "wormhole.agent.whoami" {
-		properties["project_id"] = map[string]any{"type": "string"}
-		required = append(required, "project_id")
+	sort.Strings(variants)
+	if len(variants) == 1 {
+		return schemas[variants[0]]
 	}
-
-	return map[string]any{
-		"type":       "object",
-		"properties": properties,
-		"required":   required,
+	anyOf := make([]map[string]any, 0, len(variants))
+	for _, variant := range variants {
+		anyOf = append(anyOf, schemas[variant])
 	}
+	return map[string]any{"anyOf": anyOf}
+}
+
+// buildInputSchemas reflects each named argument example into an exact JSON
+// Schema object, then injects project_id as a required string property unless
+// the tool is project-agnostic (wormhole.agent.whoami — design doc §1).
+func buildInputSchemas(t localTool) map[string]map[string]any {
+	schemas := make(map[string]map[string]any, len(t.ArgumentExamples))
+	for variant, argument := range t.ArgumentExamples {
+		properties := map[string]any{}
+		required := []string{}
+
+		if argument.Example != nil {
+			properties, required = reflectStructSchema(reflect.TypeOf(argument.Example))
+		}
+
+		if t.Name != "wormhole.agent.whoami" {
+			properties["project_id"] = map[string]any{"type": "string"}
+			required = append(required, "project_id")
+		}
+
+		schema := map[string]any{
+			"type":       "object",
+			"properties": properties,
+			"required":   required,
+		}
+		if len(argument.AnyRequired) > 0 {
+			alternatives := make([]map[string]any, 0, len(argument.AnyRequired))
+			for _, fields := range argument.AnyRequired {
+				alternatives = append(alternatives, map[string]any{"required": fields})
+			}
+			schema["anyOf"] = alternatives
+		}
+		schemas[variant] = schema
+	}
+	return schemas
 }
 
 // reflectStructSchema, parseJSONTag, jsonSchemaForType: copied verbatim
@@ -398,7 +622,7 @@ func jsonSchemaForType(t reflect.Type) map[string]any {
 	case t == reflect.TypeOf(time.Time{}):
 		return map[string]any{"type": "string", "format": "date-time"}
 	case t == reflect.TypeOf(json.RawMessage{}):
-		return map[string]any{"type": "object"}
+		return map[string]any{}
 	}
 
 	switch t.Kind() {
@@ -410,9 +634,91 @@ func jsonSchemaForType(t reflect.Type) map[string]any {
 		return map[string]any{"type": "integer"}
 	case reflect.Slice:
 		return map[string]any{"type": "array", "items": jsonSchemaForType(t.Elem())}
+	case reflect.Struct:
+		properties, required := reflectStructSchema(t)
+		return map[string]any{"type": "object", "properties": properties, "required": required}
 	default:
 		return map[string]any{"type": "object"}
 	}
+}
+
+// jsonResponseSchemaForType derives the encoded JSON shape of a successful
+// response. Pointers, slices, and maps can encode as null when nil.
+func jsonResponseSchemaForType(t reflect.Type) map[string]any {
+	schema := jsonPresentResponseSchemaForType(t)
+	if t != reflect.TypeOf(json.RawMessage{}) &&
+		(t.Kind() == reflect.Ptr || t.Kind() == reflect.Slice || t.Kind() == reflect.Map) {
+		return map[string]any{"anyOf": []map[string]any{
+			schema,
+			{"type": "null"},
+		}}
+	}
+	return schema
+}
+
+// jsonPresentResponseSchemaForType derives the shape after encoding/json has
+// decided an omitempty field is present. The top-level value therefore cannot
+// be a nil slice/map or nil pointer, though nested values remain independently
+// nullable.
+func jsonPresentResponseSchemaForType(t reflect.Type) map[string]any {
+	switch {
+	case t == reflect.TypeOf(time.Time{}):
+		return map[string]any{"type": "string", "format": "date-time"}
+	case t == reflect.TypeOf(json.RawMessage{}):
+		return map[string]any{}
+	}
+
+	switch t.Kind() {
+	case reflect.Ptr:
+		return jsonResponseSchemaForType(t.Elem())
+	case reflect.String:
+		return map[string]any{"type": "string"}
+	case reflect.Bool:
+		return map[string]any{"type": "boolean"}
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return map[string]any{"type": "integer"}
+	case reflect.Slice:
+		return map[string]any{"type": "array", "items": jsonResponseSchemaForType(t.Elem())}
+	case reflect.Map:
+		return map[string]any{"type": "object"}
+	case reflect.Struct:
+		properties, required := reflectResponseStructSchema(t)
+		return map[string]any{"type": "object", "properties": properties, "required": required}
+	default:
+		return map[string]any{"type": "object"}
+	}
+}
+
+func reflectResponseStructSchema(t reflect.Type) (map[string]any, []string) {
+	properties := map[string]any{}
+	required := []string{}
+
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		name, omitempty := parseJSONTag(field.Tag.Get("json"), field.Name)
+		if name == "-" {
+			continue
+		}
+
+		schema := jsonResponseSchemaForType(field.Type)
+		if omitempty {
+			schema = jsonPresentResponseSchemaForType(field.Type)
+		}
+		if enumTag := field.Tag.Get("enum"); enumTag != "" {
+			values := strings.Split(enumTag, ",")
+			enumValues := make([]any, len(values))
+			for i, v := range values {
+				enumValues[i] = v
+			}
+			schema["enum"] = enumValues
+		}
+		properties[name] = schema
+		if !omitempty {
+			required = append(required, name)
+		}
+	}
+
+	return properties, required
 }
 
 // handleToolsCall implements "tools/call" (design doc §1, §5). Dispatch
@@ -550,7 +856,7 @@ func (s *Server) dispatchMCPMessage(ctx context.Context, sess *mcpSession, conn 
 
 	switch req.Method {
 	case "initialize":
-		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: marshalResult(handleInitialize())})
+		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: marshalResult(handleInitialize(s.version))})
 
 	case "notifications/initialized":
 		// No response is ever produced for a notification.

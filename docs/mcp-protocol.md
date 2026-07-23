@@ -8,9 +8,14 @@ the ambiguity ladder in `docs/implementation-rules.md` §2.4.
 
 ## 1. Transport contract
 
-`wormhole-server` exposes a single JSON-RPC 2.0 MCP endpoint at `/mcp`. The contract below
+`fabric` exposes a single JSON-RPC 2.0 MCP endpoint at `/mcp`. The contract below
 keeps the server compatible with standard MCP clients, including Claude Code, without a
 custom tool-call envelope.
+
+Harnesses normally use `gatewayd` (Gateway) through the local Unix socket and
+`wormhole mcp` bridge; they do not use this Fabric endpoint directly. The retained
+`wormholed.sock` and `wormholed.db` names are local-state paths, not executable
+aliases for Gateway.
 
 ## 2. Transport: Streamable HTTP, single `/mcp` endpoint
 

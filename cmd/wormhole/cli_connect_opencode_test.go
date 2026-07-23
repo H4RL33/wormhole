@@ -15,8 +15,8 @@ import (
 // under mcp.<connector-name>, using the confirmed opencode.ai/config.json
 // schema (type: "local", command array, enabled).
 func TestRunConnect_OpenCodeTarget_CreatesFreshConfig(t *testing.T) {
-	fakeWormholedSocket(t) // make socket reachable
-	fakeStdioBinary(t)     // add stdio binary to PATH
+	fakeGatewaySocket(t) // make socket reachable
+	fakeStdioBinary(t)   // add stdio binary to PATH
 
 	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
 		t.Fatal("connect must not call wormhole.kb.search")
@@ -97,8 +97,8 @@ func TestRunConnect_OpenCodeTarget_CreatesFreshConfig(t *testing.T) {
 // merge untouched, and an existing $schema is left exactly as found (not
 // overwritten with the opencode.ai default).
 func TestRunConnect_OpenCodeTarget_MergesExistingConfig(t *testing.T) {
-	fakeWormholedSocket(t) // make socket reachable
-	fakeStdioBinary(t)     // add stdio binary to PATH
+	fakeGatewaySocket(t) // make socket reachable
+	fakeStdioBinary(t)   // add stdio binary to PATH
 
 	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
 		t.Fatal("connect must not call wormhole.kb.search")
@@ -174,8 +174,8 @@ func TestRunConnect_OpenCodeTarget_MergesExistingConfig(t *testing.T) {
 // is used as the mcp.<name> key for the OpenCode path too, matching how
 // Claude's connector name is used positionally.
 func TestRunConnect_OpenCodeTarget_CustomConnectorName(t *testing.T) {
-	fakeWormholedSocket(t) // make socket reachable
-	fakeStdioBinary(t)     // add stdio binary to PATH
+	fakeGatewaySocket(t) // make socket reachable
+	fakeStdioBinary(t)   // add stdio binary to PATH
 
 	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
 		t.Fatal("connect must not call wormhole.kb.search")
@@ -222,8 +222,8 @@ func TestRunConnect_OpenCodeTarget_CustomConnectorName(t *testing.T) {
 // owner-only permissions (0o600), and the parent directory is created with
 // owner-only access (0o700).
 func TestRunConnect_OpenCodeTarget_ProtectsConfigFilePermissions(t *testing.T) {
-	fakeWormholedSocket(t) // make socket reachable
-	fakeStdioBinary(t)     // add stdio binary to PATH
+	fakeGatewaySocket(t) // make socket reachable
+	fakeStdioBinary(t)   // add stdio binary to PATH
 
 	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
 		t.Fatal("connect must not call wormhole.kb.search")
