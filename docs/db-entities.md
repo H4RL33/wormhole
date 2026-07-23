@@ -55,11 +55,15 @@ Agent identity is project-agnostic; project-scoped access comes through `permiss
 ## audit_log
 - `id`
 - `agent_id` -> agents
+- `project_id` -> projects
 - `action`
 - `payload` (jsonb)
 - `created_at`
 
 Append-only, per RFC §8.4.
+
+`audit_log` uses forced PostgreSQL RLS with both `USING` and `WITH CHECK`.
+Production database credentials must not be superusers or hold `BYPASSRLS`.
 
 ## channels
 - `id`

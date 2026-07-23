@@ -5,9 +5,10 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"strings"
 	"testing"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 
 	"github.com/H4RL33/wormhole/internal/types"
 )
@@ -33,6 +34,186 @@ type rlsTableCase struct {
 	updateSQL string
 	insertSQL string
 	insertArg []any
+}
+
+func TestAuditLogPolicyIsForcedAndChecksWrites(t *testing.T) {
+	db := testDB(t)
+
+	var forced bool
+	if err := db.QueryRow(`
+		SELECT relforcerowsecurity
+		  FROM pg_class
+		 WHERE oid = 'audit_log'::regclass
+	`).Scan(&forced); err != nil {
+		t.Fatalf("query audit_log forced RLS: %v", err)
+	}
+	if !forced {
+		t.Fatal("audit_log FORCE ROW LEVEL SECURITY is disabled")
+	}
+
+	var usingExpr, checkExpr string
+	if err := db.QueryRow(`
+		SELECT COALESCE(pg_get_expr(polqual, polrelid), ''),
+		       COALESCE(pg_get_expr(polwithcheck, polrelid), '')
+		  FROM pg_policy
+		 WHERE polrelid = 'audit_log'::regclass
+		   AND polname = 'audit_log_project_isolation'
+	`).Scan(&usingExpr, &checkExpr); err != nil {
+		t.Fatalf("query audit_log policy: %v", err)
+	}
+	if !strings.Contains(usingExpr, "wormhole.project_id") {
+		t.Fatalf("audit_log USING expression = %q", usingExpr)
+	}
+	if !strings.Contains(checkExpr, "wormhole.project_id") {
+		t.Fatalf("audit_log WITH CHECK expression = %q", checkExpr)
+	}
+}
+
+func TestAuditLogRLSRejectsCrossProjectReadAndWrite(t *testing.T) {
+	owner := testDB(t)
+	restricted := newRestrictedRLSDB(t, owner)
+	fx := seedRLSMatrix(t, owner)
+	mustExec(t, owner,
+		`INSERT INTO audit_log (agent_id, project_id, action) VALUES ($1, $2, 'matrix.project-b')`,
+		fx.agentID, fx.projectB,
+	)
+
+	txA := beginRestrictedTx(t, restricted, fx.projectA)
+	var projectBRows int
+	if err := txA.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM audit_log WHERE project_id = $1`, fx.projectB,
+	).Scan(&projectBRows); err != nil {
+		txA.Rollback()
+		t.Fatalf("cross-project audit read: %v", err)
+	}
+	if projectBRows != 0 {
+		txA.Rollback()
+		t.Fatalf("project-A scope read %d project-B audit rows, want 0", projectBRows)
+	}
+	if err := txA.Rollback(); err != nil {
+		t.Fatalf("rollback cross-project audit read: %v", err)
+	}
+
+	writeTxA := beginRestrictedTx(t, restricted, fx.projectA)
+	if _, err := writeTxA.ExecContext(context.Background(),
+		`INSERT INTO audit_log (agent_id, project_id, action) VALUES ($1, $2, 'cross-project')`,
+		fx.agentID, fx.projectB,
+	); err == nil {
+		writeTxA.Rollback()
+		t.Fatal("project-A scope inserted a project-B audit row")
+	}
+	if err := writeTxA.Rollback(); err != nil {
+		t.Fatalf("rollback rejected cross-project audit write: %v", err)
+	}
+
+	freshTxA := beginRestrictedTx(t, restricted, fx.projectA)
+	defer freshTxA.Rollback()
+	var projectARows int
+	if err := freshTxA.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM audit_log WHERE project_id = $1 AND action = 'matrix.seed'`, fx.projectA,
+	).Scan(&projectARows); err != nil {
+		t.Fatalf("audit read after rejected write: %v", err)
+	}
+	if projectARows != 1 {
+		t.Fatalf("project-A audit rows after rejected write = %d, want 1", projectARows)
+	}
+}
+
+func TestAuditLogForcedRLSAppliesToOrdinaryTableOwner(t *testing.T) {
+	const temporaryOwner = "wormhole_audit_table_owner"
+
+	ctx := context.Background()
+	owner := testDB(t)
+	_ = newRestrictedRLSDB(t, owner)
+	fx := seedRLSMatrix(t, owner)
+
+	var originalOwner string
+	if err := owner.QueryRowContext(ctx, `
+		SELECT pg_get_userbyid(relowner)
+		  FROM pg_class
+		 WHERE oid = 'audit_log'::regclass
+	`).Scan(&originalOwner); err != nil {
+		t.Fatalf("query original audit_log owner: %v", err)
+	}
+
+	roleCreated := false
+	ownershipTransferred := false
+	t.Cleanup(func() {
+		if _, err := owner.ExecContext(context.Background(), `RESET ROLE`); err != nil {
+			t.Errorf("reset role during audit owner cleanup: %v", err)
+		}
+		if ownershipTransferred {
+			restoreOwnerSQL := fmt.Sprintf(
+				`ALTER TABLE audit_log OWNER TO %s`,
+				pq.QuoteIdentifier(originalOwner),
+			)
+			if _, err := owner.ExecContext(context.Background(), restoreOwnerSQL); err != nil {
+				t.Errorf("restore audit_log owner to %q: %v", originalOwner, err)
+			} else {
+				ownershipTransferred = false
+			}
+		}
+		if roleCreated {
+			if _, err := owner.ExecContext(context.Background(), `DROP ROLE wormhole_audit_table_owner`); err != nil {
+				t.Errorf("drop temporary audit owner: %v", err)
+			} else {
+				roleCreated = false
+			}
+		}
+	})
+
+	if _, err := owner.ExecContext(ctx,
+		`CREATE ROLE wormhole_audit_table_owner NOLOGIN NOSUPERUSER NOBYPASSRLS`,
+	); err != nil {
+		t.Fatalf("create temporary audit owner: %v", err)
+	}
+	roleCreated = true
+
+	var canLogin, superuser, bypassRLS bool
+	if err := owner.QueryRowContext(ctx, `
+		SELECT rolcanlogin, rolsuper, rolbypassrls
+		  FROM pg_roles
+		 WHERE rolname = $1
+	`, temporaryOwner).Scan(&canLogin, &superuser, &bypassRLS); err != nil {
+		t.Fatalf("query temporary audit owner attributes: %v", err)
+	}
+	if canLogin || superuser || bypassRLS {
+		t.Fatalf(
+			"temporary audit owner attributes: login=%v superuser=%v bypassrls=%v",
+			canLogin, superuser, bypassRLS,
+		)
+	}
+
+	if _, err := owner.ExecContext(ctx,
+		`ALTER TABLE audit_log OWNER TO wormhole_audit_table_owner`,
+	); err != nil {
+		t.Fatalf("transfer audit_log ownership: %v", err)
+	}
+	ownershipTransferred = true
+
+	tx, err := owner.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin temporary audit owner transaction: %v", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `SET LOCAL ROLE wormhole_audit_table_owner`); err != nil {
+		t.Fatalf("assume temporary audit owner role: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`SELECT set_config('wormhole.project_id', $1, true)`, fx.projectB,
+	); err != nil {
+		t.Fatalf("set temporary audit owner project context: %v", err)
+	}
+
+	var projectARows int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT count(*) FROM audit_log WHERE project_id = $1`, fx.projectA,
+	).Scan(&projectARows); err != nil {
+		t.Fatalf("query audit_log as temporary owner: %v", err)
+	}
+	if projectARows != 0 {
+		t.Fatalf("project-B scoped table owner read %d project-A audit rows, want 0", projectARows)
+	}
 }
 
 func TestRestrictedRoleRLSOperationMatrix(t *testing.T) {
@@ -157,6 +338,22 @@ func newRestrictedRLSDB(t *testing.T, owner *sql.DB) *sql.DB {
 	if err := db.PingContext(context.Background()); err != nil {
 		db.Close()
 		t.Fatalf("ping restricted database: %v", err)
+	}
+	var superuser, bypassRLS bool
+	if err := db.QueryRowContext(context.Background(), `
+		SELECT rolsuper, rolbypassrls
+		  FROM pg_roles
+		 WHERE rolname = current_user
+	`).Scan(&superuser, &bypassRLS); err != nil {
+		db.Close()
+		t.Fatalf("query restricted role attributes: %v", err)
+	}
+	if superuser || bypassRLS {
+		db.Close()
+		t.Fatalf(
+			"restricted RLS role attributes: superuser=%v bypassrls=%v",
+			superuser, bypassRLS,
+		)
 	}
 	t.Cleanup(func() { db.Close() })
 	return db
