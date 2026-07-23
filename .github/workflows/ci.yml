@@ -6,9 +6,48 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  test:
+  static:
+    name: Static
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Check formatting
+        run: make fmt-check
+      - name: Vet
+        run: make vet
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: make build
+      - name: Cross-build unsupported gatewayd target
+        run: |
+          GOOS=darwin GOARCH=arm64 go build -o /tmp/gatewayd-darwin ./cmd/gatewayd
+          GOOS=darwin GOARCH=arm64 go test -c -o /tmp/gatewayd-darwin.test ./cmd/gatewayd
+
+  integration:
+    name: Integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       WORMHOLE_DATABASE_URL: postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable
       WORMHOLE_INTEGRATION_REQUIRED: "1"
@@ -26,49 +65,86 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
-
       - name: Install golang-migrate
-        run: go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
-
-      - name: Run migrations up
-        run: migrate -path migrations -database "postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable" up
-
-      - name: Check formatting
-        run: make fmt-check
-
-      - name: Build
-        run: make build
-
-      - name: Cross-build unsupported gatewayd target
-        run: |
-          GOOS=darwin GOARCH=arm64 go build -o /tmp/gatewayd-darwin ./cmd/gatewayd
-          GOOS=darwin GOARCH=arm64 go test -c -o /tmp/gatewayd-darwin.test ./cmd/gatewayd
-
-      - name: Vet
-        run: make vet
-
+        run: go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.18.3
+      - name: Run migrations
+        run: migrate -path migrations -database "$WORMHOLE_DATABASE_URL" up
       - name: Integration tests
         run: make integration
 
+  race:
+    name: Race
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      WORMHOLE_DATABASE_URL: postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable
+      WORMHOLE_INTEGRATION_REQUIRED: "1"
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: wormhole
+          POSTGRES_PASSWORD: wormhole
+          POSTGRES_DB: wormhole
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Install golang-migrate
+        run: go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.18.3
+      - name: Run migrations
+        run: migrate -path migrations -database "$WORMHOLE_DATABASE_URL" up
       - name: Race tests
         run: make race
 
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      WORMHOLE_DATABASE_URL: postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable
+      WORMHOLE_INTEGRATION_REQUIRED: "1"
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: wormhole
+          POSTGRES_PASSWORD: wormhole
+          POSTGRES_DB: wormhole
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Install golang-migrate
+        run: go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.18.3
+      - name: Run migrations
+        run: migrate -path migrations -database "$WORMHOLE_DATABASE_URL" up
       - name: Coverage
         run: make coverage
-
       - name: Upload coverage profile
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage
           path: coverage.out
-
-      - name: Verify migrations down
-        run: migrate -path migrations -database "postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable" down -all
