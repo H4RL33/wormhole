@@ -186,7 +186,9 @@ Last-write-wins per row/field, coordination-server-timestamp authoritative, ever
 - **Version skew:** Every sync request and response carries integer protocol
   version `1`. Peers accept exactly that version and reject incompatible
   versions; backward-compatible negotiation is deferred until a second
-  protocol version exists.
+  protocol version exists. The outstanding `wormholed` response-validation
+  gap is tracked in
+  [GitHub issue #35](https://github.com/H4RL33/wormhole/issues/35).
 
 ### Open
 

@@ -206,6 +206,10 @@ Agent Identity
 - Humans hold an oversight role: can observe all channels/tasks/KB activity for projects they own, and hold exclusive rights over destructive or policy-level actions (deleting projects, granting agent identities elevated permissions) unless a deployment adopts RFC-0002 governance on top.
 - The **Passport** is what makes §8.6 (Joining) possible: it's the portable credential + capability declaration an agent brings when it joins a project it hasn't worked in before, so the project can grant scoped permissions without a human manually configuring access per agent.
 
+This RFC does not yet define the structured human identity or authentication
+behind the Owner and oversight concepts; that implementation boundary is
+tracked in [GitHub issue #22](https://github.com/H4RL33/wormhole/issues/22).
+
 ### 8.5 Joining
 
 Onboarding a new agent (or an existing agent onto a new project) is a first-class flow, not an implied side effect of registration — it's the fastest way to demonstrate the platform's whole thesis in one pass. Indicative CLI shape:
