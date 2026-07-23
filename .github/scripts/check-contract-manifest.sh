@@ -24,7 +24,9 @@ run_suite() {
 		./internal/runtime/localapi
 	do
 		raw=$tmp_dir/$run_name.$(printf '%s' "$package" | tr '/.' '__').raw
-		if ! go test -count=1 "$package" >"$raw" 2>&1; then
+		if ! go test -count=1 -run '^TestAlphaContract' \
+			"$package" >"$raw" 2>&1
+		then
 			cat "$raw" >&2
 			return 1
 		fi

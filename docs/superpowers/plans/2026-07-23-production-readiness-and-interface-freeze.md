@@ -6,7 +6,7 @@
 
 **Architecture:** Repair the existing Linux safety test before making it a gate, then land the two binary renames as an alpha hard cut. Split CI into stable named jobs, add a reproducible tag/rehearsal release workflow, inventory public contracts without freezing alpha development, and apply GitHub enforcement only after every proposed required check is green on `main`.
 
-**Tech Stack:** Go 1.26.4, GitHub Actions, PostgreSQL 16 with pgvector, Docker Buildx, GHCR, Syft SPDX SBOMs, Sigstore Cosign, GitHub artifact attestations, GitHub repository rulesets.
+**Tech Stack:** Go 1.26.5, GitHub Actions, PostgreSQL 16 with pgvector, Docker Buildx, GHCR, Syft SPDX SBOMs, Sigstore Cosign, GitHub artifact attestations, GitHub repository rulesets.
 
 ## Global Constraints
 
