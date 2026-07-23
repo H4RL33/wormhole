@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 )
 
-// wormholedSocketPath derives wormholed's local API socket path
-func wormholedSocketPath() string {
+// gatewaySocketPath derives Gateway's local API socket path.
+func gatewaySocketPath() string {
 	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
 	if runtimeDir == "" {
 		runtimeDir = filepath.Join(os.TempDir(), "wormhole-runtime")

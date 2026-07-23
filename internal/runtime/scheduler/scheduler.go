@@ -1,4 +1,4 @@
-// Package scheduler implements wormholed's local scheduling surface
+// Package scheduler implements Gateway's local scheduling surface
 // (RFC-0003 §6.1, design brief "Scheduling"/"Presence"). It tracks registered
 // agents, their presence and capabilities, and routes tasks to matching agents
 // without a Coordination Server round trip.
@@ -18,7 +18,7 @@ const (
 	StatusIdle   AgentStatus = "idle"
 )
 
-// RegisteredAgent is a wormholed-registered agent identity with its capabilities
+// RegisteredAgent is a Gateway-registered agent identity with its capabilities
 // and current presence state.
 type RegisteredAgent struct {
 	AgentID      string

@@ -25,7 +25,7 @@ func main() {
 	if err := runServerMain(types.LoadConfig(), func(server *http.Server) error {
 		return server.ListenAndServe()
 	}); err != nil {
-		log.Fatal(err)
+		log.Fatalf("fabric: %v", err)
 	}
 }
 
@@ -41,7 +41,7 @@ func runServer(cfg types.Config, serve func(*http.Server) error) error {
 func runServerWithOpen(cfg types.Config, openDB func(types.Config) (*sql.DB, error), serve func(*http.Server) error) error {
 	db, err := openDB(cfg)
 	if err != nil {
-		return fmt.Errorf("open database: %w", err)
+		return fmt.Errorf("fabric: open database: %w", err)
 	}
 	defer db.Close()
 
@@ -91,7 +91,7 @@ func runServerWithOpen(cfg types.Config, openDB func(types.Config) (*sql.DB, err
 	}
 	mux.Handle("/dashboard/", webuiHandler.NewMux())
 
-	log.Printf("wormhole-server listening on %s", cfg.ListenAddr)
+	log.Printf("fabric listening on %s", cfg.ListenAddr)
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           loggingMiddleware(mux),

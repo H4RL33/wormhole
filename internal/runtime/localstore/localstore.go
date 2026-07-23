@@ -1,4 +1,4 @@
-// Package localstore is wormholed's durable local state (RFC-0003 §6.3,
+// Package localstore is Gateway's durable local state (RFC-0003 §6.3,
 // §7.2). It follows the Store-struct/sentinel-error/wrapped-error shape
 // established by internal/core/identity (docs/implementation-rules.md §5), adapted
 // for SQLite: no transactions needed yet (single-statement writes only,
@@ -190,7 +190,7 @@ func (s *Store) Close() error {
 }
 
 // DB returns the underlying *sql.DB for constructing repositories that share
-// the same connection. P2: used by cmd/wormholed to wire TaskRepo, EventRepo,
+// the same connection. P2: used by cmd/gatewayd to wire TaskRepo, EventRepo,
 // and KBRepo on the same SQLite file.
 func (s *Store) DB() *sql.DB {
 	return s.db

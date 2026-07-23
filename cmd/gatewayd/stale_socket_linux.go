@@ -18,17 +18,17 @@ const renameNoReplaceFlag = 1
 func openStaleSocketIdentity(socketPath string) (staleSocketIdentity, error) {
 	fd, err := unix.Open(socketPath, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return staleSocketIdentity{}, fmt.Errorf("wormholed: open stale socket path: %w", err)
+		return staleSocketIdentity{}, fmt.Errorf("gatewayd: open stale socket path: %w", err)
 	}
 
 	var expected unix.Stat_t
 	if err := unix.Fstat(fd, &expected); err != nil {
 		_ = unix.Close(fd)
-		return staleSocketIdentity{}, fmt.Errorf("wormholed: stat stale socket descriptor: %w", err)
+		return staleSocketIdentity{}, fmt.Errorf("gatewayd: stat stale socket descriptor: %w", err)
 	}
 	if expected.Mode&unix.S_IFMT != unix.S_IFSOCK {
 		_ = unix.Close(fd)
-		return staleSocketIdentity{}, fmt.Errorf("wormholed: stale socket path %s is not a socket", socketPath)
+		return staleSocketIdentity{}, fmt.Errorf("gatewayd: stale socket path %s is not a socket", socketPath)
 	}
 	return staleSocketIdentity{
 		dev: uint64(expected.Dev),
@@ -49,9 +49,9 @@ func quarantineAndRemoveSocket(socketPath string, expectedDev, expectedIno uint6
 		hooks.beforeQuarantine()
 	}
 
-	quarantineDir, err := os.MkdirTemp(filepath.Dir(socketPath), ".wormholed-stale-")
+	quarantineDir, err := os.MkdirTemp(filepath.Dir(socketPath), ".gatewayd-stale-")
 	if err != nil {
-		return fmt.Errorf("wormholed: create stale-socket quarantine: %w", err)
+		return fmt.Errorf("gatewayd: create stale-socket quarantine: %w", err)
 	}
 	quarantinePath := filepath.Join(quarantineDir, "socket")
 	removeQuarantineDir := true
@@ -62,7 +62,7 @@ func quarantineAndRemoveSocket(socketPath string, expectedDev, expectedIno uint6
 	}()
 
 	if err := os.Rename(socketPath, quarantinePath); err != nil {
-		return fmt.Errorf("wormholed: socket changed during stale-socket removal: %w", err)
+		return fmt.Errorf("gatewayd: socket changed during stale-socket removal: %w", err)
 	}
 	if hooks.afterQuarantine != nil {
 		hooks.afterQuarantine(quarantinePath)
@@ -70,18 +70,18 @@ func quarantineAndRemoveSocket(socketPath string, expectedDev, expectedIno uint6
 	var moved unix.Stat_t
 	if err := unix.Lstat(quarantinePath, &moved); err != nil {
 		removeQuarantineDir = false
-		return fmt.Errorf("wormholed: inspect quarantined socket %s: %w", quarantinePath, err)
+		return fmt.Errorf("gatewayd: inspect quarantined socket %s: %w", quarantinePath, err)
 	}
 	if moved.Dev != expectedDev || moved.Ino != expectedIno {
 		if err := renameNoReplace(quarantinePath, socketPath); err != nil {
 			removeQuarantineDir = false
-			return fmt.Errorf("wormholed: socket changed during stale-socket removal; replacement preserved at %s: restore: %w", quarantinePath, err)
+			return fmt.Errorf("gatewayd: socket changed during stale-socket removal; replacement preserved at %s: restore: %w", quarantinePath, err)
 		}
-		return fmt.Errorf("wormholed: socket changed during stale-socket removal")
+		return fmt.Errorf("gatewayd: socket changed during stale-socket removal")
 	}
 	if err := os.Remove(quarantinePath); err != nil {
 		removeQuarantineDir = false
-		return fmt.Errorf("wormholed: remove quarantined stale socket %s: %w", quarantinePath, err)
+		return fmt.Errorf("gatewayd: remove quarantined stale socket %s: %w", quarantinePath, err)
 	}
 	return nil
 }

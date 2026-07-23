@@ -36,7 +36,7 @@ func TestServerMainExitsOneWhenWiringFails(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
 		t.Fatalf("server main error = %v, want exit status 1", err)
 	}
-	if !strings.Contains(string(output), "injected database failure") {
+	if !strings.Contains(string(output), "fabric: injected database failure") {
 		t.Fatalf("server main output = %q, want wiring error", output)
 	}
 }

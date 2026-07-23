@@ -1,4 +1,4 @@
-// mcp.go implements wormholed's local socket MCP JSON-RPC 2.0 surface
+// mcp.go implements Gateway's local socket MCP JSON-RPC 2.0 surface
 // (RFC-0003 §6.1). It replaces the P1-era bespoke
 // {tool,args}->{result,error} one-shot protocol (localRequest/localResponse,
 // now deleted) with initialize / notifications/initialized / tools/list /
@@ -54,7 +54,7 @@ type localTool struct {
 	Handler            localToolHandler
 }
 
-// localRegistry holds every tool wormholed's local socket serves, plus
+// localRegistry holds every tool Gateway's local socket serves, plus
 // registration order so tools/list output is deterministic (map iteration
 // order is not).
 type localRegistry struct {
@@ -270,7 +270,7 @@ type mcpSession struct {
 
 // initializeResult is the "initialize" response result shape (design doc
 // §1), identical in spirit to internal/mcp/jsonrpc.go's initializeResult
-// but with serverInfo.name = "wormholed" — this is the local daemon
+// but with serverInfo.name = "gatewayd" — this is the local daemon
 // identifying itself, not the Coordination Server.
 type initializeResult struct {
 	ProtocolVersion string            `json:"protocolVersion"`
@@ -284,7 +284,7 @@ func handleInitialize() any {
 	return initializeResult{
 		ProtocolVersion: "2025-11-25",
 		Capabilities:    map[string]any{"tools": map[string]any{}},
-		ServerInfo:      map[string]string{"name": "wormholed", "version": "0.2.4-alpha"},
+		ServerInfo:      map[string]string{"name": "gatewayd", "version": "0.2.4-alpha"},
 	}
 }
 

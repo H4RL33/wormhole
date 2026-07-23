@@ -62,17 +62,17 @@ Claude Code, OpenCode, or another MCP harness
               wormhole mcp
            stdio-to-socket bridge
                      |
-                 wormholed
+                 gatewayd
        local MCP API + SQLite replica
           durable local sync queue
                      |
           wormhole.sync.* over HTTP(S)
                      |
-            wormhole-server
+                fabric
        coordination + PostgreSQL/pgvector
 ```
 
-Harnesses talk only to the local `wormholed` daemon. The daemon makes local
+Harnesses talk only to the local `gatewayd` daemon. The Gateway makes local
 writes durable before attempting network synchronization. The Coordination
 Server provides the authority required across users and machines: enrollment,
 project-scoped identity, shared discovery, conflict authority, and durable
@@ -83,14 +83,14 @@ Wormhole builds three binaries:
 | Binary | Role |
 |---|---|
 | `wormhole` | Setup, profiles, harness connection, and MCP stdio bridge |
-| `wormholed` | Per-user local runtime, SQLite replica, local MCP API, and sync queue |
-| `wormhole-server` | Coordination Server backed by PostgreSQL and pgvector |
+| `gatewayd` | Gateway: per-user local runtime, SQLite replica, local MCP API, and sync queue |
+| `fabric` | Fabric: Coordination Server backed by PostgreSQL and pgvector |
 
 ## Status
 
 Wormhole is alpha software under active development.
 
-- `wormholed` is currently supported on Linux. Windows users should use WSL.
+- `gatewayd` is currently supported on Linux. Windows users should use WSL.
 - Claude Code and OpenCode have first-party connection flows.
 - Other MCP-capable harnesses can use `wormhole mcp` or community connectors.
 - The current production embedder is a non-semantic development stub.
@@ -111,7 +111,7 @@ Choose the path that matches how you want to use Wormhole.
 
 Use this path when one machine and its local agents need to share an existing
 Wormhole project. Once enrolled and bootstrapped, harness calls go through
-`wormholed`, local state lives in SQLite, and local writes enter a
+`gatewayd`, local state lives in SQLite, and local writes enter a
 restart-surviving queue.
 
 > **Current limitation:** first-time enrollment and the startup bootstrap still
@@ -138,7 +138,7 @@ Inspect available profiles and start the local runtime:
 
 ```bash
 ./dist/wormhole profile list
-./dist/wormholed demo
+./dist/gatewayd demo
 ```
 
 In another terminal, verify the profile:
@@ -183,15 +183,15 @@ Credential profiles contain bearer tokens. Never commit or share them.
 ### Multi-device and team coordination
 
 Use this path when multiple machines, people, or runtimes need to share the
-same project state. Each machine still talks to its own `wormholed`; the
-Coordination Server is the authenticated meeting point between them.
+same project state. Each machine still talks to its own `gatewayd`; Fabric is
+the authenticated meeting point between them.
 
 Prerequisites:
 
 - Go 1.24 or newer
 - Docker with Compose
 - [`golang-migrate`](https://github.com/golang-migrate/migrate)
-- Linux or WSL for every machine running `wormholed`
+- Linux or WSL for every machine running `gatewayd`
 
 #### 1. Build Wormhole
 
@@ -230,7 +230,7 @@ docker compose exec -T db psql -U wormhole -d wormhole -v ON_ERROR_STOP=1 -c \
 
 ```bash
 export WORMHOLE_DATABASE_URL="postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable"
-./dist/wormhole-server
+./dist/fabric
 ```
 
 The default listener is `http://localhost:8080`. Set
@@ -250,9 +250,9 @@ It is not the harness endpoint. Every harness still connects to its local
 daemon:
 
 ```text
-Harness A -> wormholed A --\
-                            -> Coordination Server -> PostgreSQL
-Harness B -> wormholed B --/
+Harness A -> Gateway A --\
+                          -> Fabric -> PostgreSQL
+Harness B -> Gateway B --/
 ```
 
 #### 4. Enroll and connect each machine
@@ -274,7 +274,7 @@ On each device, while the Coordination Server is reachable:
 Then start that device's daemon:
 
 ```bash
-./dist/wormholed demo
+./dist/gatewayd demo
 ```
 
 Repeat with a distinct owner/model/profile on each machine as appropriate.
@@ -310,7 +310,7 @@ Run:
 | `wormhole profile list` | List stored credential profiles |
 | `wormhole viewer-key create` | Issue a project-scoped dashboard viewer key |
 | `wormhole mcp` | Run the harness stdio-to-daemon bridge |
-| `wormholed <profile>` | Run the local daemon for a credential profile |
+| `gatewayd <profile>` | Run the local Gateway for a credential profile |
 
 Configuration precedence for setup commands:
 

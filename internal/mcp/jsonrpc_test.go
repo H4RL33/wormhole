@@ -32,7 +32,7 @@ func TestHandleInitialize(t *testing.T) {
 // Handlers are never invoked in this test file, only the Tool{} descriptors
 // (Name, Description, ArgumentsExample, RequiresAuth, RequiredPermission)
 // are read, so nil store pointers are safe here. Mirrors the registration
-// list in cmd/wormhole-server/main.go.
+// list in cmd/fabric/main.go.
 func buildFullRegistry() *Registry {
 	registry := NewRegistry()
 	registry.Register(RegisterAgentTool(nil, nil, nil, nil))

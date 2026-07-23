@@ -8,8 +8,8 @@ This guide covers the current user-facing commands. The implementation and
 | Binary | Purpose |
 |---|---|
 | `wormhole` | Setup, profiles, harness connection, and MCP stdio bridge |
-| `wormholed` | Local SQLite-backed runtime and sync queue |
-| `wormhole-server` | PostgreSQL-backed Coordination Server |
+| `gatewayd` | Gateway: local SQLite-backed runtime and sync queue |
+| `fabric` | Fabric: PostgreSQL-backed Coordination Server |
 
 Build all three:
 
@@ -70,12 +70,12 @@ the local `wormhole mcp` bridge.
 
 Use `--target opencode` for OpenCode.
 
-### `wormholed <profile>`
+### `gatewayd <profile>`
 
 Starts the local daemon with one named credential profile:
 
 ```bash
-./dist/wormholed demo
+./dist/gatewayd demo
 ```
 
 The current startup path bootstraps against the configured Coordination
@@ -133,15 +133,15 @@ Paths:
 Single machine:
 
 ```text
-Harness -> wormhole mcp -> wormholed -> SQLite
+Harness -> wormhole mcp -> Gateway -> SQLite
 ```
 
 Coordinated machines:
 
 ```text
-Harness A -> wormholed A --\
-                            -> Coordination Server -> PostgreSQL
-Harness B -> wormholed B --/
+Harness A -> Gateway A --\
+                          -> Fabric -> PostgreSQL
+Harness B -> Gateway B --/
 ```
 
 See the [README](https://github.com/H4RL33/wormhole#readme) for complete

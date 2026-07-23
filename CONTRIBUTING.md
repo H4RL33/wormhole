@@ -12,7 +12,7 @@ Every modification must respect the codebase boundaries and layering principles:
 2. **R2: Core isolation**: Core packages (`internal/core/*`) must not import each other. The only exception is `tasks -> events` to emit status transition events.
 3. **R3: Types at the bottom**: `internal/types` contains shared, plain data structures and must not import anything outside the Go standard library.
 4. **R4: Dependencies**: Do not introduce new top-level packages or add external third-party Go dependencies without explicit human approval.
-5. **R5: Coordination Server datastore**: The Coordination Server runs on Go and PostgreSQL + pgvector. No caching layers (Redis), message brokers (NATS), or other coordination datastores may be added. RFC-0003 permits `wormholed`'s SQLite local-runtime store as a local replica and sync queue; it is not a second Coordination Server datastore.
+5. **R5: Coordination Server datastore**: Fabric runs on Go and PostgreSQL + pgvector. No caching layers (Redis), message brokers (NATS), or other coordination datastores may be added. RFC-0003 permits Gateway's SQLite local-runtime store as a local replica and sync queue; it is not a second Fabric datastore.
 
 For detailed rules on the codebase structure, review [docs/implementation-rules.md](docs/implementation-rules.md).
 

@@ -60,6 +60,14 @@ func mcpInitialize(t *testing.T, conn net.Conn, reader *bufio.Reader) {
 	if resp.Error != nil {
 		t.Fatalf("initialize error: %+v", resp.Error)
 	}
+	var initialized initializeResult
+	if err := json.Unmarshal(resp.Result, &initialized); err != nil {
+		t.Fatalf("decode initialize result: %v", err)
+	}
+	wantInfo := map[string]string{"name": "gatewayd", "version": "0.2.4-alpha"}
+	if !reflect.DeepEqual(initialized.ServerInfo, wantInfo) {
+		t.Fatalf("initialize serverInfo = %#v, want %#v", initialized.ServerInfo, wantInfo)
+	}
 
 	notif := rpcRequest{JSONRPC: "2.0", Method: "notifications/initialized"}
 	notifRaw, err := json.Marshal(notif)

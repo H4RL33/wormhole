@@ -79,7 +79,7 @@ func TestTool_JSONSerialization(t *testing.T) {
 // TestRegistry_EveryAuthedToolDeclaresPermission guards against a future
 // tool shipping authenticated-but-ungated. Every RequiresAuth tool must
 // carry a non-empty RequiredPermission, except the deliberate auth-only
-// exemptions (self-identification and wormholed transport).
+// exemptions (self-identification and Gateway transport).
 func TestRegistry_EveryAuthedToolDeclaresPermission(t *testing.T) {
 	exempt := map[string]bool{
 		"wormhole.agent.whoami":          true,

@@ -522,7 +522,7 @@ func startTestDaemonWithRunner(t *testing.T, profileName, socketPath string, run
 		}
 		if time.Now().After(deadline) {
 			cancel()
-			t.Fatalf("wormholed socket did not become ready at %s", socketPath)
+			t.Fatalf("gatewayd socket did not become ready at %s", socketPath)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

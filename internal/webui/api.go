@@ -3,7 +3,7 @@
 // MCP/JSON-RPC — RFC-0001 §12 sanctions the
 // human read-only dashboard as an exception to "every capability is an MCP
 // tool", not a precedent for further REST endpoints. This package is mounted
-// under /dashboard in cmd/wormhole-server/main.go.
+// under /dashboard in cmd/fabric/main.go.
 package webui
 
 import (
@@ -19,7 +19,7 @@ import (
 )
 
 // indexHTML is Task 1's static dashboard page, embedded at build time so
-// cmd/wormhole-server/main.go can serve it without a runtime filesystem
+// cmd/fabric/main.go can serve it without a runtime filesystem
 // dependency.
 //
 //go:embed static/index.html
@@ -41,7 +41,7 @@ type Handler struct {
 }
 
 // NewMux returns the dashboard API's routes, mounted under /dashboard in
-// cmd/wormhole-server/main.go.
+// cmd/fabric/main.go.
 func (h *Handler) NewMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /dashboard/", serveIndex)

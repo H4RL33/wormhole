@@ -67,7 +67,7 @@ func describeMCPRequest(r *http.Request) string {
 
 // loggingMiddleware logs one line per request to stdout via the standard
 // log package: method, path, status, latency, and (for /mcp requests) the
-// JSON-RPC method and tool name, so `wormhole-server`'s stdout shows real
+// JSON-RPC method and tool name, so `fabric`'s stdout shows real
 // activity during a demo or test run instead of only its startup line.
 func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

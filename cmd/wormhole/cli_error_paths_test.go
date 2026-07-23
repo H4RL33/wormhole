@@ -261,7 +261,7 @@ func TestRunViewerKeyCreate_ReportsEmptyErrorAndMalformedSuccess(t *testing.T) {
 }
 
 func TestRunConnect_TargetClaudeReportsAddFailure(t *testing.T) {
-	fakeWormholedSocket(t)
+	fakeGatewaySocket(t)
 	fakeStdioBinary(t)
 	failingClaude := filepath.Join(t.TempDir(), "claude")
 	if err := os.WriteFile(failingClaude, []byte("#!/bin/sh\nexit 7\n"), 0o755); err != nil {

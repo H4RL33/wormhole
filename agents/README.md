@@ -17,16 +17,16 @@ must not leak into Core code.
 
 ## Two-Layer Architecture
 
-Harnesses call `wormholed` by local MCP IPC. `wormholed` writes local SQLite first, then
-syncs incrementally with `wormhole-server`. The server owns authoritative Postgres plus
+Harnesses call `gatewayd` (Gateway) by local MCP IPC. Gateway writes local SQLite first, then
+syncs incrementally with `fabric` (Fabric). Fabric owns authoritative Postgres plus
 pgvector state. Core pillars: event bus, task graph, KB, identity and permissions, git
 pointers. No code copies in Wormhole.
 
 ## Binaries
 
 - `wormhole`: join, configure, connect harnesses, and bridge stdio MCP.
-- `wormholed`: per-user local daemon, Unix socket API, SQLite replica, sync queue.
-- `wormhole-server`: coordination server, HTTP MCP boundary, Postgres-backed Core.
+- `gatewayd`: Gateway, the per-user local daemon, Unix socket API, SQLite replica, sync queue.
+- `fabric`: Fabric, the coordination server, HTTP MCP boundary, Postgres-backed Core.
 
 ## Package Ownership and Dependency Bans
 
@@ -64,7 +64,7 @@ pointers. No code copies in Wormhole.
 
 MCP is the platform contract. Core names use `wormhole.<pillar>.<verb>` for agent,
 channel, task, KB, and git operations. `wormhole.sync.*` is runtime-to-server sync.
-Harnesses use local `wormholed`; do not add a direct remote harness path. Keep auth and
+Harnesses use local Gateway; do not add a direct remote harness path. Keep auth and
 permission enforcement at the MCP boundary.
 
 ## Development Protocol

@@ -16,7 +16,7 @@ import (
 )
 
 // runMCP implements the MCP stdio↔socket bridge subcommand.
-// It dials wormholed's local socket and relays newline-delimited JSON-RPC
+// It dials Gateway's local socket and relays newline-delimited JSON-RPC
 // messages between stdin/stdout and the socket until either side closes
 // or SIGINT/SIGTERM is received.
 func runMCP(args []string, stdout, stderr io.Writer) int {
@@ -25,10 +25,10 @@ func runMCP(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	socketPath := wormholedSocketPath()
+	socketPath := gatewaySocketPath()
 	conn, err := net.DialTimeout("unix", socketPath, 5*time.Second)
 	if err != nil {
-		fmt.Fprintf(stderr, "wormhole mcp: dial wormholed socket %s: %v\n", socketPath, err)
+		fmt.Fprintf(stderr, "wormhole mcp: dial gatewayd socket %s: %v\n", socketPath, err)
 		return 1
 	}
 	defer conn.Close()
@@ -50,11 +50,11 @@ func runMCP(args []string, stdout, stderr io.Writer) int {
 }
 
 // bridge relays MCP JSON-RPC messages in both directions between a stdio
-// MCP client (stdin/stdout) and wormholed's socket (conn). Both sides use
+// MCP client (stdin/stdout) and Gateway's socket (conn). Both sides use
 // the same newline-delimited JSON-RPC framing, so this is a straight copy
 // with no re-framing. It performs no interpretation of message contents, so
 // all MCP semantics (initialize, tools/list, tools/call, notifications)
-// remain wormholed's responsibility on the other end of conn.
+// remain Gateway's responsibility on the other end of conn.
 //
 // Two goroutines do the actual copying: one drains stdin -> conn, the other
 // drains conn -> stdout. Shutdown is synchronized by closing conn on signal
@@ -97,7 +97,7 @@ func bridge(stdin io.Reader, stdout io.Writer, conn net.Conn) error {
 
 // stdinToSocket reads successive newline-delimited JSON-RPC messages off r
 // and writes each one straight to conn with a trailing newline, matching
-// wormholed's socket framing. Returns io.EOF on a clean end of input
+// Gateway's socket framing. Returns io.EOF on a clean end of input
 // (r closes exactly on a line boundary), any other error on a read or
 // write failure.
 func stdinToSocket(r io.Reader, conn net.Conn) error {
@@ -121,7 +121,7 @@ func stdinToSocket(r io.Reader, conn net.Conn) error {
 // socketToStdout reads successive newline-delimited JSON-RPC messages off
 // conn and writes each one straight to w with a trailing newline -- no
 // re-framing, since the MCP stdio transport uses the same newline-delimited
-// framing as wormholed's socket. This direction carries both tools/call
+// framing as Gateway's socket. This direction carries both tools/call
 // responses and unsolicited server-to-client notifications.
 func socketToStdout(conn net.Conn, w io.Writer) error {
 	reader := bufio.NewReader(conn)

@@ -29,7 +29,7 @@ type Tool struct {
 	// AuthenticatedScope must carry to invoke this tool (RFC-0001 §8.4). It
 	// is the tool Name minus the "wormhole." prefix. Empty means "any
 	// authenticated caller" and is used only for self-identification
-	// (whoami) and wormholed transport (sync.*). Meaningful only when
+	// (whoami) and Gateway transport (sync.*). Meaningful only when
 	// RequiresAuth is true.
 	RequiredPermission string `json:"required_permission,omitempty"`
 	// ArgumentsExample is a zero-value instance of the tool's argument

@@ -20,7 +20,7 @@ func TestM3_KBWriteSearchComplianceLoop(t *testing.T) {
 	db := testDB(t)
 	// maxBodyLength=120 keeps the conciseness case below deliberately small
 	// so the test doesn't need a multi-KB body; dedupThreshold=0.85 and
-	// minLinks=1/1/1 match the values wired in cmd/wormhole-server/main.go's
+	// minLinks=1/1/1 match the values wired in cmd/fabric/main.go's
 	// default config.
 	store := kb.NewStore(db, kb.StubEmbedder{}, 0.85, 120, 1, 1, 1)
 	identityStore := testIdentityStore(t)

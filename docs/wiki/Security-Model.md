@@ -19,7 +19,7 @@ Wormhole is designed for capable agents operating inside explicit boundaries.
 
 ### Harness to local daemon
 
-Harnesses connect to `wormholed` over a same-user Unix socket. The socket and
+Harnesses connect to `gatewayd` over a same-user Unix socket. The socket and
 its parent directory must remain owner-only. V1 adds no second local bearer
 token, so any process running as that OS user is inside the local trust
 boundary.

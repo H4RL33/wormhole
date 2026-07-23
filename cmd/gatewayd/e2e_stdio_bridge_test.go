@@ -2,13 +2,13 @@
 // Issue #20 subtask 6: proves the full transport chain a real MCP client
 // (Claude Code or any other stdio-speaking harness) actually uses --
 // stdio bridge subprocess (`wormhole mcp`, cmd/wormhole/mcp.go) ->
-// wormholed's Unix socket -> wormholed's MCP dispatch -> local SQLite write
+// Gateway's Unix socket -> Gateway's MCP dispatch -> local SQLite write
 // + sync enqueue -> sync engine push -> real Coordination Server -> real
 // Postgres.
 //
-// Every existing test in this repo (wormholed_test.go's
+// Every existing test in this repo (the Gateway test harness's
 // TestRun_EndToEndWhoAmI, p7_e2e_integration_test.go's TestP7_*) dials
-// wormholed's socket directly, bypassing the stdio bridge entirely. That
+// Gateway's socket directly, bypassing the stdio bridge entirely. That
 // bypass is exactly the gap this subtask exists to close: Leg 3 below drives
 // the real `wormhole mcp` subprocess over its stdin/stdout pipes (the leg a
 // real harness talks to), speaking the bridge's newline-delimited JSON-RPC
@@ -52,7 +52,7 @@ import (
 
 // -----------------------------------------------------------------------
 // Real-Postgres helper (mirrors internal/mcp/server_test.go's testDB /
-// cmd/wormhole-server/m3_integration_test.go's testDB skip pattern
+// cmd/fabric/m3_integration_test.go's testDB skip pattern
 // exactly -- this package has no existing testDB of its own since
 // p7_e2e_integration_test.go only ever talks to a fake HTTP coord server).
 // -----------------------------------------------------------------------
@@ -91,11 +91,11 @@ func e2eMustCreateProject(t *testing.T, db *sql.DB, name string) string {
 
 // -----------------------------------------------------------------------
 // Leg 1: real Coordination Server, real Postgres. Mirrors
-// cmd/wormhole-server/m3_integration_test.go's construction and
-// cmd/wormhole-server/main.go:39-58's exact tool registration list/order
+// cmd/fabric/m3_integration_test.go's construction and
+// cmd/fabric/main.go:39-58's exact tool registration list/order
 // (16 base tools + 4 sync tools), so this test exercises the real
 // production tool surface, not a subset. m3CallTool/m3ToolsCallParams etc.
-// live in package main under cmd/wormhole-server, a different package, and
+// live in package main under cmd/fabric, a different package, and
 // are unexported -- this file keeps its own equivalent copy, matching this
 // codebase's established posture of small per-package client-shape
 // duplicates (see m3_integration_test.go:22-28's own comment on the same
@@ -196,7 +196,7 @@ func e2eCallTool(t *testing.T, srvURL, tool, projectID, token string, args any) 
 // e2eStartCoordServer builds and starts a real Coordination Server (real
 // stores, real Postgres, the exact registry from main.go) and returns its
 // httptest.Server plus a registered agent's token/project for wiring
-// wormholed's credentials in Leg 2.
+// Gateway's credentials in Leg 2.
 func e2eStartCoordServer(t *testing.T, db *sql.DB) (srvURL, projectID, agentID, token string) {
 	t.Helper()
 
@@ -261,8 +261,8 @@ func e2eStartCoordServer(t *testing.T, db *sql.DB) (srvURL, projectID, agentID, 
 // `wormhole mcp` subprocess's stdin/stdout -- matching that bridge's own
 // framing (cmd/wormhole/mcp.go stdinToSocket/socketToStdout: one JSON
 // object per line, terminated by \n, no length header).
-// wormholed_test.go's mcpInitialize/mcpCallTool helpers happen to use the
-// same newline framing, but against a raw net.Conn to wormholed's socket;
+// the Gateway test harness's mcpInitialize/mcpCallTool helpers happen to use
+// the same newline framing, but against a raw net.Conn to Gateway's socket;
 // this test drives it through the real `wormhole mcp` subprocess's
 // stdin/stdout instead, the leg a real harness talks to.
 // -----------------------------------------------------------------------
@@ -303,7 +303,7 @@ func e2eBuildStdioBridgeBinary(t *testing.T) string {
 }
 
 // repoRootForTest returns the repo root (two levels up from
-// cmd/wormholed, where this test file lives), so `go build ./cmd/...`
+// cmd/gatewayd, where this test file lives), so `go build ./cmd/...`
 // resolves regardless of the working directory `go test` happens to use.
 func repoRootForTest(t *testing.T) string {
 	t.Helper()
@@ -311,7 +311,7 @@ func repoRootForTest(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
-	// cmd/wormholed -> repo root
+	// cmd/gatewayd -> repo root
 	return filepath.Join(wd, "..", "..")
 }
 
@@ -491,15 +491,15 @@ func (c *e2eStdioClient) callTool(t *testing.T, tool string, args map[string]int
 // -----------------------------------------------------------------------
 
 // TestE2E_StdioBridgeToPostgres drives a real MCP client through the real
-// stdio bridge subprocess, through wormholed's Unix socket, through
-// wormholed's MCP dispatch, into the local SQLite replica and sync queue,
+// stdio bridge subprocess, through Gateway's Unix socket, through
+// Gateway's MCP dispatch, into the local SQLite replica and sync queue,
 // through the sync engine, into a real Coordination Server, and finally
 // into real Postgres -- the full chain subtask 6 of issue #20 asks for,
 // which no other test in this repo currently exercises (see file header).
 //
 // This test does NOT delete, modify, or attempt to fix the existing
 // TestP7_* tests in p7_e2e_integration_test.go -- they remain queue-
-// mechanics-only coverage via wormholed's internal test harness (direct
+// mechanics-only coverage via Gateway's internal test harness (direct
 // sync.QueueRepo manipulation, or a direct socket dial for
 // TestP7_MultiDaemonSync), a different and still-useful layer. This test
 // is the complementary full-transport layer subtask 6 was written for.
@@ -543,7 +543,7 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 	}))
 	defer coordProxy.Close()
 
-	// --- Leg 2: real wormholed, in-process (mirrors
+	// --- Leg 2: real Gateway, in-process (mirrors
 	// TestRun_EndToEndWhoAmI's env-var setup exactly). ---
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -571,8 +571,8 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 	defer daemon.stop(t)
 
 	// --- Leg 3: the real transport. Spawn the stdio bridge subprocess
-	// with XDG_RUNTIME_DIR pointed at the same runDir wormholed used, so
-	// its own wormholedSocketPath() resolves to the same socket. Speak
+	// with XDG_RUNTIME_DIR pointed at the same runDir Gateway used, so
+	// its own gatewaySocketPath() resolves to the same socket. Speak
 	// genuine newline-delimited JSON-RPC over its stdin/stdout. ---
 	client := e2eStartStdioBridge(t, binPath, runDir)
 	client.initialize(t)
@@ -598,13 +598,13 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 	// internal/runtime/localapi/localapi.go's handleTaskCreate: it writes
 	// via s.tr.CreateTask then unconditionally calls s.qr.Enqueue, with no
 	// synchronous call to the Coordination Server in between), so this
-	// single call proves client -> stdio bridge -> wormholed socket -> MCP
+	// single call proves client -> stdio bridge -> Gateway socket -> MCP
 	// dispatch -> local store write -> sync queue enqueue all worked, and
 	// the subsequent poll proves the sync engine delivered it onward.
 	taskTitle := "e2e stdio bridge task"
 	resultRaw, errMsg := client.callTool(t, "wormhole.task.create", map[string]interface{}{
 		"title":       taskTitle,
-		"description": "created through the real stdio bridge -> wormholed -> Postgres transport",
+		"description": "created through the real stdio bridge -> Gateway -> Postgres transport",
 		"priority":    1,
 	})
 	if errMsg != "" {

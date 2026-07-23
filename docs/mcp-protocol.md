@@ -8,7 +8,7 @@ the ambiguity ladder in `docs/implementation-rules.md` §2.4.
 
 ## 1. Transport contract
 
-`wormhole-server` exposes a single JSON-RPC 2.0 MCP endpoint at `/mcp`. The contract below
+`fabric` exposes a single JSON-RPC 2.0 MCP endpoint at `/mcp`. The contract below
 keeps the server compatible with standard MCP clients, including Claude Code, without a
 custom tool-call envelope.
 

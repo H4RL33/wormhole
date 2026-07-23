@@ -2,7 +2,7 @@
 //
 // Tests for the local write tools (wormhole.task.create, wormhole.kb.write,
 // wormhole.channel.post) added to close the "local write path" functional-alpha
-// gap: agents connected to wormholed must be able to create tasks, write KB
+// gap: agents connected to Gateway must be able to create tasks, write KB
 // articles, and post channel events locally, with each write enqueued to the
 // outbound sync queue (RFC-0003 §8.2) for later delivery to the Coordination
 // Server.

@@ -29,7 +29,7 @@ func runMain(ctx context.Context, args []string, stderr io.Writer, run func(cont
 		profile = args[0]
 	}
 	if err := run(ctx, profile); err != nil {
-		fmt.Fprintf(stderr, "wormholed: %v\n", err)
+		fmt.Fprintf(stderr, "gatewayd: %v\n", err)
 		return err
 	}
 	return nil

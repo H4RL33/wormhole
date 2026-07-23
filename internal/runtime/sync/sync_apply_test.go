@@ -1,6 +1,6 @@
 // sync_apply_test.go exercises the local-apply path: Bootstrap and
 // PullIncremental must not just fetch the server's task/KB payload, they
-// must write it into localstore.TaskRepo/KBRepo so a fresh wormholed
+// must write it into localstore.TaskRepo/KBRepo so a fresh Gateway
 // daemon's SQLite replica actually ends up populated (RFC-0003 §8).
 package sync
 
