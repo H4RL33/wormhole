@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+umask 022
 
 if test "$#" -ne 2; then
 	printf 'usage: %s VERSION OUTPUT_DIR\n' "$0" >&2
@@ -26,41 +27,155 @@ case "$epoch" in
 		exit 2
 		;;
 esac
+
+for command in git realpath go tar gzip sha256sum jq; do
+	if ! command -v "$command" >/dev/null 2>&1; then
+		printf 'build-release: %s is required\n' "$command" >&2
+		exit 1
+	fi
+done
+
+repo_root=$(cd "$(git rev-parse --show-toplevel)" && pwd -P)
+release_root=$repo_root/dist/release
+lexical_release_root=$(realpath -ms "$release_root")
+canonical_release_root=$(realpath -m "$release_root")
+if test "$lexical_release_root" != "$release_root" ||
+	test "$canonical_release_root" != "$release_root"
+then
+	printf 'build-release: dedicated release directory contains a symlink\n' >&2
+	exit 2
+fi
+mkdir -p "$release_root"
+chmod 0755 "$release_root"
+
 case "$output_arg" in
-	"" | / | . | ..)
-		printf 'build-release: unsafe output directory %s\n' "$output_arg" >&2
+	/*) output_candidate=$output_arg ;;
+	*) output_candidate=$repo_root/$output_arg ;;
+esac
+lexical_output=$(realpath -ms "$output_candidate")
+canonical_output=$(realpath -m "$output_candidate")
+if test "$lexical_output" != "$canonical_output"; then
+	printf 'build-release: output path must not contain symlinks: %s\n' \
+		"$output_arg" >&2
+	exit 2
+fi
+case "$canonical_output" in
+	"$release_root" | "$release_root"/*) ;;
+	*)
+		printf 'build-release: output must be contained in %s: %s\n' \
+			"$release_root" "$output_arg" >&2
 		exit 2
 		;;
 esac
+if test -L "$output_candidate"; then
+	printf 'build-release: output directory must not be a symlink\n' >&2
+	exit 2
+fi
+mkdir -p "$canonical_output"
+output_dir=$(cd "$canonical_output" && pwd -P)
+chmod 0755 "$output_dir"
 
-repo_root=$(git rev-parse --show-toplevel)
-case "$output_arg" in
-	/*) output_dir=$output_arg ;;
-	*) output_dir=$repo_root/$output_arg ;;
+known_names="
+SHA256SUMS
+wormhole-${version}-linux-amd64.tar.gz
+wormhole-${version}-linux-arm64.tar.gz
+wormhole-amd64.spdx.json
+wormhole-arm64.spdx.json
+"
+for entry in "$output_dir"/* "$output_dir"/.[!.]* "$output_dir"/..?*; do
+	if ! test -e "$entry" && ! test -L "$entry"; then
+		continue
+	fi
+	name=${entry##*/}
+	if ! printf '%s' "$known_names" | grep -Fxq "$name"; then
+		printf 'build-release: refusing unexpected output entry %s\n' \
+			"$name" >&2
+		exit 2
+	fi
+	if ! test -f "$entry" || test -L "$entry"; then
+		printf 'build-release: refusing non-regular artifact %s\n' \
+			"$name" >&2
+		exit 2
+	fi
+done
+for name in \
+	SHA256SUMS \
+	"wormhole-${version}-linux-amd64.tar.gz" \
+	"wormhole-${version}-linux-arm64.tar.gz" \
+	wormhole-amd64.spdx.json \
+	wormhole-arm64.spdx.json
+do
+	path=$output_dir/$name
+	if test -e "$path"; then
+		rm -f -- "$path"
+	fi
+done
+
+build_dir=$(mktemp -d "${TMPDIR:-/tmp}/wormhole-release.XXXXXX")
+cleanup() {
+	if test -d "$build_dir" && ! test -L "$build_dir"; then
+		find -P "$build_dir" -depth -delete
+	fi
+}
+trap cleanup EXIT HUP INT TERM
+
+if test -n "${WORMHOLE_SYFT_BIN:-}"; then
+	syft_bin=$WORMHOLE_SYFT_BIN
+else
+	"$(dirname "$0")/install-syft.sh" "$build_dir/tools"
+	syft_bin=$build_dir/tools/syft
+fi
+if ! test -x "$syft_bin"; then
+	printf 'build-release: Syft executable not found: %s\n' "$syft_bin" >&2
+	exit 1
+fi
+case "$(uname -s):$(uname -m)" in
+	Linux:x86_64)
+		syft_checksum=23d4e25a32026ab27351c3c044a40bcc51311c00b8bb990aa204bec4b0bb19cd
+		;;
+	Linux:aarch64 | Linux:arm64)
+		syft_checksum=ce828dc43bc44271f77c5e3fbc35efce71890cd83ba8dd39d6cfc8e2a031b2f2
+		;;
+	Darwin:x86_64)
+		syft_checksum=7b73ad1a2a956a121686c9f18aa2c9ac2cb11f65c5648bd6013e1999b34bdcd2
+		;;
+	Darwin:arm64)
+		syft_checksum=09aa35f766d0ea34b2e64d82b9c6e2e315ff74019bd7cebe7f3bf6057ef6c62f
+		;;
+	*)
+		printf 'build-release: unsupported Syft host %s/%s\n' \
+			"$(uname -s)" "$(uname -m)" >&2
+		exit 1
+		;;
 esac
-mkdir -p "$output_dir"
-output_dir=$(cd "$output_dir" && pwd -P)
-
-find "$output_dir" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-build_dir=$(mktemp -d "$output_dir/.build.XXXXXX")
-trap 'rm -rf "$build_dir"' EXIT HUP INT TERM
+printf '%s  %s\n' "$syft_checksum" "$syft_bin" | sha256sum -c -
+syft_version=$("$syft_bin" version -o json | jq -er .version)
+if test "$syft_version" != 1.44.0; then
+	printf 'build-release: expected Syft 1.44.0, got %s\n' \
+		"$syft_version" >&2
+	exit 1
+fi
 
 created=$(date -u -d "@$epoch" '+%Y-%m-%dT%H:%M:%SZ')
 
 cd "$repo_root"
 for arch in amd64 arm64; do
 	base=wormhole-${version}-linux-${arch}
-	stage=$build_dir/$base
-	archive=$output_dir/$base.tar.gz
+	stage=$build_dir/stage/$base
+	archive_name=$base.tar.gz
+	archive=$output_dir/$archive_name
 	mkdir -p "$stage"
+	chmod 0755 "$build_dir/stage" "$stage"
 
 	for binary in wormhole gatewayd fabric; do
 		CGO_ENABLED=0 GOOS=linux GOARCH=$arch \
 			go build -mod=readonly -trimpath -buildvcs=false \
 			-ldflags "-s -w -X main.version=$version" \
 			-o "$stage/$binary" "./cmd/$binary"
+		chmod 0755 "$stage/$binary"
 	done
 	cp LICENSE README.md "$stage/"
+	chmod 0644 "$stage/LICENSE" "$stage/README.md"
 
 	tar \
 		--sort=name \
@@ -69,49 +184,79 @@ for arch in amd64 arm64; do
 		--group=0 \
 		--numeric-owner \
 		--mtime="@$epoch" \
-		-C "$build_dir" \
+		--mode='u+rwX,go+rX,go-w' \
+		-C "$build_dir/stage" \
 		-cf - "$base" |
 		gzip -9 -n >"$archive"
+	chmod 0644 "$archive"
 
-	archive_name=$(basename "$archive")
 	archive_sha=$(sha256sum "$archive" | cut -d' ' -f1)
-	cat >"$output_dir/wormhole-${arch}.spdx.json" <<EOF
-{
-  "spdxVersion": "SPDX-2.3",
-  "dataLicense": "CC0-1.0",
-  "SPDXID": "SPDXRef-DOCUMENT",
-  "name": "$base",
-  "documentNamespace": "https://github.com/H4RL33/wormhole/releases/$version/$arch/$archive_sha",
-  "creationInfo": {
-    "created": "$created",
-    "creators": ["Tool: wormhole-build-release"]
-  },
-  "files": [
-    {
-      "fileName": "$archive_name",
-      "SPDXID": "SPDXRef-Archive",
-      "checksums": [
-        {"algorithm": "SHA256", "checksumValue": "$archive_sha"}
-      ],
-      "licenseConcluded": "NOASSERTION",
-      "copyrightText": "NOASSERTION"
-    }
-  ],
-  "relationships": [
-    {
-      "spdxElementId": "SPDXRef-DOCUMENT",
-      "relationshipType": "DESCRIBES",
-      "relatedSpdxElement": "SPDXRef-Archive"
-    }
-  ]
-}
-EOF
+	extract_dir=$build_dir/extracted/$base
+	mkdir -p "$extract_dir"
+	tar --no-same-owner --no-same-permissions -xzf "$archive" \
+		-C "$extract_dir" --strip-components=1
+
+	raw_sbom=$build_dir/$arch.raw.spdx.json
+	sbom=$output_dir/wormhole-${arch}.spdx.json
+	SYFT_CHECK_FOR_APP_UPDATE=false \
+	SYFT_FILE_METADATA_SELECTION=all \
+	SYFT_FILE_METADATA_DIGESTS=sha256 \
+		"$syft_bin" scan "dir:$extract_dir" \
+		--source-name "$base" \
+		--source-version "$version" \
+		--parallelism 1 \
+		--output "spdx-json=$raw_sbom" \
+		--quiet
+
+	jq -S \
+		--arg archive "$archive_name" \
+		--arg base "$base" \
+		--arg version "$version" \
+		--arg digest "$archive_sha" \
+		--arg created "$created" \
+		--arg platform "linux/$arch" \
+		'
+		([.relationships[] |
+			select(.spdxElementId == "SPDXRef-DOCUMENT" and
+				.relationshipType == "DESCRIBES")][0].relatedSpdxElement) as $root
+		| if $root == null then error("missing document root") else . end
+		| .name = $base
+		| .documentNamespace =
+			("https://github.com/H4RL33/wormhole/releases/" +
+				$version + "/" + $archive + "?sha256=" + $digest)
+		| .creationInfo.created = $created
+		| .packages |= map(
+			if .SPDXID == $root then
+				.name = $base
+				| .versionInfo = $version
+				| .packageFileName = $archive
+				| .primaryPackagePurpose = "APPLICATION"
+				| .checksums = [{
+					"algorithm": "SHA256",
+					"checksumValue": $digest
+				}]
+				| .comment =
+					("Generated from extracted archive contents for " +
+						$platform)
+				| .externalRefs = ((.externalRefs // []) + [{
+					"referenceCategory": "OTHER",
+					"referenceType": "wormhole-target-platform",
+					"referenceLocator": $platform
+				}])
+			else .
+			end)
+		| .packages |= sort_by(.SPDXID)
+		| .files |= sort_by(.SPDXID)
+		| .relationships |= sort_by(
+			.spdxElementId, .relationshipType, .relatedSpdxElement)
+		' "$raw_sbom" >"$sbom"
+	chmod 0644 "$sbom"
 done
 
 checksum_prefix=
 case "$output_arg" in
 	/*) ;;
-	*) checksum_prefix=${output_arg%/}/ ;;
+	*) checksum_prefix=${output_dir#"$repo_root"/}/ ;;
 esac
 : >"$output_dir/SHA256SUMS"
 for file in \
@@ -121,5 +266,9 @@ for file in \
 	wormhole-arm64.spdx.json
 do
 	hash=$(sha256sum "$output_dir/$file" | cut -d' ' -f1)
-	printf '%s  %s%s\n' "$hash" "$checksum_prefix" "$file" >>"$output_dir/SHA256SUMS"
+	printf '%s  %s%s\n' "$hash" "$checksum_prefix" "$file" \
+		>>"$output_dir/SHA256SUMS"
 done
+chmod 0644 "$output_dir/SHA256SUMS"
+
+"$(dirname "$0")/verify-release-artifacts.sh" "$output_dir"

@@ -38,7 +38,10 @@ coverage:
 	./.github/scripts/coverage-check.sh coverage.out docs/testing-coverage-exceptions.md
 
 release-test:
+	.github/scripts/release_cleanup_test.sh
 	.github/scripts/release_test.sh
+	.github/scripts/release_metadata_test.sh
+	.github/scripts/release_workflow_test.sh
 
 release-rehearsal:
 	SOURCE_DATE_EPOCH=$$(git show -s --format=%ct HEAD) \
