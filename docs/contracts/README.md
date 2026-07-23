@@ -7,13 +7,13 @@ protocol, migrations, and release artifacts.
 
 `mcp_tools` keeps the Fabric and Gateway registries separate because they are
 different externally observable surfaces. Fabric descriptors include their
-authentication and permission requirements; Gateway descriptors include the
+authentication and permission requirements; Gateway descriptors include every
 local permission gate, while same-user socket access remains part of the local
-protocol boundary. Request schemas and every named successful-response variant
-are derived from the canonical registry descriptors. In particular, Gateway's
-dual-shape `wormhole.agent.register` and `wormhole.kb.get` responses are
-inventoried as explicit variants rather than flattened into one synthetic
-shape.
+protocol boundary. Request and successful-response schemas are derived from
+named examples on the canonical registry descriptors. In particular, Gateway's
+dual-shape `wormhole.agent.register` requests and responses, and
+`wormhole.kb.get` responses, are inventoried as explicit variants rather than
+flattened into synthetic shapes.
 
 The inventory is intentionally in `alpha-inventory` mode. It makes drift
 visible during review, but it does not activate a beta compatibility promise

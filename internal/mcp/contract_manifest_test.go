@@ -33,12 +33,13 @@ type alphaResponse struct {
 }
 
 type alphaSchema struct {
-	Type       string                `json:"type"`
+	Type       string                `json:"type,omitempty"`
 	Format     string                `json:"format,omitempty"`
 	Enum       []string              `json:"enum,omitempty"`
 	Properties []alphaSchemaProperty `json:"properties,omitempty"`
 	Required   []string              `json:"required,omitempty"`
 	Items      *alphaSchema          `json:"items,omitempty"`
+	AnyOf      []alphaSchema         `json:"anyOf,omitempty"`
 }
 
 type alphaSchemaProperty struct {
@@ -156,7 +157,7 @@ func responseSchemaSnapshots(t *testing.T, examples map[string]any) []alphaRespo
 		}
 		snapshots = append(snapshots, alphaResponse{
 			Variant: variant,
-			Schema:  schemaSnapshot(t, jsonSchemaForType(exampleType)),
+			Schema:  schemaSnapshot(t, jsonResponseSchemaForType(exampleType)),
 		})
 	}
 	return snapshots
@@ -164,7 +165,14 @@ func responseSchemaSnapshots(t *testing.T, examples map[string]any) []alphaRespo
 
 func schemaSnapshot(t *testing.T, schema map[string]any) alphaSchema {
 	t.Helper()
-	snapshot := alphaSchema{Type: schemaType(t, schema)}
+	snapshot := alphaSchema{}
+	if rawType, ok := schema["type"]; ok {
+		schemaType, ok := rawType.(string)
+		if !ok {
+			t.Fatalf("schema type = %T", rawType)
+		}
+		snapshot.Type = schemaType
+	}
 	if format, ok := schema["format"].(string); ok {
 		snapshot.Format = format
 	}
@@ -192,6 +200,24 @@ func schemaSnapshot(t *testing.T, schema map[string]any) alphaSchema {
 		}
 		itemSnapshot := schemaSnapshot(t, items)
 		snapshot.Items = &itemSnapshot
+	}
+	if rawAnyOf, ok := schema["anyOf"]; ok {
+		switch alternatives := rawAnyOf.(type) {
+		case []map[string]any:
+			for _, alternative := range alternatives {
+				snapshot.AnyOf = append(snapshot.AnyOf, schemaSnapshot(t, alternative))
+			}
+		case []any:
+			for _, rawAlternative := range alternatives {
+				alternative, ok := rawAlternative.(map[string]any)
+				if !ok {
+					t.Fatalf("schema anyOf item = %T", rawAlternative)
+				}
+				snapshot.AnyOf = append(snapshot.AnyOf, schemaSnapshot(t, alternative))
+			}
+		default:
+			t.Fatalf("schema anyOf = %T", rawAnyOf)
+		}
 	}
 	if rawProperties, ok := schema["properties"]; ok {
 		properties, ok := rawProperties.(map[string]any)
@@ -230,15 +256,6 @@ func schemaSnapshot(t *testing.T, schema map[string]any) alphaSchema {
 		sort.Strings(snapshot.Required)
 	}
 	return snapshot
-}
-
-func schemaType(t *testing.T, schema map[string]any) string {
-	t.Helper()
-	value, ok := schema["type"].(string)
-	if !ok {
-		t.Fatalf("schema type = %T", schema["type"])
-	}
-	return value
 }
 
 func jsonFieldNames(t *testing.T, valueType reflect.Type) []string {

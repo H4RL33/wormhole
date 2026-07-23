@@ -5,12 +5,10 @@
 // tools/call over a persistent, newline-delimited-JSON connection.
 //
 // localTool/localRegistry mirror internal/mcp.Tool/internal/mcp.Registry's
-// shape, and buildInputSchema/reflectStructSchema/jsonSchemaForType/
-// parseJSONTag are copied (not imported) from internal/mcp/jsonrpc.go:106-225
-// — localapi cannot import internal/mcp (RFC-0003 §6.3 and
-// docs/implementation-rules.md §4.1 LR1). This is a
-// deliberate duplication, same posture as rpcRequest/rpcResponse/
-// toolsCallParams/toolCallResult already declared in localapi.go.
+// shape. The request/response schema reflection helpers are copied rather
+// than imported from internal/mcp because localapi cannot import that package
+// (RFC-0003 §6.3 and docs/implementation-rules.md §4.1 LR1). This is a
+// deliberate duplication, like the JSON-RPC envelope types in localapi.go.
 package localapi
 
 import (
@@ -20,6 +18,7 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -41,18 +40,23 @@ const (
 )
 
 // localToolHandler is a local tool's dispatch signature. Authentication is
-// enforced once in handleToolsCall from localTool.RequiredPermission before
+// enforced once in handleToolsCall from localTool.RequiredPermissions before
 // the handler is invoked.
 type localToolHandler func(ctx context.Context, args json.RawMessage) (any, error)
 
+type localArgumentVariant struct {
+	Example     any
+	AnyRequired [][]string
+}
+
 // localTool mirrors internal/mcp.Tool's shape for the local socket surface.
 type localTool struct {
-	Name               string
-	Description        string
-	ArgumentsExample   any
-	RequiredPermission string
-	ResultExamples     map[string]any
-	Handler            localToolHandler
+	Name                string
+	Description         string
+	ArgumentExamples    map[string]localArgumentVariant
+	RequiredPermissions []string
+	ResultExamples      map[string]any
+	Handler             localToolHandler
 }
 
 // localRegistry holds every tool Gateway's local socket serves, plus
@@ -70,16 +74,26 @@ type localRegistry struct {
 // they're invoked changes (design doc §5 subtask 2).
 func newLocalRegistry(s *Server) *localRegistry {
 	r := &localRegistry{tools: map[string]localTool{}}
-	reg := func(name, description string, example any, permission string, results map[string]any, handler localToolHandler) {
+	registerVariants := func(name, description string, examples map[string]localArgumentVariant, permissions []string, results map[string]any, handler localToolHandler) {
+		if permissions == nil {
+			permissions = []string{}
+		}
 		r.tools[name] = localTool{
-			Name:               name,
-			Description:        description,
-			ArgumentsExample:   example,
-			RequiredPermission: permission,
-			ResultExamples:     results,
-			Handler:            handler,
+			Name:                name,
+			Description:         description,
+			ArgumentExamples:    examples,
+			RequiredPermissions: permissions,
+			ResultExamples:      results,
+			Handler:             handler,
 		}
 		r.order = append(r.order, name)
+	}
+	reg := func(name, description string, example any, permission string, results map[string]any, handler localToolHandler) {
+		permissions := []string{}
+		if permission != "" {
+			permissions = append(permissions, permission)
+		}
+		registerVariants(name, description, singleArgument(example), permissions, results, handler)
 	}
 
 	reg("wormhole.agent.whoami", "Return the calling agent's identity, capabilities, and permissions.", whoAmIArgs{}, "", singleResult(whoAmIOutput{}), func(ctx context.Context, _ json.RawMessage) (any, error) {
@@ -98,7 +112,7 @@ func newLocalRegistry(s *Server) *localRegistry {
 		return s.handleTaskCreate(ctx, args)
 	})
 
-	reg("wormhole.task.route", "Create a task and route it to a locally-registered agent by capability match.", taskRouteArgs{}, "task.create", singleResult(localTaskRouteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+	registerVariants("wormhole.task.route", "Create a task and route it to a locally-registered agent by capability match.", singleArgument(taskRouteArgs{}), []string{"task.create", "task.assign"}, singleResult(localTaskRouteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleTaskRoute(ctx, args)
 	})
 
@@ -143,7 +157,13 @@ func newLocalRegistry(s *Server) *localRegistry {
 	// Server; presence-registration args (agent_id + capabilities) go to
 	// the local scheduler. Dispatch by shape, same as the old switch case
 	// (isJoinRegisterArgs, localapi.go).
-	reg("wormhole.agent.register", "Register an agent: join/passport creation (proxied to the Coordination Server) or local presence registration, dispatched by argument shape.", agentRegisterArgs{}, "", map[string]any{
+	registerVariants("wormhole.agent.register", "Register an agent: join/passport creation (proxied to the Coordination Server) or local presence registration, dispatched by argument shape.", map[string]localArgumentVariant{
+		"join": {
+			Example:     agentJoinRegisterArgs{},
+			AnyRequired: [][]string{{"owner"}, {"name"}},
+		},
+		"presence": {Example: agentLocalRegisterArgs{}},
+	}, nil, map[string]any{
 		"join":     localJoinResult{},
 		"presence": localAgentResult{},
 	}, func(ctx context.Context, args json.RawMessage) (any, error) {
@@ -162,6 +182,10 @@ func newLocalRegistry(s *Server) *localRegistry {
 	})
 
 	return r
+}
+
+func singleArgument(example any) map[string]localArgumentVariant {
+	return map[string]localArgumentVariant{"default": {Example: example}}
 }
 
 func singleResult(example any) map[string]any {
@@ -248,22 +272,25 @@ type kbWriteArgs struct {
 	Frontmatter json.RawMessage `json:"frontmatter,omitempty"`
 }
 
-// agentRegisterArgs advertises the union of both wormhole.agent.register
-// shapes (join/passport and local presence) — every field is optional in
-// the schema since only one shape's fields are actually required at
-// runtime, and JSON Schema has no clean way to express "one of these two
-// shapes" without oneOf complexity this design already declined to add for
-// project_id (§1). Runtime dispatch (isJoinRegisterArgs) still enforces the
-// real shape-specific requirements.
-type agentRegisterArgs struct {
-	AgentID      string   `json:"agent_id,omitempty"`
-	Capabilities []string `json:"capabilities,omitempty"`
+// agentJoinRegisterArgs mirrors Fabric's accepted registration input,
+// including name as the backward-compatible alias for owner.
+type agentJoinRegisterArgs struct {
+	Name         string   `json:"name,omitempty"`
+	Permissions  []string `json:"permissions"`
 	Owner        string   `json:"owner,omitempty"`
-	Model        string   `json:"model,omitempty"`
-	Repositories []string `json:"repositories,omitempty"`
-	Roles        []string `json:"roles,omitempty"`
+	Model        string   `json:"model"`
+	Capabilities []string `json:"capabilities"`
+	Repositories []string `json:"repositories"`
+	Roles        []string `json:"roles"`
 	Role         string   `json:"role,omitempty"`
-	Permissions  []string `json:"permissions,omitempty"`
+}
+
+// agentLocalRegisterArgs is the local scheduler-presence registration shape.
+// Capabilities are optional because handleAgentRegister accepts an omitted
+// list and registers the agent with no declared capabilities.
+type agentLocalRegisterArgs struct {
+	AgentID      string   `json:"agent_id"`
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 type agentPresenceArgs struct {
@@ -463,7 +490,7 @@ type toolListEntry struct {
 }
 
 // handleToolsList implements "tools/list": schemas are derived from each
-// tool's ArgumentsExample via reflection, matching design doc §1/§5.
+// tool's ArgumentExamples via reflection, matching design doc §1/§5.
 func handleToolsList(reg *localRegistry) any {
 	tools := reg.List()
 	entries := make([]toolListEntry, 0, len(tools))
@@ -477,28 +504,58 @@ func handleToolsList(reg *localRegistry) any {
 	return map[string]any{"tools": entries}
 }
 
-// buildInputSchema reflects on tool.ArgumentsExample to produce a JSON
-// Schema object (properties + required), then injects project_id as a
-// required string property unless the tool is project-agnostic
-// (wormhole.agent.whoami — design doc §1).
+// buildInputSchema returns the one canonical request schema for ordinary
+// tools and an anyOf union for tools with multiple accepted request variants.
 func buildInputSchema(t localTool) map[string]any {
-	properties := map[string]any{}
-	required := []string{}
-
-	if t.ArgumentsExample != nil {
-		properties, required = reflectStructSchema(reflect.TypeOf(t.ArgumentsExample))
+	schemas := buildInputSchemas(t)
+	variants := make([]string, 0, len(schemas))
+	for variant := range schemas {
+		variants = append(variants, variant)
 	}
-
-	if t.Name != "wormhole.agent.whoami" {
-		properties["project_id"] = map[string]any{"type": "string"}
-		required = append(required, "project_id")
+	sort.Strings(variants)
+	if len(variants) == 1 {
+		return schemas[variants[0]]
 	}
-
-	return map[string]any{
-		"type":       "object",
-		"properties": properties,
-		"required":   required,
+	anyOf := make([]map[string]any, 0, len(variants))
+	for _, variant := range variants {
+		anyOf = append(anyOf, schemas[variant])
 	}
+	return map[string]any{"anyOf": anyOf}
+}
+
+// buildInputSchemas reflects each named argument example into an exact JSON
+// Schema object, then injects project_id as a required string property unless
+// the tool is project-agnostic (wormhole.agent.whoami — design doc §1).
+func buildInputSchemas(t localTool) map[string]map[string]any {
+	schemas := make(map[string]map[string]any, len(t.ArgumentExamples))
+	for variant, argument := range t.ArgumentExamples {
+		properties := map[string]any{}
+		required := []string{}
+
+		if argument.Example != nil {
+			properties, required = reflectStructSchema(reflect.TypeOf(argument.Example))
+		}
+
+		if t.Name != "wormhole.agent.whoami" {
+			properties["project_id"] = map[string]any{"type": "string"}
+			required = append(required, "project_id")
+		}
+
+		schema := map[string]any{
+			"type":       "object",
+			"properties": properties,
+			"required":   required,
+		}
+		if len(argument.AnyRequired) > 0 {
+			alternatives := make([]map[string]any, 0, len(argument.AnyRequired))
+			for _, fields := range argument.AnyRequired {
+				alternatives = append(alternatives, map[string]any{"required": fields})
+			}
+			schema["anyOf"] = alternatives
+		}
+		schemas[variant] = schema
+	}
+	return schemas
 }
 
 // reflectStructSchema, parseJSONTag, jsonSchemaForType: copied verbatim
@@ -565,7 +622,7 @@ func jsonSchemaForType(t reflect.Type) map[string]any {
 	case t == reflect.TypeOf(time.Time{}):
 		return map[string]any{"type": "string", "format": "date-time"}
 	case t == reflect.TypeOf(json.RawMessage{}):
-		return map[string]any{"type": "object"}
+		return map[string]any{}
 	}
 
 	switch t.Kind() {
@@ -583,6 +640,75 @@ func jsonSchemaForType(t reflect.Type) map[string]any {
 	default:
 		return map[string]any{"type": "object"}
 	}
+}
+
+// jsonResponseSchemaForType derives the encoded JSON shape of a successful
+// response. Response presence differs from request optionality: only
+// omitempty removes a struct field, while a non-omitempty nil pointer is
+// emitted as null.
+func jsonResponseSchemaForType(t reflect.Type) map[string]any {
+	if t.Kind() == reflect.Ptr {
+		return map[string]any{"anyOf": []map[string]any{
+			jsonResponseSchemaForType(t.Elem()),
+			{"type": "null"},
+		}}
+	}
+
+	switch {
+	case t == reflect.TypeOf(time.Time{}):
+		return map[string]any{"type": "string", "format": "date-time"}
+	case t == reflect.TypeOf(json.RawMessage{}):
+		return map[string]any{}
+	}
+
+	switch t.Kind() {
+	case reflect.String:
+		return map[string]any{"type": "string"}
+	case reflect.Bool:
+		return map[string]any{"type": "boolean"}
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return map[string]any{"type": "integer"}
+	case reflect.Slice:
+		return map[string]any{"type": "array", "items": jsonResponseSchemaForType(t.Elem())}
+	case reflect.Struct:
+		properties, required := reflectResponseStructSchema(t)
+		return map[string]any{"type": "object", "properties": properties, "required": required}
+	default:
+		return map[string]any{"type": "object"}
+	}
+}
+
+func reflectResponseStructSchema(t reflect.Type) (map[string]any, []string) {
+	properties := map[string]any{}
+	required := []string{}
+
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		name, omitempty := parseJSONTag(field.Tag.Get("json"), field.Name)
+		if name == "-" {
+			continue
+		}
+
+		schemaType := field.Type
+		if omitempty && schemaType.Kind() == reflect.Ptr {
+			schemaType = schemaType.Elem()
+		}
+		schema := jsonResponseSchemaForType(schemaType)
+		if enumTag := field.Tag.Get("enum"); enumTag != "" {
+			values := strings.Split(enumTag, ",")
+			enumValues := make([]any, len(values))
+			for i, v := range values {
+				enumValues[i] = v
+			}
+			schema["enum"] = enumValues
+		}
+		properties[name] = schema
+		if !omitempty {
+			required = append(required, name)
+		}
+	}
+
+	return properties, required
 }
 
 // handleToolsCall implements "tools/call" (design doc §1, §5). Dispatch

@@ -250,6 +250,7 @@ func TestLocalAPIHelpersClassifyJoinAndSubscriptionFailures(t *testing.T) {
 		{"empty", nil, false},
 		{"malformed", json.RawMessage(`{`), false},
 		{"presence", json.RawMessage(`{"agent_id":"agent-1"}`), false},
+		{"hybrid dispatches as presence", json.RawMessage(`{"agent_id":"agent-1","owner":"owner"}`), false},
 		{"join", json.RawMessage(`{"owner":"owner"}`), true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

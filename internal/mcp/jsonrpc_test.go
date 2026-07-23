@@ -208,9 +208,51 @@ func TestJSONSchemaForType_TimeAndRawMessage(t *testing.T) {
 	}
 
 	got = jsonSchemaForType(reflect.TypeOf(json.RawMessage{}))
-	want = map[string]any{"type": "object"}
+	want = map[string]any{}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("jsonSchemaForType(json.RawMessage) = %#v, want %#v", got, want)
+	}
+}
+
+func TestJSONResponseSchemaMatchesEncodingSemantics(t *testing.T) {
+	type response struct {
+		RequiredPointer *string         `json:"required_pointer"`
+		OptionalPointer *string         `json:"optional_pointer,omitempty"`
+		Payload         json.RawMessage `json:"payload"`
+		OptionalPayload json.RawMessage `json:"optional_payload,omitempty"`
+	}
+
+	schema := jsonResponseSchemaForType(reflect.TypeOf(response{}))
+	properties := schema["properties"].(map[string]any)
+	required := schema["required"].([]string)
+
+	for _, name := range []string{"required_pointer", "payload"} {
+		if !containsStr(required, name) {
+			t.Errorf("required = %v, want %q", required, name)
+		}
+	}
+	for _, name := range []string{"optional_pointer", "optional_payload"} {
+		if containsStr(required, name) {
+			t.Errorf("required = %v, want %q optional", required, name)
+		}
+	}
+
+	requiredPointer := properties["required_pointer"].(map[string]any)
+	wantNullableString := []map[string]any{{"type": "string"}, {"type": "null"}}
+	if got := requiredPointer["anyOf"]; !reflect.DeepEqual(got, wantNullableString) {
+		t.Errorf("required pointer schema = %#v, want anyOf %v", requiredPointer, wantNullableString)
+	}
+	optionalPointer := properties["optional_pointer"].(map[string]any)
+	if optionalPointer["type"] != "string" {
+		t.Errorf("optional pointer schema = %#v, want optional string", optionalPointer)
+	}
+	if _, nullable := optionalPointer["anyOf"]; nullable {
+		t.Errorf("optional pointer schema = %#v, want no null union", optionalPointer)
+	}
+	for _, name := range []string{"payload", "optional_payload"} {
+		if got := properties[name].(map[string]any); len(got) != 0 {
+			t.Errorf("%s schema = %#v, want unconstrained JSON", name, got)
+		}
 	}
 }
 

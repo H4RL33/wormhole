@@ -214,7 +214,7 @@ func jsonSchemaForType(t reflect.Type) map[string]any {
 	case t == reflect.TypeOf(time.Time{}):
 		return map[string]any{"type": "string", "format": "date-time"}
 	case t == reflect.TypeOf(json.RawMessage{}):
-		return map[string]any{"type": "object"}
+		return map[string]any{}
 	}
 
 	switch t.Kind() {
@@ -232,6 +232,75 @@ func jsonSchemaForType(t reflect.Type) map[string]any {
 	default:
 		return map[string]any{"type": "object"}
 	}
+}
+
+// jsonResponseSchemaForType derives the encoded JSON shape of a successful
+// response. Response presence differs from request optionality: only
+// omitempty removes a struct field, while a non-omitempty nil pointer is
+// emitted as null.
+func jsonResponseSchemaForType(t reflect.Type) map[string]any {
+	if t.Kind() == reflect.Ptr {
+		return map[string]any{"anyOf": []map[string]any{
+			jsonResponseSchemaForType(t.Elem()),
+			{"type": "null"},
+		}}
+	}
+
+	switch {
+	case t == reflect.TypeOf(time.Time{}):
+		return map[string]any{"type": "string", "format": "date-time"}
+	case t == reflect.TypeOf(json.RawMessage{}):
+		return map[string]any{}
+	}
+
+	switch t.Kind() {
+	case reflect.String:
+		return map[string]any{"type": "string"}
+	case reflect.Bool:
+		return map[string]any{"type": "boolean"}
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return map[string]any{"type": "integer"}
+	case reflect.Slice:
+		return map[string]any{"type": "array", "items": jsonResponseSchemaForType(t.Elem())}
+	case reflect.Struct:
+		properties, required := reflectResponseStructSchema(t)
+		return map[string]any{"type": "object", "properties": properties, "required": required}
+	default:
+		return map[string]any{"type": "object"}
+	}
+}
+
+func reflectResponseStructSchema(t reflect.Type) (map[string]any, []string) {
+	properties := map[string]any{}
+	required := []string{}
+
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		name, omitempty := parseJSONTag(field.Tag.Get("json"), field.Name)
+		if name == "-" {
+			continue
+		}
+
+		schemaType := field.Type
+		if omitempty && schemaType.Kind() == reflect.Ptr {
+			schemaType = schemaType.Elem()
+		}
+		schema := jsonResponseSchemaForType(schemaType)
+		if enumTag := field.Tag.Get("enum"); enumTag != "" {
+			values := strings.Split(enumTag, ",")
+			enumValues := make([]any, len(values))
+			for i, v := range values {
+				enumValues[i] = v
+			}
+			schema["enum"] = enumValues
+		}
+		properties[name] = schema
+		if !omitempty {
+			required = append(required, name)
+		}
+	}
+
+	return properties, required
 }
 
 // toolsCallParams is the tools/call method's params shape

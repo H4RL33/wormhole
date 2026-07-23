@@ -33,10 +33,15 @@ type alphaMCPInventories struct {
 }
 
 type alphaGatewayMCPTool struct {
-	Name               string          `json:"name"`
-	RequiredPermission string          `json:"required_permission"`
-	RequestSchema      alphaSchema     `json:"request_schema"`
-	ResponseSchemas    []alphaResponse `json:"response_schemas"`
+	Name                string          `json:"name"`
+	RequiredPermissions []string        `json:"required_permissions"`
+	RequestSchemas      []alphaRequest  `json:"request_schemas"`
+	ResponseSchemas     []alphaResponse `json:"response_schemas"`
+}
+
+type alphaRequest struct {
+	Variant string      `json:"variant"`
+	Schema  alphaSchema `json:"schema"`
 }
 
 type alphaResponse struct {
@@ -45,12 +50,13 @@ type alphaResponse struct {
 }
 
 type alphaSchema struct {
-	Type       string                `json:"type"`
+	Type       string                `json:"type,omitempty"`
 	Format     string                `json:"format,omitempty"`
 	Enum       []string              `json:"enum,omitempty"`
 	Properties []alphaSchemaProperty `json:"properties,omitempty"`
 	Required   []string              `json:"required,omitempty"`
 	Items      *alphaSchema          `json:"items,omitempty"`
+	AnyOf      []alphaSchema         `json:"anyOf,omitempty"`
 }
 
 type alphaSchemaProperty struct {
@@ -114,10 +120,10 @@ func gatewayMCPContract(t *testing.T) []alphaGatewayMCPTool {
 	actual := make([]alphaGatewayMCPTool, 0, len(registry.List()))
 	for _, tool := range registry.List() {
 		actual = append(actual, alphaGatewayMCPTool{
-			Name:               tool.Name,
-			RequiredPermission: tool.RequiredPermission,
-			RequestSchema:      schemaSnapshot(t, buildInputSchema(tool)),
-			ResponseSchemas:    responseSchemaSnapshots(t, tool.ResultExamples),
+			Name:                tool.Name,
+			RequiredPermissions: tool.RequiredPermissions,
+			RequestSchemas:      requestSchemaSnapshots(t, tool),
+			ResponseSchemas:     responseSchemaSnapshots(t, tool.ResultExamples),
 		})
 	}
 	sort.Slice(actual, func(i, j int) bool { return actual[i].Name < actual[j].Name })
@@ -449,6 +455,23 @@ func sortedKeys[V any](values map[string]V) []string {
 	return keys
 }
 
+func requestSchemaSnapshots(t *testing.T, tool localTool) []alphaRequest {
+	t.Helper()
+	schemas := buildInputSchemas(tool)
+	if len(schemas) == 0 {
+		t.Fatal("tool descriptor has no request examples")
+	}
+	variants := sortedKeys(schemas)
+	snapshots := make([]alphaRequest, 0, len(variants))
+	for _, variant := range variants {
+		snapshots = append(snapshots, alphaRequest{
+			Variant: variant,
+			Schema:  schemaSnapshot(t, schemas[variant]),
+		})
+	}
+	return snapshots
+}
+
 func responseSchemaSnapshots(t *testing.T, examples map[string]any) []alphaResponse {
 	t.Helper()
 	if len(examples) == 0 {
@@ -467,7 +490,7 @@ func responseSchemaSnapshots(t *testing.T, examples map[string]any) []alphaRespo
 		}
 		snapshots = append(snapshots, alphaResponse{
 			Variant: variant,
-			Schema:  schemaSnapshot(t, jsonSchemaForType(exampleType)),
+			Schema:  schemaSnapshot(t, jsonResponseSchemaForType(exampleType)),
 		})
 	}
 	return snapshots
@@ -475,7 +498,14 @@ func responseSchemaSnapshots(t *testing.T, examples map[string]any) []alphaRespo
 
 func schemaSnapshot(t *testing.T, schema map[string]any) alphaSchema {
 	t.Helper()
-	snapshot := alphaSchema{Type: schemaType(t, schema)}
+	snapshot := alphaSchema{}
+	if rawType, ok := schema["type"]; ok {
+		schemaType, ok := rawType.(string)
+		if !ok {
+			t.Fatalf("schema type = %T", rawType)
+		}
+		snapshot.Type = schemaType
+	}
 	if format, ok := schema["format"].(string); ok {
 		snapshot.Format = format
 	}
@@ -503,6 +533,24 @@ func schemaSnapshot(t *testing.T, schema map[string]any) alphaSchema {
 		}
 		itemSnapshot := schemaSnapshot(t, items)
 		snapshot.Items = &itemSnapshot
+	}
+	if rawAnyOf, ok := schema["anyOf"]; ok {
+		switch alternatives := rawAnyOf.(type) {
+		case []map[string]any:
+			for _, alternative := range alternatives {
+				snapshot.AnyOf = append(snapshot.AnyOf, schemaSnapshot(t, alternative))
+			}
+		case []any:
+			for _, rawAlternative := range alternatives {
+				alternative, ok := rawAlternative.(map[string]any)
+				if !ok {
+					t.Fatalf("schema anyOf item = %T", rawAlternative)
+				}
+				snapshot.AnyOf = append(snapshot.AnyOf, schemaSnapshot(t, alternative))
+			}
+		default:
+			t.Fatalf("schema anyOf = %T", rawAnyOf)
+		}
 	}
 	if rawProperties, ok := schema["properties"]; ok {
 		properties, ok := rawProperties.(map[string]any)
@@ -541,15 +589,6 @@ func schemaSnapshot(t *testing.T, schema map[string]any) alphaSchema {
 		sort.Strings(snapshot.Required)
 	}
 	return snapshot
-}
-
-func schemaType(t *testing.T, schema map[string]any) string {
-	t.Helper()
-	value, ok := schema["type"].(string)
-	if !ok {
-		t.Fatalf("schema type = %T", schema["type"])
-	}
-	return value
 }
 
 func readAlphaLocalContract(t *testing.T) alphaLocalContract {

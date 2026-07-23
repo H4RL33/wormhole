@@ -15,6 +15,7 @@ import (
 	"net"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -305,13 +306,25 @@ func TestMCP_ToolsList_AllToolsWithSchemas(t *testing.T) {
 		if !ok {
 			t.Fatalf("tools/list missing tool %q", name)
 		}
-		required, _ := entry.InputSchema["required"].([]interface{})
-		hasProjectID := false
-		for _, r := range required {
-			if r == "project_id" {
-				hasProjectID = true
+		if name == "wormhole.agent.register" {
+			variants, ok := entry.InputSchema["anyOf"].([]interface{})
+			if !ok || len(variants) != 2 {
+				t.Fatalf("%s: inputSchema = %#v, want two anyOf variants", name, entry.InputSchema)
 			}
+			for i, rawVariant := range variants {
+				variant, ok := rawVariant.(map[string]interface{})
+				if !ok {
+					t.Fatalf("%s: oneOf[%d] = %T", name, i, rawVariant)
+				}
+				required, _ := variant["required"].([]interface{})
+				if !slices.Contains(required, interface{}("project_id")) {
+					t.Errorf("%s: oneOf[%d] required=%v, want project_id", name, i, required)
+				}
+			}
+			continue
 		}
+		required, _ := entry.InputSchema["required"].([]interface{})
+		hasProjectID := slices.Contains(required, interface{}("project_id"))
 		if name == "wormhole.agent.whoami" {
 			if hasProjectID {
 				t.Errorf("%s: project_id must not be required", name)
@@ -481,7 +494,7 @@ func TestLocalMCPSchemaAndResponseHelpersDescribeWireTypes(t *testing.T) {
 	active := properties["active"].(map[string]any)
 	names := properties["names"].(map[string]any)
 	mode := properties["mode"].(map[string]any)
-	if when["format"] != "date-time" || payload["type"] != "object" || count["type"] != "integer" || active["type"] != "boolean" || names["type"] != "array" {
+	if when["format"] != "date-time" || len(payload) != 0 || count["type"] != "integer" || active["type"] != "boolean" || names["type"] != "array" {
 		t.Fatalf("schema types = %#v", properties)
 	}
 	if got := mode["enum"]; !reflect.DeepEqual(got, []any{"fast", "safe"}) {
@@ -492,6 +505,111 @@ func TestLocalMCPSchemaAndResponseHelpersDescribeWireTypes(t *testing.T) {
 	}
 	if got := marshalResult(func() {}); got != nil {
 		t.Fatalf("marshalResult(unmarshalable) = %s, want nil", got)
+	}
+}
+
+func TestLocalJSONResponseSchemaMatchesEncodingSemantics(t *testing.T) {
+	type response struct {
+		RequiredPointer *string         `json:"required_pointer"`
+		OptionalPointer *string         `json:"optional_pointer,omitempty"`
+		Payload         json.RawMessage `json:"payload"`
+		OptionalPayload json.RawMessage `json:"optional_payload,omitempty"`
+	}
+
+	schema := jsonResponseSchemaForType(reflect.TypeOf(response{}))
+	properties := schema["properties"].(map[string]any)
+	required := schema["required"].([]string)
+
+	for _, name := range []string{"required_pointer", "payload"} {
+		if !slices.Contains(required, name) {
+			t.Errorf("required = %v, want %q", required, name)
+		}
+	}
+	for _, name := range []string{"optional_pointer", "optional_payload"} {
+		if slices.Contains(required, name) {
+			t.Errorf("required = %v, want %q optional", required, name)
+		}
+	}
+
+	requiredPointer := properties["required_pointer"].(map[string]any)
+	wantNullableString := []map[string]any{{"type": "string"}, {"type": "null"}}
+	if got := requiredPointer["anyOf"]; !reflect.DeepEqual(got, wantNullableString) {
+		t.Errorf("required pointer schema = %#v, want anyOf %v", requiredPointer, wantNullableString)
+	}
+	optionalPointer := properties["optional_pointer"].(map[string]any)
+	if optionalPointer["type"] != "string" {
+		t.Errorf("optional pointer schema = %#v, want optional string", optionalPointer)
+	}
+	if _, nullable := optionalPointer["anyOf"]; nullable {
+		t.Errorf("optional pointer schema = %#v, want no null union", optionalPointer)
+	}
+	for _, name := range []string{"payload", "optional_payload"} {
+		if got := properties[name].(map[string]any); len(got) != 0 {
+			t.Errorf("%s schema = %#v, want unconstrained JSON", name, got)
+		}
+	}
+}
+
+func TestLocalRegistryDescribesRoutePermissionsAndRegisterRequestVariants(t *testing.T) {
+	registry := newLocalRegistry(&Server{})
+
+	route, ok := registry.Get("wormhole.task.route")
+	if !ok {
+		t.Fatal("registry missing wormhole.task.route")
+	}
+	if want := []string{"task.create", "task.assign"}; !reflect.DeepEqual(route.RequiredPermissions, want) {
+		t.Fatalf("task.route RequiredPermissions = %v, want %v", route.RequiredPermissions, want)
+	}
+
+	register, ok := registry.Get("wormhole.agent.register")
+	if !ok {
+		t.Fatal("registry missing wormhole.agent.register")
+	}
+	if got := sortedKeys(register.ArgumentExamples); !reflect.DeepEqual(got, []string{"join", "presence"}) {
+		t.Fatalf("agent.register argument variants = %v, want [join presence]", got)
+	}
+
+	schemas := buildInputSchemas(register)
+	join := schemas["join"]
+	joinProperties := join["properties"].(map[string]any)
+	if _, ok := joinProperties["name"]; !ok {
+		t.Fatalf("join request schema omits Fabric-accepted name alias: %#v", joinProperties)
+	}
+	joinRequired := join["required"].([]string)
+	for _, name := range []string{"capabilities", "model", "permissions", "project_id", "repositories", "roles"} {
+		if !slices.Contains(joinRequired, name) {
+			t.Errorf("join required = %v, want %q", joinRequired, name)
+		}
+	}
+	for _, name := range []string{"name", "owner", "role"} {
+		if slices.Contains(joinRequired, name) {
+			t.Errorf("join required = %v, want %q optional", joinRequired, name)
+		}
+	}
+	wantOwnerAlias := []map[string]any{
+		{"required": []string{"owner"}},
+		{"required": []string{"name"}},
+	}
+	if got := join["anyOf"]; !reflect.DeepEqual(got, wantOwnerAlias) {
+		t.Errorf("join owner/name constraint = %#v, want %#v", got, wantOwnerAlias)
+	}
+
+	presence := schemas["presence"]
+	presenceRequired := presence["required"].([]string)
+	if want := []string{"agent_id", "project_id"}; !reflect.DeepEqual(presenceRequired, want) {
+		t.Fatalf("presence required = %v, want %v", presenceRequired, want)
+	}
+	presenceProperties := presence["properties"].(map[string]any)
+	if got := sortedKeys(presenceProperties); !reflect.DeepEqual(got, []string{"agent_id", "capabilities", "project_id"}) {
+		t.Fatalf("presence properties = %v, want exact presence shape", got)
+	}
+
+	advertised := buildInputSchema(register)
+	if variants, ok := advertised["anyOf"].([]map[string]any); !ok || len(variants) != 2 {
+		t.Fatalf("agent.register tools/list schema = %#v, want two anyOf variants", advertised)
+	}
+	if _, ambiguous := advertised["oneOf"]; ambiguous {
+		t.Fatalf("agent.register tools/list schema = %#v, hybrid inputs must remain valid", advertised)
 	}
 }
 

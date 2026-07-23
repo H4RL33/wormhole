@@ -661,12 +661,16 @@ func (s *Server) WarmAuthorizationScopes(ctx context.Context) error {
 // requested project, which keeps already-enrolled agents functional offline;
 // incremental_push independently rechecks every queued item server-side.
 func (s *Server) authorizeLocalTool(ctx context.Context, tool localTool, args json.RawMessage) error {
-	return s.authorizeLocalPermission(ctx, tool.RequiredPermission, args)
+	for _, requiredPermission := range tool.RequiredPermissions {
+		if err := s.authorizeLocalPermission(ctx, requiredPermission, args); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // authorizeLocalPermission checks one action against the exact cached
-// agent-and-project scope selected by the request. Handlers that perform more
-// than their registered primary action use this for their additional gates.
+// agent-and-project scope selected by the request.
 func (s *Server) authorizeLocalPermission(ctx context.Context, requiredPermission string, args json.RawMessage) error {
 	if requiredPermission == "" {
 		return nil
@@ -1185,9 +1189,6 @@ func (s *Server) handleTaskRoute(ctx context.Context, args json.RawMessage) (map
 
 	orgCtx, err := s.resolveOrgContext(projectID)
 	if err != nil {
-		return nil, err
-	}
-	if err := s.authorizeLocalPermission(ctx, "task.assign", args); err != nil {
 		return nil, err
 	}
 
