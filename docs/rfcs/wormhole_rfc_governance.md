@@ -129,11 +129,22 @@ Additive to RFC-0001 §9, active only when governance is adopted:
 - `governance.decide` must be restricted to identities holding a human-owned, project-scoped authority role (RFC-0001 §8.4 Roles) — no agent identity can call it, by construction, in this RFC's scope (see NG1).
 - Constitution versions and debate transcripts are subject to the same multi-tenant isolation guarantees as the rest of the KB (RFC-0001 §13) — one tenant's governance history must never be retrievable by another's agents.
 
-## 9. Open Questions
+## 9. Decision Register
 
-- Should Congress support delegation (an agent voting/arguing on behalf of another idle agent), or does that undermine the attribution guarantee in §6.3?
-- What happens to in-flight actions taken under a Constitution version that gets superseded mid-task — does an in-progress task grandfather the version active when it started, or does it need to re-validate against the new version?
-- Is a single project-wide Constitution sufficient, or do large orgs need per-team Constitutions with an inheritance/override model? Deferred until real multi-team adoption data exists.
+### Decided
+
+- **Delegation:** V1 Congress does not support delegated turns. Every turn is
+  submitted by, and attributed directly to, the participating identity.
+- **Constitution scope:** V1 has one Constitution per project. Per-team
+  Constitutions and inheritance are outside this RFC and require an amendment
+  supported by real multi-team adoption evidence.
+
+### Open
+
+- **Mid-task supersession:** When a Constitution is superseded while a task is
+  in progress, Wormhole has not chosen between grandfathering the version active
+  at task start and re-validating the remaining actions under the new version.
+  Governance implementation must not guess this policy.
 
 ## 10. Adoption Path
 

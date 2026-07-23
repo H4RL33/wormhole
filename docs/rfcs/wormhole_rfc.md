@@ -140,7 +140,7 @@ The Collaboration Layer is a single backend service (API + storage), with the MC
 ### 7.1 Storage shape (indicative, not final schema)
 
 - **Relational store** (Postgres) for identities, channels, tasks, permissions, project metadata — anything with clear structure and referential integrity needs.
-- **Event log** (append-only, e.g. Postgres table or a lightweight stream like NATS/Redis Streams) for the event bus — channel messages, task-state transitions, discoveries.
+- **Event log** (append-only Postgres table, polled by agent runtimes) for the event bus — channel messages, task-state transitions, discoveries.
 - **Vector store** (pgvector to start, to avoid an extra moving part) for the KB, enabling semantic retrieval over atomic knowledge articles.
 - **Git remotes** are referenced by URL/commit SHA, never mirrored.
 
@@ -176,7 +176,7 @@ Design constraints:
 
 - **Atomic articles.** One article = one fact/decision/procedure. No sprawling wiki pages.
 - **Explicit linking.** Articles link to related articles by ID (mirrors this repo's own memory-file convention of `[[name]]` links) — the KB is a graph, not a folder tree.
-- **Compliance checks on write.** Every contribution is checked for duplication (semantic similarity against existing articles above a threshold blocks or merges), conciseness (length ceiling, rejection/rewrite prompt if exceeded), and required outbound links where applicable.
+- **Compliance checks on write.** Every contribution is checked for duplication (semantic similarity against existing articles above a threshold), conciseness (length ceiling), and required outbound links where applicable. Failures use soft rejection with structured rewrite suggestions; thresholds remain tunable configuration.
 - **Semantic search as the retrieval path.** Agents query by meaning, not by filename or folder guess — this is what actually collapses onboarding/warm-up cost, versus a flat file an agent has to read in full.
 - **Model-agnostic write format.** Plain structured text (markdown + frontmatter), not vendor-specific memory formats.
 
@@ -241,7 +241,7 @@ Grouped by pillar, not exhaustive — a real spec would formalize request/respon
 **Communication**
 - `wormhole.channel.create(project_id, name)`
 - `wormhole.channel.post(channel_id, event_type, payload)`
-- `wormhole.channel.subscribe(channel_id)` (poll or push, harness-dependent)
+- `wormhole.channel.subscribe(channel_id)` (Postgres-backed polling)
 
 **Coordination**
 - `wormhole.task.create(project_id, title, description, due_by?, priority?)`
@@ -322,13 +322,29 @@ Governance (Constitution, Congress) is **not** a phase of this roadmap — it's 
 
 ---
 
-## 15. Open Questions
+## 15. Decision Register
 
-- **Real-time vs. poll.** Do agents need push notification of new channel events, or is poll-on-turn-start sufficient given how agent harnesses actually invoke tools? Affects whether an event stream (NATS/Redis) is needed in V1 or can wait.
-- **Compliance check strictness.** Where's the line between "protects KB quality" and "makes agents unable to write anything under time pressure"? Needs empirical tuning, likely a soft-reject-with-rewrite-suggestion rather than hard block.
-- **Cross-project KB visibility.** Should an agent working across multiple projects for the same user/org see a merged KB, or strictly per-project? Affects the "new machine / new model" user story from §2.3 if a user runs several related projects.
-- **Identity federation.** Should a single agent identity persist across harnesses (i.e., "this is Harley's primary Claude Code identity" regardless of which repo/session it's in), or is identity always scoped to a project? Affects onboarding-in-minutes user story and permission model complexity.
-- **Naming collision with "MCP servers hosted by the platform" (§ original draft's "host MCP servers for sending/receiving").** Clarify: Wormhole *is* the MCP server; it does not need to additionally host other agents' unrelated MCP servers. Scope this out explicitly to avoid platform sprawl.
+### Decided
+
+- **Event delivery:** V1 uses Postgres-backed polling. Agent runtimes poll at
+  turn start and during their configured sync cycle; Wormhole does not add
+  NATS, Redis, or another event-stream datastore.
+- **KB compliance:** Compliance failures use soft rejection with structured
+  rewrite suggestions. Thresholds remain tunable configuration rather than
+  architecture.
+- **Cross-project KB visibility:** KB reads are strictly project-scoped. A
+  runtime serving several projects keeps separate namespaces and never
+  constructs an implicit merged KB.
+- **Identity scope:** Credentials and resolved permissions belong to explicit
+  project Passport bindings. Harnesses may reuse descriptive persona metadata,
+  but Wormhole does not federate credentials or permissions across projects.
+- **MCP hosting boundary:** Wormhole exposes its own MCP surface. It does not
+  host arbitrary unrelated MCP servers for agents; approved integration
+  manifests are a separate RFC-0003 bootstrap concern.
+
+### Open
+
+None.
 
 ---
 
