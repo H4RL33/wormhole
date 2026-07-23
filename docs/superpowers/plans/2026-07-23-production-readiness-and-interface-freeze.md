@@ -403,16 +403,14 @@ reported version. Build flags use:
 `wormhole-${VERSION}-linux-${arch}/`, normalize tar owner/group and timestamps
 to `SOURCE_DATE_EPOCH`, gzip with `-n`, and write `SHA256SUMS`.
 
-Generate one SPDX JSON SBOM per archive with:
-
-```yaml
-- uses: anchore/sbom-action@f8bdd1d8ac5e901a77a92f111440fdb1b593736b # v0.20.6
-  with:
-    path: dist/release
-    format: spdx-json
-    output-file: dist/release/wormhole-${{ matrix.arch }}.spdx.json
-    upload-artifact: false
-```
+Generate one SPDX JSON SBOM per extracted archive tree with a direct Syft
+`1.44.0` invocation. Pin the release archive and extracted executable by
+platform-specific SHA-256 checksums, verify both checksums and the reported
+version before execution, and use the same installer locally and in the
+hosted workflow. This checksum-pinned direct invocation replaces
+`anchore/sbom-action`: the pinned action delegates to mutable installer and
+tooling resolution, so pinning the action commit alone does not freeze the
+SBOM producer.
 
 Add `make release-rehearsal`:
 
@@ -455,8 +453,12 @@ test "$(git cat-file -t "$GITHUB_REF_NAME")" = tag
 
 Use a `release` environment only for the annotated-tag publication jobs.
 `workflow_dispatch` is always a rehearsal and cannot publish, regardless of
-who invokes it. Rehearsal builds and verifies everything but skips GHCR push
-and GitHub Release creation.
+who invokes it. Every annotated-tag publication job must also require
+repository variable `WORMHOLE_RELEASE_ENABLED` to equal the exact lowercase
+string `true`; an absent or different value fails closed. Task 8 may set the
+variable only after auditing the release environment and repository rules.
+Rehearsal builds and verifies everything but skips GHCR push and GitHub
+Release creation.
 
 For annotated tag publication, sign every archive, checksum manifest, and SBOM:
 
@@ -469,8 +471,15 @@ for artifact in dist/release/*; do
 done
 ```
 
-Attest the archive subject digests, push the Fabric manifest only after its
-two architecture images pass `/healthz`, and create the release last:
+Attest the archive subject digests. For Fabric, assemble a run-scoped staging
+manifest from the exact two architecture digests that passed `/healthz`,
+resolve and sign/attest that manifest digest, recheck the annotated tag
+identity, and only then promote that same digest to the public version tag as
+the final image-publication action. A failure before promotion must leave no
+public version tag. Retain the run-scoped architecture and manifest staging
+tags while the public version exists: GHCR deletion is digest-scoped, so
+automatic deletion could remove manifests referenced by the public
+multi-architecture tag. Create the GitHub release last:
 
 ```sh
 gh release create "$GITHUB_REF_NAME" dist/release/* \
@@ -645,7 +654,12 @@ annotated v* tag + protected environment approval -> publication
 ```
 
 Include archive names, GHCR image name, checksum/SBOM/signature verification,
-and the explicit prohibition on creating beta as part of this work.
+the fail-closed `WORMHOLE_RELEASE_ENABLED` activation gate, and the explicit
+prohibition on creating beta as part of this work. Document that run-scoped
+GHCR staging tags are retained for the lifetime of their public version
+because package deletion is digest-scoped; they may be removed only when the
+corresponding public version is retired and its referenced child manifests no
+longer need to resolve.
 
 - [ ] **Step 4: Document alpha versus beta compatibility**
 
@@ -744,6 +758,10 @@ evidence exists.
 
 - [ ] **Step 1: Create the protected release environment**
 
+Confirm repository variable `WORMHOLE_RELEASE_ENABLED` is absent or has a
+value other than the exact lowercase string `true` before changing
+enforcement. The release workflow must remain fail-closed throughout setup.
+
 Create environment `release` with the repository owner as required reviewer,
 deployment branches restricted to protected branches and tags, and no
 self-review prevention that would deadlock a solo maintainer.
@@ -784,14 +802,23 @@ gh api repos/H4RL33/wormhole
 Store a redacted, human-readable summary—not raw account IDs or credentials—in
 `docs/operations/github-enforcement.md`.
 
-- [ ] **Step 5: Confirm normal and bypass behavior**
+- [ ] **Step 5: Activate release publication after the audit**
+
+Only after the release-environment and repository-ruleset read-back in Step 4
+matches the intended protections, set repository variable
+`WORMHOLE_RELEASE_ENABLED` to the exact lowercase string `true`. Read it back
+through the GitHub API and record the enabled state in
+`docs/operations/github-enforcement.md`. If any audit check fails, leave the
+variable absent or false.
+
+- [ ] **Step 6: Confirm normal and bypass behavior**
 
 Open a documentation-only test PR and confirm direct pushes are rejected while
 the PR path is accepted after required checks. Do not perform an emergency
 bypass merely to test it; confirm the configured bypass actor and mode through
 the API.
 
-- [ ] **Step 6: Commit the enforcement record through a PR**
+- [ ] **Step 7: Commit the enforcement record through a PR**
 
 ```bash
 git add docs/operations/github-enforcement.md
@@ -813,5 +840,7 @@ Merge through the protected PR path and confirm required checks apply.
   `ghcr.io/h4rl33/wormhole-fabric`.
 - [ ] Confirm the alpha contract mode is `alpha-inventory`.
 - [ ] Confirm all required checks and GitHub controls by API read-back.
+- [ ] Confirm `WORMHOLE_RELEASE_ENABLED` is exactly `true` only after the
+      protected release environment and repository ruleset pass read-back.
 - [ ] Preserve the unrelated `brand/WORMHOLE-BRAND-GUIDELINES.md` and
   `resume.md` files unchanged.

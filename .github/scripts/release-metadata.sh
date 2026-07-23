@@ -13,8 +13,13 @@ rehearsal_version=$3
 output_file=$4
 publish=false
 prerelease=false
+release_enabled=false
 tag_object=
 tag_commit=
+
+if test "${WORMHOLE_RELEASE_ENABLED:-}" = true; then
+	release_enabled=true
+fi
 
 if test "$event_name" = push; then
 	printf '%s\n' "$ref_name" |
@@ -54,6 +59,7 @@ fi
 {
 	printf 'publish=%s\n' "$publish"
 	printf 'prerelease=%s\n' "$prerelease"
+	printf 'release_enabled=%s\n' "$release_enabled"
 	printf 'version=%s\n' "$version"
 	printf 'tag_object=%s\n' "$tag_object"
 	printf 'tag_commit=%s\n' "$tag_commit"

@@ -26,6 +26,7 @@ jobs:
     outputs:
       publish: ${{ steps.metadata.outputs.publish }}
       prerelease: ${{ steps.metadata.outputs.prerelease }}
+      release-enabled: ${{ steps.metadata.outputs.release_enabled }}
       version: ${{ steps.metadata.outputs.version }}
       tag-object: ${{ steps.metadata.outputs.tag_object }}
       tag-commit: ${{ steps.metadata.outputs.tag_commit }}
@@ -38,6 +39,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           REHEARSAL_VERSION: ${{ inputs.version }}
+          WORMHOLE_RELEASE_ENABLED: ${{ vars.WORMHOLE_RELEASE_ENABLED }}
         run: >-
           .github/scripts/release-metadata.sh
           "$EVENT_NAME"
@@ -163,7 +165,9 @@ jobs:
     if: >-
       github.event_name == 'push' &&
       startsWith(github.ref, 'refs/tags/v') &&
-      needs.validate.outputs.publish == 'true'
+      vars.WORMHOLE_RELEASE_ENABLED == 'true' &&
+      needs.validate.outputs.publish == 'true' &&
+      needs.validate.outputs.release-enabled == 'true'
     needs: [validate, artifacts]
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -203,6 +207,14 @@ jobs:
           IMAGE: ghcr.io/h4rl33/wormhole-fabric
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
+          if docker buildx imagetools inspect "$IMAGE:$VERSION" \
+            >/dev/null 2>&1
+          then
+            printf 'refusing to overwrite existing image tag %s:%s\n' \
+              "$IMAGE" "$VERSION" >&2
+            exit 1
+          fi
+
           digest_file=$RUNNER_TEMP/fabric-digests
           : >"$digest_file"
           for arch in amd64 arm64; do
@@ -232,17 +244,23 @@ jobs:
 
           amd64_digest=$(awk -F= '$1 == "amd64" { print $2 }' "$digest_file")
           arm64_digest=$(awk -F= '$1 == "arm64" { print $2 }' "$digest_file")
+          temporary_manifest=$IMAGE:staging-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-manifest
+          # Staging tag retention policy: retain architecture and manifest
+          # staging tags for as long as the public version exists. GHCR
+          # deletion is digest-scoped, so deleting them automatically could
+          # remove manifests referenced by the public multi-architecture tag.
           .github/scripts/verify-release-tag.sh \
             "$GITHUB_REF_NAME" \
             "$EXPECTED_TAG_OBJECT" \
             "$EXPECTED_COMMIT"
           docker buildx imagetools create \
-            --tag "$IMAGE:$VERSION" \
+            --tag "$temporary_manifest" \
             "$IMAGE@$amd64_digest" \
             "$IMAGE@$arm64_digest"
 
           manifest=$RUNNER_TEMP/fabric-manifest.json
-          docker buildx imagetools inspect "$IMAGE:$VERSION" --raw >"$manifest"
+          docker buildx imagetools inspect "$temporary_manifest" --raw \
+            >"$manifest"
           jq -e \
             --arg amd64 "$amd64_digest" \
             --arg arm64 "$arm64_digest" \
@@ -255,6 +273,11 @@ jobs:
                .platform.architecture == "arm64")' \
             "$manifest" >/dev/null
           digest=sha256:$(sha256sum "$manifest" | cut -d' ' -f1)
+          registry_digest=$(
+            docker buildx imagetools inspect "$temporary_manifest" \
+              --format '{{.Manifest.Digest}}'
+          )
+          test "$registry_digest" = "$digest"
           printf 'digest=%s\n' "$digest" >>"$GITHUB_OUTPUT"
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
       - name: Sign Fabric manifest
@@ -268,13 +291,36 @@ jobs:
           subject-name: ghcr.io/h4rl33/wormhole-fabric
           subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true
+      - name: Recheck tag and promote signed Fabric manifest last
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+          EXPECTED_COMMIT: ${{ needs.validate.outputs.tag-commit }}
+          EXPECTED_TAG_OBJECT: ${{ needs.validate.outputs.tag-object }}
+          IMAGE: ghcr.io/h4rl33/wormhole-fabric
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          .github/scripts/verify-release-tag.sh \
+            "$GITHUB_REF_NAME" \
+            "$EXPECTED_TAG_OBJECT" \
+            "$EXPECTED_COMMIT"
+          docker buildx imagetools create \
+            --prefer-index=false \
+            --tag "$IMAGE:$VERSION" \
+            "$IMAGE@$DIGEST"
+          promoted_digest=$(
+            docker buildx imagetools inspect "$IMAGE:$VERSION" \
+              --format '{{.Manifest.Digest}}'
+          )
+          test "$promoted_digest" = "$DIGEST"
 
   publish-release:
     name: Publish GitHub release
     if: >-
       github.event_name == 'push' &&
       startsWith(github.ref, 'refs/tags/v') &&
-      needs.validate.outputs.publish == 'true'
+      vars.WORMHOLE_RELEASE_ENABLED == 'true' &&
+      needs.validate.outputs.publish == 'true' &&
+      needs.validate.outputs.release-enabled == 'true'
     needs: [validate, artifacts, publish-image]
     runs-on: ubuntu-latest
     timeout-minutes: 30

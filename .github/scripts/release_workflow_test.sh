@@ -13,12 +13,26 @@ grep -Fq '.github/scripts/release-metadata.sh' "$workflow"
 grep -Fq '.github/scripts/verify-release-tag.sh' "$workflow"
 grep -Fq '.github/scripts/verify-artifact-transfer.sh' "$workflow"
 grep -Fq '.github/scripts/publish-github-release.sh' "$workflow"
+# shellcheck disable=SC2016 # Literal workflow expression.
+grep -Fq 'WORMHOLE_RELEASE_ENABLED: ${{ vars.WORMHOLE_RELEASE_ENABLED }}' \
+	"$workflow"
+# shellcheck disable=SC2016 # Literal workflow expression.
+grep -Fq 'release-enabled: ${{ steps.metadata.outputs.release_enabled }}' "$workflow"
+direct_release_gate_count=$(
+	grep -c "vars.WORMHOLE_RELEASE_ENABLED == 'true'" "$workflow"
+)
+test "$direct_release_gate_count" -eq 2
+release_gate_count=$(
+	grep -c "needs.validate.outputs.release-enabled == 'true'" "$workflow"
+)
+test "$release_gate_count" -eq 2
 grep -Fq 'archive-amd64-sha256:' "$workflow"
 grep -Fq 'archive-arm64-sha256:' "$workflow"
 grep -Fq 'sbom-amd64-sha256:' "$workflow"
 grep -Fq 'sbom-arm64-sha256:' "$workflow"
 grep -Fq 'manifest-sha256:' "$workflow"
-grep -Fq 'docker buildx imagetools create' "$workflow"
+grep -Fq 'temporary_manifest=' "$workflow"
+grep -Fq -- '--prefer-index=false' "$workflow"
 # shellcheck disable=SC2016 # Literal workflow shell source.
 grep -Fq 'verify-fabric-image.sh "$IMAGE@$digest"' "$workflow"
 build_line=$(grep -n 'docker buildx build' "$workflow" | cut -d: -f1)
@@ -31,23 +45,52 @@ push_line=$(grep -n 'docker push "$staging_tag"' "$workflow" |
 # shellcheck disable=SC2016 # Literal workflow shell source.
 health_line=$(grep -n 'verify-fabric-image.sh "$IMAGE@$digest"' "$workflow" |
 	cut -d: -f1)
-manifest_line=$(grep -n 'docker buildx imagetools create' "$workflow" |
-	cut -d: -f1)
+temporary_manifest_line=$(
+	# shellcheck disable=SC2016 # Literal workflow shell source.
+	grep -nF -- '--tag "$temporary_manifest"' "$workflow" | cut -d: -f1
+)
+promotion_line=$(
+	# shellcheck disable=SC2016 # Literal workflow shell source.
+	grep -nF -- '--tag "$IMAGE:$VERSION"' "$workflow" | cut -d: -f1
+)
+prefer_carbon_copy_line=$(
+	grep -nF -- '--prefer-index=false' "$workflow" | cut -d: -f1
+)
 tag_check_lines=$(grep -nF '.github/scripts/verify-release-tag.sh' \
 	"$workflow" | cut -d: -f1)
 pre_push_check=$(printf '%s\n' "$tag_check_lines" | sed -n '1p')
-pre_manifest_check=$(printf '%s\n' "$tag_check_lines" | sed -n '2p')
-pre_sign_check=$(printf '%s\n' "$tag_check_lines" | sed -n '3p')
+pre_temporary_manifest_check=$(printf '%s\n' "$tag_check_lines" | sed -n '2p')
+pre_promotion_check=$(printf '%s\n' "$tag_check_lines" | sed -n '3p')
+pre_sign_check=$(printf '%s\n' "$tag_check_lines" | sed -n '4p')
 sign_line=$(grep -n 'cosign sign-blob' "$workflow" | cut -d: -f1)
+manifest_sign_line=$(
+	# shellcheck disable=SC2016 # Literal workflow shell source.
+	grep -nF 'cosign sign --yes "$IMAGE@$DIGEST"' "$workflow" | cut -d: -f1
+)
+manifest_attest_line=$(
+	# shellcheck disable=SC2016 # Literal workflow expression.
+	grep -nF 'subject-digest: ${{ steps.image.outputs.digest }}' "$workflow" |
+		cut -d: -f1
+)
 test "$(printf '%s\n' "$build_line" | wc -l)" -eq 1
 test "$build_line" -lt "$local_health_line"
 test "$local_health_line" -lt "$pre_push_check"
 test "$pre_push_check" -lt "$push_line"
 test "$push_line" -lt "$health_line"
-test "$health_line" -lt "$pre_manifest_check"
-test "$pre_manifest_check" -lt "$manifest_line"
+test "$health_line" -lt "$pre_temporary_manifest_check"
+test "$pre_temporary_manifest_check" -lt "$temporary_manifest_line"
+test "$temporary_manifest_line" -lt "$manifest_sign_line"
+test "$manifest_sign_line" -lt "$manifest_attest_line"
+test "$manifest_attest_line" -lt "$pre_promotion_check"
+test "$pre_promotion_check" -lt "$promotion_line"
+test "$prefer_carbon_copy_line" -lt "$promotion_line"
 test "$pre_sign_check" -lt "$sign_line"
 grep -Fq -- '--load' "$workflow"
+grep -Fq 'Staging tag retention policy:' "$workflow"
+if grep -Eq 'packages:[[:space:]]*delete|gh api .*--method DELETE' "$workflow"; then
+	printf 'release workflow must not broaden package deletion permissions\n' >&2
+	exit 1
+fi
 
 if grep -Fq 'anchore/sbom-action' "$workflow"; then
 	printf 'release workflow must use the same pinned Syft installer as local builds\n' >&2

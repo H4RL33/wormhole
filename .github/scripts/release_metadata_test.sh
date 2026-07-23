@@ -37,6 +37,7 @@ git init -q "$tmp_dir/source"
 		GITHUB_SHA=$(git rev-parse "$tag^{commit}") \
 			"$metadata" push "$tag" ignored "$output"
 		grep -qx 'publish=true' "$output"
+		grep -qx 'release_enabled=false' "$output"
 		grep -qx "tag_object=$(git rev-parse "$tag^{tag}")" "$output"
 		grep -qx "tag_commit=$(git rev-parse "$tag^{commit}")" "$output"
 	done
@@ -54,7 +55,24 @@ git init -q "$tmp_dir/source"
 	"$metadata" workflow_dispatch ignored 3.4.5-alpha.rehearsal \
 		"$tmp_dir/manual.output"
 	grep -qx 'publish=false' "$tmp_dir/manual.output"
+	grep -qx 'release_enabled=false' "$tmp_dir/manual.output"
 	grep -qx 'version=3.4.5-alpha.rehearsal' "$tmp_dir/manual.output"
+
+	WORMHOLE_RELEASE_ENABLED=false \
+		GITHUB_SHA=$(git rev-parse 'v1.2.3^{commit}') \
+		"$metadata" push v1.2.3 ignored "$tmp_dir/disabled.output"
+	grep -qx 'publish=true' "$tmp_dir/disabled.output"
+	grep -qx 'release_enabled=false' "$tmp_dir/disabled.output"
+
+	WORMHOLE_RELEASE_ENABLED=TRUE \
+		GITHUB_SHA=$(git rev-parse 'v1.2.3^{commit}') \
+		"$metadata" push v1.2.3 ignored "$tmp_dir/wrong-case.output"
+	grep -qx 'release_enabled=false' "$tmp_dir/wrong-case.output"
+
+	WORMHOLE_RELEASE_ENABLED=true \
+		GITHUB_SHA=$(git rev-parse 'v1.2.3^{commit}') \
+		"$metadata" push v1.2.3 ignored "$tmp_dir/enabled.output"
+	grep -qx 'release_enabled=true' "$tmp_dir/enabled.output"
 
 	alpha_object=$(git rev-parse 'v1.2.3-alpha^{tag}')
 	alpha_commit=$(git rev-parse 'v1.2.3-alpha^{commit}')
