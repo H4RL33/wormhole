@@ -49,7 +49,7 @@ This is a genuine architecture pivot, not an incremental feature. It roughly dou
 
 ### 3.2 Non-goals (this RFC, this phase)
 
-- NG1: Advanced scheduling algorithms, distributed consensus, or CRDTs for conflict resolution. Sync conflict handling in v1 is last-write-wins at the field/row level with a durable audit trail — the harder cases are an explicit open question (§9).
+- NG1: Advanced scheduling algorithms, distributed consensus, or CRDTs for conflict resolution. Sync conflict handling in v1 is last-write-wins at the field/row level with a durable audit trail. CRDTs and operational transforms are outside this RFC and require a future amendment.
 - NG2: Full peer-to-peer operation. All synchronisation flows through a coordination server; runtimes do not sync with each other directly.
 - NG3: Autonomous planning or LLM reasoning inside `wormholed`. The runtime is deterministic infrastructure, matching RFC-0001 G-line intent — no model calls inside the daemon.
 - NG4: Governance (RFC-0002) integration. Constitution/Congress concepts do not appear in `wormholed`; if governance ships, it is a coordination-server-side concern proxied through, not reasoned about locally.
@@ -155,7 +155,7 @@ Identity *records* (who an agent is, its org memberships) are recoverable; *cred
 
 `wormhole join` (existing CLI concept, RFC-0001 §8.5) now targets `wormholed`, which executes: **Authentication → Enrolment → Bootstrap → Synchronisation → Normal operation.**
 
-Bootstrap pulls a complete working environment before the runtime switches to incremental sync: org config, project manifests, initial KB, existing tasks, policies, capability definitions, approved integrations (MCP servers/skills/tooling manifests), agent configuration. This is a `wormhole.sync.bootstrap` operation — one bulk pull, not N individual pillar calls.
+Bootstrap pulls a complete working environment before the runtime switches to incremental sync: org config, project manifests, initial KB, existing tasks, policies, capability definitions, and agent configuration. This is a `wormhole.sync.bootstrap` operation — one bulk pull, not N individual pillar calls. Integration-manifest distribution and enforcement remain open as recorded in §9.
 
 ### 8.2 Steady-state sync
 
@@ -166,27 +166,46 @@ Bootstrap pulls a complete working environment before the runtime switches to in
 
 ### 8.3 Conflict handling (v1 answer)
 
-Last-write-wins per row/field, coordination-server-timestamp authoritative, every overwrite logged to the append-only audit trail (never silently dropped). This is a deliberately conservative v1 answer, not a claim that it's sufficient long-term — see §9.
+Last-write-wins per row/field, coordination-server-timestamp authoritative, every overwrite logged to the append-only audit trail (never silently dropped). CRDTs and operational transforms are outside this RFC and require a future amendment.
 
 ---
 
-## 9. Open Questions
+## 9. Decision Register
 
-Carried forward explicitly, not resolved here (per the ambiguity ladder in `docs/implementation-rules.md` §2.4 rung 5 — conservative default stated, marked open):
+### Decided
 
-- OQ1: Conflict resolution beyond last-write-wins (CRDTs, operational transforms) — deferred, NG1.
-- OQ2: Exact `wormhole.sync.*` request/response schemas — indicative only, frozen at implementation time like all other MCP schemas (RFC-0001 M1).
-- OQ3: Cross-runtime discovery mechanics for multi-user collaboration — a Coordination Server responsibility (§6.2), but no protocol is specified.
-- OQ4: Local IPC authentication model — same-user process trust assumed as the conservative default (no additional local auth token) unless a concrete threat model says otherwise; multi-user machine sharing a single `wormholed` is out of scope for v1.
-- OQ5: Version skew handling between `wormholed` and Coordination Server (protocol versioning strategy) — not specified; flagged as needed before any multi-version deployment.
-- OQ6: Tool/manifest distribution enforcement — bootstrap distributes approved integration manifests (§8.1), but how `wormholed` validates or sandboxes what it installs locally is unspecified.
+- **Conflict resolution:** V1 uses coordination-server-timestamp-authoritative
+  last-write-wins with a durable audit trail. CRDTs, operational transforms,
+  and distributed consensus are outside RFC-0003.
+- **Sync wire contract:** The version-1 request and response shapes implemented
+  by `wormhole.sync.bootstrap`, `incremental_pull`, `incremental_push`, and
+  `conflict_report` are the frozen v1 contract.
+- **Local IPC authentication:** V1 trusts processes able to connect through the
+  same-user OS-protected socket or named pipe. It adds no local bearer-token
+  layer and does not support sharing one daemon across OS users.
+- **Version skew:** Every sync request and response carries integer protocol
+  version `1`. Peers accept exactly that version and reject incompatible
+  versions; backward-compatible negotiation is deferred until a second
+  protocol version exists.
+
+### Open
+
+- **Cross-runtime discovery:** The Coordination Server owns discovery, but the
+  protocol for advertising runtimes, projects, capabilities, and presence has
+  not been selected. Empty bootstrap `org_config` and `project_list` values are
+  placeholders, not a contract.
+- **Integration-manifest enforcement:** Bootstrap may eventually distribute
+  approved integration manifests, but signature verification, allow-listing,
+  installation, update, revocation, and sandbox boundaries have not been
+  selected. `wormholed` must not install or execute manifests until a separate
+  approved design defines those controls.
 
 ---
 
 ## 10. Security Considerations
 
 - The Coordination Server's Postgres store and `wormholed`'s SQLite store do not persist raw Passport tokens; the server stores token hashes. The raw-token profile at `~/.wormhole/credentials/<profile>.json` must be kept permission-restricted. Raw tokens are not logged. Registration is the deliberate exception to the usual local API exposure rule: `proxyRegister` returns a newly issued raw token once over the local socket so the CLI can write the credential profile. Any process able to connect to that socket can invoke registration and receive its one-time token response.
-- The local API (Unix socket/named pipe) has no additional bearer-token layer in v1. Its intended same-user trust boundary depends on OS filesystem permissions for the socket path and parent directory (OQ4); users must restrict those paths accordingly.
+- The local API (Unix socket/named pipe) has no additional bearer-token layer in v1. Its same-user trust boundary depends on OS filesystem permissions for the socket path and parent directory; users must restrict those paths accordingly.
 - Multi-org isolation is application-enforced, not database-enforced, in `wormholed` (§7.2) — the single biggest security-relevant departure from the coordination server's RLS guarantee, and the top implementation review priority for any `internal/runtime/localstore` change.
 - The sync channel (`wormholed` ↔ Coordination Server) is authenticated per organisation with the existing Passport-derived bearer token; no new auth primitive is introduced beyond RFC-0001 §8.4. Transport encryption exists only when the configured Coordination Server URL uses HTTPS. The current implementation accepts HTTP URLs and sends the bearer token in the `Authorization` header, so deployments must require HTTPS for every non-loopback Coordination Server. Plain HTTP is suitable only for loopback development.
 
