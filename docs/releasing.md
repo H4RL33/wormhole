@@ -55,8 +55,10 @@ also signed and attested. Consumers should verify the checksum manifest, keyless
 Sigstore signature/certificate, SBOM, and applicable GitHub attestation before
 trusting a release.
 
-The GitHub Release is created last. A prior failure must not create a final
-GitHub Release or public version image tag.
+The GitHub Release is created last. A failure before Fabric manifest promotion
+leaves no public version image tag. After that promotion, a later artifact
+signing, attestation, tag-verification, or GitHub Release failure can leave the
+signed and attested public version image without a GitHub Release.
 
 ## GHCR staging-tag retention
 
