@@ -1,0 +1,646 @@
+{
+  "mode": "alpha-inventory",
+  "mcp_tools": [
+    {
+      "name": "wormhole.agent.register",
+      "requires_auth": false,
+      "required_permission": "",
+      "input_schema": {
+        "type": "object",
+        "properties": [
+          {"name": "capabilities", "type": "array", "items": "string"},
+          {"name": "model", "type": "string"},
+          {"name": "name", "type": "string"},
+          {"name": "owner", "type": "string"},
+          {"name": "permissions", "type": "array", "items": "string"},
+          {"name": "project_id", "type": "string"},
+          {"name": "repositories", "type": "array", "items": "string"},
+          {"name": "role", "type": "string"},
+          {"name": "roles", "type": "array", "items": "string"}
+        ],
+        "required": [
+          "capabilities",
+          "model",
+          "owner",
+          "permissions",
+          "project_id",
+          "repositories",
+          "roles"
+        ]
+      }
+    },
+    {
+      "name": "wormhole.agent.whoami",
+      "requires_auth": true,
+      "required_permission": "",
+      "input_schema": {
+        "type": "object",
+        "properties": [],
+        "required": []
+      }
+    },
+    {
+      "name": "wormhole.channel.create",
+      "requires_auth": true,
+      "required_permission": "channel.create",
+      "input_schema": {
+        "type": "object",
+        "properties": [
+          {"name": "name", "type": "string"},
+          {"name": "project_id", "type": "string"}
+        ],
+        "required": ["name", "project_id"]
+      }
+    },
+    {
+      "name": "wormhole.channel.list",
+      "requires_auth": true,
+      "required_permission": "channel.list",
+      "input_schema": {
+        "type": "object",
+        "properties": [
+          {"name": "project_id", "type": "string"}
+        ],
+        "required": ["project_id"]
+      }
+    },
+    {
+      "name": "wormhole.channel.post",
+      "requires_auth": true,
+      "required_permission": "channel.post",
+      "input_schema": {
+        "type": "object",
+        "properties": [
+          {"name": "channel_id", "type": "string"},
+          {
+            "name": "event_type",
+            "type": "string",
+            "enum": [
+              "build.failed",
+              "discovery.logged",
+              "message.posted",
+              "review.requested",
+              "task.status_changed"
+            ]
+          },
+          {"name": "note", "type": "string"},
+          {"name": "payload", "type": "object"},
+          {"name": "project_id", "type": "string"}
+        ],
+        "required": ["channel_id", "event_type", "payload", "project_id"]
+      }
+    },
+    {
+      "name": "wormhole.channel.subscribe",
+      "requires_auth": true,
+      "required_permission": "channel.subscribe",
+      "input_schema": {
+        "type": "object",
+        "properties": [
+          {"name": "channel_id", "type": "string"},
+          {"name": "limit", "type": "integer"},
+          {"name": "offset", "type": "integer"},
+          {"name": "project_id", "type": "string"}
+        ],
+        "required": ["channel_id", "project_id"]
+      }
+    },
+    {
+      "name": "wormhole.git.link_commit",
+      "requires_auth": true,
+      "required_permission": "git.link_commit",
+      "input_schema": {
+        "type": "object",
+        "properties": [
+          {"name": "commit_sha", "type": "string"},
+          {"name": "project_id", "type": "string"},
+          {"name": "repo", "type": "string"},
+          {"name": "summary", "type": "string"},
+          {"name": "task_id", "type": "string"}
+        ],
+        "required": ["commit_sha", "project_id", "repo", "summary", "task_id"]
+      }
+    },
+    {
+      "name": "wormhole.git.request_review",
+      "requires_auth": true,
+      "required_permission": "git.request_review",
+      "input_schema": {
+        "type": "object",
+        "properties": [
+          {"name": "pr_url", "type": "string"},
+          {"name": "project_id", "type": "string"},
+          {"name": "repo", "type": "string"},
+          {"name": "summary", "type": "string"}
+        ],
+        "required": ["pr_url", "project_id", "repo", "summary"]
+      }
+    },
+    {
+      "name": "wormhole.kb.get",
+      "requires_auth": true,
+      "required_permission": "kb.get",
+      "input_schema": {
+        "type": "object",
+        "properties": [
+          {"name": "article_id", "type": "string"},
+          {"name": "project_id", "type": "string"}
+        ],
+        "required": ["article_id", "project_id"]
+      }
+    },
+    {
+      "name": "wormhole.kb.get_links",
+      "requires_auth": true,
+      "required_permission": "kb.get_links",
+      "input_schema": {
+        "type": "object",
+        "properties": [
+          {"name": "article_id", "type": "string"},
+          {"name": "project_id", "type": "string"}
+        ],
+        "required": ["article_id", "project_id"]
+      }
+    },
+    {
+      "name": "wormhole.kb.search",
+      "requires_auth": true,
+      "required_permission": "kb.search",
+      "input_schema": {
+        "type": "object",
+        "properties": [
+          {"name": "limit", "type": "integer"},
+          {"name": "project_id", "type": "string"},
+          {"name": "query", "type": "string"}
+        ],
+        "required": ["project_id", "query"]
+      }
+    },
+    {
+      "name": "wormhole.kb.write",
+      "requires_auth": true,
+      "required_permission": "kb.write",
+      "input_schema": {
+        "type": "object",
+        "properties": [
+          {"name": "body", "type": "string"},
+          {"name": "force", "type": "boolean"},
+          {"name": "frontmatter", "type": "object"},
+          {"name": "links", "type": "array", "items": "string"},
+          {"name": "project_id", "type": "string"},
+          {"name": "title", "type": "string"}
+        ],
+        "required": ["body", "force", "links", "project_id", "title"]
+      }
+    },
+    {
+      "name": "wormhole.sync.bootstrap",
+      "requires_auth": true,
+      "required_permission": "",
+      "input_schema": {
+        "type": "object",
+        "properties": [
+          {"name": "namespace_id", "type": "string"},
+          {"name": "project_id", "type": "string"},
+          {"name": "version", "type": "integer"}
+        ],
+        "required": ["namespace_id", "project_id", "version"]
+      }
+    },
+    {
+      "name": "wormhole.sync.conflict_report",
+      "requires_auth": true,
+      "required_permission": "",
+      "input_schema": {
+        "type": "object",
+        "properties": [
+          {"name": "conflict_type", "type": "string"},
+          {"name": "entity_id", "type": "string"},
+          {"name": "entity_type", "type": "string"},
+          {"name": "local_value", "type": "string"},
+          {"name": "namespace_id", "type": "string"},
+          {"name": "project_id", "type": "string"},
+          {"name": "server_value", "type": "string"},
+          {"name": "version", "type": "integer"}
+        ],
+        "required": [
+          "conflict_type",
+          "entity_id",
+          "entity_type",
+          "local_value",
+          "namespace_id",
+          "project_id",
+          "server_value",
+          "version"
+        ]
+      }
+    },
+    {
+      "name": "wormhole.sync.incremental_pull",
+      "requires_auth": true,
+      "required_permission": "",
+      "input_schema": {
+        "type": "object",
+        "properties": [
+          {"name": "last_sync", "type": "string"},
+          {"name": "namespace_id", "type": "string"},
+          {"name": "project_id", "type": "string"},
+          {"name": "version", "type": "integer"}
+        ],
+        "required": ["namespace_id", "project_id", "version"]
+      }
+    },
+    {
+      "name": "wormhole.sync.incremental_push",
+      "requires_auth": true,
+      "required_permission": "",
+      "input_schema": {
+        "type": "object",
+        "properties": [
+          {"name": "items", "type": "array", "items": "object"},
+          {"name": "namespace_id", "type": "string"},
+          {"name": "project_id", "type": "string"},
+          {"name": "version", "type": "integer"}
+        ],
+        "required": ["items", "namespace_id", "project_id", "version"]
+      }
+    },
+    {
+      "name": "wormhole.task.assign",
+      "requires_auth": true,
+      "required_permission": "task.assign",
+      "input_schema": {
+        "type": "object",
+        "properties": [
+          {"name": "owner_agent_id", "type": "string"},
+          {"name": "project_id", "type": "string"},
+          {"name": "task_id", "type": "string"}
+        ],
+        "required": ["owner_agent_id", "project_id", "task_id"]
+      }
+    },
+    {
+      "name": "wormhole.task.create",
+      "requires_auth": true,
+      "required_permission": "task.create",
+      "input_schema": {
+        "type": "object",
+        "properties": [
+          {"name": "description", "type": "string"},
+          {"name": "due_by", "type": "string", "format": "date-time"},
+          {"name": "parent_task_id", "type": "string"},
+          {"name": "priority", "type": "integer"},
+          {"name": "project_id", "type": "string"},
+          {"name": "title", "type": "string"}
+        ],
+        "required": ["description", "priority", "project_id", "title"]
+      }
+    },
+    {
+      "name": "wormhole.task.list",
+      "requires_auth": true,
+      "required_permission": "task.list",
+      "input_schema": {
+        "type": "object",
+        "properties": [
+          {"name": "project_id", "type": "string"},
+          {"name": "role", "type": "string"},
+          {"name": "status", "type": "string"}
+        ],
+        "required": ["project_id"]
+      }
+    },
+    {
+      "name": "wormhole.task.update_status",
+      "requires_auth": true,
+      "required_permission": "task.update_status",
+      "input_schema": {
+        "type": "object",
+        "properties": [
+          {"name": "channel_id", "type": "string"},
+          {
+            "name": "new_status",
+            "type": "string",
+            "enum": ["blocked", "done", "todo", "wip"]
+          },
+          {"name": "project_id", "type": "string"},
+          {"name": "task_id", "type": "string"}
+        ],
+        "required": ["channel_id", "new_status", "project_id", "task_id"]
+      }
+    }
+  ],
+  "cli": {
+    "commands": [
+      {
+        "name": "connect",
+        "usage": "connect [flags]",
+        "flags": [
+          "capabilities",
+          "claude-bin",
+          "connector-name",
+          "model",
+          "opencode-config",
+          "owner",
+          "permissions",
+          "profile",
+          "project",
+          "repositories",
+          "roles",
+          "server",
+          "stdio-bin",
+          "target",
+          "token-file"
+        ],
+        "positionals": [],
+        "help_exit": 2
+      },
+      {
+        "name": "help",
+        "usage": "help",
+        "flags": [],
+        "positionals": [],
+        "help_exit": 0
+      },
+      {
+        "name": "init",
+        "usage": "init",
+        "flags": [],
+        "positionals": [],
+        "help_exit": 2
+      },
+      {
+        "name": "join",
+        "usage": "join [flags]",
+        "flags": [
+          "capabilities",
+          "context",
+          "kb-limit",
+          "model",
+          "owner",
+          "permissions",
+          "profile",
+          "project",
+          "repositories",
+          "role",
+          "roles",
+          "server",
+          "token-file"
+        ],
+        "positionals": [],
+        "help_exit": 2
+      },
+      {
+        "name": "mcp",
+        "usage": "mcp",
+        "flags": [],
+        "positionals": [],
+        "help_exit": 1
+      },
+      {
+        "name": "profile list",
+        "usage": "profile list [flags]",
+        "flags": [],
+        "positionals": [],
+        "help_exit": 2
+      },
+      {
+        "name": "viewer-key create",
+        "usage": "viewer-key create [flags]",
+        "flags": [
+          "admin-key",
+          "label",
+          "project",
+          "server"
+        ],
+        "positionals": [],
+        "help_exit": 2
+      },
+      {
+        "name": "whoami",
+        "usage": "whoami [flags]",
+        "flags": [
+          "profile"
+        ],
+        "positionals": [],
+        "help_exit": 2
+      }
+    ],
+    "config_files": {
+      "credential_fields": [
+        "agent_id",
+        "issued_at",
+        "passport_id",
+        "project_id",
+        "role",
+        "server",
+        "token"
+      ],
+      "credentials_format": "json",
+      "project_config_fields": [
+        "project",
+        "role",
+        "server"
+      ],
+      "project_config_format": "toml"
+    },
+    "exit_behavior": {
+      "help": 0,
+      "missing_command": 2,
+      "unknown_command": 2
+    }
+  },
+  "environment": [
+    "HOME",
+    "TMPDIR",
+    "WORMHOLE_ADMIN_KEY",
+    "WORMHOLE_DATABASE_URL",
+    "WORMHOLE_KB_DEDUP_THRESHOLD",
+    "WORMHOLE_KB_MAX_BODY_LENGTH",
+    "WORMHOLE_KB_MIN_LINKS_DECISION",
+    "WORMHOLE_KB_MIN_LINKS_POLICY",
+    "WORMHOLE_KB_MIN_LINKS_PROCEDURE",
+    "WORMHOLE_LISTEN_ADDR",
+    "WORMHOLE_MODEL",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_RUNTIME_DIR"
+  ],
+  "paths": {
+    "credentials": "~/.wormhole/credentials/*.json",
+    "global_config": "$XDG_CONFIG_HOME/wormhole/config.toml",
+    "global_config_fallback": "~/.config/wormhole/config.toml",
+    "project_config": ".wormhole/config.toml",
+    "runtime_database": "$XDG_DATA_HOME/wormhole/wormholed.db",
+    "runtime_database_fallback": "~/.local/share/wormhole/wormholed.db",
+    "runtime_socket": "$XDG_RUNTIME_DIR/wormhole/wormholed.sock",
+    "runtime_socket_fallback": "$TMPDIR/wormhole-runtime/wormhole/wormholed.sock"
+  },
+  "local_protocol": {
+    "transport": "unix-domain-socket",
+    "framing": "newline-delimited-json",
+    "jsonrpc_version": "2.0",
+    "mcp_protocol_version": "2025-11-25",
+    "methods": [
+      "initialize",
+      "notifications/initialized",
+      "tools/call",
+      "tools/list"
+    ],
+    "server_notifications": [
+      {
+        "method": "notifications/wormhole.event",
+        "envelope_fields": [
+          "jsonrpc",
+          "method",
+          "params"
+        ],
+        "params": "event-payload"
+      }
+    ]
+  },
+  "sync_protocol": {
+    "version": 1,
+    "methods": [
+      {
+        "name": "wormhole.sync.bootstrap",
+        "request_fields": [
+          "namespace_id",
+          "version"
+        ],
+        "optional_request_fields": []
+      },
+      {
+        "name": "wormhole.sync.conflict_report",
+        "request_fields": [
+          "conflict_type",
+          "entity_id",
+          "entity_type",
+          "local_value",
+          "namespace_id",
+          "server_value",
+          "version"
+        ],
+        "optional_request_fields": []
+      },
+      {
+        "name": "wormhole.sync.incremental_pull",
+        "request_fields": [
+          "last_sync",
+          "namespace_id",
+          "version"
+        ],
+        "optional_request_fields": [
+          "last_sync"
+        ]
+      },
+      {
+        "name": "wormhole.sync.incremental_push",
+        "request_fields": [
+          "items",
+          "namespace_id",
+          "version"
+        ],
+        "optional_request_fields": []
+      }
+    ],
+    "wire_types": [
+      {
+        "name": "applied_item",
+        "fields": [
+          "error",
+          "id",
+          "type"
+        ]
+      },
+      {
+        "name": "article_summary",
+        "fields": [
+          "article_id",
+          "author_agent_id",
+          "body",
+          "created_at",
+          "frontmatter",
+          "project_id",
+          "title",
+          "updated_at"
+        ]
+      },
+      {
+        "name": "bootstrap_response",
+        "fields": [
+          "kb_list",
+          "task_list"
+        ]
+      },
+      {
+        "name": "incremental_pull_response",
+        "fields": [
+          "timestamp",
+          "updates",
+          "version"
+        ]
+      },
+      {
+        "name": "incremental_pull_update",
+        "fields": [
+          "data",
+          "type"
+        ]
+      },
+      {
+        "name": "incremental_push_response",
+        "fields": [
+          "applied",
+          "items_received",
+          "timestamp",
+          "version"
+        ]
+      },
+      {
+        "name": "task_summary",
+        "fields": [
+          "description",
+          "due_by",
+          "owner_agent_id",
+          "parent_task_id",
+          "priority",
+          "status",
+          "task_id",
+          "title"
+        ]
+      }
+    ]
+  },
+  "migrations": [
+    "000001_init_schema",
+    "000002_agent_tokens",
+    "000003_audit_trail",
+    "000004_audit_log_seq",
+    "000005_agent_tokens_expiry",
+    "000006_task_graph",
+    "000007_event_channels",
+    "000008_git_links",
+    "000009_kb_articles",
+    "000010_role_templates",
+    "000011_viewer_keys",
+    "000012_sync_conflict_event_type",
+    "000013_role_templates_defaults",
+    "000014_role_templates_fine_grained",
+    "000015_bootstrap_idempotency",
+    "000016_project_reference_isolation",
+    "000017_audit_log_force_rls"
+  ],
+  "artifacts": {
+    "binaries": [
+      "fabric",
+      "gatewayd",
+      "wormhole"
+    ],
+    "fabric_image": "ghcr.io/h4rl33/wormhole-fabric",
+    "release_platforms": [
+      "linux/amd64",
+      "linux/arm64"
+    ]
+  }
+}
