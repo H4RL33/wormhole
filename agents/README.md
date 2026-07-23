@@ -98,6 +98,22 @@ and may skip when it is unavailable unless `WORMHOLE_INTEGRATION_REQUIRED=1`.
 - Runtime SQLite: `$XDG_DATA_HOME/wormhole/wormholed.db`, else
   `~/.local/share/wormhole/wormholed.db`.
 
+`wormholed.sock` and `wormholed.db` are retained local-state filenames, not
+legacy executable aliases. Invoke `gatewayd`, never a former daemon name.
+
+## Delivery and Compatibility Policy
+
+The intended required CI contexts are `Contract Inventory`, `Static`, `Build`,
+`Integration`, `Race`, `Coverage`, `Migrations`, `Vulnerability`, `Secret Scan`,
+and `Action Pins`; `Dependency Review` is pull-request-only. Do not represent
+these as hosted protections until their GitHub configuration has been read back
+and verified. An emergency owner bypass requires a follow-up issue with reason,
+impact, verification debt, and corrective action.
+
+`docs/releasing.md` distinguishes non-publishing rehearsals from guarded tag
+publication. `docs/compatibility.md` records the current `alpha-inventory`
+policy; no beta compatibility promise exists.
+
 ## Live-Doc Map
 
 - RFCs: `docs/rfcs/`.

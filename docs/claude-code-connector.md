@@ -76,6 +76,8 @@ The positional profile name must match `claude-code` in
 `~/.wormhole/credentials/claude-code.json`. `gatewayd` then listens on
 `$XDG_RUNTIME_DIR/wormhole/wormholed.sock`, or
 `$TMPDIR/wormhole-runtime/wormhole/wormholed.sock` when `XDG_RUNTIME_DIR` is unset.
+The `wormholed.sock` basename is retained runtime-state compatibility, not an
+executable alias: start `gatewayd` and configure Claude Code with `wormhole mcp`.
 
 ## 4. Register Claude Code
 

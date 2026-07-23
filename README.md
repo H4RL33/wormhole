@@ -103,6 +103,10 @@ Interfaces may change before a stable release. Do not expose an alpha
 Coordination Server directly to the public internet without reviewing the
 [security policy](SECURITY.md).
 
+The current compatibility mode is `alpha-inventory`: reviewed interface changes
+update the checked-in inventory, but this alpha state makes no beta compatibility
+promise. See [Compatibility policy](docs/compatibility.md).
+
 ## Get started
 
 Choose the path that matches how you want to use Wormhole.
@@ -177,6 +181,11 @@ Local paths:
   `~/.local/share/wormhole/wormholed.db`
 - Daemon socket: `$XDG_RUNTIME_DIR/wormhole/wormholed.sock`, or the
   `$TMPDIR/wormhole-runtime/` fallback
+
+The retained `wormholed.sock` and `wormholed.db` basenames identify on-disk
+runtime state from before the hard executable rename. They are data-path
+compatibility names only: neither is a command, binary, symlink, or alias for
+`gatewayd`.
 
 Credential profiles contain bearer tokens. Never commit or share them.
 
@@ -347,6 +356,8 @@ issue.
 - [Security Model](https://github.com/H4RL33/wormhole/wiki/Security-Model)
 - [Architecture and implementation rules](docs/implementation-rules.md)
 - [MCP protocol](docs/mcp-protocol.md)
+- [Release policy](docs/releasing.md)
+- [Compatibility policy](docs/compatibility.md)
 - [Data entities](docs/db-entities.md)
 - [RFC-0001: Core](docs/rfcs/wormhole_rfc.md)
 - [RFC-0002: Governance](docs/rfcs/wormhole_rfc_governance.md)

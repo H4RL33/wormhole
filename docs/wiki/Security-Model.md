@@ -68,3 +68,17 @@ Do not open a public issue.
 
 See [SECURITY.md](https://github.com/H4RL33/wormhole/blob/main/SECURITY.md) for
 the current response policy.
+
+## Delivery controls
+
+The intended CI contexts are `Contract Inventory`, `Static`, `Build`,
+`Integration`, `Race`, `Coverage`, `Migrations`, `Vulnerability`, `Secret Scan`,
+and `Action Pins`; `Dependency Review` is pull-request-only. An emergency owner
+bypass requires a follow-up issue recording reason, impact, verification debt,
+and corrective action. Workflow files do not by themselves prove hosted branch
+protection or the protected `release` environment is active; that requires an
+API read-back audit.
+
+Manual release dispatch is rehearsal-only. Annotated tags may publish only after
+release-environment approval and the exact-lowercase `WORMHOLE_RELEASE_ENABLED=true`
+gate. See the canonical [release policy](https://github.com/H4RL33/wormhole/blob/main/docs/releasing.md).

@@ -128,6 +128,9 @@ Paths:
 - Daemon socket: `$XDG_RUNTIME_DIR/wormhole/wormholed.sock`, or the
   `$TMPDIR/wormhole-runtime/` fallback
 
+The retained `wormholed.db` and `wormholed.sock` filenames are paths for local
+Gateway state. They are not executable aliases; use `gatewayd` for the daemon.
+
 ## Connection patterns
 
 Single machine:

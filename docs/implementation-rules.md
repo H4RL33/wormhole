@@ -410,6 +410,10 @@ the same layering pattern and isolation discipline.
 - T4: Do not claim done without `go build ./...`, `go vet ./...`, and `go test ./...`
   passing, run and output observed.
 
+Release and compatibility policy live in `docs/releasing.md` and
+`docs/compatibility.md`. Those documents describe repository workflow behavior;
+do not infer that external GitHub controls are active without an API read-back.
+
 ---
 
 ## 10. Scope Tripwires — Stop and Escalate If a Task Seems to Require

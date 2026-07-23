@@ -52,3 +52,20 @@ All contributions must include test coverage matching these requirements:
 1. **Open an Issue**: For non-trivial changes, open an issue to discuss design and alignment before writing code.
 2. **Single-Scoped PRs**: Keep pull requests tightly scoped to a single feature or bug fix.
 3. **Clean Diffs**: Avoid modifying unrelated code formatting or adding speculative code.
+
+## CI and emergency bypasses
+
+Before requesting review, run the focused checks relevant to the change. The
+intended required GitHub check contexts are `Contract Inventory`, `Static`,
+`Build`, `Integration`, `Race`, `Coverage`, `Migrations`, `Vulnerability`,
+`Secret Scan`, and `Action Pins`; `Dependency Review` runs only for pull
+requests. The workflow definitions alone do not prove these contexts are
+currently enforced by hosted branch protection.
+
+An emergency repository-owner bypass is a last resort. The owner must open a
+follow-up issue that records the reason, impact, verification debt, and
+corrective action. Do not use a bypass to avoid ordinary CI or review work.
+
+For the complete artifact and publication procedure, see
+[docs/releasing.md](docs/releasing.md). Alpha interface changes are governed by
+[docs/compatibility.md](docs/compatibility.md).

@@ -14,6 +14,8 @@ experimental multi-agent systems.
   architecture, status, and quickstarts
 - [CLI Guide](CLI-Guide) — commands, profiles, paths, and connection patterns
 - [Security Model](Security-Model) — deployment boundaries and human control
+- [Release policy](https://github.com/H4RL33/wormhole/blob/main/docs/releasing.md)
+- [Compatibility policy](https://github.com/H4RL33/wormhole/blob/main/docs/compatibility.md)
 - [Contributing](https://github.com/H4RL33/wormhole/blob/main/CONTRIBUTING.md)
 - [RFCs](https://github.com/H4RL33/wormhole/tree/main/docs/rfcs)
 
@@ -44,3 +46,7 @@ This Wiki is a user-facing navigation layer. Repository files are canonical:
 - [MCP protocol](https://github.com/H4RL33/wormhole/blob/main/docs/mcp-protocol.md)
 
 When Wiki text and a repository file disagree, follow the repository.
+
+The current interface policy is `alpha-inventory`, not a beta promise. Hosted
+release-environment and branch-protection configuration must be verified through
+repository API read-back before it is described as active.

@@ -11,6 +11,26 @@ If you discover a security vulnerability in Wormhole, please do not open a publi
 
 We aim to acknowledge and investigate all legitimate reports within 48 hours and work with you to coordinate a patch and public advisory.
 
+## Delivery controls
+
+The repository has release and CI workflow definitions, but this document does
+not assert that hosted branch rules, GitHub security settings, or the `release`
+environment have been configured or verified. Those controls require a separate
+API read-back audit before they are treated as active.
+
+The intended merge gates are `Contract Inventory`, `Static`, `Build`,
+`Integration`, `Race`, `Coverage`, `Migrations`, `Vulnerability`, `Secret Scan`,
+and `Action Pins`. `Dependency Review` is a pull-request-only check and is not a
+push-required context. An emergency repository-owner bypass is exceptional and
+must be followed by a human-owned GitHub issue recording the reason, impact,
+verification debt, and corrective action.
+
+Publication is fail-closed: the workflow can publish only from an annotated
+`v*` tag, after `release` environment approval, and only when the repository
+variable `WORMHOLE_RELEASE_ENABLED` is exactly the lowercase string `true`.
+Manual dispatch is a rehearsal and never publishes. See
+[the release policy](docs/releasing.md).
+
 ---
 
 ## Security Model & Boundary Isolation
