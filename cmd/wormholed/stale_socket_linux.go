@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"syscall"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 const renameNoReplaceFlag = 1
@@ -18,7 +20,7 @@ const renameNoReplaceFlag = 1
 // was checked. A replacement is restored with RENAME_NOREPLACE and is never
 // unlinked. The private directory closes the check/unlink race under RFC-0003
 // OQ4's same-user trust model.
-func quarantineAndRemoveSocket(socketPath string, expected os.FileInfo, hooks staleSocketRemovalHooks) error {
+func quarantineAndRemoveSocket(socketPath string, expectedDev, expectedIno uint64, hooks staleSocketRemovalHooks) error {
 	if hooks.beforeQuarantine != nil {
 		hooks.beforeQuarantine()
 	}
@@ -41,12 +43,12 @@ func quarantineAndRemoveSocket(socketPath string, expected os.FileInfo, hooks st
 	if hooks.afterQuarantine != nil {
 		hooks.afterQuarantine(quarantinePath)
 	}
-	moved, err := os.Lstat(quarantinePath)
-	if err != nil {
+	var moved unix.Stat_t
+	if err := unix.Lstat(quarantinePath, &moved); err != nil {
 		removeQuarantineDir = false
 		return fmt.Errorf("wormholed: inspect quarantined socket %s: %w", quarantinePath, err)
 	}
-	if !os.SameFile(expected, moved) {
+	if moved.Dev != expectedDev || moved.Ino != expectedIno {
 		if err := renameNoReplace(quarantinePath, socketPath); err != nil {
 			removeQuarantineDir = false
 			return fmt.Errorf("wormholed: socket changed during stale-socket removal; replacement preserved at %s: restore: %w", quarantinePath, err)

@@ -21,6 +21,7 @@ import (
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/runtime/scheduler"
 	"github.com/H4RL33/wormhole/internal/runtime/sync"
+	"golang.org/x/sys/unix"
 )
 
 type syncEngine interface {
@@ -197,6 +198,16 @@ func removeStaleSocketWithHooks(socketPath string, hooks staleSocketRemovalHooks
 	if info.Mode()&os.ModeSocket == 0 {
 		return fmt.Errorf("wormholed: stale socket path %s is not a socket", socketPath)
 	}
+	fd, err := unix.Open(socketPath, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("wormholed: open stale socket path: %w", err)
+	}
+	defer unix.Close(fd)
+
+	var expected unix.Stat_t
+	if err := unix.Fstat(fd, &expected); err != nil {
+		return fmt.Errorf("wormholed: stat stale socket descriptor: %w", err)
+	}
 	conn, dialErr := net.DialTimeout("unix", socketPath, 250*time.Millisecond)
 	if dialErr == nil {
 		_ = conn.Close()
@@ -205,7 +216,7 @@ func removeStaleSocketWithHooks(socketPath string, hooks staleSocketRemovalHooks
 	if !errors.Is(dialErr, syscall.ECONNREFUSED) {
 		return fmt.Errorf("wormholed: cannot prove socket %s is stale: %w", socketPath, dialErr)
 	}
-	return quarantineAndRemoveSocket(socketPath, info, hooks)
+	return quarantineAndRemoveSocket(socketPath, expected.Dev, expected.Ino, hooks)
 }
 
 func runWithSyncEngineFactory(ctx context.Context, profileName string, factory syncEngineFactory) error {
