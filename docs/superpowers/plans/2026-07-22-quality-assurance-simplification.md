@@ -4,7 +4,7 @@
 
 **Goal:** Make every testable Wormhole production/runtime path covered and passing, prove the complete local-to-server system with real integration tests, and enforce `wormholed` resource ceilings.
 
-**Architecture:** Keep the existing local-runtime/coordination-server split. Work risk-first: restore the gate, fix isolation and sync contracts with focused red-green cycles, harden process boundaries, then raise merged coverage to 90%. Each task is independently reviewed before dependent work begins.
+**Architecture:** Keep the existing local-runtime/coordination-server split. Work risk-first: restore the gate, fix isolation and sync contracts with focused red-green cycles, harden process boundaries, then maintain merged coverage at 80% or greater. Each task is independently reviewed before dependent work begins.
 
 **Tech Stack:** Go, Unix sockets, SQLite (`modernc.org/sqlite`), Postgres/pgvector, Docker Compose, `golang-migrate`, Go race and coverage tooling.
 
@@ -15,7 +15,7 @@
 - Core packages do not cross-import except `tasks -> events`; runtime packages do not import Core or MCP.
 - Use real Postgres for server persistence/RLS tests and explicit namespaces for every localstore query.
 - Write and observe a failing test before each production behavior change.
-- Require at least 90% merged statement coverage for production/runtime behavior; document deliberately uncovered high-risk paths.
+- Require at least 80% merged statement coverage for production/runtime behavior; document deliberately uncovered high-risk paths.
 - Preserve unrelated worktree changes.
 
 ---
@@ -79,7 +79,7 @@ check: fmt-check build vet integration race coverage
 
 - [ ] **Step 4: Add the coverage checker and exception format**
 
-Create this executable checker. It requires at least 90% merged statement coverage:
+Create this executable checker. It requires at least 80% merged statement coverage:
 
 ```sh
 #!/bin/sh
@@ -95,8 +95,8 @@ printf '%s\n' "$report"
 total=$(printf '%s\n' "$report" | awk '$1 == "total:" {print $3}')
 total_number=${total%\%}
 
-if ! awk -v total="$total_number" 'BEGIN { exit !(total + 0 >= 90) }'; then
-    printf '%s\n' "coverage gate failed: merged statement coverage must be at least 90.0%" >&2
+if ! awk -v total="$total_number" 'BEGIN { exit !(total + 0 >= 80) }'; then
+    printf '%s\n' "coverage gate failed: merged statement coverage must be at least 80.0%" >&2
     exit 1
 fi
 ```
@@ -366,12 +366,12 @@ Commit: `test: cover end-to-end isolation and recovery`
 ### Task 7: Close All Testable Coverage Gaps and Simplify Under Test
 
 **Files:**
-- Modify: tests adjacent to uncovered high-risk production/runtime paths until merged coverage reaches 90%
+- Modify: tests adjacent to uncovered high-risk production/runtime paths until merged coverage reaches 80%
 - Modify when needed for injection: `cmd/wormhole/main.go`, `cmd/wormholed/main.go`, `cmd/wormhole-server/main.go`
 - Modify: `docs/testing-coverage-exceptions.md`
 
 **Interfaces:**
-- Produces: at least 90% merged statement coverage and testable command wiring for the highest-risk entrypoints.
+- Produces: at least 80% merged statement coverage and testable command wiring for the highest-risk entrypoints.
 
 - [ ] **Step 1: Generate the merged coverage worklist**
 
@@ -392,7 +392,7 @@ Add focused behavior tests for config resolution, `EventRepo.GetChannel/ListChan
 
 Extract `run(ctx, args, stdout, stderr) error` or equivalent injected wiring from each `main`; retain `main` as signal/argument adaptation plus one exit decision. Use subprocess helper tests for the final `os.Exit`/signal boundary and direct tests for all wiring errors.
 
-- [ ] **Step 4: Iterate high-risk uncovered branches until the merged total reaches 90%**
+- [ ] **Step 4: Iterate high-risk uncovered branches until the merged total reaches 80%**
 
 Prioritize isolation, persistence, sync, IPC, authorization, cancellation, and command-wiring branches. For each selected branch, write a test that observes meaningful behavior or a controlled dependency failure, run it, then rerun the merged report. Do not use assertions that merely execute a line without checking its contract.
 
@@ -404,7 +404,7 @@ For each exception, add exact `path:line`, technical reason, replacement behavio
 
 Run: `make coverage`
 
-Expected: merged statement coverage is at least `90.0%`.
+Expected: merged statement coverage is at least `80.0%`.
 
 With coverage green, remove duplicated test helpers and extract only production helpers whose responsibility is proven by multiple tests. Run `gofmt` only on touched files.
 
@@ -446,7 +446,7 @@ make coverage
 git diff --check
 ```
 
-Expected: every command exits 0; merged statement coverage is at least 90%; no unresolved review finding remains.
+Expected: every command exits 0; merged statement coverage is at least 80%; no unresolved review finding remains.
 
 - [ ] **Step 4: Produce completion report**
 

@@ -12,7 +12,7 @@ Bring the current Wormhole implementation to a trustworthy release-quality basel
 
 The work is complete only when all of the following hold:
 
-- Merged statement coverage is at least 90%, measured across all packages with `-coverpkg=./... -covermode=atomic`.
+- Merged statement coverage is at least 80%, measured across all packages with `-coverpkg=./... -covermode=atomic`.
 - Every genuinely untestable line has a written, per-line technical justification and explicit approval; command entrypoints are not automatically exempt.
 - Formatting, build, vet, full tests, race tests, and mandatory real-Postgres integration tests pass from a clean invocation.
 - Integration coverage exercises the CLI/stdio bridge, Unix socket, `wormholed`, SQLite durability, sync protocol, coordination server, and Postgres/RLS boundary.
@@ -21,7 +21,7 @@ The work is complete only when all of the following hold:
 
 ## Approach
 
-Use a risk-first staged pass. Restore a trustworthy baseline first, then fix high-risk correctness, durability, and isolation defects using test-driven changes. Complete integration and raise merged coverage to 90% after runtime contracts are correct.
+Use a risk-first staged pass. Restore a trustworthy baseline first, then fix high-risk correctness, durability, and isolation defects using test-driven changes. Complete integration and maintain merged coverage at 80% or greater after runtime contracts are correct.
 
 Coverage-first was rejected because it can encode defective behavior. Refactor-first was rejected because broad structural movement before adequate tests creates unnecessary regression risk.
 

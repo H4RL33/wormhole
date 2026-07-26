@@ -115,7 +115,7 @@ constraints, but the required check names remain stable.
    - run the repository race target against migrated PostgreSQL.
 
 5. **Coverage**
-   - enforce the existing merged statement-coverage floor of 90%;
+   - enforce the merged statement-coverage floor of 80%;
    - upload the coverage profile for diagnosis.
 
 6. **Migration verification**

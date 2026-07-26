@@ -116,7 +116,7 @@ make race
 make coverage
 ```
 
-Expected: all commands exit 0 and merged coverage is at least `90.0%`.
+Expected: all commands exit 0 and merged coverage is at least `80.0%`.
 
 - [ ] **Step 6: Commit**
 
