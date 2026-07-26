@@ -225,6 +225,21 @@ If the semantic provider or active index is unavailable, there is no lexical fal
 - Live request schema: `{"additionalProperties":false,"properties":{"project_id":{"type":"string"}},"required":["project_id"],"type":"object"}`
 - Misuse warning: Do not call status as a rebuild request or mistake degraded health for current source.
 
+## `wormhole.git.link_commit`
+
+- Purpose: Record a metadata-only task-to-commit pointer locally and enqueue it for synchronization.
+- Use when: When a verified commit materially advances or completes a tracked task and reviewers need the exact Git reference.
+- Do not use when: Do not use it before the commit exists, for a pull-request review request, or to copy source into Wormhole.
+- Mutates state: true
+- Required permissions: git.link_commit
+- Prerequisites: A bound project, existing task, repository identifier, exact commit SHA, concise summary, and git.link_commit permission.
+- Freshness implications: The pointer is durable locally first and becomes visible to other Gateways after synchronization.
+- Source-access implications: This tool stores only a Git pointer and summary; it never reads, mirrors, or proves repository source.
+- Recommended follow-up: Verify the commit directly with Git, check sync.status, and include the pointer in the reviewer handoff.
+- Minimal request example: `{"commit_sha":"example","project_id":"example","repo":"example","summary":"example","task_id":"example"}`
+- Live request schema: `{"properties":{"commit_sha":{"type":"string"},"project_id":{"type":"string"},"repo":{"type":"string"},"summary":{"type":"string"},"task_id":{"type":"string"}},"required":["task_id","repo","commit_sha","summary","project_id"],"type":"object"}`
+- Misuse warning: A stored pointer is not proof that the commit is correct, reachable, reviewed, or remotely synchronized.
+
 ## `wormhole.kb.get`
 
 - Purpose: Get a named KB article or list articles when no ID is supplied.
@@ -254,6 +269,21 @@ If the semantic provider or active index is unavailable, there is no lexical fal
 - Minimal request example: `{"project_id":"example"}`
 - Live request schema: `{"properties":{"project_id":{"type":"string"}},"required":["project_id"],"type":"object"}`
 - Misuse warning: Do not treat this local inventory as a substitute for a remote freshness check.
+
+## `wormhole.kb.search`
+
+- Purpose: Search the shared Fabric knowledge base with generation-scoped semantic ranking.
+- Use when: When organisational decisions, procedures, or durable discoveries could answer the question before broad repository reconstruction.
+- Do not use when: Do not use it as source-code authority or silently substitute lexical/local search when semantic ranking is unavailable.
+- Mutates state: false
+- Required permissions: kb.search
+- Prerequisites: An online project-bound Fabric connection and kb.search permission.
+- Freshness implications: Results come from Fabric's active semantic generation; provider or index degradation returns a structured error with fallback=none.
+- Source-access implications: This tool does not read or return repository source.
+- Recommended follow-up: Read relevant durable context, then verify any code claim against Git and current source.
+- Minimal request example: `{"project_id":"example","query":"example"}`
+- Live request schema: `{"properties":{"limit":{"type":"integer"},"project_id":{"type":"string"},"query":{"type":"string"}},"required":["query","project_id"],"type":"object"}`
+- Misuse warning: Never reinterpret a semantic degradation error as a successful empty result or permission to fall back silently.
 
 ## `wormhole.kb.write`
 
@@ -344,3 +374,18 @@ If the semantic provider or active index is unavailable, there is no lexical fal
 - Minimal request example: `{"capability":"example","project_id":"example"}`
 - Live request schema: `{"properties":{"capability":{"type":"string"},"description":{"type":"string"},"project_id":{"type":"string"},"title":{"type":"string"}},"required":["capability","project_id"],"type":"object"}`
 - Misuse warning: Do not assume capability matching proves workload capacity or remote availability.
+
+## `wormhole.task.update_status`
+
+- Purpose: Transition a task through the validated local workflow and enqueue the status update for synchronization.
+- Use when: When meaningful work begins, blocks, resumes, or completes and the shared task state should reflect it.
+- Do not use when: Do not use it for narration, an invalid workflow jump, or without a durable status-event channel.
+- Mutates state: true
+- Required permissions: task.update_status
+- Prerequisites: A bound project, existing task and channel, and task.update_status permission.
+- Freshness implications: The validated transition and event commit locally first; Fabric and other Gateways observe them after synchronization.
+- Source-access implications: This tool does not read or return repository source.
+- Recommended follow-up: Verify task.get and sync.status, then leave concise handoff context before marking work done.
+- Minimal request example: `{"channel_id":"example","new_status":"todo","project_id":"example","task_id":"example"}`
+- Live request schema: `{"properties":{"channel_id":{"type":"string"},"new_status":{"enum":["todo","wip","blocked","done"],"type":"string"},"project_id":{"type":"string"},"task_id":{"type":"string"}},"required":["task_id","new_status","channel_id","project_id"],"type":"object"}`
+- Misuse warning: Do not report remote completion while the durable update is still pending synchronization.

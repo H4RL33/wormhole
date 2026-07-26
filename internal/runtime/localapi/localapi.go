@@ -147,6 +147,7 @@ type Server struct {
 	tr                    *localstore.TaskRepo
 	er                    *localstore.EventRepo
 	kb                    *localstore.KBRepo
+	gr                    *localstore.GitRepo
 	qr                    *syncpkg.QueueRepo
 	statusProvider        SyncStatusProvider
 	integrationGuidance   IntegrationGuidanceProvider
@@ -312,6 +313,7 @@ func New(socketPath, coordServerURL, token, projectID string, store *localstore.
 		tr:          tr,
 		er:          er,
 		kb:          kb,
+		gr:          localstore.NewGitRepo(store.DB()),
 		qr:          qr,
 		handlers:    make(chan struct{}, maxActiveConnections),
 		serveReady:  make(chan struct{}),
@@ -341,6 +343,7 @@ func NewWithRuntime(socketPath, coordServerURL, token, projectID string, store *
 		tr:          tr,
 		er:          er,
 		kb:          kb,
+		gr:          localstore.NewGitRepo(store.DB()),
 		qr:          qr,
 		eventbus:    eb,
 		scheduler:   sched,
@@ -374,6 +377,7 @@ func NewMultiOrg(socketPath string, orgs map[string]config.Org, bindings []confi
 		tr:         tr,
 		er:         er,
 		kb:         kb,
+		gr:         localstore.NewGitRepo(store.DB()),
 		qr:         qr,
 		eventbus:   eb,
 		scheduler:  sched,
@@ -676,6 +680,80 @@ func (s *Server) proxyRegister(ctx context.Context, args json.RawMessage) (json.
 	}
 
 	return json.RawMessage(result.Content[0].Text), nil
+}
+
+// proxyAuthenticatedTool forwards a central-authority tool through the
+// project-bound Gateway credential. It deliberately has no local fallback:
+// semantic search must either return Fabric's ranked result or its exact
+// structured degradation error.
+func (s *Server) proxyAuthenticatedTool(ctx context.Context, toolName string, args json.RawMessage) (json.RawMessage, error) {
+	var argMap map[string]interface{}
+	if err := json.Unmarshal(args, &argMap); err != nil {
+		return nil, fmt.Errorf("localapi: %s: invalid args: %w", toolName, err)
+	}
+	projectID := s.projectID
+	if supplied, ok := argMap["project_id"].(string); ok && supplied != "" {
+		projectID = supplied
+	}
+	if !s.isMultiOrg && projectID != s.projectID {
+		return nil, fmt.Errorf("localapi: project_id mismatch: got %q, bound as %q", projectID, s.projectID)
+	}
+	orgCtx, err := s.resolveOrgContext(projectID)
+	if err != nil {
+		return nil, err
+	}
+	if s.statusProvider != nil {
+		status, statusErr := s.statusProvider.Status(ctx, orgCtx.ProjectID)
+		if statusErr == nil && status.State == syncpkg.StateOffline {
+			return nil, fmt.Errorf("localapi: central authority required: %s is unavailable while Fabric is offline", toolName)
+		}
+	}
+	argMap["project_id"] = orgCtx.ProjectID
+	boundArgs, err := json.Marshal(argMap)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: %s: marshal bound arguments: %w", toolName, err)
+	}
+	params, err := json.Marshal(toolsCallParams{Name: toolName, Arguments: boundArgs})
+	if err != nil {
+		return nil, fmt.Errorf("localapi: %s: marshal params: %w", toolName, err)
+	}
+	body, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "tools/call", Params: params})
+	if err != nil {
+		return nil, fmt.Errorf("localapi: %s: marshal request: %w", toolName, err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(orgCtx.Creds.Server, "/")+"/mcp", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("localapi: %s: build Fabric request: %w", toolName, err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+orgCtx.Creds.Token)
+	resp, err := s.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: %s: call Fabric: %w", toolName, err)
+	}
+	defer resp.Body.Close()
+	var rpcResp rpcResponse
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		return nil, fmt.Errorf("localapi: %s: decode Fabric response: %w", toolName, err)
+	}
+	if rpcResp.Error != nil {
+		return nil, errors.New(rpcResp.Error.Message)
+	}
+	var result toolCallResult
+	if err := json.Unmarshal(rpcResp.Result, &result); err != nil {
+		return nil, fmt.Errorf("localapi: %s: decode Fabric tool result: %w", toolName, err)
+	}
+	if len(result.Content) == 0 {
+		return nil, fmt.Errorf("localapi: empty %s result from Fabric", toolName)
+	}
+	if result.IsError {
+		return nil, errors.New(result.Content[0].Text)
+	}
+	out := json.RawMessage(result.Content[0].Text)
+	if !json.Valid(out) {
+		return nil, fmt.Errorf("localapi: %s: Fabric returned malformed JSON result", toolName)
+	}
+	return out, nil
 }
 
 // proxyWhoAmI forwards wormhole.agent.whoami to the Coordination Server
@@ -1552,6 +1630,115 @@ func (s *Server) handleTaskCreate(ctx context.Context, args json.RawMessage) (ma
 		return nil, fmt.Errorf("localapi: task create: commit: %w", err)
 	}
 
+	return out, nil
+}
+
+// handleTaskUpdateStatus serves wormhole.task.update_status from the local
+// replica, then records the validated transition for durable Fabric delivery.
+func (s *Server) handleTaskUpdateStatus(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if s.qr == nil {
+		return nil, fmt.Errorf("localapi: task update status: sync queue not available")
+	}
+	var argMap map[string]interface{}
+	if err := json.Unmarshal(args, &argMap); err != nil {
+		return nil, fmt.Errorf("localapi: task update status: invalid args: %w", err)
+	}
+	taskID, _ := argMap["task_id"].(string)
+	newStatus, _ := argMap["new_status"].(string)
+	channelID, _ := argMap["channel_id"].(string)
+	if taskID == "" || newStatus == "" || channelID == "" {
+		return nil, errors.New("localapi: task update status: task_id, new_status, and channel_id are required")
+	}
+	projectID := s.projectID
+	if supplied, ok := argMap["project_id"].(string); ok && supplied != "" {
+		projectID = supplied
+	}
+	orgCtx, err := s.resolveOrgContext(projectID)
+	if err != nil {
+		return nil, err
+	}
+	cached, err := s.cachedWhoAmIForCredential(ctx, orgCtx.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: task update status: authenticated identity: %w", err)
+	}
+	tx, err := s.beginLocalWrite(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: task update status: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+	task, err := s.tr.UpdateStatusTx(ctx, tx, orgCtx.ProjectID, taskID, newStatus, channelID, cached.AgentID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: task update status: %w", err)
+	}
+	payload, err := json.Marshal(map[string]interface{}{
+		"task_id": task.ID, "new_status": task.Status, "channel_id": channelID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("localapi: task update status: marshal payload: %w", err)
+	}
+	if _, err := s.qr.EnqueueTx(ctx, tx, orgCtx.ProjectID, "task", task.ID, "update", payload, task.Priority); err != nil {
+		return nil, fmt.Errorf("localapi: task update status: enqueue sync: %w", err)
+	}
+	if err := s.commitLocalWrite(tx); err != nil {
+		return nil, fmt.Errorf("localapi: task update status: commit: %w", err)
+	}
+	return map[string]interface{}{"task_id": task.ID, "status": task.Status}, nil
+}
+
+// handleGitLinkCommit records a metadata-only task-to-commit pointer locally
+// and enqueues the identical stable ID for Fabric delivery in one transaction.
+func (s *Server) handleGitLinkCommit(ctx context.Context, args json.RawMessage) (localGitLinkResult, error) {
+	if s.qr == nil || s.gr == nil {
+		return localGitLinkResult{}, errors.New("localapi: git link commit: local Git store or sync queue not available")
+	}
+	var input struct {
+		ProjectID string `json:"project_id"`
+		TaskID    string `json:"task_id"`
+		Repo      string `json:"repo"`
+		CommitSHA string `json:"commit_sha"`
+		Summary   string `json:"summary"`
+	}
+	if err := json.Unmarshal(args, &input); err != nil {
+		return localGitLinkResult{}, fmt.Errorf("localapi: git link commit: invalid args: %w", err)
+	}
+	projectID := input.ProjectID
+	if projectID == "" {
+		projectID = s.projectID
+	}
+	if !s.isMultiOrg && projectID != s.projectID {
+		return localGitLinkResult{}, fmt.Errorf("localapi: project_id mismatch: got %q, bound as %q", projectID, s.projectID)
+	}
+	orgCtx, err := s.resolveOrgContext(projectID)
+	if err != nil {
+		return localGitLinkResult{}, err
+	}
+	cached, err := s.cachedWhoAmIForCredential(ctx, orgCtx.ProjectID)
+	if err != nil {
+		return localGitLinkResult{}, fmt.Errorf("localapi: git link commit: authenticated identity: %w", err)
+	}
+	tx, err := s.beginLocalWrite(ctx)
+	if err != nil {
+		return localGitLinkResult{}, fmt.Errorf("localapi: git link commit: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+	link, err := s.gr.LinkCommitTx(ctx, tx, orgCtx.ProjectID, cached.AgentID, input.TaskID, input.Repo, input.CommitSHA, input.Summary)
+	if err != nil {
+		return localGitLinkResult{}, fmt.Errorf("localapi: git link commit: %w", err)
+	}
+	out := localGitLinkResult{
+		GitLinkID: link.ID, ProjectID: link.ProjectID, TaskID: link.TaskID,
+		Repo: link.Repo, CommitSHA: link.CommitSHA, Summary: link.Summary, CreatedAt: link.CreatedAt,
+	}
+	payload, err := json.Marshal(out)
+	if err != nil {
+		return localGitLinkResult{}, fmt.Errorf("localapi: git link commit: marshal payload: %w", err)
+	}
+	if _, err := s.qr.EnqueueTx(ctx, tx, orgCtx.ProjectID, "git_link", link.ID, "create", payload, 0); err != nil {
+		return localGitLinkResult{}, fmt.Errorf("localapi: git link commit: enqueue sync: %w", err)
+	}
+	if err := s.commitLocalWrite(tx); err != nil {
+		return localGitLinkResult{}, fmt.Errorf("localapi: git link commit: commit: %w", err)
+	}
 	return out, nil
 }
 

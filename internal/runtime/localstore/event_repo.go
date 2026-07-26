@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,6 +14,7 @@ import (
 
 // ErrEventNotFound is returned when an event lookup has no matching row.
 var ErrEventNotFound = errors.New("localstore/event: not found")
+var ErrEventStableIDConflict = errors.New("localstore/event: stable id conflict")
 
 // DurableEvent is a persisted event from the durable event tier (RFC-0003 §6.1).
 // Ephemeral events never reach localstore; they stay in-memory only.
@@ -68,6 +70,32 @@ func (r *EventRepo) CreateChannelTx(ctx context.Context, tx *sql.Tx, namespaceID
 		return "", fmt.Errorf("localstore/event: create channel: %w", err)
 	}
 	return id, nil
+}
+
+// UpsertChannelFromServer applies one Fabric channel under its stable ID.
+// Exact replay succeeds; changed content under the same ID is rejected.
+func (r *EventRepo) UpsertChannelFromServer(ctx context.Context, namespaceID, id, name string, createdAt time.Time) error {
+	result, err := r.db.ExecContext(ctx, `INSERT INTO channels (id, namespace_id, name, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`, id, namespaceID, name, createdAt)
+	if err != nil {
+		return fmt.Errorf("localstore/event: apply channel: %w", err)
+	}
+	if rows, _ := result.RowsAffected(); rows == 1 {
+		return nil
+	}
+	var actualNamespace, actualName string
+	var actualCreated time.Time
+	if err := r.db.QueryRowContext(ctx, `SELECT namespace_id, name, created_at FROM channels WHERE id = ?`, id).Scan(&actualNamespace, &actualName, &actualCreated); err != nil {
+		return fmt.Errorf("localstore/event: inspect channel replay: %w", err)
+	}
+	if actualNamespace != namespaceID || actualName != name {
+		return ErrEventStableIDConflict
+	}
+	if !actualCreated.Equal(createdAt) {
+		if _, err := r.db.ExecContext(ctx, `UPDATE channels SET created_at = ? WHERE id = ? AND namespace_id = ?`, createdAt, id, namespaceID); err != nil {
+			return fmt.Errorf("localstore/event: reconcile channel timestamp: %w", err)
+		}
+	}
+	return nil
 }
 
 // GetChannel returns the channel in namespaceID with channelID, or ErrEventNotFound.
@@ -151,6 +179,47 @@ func (r *EventRepo) PublishEvent(ctx context.Context, namespaceID, channelID, ag
 // commit atomically.
 func (r *EventRepo) PublishEventTx(ctx context.Context, tx *sql.Tx, namespaceID, channelID, agentID, eventType string, payload json.RawMessage, note *string) (DurableEvent, error) {
 	return r.publishEventInTx(ctx, tx, namespaceID, channelID, agentID, eventType, payload, note)
+}
+
+// UpsertEventFromServer applies one Fabric durable event under its stable ID.
+func (r *EventRepo) UpsertEventFromServer(ctx context.Context, event DurableEvent) error {
+	if len(event.Payload) == 0 {
+		event.Payload = json.RawMessage(`{}`)
+	}
+	var channelExists int
+	if err := r.db.QueryRowContext(ctx, `SELECT 1 FROM channels WHERE id = ? AND namespace_id = ?`, event.ChannelID, event.NamespaceID).Scan(&channelExists); err != nil {
+		return fmt.Errorf("localstore/event: apply event channel: %w", err)
+	}
+	result, err := r.db.ExecContext(ctx, `INSERT INTO events (id, namespace_id, channel_id, agent_id, event_type, payload, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
+		event.ID, event.NamespaceID, event.ChannelID, event.AgentID, event.EventType, string(event.Payload), event.Note, event.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("localstore/event: apply event: %w", err)
+	}
+	if rows, _ := result.RowsAffected(); rows == 1 {
+		return nil
+	}
+	actual, err := r.GetEvent(ctx, event.NamespaceID, event.ID)
+	if err != nil {
+		return fmt.Errorf("localstore/event: inspect event replay: %w", err)
+	}
+	if actual.ChannelID != event.ChannelID || actual.AgentID != event.AgentID || actual.EventType != event.EventType || !jsonEqual(actual.Payload, event.Payload) || !equalStringPointer(actual.Note, event.Note) {
+		return ErrEventStableIDConflict
+	}
+	if !actual.CreatedAt.Equal(event.CreatedAt) {
+		if _, err := r.db.ExecContext(ctx, `UPDATE events SET created_at = ? WHERE id = ? AND namespace_id = ?`, event.CreatedAt, event.ID, event.NamespaceID); err != nil {
+			return fmt.Errorf("localstore/event: reconcile event timestamp: %w", err)
+		}
+	}
+	return nil
+}
+
+func jsonEqual(left, right json.RawMessage) bool {
+	var l, r any
+	return json.Unmarshal(left, &l) == nil && json.Unmarshal(right, &r) == nil && reflect.DeepEqual(l, r)
+}
+
+func equalStringPointer(left, right *string) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
 }
 
 // publishEventInTx inserts a durable event within an existing transaction.

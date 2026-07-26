@@ -169,19 +169,31 @@ func (r *TaskRepo) ListTasks(ctx context.Context, namespaceID string, status *st
 // A legal transition also inserts a task.status_changed event onto channelID,
 // attributed to agentID, in the same transaction as the status update (RFC-0001 §8.2).
 func (r *TaskRepo) UpdateStatus(ctx context.Context, namespaceID, taskID, newStatus, channelID, agentID string) (Task, error) {
-	if !validTaskStatuses[newStatus] {
-		return Task{}, fmt.Errorf("localstore/task: invalid status %q", newStatus)
-	}
-
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Task{}, fmt.Errorf("localstore/task: update status: begin tx: %w", err)
 	}
 	defer tx.Rollback()
+	task, err := r.UpdateStatusTx(ctx, tx, namespaceID, taskID, newStatus, channelID, agentID)
+	if err != nil {
+		return Task{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Task{}, fmt.Errorf("localstore/task: update status: commit: %w", err)
+	}
+	return task, nil
+}
+
+// UpdateStatusTx performs the validated task transition and status event in
+// tx so Gateway can commit them atomically with its outbound sync entry.
+func (r *TaskRepo) UpdateStatusTx(ctx context.Context, tx *sql.Tx, namespaceID, taskID, newStatus, channelID, agentID string) (Task, error) {
+	if !validTaskStatuses[newStatus] {
+		return Task{}, fmt.Errorf("localstore/task: invalid status %q", newStatus)
+	}
 
 	// Lock the row for update.
 	var currentStatus string
-	err = tx.QueryRowContext(ctx,
+	err := tx.QueryRowContext(ctx,
 		`SELECT status FROM tasks WHERE id = ? AND namespace_id = ?`,
 		taskID, namespaceID,
 	).Scan(&currentStatus)
@@ -224,9 +236,6 @@ func (r *TaskRepo) UpdateStatus(ctx context.Context, namespaceID, taskID, newSta
 		return Task{}, fmt.Errorf("localstore/task: update status: publish event: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return Task{}, fmt.Errorf("localstore/task: update status: commit: %w", err)
-	}
 	return task, nil
 }
 

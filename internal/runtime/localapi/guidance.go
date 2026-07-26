@@ -288,6 +288,8 @@ func gatewayGuidanceConcept(toolName string) string {
 		return "channels and events"
 	case hasToolPrefix(toolName, "wormhole.kb."):
 		return "knowledge"
+	case hasToolPrefix(toolName, "wormhole.git."):
+		return "Git pointers"
 	default:
 		return ""
 	}
@@ -451,6 +453,17 @@ func gatewayGuidanceText() map[string]guidanceText {
 			RecommendedFollowUp:      "Route the new task or post a typed channel event with the resulting ID.",
 			MisuseWarning:            "Do not claim a created task is remotely visible until sync has caught up.",
 		},
+		"wormhole.task.update_status": {
+			Purpose:                  "Transition a task through the validated local workflow and enqueue the status update for synchronization.",
+			UseWhen:                  "When meaningful work begins, blocks, resumes, or completes and the shared task state should reflect it.",
+			DoNotUseWhen:             "Do not use it for narration, an invalid workflow jump, or without a durable status-event channel.",
+			MutatesState:             true,
+			Prerequisites:            "A bound project, existing task and channel, and task.update_status permission.",
+			FreshnessImplications:    "The validated transition and event commit locally first; Fabric and other Gateways observe them after synchronization.",
+			SourceAccessImplications: noSource,
+			RecommendedFollowUp:      "Verify task.get and sync.status, then leave concise handoff context before marking work done.",
+			MisuseWarning:            "Do not report remote completion while the durable update is still pending synchronization.",
+		},
 		"wormhole.task.route": {
 			Purpose:                  "Create a task and route it to a capable locally registered agent.",
 			UseWhen:                  "When work should be created and assigned in one local scheduling action.",
@@ -553,6 +566,30 @@ func gatewayGuidanceText() map[string]guidanceText {
 			SourceAccessImplications: noSource,
 			RecommendedFollowUp:      "Post a typed event or link the article from the relevant task.",
 			MisuseWarning:            "Do not store credentials or present Git-derived prose as authoritative code.",
+		},
+		"wormhole.kb.search": {
+			Purpose:                  "Search the shared Fabric knowledge base with generation-scoped semantic ranking.",
+			UseWhen:                  "When organisational decisions, procedures, or durable discoveries could answer the question before broad repository reconstruction.",
+			DoNotUseWhen:             "Do not use it as source-code authority or silently substitute lexical/local search when semantic ranking is unavailable.",
+			MutatesState:             false,
+			Prerequisites:            "An online project-bound Fabric connection and kb.search permission.",
+			FreshnessImplications:    "Results come from Fabric's active semantic generation; provider or index degradation returns a structured error with fallback=none.",
+			SourceAccessImplications: noSource,
+			RecommendedFollowUp:      "Read relevant durable context, then verify any code claim against Git and current source.",
+			MisuseWarning:            "Never reinterpret a semantic degradation error as a successful empty result or permission to fall back silently.",
+		},
+
+		// Git pointers.
+		"wormhole.git.link_commit": {
+			Purpose:                  "Record a metadata-only task-to-commit pointer locally and enqueue it for synchronization.",
+			UseWhen:                  "When a verified commit materially advances or completes a tracked task and reviewers need the exact Git reference.",
+			DoNotUseWhen:             "Do not use it before the commit exists, for a pull-request review request, or to copy source into Wormhole.",
+			MutatesState:             true,
+			Prerequisites:            "A bound project, existing task, repository identifier, exact commit SHA, concise summary, and git.link_commit permission.",
+			FreshnessImplications:    "The pointer is durable locally first and becomes visible to other Gateways after synchronization.",
+			SourceAccessImplications: "This tool stores only a Git pointer and summary; it never reads, mirrors, or proves repository source.",
+			RecommendedFollowUp:      "Verify the commit directly with Git, check sync.status, and include the pointer in the reviewer handoff.",
+			MisuseWarning:            "A stored pointer is not proof that the commit is correct, reachable, reviewed, or remotely synchronized.",
 		},
 	}
 }

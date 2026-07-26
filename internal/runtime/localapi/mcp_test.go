@@ -378,10 +378,10 @@ func TestMCP_ToolsList_AllToolsWithSchemas(t *testing.T) {
 	wantTools := []string{
 		"wormhole.agent.whoami", "wormhole.agent.get_guidance", "wormhole.sync.status", EnrolmentToolName, "wormhole.task.list", "wormhole.task.get",
 		"wormhole.code_graph.query", "wormhole.code_graph.status", "wormhole.code_graph.rebuild",
-		"wormhole.task.create", "wormhole.task.route", "wormhole.channel.list",
+		"wormhole.task.create", "wormhole.task.update_status", "wormhole.task.route", "wormhole.channel.list",
 		"wormhole.channel.create",
 		"wormhole.channel.events", "wormhole.channel.post", "wormhole.channel.subscribe",
-		"wormhole.kb.list", "wormhole.kb.get", "wormhole.kb.write",
+		"wormhole.kb.list", "wormhole.kb.get", "wormhole.kb.write", "wormhole.kb.search", "wormhole.git.link_commit",
 		"wormhole.agent.register", "wormhole.agent.presence", "wormhole.agent.list",
 	}
 	if len(result.Tools) != len(wantTools) {

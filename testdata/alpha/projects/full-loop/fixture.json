@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "project": {
+    "id": "e724dd25-5bc9-40db-bcad-0b21716d1ca4",
+    "name": "alpha-full-automated-loop",
+    "owner": "alpha-validation"
+  },
+  "publisher": {
+    "owner": "alpha-fixture-publisher",
+    "model": "deterministic-fixture",
+    "capabilities": ["coordination"],
+    "roles": ["project_admin"],
+    "permissions": ["integration_manifest.publish", "integration_manifest.revoke", "kb.write", "channel.create", "channel.post"]
+  },
+  "contributor": {
+    "owner": "alpha-agent-a",
+    "model": "deterministic-simulated-agent",
+    "capabilities": ["code"],
+    "roles": ["contributor"],
+    "permissions": ["task.list", "task.create", "task.update_status", "kb.search", "kb.get", "kb.write", "channel.list", "channel.post", "git.link_commit", "code_graph.status", "code_graph.query", "code_graph.source.read"]
+  },
+  "reviewer": {
+    "owner": "alpha-agent-b",
+    "model": "deterministic-simulated-agent",
+    "capabilities": ["code_review"],
+    "roles": ["reviewer"],
+    "permissions": ["task.list", "kb.search", "kb.get", "kb.write", "channel.list", "channel.post", "git.link_commit", "git.request_review", "code_graph.status", "code_graph.query"]
+  },
+  "task": {
+    "id": "7a1f3654-cb45-4f27-bd34-8aef89b0ab21",
+    "title": "Validate the Gateway alpha handoff path",
+    "description": "Trace gateway Run, preserve the implementation intent, and leave an auditable reviewer handoff.",
+    "status": "todo",
+    "priority": 2
+  },
+  "channel": {
+    "id": "b7831d55-df1f-49a3-91ae-3df53510cff5",
+    "name": "alpha-handoff"
+  },
+  "seed_event": {
+    "id": "88687cc9-a6a0-4c5c-99b8-02382e7f8a3d",
+    "event_type": "discovery.logged",
+    "payload": {
+      "summary": "Gateway process wiring starts at cmd/gatewayd/gatewayd.go:Run.",
+      "agent_id": "fixture-publisher"
+    }
+  },
+  "kb_article": {
+    "id": "8d932b85-a7b0-44ba-b449-8689e935cdb8",
+    "title": "Alpha handoff intent",
+    "body": "Preserve Gateway local-first durability and use cmd/gatewayd/gatewayd.go:Run as the process-level discovery entry point.",
+    "frontmatter": {
+      "type": "discovery",
+      "source": "alpha-full-loop-fixture"
+    }
+  },
+  "manifest": {
+    "path": "testdata/alpha/manifests/generated-guidance/manifest.json",
+    "id": "52b860cd-0db7-4ee0-a3fd-672ad9da0c95",
+    "version": 1,
+    "digest": "sha256:54996a31dacc73535be4fa2c9012bae090c4ed90e10b6c407739c7d1af0bcf97"
+  },
+  "code_graph": {
+    "entry_symbol": "wireCodeGraphRuntimes",
+    "expected_path": "cmd/gatewayd/gatewayd.go",
+    "requested_source_bytes": 4096
+  },
+  "meaningful_update": {
+    "event_type": "message.posted",
+    "note": "Implementation path confirmed; preparing the durable reviewer handoff."
+  },
+  "offline_task": {
+    "title": "Verify recovered alpha queue",
+    "description": "Created after Fabric stopped and Gateway A restarted.",
+    "priority": 2
+  },
+  "discovery": {
+    "title": "Gateway alpha process discovery",
+    "body": "The accepted implementation path is cmd/gatewayd/gatewayd.go:Run; verify the linked Git commit and current working tree before review.",
+    "frontmatter": {
+      "type": "discovery",
+      "source": "simulated-agent-a"
+    }
+  }
+}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/core/events"
+	coregit "github.com/H4RL33/wormhole/internal/core/git"
 	"github.com/H4RL33/wormhole/internal/core/identity"
 	"github.com/H4RL33/wormhole/internal/core/kb"
 	"github.com/H4RL33/wormhole/internal/core/tasks"
@@ -261,7 +262,7 @@ type IncrementalPullInput struct {
 // by entity type, so a client can dispatch each raw update to the right
 // local store without guessing its shape.
 type syncUpdateEnvelope struct {
-	Type string          `json:"type"` // "task" or "kb"
+	Type string          `json:"type"`
 	Data json.RawMessage `json:"data"`
 }
 
@@ -276,6 +277,17 @@ type IncrementalPullOutput struct {
 // IncrementalPullTool wires wormhole.sync.incremental_pull.
 // RFC-0003 §8.2: steady-state incremental pull of changed entities.
 func IncrementalPullTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, limiter *syncRateLimiter, manifestStores ...*IntegrationManifestStore) Tool {
+	return incrementalPullTool(tasksStore, kbStore, eventsStore, nil, limiter, manifestStores...)
+}
+
+// IncrementalPullToolWithGit adds metadata-only Git pointers to the normal
+// incremental entity stream while preserving the existing constructor for
+// callers that only exercise older entity types.
+func IncrementalPullToolWithGit(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, gitStore *coregit.Store, limiter *syncRateLimiter, manifestStores ...*IntegrationManifestStore) Tool {
+	return incrementalPullTool(tasksStore, kbStore, eventsStore, gitStore, limiter, manifestStores...)
+}
+
+func incrementalPullTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, gitStore *coregit.Store, limiter *syncRateLimiter, manifestStores ...*IntegrationManifestStore) Tool {
 	var manifestStore *IntegrationManifestStore
 	if len(manifestStores) > 0 {
 		manifestStore = manifestStores[0]
@@ -351,6 +363,62 @@ func IncrementalPullTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore
 					envelope, err := json.Marshal(syncUpdateEnvelope{Type: "kb", Data: data})
 					if err != nil {
 						return nil, fmt.Errorf("mcp: wormhole.sync.incremental_pull: marshal kb envelope: %w", err)
+					}
+					updates = append(updates, envelope)
+				}
+			}
+			channels, err := eventsStore.ListChannels(ctx, projectID)
+			if err != nil {
+				return nil, fmt.Errorf("mcp: wormhole.sync.incremental_pull: list channels: %w", err)
+			}
+			for _, channel := range channels {
+				if !channel.CreatedAt.After(cursor) {
+					continue
+				}
+				data, err := json.Marshal(syncChannelPullPayload{ID: channel.ID, ProjectID: channel.ProjectID, Name: channel.Name, CreatedAt: channel.CreatedAt})
+				if err != nil {
+					return nil, fmt.Errorf("mcp: wormhole.sync.incremental_pull: marshal channel update: %w", err)
+				}
+				envelope, err := json.Marshal(syncUpdateEnvelope{Type: "channel", Data: data})
+				if err != nil {
+					return nil, fmt.Errorf("mcp: wormhole.sync.incremental_pull: marshal channel envelope: %w", err)
+				}
+				updates = append(updates, envelope)
+			}
+			eventList, err := eventsStore.ListEventsByProject(ctx, projectID, 10000, 0)
+			if err != nil {
+				return nil, fmt.Errorf("mcp: wormhole.sync.incremental_pull: list events: %w", err)
+			}
+			for _, event := range eventList {
+				if !event.CreatedAt.After(cursor) {
+					continue
+				}
+				data, err := json.Marshal(syncEventPullPayload{ID: event.ID, ProjectID: event.ProjectID, ChannelID: event.ChannelID, AgentID: event.AgentID, EventType: event.EventType, Payload: event.Payload, Note: event.Note, CreatedAt: event.CreatedAt})
+				if err != nil {
+					return nil, fmt.Errorf("mcp: wormhole.sync.incremental_pull: marshal event update: %w", err)
+				}
+				envelope, err := json.Marshal(syncUpdateEnvelope{Type: "event", Data: data})
+				if err != nil {
+					return nil, fmt.Errorf("mcp: wormhole.sync.incremental_pull: marshal event envelope: %w", err)
+				}
+				updates = append(updates, envelope)
+			}
+			if gitStore != nil {
+				links, err := gitStore.ListLinks(ctx, projectID)
+				if err != nil {
+					return nil, fmt.Errorf("mcp: wormhole.sync.incremental_pull: list Git links: %w", err)
+				}
+				for _, link := range links {
+					if !link.CreatedAt.After(cursor) {
+						continue
+					}
+					data, err := json.Marshal(syncGitLinkPayloadFromLink(link))
+					if err != nil {
+						return nil, fmt.Errorf("mcp: wormhole.sync.incremental_pull: marshal Git link update: %w", err)
+					}
+					envelope, err := json.Marshal(syncUpdateEnvelope{Type: "git_link", Data: data})
+					if err != nil {
+						return nil, fmt.Errorf("mcp: wormhole.sync.incremental_pull: marshal Git link envelope: %w", err)
 					}
 					updates = append(updates, envelope)
 				}
@@ -440,6 +508,52 @@ type syncKBCreatePayload struct {
 	Force       bool            `json:"force"`
 }
 
+type syncTaskUpdatePayload struct {
+	TaskID    string `json:"task_id"`
+	NewStatus string `json:"new_status"`
+	ChannelID string `json:"channel_id"`
+}
+
+type syncChannelPullPayload struct {
+	ID        string    `json:"id"`
+	ProjectID string    `json:"project_id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type syncEventPullPayload struct {
+	ID        string          `json:"id"`
+	ProjectID string          `json:"project_id"`
+	ChannelID string          `json:"channel_id"`
+	AgentID   string          `json:"agent_id"`
+	EventType string          `json:"event_type"`
+	Payload   json.RawMessage `json:"payload"`
+	Note      *string         `json:"note"`
+	CreatedAt time.Time       `json:"created_at"`
+}
+
+type syncGitLinkPayload struct {
+	GitLinkID string    `json:"git_link_id"`
+	ProjectID string    `json:"project_id"`
+	TaskID    string    `json:"task_id"`
+	Repo      string    `json:"repo"`
+	CommitSHA string    `json:"commit_sha"`
+	Summary   string    `json:"summary"`
+	AgentID   string    `json:"agent_id"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func syncGitLinkPayloadFromLink(link coregit.GitLink) syncGitLinkPayload {
+	out := syncGitLinkPayload{GitLinkID: link.ID, ProjectID: link.ProjectID, Repo: link.Repo, Summary: link.Summary, AgentID: link.AgentID, CreatedAt: link.CreatedAt}
+	if link.TaskID != nil {
+		out.TaskID = *link.TaskID
+	}
+	if link.CommitSHA != nil {
+		out.CommitSHA = *link.CommitSHA
+	}
+	return out
+}
+
 // syncChannelCreatePayload is the wormhole.sync.incremental_push item
 // payload shape for entity_type "channel", operation "create".
 type syncChannelCreatePayload struct {
@@ -458,6 +572,16 @@ type syncEventCreatePayload struct {
 // IncrementalPushTool wires wormhole.sync.incremental_push.
 // RFC-0003 §8.2: Gateway pushes batched local changes to Fabric.
 func IncrementalPushTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, limiter *syncRateLimiter) Tool {
+	return incrementalPushTool(tasksStore, kbStore, eventsStore, nil, limiter)
+}
+
+// IncrementalPushToolWithGit accepts Gateway's local-first metadata-only Git
+// pointers in addition to the original sync entities.
+func IncrementalPushToolWithGit(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, gitStore *coregit.Store, limiter *syncRateLimiter) Tool {
+	return incrementalPushTool(tasksStore, kbStore, eventsStore, gitStore, limiter)
+}
+
+func incrementalPushTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, gitStore *coregit.Store, limiter *syncRateLimiter) Tool {
 	return Tool{
 		Name:         "wormhole.sync.incremental_push",
 		Description:  "Incremental push of batched local changes to the server (RFC-0003 §8.2)",
@@ -514,18 +638,21 @@ func IncrementalPushTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore
 			for _, item := range in.Items {
 				result := AppliedItem{ID: item.EntityID, Type: item.EntityType}
 
-				// Update and delete operations intentionally unimplemented pending
-				// RFC-0003 decision on per-entity-type update/delete semantics.
-				if item.Operation != "create" {
+				if item.Operation != "create" && !(item.EntityType == "task" && item.Operation == "update") {
 					result.Error = fmt.Sprintf("unsupported operation %q", item.Operation)
 					applied = append(applied, result)
 					continue
 				}
 
 				requiredPermission := map[string]string{
-					"task": "task.create", "kb": "kb.write",
-					"channel": "channel.create", "event": "channel.post",
+					"kb": "kb.write", "channel": "channel.create", "event": "channel.post", "git_link": "git.link_commit",
 				}[item.EntityType]
+				if item.EntityType == "task" {
+					requiredPermission = "task.create"
+					if item.Operation == "update" {
+						requiredPermission = "task.update_status"
+					}
+				}
 				if scope != nil && requiredPermission != "" && !scope.HasPermission(requiredPermission) {
 					result.Error = "permission denied: requires " + requiredPermission
 					applied = append(applied, result)
@@ -535,6 +662,33 @@ func IncrementalPushTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore
 				var applyErr error
 				switch item.EntityType {
 				case "task":
+					if item.Operation == "update" {
+						var payload syncTaskUpdatePayload
+						if err := json.Unmarshal(item.Payload, &payload); err != nil {
+							applyErr = fmt.Errorf("decode task update payload: %w", err)
+							break
+						}
+						if payload.TaskID == "" || payload.TaskID != item.EntityID || payload.NewStatus == "" || payload.ChannelID == "" {
+							applyErr = errors.New("task update payload must match entity_id and include new_status and channel_id")
+							break
+						}
+						list, err := tasksStore.List(ctx, projectID, nil)
+						if err != nil {
+							applyErr = err
+							break
+						}
+						alreadyApplied := false
+						for _, task := range list {
+							if task.ID == item.EntityID && task.Status == payload.NewStatus {
+								alreadyApplied = true
+								break
+							}
+						}
+						if !alreadyApplied {
+							_, applyErr = tasksStore.UpdateStatus(ctx, projectID, item.EntityID, payload.NewStatus, payload.ChannelID, callerAgentID)
+						}
+						break
+					}
 					var payload syncTaskCreatePayload
 					if err := json.Unmarshal(item.Payload, &payload); err != nil {
 						applyErr = fmt.Errorf("decode task payload: %w", err)
@@ -574,6 +728,22 @@ func IncrementalPushTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore
 						break
 					}
 					_, applyErr = eventsStore.PublishEventWithID(ctx, item.EntityID, projectID, payload.ChannelID, callerAgentID, payload.EventType, payload.Payload, payload.Note)
+				case "git_link":
+					if gitStore == nil {
+						applyErr = errors.New("Git sync store unavailable")
+						break
+					}
+					var payload syncGitLinkPayload
+					if err := json.Unmarshal(item.Payload, &payload); err != nil {
+						applyErr = fmt.Errorf("decode Git link payload: %w", err)
+						break
+					}
+					if payload.GitLinkID != "" && payload.GitLinkID != item.EntityID || payload.ProjectID != "" && payload.ProjectID != projectID {
+						applyErr = errors.New("Git link payload scope or stable ID mismatch")
+						break
+					}
+					taskID := payload.TaskID
+					_, applyErr = gitStore.LinkCommitWithID(ctx, item.EntityID, projectID, callerAgentID, &taskID, payload.Repo, payload.CommitSHA, payload.Summary)
 				default:
 					applyErr = fmt.Errorf("unsupported entity_type %q", item.EntityType)
 				}

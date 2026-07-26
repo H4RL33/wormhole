@@ -43,6 +43,21 @@ type integrationManifestConfigurableSyncEngine interface {
 	ConfigureIntegrationManifestReceiver(sync.IntegrationManifestReceiver)
 }
 
+type eventAndGitConfigurableSyncEngine interface {
+	ConfigureEventAndGitReplicas(*localstore.EventRepo, *localstore.GitRepo)
+}
+
+func wireEventAndGitReplicas(group *syncGroup, events *localstore.EventRepo, gitLinks *localstore.GitRepo) {
+	if group == nil || events == nil || gitLinks == nil {
+		return
+	}
+	for _, engine := range group.engines {
+		if configurable, ok := engine.(eventAndGitConfigurableSyncEngine); ok {
+			configurable.ConfigureEventAndGitReplicas(events, gitLinks)
+		}
+	}
+}
+
 func wireIntegrationManifestReceivers(group *syncGroup, receiver sync.IntegrationManifestReceiver) {
 	if group == nil || receiver == nil {
 		return
@@ -319,6 +334,7 @@ func runWithSyncEngineFactory(ctx context.Context, profileName string, factory s
 	er := localstore.NewEventRepo(store.DB())
 	tr := localstore.NewTaskRepo(store.DB(), er)
 	kb := localstore.NewKBRepo(store.DB())
+	gr := localstore.NewGitRepo(store.DB())
 
 	// Initialize sync repositories shared by the per-binding engines. Queue
 	// operations remain namespace-scoped inside QueueRepo.
@@ -377,6 +393,7 @@ func runWithSyncEngineFactory(ctx context.Context, profileName string, factory s
 	if err != nil {
 		return err
 	}
+	wireEventAndGitReplicas(syncEngines, er, gr)
 	wireIntegrationManifestReceivers(syncEngines, manifestService)
 
 	// P3: eventbus + scheduler are always constructed so agent registration,

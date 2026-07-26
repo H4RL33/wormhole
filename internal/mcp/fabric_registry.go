@@ -54,8 +54,8 @@ func NewFabricRegistry(deps FabricRegistryDependencies) *Registry {
 	register(GetArticleTool(deps.KB), GetArticleOutput{})
 	register(GetArticleLinksTool(deps.KB), GetArticleLinksOutput{})
 	register(BootstrapTool(deps.Identity, deps.Tasks, deps.KB, deps.Events, syncRateLimiter, deps.IntegrationManifests), BootstrapOutput{})
-	register(IncrementalPullTool(deps.Tasks, deps.KB, deps.Events, syncRateLimiter, deps.IntegrationManifests), IncrementalPullOutput{})
-	register(IncrementalPushTool(deps.Tasks, deps.KB, deps.Events, syncRateLimiter), IncrementalPushOutput{})
+	register(IncrementalPullToolWithGit(deps.Tasks, deps.KB, deps.Events, deps.Git, syncRateLimiter, deps.IntegrationManifests), IncrementalPullOutput{})
+	register(IncrementalPushToolWithGit(deps.Tasks, deps.KB, deps.Events, deps.Git, syncRateLimiter), IncrementalPushOutput{})
 	register(ConflictReportTool(deps.Tasks, deps.KB, deps.Events, syncRateLimiter), ConflictReportOutput{})
 	return registry
 }

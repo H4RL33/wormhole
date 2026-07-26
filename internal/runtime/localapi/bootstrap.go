@@ -54,6 +54,9 @@ func (s *Server) continueEnrolmentBootstrap(ctx context.Context, req EnrolmentRe
 	engine, err := syncpkg.New(credentials.Server, credentials.Token, req.ProjectID, s.qr,
 		syncpkg.NewAuditRepo(s.store.DB()), s.tr, s.kb, cfg)
 	if err == nil {
+		engine.ConfigureEventAndGitReplicas(s.er, s.gr)
+	}
+	if err == nil {
 		err = engine.ConfigureBootstrap(s.store, credentials.AgentID, credentials.PassportID, &attempt)
 	}
 	if err == nil {

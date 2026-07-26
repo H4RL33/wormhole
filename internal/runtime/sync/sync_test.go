@@ -216,6 +216,32 @@ func TestEngineStatusClassifiesSuccessfulAndInvalidSynchronization(t *testing.T)
 	}
 }
 
+func TestEngineReportsUnderlyingBackgroundSyncError(t *testing.T) {
+	qRepo, aRepo := setupTestRepos(t)
+	defer qRepo.db.Close()
+	cfg := DefaultConfig()
+	cfg.BatchInterval, cfg.LatencyCheckInterval, cfg.PullInterval = time.Hour, time.Hour, time.Hour
+	engine := mustNewEngine(t, "http://localhost:8080", qRepo, aRepo, nil, nil, cfg)
+	engine.testCallSyncToolWithResultFn = func(_ context.Context, toolName string, _ map[string]interface{}) (interface{}, error) {
+		if toolName != "wormhole.sync.incremental_pull" {
+			return nil, fmt.Errorf("unexpected tool %q", toolName)
+		}
+		return map[string]interface{}{"updates": []interface{}{}, "timestamp": "2026-01-01T00:00:00Z", "version": 2}, nil
+	}
+	reported := make(chan error, 1)
+	engine.syncErrorReporter = func(err error) { reported <- err }
+	engine.Start(context.Background())
+	defer engine.Stop()
+	select {
+	case err := <-reported:
+		if !errors.Is(err, ErrAttentionRequired) || !strings.Contains(err.Error(), "response version = 2, want 1") {
+			t.Fatalf("reported error = %v, want underlying protocol mismatch", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("background sync error was discarded")
+	}
+}
+
 func TestEngineStatusRequiresAttentionForRejectedQueuedMutation(t *testing.T) {
 	qRepo, aRepo := setupTestRepos(t)
 	defer qRepo.db.Close()

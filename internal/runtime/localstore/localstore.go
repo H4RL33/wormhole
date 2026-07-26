@@ -125,6 +125,17 @@ CREATE TABLE IF NOT EXISTS kb_links (
 	to_article_id    TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS git_links (
+	id          TEXT PRIMARY KEY,
+	project_id  TEXT NOT NULL,
+	task_id     TEXT NOT NULL,
+	repo        TEXT NOT NULL,
+	commit_sha  TEXT NOT NULL,
+	summary     TEXT NOT NULL,
+	agent_id    TEXT NOT NULL,
+	created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS sync_queue (
 	id             TEXT PRIMARY KEY,
 	namespace_id   TEXT NOT NULL,

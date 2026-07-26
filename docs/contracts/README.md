@@ -48,7 +48,7 @@ only `state` and `pending_writes`.
 
 ## Gateway tool-guidance inventory
 
-The live Gateway registry currently has 22 agent-facing tools and every one
+The live Gateway registry currently has 25 agent-facing tools and every one
 has exactly one structured guidance record. A record carries purpose, use and
 misuse boundaries, mutation behaviour, descriptor-derived permissions and
 minimal request example, prerequisites, freshness and source-access
@@ -57,8 +57,9 @@ come from the live descriptor: examples are synthesized from
 `buildInputSchema`, then validated against that schema rather than maintaining
 another parameter inventory.
 
-The inventory covers only live descriptors. Git pointers have no live Gateway
-tool in this alpha and therefore have zero guidance records. Integration
+The inventory covers only live descriptors. Metadata-only Git commit pointers,
+semantic KB search, and local-first task status transitions are live Gateway
+tools with explicit permission, freshness, and no-fallback guidance. Integration
 guidance has one live read-only record. `wormhole.agent.get_guidance` accepts
 only the bound project UUID, reads the cached approved state once, exposes
 applicable role-filtered content without repository targets or merge policy,

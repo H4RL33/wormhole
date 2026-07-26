@@ -139,6 +139,9 @@ func newLocalRegistry(s *Server) *localRegistry {
 	reg("wormhole.task.create", "Create a task locally and enqueue it for sync to the Coordination Server.", createTaskArgs{}, "task.create", singleResult(localTaskWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleTaskCreate(ctx, args)
 	})
+	reg("wormhole.task.update_status", "Transition a local task through the validated workflow and enqueue the durable update for Fabric synchronization.", taskUpdateStatusArgs{}, "task.update_status", singleResult(localTaskStatusResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+		return s.handleTaskUpdateStatus(ctx, args)
+	})
 
 	registerVariants("wormhole.task.route", "Create a task and route it to a locally-registered agent by capability match.", singleArgument(taskRouteArgs{}), []string{"task.create", "task.assign"}, singleResult(localTaskRouteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleTaskRoute(ctx, args)
@@ -178,6 +181,13 @@ func newLocalRegistry(s *Server) *localRegistry {
 
 	reg("wormhole.kb.write", "Write a KB article locally and enqueue it for sync.", kbWriteArgs{}, "kb.write", singleResult(localArticleWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleKBWrite(ctx, args)
+	})
+	reg("wormhole.kb.search", "Search the shared Fabric knowledge base semantically through the project-bound Gateway connection.", kbSearchArgs{}, "kb.search", singleResult(localKBSearchResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+		return s.proxyAuthenticatedTool(ctx, "wormhole.kb.search", args)
+	})
+
+	reg("wormhole.git.link_commit", "Record a manual task-to-commit pointer locally and enqueue it for Fabric synchronization; Wormhole stores no code.", gitLinkCommitArgs{}, "git.link_commit", singleResult(localGitLinkResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+		return s.handleGitLinkCommit(ctx, args)
 	})
 
 	// wormhole.agent.register is dual-shape (RFC-0001 §9): join/passport
@@ -274,6 +284,12 @@ type createTaskArgs struct {
 	DueBy        string `json:"due_by,omitempty"`
 }
 
+type taskUpdateStatusArgs struct {
+	TaskID    string `json:"task_id"`
+	NewStatus string `json:"new_status" enum:"todo,wip,blocked,done"`
+	ChannelID string `json:"channel_id"`
+}
+
 type channelCreateArgs struct {
 	Name string `json:"name"`
 }
@@ -314,6 +330,18 @@ type kbWriteArgs struct {
 	Title       string          `json:"title"`
 	Body        string          `json:"body,omitempty"`
 	Frontmatter json.RawMessage `json:"frontmatter,omitempty"`
+}
+
+type kbSearchArgs struct {
+	Query string `json:"query"`
+	Limit int    `json:"limit,omitempty"`
+}
+
+type gitLinkCommitArgs struct {
+	TaskID    string `json:"task_id"`
+	Repo      string `json:"repo"`
+	CommitSHA string `json:"commit_sha"`
+	Summary   string `json:"summary"`
 }
 
 // agentJoinRegisterArgs mirrors Fabric's accepted registration input,
@@ -377,6 +405,47 @@ type localTaskWriteResult struct {
 	DueBy        *time.Time `json:"due_by"`
 	CreatedAt    time.Time  `json:"created_at"`
 	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
+type localTaskStatusResult struct {
+	TaskID string `json:"task_id"`
+	Status string `json:"status"`
+}
+
+type localKBSearchResult struct {
+	Articles []localKBArticleSummary `json:"articles"`
+	Ranking  localKBRankingMetadata  `json:"ranking"`
+}
+
+type localKBArticleSummary struct {
+	ArticleID     string          `json:"article_id"`
+	ProjectID     string          `json:"project_id"`
+	Title         string          `json:"title"`
+	Body          string          `json:"body"`
+	Frontmatter   json.RawMessage `json:"frontmatter,omitempty"`
+	AuthorAgentID string          `json:"author_agent_id"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
+}
+
+type localKBRankingMetadata struct {
+	SemanticApplied bool   `json:"semantic_applied"`
+	GenerationID    string `json:"generation_id,omitempty"`
+	Provider        string `json:"provider,omitempty"`
+	Model           string `json:"model,omitempty"`
+	Version         string `json:"version,omitempty"`
+	Dimension       int    `json:"dimension,omitempty"`
+	DistanceMetric  string `json:"distance_metric,omitempty"`
+}
+
+type localGitLinkResult struct {
+	GitLinkID string    `json:"git_link_id"`
+	ProjectID string    `json:"project_id"`
+	TaskID    string    `json:"task_id"`
+	Repo      string    `json:"repo"`
+	CommitSHA string    `json:"commit_sha"`
+	Summary   string    `json:"summary"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type localTaskRouteResult struct {

@@ -334,7 +334,7 @@ func TestIncrementalPushTool_PartialFailureDoesNotAbortBatch(t *testing.T) {
 	}
 }
 
-func TestIncrementalPushTool_RejectsNonCreateOperation(t *testing.T) {
+func TestIncrementalPushTool_RejectsMalformedUpdateAndUnsupportedDelete(t *testing.T) {
 	tasksStore := testTasksStore(t)
 	tool := IncrementalPushTool(tasksStore, testKBStore(t), testEventsStore(t), NewSyncRateLimiter(30, time.Minute))
 	projectID := mustCreateProject(t, "mcp-sync-push-non-create")
@@ -368,12 +368,12 @@ func TestIncrementalPushTool_RejectsNonCreateOperation(t *testing.T) {
 	if len(out.Applied) != 3 {
 		t.Fatalf("Applied: got %d entries, want 3", len(out.Applied))
 	}
-	// First item: "update" operation should be rejected
+	// A supported task update still rejects a create-shaped payload.
 	if out.Applied[0].ID != "update-item" || out.Applied[0].Error == "" {
 		t.Fatalf("Applied[0] (update item): got %+v, want a non-empty Error", out.Applied[0])
 	}
-	if out.Applied[0].Error != `unsupported operation "update"` {
-		t.Fatalf("Applied[0].Error: got %q, want %q", out.Applied[0].Error, `unsupported operation "update"`)
+	if out.Applied[0].Error != `task update payload must match entity_id and include new_status and channel_id` {
+		t.Fatalf("Applied[0].Error: got %q", out.Applied[0].Error)
 	}
 	// Second item: "delete" operation should be rejected
 	if out.Applied[1].ID != "delete-item" || out.Applied[1].Error == "" {

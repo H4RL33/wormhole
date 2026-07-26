@@ -140,8 +140,8 @@ func assertGeneratedSkillShape(t *testing.T, file generatedGuidanceFile) {
 
 func assertToolUseSkill(t *testing.T, registry *localRegistry, content string) {
 	t.Helper()
-	if len(registry.List()) != 22 {
-		t.Fatalf("live tool count = %d, want 22", len(registry.List()))
+	if len(registry.List()) != 25 {
+		t.Fatalf("live tool count = %d, want 25", len(registry.List()))
 	}
 	guidance := map[string]toolGuidance{}
 	for _, record := range registry.Guidance() {

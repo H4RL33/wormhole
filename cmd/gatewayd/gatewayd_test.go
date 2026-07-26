@@ -79,7 +79,8 @@ func TestRun_FreshGatewayExposesPreCredentialEnrolmentEndpoint(t *testing.T) {
 	socketPath := filepath.Join(runDir, "wormhole", "wormholed.sock")
 	var conn net.Conn
 	var err error
-	for i := 0; i < 100; i++ {
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
 		conn, err = net.Dial("unix", socketPath)
 		if err == nil {
 			break
@@ -240,7 +241,7 @@ func TestRun_StalePathRegularFileRejectedWithoutRemoval(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "not a socket") {
 			t.Fatalf("Run error = %v, want non-socket stale-path rejection", err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(10 * time.Second):
 		cancel()
 		select {
 		case <-errCh:

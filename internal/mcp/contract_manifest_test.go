@@ -113,10 +113,14 @@ func TestAlphaContractFabricSyncProtocol(t *testing.T) {
 		{Name: "incremental_push_response", Fields: jsonFieldNames(t, reflect.TypeOf(IncrementalPushOutput{}))},
 		{Name: "integration_manifest_change", Fields: jsonFieldNames(t, reflect.TypeOf(IntegrationManifestChange{}))},
 		{Name: "sync_channel_create_payload", Fields: jsonFieldNames(t, reflect.TypeOf(syncChannelCreatePayload{}))},
+		{Name: "sync_channel_pull_payload", Fields: jsonFieldNames(t, reflect.TypeOf(syncChannelPullPayload{}))},
 		{Name: "sync_conflict_audit_payload", Fields: jsonFieldNames(t, reflect.TypeOf(syncConflictAuditPayload{}))},
 		{Name: "sync_event_create_payload", Fields: jsonFieldNames(t, reflect.TypeOf(syncEventCreatePayload{}))},
+		{Name: "sync_event_pull_payload", Fields: jsonFieldNames(t, reflect.TypeOf(syncEventPullPayload{}))},
+		{Name: "sync_git_link_payload", Fields: jsonFieldNames(t, reflect.TypeOf(syncGitLinkPayload{}))},
 		{Name: "sync_kb_create_payload", Fields: jsonFieldNames(t, reflect.TypeOf(syncKBCreatePayload{}))},
 		{Name: "sync_task_create_payload", Fields: jsonFieldNames(t, reflect.TypeOf(syncTaskCreatePayload{}))},
+		{Name: "sync_task_update_payload", Fields: jsonFieldNames(t, reflect.TypeOf(syncTaskUpdatePayload{}))},
 		{Name: "task_summary", Fields: jsonFieldNames(t, reflect.TypeOf(TaskSummary{}))},
 	}
 	sort.Slice(actual, func(i, j int) bool { return actual[i].Name < actual[j].Name })

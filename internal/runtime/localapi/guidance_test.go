@@ -258,8 +258,8 @@ func assertGatewayToolGuidance(t *testing.T, registry *localRegistry) {
 	t.Helper()
 	tools := registry.List()
 	guidance := registry.Guidance()
-	if len(tools) != 22 {
-		t.Fatalf("live Gateway tool count = %d, want 22", len(tools))
+	if len(tools) != 25 {
+		t.Fatalf("live Gateway tool count = %d, want 25", len(tools))
 	}
 	if len(guidance) != len(tools) {
 		t.Fatalf("guidance count = %d, live tool count = %d", len(guidance), len(tools))
@@ -312,6 +312,7 @@ func assertGatewayToolGuidance(t *testing.T, registry *localRegistry) {
 var allowedGuidanceConcepts = map[string]bool{
 	"identity": true, "tasks": true, "channels and events": true, "knowledge": true,
 	"local status and synchronisation": true, "Code Graph": true, "integration guidance": true,
+	"Git pointers": true,
 }
 
 func assertCodeGraphGuidanceSemantics(t *testing.T, byTool map[string]toolGuidance) {
@@ -337,7 +338,7 @@ func assertGuidanceMutationSet(t *testing.T, byTool map[string]toolGuidance) {
 		"wormhole.agent.enrol": true, "wormhole.agent.register": true, "wormhole.agent.presence": true,
 		"wormhole.code_graph.rebuild": true, "wormhole.task.create": true, "wormhole.task.route": true,
 		"wormhole.channel.create": true, "wormhole.channel.post": true, "wormhole.channel.subscribe": true,
-		"wormhole.kb.write": true,
+		"wormhole.kb.write": true, "wormhole.task.update_status": true, "wormhole.git.link_commit": true,
 	}
 	for toolName, record := range byTool {
 		if record.MutatesState != mutating[toolName] {

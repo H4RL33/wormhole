@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"reflect"
 	"strings"
@@ -45,6 +46,8 @@ type Engine struct {
 	auditRepo             *AuditRepo
 	taskRepo              *localstore.TaskRepo
 	kbRepo                *localstore.KBRepo
+	eventRepo             *localstore.EventRepo
+	gitRepo               *localstore.GitRepo
 	bootstrapStore        *localstore.Store
 	expectedAgentID       string
 	expectedPassportID    string
@@ -66,8 +69,18 @@ type Engine struct {
 	cancel                context.CancelFunc
 	stopped               bool
 	wg                    sync.WaitGroup
+	syncErrorReporter     func(error)
 	// testCallSyncToolWithResultFn is for testing only: if set, overrides callSyncToolWithResult.
 	testCallSyncToolWithResultFn func(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error)
+}
+
+// ConfigureEventAndGitReplicas wires the remaining durable incremental
+// pull targets without widening New's long-standing constructor signature.
+func (e *Engine) ConfigureEventAndGitReplicas(events *localstore.EventRepo, gitLinks *localstore.GitRepo) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.eventRepo = events
+	e.gitRepo = gitLinks
 }
 
 // ConfigureIntegrationManifestReceiver routes Fabric bootstrap and
@@ -147,6 +160,9 @@ func New(coordServerURL, token, namespaceID string, queueRepo *QueueRepo, auditR
 		pullInterval:          cfg.PullInterval,
 		highPriorityThreshold: cfg.HighPriorityThreshold,
 		connectionState:       StateOffline,
+		syncErrorReporter: func(err error) {
+			log.Printf("wormhole sync namespace=%q: %v", namespaceID, err)
+		},
 	}, nil
 }
 
@@ -197,7 +213,9 @@ func (e *Engine) syncLoop(ctx context.Context) {
 	// Reconcile immediately on startup. An enrolled Gateway serves its local
 	// socket independently, while this goroutine drains durable writes before
 	// accepting any server-side pull into the replica.
-	_ = e.syncOnce(ctx)
+	if err := e.syncOnce(ctx); err != nil {
+		e.reportSyncError(ctx, err)
+	}
 
 	for {
 		select {
@@ -205,20 +223,25 @@ func (e *Engine) syncLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := e.syncOnce(ctx); err != nil {
-				// Best-effort: log error and continue. The batch remains queued
-				// for retry on the next interval.
-				_ = err
+				e.reportSyncError(ctx, err)
 			}
 		case <-latencyTicker.C:
 			if err := e.checkLatencySensitive(ctx); err != nil {
-				_ = err
+				e.reportSyncError(ctx, err)
 			}
 		case <-pullTicker.C:
 			if err := e.syncOnce(ctx); err != nil {
-				_ = err
+				e.reportSyncError(ctx, err)
 			}
 		}
 	}
+}
+
+func (e *Engine) reportSyncError(ctx context.Context, err error) {
+	if err == nil || ctx.Err() != nil || e.syncErrorReporter == nil {
+		return
+	}
+	e.syncErrorReporter(err)
 }
 
 func (e *Engine) syncOnce(ctx context.Context) error {
@@ -439,6 +462,30 @@ func (e *Engine) PullIncremental(ctx context.Context) error {
 			if err := e.applyArticle(ctx, article); err != nil {
 				return fmt.Errorf("sync: pull incremental: apply kb article: %w", err)
 			}
+		case "channel":
+			var channel channelWire
+			if err := json.Unmarshal(u.Data, &channel); err != nil {
+				return fmt.Errorf("sync: pull incremental: decode channel update: %w", err)
+			}
+			if err := e.applyChannel(ctx, channel); err != nil {
+				return fmt.Errorf("sync: pull incremental: apply channel: %w", err)
+			}
+		case "event":
+			var event eventWire
+			if err := json.Unmarshal(u.Data, &event); err != nil {
+				return fmt.Errorf("sync: pull incremental: decode event update: %w", err)
+			}
+			if err := e.applyEvent(ctx, event); err != nil {
+				return fmt.Errorf("sync: pull incremental: apply event: %w", err)
+			}
+		case "git_link":
+			var link gitLinkWire
+			if err := json.Unmarshal(u.Data, &link); err != nil {
+				return fmt.Errorf("sync: pull incremental: decode Git link update: %w", err)
+			}
+			if err := e.applyGitLink(ctx, link); err != nil {
+				return fmt.Errorf("sync: pull incremental: apply Git link: %w", err)
+			}
 		case "integration_manifest":
 			if e.integrationReceiver == nil {
 				return errors.New("sync: pull incremental: no integration manifest receiver")
@@ -563,6 +610,35 @@ type articleSummaryWire struct {
 	AuthorAgentID string          `json:"author_agent_id"`
 	CreatedAt     time.Time       `json:"created_at"`
 	UpdatedAt     time.Time       `json:"updated_at"`
+}
+
+type channelWire struct {
+	ID        string    `json:"id"`
+	ProjectID string    `json:"project_id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type eventWire struct {
+	ID        string          `json:"id"`
+	ProjectID string          `json:"project_id"`
+	ChannelID string          `json:"channel_id"`
+	AgentID   string          `json:"agent_id"`
+	EventType string          `json:"event_type"`
+	Payload   json.RawMessage `json:"payload"`
+	Note      *string         `json:"note"`
+	CreatedAt time.Time       `json:"created_at"`
+}
+
+type gitLinkWire struct {
+	GitLinkID string    `json:"git_link_id"`
+	ProjectID string    `json:"project_id"`
+	TaskID    string    `json:"task_id"`
+	Repo      string    `json:"repo"`
+	CommitSHA string    `json:"commit_sha"`
+	Summary   string    `json:"summary"`
+	AgentID   string    `json:"agent_id"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // bootstrapResultWire mirrors internal/mcp.BootstrapOutput's JSON shape.
@@ -1151,6 +1227,42 @@ func (e *Engine) applyArticle(ctx context.Context, article articleSummaryWire) e
 	_, err := e.kbRepo.UpsertArticle(ctx, e.namespaceID, article.ArticleID, article.Title, article.Body,
 		article.Frontmatter, article.AuthorAgentID, article.CreatedAt, article.UpdatedAt)
 	return err
+}
+
+func (e *Engine) applyChannel(ctx context.Context, channel channelWire) error {
+	if e.eventRepo == nil {
+		return errors.New("sync: no eventRepo configured to apply server channel")
+	}
+	if channel.ID == "" || channel.ProjectID != e.namespaceID || channel.Name == "" || channel.CreatedAt.IsZero() {
+		return errors.New("sync: malformed or cross-project channel update")
+	}
+	return e.eventRepo.UpsertChannelFromServer(ctx, e.namespaceID, channel.ID, channel.Name, channel.CreatedAt)
+}
+
+func (e *Engine) applyEvent(ctx context.Context, event eventWire) error {
+	if e.eventRepo == nil {
+		return errors.New("sync: no eventRepo configured to apply server event")
+	}
+	if event.ID == "" || event.ProjectID != e.namespaceID || event.ChannelID == "" || event.AgentID == "" || event.EventType == "" || !json.Valid(event.Payload) || event.CreatedAt.IsZero() {
+		return errors.New("sync: malformed or cross-project event update")
+	}
+	return e.eventRepo.UpsertEventFromServer(ctx, localstore.DurableEvent{
+		ID: event.ID, NamespaceID: e.namespaceID, ChannelID: event.ChannelID, AgentID: event.AgentID,
+		EventType: event.EventType, Payload: event.Payload, Note: event.Note, CreatedAt: event.CreatedAt,
+	})
+}
+
+func (e *Engine) applyGitLink(ctx context.Context, link gitLinkWire) error {
+	if e.gitRepo == nil {
+		return errors.New("sync: no gitRepo configured to apply server Git link")
+	}
+	if link.GitLinkID == "" || link.ProjectID != e.namespaceID || link.TaskID == "" || link.Repo == "" || link.CommitSHA == "" || link.Summary == "" || link.AgentID == "" || link.CreatedAt.IsZero() {
+		return errors.New("sync: malformed or cross-project Git link update")
+	}
+	return e.gitRepo.UpsertFromServer(ctx, localstore.GitLink{
+		ID: link.GitLinkID, ProjectID: e.namespaceID, TaskID: link.TaskID, Repo: link.Repo,
+		CommitSHA: link.CommitSHA, Summary: link.Summary, AgentID: link.AgentID, CreatedAt: link.CreatedAt,
+	})
 }
 
 // callSyncTool makes a JSON-RPC 2.0 call to a wormhole.sync.* tool on the coordination server.

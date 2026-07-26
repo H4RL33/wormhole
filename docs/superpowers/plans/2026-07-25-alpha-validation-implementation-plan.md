@@ -1769,6 +1769,42 @@ git commit -m "feat: verify and approve integration manifests"
 - Create: `docs/testing/alpha-validation.md`
 - Create: `cmd/gatewayd/alpha_validation_e2e_test.go`
 - Create: `testdata/alpha/projects/full-loop/`
+- Create after the acceptance RED proved missing Gateway contracts: `internal/runtime/localapi/alpha_acceptance_gap_test.go`
+- Create after the acceptance RED proved missing sync semantics: `internal/mcp/alpha_acceptance_sync_test.go`
+- Create after the acceptance RED proved missing replica application: `internal/runtime/sync/alpha_acceptance_sync_test.go`
+- Modify after the acceptance RED proved missing Gateway contracts: `internal/runtime/localapi/mcp.go`
+- Modify after the acceptance RED proved missing Gateway contract handlers: `internal/runtime/localapi/localapi.go`
+- Modify after the acceptance RED proved missing Gateway tool guidance: `internal/runtime/localapi/guidance.go`
+- Modify after the acceptance RED changed the live Gateway tool count: `internal/runtime/localapi/guidance_test.go`
+- Modify after the acceptance RED changed the generated Gateway guidance: `internal/runtime/localapi/guidance_render_test.go`
+- Modify after the acceptance RED changed the live Gateway tools/list count: `internal/runtime/localapi/mcp_test.go`
+- Modify after the acceptance RED changed the reviewed Gateway contract: `docs/contracts/alpha-contract.json`
+- Modify after the acceptance RED changed the reviewed Gateway inventory prose: `docs/contracts/README.md`
+- Modify after regeneration: `testdata/alpha/manifests/generated-guidance/manifest.json`
+- Modify after regeneration: `testdata/alpha/manifests/generated-guidance/wormhole-code-graph.md`
+- Modify after regeneration: `testdata/alpha/manifests/generated-guidance/wormhole-contributor.md`
+- Modify after regeneration: `testdata/alpha/manifests/generated-guidance/wormhole-operating-loop.md`
+- Modify after regeneration: `testdata/alpha/manifests/generated-guidance/wormhole-orientation.md`
+- Modify after regeneration: `testdata/alpha/manifests/generated-guidance/wormhole-reviewer.md`
+- Modify after regeneration: `testdata/alpha/manifests/generated-guidance/wormhole-tool-use.md`
+- Modify after regeneration: `testdata/alpha/manifests/fabric/valid.json`
+- Modify after regeneration: `testdata/alpha/manifests/fabric/wrong-project.json`
+- Modify after regeneration: `testdata/alpha/manifests/fabric/revoked.json`
+- Modify after regeneration: `testdata/alpha/manifests/integration-state.json`
+- Modify after regeneration: `internal/runtime/localapi/manifest_test.go`
+- Modify after the acceptance RED proved missing task-update durability: `internal/runtime/localstore/task_repo.go`
+- Create after the acceptance RED proved missing local-first Git pointer durability: `internal/runtime/localstore/git_repo.go`
+- Modify after the acceptance RED proved missing the local Git pointer schema: `internal/runtime/localstore/localstore.go`
+- Modify after the acceptance RED proved missing stable event replay: `internal/runtime/localstore/event_repo.go`
+- Modify after the acceptance RED proved missing Fabric sync entities and task updates: `internal/mcp/sync.go`
+- Modify after the acceptance RED changed the supported incremental operation matrix: `internal/mcp/sync_test.go`
+- Modify after the acceptance RED changed the reviewed incremental wire inventory: `internal/mcp/contract_manifest_test.go`
+- Modify after the acceptance RED proved missing stable Fabric Git sync: `internal/core/git/git.go`
+- Modify after the acceptance RED proved missing stable Fabric Git sync coverage: `internal/core/git/git_test.go`
+- Modify after the acceptance RED proved Fabric registry must wire Git into sync: `internal/mcp/fabric_registry.go`
+- Modify after the acceptance RED proved missing Gateway replica sync entities: `internal/runtime/sync/sync.go`
+- Modify after the acceptance RED proved enrolment-started engines need Event/Git replicas: `internal/runtime/localapi/bootstrap.go`
+- Modify after the acceptance RED proved missing event-replica wiring: `cmd/gatewayd/gatewayd.go`
 - Modify only when the new acceptance test proves a defect: the exact production file owning that defect; add each such path to this **Files** block before changing it
 
 **Interfaces:**
