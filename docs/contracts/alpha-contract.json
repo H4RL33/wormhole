@@ -1,7 +1,535 @@
 {
   "mode": "alpha-inventory",
+  "designed_interfaces": {
+    "integration_manifest_v1": {
+      "status": "designed_not_implemented",
+      "design_document": "docs/architecture/integration-manifest-design.md",
+      "manifest_schema": {
+        "additional_properties": false,
+        "required": [
+          "created_at",
+          "entries",
+          "manifest_digest",
+          "manifest_id",
+          "manifest_version",
+          "project_id",
+          "role_filters",
+          "schema_version",
+          "source",
+          "tool_contract_digest"
+        ],
+        "schema_version": 1,
+        "source": "fabric",
+        "digest_format": "sha256:<64 lowercase hex>",
+        "manifest_digest_input": "RFC8785/JCS manifest object omitting manifest_digest",
+        "entries_min": 1,
+        "entries_max": 64,
+        "total_content_max_bytes": 1048576
+      },
+      "entry_schema": {
+        "additional_properties": false,
+        "required": [
+          "content",
+          "content_digest",
+          "kind",
+          "merge_policy",
+          "required",
+          "role_filters",
+          "target"
+        ],
+        "kinds": [
+          "agents_bootstrap",
+          "reference",
+          "skill"
+        ],
+        "targets": {
+          "agents_bootstrap": "AGENTS.md",
+          "reference": ".agents/skills/wormhole-<skill-slug>/references/<reference-slug>.md",
+          "skill": ".agents/skills/wormhole-<skill-slug>/SKILL.md"
+        },
+        "merge_policies": {
+          "agents_bootstrap": "managed_section",
+          "reference": "managed_file",
+          "skill": "managed_file"
+        },
+        "content_encoding": "UTF-8 Markdown",
+        "content_terminator": "exactly one trailing LF; no CR or NUL",
+        "content_max_bytes": 262144
+      },
+      "managed_section_markers": {
+        "begin": "<!-- wormhole:managed-begin integration-manifest/v1 -->",
+        "metadata": "<!-- wormhole:manifest id=<uuid> version=<n> digest=sha256:<hex> -->",
+        "end": "<!-- wormhole:managed-end integration-manifest/v1 -->"
+      },
+      "cli_commands": [
+        {
+          "name": "integration apply",
+          "flags": [
+            "confirm-digest",
+            "project"
+          ],
+          "exit_codes": [
+            0,
+            1,
+            2
+          ]
+        },
+        {
+          "name": "integration preview",
+          "flags": [
+            "project"
+          ],
+          "exit_codes": [
+            0,
+            1,
+            2
+          ]
+        },
+        {
+          "name": "integration remove",
+          "flags": [
+            "confirm-digest",
+            "project"
+          ],
+          "exit_codes": [
+            0,
+            1,
+            2
+          ]
+        },
+        {
+          "name": "integration rollback",
+          "flags": [
+            "confirm-digest",
+            "project"
+          ],
+          "exit_codes": [
+            0,
+            1,
+            2
+          ]
+        },
+        {
+          "name": "integration status",
+          "flags": [
+            "json",
+            "project"
+          ],
+          "exit_codes": [
+            0,
+            1,
+            2
+          ]
+        },
+        {
+          "name": "integration update",
+          "flags": [
+            "confirm-digest",
+            "project"
+          ],
+          "exit_codes": [
+            0,
+            1,
+            2
+          ]
+        }
+      ],
+      "mcp_tool": {
+        "name": "wormhole.agent.get_guidance",
+        "required_permissions": [],
+        "mutates_state": false,
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          ],
+          "required": [
+            "project_id"
+          ],
+          "additional_properties": false
+        },
+        "response_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "approval_state",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "approved",
+                  "awaiting_approval",
+                  "none",
+                  "offered",
+                  "postponed",
+                  "rejected",
+                  "revoked",
+                  "verification_failed",
+                  "verified"
+                ]
+              }
+            },
+            {
+              "name": "connection_state",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "attention_required",
+                  "offline",
+                  "online",
+                  "synchronizing"
+                ]
+              }
+            },
+            {
+              "name": "guidance",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": [
+                    {
+                      "name": "content",
+                      "schema": {
+                        "type": "string",
+                        "format": "utf8-markdown"
+                      }
+                    },
+                    {
+                      "name": "content_digest",
+                      "schema": {
+                        "type": "string",
+                        "format": "sha256"
+                      }
+                    },
+                    {
+                      "name": "kind",
+                      "schema": {
+                        "type": "string",
+                        "enum": [
+                          "agents_bootstrap",
+                          "reference",
+                          "skill"
+                        ]
+                      }
+                    },
+                    {
+                      "name": "required",
+                      "schema": {
+                        "type": "boolean"
+                      }
+                    }
+                  ],
+                  "required": [
+                    "content",
+                    "content_digest",
+                    "kind",
+                    "required"
+                  ],
+                  "additional_properties": false
+                }
+              }
+            },
+            {
+              "name": "last_verified_at",
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            {
+              "name": "manifest_digest",
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "sha256"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            {
+              "name": "manifest_id",
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            {
+              "name": "manifest_version",
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            {
+              "name": "materialization_state",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "applied",
+                  "drifted",
+                  "not_applied",
+                  "recovery_required",
+                  "removal_required"
+                ]
+              }
+            },
+            {
+              "name": "pending_manifest_digest",
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "sha256"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            {
+              "name": "pending_manifest_version",
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string",
+                "format": "uuid"
+              }
+            },
+            {
+              "name": "resolved_role",
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "role-slug"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            {
+              "name": "schema_version",
+              "schema": {
+                "type": "integer",
+                "const": 1
+              }
+            }
+          ],
+          "required": [
+            "approval_state",
+            "connection_state",
+            "guidance",
+            "last_verified_at",
+            "manifest_digest",
+            "manifest_id",
+            "manifest_version",
+            "materialization_state",
+            "pending_manifest_digest",
+            "pending_manifest_version",
+            "project_id",
+            "resolved_role",
+            "schema_version"
+          ],
+          "additional_properties": false
+        }
+      }
+    }
+  },
   "mcp_tools": {
     "fabric": [
+      {
+        "name": "wormhole.agent.enrol",
+        "requires_auth": false,
+        "required_permission": "",
+        "request_schema": {
+          "type": "object",
+          "properties": [
+            {
+              "name": "capabilities",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "name": "idempotency_key",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "model",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "owner",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "permissions",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "name": "project_id",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "reissue",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "repositories",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "name": "request_hash",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "roles",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          ],
+          "required": [
+            "capabilities",
+            "idempotency_key",
+            "model",
+            "owner",
+            "permissions",
+            "project_id",
+            "repositories",
+            "request_hash",
+            "roles"
+          ]
+        },
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "issued_at",
+                  "schema": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                {
+                  "name": "passport_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "reissued",
+                  "schema": {
+                    "type": "boolean"
+                  }
+                },
+                {
+                  "name": "replay",
+                  "schema": {
+                    "type": "boolean"
+                  }
+                },
+                {
+                  "name": "token",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "agent_id",
+                "issued_at",
+                "passport_id",
+                "reissued",
+                "replay"
+              ]
+            }
+          }
+        ]
+      },
       {
         "name": "wormhole.agent.register",
         "requires_auth": false,
@@ -1159,10 +1687,64 @@
                       }
                     ]
                   }
+                },
+                {
+                  "name": "ranking",
+                  "schema": {
+                    "type": "object",
+                    "properties": [
+                      {
+                        "name": "dimension",
+                        "schema": {
+                          "type": "integer"
+                        }
+                      },
+                      {
+                        "name": "distance_metric",
+                        "schema": {
+                          "type": "string"
+                        }
+                      },
+                      {
+                        "name": "generation_id",
+                        "schema": {
+                          "type": "string"
+                        }
+                      },
+                      {
+                        "name": "model",
+                        "schema": {
+                          "type": "string"
+                        }
+                      },
+                      {
+                        "name": "provider",
+                        "schema": {
+                          "type": "string"
+                        }
+                      },
+                      {
+                        "name": "semantic_applied",
+                        "schema": {
+                          "type": "boolean"
+                        }
+                      },
+                      {
+                        "name": "version",
+                        "schema": {
+                          "type": "string"
+                        }
+                      }
+                    ],
+                    "required": [
+                      "semantic_applied"
+                    ]
+                  }
                 }
               ],
               "required": [
-                "articles"
+                "articles",
+                "ranking"
               ]
             }
           }
@@ -1311,12 +1893,6 @@
                           "type": "object",
                           "properties": [
                             {
-                              "name": "article_id",
-                              "schema": {
-                                "type": "string"
-                              }
-                            },
-                            {
                               "name": "author_agent_id",
                               "schema": {
                                 "type": "string"
@@ -1340,6 +1916,12 @@
                               "schema": {}
                             },
                             {
+                              "name": "id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
                               "name": "project_id",
                               "schema": {
                                 "type": "string"
@@ -1360,10 +1942,11 @@
                             }
                           ],
                           "required": [
-                            "article_id",
                             "author_agent_id",
                             "body",
                             "created_at",
+                            "frontmatter",
+                            "id",
                             "project_id",
                             "title",
                             "updated_at"
@@ -1378,7 +1961,567 @@
                 },
                 {
                   "name": "org_config",
-                  "schema": {}
+                  "schema": {
+                    "type": "object",
+                    "properties": [
+                      {
+                        "name": "channels",
+                        "schema": {
+                          "anyOf": [
+                            {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": [
+                                  {
+                                    "name": "created_at",
+                                    "schema": {
+                                      "type": "string",
+                                      "format": "date-time"
+                                    }
+                                  },
+                                  {
+                                    "name": "id",
+                                    "schema": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  {
+                                    "name": "name",
+                                    "schema": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  {
+                                    "name": "project_id",
+                                    "schema": {
+                                      "type": "string"
+                                    }
+                                  }
+                                ],
+                                "required": [
+                                  "created_at",
+                                  "id",
+                                  "name",
+                                  "project_id"
+                                ]
+                              }
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "name": "events",
+                        "schema": {
+                          "anyOf": [
+                            {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": [
+                                  {
+                                    "name": "agent_id",
+                                    "schema": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  {
+                                    "name": "channel_id",
+                                    "schema": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  {
+                                    "name": "created_at",
+                                    "schema": {
+                                      "type": "string",
+                                      "format": "date-time"
+                                    }
+                                  },
+                                  {
+                                    "name": "event_type",
+                                    "schema": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  {
+                                    "name": "id",
+                                    "schema": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  {
+                                    "name": "note",
+                                    "schema": {
+                                      "anyOf": [
+                                        {
+                                          "type": "string"
+                                        },
+                                        {
+                                          "type": "null"
+                                        }
+                                      ]
+                                    }
+                                  },
+                                  {
+                                    "name": "payload",
+                                    "schema": {}
+                                  },
+                                  {
+                                    "name": "project_id",
+                                    "schema": {
+                                      "type": "string"
+                                    }
+                                  }
+                                ],
+                                "required": [
+                                  "agent_id",
+                                  "channel_id",
+                                  "created_at",
+                                  "event_type",
+                                  "id",
+                                  "note",
+                                  "payload",
+                                  "project_id"
+                                ]
+                              }
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "name": "identity",
+                        "schema": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "agent",
+                              "schema": {
+                                "type": "object",
+                                "properties": [
+                                  {
+                                    "name": "capabilities",
+                                    "schema": {
+                                      "anyOf": [
+                                        {
+                                          "type": "array",
+                                          "items": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        {
+                                          "type": "null"
+                                        }
+                                      ]
+                                    }
+                                  },
+                                  {
+                                    "name": "created_at",
+                                    "schema": {
+                                      "type": "string",
+                                      "format": "date-time"
+                                    }
+                                  },
+                                  {
+                                    "name": "id",
+                                    "schema": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  {
+                                    "name": "model",
+                                    "schema": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  {
+                                    "name": "owner",
+                                    "schema": {
+                                      "type": "string"
+                                    }
+                                  }
+                                ],
+                                "required": [
+                                  "capabilities",
+                                  "created_at",
+                                  "id",
+                                  "model",
+                                  "owner"
+                                ]
+                              }
+                            },
+                            {
+                              "name": "passport",
+                              "schema": {
+                                "type": "object",
+                                "properties": [
+                                  {
+                                    "name": "agent_id",
+                                    "schema": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  {
+                                    "name": "id",
+                                    "schema": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  {
+                                    "name": "issued_at",
+                                    "schema": {
+                                      "type": "string",
+                                      "format": "date-time"
+                                    }
+                                  },
+                                  {
+                                    "name": "project_id",
+                                    "schema": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  {
+                                    "name": "repositories",
+                                    "schema": {
+                                      "anyOf": [
+                                        {
+                                          "type": "array",
+                                          "items": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        {
+                                          "type": "null"
+                                        }
+                                      ]
+                                    }
+                                  },
+                                  {
+                                    "name": "roles",
+                                    "schema": {
+                                      "anyOf": [
+                                        {
+                                          "type": "array",
+                                          "items": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        {
+                                          "type": "null"
+                                        }
+                                      ]
+                                    }
+                                  }
+                                ],
+                                "required": [
+                                  "agent_id",
+                                  "id",
+                                  "issued_at",
+                                  "project_id",
+                                  "repositories",
+                                  "roles"
+                                ]
+                              }
+                            },
+                            {
+                              "name": "permissions",
+                              "schema": {
+                                "anyOf": [
+                                  {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            }
+                          ],
+                          "required": [
+                            "agent",
+                            "passport",
+                            "permissions"
+                          ]
+                        }
+                      },
+                      {
+                        "name": "integration_manifest_metadata",
+                        "schema": {}
+                      },
+                      {
+                        "name": "kb",
+                        "schema": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "articles",
+                              "schema": {
+                                "anyOf": [
+                                  {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "object",
+                                      "properties": [
+                                        {
+                                          "name": "author_agent_id",
+                                          "schema": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        {
+                                          "name": "body",
+                                          "schema": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        {
+                                          "name": "created_at",
+                                          "schema": {
+                                            "type": "string",
+                                            "format": "date-time"
+                                          }
+                                        },
+                                        {
+                                          "name": "frontmatter",
+                                          "schema": {}
+                                        },
+                                        {
+                                          "name": "id",
+                                          "schema": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        {
+                                          "name": "project_id",
+                                          "schema": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        {
+                                          "name": "title",
+                                          "schema": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        {
+                                          "name": "updated_at",
+                                          "schema": {
+                                            "type": "string",
+                                            "format": "date-time"
+                                          }
+                                        }
+                                      ],
+                                      "required": [
+                                        "author_agent_id",
+                                        "body",
+                                        "created_at",
+                                        "frontmatter",
+                                        "id",
+                                        "project_id",
+                                        "title",
+                                        "updated_at"
+                                      ]
+                                    }
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            }
+                          ],
+                          "required": [
+                            "articles"
+                          ]
+                        }
+                      },
+                      {
+                        "name": "project",
+                        "schema": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "created_at",
+                              "schema": {
+                                "type": "string",
+                                "format": "date-time"
+                              }
+                            },
+                            {
+                              "name": "id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "name",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "owner",
+                              "schema": {
+                                "type": "string"
+                              }
+                            }
+                          ],
+                          "required": [
+                            "created_at",
+                            "id",
+                            "name",
+                            "owner"
+                          ]
+                        }
+                      },
+                      {
+                        "name": "schema_version",
+                        "schema": {
+                          "type": "integer"
+                        }
+                      },
+                      {
+                        "name": "tasks",
+                        "schema": {
+                          "anyOf": [
+                            {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": [
+                                  {
+                                    "name": "created_at",
+                                    "schema": {
+                                      "type": "string",
+                                      "format": "date-time"
+                                    }
+                                  },
+                                  {
+                                    "name": "description",
+                                    "schema": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  {
+                                    "name": "due_by",
+                                    "schema": {
+                                      "anyOf": [
+                                        {
+                                          "type": "string",
+                                          "format": "date-time"
+                                        },
+                                        {
+                                          "type": "null"
+                                        }
+                                      ]
+                                    }
+                                  },
+                                  {
+                                    "name": "id",
+                                    "schema": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  {
+                                    "name": "owner_agent_id",
+                                    "schema": {
+                                      "anyOf": [
+                                        {
+                                          "type": "string"
+                                        },
+                                        {
+                                          "type": "null"
+                                        }
+                                      ]
+                                    }
+                                  },
+                                  {
+                                    "name": "parent_task_id",
+                                    "schema": {
+                                      "anyOf": [
+                                        {
+                                          "type": "string"
+                                        },
+                                        {
+                                          "type": "null"
+                                        }
+                                      ]
+                                    }
+                                  },
+                                  {
+                                    "name": "priority",
+                                    "schema": {
+                                      "type": "integer"
+                                    }
+                                  },
+                                  {
+                                    "name": "project_id",
+                                    "schema": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  {
+                                    "name": "status",
+                                    "schema": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  {
+                                    "name": "title",
+                                    "schema": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  {
+                                    "name": "updated_at",
+                                    "schema": {
+                                      "type": "string",
+                                      "format": "date-time"
+                                    }
+                                  }
+                                ],
+                                "required": [
+                                  "created_at",
+                                  "description",
+                                  "due_by",
+                                  "id",
+                                  "owner_agent_id",
+                                  "parent_task_id",
+                                  "priority",
+                                  "project_id",
+                                  "status",
+                                  "title",
+                                  "updated_at"
+                                ]
+                              }
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      }
+                    ],
+                    "required": [
+                      "channels",
+                      "events",
+                      "identity",
+                      "integration_manifest_metadata",
+                      "kb",
+                      "project",
+                      "schema_version",
+                      "tasks"
+                    ]
+                  }
                 },
                 {
                   "name": "project_list",
@@ -1406,6 +2549,13 @@
                           "type": "object",
                           "properties": [
                             {
+                              "name": "created_at",
+                              "schema": {
+                                "type": "string",
+                                "format": "date-time"
+                              }
+                            },
+                            {
                               "name": "description",
                               "schema": {
                                 "type": "string"
@@ -1423,6 +2573,12 @@
                                     "type": "null"
                                   }
                                 ]
+                              }
+                            },
+                            {
+                              "name": "id",
+                              "schema": {
+                                "type": "string"
                               }
                             },
                             {
@@ -1458,13 +2614,13 @@
                               }
                             },
                             {
-                              "name": "status",
+                              "name": "project_id",
                               "schema": {
                                 "type": "string"
                               }
                             },
                             {
-                              "name": "task_id",
+                              "name": "status",
                               "schema": {
                                 "type": "string"
                               }
@@ -1474,17 +2630,27 @@
                               "schema": {
                                 "type": "string"
                               }
+                            },
+                            {
+                              "name": "updated_at",
+                              "schema": {
+                                "type": "string",
+                                "format": "date-time"
+                              }
                             }
                           ],
                           "required": [
+                            "created_at",
                             "description",
                             "due_by",
+                            "id",
                             "owner_agent_id",
                             "parent_task_id",
                             "priority",
+                            "project_id",
                             "status",
-                            "task_id",
-                            "title"
+                            "title",
+                            "updated_at"
                           ]
                         }
                       },
@@ -2045,6 +3211,13 @@
                           "type": "object",
                           "properties": [
                             {
+                              "name": "created_at",
+                              "schema": {
+                                "type": "string",
+                                "format": "date-time"
+                              }
+                            },
+                            {
                               "name": "description",
                               "schema": {
                                 "type": "string"
@@ -2113,9 +3286,17 @@
                               "schema": {
                                 "type": "string"
                               }
+                            },
+                            {
+                              "name": "updated_at",
+                              "schema": {
+                                "type": "string",
+                                "format": "date-time"
+                              }
                             }
                           ],
                           "required": [
+                            "created_at",
                             "description",
                             "due_by",
                             "owner_agent_id",
@@ -2123,7 +3304,8 @@
                             "priority",
                             "status",
                             "task_id",
-                            "title"
+                            "title",
+                            "updated_at"
                           ]
                         }
                       },
@@ -2215,6 +3397,905 @@
       }
     ],
     "gateway": [
+      {
+        "name": "wormhole.agent.enrol",
+        "required_permissions": [],
+        "request_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "capabilities",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                {
+                  "name": "credential_profile",
+                  "schema": {
+                    "type": "string",
+                    "min_length": 1
+                  }
+                },
+                {
+                  "name": "fabric_address",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "idempotency_key",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "model",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "owner",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "project_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "repositories",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                {
+                  "name": "requested_permissions",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                {
+                  "name": "roles",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                {
+                  "name": "version",
+                  "schema": {
+                    "type": "integer"
+                  }
+                }
+              ],
+              "required": [
+                "capabilities",
+                "credential_profile",
+                "fabric_address",
+                "idempotency_key",
+                "model",
+                "owner",
+                "project_id",
+                "repositories",
+                "requested_permissions",
+                "roles",
+                "version"
+              ],
+              "additional_properties": false
+            }
+          }
+        ],
+        "response_schemas": [
+          {
+            "variant": "bootstrap_failed_after_enrolment",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "code",
+                  "schema": {
+                    "type": "string",
+                    "enum": [
+                      "bootstrap_failed_after_enrolment"
+                    ]
+                  }
+                },
+                {
+                  "name": "credential_profile",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "idempotency_key",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "message",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "passport_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "retryable",
+                  "schema": {
+                    "type": "boolean",
+                    "boolean_enum": [
+                      true
+                    ]
+                  }
+                },
+                {
+                  "name": "state",
+                  "schema": {
+                    "type": "string",
+                    "enum": [
+                      "recovery_required"
+                    ]
+                  }
+                },
+                {
+                  "name": "version",
+                  "schema": {
+                    "type": "integer"
+                  }
+                }
+              ],
+              "required": [
+                "code",
+                "idempotency_key",
+                "retryable",
+                "state",
+                "version"
+              ],
+              "additional_properties": false
+            }
+          },
+          {
+            "variant": "checkpoint_persistence_failed",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "code",
+                  "schema": {
+                    "type": "string",
+                    "enum": [
+                      "checkpoint_persistence_failed"
+                    ]
+                  }
+                },
+                {
+                  "name": "credential_profile",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "idempotency_key",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "message",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "passport_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "retryable",
+                  "schema": {
+                    "type": "boolean",
+                    "boolean_enum": [
+                      false
+                    ]
+                  }
+                },
+                {
+                  "name": "state",
+                  "schema": {
+                    "type": "string",
+                    "enum": [
+                      "attention_required"
+                    ]
+                  }
+                },
+                {
+                  "name": "version",
+                  "schema": {
+                    "type": "integer"
+                  }
+                }
+              ],
+              "required": [
+                "code",
+                "idempotency_key",
+                "retryable",
+                "state",
+                "version"
+              ],
+              "additional_properties": false
+            }
+          },
+          {
+            "variant": "credential_persistence_failed",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "code",
+                  "schema": {
+                    "type": "string",
+                    "enum": [
+                      "credential_persistence_failed"
+                    ]
+                  }
+                },
+                {
+                  "name": "credential_profile",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "idempotency_key",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "message",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "passport_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "retryable",
+                  "schema": {
+                    "type": "boolean",
+                    "boolean_enum": [
+                      true
+                    ]
+                  }
+                },
+                {
+                  "name": "state",
+                  "schema": {
+                    "type": "string",
+                    "enum": [
+                      "recovery_required"
+                    ]
+                  }
+                },
+                {
+                  "name": "version",
+                  "schema": {
+                    "type": "integer"
+                  }
+                }
+              ],
+              "required": [
+                "code",
+                "idempotency_key",
+                "retryable",
+                "state",
+                "version"
+              ],
+              "additional_properties": false
+            }
+          },
+          {
+            "variant": "credentials_persisted",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "code",
+                  "schema": {
+                    "type": "string",
+                    "enum": [
+                      "credentials_persisted"
+                    ]
+                  }
+                },
+                {
+                  "name": "credential_profile",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "idempotency_key",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "message",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "passport_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "retryable",
+                  "schema": {
+                    "type": "boolean",
+                    "boolean_enum": [
+                      true
+                    ]
+                  }
+                },
+                {
+                  "name": "state",
+                  "schema": {
+                    "type": "string",
+                    "enum": [
+                      "credentials_persisted"
+                    ]
+                  }
+                },
+                {
+                  "name": "version",
+                  "schema": {
+                    "type": "integer"
+                  }
+                }
+              ],
+              "required": [
+                "code",
+                "idempotency_key",
+                "retryable",
+                "state",
+                "version"
+              ],
+              "additional_properties": false
+            }
+          },
+          {
+            "variant": "duplicate_identity",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "code",
+                  "schema": {
+                    "type": "string",
+                    "enum": [
+                      "duplicate_identity"
+                    ]
+                  }
+                },
+                {
+                  "name": "credential_profile",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "idempotency_key",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "message",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "passport_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "retryable",
+                  "schema": {
+                    "type": "boolean",
+                    "boolean_enum": [
+                      false
+                    ]
+                  }
+                },
+                {
+                  "name": "state",
+                  "schema": {
+                    "type": "string",
+                    "enum": [
+                      "failed"
+                    ]
+                  }
+                },
+                {
+                  "name": "version",
+                  "schema": {
+                    "type": "integer"
+                  }
+                }
+              ],
+              "required": [
+                "code",
+                "idempotency_key",
+                "retryable",
+                "state",
+                "version"
+              ],
+              "additional_properties": false
+            }
+          },
+          {
+            "variant": "fabric_unreachable",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "code",
+                  "schema": {
+                    "type": "string",
+                    "enum": [
+                      "fabric_unreachable"
+                    ]
+                  }
+                },
+                {
+                  "name": "credential_profile",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "idempotency_key",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "message",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "passport_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "retryable",
+                  "schema": {
+                    "type": "boolean",
+                    "boolean_enum": [
+                      true
+                    ]
+                  }
+                },
+                {
+                  "name": "state",
+                  "schema": {
+                    "type": "string",
+                    "enum": [
+                      "failed"
+                    ]
+                  }
+                },
+                {
+                  "name": "version",
+                  "schema": {
+                    "type": "integer"
+                  }
+                }
+              ],
+              "required": [
+                "code",
+                "idempotency_key",
+                "retryable",
+                "state",
+                "version"
+              ],
+              "additional_properties": false
+            }
+          },
+          {
+            "variant": "invalid_project",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "code",
+                  "schema": {
+                    "type": "string",
+                    "enum": [
+                      "invalid_project"
+                    ]
+                  }
+                },
+                {
+                  "name": "credential_profile",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "idempotency_key",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "message",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "passport_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "retryable",
+                  "schema": {
+                    "type": "boolean",
+                    "boolean_enum": [
+                      false
+                    ]
+                  }
+                },
+                {
+                  "name": "state",
+                  "schema": {
+                    "type": "string",
+                    "enum": [
+                      "failed"
+                    ]
+                  }
+                },
+                {
+                  "name": "version",
+                  "schema": {
+                    "type": "integer"
+                  }
+                }
+              ],
+              "required": [
+                "code",
+                "idempotency_key",
+                "retryable",
+                "state",
+                "version"
+              ],
+              "additional_properties": false
+            }
+          },
+          {
+            "variant": "permissions_rejected",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "code",
+                  "schema": {
+                    "type": "string",
+                    "enum": [
+                      "permissions_rejected"
+                    ]
+                  }
+                },
+                {
+                  "name": "credential_profile",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "idempotency_key",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "message",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "passport_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "retryable",
+                  "schema": {
+                    "type": "boolean",
+                    "boolean_enum": [
+                      false
+                    ]
+                  }
+                },
+                {
+                  "name": "state",
+                  "schema": {
+                    "type": "string",
+                    "enum": [
+                      "failed"
+                    ]
+                  }
+                },
+                {
+                  "name": "version",
+                  "schema": {
+                    "type": "integer"
+                  }
+                }
+              ],
+              "required": [
+                "code",
+                "idempotency_key",
+                "retryable",
+                "state",
+                "version"
+              ],
+              "additional_properties": false
+            }
+          },
+          {
+            "variant": "repository_mismatch",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "code",
+                  "schema": {
+                    "type": "string",
+                    "enum": [
+                      "repository_mismatch"
+                    ]
+                  }
+                },
+                {
+                  "name": "credential_profile",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "idempotency_key",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "message",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "passport_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "retryable",
+                  "schema": {
+                    "type": "boolean",
+                    "boolean_enum": [
+                      false
+                    ]
+                  }
+                },
+                {
+                  "name": "state",
+                  "schema": {
+                    "type": "string",
+                    "enum": [
+                      "failed"
+                    ]
+                  }
+                },
+                {
+                  "name": "version",
+                  "schema": {
+                    "type": "integer"
+                  }
+                }
+              ],
+              "required": [
+                "code",
+                "idempotency_key",
+                "retryable",
+                "state",
+                "version"
+              ],
+              "additional_properties": false
+            }
+          },
+          {
+            "variant": "success",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "agent_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "code",
+                  "schema": {
+                    "type": "string",
+                    "enum": [
+                      "success"
+                    ]
+                  }
+                },
+                {
+                  "name": "credential_profile",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "idempotency_key",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "message",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "passport_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "retryable",
+                  "schema": {
+                    "type": "boolean",
+                    "boolean_enum": [
+                      false
+                    ]
+                  }
+                },
+                {
+                  "name": "state",
+                  "schema": {
+                    "type": "string",
+                    "enum": [
+                      "ready"
+                    ]
+                  }
+                },
+                {
+                  "name": "version",
+                  "schema": {
+                    "type": "integer"
+                  }
+                }
+              ],
+              "required": [
+                "code",
+                "idempotency_key",
+                "retryable",
+                "state",
+                "version"
+              ],
+              "additional_properties": false
+            }
+          }
+        ]
+      },
       {
         "name": "wormhole.agent.list",
         "required_permissions": [],
@@ -3190,6 +5271,793 @@
         ]
       },
       {
+        "name": "wormhole.code_graph.query",
+        "required_permissions": [
+          "code_graph.query"
+        ],
+        "request_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "entry_symbols",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                {
+                  "name": "include_edges",
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "calls",
+                        "references",
+                        "uses_type"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "name": "intent",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "max_depth",
+                  "schema": {
+                    "type": "integer"
+                  }
+                },
+                {
+                  "name": "minimum_confidence",
+                  "schema": {
+                    "type": "number"
+                  }
+                },
+                {
+                  "name": "project_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "requested_source_bytes",
+                  "schema": {
+                    "type": "integer"
+                  }
+                }
+              ],
+              "required": [
+                "project_id"
+              ],
+              "additional_properties": false,
+              "anyOf": [
+                {
+                  "required": [
+                    "intent"
+                  ]
+                },
+                {
+                  "required": [
+                    "entry_symbols"
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "completeness",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "current_git_commit",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "edges",
+                  "schema": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "authoritative",
+                              "schema": {
+                                "type": "boolean"
+                              }
+                            },
+                            {
+                              "name": "confidence",
+                              "schema": {
+                                "type": "number"
+                              }
+                            },
+                            {
+                              "name": "id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "provenance",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "relationship",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "source_node_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "target_node_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            }
+                          ],
+                          "required": [
+                            "authoritative",
+                            "confidence",
+                            "id",
+                            "provenance",
+                            "relationship",
+                            "source_node_id",
+                            "target_node_id"
+                          ]
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "name": "effective_source_budget",
+                  "schema": {
+                    "type": "integer"
+                  }
+                },
+                {
+                  "name": "graph_not_current",
+                  "schema": {
+                    "type": "boolean"
+                  }
+                },
+                {
+                  "name": "graph_revision",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "matches",
+                  "schema": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "file_path",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "qualified_name",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "rank",
+                              "schema": {
+                                "type": "integer"
+                              }
+                            },
+                            {
+                              "name": "reason",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "symbol_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            }
+                          ],
+                          "required": [
+                            "file_path",
+                            "qualified_name",
+                            "rank",
+                            "reason",
+                            "symbol_id"
+                          ]
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "name": "nodes",
+                  "schema": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "distance",
+                              "schema": {
+                                "type": "integer"
+                              }
+                            },
+                            {
+                              "name": "id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "kind",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "name",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "path",
+                              "schema": {
+                                "type": "string"
+                              }
+                            }
+                          ],
+                          "required": [
+                            "distance",
+                            "id",
+                            "kind",
+                            "name",
+                            "path"
+                          ]
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "name": "omission_reason",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "omitted_edge_count",
+                  "schema": {
+                    "type": "integer"
+                  }
+                },
+                {
+                  "name": "omitted_node_count",
+                  "schema": {
+                    "type": "integer"
+                  }
+                },
+                {
+                  "name": "rebuild_recommended",
+                  "schema": {
+                    "type": "boolean"
+                  }
+                },
+                {
+                  "name": "refresh_recommended",
+                  "schema": {
+                    "type": "boolean"
+                  }
+                },
+                {
+                  "name": "source_bytes",
+                  "schema": {
+                    "type": "integer"
+                  }
+                },
+                {
+                  "name": "sources",
+                  "schema": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "end_byte",
+                              "schema": {
+                                "type": "integer"
+                              }
+                            },
+                            {
+                              "name": "end_line",
+                              "schema": {
+                                "type": "integer"
+                              }
+                            },
+                            {
+                              "name": "file_path",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "qualified_name",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "refresh_recommended",
+                              "schema": {
+                                "type": "boolean"
+                              }
+                            },
+                            {
+                              "name": "required_permission",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "returned_bytes",
+                              "schema": {
+                                "type": "integer"
+                              }
+                            },
+                            {
+                              "name": "source",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "source_included",
+                              "schema": {
+                                "type": "boolean"
+                              }
+                            },
+                            {
+                              "name": "source_omission_reason",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "start_byte",
+                              "schema": {
+                                "type": "integer"
+                              }
+                            },
+                            {
+                              "name": "start_line",
+                              "schema": {
+                                "type": "integer"
+                              }
+                            },
+                            {
+                              "name": "symbol_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            }
+                          ],
+                          "required": [
+                            "end_byte",
+                            "end_line",
+                            "file_path",
+                            "qualified_name",
+                            "returned_bytes",
+                            "source_included",
+                            "start_byte",
+                            "start_line",
+                            "symbol_id"
+                          ]
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "name": "structural_paths",
+                  "schema": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "depth",
+                              "schema": {
+                                "type": "integer"
+                              }
+                            },
+                            {
+                              "name": "edge_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "from_node_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "to_node_id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            }
+                          ],
+                          "required": [
+                            "depth",
+                            "edge_id",
+                            "from_node_id",
+                            "to_node_id"
+                          ]
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "name": "suggested_follow_up_symbols",
+                  "schema": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "name": "working_tree_status",
+                  "schema": {
+                    "type": "string",
+                    "enum": [
+                      "clean",
+                      "dirty"
+                    ]
+                  }
+                }
+              ],
+              "required": [
+                "completeness",
+                "current_git_commit",
+                "edges",
+                "effective_source_budget",
+                "graph_not_current",
+                "graph_revision",
+                "matches",
+                "nodes",
+                "omitted_edge_count",
+                "omitted_node_count",
+                "rebuild_recommended",
+                "refresh_recommended",
+                "source_bytes",
+                "sources",
+                "structural_paths",
+                "suggested_follow_up_symbols",
+                "working_tree_status"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.code_graph.rebuild",
+        "required_permissions": [
+          "code_graph.rebuild"
+        ],
+        "request_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "project_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "project_id"
+              ],
+              "additional_properties": false
+            }
+          }
+        ],
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "graph_revision",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "indexed_commit",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "state",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "graph_revision",
+                "indexed_commit",
+                "state"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.code_graph.status",
+        "required_permissions": [
+          "code_graph.status"
+        ],
+        "request_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "project_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "project_id"
+              ],
+              "additional_properties": false
+            }
+          }
+        ],
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "active_checkout",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "active_revision",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "canonical_remote",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "database_size",
+                  "schema": {
+                    "type": "integer"
+                  }
+                },
+                {
+                  "name": "dirty_tracked_file_count",
+                  "schema": {
+                    "type": "integer"
+                  }
+                },
+                {
+                  "name": "edge_count",
+                  "schema": {
+                    "type": "integer"
+                  }
+                },
+                {
+                  "name": "indexed_commit",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "last_successful_build",
+                  "schema": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "name": "latest_diagnostics",
+                  "schema": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "code",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "created_at",
+                              "schema": {
+                                "type": "string",
+                                "format": "date-time"
+                              }
+                            },
+                            {
+                              "name": "id",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "message",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "severity",
+                              "schema": {
+                                "type": "string"
+                              }
+                            }
+                          ],
+                          "required": [
+                            "code",
+                            "created_at",
+                            "id",
+                            "message",
+                            "severity"
+                          ]
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "name": "state",
+                  "schema": {
+                    "type": "string",
+                    "enum": [
+                      "degraded",
+                      "disabled",
+                      "error",
+                      "initializing",
+                      "ready",
+                      "stale"
+                    ]
+                  }
+                },
+                {
+                  "name": "symbol_count",
+                  "schema": {
+                    "type": "integer"
+                  }
+                },
+                {
+                  "name": "tracked_go_file_count",
+                  "schema": {
+                    "type": "integer"
+                  }
+                }
+              ],
+              "required": [
+                "active_checkout",
+                "active_revision",
+                "canonical_remote",
+                "database_size",
+                "dirty_tracked_file_count",
+                "edge_count",
+                "indexed_commit",
+                "last_successful_build",
+                "latest_diagnostics",
+                "state",
+                "symbol_count",
+                "tracked_go_file_count"
+              ]
+            }
+          }
+        ]
+      },
+      {
         "name": "wormhole.kb.get",
         "required_permissions": [],
         "request_schemas": [
@@ -3575,6 +6443,61 @@
                 "namespace_id",
                 "title",
                 "updated_at"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.sync.status",
+        "required_permissions": [],
+        "request_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "project_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "project_id"
+              ]
+            }
+          }
+        ],
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "pending_writes",
+                  "schema": {
+                    "type": "integer"
+                  }
+                },
+                {
+                  "name": "state",
+                  "schema": {
+                    "type": "string",
+                    "enum": [
+                      "attention_required",
+                      "offline",
+                      "online",
+                      "synchronizing"
+                    ]
+                  }
+                }
+              ],
+              "required": [
+                "pending_writes",
+                "state"
               ]
             }
           }
@@ -4182,6 +7105,66 @@
         "help_exit": 2
       },
       {
+        "name": "config code-graph checkout set",
+        "usage": "config code-graph checkout set [flags] <path>",
+        "flags": [
+          "confirm",
+          "project"
+        ],
+        "positionals": [
+          "<path>"
+        ],
+        "help_exit": 0
+      },
+      {
+        "name": "config code-graph checkout show",
+        "usage": "config code-graph checkout show [flags]",
+        "flags": [
+          "project"
+        ],
+        "positionals": [],
+        "help_exit": 0
+      },
+      {
+        "name": "config code-graph disable",
+        "usage": "config code-graph disable [flags]",
+        "flags": [
+          "confirm",
+          "project"
+        ],
+        "positionals": [],
+        "help_exit": 0
+      },
+      {
+        "name": "config code-graph enable",
+        "usage": "config code-graph enable [flags]",
+        "flags": [
+          "confirm",
+          "project"
+        ],
+        "positionals": [],
+        "help_exit": 0
+      },
+      {
+        "name": "config code-graph rebuild",
+        "usage": "config code-graph rebuild [flags]",
+        "flags": [
+          "confirm",
+          "project"
+        ],
+        "positionals": [],
+        "help_exit": 0
+      },
+      {
+        "name": "config code-graph status",
+        "usage": "config code-graph status [flags]",
+        "flags": [
+          "project"
+        ],
+        "positionals": [],
+        "help_exit": 0
+      },
+      {
         "name": "help",
         "usage": "help",
         "flags": [],
@@ -4227,6 +7210,15 @@
         "name": "profile list",
         "usage": "profile list [flags]",
         "flags": [],
+        "positionals": [],
+        "help_exit": 2
+      },
+      {
+        "name": "status",
+        "usage": "status [flags]",
+        "flags": [
+          "profile"
+        ],
         "positionals": [],
         "help_exit": 2
       },
@@ -4392,7 +7384,10 @@
     "HOME",
     "TMPDIR",
     "WORMHOLE_ADMIN_KEY",
+    "WORMHOLE_COHERE_API_KEY",
     "WORMHOLE_DATABASE_URL",
+    "WORMHOLE_ENROLMENT_PERMISSIONS",
+    "WORMHOLE_ENROLMENT_ROLES",
     "WORMHOLE_KB_DEDUP_THRESHOLD",
     "WORMHOLE_KB_MAX_BODY_LENGTH",
     "WORMHOLE_KB_MIN_LINKS_DECISION",
@@ -4690,6 +7685,7 @@
       {
         "name": "task_summary",
         "fields": [
+          "created_at",
           "description",
           "due_by",
           "owner_agent_id",
@@ -4697,7 +7693,8 @@
           "priority",
           "status",
           "task_id",
-          "title"
+          "title",
+          "updated_at"
         ]
       }
     ]
@@ -4707,7 +7704,7 @@
       "tag": "v0.2.4-alpha",
       "version": 12
     },
-    "current_version": 17,
+    "current_version": 19,
     "empty_version": 0,
     "entries": [
       {
@@ -4845,6 +7842,22 @@
         "up_empty": false,
         "up_file": "migrations/000017_audit_log_force_rls.up.sql",
         "version": 17
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000018_agent_enrolments.down.sql",
+        "name": "agent_enrolments",
+        "up_empty": false,
+        "up_file": "migrations/000018_agent_enrolments.up.sql",
+        "version": 18
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000019_kb_semantic_embeddings.down.sql",
+        "name": "kb_semantic_embeddings",
+        "up_empty": false,
+        "up_file": "migrations/000019_kb_semantic_embeddings.up.sql",
+        "version": 19
       }
     ],
     "verification_paths": [
@@ -4854,11 +7867,11 @@
         "from_version": 12,
         "name": "alpha_upgrade",
         "source": ".github/scripts/test-alpha-upgrade.sh",
-        "to_version": 17
+        "to_version": 19
       },
       {
         "command": "down -all",
-        "from_version": 17,
+        "from_version": 19,
         "name": "current_down",
         "source": ".github/workflows/migrations.yml",
         "to_version": 0
@@ -4868,7 +7881,7 @@
         "from_version": 0,
         "name": "empty_up",
         "source": ".github/workflows/migrations.yml",
-        "to_version": 17
+        "to_version": 19
       }
     ]
   },

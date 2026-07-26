@@ -20,9 +20,100 @@ import (
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/runtime/config"
+	"github.com/H4RL33/wormhole/internal/runtime/localapi"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	runtimesync "github.com/H4RL33/wormhole/internal/runtime/sync"
+	"github.com/H4RL33/wormhole/internal/types"
 )
+
+func TestWireCodeGraphRuntimesIsolatesReadyRecoveryAndUnavailableProjects(t *testing.T) {
+	store, err := localstore.Open(filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &localapi.Server{}
+	ready := wireCodeGraphRuntimes(context.Background(), srv, store.DB(), []string{"project-a", "project-b", "project-a"}, nil)
+	if len(ready) != 2 || ready["project-a"] != nil || ready["project-b"] != nil {
+		t.Fatalf("ready wiring outcomes = %+v, want one successful runtime per unique project", ready)
+	}
+	recovery := wireCodeGraphRuntimes(context.Background(), srv, store.DB(), []string{"project-ready", "project-recovery"}, map[string]bool{"project-recovery": true})
+	if recovery["project-ready"] != nil || !errors.Is(recovery["project-recovery"], errCodeGraphRecoveryOnly) {
+		t.Fatalf("recovery wiring outcomes = %+v", recovery)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	unavailable := wireCodeGraphRuntimes(context.Background(), srv, store.DB(), []string{"project-unavailable"}, nil)
+	if unavailable["project-unavailable"] == nil {
+		t.Fatalf("closed derivative store unexpectedly wired: %+v", unavailable)
+	}
+}
+
+func gatewayTestBootstrapOutput(projectID, agentID, passportID string) map[string]any {
+	now := time.Date(2026, 7, 25, 12, 0, 0, 123, time.UTC)
+	org := types.BootstrapOrgConfigV1{
+		SchemaVersion: types.BootstrapSchemaVersionV1,
+		Project:       types.BootstrapProjectV1{ID: projectID, Name: "project", Owner: "owner", CreatedAt: now},
+		Identity: types.BootstrapIdentityV1{
+			Agent:       types.BootstrapAgentV1{ID: agentID, Owner: "owner", Model: "model", Capabilities: []string{}, CreatedAt: now},
+			Passport:    types.BootstrapPassportV1{ID: passportID, AgentID: agentID, ProjectID: projectID, Repositories: []string{}, Roles: []string{}, IssuedAt: now},
+			Permissions: []string{"task.create", "read_kb"},
+		},
+		Channels: []types.BootstrapChannelV1{}, Events: []types.BootstrapEventV1{}, Tasks: []types.BootstrapTaskV1{},
+		KB: types.BootstrapKBV1{Articles: []types.BootstrapArticleV1{}}, IntegrationManifestMetadata: json.RawMessage(`null`),
+	}
+	return map[string]any{"org_config": org, "project_list": []string{}, "task_list": org.Tasks, "kb_list": org.KB.Articles, "timestamp": now.Format(time.RFC3339Nano), "version": 1}
+}
+
+func TestRun_FreshGatewayExposesPreCredentialEnrolmentEndpoint(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	runDir := filepath.Join(home, "run")
+	t.Setenv("XDG_RUNTIME_DIR", runDir)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- runWithSyncEngineFactory(ctx, "default", nil) }()
+
+	socketPath := filepath.Join(runDir, "wormhole", "wormholed.sock")
+	var conn net.Conn
+	var err error
+	for i := 0; i < 100; i++ {
+		conn, err = net.Dial("unix", socketPath)
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		cancel()
+		select {
+		case runErr := <-errCh:
+			t.Fatalf("fresh Gateway did not expose socket: dial=%v run=%v", err, runErr)
+		default:
+			t.Fatalf("fresh Gateway did not expose socket: %v", err)
+		}
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	mcpInitialize(t, conn, reader)
+	resp := mcpCallTool(t, conn, reader, 2, localapi.EnrolmentToolName, map[string]interface{}{})
+	if !strings.Contains(resp.Error, "enrolment policy unavailable") {
+		cancel()
+		t.Fatalf("fresh Gateway enrolment endpoint error = %q, want deny-closed policy error", resp.Error)
+	}
+
+	cancel()
+	select {
+	case runErr := <-errCh:
+		if runErr != nil {
+			t.Fatalf("fresh Gateway shutdown: %v", runErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("fresh Gateway did not shut down")
+	}
+}
 
 // Local MCP types (duplicated from internal/runtime/localapi for test use).
 type mcpRpcRequest struct {
@@ -83,7 +174,7 @@ func configureSecurityTestDaemon(t *testing.T) (string, syncEngineFactory) {
 		t.Fatalf("create credentials directory: %v", err)
 	}
 	credData, err := json.Marshal(map[string]string{
-		"server": "http://127.0.0.1:1", "project_id": "project-1", "agent_id": "agent-1", "token": "test-token",
+		"server": "http://127.0.0.1:1", "project_id": "project-1", "agent_id": "agent-1", "passport_id": "passport-1", "token": "test-token",
 	})
 	if err != nil {
 		t.Fatalf("marshal credentials: %v", err)
@@ -620,11 +711,14 @@ func (s *isolatedCoordServer) serveHTTP(w http.ResponseWriter, r *http.Request) 
 		}
 		result = map[string]any{"agent_id": "isolated-agent", "owner": "test", "model": "test", "capabilities": []string{}, "project_id": args.ProjectID, "permissions": []string{"task.create"}}
 	case "wormhole.sync.bootstrap":
-		result = map[string]any{
-			"org_config": map[string]any{}, "project_list": []string{},
-			"task_list": []any{}, "kb_list": []any{},
-			"timestamp": time.Now().UTC().Format(time.RFC3339), "version": 1,
+		var args struct {
+			NamespaceID string `json:"namespace_id"`
 		}
+		if err := json.Unmarshal(params.Arguments, &args); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		result = gatewayTestBootstrapOutput(args.NamespaceID, "isolated-agent", "isolated-passport")
 	case "wormhole.sync.incremental_pull":
 		result = map[string]any{
 			"updates": []any{}, "timestamp": time.Now().UTC().Format(time.RFC3339), "version": 1,
@@ -721,27 +815,26 @@ func (e *fakeGroupEngine) Stop() {
 	*e.events = append(*e.events, "stop "+e.name)
 }
 
-func TestSyncGroupBootstrapBarrierStartsNoneOnAnyFailure(t *testing.T) {
+func TestSyncGroupRestartDoesNotBootstrap(t *testing.T) {
 	events := []string{}
 	first := &fakeGroupEngine{name: "first", events: &events}
 	second := &fakeGroupEngine{name: "second", events: &events, bootstrapErr: fmt.Errorf("bootstrap failed")}
 	third := &fakeGroupEngine{name: "third", events: &events}
 	group := &syncGroup{engines: []syncEngine{first, second, third}}
 
-	err := group.Start(context.Background())
-	if err == nil {
-		t.Fatal("syncGroup.Start returned nil, want bootstrap error")
+	if err := group.Start(context.Background()); err != nil {
+		t.Fatalf("syncGroup.Start: %v", err)
 	}
-	want := []string{"bootstrap first", "bootstrap second"}
+	want := []string{"start first", "start second", "start third"}
 	if fmt.Sprint(events) != fmt.Sprint(want) {
 		t.Fatalf("lifecycle events = %v, want %v", events, want)
 	}
-	if first.startCalls != 0 || second.startCalls != 0 || third.startCalls != 0 {
-		t.Fatalf("start calls = (%d, %d, %d), want no engine started", first.startCalls, second.startCalls, third.startCalls)
+	if first.startCalls != 1 || second.startCalls != 1 || third.startCalls != 1 {
+		t.Fatalf("start calls = (%d, %d, %d), want each engine started once", first.startCalls, second.startCalls, third.startCalls)
 	}
 }
 
-func TestSyncGroupBootstrapsEveryEngineBeforeStartingAny(t *testing.T) {
+func TestSyncGroupStartsEveryReadyEngineWithoutBootstrap(t *testing.T) {
 	events := []string{}
 	first := &fakeGroupEngine{name: "first", events: &events}
 	second := &fakeGroupEngine{name: "second", events: &events}
@@ -749,7 +842,7 @@ func TestSyncGroupBootstrapsEveryEngineBeforeStartingAny(t *testing.T) {
 	if err := group.Start(context.Background()); err != nil {
 		t.Fatalf("syncGroup.Start: %v", err)
 	}
-	want := []string{"bootstrap first", "bootstrap second", "start first", "start second"}
+	want := []string{"start first", "start second"}
 	if fmt.Sprint(events) != fmt.Sprint(want) {
 		t.Fatalf("lifecycle events = %v, want %v", events, want)
 	}
@@ -759,6 +852,55 @@ type blockingBootstrapEngine struct {
 	entered    chan struct{}
 	startCalls atomic.Int32
 	stopCalls  atomic.Int32
+}
+
+type acceptingBarrierEngine struct {
+	socketPath string
+	result     chan error
+}
+
+func (e *acceptingBarrierEngine) Bootstrap(context.Context) error { return nil }
+func (e *acceptingBarrierEngine) Stop()                           {}
+func (e *acceptingBarrierEngine) Start(context.Context) {
+	conn, err := net.DialTimeout("unix", e.socketPath, time.Second)
+	if err == nil {
+		defer conn.Close()
+		_ = conn.SetDeadline(time.Now().Add(time.Second))
+		request, _ := json.Marshal(mcpRpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "initialize", Params: json.RawMessage(`{}`)})
+		if _, err = conn.Write(append(request, '\n')); err == nil {
+			_, err = bufio.NewReader(conn).ReadBytes('\n')
+		}
+	}
+	e.result <- err
+}
+
+func TestServeWithSyncAcceptsMCPBeforeIncrementalStart(t *testing.T) {
+	store, err := localstore.Open(filepath.Join(t.TempDir(), "barrier.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	socketPath := filepath.Join(t.TempDir(), "gateway.sock")
+	events := localstore.NewEventRepo(store.DB())
+	server, err := localapi.New(socketPath, "", "", "project-1", store,
+		localstore.NewTaskRepo(store.DB(), events), events, localstore.NewKBRepo(store.DB()), runtimesync.NewQueueRepo(store.DB()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	engine := &acceptingBarrierEngine{socketPath: socketPath, result: make(chan error, 1)}
+	group := &syncGroup{engines: []syncEngine{engine}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- serveWithSync(ctx, server, group) }()
+	if err := <-engine.result; err != nil {
+		cancel()
+		t.Fatalf("incremental Start ran before MCP accept loop was serving: %v", err)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("serveWithSync shutdown: %v", err)
+	}
 }
 
 type engineLifecycleCounts struct {
@@ -792,6 +934,14 @@ type countingSyncEngine struct {
 	counts    *engineLifecycleCounts
 }
 
+func (e *countingSyncEngine) ConfigureBootstrap(store *localstore.Store, agentID, passportID string, attempt *localstore.EnrolmentAttemptRecord) error {
+	configurable, ok := e.syncEngine.(bootstrapConfigurableSyncEngine)
+	if !ok {
+		return fmt.Errorf("wrapped engine does not support bootstrap configuration")
+	}
+	return configurable.ConfigureBootstrap(store, agentID, passportID, attempt)
+}
+
 func (e *countingSyncEngine) Bootstrap(ctx context.Context) error {
 	e.counts.increment(e.counts.bootstraps, e.projectID)
 	return e.syncEngine.Bootstrap(ctx)
@@ -800,6 +950,14 @@ func (e *countingSyncEngine) Bootstrap(ctx context.Context) error {
 func (e *countingSyncEngine) Start(ctx context.Context) {
 	e.counts.increment(e.counts.starts, e.projectID)
 	e.syncEngine.Start(ctx)
+}
+
+func (e *countingSyncEngine) Status(ctx context.Context) (runtimesync.Status, error) {
+	statusEngine, ok := e.syncEngine.(syncStatusEngine)
+	if !ok {
+		return runtimesync.Status{}, errors.New("wrapped engine does not expose status")
+	}
+	return statusEngine.Status(ctx)
 }
 
 func countingEngineFactory(counts *engineLifecycleCounts) syncEngineFactory {
@@ -822,32 +980,29 @@ func (e *blockingBootstrapEngine) Bootstrap(ctx context.Context) error {
 func (e *blockingBootstrapEngine) Start(context.Context) { e.startCalls.Add(1) }
 func (e *blockingBootstrapEngine) Stop()                 { e.stopCalls.Add(1) }
 
-func TestSyncGroupStopDuringBootstrapCancelsAndPreventsStart(t *testing.T) {
+func TestSyncGroupStopAfterStartStopsEngineOnce(t *testing.T) {
 	engine := &blockingBootstrapEngine{entered: make(chan struct{})}
 	group := &syncGroup{engines: []syncEngine{engine}}
-	errCh := make(chan error, 1)
-	go func() { errCh <- group.Start(context.Background()) }()
-	<-engine.entered
-	group.Stop()
-	if err := <-errCh; err == nil {
-		t.Fatal("Start returned nil after Stop canceled bootstrap")
+	if err := group.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
 	}
-	if got := engine.startCalls.Load(); got != 0 {
-		t.Fatalf("Start calls = %d, want 0", got)
+	group.Stop()
+	if got := engine.startCalls.Load(); got != 1 {
+		t.Fatalf("Start calls = %d, want 1", got)
 	}
 	if got := engine.stopCalls.Load(); got != 1 {
 		t.Fatalf("Stop calls = %d, want 1", got)
 	}
 }
 
-func TestSyncGroupStopAfterBootstrapPreventsStart(t *testing.T) {
+func TestSyncGroupStopBeforeStartPreventsStart(t *testing.T) {
 	events := []string{}
 	engine := &fakeGroupEngine{name: "only", events: &events}
 	reached := make(chan struct{})
 	release := make(chan struct{})
 	group := &syncGroup{
 		engines: []syncEngine{engine},
-		testAfterBootstrap: func() {
+		testBeforeStart: func() {
 			close(reached)
 			<-release
 		},
@@ -920,9 +1075,9 @@ func TestNewMultiOrgSyncGroupValidatesBindings(t *testing.T) {
 	taskRepo := localstore.NewTaskRepo(store.DB(), localstore.NewEventRepo(store.DB()))
 	kbRepo := localstore.NewKBRepo(store.DB())
 	orgs := map[string]config.Org{
-		"org-a": {Name: "org-a", Credentials: config.Credentials{Server: "https://a.example", ProjectID: "project-1", Token: "token-a"}},
-		"org-b": {Name: "org-b", Credentials: config.Credentials{Server: "https://b.example", ProjectID: "project-1", Token: "token-b"}},
-		"alias": {Name: "alias", Credentials: config.Credentials{Server: "https://a.example", ProjectID: "project-1", Token: "token-a"}},
+		"org-a": {Name: "org-a", Credentials: config.Credentials{Server: "https://a.example", ProjectID: "project-1", AgentID: "agent-a", PassportID: "passport-a", Token: "token-a"}},
+		"org-b": {Name: "org-b", Credentials: config.Credentials{Server: "https://b.example", ProjectID: "project-1", AgentID: "agent-b", PassportID: "passport-b", Token: "token-b"}},
+		"alias": {Name: "alias", Credentials: config.Credentials{Server: "https://a.example", ProjectID: "project-1", AgentID: "agent-a", PassportID: "passport-a", Token: "token-a"}},
 	}
 
 	tests := []struct {
@@ -937,7 +1092,7 @@ func TestNewMultiOrgSyncGroupValidatesBindings(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			group, err := newMultiOrgSyncGroup(orgs, tc.bindings, queue, audit, taskRepo, kbRepo, runtimesync.DefaultConfig(), defaultSyncEngineFactory)
+			group, err := newMultiOrgSyncGroup(orgs, tc.bindings, store, queue, audit, taskRepo, kbRepo, runtimesync.DefaultConfig(), defaultSyncEngineFactory)
 			if tc.wantErr != "" {
 				if err == nil || !bytes.Contains([]byte(err.Error()), []byte(tc.wantErr)) {
 					t.Fatalf("error = %v, want containing %q", err, tc.wantErr)
@@ -1041,9 +1196,18 @@ func TestRun_EndToEndWhoAmI(t *testing.T) {
 		}
 		var req mcpRpcRequest
 		json.NewDecoder(r.Body).Decode(&req)
-		out := map[string]any{
-			"agent_id": "agent-1", "owner": "harley", "model": "claude-sonnet-5",
-			"capabilities": []string{"code"}, "project_id": "project-1", "permissions": []string{"read_kb"},
+		var params mcpToolsCallParams
+		_ = json.Unmarshal(req.Params, &params)
+		var out any
+		if params.Name == "wormhole.sync.bootstrap" {
+			out = gatewayTestBootstrapOutput("project-1", "agent-1", "passport-1")
+		} else if params.Name == "wormhole.sync.incremental_pull" {
+			out = map[string]any{"updates": []any{}, "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "version": 1}
+		} else {
+			out = map[string]any{
+				"agent_id": "agent-1", "owner": "harley", "model": "claude-sonnet-5",
+				"capabilities": []string{"code"}, "project_id": "project-1", "permissions": []string{"read_kb"},
+			}
 		}
 		outRaw, _ := json.Marshal(out)
 		result := map[string]any{"content": []map[string]string{{"type": "text", "text": string(outRaw)}}}
@@ -1066,9 +1230,10 @@ func TestRun_EndToEndWhoAmI(t *testing.T) {
 	credDir := filepath.Join(home, ".wormhole", "credentials")
 	os.MkdirAll(credDir, 0o700)
 	credData, _ := json.Marshal(map[string]string{
-		"server": coord.URL, "project_id": "project-1", "agent_id": "agent-1", "token": "test-token",
+		"server": coord.URL, "project_id": "project-1", "agent_id": "agent-1", "passport_id": "passport-1", "token": "test-token",
 	})
 	os.WriteFile(filepath.Join(credDir, "default.json"), credData, 0o600)
+	seedEnrolledGatewayCheckpoint(t, filepath.Join(dataDir, "wormhole", "wormholed.db"), coord.URL, "project-1", "agent-1", "passport-1", "test-token", "default")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -1131,11 +1296,7 @@ func TestRun_AgentRegisterReachesSchedulerAndEventBus(t *testing.T) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		writeToolRPCResponse(w, req.ID, map[string]any{
-			"org_config": map[string]any{}, "project_list": []string{},
-			"task_list": []any{}, "kb_list": []any{},
-			"timestamp": time.Now().UTC().Format(time.RFC3339), "version": 1,
-		}, "")
+		writeToolRPCResponse(w, req.ID, gatewayTestBootstrapOutput("project-1", "agent-1", "passport-1"), "")
 	}))
 	defer coord.Close()
 
@@ -1152,9 +1313,10 @@ func TestRun_AgentRegisterReachesSchedulerAndEventBus(t *testing.T) {
 	credDir := filepath.Join(home, ".wormhole", "credentials")
 	os.MkdirAll(credDir, 0o700)
 	credData, _ := json.Marshal(map[string]string{
-		"server": coord.URL, "project_id": "project-1", "agent_id": "agent-1", "token": "test-token",
+		"server": coord.URL, "project_id": "project-1", "agent_id": "agent-1", "passport_id": "passport-1", "token": "test-token",
 	})
 	os.WriteFile(filepath.Join(credDir, "default.json"), credData, 0o600)
+	seedEnrolledGatewayCheckpoint(t, filepath.Join(dataDir, "wormhole", "wormholed.db"), coord.URL, "project-1", "agent-1", "passport-1", "test-token", "default")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -1233,7 +1395,7 @@ func TestRun_MultiOrgSyncIsolation(t *testing.T) {
 	} {
 		data, err := json.Marshal(map[string]string{
 			"server": profile.server, "project_id": profile.project,
-			"agent_id": "agent-" + profile.name, "token": profile.token,
+			"agent_id": "isolated-agent", "passport_id": "isolated-passport", "token": profile.token,
 		})
 		if err != nil {
 			t.Fatalf("marshal %s credentials: %v", profile.name, err)
@@ -1241,6 +1403,38 @@ func TestRun_MultiOrgSyncIsolation(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(credDir, profile.name+".json"), data, 0o600); err != nil {
 			t.Fatalf("write %s credentials: %v", profile.name, err)
 		}
+	}
+	dbPath := filepath.Join(dataDir, "wormhole", "wormholed.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	checkpointStore, err := localstore.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, identity := range []struct{ project, agent, passport, profile string }{
+		{projectA, "isolated-agent", "isolated-passport", "org-a"},
+		{projectB, "isolated-agent", "isolated-passport", "org-b"},
+	} {
+		snapshot := gatewayTestBootstrapOutput(identity.project, identity.agent, identity.passport)["org_config"].(types.BootstrapOrgConfigV1)
+		attempt, _, err := checkpointStore.ResolveEnrolmentAttempt(context.Background(), localstore.EnrolmentAttemptRecord{
+			ProjectID: identity.project, IdempotencyKey: "018f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1", RequestHash: strings.Repeat("a", 64),
+			State: "credentials_persisted", CredentialProfile: identity.profile, AgentID: identity.agent, PassportID: identity.passport,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := checkpointStore.UpdateEnrolmentAttempt(context.Background(), attempt, "credentials_persisted", identity.agent, identity.passport, false); err != nil {
+			t.Fatal(err)
+		}
+		attempt.AgentID, attempt.PassportID = identity.agent, identity.passport
+		if err := checkpointStore.ApplyBootstrap(context.Background(), identity.project, snapshot, time.Now().UTC(), &attempt); err != nil {
+			_ = checkpointStore.Close()
+			t.Fatalf("seed %s ready checkpoint: %v", identity.project, err)
+		}
+	}
+	if err := checkpointStore.Close(); err != nil {
+		t.Fatal(err)
 	}
 
 	socketPath := filepath.Join(runDir, "wormhole", "wormholed.sock")
@@ -1266,12 +1460,11 @@ func TestRun_MultiOrgSyncIsolation(t *testing.T) {
 	firstRun.stop(t)
 	for _, projectID := range []string{projectA, projectB} {
 		constructed, bootstraps, starts := engineCounts.project(projectID)
-		if constructed != 1 || bootstraps != 1 || starts != 1 {
-			t.Fatalf("first run %s engine counts = constructed:%d bootstrap:%d start:%d, want 1/1/1", projectID, constructed, bootstraps, starts)
+		if constructed != 1 || bootstraps != 0 || starts != 1 {
+			t.Fatalf("first run %s engine counts = constructed:%d bootstrap:%d start:%d, want 1/0/1", projectID, constructed, bootstraps, starts)
 		}
 	}
 
-	dbPath := filepath.Join(dataDir, "wormhole", "wormholed.db")
 	inspectionStore, err := localstore.Open(dbPath)
 	if err != nil {
 		t.Fatalf("open persisted local store: %v", err)
@@ -1313,8 +1506,8 @@ func TestRun_MultiOrgSyncIsolation(t *testing.T) {
 	secondRun.stop(t)
 	for _, projectID := range []string{projectA, projectB} {
 		constructed, bootstraps, starts := engineCounts.project(projectID)
-		if constructed != 2 || bootstraps != 2 || starts != 2 {
-			t.Fatalf("two runs %s engine counts = constructed:%d bootstrap:%d start:%d, want 2/2/2", projectID, constructed, bootstraps, starts)
+		if constructed != 2 || bootstraps != 0 || starts != 2 {
+			t.Fatalf("two runs %s engine counts = constructed:%d bootstrap:%d start:%d, want 2/0/2", projectID, constructed, bootstraps, starts)
 		}
 	}
 
@@ -1342,8 +1535,8 @@ func TestRun_MultiOrgSyncIsolation(t *testing.T) {
 				bootstrapCalls++
 			}
 		}
-		if bootstrapCalls != 2 {
-			t.Errorf("%s bootstrap calls = %d, want exactly 2 across two daemon runs (tools=%v)", name, bootstrapCalls, tools)
+		if bootstrapCalls != 0 {
+			t.Errorf("%s bootstrap calls = %d, want none across daemon restarts (tools=%v)", name, bootstrapCalls, tools)
 		}
 		if len(pushes) == 0 {
 			t.Fatalf("%s accepted no pushes, tools = %v", name, tools)

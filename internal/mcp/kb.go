@@ -48,6 +48,10 @@ func WriteArticleTool(store *kb.Store) Tool {
 			}
 			article, err := store.WriteArticle(ctx, projectID, scope.Agent.ID, in.Title, in.Body, frontmatter, in.Links, in.Force)
 			if err != nil {
+				var embeddingFailure *kb.EmbeddingFailure
+				if errors.As(err, &embeddingFailure) {
+					return nil, embeddingFailure
+				}
 				var dedupErr *kb.ErrDedupViolation
 				if errors.As(err, &dedupErr) {
 					return nil, dedupErr
@@ -93,7 +97,27 @@ type ArticleSummary struct {
 
 // SearchArticlesOutput is the wormhole.kb.search result shape.
 type SearchArticlesOutput struct {
-	Articles []ArticleSummary `json:"articles"`
+	Articles []ArticleSummary   `json:"articles"`
+	Ranking  kb.RankingMetadata `json:"ranking"`
+}
+
+// SemanticDegradedError is deliberately text-free: it can cross the MCP
+// boundary without exposing article/query text, vectors, credentials, or an
+// upstream response body.
+type SemanticDegradedError struct {
+	Code            string `json:"code"`
+	Provider        string `json:"provider"`
+	Model           string `json:"model"`
+	Version         string `json:"version"`
+	SemanticRanking bool   `json:"semantic_ranking"`
+	Degraded        bool   `json:"degraded"`
+	Fallback        string `json:"fallback"`
+	Retryable       bool   `json:"retryable"`
+}
+
+func (e *SemanticDegradedError) Error() string {
+	encoded, _ := json.Marshal(e)
+	return string(encoded)
 }
 
 // SearchArticlesTool wires wormhole.kb.search.
@@ -115,11 +139,26 @@ func SearchArticlesTool(store *kb.Store) Tool {
 			if in.Limit == 0 {
 				in.Limit = 10
 			}
-			articleList, err := store.SearchArticles(ctx, projectID, scope.Agent.ID, in.Query, in.Limit)
+			articleList, ranking, err := store.SearchArticlesWithMetadata(ctx, projectID, scope.Agent.ID, in.Query, in.Limit)
 			if err != nil {
+				var embeddingFailure *kb.EmbeddingFailure
+				if errors.As(err, &embeddingFailure) {
+					return nil, embeddingFailure
+				}
+				if errors.Is(err, kb.ErrSemanticIndexUnavailable) || errors.Is(err, kb.ErrEmbeddingGenerationMismatch) {
+					descriptor := store.EmbeddingDescriptor()
+					code := "semantic_index_unavailable"
+					if errors.Is(err, kb.ErrEmbeddingGenerationMismatch) {
+						code = "semantic_generation_mismatch"
+					}
+					return nil, &SemanticDegradedError{
+						Code: code, Provider: descriptor.Provider, Model: descriptor.Model, Version: descriptor.Version, SemanticRanking: false,
+						Degraded: true, Fallback: "none", Retryable: false,
+					}
+				}
 				return nil, fmt.Errorf("mcp: wormhole.kb.search: %w", err)
 			}
-			out := SearchArticlesOutput{Articles: make([]ArticleSummary, 0, len(articleList))}
+			out := SearchArticlesOutput{Articles: make([]ArticleSummary, 0, len(articleList)), Ranking: ranking}
 			for _, article := range articleList {
 				out.Articles = append(out.Articles, ArticleSummary{
 					ArticleID:     article.ID,

@@ -167,6 +167,7 @@ func TestMCP_MultiTenantIsolation(t *testing.T) {
 	eventsStore := events.NewStore(db)
 	tasksStore := tasks.NewStore(db, eventsStore)
 	kbStore := kb.NewStore(db, kb.StubEmbedder{}, 0.9, 5000, 0, 0, 0)
+	prepareOnboardingEmbeddingForTest(t, kbStore)
 
 	registry := NewRegistry()
 	registry.Register(RegisterAgentTool(identityStore, eventsStore, testRolesStore(t), kbStore))
@@ -321,6 +322,19 @@ func TestMCP_MultiTenantIsolation(t *testing.T) {
 		t.Errorf("search articles project mismatch rpcResp.Error: got %+v, want Code %d", rpcResp.Error, -32001)
 	}
 
+	// Seed Project A's active semantic generation so the isolation assertion
+	// exercises vector ranking rather than the fail-closed no-index path.
+	status, rpcResp, err = makeMCPCall(t, srv.URL, "wormhole.kb.write", projectA, tokenA, WriteArticleInput{
+		Title: "Project A Public Article", Body: "This contains only project A data.", Links: []string{},
+	})
+	if err != nil || status != http.StatusOK || rpcResp.Error != nil {
+		t.Fatalf("seed project A KB article: status=%d rpc=%+v err=%v", status, rpcResp.Error, err)
+	}
+	projectAWrite, err := decodeToolResult(rpcResp)
+	if err != nil || projectAWrite.IsError {
+		t.Fatalf("seed project A KB article result: %+v err=%v", projectAWrite, err)
+	}
+
 	// Search Project A using Agent A's token, verify Project B's secret article is NOT returned
 	status, rpcResp, err = makeMCPCall(t, srv.URL, "wormhole.kb.search", projectA, tokenA, SearchArticlesInput{
 		Query: "secret",
@@ -382,6 +396,7 @@ func TestMCP_LoadSmokeTest(t *testing.T) {
 	eventsStore := events.NewStore(db)
 	tasksStore := tasks.NewStore(db, eventsStore)
 	kbStore := kb.NewStore(db, kb.StubEmbedder{}, 0.9, 5000, 0, 0, 0)
+	prepareOnboardingEmbeddingForTest(t, kbStore)
 
 	registry := NewRegistry()
 	registry.Register(RegisterAgentTool(identityStore, eventsStore, testRolesStore(t), kbStore))

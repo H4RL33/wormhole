@@ -43,7 +43,7 @@ func TestSyncToolsRejectMissingNamespace(t *testing.T) {
 		tool Tool
 		args any
 	}{
-		{"bootstrap", BootstrapTool(tasksStore, kbStore, eventsStore, NewSyncRateLimiter(10, time.Minute)), BootstrapInput{Version: SyncProtocolVersion}},
+		{"bootstrap", BootstrapTool(testIdentityStore(t), tasksStore, kbStore, eventsStore, NewSyncRateLimiter(10, time.Minute)), BootstrapInput{Version: SyncProtocolVersion}},
 		{"pull", IncrementalPullTool(tasksStore, kbStore, eventsStore, NewSyncRateLimiter(10, time.Minute)), IncrementalPullInput{Version: SyncProtocolVersion}},
 		{"push", IncrementalPushTool(tasksStore, kbStore, eventsStore, NewSyncRateLimiter(10, time.Minute)), IncrementalPushInput{Version: SyncProtocolVersion}},
 		{"conflict", ConflictReportTool(tasksStore, kbStore, eventsStore, NewSyncRateLimiter(10, time.Minute)), ConflictReportInput{Version: SyncProtocolVersion}},
@@ -315,13 +315,13 @@ func TestSyncToolsPropagateCanceledContext(t *testing.T) {
 		args any
 		want string
 	}{
-		{"bootstrap", BootstrapTool(tasksStore, kbStore, eventsStore, NewSyncRateLimiter(10, time.Minute)), BootstrapInput{NamespaceID: projectID, Version: SyncProtocolVersion}, "list tasks"},
+		{"bootstrap", BootstrapTool(testIdentityStore(t), tasksStore, kbStore, eventsStore, NewSyncRateLimiter(10, time.Minute)), BootstrapInput{NamespaceID: projectID, Version: SyncProtocolVersion}, "begin snapshot"},
 		{"pull", IncrementalPullTool(tasksStore, kbStore, eventsStore, NewSyncRateLimiter(10, time.Minute)), IncrementalPullInput{NamespaceID: projectID, Version: SyncProtocolVersion}, "list tasks"},
 		{"conflict", ConflictReportTool(tasksStore, kbStore, eventsStore, NewSyncRateLimiter(10, time.Minute)), ConflictReportInput{NamespaceID: projectID, Version: SyncProtocolVersion, EntityType: "task", EntityID: "1"}, "list channels"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := tt.tool.Handler(ctx, &identity.AuthenticatedScope{}, projectID, mustMarshal(t, tt.args))
+			_, err := tt.tool.Handler(ctx, &identity.AuthenticatedScope{Agent: identity.Agent{ID: "canceled"}, ProjectID: projectID, Permissions: []string{}}, projectID, mustMarshal(t, tt.args))
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("Handler error = %v, want %q", err, tt.want)
 			}

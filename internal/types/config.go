@@ -1,9 +1,21 @@
 package types
 
 import (
+	"errors"
 	"os"
 	"strconv"
+	"strings"
 )
+
+var ErrEmbeddingConfig = errors.New("types: embedding configuration missing or unapproved")
+
+type EmbeddingConfig struct {
+	Provider  string
+	Model     string
+	Version   string
+	Dimension int
+	APIKey    string
+}
 
 type Config struct {
 	ListenAddr          string
@@ -13,6 +25,7 @@ type Config struct {
 	KBMinLinksDecision  int
 	KBMinLinksPolicy    int
 	KBMinLinksProcedure int
+	KBEmbedding         EmbeddingConfig
 	AdminKey            string
 }
 
@@ -55,8 +68,20 @@ func LoadConfig() Config {
 		KBMinLinksDecision:  minLinksDecision,
 		KBMinLinksPolicy:    minLinksPolicy,
 		KBMinLinksProcedure: minLinksProcedure,
-		AdminKey:            getEnv("WORMHOLE_ADMIN_KEY", ""),
+		KBEmbedding: EmbeddingConfig{
+			Provider: "cohere", Model: "embed-v4.0", Version: "4.0", Dimension: 1024,
+			APIKey: getEnv("WORMHOLE_COHERE_API_KEY", ""),
+		},
+		AdminKey: getEnv("WORMHOLE_ADMIN_KEY", ""),
 	}
+}
+
+func ValidateEmbeddingConfig(cfg EmbeddingConfig) error {
+	if cfg.Provider != "cohere" || cfg.Model != "embed-v4.0" || cfg.Version != "4.0" || cfg.Dimension != 1024 ||
+		cfg.APIKey == "" || strings.TrimSpace(cfg.APIKey) != cfg.APIKey {
+		return ErrEmbeddingConfig
+	}
+	return nil
 }
 
 func getEnv(key, fallback string) string {

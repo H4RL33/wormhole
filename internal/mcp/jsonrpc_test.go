@@ -53,11 +53,12 @@ func TestHandleToolsList_AllToolsPresent(t *testing.T) {
 		t.Fatalf("tools field is %T, want []toolListEntry", m["tools"])
 	}
 
-	if len(entries) != 20 {
-		t.Fatalf("got %d tools, want 20", len(entries))
+	if len(entries) != 21 {
+		t.Fatalf("got %d tools, want 21", len(entries))
 	}
 
 	wantNames := []string{
+		"wormhole.agent.enrol",
 		"wormhole.agent.register",
 		"wormhole.agent.whoami",
 		"wormhole.task.create",

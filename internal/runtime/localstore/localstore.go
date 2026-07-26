@@ -22,8 +22,12 @@ import (
 // ErrNotFound is returned when a cache lookup has no matching row.
 var ErrNotFound = errors.New("localstore: not found")
 
+// ErrEnrolmentAttemptConflict is returned when an active credential profile
+// is already bound to a different project or canonical enrolment request.
+var ErrEnrolmentAttemptConflict = errors.New("localstore: enrolment attempt conflict")
+
 const schema = `
-CREATE TABLE IF NOT EXISTS whoami_cache (
+	CREATE TABLE IF NOT EXISTS whoami_cache (
 	agent_id     TEXT NOT NULL,
 	owner        TEXT NOT NULL,
 	model        TEXT NOT NULL,
@@ -32,7 +36,44 @@ CREATE TABLE IF NOT EXISTS whoami_cache (
 	permissions  TEXT NOT NULL DEFAULT '[]',
 	cached_at    TIMESTAMP NOT NULL,
 	PRIMARY KEY (agent_id, project_id)
-);
+	);
+
+	CREATE TABLE IF NOT EXISTS projects (
+		namespace_id TEXT PRIMARY KEY,
+		id           TEXT NOT NULL,
+		name         TEXT NOT NULL,
+		owner        TEXT NOT NULL,
+		created_at   TIMESTAMP NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS agents (
+		namespace_id TEXT NOT NULL,
+		id           TEXT NOT NULL,
+		owner        TEXT NOT NULL,
+		model        TEXT NOT NULL,
+		capabilities TEXT NOT NULL,
+		created_at   TIMESTAMP NOT NULL,
+		PRIMARY KEY (namespace_id, id)
+	);
+
+	CREATE TABLE IF NOT EXISTS passports (
+		namespace_id TEXT NOT NULL,
+		id           TEXT NOT NULL,
+		agent_id     TEXT NOT NULL,
+		project_id   TEXT NOT NULL,
+		repositories TEXT NOT NULL,
+		roles        TEXT NOT NULL,
+		issued_at    TIMESTAMP NOT NULL,
+		PRIMARY KEY (namespace_id, id)
+	);
+
+	CREATE TABLE IF NOT EXISTS auth_scopes (
+		namespace_id TEXT NOT NULL,
+		agent_id     TEXT NOT NULL,
+		passport_id  TEXT NOT NULL,
+		permissions  TEXT NOT NULL,
+		PRIMARY KEY (namespace_id, agent_id, passport_id)
+	);
 
 CREATE TABLE IF NOT EXISTS tasks (
 	id              TEXT PRIMARY KEY,
@@ -48,10 +89,11 @@ CREATE TABLE IF NOT EXISTS tasks (
 	updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS channels (
-	id             TEXT PRIMARY KEY,
-	namespace_id   TEXT NOT NULL,
-	name           TEXT NOT NULL
+	CREATE TABLE IF NOT EXISTS channels (
+		id             TEXT PRIMARY KEY,
+		namespace_id   TEXT NOT NULL,
+		name           TEXT NOT NULL,
+		created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -108,7 +150,31 @@ CREATE TABLE IF NOT EXISTS sync_audit (
 	resolved_by    TEXT,
 	created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-`
+
+	CREATE TABLE IF NOT EXISTS enrolment_attempts (
+	project_id         TEXT NOT NULL,
+	idempotency_key    TEXT NOT NULL,
+	request_hash       TEXT NOT NULL,
+	state              TEXT NOT NULL,
+	credential_profile TEXT NOT NULL,
+	agent_id           TEXT NOT NULL DEFAULT '',
+	passport_id        TEXT NOT NULL DEFAULT '',
+	terminal           INTEGER NOT NULL DEFAULT 0 CHECK (terminal IN (0, 1)),
+	created_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (project_id, idempotency_key)
+);
+
+	CREATE UNIQUE INDEX IF NOT EXISTS enrolment_attempts_active_profile
+		ON enrolment_attempts(credential_profile) WHERE terminal = 0;
+
+	CREATE TABLE IF NOT EXISTS bootstrap_metadata (
+		namespace_id                 TEXT PRIMARY KEY,
+		schema_version               INTEGER NOT NULL,
+		integration_manifest_metadata TEXT NOT NULL,
+		bootstrap_timestamp          TIMESTAMP NOT NULL
+	);
+	`
 
 // Store wraps a *sql.DB backed by a local SQLite file.
 type Store struct {
@@ -130,7 +196,42 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("localstore: migrate whoami cache: %w", err)
 	}
+	if err := migrateChannelCreatedAt(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("localstore: migrate channel timestamp: %w", err)
+	}
 	return &Store{db: db}, nil
+}
+
+func migrateChannelCreatedAt(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(channels)`)
+	if err != nil {
+		return err
+	}
+	hasCreatedAt := false
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "created_at" {
+			hasCreatedAt = true
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if hasCreatedAt {
+		return nil
+	}
+	if _, err := db.Exec(`ALTER TABLE channels ADD COLUMN created_at TIMESTAMP`); err != nil {
+		return err
+	}
+	_, err = db.Exec(`UPDATE channels SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL`)
+	return err
 }
 
 func sqliteDSN(path string) string {
@@ -194,6 +295,149 @@ func (s *Store) Close() error {
 // and KBRepo on the same SQLite file.
 func (s *Store) DB() *sql.DB {
 	return s.db
+}
+
+// EnrolmentAttemptRecord is Gateway's non-secret durable checkpoint for one
+// user-approved enrolment. Raw credential material has no representation in
+// this record or its SQLite table.
+type EnrolmentAttemptRecord struct {
+	ProjectID         string
+	IdempotencyKey    string
+	RequestHash       string
+	State             string
+	CredentialProfile string
+	AgentID           string
+	PassportID        string
+	Terminal          bool
+}
+
+// ResolveEnrolmentAttempt creates the first durable requested checkpoint or
+// resumes the active attempt already owning the credential profile. A new CLI
+// process may propose a new key; the stored key wins when the canonical digest
+// and project match.
+func (s *Store) ResolveEnrolmentAttempt(ctx context.Context, candidate EnrolmentAttemptRecord) (EnrolmentAttemptRecord, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return EnrolmentAttemptRecord{}, false, fmt.Errorf("localstore: begin enrolment attempt: %w", err)
+	}
+	defer tx.Rollback()
+	resumable, err := queryResumableEnrolmentAttempt(ctx, tx, candidate.ProjectID, candidate.CredentialProfile)
+	if err == nil {
+		if resumable.RequestHash != candidate.RequestHash {
+			return EnrolmentAttemptRecord{}, false, ErrEnrolmentAttemptConflict
+		}
+		if err := tx.Commit(); err != nil {
+			return EnrolmentAttemptRecord{}, false, fmt.Errorf("localstore: commit resumed enrolment attempt: %w", err)
+		}
+		return resumable, false, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return EnrolmentAttemptRecord{}, false, fmt.Errorf("localstore: read resumable enrolment attempt: %w", err)
+	}
+	result, err := tx.ExecContext(ctx, `
+		INSERT OR IGNORE INTO enrolment_attempts
+			(project_id, idempotency_key, request_hash, state, credential_profile, terminal)
+		VALUES (?, ?, ?, ?, ?, 0)
+	`, candidate.ProjectID, candidate.IdempotencyKey, candidate.RequestHash, candidate.State, candidate.CredentialProfile)
+	if err != nil {
+		return EnrolmentAttemptRecord{}, false, fmt.Errorf("localstore: create enrolment attempt: %w", err)
+	}
+	createdRows, err := result.RowsAffected()
+	if err != nil {
+		return EnrolmentAttemptRecord{}, false, fmt.Errorf("localstore: inspect enrolment attempt insert: %w", err)
+	}
+	record, err := queryEnrolmentAttemptByKey(ctx, tx, candidate.ProjectID, candidate.IdempotencyKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		record, err = queryActiveEnrolmentAttempt(ctx, tx, candidate.ProjectID, candidate.CredentialProfile)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return EnrolmentAttemptRecord{}, false, ErrEnrolmentAttemptConflict
+	}
+	if err != nil {
+		return EnrolmentAttemptRecord{}, false, fmt.Errorf("localstore: read enrolment attempt: %w", err)
+	}
+	if record.RequestHash != candidate.RequestHash || record.CredentialProfile != candidate.CredentialProfile {
+		return EnrolmentAttemptRecord{}, false, ErrEnrolmentAttemptConflict
+	}
+	if err := tx.Commit(); err != nil {
+		return EnrolmentAttemptRecord{}, false, fmt.Errorf("localstore: commit enrolment attempt: %w", err)
+	}
+	return record, createdRows == 1, nil
+}
+
+func queryResumableEnrolmentAttempt(ctx context.Context, queryer enrolmentAttemptQueryRower, projectID, credentialProfile string) (EnrolmentAttemptRecord, error) {
+	return scanEnrolmentAttempt(queryer.QueryRowContext(ctx, `
+		SELECT project_id, idempotency_key, request_hash, state, credential_profile,
+		       agent_id, passport_id, terminal
+		FROM enrolment_attempts
+		WHERE project_id = ? AND credential_profile = ?
+		  AND (terminal = 0 OR state = 'ready')
+		ORDER BY CASE WHEN state = 'ready' THEN 0 ELSE 1 END
+		LIMIT 1
+	`, projectID, credentialProfile))
+}
+
+func queryEnrolmentAttemptByKey(ctx context.Context, queryer enrolmentAttemptQueryRower, projectID, idempotencyKey string) (EnrolmentAttemptRecord, error) {
+	return scanEnrolmentAttempt(queryer.QueryRowContext(ctx, `
+		SELECT project_id, idempotency_key, request_hash, state, credential_profile,
+		       agent_id, passport_id, terminal
+		FROM enrolment_attempts
+		WHERE project_id = ? AND idempotency_key = ?
+	`, projectID, idempotencyKey))
+}
+
+type enrolmentAttemptQueryRower interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func queryActiveEnrolmentAttempt(ctx context.Context, queryer enrolmentAttemptQueryRower, projectID, credentialProfile string) (EnrolmentAttemptRecord, error) {
+	return scanEnrolmentAttempt(queryer.QueryRowContext(ctx, `
+		SELECT project_id, idempotency_key, request_hash, state, credential_profile,
+		       agent_id, passport_id, terminal
+		FROM enrolment_attempts
+		WHERE project_id = ? AND credential_profile = ? AND terminal = 0
+	`, projectID, credentialProfile))
+}
+
+func (s *Store) getActiveEnrolmentAttempt(ctx context.Context, projectID, credentialProfile string) (EnrolmentAttemptRecord, error) {
+	record, err := queryActiveEnrolmentAttempt(ctx, s.db, projectID, credentialProfile)
+	if errors.Is(err, sql.ErrNoRows) {
+		return EnrolmentAttemptRecord{}, ErrNotFound
+	}
+	if err != nil {
+		return EnrolmentAttemptRecord{}, fmt.Errorf("localstore: get active enrolment attempt: %w", err)
+	}
+	return record, nil
+}
+
+// UpdateEnrolmentAttempt advances a durable checkpoint and optional identity
+// references. It refuses to update a record whose immutable binding changed.
+func (s *Store) UpdateEnrolmentAttempt(ctx context.Context, record EnrolmentAttemptRecord, state, agentID, passportID string, terminal bool) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE enrolment_attempts
+		SET state = ?, agent_id = ?, passport_id = ?, terminal = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE project_id = ? AND idempotency_key = ? AND request_hash = ? AND credential_profile = ?
+	`, state, agentID, passportID, terminal, record.ProjectID, record.IdempotencyKey, record.RequestHash, record.CredentialProfile)
+	if err != nil {
+		return fmt.Errorf("localstore: update enrolment attempt: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("localstore: inspect enrolment attempt update: %w", err)
+	}
+	if rows != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func scanEnrolmentAttempt(row interface{ Scan(...any) error }) (EnrolmentAttemptRecord, error) {
+	var record EnrolmentAttemptRecord
+	var terminal int
+	err := row.Scan(&record.ProjectID, &record.IdempotencyKey, &record.RequestHash, &record.State,
+		&record.CredentialProfile, &record.AgentID, &record.PassportID, &terminal)
+	record.Terminal = terminal != 0
+	return record, err
 }
 
 // WhoAmICache is the cached wormhole.agent.whoami result for one agent.

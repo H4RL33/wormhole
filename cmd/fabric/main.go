@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -45,6 +46,20 @@ func fabricMCPHandler(registry *mcp.Registry, identityStore *identity.Store) htt
 // runServerWithOpen separates database acquisition from HTTP composition so
 // startup failures are observable without needing a live Postgres instance.
 func runServerWithOpen(cfg types.Config, openDB func(types.Config) (*sql.DB, error), serve func(*http.Server) error) error {
+	if err := types.ValidateEmbeddingConfig(cfg.KBEmbedding); err != nil {
+		return fmt.Errorf("validate embedding configuration: %w", err)
+	}
+	embedder, err := newFabricEmbedder(cfg.KBEmbedding)
+	if err != nil {
+		return fmt.Errorf("configure embedding provider: %w", err)
+	}
+	return runServerWithEmbedder(cfg, embedder, openDB, serve)
+}
+
+// runServerWithEmbedder is the explicit test seam for process assembly. Normal
+// Fabric calls runServerWithOpen, which always supplies the fixed production
+// Cohere constructor.
+func runServerWithEmbedder(cfg types.Config, embedder kb.Embedder, openDB func(types.Config) (*sql.DB, error), serve func(*http.Server) error) error {
 	db, err := openDB(cfg)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
@@ -55,8 +70,11 @@ func runServerWithOpen(cfg types.Config, openDB func(types.Config) (*sql.DB, err
 	eventsStore := events.NewStore(db)
 	tasksStore := tasks.NewStore(db, eventsStore)
 	gitStore := git.NewStore(db)
-	kbStore := kb.NewStore(db, kb.StubEmbedder{}, cfg.KBDedupThreshold, cfg.KBMaxBodyLength, cfg.KBMinLinksDecision, cfg.KBMinLinksPolicy, cfg.KBMinLinksProcedure)
+	kbStore := kb.NewStore(db, embedder, cfg.KBDedupThreshold, cfg.KBMaxBodyLength, cfg.KBMinLinksDecision, cfg.KBMinLinksPolicy, cfg.KBMinLinksProcedure)
 	rolesStore := roles.NewStore(db)
+	if err := mcp.PrepareOnboardingArticleEmbedding(context.Background(), kbStore); err != nil {
+		return fmt.Errorf("prepare onboarding article embedding: %w", err)
+	}
 
 	registry := mcp.NewFabricRegistry(mcp.FabricRegistryDependencies{
 		Identity: identityStore,

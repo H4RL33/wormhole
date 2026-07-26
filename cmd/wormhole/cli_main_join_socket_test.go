@@ -1,4 +1,3 @@
-// Tests the socket-based join registration path.
 package main
 
 import (
@@ -11,205 +10,206 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
-	"time"
+
+	"github.com/H4RL33/wormhole/internal/runtime/localapi"
 )
 
-// fakeGateway starts a fake Gateway local socket at the path
-// gatewaySocketPath() would derive under XDG_RUNTIME_DIR (set by the
-// caller via t.Setenv before calling this), and speaks the real MCP
-// handshake (initialize -> notifications/initialized -> tools/call) that
-// doRegisterViaSocket now uses (RFC-0003 §8.1 join proxy).
-// Answers exactly one wormhole.agent.register tools/call with a canned
-// result. Returns the socket path.
-func fakeGateway(t *testing.T, out registerAgentOutput) string {
+func fakeEnrolmentGateway(t *testing.T, out localapi.EnrolmentResult) <-chan localapi.EnrolmentRequest {
 	t.Helper()
-	dir := filepath.Join(t.TempDir(), "runtime")
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-	socketPath := filepath.Join(dir, "wormhole", "wormholed.sock")
+	runtimeDir, err := os.MkdirTemp("", "wh-")
+	if err != nil {
+		t.Fatalf("create short runtime dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	socketPath := filepath.Join(runtimeDir, "wormhole", "wormholed.sock")
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
 		t.Fatalf("mkdir socket dir: %v", err)
 	}
-	ln, err := net.Listen("unix", socketPath)
+	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("listen unix socket: %v", err)
 	}
-	t.Cleanup(func() { ln.Close() })
-
+	t.Cleanup(func() { listener.Close() })
+	received := make(chan localapi.EnrolmentRequest, 1)
 	go func() {
-		conn, err := ln.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
 			return
 		}
 		defer conn.Close()
-
 		reader := bufio.NewReader(conn)
-
-		// initialize
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
 			return
 		}
-		var initReq rpcRequest
-		if err := json.Unmarshal(bytes.TrimSpace(line), &initReq); err != nil || initReq.Method != "initialize" {
+		var initialize rpcRequest
+		if json.Unmarshal(bytes.TrimSpace(line), &initialize) != nil || initialize.Method != "initialize" {
 			return
 		}
-		initResp, _ := json.Marshal(rpcResponse{JSONRPC: "2.0", ID: initReq.ID, Result: json.RawMessage(`{}`)})
-		conn.Write(append(initResp, '\n'))
-
-		// notifications/initialized (no response)
+		initializeResult, _ := json.Marshal(rpcResponse{JSONRPC: "2.0", ID: initialize.ID, Result: json.RawMessage(`{}`)})
+		_, _ = conn.Write(append(initializeResult, '\n'))
+		if _, err := reader.ReadBytes('\n'); err != nil { // notifications/initialized
+			return
+		}
 		line, err = reader.ReadBytes('\n')
 		if err != nil {
 			return
 		}
-		var notif rpcRequest
-		if err := json.Unmarshal(bytes.TrimSpace(line), &notif); err != nil || notif.Method != "notifications/initialized" {
-			return
-		}
-
-		// tools/call
-		line, err = reader.ReadBytes('\n')
-		if err != nil {
-			return
-		}
-		var callReq rpcRequest
-		if err := json.Unmarshal(bytes.TrimSpace(line), &callReq); err != nil || callReq.Method != "tools/call" {
+		var call rpcRequest
+		if json.Unmarshal(bytes.TrimSpace(line), &call) != nil || call.Method != "tools/call" {
 			return
 		}
 		var params toolsCallParams
-		if err := json.Unmarshal(callReq.Params, &params); err != nil {
+		if json.Unmarshal(call.Params, &params) != nil || params.Name != localapi.EnrolmentToolName {
 			return
 		}
-		if params.Name != "wormhole.agent.register" {
-			result, _ := json.Marshal(toolCallResult{
-				Content: []toolCallResultContent{{Type: "text", Text: "unexpected tool: " + params.Name}},
-				IsError: true,
-			})
-			resp, _ := json.Marshal(rpcResponse{JSONRPC: "2.0", ID: callReq.ID, Result: result})
-			conn.Write(append(resp, '\n'))
+		var request localapi.EnrolmentRequest
+		if json.Unmarshal(params.Arguments, &request) != nil {
 			return
 		}
+		received <- request
+		if out.IdempotencyKey == "" {
+			out.IdempotencyKey = request.IdempotencyKey
+		}
+		out.CredentialProfile = request.CredentialProfile
 		outRaw, _ := json.Marshal(out)
-		result, _ := json.Marshal(toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: string(outRaw)}}})
-		resp, _ := json.Marshal(rpcResponse{JSONRPC: "2.0", ID: callReq.ID, Result: result})
-		conn.Write(append(resp, '\n'))
+		toolResult, _ := json.Marshal(toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: string(outRaw)}}})
+		response, _ := json.Marshal(rpcResponse{JSONRPC: "2.0", ID: call.ID, Result: toolResult})
+		_, _ = conn.Write(append(response, '\n'))
 	}()
-
-	return socketPath
+	return received
 }
 
-// TestRunJoin_GatewayRunning_UsesLocalSocket proves RFC-0003 §8.1: when
-// Gateway's local socket is reachable, `wormhole join` registers through it
-// instead of calling Fabric's wormhole.agent.register
-// directly. The httptest server below fails the test if wormhole.agent.register
-// is called on it, proving the socket path was used exclusively for step 1.
-func TestRunJoin_GatewayRunning_UsesLocalSocket(t *testing.T) {
-	issuedAt := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
-	fakeGateway(t, registerAgentOutput{
-		AgentID:    "agent-socket",
-		PassportID: "passport-socket",
-		Token:      "socket-token",
-		IssuedAt:   issuedAt,
-	})
+func persistedEnrolmentResult() localapi.EnrolmentResult {
+	return localapi.EnrolmentResult{
+		Version: localapi.EnrolmentProtocolVersion, Code: localapi.EnrolmentCredentialsPersistedResult,
+		State:     localapi.EnrolmentCredentialsPersisted,
+		Retryable: true, AgentID: "agent-gateway", PassportID: "passport-gateway", CredentialProfile: "project-1__contributor",
+	}
+}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req rpcRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode request: %v", err)
-		}
-		var params toolsCallParams
-		if err := json.Unmarshal(req.Params, &params); err != nil {
-			t.Fatalf("decode params: %v", err)
-		}
-		if params.Name == "wormhole.agent.register" {
-			t.Fatal("wormhole.agent.register called directly on Fabric; should have gone through Gateway's local socket")
-		}
-		switch params.Name {
-		case "wormhole.kb.search":
-			if got := r.Header.Get("Authorization"); got != "Bearer socket-token" {
-				t.Fatalf("kb.search Authorization: got %q, want Bearer socket-token", got)
-			}
-			out, _ := json.Marshal(searchArticlesOutput{Articles: []articleSummary{}})
-			result, _ := json.Marshal(toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: string(out)}}})
-			json.NewEncoder(w).Encode(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: result})
-		case "wormhole.channel.list":
-			out, _ := json.Marshal(listChannelsOutput{Channels: nil})
-			result, _ := json.Marshal(toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: string(out)}}})
-			json.NewEncoder(w).Encode(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: result})
-		case "wormhole.task.list":
-			out, _ := json.Marshal(listTasksOutput{Tasks: nil})
-			result, _ := json.Marshal(toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: string(out)}}})
-			json.NewEncoder(w).Encode(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: result})
-		default:
-			t.Fatalf("unexpected tool: %s", params.Name)
-		}
+func TestRunJoinAcceptsGatewayResumedAttemptKey(t *testing.T) {
+	result := persistedEnrolmentResult()
+	result.IdempotencyKey = "318f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1"
+	fakeEnrolmentGateway(t, result)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"join", "--server", "https://fabric.example", "--project", "project-1", "--owner", "harley", "--profile", "project-1__contributor",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "credentials persisted by gatewayd") {
+		t.Fatalf("stdout missing persistence confirmation: %q", stdout.String())
+	}
+}
+
+func TestRunJoinDelegatesOnlyToGateway(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	received := fakeEnrolmentGateway(t, persistedEnrolmentResult())
+	var fabricCalls atomic.Int32
+	fabric := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		fabricCalls.Add(1)
 	}))
-	defer srv.Close()
+	defer fabric.Close()
 
-	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
 	var stdout, stderr bytes.Buffer
 	code := run([]string{
-		"join",
-		"--server", srv.URL,
-		"--project", "proj-1",
-		"--owner", "harley",
-		"--model", "claude",
-		"--capabilities", "code",
-		"--permissions", "task.create",
-		"--token-file", tokenFile,
+		"join", "--server", fabric.URL, "--project", "project-1", "--owner", "harley", "--model", "gpt-5",
+		"--capabilities", "code", "--roles", "contributor", "--permissions", "task.create", "--profile", "project-1__contributor",
 	}, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
+		t.Fatalf("exit code = %d, stderr=%q", code, stderr.String())
 	}
-
-	out := stdout.String()
-	for _, want := range []string{"agent_id=agent-socket", "passport_id=passport-socket"} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("stdout missing %q: got %q", want, out)
+	request := <-received
+	if request.Version != localapi.EnrolmentProtocolVersion || request.ProjectID != "project-1" || request.FabricAddress != fabric.URL ||
+		request.CredentialProfile != "project-1__contributor" || request.IdempotencyKey == "" {
+		t.Fatalf("Gateway request = %+v", request)
+	}
+	if fabricCalls.Load() != 0 {
+		t.Fatalf("CLI made %d direct Fabric calls, want 0", fabricCalls.Load())
+	}
+	if _, err := os.Stat(filepath.Join(home, ".wormhole", "credentials", "project-1__contributor.json")); !os.IsNotExist(err) {
+		t.Fatalf("CLI wrote credential profile: %v", err)
+	}
+	for _, want := range []string{"agent_id=agent-gateway", "passport_id=passport-gateway", "credentials persisted by gatewayd"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout missing %q: %q", want, stdout.String())
 		}
-	}
-
-	data, err := os.ReadFile(tokenFile)
-	if err != nil {
-		t.Fatalf("read credentials file: %v", err)
-	}
-	var creds credentials
-	if err := json.Unmarshal(data, &creds); err != nil {
-		t.Fatalf("decode credentials file: %v", err)
-	}
-	if creds.Token != "socket-token" || creds.AgentID != "agent-socket" {
-		t.Fatalf("credentials: got %+v", creds)
 	}
 }
 
-// TestRunJoin_GatewayNotRunning_FallsBackToDirectServer proves RFC-0003
-// doesn't mandate Gateway availability (§3.2 NG2/§6.1 pattern): with no
-// socket reachable at the derived XDG path, join falls back to the existing
-// direct-to-Coordination-Server path, unchanged.
-func TestRunJoin_GatewayNotRunning_FallsBackToDirectServer(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "runtime"))
+func TestRunJoinDoesNotFallbackToFabricWhenGatewayIsUnavailable(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "missing-runtime"))
+	var fabricCalls atomic.Int32
+	fabric := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { fabricCalls.Add(1) }))
+	defer fabric.Close()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"join", "--server", fabric.URL, "--project", "project-1", "--owner", "harley", "--profile", "profile"}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "gatewayd not running") {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	if fabricCalls.Load() != 0 {
+		t.Fatalf("CLI made %d fallback Fabric calls, want 0", fabricCalls.Load())
+	}
+}
 
-	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
-		return searchArticlesOutput{Articles: []articleSummary{}}, nil
-	})
-	defer srv.Close()
+func TestRunJoinRejectsLegacyTokenFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "credential.json")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"join", "--server", "https://fabric.example", "--project", "project-1", "--owner", "harley", "--token-file", path}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "--token-file is no longer supported") {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("legacy token path was written: %v", err)
+	}
+}
 
-	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
+func TestRunConnectDelegatesOnlyToGatewayThenWiresHarness(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	received := fakeEnrolmentGateway(t, persistedEnrolmentResult())
+	var fabricCalls atomic.Int32
+	fabric := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { fabricCalls.Add(1) }))
+	defer fabric.Close()
+	openCodeConfig := filepath.Join(t.TempDir(), "opencode.json")
+
 	var stdout, stderr bytes.Buffer
 	code := run([]string{
-		"join",
-		"--server", srv.URL,
-		"--project", "proj-1",
-		"--owner", "harley",
-		"--model", "claude",
-		"--capabilities", "code",
-		"--permissions", "task.create",
-		"--token-file", tokenFile,
+		"connect", "--server", fabric.URL, "--project", "project-1", "--owner", "harley",
+		"--roles", "contributor", "--permissions", "task.create", "--profile", "project-1__contributor",
+		"--target", "opencode", "--opencode-config", openCodeConfig, "--stdio-bin", os.Args[0],
 	}, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "agent_id=agent-1") {
-		t.Fatalf("stdout missing direct-path result: got %q", stdout.String())
+	request := <-received
+	if request.ProjectID != "project-1" || request.FabricAddress != fabric.URL || request.CredentialProfile != "project-1__contributor" {
+		t.Fatalf("Gateway request = %+v", request)
+	}
+	if fabricCalls.Load() != 0 {
+		t.Fatalf("CLI made %d direct Fabric calls, want 0", fabricCalls.Load())
+	}
+	if _, err := os.Stat(filepath.Join(home, ".wormhole", "credentials", "project-1__contributor.json")); !os.IsNotExist(err) {
+		t.Fatalf("CLI wrote credential profile: %v", err)
+	}
+	if _, err := os.Stat(openCodeConfig); err != nil {
+		t.Fatalf("connector config was not written: %v", err)
+	}
+}
+
+func TestRunConnectRejectsLegacyTokenFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "credential.json")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connect", "--server", "https://fabric.example", "--project", "project-1", "--owner", "harley", "--token-file", path}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "--token-file is no longer supported") {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
 	}
 }

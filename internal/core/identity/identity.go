@@ -9,8 +9,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
+	"github.com/H4RL33/wormhole/internal/types"
 	"github.com/lib/pq"
 )
 
@@ -30,6 +33,19 @@ var ErrInvalidScope = errors.New("identity: invalid scope")
 // and unique per (agent, project) (migration 000001, UNIQUE(agent_id,
 // project_id)).
 var ErrPassportExists = errors.New("identity: passport already issued for this agent and project")
+
+var (
+	// ErrEnrolmentConflict rejects reuse of one project-scoped idempotency key
+	// for a different canonical request.
+	ErrEnrolmentConflict = errors.New("identity: enrolment idempotency conflict")
+	// ErrEnrolmentInProgress rejects live concurrent execution for one
+	// project-scoped idempotency key. The caller may retry the same request.
+	ErrEnrolmentInProgress = errors.New("identity: enrolment already in progress")
+	// ErrEnrolmentReissueExhausted is returned after the single controlled
+	// credential recovery permitted for an enrolment has already been used.
+	ErrEnrolmentReissueExhausted = errors.New("identity: enrolment credential reissue exhausted")
+	ErrInvalidEnrolment          = errors.New("identity: invalid enrolment")
+)
 
 // tokenTTL is an inferred alpha default — neither RFC-0001 nor RFC-0002
 // specifies a token lifetime.
@@ -85,6 +101,33 @@ type Passport struct {
 	IssuedAt     time.Time
 }
 
+// EnrolmentRegistrationInput is Fabric's durable identity-registration
+// contract. RequestHash is the Gateway-computed SHA-256 digest of the
+// canonical local request. Reissue requests preserve identity and Passport.
+type EnrolmentRegistrationInput struct {
+	ProjectID      string
+	IdempotencyKey string
+	RequestHash    string
+	Permissions    []string
+	Owner          string
+	Model          string
+	Capabilities   []string
+	Repositories   []string
+	Roles          []string
+	Reissue        bool
+}
+
+// EnrolmentRegistrationResult contains a raw token only for a fresh issuance
+// or the one controlled reissue. Completed ordinary replays return references
+// only, so Fabric never attempts to recover raw credential material.
+type EnrolmentRegistrationResult struct {
+	Agent    Agent
+	Passport Passport
+	RawToken string
+	Replay   bool
+	Reissued bool
+}
+
 // AuditEntry is one append-only record in an identity's audit trail
 // (RFC-0001 §8.4).
 type AuditEntry struct {
@@ -129,6 +172,94 @@ func (s *Store) BeginProjectTx(ctx context.Context, projectID string) (*sql.Tx, 
 	return tx, nil
 }
 
+// BeginBootstrapSnapshotTx starts the single repeatable-read, project-scoped
+// transaction used to compose a complete bootstrap snapshot (RFC-0003 §8.1).
+func (s *Store) BeginBootstrapSnapshotTx(ctx context.Context, projectID string) (*sql.Tx, error) {
+	if projectID == "" {
+		return nil, ErrInvalidScope
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("identity: begin bootstrap snapshot tx: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "SELECT set_config('wormhole.project_id', $1, true)", projectID); err != nil {
+		_ = tx.Rollback()
+		return nil, fmt.Errorf("identity: begin bootstrap snapshot tx: set project id: %w", err)
+	}
+	return tx, nil
+}
+
+// ReadBootstrapIdentityInTx returns project, agent, Passport, and the already
+// authenticated permission scope from the caller-owned snapshot transaction.
+func (s *Store) ReadBootstrapIdentityInTx(ctx context.Context, tx *sql.Tx, projectID, agentID string, permissions []string) (types.BootstrapProjectV1, types.BootstrapIdentityV1, error) {
+	if tx == nil || projectID == "" || agentID == "" || permissions == nil {
+		return types.BootstrapProjectV1{}, types.BootstrapIdentityV1{}, ErrInvalidScope
+	}
+	var project types.BootstrapProjectV1
+	if err := tx.QueryRowContext(ctx,
+		`SELECT id, name, owner, created_at FROM projects WHERE id = $1`, projectID,
+	).Scan(&project.ID, &project.Name, &project.Owner, &project.CreatedAt); err != nil {
+		return types.BootstrapProjectV1{}, types.BootstrapIdentityV1{}, fmt.Errorf("identity: read bootstrap project: %w", err)
+	}
+
+	var identity types.BootstrapIdentityV1
+	var capabilities, repositories, roles []byte
+	if err := tx.QueryRowContext(ctx, `
+		SELECT a.id, a.owner, a.model, a.capabilities, a.created_at,
+		       p.id, p.agent_id, p.project_id, p.repositories, p.roles, p.issued_at
+		FROM agents a
+		JOIN passports p ON p.agent_id = a.id AND p.project_id = $1
+		WHERE a.id = $2`, projectID, agentID,
+	).Scan(
+		&identity.Agent.ID, &identity.Agent.Owner, &identity.Agent.Model, &capabilities, &identity.Agent.CreatedAt,
+		&identity.Passport.ID, &identity.Passport.AgentID, &identity.Passport.ProjectID, &repositories, &roles, &identity.Passport.IssuedAt,
+	); err != nil {
+		return types.BootstrapProjectV1{}, types.BootstrapIdentityV1{}, fmt.Errorf("identity: read bootstrap identity: %w", err)
+	}
+	if err := json.Unmarshal(capabilities, &identity.Agent.Capabilities); err != nil {
+		return types.BootstrapProjectV1{}, types.BootstrapIdentityV1{}, fmt.Errorf("identity: decode bootstrap capabilities: %w", err)
+	}
+	if err := json.Unmarshal(repositories, &identity.Passport.Repositories); err != nil {
+		return types.BootstrapProjectV1{}, types.BootstrapIdentityV1{}, fmt.Errorf("identity: decode bootstrap repositories: %w", err)
+	}
+	if err := json.Unmarshal(roles, &identity.Passport.Roles); err != nil {
+		return types.BootstrapProjectV1{}, types.BootstrapIdentityV1{}, fmt.Errorf("identity: decode bootstrap roles: %w", err)
+	}
+	identity.Agent.Capabilities = sortedUniqueStrings(identity.Agent.Capabilities)
+	identity.Passport.Repositories = sortedUniqueStrings(identity.Passport.Repositories)
+	identity.Passport.Roles = sortedUniqueStrings(identity.Passport.Roles)
+	identity.Permissions = sortedUniqueStrings(permissions)
+	return project, identity, nil
+}
+
+// BootstrapTimestampInTx reads Postgres's stable transaction timestamp so the
+// response cursor describes the same repeatable-read snapshot as every row.
+func (s *Store) BootstrapTimestampInTx(ctx context.Context, tx *sql.Tx) (time.Time, error) {
+	if tx == nil {
+		return time.Time{}, ErrInvalidScope
+	}
+	var timestamp time.Time
+	if err := tx.QueryRowContext(ctx, `SELECT transaction_timestamp()`).Scan(&timestamp); err != nil {
+		return time.Time{}, fmt.Errorf("identity: read bootstrap timestamp: %w", err)
+	}
+	return timestamp.UTC(), nil
+}
+
+func sortedUniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Register creates a new agent identity, issues its passport for
 // projectID, and issues a bearer token for it. The raw token is returned
 // exactly once — only its SHA-256 hash is persisted, so the raw value can
@@ -148,6 +279,174 @@ func (s *Store) Register(ctx context.Context, projectID string, permissions []st
 		return Agent{}, Passport{}, "", fmt.Errorf("identity: commit: %w", err)
 	}
 	return agent, passport, rawToken, nil
+}
+
+// RegisterEnrolment durably serializes one project-scoped Gateway enrolment.
+// A completed replay returns the original identity references without a raw
+// token. Reissue=true permits exactly one replacement credential and expires
+// the unusable prior token in the same transaction.
+func (s *Store) RegisterEnrolment(ctx context.Context, in EnrolmentRegistrationInput) (EnrolmentRegistrationResult, error) {
+	if in.ProjectID == "" || in.IdempotencyKey == "" || !validRequestHash(in.RequestHash) || in.Permissions == nil {
+		return EnrolmentRegistrationResult{}, ErrInvalidEnrolment
+	}
+	tx, err := s.BeginProjectTx(ctx, in.ProjectID)
+	if err != nil {
+		return EnrolmentRegistrationResult{}, err
+	}
+	defer tx.Rollback()
+
+	result, err := s.RegisterEnrolmentInTx(ctx, tx, in)
+	if err != nil {
+		return EnrolmentRegistrationResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return EnrolmentRegistrationResult{}, fmt.Errorf("identity: commit enrolment: %w", err)
+	}
+	return result, nil
+}
+
+// RegisterEnrolmentInTx is the transaction-scoped core used by Fabric's MCP
+// handler so fixed registration bootstrap rows share the same commit.
+func (s *Store) RegisterEnrolmentInTx(ctx context.Context, tx *sql.Tx, in EnrolmentRegistrationInput) (EnrolmentRegistrationResult, error) {
+	if tx == nil || in.ProjectID == "" || in.IdempotencyKey == "" || !validRequestHash(in.RequestHash) || in.Permissions == nil {
+		return EnrolmentRegistrationResult{}, ErrInvalidEnrolment
+	}
+	lockName := in.ProjectID + ":" + in.IdempotencyKey
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lockName); err != nil {
+		return EnrolmentRegistrationResult{}, fmt.Errorf("identity: acquire enrolment lock: %w", err)
+	}
+
+	var storedHash, state string
+	var agentID, passportID, tokenID sql.NullString
+	var reissueCount int
+	err := tx.QueryRowContext(ctx, `
+		SELECT request_hash, state, agent_id, passport_id, token_id, reissue_count
+		FROM agent_enrolments
+		WHERE project_id = $1 AND idempotency_key = $2
+		FOR UPDATE`, in.ProjectID, in.IdempotencyKey,
+	).Scan(&storedHash, &state, &agentID, &passportID, &tokenID, &reissueCount)
+	if errors.Is(err, sql.ErrNoRows) {
+		return s.createEnrolmentInTx(ctx, tx, in)
+	}
+	if err != nil {
+		return EnrolmentRegistrationResult{}, fmt.Errorf("identity: read enrolment: %w", err)
+	}
+	if storedHash != in.RequestHash {
+		return EnrolmentRegistrationResult{}, ErrEnrolmentConflict
+	}
+	if state != "registered" || !agentID.Valid || !passportID.Valid || !tokenID.Valid {
+		return EnrolmentRegistrationResult{}, ErrEnrolmentInProgress
+	}
+
+	agent, passport, err := loadEnrolmentIdentity(ctx, tx, agentID.String, passportID.String)
+	if err != nil {
+		return EnrolmentRegistrationResult{}, err
+	}
+	result := EnrolmentRegistrationResult{Agent: agent, Passport: passport, Replay: true}
+	if !in.Reissue {
+		return result, nil
+	}
+	if reissueCount >= 1 {
+		return EnrolmentRegistrationResult{}, ErrEnrolmentReissueExhausted
+	}
+
+	rawToken, tokenHash, err := generateToken()
+	if err != nil {
+		return EnrolmentRegistrationResult{}, err
+	}
+	permissionsJSON, err := json.Marshal(in.Permissions)
+	if err != nil {
+		return EnrolmentRegistrationResult{}, fmt.Errorf("identity: marshal reissue permissions: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE agent_tokens SET expires_at = now() WHERE id = $1 AND project_id = $2`, tokenID.String, in.ProjectID); err != nil {
+		return EnrolmentRegistrationResult{}, fmt.Errorf("identity: supersede enrolment token: %w", err)
+	}
+	var newTokenID string
+	if err := tx.QueryRowContext(ctx, `
+		INSERT INTO agent_tokens (agent_id, project_id, permissions, token_hash, expires_at)
+		VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+		agent.ID, in.ProjectID, permissionsJSON, tokenHash, time.Now().Add(tokenTTL),
+	).Scan(&newTokenID); err != nil {
+		return EnrolmentRegistrationResult{}, fmt.Errorf("identity: insert reissued enrolment token: %w", err)
+	}
+	if _, err := recordAction(ctx, tx, agent.ID, in.ProjectID, ActionTokenIssued); err != nil {
+		return EnrolmentRegistrationResult{}, fmt.Errorf("identity: record reissued token audit entry: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE agent_enrolments
+		SET token_id = $3, reissue_count = reissue_count + 1, updated_at = now()
+		WHERE project_id = $1 AND idempotency_key = $2`, in.ProjectID, in.IdempotencyKey, newTokenID,
+	); err != nil {
+		return EnrolmentRegistrationResult{}, fmt.Errorf("identity: complete enrolment reissue: %w", err)
+	}
+	result.RawToken = rawToken
+	result.Reissued = true
+	return result, nil
+}
+
+func (s *Store) createEnrolmentInTx(ctx context.Context, tx *sql.Tx, in EnrolmentRegistrationInput) (EnrolmentRegistrationResult, error) {
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO agent_enrolments (project_id, idempotency_key, request_hash, state)
+		VALUES ($1, $2, $3, 'registration_in_progress')`, in.ProjectID, in.IdempotencyKey, in.RequestHash,
+	); err != nil {
+		return EnrolmentRegistrationResult{}, fmt.Errorf("identity: create enrolment: %w", err)
+	}
+	agent, passport, rawToken, err := s.RegisterInTx(ctx, tx, in.ProjectID, in.Permissions, in.Owner, in.Model, in.Capabilities, in.Repositories, in.Roles)
+	if err != nil {
+		return EnrolmentRegistrationResult{}, err
+	}
+	tokenSum := sha256.Sum256([]byte(rawToken))
+	tokenHash := hex.EncodeToString(tokenSum[:])
+	var tokenID string
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM agent_tokens WHERE project_id = $1 AND token_hash = $2`, in.ProjectID, tokenHash).Scan(&tokenID); err != nil {
+		return EnrolmentRegistrationResult{}, fmt.Errorf("identity: resolve enrolment token reference: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE agent_enrolments
+		SET state = 'registered', agent_id = $3, passport_id = $4, token_id = $5, updated_at = now()
+		WHERE project_id = $1 AND idempotency_key = $2`, in.ProjectID, in.IdempotencyKey, agent.ID, passport.ID, tokenID,
+	); err != nil {
+		return EnrolmentRegistrationResult{}, fmt.Errorf("identity: complete enrolment: %w", err)
+	}
+	return EnrolmentRegistrationResult{Agent: agent, Passport: passport, RawToken: rawToken}, nil
+}
+
+func loadEnrolmentIdentity(ctx context.Context, tx *sql.Tx, agentID, passportID string) (Agent, Passport, error) {
+	var agent Agent
+	var capsRaw []byte
+	if err := tx.QueryRowContext(ctx, `SELECT id, owner, model, capabilities, created_at FROM agents WHERE id = $1`, agentID).Scan(&agent.ID, &agent.Owner, &agent.Model, &capsRaw, &agent.CreatedAt); err != nil {
+		return Agent{}, Passport{}, fmt.Errorf("identity: load enrolled agent: %w", err)
+	}
+	if err := json.Unmarshal(capsRaw, &agent.Capabilities); err != nil {
+		return Agent{}, Passport{}, fmt.Errorf("identity: unmarshal enrolled capabilities: %w", err)
+	}
+	var passport Passport
+	var repositoriesRaw, rolesRaw []byte
+	if err := tx.QueryRowContext(ctx, `
+		SELECT id, agent_id, project_id, repositories, roles, issued_at
+		FROM passports WHERE id = $1`, passportID,
+	).Scan(&passport.ID, &passport.AgentID, &passport.ProjectID, &repositoriesRaw, &rolesRaw, &passport.IssuedAt); err != nil {
+		return Agent{}, Passport{}, fmt.Errorf("identity: load enrolled passport: %w", err)
+	}
+	if err := json.Unmarshal(repositoriesRaw, &passport.Repositories); err != nil {
+		return Agent{}, Passport{}, fmt.Errorf("identity: unmarshal enrolled repositories: %w", err)
+	}
+	if err := json.Unmarshal(rolesRaw, &passport.Roles); err != nil {
+		return Agent{}, Passport{}, fmt.Errorf("identity: unmarshal enrolled roles: %w", err)
+	}
+	return agent, passport, nil
+}
+
+func validRequestHash(hash string) bool {
+	if len(hash) != sha256.Size*2 {
+		return false
+	}
+	for _, r := range hash {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 // RegisterInTx is the transaction-scoped core of Register. It creates the

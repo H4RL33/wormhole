@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 
 	"github.com/H4RL33/wormhole/internal/core/identity"
 	"github.com/H4RL33/wormhole/internal/core/tasks"
+	"github.com/H4RL33/wormhole/internal/types"
 )
 
 func TestIncrementalPushTool_DeniesSameProjectItemWithoutActionPermission(t *testing.T) {
@@ -100,6 +102,65 @@ func TestIncrementalPushTool_AppliesTaskCreate(t *testing.T) {
 	// different id than the one the client sent.
 	if list[0].ID != clientID {
 		t.Fatalf("server-side task id = %q, want client id %q (client entity id was not preserved)", list[0].ID, clientID)
+	}
+}
+
+func TestIncrementalPushTool_IdenticalReplaySucceedsWithoutDuplicateEffects(t *testing.T) {
+	tasksStore := testTasksStore(t)
+	kbStore := testKBStore(t)
+	eventsStore := testEventsStore(t)
+	tool := IncrementalPushTool(tasksStore, kbStore, eventsStore, NewSyncRateLimiter(30, time.Minute))
+	projectID := mustCreateProject(t, "mcp-sync-push-replay")
+	agentID, _ := mustRegisterAgent(t, projectID)
+	scope := &identity.AuthenticatedScope{
+		Agent: identity.Agent{ID: agentID}, ProjectID: projectID,
+		Permissions: []string{"task.create", "kb.write", "channel.create", "channel.post"},
+	}
+	taskID, articleID, channelID, eventID := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+	items := []struct {
+		EntityType string
+		EntityID   string
+		Payload    json.RawMessage
+	}{
+		{"channel", channelID, mustMarshal(t, syncChannelCreatePayload{Name: "offline"})},
+		{"task", taskID, mustMarshal(t, syncTaskCreatePayload{Title: "offline task", Description: "durable", Status: "todo", Priority: 1})},
+		{"kb", articleID, mustMarshal(t, syncKBCreatePayload{Title: "offline fact", Body: "durable fact", Links: []string{}, Force: true})},
+		{"event", eventID, mustMarshal(t, syncEventCreatePayload{ChannelID: channelID, EventType: "build.failed", Payload: json.RawMessage(`{"offline":true}`)})},
+	}
+	in := IncrementalPushInput{NamespaceID: projectID, Version: SyncProtocolVersion}
+	for _, item := range items {
+		in.Items = append(in.Items, struct {
+			EntityType string          `json:"entity_type"`
+			EntityID   string          `json:"entity_id"`
+			Operation  string          `json:"operation"`
+			Payload    json.RawMessage `json:"payload"`
+		}{EntityType: item.EntityType, EntityID: item.EntityID, Operation: "create", Payload: item.Payload})
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		result, err := tool.Handler(context.Background(), scope, projectID, mustMarshal(t, in))
+		if err != nil {
+			t.Fatalf("attempt %d Handler: %v", attempt, err)
+		}
+		out := result.(IncrementalPushOutput)
+		if len(out.Applied) != len(items) {
+			t.Fatalf("attempt %d Applied = %+v", attempt, out.Applied)
+		}
+		for _, applied := range out.Applied {
+			if applied.Error != "" {
+				t.Fatalf("attempt %d replay item %+v", attempt, applied)
+			}
+		}
+	}
+
+	db := testDB(t)
+	for table, id := range map[string]string{"tasks": taskID, "kb_articles": articleID, "channels": channelID, "events": eventID} {
+		var count int
+		if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM `+table+` WHERE id = $1 AND project_id = $2`, id, projectID).Scan(&count); err != nil {
+			t.Fatalf("count %s replay effects: %v", table, err)
+		}
+		if count != 1 {
+			t.Fatalf("%s replay effect count = %d, want 1", table, count)
+		}
 	}
 }
 
@@ -367,36 +428,93 @@ func TestIncrementalPushTool_RejectsNamespaceMismatch(t *testing.T) {
 	}
 }
 
-func TestBootstrapTool_ReturnsRealTaskAndKBLists(t *testing.T) {
+func TestBootstrapTool_ReturnsCompleteDeterministicSnapshot(t *testing.T) {
+	identityStore := testIdentityStore(t)
 	tasksStore := testTasksStore(t)
 	kbStore := testKBStore(t)
 	eventsStore := testEventsStore(t)
 	projectID := mustCreateProject(t, "mcp-sync-bootstrap")
-	agentID, _ := mustRegisterAgent(t, projectID)
-
-	if _, err := tasksStore.Create(context.Background(), projectID, "bootstrap task", "desc", nil, 2, nil); err != nil {
-		t.Fatalf("create task: %v", err)
+	agent, passport, token, err := identityStore.Register(context.Background(), projectID,
+		[]string{"task.list", "event.publish", "task.list"}, "harley", "claude",
+		[]string{"review", "code", "review"}, []string{"z-repo", "a-repo", "z-repo"}, []string{"reviewer", "builder", "reviewer"})
+	if err != nil {
+		t.Fatalf("register agent: %v", err)
 	}
-	if _, err := kbStore.WriteArticle(context.Background(), projectID, agentID, "bootstrap article", "body text", nil, nil, false); err != nil {
+	scope, err := identityStore.WhoAmI(context.Background(), projectID, token)
+	if err != nil {
+		t.Fatalf("WhoAmI: %v", err)
+	}
+
+	channelB, err := eventsStore.CreateChannel(context.Background(), projectID, "zeta")
+	if err != nil {
+		t.Fatalf("create zeta channel: %v", err)
+	}
+	channelA, err := eventsStore.CreateChannel(context.Background(), projectID, "alpha")
+	if err != nil {
+		t.Fatalf("create alpha channel: %v", err)
+	}
+	note := "bootstrap"
+	if _, err := eventsStore.PublishEvent(context.Background(), projectID, channelB.ID, agent.ID, "message.posted", json.RawMessage(`{"body":"bootstrap"}`), &note); err != nil {
+		t.Fatalf("publish event: %v", err)
+	}
+
+	parent, err := tasksStore.Create(context.Background(), projectID, "parent", "desc", nil, 2, nil)
+	if err != nil {
+		t.Fatalf("create parent task: %v", err)
+	}
+	if _, err := tasksStore.Create(context.Background(), projectID, "child", "desc", &parent.ID, 3, nil); err != nil {
+		t.Fatalf("create child task: %v", err)
+	}
+	if _, err := kbStore.WriteArticle(context.Background(), projectID, agent.ID, "bootstrap article", "body text", nil, nil, false); err != nil {
 		t.Fatalf("write article: %v", err)
 	}
 
-	tool := BootstrapTool(tasksStore, kbStore, eventsStore, NewSyncRateLimiter(30, time.Minute))
+	tool := BootstrapTool(identityStore, tasksStore, kbStore, eventsStore, NewSyncRateLimiter(30, time.Minute))
 	arguments := mustMarshal(t, BootstrapInput{NamespaceID: projectID, Version: SyncProtocolVersion})
 
-	result, err := tool.Handler(context.Background(), nil, projectID, arguments)
+	result, err := tool.Handler(context.Background(), &scope, projectID, arguments)
 	if err != nil {
 		t.Fatalf("Handler: %v", err)
 	}
 	out := result.(BootstrapOutput)
-	if len(out.TaskList) != 1 || out.TaskList[0].Title != "bootstrap task" {
-		t.Fatalf("TaskList: got %+v, want one task titled %q", out.TaskList, "bootstrap task")
+	if out.Version != SyncProtocolVersion || out.OrgConfig.SchemaVersion != types.BootstrapSchemaVersionV1 {
+		t.Fatalf("versions: outer=%d nested=%d", out.Version, out.OrgConfig.SchemaVersion)
 	}
-	if len(out.KBList) != 1 || out.KBList[0].Title != "bootstrap article" {
-		t.Fatalf("KBList: got %+v, want one article titled %q", out.KBList, "bootstrap article")
+	if out.ProjectList == nil || len(out.ProjectList) != 0 {
+		t.Fatalf("ProjectList = %#v, want non-nil empty", out.ProjectList)
 	}
-	if out.Version != SyncProtocolVersion {
-		t.Fatalf("Version: got %d, want %d", out.Version, SyncProtocolVersion)
+	if out.OrgConfig.Project.ID != projectID || out.OrgConfig.Identity.Agent.ID != agent.ID || out.OrgConfig.Identity.Passport.ID != passport.ID {
+		t.Fatalf("snapshot identity/project mismatch: %+v", out.OrgConfig)
+	}
+	if got := out.OrgConfig.Identity.Agent.Capabilities; !reflect.DeepEqual(got, []string{"code", "review"}) {
+		t.Fatalf("capabilities = %#v", got)
+	}
+	if got := out.OrgConfig.Identity.Passport.Repositories; !reflect.DeepEqual(got, []string{"a-repo", "z-repo"}) {
+		t.Fatalf("repositories = %#v", got)
+	}
+	if got := out.OrgConfig.Identity.Passport.Roles; !reflect.DeepEqual(got, []string{"builder", "reviewer"}) {
+		t.Fatalf("roles = %#v", got)
+	}
+	if got := out.OrgConfig.Identity.Permissions; !reflect.DeepEqual(got, []string{"event.publish", "task.list"}) {
+		t.Fatalf("permissions = %#v", got)
+	}
+	if len(out.OrgConfig.Channels) != 2 || out.OrgConfig.Channels[0].ID != channelA.ID || out.OrgConfig.Channels[1].ID != channelB.ID {
+		t.Fatalf("channels = %+v, want name/id order", out.OrgConfig.Channels)
+	}
+	if len(out.OrgConfig.Events) != 1 || out.OrgConfig.Events[0].ChannelID != channelB.ID {
+		t.Fatalf("events = %+v", out.OrgConfig.Events)
+	}
+	if len(out.OrgConfig.Tasks) != 2 || out.OrgConfig.Tasks[0].ID != parent.ID || out.OrgConfig.Tasks[1].ParentTaskID == nil || *out.OrgConfig.Tasks[1].ParentTaskID != parent.ID {
+		t.Fatalf("tasks = %+v, want parent before child", out.OrgConfig.Tasks)
+	}
+	if !reflect.DeepEqual(out.TaskList, out.OrgConfig.Tasks) || !reflect.DeepEqual(out.KBList, out.OrgConfig.KB.Articles) {
+		t.Fatalf("top-level mirrors differ: tasks=%+v/%+v kb=%+v/%+v", out.TaskList, out.OrgConfig.Tasks, out.KBList, out.OrgConfig.KB.Articles)
+	}
+	if string(out.OrgConfig.IntegrationManifestMetadata) != "null" {
+		t.Fatalf("integration_manifest_metadata = %s, want null", out.OrgConfig.IntegrationManifestMetadata)
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, out.Timestamp); err != nil || parsed.IsZero() {
+		t.Fatalf("timestamp = %q: %v", out.Timestamp, err)
 	}
 }
 
@@ -528,7 +646,7 @@ func mustNotPanic(t *testing.T, call func() (any, error)) (result any, err error
 }
 
 func TestBootstrapTool_RejectsMalformedJSON(t *testing.T) {
-	tool := BootstrapTool(testTasksStore(t), testKBStore(t), testEventsStore(t), NewSyncRateLimiter(30, time.Minute))
+	tool := BootstrapTool(testIdentityStore(t), testTasksStore(t), testKBStore(t), testEventsStore(t), NewSyncRateLimiter(30, time.Minute))
 	projectID := mustCreateProject(t, "mcp-sync-bootstrap-malformed")
 
 	_, err := mustNotPanic(t, func() (any, error) {
@@ -615,7 +733,7 @@ func TestConflictReportTool_RejectsMissingRequiredFields(t *testing.T) {
 // reject an unrecognized/incompatible version cleanly rather than silently
 // proceeding.
 func TestBootstrapTool_RejectsUnsupportedVersion(t *testing.T) {
-	tool := BootstrapTool(testTasksStore(t), testKBStore(t), testEventsStore(t), NewSyncRateLimiter(30, time.Minute))
+	tool := BootstrapTool(testIdentityStore(t), testTasksStore(t), testKBStore(t), testEventsStore(t), NewSyncRateLimiter(30, time.Minute))
 	projectID := mustCreateProject(t, "mcp-sync-bootstrap-version")
 
 	arguments := mustMarshal(t, BootstrapInput{NamespaceID: projectID, Version: SyncProtocolVersion + 1})

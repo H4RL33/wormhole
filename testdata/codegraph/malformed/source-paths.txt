@@ -1,0 +1,5 @@
+../outside.go
+nested/../../outside.go
+/etc/passwd
+nested\escape.go
+./source.go

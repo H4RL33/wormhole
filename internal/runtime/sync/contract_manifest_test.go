@@ -39,23 +39,18 @@ func TestAlphaContractSyncProtocol(t *testing.T) {
 		t.Fatalf("Gateway SyncProtocolVersion = %d, manifest = %d", SyncProtocolVersion, manifest.SyncProtocol.Version)
 	}
 
-	queueRepo, auditRepo := setupTestRepos(t)
-	defer queueRepo.db.Close()
-	engine := mustNewEngine(t, "http://unused.invalid", queueRepo, auditRepo, nil, nil, DefaultConfig())
+	store, queueRepo, auditRepo, taskRepo, kbRepo := newApplyTestRepos(t)
+	engine := mustNewEngine(t, "http://unused.invalid", queueRepo, auditRepo, taskRepo, kbRepo, DefaultConfig())
+	if err := engine.ConfigureBootstrap(store, "agent-1", "passport-1", nil); err != nil {
+		t.Fatalf("ConfigureBootstrap: %v", err)
+	}
 
 	calls := map[string][]map[string]interface{}{}
 	engine.testCallSyncToolWithResultFn = func(_ context.Context, name string, args map[string]interface{}) (interface{}, error) {
 		calls[name] = append(calls[name], args)
 		switch name {
 		case "wormhole.sync.bootstrap":
-			return map[string]interface{}{
-				"org_config":   map[string]interface{}{},
-				"project_list": []interface{}{},
-				"task_list":    []interface{}{},
-				"kb_list":      []interface{}{},
-				"timestamp":    "2026-07-23T00:00:00Z",
-				"version":      manifest.SyncProtocol.Version,
-			}, nil
+			return validBootstrapWire(), nil
 		case "wormhole.sync.incremental_pull":
 			return map[string]interface{}{"updates": []interface{}{}, "timestamp": "2026-07-23T00:00:00Z", "version": manifest.SyncProtocol.Version}, nil
 		case "wormhole.sync.incremental_push":

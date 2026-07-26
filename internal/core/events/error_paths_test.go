@@ -105,8 +105,15 @@ func TestPublishEventWithIDDuplicateRollsBack(t *testing.T) {
 	if _, err := s.PublishEventWithID(ctx, id, projectID, channel.ID, agentID, "build.failed", nil, nil); err != nil {
 		t.Fatalf("first PublishEventWithID: %v", err)
 	}
-	if _, err := s.PublishEventWithID(ctx, id, projectID, channel.ID, agentID, "build.failed", nil, nil); err == nil || !strings.Contains(err.Error(), "publish event") {
-		t.Fatalf("duplicate PublishEventWithID error = %v, want wrapped insert error", err)
+	replayed, err := s.PublishEventWithID(ctx, id, projectID, channel.ID, agentID, "build.failed", nil, nil)
+	if err != nil {
+		t.Fatalf("identical PublishEventWithID replay: %v", err)
+	}
+	if replayed.ID != id || replayed.EventType != "build.failed" {
+		t.Fatalf("identical replay = %+v, want original event", replayed)
+	}
+	if _, err := s.PublishEventWithID(ctx, id, projectID, channel.ID, agentID, "discovery.logged", nil, nil); !errors.Is(err, ErrStableIDConflict) || !strings.Contains(err.Error(), "publish event") {
+		t.Fatalf("mismatched PublishEventWithID error = %v, want ErrStableIDConflict", err)
 	}
 
 	var count int
@@ -115,6 +122,26 @@ func TestPublishEventWithIDDuplicateRollsBack(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("event count = %d, want 1", count)
+	}
+}
+
+func TestCreateChannelWithIDReplayRequiresIdenticalContent(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "channel-id-replay")
+	id := uuid.NewString()
+	if _, err := s.CreateChannelWithID(ctx, id, projectID, "general"); err != nil {
+		t.Fatalf("first CreateChannelWithID: %v", err)
+	}
+	replayed, err := s.CreateChannelWithID(ctx, id, projectID, "general")
+	if err != nil {
+		t.Fatalf("identical CreateChannelWithID replay: %v", err)
+	}
+	if replayed.ID != id || replayed.Name != "general" {
+		t.Fatalf("identical replay = %+v, want original channel", replayed)
+	}
+	if _, err := s.CreateChannelWithID(ctx, id, projectID, "changed"); !errors.Is(err, ErrStableIDConflict) || !strings.Contains(err.Error(), "create channel") {
+		t.Fatalf("mismatched CreateChannelWithID error = %v, want ErrStableIDConflict", err)
 	}
 }
 

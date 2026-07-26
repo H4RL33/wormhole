@@ -4,10 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	_ "github.com/lib/pq"
 
@@ -33,6 +36,293 @@ func testStore(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { db.Close() })
 	return NewStore(db)
+}
+
+func lockIdentityRLSFixture(t *testing.T, db *sql.DB) {
+	t.Helper()
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("open RLS fixture lock connection: %v", err)
+	}
+	if _, err := conn.ExecContext(context.Background(), `SELECT pg_advisory_lock(867530913)`); err != nil {
+		conn.Close()
+		t.Fatalf("acquire RLS fixture lock: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock(867530913)`)
+		_ = conn.Close()
+	})
+}
+
+func testEnrolmentRegistrationInput(projectID string) EnrolmentRegistrationInput {
+	return EnrolmentRegistrationInput{
+		ProjectID:      projectID,
+		IdempotencyKey: "018f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1",
+		RequestHash:    strings.Repeat("a", 64),
+		Permissions:    []string{"task.create", "kb.write"},
+		Owner:          "enrolment-owner",
+		Model:          "gpt-5",
+		Capabilities:   []string{"code", "review"},
+		Repositories:   []string{"https://github.com/H4RL33/wormhole"},
+		Roles:          []string{"contributor"},
+	}
+}
+
+func TestRegisterEnrolment_ReplayReturnsSameIdentityWithoutRawToken(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "enrolment-replay")
+	in := testEnrolmentRegistrationInput(projectID)
+
+	first, err := s.RegisterEnrolment(ctx, in)
+	if err != nil {
+		t.Fatalf("RegisterEnrolment first: %v", err)
+	}
+	cleanupAgent(t, s, first.Agent.ID)
+	if first.RawToken == "" || first.Replay {
+		t.Fatalf("first result fields: token_empty=%v replay=%v", first.RawToken == "", first.Replay)
+	}
+
+	replay, err := s.RegisterEnrolment(ctx, in)
+	if err != nil {
+		t.Fatalf("RegisterEnrolment replay: %v", err)
+	}
+	if replay.Agent.ID != first.Agent.ID || replay.Passport.ID != first.Passport.ID {
+		t.Fatalf("replay identity = agent %q passport %q, want %q/%q", replay.Agent.ID, replay.Passport.ID, first.Agent.ID, first.Passport.ID)
+	}
+	if replay.RawToken != "" || !replay.Replay {
+		t.Fatalf("replay fields: token_empty=%v replay=%v", replay.RawToken == "", replay.Replay)
+	}
+
+	var agents, passports, enrolments int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM agents WHERE id = $1`, first.Agent.ID).Scan(&agents); err != nil {
+		t.Fatalf("count agents: %v", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM passports WHERE id = $1`, first.Passport.ID).Scan(&passports); err != nil {
+		t.Fatalf("count passports: %v", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM agent_enrolments WHERE project_id = $1 AND idempotency_key = $2`, projectID, in.IdempotencyKey).Scan(&enrolments); err != nil {
+		t.Fatalf("count enrolments: %v", err)
+	}
+	if agents != 1 || passports != 1 || enrolments != 1 {
+		t.Fatalf("row counts agents=%d passports=%d enrolments=%d, want 1/1/1", agents, passports, enrolments)
+	}
+}
+
+func TestRegisterEnrolment_RejectsDigestConflict(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "enrolment-conflict")
+	in := testEnrolmentRegistrationInput(projectID)
+
+	first, err := s.RegisterEnrolment(ctx, in)
+	if err != nil {
+		t.Fatalf("RegisterEnrolment first: %v", err)
+	}
+	cleanupAgent(t, s, first.Agent.ID)
+
+	conflict := in
+	conflict.RequestHash = strings.Repeat("b", 64)
+	if _, err := s.RegisterEnrolment(ctx, conflict); !errors.Is(err, ErrEnrolmentConflict) {
+		t.Fatalf("digest conflict error = %v, want ErrEnrolmentConflict", err)
+	}
+}
+
+func TestRegisterEnrolment_ConcurrentSameKeyWaitsAndReplaysWinner(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "enrolment-concurrent-replay")
+	in := testEnrolmentRegistrationInput(projectID)
+
+	winnerTx, err := s.BeginProjectTx(ctx, projectID)
+	if err != nil {
+		t.Fatalf("begin winner tx: %v", err)
+	}
+	defer winnerTx.Rollback()
+	winner, err := s.RegisterEnrolmentInTx(ctx, winnerTx, in)
+	if err != nil {
+		t.Fatalf("register winner in transaction: %v", err)
+	}
+
+	type registrationResponse struct {
+		result EnrolmentRegistrationResult
+		err    error
+	}
+	response := make(chan registrationResponse, 1)
+	go func() {
+		result, err := s.RegisterEnrolment(ctx, in)
+		response <- registrationResponse{result: result, err: err}
+	}()
+	select {
+	case early := <-response:
+		t.Fatalf("concurrent request returned before winner committed: err=%v replay=%v", early.err, early.result.Replay)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := winnerTx.Commit(); err != nil {
+		t.Fatalf("commit winner: %v", err)
+	}
+	cleanupAgent(t, s, winner.Agent.ID)
+	select {
+	case replay := <-response:
+		if replay.err != nil {
+			t.Fatalf("concurrent replay: %v", replay.err)
+		}
+		if !replay.result.Replay || replay.result.RawToken != "" || replay.result.Agent.ID != winner.Agent.ID || replay.result.Passport.ID != winner.Passport.ID {
+			t.Fatalf("concurrent replay fields: replay=%v token_empty=%v agent_match=%v passport_match=%v",
+				replay.result.Replay, replay.result.RawToken == "", replay.result.Agent.ID == winner.Agent.ID, replay.result.Passport.ID == winner.Passport.ID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("concurrent replay did not unblock after winner commit")
+	}
+}
+
+func TestRegisterEnrolment_IsProjectScoped(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectA := createProject(t, s, "enrolment-project-a")
+	projectB := createProject(t, s, "enrolment-project-b")
+	inA := testEnrolmentRegistrationInput(projectA)
+	inB := testEnrolmentRegistrationInput(projectB)
+
+	gotA, err := s.RegisterEnrolment(ctx, inA)
+	if err != nil {
+		t.Fatalf("RegisterEnrolment A: %v", err)
+	}
+	cleanupAgent(t, s, gotA.Agent.ID)
+	gotB, err := s.RegisterEnrolment(ctx, inB)
+	if err != nil {
+		t.Fatalf("RegisterEnrolment B: %v", err)
+	}
+	cleanupAgent(t, s, gotB.Agent.ID)
+	if gotA.Agent.ID == gotB.Agent.ID || gotA.Passport.ID == gotB.Passport.ID {
+		t.Fatalf("same idempotency key crossed projects: A=%s/%s B=%s/%s", gotA.Agent.ID, gotA.Passport.ID, gotB.Agent.ID, gotB.Passport.ID)
+	}
+
+	tx, err := s.BeginProjectTx(ctx, projectA)
+	if err != nil {
+		t.Fatalf("BeginProjectTx A: %v", err)
+	}
+	defer tx.Rollback()
+	var visible int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM agent_enrolments WHERE project_id = $1 AND idempotency_key = $2`, projectA, inA.IdempotencyKey).Scan(&visible); err != nil {
+		t.Fatalf("query project-scoped enrolments: %v", err)
+	}
+	if visible != 1 {
+		t.Fatalf("project A visible enrolments = %d, want 1", visible)
+	}
+}
+
+func TestAgentEnrolmentsRLSHidesProjectBWhileScopedToProjectA(t *testing.T) {
+	ownerStore := testStore(t)
+	lockIdentityRLSFixture(t, ownerStore.db)
+	ctx := context.Background()
+	projectA := createProject(t, ownerStore, "enrolment-rls-a")
+	projectB := createProject(t, ownerStore, "enrolment-rls-b")
+	inputA := testEnrolmentRegistrationInput(projectA)
+	inputB := testEnrolmentRegistrationInput(projectB)
+	resultA, err := ownerStore.RegisterEnrolment(ctx, inputA)
+	if err != nil {
+		t.Fatalf("register project A enrolment: %v", err)
+	}
+	cleanupAgent(t, ownerStore, resultA.Agent.ID)
+	resultB, err := ownerStore.RegisterEnrolment(ctx, inputB)
+	if err != nil {
+		t.Fatalf("register project B enrolment: %v", err)
+	}
+	cleanupAgent(t, ownerStore, resultB.Agent.ID)
+
+	const roleName = "identity_enrolment_rls_test_user"
+	const rolePassword = "identity_enrolment_rls_test_password"
+	t.Cleanup(func() {
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE agent_enrolments FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("DROP ROLE IF EXISTS %s", roleName))
+	})
+	if _, err := ownerStore.db.Exec(fmt.Sprintf("DROP ROLE IF EXISTS %s", roleName)); err != nil {
+		t.Fatalf("drop pre-existing RLS role: %v", err)
+	}
+	if _, err := ownerStore.db.Exec(fmt.Sprintf("CREATE ROLE %s WITH LOGIN PASSWORD '%s'", roleName, rolePassword)); err != nil {
+		t.Fatalf("create RLS role: %v", err)
+	}
+	if _, err := ownerStore.db.Exec(fmt.Sprintf("GRANT SELECT ON TABLE agent_enrolments TO %s", roleName)); err != nil {
+		t.Fatalf("grant enrolment select: %v", err)
+	}
+	cfg := types.LoadConfig()
+	databaseURL, err := url.Parse(cfg.DatabaseURL)
+	if err != nil {
+		t.Fatalf("parse database URL: %v", err)
+	}
+	databaseURL.User = url.UserPassword(roleName, rolePassword)
+	restrictedDB, err := sql.Open("postgres", databaseURL.String())
+	if err != nil {
+		t.Fatalf("open restricted database: %v", err)
+	}
+	t.Cleanup(func() { _ = restrictedDB.Close() })
+	if err := restrictedDB.PingContext(ctx); err != nil {
+		t.Fatalf("ping restricted database: %v", err)
+	}
+	tx, err := restrictedDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin restricted transaction: %v", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "SELECT set_config('wormhole.project_id', $1, true)", projectA); err != nil {
+		t.Fatalf("scope restricted transaction to project A: %v", err)
+	}
+	var found string
+	err = tx.QueryRowContext(ctx, `SELECT project_id FROM agent_enrolments WHERE project_id = $1 AND idempotency_key = $2`, projectB, inputB.IdempotencyKey).Scan(&found)
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("project B enrolment visible while scoped A: err=%v found=%q", err, found)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT project_id FROM agent_enrolments WHERE project_id = $1 AND idempotency_key = $2`, projectA, inputA.IdempotencyKey).Scan(&found); err != nil {
+		t.Fatalf("project A enrolment hidden under own scope: %v", err)
+	}
+	if found != projectA {
+		t.Fatalf("visible project = %q, want project A", found)
+	}
+}
+
+func TestRegisterEnrolment_ControlledReissueSupersedesTokenOnce(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "enrolment-reissue")
+	in := testEnrolmentRegistrationInput(projectID)
+
+	first, err := s.RegisterEnrolment(ctx, in)
+	if err != nil {
+		t.Fatalf("RegisterEnrolment first: %v", err)
+	}
+	cleanupAgent(t, s, first.Agent.ID)
+
+	in.Reissue = true
+	reissued, err := s.RegisterEnrolment(ctx, in)
+	if err != nil {
+		t.Fatalf("RegisterEnrolment reissue: %v", err)
+	}
+	if reissued.Agent.ID != first.Agent.ID || reissued.Passport.ID != first.Passport.ID || reissued.RawToken == "" || reissued.RawToken == first.RawToken || !reissued.Reissued {
+		t.Fatalf("reissue fields: agent_match=%v passport_match=%v token_empty=%v token_changed=%v reissued=%v",
+			reissued.Agent.ID == first.Agent.ID, reissued.Passport.ID == first.Passport.ID,
+			reissued.RawToken == "", reissued.RawToken != first.RawToken, reissued.Reissued)
+	}
+	if _, err := s.WhoAmI(ctx, projectID, first.RawToken); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("superseded token WhoAmI error = %v, want ErrInvalidToken", err)
+	}
+	if _, err := s.WhoAmI(ctx, projectID, reissued.RawToken); err != nil {
+		t.Fatalf("reissued token WhoAmI: %v", err)
+	}
+	if _, err := s.RegisterEnrolment(ctx, in); !errors.Is(err, ErrEnrolmentReissueExhausted) {
+		t.Fatalf("second reissue error = %v, want ErrEnrolmentReissueExhausted", err)
+	}
+
+	var requestHash, tokenHash string
+	if err := s.db.QueryRowContext(ctx, `SELECT request_hash FROM agent_enrolments WHERE project_id = $1 AND idempotency_key = $2`, projectID, in.IdempotencyKey).Scan(&requestHash); err != nil {
+		t.Fatalf("read stored request hash: %v", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT token_hash FROM agent_tokens WHERE agent_id = $1 AND expires_at > now()`, first.Agent.ID).Scan(&tokenHash); err != nil {
+		t.Fatalf("read active token hash: %v", err)
+	}
+	if requestHash == first.RawToken || requestHash == reissued.RawToken || tokenHash == first.RawToken || tokenHash == reissued.RawToken {
+		t.Fatal("Fabric persisted a raw token in enrolment or agent_tokens storage")
+	}
 }
 
 func createProject(t *testing.T, s *Store, name string) string {

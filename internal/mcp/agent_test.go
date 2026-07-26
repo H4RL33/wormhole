@@ -7,12 +7,71 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/H4RL33/wormhole/internal/core/identity"
 	"github.com/H4RL33/wormhole/internal/core/kb"
 	"github.com/H4RL33/wormhole/internal/core/roles"
 )
+
+type countingOnboardingEmbedder struct {
+	calls atomic.Int32
+}
+
+func (*countingOnboardingEmbedder) Descriptor() kb.EmbeddingDescriptor {
+	return kb.StubEmbedder{}.Descriptor()
+}
+
+func (e *countingOnboardingEmbedder) Embed(ctx context.Context, request kb.EmbeddingRequest) ([][]float32, error) {
+	e.calls.Add(1)
+	return kb.StubEmbedder{}.Embed(ctx, request)
+}
+
+func TestEnrolmentInvalidAndReplayRequestsDoNotCallEmbeddingProvider(t *testing.T) {
+	embedder := &countingOnboardingEmbedder{}
+	kbStore := kb.NewStore(testDB(t), embedder, 0.85, 2000, 1, 1, 1)
+	if err := PrepareOnboardingArticleEmbedding(context.Background(), kbStore); err != nil {
+		t.Fatalf("PrepareOnboardingArticleEmbedding: %v", err)
+	}
+	if got := embedder.calls.Load(); got != 1 {
+		t.Fatalf("startup embedding calls = %d, want 1", got)
+	}
+	tool := EnrolAgentTool(testIdentityStore(t), testEventsStore(t), kbStore)
+	projectID := mustCreateProject(t, "enrol-no-provider-amplification")
+	invalid, _ := json.Marshal(EnrolAgentInput{
+		IdempotencyKey: "928f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1",
+		RequestHash:    "not-a-valid-request-hash",
+		Owner:          "invalid", Model: "gpt-5",
+	})
+	if _, err := tool.Handler(context.Background(), nil, projectID, invalid); err == nil {
+		t.Fatal("invalid enrolment error = nil")
+	}
+	if got := embedder.calls.Load(); got != 1 {
+		t.Fatalf("embedding calls after invalid request = %d, want 1", got)
+	}
+
+	validInput := EnrolAgentInput{
+		IdempotencyKey: "218f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1",
+		RequestHash:    strings.Repeat("c", 64),
+		Permissions:    []string{"task.create"},
+		Owner:          "valid",
+		Model:          "gpt-5",
+		Capabilities:   []string{"code"},
+		Repositories:   []string{"https://github.com/H4RL33/wormhole"},
+		Roles:          []string{"contributor"},
+	}
+	valid, _ := json.Marshal(validInput)
+	if _, err := tool.Handler(context.Background(), nil, projectID, valid); err != nil {
+		t.Fatalf("first enrolment: %v", err)
+	}
+	if _, err := tool.Handler(context.Background(), nil, projectID, valid); err != nil {
+		t.Fatalf("replay enrolment: %v", err)
+	}
+	if got := embedder.calls.Load(); got != 1 {
+		t.Fatalf("embedding calls after valid and replay requests = %d, want startup-only call", got)
+	}
+}
 
 func TestRegisterAgentTool_Handler(t *testing.T) {
 	store := testIdentityStore(t)
@@ -43,6 +102,73 @@ func TestRegisterAgentTool_Handler(t *testing.T) {
 	}
 	if out.AgentID == "" || out.PassportID == "" || out.Token == "" {
 		t.Fatalf("output missing fields: %+v", out)
+	}
+}
+
+func TestEnrolAgentTool_DurableReplayAndControlledReissue(t *testing.T) {
+	identityStore := testIdentityStore(t)
+	tool := EnrolAgentTool(identityStore, testEventsStore(t), testKBStore(t))
+	if tool.Name != "wormhole.agent.enrol" || tool.RequiresAuth {
+		t.Fatalf("tool contract = name %q auth=%t", tool.Name, tool.RequiresAuth)
+	}
+	projectID := mustCreateProject(t, "mcp-enrol-replay")
+	in := EnrolAgentInput{
+		IdempotencyKey: "218f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1",
+		RequestHash:    strings.Repeat("c", 64),
+		Permissions:    []string{"task.create"},
+		Owner:          "enrol-owner",
+		Model:          "gpt-5",
+		Capabilities:   []string{"code"},
+		Repositories:   []string{"https://github.com/H4RL33/wormhole"},
+		Roles:          []string{"contributor"},
+	}
+	arguments, _ := json.Marshal(in)
+
+	firstRaw, err := tool.Handler(context.Background(), nil, projectID, arguments)
+	if err != nil {
+		t.Fatalf("first enrolment: %v", err)
+	}
+	first := firstRaw.(EnrolAgentOutput)
+	if first.AgentID == "" || first.PassportID == "" || first.Token == "" || first.Replay {
+		t.Fatalf("first output fields: token_empty=%v replay=%v agent_empty=%v passport_empty=%v",
+			first.Token == "", first.Replay, first.AgentID == "", first.PassportID == "")
+	}
+
+	replayRaw, err := tool.Handler(context.Background(), nil, projectID, arguments)
+	if err != nil {
+		t.Fatalf("replay enrolment: %v", err)
+	}
+	replay := replayRaw.(EnrolAgentOutput)
+	if replay.AgentID != first.AgentID || replay.PassportID != first.PassportID || replay.Token != "" || !replay.Replay {
+		t.Fatalf("replay fields: replay=%v token_empty=%v agent_match=%v passport_match=%v",
+			replay.Replay, replay.Token == "", replay.AgentID == first.AgentID, replay.PassportID == first.PassportID)
+	}
+
+	in.Reissue = true
+	reissueArguments, _ := json.Marshal(in)
+	reissuedRaw, err := tool.Handler(context.Background(), nil, projectID, reissueArguments)
+	if err != nil {
+		t.Fatalf("reissue enrolment: %v", err)
+	}
+	reissued := reissuedRaw.(EnrolAgentOutput)
+	if reissued.AgentID != first.AgentID || reissued.PassportID != first.PassportID || reissued.Token == "" || reissued.Token == first.Token || !reissued.Reissued {
+		t.Fatalf("reissued fields: reissued=%v token_empty=%v token_changed=%v agent_match=%v passport_match=%v",
+			reissued.Reissued, reissued.Token == "", reissued.Token != first.Token,
+			reissued.AgentID == first.AgentID, reissued.PassportID == first.PassportID)
+	}
+}
+
+func TestFabricRegistryIncludesGatewayEnrolmentEndpoint(t *testing.T) {
+	registry := NewFabricRegistry(FabricRegistryDependencies{})
+	tool, ok := registry.Get("wormhole.agent.enrol")
+	if !ok {
+		t.Fatal("Fabric registry missing wormhole.agent.enrol")
+	}
+	if tool.RequiresAuth {
+		t.Fatal("Fabric enrolment must be available before a Passport exists")
+	}
+	if _, ok := tool.ResultExamples["default"].(EnrolAgentOutput); !ok {
+		t.Fatalf("result example = %T, want EnrolAgentOutput", tool.ResultExamples["default"])
 	}
 }
 
@@ -216,9 +342,8 @@ func TestRegisterAgentTool_BootstrapFailurePropagatesAndRetryIsIdempotent(t *tes
 	t.Run("onboarding article", func(t *testing.T) {
 		projectID := mustCreateProject(t, "bootstrap-article-failure-retry")
 		failingKB := kb.NewStore(testDB(t), failingEmbedder{err: errors.New("forced onboarding embedding failure")}, 0.85, 2000, 1, 1, 1)
-		failingTool := RegisterAgentTool(testIdentityStore(t), testEventsStore(t), testRolesStore(t), failingKB)
-		if _, err := failingTool.Handler(context.Background(), nil, projectID, args); err == nil || !strings.Contains(err.Error(), "onboarding article bootstrap") {
-			t.Fatalf("registration error = %v, want onboarding bootstrap failure", err)
+		if err := PrepareOnboardingArticleEmbedding(context.Background(), failingKB); err == nil || !strings.Contains(err.Error(), "forced onboarding embedding failure") {
+			t.Fatalf("startup preparation error = %v, want onboarding embedding failure", err)
 		}
 		assertRegistrationCount(t, projectID, "bootstrap-retry-agent", 0)
 
@@ -235,7 +360,11 @@ type failingEmbedder struct {
 	err error
 }
 
-func (e failingEmbedder) Embed(context.Context, string) ([]float32, error) {
+func (e failingEmbedder) Descriptor() kb.EmbeddingDescriptor {
+	return kb.StubEmbedder{}.Descriptor()
+}
+
+func (e failingEmbedder) Embed(context.Context, kb.EmbeddingRequest) ([][]float32, error) {
 	return nil, e.err
 }
 

@@ -278,6 +278,22 @@ func (r *TaskRepo) AssignTx(ctx context.Context, tx *sql.Tx, namespaceID, taskID
 // since accepting it would leave a row UpdateStatus's transition table can
 // never reason about again.
 func (r *TaskRepo) UpsertTask(ctx context.Context, namespaceID, taskID, title, description string, parentTaskID, ownerAgentID *string, status string, priority int, dueBy *time.Time) (Task, error) {
+	return r.upsertTask(ctx, namespaceID, taskID, title, description, parentTaskID, ownerAgentID, status, priority, dueBy, nil, nil)
+}
+
+// UpsertTaskFromServer applies the complete authoritative Fabric task wire,
+// including its original timestamps. Incremental pull calls this only after
+// confirming no outbound writes remain for the namespace.
+func (r *TaskRepo) UpsertTaskFromServer(ctx context.Context, namespaceID, taskID, title, description string, parentTaskID, ownerAgentID *string, status string, priority int, dueBy *time.Time, createdAt, updatedAt time.Time) (Task, error) {
+	if createdAt.IsZero() || updatedAt.IsZero() {
+		return Task{}, errors.New("localstore/task: upsert from server: timestamps are required")
+	}
+	createdAt = createdAt.UTC()
+	updatedAt = updatedAt.UTC()
+	return r.upsertTask(ctx, namespaceID, taskID, title, description, parentTaskID, ownerAgentID, status, priority, dueBy, &createdAt, &updatedAt)
+}
+
+func (r *TaskRepo) upsertTask(ctx context.Context, namespaceID, taskID, title, description string, parentTaskID, ownerAgentID *string, status string, priority int, dueBy *time.Time, createdAt, updatedAt *time.Time) (Task, error) {
 	if !validTaskStatuses[status] {
 		return Task{}, fmt.Errorf("localstore/task: upsert: invalid status %q", status)
 	}
@@ -297,9 +313,11 @@ func (r *TaskRepo) UpsertTask(ctx context.Context, namespaceID, taskID, title, d
 		return Task{}, fmt.Errorf("localstore/task: upsert: namespace lookup: %w", err)
 	}
 
-	row := tx.QueryRowContext(ctx,
-		`INSERT INTO tasks (id, namespace_id, parent_task_id, title, description, owner_agent_id, status, priority, due_by)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	var row *sql.Row
+	if createdAt != nil {
+		row = tx.QueryRowContext(ctx,
+			`INSERT INTO tasks (id, namespace_id, parent_task_id, title, description, owner_agent_id, status, priority, due_by, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
 			parent_task_id = excluded.parent_task_id,
 			title = excluded.title,
@@ -308,10 +326,27 @@ func (r *TaskRepo) UpsertTask(ctx context.Context, namespaceID, taskID, title, d
 			status = excluded.status,
 			priority = excluded.priority,
 			due_by = excluded.due_by,
-			updated_at = CURRENT_TIMESTAMP
+			created_at = excluded.created_at,
+			updated_at = excluded.updated_at
 		 RETURNING id, namespace_id, parent_task_id, title, description, owner_agent_id, status, priority, due_by, created_at, updated_at`,
-		taskID, namespaceID, parentTaskID, title, description, ownerAgentID, status, priority, dueBy,
-	)
+			taskID, namespaceID, parentTaskID, title, description, ownerAgentID, status, priority, dueBy, *createdAt, *updatedAt,
+		)
+	} else {
+		row = tx.QueryRowContext(ctx,
+			`INSERT INTO tasks (id, namespace_id, parent_task_id, title, description, owner_agent_id, status, priority, due_by)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+			parent_task_id = excluded.parent_task_id,
+			title = excluded.title,
+			description = excluded.description,
+			owner_agent_id = excluded.owner_agent_id,
+			status = excluded.status,
+			priority = excluded.priority,
+			due_by = excluded.due_by
+		 RETURNING id, namespace_id, parent_task_id, title, description, owner_agent_id, status, priority, due_by, created_at, updated_at`,
+			taskID, namespaceID, parentTaskID, title, description, ownerAgentID, status, priority, dueBy,
+		)
+	}
 	task, err := scanTask(row)
 	if err != nil {
 		return Task{}, fmt.Errorf("localstore/task: upsert: %w", err)

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
+	"github.com/H4RL33/wormhole/internal/types"
 )
 
 // newApplyTestRepos opens a real localstore-schema SQLite file (tasks,
@@ -64,6 +65,8 @@ func fakeBootstrapServer(t *testing.T) *httptest.Server {
 			Description: "from server",
 			Status:      "todo",
 			Priority:    2,
+			CreatedAt:   time.Date(2026, 7, 26, 1, 2, 3, 123456000, time.UTC),
+			UpdatedAt:   time.Date(2026, 7, 26, 2, 3, 4, 654321000, time.UTC),
 		}
 		article := articleSummaryWire{
 			ArticleID:     "kb-1",
@@ -79,14 +82,17 @@ func fakeBootstrapServer(t *testing.T) *httptest.Server {
 		var resultData interface{}
 		switch params.Name {
 		case "wormhole.sync.bootstrap":
-			resultData = map[string]interface{}{
-				"org_config":   map[string]interface{}{},
-				"project_list": []string{},
-				"task_list":    []taskSummaryWire{task},
-				"kb_list":      []articleSummaryWire{article},
-				"timestamp":    time.Now().UTC().Format(time.RFC3339),
-				"version":      1,
-			}
+			bootstrap := validBootstrapWire()
+			bootstrap.OrgConfig.Tasks = bootstrap.OrgConfig.Tasks[:1]
+			bootstrap.OrgConfig.Tasks[0].ID = "task-1"
+			bootstrap.OrgConfig.Tasks[0].Title = "Server task"
+			bootstrap.OrgConfig.Tasks[0].Description = "from server"
+			bootstrap.OrgConfig.Tasks[0].Priority = 2
+			bootstrap.TaskList = append([]types.BootstrapTaskV1(nil), bootstrap.OrgConfig.Tasks...)
+			bootstrap.OrgConfig.KB.Articles[0].Title = "Server article"
+			bootstrap.OrgConfig.KB.Articles[0].Body = "server body"
+			bootstrap.KBList = append([]types.BootstrapArticleV1(nil), bootstrap.OrgConfig.KB.Articles...)
+			resultData = bootstrap
 		case "wormhole.sync.incremental_pull":
 			taskData, _ := json.Marshal(task)
 			articleData, _ := json.Marshal(article)
@@ -121,8 +127,11 @@ func TestBootstrap_AppliesServerTasksAndKBToLocalStore(t *testing.T) {
 	srv := fakeBootstrapServer(t)
 	defer srv.Close()
 
-	_, qRepo, aRepo, taskRepo, kbRepo := newApplyTestRepos(t)
+	store, qRepo, aRepo, taskRepo, kbRepo := newApplyTestRepos(t)
 	engine := mustNewEngine(t, srv.URL, qRepo, aRepo, taskRepo, kbRepo, DefaultConfig())
+	if err := engine.ConfigureBootstrap(store, "agent-1", "passport-1", nil); err != nil {
+		t.Fatalf("ConfigureBootstrap: %v", err)
+	}
 
 	ctx := context.Background()
 	if err := engine.Bootstrap(ctx); err != nil {
@@ -166,6 +175,71 @@ func TestPullIncremental_AppliesServerUpdatesToLocalStore(t *testing.T) {
 	}
 	if _, err := kbRepo.GetArticle(ctx, "ns-1", "kb-1"); err != nil {
 		t.Fatalf("GetArticle after PullIncremental: %v", err)
+	}
+}
+
+func TestPullIncrementalAppliesAuthoritativeTaskTimestamps(t *testing.T) {
+	store, qRepo, aRepo, taskRepo, kbRepo := newApplyTestRepos(t)
+	ctx := context.Background()
+	if _, err := taskRepo.UpsertTask(ctx, "ns-1", "task-1", "local", "local", nil, nil, "todo", 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	localCreated := time.Date(2025, 1, 2, 3, 4, 5, 111111000, time.UTC)
+	localUpdated := localCreated.Add(time.Hour)
+	if _, err := store.DB().ExecContext(ctx, `UPDATE tasks SET created_at = ?, updated_at = ? WHERE id = ?`, localCreated, localUpdated, "task-1"); err != nil {
+		t.Fatal(err)
+	}
+	serverCreated := time.Date(2026, 7, 26, 3, 4, 5, 123456000, time.UTC)
+	serverUpdated := time.Date(2026, 7, 26, 4, 5, 6, 654321000, time.UTC)
+	data, _ := json.Marshal(map[string]interface{}{
+		"task_id": "task-1", "parent_task_id": nil, "title": "server", "description": "authoritative",
+		"owner_agent_id": nil, "status": "wip", "priority": 2, "due_by": nil,
+		"created_at": serverCreated, "updated_at": serverUpdated,
+	})
+	engine := mustNewEngine(t, "http://unused", qRepo, aRepo, taskRepo, kbRepo, DefaultConfig())
+	engine.testCallSyncToolWithResultFn = func(context.Context, string, map[string]interface{}) (interface{}, error) {
+		return incrementalPullResultWire{Updates: []syncUpdateEnvelopeWire{{Type: "task", Data: data}}, Timestamp: "2026-07-26T04:05:07Z", Version: 1}, nil
+	}
+	if err := engine.PullIncremental(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, err := taskRepo.GetTask(ctx, "ns-1", "task-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != "server" || !got.CreatedAt.Equal(serverCreated) || !got.UpdatedAt.Equal(serverUpdated) {
+		t.Fatalf("pulled task = %+v, want authoritative timestamps %s/%s", got, serverCreated.Format(time.RFC3339Nano), serverUpdated.Format(time.RFC3339Nano))
+	}
+}
+
+func TestPullIncrementalDoesNotClobberPendingTaskTimestamps(t *testing.T) {
+	store, qRepo, aRepo, taskRepo, kbRepo := newApplyTestRepos(t)
+	ctx := context.Background()
+	if _, err := taskRepo.UpsertTask(ctx, "ns-1", "task-1", "pending local", "local", nil, nil, "todo", 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	localCreated := time.Date(2026, 7, 26, 1, 2, 3, 111111000, time.UTC)
+	localUpdated := time.Date(2026, 7, 26, 2, 3, 4, 222222000, time.UTC)
+	if _, err := store.DB().ExecContext(ctx, `UPDATE tasks SET created_at = ?, updated_at = ? WHERE id = ?`, localCreated, localUpdated, "task-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := qRepo.Enqueue(ctx, "ns-1", "task", "task-1", "create", json.RawMessage(`{"title":"pending local"}`), 1); err != nil {
+		t.Fatal(err)
+	}
+	engine := mustNewEngine(t, "http://unused", qRepo, aRepo, taskRepo, kbRepo, DefaultConfig())
+	engine.testCallSyncToolWithResultFn = func(context.Context, string, map[string]interface{}) (interface{}, error) {
+		t.Fatal("Fabric contacted while task write pending")
+		return nil, nil
+	}
+	if err := engine.PullIncremental(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, err := taskRepo.GetTask(ctx, "ns-1", "task-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != "pending local" || !got.CreatedAt.Equal(localCreated) || !got.UpdatedAt.Equal(localUpdated) {
+		t.Fatalf("pending task was clobbered: %+v", got)
 	}
 }
 

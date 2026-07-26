@@ -345,6 +345,75 @@ func TestRestrictedRoleRejectsCrossProjectForeignReferences(t *testing.T) {
 	}
 }
 
+func TestRestrictedRoleKBVectorQueryCannotCrossProject(t *testing.T) {
+	owner := testDB(t)
+	restricted := newRestrictedRLSDB(t, owner)
+	fx := seedRLSMatrix(t, owner)
+	var articleB, generationA, generationB string
+	mustScan(t, owner, `INSERT INTO kb_articles (project_id, title, body, author_agent_id) VALUES ($1, 'matrix-b', 'seed', $2) RETURNING id`, &articleB, fx.projectB, fx.agentID)
+	mustScan(t, owner, `INSERT INTO kb_embedding_generations (project_id, provider, model, version, dimension, state, activated_at) VALUES ($1, 'fixture', 'meaning', 'v1', 1024, 'active', now()) RETURNING id`, &generationA, fx.projectA)
+	mustScan(t, owner, `INSERT INTO kb_embedding_generations (project_id, provider, model, version, dimension, state, activated_at) VALUES ($1, 'fixture', 'meaning', 'v1', 1024, 'active', now()) RETURNING id`, &generationB, fx.projectB)
+	vectorA := rlsVectorLiteral(0)
+	vectorB := rlsVectorLiteral(1)
+	mustExec(t, owner, `INSERT INTO kb_article_embeddings (project_id, article_id, generation_id, provider, model, version, dimension, content_hash, embedding) VALUES ($1, $2, $3, 'fixture', 'meaning', 'v1', 1024, $4, $5::vector)`, fx.projectA, fx.articleA, generationA, strings.Repeat("a", 64), vectorA)
+	mustExec(t, owner, `INSERT INTO kb_article_embeddings (project_id, article_id, generation_id, provider, model, version, dimension, content_hash, embedding) VALUES ($1, $2, $3, 'fixture', 'meaning', 'v1', 1024, $4, $5::vector)`, fx.projectB, articleB, generationB, strings.Repeat("b", 64), vectorB)
+
+	tx := beginRestrictedTx(t, restricted, fx.projectA)
+	defer tx.Rollback()
+	var visibleGenerations, visibleEmbeddings int
+	if err := tx.QueryRow(`SELECT count(*) FROM kb_embedding_generations WHERE project_id = $1`, fx.projectB).Scan(&visibleGenerations); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.QueryRow(`SELECT count(*) FROM kb_article_embeddings WHERE project_id = $1`, fx.projectB).Scan(&visibleEmbeddings); err != nil {
+		t.Fatal(err)
+	}
+	if visibleGenerations != 0 || visibleEmbeddings != 0 {
+		t.Fatalf("project-B semantic rows visible in project-A scope: generations=%d embeddings=%d", visibleGenerations, visibleEmbeddings)
+	}
+	rows, err := tx.Query(
+		`SELECT a.project_id
+		 FROM kb_articles a
+		 JOIN kb_article_embeddings e ON e.article_id = a.id AND e.project_id = a.project_id
+		 WHERE a.project_id = $1 AND e.generation_id = $2
+		 ORDER BY e.embedding <=> $3::vector`, fx.projectA, generationA, vectorB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var projectID string
+		if err := rows.Scan(&projectID); err != nil {
+			t.Fatal(err)
+		}
+		if projectID != fx.projectA {
+			t.Fatalf("nearest-neighbour query returned project %s", projectID)
+		}
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("project-A nearest-neighbour rows = %d, want 1", count)
+	}
+	assertRLSInsert(t, restricted, fx.projectA,
+		`INSERT INTO kb_embedding_generations (project_id, provider, model, version, dimension, state) VALUES ($1, 'fixture', 'meaning', 'v2', 1024, 'building')`,
+		[]any{fx.projectB}, false)
+	assertRLSInsert(t, restricted, fx.projectA,
+		`INSERT INTO kb_article_embeddings (project_id, article_id, generation_id, provider, model, version, dimension, content_hash, embedding) VALUES ($1, $2, $3, 'fixture', 'meaning', 'v1', 1024, $4, $5::vector)`,
+		[]any{fx.projectB, articleB, generationB, strings.Repeat("c", 64), vectorB}, false)
+}
+
+func rlsVectorLiteral(axis int) string {
+	values := make([]string, 1024)
+	for i := range values {
+		values[i] = "0"
+	}
+	values[axis] = "1"
+	return "[" + strings.Join(values, ",") + "]"
+}
+
 func newRestrictedRLSDB(t *testing.T, owner *sql.DB) *sql.DB {
 	t.Helper()
 	lockConn, err := owner.Conn(context.Background())

@@ -38,6 +38,7 @@ func TestLoadConfig_DefaultsAndNumericEnvironment(t *testing.T) {
 		"WORMHOLE_KB_MIN_LINKS_DECISION",
 		"WORMHOLE_KB_MIN_LINKS_POLICY",
 		"WORMHOLE_KB_MIN_LINKS_PROCEDURE",
+		"WORMHOLE_COHERE_API_KEY",
 		"WORMHOLE_ADMIN_KEY",
 	}
 	for _, key := range envKeys {
@@ -91,5 +92,45 @@ func TestLoadConfig_InvalidNumbersKeepDefaults(t *testing.T) {
 	}
 	if cfg.KBMinLinksDecision != 1 || cfg.KBMinLinksPolicy != 1 || cfg.KBMinLinksProcedure != 1 {
 		t.Fatalf("invalid minimum links changed defaults: decision=%d policy=%d procedure=%d", cfg.KBMinLinksDecision, cfg.KBMinLinksPolicy, cfg.KBMinLinksProcedure)
+	}
+}
+
+func TestLoadConfig_ApprovedEmbeddingConfiguration(t *testing.T) {
+	t.Setenv("WORMHOLE_COHERE_API_KEY", "cohere-secret")
+	cfg := LoadConfig()
+	want := EmbeddingConfig{
+		Provider: "cohere", Model: "embed-v4.0", Version: "4.0", Dimension: 1024,
+		APIKey: "cohere-secret",
+	}
+	if cfg.KBEmbedding != want {
+		t.Fatalf("KBEmbedding = %+v, want approved descriptor", cfg.KBEmbedding)
+	}
+	if err := ValidateEmbeddingConfig(cfg.KBEmbedding); err != nil {
+		t.Fatalf("ValidateEmbeddingConfig: %v", err)
+	}
+}
+
+func TestValidateEmbeddingConfigRejectsMissingOrUnapprovedValues(t *testing.T) {
+	approved := EmbeddingConfig{
+		Provider: "cohere", Model: "embed-v4.0", Version: "4.0", Dimension: 1024, APIKey: "key",
+	}
+	tests := []struct {
+		name   string
+		mutate func(*EmbeddingConfig)
+	}{
+		{"missing key", func(c *EmbeddingConfig) { c.APIKey = "" }},
+		{"provider", func(c *EmbeddingConfig) { c.Provider = "other" }},
+		{"model", func(c *EmbeddingConfig) { c.Model = "embed-v3.0" }},
+		{"version", func(c *EmbeddingConfig) { c.Version = "3.0" }},
+		{"dimension", func(c *EmbeddingConfig) { c.Dimension = 16 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := approved
+			test.mutate(&cfg)
+			if err := ValidateEmbeddingConfig(cfg); err == nil {
+				t.Fatal("ValidateEmbeddingConfig accepted missing/unapproved configuration")
+			}
+		})
 	}
 }

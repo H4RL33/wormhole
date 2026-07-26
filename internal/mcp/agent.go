@@ -49,11 +49,22 @@ const onboardingArticleBody = `This project uses Wormhole's MCP tool surface for
 
 // ensureOnboardingArticle atomically creates the fixed onboarding KB article
 // for projectID if its dedicated bootstrap marker is absent.
-func ensureOnboardingArticleInTx(ctx context.Context, tx *sql.Tx, kbStore *kb.Store, projectID, authorAgentID string) error {
-	if _, err := kbStore.EnsureBootstrapArticleInTx(ctx, tx, projectID, authorAgentID, onboardingArticleBootstrapKey, onboardingArticleTitle, onboardingArticleBody, nil); err != nil {
+func ensureOnboardingArticleInTx(ctx context.Context, tx *sql.Tx, kbStore *kb.Store, projectID, authorAgentID string, embedding []float32) error {
+	if _, err := kbStore.EnsureBootstrapArticleInTx(ctx, tx, projectID, authorAgentID, onboardingArticleBootstrapKey, onboardingArticleTitle, onboardingArticleBody, nil, embedding); err != nil {
 		return fmt.Errorf("ensure onboarding article: write: %w", err)
 	}
 	return nil
+}
+
+// PrepareOnboardingArticleEmbedding performs the fixed paid provider call once
+// during Fabric startup. Unauthenticated registration handlers only read the
+// resulting in-memory vector after their database validation/reservation step.
+func PrepareOnboardingArticleEmbedding(ctx context.Context, kbStore *kb.Store) error {
+	embedding, err := kbStore.PrepareArticleEmbedding(ctx, onboardingArticleTitle, onboardingArticleBody)
+	if err != nil {
+		return fmt.Errorf("prepare onboarding article embedding: %w", err)
+	}
+	return kbStore.SetPreparedBootstrapEmbedding(onboardingArticleBootstrapKey, embedding)
 }
 
 // RegisterAgentInput is the wormhole.agent.register argument shape.
@@ -81,6 +92,85 @@ type RegisterAgentOutput struct {
 	Roles        []string  `json:"roles"`
 	IssuedAt     time.Time `json:"issued_at"`
 	Role         string    `json:"role,omitempty"`
+}
+
+// EnrolAgentInput is Gateway's Fabric-facing registration contract. The
+// local request itself never crosses this package boundary unchanged: Gateway
+// supplies its canonical SHA-256 digest and a project-scoped attempt key.
+type EnrolAgentInput struct {
+	IdempotencyKey string   `json:"idempotency_key"`
+	RequestHash    string   `json:"request_hash"`
+	Permissions    []string `json:"permissions"`
+	Owner          string   `json:"owner"`
+	Model          string   `json:"model"`
+	Capabilities   []string `json:"capabilities"`
+	Repositories   []string `json:"repositories"`
+	Roles          []string `json:"roles"`
+	Reissue        bool     `json:"reissue,omitempty"`
+}
+
+// EnrolAgentOutput is an internal Gateway/Fabric response. Token is present
+// only on initial issuance or the single controlled recovery reissue. Gateway
+// consumes it into an atomic credential write and never forwards it locally.
+type EnrolAgentOutput struct {
+	AgentID    string    `json:"agent_id"`
+	PassportID string    `json:"passport_id"`
+	Token      string    `json:"token,omitempty"`
+	IssuedAt   time.Time `json:"issued_at"`
+	Replay     bool      `json:"replay"`
+	Reissued   bool      `json:"reissued"`
+}
+
+// EnrolAgentTool executes the Gateway-owned enrolment registration step in
+// Fabric. Identity, Passport, token hash, idempotency row, and fixed project
+// bootstrap records commit atomically in Postgres.
+func EnrolAgentTool(store *identity.Store, eventsStore *events.Store, kbStore *kb.Store) Tool {
+	return Tool{
+		Name:             "wormhole.agent.enrol",
+		Description:      "Idempotently registers a Gateway enrolment and issues its project-scoped Passport credential.",
+		RequiresAuth:     false,
+		ArgumentsExample: EnrolAgentInput{},
+		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
+			var in EnrolAgentInput
+			if err := json.Unmarshal(arguments, &in); err != nil {
+				return nil, fmt.Errorf("mcp: decode wormhole.agent.enrol arguments: %w", err)
+			}
+			tx, err := store.BeginProjectTx(ctx, projectID)
+			if err != nil {
+				return nil, fmt.Errorf("mcp: wormhole.agent.enrol: %w", err)
+			}
+			defer tx.Rollback()
+
+			registration, err := store.RegisterEnrolmentInTx(ctx, tx, identity.EnrolmentRegistrationInput{
+				ProjectID: projectID, IdempotencyKey: in.IdempotencyKey, RequestHash: in.RequestHash,
+				Permissions: in.Permissions, Owner: in.Owner, Model: in.Model, Capabilities: in.Capabilities,
+				Repositories: in.Repositories, Roles: in.Roles, Reissue: in.Reissue,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("mcp: wormhole.agent.enrol: %w", err)
+			}
+			if !registration.Replay {
+				onboardingEmbedding, err := kbStore.PreparedBootstrapEmbedding(onboardingArticleBootstrapKey)
+				if err != nil {
+					return nil, fmt.Errorf("mcp: wormhole.agent.enrol: onboarding article embedding: %w", err)
+				}
+				if err := ensureDefaultChannelsInTx(ctx, tx, eventsStore, projectID); err != nil {
+					return nil, fmt.Errorf("mcp: wormhole.agent.enrol: default channel bootstrap: %w", err)
+				}
+				if err := ensureOnboardingArticleInTx(ctx, tx, kbStore, projectID, registration.Agent.ID, onboardingEmbedding); err != nil {
+					return nil, fmt.Errorf("mcp: wormhole.agent.enrol: onboarding article bootstrap: %w", err)
+				}
+			}
+			if err := tx.Commit(); err != nil {
+				return nil, fmt.Errorf("mcp: wormhole.agent.enrol: commit registration: %w", err)
+			}
+			return EnrolAgentOutput{
+				AgentID: registration.Agent.ID, PassportID: registration.Passport.ID,
+				Token: registration.RawToken, IssuedAt: registration.Passport.IssuedAt,
+				Replay: registration.Replay, Reissued: registration.Reissued,
+			}, nil
+		},
+	}
 }
 
 // unionAppend returns a new slice containing base's elements followed by
@@ -153,10 +243,14 @@ func RegisterAgentTool(store *identity.Store, eventsStore *events.Store, rolesSt
 			if err != nil {
 				return nil, fmt.Errorf("mcp: wormhole.agent.register: %w", err)
 			}
+			onboardingEmbedding, err := kbStore.PreparedBootstrapEmbedding(onboardingArticleBootstrapKey)
+			if err != nil {
+				return nil, fmt.Errorf("mcp: wormhole.agent.register: onboarding article embedding: %w", err)
+			}
 			if err := ensureDefaultChannelsInTx(ctx, tx, eventsStore, projectID); err != nil {
 				return nil, fmt.Errorf("mcp: wormhole.agent.register: default channel bootstrap: %w", err)
 			}
-			if err := ensureOnboardingArticleInTx(ctx, tx, kbStore, projectID, agent.ID); err != nil {
+			if err := ensureOnboardingArticleInTx(ctx, tx, kbStore, projectID, agent.ID, onboardingEmbedding); err != nil {
 				return nil, fmt.Errorf("mcp: wormhole.agent.register: onboarding article bootstrap: %w", err)
 			}
 			if err := tx.Commit(); err != nil {

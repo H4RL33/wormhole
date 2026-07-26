@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/config"
+	"github.com/H4RL33/wormhole/internal/runtime/localapi"
 )
 
 var version = "dev"
@@ -27,7 +29,7 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	// Dispatch table: join, connect, whoami, profile, viewer-key, mcp
+	// Dispatch table: join, connect, whoami, config, profile, viewer-key, mcp
 	if len(args) == 0 {
 		usage(stderr)
 		return 2
@@ -43,6 +45,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runConnect(args[1:], stdout, stderr)
 	case "whoami":
 		return runWhoami(args[1:], stdout, stderr)
+	case "status":
+		return runStatus(args[1:], stdout, stderr)
+	case "config":
+		return runConfig(args[1:], stdout, stderr)
 	case "profile":
 		return runProfile(args[1:], stdout, stderr)
 	case "viewer-key":
@@ -71,6 +77,13 @@ commands:
   wormhole join [flags]                  register this agent at a project
   wormhole connect [flags]               wire harnesses to credentials
   wormhole whoami [flags]                show this agent's identity
+  wormhole status [flags]                show local Gateway sync status (--profile required)
+  wormhole config code-graph enable [flags]                 enable and build the local Code Graph
+  wormhole config code-graph disable [flags]                destructively disable the local Code Graph
+  wormhole config code-graph status [flags]                 show local Code Graph lifecycle state
+  wormhole config code-graph rebuild [flags]                rebuild the active checkout copy-on-write
+  wormhole config code-graph checkout set [flags] <path>    validate, build, and select another checkout
+  wormhole config code-graph checkout show [flags]          show the approved checkout
   wormhole profile list [flags]          list stored credential profiles
   wormhole viewer-key create [flags]     issue a viewer passport
   wormhole mcp                           stdio↔socket bridge for MCP harness (no flags)
@@ -512,6 +525,89 @@ func doRegisterViaSocket(socketPath, project string, in registerAgentInput) (out
 	return out, true, nil
 }
 
+// doEnrolViaSocket sends the complete enrolment attempt to Gateway. There is
+// deliberately no HTTP fallback: Gateway owns Fabric registration and
+// credential persistence.
+func doEnrolViaSocket(socketPath string, request localapi.EnrolmentRequest) (localapi.EnrolmentResult, error) {
+	conn, err := net.DialTimeout("unix", socketPath, 2*time.Second)
+	if err != nil {
+		return localapi.EnrolmentResult{}, fmt.Errorf("gatewayd not running (dial %s: %w)", socketPath, err)
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+
+	initialize, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "initialize", Params: json.RawMessage(`{}`)})
+	if err != nil {
+		return localapi.EnrolmentResult{}, fmt.Errorf("marshal Gateway initialize request: %w", err)
+	}
+	if _, err := conn.Write(append(initialize, '\n')); err != nil {
+		return localapi.EnrolmentResult{}, fmt.Errorf("write Gateway initialize request: %w", err)
+	}
+	line, err := reader.ReadBytes('\n')
+	if err != nil {
+		return localapi.EnrolmentResult{}, fmt.Errorf("read Gateway initialize response: %w", err)
+	}
+	var initializeResponse rpcResponse
+	if err := json.Unmarshal(bytes.TrimSpace(line), &initializeResponse); err != nil {
+		return localapi.EnrolmentResult{}, fmt.Errorf("decode Gateway initialize response: %w", err)
+	}
+	if initializeResponse.Error != nil {
+		return localapi.EnrolmentResult{}, fmt.Errorf("Gateway initialize: %s", initializeResponse.Error.Message)
+	}
+	initialized, err := json.Marshal(rpcRequest{JSONRPC: "2.0", Method: "notifications/initialized"})
+	if err != nil {
+		return localapi.EnrolmentResult{}, fmt.Errorf("marshal Gateway initialized notification: %w", err)
+	}
+	if _, err := conn.Write(append(initialized, '\n')); err != nil {
+		return localapi.EnrolmentResult{}, fmt.Errorf("write Gateway initialized notification: %w", err)
+	}
+
+	arguments, err := json.Marshal(request)
+	if err != nil {
+		return localapi.EnrolmentResult{}, fmt.Errorf("marshal enrolment request: %w", err)
+	}
+	params, err := json.Marshal(toolsCallParams{Name: localapi.EnrolmentToolName, Arguments: arguments})
+	if err != nil {
+		return localapi.EnrolmentResult{}, fmt.Errorf("marshal enrolment call params: %w", err)
+	}
+	call, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("2"), Method: "tools/call", Params: params})
+	if err != nil {
+		return localapi.EnrolmentResult{}, fmt.Errorf("marshal enrolment call: %w", err)
+	}
+	if _, err := conn.Write(append(call, '\n')); err != nil {
+		return localapi.EnrolmentResult{}, fmt.Errorf("write enrolment call: %w", err)
+	}
+	line, err = reader.ReadBytes('\n')
+	if err != nil {
+		return localapi.EnrolmentResult{}, fmt.Errorf("read enrolment response: %w", err)
+	}
+	var callResponse rpcResponse
+	if err := json.Unmarshal(bytes.TrimSpace(line), &callResponse); err != nil {
+		return localapi.EnrolmentResult{}, fmt.Errorf("decode enrolment response: %w", err)
+	}
+	if callResponse.Error != nil {
+		return localapi.EnrolmentResult{}, errors.New(callResponse.Error.Message)
+	}
+	var toolResult toolCallResult
+	if err := json.Unmarshal(callResponse.Result, &toolResult); err != nil {
+		return localapi.EnrolmentResult{}, fmt.Errorf("decode enrolment tool result: %w", err)
+	}
+	if len(toolResult.Content) == 0 {
+		return localapi.EnrolmentResult{}, errors.New("empty enrolment result from gatewayd")
+	}
+	if toolResult.IsError {
+		return localapi.EnrolmentResult{}, errors.New(toolResult.Content[0].Text)
+	}
+	var result localapi.EnrolmentResult
+	if err := json.Unmarshal([]byte(toolResult.Content[0].Text), &result); err != nil {
+		return localapi.EnrolmentResult{}, fmt.Errorf("decode Gateway enrolment result: %w", err)
+	}
+	if err := result.Validate(); err != nil {
+		return localapi.EnrolmentResult{}, errors.New("Gateway returned an invalid enrolment result")
+	}
+	return result, nil
+}
+
 // doRegister calls wormhole.agent.register (no auth required)
 func doRegister(client *http.Client, server, project string, in registerAgentInput) (registerAgentOutput, error) {
 	resultRaw, err := callTool(client, server, "wormhole.agent.register", project, "", in)
@@ -618,6 +714,12 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	if *tokenFile != "" {
+		fmt.Fprintln(stderr, "wormhole join: --token-file is no longer supported; use --profile so gatewayd can persist credentials safely")
+		return 2
+	}
+	_ = context
+	_ = kbLimit
 
 	// Load configs
 	localCfg, _ := config.LoadLocal()
@@ -672,135 +774,43 @@ func runJoin(args []string, stdout, stderr io.Writer) int {
 		Role:         *role,
 	}
 
-	path, err := resolveCredentialsPath(*tokenFile, *profile, resolvedProject, *role)
+	if *role != "" {
+		found := false
+		for _, existing := range in.Roles {
+			found = found || existing == *role
+		}
+		if !found {
+			in.Roles = append(in.Roles, *role)
+		}
+	}
+	credentialProfile := *profile
+	if credentialProfile == "" {
+		credentialProfile = defaultProfileName(resolvedProject, *role)
+	}
+	if err := validateProfileName(credentialProfile); err != nil {
+		fmt.Fprintf(stderr, "wormhole join: --profile: %v\n", err)
+		return 2
+	}
+	idempotencyKey, err := localapi.NewEnrolmentIdempotencyKey()
 	if err != nil {
 		fmt.Fprintf(stderr, "wormhole join: %v\n", err)
 		return 1
 	}
-
-	out, viaSocket, sockErr := doRegisterViaSocket(gatewaySocketPath(), resolvedProject, in)
-	if viaSocket && sockErr != nil {
-		fmt.Fprintf(stderr, "wormhole join: %v\n", sockErr)
+	result, err := doEnrolViaSocket(gatewaySocketPath(), newGatewayEnrolmentRequest(
+		resolvedProject, resolvedServer, idempotencyKey, credentialProfile, in,
+	))
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole join: %v\n", err)
 		return 1
 	}
-	if !viaSocket {
-		var err error
-		out, err = doRegister(http.DefaultClient, resolvedServer, resolvedProject, in)
-		if err != nil {
-			fmt.Fprintf(stderr, "wormhole join: %v\n", err)
-			return 1
-		}
-	}
-
-	creds := credentials{
-		Server:     resolvedServer,
-		ProjectID:  resolvedProject,
-		AgentID:    out.AgentID,
-		PassportID: out.PassportID,
-		Token:      out.Token,
-		IssuedAt:   out.IssuedAt,
-		Role:       *role,
-	}
-	if err := writeCredentials(path, creds); err != nil {
-		fmt.Fprintf(stderr, "wormhole join: %v\n", err)
+	if result.Code != localapi.EnrolmentCredentialsPersistedResult && result.Code != localapi.EnrolmentSuccess {
+		fmt.Fprintf(stderr, "wormhole join: %s: %s\n", result.Code, result.Message)
 		return 1
 	}
 
 	fmt.Fprintln(stdout, "Passport created.")
-	fmt.Fprintf(stdout, "agent_id=%s passport_id=%s project=%s\n", out.AgentID, out.PassportID, resolvedProject)
-	fmt.Fprintf(stdout, "credentials written to %s\n", path)
-
-	kbQuery := *context
-	if kbQuery == "" {
-		// Build the semantic-sync query only from explicitly supplied signals.
-		// Use the raw --owner flag, not resolvedOwner: the latter falls back to
-		// git user.name/$USER, which is the developer's identity (semantic noise)
-		// and would keep an otherwise-empty join from correctly skipping the sync.
-		parts := []string{}
-		if *owner != "" {
-			parts = append(parts, *owner)
-		}
-		if resolvedModel != "" {
-			parts = append(parts, resolvedModel)
-		}
-		parts = append(parts, in.Capabilities...)
-		parts = append(parts, in.Roles...)
-		kbQuery = strings.Join(parts, " ")
-	}
-	if kbQuery == "" {
-		fmt.Fprintln(stdout, "Synchronising knowledge graph... skipped (no --context, capabilities, roles, owner, or model to build a query from)")
-	} else {
-		searchOut, searchErr := doSearch(http.DefaultClient, resolvedServer, resolvedProject, out.Token, kbQuery, *kbLimit)
-		if searchErr != nil {
-			fmt.Fprintf(stderr, "wormhole join: KB sync failed: %v\n", searchErr)
-		} else {
-			fmt.Fprintf(stdout, "Synchronising knowledge graph (%d relevant)...\n", len(searchOut.Articles))
-			for _, a := range searchOut.Articles {
-				fmt.Fprintf(stdout, "  - %s (%s)\n", a.Title, a.ArticleID)
-			}
-		}
-	}
-
-	channelsOut, chanErr := doListChannels(http.DefaultClient, resolvedServer, resolvedProject, out.Token)
-	if chanErr != nil {
-		fmt.Fprintf(stderr, "wormhole join: self-introduction failed: %v\n", chanErr)
-	} else {
-		var introChan *channelSummary
-		for _, ch := range channelsOut.Channels {
-			if ch.Name == "introductions" {
-				introChan = &ch
-				break
-			}
-		}
-		if introChan == nil {
-			fmt.Fprintln(stderr, "wormhole join: introductions channel not found")
-		} else {
-			var introText string
-			if *owner != "" && *model != "" {
-				introText = fmt.Sprintf("%s (%s) joined the project.", *owner, *model)
-			} else if *owner != "" {
-				introText = fmt.Sprintf("%s joined the project.", *owner)
-			} else if *model != "" {
-				introText = fmt.Sprintf("%s joined the project.", *model)
-			} else {
-				introText = fmt.Sprintf("%s joined the project.", out.AgentID)
-			}
-
-			payloadStruct := struct {
-				Text string `json:"text"`
-			}{
-				Text: introText,
-			}
-			payloadRaw, err := json.Marshal(payloadStruct)
-			if err != nil {
-				fmt.Fprintf(stderr, "wormhole join: self-introduction failed: %v\n", err)
-			} else {
-				_, postErr := doPostEvent(http.DefaultClient, resolvedServer, resolvedProject, out.Token, introChan.ChannelID, "message.posted", payloadRaw, &introText)
-				if postErr != nil {
-					fmt.Fprintf(stderr, "wormhole join: self-introduction failed: %v\n", postErr)
-				} else {
-					fmt.Fprintln(stdout, "Introducing agent to #introductions...")
-				}
-			}
-		}
-	}
-
-	tasksOut, tasksErr := doListTasks(http.DefaultClient, resolvedServer, resolvedProject, out.Token)
-	if tasksErr != nil {
-		fmt.Fprintf(stderr, "wormhole join: task list failed: %v\n", tasksErr)
-	} else {
-		var openCount, doneCount int
-		for _, t := range tasksOut.Tasks {
-			switch strings.ToLower(t.Status) {
-			case "todo", "wip", "blocked":
-				openCount++
-			case "done":
-				doneCount++
-			}
-		}
-		fmt.Fprintf(stdout, "Ready. %d open tasks, %d done.\n", openCount, doneCount)
-	}
-
+	fmt.Fprintf(stdout, "agent_id=%s passport_id=%s project=%s\n", result.AgentID, result.PassportID, resolvedProject)
+	fmt.Fprintf(stdout, "credentials persisted by gatewayd in profile %s\n", result.CredentialProfile)
 	return 0
 }
 
@@ -824,6 +834,10 @@ func runConnect(args []string, stdout, stderr io.Writer) int {
 	target := fs.String("target", "claude", "connector target: \"claude\" or \"opencode\"")
 	openCodeConfig := fs.String("opencode-config", "", "path to the OpenCode config file (default: nearest opencode.json/.jsonc walking up to .git, else $HOME/.config/opencode/opencode.json)")
 	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *tokenFile != "" {
+		fmt.Fprintln(stderr, "wormhole connect: --token-file is no longer supported; use --profile so gatewayd can persist credentials safely")
 		return 2
 	}
 
@@ -885,41 +899,34 @@ func runConnect(args []string, stdout, stderr io.Writer) int {
 		Roles:        splitOrNil(*roles),
 	}
 
-	path, err := resolveCredentialsPath(*tokenFile, *profile, resolvedProject, "")
+	credentialProfile := *profile
+	if credentialProfile == "" {
+		credentialProfile = defaultProfileName(resolvedProject, "")
+	}
+	if err := validateProfileName(credentialProfile); err != nil {
+		fmt.Fprintf(stderr, "wormhole connect: --profile: %v\n", err)
+		return 2
+	}
+	idempotencyKey, err := localapi.NewEnrolmentIdempotencyKey()
 	if err != nil {
 		fmt.Fprintf(stderr, "wormhole connect: %v\n", err)
 		return 1
 	}
-
-	out, err := doRegister(http.DefaultClient, resolvedServer, resolvedProject, in)
+	result, err := doEnrolViaSocket(gatewaySocketPath(), newGatewayEnrolmentRequest(
+		resolvedProject, resolvedServer, idempotencyKey, credentialProfile, in,
+	))
 	if err != nil {
 		fmt.Fprintf(stderr, "wormhole connect: %v\n", err)
 		return 1
 	}
-
-	creds := credentials{
-		Server:     resolvedServer,
-		ProjectID:  resolvedProject,
-		AgentID:    out.AgentID,
-		PassportID: out.PassportID,
-		Token:      out.Token,
-		IssuedAt:   out.IssuedAt,
-	}
-	if err := writeCredentials(path, creds); err != nil {
-		fmt.Fprintf(stderr, "wormhole connect: %v\n", err)
+	if result.Code != localapi.EnrolmentCredentialsPersistedResult && result.Code != localapi.EnrolmentSuccess {
+		fmt.Fprintf(stderr, "wormhole connect: %s: %s\n", result.Code, result.Message)
 		return 1
 	}
 
 	fmt.Fprintln(stdout, "Passport created.")
-	fmt.Fprintf(stdout, "agent_id=%s passport_id=%s project=%s\n", out.AgentID, out.PassportID, resolvedProject)
-	fmt.Fprintf(stdout, "credentials written to %s\n", path)
-
-	socketPath := gatewaySocketPath()
-	if conn, dialErr := net.DialTimeout("unix", socketPath, 2*time.Second); dialErr != nil {
-		fmt.Fprintf(stderr, "wormhole connect: warning: gatewayd not running (dial %s: %v) — start gatewayd before using the harness\n", socketPath, dialErr)
-	} else {
-		conn.Close()
-	}
+	fmt.Fprintf(stdout, "agent_id=%s passport_id=%s project=%s\n", result.AgentID, result.PassportID, resolvedProject)
+	fmt.Fprintf(stdout, "credentials persisted by gatewayd in profile %s\n", result.CredentialProfile)
 
 	// Dispatch on whether --target was explicitly provided:
 	//   explicit -> single-target inline wiring (deprecated, but still supported)
@@ -1133,6 +1140,121 @@ func runWhoami(args []string, stdout, stderr io.Writer) int {
 		entry.Name, entry.Project, role, entry.AgentID,
 		entry.IssuedAt.Format(time.RFC3339), entry.ExpiresAt.Format(time.RFC3339))
 	return 0
+}
+
+type syncStatusOutput struct {
+	State         string `json:"state"`
+	PendingWrites int    `json:"pending_writes"`
+}
+
+// runStatus reads one profile only to select its project, then asks the local
+// Gateway for runtime-owned state. It never contacts the profile's server.
+func runStatus(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	profile := fs.String("profile", "", "credential profile whose project status should be shown")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *profile == "" {
+		fmt.Fprintln(stderr, "wormhole status: --profile is required")
+		return 2
+	}
+	if err := validateProfileName(*profile); err != nil {
+		fmt.Fprintf(stderr, "wormhole status: --profile: %v\n", err)
+		return 2
+	}
+	dir, err := profilesDir()
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole status: %v\n", err)
+		return 1
+	}
+	creds, err := readCredentials(filepath.Join(dir, *profile+".json"))
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole status: profile %q: %v\n", *profile, err)
+		return 1
+	}
+	raw, err := callGatewayTool(gatewaySocketPath(), "wormhole.sync.status", map[string]string{"project_id": creds.ProjectID})
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole status: %v\n", err)
+		return 1
+	}
+	var status syncStatusOutput
+	if err := json.Unmarshal(raw, &status); err != nil {
+		fmt.Fprintf(stderr, "wormhole status: decode response: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "state=%s pending_writes=%d\n", status.State, status.PendingWrites)
+	return 0
+}
+
+func callGatewayTool(socketPath, tool string, arguments any) (json.RawMessage, error) {
+	conn, err := net.DialTimeout("unix", socketPath, 2*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("gatewayd not running (dial %s: %w)", socketPath, err)
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+
+	initialize, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "initialize", Params: json.RawMessage(`{}`)})
+	if err != nil {
+		return nil, fmt.Errorf("marshal Gateway initialize request: %w", err)
+	}
+	if _, err := conn.Write(append(initialize, '\n')); err != nil {
+		return nil, fmt.Errorf("write Gateway initialize request: %w", err)
+	}
+	line, err := reader.ReadBytes('\n')
+	if err != nil {
+		return nil, fmt.Errorf("read Gateway initialize response: %w", err)
+	}
+	var initResponse rpcResponse
+	if err := json.Unmarshal(bytes.TrimSpace(line), &initResponse); err != nil {
+		return nil, fmt.Errorf("decode Gateway initialize response: %w", err)
+	}
+	if initResponse.Error != nil {
+		return nil, fmt.Errorf("Gateway initialize: %s", initResponse.Error.Message)
+	}
+	initialized, _ := json.Marshal(rpcRequest{JSONRPC: "2.0", Method: "notifications/initialized"})
+	if _, err := conn.Write(append(initialized, '\n')); err != nil {
+		return nil, fmt.Errorf("write Gateway initialized notification: %w", err)
+	}
+	args, err := json.Marshal(arguments)
+	if err != nil {
+		return nil, fmt.Errorf("marshal %s arguments: %w", tool, err)
+	}
+	params, err := json.Marshal(toolsCallParams{Name: tool, Arguments: args})
+	if err != nil {
+		return nil, fmt.Errorf("marshal %s params: %w", tool, err)
+	}
+	call, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("2"), Method: "tools/call", Params: params})
+	if err != nil {
+		return nil, fmt.Errorf("marshal %s request: %w", tool, err)
+	}
+	if _, err := conn.Write(append(call, '\n')); err != nil {
+		return nil, fmt.Errorf("write %s request: %w", tool, err)
+	}
+	line, err = reader.ReadBytes('\n')
+	if err != nil {
+		return nil, fmt.Errorf("read %s response: %w", tool, err)
+	}
+	var callResponse rpcResponse
+	if err := json.Unmarshal(bytes.TrimSpace(line), &callResponse); err != nil {
+		return nil, fmt.Errorf("decode %s response: %w", tool, err)
+	}
+	if callResponse.Error != nil {
+		return nil, errors.New(callResponse.Error.Message)
+	}
+	var result toolCallResult
+	if err := json.Unmarshal(callResponse.Result, &result); err != nil {
+		return nil, fmt.Errorf("decode %s result: %w", tool, err)
+	}
+	if len(result.Content) == 0 {
+		return nil, fmt.Errorf("%s: empty tool result content", tool)
+	}
+	if result.IsError {
+		return nil, errors.New(result.Content[0].Text)
+	}
+	return json.RawMessage(result.Content[0].Text), nil
 }
 
 // runProfile dispatches wormhole profile <subcommand>

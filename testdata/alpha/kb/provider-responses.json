@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "approved_request": {
+    "endpoint": "https://api.cohere.com/v1/embed",
+    "model": "embed-v4.0",
+    "version": "4.0",
+    "embedding_types": ["float"],
+    "output_dimension": 1024,
+    "max_tokens": 8192,
+    "truncate": "NONE"
+  },
+  "response_cases": [
+    {
+      "name": "ordered_float_vectors",
+      "http_status": 200,
+      "texts": ["first", "second"],
+      "vector_count": 2,
+      "dimension": 1024,
+      "accepted": true
+    },
+    {
+      "name": "dimension_mismatch",
+      "http_status": 200,
+      "texts": ["first"],
+      "vector_count": 1,
+      "dimension": 3,
+      "accepted": false,
+      "error_code": "dimension_mismatch"
+    },
+    {
+      "name": "provider_unavailable",
+      "http_status": 503,
+      "accepted": false,
+      "retryable": true,
+      "semantic_ranking": false,
+      "degraded": true,
+      "fallback": "none"
+    },
+    {
+      "name": "reembedding_batch",
+      "http_status": 200,
+      "input_type": "search_document",
+      "mode": "reembedding",
+      "max_batch_count": 64,
+      "dimension": 1024,
+      "accepted": true,
+      "database_transaction_during_request": false
+    },
+    {
+      "name": "failed_candidate_preserves_active",
+      "http_status": 503,
+      "accepted": false,
+      "candidate_state": "failed",
+      "previous_generation_state": "active",
+      "fallback": "none"
+    }
+  ],
+  "live_acceptance": {
+    "enabled_by": "WORMHOLE_COHERE_LIVE_TEST=1",
+    "credential_env": "WORMHOLE_COHERE_API_KEY",
+    "default": "skipped"
+  }
+}

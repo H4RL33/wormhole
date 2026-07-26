@@ -85,6 +85,24 @@ func TestQueueListPending(t *testing.T) {
 	}
 }
 
+func TestQueuePendingCountIsNamespaceScoped(t *testing.T) {
+	repo := setupQueueRepo(t)
+	defer closeQueueRepo(t, repo)
+	ctx := context.Background()
+	for _, namespace := range []string{"ns-1", "ns-1", "ns-2"} {
+		if _, err := repo.Enqueue(ctx, namespace, "task", namespace, "create", json.RawMessage(`{}`), 0); err != nil {
+			t.Fatalf("Enqueue %s: %v", namespace, err)
+		}
+	}
+	count, err := repo.PendingCount(ctx, "ns-1")
+	if err != nil {
+		t.Fatalf("PendingCount: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("PendingCount ns-1 = %d, want 2", count)
+	}
+}
+
 // TestQueueMarkDelivered tests marking entries as delivered.
 func TestQueueMarkDelivered(t *testing.T) {
 	repo := setupQueueRepo(t)

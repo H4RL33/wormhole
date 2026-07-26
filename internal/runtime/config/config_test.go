@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeFakeCredentials(t *testing.T, home, profile string) {
@@ -26,6 +27,194 @@ func writeFakeCredentials(t *testing.T, home, profile string) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, profile+".json"), data, 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
+	}
+}
+
+func TestRuntimePathsResolveWithoutCredentials(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(home, "run"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+
+	paths, err := ResolveRuntimePaths()
+	if err != nil {
+		t.Fatalf("ResolveRuntimePaths: %v", err)
+	}
+	if paths.SocketPath != filepath.Join(home, "run", "wormhole", "wormholed.sock") ||
+		paths.DBPath != filepath.Join(home, "data", "wormhole", "wormholed.db") ||
+		paths.CredentialsDir != filepath.Join(home, ".wormhole", "credentials") {
+		t.Fatalf("runtime paths = %+v", paths)
+	}
+	if _, err := os.Stat(paths.CredentialsDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ResolveRuntimePaths created credential directory: %v", err)
+	}
+}
+
+func TestWriteCredentialProfileIsAtomicAndRestrictive(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "credentials")
+	issuedAt := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	want := Credentials{
+		Server: "https://fabric.example", ProjectID: "project-1", AgentID: "agent-1",
+		PassportID: "passport-1", Token: "raw-secret-token", IssuedAt: issuedAt, Role: "contributor",
+	}
+	path, err := WriteCredentialProfile(root, "project-1__contributor", want)
+	if err != nil {
+		t.Fatalf("WriteCredentialProfile: %v", err)
+	}
+	if path != filepath.Join(root, "project-1__contributor.json") {
+		t.Fatalf("path = %q", path)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat credential: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("credential mode = %o, want 0600", info.Mode().Perm())
+	}
+	dirInfo, err := os.Stat(root)
+	if err != nil {
+		t.Fatalf("stat credential root: %v", err)
+	}
+	if dirInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("credential root mode = %o, want 0700", dirInfo.Mode().Perm())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read credential: %v", err)
+	}
+	var got Credentials
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("decode credential: %v", err)
+	}
+	if got != want {
+		t.Fatalf("credential mismatch: server=%q project=%q agent=%q passport=%q role=%q issued_at_match=%v token_match=%v",
+			got.Server, got.ProjectID, got.AgentID, got.PassportID, got.Role, got.IssuedAt.Equal(want.IssuedAt), got.Token == want.Token)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read credential root: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "project-1__contributor.json" {
+		t.Fatalf("credential root entries = %v, want committed profile only", entries)
+	}
+}
+
+func TestWriteCredentialProfileRejectsPathsAndCleansFailedTemporaryFile(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "credentials")
+	for _, profile := range []string{"", "../escape", "nested/profile", `nested\profile`, ".."} {
+		if _, err := WriteCredentialProfile(root, profile, Credentials{}); !errors.Is(err, ErrInvalidProfileName) {
+			t.Fatalf("WriteCredentialProfile(%q) error = %v, want ErrInvalidProfileName", profile, err)
+		}
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "blocked.json"), 0o700); err != nil {
+		t.Fatalf("mkdir blocked target: %v", err)
+	}
+	if _, err := WriteCredentialProfile(root, "blocked", Credentials{Token: "must-not-leak"}); err == nil {
+		t.Fatal("WriteCredentialProfile to directory target returned nil")
+	} else if strings.Contains(err.Error(), "must-not-leak") {
+		t.Fatalf("credential write error exposed token: %v", err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read root: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".tmp") {
+			t.Fatalf("failed write left temporary file %q", entry.Name())
+		}
+	}
+}
+
+func TestWriteCredentialProfileDoesNotClobberOccupiedProfile(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "credentials")
+	first := Credentials{Server: "https://fabric-a.example", ProjectID: "project-a", AgentID: "agent-a", PassportID: "passport-a", Token: "first-secret"}
+	if _, err := WriteCredentialProfile(root, "occupied", first); err != nil {
+		t.Fatalf("first WriteCredentialProfile: %v", err)
+	}
+	if _, err := WriteCredentialProfile(root, "occupied", Credentials{Token: "second-secret"}); !errors.Is(err, ErrCredentialProfileExists) {
+		t.Fatalf("second WriteCredentialProfile error = %v, want ErrCredentialProfileExists", err)
+	}
+	got, err := ReadCredentialProfile(root, "occupied")
+	if err != nil {
+		t.Fatalf("ReadCredentialProfile: %v", err)
+	}
+	if got.Server != first.Server || got.ProjectID != first.ProjectID || got.AgentID != first.AgentID || got.PassportID != first.PassportID || got.Token != first.Token {
+		t.Fatalf("occupied profile changed: server=%q project=%q agent=%q passport=%q token_matches_first=%v",
+			got.Server, got.ProjectID, got.AgentID, got.PassportID, got.Token == first.Token)
+	}
+}
+
+func TestReadCredentialProfileRejectsUnsafeFilesystemObjects(t *testing.T) {
+	writeJSON := func(t *testing.T, path string, mode os.FileMode) {
+		t.Helper()
+		data, err := json.Marshal(Credentials{Server: "https://fabric.example", ProjectID: "project-a", AgentID: "agent-a", PassportID: "passport-a", Token: "secret"})
+		if err != nil {
+			t.Fatalf("marshal credentials: %v", err)
+		}
+		if err := os.WriteFile(path, data, mode); err != nil {
+			t.Fatalf("write credentials: %v", err)
+		}
+	}
+
+	t.Run("final symlink", func(t *testing.T) {
+		root := t.TempDir()
+		target := filepath.Join(t.TempDir(), "target.json")
+		writeJSON(t, target, 0o600)
+		if err := os.Symlink(target, filepath.Join(root, "profile.json")); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+		if _, err := ReadCredentialProfile(root, "profile"); !errors.Is(err, ErrUnsafeCredentialProfile) {
+			t.Fatalf("ReadCredentialProfile final symlink error = %v, want ErrUnsafeCredentialProfile", err)
+		}
+	})
+
+	t.Run("ancestor symlink", func(t *testing.T) {
+		parent := t.TempDir()
+		realRoot := filepath.Join(parent, "real")
+		if err := os.Mkdir(realRoot, 0o700); err != nil {
+			t.Fatalf("mkdir real root: %v", err)
+		}
+		writeJSON(t, filepath.Join(realRoot, "profile.json"), 0o600)
+		linkedRoot := filepath.Join(parent, "linked")
+		if err := os.Symlink(realRoot, linkedRoot); err != nil {
+			t.Fatalf("symlink root: %v", err)
+		}
+		if _, err := ReadCredentialProfile(linkedRoot, "profile"); !errors.Is(err, ErrUnsafeCredentialProfile) {
+			t.Fatalf("ReadCredentialProfile ancestor symlink error = %v, want ErrUnsafeCredentialProfile", err)
+		}
+	})
+
+	t.Run("non regular final", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.Mkdir(filepath.Join(root, "profile.json"), 0o700); err != nil {
+			t.Fatalf("mkdir final: %v", err)
+		}
+		if _, err := ReadCredentialProfile(root, "profile"); !errors.Is(err, ErrUnsafeCredentialProfile) {
+			t.Fatalf("ReadCredentialProfile directory error = %v, want ErrUnsafeCredentialProfile", err)
+		}
+	})
+
+	t.Run("group readable final", func(t *testing.T) {
+		root := t.TempDir()
+		path := filepath.Join(root, "profile.json")
+		writeJSON(t, path, 0o640)
+		if _, err := ReadCredentialProfile(root, "profile"); !errors.Is(err, ErrUnsafeCredentialProfile) {
+			t.Fatalf("ReadCredentialProfile mode error = %v, want ErrUnsafeCredentialProfile", err)
+		}
+	})
+}
+
+func TestReadCredentialProfileMissingFilePreservesNotExist(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatalf("chmod credential root: %v", err)
+	}
+	_, err := ReadCredentialProfile(root, "missing")
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ReadCredentialProfile missing error = %v, want os.ErrNotExist", err)
 	}
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -13,9 +14,38 @@ import (
 	"testing"
 	"time"
 
+	"github.com/H4RL33/wormhole/internal/core/kb"
 	"github.com/H4RL33/wormhole/internal/mcp"
+	"github.com/H4RL33/wormhole/internal/storage"
 	"github.com/H4RL33/wormhole/internal/types"
 )
+
+type countingStartupEmbedder struct {
+	calls int
+}
+
+func (*countingStartupEmbedder) Descriptor() kb.EmbeddingDescriptor {
+	return kb.StubEmbedder{}.Descriptor()
+}
+
+func (e *countingStartupEmbedder) Embed(ctx context.Context, request kb.EmbeddingRequest) ([][]float32, error) {
+	e.calls++
+	return kb.StubEmbedder{}.Embed(ctx, request)
+}
+
+func TestRunServerWithEmbedderPrecomputesOnboardingExactlyOnce(t *testing.T) {
+	cfg := types.LoadConfig()
+	cfg.KBEmbedding.APIKey = "test-key"
+	embedder := &countingStartupEmbedder{}
+	wantErr := errors.New("stop after assembly")
+	err := runServerWithEmbedder(cfg, embedder, storage.Open, func(*http.Server) error { return wantErr })
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("runServerWithEmbedder error = %v, want %v", err, wantErr)
+	}
+	if embedder.calls != 1 {
+		t.Fatalf("startup embedding calls = %d, want 1", embedder.calls)
+	}
+}
 
 func TestLinkedVersionAppearsInServerMetadata(t *testing.T) {
 	want := os.Getenv("WORMHOLE_EXPECT_LINKED_VERSION")
@@ -76,7 +106,9 @@ func TestServerMainExitsOneWhenWiringFails(t *testing.T) {
 func TestRunServerWithOpenReturnsDatabaseFailureBeforeServing(t *testing.T) {
 	wantErr := errors.New("database unavailable")
 	served := false
-	err := runServerWithOpen(types.Config{}, func(types.Config) (*sql.DB, error) {
+	cfg := types.LoadConfig()
+	cfg.KBEmbedding.APIKey = "test-cohere-key"
+	err := runServerWithOpen(cfg, func(types.Config) (*sql.DB, error) {
 		return nil, wantErr
 	}, func(*http.Server) error {
 		served = true
@@ -93,13 +125,30 @@ func TestRunServerWithOpenReturnsDatabaseFailureBeforeServing(t *testing.T) {
 	}
 }
 
+func TestRunServerWithOpenRejectsMissingEmbeddingConfigurationBeforeDatabaseOpen(t *testing.T) {
+	cfg := types.LoadConfig()
+	cfg.KBEmbedding.APIKey = ""
+	opened := false
+	err := runServerWithOpen(cfg, func(types.Config) (*sql.DB, error) {
+		opened = true
+		return nil, errors.New("must not open")
+	}, func(*http.Server) error { return nil })
+	if !errors.Is(err, types.ErrEmbeddingConfig) {
+		t.Fatalf("runServerWithOpen error = %v, want ErrEmbeddingConfig", err)
+	}
+	if opened {
+		t.Fatal("database opened before embedding configuration validation")
+	}
+}
+
 func TestRunServerBuildsBoundedMCPAndDashboardMux(t *testing.T) {
 	cfg := types.LoadConfig()
 	cfg.ListenAddr = "127.0.0.1:0"
 	cfg.AdminKey = "admin-key"
+	cfg.KBEmbedding.APIKey = "test-cohere-key"
 	wantErr := errors.New("stop after inspecting server")
 
-	err := runServer(cfg, func(server *http.Server) error {
+	err := runServerWithEmbedder(cfg, kb.StubEmbedder{}, storage.Open, func(server *http.Server) error {
 		if server.Addr != cfg.ListenAddr {
 			t.Fatalf("server address = %q, want %q", server.Addr, cfg.ListenAddr)
 		}

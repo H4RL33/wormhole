@@ -36,6 +36,7 @@ func NewFabricRegistry(deps FabricRegistryDependencies) *Registry {
 		registry.Register(tool)
 	}
 	register(RegisterAgentTool(deps.Identity, deps.Events, deps.Roles, deps.KB), RegisterAgentOutput{})
+	register(EnrolAgentTool(deps.Identity, deps.Events, deps.KB), EnrolAgentOutput{})
 	register(WhoAmITool(), WhoAmIOutput{})
 	register(CreateTaskTool(deps.Tasks), CreateTaskOutput{})
 	register(AssignTaskTool(deps.Tasks), AssignTaskOutput{})
@@ -51,7 +52,7 @@ func NewFabricRegistry(deps FabricRegistryDependencies) *Registry {
 	register(SearchArticlesTool(deps.KB), SearchArticlesOutput{})
 	register(GetArticleTool(deps.KB), GetArticleOutput{})
 	register(GetArticleLinksTool(deps.KB), GetArticleLinksOutput{})
-	register(BootstrapTool(deps.Tasks, deps.KB, deps.Events, syncRateLimiter), BootstrapOutput{})
+	register(BootstrapTool(deps.Identity, deps.Tasks, deps.KB, deps.Events, syncRateLimiter), BootstrapOutput{})
 	register(IncrementalPullTool(deps.Tasks, deps.KB, deps.Events, syncRateLimiter), IncrementalPullOutput{})
 	register(IncrementalPushTool(deps.Tasks, deps.KB, deps.Events, syncRateLimiter), IncrementalPushOutput{})
 	register(ConflictReportTool(deps.Tasks, deps.KB, deps.Events, syncRateLimiter), ConflictReportOutput{})

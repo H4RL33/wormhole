@@ -6,14 +6,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
+
+	"github.com/H4RL33/wormhole/internal/types"
 )
 
 var ErrInvalidEventType = errors.New("events: invalid event type")
 var ErrEmptyMessagePostedNote = errors.New("events: message.posted requires a non-empty note")
 var ErrChannelNotFound = errors.New("events: channel not found")
 var ErrPassportNotFound = errors.New("events: agent not registered or has no passport for this project")
+var ErrStableIDConflict = errors.New("events: stable id conflict")
 
 var AllowedEventTypes = map[string]bool{
 	"task.status_changed":    true,
@@ -135,12 +139,21 @@ func (s *Store) createChannelWithOptionalID(ctx context.Context, id, projectID, 
 		)
 	} else {
 		row = tx.QueryRowContext(ctx,
-			`INSERT INTO channels (id, project_id, name) VALUES ($1, $2, $3) RETURNING `+channelColumns,
+			`INSERT INTO channels (id, project_id, name) VALUES ($1, $2, $3)
+			 ON CONFLICT (id) DO NOTHING RETURNING `+channelColumns,
 			id, projectID, name,
 		)
 	}
 	var channel Channel
 	err = row.Scan(&channel.ID, &channel.ProjectID, &channel.Name, &channel.CreatedAt)
+	if id != "" && errors.Is(err, sql.ErrNoRows) {
+		err = tx.QueryRowContext(ctx,
+			`SELECT `+channelColumns+` FROM channels WHERE id = $1 AND project_id = $2`, id, projectID,
+		).Scan(&channel.ID, &channel.ProjectID, &channel.Name, &channel.CreatedAt)
+		if errors.Is(err, sql.ErrNoRows) || err == nil && channel.Name != name {
+			return Channel{}, fmt.Errorf("events: create channel: %w", ErrStableIDConflict)
+		}
+	}
 	if err != nil {
 		return Channel{}, fmt.Errorf("events: create channel: %w", err)
 	}
@@ -187,6 +200,55 @@ func (s *Store) ListChannels(ctx context.Context, projectID string) ([]Channel, 
 		return nil, fmt.Errorf("events: list channels commit: %w", err)
 	}
 	return channels, nil
+}
+
+// ListBootstrapInTx reads every channel and durable event in deterministic
+// order through the caller's project-scoped repeatable-read transaction.
+func (s *Store) ListBootstrapInTx(ctx context.Context, tx *sql.Tx, projectID string) ([]types.BootstrapChannelV1, []types.BootstrapEventV1, error) {
+	if tx == nil || projectID == "" {
+		return nil, nil, fmt.Errorf("events: list bootstrap: invalid scope")
+	}
+	channelRows, err := tx.QueryContext(ctx,
+		`SELECT `+channelColumns+` FROM channels WHERE project_id = $1 ORDER BY name, id`, projectID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("events: list bootstrap channels: query: %w", err)
+	}
+	channels := make([]types.BootstrapChannelV1, 0)
+	for channelRows.Next() {
+		var channel types.BootstrapChannelV1
+		if err := channelRows.Scan(&channel.ID, &channel.ProjectID, &channel.Name, &channel.CreatedAt); err != nil {
+			channelRows.Close()
+			return nil, nil, fmt.Errorf("events: list bootstrap channels: scan: %w", err)
+		}
+		channels = append(channels, channel)
+	}
+	if err := channelRows.Err(); err != nil {
+		channelRows.Close()
+		return nil, nil, fmt.Errorf("events: list bootstrap channels: iterate: %w", err)
+	}
+	if err := channelRows.Close(); err != nil {
+		return nil, nil, fmt.Errorf("events: list bootstrap channels: close: %w", err)
+	}
+
+	eventRows, err := tx.QueryContext(ctx,
+		`SELECT `+eventColumns+` FROM events WHERE project_id = $1 ORDER BY created_at, id`, projectID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("events: list bootstrap events: query: %w", err)
+	}
+	defer eventRows.Close()
+	events := make([]types.BootstrapEventV1, 0)
+	for eventRows.Next() {
+		var event types.BootstrapEventV1
+		if err := eventRows.Scan(&event.ID, &event.ProjectID, &event.ChannelID, &event.AgentID,
+			&event.EventType, &event.Payload, &event.Note, &event.CreatedAt); err != nil {
+			return nil, nil, fmt.Errorf("events: list bootstrap events: scan: %w", err)
+		}
+		events = append(events, event)
+	}
+	if err := eventRows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("events: list bootstrap events: iterate: %w", err)
+	}
+	return channels, events, nil
 }
 
 func (s *Store) GetChannel(ctx context.Context, projectID, channelID string) (Channel, error) {
@@ -335,6 +397,7 @@ func (s *Store) publishEventInTxWithOptionalID(ctx context.Context, tx *sql.Tx, 
 		row = tx.QueryRowContext(ctx,
 			`INSERT INTO events (id, project_id, channel_id, agent_id, event_type, payload, note)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7)
+			 ON CONFLICT (id) DO NOTHING
 			 RETURNING `+eventColumns,
 			id, projectID, channelID, agentID, eventType, payload, note,
 		)
@@ -342,11 +405,36 @@ func (s *Store) publishEventInTxWithOptionalID(ctx context.Context, tx *sql.Tx, 
 
 	var event Event
 	err = row.Scan(&event.ID, &event.ProjectID, &event.ChannelID, &event.AgentID, &event.EventType, &event.Payload, &event.Note, &event.CreatedAt)
+	if id != "" && errors.Is(err, sql.ErrNoRows) {
+		err = tx.QueryRowContext(ctx,
+			`SELECT `+eventColumns+` FROM events WHERE id = $1 AND project_id = $2`, id, projectID,
+		).Scan(&event.ID, &event.ProjectID, &event.ChannelID, &event.AgentID, &event.EventType, &event.Payload, &event.Note, &event.CreatedAt)
+		if errors.Is(err, sql.ErrNoRows) || err == nil && !sameEventReplay(event, channelID, agentID, eventType, payload, note) {
+			return Event{}, fmt.Errorf("events: publish event: %w", ErrStableIDConflict)
+		}
+	}
 	if err != nil {
 		return Event{}, fmt.Errorf("events: publish event: %w", err)
 	}
 
 	return event, nil
+}
+
+func sameEventReplay(event Event, channelID, agentID, eventType string, payload json.RawMessage, note *string) bool {
+	return event.ChannelID == channelID && event.AgentID == agentID && event.EventType == eventType &&
+		equalOptionalString(event.Note, note) && equalJSON(event.Payload, payload)
+}
+
+func equalOptionalString(left, right *string) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
+}
+
+func equalJSON(left, right json.RawMessage) bool {
+	var leftValue, rightValue any
+	if json.Unmarshal(left, &leftValue) != nil || json.Unmarshal(right, &rightValue) != nil {
+		return false
+	}
+	return reflect.DeepEqual(leftValue, rightValue)
 }
 
 func (s *Store) ListEvents(ctx context.Context, projectID, channelID string, limit, offset int) ([]Event, error) {

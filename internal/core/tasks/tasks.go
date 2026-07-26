@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -30,6 +31,10 @@ var ErrInvalidTransition = errors.New("tasks: invalid status transition")
 // ErrPassportNotFound is returned when an assignment references an agent that
 // is not registered or has no passport for the given project.
 var ErrPassportNotFound = errors.New("tasks: agent not registered or has no passport for this project")
+
+// ErrStableIDConflict is returned when a sync replay reuses a client-owned
+// task id with different durable content. The existing task is never changed.
+var ErrStableIDConflict = errors.New("tasks: stable id conflict")
 
 // validTransitions encodes the allowed status transitions. Neither RFC-0001
 // nor RFC-0002 specifies task lifecycle transitions; this is an inferred
@@ -96,6 +101,7 @@ func (s *Store) CreateWithIDAndOwner(ctx context.Context, id, projectID, title, 
 // non-empty id is inserted exactly. An optional owner is passport-validated
 // before insertion and written in that same transaction.
 func (s *Store) createWithOptionalID(ctx context.Context, id, projectID, title, description string, parentTaskID, ownerAgentID *string, priority int, dueBy *time.Time) (Task, error) {
+	dueBy = normalizePostgresTimestamp(dueBy)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Task{}, fmt.Errorf("tasks: create: begin tx: %w", err)
@@ -136,11 +142,22 @@ func (s *Store) createWithOptionalID(ctx context.Context, id, projectID, title, 
 	} else {
 		row = tx.QueryRowContext(ctx,
 			`INSERT INTO tasks (id, project_id, parent_task_id, title, description, owner_agent_id, priority, due_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			 ON CONFLICT (id) DO NOTHING
 			 RETURNING `+taskColumns,
 			id, projectID, parentTaskID, title, description, ownerAgentID, priority, dueBy,
 		)
 	}
 	task, err := scanTask(row)
+	if id != "" && errors.Is(err, sql.ErrNoRows) {
+		task, err = scanTask(tx.QueryRowContext(ctx,
+			`SELECT `+taskColumns+` FROM tasks WHERE id = $1 AND project_id = $2`, id, projectID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return Task{}, fmt.Errorf("tasks: create: %w", ErrStableIDConflict)
+		}
+		if err == nil && !sameCreateReplay(task, title, description, parentTaskID, ownerAgentID, priority, dueBy) {
+			return Task{}, fmt.Errorf("tasks: create: %w", ErrStableIDConflict)
+		}
+	}
 	if err != nil {
 		return Task{}, fmt.Errorf("tasks: create: %w", err)
 	}
@@ -149,6 +166,30 @@ func (s *Store) createWithOptionalID(ctx context.Context, id, projectID, title, 
 		return Task{}, fmt.Errorf("tasks: create: commit: %w", err)
 	}
 	return task, nil
+}
+
+func sameCreateReplay(task Task, title, description string, parentTaskID, ownerAgentID *string, priority int, dueBy *time.Time) bool {
+	return task.Title == title && task.Description == description && task.Status == "todo" && task.Priority == priority &&
+		equalOptionalString(task.ParentTaskID, parentTaskID) && equalOptionalString(task.OwnerAgentID, ownerAgentID) &&
+		equalOptionalTime(task.DueBy, dueBy)
+}
+
+func equalOptionalString(left, right *string) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
+}
+
+func equalOptionalTime(left, right *time.Time) bool {
+	left = normalizePostgresTimestamp(left)
+	right = normalizePostgresTimestamp(right)
+	return left == nil && right == nil || left != nil && right != nil && left.Equal(*right)
+}
+
+func normalizePostgresTimestamp(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	normalized := value.UTC().Truncate(time.Microsecond)
+	return &normalized
 }
 
 // Assign sets a task's owner_agent_id.
@@ -238,6 +279,81 @@ func (s *Store) List(ctx context.Context, projectID string, status *string) ([]T
 		return nil, fmt.Errorf("tasks: list: commit: %w", err)
 	}
 	return tasks, nil
+}
+
+// ListBootstrapInTx reads the complete project task graph through the caller's
+// repeatable-read transaction and returns a deterministic parent-before-child
+// topological order, breaking available-node ties by created_at then id.
+func (s *Store) ListBootstrapInTx(ctx context.Context, tx *sql.Tx, projectID string) ([]types.BootstrapTaskV1, error) {
+	if tx == nil || projectID == "" {
+		return nil, fmt.Errorf("tasks: list bootstrap: invalid scope")
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT `+taskColumns+` FROM tasks WHERE project_id = $1 ORDER BY created_at, id`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("tasks: list bootstrap: query: %w", err)
+	}
+	defer rows.Close()
+
+	all := make([]types.BootstrapTaskV1, 0)
+	for rows.Next() {
+		var task types.BootstrapTaskV1
+		if err := rows.Scan(&task.ID, &task.ProjectID, &task.ParentTaskID, &task.Title, &task.Description,
+			&task.OwnerAgentID, &task.Status, &task.Priority, &task.DueBy, &task.CreatedAt, &task.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("tasks: list bootstrap: scan: %w", err)
+		}
+		all = append(all, task)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("tasks: list bootstrap: iterate: %w", err)
+	}
+
+	byID := make(map[string]types.BootstrapTaskV1, len(all))
+	children := make(map[string][]string, len(all))
+	indegree := make(map[string]int, len(all))
+	for _, task := range all {
+		byID[task.ID] = task
+		indegree[task.ID] = 0
+	}
+	for _, task := range all {
+		if task.ParentTaskID == nil {
+			continue
+		}
+		if _, ok := byID[*task.ParentTaskID]; !ok {
+			return nil, fmt.Errorf("tasks: list bootstrap: task %q references missing parent %q", task.ID, *task.ParentTaskID)
+		}
+		children[*task.ParentTaskID] = append(children[*task.ParentTaskID], task.ID)
+		indegree[task.ID]++
+	}
+	lessID := func(left, right string) bool {
+		a, b := byID[left], byID[right]
+		if a.CreatedAt.Equal(b.CreatedAt) {
+			return a.ID < b.ID
+		}
+		return a.CreatedAt.Before(b.CreatedAt)
+	}
+	ready := make([]string, 0, len(all))
+	for id, degree := range indegree {
+		if degree == 0 {
+			ready = append(ready, id)
+		}
+	}
+	ordered := make([]types.BootstrapTaskV1, 0, len(all))
+	for len(ready) > 0 {
+		sort.Slice(ready, func(i, j int) bool { return lessID(ready[i], ready[j]) })
+		id := ready[0]
+		ready = ready[1:]
+		ordered = append(ordered, byID[id])
+		for _, childID := range children[id] {
+			indegree[childID]--
+			if indegree[childID] == 0 {
+				ready = append(ready, childID)
+			}
+		}
+	}
+	if len(ordered) != len(all) {
+		return nil, fmt.Errorf("tasks: list bootstrap: task graph contains a cycle")
+	}
+	return ordered, nil
 }
 
 // UpdateStatus moves a task to newStatus, rejecting any transition not in

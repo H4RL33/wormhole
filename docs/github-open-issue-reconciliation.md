@@ -18,7 +18,7 @@ gh issue list --repo H4RL33/wormhole --state open --limit 200 \
 |---|---|---|---|
 | [#1: Project bootstrap](https://github.com/H4RL33/wormhole/issues/1) | 2026-07-07 | Close | `go.mod`, `docker-compose.yml`, `cmd/fabric/main.go`, and `internal/mcp/jsonrpc.go` provide the requested repository, database, server, and MCP foundations. |
 | [#2: Identity model](https://github.com/H4RL33/wormhole/issues/2) | 2026-07-07 | Close | `internal/core/identity/identity.go` implements registration, Passport and token issuance, `WhoAmI`, permissions, and append-only audit entries; `internal/core/identity/identity_test.go` exercises those paths. Audit RLS hardening was completed by #33 after correcting every standalone identity transaction that accesses `audit_log`; the broader beta audit remains #36. |
-| [#3: Database schema](https://github.com/H4RL33/wormhole/issues/3) | 2026-07-07 | Keep open | Migrations define every entity named by the issue except `sessions`: there is no `CREATE TABLE sessions` migration, although `docs/db-entities.md` and RFC-0001 §8.4 still include identity sessions. |
+| [#3: Database schema](https://github.com/H4RL33/wormhole/issues/3) | 2026-07-07 | Keep open, deferred from alpha | Migrations define every entity named by the issue except `sessions`. Alpha explicitly defers durable harness-session records: Passports identify agents, credential profiles authorise local runtime access, and process sessions are ephemeral. |
 | [#4: MCP server](https://github.com/H4RL33/wormhole/issues/4) | 2026-07-07 | Close | `cmd/fabric/main.go` registers every RFC-0001 §9 identity, communication, task, KB, and git tool; `internal/mcp/jsonrpc_test.go` verifies the current surface. Registry single-source hardening is completed by #32. |
 | [#5: Task CRUD](https://github.com/H4RL33/wormhole/issues/5) | 2026-07-07 | Close | `internal/core/tasks/tasks.go` implements create, assign, list, the status state machine, and transactional `task.status_changed` emission; `internal/mcp/task_test.go` and `internal/core/tasks/tasks_test.go` pass. |
 | [#6: Event bus](https://github.com/H4RL33/wormhole/issues/6) | 2026-07-07 | Close | `internal/core/events/events.go` implements channels and the append-only typed event log; `internal/mcp/channel.go` exposes create, post, subscribe, and list, covered by `internal/mcp/channel_test.go`. |
@@ -68,9 +68,9 @@ gh issue list --repo H4RL33/wormhole --state open --limit 200 \
 
 ## Keep open
 
-- **#3:** Add the missing durable identity-session entity or amend the issue and
-  RFC-0001 §8.4 with an explicit decision not to persist sessions. RFC-0001's
-  decision register currently records no such deferral.
+- **#3:** Durable harness-session records are explicitly deferred from Alpha
+  Validation. Keep the issue open for a demonstrated post-alpha use case that
+  requires a durable session entity or a corresponding RFC amendment.
 - **#8:** Replace `StubEmbedder` in production with a meaning-bearing embedding
   pipeline and prove semantic ranking. RFC-0001 §15 now has no open provider
   question, so this is an implementation gap rather than permission to call the
@@ -105,3 +105,77 @@ gh issue list --repo H4RL33/wormhole --state open --limit 200 \
   supersede or fold it into **#10**.
 - Make no issue, label, milestone, or release changes as part of this
   documentation-only reconciliation.
+
+---
+
+## Alpha Validation programme reconciliation (2026-07-25)
+
+**Intended milestone:** `Alpha Validation`. This section records the GitHub
+state read on 2026-07-25 and the delivery map for the canonical Alpha
+Validation specification. It is a documentation record only; it does not
+change GitHub state.
+
+### Existing milestone and umbrella-issue map
+
+| Milestone | Issue | State | Scope |
+|---|---:|---|---|
+| Alpha Validation | [#47](https://github.com/H4RL33/wormhole/issues/47) | Open | M0: rebaseline roadmap and issue inventory |
+| Alpha Validation | [#48](https://github.com/H4RL33/wormhole/issues/48) | Open | M1: Gateway-owned enrolment lifecycle; tracks #24 |
+| Alpha Validation | [#49](https://github.com/H4RL33/wormhole/issues/49) | Open | M2: enrolled-Gateway offline restart; narrows #37 |
+| Alpha Validation | [#50](https://github.com/H4RL33/wormhole/issues/50) | Open | M3: approve Gateway integration-manifest design |
+| Alpha Validation | [#51](https://github.com/H4RL33/wormhole/issues/51) | Open | M4: experimental local Go-only Code Graph slice, not full V1 |
+| Alpha Validation | [#52](https://github.com/H4RL33/wormhole/issues/52) | Open | M5: generated tool guidance and operating templates |
+| Alpha Validation | [#53](https://github.com/H4RL33/wormhole/issues/53) | Open | M6: meaning-bearing shared KB search; tracks #8 |
+| Alpha Validation | [#54](https://github.com/H4RL33/wormhole/issues/54) | Open | M7: Fabric-distributed integration manifests |
+| Alpha Validation | [#55](https://github.com/H4RL33/wormhole/issues/55) | Open | M8: real two-agent alpha acceptance loop; extends #10 |
+| Alpha Validation | [#56](https://github.com/H4RL33/wormhole/issues/56) | Open | M9: closed external validation and Gate D decision |
+
+### Issue scope decisions
+
+* **#3 — resolved for alpha and deferred:** no durable harness-session record is
+  required for Alpha Validation. Passports identify agents, credential profiles
+  authorise local runtime access, and harness process sessions are ephemeral.
+  Durable session records are deferred until a demonstrated use case requires
+  them.
+* **#37 — narrowed for alpha:** only the already-enrolled Gateway offline-restart
+  scope belongs to Alpha Validation through #49. Brand-new serverless local
+  organisation creation, provisional identities, and later Fabric attachment
+  remain outside the milestone.
+* **#22, #23, and #36 — outside Alpha Validation:** human identity and login,
+  viewer-key migration, and the beta database-role/RLS audit are deferred work;
+  none belongs on the alpha critical path or in the Alpha Validation milestone.
+
+### Plan work-package map
+
+Every package below is owned by **Harley Welsh (H4RL33)**. Dependencies are
+completion dependencies; the umbrella issue supplies the milestone-level
+tracking and acceptance aggregation.
+
+| Plan package | Umbrella issue / milestone | Owner | Dependencies | Unambiguous acceptance criterion |
+|---|---|---|---|---|
+| 1. Rebaseline roadmap and issue inventory | #47 / Alpha Validation M0 | Harley Welsh (H4RL33) | None | Root pointer, historical source pointers, session decision, and this 23-package map exist and pass documentation checks. |
+| 2. Gateway enrolment request and lifecycle design | #48 / Alpha Validation M1 | Harley Welsh (H4RL33) | 1 | Versioned request/result, lifecycle states, idempotency, and recovery contract are documented and contract-tested. |
+| 3. Gateway-owned registration and credential persistence | #48 / Alpha Validation M1 | Harley Welsh (H4RL33) | 2 | Gateway registration is idempotent and writes credentials atomically without token exposure. |
+| 4. Gateway bootstrap ownership and lifecycle process tests | #48 / Alpha Validation M1 | Harley Welsh (H4RL33) | 3 | Real-process bootstrap is transactional, recoverable, and leaves the CLI with no direct follow-on Fabric calls. |
+| 5. Offline Gateway restart | #49 / Alpha Validation M2 | Harley Welsh (H4RL33) | 4 | An enrolled Gateway serves valid local state offline and synchronizes each queued write exactly once after recovery. |
+| 6. Approve the integration-manifest design | #50 / Alpha Validation M3 | Harley Welsh (H4RL33) | 5 | An approved design fixes the declarative schema, trust, ownership, commands, MCP name, markers, rollback, and test strategy. |
+| 7. Code Graph alpha storage and revision model | #51 / Alpha Validation M4 | Harley Welsh (H4RL33) | 5 | Per-project local graph revisions publish copy-on-write and preserve the active revision after a failed candidate build. |
+| 8. Git-tracked Go inventory and semantic adapter | #51 / Alpha Validation M4 | Harley Welsh (H4RL33) | 7; recorded human dependency approval | Only tracked Go files yield deterministic project-scoped graph symbols and provenance-bearing edges. |
+| 9. Structural query and bounded source assembly | #51 / Alpha Validation M4 | Harley Welsh (H4RL33) | 8 | Query returns deterministic bounded paths and source only after checkout containment and indexed-hash validation. |
+| 10. Code Graph MCP tools and permissions | #51 / Alpha Validation M4 | Harley Welsh (H4RL33) | 9 | Query, status, and rebuild expose only authorized project-scoped data and explicit degradation metadata. |
+| 11. Code Graph CLI lifecycle and destructive disablement | #51 / Alpha Validation M4 | Harley Welsh (H4RL33) | 10 | Human-only CLI lifecycle operations enforce approval and destructive-disable safeguards. |
+| 12. Code Graph benchmark and security hardening | #51 / Alpha Validation M4 | Harley Welsh (H4RL33) | 11 | Benchmark baseline and failure evidence exist, and security tests cover project, traversal, symlink, stale-source, permission, and destructive-action cases. |
+| 13. Tool-guidance metadata and contract coverage | #52 / Alpha Validation M5 | Harley Welsh (H4RL33) | 6; live Gateway tool contracts | Every exposed agent-facing Gateway tool has one schema-valid guidance record with registry-drift coverage. |
+| 14. Generated orientation, operating-loop, role, and Code Graph skills | #52 / Alpha Validation M5 | Harley Welsh (H4RL33) | 13; 12 for Code Graph guidance | Generated skills contain correct role-aware operating guidance and name no absent tool. |
+| 15. Safe AGENTS and SKILLS materialisation | #52 / Alpha Validation M5 | Harley Welsh (H4RL33) | 14 | Explicitly approved preview, atomic update, rollback, and removal preserve all user-owned instructions. |
+| 16. Read-only model guidance through Gateway | #52 / Alpha Validation M5 | Harley Welsh (H4RL33) | 15 | Models can read approved guidance but no MCP request can approve, apply, or alter it. |
+| 17. Shared KB semantic embedding implementation | #53 / Alpha Validation M6 | Harley Welsh (H4RL33) | 5; recorded human provider approval | Production embeddings are project-isolated, versioned, observable, and explicitly degraded on provider failure. |
+| 18. Shared KB semantic ranking and migration tests | #53 / Alpha Validation M6 | Harley Welsh (H4RL33) | 17 | Semantic relevance beats lexical decoys without cross-project results, and model migration is recoverable. |
+| 19. Fabric manifest storage and bootstrap distribution | #54 / Alpha Validation M7 | Harley Welsh (H4RL33) | 6 | Fabric stores immutable, project-scoped manifest versions and distributes applicable verified offers through bootstrap and sync. |
+| 20. Gateway manifest verification and approval | #54 / Alpha Validation M7 | Harley Welsh (H4RL33) | 16; 19 | Invalid offers never replace approved local state, and only explicit human approval can apply or revoke managed content. |
+| 21. Full automated alpha acceptance loop | #55 / Alpha Validation M8 | Harley Welsh (H4RL33) | 12; 16; 18; 20 | A clean-environment two-Gateway process test proves context handoff, bounded Code Graph use, offline recovery, and explicit denials. |
+| 22. Manual two-model and Code Graph validation | #55 / Alpha Validation M8 | Harley Welsh (H4RL33) | 21 | Two distinct real model or harness runs retain comparable baseline, enabled, handoff, provenance, and negative evidence. |
+| 23. Closed-trial instrumentation and operator guide | #56 / Alpha Validation M9 | Harley Welsh (H4RL33) | 22; deployed release candidate | Three external participants complete the controlled trial and Gate D records one evidence-based decision. |
+
+The canonical scope remains
+[`docs/superpowers/specs/2026-07-25-alpha-validation-unified-spec.md`](superpowers/specs/2026-07-25-alpha-validation-unified-spec.md).

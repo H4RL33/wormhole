@@ -261,23 +261,16 @@ func TestRunViewerKeyCreate_ReportsEmptyErrorAndMalformedSuccess(t *testing.T) {
 }
 
 func TestRunConnect_TargetClaudeReportsAddFailure(t *testing.T) {
-	fakeGatewaySocket(t)
-	fakeStdioBinary(t)
+	fakeEnrolmentGateway(t, persistedEnrolmentResult())
 	failingClaude := filepath.Join(t.TempDir(), "claude")
 	if err := os.WriteFile(failingClaude, []byte("#!/bin/sh\nexit 7\n"), 0o755); err != nil {
 		t.Fatalf("write failing claude: %v", err)
 	}
-	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
-		t.Fatal("connect must not search KB")
-		return searchArticlesOutput{}, nil
-	})
-	defer srv.Close()
-
 	var stdout, stderr bytes.Buffer
 	code := runConnect([]string{
-		"--server", srv.URL, "--project", "project-a", "--permissions", "task.read",
-		"--token-file", filepath.Join(t.TempDir(), "credentials.json"),
-		"--target", "claude", "--claude-bin", failingClaude,
+		"--server", "https://fabric.example", "--project", "project-a", "--permissions", "task.read",
+		"--profile", "project-a__default",
+		"--target", "claude", "--claude-bin", failingClaude, "--stdio-bin", os.Args[0],
 	}, &stdout, &stderr)
 	if code != 1 || !strings.Contains(stderr.String(), "claude mcp add failed") {
 		t.Fatalf("runConnect code=%d stderr=%q, want add failure", code, stderr.String())

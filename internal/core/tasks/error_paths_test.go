@@ -75,8 +75,15 @@ func TestCreateWithIDDuplicatePreservesOriginal(t *testing.T) {
 	if _, err := s.CreateWithID(ctx, id, projectID, "Original", "original", nil, 1, nil); err != nil {
 		t.Fatalf("first CreateWithID: %v", err)
 	}
-	if _, err := s.CreateWithID(ctx, id, projectID, "Replacement", "replacement", nil, 2, nil); err == nil || !strings.Contains(err.Error(), "tasks: create") {
-		t.Fatalf("duplicate CreateWithID error = %v, want wrapped insert error", err)
+	replayed, err := s.CreateWithID(ctx, id, projectID, "Original", "original", nil, 1, nil)
+	if err != nil {
+		t.Fatalf("identical CreateWithID replay: %v", err)
+	}
+	if replayed.ID != id || replayed.Title != "Original" {
+		t.Fatalf("identical replay = %+v, want original task", replayed)
+	}
+	if _, err := s.CreateWithID(ctx, id, projectID, "Replacement", "replacement", nil, 2, nil); !errors.Is(err, ErrStableIDConflict) || !strings.Contains(err.Error(), "tasks: create") {
+		t.Fatalf("mismatched CreateWithID error = %v, want ErrStableIDConflict", err)
 	}
 
 	var title string
@@ -85,6 +92,29 @@ func TestCreateWithIDDuplicatePreservesOriginal(t *testing.T) {
 	}
 	if title != "Original" {
 		t.Fatalf("title after duplicate = %q, want Original", title)
+	}
+}
+
+func TestCreateWithIDReplayNormalizesSubMicrosecondDueBy(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := createProject(t, s, "precise-due-replay")
+	id := uuid.NewString()
+	due := time.Date(2026, 7, 26, 12, 0, 0, 123456789, time.UTC)
+	wantDue := due.Truncate(time.Microsecond)
+	created, err := s.CreateWithID(ctx, id, projectID, "Precise", "lost ACK replay", nil, 1, &due)
+	if err != nil {
+		t.Fatalf("first CreateWithID: %v", err)
+	}
+	if created.DueBy == nil || !created.DueBy.Equal(wantDue) {
+		t.Fatalf("stored due_by = %v, want normalized %s", created.DueBy, wantDue.Format(time.RFC3339Nano))
+	}
+	replayed, err := s.CreateWithID(ctx, id, projectID, "Precise", "lost ACK replay", nil, 1, &due)
+	if err != nil {
+		t.Fatalf("sub-microsecond identical replay: %v", err)
+	}
+	if replayed.DueBy == nil || !replayed.DueBy.Equal(wantDue) {
+		t.Fatalf("replayed due_by = %v, want %s", replayed.DueBy, wantDue.Format(time.RFC3339Nano))
 	}
 }
 

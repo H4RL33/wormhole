@@ -70,6 +70,193 @@ func TestEnginePushBatchEmpty(t *testing.T) {
 	}
 }
 
+func TestPullIncrementalDefersWhileOutboundWritesArePending(t *testing.T) {
+	qRepo, aRepo := setupTestRepos(t)
+	defer qRepo.db.Close()
+	if _, err := qRepo.Enqueue(context.Background(), "ns-1", "task", "task-1", "create", json.RawMessage(`{"title":"offline"}`), 0); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	engine := mustNewEngine(t, "http://localhost:8080", qRepo, aRepo, nil, nil, DefaultConfig())
+	called := false
+	engine.testCallSyncToolWithResultFn = func(context.Context, string, map[string]interface{}) (interface{}, error) {
+		called = true
+		return map[string]interface{}{"updates": []interface{}{}, "timestamp": "2026-01-01T00:00:00Z", "version": 1}, nil
+	}
+	if err := engine.PullIncremental(context.Background()); err != nil {
+		t.Fatalf("PullIncremental with pending writes: %v", err)
+	}
+	if called {
+		t.Fatal("PullIncremental contacted Fabric while an outbound write was pending")
+	}
+}
+
+func TestEngineStartImmediatelyPushesBeforePull(t *testing.T) {
+	qRepo, aRepo := setupTestRepos(t)
+	defer qRepo.db.Close()
+	if _, err := qRepo.Enqueue(context.Background(), "ns-1", "task", "task-1", "create", json.RawMessage(`{"title":"offline"}`), 0); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	cfg := DefaultConfig()
+	cfg.BatchInterval, cfg.LatencyCheckInterval, cfg.PullInterval = time.Hour, time.Hour, time.Hour
+	engine := mustNewEngine(t, "http://localhost:8080", qRepo, aRepo, nil, nil, cfg)
+	var mu stdsync.Mutex
+	var calls []string
+	pulled := make(chan struct{})
+	engine.testCallSyncToolWithResultFn = func(_ context.Context, toolName string, _ map[string]interface{}) (interface{}, error) {
+		mu.Lock()
+		calls = append(calls, toolName)
+		mu.Unlock()
+		switch toolName {
+		case "wormhole.sync.incremental_push":
+			return pushResult(1, []map[string]interface{}{{"id": "task-1", "type": "task", "error": ""}}), nil
+		case "wormhole.sync.incremental_pull":
+			close(pulled)
+			return map[string]interface{}{"updates": []interface{}{}, "timestamp": "2026-01-01T00:00:00Z", "version": 1}, nil
+		default:
+			return nil, fmt.Errorf("unexpected tool %q", toolName)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	engine.Start(ctx)
+	select {
+	case <-pulled:
+	case <-time.After(time.Second):
+		engine.Stop()
+		t.Fatal("initial asynchronous sync did not run")
+	}
+	engine.Stop()
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"wormhole.sync.incremental_push", "wormhole.sync.incremental_pull"}
+	if fmt.Sprint(calls) != fmt.Sprint(want) {
+		t.Fatalf("initial sync calls = %v, want %v", calls, want)
+	}
+}
+
+func TestEngineStatusReportsExactStatesAndDurablePendingCount(t *testing.T) {
+	qRepo, aRepo := setupTestRepos(t)
+	defer qRepo.db.Close()
+	if _, err := qRepo.Enqueue(context.Background(), "ns-1", "task", "task-1", "create", json.RawMessage(`{"title":"offline"}`), 0); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	cfg := DefaultConfig()
+	cfg.BatchInterval, cfg.LatencyCheckInterval, cfg.PullInterval = time.Hour, time.Hour, time.Hour
+	engine := mustNewEngine(t, "http://localhost:8080", qRepo, aRepo, nil, nil, cfg)
+	initial, err := engine.Status(context.Background())
+	if err != nil {
+		t.Fatalf("initial Status: %v", err)
+	}
+	if initial.State != StateOffline || initial.PendingWrites != 1 {
+		t.Fatalf("initial status = %+v, want offline/1", initial)
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	engine.testCallSyncToolWithResultFn = func(_ context.Context, toolName string, _ map[string]interface{}) (interface{}, error) {
+		if toolName != "wormhole.sync.incremental_push" {
+			return nil, fmt.Errorf("unexpected tool %q", toolName)
+		}
+		close(entered)
+		<-release
+		return nil, ErrFabricUnavailable
+	}
+	engine.Start(context.Background())
+	<-entered
+	during, err := engine.Status(context.Background())
+	if err != nil {
+		t.Fatalf("synchronizing Status: %v", err)
+	}
+	if during.State != StateSynchronizing || during.PendingWrites != 1 {
+		t.Fatalf("during status = %+v, want synchronizing/1", during)
+	}
+	close(release)
+	waitForEngineState(t, engine, StateOffline)
+	engine.Stop()
+
+	encoded, err := json.Marshal(during)
+	if err != nil {
+		t.Fatalf("marshal status: %v", err)
+	}
+	if string(encoded) != `{"state":"synchronizing","pending_writes":1}` {
+		t.Fatalf("status JSON = %s", encoded)
+	}
+	for _, state := range []ConnectionState{StateOnline, StateOffline, StateSynchronizing, StateAttentionRequired} {
+		if state != ConnectionState(string(state)) || state == "" {
+			t.Fatalf("invalid connection state %q", state)
+		}
+	}
+}
+
+func TestEngineStatusClassifiesSuccessfulAndInvalidSynchronization(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result map[string]interface{}
+		want   ConnectionState
+	}{
+		{name: "online", result: map[string]interface{}{"updates": []interface{}{}, "timestamp": "2026-01-01T00:00:00Z", "version": 1}, want: StateOnline},
+		{name: "attention required", result: map[string]interface{}{"updates": []interface{}{}, "timestamp": "2026-01-01T00:00:00Z", "version": 2}, want: StateAttentionRequired},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			qRepo, aRepo := setupTestRepos(t)
+			defer qRepo.db.Close()
+			cfg := DefaultConfig()
+			cfg.BatchInterval, cfg.LatencyCheckInterval, cfg.PullInterval = time.Hour, time.Hour, time.Hour
+			engine := mustNewEngine(t, "http://localhost:8080", qRepo, aRepo, nil, nil, cfg)
+			engine.testCallSyncToolWithResultFn = func(_ context.Context, toolName string, _ map[string]interface{}) (interface{}, error) {
+				if toolName != "wormhole.sync.incremental_pull" {
+					return nil, fmt.Errorf("unexpected tool %q", toolName)
+				}
+				return tc.result, nil
+			}
+			engine.Start(context.Background())
+			waitForEngineState(t, engine, tc.want)
+			engine.Stop()
+		})
+	}
+}
+
+func TestEngineStatusRequiresAttentionForRejectedQueuedMutation(t *testing.T) {
+	qRepo, aRepo := setupTestRepos(t)
+	defer qRepo.db.Close()
+	if _, err := qRepo.Enqueue(context.Background(), "ns-1", "task", "task-1", "create", json.RawMessage(`{"title":"changed replay"}`), 0); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	cfg := DefaultConfig()
+	cfg.BatchInterval, cfg.LatencyCheckInterval, cfg.PullInterval = time.Hour, time.Hour, time.Hour
+	engine := mustNewEngine(t, "http://localhost:8080", qRepo, aRepo, nil, nil, cfg)
+	engine.testCallSyncToolWithResultFn = func(_ context.Context, toolName string, _ map[string]interface{}) (interface{}, error) {
+		if toolName != "wormhole.sync.incremental_push" {
+			return nil, fmt.Errorf("unexpected tool %q", toolName)
+		}
+		return pushResult(1, []map[string]interface{}{{"id": "task-1", "type": "task", "error": "tasks: stable id conflict"}}), nil
+	}
+	engine.Start(context.Background())
+	waitForEngineState(t, engine, StateAttentionRequired)
+	engine.Stop()
+	status, err := engine.Status(context.Background())
+	if err != nil || status.PendingWrites != 1 {
+		t.Fatalf("status after rejected mutation = %+v, %v", status, err)
+	}
+}
+
+func waitForEngineState(t *testing.T, engine *Engine, want ConnectionState) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		status, err := engine.Status(context.Background())
+		if err != nil {
+			t.Fatalf("Status: %v", err)
+		}
+		if status.State == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	status, _ := engine.Status(context.Background())
+	t.Fatalf("status = %+v, want state %s", status, want)
+}
+
 // TestDefaultConfig tests that DefaultConfig returns reasonable defaults.
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
@@ -660,8 +847,8 @@ func TestPushBatchPartialFailure(t *testing.T) {
 
 	// Call pushBatch.
 	err = engine.pushBatch(ctx)
-	if err != nil {
-		t.Fatalf("pushBatch failed: %v", err)
+	if !errors.Is(err, ErrAttentionRequired) {
+		t.Fatalf("pushBatch error = %v, want ErrAttentionRequired for rejected durable mutation", err)
 	}
 
 	// Verify that task-1 is no longer pending (marked delivered).

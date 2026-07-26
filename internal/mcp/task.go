@@ -123,6 +123,8 @@ type TaskSummary struct {
 	Status       string     `json:"status"`
 	Priority     int        `json:"priority"`
 	DueBy        *time.Time `json:"due_by"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 // ListTasksOutput is the wormhole.task.list result shape.

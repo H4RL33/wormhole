@@ -35,6 +35,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	codegraphconfig "github.com/H4RL33/wormhole/internal/runtime/codegraph/config"
+	codegraphindex "github.com/H4RL33/wormhole/internal/runtime/codegraph/index"
+	codegraphquery "github.com/H4RL33/wormhole/internal/runtime/codegraph/query"
+	codegraphstore "github.com/H4RL33/wormhole/internal/runtime/codegraph/store"
 	"github.com/H4RL33/wormhole/internal/runtime/config"
 	"github.com/H4RL33/wormhole/internal/runtime/eventbus"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
@@ -111,6 +115,13 @@ type connectionState struct {
 	cancel context.CancelFunc
 }
 
+// SyncStatusProvider supplies one project's runtime-owned connection state.
+// syncGroup implements it in gatewayd; the interface keeps localapi unaware
+// of process wiring details.
+type SyncStatusProvider interface {
+	Status(context.Context, string) (syncpkg.Status, error)
+}
+
 // Server is Gateway's local API socket server (RFC-0003 §6.1).
 // P1 shipped whoami; P2 adds local-servable reads for tasks, events, and KB.
 // P3 adds eventbus, scheduler, and subscription support.
@@ -132,11 +143,14 @@ type Server struct {
 	isMultiOrg bool                    // true if using multi-org mode
 
 	// P2 local-read repositories (single-org mode)
-	store *localstore.Store
-	tr    *localstore.TaskRepo
-	er    *localstore.EventRepo
-	kb    *localstore.KBRepo
-	qr    *syncpkg.QueueRepo
+	store                 *localstore.Store
+	tr                    *localstore.TaskRepo
+	er                    *localstore.EventRepo
+	kb                    *localstore.KBRepo
+	qr                    *syncpkg.QueueRepo
+	statusProvider        SyncStatusProvider
+	recoveryOnlyProjects  sync.Map // map[projectID]struct{}
+	recoveryOnlyInventory atomic.Bool
 
 	eventbus  *eventbus.EventBus
 	scheduler *scheduler.Scheduler
@@ -156,6 +170,7 @@ type Server struct {
 	// authorizationAgents binds each project to the agent id in the active
 	// credential profile, preventing stale cache rows from authorizing it.
 	authorizationAgents sync.Map // map[projectID]agentID
+	codeGraphs          sync.Map // map[projectID]CodeGraphRuntime
 
 	// testBeforeHandlerStart is a deterministic test barrier between admission
 	// and handler execution. Production servers leave it nil.
@@ -167,13 +182,93 @@ type Server struct {
 	// registry is the local MCP tool registry (mcp.go), built once at
 	// construction time from the Server that will service every
 	// connection's tools/call dispatch (design doc §5 subtask 2).
-	registry *localRegistry
+	registry       *localRegistry
+	serveReady     chan struct{}
+	serveReadyOnce sync.Once
+
+	// enrolmentPolicy is operator-approved local policy available before a
+	// Passport exists. Nil denies wormhole.agent.enrol closed.
+	enrolmentPolicy        EnrolmentPolicySource
+	credentialsDir         string
+	writeCredentialProfile func(string, string, config.Credentials) (string, error)
+	credentialProfileLocks sync.Map // map[profile]*sync.Mutex
+
+	enrolmentBootstrapMu      sync.Mutex
+	enrolmentBootstrapEnabled bool
+	enrolmentSyncConfig       syncpkg.Config
+	enrolmentSyncEngines      map[string]*syncpkg.Engine
+}
+
+// CodeGraphRuntime is one explicitly project-bound local Code Graph. Gateway
+// construction owns it; callers cannot select a checkout, limits, or store.
+type CodeGraphRuntime struct {
+	projectID string
+	Store     *codegraphstore.Store
+	Query     *codegraphquery.Service
+	Index     *codegraphindex.Index
+	rebuildMu *sync.Mutex
+}
+
+// NewCodeGraphRuntime opens one project-bound store over Gateway's SQLite
+// handle. The source ceiling is intentionally fixed until a human-controlled
+// configuration surface exists.
+func NewCodeGraphRuntime(ctx context.Context, db *sql.DB, projectID string) (CodeGraphRuntime, error) {
+	graphStore, err := codegraphstore.OpenRecovering(ctx, db, projectID)
+	if err != nil {
+		return CodeGraphRuntime{}, err
+	}
+	return CodeGraphRuntime{
+		projectID: projectID,
+		Store:     graphStore,
+		Query:     codegraphquery.New(graphStore, codegraphconfig.DefaultProjectSourceByteCeiling),
+		Index:     codegraphindex.New(graphStore),
+		rebuildMu: &sync.Mutex{},
+	}, nil
+}
+
+// SetCodeGraphRuntime binds a runtime to precisely one project. A nil or
+// incomplete runtime is ignored so unavailable graph state fails closed.
+func (s *Server) SetCodeGraphRuntime(projectID string, runtime CodeGraphRuntime) {
+	if projectID != "" && runtime.projectID == projectID && runtime.Store != nil && runtime.Query != nil && runtime.Index != nil && runtime.rebuildMu != nil {
+		s.codeGraphs.Store(projectID, runtime)
+	}
 }
 
 // SetVersion sets the linker-injected Gateway version reported by MCP
 // initialize responses. Empty versions retain the development default.
 func (s *Server) SetVersion(version string) {
 	s.version = version
+}
+
+// SetSyncStatusProvider enables the read-only wormhole.sync.status tool.
+func (s *Server) SetSyncStatusProvider(provider SyncStatusProvider) {
+	s.statusProvider = provider
+}
+
+// SetRecoveryOnlyProjects restricts invalid or incomplete enrolments to the
+// recovery surface. When restrictInventory is true every configured project
+// is non-ready, so tools/list advertises only enrolment and sync status.
+func (s *Server) SetRecoveryOnlyProjects(projectIDs []string, restrictInventory bool) {
+	for _, projectID := range projectIDs {
+		if projectID != "" {
+			s.recoveryOnlyProjects.Store(projectID, struct{}{})
+		}
+	}
+	s.recoveryOnlyInventory.Store(restrictInventory)
+}
+
+// SetEnrolmentPolicySource configures trusted pre-credential enrolment policy.
+// Callers set it before Serve; nil deliberately denies enrolment closed.
+func (s *Server) SetEnrolmentPolicySource(source EnrolmentPolicySource) {
+	s.enrolmentPolicy = source
+}
+
+// SetEnrolmentRuntime wires the trusted pre-credential policy and the only
+// directory in which Gateway may persist issued credential profiles.
+func (s *Server) SetEnrolmentRuntime(source EnrolmentPolicySource, credentialsDir string) {
+	s.enrolmentPolicy = source
+	s.credentialsDir = credentialsDir
+	s.writeCredentialProfile = config.WriteCredentialProfile
 }
 
 // New binds the Unix domain socket at socketPath. Callers must call Serve
@@ -198,6 +293,7 @@ func New(socketPath, coordServerURL, token, projectID string, store *localstore.
 		kb:          kb,
 		qr:          qr,
 		handlers:    make(chan struct{}, maxActiveConnections),
+		serveReady:  make(chan struct{}),
 	}
 	srv.registry = newLocalRegistry(srv)
 	return srv, nil
@@ -228,6 +324,7 @@ func NewWithRuntime(socketPath, coordServerURL, token, projectID string, store *
 		eventbus:    eb,
 		scheduler:   sched,
 		handlers:    make(chan struct{}, maxActiveConnections),
+		serveReady:  make(chan struct{}),
 	}
 	srv.registry = newLocalRegistry(srv)
 	return srv, nil
@@ -260,6 +357,7 @@ func NewMultiOrg(socketPath string, orgs map[string]config.Org, bindings []confi
 		eventbus:   eb,
 		scheduler:  sched,
 		handlers:   make(chan struct{}, maxActiveConnections),
+		serveReady: make(chan struct{}),
 	}
 	srv.registry = newLocalRegistry(srv)
 	return srv, nil
@@ -349,6 +447,7 @@ func (s *Server) Close() error {
 		s.admissionMu.Lock()
 		s.shutdown.Store(true)
 		s.closeErr = s.listener.Close()
+		s.stopEnrolmentSyncEngines()
 
 		// Force-close all tracked open connections to prevent handle goroutines
 		// from leaking on shutdown. Iterate conns and close each one (issue #20).
@@ -377,6 +476,7 @@ func (s *Server) Close() error {
 
 // Serve accepts connections until ctx is cancelled or the listener closes.
 func (s *Server) Serve(ctx context.Context) error {
+	s.serveReadyOnce.Do(func() { close(s.serveReady) })
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
@@ -429,6 +529,11 @@ func (s *Server) Serve(ctx context.Context) error {
 		}
 	}
 }
+
+// Serving closes once Serve has entered its accept lifecycle. It is an
+// explicit startup barrier for callers that must not launch background work
+// merely because the socket has been bound.
+func (s *Server) Serving() <-chan struct{} { return s.serveReady }
 
 // handle services one connection as a persistent MCP JSON-RPC 2.0 session
 // (design doc §2, §5 subtask 2): initialize -> notifications/initialized ->
@@ -502,6 +607,12 @@ func (s *Server) proxyRegister(ctx context.Context, args json.RawMessage) (json.
 	if err != nil {
 		return nil, err
 	}
+	if s.statusProvider != nil {
+		status, statusErr := s.statusProvider.Status(ctx, orgCtx.ProjectID)
+		if statusErr == nil && status.State == syncpkg.StateOffline {
+			return nil, errors.New("localapi: central authority required: wormhole.agent.register is unavailable while Fabric is offline")
+		}
+	}
 
 	paramsRaw, err := json.Marshal(toolsCallParams{Name: "wormhole.agent.register", Arguments: args})
 	if err != nil {
@@ -555,7 +666,47 @@ func (s *Server) proxyWhoAmI(ctx context.Context) (whoAmIOutput, error) {
 	if err != nil {
 		return whoAmIOutput{}, err
 	}
-	return s.fetchAndCacheWhoAmI(ctx, orgCtx)
+	out, remoteErr := s.fetchAndCacheWhoAmI(ctx, orgCtx)
+	if remoteErr == nil {
+		return out, nil
+	}
+	cached, cacheErr := s.cachedWhoAmIForCredential(ctx, orgCtx.ProjectID)
+	if cacheErr != nil {
+		if errors.Is(cacheErr, localstore.ErrNotFound) {
+			return whoAmIOutput{}, remoteErr
+		}
+		return whoAmIOutput{}, fmt.Errorf("%v; localapi: read cached whoami: %w", remoteErr, cacheErr)
+	}
+	return whoAmIOutput{
+		AgentID: cached.AgentID, Owner: cached.Owner, Model: cached.Model,
+		Capabilities: cached.Capabilities, ProjectID: cached.ProjectID, Permissions: cached.Permissions,
+	}, nil
+}
+
+func (s *Server) cachedWhoAmIForCredential(ctx context.Context, projectID string) (localstore.WhoAmICache, error) {
+	if expectedAgent, ok := s.authorizationAgents.Load(projectID); ok {
+		return s.store.GetCachedWhoAmIForAgentProject(ctx, expectedAgent.(string), projectID)
+	}
+	return s.store.GetCachedWhoAmIForProject(ctx, projectID)
+}
+
+func (s *Server) localSyncStatus(ctx context.Context, args json.RawMessage) (syncpkg.Status, error) {
+	var input struct {
+		ProjectID string `json:"project_id"`
+	}
+	if err := json.Unmarshal(args, &input); err != nil {
+		return syncpkg.Status{}, fmt.Errorf("localapi: sync status: invalid args: %w", err)
+	}
+	if input.ProjectID == "" {
+		return syncpkg.Status{}, errors.New("localapi: sync status: project_id is required")
+	}
+	if _, err := s.resolveOrgContext(input.ProjectID); err != nil {
+		return syncpkg.Status{}, err
+	}
+	if s.statusProvider == nil {
+		return syncpkg.Status{}, errors.New("localapi: sync status unavailable")
+	}
+	return s.statusProvider.Status(ctx, input.ProjectID)
 }
 
 func (s *Server) fetchAndCacheWhoAmI(ctx context.Context, orgCtx OrgContext) (whoAmIOutput, error) {

@@ -31,6 +31,30 @@ Agent identity is project-agnostic; project-scoped access comes through `permiss
 - `roles` (contributor/reviewer/maintainer/...)
 - `issued_at`
 
+## agent_enrolments
+- `project_id` -> projects
+- `idempotency_key` (project-scoped attempt identifier)
+- `request_hash` (SHA-256 of the canonical request; no raw credential)
+- `state` (`registration_in_progress` / `registered`)
+- `agent_id` -> agents (set after registration)
+- `passport_id` -> passports (set after registration)
+- `token_id` -> agent_tokens (hash-bearing credential reference only)
+- `reissue_count` (bounded recovery counter; maximum one)
+- `created_at`
+- `updated_at`
+
+The `(project_id, idempotency_key)` primary key and transaction-scoped advisory
+lock serialize retries. A matching digest replays the same identity references;
+a different digest conflicts. This table has project RLS with both `USING` and
+`WITH CHECK`. Raw Passport tokens are never stored here.
+
+Gateway separately stores a local SQLite `enrolment_attempts` checkpoint keyed
+by `(project_id, idempotency_key)`, with one active row per credential profile.
+It contains the canonical request hash, lifecycle state, profile identifier,
+and optional agent/Passport references only. This local row is committed before
+Fabric contact and permits a later CLI process or restarted Gateway to resume
+the original attempt key; it has no token column.
+
 ## permissions
 - `id`
 - `passport_id` -> passports
@@ -116,7 +140,7 @@ RFC-0001 §8.2 doesn't specify exact column names/types for `tasks`/`task_links`
 - `title`
 - `body`
 - `frontmatter` (jsonb)
-- `embedding` (vector, pgvector)
+- `embedding` (legacy nullable vector; compatibility-only after migration 19)
 - `author_agent_id` -> agents
 - `bootstrap_key` (nullable; partial uniqueness within a project is reserved
   for fixed system/bootstrap articles and does not constrain ordinary titles)
@@ -124,6 +148,38 @@ RFC-0001 §8.2 doesn't specify exact column names/types for `tasks`/`task_links`
 - `updated_at`
 
 Atomic articles per RFC §8.3 — one article = one fact/decision/procedure.
+
+## kb_embedding_generations
+- `id`
+- `project_id` -> projects
+- `provider`
+- `model`
+- `version`
+- `dimension` (1024)
+- `state` (building / active / failed / retired)
+- `failure_code` (nullable, safe machine code only)
+- lifecycle timestamps
+
+At most one generation is active per project. A building generation is
+activated only when complete; the previous active generation becomes retired
+without deleting its vectors.
+
+## kb_article_embeddings
+- `project_id` -> projects
+- `article_id` -> kb_articles
+- `generation_id` -> kb_embedding_generations
+- `provider`
+- `model`
+- `version`
+- `dimension` (1024)
+- `content_hash` (SHA-256 of the exact `title + "\n\n" + body` provider input)
+- `embedding` (vector(1024), pgvector)
+- `created_at`
+
+Model metadata is bound to the generation by a composite foreign key. New
+writes and semantic ranking use this table, not the legacy article column.
+Activation verifies both exact article membership and every content hash, so a
+same-count candidate containing a stale vector cannot become active.
 
 ## kb_links
 - `id`

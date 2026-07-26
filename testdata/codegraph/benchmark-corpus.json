@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "queries": [
+    {
+      "id": "agent-registration-authentication",
+      "question": "Where is agent registration authenticated?",
+      "entry_symbols": ["RegisterAgentTool", "HandleToolsCall", "RegisterInTx", "WhoAmI"],
+      "expected_files": ["internal/mcp/agent.go", "internal/mcp/jsonrpc.go", "internal/core/identity/identity.go"],
+      "expected_relationship_path": [
+        {"from": "RegisterAgentTool", "relationship": "calls", "to": "RegisterInTx"},
+        {"from": "RegisterInTx", "relationship": "calls", "to": "recordAction"}
+      ],
+      "expected_authoritative_edges": ["RegisterAgentTool calls RegisterInTx", "HandleToolsCall calls WhoAmI"],
+      "expected_heuristic_edges": [],
+      "sufficiency_criteria": "Shows that initial registration is deliberately unauthenticated, identifies RegisterInTx as the token and Passport bootstrap, and locates bearer-token authentication for subsequent tools in HandleToolsCall and WhoAmI."
+    },
+    {
+      "id": "task-status-event",
+      "question": "Trace a task status update into its emitted event.",
+      "entry_symbols": ["UpdateTaskStatusTool", "UpdateStatus", "PublishEventInTx"],
+      "expected_files": ["internal/mcp/task.go", "internal/core/tasks/tasks.go", "internal/core/events/events.go"],
+      "expected_relationship_path": [
+        {"from": "UpdateTaskStatusTool", "relationship": "calls", "to": "UpdateStatus"},
+        {"from": "UpdateStatus", "relationship": "calls", "to": "PublishEventInTx"}
+      ],
+      "expected_authoritative_edges": ["UpdateTaskStatusTool calls UpdateStatus", "UpdateStatus calls PublishEventInTx"],
+      "expected_heuristic_edges": [],
+      "sufficiency_criteria": "Locates the MCP entry, validated state transition, and task.status_changed insert performed in the same transaction."
+    },
+    {
+      "id": "gateway-sync-response-version",
+      "question": "Where are Gateway sync response versions validated?",
+      "entry_symbols": ["pushBatch", "PullIncremental", "validateBootstrapResult", "SyncProtocolVersion"],
+      "expected_files": ["internal/runtime/sync/sync.go"],
+      "expected_relationship_path": [
+        {"from": "pushBatch", "relationship": "calls", "to": "decodeIncrementalPushResult"},
+        {"from": "PullIncremental", "relationship": "calls", "to": "decodeIncrementalPullResult"}
+      ],
+      "expected_authoritative_edges": ["pushBatch calls decodeIncrementalPushResult", "PullIncremental calls decodeIncrementalPullResult", "Bootstrap calls validateBootstrapResult"],
+      "expected_heuristic_edges": [],
+      "sufficiency_criteria": "Finds the push, pull, and bootstrap response-version comparisons against SyncProtocolVersion and their fail-closed errors."
+    },
+    {
+      "id": "passport-audit-writes",
+      "question": "Which code writes Passport audit records?",
+      "entry_symbols": ["RegisterInTx", "IssuePassport", "recordAction", "RecordAction"],
+      "expected_files": ["internal/core/identity/identity.go"],
+      "expected_relationship_path": [
+        {"from": "RegisterInTx", "relationship": "calls", "to": "recordAction"},
+        {"from": "IssuePassport", "relationship": "calls", "to": "recordAction"}
+      ],
+      "expected_authoritative_edges": ["RegisterInTx calls recordAction", "IssuePassport calls recordAction"],
+      "expected_heuristic_edges": [],
+      "sufficiency_criteria": "Locates ActionPassportIssued and the append-only audit_log insert in the same project transaction as Passport issuance."
+    },
+    {
+      "id": "local-task-durable-queue",
+      "question": "Trace a local task write into the durable outbound queue.",
+      "entry_symbols": ["handleTaskCreate", "CreateTaskTx", "EnqueueTx", "enqueue"],
+      "expected_files": ["internal/runtime/localapi/localapi.go", "internal/runtime/localstore/task_repo.go", "internal/runtime/sync/queue_repo.go"],
+      "expected_relationship_path": [
+        {"from": "handleTaskCreate", "relationship": "calls", "to": "CreateTaskTx"},
+        {"from": "handleTaskCreate", "relationship": "calls", "to": "EnqueueTx"}
+      ],
+      "expected_authoritative_edges": ["handleTaskCreate calls CreateTaskTx", "handleTaskCreate calls EnqueueTx", "EnqueueTx calls enqueue"],
+      "expected_heuristic_edges": [],
+      "sufficiency_criteria": "Shows the local task row and sync_queue row being written through one SQLite transaction before commit."
+    },
+    {
+      "id": "local-sqlite-project-isolation",
+      "question": "Where is project isolation enforced for local SQLite queries?",
+      "entry_symbols": ["GetTask", "ListTasks", "GetCachedWhoAmIForAgentProject", "ListPending"],
+      "expected_files": ["internal/runtime/localstore/task_repo.go", "internal/runtime/localstore/localstore.go", "internal/runtime/sync/queue_repo.go"],
+      "expected_relationship_path": [
+        {"from": "GetTask", "relationship": "calls", "to": "queryTask"},
+        {"from": "ListPending", "relationship": "uses_type", "to": "QueueEntry"}
+      ],
+      "expected_authoritative_edges": ["GetTask calls queryTask", "ListPending uses QueueEntry"],
+      "expected_heuristic_edges": [],
+      "sufficiency_criteria": "Finds mandatory namespace or project predicates on local task, identity-cache, and outbound-queue reads, with no ambient project inference."
+    }
+  ]
+}

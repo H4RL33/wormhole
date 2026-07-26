@@ -162,6 +162,9 @@ func TestM3_MCPSeededStateReflectedInDashboard(t *testing.T) {
 	tasksStore := tasks.NewStore(db, eventsStore)
 	gitStore := git.NewStore(db)
 	kbStore := kb.NewStore(db, kb.StubEmbedder{}, 0.85, 4000, 1, 1, 1)
+	if err := mcp.PrepareOnboardingArticleEmbedding(context.Background(), kbStore); err != nil {
+		t.Fatalf("prepare onboarding embedding: %v", err)
+	}
 	rolesStore := roles.NewStore(db)
 
 	registry := mcp.NewFabricRegistry(mcp.FabricRegistryDependencies{

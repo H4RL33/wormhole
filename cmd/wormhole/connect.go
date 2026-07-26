@@ -5,7 +5,29 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	"github.com/H4RL33/wormhole/internal/runtime/localapi"
 )
+
+// newGatewayEnrolmentRequest maps the CLI's existing join/connect identity
+// input onto the one canonical local Gateway contract. Callers generate the
+// idempotency key once per user-approved attempt and reuse the returned value
+// unchanged for retries; sending it is implemented by the next lifecycle task.
+func newGatewayEnrolmentRequest(projectID, fabricAddress, idempotencyKey, credentialProfile string, in registerAgentInput) localapi.EnrolmentRequest {
+	return localapi.EnrolmentRequest{
+		Version:              localapi.EnrolmentProtocolVersion,
+		ProjectID:            projectID,
+		Owner:                in.Owner,
+		Model:                in.Model,
+		Capabilities:         in.Capabilities,
+		Repositories:         in.Repositories,
+		Roles:                in.Roles,
+		RequestedPermissions: in.Permissions,
+		FabricAddress:        fabricAddress,
+		IdempotencyKey:       idempotencyKey,
+		CredentialProfile:    credentialProfile,
+	}
+}
 
 // Harness represents a detected harness (Claude Code or OpenCode)
 type Harness struct {

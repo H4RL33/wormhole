@@ -134,16 +134,12 @@ func TestWriteArticle_SuccessNoLinks(t *testing.T) {
 		t.Error("article.UpdatedAt is zero")
 	}
 
-	// Day 14 wires the stub embedder into every write, so the embedding
-	// column is now populated (Day 13 left it NULL; see
-	// TestWriteArticle_EmbeddingPopulated for the dedicated coverage of
-	// this behavior).
-	var embeddingIsNull bool
-	if err := s.db.QueryRow(`SELECT embedding IS NULL FROM kb_articles WHERE id = $1`, article.ID).Scan(&embeddingIsNull); err != nil {
+	var embeddingCount int
+	if err := s.db.QueryRow(`SELECT count(*) FROM kb_article_embeddings WHERE article_id = $1`, article.ID).Scan(&embeddingCount); err != nil {
 		t.Fatalf("query embedding: %v", err)
 	}
-	if embeddingIsNull {
-		t.Error("expected embedding column to be populated, got NULL")
+	if embeddingCount != 1 {
+		t.Fatalf("embedding count = %d, want 1", embeddingCount)
 	}
 }
 
@@ -389,8 +385,7 @@ func TestWriteArticle_CrossProjectIsolation(t *testing.T) {
 }
 
 // TestWriteArticle_EmbeddingPopulated proves WriteArticle actually stores a
-// stub embedding (not just leaving the column NULL as Day 13 did): the
-// pgvector text representation must round-trip a 16-element vector.
+// generation-scoped embedding with immutable provider/model metadata.
 func TestWriteArticle_EmbeddingPopulated(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -403,18 +398,22 @@ func TestWriteArticle_EmbeddingPopulated(t *testing.T) {
 		t.Fatalf("WriteArticle: %v", err)
 	}
 
-	var embeddingText sql.NullString
-	if err := s.db.QueryRow(`SELECT embedding::text FROM kb_articles WHERE id = $1`, article.ID).Scan(&embeddingText); err != nil {
+	var embeddingText, provider, model, version string
+	var dimension int
+	if err := s.db.QueryRow(`SELECT embedding::text, provider, model, version, dimension FROM kb_article_embeddings WHERE article_id = $1`, article.ID).
+		Scan(&embeddingText, &provider, &model, &version, &dimension); err != nil {
 		t.Fatalf("query embedding: %v", err)
 	}
-	if !embeddingText.Valid || embeddingText.String == "" {
+	if embeddingText == "" {
 		t.Fatal("expected embedding column to be non-null and non-empty")
 	}
-
-	trimmed := strings.Trim(embeddingText.String, "[]")
+	if provider != "stub" || model != "sha256" || version != "test-v1" || dimension != 1024 {
+		t.Fatalf("embedding metadata = %s/%s/%s/%d", provider, model, version, dimension)
+	}
+	trimmed := strings.Trim(embeddingText, "[]")
 	components := strings.Split(trimmed, ",")
-	if len(components) != 16 {
-		t.Fatalf("stored embedding has %d dimensions, want 16 (raw: %q)", len(components), embeddingText.String)
+	if len(components) != 1024 {
+		t.Fatalf("stored embedding has %d dimensions, want 1024", len(components))
 	}
 }
 
@@ -430,20 +429,20 @@ func TestWriteArticle_EmbeddingDeterministic(t *testing.T) {
 	createPassport(t, s, agentID, projectID)
 
 	const body = "identical body text for both articles"
-	first, err := s.WriteArticle(ctx, projectID, agentID, "first", body, nil, nil, false)
+	first, err := s.WriteArticle(ctx, projectID, agentID, "same title", body, nil, nil, false)
 	if err != nil {
 		t.Fatalf("WriteArticle (first): %v", err)
 	}
-	second, err := s.WriteArticle(ctx, projectID, agentID, "second", body, nil, nil, true)
+	second, err := s.WriteArticle(ctx, projectID, agentID, "same title", body, nil, nil, true)
 	if err != nil {
 		t.Fatalf("WriteArticle (second): %v", err)
 	}
 
 	var firstEmbedding, secondEmbedding string
-	if err := s.db.QueryRow(`SELECT embedding::text FROM kb_articles WHERE id = $1`, first.ID).Scan(&firstEmbedding); err != nil {
+	if err := s.db.QueryRow(`SELECT embedding::text FROM kb_article_embeddings WHERE article_id = $1`, first.ID).Scan(&firstEmbedding); err != nil {
 		t.Fatalf("query embedding (first): %v", err)
 	}
-	if err := s.db.QueryRow(`SELECT embedding::text FROM kb_articles WHERE id = $1`, second.ID).Scan(&secondEmbedding); err != nil {
+	if err := s.db.QueryRow(`SELECT embedding::text FROM kb_article_embeddings WHERE article_id = $1`, second.ID).Scan(&secondEmbedding); err != nil {
 		t.Fatalf("query embedding (second): %v", err)
 	}
 
@@ -475,7 +474,8 @@ func TestSearchArticles_SuccessAndLimit(t *testing.T) {
 
 	// 1. Search with exact body of a2. Under StubEmbedder, identical text produces identical embedding.
 	// Cosine distance should be 0, so a2 must rank first.
-	results, err := s.SearchArticles(ctx, projectID, agentID, "install go and docker compose first", 10)
+	const exactQuery = "setup guide\n\ninstall go and docker compose first"
+	results, err := s.SearchArticles(ctx, projectID, agentID, exactQuery, 10)
 	if err != nil {
 		t.Fatalf("SearchArticles: %v", err)
 	}
@@ -487,7 +487,7 @@ func TestSearchArticles_SuccessAndLimit(t *testing.T) {
 	}
 
 	// 2. Test limit parameter caps results.
-	resultsCap, err := s.SearchArticles(ctx, projectID, agentID, "install go and docker compose first", 2)
+	resultsCap, err := s.SearchArticles(ctx, projectID, agentID, exactQuery, 2)
 	if err != nil {
 		t.Fatalf("SearchArticles limit 2: %v", err)
 	}
@@ -499,7 +499,7 @@ func TestSearchArticles_SuccessAndLimit(t *testing.T) {
 	}
 
 	// 3. Test limit defaulting to 10 when <= 0.
-	resultsDefault, err := s.SearchArticles(ctx, projectID, agentID, "install go and docker compose first", 0)
+	resultsDefault, err := s.SearchArticles(ctx, projectID, agentID, exactQuery, 0)
 	if err != nil {
 		t.Fatalf("SearchArticles limit 0: %v", err)
 	}
@@ -572,6 +572,8 @@ func TestSearchArticles_CrossProjectIsolation(t *testing.T) {
 	t.Cleanup(func() {
 		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE kb_articles FROM %s", roleName))
 		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE kb_links FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE kb_embedding_generations FROM %s", roleName))
+		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE kb_article_embeddings FROM %s", roleName))
 		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE projects FROM %s", roleName))
 		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE agents FROM %s", roleName))
 		_, _ = ownerStore.db.Exec(fmt.Sprintf("REVOKE ALL PRIVILEGES ON TABLE passports FROM %s", roleName))
@@ -584,7 +586,7 @@ func TestSearchArticles_CrossProjectIsolation(t *testing.T) {
 	if _, err := ownerStore.db.Exec(fmt.Sprintf("CREATE ROLE %s WITH LOGIN PASSWORD '%s'", roleName, rolePassword)); err != nil {
 		t.Fatalf("failed to create role: %v", err)
 	}
-	if _, err := ownerStore.db.Exec(fmt.Sprintf("GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE kb_articles, kb_links, projects, agents, passports TO %s", roleName)); err != nil {
+	if _, err := ownerStore.db.Exec(fmt.Sprintf("GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE kb_articles, kb_links, projects, agents, passports, kb_embedding_generations, kb_article_embeddings TO %s", roleName)); err != nil {
 		t.Fatalf("failed to grant table privileges: %v", err)
 	}
 
@@ -654,7 +656,7 @@ func TestWriteArticle_DedupViolation(t *testing.T) {
 		t.Fatalf("WriteArticle first: %v", err)
 	}
 
-	const title2 = "duplicate article"
+	const title2 = title1
 	_, err = s.WriteArticle(ctx, projectID, agentID, title2, body, nil, nil, false)
 	if err == nil {
 		t.Fatal("expected ErrDedupViolation error, got nil")
@@ -684,8 +686,8 @@ func TestWriteArticle_DedupViolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query count of title2: %v", err)
 	}
-	if count != 0 {
-		t.Errorf("expected 0 articles for title %q due to transaction rollback, got %d", title2, count)
+	if count != 1 {
+		t.Errorf("expected only the original article for title %q, got %d", title2, count)
 	}
 }
 
@@ -913,17 +915,24 @@ func TestWriteArticle_RequiredLinksViolation(t *testing.T) {
 
 	body := "Need to make a decision about architecture and links"
 	embedder := StubEmbedder{}
-	queryEmbedding, err := embedder.Embed(ctx, body)
+	queryEmbeddings, err := embedder.Embed(ctx, EmbeddingRequest{
+		InputType: EmbeddingInputSearchDocument,
+		Texts:     []string{articleEmbeddingText("My Article", body)},
+		Mode:      EmbeddingModeInteractive,
+	})
 	if err != nil {
 		t.Fatalf("Embed: %v", err)
 	}
+	queryEmbedding := queryEmbeddings[0]
 
 	// Fetch expected top 3 closest articles from the db using pgvector
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, title
-		 FROM kb_articles
-		 WHERE project_id = $1 AND embedding IS NOT NULL
-		 ORDER BY embedding <=> $2::vector
+		`SELECT a.id, a.title
+		 FROM kb_articles a
+		 JOIN kb_article_embeddings e ON e.article_id = a.id AND e.project_id = a.project_id
+		 JOIN kb_embedding_generations g ON g.id = e.generation_id AND g.project_id = e.project_id
+		 WHERE a.project_id = $1 AND g.state = 'active'
+		 ORDER BY e.embedding <=> $2::vector
 		 LIMIT 3`,
 		projectID, formatVectorLiteral(queryEmbedding),
 	)

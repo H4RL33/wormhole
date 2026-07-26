@@ -11,6 +11,7 @@ import (
 	"github.com/H4RL33/wormhole/internal/core/identity"
 	"github.com/H4RL33/wormhole/internal/core/kb"
 	"github.com/H4RL33/wormhole/internal/core/tasks"
+	"github.com/H4RL33/wormhole/internal/types"
 )
 
 // SyncProtocolVersion is the current protocol version for wormhole.sync.* tools.
@@ -114,12 +115,12 @@ type BootstrapInput struct {
 // RFC-0003 §8.1); org_config/project_list remain an open design question
 // (RFC-0003 §9 OQ3) and stay empty placeholders in v1.
 type BootstrapOutput struct {
-	OrgConfig   json.RawMessage  `json:"org_config"`
-	ProjectList []string         `json:"project_list"`
-	TaskList    []TaskSummary    `json:"task_list"`
-	KBList      []ArticleSummary `json:"kb_list"`
-	Timestamp   string           `json:"timestamp"`
-	Version     int              `json:"version"` // protocol version for response validation
+	OrgConfig   types.BootstrapOrgConfigV1 `json:"org_config"`
+	ProjectList []string                   `json:"project_list"`
+	TaskList    []types.BootstrapTaskV1    `json:"task_list"`
+	KBList      []types.BootstrapArticleV1 `json:"kb_list"`
+	Timestamp   string                     `json:"timestamp"`
+	Version     int                        `json:"version"` // protocol version for response validation
 }
 
 // taskToSummary converts a core tasks.Task into the wire shape already used
@@ -135,6 +136,8 @@ func taskToSummary(task tasks.Task) TaskSummary {
 		Status:       task.Status,
 		Priority:     task.Priority,
 		DueBy:        task.DueBy,
+		CreatedAt:    task.CreatedAt,
+		UpdatedAt:    task.UpdatedAt,
 	}
 }
 
@@ -155,7 +158,7 @@ func articleToSummary(article kb.Article) ArticleSummary {
 
 // BootstrapTool wires wormhole.sync.bootstrap. Gateway calls it on org enrolment.
 // RFC-0003 §8.1: one-time bulk pull of complete working environment.
-func BootstrapTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, limiter *syncRateLimiter) Tool {
+func BootstrapTool(identityStore *identity.Store, tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, limiter *syncRateLimiter) Tool {
 	return Tool{
 		Name:         "wormhole.sync.bootstrap",
 		Description:  "One-time bulk pull of org configuration, project manifests, initial KB, tasks, and policies on org enrolment (RFC-0003 §8.1)",
@@ -180,31 +183,50 @@ func BootstrapTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *even
 			if !limiter.allow(in.NamespaceID, time.Now()) {
 				return nil, fmt.Errorf("mcp: wormhole.sync.bootstrap: rate limit exceeded for namespace %q", in.NamespaceID)
 			}
-
-			taskList, err := tasksStore.List(ctx, projectID, nil)
-			if err != nil {
-				return nil, fmt.Errorf("mcp: wormhole.sync.bootstrap: list tasks: %w", err)
-			}
-			articleList, err := kbStore.ListArticles(ctx, projectID)
-			if err != nil {
-				return nil, fmt.Errorf("mcp: wormhole.sync.bootstrap: list kb articles: %w", err)
+			if scope == nil || scope.Agent.ID == "" || scope.ProjectID != projectID {
+				return nil, fmt.Errorf("mcp: wormhole.sync.bootstrap: missing authenticated identity scope")
 			}
 
-			out := BootstrapOutput{
-				OrgConfig:   json.RawMessage(`{}`),
-				ProjectList: []string{},
-				TaskList:    make([]TaskSummary, 0, len(taskList)),
-				KBList:      make([]ArticleSummary, 0, len(articleList)),
-				Timestamp:   time.Now().UTC().Format(time.RFC3339),
-				Version:     SyncProtocolVersion,
+			tx, err := identityStore.BeginBootstrapSnapshotTx(ctx, projectID)
+			if err != nil {
+				return nil, fmt.Errorf("mcp: wormhole.sync.bootstrap: begin snapshot: %w", err)
 			}
-			for _, task := range taskList {
-				out.TaskList = append(out.TaskList, taskToSummary(task))
+			defer tx.Rollback()
+			project, snapshotIdentity, err := identityStore.ReadBootstrapIdentityInTx(ctx, tx, projectID, scope.Agent.ID, scope.Permissions)
+			if err != nil {
+				return nil, fmt.Errorf("mcp: wormhole.sync.bootstrap: read identity: %w", err)
 			}
-			for _, article := range articleList {
-				out.KBList = append(out.KBList, articleToSummary(article))
+			channels, eventList, err := eventsStore.ListBootstrapInTx(ctx, tx, projectID)
+			if err != nil {
+				return nil, fmt.Errorf("mcp: wormhole.sync.bootstrap: read channels/events: %w", err)
 			}
-			return out, nil
+			taskList, err := tasksStore.ListBootstrapInTx(ctx, tx, projectID)
+			if err != nil {
+				return nil, fmt.Errorf("mcp: wormhole.sync.bootstrap: read tasks: %w", err)
+			}
+			articleList, err := kbStore.ListBootstrapInTx(ctx, tx, projectID)
+			if err != nil {
+				return nil, fmt.Errorf("mcp: wormhole.sync.bootstrap: read kb articles: %w", err)
+			}
+			timestamp, err := identityStore.BootstrapTimestampInTx(ctx, tx)
+			if err != nil {
+				return nil, fmt.Errorf("mcp: wormhole.sync.bootstrap: read timestamp: %w", err)
+			}
+			if err := tx.Commit(); err != nil {
+				return nil, fmt.Errorf("mcp: wormhole.sync.bootstrap: commit snapshot: %w", err)
+			}
+
+			orgConfig := types.BootstrapOrgConfigV1{
+				SchemaVersion: types.BootstrapSchemaVersionV1,
+				Project:       project, Identity: snapshotIdentity,
+				Channels: channels, Events: eventList, Tasks: taskList,
+				KB:                          types.BootstrapKBV1{Articles: articleList},
+				IntegrationManifestMetadata: json.RawMessage(`null`),
+			}
+			return BootstrapOutput{
+				OrgConfig: orgConfig, ProjectList: []string{}, TaskList: taskList, KBList: articleList,
+				Timestamp: timestamp.Format(time.RFC3339Nano), Version: SyncProtocolVersion,
+			}, nil
 		},
 	}
 }

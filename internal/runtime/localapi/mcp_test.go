@@ -13,6 +13,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -20,10 +22,23 @@ import (
 	"testing"
 	"time"
 
+	codegraphconfig "github.com/H4RL33/wormhole/internal/runtime/codegraph/config"
+	codegraphindex "github.com/H4RL33/wormhole/internal/runtime/codegraph/index"
 	"github.com/H4RL33/wormhole/internal/runtime/eventbus"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/runtime/scheduler"
+	syncpkg "github.com/H4RL33/wormhole/internal/runtime/sync"
 )
+
+type fixedSyncStatusProvider struct {
+	project string
+	status  syncpkg.Status
+}
+
+func (p *fixedSyncStatusProvider) Status(_ context.Context, projectID string) (syncpkg.Status, error) {
+	p.project = projectID
+	return p.status, nil
+}
 
 // mcpToolResponse mirrors the old localResponse shape for test convenience:
 // decoded from an MCP tools/call {content,isError} result (or a JSON-RPC
@@ -205,6 +220,81 @@ func TestMCP_InitializeLifecycle(t *testing.T) {
 	}
 }
 
+func TestMCP_SyncStatusReturnsExactProjectScopedState(t *testing.T) {
+	srv, socketPath := newMCPTestServer(t)
+	provider := &fixedSyncStatusProvider{status: syncpkg.Status{State: syncpkg.StateOffline, PendingWrites: 3}}
+	srv.SetSyncStatusProvider(provider)
+	conn := dialLocalSocket(t, socketPath)
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	mcpInitialize(t, conn, reader)
+	resp := mcpCallTool(t, conn, reader, 2, "wormhole.sync.status", map[string]interface{}{"project_id": "project-1"})
+	if resp.Error != "" {
+		t.Fatalf("wormhole.sync.status: %s", resp.Error)
+	}
+	if provider.project != "project-1" {
+		t.Fatalf("status provider project = %q, want project-1", provider.project)
+	}
+	if string(resp.Result) != `{"state":"offline","pending_writes":3}` {
+		t.Fatalf("status result = %s", resp.Result)
+	}
+}
+
+func TestMCP_RecoveryOnlyProjectExposesOnlyEnrolmentAndStatus(t *testing.T) {
+	srv, socketPath := newMCPTestServer(t)
+	srv.SetSyncStatusProvider(&fixedSyncStatusProvider{status: syncpkg.Status{State: syncpkg.StateAttentionRequired}})
+	srv.SetRecoveryOnlyProjects([]string{"project-1"}, true)
+	conn := dialLocalSocket(t, socketPath)
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	mcpInitialize(t, conn, reader)
+
+	listRequest, _ := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("2"), Method: "tools/list"})
+	if _, err := conn.Write(append(listRequest, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	line, err := reader.ReadBytes('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listResponse rpcResponse
+	if err := json.Unmarshal(bytes.TrimSpace(line), &listResponse); err != nil {
+		t.Fatal(err)
+	}
+	var listed struct {
+		Tools []toolListEntry `json:"tools"`
+	}
+	if err := json.Unmarshal(listResponse.Result, &listed); err != nil {
+		t.Fatal(err)
+	}
+	gotNames := make([]string, 0, len(listed.Tools))
+	for _, tool := range listed.Tools {
+		gotNames = append(gotNames, tool.Name)
+	}
+	slices.Sort(gotNames)
+	if want := []string{EnrolmentToolName, "wormhole.sync.status"}; !reflect.DeepEqual(gotNames, want) {
+		t.Fatalf("recovery tools/list = %v, want %v", gotNames, want)
+	}
+
+	status := mcpCallTool(t, conn, reader, 3, "wormhole.sync.status", map[string]interface{}{"project_id": "project-1"})
+	if status.Error != "" {
+		t.Fatalf("recovery sync.status error = %q", status.Error)
+	}
+	for id, call := range []struct {
+		tool string
+		args map[string]interface{}
+	}{
+		{tool: "wormhole.task.list", args: map[string]interface{}{"project_id": "project-1"}},
+		{tool: "wormhole.task.create", args: map[string]interface{}{"project_id": "project-1", "title": "blocked"}},
+		{tool: "wormhole.agent.whoami", args: map[string]interface{}{}},
+	} {
+		resp := mcpCallTool(t, conn, reader, id+4, call.tool, call.args)
+		if !strings.Contains(resp.Error, "recovery required") {
+			t.Fatalf("%s recovery error = %q, want explicit recovery required", call.tool, resp.Error)
+		}
+	}
+}
+
 // TestMCP_ToolsCallBeforeInitializeRejected proves the design doc's
 // enforcement recommendation: a connection that hasn't completed
 // initialize -> notifications/initialized gets a JSON-RPC error for
@@ -286,7 +376,8 @@ func TestMCP_ToolsList_AllToolsWithSchemas(t *testing.T) {
 	}
 
 	wantTools := []string{
-		"wormhole.agent.whoami", "wormhole.task.list", "wormhole.task.get",
+		"wormhole.agent.whoami", "wormhole.sync.status", EnrolmentToolName, "wormhole.task.list", "wormhole.task.get",
+		"wormhole.code_graph.query", "wormhole.code_graph.status", "wormhole.code_graph.rebuild",
 		"wormhole.task.create", "wormhole.task.route", "wormhole.channel.list",
 		"wormhole.channel.create",
 		"wormhole.channel.events", "wormhole.channel.post", "wormhole.channel.subscribe",
@@ -335,6 +426,181 @@ func TestMCP_ToolsList_AllToolsWithSchemas(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestCodeGraphRuntimeRejectsMiswiredProject(t *testing.T) {
+	srv, _ := newMCPTestServer(t)
+	runtime, err := NewCodeGraphRuntime(context.Background(), srv.store.DB(), "project-a")
+	if err != nil {
+		t.Fatalf("NewCodeGraphRuntime: %v", err)
+	}
+	srv.SetCodeGraphRuntime("project-b", runtime)
+	if _, err := srv.resolveCodeGraphRuntime("project-b"); err == nil {
+		t.Fatal("miswired project runtime resolved")
+	}
+}
+
+func TestCodeGraphSchemasAreClosedAndBounded(t *testing.T) {
+	registry := newLocalRegistry(&Server{})
+	for _, name := range []string{"wormhole.code_graph.query", "wormhole.code_graph.status", "wormhole.code_graph.rebuild"} {
+		tool, ok := registry.Get(name)
+		if !ok {
+			t.Fatalf("registry missing %s", name)
+		}
+		schema := buildInputSchema(tool)
+		if additional, ok := schema["additionalProperties"].(bool); !ok || additional {
+			t.Fatalf("%s additionalProperties = %#v, want false", name, schema["additionalProperties"])
+		}
+	}
+	query, _ := registry.Get("wormhole.code_graph.query")
+	querySchema := buildInputSchema(query)
+	if required := querySchema["required"].([]string); slices.Contains(required, "intent") || !slices.Contains(required, "project_id") {
+		t.Fatalf("query required fields = %v, want project_id but optional intent", required)
+	}
+	if got := querySchema["anyOf"]; !reflect.DeepEqual(got, []map[string]any{{"required": []string{"intent"}}, {"required": []string{"entry_symbols"}}}) {
+		t.Fatalf("query anyOf = %#v", got)
+	}
+	items := querySchema["properties"].(map[string]any)["include_edges"].(map[string]any)["items"].(map[string]any)
+	if got := items["enum"]; !reflect.DeepEqual(got, []any{"calls", "references", "uses_type"}) {
+		t.Fatalf("include_edges enum = %#v", got)
+	}
+}
+
+func TestCodeGraphRequestsRejectCallerControlledAndTrailingFields(t *testing.T) {
+	for _, raw := range []string{
+		`{"intent":"find","project_id":"project-1","source_authorized":true}`,
+		`{"intent":"find","project_id":"project-1","max_nodes":999}`,
+		`{"intent":"find","project_id":"project-1","direction":"outbound"}`,
+		`{"intent":"find","project_id":"project-1"} {}`,
+	} {
+		var args codeGraphQueryArgs
+		if err := decodeCodeGraphArgs(json.RawMessage(raw), &args); err == nil {
+			t.Fatalf("query accepted %s", raw)
+		}
+	}
+	for _, field := range []string{"enabled", "disabled", "checkout", "canonical_remote", "source_byte_ceiling", "global_source_byte_ceiling", "warpspeed", "in_place", "project_config", "limits"} {
+		var args codeGraphProjectArgs
+		raw := json.RawMessage(`{"project_id":"project-1","` + field + `":true}`)
+		if err := decodeCodeGraphArgs(raw, &args); err == nil {
+			t.Fatalf("rebuild accepted %s", field)
+		}
+	}
+}
+
+func TestMCPCodeGraphQuerySourcePermissionDegradesOnlySource(t *testing.T) {
+	srv, socketPath := newMCPTestServer(t)
+	checkout := t.TempDir()
+	for _, args := range [][]string{{"init"}, {"config", "user.email", "test@example.invalid"}, {"config", "user.name", "test"}, {"remote", "add", "origin", "https://example.invalid/project.git"}} {
+		if output, err := exec.Command("git", append([]string{"-C", checkout}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(checkout, "go.mod"), []byte("module example.invalid/project\n\ngo 1.26\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sourceBytes := []byte("package fixture\n\nfunc Target() string { return \"exact slice\" }\n")
+	if err := os.WriteFile(filepath.Join(checkout, "target.go"), sourceBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "go.mod", "target.go"}, {"commit", "-m", "fixture"}} {
+		if output, err := exec.Command("git", append([]string{"-C", checkout}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+	}
+	runtime, err := NewCodeGraphRuntime(context.Background(), srv.store.DB(), "project-1")
+	if err != nil {
+		t.Fatalf("NewCodeGraphRuntime: %v", err)
+	}
+	if err := runtime.Store.PutProjectConfig(context.Background(), codegraphconfig.Project{ProjectID: "project-1", Enabled: true, CanonicalRemote: "https://example.invalid/project.git", ActiveCheckout: checkout, ProjectSourceByteCeiling: codegraphconfig.DefaultProjectSourceByteCeiling}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Index.Build(context.Background(), codegraphindex.BuildRequest{ProjectID: "project-1", RevisionID: "fixture"}); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	indexedCommit := runCodeGraphGit(t, checkout, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(checkout, "later.go"), []byte("package fixture\nconst Later = true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runCodeGraphGit(t, checkout, "add", "later.go")
+	runCodeGraphGit(t, checkout, "commit", "-m", "later clean commit")
+	currentCommit := runCodeGraphGit(t, checkout, "rev-parse", "HEAD")
+	srv.SetCodeGraphRuntime("project-1", runtime)
+	srv.SetAuthorizationAgent("project-1", "agent-1")
+	cache := func(permissions []string) {
+		if err := srv.store.CacheWhoAmI(context.Background(), localstore.WhoAmICache{AgentID: "agent-1", ProjectID: "project-1", Permissions: permissions, CachedAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	conn := dialLocalSocket(t, socketPath)
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	mcpInitialize(t, conn, reader)
+	args := map[string]interface{}{"project_id": "project-1", "intent": "Target", "entry_symbols": []string{"fixture.Target"}, "requested_source_bytes": 1024}
+	cache([]string{"code_graph.query", "code_graph.source.read"})
+	allowed := mcpCallTool(t, conn, reader, 41, "wormhole.code_graph.query", args)
+	if allowed.Error != "" {
+		t.Fatalf("query with source permission: %s", allowed.Error)
+	}
+	var withSource codeGraphQueryResult
+	if err := json.Unmarshal(allowed.Result, &withSource); err != nil {
+		t.Fatal(err)
+	}
+	var freshness map[string]any
+	if err := json.Unmarshal(allowed.Result, &freshness); err != nil {
+		t.Fatal(err)
+	}
+	if withSource.CurrentGitCommit != currentCommit || withSource.WorkingTreeStatus != "clean" {
+		t.Fatalf("query checkout freshness commit/status = %q/%q, want %q/clean (indexed %q)", withSource.CurrentGitCommit, withSource.WorkingTreeStatus, currentCommit, indexedCommit)
+	}
+	if freshness["graph_not_current"] != true || freshness["rebuild_recommended"] != true {
+		t.Fatalf("query freshness flags = graph_not_current:%v rebuild_recommended:%v", freshness["graph_not_current"], freshness["rebuild_recommended"])
+	}
+	if withSource.OmissionReason != "" {
+		t.Fatalf("freshness changed query omission reason to %q", withSource.OmissionReason)
+	}
+	if len(withSource.Sources) == 0 || !withSource.Sources[0].SourceIncluded || !strings.Contains(withSource.Sources[0].Source, "exact slice") {
+		t.Fatalf("source result = %+v", withSource.Sources)
+	}
+
+	cache([]string{"code_graph.query"})
+	metadata := mcpCallTool(t, conn, reader, 42, "wormhole.code_graph.query", args)
+	if metadata.Error != "" {
+		t.Fatalf("query without source permission: %s", metadata.Error)
+	}
+	var withoutSource codeGraphQueryResult
+	if err := json.Unmarshal(metadata.Result, &withoutSource); err != nil {
+		t.Fatal(err)
+	}
+	if len(withoutSource.Matches) == 0 || len(withoutSource.Sources) == 0 {
+		t.Fatalf("metadata result lacks graph information: %+v", withoutSource)
+	}
+	for _, outcome := range withoutSource.Sources {
+		if outcome.SourceIncluded || outcome.SourceOmissionReason != "missing_permission" || outcome.RequiredPermission != "code_graph.source.read" {
+			t.Fatalf("metadata-only source outcome = %+v", outcome)
+		}
+	}
+	cache([]string{"code_graph.source.read"})
+	if denied := mcpCallTool(t, conn, reader, 43, "wormhole.code_graph.query", args); denied.Error == "" || !strings.Contains(denied.Error, "code_graph.query") {
+		t.Fatalf("source-only query error = %q", denied.Error)
+	}
+	cache(nil)
+	if denied := mcpCallTool(t, conn, reader, 44, "wormhole.code_graph.query", args); denied.Error == "" || !strings.Contains(denied.Error, "code_graph.query") {
+		t.Fatalf("unscoped query error = %q", denied.Error)
+	}
+	srv.SetAuthorizationAgent("project-1", "replacement-agent")
+	if denied := mcpCallTool(t, conn, reader, 45, "wormhole.code_graph.query", args); denied.Error == "" || !strings.Contains(denied.Error, "no authenticated scope") {
+		t.Fatalf("missing exact scope query error = %q", denied.Error)
+	}
+}
+
+func runCodeGraphGit(t *testing.T, checkout string, args ...string) string {
+	t.Helper()
+	output, err := exec.Command("git", append([]string{"-C", checkout}, args...)...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, output)
+	}
+	return strings.TrimSpace(string(output))
 }
 
 // TestMCP_ToolsCall_WrapsHandlerError proves a tool handler's own error
@@ -669,6 +935,31 @@ func TestLocalRegistryDescribesRoutePermissionsAndRegisterRequestVariants(t *tes
 	}
 	if _, ambiguous := advertised["oneOf"]; ambiguous {
 		t.Fatalf("agent.register tools/list schema = %#v, hybrid inputs must remain valid", advertised)
+	}
+}
+
+func TestLocalRegistryDescribesCodeGraphToolsAndPermissions(t *testing.T) {
+	registry := newLocalRegistry(&Server{})
+	want := map[string][]string{
+		"wormhole.code_graph.query":   {"code_graph.query"},
+		"wormhole.code_graph.status":  {"code_graph.status"},
+		"wormhole.code_graph.rebuild": {"code_graph.rebuild"},
+	}
+	for name, permissions := range want {
+		tool, ok := registry.Get(name)
+		if !ok {
+			t.Fatalf("registry missing %s", name)
+		}
+		if !reflect.DeepEqual(tool.RequiredPermissions, permissions) {
+			t.Fatalf("%s RequiredPermissions = %v, want %v", name, tool.RequiredPermissions, permissions)
+		}
+	}
+	for _, tool := range registry.List() {
+		if strings.HasPrefix(tool.Name, "wormhole.code_graph.") {
+			if _, ok := want[tool.Name]; !ok {
+				t.Fatalf("unexpected Code Graph tool %s", tool.Name)
+			}
+		}
 	}
 }
 

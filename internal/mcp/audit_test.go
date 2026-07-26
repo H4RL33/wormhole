@@ -10,6 +10,7 @@ func TestMCPAudit_ToolSurfaceCompleteness(t *testing.T) {
 	r := NewFabricRegistry(FabricRegistryDependencies{})
 
 	expectedTools := map[string]bool{
+		"wormhole.agent.enrol":           false, // Gateway-owned pre-credential path
 		"wormhole.agent.register":        false, // RequiresAuth: false
 		"wormhole.agent.whoami":          true,
 		"wormhole.channel.create":        true,

@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
+	"github.com/H4RL33/wormhole/internal/types"
 )
 
 // SyncProtocolVersion is the Gateway-side version sent on every Fabric sync
@@ -31,7 +33,13 @@ type Engine struct {
 	auditRepo             *AuditRepo
 	taskRepo              *localstore.TaskRepo
 	kbRepo                *localstore.KBRepo
+	bootstrapStore        *localstore.Store
+	expectedAgentID       string
+	expectedPassportID    string
+	bootstrapAttempt      *localstore.EnrolmentAttemptRecord
 	mu                    sync.Mutex
+	stateMu               sync.RWMutex
+	connectionState       ConnectionState
 	lastSyncCursor        string
 	batchInterval         time.Duration
 	batchSize             int
@@ -46,6 +54,19 @@ type Engine struct {
 	wg                    sync.WaitGroup
 	// testCallSyncToolWithResultFn is for testing only: if set, overrides callSyncToolWithResult.
 	testCallSyncToolWithResultFn func(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error)
+}
+
+// ConfigureBootstrap supplies the durable snapshot target and the identity
+// references authenticated by the credential used for this engine.
+func (e *Engine) ConfigureBootstrap(store *localstore.Store, agentID, passportID string, attempt *localstore.EnrolmentAttemptRecord) error {
+	if store == nil || e.namespaceID == "" || agentID == "" || passportID == "" {
+		return errors.New("sync: invalid bootstrap configuration")
+	}
+	e.bootstrapStore = store
+	e.expectedAgentID = agentID
+	e.expectedPassportID = passportID
+	e.bootstrapAttempt = attempt
+	return nil
 }
 
 // Config holds tunable sync batching parameters (RFC-0003 §8.2).
@@ -103,6 +124,7 @@ func New(coordServerURL, token, namespaceID string, queueRepo *QueueRepo, auditR
 		latencyCheckInterval:  cfg.LatencyCheckInterval,
 		pullInterval:          cfg.PullInterval,
 		highPriorityThreshold: cfg.HighPriorityThreshold,
+		connectionState:       StateOffline,
 	}, nil
 }
 
@@ -117,6 +139,7 @@ func (e *Engine) Start(ctx context.Context) {
 
 		loopCtx, cancel := context.WithCancel(ctx)
 		e.cancel = cancel
+		e.setConnectionState(StateSynchronizing)
 		e.wg.Add(1)
 		go e.syncLoop(loopCtx)
 	})
@@ -149,13 +172,17 @@ func (e *Engine) syncLoop(ctx context.Context) {
 	pullTicker := time.NewTicker(e.pullInterval)
 	defer pullTicker.Stop()
 
+	// Reconcile immediately on startup. An enrolled Gateway serves its local
+	// socket independently, while this goroutine drains durable writes before
+	// accepting any server-side pull into the replica.
+	_ = e.syncOnce(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// Time-based batch trigger: push any pending work.
-			if err := e.pushBatch(ctx); err != nil {
+			if err := e.syncOnce(ctx); err != nil {
 				// Best-effort: log error and continue. The batch remains queued
 				// for retry on the next interval.
 				_ = err
@@ -165,11 +192,37 @@ func (e *Engine) syncLoop(ctx context.Context) {
 				_ = err
 			}
 		case <-pullTicker.C:
-			if err := e.PullIncremental(ctx); err != nil {
+			if err := e.syncOnce(ctx); err != nil {
 				_ = err
 			}
 		}
 	}
+}
+
+func (e *Engine) syncOnce(ctx context.Context) error {
+	e.setConnectionState(StateSynchronizing)
+	if err := e.pushBatch(ctx); err != nil {
+		if ctx.Err() == nil {
+			e.setConnectionState(stateForSyncError(err))
+		}
+		return err
+	}
+	pending, err := e.queueRepo.PendingCount(ctx, e.namespaceID)
+	if err != nil {
+		e.setConnectionState(StateAttentionRequired)
+		return fmt.Errorf("sync: inspect pending writes: %w", err)
+	}
+	if pending > 0 {
+		return nil
+	}
+	if err := e.PullIncremental(ctx); err != nil {
+		if ctx.Err() == nil {
+			e.setConnectionState(stateForSyncError(err))
+		}
+		return err
+	}
+	e.setConnectionState(StateOnline)
+	return nil
 }
 
 // pushBatch retrieves pending entries up to batchSize and pushes to the server.
@@ -220,6 +273,9 @@ func (e *Engine) pushBatch(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("sync: push batch: decode result: %w", err)
 	}
+	if pushResult.Version != SyncProtocolVersion {
+		return fmt.Errorf("sync: push batch: %w: response version = %d, want %d", ErrAttentionRequired, pushResult.Version, SyncProtocolVersion)
+	}
 
 	acknowledgements, err := validatePushAcknowledgements(entries, pushResult)
 	if err != nil {
@@ -227,15 +283,21 @@ func (e *Engine) pushBatch(ctx context.Context) error {
 	}
 
 	// Mark only successful entries as delivered. Failed entries remain in the queue for retry.
+	var rejected []string
 	for _, entry := range entries {
 		key := acknowledgementKey{entityType: entry.EntityType, entityID: entry.EntityID}
-		if acknowledgements[key].Error == "" {
+		if acknowledgement := acknowledgements[key]; acknowledgement.Error == "" {
 			if err := e.queueRepo.MarkDelivered(ctx, e.namespaceID, entry.ID); err != nil {
 				// Earlier rows remain delivered; this row and all later rows remain
 				// pending so the next cycle can retry without hiding local data loss.
 				return fmt.Errorf("sync: push batch: mark queue entry %q delivered: %w", entry.ID, err)
 			}
+		} else {
+			rejected = append(rejected, fmt.Sprintf("%s/%s: %s", entry.EntityType, entry.EntityID, acknowledgement.Error))
 		}
+	}
+	if len(rejected) > 0 {
+		return fmt.Errorf("sync: push batch: %w: %s", ErrAttentionRequired, strings.Join(rejected, "; "))
 	}
 
 	return nil
@@ -304,6 +366,13 @@ func (e *Engine) checkLatencySensitive(ctx context.Context) error {
 func (e *Engine) PullIncremental(ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	pending, err := e.queueRepo.ListPending(ctx, e.namespaceID, 1)
+	if err != nil {
+		return fmt.Errorf("sync: pull incremental: inspect pending writes: %w", err)
+	}
+	if len(pending) > 0 {
+		return nil
+	}
 
 	// Call wormhole.sync.incremental_pull on the coordination server.
 	// Include protocol version per RFC-0003 §9 OQ5 (P6 hardening).
@@ -322,6 +391,9 @@ func (e *Engine) PullIncremental(ctx context.Context) error {
 	pullResult, err := decodeIncrementalPullResult(result)
 	if err != nil {
 		return fmt.Errorf("sync: pull incremental: decode result: %w", err)
+	}
+	if pullResult.Version != SyncProtocolVersion {
+		return fmt.Errorf("sync: pull incremental: %w: response version = %d, want %d", ErrAttentionRequired, pullResult.Version, SyncProtocolVersion)
 	}
 	_, err = time.Parse(time.RFC3339, pullResult.Timestamp)
 	if err != nil {
@@ -374,17 +446,16 @@ func (e *Engine) Bootstrap(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("sync: bootstrap: decode result: %w", err)
 	}
-	for _, task := range out.TaskList {
-		if err := e.applyTask(ctx, task); err != nil {
-			return fmt.Errorf("sync: bootstrap: apply task: %w", err)
-		}
+	if err := validateBootstrapResult(out, e.namespaceID, e.expectedAgentID, e.expectedPassportID); err != nil {
+		return fmt.Errorf("sync: bootstrap: validate result: %w", err)
 	}
-	for _, article := range out.KBList {
-		if err := e.applyArticle(ctx, article); err != nil {
-			return fmt.Errorf("sync: bootstrap: apply kb article: %w", err)
-		}
+	if e.bootstrapStore == nil {
+		return errors.New("sync: bootstrap: no local store configured")
 	}
-
+	timestamp, _ := time.Parse(time.RFC3339Nano, out.Timestamp)
+	if err := e.bootstrapStore.ApplyBootstrap(ctx, e.namespaceID, out.OrgConfig, timestamp, e.bootstrapAttempt); err != nil {
+		return fmt.Errorf("sync: bootstrap: commit snapshot: %w", err)
+	}
 	return nil
 }
 
@@ -401,6 +472,8 @@ type taskSummaryWire struct {
 	Status       string     `json:"status"`
 	Priority     int        `json:"priority"`
 	DueBy        *time.Time `json:"due_by"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 // articleSummaryWire mirrors internal/mcp.ArticleSummary's JSON shape.
@@ -417,12 +490,114 @@ type articleSummaryWire struct {
 
 // bootstrapResultWire mirrors internal/mcp.BootstrapOutput's JSON shape.
 type bootstrapResultWire struct {
-	OrgConfig   json.RawMessage      `json:"org_config"`
-	ProjectList []string             `json:"project_list"`
-	TaskList    []taskSummaryWire    `json:"task_list"`
-	KBList      []articleSummaryWire `json:"kb_list"`
-	Timestamp   string               `json:"timestamp"`
-	Version     int                  `json:"version"`
+	OrgConfig   types.BootstrapOrgConfigV1 `json:"org_config"`
+	ProjectList []string                   `json:"project_list"`
+	TaskList    []types.BootstrapTaskV1    `json:"task_list"`
+	KBList      []types.BootstrapArticleV1 `json:"kb_list"`
+	Timestamp   string                     `json:"timestamp"`
+	Version     int                        `json:"version"`
+}
+
+// bootstrapPresence*Wire mirrors the required version-1 JSON fields with
+// pointers (or RawMessage for nullable/opaque values). It distinguishes a
+// required field that is absent from one that is present with its domain-valid
+// zero value; the normal bootstrap DTO remains the value used by validation
+// and storage.
+type bootstrapPresenceResultWire struct {
+	OrgConfig   *bootstrapPresenceOrgConfigWire `json:"org_config"`
+	ProjectList *[]string                       `json:"project_list"`
+	TaskList    *[]bootstrapPresenceTaskWire    `json:"task_list"`
+	KBList      *[]bootstrapPresenceArticleWire `json:"kb_list"`
+	Timestamp   *string                         `json:"timestamp"`
+	Version     *int                            `json:"version"`
+}
+
+type bootstrapPresenceOrgConfigWire struct {
+	SchemaVersion               *int                            `json:"schema_version"`
+	Project                     *bootstrapPresenceProjectWire   `json:"project"`
+	Identity                    *bootstrapPresenceIdentityWire  `json:"identity"`
+	Channels                    *[]bootstrapPresenceChannelWire `json:"channels"`
+	Events                      *[]bootstrapPresenceEventWire   `json:"events"`
+	Tasks                       *[]bootstrapPresenceTaskWire    `json:"tasks"`
+	KB                          *bootstrapPresenceKBWire        `json:"kb"`
+	IntegrationManifestMetadata json.RawMessage                 `json:"integration_manifest_metadata"`
+}
+
+type bootstrapPresenceProjectWire struct {
+	ID        *string    `json:"id"`
+	Name      *string    `json:"name"`
+	Owner     *string    `json:"owner"`
+	CreatedAt *time.Time `json:"created_at"`
+}
+
+type bootstrapPresenceIdentityWire struct {
+	Agent       *bootstrapPresenceAgentWire    `json:"agent"`
+	Passport    *bootstrapPresencePassportWire `json:"passport"`
+	Permissions *[]string                      `json:"permissions"`
+}
+
+type bootstrapPresenceAgentWire struct {
+	ID           *string    `json:"id"`
+	Owner        *string    `json:"owner"`
+	Model        *string    `json:"model"`
+	Capabilities *[]string  `json:"capabilities"`
+	CreatedAt    *time.Time `json:"created_at"`
+}
+
+type bootstrapPresencePassportWire struct {
+	ID           *string    `json:"id"`
+	AgentID      *string    `json:"agent_id"`
+	ProjectID    *string    `json:"project_id"`
+	Repositories *[]string  `json:"repositories"`
+	Roles        *[]string  `json:"roles"`
+	IssuedAt     *time.Time `json:"issued_at"`
+}
+
+type bootstrapPresenceChannelWire struct {
+	ID        *string    `json:"id"`
+	ProjectID *string    `json:"project_id"`
+	Name      *string    `json:"name"`
+	CreatedAt *time.Time `json:"created_at"`
+}
+
+type bootstrapPresenceEventWire struct {
+	ID        *string         `json:"id"`
+	ProjectID *string         `json:"project_id"`
+	ChannelID *string         `json:"channel_id"`
+	AgentID   *string         `json:"agent_id"`
+	EventType *string         `json:"event_type"`
+	Payload   json.RawMessage `json:"payload"`
+	Note      json.RawMessage `json:"note"`
+	CreatedAt *time.Time      `json:"created_at"`
+}
+
+type bootstrapPresenceTaskWire struct {
+	ID           *string         `json:"id"`
+	ProjectID    *string         `json:"project_id"`
+	ParentTaskID json.RawMessage `json:"parent_task_id"`
+	Title        *string         `json:"title"`
+	Description  *string         `json:"description"`
+	OwnerAgentID json.RawMessage `json:"owner_agent_id"`
+	Status       *string         `json:"status"`
+	Priority     *int            `json:"priority"`
+	DueBy        json.RawMessage `json:"due_by"`
+	CreatedAt    *time.Time      `json:"created_at"`
+	UpdatedAt    *time.Time      `json:"updated_at"`
+}
+
+type bootstrapPresenceKBWire struct {
+	Articles *[]bootstrapPresenceArticleWire `json:"articles"`
+}
+
+type bootstrapPresenceArticleWire struct {
+	ID            *string         `json:"id"`
+	ProjectID     *string         `json:"project_id"`
+	Title         *string         `json:"title"`
+	Body          *string         `json:"body"`
+	Frontmatter   json.RawMessage `json:"frontmatter"`
+	AuthorAgentID *string         `json:"author_agent_id"`
+	CreatedAt     *time.Time      `json:"created_at"`
+	UpdatedAt     *time.Time      `json:"updated_at"`
 }
 
 // syncUpdateEnvelopeWire mirrors internal/mcp's syncUpdateEnvelope.
@@ -467,10 +642,381 @@ func decodeBootstrapResult(result interface{}) (bootstrapResultWire, error) {
 	if err != nil {
 		return out, fmt.Errorf("marshal: %w", err)
 	}
-	if err := json.Unmarshal(raw, &out); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&out); err != nil {
 		return out, fmt.Errorf("unmarshal: %w", err)
 	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return out, fmt.Errorf("unmarshal: trailing data")
+	}
+	if err := validateBootstrapRequiredFieldPresence(raw); err != nil {
+		return out, err
+	}
 	return out, nil
+}
+
+func validateBootstrapRequiredFieldPresence(raw []byte) error {
+	var presence bootstrapPresenceResultWire
+	if err := json.Unmarshal(raw, &presence); err != nil {
+		return fmt.Errorf("unmarshal required-field presence: %w", err)
+	}
+	require := func(present bool, path string) error {
+		if !present {
+			return fmt.Errorf("missing required field %s", path)
+		}
+		return nil
+	}
+	for _, field := range []struct {
+		present bool
+		path    string
+	}{
+		{presence.OrgConfig != nil, "org_config"},
+		{presence.ProjectList != nil, "project_list"},
+		{presence.TaskList != nil, "task_list"},
+		{presence.KBList != nil, "kb_list"},
+		{presence.Timestamp != nil, "timestamp"},
+		{presence.Version != nil, "version"},
+	} {
+		if err := require(field.present, field.path); err != nil {
+			return err
+		}
+	}
+	org := presence.OrgConfig
+	for _, field := range []struct {
+		present bool
+		path    string
+	}{
+		{org.SchemaVersion != nil, "org_config.schema_version"},
+		{org.Project != nil, "org_config.project"},
+		{org.Identity != nil, "org_config.identity"},
+		{org.Channels != nil, "org_config.channels"},
+		{org.Events != nil, "org_config.events"},
+		{org.Tasks != nil, "org_config.tasks"},
+		{org.KB != nil, "org_config.kb"},
+		{len(org.IntegrationManifestMetadata) != 0, "org_config.integration_manifest_metadata"},
+	} {
+		if err := require(field.present, field.path); err != nil {
+			return err
+		}
+	}
+	project := org.Project
+	for _, field := range []struct {
+		present bool
+		path    string
+	}{
+		{project.ID != nil, "org_config.project.id"},
+		{project.Name != nil, "org_config.project.name"},
+		{project.Owner != nil, "org_config.project.owner"},
+		{project.CreatedAt != nil, "org_config.project.created_at"},
+	} {
+		if err := require(field.present, field.path); err != nil {
+			return err
+		}
+	}
+	identity := org.Identity
+	if err := require(identity.Agent != nil, "org_config.identity.agent"); err != nil {
+		return err
+	}
+	if err := require(identity.Passport != nil, "org_config.identity.passport"); err != nil {
+		return err
+	}
+	if err := require(identity.Permissions != nil, "org_config.identity.permissions"); err != nil {
+		return err
+	}
+	agent := identity.Agent
+	for _, field := range []struct {
+		present bool
+		path    string
+	}{
+		{agent.ID != nil, "org_config.identity.agent.id"},
+		{agent.Owner != nil, "org_config.identity.agent.owner"},
+		{agent.Model != nil, "org_config.identity.agent.model"},
+		{agent.Capabilities != nil, "org_config.identity.agent.capabilities"},
+		{agent.CreatedAt != nil, "org_config.identity.agent.created_at"},
+	} {
+		if err := require(field.present, field.path); err != nil {
+			return err
+		}
+	}
+	passport := identity.Passport
+	for _, field := range []struct {
+		present bool
+		path    string
+	}{
+		{passport.ID != nil, "org_config.identity.passport.id"},
+		{passport.AgentID != nil, "org_config.identity.passport.agent_id"},
+		{passport.ProjectID != nil, "org_config.identity.passport.project_id"},
+		{passport.Repositories != nil, "org_config.identity.passport.repositories"},
+		{passport.Roles != nil, "org_config.identity.passport.roles"},
+		{passport.IssuedAt != nil, "org_config.identity.passport.issued_at"},
+	} {
+		if err := require(field.present, field.path); err != nil {
+			return err
+		}
+	}
+	for i, channel := range *org.Channels {
+		prefix := fmt.Sprintf("org_config.channels[%d].", i)
+		for _, field := range []struct {
+			present bool
+			name    string
+		}{
+			{channel.ID != nil, "id"}, {channel.ProjectID != nil, "project_id"},
+			{channel.Name != nil, "name"}, {channel.CreatedAt != nil, "created_at"},
+		} {
+			if err := require(field.present, prefix+field.name); err != nil {
+				return err
+			}
+		}
+	}
+	for i, event := range *org.Events {
+		prefix := fmt.Sprintf("org_config.events[%d].", i)
+		for _, field := range []struct {
+			present bool
+			name    string
+		}{
+			{event.ID != nil, "id"}, {event.ProjectID != nil, "project_id"},
+			{event.ChannelID != nil, "channel_id"}, {event.AgentID != nil, "agent_id"},
+			{event.EventType != nil, "event_type"}, {len(event.Payload) != 0, "payload"},
+			{len(event.Note) != 0, "note"}, {event.CreatedAt != nil, "created_at"},
+		} {
+			if err := require(field.present, prefix+field.name); err != nil {
+				return err
+			}
+		}
+	}
+	if err := validateBootstrapTaskFieldPresence(*org.Tasks, "org_config.tasks", require); err != nil {
+		return err
+	}
+	if err := require(org.KB.Articles != nil, "org_config.kb.articles"); err != nil {
+		return err
+	}
+	if err := validateBootstrapArticleFieldPresence(*org.KB.Articles, "org_config.kb.articles", require); err != nil {
+		return err
+	}
+	if err := validateBootstrapTaskFieldPresence(*presence.TaskList, "task_list", require); err != nil {
+		return err
+	}
+	return validateBootstrapArticleFieldPresence(*presence.KBList, "kb_list", require)
+}
+
+func validateBootstrapTaskFieldPresence(tasks []bootstrapPresenceTaskWire, path string, require func(bool, string) error) error {
+	for i, task := range tasks {
+		prefix := fmt.Sprintf("%s[%d].", path, i)
+		for _, field := range []struct {
+			present bool
+			name    string
+		}{
+			{task.ID != nil, "id"}, {task.ProjectID != nil, "project_id"},
+			{len(task.ParentTaskID) != 0, "parent_task_id"}, {task.Title != nil, "title"},
+			{task.Description != nil, "description"}, {len(task.OwnerAgentID) != 0, "owner_agent_id"},
+			{task.Status != nil, "status"}, {task.Priority != nil, "priority"},
+			{len(task.DueBy) != 0, "due_by"}, {task.CreatedAt != nil, "created_at"},
+			{task.UpdatedAt != nil, "updated_at"},
+		} {
+			if err := require(field.present, prefix+field.name); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func validateBootstrapArticleFieldPresence(articles []bootstrapPresenceArticleWire, path string, require func(bool, string) error) error {
+	for i, article := range articles {
+		prefix := fmt.Sprintf("%s[%d].", path, i)
+		for _, field := range []struct {
+			present bool
+			name    string
+		}{
+			{article.ID != nil, "id"}, {article.ProjectID != nil, "project_id"},
+			{article.Title != nil, "title"}, {article.Body != nil, "body"},
+			{len(article.Frontmatter) != 0, "frontmatter"}, {article.AuthorAgentID != nil, "author_agent_id"},
+			{article.CreatedAt != nil, "created_at"}, {article.UpdatedAt != nil, "updated_at"},
+		} {
+			if err := require(field.present, prefix+field.name); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func validateBootstrapResult(out bootstrapResultWire, namespaceID, expectedAgentID, expectedPassportID string) error {
+	if out.Version != SyncProtocolVersion {
+		return fmt.Errorf("outer version = %d, want %d", out.Version, SyncProtocolVersion)
+	}
+	if out.OrgConfig.SchemaVersion != types.BootstrapSchemaVersionV1 {
+		return fmt.Errorf("org_config schema_version = %d, want %d", out.OrgConfig.SchemaVersion, types.BootstrapSchemaVersionV1)
+	}
+	if namespaceID == "" || expectedAgentID == "" || expectedPassportID == "" {
+		return errors.New("missing authenticated namespace or credential identity")
+	}
+	if out.ProjectList == nil || len(out.ProjectList) != 0 {
+		return errors.New("project_list must be a non-nil empty array")
+	}
+	identity := out.OrgConfig.Identity
+	if identity.Agent.Capabilities == nil {
+		return errors.New("agent capabilities must be an array")
+	}
+	if identity.Passport.Repositories == nil {
+		return errors.New("passport repositories must be an array")
+	}
+	if identity.Passport.Roles == nil {
+		return errors.New("passport roles must be an array")
+	}
+	if identity.Permissions == nil {
+		return errors.New("identity permissions must be an array")
+	}
+	if out.OrgConfig.Channels == nil {
+		return errors.New("channels must be an array")
+	}
+	if out.OrgConfig.Events == nil {
+		return errors.New("events must be an array")
+	}
+	if out.OrgConfig.Tasks == nil {
+		return errors.New("tasks must be an array")
+	}
+	if out.OrgConfig.KB.Articles == nil {
+		return errors.New("kb articles must be an array")
+	}
+	if out.TaskList == nil || out.KBList == nil {
+		return errors.New("task_list and kb_list must be arrays")
+	}
+	if out.OrgConfig.Project.ID != namespaceID {
+		return fmt.Errorf("project id %q does not match namespace %q", out.OrgConfig.Project.ID, namespaceID)
+	}
+	if out.OrgConfig.Project.CreatedAt.IsZero() {
+		return errors.New("project created_at is zero")
+	}
+	if identity.Agent.ID != expectedAgentID {
+		return fmt.Errorf("credential agent %q does not match snapshot agent %q", expectedAgentID, identity.Agent.ID)
+	}
+	if identity.Passport.ID != expectedPassportID {
+		return fmt.Errorf("credential passport %q does not match snapshot passport %q", expectedPassportID, identity.Passport.ID)
+	}
+	if identity.Passport.AgentID != identity.Agent.ID || identity.Passport.ProjectID != namespaceID {
+		return errors.New("passport identity/project references do not match snapshot")
+	}
+	if identity.Agent.CreatedAt.IsZero() || identity.Passport.IssuedAt.IsZero() {
+		return errors.New("identity timestamps must be nonzero")
+	}
+	if !reflect.DeepEqual(out.TaskList, out.OrgConfig.Tasks) {
+		return errors.New("task_list mirror differs from org_config tasks")
+	}
+	if !reflect.DeepEqual(out.KBList, out.OrgConfig.KB.Articles) {
+		return errors.New("kb_list mirror differs from org_config kb articles")
+	}
+	if !bytes.Equal(bytes.TrimSpace(out.OrgConfig.IntegrationManifestMetadata), []byte("null")) {
+		return errors.New("integration manifest metadata must be JSON null")
+	}
+	outerTimestamp, err := time.Parse(time.RFC3339Nano, out.Timestamp)
+	if err != nil || outerTimestamp.IsZero() {
+		return fmt.Errorf("bootstrap timestamp is invalid: %w", err)
+	}
+
+	channels := make(map[string]struct{}, len(out.OrgConfig.Channels))
+	for _, channel := range out.OrgConfig.Channels {
+		if channel.ID == "" || channel.ProjectID != namespaceID || channel.CreatedAt.IsZero() {
+			return fmt.Errorf("channel %q has invalid project or timestamp", channel.ID)
+		}
+		if _, duplicate := channels[channel.ID]; duplicate {
+			return fmt.Errorf("duplicate channel id %q", channel.ID)
+		}
+		channels[channel.ID] = struct{}{}
+	}
+	events := make(map[string]struct{}, len(out.OrgConfig.Events))
+	for _, event := range out.OrgConfig.Events {
+		if event.ID == "" || event.ProjectID != namespaceID || event.CreatedAt.IsZero() {
+			return fmt.Errorf("event %q has invalid project or timestamp", event.ID)
+		}
+		if _, duplicate := events[event.ID]; duplicate {
+			return fmt.Errorf("duplicate event id %q", event.ID)
+		}
+		events[event.ID] = struct{}{}
+		if strings.TrimSpace(event.AgentID) == "" {
+			return fmt.Errorf("event agent_id for %q must be nonempty", event.ID)
+		}
+		if strings.TrimSpace(event.EventType) == "" {
+			return fmt.Errorf("event event_type for %q must be nonempty", event.ID)
+		}
+		if _, ok := channels[event.ChannelID]; !ok {
+			return fmt.Errorf("event channel reference %q is missing", event.ChannelID)
+		}
+		if len(event.Payload) == 0 || !json.Valid(event.Payload) {
+			return fmt.Errorf("event payload %q is invalid JSON", event.ID)
+		}
+	}
+	tasksByID := make(map[string]types.BootstrapTaskV1, len(out.OrgConfig.Tasks))
+	for _, task := range out.OrgConfig.Tasks {
+		if task.ID == "" || task.ProjectID != namespaceID || task.CreatedAt.IsZero() || task.UpdatedAt.IsZero() || (task.DueBy != nil && task.DueBy.IsZero()) {
+			return fmt.Errorf("task %q has invalid project or timestamp", task.ID)
+		}
+		if task.ParentTaskID != nil && strings.TrimSpace(*task.ParentTaskID) == "" {
+			return fmt.Errorf("task %q parent_task_id must be nonempty when present", task.ID)
+		}
+		if task.OwnerAgentID != nil && strings.TrimSpace(*task.OwnerAgentID) == "" {
+			return fmt.Errorf("task %q owner_agent_id must be nonempty when present", task.ID)
+		}
+		switch task.Status {
+		case "todo", "wip", "blocked", "done":
+		default:
+			return fmt.Errorf("task %q has invalid status %q", task.ID, task.Status)
+		}
+		if _, duplicate := tasksByID[task.ID]; duplicate {
+			return fmt.Errorf("duplicate task id %q", task.ID)
+		}
+		tasksByID[task.ID] = task
+	}
+	for _, task := range out.OrgConfig.Tasks {
+		if task.ParentTaskID != nil {
+			if _, ok := tasksByID[*task.ParentTaskID]; !ok {
+				return fmt.Errorf("task %q parent reference %q is missing", task.ID, *task.ParentTaskID)
+			}
+		}
+	}
+	visiting := make(map[string]bool, len(tasksByID))
+	visited := make(map[string]bool, len(tasksByID))
+	var visit func(string) error
+	visit = func(id string) error {
+		if visiting[id] {
+			return fmt.Errorf("task graph contains a cycle at %q", id)
+		}
+		if visited[id] {
+			return nil
+		}
+		visiting[id] = true
+		if parent := tasksByID[id].ParentTaskID; parent != nil {
+			if err := visit(*parent); err != nil {
+				return err
+			}
+		}
+		visiting[id] = false
+		visited[id] = true
+		return nil
+	}
+	for id := range tasksByID {
+		if err := visit(id); err != nil {
+			return err
+		}
+	}
+	articles := make(map[string]struct{}, len(out.OrgConfig.KB.Articles))
+	for _, article := range out.OrgConfig.KB.Articles {
+		if article.ID == "" || article.ProjectID != namespaceID || article.CreatedAt.IsZero() || article.UpdatedAt.IsZero() {
+			return fmt.Errorf("kb article %q has invalid project or timestamp", article.ID)
+		}
+		if strings.TrimSpace(article.AuthorAgentID) == "" {
+			return fmt.Errorf("kb article author_agent_id for %q must be nonempty", article.ID)
+		}
+		if _, duplicate := articles[article.ID]; duplicate {
+			return fmt.Errorf("duplicate kb article id %q", article.ID)
+		}
+		articles[article.ID] = struct{}{}
+		if len(article.Frontmatter) == 0 || !json.Valid(article.Frontmatter) {
+			return fmt.Errorf("kb article %q frontmatter is invalid JSON", article.ID)
+		}
+	}
+	return nil
 }
 
 // decodeIncrementalPullResult is decodeBootstrapResult's counterpart for
@@ -509,8 +1055,8 @@ func (e *Engine) applyTask(ctx context.Context, task taskSummaryWire) error {
 	if e.taskRepo == nil {
 		return errors.New("sync: no taskRepo configured to apply server task")
 	}
-	_, err := e.taskRepo.UpsertTask(ctx, e.namespaceID, task.TaskID, task.Title, task.Description,
-		task.ParentTaskID, task.OwnerAgentID, task.Status, task.Priority, task.DueBy)
+	_, err := e.taskRepo.UpsertTaskFromServer(ctx, e.namespaceID, task.TaskID, task.Title, task.Description,
+		task.ParentTaskID, task.OwnerAgentID, task.Status, task.Priority, task.DueBy, task.CreatedAt, task.UpdatedAt)
 	return err
 }
 
@@ -575,6 +1121,12 @@ func (e *Engine) callSyncToolWithResult(ctx context.Context, toolName string, ar
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("sync: read response: %w", err)
+	}
+	if resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+		return nil, fmt.Errorf("%w: HTTP status %d", ErrFabricUnavailable, resp.StatusCode)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("%w: Fabric HTTP status %d", ErrAttentionRequired, resp.StatusCode)
 	}
 
 	var rpcResp map[string]interface{}

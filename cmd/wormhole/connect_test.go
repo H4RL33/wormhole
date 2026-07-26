@@ -271,10 +271,9 @@ func TestWireHarness_InvalidType(t *testing.T) {
 
 // TestRunConnect_AutoDetectsHarnesses confirms connect auto-detects and wires all harnesses
 func TestRunConnect_AutoDetectsHarnesses(t *testing.T) {
-	fakeGatewaySocket(t)
+	fakeEnrolmentGateway(t, persistedEnrolmentResult())
 	fakeClaude(t)
 	fakeWormhole(t)
-	fakeStdioBinary(t)
 
 	// Create opencode.json in a temp directory
 	tmpDir := t.TempDir()
@@ -292,21 +291,14 @@ func TestRunConnect_AutoDetectsHarnesses(t *testing.T) {
 		t.Fatalf("create opencode.json: %v", err)
 	}
 
-	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
-		t.Fatal("connect must not call wormhole.kb.search")
-		return searchArticlesOutput{}, nil
-	})
-	defer srv.Close()
-
-	tokenFile := filepath.Join(tmpDir, "credentials.json")
 	var stdout, stderr bytes.Buffer
 	// Call connect without --target (should auto-detect)
 	code := run([]string{
 		"connect",
-		"--server", srv.URL,
+		"--server", "https://fabric.example",
 		"--project", "proj-1",
 		"--permissions", "task.read",
-		"--token-file", tokenFile,
+		"--profile", "proj-1__default",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
@@ -321,26 +313,18 @@ func TestRunConnect_AutoDetectsHarnesses(t *testing.T) {
 
 // TestRunConnect_TargetFlagDeprecated confirms --target flag still works but is deprecated
 func TestRunConnect_TargetFlagDeprecated(t *testing.T) {
-	fakeGatewaySocket(t)
+	fakeEnrolmentGateway(t, persistedEnrolmentResult())
 	fakeClaude(t)
 	fakeWormhole(t)
-	fakeStdioBinary(t)
 
-	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
-		t.Fatal("connect must not call wormhole.kb.search")
-		return searchArticlesOutput{}, nil
-	})
-	defer srv.Close()
-
-	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
 	var stdout, stderr bytes.Buffer
 	// Call connect with --target claude (should still work)
 	code := run([]string{
 		"connect",
-		"--server", srv.URL,
+		"--server", "https://fabric.example",
 		"--project", "proj-1",
 		"--permissions", "task.read",
-		"--token-file", tokenFile,
+		"--profile", "proj-1__default",
 		"--target", "claude",
 	}, &stdout, &stderr)
 	if code != 0 {
@@ -350,7 +334,7 @@ func TestRunConnect_TargetFlagDeprecated(t *testing.T) {
 
 // TestRunConnect_NoHarnesses confirms connect fails gracefully when no harnesses are detected
 func TestRunConnect_NoHarnesses(t *testing.T) {
-	fakeGatewaySocket(t)
+	fakeEnrolmentGateway(t, persistedEnrolmentResult())
 	// Isolate PATH to an empty dir so a real claude/opencode installed on the
 	// dev machine isn't picked up by detectHarnesses (which walks the ambient
 	// PATH). Without this, /usr/bin/claude would be detected and the test would
@@ -368,20 +352,13 @@ func TestRunConnect_NoHarnesses(t *testing.T) {
 	}
 	defer os.Chdir(oldCwd)
 
-	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
-		t.Fatal("connect must not call wormhole.kb.search")
-		return searchArticlesOutput{}, nil
-	})
-	defer srv.Close()
-
-	tokenFile := filepath.Join(tmpDir, "credentials.json")
 	var stdout, stderr bytes.Buffer
 	code := run([]string{
 		"connect",
-		"--server", srv.URL,
+		"--server", "https://fabric.example",
 		"--project", "proj-1",
 		"--permissions", "task.read",
-		"--token-file", tokenFile,
+		"--profile", "proj-1__default",
 	}, &stdout, &stderr)
 	// Should fail because no harnesses detected
 	if code == 0 {

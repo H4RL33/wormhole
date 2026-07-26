@@ -6,10 +6,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
+	syncpkg "github.com/H4RL33/wormhole/internal/runtime/sync"
 )
 
 func newProxyTestServer(t *testing.T, handler http.HandlerFunc) *Server {
@@ -60,5 +63,49 @@ func TestLocalAPIRemoteProxyFailuresRemainActionable(t *testing.T) {
 				t.Fatalf("proxyRegister error = %v, want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestProxyWhoAmIFallsBackToExactCachedCredentialIdentityOffline(t *testing.T) {
+	srv := newProxyTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "Fabric unavailable", http.StatusServiceUnavailable)
+	})
+	want := localstore.WhoAmICache{
+		AgentID: "credential-agent", Owner: "cached owner", Model: "cached model",
+		Capabilities: []string{"code"}, ProjectID: "project-1", Permissions: []string{"task.create"}, CachedAt: time.Now().UTC(),
+	}
+	if err := srv.store.CacheWhoAmI(context.Background(), want); err != nil {
+		t.Fatalf("cache credential identity: %v", err)
+	}
+	if err := srv.store.CacheWhoAmI(context.Background(), localstore.WhoAmICache{
+		AgentID: "stale-other-agent", Owner: "wrong", Model: "wrong", ProjectID: "project-1",
+		Permissions: []string{"*"}, CachedAt: want.CachedAt.Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("cache stale identity: %v", err)
+	}
+	srv.SetAuthorizationAgent("project-1", "credential-agent")
+	out, err := srv.proxyWhoAmI(context.Background())
+	if err != nil {
+		t.Fatalf("proxyWhoAmI offline: %v", err)
+	}
+	if out.AgentID != want.AgentID || out.Owner != want.Owner || out.Model != want.Model ||
+		out.ProjectID != want.ProjectID || !reflect.DeepEqual(out.Capabilities, want.Capabilities) || !reflect.DeepEqual(out.Permissions, want.Permissions) {
+		t.Fatalf("offline whoami = %+v, want exact credential cache %+v", out, want)
+	}
+}
+
+func TestProxyRegisterRejectsExplicitlyWhenCentralAuthorityIsOffline(t *testing.T) {
+	called := false
+	srv := newProxyTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		http.Error(w, "unexpected", http.StatusInternalServerError)
+	})
+	srv.SetSyncStatusProvider(&fixedSyncStatusProvider{status: syncpkg.Status{State: syncpkg.StateOffline}})
+	_, err := srv.proxyRegister(context.Background(), json.RawMessage(`{"owner":"owner","project_id":"project-1"}`))
+	if err == nil || !strings.Contains(err.Error(), "central authority required") {
+		t.Fatalf("proxyRegister error = %v, want explicit central authority rejection", err)
+	}
+	if called {
+		t.Fatal("proxyRegister contacted Fabric after offline state was known")
 	}
 }

@@ -184,6 +184,26 @@ func TestUpsertTaskAndArticleReplaceExistingRows(t *testing.T) {
 	}
 }
 
+func TestUpsertTaskPreservesServerTimestampWhenPullOmitsIt(t *testing.T) {
+	store := openCoverageStore(t)
+	ctx := context.Background()
+	tr := NewTaskRepo(store.DB(), NewEventRepo(store.DB()))
+	if _, err := tr.UpsertTask(ctx, "project-a", "task", "first", "body", nil, nil, "todo", 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	want := time.Date(2026, 7, 26, 1, 2, 3, 456789000, time.UTC)
+	if _, err := store.DB().ExecContext(ctx, `UPDATE tasks SET updated_at = ? WHERE id = ?`, want, "task"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := tr.UpsertTask(ctx, "project-a", "task", "second", "changed", nil, nil, "wip", 2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.UpdatedAt.Equal(want) {
+		t.Fatalf("updated_at = %s, want preserved %s", got.UpdatedAt.Format(time.RFC3339Nano), want.Format(time.RFC3339Nano))
+	}
+}
+
 func TestCacheWhoAmIRejectsMalformedStoredJSONAndOpenRejectsDirectory(t *testing.T) {
 	store := openCoverageStore(t)
 	ctx := context.Background()

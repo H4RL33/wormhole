@@ -231,6 +231,9 @@ the same layering pattern and isolation discipline.
 | `internal/runtime/eventbus` | In-memory pub/sub for ephemeral events (presence, heartbeats); never persists (RFC-0003 §8.2) | `internal/types`, stdlib |
 | `internal/runtime/scheduler` | Agent registration, presence tracking, capability matching, local task routing (RFC-0003 §6.3) | `internal/types`, stdlib |
 | `internal/runtime/sync` | Outbound queue (durable, SQLite-backed), bootstrap/incremental pull/push clients, conflict audit logging (RFC-0003 §8.2, §8.3) | `internal/runtime/localstore`, `internal/types`, stdlib |
+| `internal/runtime/codegraph/config` | Disabled-by-default, project-scoped local Code Graph configuration | stdlib |
+| `internal/runtime/codegraph/store` | Component-local SQLite schema, revision payloads, snapshot reads, and atomic publication | `internal/runtime/codegraph/config`, stdlib |
+| `internal/runtime/codegraph/index` | Candidate invariant validation and publication orchestration | `internal/runtime/codegraph/store`, stdlib |
 
 **Local runtime hard dependency rules (RFC-0003 §6.3):**
 
@@ -239,6 +242,10 @@ the same layering pattern and isolation discipline.
 - LR3: `internal/runtime/localstore` repository methods enforce namespace isolation by construction: every query is namespace-scoped via mandatory parameters, never inferred from ambient state (RFC-0003 §7.2 — accepted RLS-gap risk with process discipline).
 - LR4: Ephemeral events (presence, heartbeats) are eventbus-only; durable events (task/KB changes) go through localstore. Never persist ephemeral state.
 - LR5: Sync queue is SQLite-backed and restart-surviving (RFC-0003 G4). Local writes become durable before sync is attempted; sync never blocks local writes.
+- LR6: Code Graph is Gateway-local derivative state. Its dependencies flow
+  `index` → `store` → Code Graph `config`; none imports `localapi`, `sync`, Core,
+  or MCP. Stores bind one explicit Gate A project at `Open`, every payload SQL
+  remains project- and revision-scoped, and no Code Graph state enters Fabric.
 
 **Hard dependency rules (Coordination Server):**
 
@@ -314,8 +321,23 @@ the same layering pattern and isolation discipline.
 - D5: Append-only tables (`events`, `audit_log`, future Constitution versions): no
   UPDATE or DELETE statements against them anywhere in application code. Corrections
   are new rows.
-- D6: KB embeddings live in pgvector (`vector` column on `kb_articles`), not an
-  external vector DB.
+- D6: KB embeddings live in Fabric's Postgres pgvector datastore, in the
+  project-scoped `kb_article_embeddings` generation table; an approved remote
+  provider may compute vectors but is never the vector datastore. The legacy
+  nullable `kb_articles.embedding` column is compatibility-only and must not be
+  used for production ranking or new writes.
+- D7: D1 governs Fabric's Postgres schema. Gateway Code Graph tables use their
+  own `codegraph_schema_migrations` SQLite ledger, fail closed on a schema newer
+  than the binary, and never enter the Fabric migration sequence. They may store
+  paths, indexed hashes, signatures, ranges, edges, and diagnostics, but never
+  complete source files, function bodies, or returned context packages. Schema
+  version 2 adds only `codegraph_lifecycle`, a project-scoped cross-handle
+  build/disable lease with PID plus process-start identity for safe startup
+  recovery arbitration. Startup recovery holds a SQLite `BEGIN IMMEDIATE`
+  writer barrier across lifecycle inspection and cleanup; ordinary build
+  admission may reclaim only an exactly matched, positively dead owner, while
+  uncertain liveness fails closed. Completed disablement removes its project row
+  together with all derivative graph/configuration rows.
 
 ---
 

@@ -62,16 +62,25 @@ func TestBootstrapTool_RateLimitRejectsCleanly(t *testing.T) {
 	tasksStore := testTasksStore(t)
 	kbStore := testKBStore(t)
 	eventsStore := testEventsStore(t)
+	identityStore := testIdentityStore(t)
 	projectID := mustCreateProject(t, "mcp-sync-ratelimit")
+	agentID, token := mustRegisterAgent(t, projectID)
+	scope, err := identityStore.WhoAmI(context.Background(), projectID, token)
+	if err != nil {
+		t.Fatalf("WhoAmI: %v", err)
+	}
+	if scope.Agent.ID != agentID {
+		t.Fatalf("scope agent = %q, want %q", scope.Agent.ID, agentID)
+	}
 	limiter := NewSyncRateLimiter(1, time.Minute)
-	tool := BootstrapTool(tasksStore, kbStore, eventsStore, limiter)
+	tool := BootstrapTool(identityStore, tasksStore, kbStore, eventsStore, limiter)
 
 	in := BootstrapInput{NamespaceID: projectID, Version: SyncProtocolVersion}
 	argsFirst := mustMarshal(t, in)
-	if _, err := tool.Handler(context.Background(), nil, projectID, argsFirst); err != nil {
+	if _, err := tool.Handler(context.Background(), &scope, projectID, argsFirst); err != nil {
 		t.Fatalf("first call: expected success, got %v", err)
 	}
-	if _, err := tool.Handler(context.Background(), nil, projectID, argsFirst); err == nil {
+	if _, err := tool.Handler(context.Background(), &scope, projectID, argsFirst); err == nil {
 		t.Fatalf("second call within window: expected rate-limit rejection, got nil error")
 	}
 }

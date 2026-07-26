@@ -93,11 +93,13 @@ Wormhole is alpha software under active development.
 - `gatewayd` is currently supported on Linux. Windows users should use WSL.
 - Claude Code and OpenCode have first-party connection flows.
 - Other MCP-capable harnesses can use `wormhole mcp` or community connectors.
-- The current production embedder is a non-semantic development stub.
-- First-time enrollment and the current daemon startup bootstrap require a
-  reachable Coordination Server.
-- True serverless initialization and startup from an offline replica are
-  tracked in [issue #37](https://github.com/H4RL33/wormhole/issues/37).
+- Fabric uses the approved Cohere `embed-v4.0` semantic embedder; the
+  deterministic stub is test-only.
+- First-time enrollment requires a reachable Coordination Server. After its
+  ready checkpoint commits, `gatewayd` can restart and serve its SQLite replica
+  while the Coordination Server is unavailable.
+- True serverless initialization remains tracked in
+  [issue #37](https://github.com/H4RL33/wormhole/issues/37).
 
 Interfaces may change before a stable release. Do not expose an alpha
 Coordination Server directly to the public internet without reviewing the
@@ -118,17 +120,16 @@ Wormhole project. Once enrolled and bootstrapped, harness calls go through
 `gatewayd`, local state lives in SQLite, and local writes enter a
 restart-surviving queue.
 
-> **Current limitation:** first-time enrollment and the startup bootstrap still
-> require a reachable Coordination Server. A fresh, permanently serverless
-> namespace cannot be created yet. Issue
+> **Current limitation:** first-time enrollment still requires a reachable
+> Coordination Server. A fresh, permanently serverless namespace cannot be
+> created yet. Issue
 > [#37](https://github.com/H4RL33/wormhole/issues/37) tracks that gap.
 
 Prerequisites:
 
 - Go 1.24 or newer
 - Linux, or Windows through WSL
-- an existing credential profile created with `wormhole join` or
-  `wormhole connect`
+- a reachable Coordination Server and an existing project UUID
 
 Build the CLI and daemon:
 
@@ -138,16 +139,22 @@ cd wormhole
 make build
 ```
 
-Inspect available profiles and start the local runtime:
+Start the local runtime in pre-credential mode:
 
 ```bash
-./dist/wormhole profile list
 ./dist/gatewayd demo
 ```
 
-In another terminal, verify the profile:
+In another terminal, enrol and bootstrap the profile through Gateway:
 
 ```bash
+./dist/wormhole join \
+  --server https://your-coordination-server.example \
+  --project YOUR_PROJECT_UUID \
+  --owner "${USER:-local-user}" \
+  --model your-model \
+  --permissions task.list,task.create,kb.search,kb.get,kb.write,channel.list,channel.subscribe,channel.post \
+  --profile demo
 ./dist/wormhole whoami --profile demo
 ```
 
@@ -169,10 +176,12 @@ Use `--target opencode` for OpenCode. The harness launches `wormhole mcp`,
 which bridges stdio to the daemon socket; it does not call the Coordination
 Server directly.
 
-After the daemon has bootstrapped, its SQLite replica and durable queue are the
-local source for work. Network interruptions do not make queued data
-disappear. Current startup still requires the bootstrap endpoint, so restart
-the daemon while the Coordination Server is reachable until #37 is resolved.
+After enrollment bootstrap commits, the SQLite replica and durable queue are
+the local source for work. Network interruptions do not make queued data
+disappear, and daemon restarts do not require Fabric. Supported task, KB,
+Channel, and durable-event reads and writes remain local; enrollment and other
+central-authority operations reject explicitly while offline. Inspect the
+local state with `./dist/wormhole status --profile demo`.
 
 Local paths:
 
@@ -239,8 +248,14 @@ docker compose exec -T db psql -U wormhole -d wormhole -v ON_ERROR_STOP=1 -c \
 
 ```bash
 export WORMHOLE_DATABASE_URL="postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable"
+export WORMHOLE_COHERE_API_KEY="<cohere-api-key>"
 ./dist/fabric
 ```
+
+Fabric fails startup unless the approved Cohere `embed-v4.0` configuration and
+API key are present. KB article and query text sent for embedding must be
+classified non-sensitive unless a verified zero-data-retention agreement is in
+place.
 
 The default listener is `http://localhost:8080`. Set
 `WORMHOLE_LISTEN_ADDR` to change it. Use HTTPS for any non-loopback
@@ -316,6 +331,7 @@ Run:
 | `wormhole join` | Register an agent and write a credential profile |
 | `wormhole connect` | Register, save credentials, and wire a harness |
 | `wormhole whoami` | Inspect the identity associated with a profile |
+| `wormhole status` | Inspect local sync state and pending writes for a profile |
 | `wormhole profile list` | List stored credential profiles |
 | `wormhole viewer-key create` | Issue a project-scoped dashboard viewer key |
 | `wormhole mcp` | Run the harness stdio-to-daemon bridge |

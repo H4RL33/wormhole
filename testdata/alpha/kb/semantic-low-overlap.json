@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "generated_guidance_requirements": {
+    "kb_search": "Use shared KB semantic search for organisational decisions, procedures, and discoveries before broad repository reconstruction when that context could answer the question.",
+    "code_graph": "Use Code Graph only for project-local source structure and bounded code discovery when it is enabled and current; it is separate from the shared KB and does not replace Git or verification."
+  },
+  "cases": [
+    {
+      "name": "credential-rotation",
+      "query": "replace an exposed access secret",
+      "related": {
+        "title": "Token recovery procedure",
+        "body": "Revoke the compromised credential, issue a new one, and verify the old identifier can no longer authenticate."
+      },
+      "lexical_decoy": {
+        "title": "Access review notes",
+        "body": "Replace the exposed dashboard label with a shorter access heading."
+      }
+    },
+    {
+      "name": "safe-release-rollback",
+      "query": "undo a faulty production rollout",
+      "related": {
+        "title": "Deployment recovery procedure",
+        "body": "Restore the last known-good artifact, confirm service health, and preserve the failed build for investigation."
+      },
+      "lexical_decoy": {
+        "title": "Production rollout wording",
+        "body": "Undo the faulty production rollout wording in the announcement before publication."
+      }
+    },
+    {
+      "name": "database-capacity",
+      "query": "requests stall when the connection pool is exhausted",
+      "related": {
+        "title": "Postgres saturation runbook",
+        "body": "Inspect active sessions, identify long-held transactions, and reduce concurrency until checkout latency recovers."
+      },
+      "lexical_decoy": {
+        "title": "Pool request template",
+        "body": "Requests for the office pool must include an exhausted inventory checklist and manager approval."
+      }
+    }
+  ]
+}

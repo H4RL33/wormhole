@@ -18,6 +18,7 @@ func TestE2E_V1ExitCriteria(t *testing.T) {
 	eventsStore := events.NewStore(db)
 	tasksStore := tasks.NewStore(db, eventsStore)
 	kbStore := kb.NewStore(db, kb.StubEmbedder{}, 0.9, 5000, 0, 0, 0)
+	prepareOnboardingEmbeddingForTest(t, kbStore)
 
 	registry := NewRegistry()
 	registry.Register(RegisterAgentTool(identityStore, eventsStore, testRolesStore(t), kbStore))

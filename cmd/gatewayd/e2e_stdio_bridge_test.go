@@ -197,7 +197,7 @@ func e2eCallTool(t *testing.T, srvURL, tool, projectID, token string, args any) 
 // stores, real Postgres, the exact registry from main.go) and returns its
 // httptest.Server plus a registered agent's token/project for wiring
 // Gateway's credentials in Leg 2.
-func e2eStartCoordServer(t *testing.T, db *sql.DB) (srvURL, projectID, agentID, token string) {
+func e2eStartCoordServer(t *testing.T, db *sql.DB) (srvURL, projectID, agentID, passportID, token string) {
 	t.Helper()
 
 	identityStore := identity.NewStore(db)
@@ -205,6 +205,9 @@ func e2eStartCoordServer(t *testing.T, db *sql.DB) (srvURL, projectID, agentID, 
 	tasksStore := tasks.NewStore(db, eventsStore)
 	gitStore := git.NewStore(db)
 	kbStore := kb.NewStore(db, kb.StubEmbedder{}, 0.85, 4000, 1, 1, 1)
+	if err := mcp.PrepareOnboardingArticleEmbedding(context.Background(), kbStore); err != nil {
+		t.Fatalf("prepare onboarding embedding: %v", err)
+	}
 	rolesStore := roles.NewStore(db)
 
 	registry := mcp.NewFabricRegistry(mcp.FabricRegistryDependencies{
@@ -237,7 +240,7 @@ func e2eStartCoordServer(t *testing.T, db *sql.DB) (srvURL, projectID, agentID, 
 		t.Fatalf("register output missing fields: %+v", registerOut)
 	}
 
-	return srv.URL, projectID, registerOut.AgentID, registerOut.Token
+	return srv.URL, projectID, registerOut.AgentID, registerOut.PassportID, registerOut.Token
 }
 
 // -----------------------------------------------------------------------
@@ -471,6 +474,22 @@ func (c *e2eStdioClient) callTool(t *testing.T, tool string, args map[string]int
 	return json.RawMessage(result.Content[0].Text), ""
 }
 
+func e2eGatewaySyncStatus(t *testing.T, client *e2eStdioClient, projectID string) (string, int, error) {
+	t.Helper()
+	raw, toolErr := client.callTool(t, "wormhole.sync.status", map[string]interface{}{"project_id": projectID})
+	if toolErr != "" {
+		return "", 0, errors.New(toolErr)
+	}
+	var status struct {
+		State         string `json:"state"`
+		PendingWrites int    `json:"pending_writes"`
+	}
+	if err := json.Unmarshal(raw, &status); err != nil {
+		return "", 0, err
+	}
+	return status.State, status.PendingWrites, nil
+}
+
 // -----------------------------------------------------------------------
 // The test.
 // -----------------------------------------------------------------------
@@ -495,11 +514,37 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 	if stdioBridgeBinErr != nil {
 		t.Fatalf("build wormhole mcp bridge: %v", stdioBridgeBinErr)
 	}
+	gatewayBin := task4BuildGatewayBinary(t)
+	if task4GatewayBinErr != nil {
+		t.Fatalf("build gatewayd: %v", task4GatewayBinErr)
+	}
+	fabricBin := task4BuildFabricBinary(t)
+	if task4FabricBinErr != nil {
+		t.Fatalf("build Fabric: %v", task4FabricBinErr)
+	}
 
-	// --- Leg 1: real Coordination Server, real Postgres. ---
-	coordURL, projectID, agentID, token := e2eStartCoordServer(t, db)
+	// --- Leg 1: real Fabric process and real Postgres. ---
+	databaseURL := types.LoadConfig().DatabaseURL
+	fabricProcess, coordURL := startTask4FabricProcess(t, fabricBin, databaseURL)
+	defer fabricProcess.Stop(t)
+	projectID := e2eMustCreateProject(t, db, "e2e-stdio-bridge-project")
+	registerRaw := e2eCallTool(t, coordURL, "wormhole.agent.register", projectID, "", mcp.RegisterAgentInput{
+		Permissions: []string{"task.create", "task.assign", "task.list", "kb.write", "channel.create", "channel.post"},
+		Owner:       "harley", Model: "claude", Capabilities: []string{"code_review"},
+	})
+	var registered mcp.RegisterAgentOutput
+	if err := json.Unmarshal(registerRaw, &registered); err != nil {
+		t.Fatalf("decode register result: %v", err)
+	}
+	agentID, passportID, token := registered.AgentID, registered.PassportID, registered.Token
 	var coordOnline atomic.Bool
 	coordOnline.Store(true)
+	var dropNextPushResponse atomic.Bool
+	var droppedPushResponse atomic.Bool
+	var retryBlocked atomic.Bool
+	droppedACK := make(chan struct{})
+	retryEntered := make(chan struct{})
+	releaseRetry := make(chan struct{})
 	coordProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !coordOnline.Load() {
 			http.Error(w, "coordination server offline", http.StatusServiceUnavailable)
@@ -509,6 +554,20 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
+		}
+		var rpcReq mcpRpcRequest
+		var params mcpToolsCallParams
+		_ = json.Unmarshal(body, &rpcReq)
+		_ = json.Unmarshal(rpcReq.Params, &params)
+		isPush := params.Name == "wormhole.sync.incremental_push"
+		dropResponse := isPush && dropNextPushResponse.CompareAndSwap(true, false)
+		if isPush && droppedPushResponse.Load() && retryBlocked.CompareAndSwap(false, true) {
+			close(retryEntered)
+			select {
+			case <-releaseRetry:
+			case <-r.Context().Done():
+				return
+			}
 		}
 		upstream, err := http.NewRequestWithContext(r.Context(), r.Method, coordURL+r.URL.Path, bytes.NewReader(body))
 		if err != nil {
@@ -522,14 +581,25 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 			return
 		}
 		defer resp.Body.Close()
-		w.WriteHeader(resp.StatusCode)
 		responseBody, _ := io.ReadAll(resp.Body)
+		if dropResponse {
+			droppedPushResponse.Store(true)
+			close(droppedACK)
+			if hijacker, ok := w.(http.Hijacker); ok {
+				conn, _, hijackErr := hijacker.Hijack()
+				if hijackErr == nil {
+					_ = conn.Close()
+					return
+				}
+			}
+			return
+		}
+		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(responseBody)
 	}))
 	defer coordProxy.Close()
 
-	// --- Leg 2: real Gateway, in-process (mirrors
-	// TestRun_EndToEndWhoAmI's env-var setup exactly). ---
+	// --- Leg 2: real gatewayd process with persistent SQLite. ---
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	runDir := filepath.Join(home, "run")
@@ -542,7 +612,7 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 		t.Fatalf("mkdir credentials dir: %v", err)
 	}
 	credData, err := json.Marshal(map[string]string{
-		"server": coordProxy.URL, "project_id": projectID, "agent_id": "e2e-agent", "token": token,
+		"server": coordProxy.URL, "project_id": projectID, "agent_id": agentID, "passport_id": passportID, "token": token,
 	})
 	if err != nil {
 		t.Fatalf("marshal credentials: %v", err)
@@ -550,10 +620,12 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(credDir, "default.json"), credData, 0o600); err != nil {
 		t.Fatalf("write credentials: %v", err)
 	}
+	dbPath := filepath.Join(dataDir, "wormhole", "wormholed.db")
+	seedEnrolledGatewayCheckpoint(t, dbPath, coordURL, projectID, agentID, passportID, token, "default")
 
 	socketPath := filepath.Join(runDir, "wormhole", "wormholed.sock")
-	daemon := startTestDaemon(t, "default", socketPath)
-	defer daemon.stop(t)
+	daemon := startTask4ProcessDaemon(t, gatewayBin, "default", os.Environ(), socketPath)
+	defer daemon.Stop(t)
 
 	// --- Leg 3: the real transport. Spawn the stdio bridge subprocess
 	// with XDG_RUNTIME_DIR pointed at the same runDir Gateway used, so
@@ -568,7 +640,8 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 	if !bytes.Contains(listResp.Result, []byte(`"wormhole.task.create"`)) || !bytes.Contains(listResp.Result, []byte(`"wormhole.channel.create"`)) {
 		t.Fatalf("tools/list missing durable write tools: %s", listResp.Result)
 	}
-	if _, errMsg := client.callTool(t, "wormhole.agent.whoami", nil); errMsg != "" {
+	warmWhoAmI, errMsg := client.callTool(t, "wormhole.agent.whoami", nil)
+	if errMsg != "" {
 		t.Fatalf("warm authenticated local scope: %s", errMsg)
 	}
 	if _, errMsg := client.callTool(t, "wormhole.agent.register", map[string]interface{}{
@@ -577,6 +650,11 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 		t.Fatalf("register local route agent: %s", errMsg)
 	}
 	coordOnline.Store(false)
+	fabricProcess.Stop(t)
+	whoAmIOffline, errMsg := client.callTool(t, "wormhole.agent.whoami", nil)
+	if errMsg != "" || !bytes.Equal(warmWhoAmI, whoAmIOffline) {
+		t.Fatalf("offline whoami=%s error=%q, want exact cached identity %s", whoAmIOffline, errMsg, warmWhoAmI)
+	}
 
 	// Create a task through the full chain. Local-first writes never
 	// block on Coordination Server reachability (confirmed by reading
@@ -677,7 +755,7 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 		t.Fatalf("decode event result %s: %v", eventRaw, err)
 	}
 
-	daemon.stop(t)
+	daemon.Stop(t)
 	bridgeExited := make(chan error, 1)
 	go func() { bridgeExited <- client.cmd.Wait() }()
 	select {
@@ -710,15 +788,56 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 		t.Fatalf("close local store between daemon runs: %v", err)
 	}
 
-	coordOnline.Store(true)
-	restarted := startTestDaemon(t, "default", socketPath)
-	defer restarted.stop(t)
+	restarted := startTask4ProcessDaemon(t, gatewayBin, "default", os.Environ(), socketPath)
+	defer restarted.Stop(t)
 	reconnectedClient := e2eStartStdioBridge(t, binPath, runDir)
 	reconnectedClient.initialize(t)
+	waitForCondition(t, 5*time.Second, "offline sync status after Gateway restart", func() (bool, error) {
+		state, pending, err := e2eGatewaySyncStatus(t, reconnectedClient, projectID)
+		return state == "offline" && pending >= 5, err
+	})
 	restartedReadRaw, restartedErr := reconnectedClient.callTool(t, "wormhole.task.get", map[string]interface{}{"task_id": taskOut.ID})
 	if restartedErr != "" || !bytes.Contains(restartedReadRaw, []byte(taskTitle)) {
 		t.Fatalf("local task after daemon/bridge restart = %s error=%q", restartedReadRaw, restartedErr)
 	}
+	if _, authorityErr := reconnectedClient.callTool(t, "wormhole.agent.register", map[string]interface{}{
+		"owner": "offline", "model": "test", "permissions": []string{}, "capabilities": []string{},
+		"repositories": []string{}, "roles": []string{},
+	}); !strings.Contains(authorityErr, "central authority required") {
+		t.Fatalf("offline authority operation error=%q, want explicit central authority denial", authorityErr)
+	}
+
+	restartedFabricProcess := startTask4FabricProcessAtURL(t, fabricBin, databaseURL, coordURL)
+	defer restartedFabricProcess.Stop(t)
+	dropNextPushResponse.Store(true)
+	coordOnline.Store(true)
+	select {
+	case <-droppedACK:
+	case <-time.After(10 * time.Second):
+		t.Fatal("fault proxy did not drop the first post-commit incremental-push response")
+	}
+	for table, id := range map[string]string{
+		"tasks": taskOut.ID, "kb_articles": kbOut.ID, "channels": channelOut.ID, "events": eventOut.ID,
+	} {
+		var count int
+		if err := db.QueryRow(`SELECT count(*) FROM `+table+` WHERE id = $1`, id).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("%s stable effect count after lost ACK = %d err=%v, want 1", table, count, err)
+		}
+	}
+	select {
+	case <-retryEntered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Gateway did not retry the lost-ACK batch")
+	}
+	state, pending, statusErr := e2eGatewaySyncStatus(t, reconnectedClient, projectID)
+	if statusErr != nil || state != "synchronizing" || pending == 0 {
+		t.Fatalf("status during blocked replay = %q/%d err=%v, want synchronizing with pending writes", state, pending, statusErr)
+	}
+	close(releaseRetry)
+	waitForCondition(t, 10*time.Second, "online sync status and drained durable queue", func() (bool, error) {
+		state, pending, err := e2eGatewaySyncStatus(t, reconnectedClient, projectID)
+		return state == "online" && pending == 0, err
+	})
 
 	// --- Offline-write -> reconnect -> sync (P7 path), now through the
 	// real transport: poll the real Coordination Server's own Postgres

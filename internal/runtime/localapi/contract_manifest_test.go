@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,13 +51,16 @@ type alphaResponse struct {
 }
 
 type alphaSchema struct {
-	Type       string                `json:"type,omitempty"`
-	Format     string                `json:"format,omitempty"`
-	Enum       []string              `json:"enum,omitempty"`
-	Properties []alphaSchemaProperty `json:"properties,omitempty"`
-	Required   []string              `json:"required,omitempty"`
-	Items      *alphaSchema          `json:"items,omitempty"`
-	AnyOf      []alphaSchema         `json:"anyOf,omitempty"`
+	Type                 string                `json:"type,omitempty"`
+	Format               string                `json:"format,omitempty"`
+	Enum                 []string              `json:"enum,omitempty"`
+	BooleanEnum          []bool                `json:"boolean_enum,omitempty"`
+	Properties           []alphaSchemaProperty `json:"properties,omitempty"`
+	Required             []string              `json:"required,omitempty"`
+	Items                *alphaSchema          `json:"items,omitempty"`
+	AnyOf                []alphaSchema         `json:"anyOf,omitempty"`
+	AdditionalProperties *bool                 `json:"additional_properties,omitempty"`
+	MinLength            int                   `json:"min_length,omitempty"`
 }
 
 type alphaSchemaProperty struct {
@@ -111,6 +115,155 @@ func TestAlphaContractGatewayMCPRegistry(t *testing.T) {
 		got, _ := json.MarshalIndent(actual, "", "  ")
 		want, _ := json.MarshalIndent(manifest.MCPTools.Gateway, "", "  ")
 		t.Fatalf("Gateway MCP contract drifted\nactual:\n%s\nmanifest:\n%s", got, want)
+	}
+}
+
+func TestAlphaContractCodeGraphSurface(t *testing.T) {
+	manifest := readAlphaLocalContract(t)
+	wantPermissions := map[string][]string{
+		"wormhole.code_graph.query":   {"code_graph.query"},
+		"wormhole.code_graph.rebuild": {"code_graph.rebuild"},
+		"wormhole.code_graph.status":  {"code_graph.status"},
+	}
+	seen := map[string]bool{}
+	for _, tool := range manifest.MCPTools.Gateway {
+		permissions, ok := wantPermissions[tool.Name]
+		if !ok {
+			if strings.HasPrefix(tool.Name, "wormhole.code_graph.") {
+				t.Fatalf("unexpected Code Graph contract tool %q", tool.Name)
+			}
+			continue
+		}
+		seen[tool.Name] = true
+		if !reflect.DeepEqual(tool.RequiredPermissions, permissions) || len(tool.RequestSchemas) != 1 || len(tool.ResponseSchemas) != 1 {
+			t.Fatalf("%s contract permissions/shapes = %v/%d/%d", tool.Name, tool.RequiredPermissions, len(tool.RequestSchemas), len(tool.ResponseSchemas))
+		}
+		request := tool.RequestSchemas[0].Schema
+		if request.AdditionalProperties == nil || *request.AdditionalProperties || !reflect.DeepEqual(request.Required, []string{"project_id"}) {
+			t.Fatalf("%s request is not closed/project-required: %+v", tool.Name, request)
+		}
+		responseProperties := contractProperties(tool.ResponseSchemas[0].Schema)
+		switch tool.Name {
+		case "wormhole.code_graph.status":
+			if !reflect.DeepEqual(responseProperties["state"].Enum, []string{"degraded", "disabled", "error", "initializing", "ready", "stale"}) {
+				t.Fatalf("status state enum = %v", responseProperties["state"].Enum)
+			}
+		case "wormhole.code_graph.query":
+			if !reflect.DeepEqual(request.AnyOf, []alphaSchema{{Required: []string{"intent"}}, {Required: []string{"entry_symbols"}}}) {
+				t.Fatalf("query anyOf = %+v", request.AnyOf)
+			}
+			for _, field := range []string{"current_git_commit", "working_tree_status", "graph_revision", "graph_not_current", "rebuild_recommended", "sources"} {
+				if _, ok := responseProperties[field]; !ok {
+					t.Errorf("query response missing %s", field)
+				}
+			}
+			if !reflect.DeepEqual(responseProperties["working_tree_status"].Enum, []string{"clean", "dirty"}) {
+				t.Fatalf("working_tree_status enum = %v", responseProperties["working_tree_status"].Enum)
+			}
+		}
+	}
+	if len(seen) != len(wantPermissions) {
+		t.Fatalf("Code Graph contract tools = %v, want %v", seen, wantPermissions)
+	}
+	readme, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "contracts", "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, phrase := range []string{"code_graph.source.read", "metadata-only", "project-local", "graph_not_current", "rebuild_recommended", "balanced copy-on-write", "does not call the working tree `stale`"} {
+		if !bytes.Contains(readme, []byte(phrase)) {
+			t.Errorf("contract README missing %q", phrase)
+		}
+	}
+	for _, errorCase := range []string{"invalid or unknown input", "missing primary permission", "missing or ambiguous project scope", "disabled rebuild", "concurrent rebuild", "preserves the active graph", "status becomes `degraded` or `error`"} {
+		if !bytes.Contains(readme, []byte(errorCase)) {
+			t.Errorf("contract README missing Code Graph error case %q", errorCase)
+		}
+	}
+}
+
+func contractProperties(schema alphaSchema) map[string]alphaSchema {
+	properties := make(map[string]alphaSchema, len(schema.Properties))
+	for _, property := range schema.Properties {
+		properties[property.Name] = property.Schema
+	}
+	return properties
+}
+
+func TestAlphaContractGatewayEnrolmentIsPreCredentialAndVersioned(t *testing.T) {
+	manifest := readAlphaLocalContract(t)
+	var enrolment *alphaGatewayMCPTool
+	for i := range manifest.MCPTools.Gateway {
+		if manifest.MCPTools.Gateway[i].Name == EnrolmentToolName {
+			enrolment = &manifest.MCPTools.Gateway[i]
+			break
+		}
+	}
+	if enrolment == nil {
+		for _, actual := range gatewayMCPContract(t) {
+			if actual.Name == EnrolmentToolName {
+				encoded, _ := json.MarshalIndent(actual, "", "  ")
+				t.Fatalf("manifest is missing %s; registry contract:\n%s", EnrolmentToolName, encoded)
+			}
+		}
+		t.Fatalf("manifest and registry are missing %s", EnrolmentToolName)
+	}
+	if len(enrolment.RequiredPermissions) != 0 {
+		t.Fatalf("pre-credential enrolment permissions = %v, want none", enrolment.RequiredPermissions)
+	}
+	if len(enrolment.RequestSchemas) != 1 {
+		t.Fatalf("request schemas = %d, want 1", len(enrolment.RequestSchemas))
+	}
+	wantRequired := []string{
+		"capabilities", "credential_profile", "fabric_address", "idempotency_key", "model", "owner",
+		"project_id", "repositories", "requested_permissions", "roles", "version",
+	}
+	if !reflect.DeepEqual(enrolment.RequestSchemas[0].Schema.Required, wantRequired) {
+		t.Fatalf("required request fields = %v, want %v", enrolment.RequestSchemas[0].Schema.Required, wantRequired)
+	}
+	if enrolment.RequestSchemas[0].Schema.AdditionalProperties == nil || *enrolment.RequestSchemas[0].Schema.AdditionalProperties {
+		t.Fatal("enrolment request schema must disallow additional properties")
+	}
+	var profileSchema *alphaSchema
+	for i := range enrolment.RequestSchemas[0].Schema.Properties {
+		if enrolment.RequestSchemas[0].Schema.Properties[i].Name == "credential_profile" {
+			profileSchema = &enrolment.RequestSchemas[0].Schema.Properties[i].Schema
+		}
+	}
+	if profileSchema == nil || profileSchema.MinLength != 1 {
+		t.Fatalf("credential_profile schema = %+v, want min length 1", profileSchema)
+	}
+
+	wantContracts := map[string]struct {
+		state     string
+		retryable bool
+	}{
+		"fabric_unreachable": {"failed", true}, "invalid_project": {"failed", false},
+		"permissions_rejected": {"failed", false}, "duplicate_identity": {"failed", false},
+		"repository_mismatch": {"failed", false}, "credential_persistence_failed": {"recovery_required", true},
+		"bootstrap_failed_after_enrolment": {"recovery_required", true}, "checkpoint_persistence_failed": {"attention_required", false},
+		"credentials_persisted": {"credentials_persisted", true},
+		"success":               {"ready", false},
+	}
+	if len(enrolment.ResponseSchemas) != len(wantContracts) {
+		t.Fatalf("result variants = %d, want %d", len(enrolment.ResponseSchemas), len(wantContracts))
+	}
+	for _, response := range enrolment.ResponseSchemas {
+		want, ok := wantContracts[response.Variant]
+		if !ok {
+			t.Fatalf("unexpected result variant %q", response.Variant)
+		}
+		if response.Schema.AdditionalProperties == nil || *response.Schema.AdditionalProperties {
+			t.Fatalf("%s allows additional properties", response.Variant)
+		}
+		properties := map[string]alphaSchema{}
+		for _, property := range response.Schema.Properties {
+			properties[property.Name] = property.Schema
+		}
+		if !reflect.DeepEqual(properties["code"].Enum, []string{response.Variant}) ||
+			!reflect.DeepEqual(properties["state"].Enum, []string{want.state}) ||
+			!reflect.DeepEqual(properties["retryable"].BooleanEnum, []bool{want.retryable}) {
+			t.Fatalf("%s discriminants code=%v state=%v retryable=%v", response.Variant, properties["code"].Enum, properties["state"].Enum, properties["retryable"].BooleanEnum)
+		}
 	}
 }
 
@@ -488,9 +641,17 @@ func responseSchemaSnapshots(t *testing.T, examples map[string]any) []alphaRespo
 		if exampleType == nil {
 			t.Fatalf("response variant %q has nil example", variant)
 		}
+		schema := jsonResponseSchemaForType(exampleType)
+		if example, ok := examples[variant].(EnrolmentResult); ok {
+			schema["additionalProperties"] = false
+			properties := schema["properties"].(map[string]any)
+			properties["code"].(map[string]any)["enum"] = []any{string(example.Code)}
+			properties["state"].(map[string]any)["enum"] = []any{string(example.State)}
+			properties["retryable"].(map[string]any)["enum"] = []any{example.Retryable}
+		}
 		snapshots = append(snapshots, alphaResponse{
 			Variant: variant,
-			Schema:  schemaSnapshot(t, jsonResponseSchemaForType(exampleType)),
+			Schema:  schemaSnapshot(t, schema),
 		})
 	}
 	return snapshots
@@ -515,16 +676,25 @@ func schemaSnapshot(t *testing.T, schema map[string]any) alphaSchema {
 			snapshot.Enum = append(snapshot.Enum, values...)
 		case []any:
 			for _, value := range values {
-				item, ok := value.(string)
-				if !ok {
+				switch item := value.(type) {
+				case string:
+					snapshot.Enum = append(snapshot.Enum, item)
+				case bool:
+					snapshot.BooleanEnum = append(snapshot.BooleanEnum, item)
+				default:
 					t.Fatalf("schema enum item = %T", value)
 				}
-				snapshot.Enum = append(snapshot.Enum, item)
 			}
 		default:
 			t.Fatalf("schema enum = %T", rawEnum)
 		}
 		sort.Strings(snapshot.Enum)
+	}
+	if additional, ok := schema["additionalProperties"].(bool); ok {
+		snapshot.AdditionalProperties = &additional
+	}
+	if minLength, ok := schema["minLength"].(int); ok {
+		snapshot.MinLength = minLength
 	}
 	if rawItems, ok := schema["items"]; ok {
 		items, ok := rawItems.(map[string]any)

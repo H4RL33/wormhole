@@ -145,7 +145,7 @@ This is weaker than RLS in one specific way: a bug in repository code can leak a
 
 ### 7.3 Credentials vs identity records
 
-Identity *records* (who an agent is, its org memberships) are recoverable; *credentials* (raw Passport tokens, keys) are not redistributed on recovery and must be regenerated instead. The Coordination Server's Postgres store and `wormholed`'s SQLite store do not persist raw Passport tokens; the server stores token hashes. However, `wormholed` must read a raw bearer token from the credential profile at `~/.wormhole/credentials/<profile>.json`. The CLI requests mode `0600` for a newly created profile file and mode `0700` for a newly created parent directory; it does not automatically tighten existing path modes, which users must verify. A lost or wiped machine recovers through coordination-server re-issuance, not credential replication.
+Identity *records* (who an agent is, its org memberships) are recoverable; *credentials* (raw Passport tokens, keys) are not redistributed on recovery and must be regenerated instead. The Coordination Server's Postgres store and Gateway's SQLite store do not persist raw Passport tokens; the server stores token hashes. Gateway owns credential persistence beneath `~/.wormhole/credentials/`, using a validated profile identifier, mode `0600` for a newly created profile file, mode `0700` for a newly created parent directory, and an atomic rename. The local enrolment response never contains the raw token. A lost, wiped, or interrupted pre-persistence machine recovers through coordination-server re-issuance, not token replay or credential replication.
 
 ---
 
@@ -153,13 +153,18 @@ Identity *records* (who an agent is, its org memberships) are recoverable; *cred
 
 ### 8.1 Bootstrap lifecycle
 
-`wormhole join` (existing CLI concept, RFC-0001 §8.5) now targets `wormholed`, which executes: **Authentication → Enrolment → Bootstrap → Synchronisation → Normal operation.**
+`wormhole join` and `wormhole connect` (existing CLI concepts, RFC-0001 §8.5) target Gateway's local `wormhole.agent.enrol` MCP tool. Gateway makes this same-user, OS-protected local endpoint available before any credential profile exists, then executes: **Authentication → Enrolment → Credential persistence → Bootstrap → Synchronisation → Normal operation.** The CLI performs no direct Fabric follow-on call. Gateway owns Fabric registration and persists the issued raw token before returning a token-free local result.
 
-Bootstrap pulls a complete working environment before the runtime switches to incremental sync: org config, project manifests, initial KB, existing tasks, policies, capability definitions, and agent configuration. This is a `wormhole.sync.bootstrap` operation — one bulk pull, not N individual pillar calls. Integration-manifest distribution and enforcement remain open as recorded in §9.
+Bootstrap pulls a complete project working environment before the runtime switches to incremental sync: project metadata, authenticated Agent and Passport identity, permissions, Channels, Events, Tasks, and KB articles. This is one `wormhole.sync.bootstrap` bulk pull, not N individual pillar calls. Fabric composes it in a repeatable-read project transaction; Gateway validates it before mutation and commits the full snapshot plus the `ready` checkpoint in one SQLite transaction. A failed validation or write rolls back the snapshot and moves the durable enrolment attempt to `recovery_required` in a separate transaction executed with a bounded context detached from request cancellation. Gateway reports recoverability only after that checkpoint commits; a checkpoint write failure instead returns `checkpoint_persistence_failed` in `attention_required` state. The frozen version-1 outer response contains exactly `org_config`, `project_list`, `task_list`, `kb_list`, `timestamp`, and `version`; `project_list` is a non-null empty array, while the top-level Task and KB lists exactly mirror their nested values. Integration-manifest metadata must be exactly JSON `null` until the separate storage and distribution design is implemented.
 
 ### 8.2 Steady-state sync
 
 - Local writes become durable in SQLite first (G4). Sync is a separate, asynchronous step — never blocking a local write's success on network reachability.
+- On restart Gateway opens credentials, opens and validates the SQLite ready
+  checkpoint, serves the local socket, then starts incremental sync in the
+  background. Bootstrap is an enrollment transition and is not repeated on
+  ordinary restarts. A sync cycle pushes durable outbound work before pulling;
+  pull is deferred while outbound work remains pending.
 - Outbound queue in `internal/runtime/sync` persists across restarts and network interruptions (SQLite-backed, not in-memory-only).
 - Delivery classes are explicit: ephemeral events never sync; durable events (task/KB changes) queue and sync reliably; persistent state syncs via the incremental pull/push cycle.
 - Batching is time-, queue-size-, and priority-based, with an explicit bypass for latency-sensitive event classes; exact thresholds are tunable configuration, not hardcoded.
@@ -173,6 +178,21 @@ Last-write-wins per row/field, coordination-server-timestamp authoritative, ever
 ## 9. Decision Register
 
 ### Decided
+
+- **Local sync status:** The M2-compatible read-only local tool
+  `wormhole.sync.status` accepts exactly `project_id` and returns exactly
+  `state` plus `pending_writes`. State is one of `online`, `offline`,
+  `synchronizing`, or `attention_required`; it is maintained by Gateway and
+  does not synchronously probe Fabric.
+
+- **Gateway-owned enrolment:** Local protocol version 1 uses the M2-compatible
+  `wormhole.agent.enrol` tool. It is available over the protected local socket
+  before credentials exist, requires a Gateway-configured local permission
+  envelope, accepts only a validated profile identifier beneath Gateway's
+  credential root, and never returns a raw token. Gateway owns all Fabric
+  registration, credential persistence, bootstrap, and recovery follow-on
+  work. The legacy local `proxyRegister` token-return path is superseded for
+  enrolment and is not a permitted CLI fallback.
 
 - **Conflict resolution:** V1 uses coordination-server-timestamp-authoritative
   last-write-wins with a durable audit trail. CRDTs, operational transforms,
@@ -194,8 +214,9 @@ Last-write-wins per row/field, coordination-server-timestamp authoritative, ever
 
 - **Cross-runtime discovery:** The Coordination Server owns discovery, but the
   protocol for advertising runtimes, projects, capabilities, and presence has
-  not been selected. Empty bootstrap `org_config` and `project_list` values are
-  placeholders, not a contract.
+  not been selected. Bootstrap version 1 deliberately returns an empty
+  `project_list`; its strict non-empty `org_config` is the enrolled project's
+  snapshot and does not define cross-runtime discovery.
 - **Integration-manifest enforcement:** Bootstrap may eventually distribute
   approved integration manifests, but signature verification, allow-listing,
   installation, update, revocation, and sandbox boundaries have not been
@@ -206,7 +227,7 @@ Last-write-wins per row/field, coordination-server-timestamp authoritative, ever
 
 ## 10. Security Considerations
 
-- The Coordination Server's Postgres store and `wormholed`'s SQLite store do not persist raw Passport tokens; the server stores token hashes. The raw-token profile at `~/.wormhole/credentials/<profile>.json` must be kept permission-restricted. Raw tokens are not logged. Registration is the deliberate exception to the usual local API exposure rule: `proxyRegister` returns a newly issued raw token once over the local socket so the CLI can write the credential profile. Any process able to connect to that socket can invoke registration and receive its one-time token response.
+- The Coordination Server's Postgres store and Gateway's SQLite store do not persist raw Passport tokens; the server stores token hashes. Gateway writes the raw-token profile beneath `~/.wormhole/credentials/<profile>.json` atomically and permission-restricts it. Raw tokens are not logged, placed in local results, events, diagnostics, or model-facing responses. `wormhole.agent.enrol` is the deliberate pre-credential local API exception: it is callable through the same-user protected socket without a Passport, but fails closed unless trusted local Gateway policy permits the requested roles and permissions. The former `proxyRegister` response that exposed the issued token to the CLI is superseded for enrolment.
 - The local API (Unix socket/named pipe) has no additional bearer-token layer in v1. Its same-user trust boundary depends on OS filesystem permissions for the socket path and parent directory; users must restrict those paths accordingly.
 - Multi-org isolation is application-enforced, not database-enforced, in `wormholed` (§7.2) — the single biggest security-relevant departure from the coordination server's RLS guarantee, and the top implementation review priority for any `internal/runtime/localstore` change.
 - The sync channel (`wormholed` ↔ Coordination Server) is authenticated per organisation with the existing Passport-derived bearer token; no new auth primitive is introduced beyond RFC-0001 §8.4. Transport encryption exists only when the configured Coordination Server URL uses HTTPS. The current implementation accepts HTTP URLs and sends the bearer token in the `Authorization` header, so deployments must require HTTPS for every non-loopback Coordination Server. Plain HTTP is suitable only for loopback development.

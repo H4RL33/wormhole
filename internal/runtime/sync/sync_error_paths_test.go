@@ -129,8 +129,6 @@ func TestPullIncrementalRejectsInvalidServerUpdates(t *testing.T) {
 }
 
 func TestBootstrapErrorPaths(t *testing.T) {
-	task := taskSummaryWire{TaskID: "task-1", Title: "task", Status: "todo"}
-	article := articleSummaryWire{ArticleID: "kb-1", Title: "article"}
 	tests := []struct {
 		name   string
 		result interface{}
@@ -139,8 +137,7 @@ func TestBootstrapErrorPaths(t *testing.T) {
 	}{
 		{name: "coordination error", err: errors.New("offline"), want: "call server"},
 		{name: "invalid result", result: map[string]interface{}{"task_list": "not-a-list"}, want: "decode result"},
-		{name: "missing task repository", result: bootstrapResultWire{TaskList: []taskSummaryWire{task}}, want: "no taskRepo"},
-		{name: "missing KB repository", result: bootstrapResultWire{KBList: []articleSummaryWire{article}}, want: "no kbRepo"},
+		{name: "missing local store", result: validBootstrapWire(), want: "no local store"},
 	}
 
 	for _, tt := range tests {
@@ -148,6 +145,8 @@ func TestBootstrapErrorPaths(t *testing.T) {
 			qRepo, aRepo := setupTestRepos(t)
 			defer qRepo.db.Close()
 			engine := mustNewEngine(t, "http://unused.invalid", qRepo, aRepo, nil, nil, DefaultConfig())
+			engine.expectedAgentID = "agent-1"
+			engine.expectedPassportID = "passport-1"
 			engine.testCallSyncToolWithResultFn = func(context.Context, string, map[string]interface{}) (interface{}, error) {
 				return tt.result, tt.err
 			}

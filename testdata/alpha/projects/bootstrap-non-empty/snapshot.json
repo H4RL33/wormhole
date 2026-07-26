@@ -1,0 +1,36 @@
+{
+  "project": {
+    "name": "task-4-process-bootstrap",
+    "owner": "alpha-validation"
+  },
+  "agent": {
+    "owner": "alpha-validation",
+    "model": "process-test",
+    "capabilities": [
+      "code"
+    ]
+  },
+  "task": {
+    "title": "Bootstrap preserves a non-empty task",
+    "description": "Seeded in Fabric before Gateway requests its first snapshot",
+    "status": "todo",
+    "priority": 1
+  },
+  "channel": {
+    "name": "general"
+  },
+  "event": {
+    "event_type": "discovery.logged",
+    "payload": {
+      "source": "task-4-process-fixture"
+    }
+  },
+  "kb_article": {
+    "title": "Bootstrap fixture article",
+    "body": "Exact KB content copied from Fabric into SQLite.",
+    "frontmatter": {
+      "kind": "task-4-process-fixture"
+    }
+  },
+  "integration_manifest_metadata": null
+}

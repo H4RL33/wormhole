@@ -15,7 +15,123 @@ import (
 func testKBStore(t *testing.T) *kb.Store {
 	t.Helper()
 	db := testDB(t)
-	return kb.NewStore(db, kb.StubEmbedder{}, 0.85, 2000, 1, 1, 1)
+	store := kb.NewStore(db, kb.StubEmbedder{}, 0.85, 2000, 1, 1, 1)
+	prepareOnboardingEmbeddingForTest(t, store)
+	return store
+}
+
+func prepareOnboardingEmbeddingForTest(t *testing.T, store *kb.Store) {
+	t.Helper()
+	if err := PrepareOnboardingArticleEmbedding(context.Background(), store); err != nil {
+		t.Fatalf("prepare onboarding embedding: %v", err)
+	}
+}
+
+type providerFailureEmbedder struct{}
+
+func (providerFailureEmbedder) Descriptor() kb.EmbeddingDescriptor {
+	return kb.ApprovedEmbeddingDescriptor()
+}
+
+type availableApprovedEmbedder struct{}
+
+func (availableApprovedEmbedder) Descriptor() kb.EmbeddingDescriptor {
+	return kb.ApprovedEmbeddingDescriptor()
+}
+
+func (availableApprovedEmbedder) Embed(_ context.Context, request kb.EmbeddingRequest) ([][]float32, error) {
+	vectors := make([][]float32, len(request.Texts))
+	for i := range vectors {
+		vectors[i] = make([]float32, 1024)
+		vectors[i][0] = 1
+	}
+	return vectors, nil
+}
+
+func (providerFailureEmbedder) Embed(context.Context, kb.EmbeddingRequest) ([][]float32, error) {
+	return nil, &kb.EmbeddingFailure{
+		Code: "provider_unavailable", Provider: "cohere", Model: "embed-v4.0", Version: "4.0",
+		SemanticRanking: false, Degraded: true, Fallback: "none", Retryable: true,
+	}
+}
+
+func TestKBWriteAndSearchFailClosedWithStructuredProviderError(t *testing.T) {
+	db := testDB(t)
+	store := kb.NewStore(db, providerFailureEmbedder{}, 0.85, 2000, 1, 1, 1)
+	projectID := mustCreateProject(t, "mcp-kb-provider-unavailable")
+	agentID, _ := mustRegisterAgent(t, projectID)
+	scope := mustBuildScope(agentID, projectID)
+
+	writeArguments, _ := json.Marshal(WriteArticleInput{Title: "title", Body: "body"})
+	if _, err := WriteArticleTool(store).Handler(context.Background(), scope, projectID, writeArguments); err == nil {
+		t.Fatal("write provider failure = nil")
+	} else {
+		assertSemanticProviderFailure(t, err)
+	}
+	var articleCount int
+	if err := db.QueryRow(`SELECT count(*) FROM kb_articles WHERE project_id = $1`, projectID).Scan(&articleCount); err != nil {
+		t.Fatalf("count articles: %v", err)
+	}
+	if articleCount != 0 {
+		t.Fatalf("article count after provider failure = %d, want 0", articleCount)
+	}
+
+	searchArguments, _ := json.Marshal(SearchArticlesInput{Query: "query"})
+	if _, err := SearchArticlesTool(store).Handler(context.Background(), scope, projectID, searchArguments); err == nil {
+		t.Fatal("search provider failure = nil")
+	} else {
+		assertSemanticProviderFailure(t, err)
+	}
+}
+
+func assertSemanticProviderFailure(t *testing.T, err error) {
+	t.Helper()
+	var fields struct {
+		Code            string `json:"code"`
+		SemanticRanking bool   `json:"semantic_ranking"`
+		Degraded        bool   `json:"degraded"`
+		Fallback        string `json:"fallback"`
+		Retryable       bool   `json:"retryable"`
+	}
+	if jsonErr := json.Unmarshal([]byte(err.Error()), &fields); jsonErr != nil {
+		t.Fatalf("provider error is not raw structured JSON: %v (%q)", jsonErr, err)
+	}
+	if fields.Code != "provider_unavailable" || fields.SemanticRanking || !fields.Degraded || fields.Fallback != "none" || !fields.Retryable {
+		t.Fatalf("provider error metadata = %+v", fields)
+	}
+}
+
+func TestKBSearchIndexErrorsAreTruthfulAndHaveNoFallback(t *testing.T) {
+	db := testDB(t)
+	projectID := mustCreateProject(t, "mcp-kb-index-errors")
+	agentID, _ := mustRegisterAgent(t, projectID)
+	scope := mustBuildScope(agentID, projectID)
+	arguments, _ := json.Marshal(SearchArticlesInput{Query: "query"})
+
+	assertIndexError := func(t *testing.T, err error, wantCode string) {
+		t.Helper()
+		var fields SemanticDegradedError
+		if err == nil {
+			t.Fatal("search index error = nil")
+		}
+		if jsonErr := json.Unmarshal([]byte(err.Error()), &fields); jsonErr != nil {
+			t.Fatalf("index error is not structured JSON: %v (%q)", jsonErr, err)
+		}
+		if fields.Code != wantCode || fields.SemanticRanking || !fields.Degraded || fields.Fallback != "none" || fields.Retryable || fields.Provider != "cohere" || fields.Model != "embed-v4.0" || fields.Version != "4.0" {
+			t.Fatalf("index error = %+v", fields)
+		}
+	}
+
+	approvedStore := kb.NewStore(db, availableApprovedEmbedder{}, 0.85, 2000, 1, 1, 1)
+	_, err := SearchArticlesTool(approvedStore).Handler(context.Background(), scope, projectID, arguments)
+	assertIndexError(t, err, "semantic_index_unavailable")
+
+	stubStore := kb.NewStore(db, kb.StubEmbedder{}, 0.85, 2000, 1, 1, 1)
+	if _, err := stubStore.WriteArticle(context.Background(), projectID, agentID, "legacy descriptor", "active stub generation", nil, nil, true); err != nil {
+		t.Fatalf("seed mismatched active generation: %v", err)
+	}
+	_, err = SearchArticlesTool(approvedStore).Handler(context.Background(), scope, projectID, arguments)
+	assertIndexError(t, err, "semantic_generation_mismatch")
 }
 
 func TestKBTools_WriteArticle(t *testing.T) {
@@ -153,7 +269,7 @@ func TestKBTools_SearchArticles(t *testing.T) {
 
 	// Search for the second article's body
 	searchArgs, _ := json.Marshal(SearchArticlesInput{
-		Query: "install docker daemon and run compose",
+		Query: "setup instructions\n\ninstall docker daemon and run compose",
 		Limit: 10,
 	})
 	result, err := searchTool.Handler(context.Background(), scope, projectID, searchArgs)
@@ -168,6 +284,9 @@ func TestKBTools_SearchArticles(t *testing.T) {
 
 	if len(out.Articles) != 2 {
 		t.Fatalf("expected 2 search results, got %d", len(out.Articles))
+	}
+	if !out.Ranking.SemanticApplied || out.Ranking.Dimension != 1024 || out.Ranking.DistanceMetric != "cosine" {
+		t.Fatalf("ranking metadata = %+v", out.Ranking)
 	}
 
 	// The first article in results should be the second one we wrote (distance 0)
@@ -196,7 +315,7 @@ func TestMcp_WriteArticle_DedupViolation(t *testing.T) {
 
 	// 2. Write the duplicate article.
 	writeArgs2, _ := json.Marshal(WriteArticleInput{
-		Title: "second article",
+		Title: "first article",
 		Body:  "unique article body content for dedup test",
 	})
 	_, rpcResp := toolsCallRPC(t, srv, token, "wormhole.kb.write", projectID, writeArgs2)

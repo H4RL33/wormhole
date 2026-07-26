@@ -140,6 +140,19 @@ func (r *QueueRepo) ListPending(ctx context.Context, namespaceID string, limit i
 	return entries, nil
 }
 
+// PendingCount returns the durable undelivered write count for exactly one
+// namespace. Connection status uses it directly so restarts cannot reset the
+// reported backlog.
+func (r *QueueRepo) PendingCount(ctx context.Context, namespaceID string) (int, error) {
+	var count int
+	if err := r.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM sync_queue WHERE namespace_id = ? AND delivered_at IS NULL`, namespaceID,
+	).Scan(&count); err != nil {
+		return 0, fmt.Errorf("sync/queue: count pending: %w", err)
+	}
+	return count, nil
+}
+
 // MarkDelivered marks a queue entry as successfully delivered to the server.
 func (r *QueueRepo) MarkDelivered(ctx context.Context, namespaceID, entryID string) error {
 	result, err := r.db.ExecContext(ctx, `

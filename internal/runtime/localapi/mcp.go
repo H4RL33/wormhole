@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"reflect"
@@ -98,6 +99,24 @@ func newLocalRegistry(s *Server) *localRegistry {
 
 	reg("wormhole.agent.whoami", "Return the calling agent's identity, capabilities, and permissions.", whoAmIArgs{}, "", singleResult(whoAmIOutput{}), func(ctx context.Context, _ json.RawMessage) (any, error) {
 		return s.proxyWhoAmI(ctx)
+	})
+
+	reg("wormhole.sync.status", "Return this project's Gateway-to-Fabric connection state and durable pending-write count.", syncStatusArgs{}, "", singleResult(localSyncStatusResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+		return s.localSyncStatus(ctx, args)
+	})
+
+	registerVariants("wormhole.code_graph.query", "Query this project's bounded local Go Code Graph; source slices are included only when separately authorised.", map[string]localArgumentVariant{"default": {Example: codeGraphQueryArgs{}, AnyRequired: [][]string{{"intent"}, {"entry_symbols"}}}}, []string{"code_graph.query"}, singleResult(codeGraphQueryResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+		return s.handleCodeGraphQuery(ctx, args)
+	})
+	reg("wormhole.code_graph.status", "Inspect this project's local Code Graph health and freshness without modifying it.", codeGraphProjectArgs{}, "code_graph.status", singleResult(codeGraphStatusResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+		return s.handleCodeGraphStatus(ctx, args)
+	})
+	reg("wormhole.code_graph.rebuild", "Request one normal balanced copy-on-write rebuild using persisted approved Code Graph configuration.", codeGraphProjectArgs{}, "code_graph.rebuild", singleResult(codeGraphRebuildResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+		return s.handleCodeGraphRebuild(ctx, args)
+	})
+
+	reg(EnrolmentToolName, "Request Gateway-owned project enrolment before a Passport credential exists.", EnrolmentRequest{}, "", enrolmentResultExamples(), func(ctx context.Context, args json.RawMessage) (any, error) {
+		return s.handleEnrolmentContract(ctx, args)
 	})
 
 	reg("wormhole.task.list", "List tasks in the local task graph replica, optionally filtered by status.", listTasksArgs{}, "", singleResult(localTaskListResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
@@ -192,6 +211,15 @@ func singleResult(example any) map[string]any {
 	return map[string]any{"default": example}
 }
 
+func enrolmentResultExamples() map[string]any {
+	examples := make(map[string]any, len(EnrolmentResultCodes()))
+	for _, code := range EnrolmentResultCodes() {
+		state, retryable, _ := EnrolmentResultContract(code)
+		examples[string(code)] = EnrolmentResult{Code: code, State: state, Retryable: retryable}
+	}
+	return examples
+}
+
 // List returns every registered tool in registration order.
 func (r *localRegistry) List() []localTool {
 	out := make([]localTool, 0, len(r.order))
@@ -213,6 +241,8 @@ func (r *localRegistry) Get(name string) (localTool, bool) {
 // design doc §5). project_id is deliberately NOT a field on any of these:
 // buildInputSchema injects it uniformly except for whoAmIArgs (§1).
 type whoAmIArgs struct{}
+
+type syncStatusArgs struct{}
 
 type listTasksArgs struct {
 	Status string `json:"status,omitempty"`
@@ -435,6 +465,11 @@ type localAgentListResult struct {
 	Agents []localAgentResult `json:"agents"`
 }
 
+type localSyncStatusResult struct {
+	State         string `json:"state" enum:"online,offline,synchronizing,attention_required"`
+	PendingWrites int    `json:"pending_writes"`
+}
+
 type localJoinResult struct {
 	AgentID      string    `json:"agent_id"`
 	PassportID   string    `json:"passport_id"`
@@ -504,6 +539,21 @@ func handleToolsList(reg *localRegistry) any {
 	return map[string]any{"tools": entries}
 }
 
+func (s *Server) handleVisibleToolsList(reg *localRegistry) any {
+	if !s.recoveryOnlyInventory.Load() {
+		return handleToolsList(reg)
+	}
+	entries := make([]toolListEntry, 0, 2)
+	for _, name := range []string{"wormhole.sync.status", EnrolmentToolName} {
+		tool, ok := reg.Get(name)
+		if !ok {
+			continue
+		}
+		entries = append(entries, toolListEntry{Name: tool.Name, Description: tool.Description, InputSchema: buildInputSchema(tool)})
+	}
+	return map[string]any{"tools": entries}
+}
+
 // buildInputSchema returns the one canonical request schema for ordinary
 // tools and an anyOf union for tools with multiple accepted request variants.
 func buildInputSchema(t localTool) map[string]any {
@@ -536,7 +586,7 @@ func buildInputSchemas(t localTool) map[string]map[string]any {
 			properties, required = reflectStructSchema(reflect.TypeOf(argument.Example))
 		}
 
-		if t.Name != "wormhole.agent.whoami" {
+		if _, hasProjectID := properties["project_id"]; t.Name != "wormhole.agent.whoami" && !hasProjectID {
 			properties["project_id"] = map[string]any{"type": "string"}
 			required = append(required, "project_id")
 		}
@@ -545,6 +595,15 @@ func buildInputSchemas(t localTool) map[string]map[string]any {
 			"type":       "object",
 			"properties": properties,
 			"required":   required,
+		}
+		if t.Name == EnrolmentToolName || strings.HasPrefix(t.Name, "wormhole.code_graph.") {
+			schema["additionalProperties"] = false
+		}
+		if t.Name == "wormhole.code_graph.query" {
+			properties["include_edges"].(map[string]any)["items"] = map[string]any{"type": "string", "enum": []any{"calls", "references", "uses_type"}}
+		}
+		if t.Name == EnrolmentToolName {
+			properties["credential_profile"].(map[string]any)["minLength"] = 1
 		}
 		if len(argument.AnyRequired) > 0 {
 			alternatives := make([]map[string]any, 0, len(argument.AnyRequired))
@@ -632,6 +691,8 @@ func jsonSchemaForType(t reflect.Type) map[string]any {
 		return map[string]any{"type": "boolean"}
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		return map[string]any{"type": "integer"}
+	case reflect.Float32, reflect.Float64:
+		return map[string]any{"type": "number"}
 	case reflect.Slice:
 		return map[string]any{"type": "array", "items": jsonSchemaForType(t.Elem())}
 	case reflect.Struct:
@@ -677,6 +738,8 @@ func jsonPresentResponseSchemaForType(t reflect.Type) map[string]any {
 		return map[string]any{"type": "boolean"}
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		return map[string]any{"type": "integer"}
+	case reflect.Float32, reflect.Float64:
+		return map[string]any{"type": "number"}
 	case reflect.Slice:
 		return map[string]any{"type": "array", "items": jsonResponseSchemaForType(t.Elem())}
 	case reflect.Map:
@@ -738,6 +801,9 @@ func (s *Server) handleToolsCall(ctx context.Context, sess *mcpSession, conn net
 	if !ok {
 		return nil, &rpcError{Code: rpcInvalidParams, Message: "unknown tool: " + params.Name}
 	}
+	if err := s.authorizeRecoverySurface(params.Name, params.Arguments); err != nil {
+		return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
+	}
 	if err := s.authorizeLocalTool(ctx, tool, params.Arguments); err != nil {
 		return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
 	}
@@ -769,6 +835,21 @@ func (s *Server) handleToolsCall(ctx context.Context, sess *mcpSession, conn net
 		return nil, &rpcError{Code: rpcInternalError, Message: "encode tool result"}
 	}
 	return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: string(resultJSON)}}}, nil
+}
+
+func (s *Server) authorizeRecoverySurface(toolName string, args json.RawMessage) error {
+	if toolName == EnrolmentToolName || toolName == "wormhole.sync.status" {
+		return nil
+	}
+	var input struct {
+		ProjectID string `json:"project_id"`
+	}
+	_ = json.Unmarshal(args, &input)
+	_, projectRecoveryOnly := s.recoveryOnlyProjects.Load(input.ProjectID)
+	if s.recoveryOnlyInventory.Load() || projectRecoveryOnly {
+		return errors.New("localapi: project recovery required: only wormhole.agent.enrol and wormhole.sync.status are available")
+	}
+	return nil
 }
 
 // handleChannelSubscribeMCP creates an eventbus subscription for the
@@ -870,7 +951,7 @@ func (s *Server) dispatchMCPMessage(ctx context.Context, sess *mcpSession, conn 
 			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcServerNotInitialized, Message: "server not initialized: send initialize and notifications/initialized before tools/list"}})
 			return
 		}
-		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: marshalResult(handleToolsList(reg))})
+		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: marshalResult(s.handleVisibleToolsList(reg))})
 
 	case "tools/call":
 		if isNotification {

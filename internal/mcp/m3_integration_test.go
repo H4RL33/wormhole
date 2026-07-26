@@ -66,7 +66,7 @@ func TestM3_KBWriteSearchComplianceLoop(t *testing.T) {
 	// toolCallResult.IsError == true, and Content[0].Text carries the same
 	// JSON error string kb.ErrDedupViolation.Error() always produced.
 	_, dedupRPCResp := toolsCallRPC(t, srv, token, "wormhole.kb.write", projectID, mustMarshal(t, WriteArticleInput{
-		Title: "deploy runbook (copy)",
+		Title: "deploy runbook",
 		Body:  "run deploy.sh then verify the health endpoint returns 200",
 	}))
 	if dedupRPCResp.Error != nil {

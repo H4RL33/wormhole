@@ -15,26 +15,18 @@ import (
 // under mcp.<connector-name>, using the confirmed opencode.ai/config.json
 // schema (type: "local", command array, enabled).
 func TestRunConnect_OpenCodeTarget_CreatesFreshConfig(t *testing.T) {
-	fakeGatewaySocket(t) // make socket reachable
-	fakeStdioBinary(t)   // add stdio binary to PATH
-
-	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
-		t.Fatal("connect must not call wormhole.kb.search")
-		return searchArticlesOutput{}, nil
-	})
-	defer srv.Close()
-
-	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
+	fakeEnrolmentGateway(t, persistedEnrolmentResult())
 	configPath := filepath.Join(t.TempDir(), "nested", "opencode.json")
 	var stdout, stderr bytes.Buffer
 	code := run([]string{
 		"connect",
-		"--server", srv.URL,
+		"--server", "https://fabric.example",
 		"--project", "proj-1",
 		"--permissions", "task.read",
-		"--token-file", tokenFile,
+		"--profile", "proj-1__default",
 		"--target", "opencode",
 		"--opencode-config", configPath,
+		"--stdio-bin", os.Args[0],
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
@@ -97,14 +89,7 @@ func TestRunConnect_OpenCodeTarget_CreatesFreshConfig(t *testing.T) {
 // merge untouched, and an existing $schema is left exactly as found (not
 // overwritten with the opencode.ai default).
 func TestRunConnect_OpenCodeTarget_MergesExistingConfig(t *testing.T) {
-	fakeGatewaySocket(t) // make socket reachable
-	fakeStdioBinary(t)   // add stdio binary to PATH
-
-	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
-		t.Fatal("connect must not call wormhole.kb.search")
-		return searchArticlesOutput{}, nil
-	})
-	defer srv.Close()
+	fakeEnrolmentGateway(t, persistedEnrolmentResult())
 
 	configPath := filepath.Join(t.TempDir(), "opencode.json")
 	existing := `{
@@ -121,16 +106,16 @@ func TestRunConnect_OpenCodeTarget_MergesExistingConfig(t *testing.T) {
 		t.Fatalf("seed existing opencode config: %v", err)
 	}
 
-	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
 	var stdout, stderr bytes.Buffer
 	code := run([]string{
 		"connect",
-		"--server", srv.URL,
+		"--server", "https://fabric.example",
 		"--project", "proj-1",
 		"--permissions", "task.read",
-		"--token-file", tokenFile,
+		"--profile", "proj-1__default",
 		"--target", "opencode",
 		"--opencode-config", configPath,
+		"--stdio-bin", os.Args[0],
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
@@ -174,27 +159,20 @@ func TestRunConnect_OpenCodeTarget_MergesExistingConfig(t *testing.T) {
 // is used as the mcp.<name> key for the OpenCode path too, matching how
 // Claude's connector name is used positionally.
 func TestRunConnect_OpenCodeTarget_CustomConnectorName(t *testing.T) {
-	fakeGatewaySocket(t) // make socket reachable
-	fakeStdioBinary(t)   // add stdio binary to PATH
-
-	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
-		t.Fatal("connect must not call wormhole.kb.search")
-		return searchArticlesOutput{}, nil
-	})
-	defer srv.Close()
+	fakeEnrolmentGateway(t, persistedEnrolmentResult())
 
 	configPath := filepath.Join(t.TempDir(), "opencode.json")
-	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
 	var stdout, stderr bytes.Buffer
 	code := run([]string{
 		"connect",
-		"--server", srv.URL,
+		"--server", "https://fabric.example",
 		"--project", "proj-1",
 		"--permissions", "task.read",
-		"--token-file", tokenFile,
+		"--profile", "proj-1__default",
 		"--target", "opencode",
 		"--opencode-config", configPath,
 		"--connector-name", "wh-staging",
+		"--stdio-bin", os.Args[0],
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())
@@ -222,26 +200,19 @@ func TestRunConnect_OpenCodeTarget_CustomConnectorName(t *testing.T) {
 // owner-only permissions (0o600), and the parent directory is created with
 // owner-only access (0o700).
 func TestRunConnect_OpenCodeTarget_ProtectsConfigFilePermissions(t *testing.T) {
-	fakeGatewaySocket(t) // make socket reachable
-	fakeStdioBinary(t)   // add stdio binary to PATH
+	fakeEnrolmentGateway(t, persistedEnrolmentResult())
 
-	srv := fakeServer(t, func(t *testing.T, in searchArticlesInput) (searchArticlesOutput, *callResponse) {
-		t.Fatal("connect must not call wormhole.kb.search")
-		return searchArticlesOutput{}, nil
-	})
-	defer srv.Close()
-
-	tokenFile := filepath.Join(t.TempDir(), "credentials.json")
 	configPath := filepath.Join(t.TempDir(), "nested", "opencode.json")
 	var stdout, stderr bytes.Buffer
 	code := run([]string{
 		"connect",
-		"--server", srv.URL,
+		"--server", "https://fabric.example",
 		"--project", "proj-1",
 		"--permissions", "task.read",
-		"--token-file", tokenFile,
+		"--profile", "proj-1__default",
 		"--target", "opencode",
 		"--opencode-config", configPath,
+		"--stdio-bin", os.Args[0],
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code: got %d, want 0, stderr: %q", code, stderr.String())

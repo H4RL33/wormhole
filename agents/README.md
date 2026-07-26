@@ -36,6 +36,10 @@ pointers. No code copies in Wormhole.
   server pillars.
 - `internal/runtime/localapi`, `localstore`, `eventbus`, `scheduler`, `sync`, `config`:
   local runtime.
+- `internal/runtime/codegraph/{config,store,index,query,source}`: Gateway-local Code
+  Graph configuration, derivative SQLite state, revision publication, bounded query,
+  and transient hash-validated source assembly only; never Fabric state or persisted
+  source bodies.
 - `internal/storage`: server DB open only. `internal/types`: shared plain types/config.
 - `internal/webui`: read-oriented human dashboard.
 - `internal/core/*` never imports `internal/mcp`; core-to-core imports are banned except
@@ -43,6 +47,9 @@ pointers. No code copies in Wormhole.
 - `internal/runtime/*` never imports `internal/core/*` or `internal/mcp`. `localapi`
   may import all sibling runtime packages because it wires them together; other runtime
   packages must not import `localapi`.
+- Code Graph dependencies flow `query` → `source`/`store` → Code Graph `config` and
+  `index` → `store` → Code Graph `config`. These packages do not import `localapi`,
+  `sync`, Core, or MCP and do not use Fabric migrations.
 - `internal/types` imports stdlib only. No new top-level package or external dependency
   without human approval. No ORM, global singleton, `init()` registration, or control-flow
   `panic`.
@@ -74,6 +81,13 @@ precedent before editing. Keep smallest correct diff. Match `internal/core/ident
 Core store shape. Run focused tests first, then required full checks. Do not guess across
 an RFC open question: use conservative documented behavior or escalate. Do not alter
 unrelated worktree changes.
+
+## Alpha Session Decision
+
+Passports identify agents.
+Credential profiles authorise local runtime access.
+Harness process sessions are ephemeral during alpha.
+Durable session records are deferred until a demonstrated use case requires them.
 
 ## Build and Test Commands
 

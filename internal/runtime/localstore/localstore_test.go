@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -24,6 +25,134 @@ func TestOpenSupportsRelativeSQLitePaths(t *testing.T) {
 		CachedAt:  time.Date(2026, 7, 23, 9, 8, 7, 6, time.UTC),
 	}); err != nil {
 		t.Fatalf("CacheWhoAmI: %v", err)
+	}
+}
+
+func TestEnrolmentAttemptPersistsAndResumesAcrossStoreRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wormholed.db")
+	ctx := context.Background()
+	firstKey := "018f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1"
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open first: %v", err)
+	}
+	first, created, err := store.ResolveEnrolmentAttempt(ctx, EnrolmentAttemptRecord{
+		ProjectID: "project-a", IdempotencyKey: firstKey, RequestHash: strings.Repeat("a", 64),
+		State: "requested", CredentialProfile: "project-a__contributor",
+	})
+	if err != nil || !created || first.IdempotencyKey != firstKey {
+		t.Fatalf("first resolve: created=%v key=%q err=%v", created, first.IdempotencyKey, err)
+	}
+	if err := store.UpdateEnrolmentAttempt(ctx, first, "registered", "agent-a", "passport-a", false); err != nil {
+		t.Fatalf("update registered attempt: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close first store: %v", err)
+	}
+
+	store, err = Open(path)
+	if err != nil {
+		t.Fatalf("Open second: %v", err)
+	}
+	defer store.Close()
+	resumed, created, err := store.ResolveEnrolmentAttempt(ctx, EnrolmentAttemptRecord{
+		ProjectID: "project-a", IdempotencyKey: "118f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1", RequestHash: strings.Repeat("a", 64),
+		State: "requested", CredentialProfile: "project-a__contributor",
+	})
+	if err != nil || created {
+		t.Fatalf("resume: created=%v err=%v", created, err)
+	}
+	if resumed.IdempotencyKey != firstKey || resumed.State != "registered" || resumed.AgentID != "agent-a" || resumed.PassportID != "passport-a" {
+		t.Fatalf("resumed refs: key=%q state=%q agent=%q passport=%q", resumed.IdempotencyKey, resumed.State, resumed.AgentID, resumed.PassportID)
+	}
+
+	_, _, err = store.ResolveEnrolmentAttempt(ctx, EnrolmentAttemptRecord{
+		ProjectID: "project-a", IdempotencyKey: "218f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1", RequestHash: strings.Repeat("b", 64),
+		State: "requested", CredentialProfile: "project-a__contributor",
+	})
+	if !errors.Is(err, ErrEnrolmentAttemptConflict) {
+		t.Fatalf("digest conflict error = %v, want ErrEnrolmentAttemptConflict", err)
+	}
+
+	rows, err := store.DB().QueryContext(ctx, `PRAGMA table_info(enrolment_attempts)`)
+	if err != nil {
+		t.Fatalf("inspect enrolment_attempts: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatalf("scan enrolment_attempts column: %v", err)
+		}
+		if strings.Contains(strings.ToLower(name), "token") {
+			t.Fatalf("enrolment_attempts has secret-bearing column %q", name)
+		}
+	}
+}
+
+func TestReadyEnrolmentAttemptResumesWithNewCandidateKey(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "wormholed.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	first, created, err := store.ResolveEnrolmentAttempt(ctx, EnrolmentAttemptRecord{
+		ProjectID: "project-ready", IdempotencyKey: "018f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1", RequestHash: strings.Repeat("a", 64),
+		State: "requested", CredentialProfile: "project-ready__contributor",
+	})
+	if err != nil || !created {
+		t.Fatalf("create attempt: created=%v err=%v", created, err)
+	}
+	if err := store.UpdateEnrolmentAttempt(ctx, first, "ready", "agent-ready", "passport-ready", true); err != nil {
+		t.Fatal(err)
+	}
+	resumed, created, err := store.ResolveEnrolmentAttempt(ctx, EnrolmentAttemptRecord{
+		ProjectID: "project-ready", IdempotencyKey: "118f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1", RequestHash: strings.Repeat("a", 64),
+		State: "requested", CredentialProfile: "project-ready__contributor",
+	})
+	if err != nil || created {
+		t.Fatalf("resolve ready attempt: created=%v err=%v", created, err)
+	}
+	if resumed.IdempotencyKey != first.IdempotencyKey || resumed.State != "ready" || !resumed.Terminal || resumed.PassportID != "passport-ready" {
+		t.Fatalf("resumed attempt = %+v", resumed)
+	}
+	var count int
+	if err := store.DB().QueryRow(`SELECT count(*) FROM enrolment_attempts WHERE project_id = ?`, first.ProjectID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("attempt count=%d err=%v, want 1", count, err)
+	}
+}
+
+func TestActiveEnrolmentAttemptLookupCannotExposeAnotherProject(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "wormholed.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	profile := "shared-profile"
+	projectA := EnrolmentAttemptRecord{
+		ProjectID: "project-a", IdempotencyKey: "018f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1",
+		RequestHash: strings.Repeat("a", 64), State: "requested", CredentialProfile: profile,
+	}
+	if _, created, err := store.ResolveEnrolmentAttempt(ctx, projectA); err != nil || !created {
+		t.Fatalf("create project A attempt: created=%v err=%v", created, err)
+	}
+	if _, err := store.getActiveEnrolmentAttempt(ctx, "project-b", profile); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("project B lookup error = %v, want ErrNotFound", err)
+	}
+	projectB := projectA
+	projectB.ProjectID = "project-b"
+	projectB.IdempotencyKey = "118f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1"
+	got, created, err := store.ResolveEnrolmentAttempt(ctx, projectB)
+	if !errors.Is(err, ErrEnrolmentAttemptConflict) || created {
+		t.Fatalf("project B resolve: created=%v err=%v, want conflict", created, err)
+	}
+	if got.ProjectID != "" || got.IdempotencyKey != "" || got.RequestHash != "" || got.CredentialProfile != "" {
+		t.Fatalf("cross-project conflict exposed record fields: project=%q key=%q hash_empty=%v profile=%q",
+			got.ProjectID, got.IdempotencyKey, got.RequestHash == "", got.CredentialProfile)
 	}
 }
 
