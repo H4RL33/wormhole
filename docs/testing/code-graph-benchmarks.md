@@ -36,73 +36,33 @@ expectation, and `sufficient`, `incomplete`, or `useless` classification.
 checkout for development diagnosis. It is never an implicit fallback and must
 not be presented as the clean baseline for a different checkout.
 
-## Actual-checkout run: baseline not established
+## Clean tracked-checkout baseline
 
 Run on 2026-07-26 with:
 
-- source `HEAD`: `6de2f67646416786cac346a0b9e48b6318569b54`
-- source `HEAD` tree: `6a11c70b0a24971d694113391d23a2a66144ed58`
-- worktree: 73 modified/deleted entries and 45 untracked entries
+- source `HEAD`: `471ef700366836e282f77e689706df917b1bbe1b`
+- source `HEAD` tree: `005ef72d9f12ea861796955083ac35fe9fb959c3`
+- tracked worktree: clean detached worktree at the source commit
 - Go: `go1.26.5-X:nodwarf5 linux/amd64`
 - kernel: `Linux 7.0.12-2-cachyos-hardened-lto x86_64`
 - CPU: `AMD Ryzen 5 5600 6-Core Processor`
 
-The exact default command failed before querying:
-
-```text
-BenchmarkWormholeCodeGraphCorpus
-    benchmark_test.go:206: build Wormhole benchmark graph: codegraph golang: package loading failed: <checkout>/cmd/fabric/main.go:52:19: undefined: newFabricEmbedder
---- FAIL: BenchmarkWormholeCodeGraphCorpus
-FAIL
-```
-
-This is meaningful tracked-only evidence, not a benchmark defect. The modified
-tracked `cmd/fabric/main.go` refers to untracked `cmd/fabric/embedding_wiring.go`;
-the inventory correctly excludes the untracked implementation. No result was
-fabricated by indexing untracked files, and no clean Gate B baseline is claimed
-for the shared worktree. The baseline remains conditional on intentionally
-committing a coherent cumulative source set.
-
-## Prepared-snapshot development run
-
-For development-only diagnosis, all current files except `.git` and the local
-`wormhole-server` binary were copied into an isolated Git repository and
-intentionally tracked there. The exact isolated identity was:
-
-- temporary checkout: `/tmp/tmp.xOzb82UCt6`
-- commit: `b6994c6f2f7e3910924714239f56f1c0e3874fc1`
-- tree fingerprint: `9d074c6785c4c0646c15a1217aa81247ea0fc6d2`
-- isolated tree state: clean (zero porcelain entries)
-- graph revision: `task-12-wormhole-corpus`
-- environment: `linux/amd64`, `go1.26.5-X:nodwarf5`
-
-The reporting run used:
-
-```bash
-WORMHOLE_CODEGRAPH_BENCHMARK_CHECKOUT=/tmp/tmp.xOzb82UCt6 \
-go test ./internal/runtime/codegraph/query \
-  -run '^$' \
-  -bench '^BenchmarkWormholeCodeGraphCorpus$' \
-  -benchtime=1x \
-  -count=1 \
-  -v
-```
-
-Raw measured outcomes from that run:
+The reporting run used the exact default benchmark command shown above from a
+clean detached worktree. Raw measured outcomes were:
 
 | Query | Duration (ns) | Source bytes | Irrelevant bytes | Omitted nodes / edges | Selected files / matches | Result |
 |---|---:|---:|---:|---:|---:|---|
-| agent-registration-authentication | 285978607 | 16380 | 5518 | 794 / 1072 | 26 / 64 | sufficient |
-| task-status-event | 233813093 | 16342 | 7674 | 2914 / 1212 | 39 / 32 | sufficient |
-| gateway-sync-response-version | 335246002 | 16373 | 2629 | 896 / 1009 | 27 / 64 | incomplete |
-| passport-audit-writes | 318767022 | 16377 | 8404 | 958 / 995 | 29 / 64 | sufficient |
-| local-task-durable-queue | 254803548 | 16376 | 11847 | 2866 / 1078 | 37 / 34 | sufficient |
-| local-sqlite-project-isolation | 336831979 | 16340 | 12997 | 1794 / 1272 | 45 / 64 | incomplete |
+| agent-registration-authentication | 229004925 | 16380 | 5518 | 797 / 1072 | 26 / 64 | sufficient |
+| task-status-event | 193672691 | 16353 | 12642 | 2881 / 1124 | 33 / 29 | sufficient |
+| gateway-sync-response-version | 256354276 | 16373 | 2629 | 901 / 1013 | 27 / 64 | incomplete |
+| passport-audit-writes | 263865492 | 16377 | 8404 | 966 / 999 | 29 / 64 | sufficient |
+| local-task-durable-queue | 194628936 | 16376 | 11847 | 2828 / 1036 | 35 / 35 | sufficient |
+| local-sqlite-project-isolation | 261086615 | 16340 | 12997 | 1766 / 1284 | 45 / 64 | incomplete |
 
 All six query results reported `partial` with
 `omission_reason=match_budget_exhausted`; those raw completeness signals are
 retained even where the expected answer artifacts were sufficient. The
-prepared run produced no `useless` result. Two outcomes were explicitly
+baseline produced no `useless` result. Two outcomes were explicitly
 incomplete:
 
 - `gateway-sync-response-version` missed relationship segment
@@ -114,10 +74,15 @@ incomplete:
   authoritative expectations `GetTask calls queryTask` and
   `ListPending uses QueueEntry`.
 
-Every expected file was selected in all six prepared-snapshot outcomes, and no
-heuristic expectation was missing. These facts do not turn the prepared
-snapshot into the actual-checkout baseline and do not establish a performance
+Every expected file was selected in all six outcomes, and no heuristic
+expectation was missing. These measurements establish no performance
 threshold.
+
+Before commit `471ef70`, the default runner correctly failed because tracked
+`cmd/fabric/main.go` referenced the then-untracked
+`cmd/fabric/embedding_wiring.go`. That failure remains useful evidence that the
+inventory never widened to untracked source. It was resolved by committing the
+coherent cumulative source set, not by weakening tracked-only indexing.
 
 ## Interpretation rules
 
