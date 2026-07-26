@@ -1,0 +1,18 @@
+title = "Wormhole Gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "Synthetic UUID idempotency keys in enrolment tests"
+condition = "AND"
+regexTarget = "secret"
+regexes = [
+  '''^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$''',
+]
+paths = [
+  '''^(cmd/gatewayd/(gatewayd|p7_e2e_integration)_test\.go|cmd/wormhole/cli_main_join_socket_test\.go|internal/core/identity/identity_test\.go|internal/mcp/agent_test\.go|internal/runtime/localapi/enrolment_test\.go|internal/runtime/localstore/(bootstrap|localstore)_test\.go)$''',
+]
