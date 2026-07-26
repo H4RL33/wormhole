@@ -53,6 +53,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runProfile(args[1:], stdout, stderr)
 	case "viewer-key":
 		return runViewerKey(args[1:], stdout, stderr)
+	case "integration":
+		return runIntegrationCommand(args[1:], stdout, stderr)
 	case "mcp":
 		return runMCP(args[1:], stdout, stderr)
 	case "-h", "--help", "help":
@@ -86,6 +88,12 @@ commands:
   wormhole config code-graph checkout show [flags]          show the approved checkout
   wormhole profile list [flags]          list stored credential profiles
   wormhole viewer-key create [flags]     issue a viewer passport
+  wormhole integration preview [flags]  preview approved guidance repository changes
+  wormhole integration apply [flags]    explicitly apply approved guidance
+  wormhole integration status [flags]   inspect approved guidance and drift state
+  wormhole integration update [flags]   explicitly apply a verified higher version
+  wormhole integration remove [flags]   remove unchanged managed guidance
+  wormhole integration rollback [flags]  apply the selected prior approved version
   wormhole mcp                           stdio↔socket bridge for MCP harness (no flags)
   wormhole help                          show this message
 

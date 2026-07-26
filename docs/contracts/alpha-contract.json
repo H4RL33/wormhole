@@ -2,7 +2,7 @@
   "mode": "alpha-inventory",
   "designed_interfaces": {
     "integration_manifest_v1": {
-      "status": "designed_not_implemented",
+      "status": "materialization_implemented_guidance_tool_planned",
       "design_document": "docs/architecture/integration-manifest-design.md",
       "manifest_schema": {
         "additional_properties": false,
@@ -7177,6 +7177,65 @@
         "flags": [],
         "positionals": [],
         "help_exit": 2
+      },
+      {
+        "name": "integration apply",
+        "usage": "integration apply [flags]",
+        "flags": [
+          "confirm-digest",
+          "project"
+        ],
+        "positionals": [],
+        "help_exit": 0
+      },
+      {
+        "name": "integration preview",
+        "usage": "integration preview [flags]",
+        "flags": [
+          "project"
+        ],
+        "positionals": [],
+        "help_exit": 0
+      },
+      {
+        "name": "integration remove",
+        "usage": "integration remove [flags]",
+        "flags": [
+          "confirm-digest",
+          "project"
+        ],
+        "positionals": [],
+        "help_exit": 0
+      },
+      {
+        "name": "integration rollback",
+        "usage": "integration rollback [flags]",
+        "flags": [
+          "confirm-digest",
+          "project"
+        ],
+        "positionals": [],
+        "help_exit": 0
+      },
+      {
+        "name": "integration status",
+        "usage": "integration status [flags]",
+        "flags": [
+          "json",
+          "project"
+        ],
+        "positionals": [],
+        "help_exit": 0
+      },
+      {
+        "name": "integration update",
+        "usage": "integration update [flags]",
+        "flags": [
+          "confirm-digest",
+          "project"
+        ],
+        "positionals": [],
+        "help_exit": 0
       },
       {
         "name": "join",

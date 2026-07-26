@@ -1,0 +1,212 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"regexp"
+	"strings"
+
+	"github.com/H4RL33/wormhole/internal/runtime/localapi"
+	"golang.org/x/term"
+)
+
+type integrationCommandPlan struct {
+	Operation      string
+	ProjectID      string
+	ResolvedRole   string
+	ExpectedDigest string
+	Diff           string
+	State          localapi.IntegrationState
+}
+
+type integrationCommandBackend interface {
+	Plan(context.Context, string, string) (integrationCommandPlan, error)
+	Commit(context.Context, integrationCommandPlan) (localapi.IntegrationState, error)
+}
+
+type unavailableIntegrationBackend struct{}
+
+func (unavailableIntegrationBackend) Plan(context.Context, string, string) (integrationCommandPlan, error) {
+	return integrationCommandPlan{}, errors.New("Gateway approved integration cache is unavailable")
+}
+
+func (unavailableIntegrationBackend) Commit(context.Context, integrationCommandPlan) (localapi.IntegrationState, error) {
+	return localapi.IntegrationState{}, errors.New("Gateway approved integration cache is unavailable")
+}
+
+var (
+	integrationTerminal       = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
+	integrationBackendFactory = func() (integrationCommandBackend, error) { return unavailableIntegrationBackend{}, nil }
+	integrationUUIDPattern    = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+)
+
+func runIntegrationCommand(args []string, stdout, stderr io.Writer) int {
+	backend, err := integrationBackendFactory()
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole integration: %v\n", err)
+		return 1
+	}
+	return runIntegration(args, os.Stdin, stdout, stderr, integrationTerminal(), backend)
+}
+
+func runIntegration(args []string, stdin io.Reader, stdout, stderr io.Writer, interactive bool, backend integrationCommandBackend) int {
+	if len(args) == 0 {
+		integrationUsage(stderr)
+		return 2
+	}
+	command := args[0]
+	mutating := command == "apply" || command == "update" || command == "remove" || command == "rollback"
+	if command != "preview" && command != "status" && !mutating {
+		fmt.Fprintf(stderr, "unknown integration command %q\n", command)
+		integrationUsage(stderr)
+		return 2
+	}
+
+	flags := flag.NewFlagSet("integration "+command, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	project := flags.String("project", "", "Wormhole project id (defaults to nearest project config)")
+	jsonOutput := false
+	if command == "status" {
+		flags.BoolVar(&jsonOutput, "json", false, "print machine-readable status")
+	}
+	confirmDigest := ""
+	if mutating {
+		flags.StringVar(&confirmDigest, "confirm-digest", "", "confirm the full expected manifest digest")
+	}
+	if err := flags.Parse(args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintf(stderr, "wormhole integration %s: unexpected operand %q\n", command, flags.Arg(0))
+		return 2
+	}
+	if confirmDigest != "" && !integrationDigestValid(confirmDigest) {
+		fmt.Fprintf(stderr, "wormhole integration %s: --confirm-digest requires a full lowercase sha256 digest\n", command)
+		return 2
+	}
+	if mutating && !interactive && confirmDigest == "" {
+		fmt.Fprintf(stderr, "wormhole integration %s: non-interactive mutation requires --confirm-digest\n", command)
+		return 2
+	}
+	resolvedProject, err := resolveCodeGraphProject(*project)
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole integration %s: %v\n", command, err)
+		return 2
+	}
+	if !integrationUUIDPattern.MatchString(resolvedProject) || resolvedProject == "00000000-0000-0000-0000-000000000000" {
+		fmt.Fprintf(stderr, "wormhole integration %s: project must be a canonical non-nil UUID\n", command)
+		return 2
+	}
+	plan, err := backend.Plan(context.Background(), command, resolvedProject)
+	if err != nil {
+		fmt.Fprintf(stderr, "wormhole integration %s: %v\n", command, err)
+		return 1
+	}
+	if plan.ProjectID != resolvedProject {
+		fmt.Fprintf(stderr, "wormhole integration %s: backend project binding mismatch\n", command)
+		return 1
+	}
+
+	switch command {
+	case "preview":
+		writeIntegrationPlan(stdout, plan)
+		return 0
+	case "status":
+		if jsonOutput {
+			encoded, err := json.MarshalIndent(plan.State, "", "  ")
+			if err != nil {
+				fmt.Fprintf(stderr, "wormhole integration status: encode status: %v\n", err)
+				return 1
+			}
+			fmt.Fprintln(stdout, string(encoded))
+		} else {
+			writeIntegrationStatus(stdout, plan.State)
+		}
+		return 0
+	}
+
+	if !integrationDigestValid(plan.ExpectedDigest) {
+		fmt.Fprintf(stderr, "wormhole integration %s: backend returned an invalid expected digest\n", command)
+		return 1
+	}
+	writeIntegrationPlan(stdout, plan)
+	if confirmDigest != "" {
+		if confirmDigest != plan.ExpectedDigest {
+			fmt.Fprintf(stderr, "wormhole integration %s: --confirm-digest does not match expected digest\n", command)
+			return 1
+		}
+	} else {
+		fmt.Fprint(stdout, "Confirm? Type y, yes, or the full expected digest: ")
+		answer, readErr := bufio.NewReader(stdin).ReadString('\n')
+		if readErr != nil && answer == "" {
+			fmt.Fprintf(stderr, "wormhole integration %s: read confirmation: %v\n", command, readErr)
+			return 1
+		}
+		answer = strings.TrimSpace(answer)
+		if !strings.EqualFold(answer, "y") && !strings.EqualFold(answer, "yes") && !strings.EqualFold(answer, plan.ExpectedDigest) {
+			fmt.Fprintf(stderr, "wormhole integration %s: declined\n", command)
+			return 1
+		}
+	}
+	if _, err := backend.Commit(context.Background(), plan); err != nil {
+		fmt.Fprintf(stderr, "wormhole integration %s: %v\n", command, err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "integration %s committed for project %s at %s\n", command, plan.ProjectID, plan.ExpectedDigest)
+	return 0
+}
+
+func integrationDigestValid(value string) bool {
+	if len(value) != len("sha256:")+64 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	for _, character := range value[len("sha256:"):] {
+		if !(character >= '0' && character <= '9') && !(character >= 'a' && character <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func writeIntegrationPlan(output io.Writer, plan integrationCommandPlan) {
+	fmt.Fprintf(output, "operation=%s\nproject=%s\nrole=%s\ndigest=%s\n", plan.Operation, plan.ProjectID, plan.ResolvedRole, plan.ExpectedDigest)
+	if plan.Diff != "" {
+		fmt.Fprint(output, plan.Diff)
+		if !strings.HasSuffix(plan.Diff, "\n") {
+			fmt.Fprintln(output)
+		}
+	}
+}
+
+func writeIntegrationStatus(output io.Writer, state localapi.IntegrationState) {
+	fmt.Fprintf(output, "project=%s\nresolved_role=%s\napproval_state=%s\nguidance_active=%t\nmaterialization_state=%s\nconnection_state=%s\ncompatibility_state=%s\ndrift_detected=%t\n",
+		state.ProjectID, state.ResolvedRole, state.ApprovalState, state.GuidanceActive, state.MaterializationState, state.ConnectionState, state.CompatibilityState, state.DriftDetected)
+	if state.ActiveManifestDigest != nil {
+		fmt.Fprintf(output, "active_manifest_digest=%s\n", *state.ActiveManifestDigest)
+	}
+	if state.PendingManifestDigest != nil {
+		fmt.Fprintf(output, "pending_manifest_digest=%s\n", *state.PendingManifestDigest)
+	}
+	if state.RollbackCandidateManifestVersion != nil {
+		fmt.Fprintf(output, "rollback_candidate_manifest_version=%d\n", *state.RollbackCandidateManifestVersion)
+	}
+	if state.RollbackCandidateManifestDigest != nil {
+		fmt.Fprintf(output, "rollback_candidate_manifest_digest=%s\n", *state.RollbackCandidateManifestDigest)
+	}
+	for _, target := range state.PreservedTargets {
+		fmt.Fprintf(output, "preserved_target=%s\n", target)
+	}
+}
+
+func integrationUsage(output io.Writer) {
+	fmt.Fprintln(output, "usage: wormhole integration <preview|apply|status|update|remove|rollback> [flags]")
+}

@@ -133,7 +133,7 @@ func TestAlphaContractIntegrationManifestDesignCompleteness(t *testing.T) {
 	}
 }
 
-func TestAlphaContractIntegrationManifestV1IsPlannedOnly(t *testing.T) {
+func TestAlphaContractIntegrationManifestV1MaterializationIsLiveAndGuidanceToolIsPlanned(t *testing.T) {
 	data, err := os.ReadFile("../../docs/contracts/alpha-contract.json")
 	if err != nil {
 		t.Fatal(err)
@@ -143,7 +143,7 @@ func TestAlphaContractIntegrationManifestV1IsPlannedOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	planned := inventory.DesignedInterfaces.IntegrationManifestV1
-	if planned.Status != "designed_not_implemented" || planned.DesignDocument != "docs/architecture/integration-manifest-design.md" {
+	if planned.Status != "materialization_implemented_guidance_tool_planned" || planned.DesignDocument != "docs/architecture/integration-manifest-design.md" {
 		t.Fatalf("planned integration manifest status/document = %q/%q", planned.Status, planned.DesignDocument)
 	}
 	wantManifestFields := []string{
@@ -207,8 +207,8 @@ func TestAlphaContractIntegrationManifestV1IsPlannedOnly(t *testing.T) {
 		liveCommands[command.Name] = true
 	}
 	for _, command := range planned.CLICommands {
-		if liveCommands[command.Name] {
-			t.Errorf("planned CLI command %q appears in the live inventory", command.Name)
+		if !liveCommands[command.Name] {
+			t.Errorf("implemented CLI command %q is missing from the live inventory", command.Name)
 		}
 	}
 	for surface, tools := range map[string][]struct {

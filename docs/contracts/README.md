@@ -6,14 +6,15 @@ surface, environment and path conventions, Gateway local protocol, sync wire
 protocol, migrations, and release artifacts.
 
 `designed_interfaces` is separate from those live inventories. It records
-decision-complete public contracts that have human design review but no runtime
-implementation. `integration_manifest_v1` is currently
-`designed_not_implemented`; its exact manifest/entry constraints, managed
-markers, CLI names, and full closed read-only MCP request/response schemas are fixed by
+decision-complete public contracts that have human design review and may be
+implemented in independently inventoried stages. `integration_manifest_v1` is
+currently `materialization_implemented_guidance_tool_planned`: its exact
+manifest/entry constraints, managed markers, CLI names, and full closed
+read-only MCP request/response schemas are fixed by
 [`integration-manifest-design.md`](../architecture/integration-manifest-design.md).
-Its commands must not appear under `cli.commands`, and
-`wormhole.agent.get_guidance` must not appear under either live MCP registry,
-until their implementation changes update both the runtime and inventory.
+Its six repository-materialisation commands now appear under `cli.commands`.
+`wormhole.agent.get_guidance` must not appear under either live MCP registry
+until Task 16 updates both the runtime and inventory.
 The design requires descriptor-relative, no-follow repository operations and
 immediate journaled removal of unchanged managed bytes after revocation; drift
 is preserved and reported as `removal_required`.

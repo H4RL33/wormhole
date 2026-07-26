@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "project_id": "e724dd25-5bc9-40db-bcad-0b21716d1ca4",
+  "active_manifest_id": "52b860cd-0db7-4ee0-a3fd-672ad9da0c95",
+  "active_manifest_version": 1,
+  "active_manifest_digest": "sha256:087db9b8663541ad663f3a9ad4e73397011cadd20975b81e8ef78bf174449a57",
+  "pending_manifest_id": null,
+  "pending_manifest_version": null,
+  "pending_manifest_digest": null,
+  "resolved_role": "contributor",
+  "approval_state": "approved",
+  "materialization_state": "applied",
+  "connection_state": "online",
+  "guidance_active": true,
+  "compatibility_state": "compatible",
+  "drift_detected": false,
+  "rollback_candidate_manifest_version": null,
+  "rollback_candidate_manifest_digest": null,
+  "last_verified_at": "2026-07-26T12:00:00Z",
+  "preserved_targets": [],
+  "targets": [
+    {
+      "kind": "skill",
+      "target": ".agents/skills/wormhole-code-graph/SKILL.md",
+      "content_digest": "sha256:bebdabdbaa8af2f3fa62a06a9b1ab21d02c653fdc433402c14b690cfb80a4ed5",
+      "rendered_digest": "sha256:bebdabdbaa8af2f3fa62a06a9b1ab21d02c653fdc433402c14b690cfb80a4ed5",
+      "ownership_mode": "managed_file",
+      "file_mode": 420,
+      "file_identity": {"device": 1, "inode": 1}
+    },
+    {
+      "kind": "skill",
+      "target": ".agents/skills/wormhole-contributor/SKILL.md",
+      "content_digest": "sha256:6e76cc490bb9c19f24d3233d9e7df35ae124429b8b7b457a5dc9880d529690e5",
+      "rendered_digest": "sha256:6e76cc490bb9c19f24d3233d9e7df35ae124429b8b7b457a5dc9880d529690e5",
+      "ownership_mode": "managed_file",
+      "file_mode": 420,
+      "file_identity": {"device": 1, "inode": 2}
+    },
+    {
+      "kind": "skill",
+      "target": ".agents/skills/wormhole-operating-loop/SKILL.md",
+      "content_digest": "sha256:ae3fba2e81463e0ccc3f70586d3413c58b6911fe0121498f050cbc1f40d3f2e8",
+      "rendered_digest": "sha256:ae3fba2e81463e0ccc3f70586d3413c58b6911fe0121498f050cbc1f40d3f2e8",
+      "ownership_mode": "managed_file",
+      "file_mode": 420,
+      "file_identity": {"device": 1, "inode": 3}
+    },
+    {
+      "kind": "skill",
+      "target": ".agents/skills/wormhole-orientation/SKILL.md",
+      "content_digest": "sha256:be42e2817cc6fcf3efe41c17dcdb5312c579f487bdabaeb7b852fc838da1aca5",
+      "rendered_digest": "sha256:be42e2817cc6fcf3efe41c17dcdb5312c579f487bdabaeb7b852fc838da1aca5",
+      "ownership_mode": "managed_file",
+      "file_mode": 420,
+      "file_identity": {"device": 1, "inode": 4}
+    },
+    {
+      "kind": "skill",
+      "target": ".agents/skills/wormhole-reviewer/SKILL.md",
+      "content_digest": "sha256:008af738d2c91cfd0d153037f142a1ef0ebb99afe6d24d90d34c40469f753ff3",
+      "rendered_digest": "sha256:008af738d2c91cfd0d153037f142a1ef0ebb99afe6d24d90d34c40469f753ff3",
+      "ownership_mode": "managed_file",
+      "file_mode": 420,
+      "file_identity": {"device": 1, "inode": 5}
+    },
+    {
+      "kind": "skill",
+      "target": ".agents/skills/wormhole-tool-use/SKILL.md",
+      "content_digest": "sha256:acc9f58e43f605f6fce5727aae69ff00dc946581e192b00d32e751044e8222dc",
+      "rendered_digest": "sha256:acc9f58e43f605f6fce5727aae69ff00dc946581e192b00d32e751044e8222dc",
+      "ownership_mode": "managed_file",
+      "file_mode": 420,
+      "file_identity": {"device": 1, "inode": 6}
+    }
+  ]
+}
