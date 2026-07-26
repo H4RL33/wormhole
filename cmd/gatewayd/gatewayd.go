@@ -39,6 +39,21 @@ type bootstrapConfigurableSyncEngine interface {
 	ConfigureBootstrap(*localstore.Store, string, string, *localstore.EnrolmentAttemptRecord) error
 }
 
+type integrationManifestConfigurableSyncEngine interface {
+	ConfigureIntegrationManifestReceiver(sync.IntegrationManifestReceiver)
+}
+
+func wireIntegrationManifestReceivers(group *syncGroup, receiver sync.IntegrationManifestReceiver) {
+	if group == nil || receiver == nil {
+		return
+	}
+	for _, engine := range group.engines {
+		if configurable, ok := engine.(integrationManifestConfigurableSyncEngine); ok {
+			configurable.ConfigureIntegrationManifestReceiver(receiver)
+		}
+	}
+}
+
 type syncEngineFactory func(string, string, string, *sync.QueueRepo, *sync.AuditRepo, *localstore.TaskRepo, *localstore.KBRepo, sync.Config) (syncEngine, error)
 
 func defaultSyncEngineFactory(server, token, projectID string, queueRepo *sync.QueueRepo, auditRepo *sync.AuditRepo, taskRepo *localstore.TaskRepo, kbRepo *localstore.KBRepo, cfg sync.Config) (syncEngine, error) {
@@ -286,6 +301,10 @@ func runWithSyncEngineFactory(ctx context.Context, profileName string, factory s
 		return fmt.Errorf("open local store: %w", err)
 	}
 	defer store.Close()
+	manifestService, err := localapi.NewIntegrationManifestService(store)
+	if err != nil {
+		return fmt.Errorf("open integration manifest service: %w", err)
+	}
 
 	// Credentials and SQLite are resolved before the local endpoint. A stale
 	// Unix socket from an unclean shutdown is replaceable; other file types
@@ -318,6 +337,7 @@ func runWithSyncEngineFactory(ctx context.Context, profileName string, factory s
 		}
 		defer srv.Close()
 		srv.SetVersion(gatewayVersion())
+		srv.SetIntegrationManifestService(manifestService)
 		srv.SetRecoveryOnlyProjects(nil, true)
 		srv.SetEnrolmentRuntime(loadEnrolmentPolicy(), paths.CredentialsDir)
 		srv.EnableEnrolmentBootstrap(syncCfg)
@@ -357,6 +377,7 @@ func runWithSyncEngineFactory(ctx context.Context, profileName string, factory s
 	if err != nil {
 		return err
 	}
+	wireIntegrationManifestReceivers(syncEngines, manifestService)
 
 	// P3: eventbus + scheduler are always constructed so agent registration,
 	// presence, task routing, and subscriptions (wormhole.agent.register,
@@ -382,6 +403,7 @@ func runWithSyncEngineFactory(ctx context.Context, profileName string, factory s
 		}
 	}
 	srv.SetVersion(gatewayVersion())
+	srv.SetIntegrationManifestService(manifestService)
 	srv.SetSyncStatusProvider(syncEngines)
 	recoveryProjects := make([]string, 0, len(syncEngines.notReady))
 	for projectID := range syncEngines.notReady {

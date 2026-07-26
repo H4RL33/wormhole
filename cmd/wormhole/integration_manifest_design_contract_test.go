@@ -143,7 +143,7 @@ func TestAlphaContractIntegrationManifestV1MaterializationAndGuidanceToolAreLive
 		t.Fatal(err)
 	}
 	planned := inventory.DesignedInterfaces.IntegrationManifestV1
-	if planned.Status != "materialization_and_guidance_tool_implemented_cache_binding_planned" || planned.DesignDocument != "docs/architecture/integration-manifest-design.md" {
+	if planned.Status != "fabric_distribution_materialization_guidance_and_gateway_cache_binding_implemented" || planned.DesignDocument != "docs/architecture/integration-manifest-design.md" {
 		t.Fatalf("planned integration manifest status/document = %q/%q", planned.Status, planned.DesignDocument)
 	}
 	wantManifestFields := []string{

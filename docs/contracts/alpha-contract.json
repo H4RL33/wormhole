@@ -2,7 +2,7 @@
   "mode": "alpha-inventory",
   "designed_interfaces": {
     "integration_manifest_v1": {
-      "status": "fabric_distribution_materialization_and_guidance_implemented_gateway_cache_binding_planned",
+      "status": "fabric_distribution_materialization_guidance_and_gateway_cache_binding_implemented",
       "design_document": "docs/architecture/integration-manifest-design.md",
       "manifest_schema": {
         "additional_properties": false,

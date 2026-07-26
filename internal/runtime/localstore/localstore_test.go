@@ -449,3 +449,84 @@ func TestLocalRepositoriesPreserveDurableTaskEventAndKBState(t *testing.T) {
 		t.Fatalf("GetArticleLinks = %+v, err=%v", links, err)
 	}
 }
+
+func TestIntegrationManifestSchemaExistsAfterOpen(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "wormholed.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	for _, table := range []string{
+		"integration_manifest_bodies",
+		"integration_manifest_project_state",
+		"integration_manifest_journal",
+		"integration_manifest_audit",
+	} {
+		var found string
+		err := store.DB().QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&found)
+		if err != nil {
+			t.Fatalf("required integration manifest table %q is absent: %v", table, err)
+		}
+	}
+}
+
+func TestIntegrationManifestSchemaBodyIsImmutableAndRejectsEquivocation(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "wormholed.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	db := store.DB()
+	if _, err := db.Exec(`INSERT INTO integration_manifest_bodies (project_id, manifest_id, manifest_version, digest, body) VALUES (?, ?, ?, ?, ?)`, "project-a", "manifest-1", 1, "digest-a", `{"schema_version":1}`); err != nil {
+		t.Fatalf("insert verified manifest body: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO integration_manifest_bodies (project_id, manifest_id, manifest_version, digest, body) VALUES (?, ?, ?, ?, ?)`, "project-a", "manifest-1", 1, "digest-b", `{"schema_version":1,"changed":true}`); err == nil {
+		t.Fatal("equivocating manifest body insert succeeded")
+	}
+	if _, err := db.Exec(`UPDATE integration_manifest_bodies SET digest = ?, body = ? WHERE project_id = ? AND manifest_id = ? AND manifest_version = ?`, "digest-b", `{"schema_version":1,"changed":true}`, "project-a", "manifest-1", 1); err == nil {
+		t.Fatal("verified manifest body update succeeded")
+	}
+}
+
+func TestIntegrationManifestSchemaAuditIsAppendOnly(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "wormholed.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	db := store.DB()
+	if _, err := db.Exec(`INSERT INTO integration_manifest_audit (project_id, id, action, payload) VALUES (?, ?, ?, ?)`, "project-a", "audit-1", "verified", `{}`); err != nil {
+		t.Fatalf("insert audit record: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE integration_manifest_audit SET action = ? WHERE project_id = ? AND id = ?`, "altered", "project-a", "audit-1"); err == nil {
+		t.Fatal("audit UPDATE succeeded")
+	}
+	if _, err := db.Exec(`DELETE FROM integration_manifest_audit WHERE project_id = ? AND id = ?`, "project-a", "audit-1"); err == nil {
+		t.Fatal("audit DELETE succeeded")
+	}
+}
+
+func TestIntegrationManifestSchemaProjectScopedKeysPermitSameIDs(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "wormholed.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	db := store.DB()
+	for _, projectID := range []string{"project-a", "project-b"} {
+		if _, err := db.Exec(`INSERT INTO integration_manifest_bodies (project_id, manifest_id, manifest_version, digest, body) VALUES (?, ?, ?, ?, ?)`, projectID, "manifest-1", 1, "digest-"+projectID, `{"schema_version":1}`); err != nil {
+			t.Fatalf("insert %s manifest: %v", projectID, err)
+		}
+	}
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM integration_manifest_bodies WHERE manifest_id = ? AND manifest_version = ?`, "manifest-1", 1).Scan(&count); err != nil {
+		t.Fatalf("count project-scoped manifest IDs: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("manifest IDs shared across projects count = %d, want 2", count)
+	}
+}

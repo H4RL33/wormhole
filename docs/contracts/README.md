@@ -8,15 +8,15 @@ protocol, migrations, and release artifacts.
 `designed_interfaces` is separate from those live inventories. It records
 decision-complete public contracts that have human design review and may be
 implemented in independently inventoried stages. `integration_manifest_v1` is
-currently `materialization_and_guidance_tool_implemented_cache_binding_planned`:
+currently `fabric_distribution_materialization_guidance_and_gateway_cache_binding_implemented`:
 its exact
 manifest/entry constraints, managed markers, CLI names, and full closed
 read-only MCP request/response schemas are fixed by
 [`integration-manifest-design.md`](../architecture/integration-manifest-design.md).
 Its six repository-materialisation commands appear under `cli.commands`, and
 its read-only `wormhole.agent.get_guidance` contract appears in the live Gateway
-registry. The authoritative SQLite cache/provider binding remains owned by the
-later persistence stage; an unbound provider fails closed.
+registry. The authoritative SQLite cache/provider binding is live; an unbound
+provider still fails closed.
 The design requires descriptor-relative, no-follow repository operations and
 immediate journaled removal of unchanged managed bytes after revocation; drift
 is preserved and reported as `removal_required`.

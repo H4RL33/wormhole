@@ -22,6 +22,18 @@ import (
 // because runtime packages cannot import internal/mcp.
 const SyncProtocolVersion = 1
 
+// IntegrationManifestReceiver is the narrow boundary between transport sync
+// and Gateway's authoritative manifest verifier/cache. The project, Passport,
+// and roles are derived from the authenticated sync identity, never from the
+// manifest body.
+type IntegrationManifestReceiver interface {
+	ReceiveIntegrationManifest(ctx context.Context, projectID, passportID string, roles []string, raw json.RawMessage) error
+}
+
+type bootstrapIntegrationManifestRollback interface {
+	RollbackBootstrapIntegrationManifest(ctx context.Context, projectID, passportID string, roles []string, raw json.RawMessage) error
+}
+
 // Engine orchestrates the local sync lifecycle: bootstrap, incremental push/pull,
 // and batching (RFC-0003 §8). It holds per-org state including queue and audit repos.
 type Engine struct {
@@ -37,6 +49,8 @@ type Engine struct {
 	expectedAgentID       string
 	expectedPassportID    string
 	bootstrapAttempt      *localstore.EnrolmentAttemptRecord
+	integrationReceiver   IntegrationManifestReceiver
+	authenticatedRoles    []string
 	mu                    sync.Mutex
 	stateMu               sync.RWMutex
 	connectionState       ConnectionState
@@ -54,6 +68,14 @@ type Engine struct {
 	wg                    sync.WaitGroup
 	// testCallSyncToolWithResultFn is for testing only: if set, overrides callSyncToolWithResult.
 	testCallSyncToolWithResultFn func(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error)
+}
+
+// ConfigureIntegrationManifestReceiver routes Fabric bootstrap and
+// incremental manifest records through the same Gateway verifier/cache.
+func (e *Engine) ConfigureIntegrationManifestReceiver(receiver IntegrationManifestReceiver) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.integrationReceiver = receiver
 }
 
 // ConfigureBootstrap supplies the durable snapshot target and the identity
@@ -417,6 +439,17 @@ func (e *Engine) PullIncremental(ctx context.Context) error {
 			if err := e.applyArticle(ctx, article); err != nil {
 				return fmt.Errorf("sync: pull incremental: apply kb article: %w", err)
 			}
+		case "integration_manifest":
+			if e.integrationReceiver == nil {
+				return errors.New("sync: pull incremental: no integration manifest receiver")
+			}
+			roles, err := e.integrationManifestRoles(ctx)
+			if err != nil {
+				return fmt.Errorf("sync: pull incremental: load authenticated manifest binding: %w", err)
+			}
+			if err := e.integrationReceiver.ReceiveIntegrationManifest(ctx, e.namespaceID, e.expectedPassportID, roles, u.Data); err != nil {
+				return fmt.Errorf("sync: pull incremental: receive integration manifest: %w", err)
+			}
 		default:
 			return fmt.Errorf("sync: pull incremental: unknown update type %q", u.Type)
 		}
@@ -452,11 +485,55 @@ func (e *Engine) Bootstrap(ctx context.Context) error {
 	if e.bootstrapStore == nil {
 		return errors.New("sync: bootstrap: no local store configured")
 	}
+	metadata := bytes.TrimSpace(out.OrgConfig.IntegrationManifestMetadata)
+	manifestReceived := false
+	var manifestRoles []string
+	if !bytes.Equal(metadata, []byte("null")) {
+		if e.integrationReceiver == nil {
+			return errors.New("sync: bootstrap: no integration manifest receiver")
+		}
+		manifestRoles = append([]string(nil), out.OrgConfig.Identity.Passport.Roles...)
+		if err := e.integrationReceiver.ReceiveIntegrationManifest(ctx, e.namespaceID, e.expectedPassportID, manifestRoles, metadata); err != nil {
+			return fmt.Errorf("sync: bootstrap: receive integration manifest: %w", err)
+		}
+		e.authenticatedRoles = manifestRoles
+		manifestReceived = true
+	}
 	timestamp, _ := time.Parse(time.RFC3339Nano, out.Timestamp)
 	if err := e.bootstrapStore.ApplyBootstrap(ctx, e.namespaceID, out.OrgConfig, timestamp, e.bootstrapAttempt); err != nil {
+		if manifestReceived {
+			rollback, ok := e.integrationReceiver.(bootstrapIntegrationManifestRollback)
+			if !ok {
+				return fmt.Errorf("sync: bootstrap: commit snapshot: %w; integration manifest receiver cannot roll back candidate", err)
+			}
+			if rollbackErr := rollback.RollbackBootstrapIntegrationManifest(ctx, e.namespaceID, e.expectedPassportID, manifestRoles, metadata); rollbackErr != nil {
+				return fmt.Errorf("sync: bootstrap: commit snapshot: %w; roll back integration manifest: %v", err, rollbackErr)
+			}
+		}
 		return fmt.Errorf("sync: bootstrap: commit snapshot: %w", err)
 	}
 	return nil
+}
+
+func (e *Engine) integrationManifestRoles(ctx context.Context) ([]string, error) {
+	if len(e.authenticatedRoles) > 0 {
+		return append([]string(nil), e.authenticatedRoles...), nil
+	}
+	if e.bootstrapStore == nil || e.expectedPassportID == "" {
+		return nil, errors.New("authenticated Passport binding unavailable")
+	}
+	var raw string
+	err := e.bootstrapStore.DB().QueryRowContext(ctx, `SELECT roles FROM passports
+		WHERE namespace_id = ? AND id = ? AND project_id = ?`, e.namespaceID, e.expectedPassportID, e.namespaceID).Scan(&raw)
+	if err != nil {
+		return nil, err
+	}
+	var roles []string
+	if err := json.Unmarshal([]byte(raw), &roles); err != nil {
+		return nil, err
+	}
+	e.authenticatedRoles = append([]string(nil), roles...)
+	return roles, nil
 }
 
 // taskSummaryWire mirrors internal/mcp.TaskSummary's JSON shape. This
@@ -907,8 +984,9 @@ func validateBootstrapResult(out bootstrapResultWire, namespaceID, expectedAgent
 	if !reflect.DeepEqual(out.KBList, out.OrgConfig.KB.Articles) {
 		return errors.New("kb_list mirror differs from org_config kb articles")
 	}
-	if !bytes.Equal(bytes.TrimSpace(out.OrgConfig.IntegrationManifestMetadata), []byte("null")) {
-		return errors.New("integration manifest metadata must be JSON null")
+	metadata := bytes.TrimSpace(out.OrgConfig.IntegrationManifestMetadata)
+	if !json.Valid(metadata) || (!bytes.Equal(metadata, []byte("null")) && (len(metadata) == 0 || metadata[0] != '{')) {
+		return errors.New("integration manifest metadata must be JSON null or an object")
 	}
 	outerTimestamp, err := time.Parse(time.RFC3339Nano, out.Timestamp)
 	if err != nil || outerTimestamp.IsZero() {
@@ -1027,8 +1105,13 @@ func decodeIncrementalPullResult(result interface{}) (incrementalPullResultWire,
 	if err != nil {
 		return out, fmt.Errorf("marshal: %w", err)
 	}
-	if err := json.Unmarshal(raw, &out); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&out); err != nil {
 		return out, fmt.Errorf("unmarshal: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return out, fmt.Errorf("unmarshal: trailing data")
 	}
 	return out, nil
 }

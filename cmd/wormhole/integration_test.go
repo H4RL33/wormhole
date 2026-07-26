@@ -186,6 +186,46 @@ func TestIntegrationCLI_ExactSurfaceAndMainDispatch(t *testing.T) {
 	}
 }
 
+func TestGatewayIntegrationBackendUsesPrivatePlanCommitSocketMethods(t *testing.T) {
+	var calls []string
+	backend := &gatewayIntegrationBackend{
+		socketPath: "/tmp/wormholed-test.sock", repositoryRoot: "/repo",
+		call: func(_ context.Context, _ string, method string, request any, response any) error {
+			calls = append(calls, method)
+			switch method {
+			case "wormhole/integration/plan":
+				out := response.(*integrationCommandPlan)
+				*out = integrationTestBackend().plan
+				out.Operation, out.ProjectID = "apply", "e724dd25-5bc9-40db-bcad-0b21716d1ca4"
+			case "wormhole/integration/commit":
+				out := response.(*localapi.IntegrationState)
+				*out = integrationTestBackend().plan.State
+			}
+			return nil
+		},
+	}
+	plan, err := backend.Plan(context.Background(), "apply", "e724dd25-5bc9-40db-bcad-0b21716d1ca4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Commit(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(calls, []string{"wormhole/integration/plan", "wormhole/integration/commit"}) {
+		t.Fatalf("private socket methods = %v", calls)
+	}
+}
+
+func TestGatewayIntegrationBackendRejectsConfiguredProjectMismatch(t *testing.T) {
+	backend := &gatewayIntegrationBackend{projectID: "e724dd25-5bc9-40db-bcad-0b21716d1ca4", call: func(context.Context, string, string, any, any) error {
+		t.Fatal("mismatched project reached Gateway socket")
+		return nil
+	}}
+	if _, err := backend.Plan(context.Background(), "status", "f724dd25-5bc9-40db-bcad-0b21716d1ca4"); err == nil {
+		t.Fatal("backend accepted a project different from nearest repository config")
+	}
+}
+
 func TestIntegrationStateFixture(t *testing.T) {
 	data, err := os.ReadFile("../../testdata/alpha/manifests/integration-state.json")
 	if err != nil {

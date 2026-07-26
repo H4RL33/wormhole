@@ -57,6 +57,9 @@ func (s *Server) continueEnrolmentBootstrap(ctx context.Context, req EnrolmentRe
 		err = engine.ConfigureBootstrap(s.store, credentials.AgentID, credentials.PassportID, &attempt)
 	}
 	if err == nil {
+		s.configureIntegrationManifestReceiver(engine)
+	}
+	if err == nil {
 		err = engine.Bootstrap(ctx)
 	}
 	if err != nil {
@@ -81,6 +84,16 @@ func (s *Server) continueEnrolmentBootstrap(ctx context.Context, req EnrolmentRe
 	// incremental loop can run. Engine.Stop owns cancellation at Server.Close.
 	engine.Start(context.Background())
 	return enrolmentReady(req, attempt.AgentID, attempt.PassportID)
+}
+
+type integrationManifestReceiverConfigurer interface {
+	ConfigureIntegrationManifestReceiver(syncpkg.IntegrationManifestReceiver)
+}
+
+func (s *Server) configureIntegrationManifestReceiver(engine integrationManifestReceiverConfigurer) {
+	if engine != nil && s.integrationReceiver != nil {
+		engine.ConfigureIntegrationManifestReceiver(s.integrationReceiver)
+	}
 }
 
 func (s *Server) checkpointEnrolmentRecovery(ctx context.Context, attempt localstore.EnrolmentAttemptRecord) error {

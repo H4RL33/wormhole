@@ -192,14 +192,13 @@ func TestDecodeBootstrapResultRejectsMissingRequiredNestedFields(t *testing.T) {
 	}
 }
 
-func TestValidateBootstrapResultRejectsNonNullManifestAndMissingRequiredScalars(t *testing.T) {
+func TestValidateBootstrapResultRejectsInvalidManifestMetadataAndMissingRequiredScalars(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(*bootstrapResultWire)
 		want   string
 	}{
-		{"manifest object", func(out *bootstrapResultWire) { out.OrgConfig.IntegrationManifestMetadata = json.RawMessage(`{}`) }, "must be JSON null"},
-		{"manifest string", func(out *bootstrapResultWire) { out.OrgConfig.IntegrationManifestMetadata = json.RawMessage(`"null"`) }, "must be JSON null"},
+		{"manifest string", func(out *bootstrapResultWire) { out.OrgConfig.IntegrationManifestMetadata = json.RawMessage(`"null"`) }, "must be JSON null or an object"},
 		{"event agent", func(out *bootstrapResultWire) { out.OrgConfig.Events[0].AgentID = "" }, "event agent_id"},
 		{"event type", func(out *bootstrapResultWire) { out.OrgConfig.Events[0].EventType = " " }, "event event_type"},
 		{"empty parent reference", func(out *bootstrapResultWire) {

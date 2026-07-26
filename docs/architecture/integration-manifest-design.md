@@ -439,6 +439,15 @@ Every command uses these exits:
   unavailable-candidate, or recovery failure;
 * `2`: command, flag, value, or usage error.
 
+The CLI reaches Gateway through lifecycle-gated private JSON-RPC methods on the
+existing same-user Unix socket. Those methods are deliberately absent from
+`tools/list` and are not model-facing MCP tools. They accept no manifest body,
+role, URL, or force option: Gateway derives a fresh plan from its authoritative
+cache and requires the full confirmed digest, project, and canonical persisted
+repository root to match before commit. V1 relies on the documented same-user
+IPC trust boundary; hiding an advertised tool is not treated as an additional
+authorization control.
+
 Status returning a successfully read unhealthy state still exits `0`; the JSON
 body carries that state. No command silently changes files after exit `1` or
 `2`; an interrupted journal may only restore its own partial writes.

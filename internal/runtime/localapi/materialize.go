@@ -46,11 +46,11 @@ type IntegrationManifest struct {
 	ManifestID         string                     `json:"manifest_id"`
 	ManifestVersion    int64                      `json:"manifest_version"`
 	ProjectID          string                     `json:"project_id"`
-	Source             string                     `json:"source,omitempty"`
-	CreatedAt          string                     `json:"created_at,omitempty"`
-	ToolContractDigest string                     `json:"tool_contract_digest,omitempty"`
+	Source             string                     `json:"source"`
+	CreatedAt          string                     `json:"created_at"`
+	ToolContractDigest string                     `json:"tool_contract_digest"`
 	ManifestDigest     string                     `json:"manifest_digest"`
-	RoleFilters        []string                   `json:"role_filters,omitempty"`
+	RoleFilters        []string                   `json:"role_filters"`
 	Entries            []IntegrationManifestEntry `json:"entries"`
 }
 
@@ -316,6 +316,74 @@ func (m *IntegrationMaterializer) Apply(request IntegrationMaterializationReques
 		root.removeCreatedDirectories(createdMaterializationDirectories(prepared))
 	}
 	return next, materializationResultError(next)
+}
+
+// recoverRollback restores only bytes whose current value still matches an
+// interrupted journal's intended value. It uses the same held-root,
+// descriptor-relative operations as normal materialization and fails closed
+// on any divergent user change.
+func (m *IntegrationMaterializer) recoverRollback(preview IntegrationMaterializationPreview, authoritative IntegrationState) error {
+	root, err := openMaterializationRoot(m.root)
+	if err != nil {
+		return err
+	}
+	defer root.close()
+	matches := func(current []byte, exists bool, expected []byte) bool {
+		if expected == nil {
+			return !exists
+		}
+		return exists && bytes.Equal(current, expected)
+	}
+	for index := len(preview.Changes) - 1; index >= 0; index-- {
+		change := preview.Changes[index]
+		parent, openErr := root.openParent(change.Target, false)
+		if openErr != nil {
+			return openErr
+		}
+		current, mode, _, exists, readErr := parent.read()
+		if readErr != nil {
+			parent.close()
+			return readErr
+		}
+		if matches(current, exists, change.Before) {
+			parent.close()
+			continue
+		}
+		if !matches(current, exists, change.After) {
+			parent.close()
+			return fmt.Errorf("%w: recovery target %q diverged", ErrIntegrationDrift, change.Target)
+		}
+		if change.Before == nil {
+			err = parent.unlink(change.After, nil)
+		} else {
+			restoreMode := change.Mode
+			if restoreMode == 0 {
+				restoreMode = mode.Perm()
+			}
+			_, err = parent.atomicWrite(current, exists, change.Before, restoreMode, nil)
+		}
+		parent.close()
+		if err != nil {
+			return fmt.Errorf("recover integration target %q: %w", change.Target, err)
+		}
+	}
+	projection, err := marshalIntegrationState(authoritative)
+	if err != nil {
+		return err
+	}
+	stateParent, err := root.openParent(integrationStateTarget, true)
+	if err != nil {
+		return err
+	}
+	defer stateParent.close()
+	current, _, _, exists, err := stateParent.read()
+	if err != nil {
+		return err
+	}
+	if _, err := stateParent.atomicWrite(current, exists, projection, 0o600, nil); err != nil {
+		return fmt.Errorf("recover integration state projection: %w", err)
+	}
+	return nil
 }
 
 func closePreparedMaterializationParents(prepared []preparedMaterializationChange) {

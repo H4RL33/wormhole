@@ -26,6 +26,11 @@ import (
 	"time"
 )
 
+const (
+	integrationPlanRPCMethod   = "wormhole/integration/plan"
+	integrationCommitRPCMethod = "wormhole/integration/commit"
+)
+
 // Local JSON-RPC 2.0 error codes (docs/mcp-protocol.md §3.1's table,
 // duplicated per the module-boundary reason above). rpcServerNotInitialized
 // is this server's own implementation-defined addition (-32000..-32099
@@ -1010,6 +1015,38 @@ func (s *Server) dispatchMCPMessage(ctx context.Context, sess *mcpSession, conn 
 		result, rpcErr := s.handleToolsCall(ctx, sess, conn, reg, req.Params)
 		if rpcErr != nil {
 			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: rpcErr})
+			return
+		}
+		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: marshalResult(result)})
+
+	case integrationPlanRPCMethod, integrationCommitRPCMethod:
+		// Private same-user CLI methods. They are intentionally absent from the
+		// MCP tools inventory so a model response cannot approve or mutate a
+		// repository through tools/call.
+		if isNotification {
+			return
+		}
+		if !sess.initialized {
+			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcServerNotInitialized, Message: "server not initialized: send initialize and notifications/initialized before integration commands"}})
+			return
+		}
+		var command IntegrationCommandRequest
+		if err := decodeClosedJSON(req.Params, &command); err != nil {
+			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: "invalid integration command request"}})
+			return
+		}
+		if req.Method == integrationPlanRPCMethod {
+			result, err := s.PlanIntegrationCommand(ctx, command)
+			if err != nil {
+				writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: err.Error()}})
+				return
+			}
+			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: marshalResult(result)})
+			return
+		}
+		result, err := s.CommitIntegrationCommand(ctx, command)
+		if err != nil {
+			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: err.Error()}})
 			return
 		}
 		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: marshalResult(result)})

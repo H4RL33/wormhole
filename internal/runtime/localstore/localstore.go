@@ -174,6 +174,87 @@ CREATE TABLE IF NOT EXISTS sync_audit (
 		integration_manifest_metadata TEXT NOT NULL,
 		bootstrap_timestamp          TIMESTAMP NOT NULL
 	);
+
+	CREATE TABLE IF NOT EXISTS integration_manifest_bodies (
+		project_id          TEXT NOT NULL,
+		manifest_id         TEXT NOT NULL,
+		manifest_version    INTEGER NOT NULL CHECK (manifest_version > 0),
+		digest              TEXT NOT NULL,
+		body                TEXT NOT NULL,
+		tool_contract_digest TEXT NOT NULL DEFAULT '',
+		resolved_role       TEXT NOT NULL DEFAULT '',
+		verified_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (project_id, manifest_id, manifest_version),
+		UNIQUE (project_id, manifest_id, manifest_version, digest)
+	);
+
+	CREATE TRIGGER IF NOT EXISTS integration_manifest_bodies_no_update
+	BEFORE UPDATE ON integration_manifest_bodies
+	BEGIN SELECT RAISE(ABORT, 'verified integration manifest bodies are immutable'); END;
+
+	CREATE TRIGGER IF NOT EXISTS integration_manifest_bodies_no_delete
+	BEFORE DELETE ON integration_manifest_bodies
+	BEGIN SELECT RAISE(ABORT, 'verified integration manifest bodies are retained'); END;
+
+	CREATE TABLE IF NOT EXISTS integration_manifest_project_state (
+		project_id       TEXT PRIMARY KEY,
+		state            TEXT NOT NULL,
+		repository_root  TEXT NOT NULL DEFAULT '',
+		updated_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS integration_manifest_decisions (
+		project_id       TEXT NOT NULL,
+		manifest_id      TEXT NOT NULL,
+		manifest_version INTEGER NOT NULL,
+		digest           TEXT NOT NULL,
+		decision         TEXT NOT NULL,
+		decided_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (project_id, manifest_id, manifest_version, digest)
+	);
+
+	CREATE TABLE IF NOT EXISTS integration_manifest_revocations (
+		project_id       TEXT NOT NULL,
+		manifest_id      TEXT NOT NULL,
+		manifest_version INTEGER NOT NULL,
+		digest           TEXT NOT NULL,
+		revoked_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (project_id, manifest_id, manifest_version, digest)
+	);
+
+	CREATE TABLE IF NOT EXISTS integration_manifest_journal (
+		operation_id TEXT PRIMARY KEY,
+		project_id   TEXT NOT NULL,
+		operation    TEXT NOT NULL,
+		status       TEXT NOT NULL,
+		payload      TEXT NOT NULL,
+		created_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS integration_manifest_audit (
+		project_id       TEXT NOT NULL,
+		id               TEXT NOT NULL,
+		action           TEXT NOT NULL,
+		payload          TEXT NOT NULL,
+		actor_kind       TEXT NOT NULL DEFAULT 'gateway',
+		operation_id     TEXT NOT NULL DEFAULT '',
+		manifest_id      TEXT NOT NULL DEFAULT '',
+		manifest_version INTEGER,
+		manifest_digest  TEXT NOT NULL DEFAULT '',
+		outcome          TEXT NOT NULL DEFAULT '',
+		reason_code      TEXT NOT NULL DEFAULT '',
+		created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (project_id, id)
+	);
+
+	CREATE TRIGGER IF NOT EXISTS integration_manifest_audit_no_update
+	BEFORE UPDATE ON integration_manifest_audit
+	BEGIN SELECT RAISE(ABORT, 'integration manifest audit is append-only'); END;
+
+	CREATE TRIGGER IF NOT EXISTS integration_manifest_audit_no_delete
+	BEFORE DELETE ON integration_manifest_audit
+	BEGIN SELECT RAISE(ABORT, 'integration manifest audit is append-only'); END;
 	`
 
 // Store wraps a *sql.DB backed by a local SQLite file.

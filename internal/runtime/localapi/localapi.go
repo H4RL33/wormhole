@@ -150,6 +150,8 @@ type Server struct {
 	qr                    *syncpkg.QueueRepo
 	statusProvider        SyncStatusProvider
 	integrationGuidance   IntegrationGuidanceProvider
+	integrationReceiver   syncpkg.IntegrationManifestReceiver
+	integrationService    *IntegrationManifestService
 	recoveryOnlyProjects  sync.Map // map[projectID]struct{}
 	recoveryOnlyInventory atomic.Bool
 
@@ -251,6 +253,17 @@ func (s *Server) SetSyncStatusProvider(provider SyncStatusProvider) {
 // localapi never treats the repository projection as authority.
 func (s *Server) SetIntegrationGuidanceProvider(provider IntegrationGuidanceProvider) {
 	s.integrationGuidance = provider
+}
+
+// SetIntegrationManifestService binds one authoritative service to both the
+// read-only MCP guidance surface and every sync engine created by enrolment.
+func (s *Server) SetIntegrationManifestService(service *IntegrationManifestService) {
+	if service == nil {
+		return
+	}
+	s.integrationGuidance = service
+	s.integrationReceiver = service
+	s.integrationService = service
 }
 
 // SetRecoveryOnlyProjects restricts invalid or incomplete enrolments to the

@@ -2,27 +2,32 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
+	projectconfig "github.com/H4RL33/wormhole/internal/config"
 	"github.com/H4RL33/wormhole/internal/runtime/localapi"
 	"golang.org/x/term"
 )
 
 type integrationCommandPlan struct {
-	Operation      string
-	ProjectID      string
-	ResolvedRole   string
-	ExpectedDigest string
-	Diff           string
-	State          localapi.IntegrationState
+	Operation      string                    `json:"operation"`
+	ProjectID      string                    `json:"project_id"`
+	ResolvedRole   string                    `json:"resolved_role"`
+	ExpectedDigest string                    `json:"expected_digest"`
+	Diff           string                    `json:"diff"`
+	State          localapi.IntegrationState `json:"state"`
 }
 
 type integrationCommandBackend interface {
@@ -30,21 +35,126 @@ type integrationCommandBackend interface {
 	Commit(context.Context, integrationCommandPlan) (localapi.IntegrationState, error)
 }
 
-type unavailableIntegrationBackend struct{}
+type integrationGatewayCaller func(context.Context, string, string, any, any) error
 
-func (unavailableIntegrationBackend) Plan(context.Context, string, string) (integrationCommandPlan, error) {
-	return integrationCommandPlan{}, errors.New("Gateway approved integration cache is unavailable")
+type gatewayIntegrationBackend struct {
+	socketPath     string
+	repositoryRoot string
+	projectID      string
+	call           integrationGatewayCaller
 }
 
-func (unavailableIntegrationBackend) Commit(context.Context, integrationCommandPlan) (localapi.IntegrationState, error) {
-	return localapi.IntegrationState{}, errors.New("Gateway approved integration cache is unavailable")
+func newGatewayIntegrationBackend() (integrationCommandBackend, error) {
+	root, err := integrationRepositoryRoot()
+	if err != nil {
+		return nil, err
+	}
+	configured, err := projectconfig.LoadLocal()
+	if err != nil {
+		return nil, fmt.Errorf("load nearest project config: %w", err)
+	}
+	if strings.TrimSpace(configured.Project) == "" {
+		return nil, errors.New("integration commands require a nearest .wormhole/config.toml project binding")
+	}
+	return &gatewayIntegrationBackend{socketPath: gatewaySocketPath(), repositoryRoot: root,
+		projectID: strings.TrimSpace(configured.Project), call: callGatewayIntegrationMethod}, nil
+}
+
+func (backend *gatewayIntegrationBackend) Plan(ctx context.Context, operation, projectID string) (integrationCommandPlan, error) {
+	if backend.projectID != "" && projectID != backend.projectID {
+		return integrationCommandPlan{}, errors.New("requested project does not match nearest repository config")
+	}
+	request := localapi.IntegrationCommandRequest{Operation: operation, ProjectID: projectID, RepositoryRoot: backend.repositoryRoot}
+	var response integrationCommandPlan
+	if err := backend.call(ctx, backend.socketPath, "wormhole/integration/plan", request, &response); err != nil {
+		return integrationCommandPlan{}, err
+	}
+	return response, nil
+}
+
+func (backend *gatewayIntegrationBackend) Commit(ctx context.Context, plan integrationCommandPlan) (localapi.IntegrationState, error) {
+	request := localapi.IntegrationCommandRequest{
+		Operation: plan.Operation, ProjectID: plan.ProjectID, RepositoryRoot: backend.repositoryRoot, ExpectedDigest: plan.ExpectedDigest,
+	}
+	var response localapi.IntegrationState
+	if err := backend.call(ctx, backend.socketPath, "wormhole/integration/commit", request, &response); err != nil {
+		return localapi.IntegrationState{}, err
+	}
+	return response, nil
 }
 
 var (
 	integrationTerminal       = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
-	integrationBackendFactory = func() (integrationCommandBackend, error) { return unavailableIntegrationBackend{}, nil }
+	integrationBackendFactory = newGatewayIntegrationBackend
 	integrationUUIDPattern    = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 )
+
+func integrationRepositoryRoot() (string, error) {
+	if configPath := projectconfig.LocalConfigPath(); configPath != "" {
+		return filepath.Dir(filepath.Dir(configPath)), nil
+	}
+	return "", errors.New("integration commands require a nearest .wormhole/config.toml repository root")
+}
+
+func callGatewayIntegrationMethod(ctx context.Context, socketPath, method string, request, response any) error {
+	dialer := net.Dialer{Timeout: 2 * time.Second}
+	conn, err := dialer.DialContext(ctx, "unix", socketPath)
+	if err != nil {
+		return fmt.Errorf("gatewayd not running (dial %s: %w)", socketPath, err)
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	write := func(value any) error {
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		_, err = conn.Write(append(raw, '\n'))
+		return err
+	}
+	read := func(destination any) error {
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			return err
+		}
+		decoder := json.NewDecoder(bytes.NewReader(bytes.TrimSpace(line)))
+		decoder.DisallowUnknownFields()
+		return decoder.Decode(destination)
+	}
+	if err := write(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "initialize", Params: json.RawMessage(`{}`)}); err != nil {
+		return fmt.Errorf("write Gateway initialize request: %w", err)
+	}
+	var initialized rpcResponse
+	if err := read(&initialized); err != nil {
+		return fmt.Errorf("read Gateway initialize response: %w", err)
+	}
+	if initialized.Error != nil {
+		return errors.New(initialized.Error.Message)
+	}
+	if err := write(rpcRequest{JSONRPC: "2.0", Method: "notifications/initialized"}); err != nil {
+		return fmt.Errorf("write Gateway initialized notification: %w", err)
+	}
+	params, err := json.Marshal(request)
+	if err != nil {
+		return fmt.Errorf("marshal integration command: %w", err)
+	}
+	if err := write(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("2"), Method: method, Params: params}); err != nil {
+		return fmt.Errorf("write integration command: %w", err)
+	}
+	var commandResponse rpcResponse
+	if err := read(&commandResponse); err != nil {
+		return fmt.Errorf("read integration command response: %w", err)
+	}
+	if commandResponse.Error != nil {
+		return errors.New(commandResponse.Error.Message)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(commandResponse.Result))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(response); err != nil {
+		return fmt.Errorf("decode integration command response: %w", err)
+	}
+	return nil
+}
 
 func runIntegrationCommand(args []string, stdout, stderr io.Writer) int {
 	backend, err := integrationBackendFactory()
