@@ -26,6 +26,8 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      - name: Test Gateway guidance contract inventory
+        run: go test ./internal/runtime/localapi -run 'TestGatewayToolGuidanceCoversLiveRegistry|TestAlphaContractGatewayMCPGuidanceInventory' -count=1
       - name: Check alpha contract inventory
         run: sh .github/scripts/check-contract-manifest.sh
 

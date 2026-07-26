@@ -118,6 +118,10 @@ func TestAlphaContractGatewayMCPRegistry(t *testing.T) {
 	}
 }
 
+func TestAlphaContractGatewayMCPGuidanceInventory(t *testing.T) {
+	assertGatewayToolGuidance(t, newLocalRegistry(&Server{}))
+}
+
 func TestAlphaContractCodeGraphSurface(t *testing.T) {
 	manifest := readAlphaLocalContract(t)
 	wantPermissions := map[string][]string{

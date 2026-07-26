@@ -43,6 +43,31 @@ Gateway's read-only `wormhole.sync.status` entry is local runtime state, not a
 Fabric probe. Its request contains only `project_id`; its response contains
 only `state` and `pending_writes`.
 
+## Gateway tool-guidance inventory
+
+The live Gateway registry currently has 21 agent-facing tools and every one
+has exactly one structured guidance record. A record carries purpose, use and
+misuse boundaries, mutation behaviour, descriptor-derived permissions and
+minimal request example, prerequisites, freshness and source-access
+implications, and the recommended follow-up. Permission lists and examples
+come from the live descriptor: examples are synthesized from
+`buildInputSchema`, then validated against that schema rather than maintaining
+another parameter inventory.
+
+The inventory covers only live descriptors. Git pointers have no live Gateway
+tool in this alpha and therefore have zero guidance records. Integration
+guidance is designed-only and also has zero live guidance records.
+`wormhole.agent.get_guidance` remains designed-only; Task 16 must register its
+live descriptor and add its record atomically. It must not appear in this
+inventory before that change.
+
+The Code Graph records require agents to check graph freshness, then verify
+Git HEAD and working-tree state directly. Bounded source slices require
+`code_graph.source.read` in addition to the primary query permission, and
+heuristic graph edges are discovery aids rather than authoritative proof.
+Rebuild guidance describes the normal balanced copy-on-write rebuild and does
+not treat it as a source-access bypass.
+
 Gateway's experimental Code Graph entries are project-scoped and closed:
 `wormhole.code_graph.query` requires `code_graph.query`,
 `wormhole.code_graph.status` requires `code_graph.status`, and

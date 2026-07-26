@@ -235,6 +235,13 @@ func (r *localRegistry) Get(name string) (localTool, bool) {
 	return t, ok
 }
 
+// Guidance returns the generated guidance inventory for the live registry.
+// It intentionally has no MCP tool of its own: designed-only read guidance is
+// added atomically with its descriptor in Task 16.
+func (r *localRegistry) Guidance() []toolGuidance {
+	return gatewayToolGuidance(r)
+}
+
 // Argument-example structs for tools/list schema reflection. These exist
 // purely to drive buildInputSchema/reflectStructSchema — the actual
 // handlers still read from a map[string]interface{} (unchanged internally,
