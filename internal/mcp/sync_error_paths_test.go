@@ -210,13 +210,14 @@ func TestIncrementalPullIncludesKBUpdates(t *testing.T) {
 	eventsStore := testEventsStore(t)
 	projectID := mustCreateProject(t, "mcp-sync-pull-kb")
 	agentID, _ := mustRegisterAgent(t, projectID)
+	scope := mustBuildScope(agentID, projectID)
 	article, err := kbStore.WriteArticle(context.Background(), projectID, agentID, "pull me", "body", nil, nil, false)
 	if err != nil {
 		t.Fatalf("WriteArticle: %v", err)
 	}
 
 	result, err := IncrementalPullTool(tasksStore, kbStore, eventsStore, NewSyncRateLimiter(10, time.Minute)).Handler(
-		context.Background(), nil, projectID, mustMarshal(t, IncrementalPullInput{NamespaceID: projectID, Version: SyncProtocolVersion}),
+		context.Background(), scope, projectID, mustMarshal(t, IncrementalPullInput{NamespaceID: projectID, Version: SyncProtocolVersion}),
 	)
 	if err != nil {
 		t.Fatalf("Handler: %v", err)

@@ -106,10 +106,23 @@ Code Graph tool errors are fail-closed:
 Fabric's version-1 `wormhole.sync.bootstrap` response has a fixed six-field
 outer shape and a strict nested `org_config` snapshot. The nested snapshot
 contains project, authenticated identity and authorization, Channels, Events,
-Tasks, KB articles, and integration-manifest metadata fixed to JSON `null`.
+Tasks, KB articles, and the applicable Fabric integration-manifest offer or
+revocation. When the project has no applicable manifest, integration-manifest
+metadata is JSON `null`. Manifest bodies remain declarative data: Fabric
+preserves immutable version history and digest strings, while Gateway owns
+verification, approval, caching, audit, and repository application. Publication
+and revocation require the explicit `integration_manifest.publish` and
+`integration_manifest.revoke` permissions respectively; they are not exposed
+as model-facing MCP authoring tools.
 The top-level
 Task and KB lists mirror the nested lists exactly; `project_list` is a non-null
 empty array in version 1.
+
+`wormhole.sync.incremental_pull` carries later offers and revocations inside
+the existing `{type,data}` update envelope with type `integration_manifest`.
+The `integration_manifest_change` wire record binds every change to project,
+manifest ID, version, full digest, operation, and timestamp. Offered changes
+contain the exact manifest body; revocations use a null body.
 
 The inventory is intentionally in `alpha-inventory` mode. It makes drift
 visible during review, but it does not activate a beta compatibility promise

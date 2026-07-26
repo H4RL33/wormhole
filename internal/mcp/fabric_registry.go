@@ -14,12 +14,13 @@ import (
 // FabricRegistryDependencies contains the stores used by Fabric's complete MCP
 // tool surface. Nil stores are valid when callers only inspect descriptors.
 type FabricRegistryDependencies struct {
-	Identity *identity.Store
-	Events   *events.Store
-	Tasks    *tasks.Store
-	Git      *git.Store
-	KB       *kb.Store
-	Roles    *roles.Store
+	Identity             *identity.Store
+	Events               *events.Store
+	Tasks                *tasks.Store
+	Git                  *git.Store
+	KB                   *kb.Store
+	Roles                *roles.Store
+	IntegrationManifests *IntegrationManifestStore
 }
 
 // NewFabricRegistry composes the exact MCP registry served by Fabric.
@@ -52,8 +53,8 @@ func NewFabricRegistry(deps FabricRegistryDependencies) *Registry {
 	register(SearchArticlesTool(deps.KB), SearchArticlesOutput{})
 	register(GetArticleTool(deps.KB), GetArticleOutput{})
 	register(GetArticleLinksTool(deps.KB), GetArticleLinksOutput{})
-	register(BootstrapTool(deps.Identity, deps.Tasks, deps.KB, deps.Events, syncRateLimiter), BootstrapOutput{})
-	register(IncrementalPullTool(deps.Tasks, deps.KB, deps.Events, syncRateLimiter), IncrementalPullOutput{})
+	register(BootstrapTool(deps.Identity, deps.Tasks, deps.KB, deps.Events, syncRateLimiter, deps.IntegrationManifests), BootstrapOutput{})
+	register(IncrementalPullTool(deps.Tasks, deps.KB, deps.Events, syncRateLimiter, deps.IntegrationManifests), IncrementalPullOutput{})
 	register(IncrementalPushTool(deps.Tasks, deps.KB, deps.Events, syncRateLimiter), IncrementalPushOutput{})
 	register(ConflictReportTool(deps.Tasks, deps.KB, deps.Events, syncRateLimiter), ConflictReportOutput{})
 	return registry

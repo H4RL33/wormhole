@@ -72,17 +72,19 @@ func runServerWithEmbedder(cfg types.Config, embedder kb.Embedder, openDB func(t
 	gitStore := git.NewStore(db)
 	kbStore := kb.NewStore(db, embedder, cfg.KBDedupThreshold, cfg.KBMaxBodyLength, cfg.KBMinLinksDecision, cfg.KBMinLinksPolicy, cfg.KBMinLinksProcedure)
 	rolesStore := roles.NewStore(db)
+	integrationManifestStore := mcp.NewIntegrationManifestStore(db)
 	if err := mcp.PrepareOnboardingArticleEmbedding(context.Background(), kbStore); err != nil {
 		return fmt.Errorf("prepare onboarding article embedding: %w", err)
 	}
 
 	registry := mcp.NewFabricRegistry(mcp.FabricRegistryDependencies{
-		Identity: identityStore,
-		Events:   eventsStore,
-		Tasks:    tasksStore,
-		Git:      gitStore,
-		KB:       kbStore,
-		Roles:    rolesStore,
+		Identity:             identityStore,
+		Events:               eventsStore,
+		Tasks:                tasksStore,
+		Git:                  gitStore,
+		KB:                   kbStore,
+		Roles:                rolesStore,
+		IntegrationManifests: integrationManifestStore,
 	})
 
 	mux := http.NewServeMux()

@@ -1,0 +1,9 @@
+{
+  "operation": "revoked",
+  "project_id": "e724dd25-5bc9-40db-bcad-0b21716d1ca4",
+  "manifest_id": "52b860cd-0db7-4ee0-a3fd-672ad9da0c95",
+  "manifest_version": 1,
+  "manifest_digest": "sha256:9bd1464d7bc9b4b01ccc6268463cd49d6c8c980961824df498b9fe1193a0a959",
+  "manifest": null,
+  "changed_at": "2026-07-26T13:00:00Z"
+}

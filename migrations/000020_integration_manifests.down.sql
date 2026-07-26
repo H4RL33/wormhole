@@ -1,0 +1,6 @@
+DROP POLICY IF EXISTS integration_manifest_versions_project_isolation ON integration_manifest_versions;
+DROP POLICY IF EXISTS integration_manifest_lineages_project_isolation ON integration_manifest_lineages;
+DROP TRIGGER IF EXISTS integration_manifest_versions_immutable_body_trigger ON integration_manifest_versions;
+DROP FUNCTION IF EXISTS integration_manifest_versions_immutable_body();
+DROP TABLE IF EXISTS integration_manifest_versions;
+DROP TABLE IF EXISTS integration_manifest_lineages;

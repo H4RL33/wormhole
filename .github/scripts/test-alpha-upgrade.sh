@@ -2,7 +2,7 @@
 set -eu
 baseline_tag=v0.2.4-alpha
 baseline_version=12
-current_version=19
+current_version=20
 
 if test "${1:-}" = "--print-contract"; then
 	if test "$#" -ne 1; then
@@ -39,10 +39,13 @@ test "$(psql "$database_url" -At -F: \
 	-c 'select version, dirty from schema_migrations')" = "$current_version:f"
 test "$(psql "$database_url" -At -c "select count(*) from kb_articles where id = '$legacy_article' and vector_dims(embedding) = 3")" = 1
 test "$(psql "$database_url" -At -c "select count(*) from kb_embedding_generations where project_id = '$legacy_project'")" = 0
-migrate -path migrations -database "$database_url" down 1
+test "$(psql "$database_url" -At -c "select to_regclass('public.integration_manifest_versions') is not null")" = t
+migrate -path migrations -database "$database_url" goto 18
 test "$(psql "$database_url" -At -c "select count(*) from kb_articles where id = '$legacy_article' and vector_dims(embedding) = 3")" = 1
 test "$(psql "$database_url" -At -c "select to_regclass('public.kb_embedding_generations') is null")" = t
+test "$(psql "$database_url" -At -c "select to_regclass('public.integration_manifest_versions') is null")" = t
 migrate -path migrations -database "$database_url" up
 test "$(psql "$database_url" -At -F: \
 	-c 'select version, dirty from schema_migrations')" = "$current_version:f"
 test "$(psql "$database_url" -At -c "select count(*) from kb_embedding_generations where project_id = '$legacy_project'")" = 0
+test "$(psql "$database_url" -At -c "select to_regclass('public.integration_manifest_versions') is not null")" = t

@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -158,7 +159,11 @@ func articleToSummary(article kb.Article) ArticleSummary {
 
 // BootstrapTool wires wormhole.sync.bootstrap. Gateway calls it on org enrolment.
 // RFC-0003 §8.1: one-time bulk pull of complete working environment.
-func BootstrapTool(identityStore *identity.Store, tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, limiter *syncRateLimiter) Tool {
+func BootstrapTool(identityStore *identity.Store, tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, limiter *syncRateLimiter, manifestStores ...*IntegrationManifestStore) Tool {
+	var manifestStore *IntegrationManifestStore
+	if len(manifestStores) > 0 {
+		manifestStore = manifestStores[0]
+	}
 	return Tool{
 		Name:         "wormhole.sync.bootstrap",
 		Description:  "One-time bulk pull of org configuration, project manifests, initial KB, tasks, and policies on org enrolment (RFC-0003 §8.1)",
@@ -208,6 +213,20 @@ func BootstrapTool(identityStore *identity.Store, tasksStore *tasks.Store, kbSto
 			if err != nil {
 				return nil, fmt.Errorf("mcp: wormhole.sync.bootstrap: read kb articles: %w", err)
 			}
+			manifestMetadata := json.RawMessage(`null`)
+			if manifestStore != nil {
+				change, manifestErr := manifestStore.CurrentInTx(ctx, tx, projectID)
+				switch {
+				case errors.Is(manifestErr, ErrIntegrationManifestNotFound):
+				case manifestErr != nil:
+					return nil, fmt.Errorf("mcp: wormhole.sync.bootstrap: read integration manifest: %w", manifestErr)
+				case integrationManifestApplies(change, scope.Roles):
+					manifestMetadata, err = json.Marshal(change)
+					if err != nil {
+						return nil, fmt.Errorf("mcp: wormhole.sync.bootstrap: marshal integration manifest: %w", err)
+					}
+				}
+			}
 			timestamp, err := identityStore.BootstrapTimestampInTx(ctx, tx)
 			if err != nil {
 				return nil, fmt.Errorf("mcp: wormhole.sync.bootstrap: read timestamp: %w", err)
@@ -221,7 +240,7 @@ func BootstrapTool(identityStore *identity.Store, tasksStore *tasks.Store, kbSto
 				Project:       project, Identity: snapshotIdentity,
 				Channels: channels, Events: eventList, Tasks: taskList,
 				KB:                          types.BootstrapKBV1{Articles: articleList},
-				IntegrationManifestMetadata: json.RawMessage(`null`),
+				IntegrationManifestMetadata: manifestMetadata,
 			}
 			return BootstrapOutput{
 				OrgConfig: orgConfig, ProjectList: []string{}, TaskList: taskList, KBList: articleList,
@@ -256,7 +275,11 @@ type IncrementalPullOutput struct {
 
 // IncrementalPullTool wires wormhole.sync.incremental_pull.
 // RFC-0003 §8.2: steady-state incremental pull of changed entities.
-func IncrementalPullTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, limiter *syncRateLimiter) Tool {
+func IncrementalPullTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore *events.Store, limiter *syncRateLimiter, manifestStores ...*IntegrationManifestStore) Tool {
+	var manifestStore *IntegrationManifestStore
+	if len(manifestStores) > 0 {
+		manifestStore = manifestStores[0]
+	}
 	return Tool{
 		Name:         "wormhole.sync.incremental_pull",
 		Description:  "Incremental pull of entity changes since last sync (RFC-0003 §8.2)",
@@ -281,7 +304,6 @@ func IncrementalPullTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore
 			if !limiter.allow(in.NamespaceID, time.Now()) {
 				return nil, fmt.Errorf("mcp: wormhole.sync.incremental_pull: rate limit exceeded for namespace %q", in.NamespaceID)
 			}
-
 			// A nil/empty last_sync cursor means "everything" (equivalent to
 			// a full pull), matching bootstrap's semantics for a client with
 			// no prior sync state.
@@ -292,6 +314,9 @@ func IncrementalPullTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore
 					return nil, fmt.Errorf("mcp: wormhole.sync.incremental_pull: invalid last_sync %q: %w", *in.LastSync, err)
 				}
 				cursor = parsed
+			}
+			if scope == nil || scope.Agent.ID == "" || scope.ProjectID != projectID {
+				return nil, fmt.Errorf("mcp: wormhole.sync.incremental_pull: missing authenticated identity scope")
 			}
 
 			taskList, err := tasksStore.List(ctx, projectID, nil)
@@ -326,6 +351,26 @@ func IncrementalPullTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore
 					envelope, err := json.Marshal(syncUpdateEnvelope{Type: "kb", Data: data})
 					if err != nil {
 						return nil, fmt.Errorf("mcp: wormhole.sync.incremental_pull: marshal kb envelope: %w", err)
+					}
+					updates = append(updates, envelope)
+				}
+			}
+			if manifestStore != nil {
+				changes, err := manifestStore.ChangesSince(ctx, projectID, cursor)
+				if err != nil {
+					return nil, fmt.Errorf("mcp: wormhole.sync.incremental_pull: list integration manifests: %w", err)
+				}
+				for _, change := range changes {
+					if !integrationManifestApplies(change, scope.Roles) {
+						continue
+					}
+					data, err := json.Marshal(change)
+					if err != nil {
+						return nil, fmt.Errorf("mcp: wormhole.sync.incremental_pull: marshal integration manifest update: %w", err)
+					}
+					envelope, err := json.Marshal(syncUpdateEnvelope{Type: "integration_manifest", Data: data})
+					if err != nil {
+						return nil, fmt.Errorf("mcp: wormhole.sync.incremental_pull: marshal integration manifest envelope: %w", err)
 					}
 					updates = append(updates, envelope)
 				}

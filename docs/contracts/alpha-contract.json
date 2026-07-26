@@ -2,7 +2,7 @@
   "mode": "alpha-inventory",
   "designed_interfaces": {
     "integration_manifest_v1": {
-      "status": "materialization_and_guidance_tool_implemented_cache_binding_planned",
+      "status": "fabric_distribution_materialization_and_guidance_implemented_gateway_cache_binding_planned",
       "design_document": "docs/architecture/integration-manifest-design.md",
       "manifest_schema": {
         "additional_properties": false,
@@ -7948,6 +7948,18 @@
         ]
       },
       {
+        "name": "integration_manifest_change",
+        "fields": [
+          "changed_at",
+          "manifest",
+          "manifest_digest",
+          "manifest_id",
+          "manifest_version",
+          "operation",
+          "project_id"
+        ]
+      },
+      {
         "name": "sync_channel_create_payload",
         "fields": [
           "name"
@@ -8017,7 +8029,7 @@
       "tag": "v0.2.4-alpha",
       "version": 12
     },
-    "current_version": 19,
+    "current_version": 20,
     "empty_version": 0,
     "entries": [
       {
@@ -8171,6 +8183,14 @@
         "up_empty": false,
         "up_file": "migrations/000019_kb_semantic_embeddings.up.sql",
         "version": 19
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000020_integration_manifests.down.sql",
+        "name": "integration_manifests",
+        "up_empty": false,
+        "up_file": "migrations/000020_integration_manifests.up.sql",
+        "version": 20
       }
     ],
     "verification_paths": [
@@ -8180,11 +8200,11 @@
         "from_version": 12,
         "name": "alpha_upgrade",
         "source": ".github/scripts/test-alpha-upgrade.sh",
-        "to_version": 19
+        "to_version": 20
       },
       {
         "command": "down -all",
-        "from_version": 19,
+        "from_version": 20,
         "name": "current_down",
         "source": ".github/workflows/migrations.yml",
         "to_version": 0
@@ -8194,7 +8214,7 @@
         "from_version": 0,
         "name": "empty_up",
         "source": ".github/workflows/migrations.yml",
-        "to_version": 19
+        "to_version": 20
       }
     ]
   },

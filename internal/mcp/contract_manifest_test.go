@@ -111,6 +111,7 @@ func TestAlphaContractFabricSyncProtocol(t *testing.T) {
 		{Name: "incremental_push_item", Fields: jsonFieldNames(t, pushItems.Type.Elem())},
 		{Name: "incremental_push_request", Fields: jsonFieldNames(t, reflect.TypeOf(IncrementalPushInput{}))},
 		{Name: "incremental_push_response", Fields: jsonFieldNames(t, reflect.TypeOf(IncrementalPushOutput{}))},
+		{Name: "integration_manifest_change", Fields: jsonFieldNames(t, reflect.TypeOf(IntegrationManifestChange{}))},
 		{Name: "sync_channel_create_payload", Fields: jsonFieldNames(t, reflect.TypeOf(syncChannelCreatePayload{}))},
 		{Name: "sync_conflict_audit_payload", Fields: jsonFieldNames(t, reflect.TypeOf(syncConflictAuditPayload{}))},
 		{Name: "sync_event_create_payload", Fields: jsonFieldNames(t, reflect.TypeOf(syncEventCreatePayload{}))},

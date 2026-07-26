@@ -200,6 +200,34 @@ Explicit `[[link]]`-style linking, graph not folder tree (RFC §8.3).
 
 Pointers only, per RFC §8.6 — never mirrors code.
 
+## integration_manifest_lineages
+
+- `project_id` -> projects
+- `manifest_id`
+- `active`
+- `created_by_agent_id` -> agents
+- `created_at`
+
+At most one lineage is active per project. Fabric stores and distributes
+declarative offers; it is not the approval or repository-application authority.
+
+## integration_manifest_versions
+
+- `(project_id, manifest_id)` -> integration_manifest_lineages
+- `manifest_version`
+- `schema_version` (1)
+- `source` (`fabric`)
+- `authored_at`
+- `tool_contract_digest`
+- `manifest_digest`
+- `role_filters` (jsonb)
+- `entries` (jsonb declarative content)
+- authenticated publication and revocation agent IDs/timestamps
+
+The manifest body and publication metadata are immutable after insertion. A
+revocation may be recorded once; immutable version history is retained. Both
+manifest tables are project-scoped with RLS.
+
 ## role_templates
 
 Stores role definitions and their default capabilities, roles, and permissions. Used during agent registration to auto-fill Passport fields when a role is specified.

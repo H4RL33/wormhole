@@ -523,6 +523,8 @@ func TestIncrementalPullTool_FiltersByCursor(t *testing.T) {
 	kbStore := testKBStore(t)
 	eventsStore := testEventsStore(t)
 	projectID := mustCreateProject(t, "mcp-sync-pull-cursor")
+	agentID, _ := mustRegisterAgent(t, projectID)
+	scope := mustBuildScope(agentID, projectID)
 
 	if _, err := tasksStore.Create(context.Background(), projectID, "old task", "before cursor", nil, 1, nil); err != nil {
 		t.Fatalf("create old task: %v", err)
@@ -540,7 +542,7 @@ func TestIncrementalPullTool_FiltersByCursor(t *testing.T) {
 	lastSync := cursor.Format(time.RFC3339)
 	arguments := mustMarshal(t, IncrementalPullInput{NamespaceID: projectID, Version: SyncProtocolVersion, LastSync: &lastSync})
 
-	result, err := tool.Handler(context.Background(), nil, projectID, arguments)
+	result, err := tool.Handler(context.Background(), scope, projectID, arguments)
 	if err != nil {
 		t.Fatalf("Handler: %v", err)
 	}
@@ -752,6 +754,36 @@ func TestIncrementalPullTool_RejectsUnsupportedVersion(t *testing.T) {
 	}
 }
 
+func TestIncrementalPullTool_RejectsMismatchedAuthenticatedScopeBeforeManifestRead(t *testing.T) {
+	projectA := mustCreateProject(t, "mcp-sync-pull-scope-a")
+	projectB := mustCreateProject(t, "mcp-sync-pull-scope-b")
+	agentA, _ := mustRegisterAgent(t, projectA)
+	agentB, _ := mustRegisterAgentWithPerms(t, projectB, []string{IntegrationManifestPublishPermission})
+	manifestStore := NewIntegrationManifestStore(testDB(t))
+	manifest := readFabricManifestFixture(t, "valid.json")
+	manifest.ProjectID = projectB
+	publisher := &identity.AuthenticatedScope{
+		Agent: identity.Agent{ID: agentB}, ProjectID: projectB,
+		Permissions: []string{IntegrationManifestPublishPermission}, Roles: []string{"contributor"},
+	}
+	if _, err := manifestStore.Publish(context.Background(), publisher, manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	wrongScope := &identity.AuthenticatedScope{
+		Agent: identity.Agent{ID: agentA}, ProjectID: projectA, Roles: []string{"contributor"},
+	}
+	tool := IncrementalPullTool(
+		testTasksStore(t), testKBStore(t), testEventsStore(t),
+		NewSyncRateLimiter(30, time.Minute), manifestStore,
+	)
+	if _, err := tool.Handler(context.Background(), wrongScope, projectB, mustMarshal(t, IncrementalPullInput{
+		NamespaceID: projectB, Version: SyncProtocolVersion,
+	})); err == nil {
+		t.Fatal("incremental pull accepted a mismatched authenticated project scope")
+	}
+}
+
 func TestIncrementalPushTool_RejectsUnsupportedVersion(t *testing.T) {
 	tool := IncrementalPushTool(testTasksStore(t), testKBStore(t), testEventsStore(t), NewSyncRateLimiter(30, time.Minute))
 	projectID := mustCreateProject(t, "mcp-sync-push-version")
@@ -794,5 +826,39 @@ func TestConflictReportTool_RejectsUnsupportedVersion(t *testing.T) {
 	})
 	if _, err := tool.Handler(context.Background(), scope, projectID, arguments); err == nil {
 		t.Fatalf("Handler: expected error on unsupported protocol version, got nil")
+	}
+}
+
+func TestBootstrapTool_FiltersManifestByBoundRole(t *testing.T) {
+	projectID := mustCreateProject(t, "mcp-sync-manifest-role-filter")
+	agentID, _ := mustRegisterAgentWithPerms(t, projectID, []string{IntegrationManifestPublishPermission})
+	publisher := &identity.AuthenticatedScope{
+		Agent: identity.Agent{ID: agentID}, ProjectID: projectID,
+		Permissions: []string{IntegrationManifestPublishPermission}, Roles: []string{"contributor"},
+	}
+	manifest := readFabricManifestFixture(t, "valid.json")
+	manifest.ProjectID = projectID
+	manifest.RoleFilters = []string{}
+	manifestStore := NewIntegrationManifestStore(testDB(t))
+	if _, err := manifestStore.Publish(context.Background(), publisher, manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := BootstrapTool(
+		testIdentityStore(t), testTasksStore(t), testKBStore(t), testEventsStore(t),
+		NewSyncRateLimiter(30, time.Minute), manifestStore,
+	)
+	for _, roles := range [][]string{nil, {"contributor", "reviewer"}, {"Contributor"}} {
+		bound := *publisher
+		bound.Roles = roles
+		result, err := tool.Handler(context.Background(), &bound, projectID, mustMarshal(t, BootstrapInput{
+			NamespaceID: projectID, Version: SyncProtocolVersion,
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if metadata := string(result.(BootstrapOutput).OrgConfig.IntegrationManifestMetadata); metadata != "null" {
+			t.Fatalf("manifest metadata for invalid bound roles %v = %s, want null", roles, metadata)
+		}
 	}
 }
