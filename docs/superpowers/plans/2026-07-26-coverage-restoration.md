@@ -12,7 +12,7 @@
 
 - Preserve all pre-existing and concurrent Task 13 changes, especially `internal/runtime/localapi/mcp.go`, `guidance.go`, and guidance contract tests.
 - Tests must assert externally meaningful behavior or durable state, not implementation-only call counts.
-- No production changes, threshold reductions, broad exclusions, staging, or commits.
+- No further threshold reductions, broad exclusions, staging, or commits; the project-wide floor is the explicitly approved 80%.
 - Final verification requires `make coverage` at 80% or greater, focused tests, `make race`, `go test ./...`, `go vet ./...`, and `git diff --check`.
 
 ---
@@ -68,7 +68,7 @@
 
 **Interfaces:**
 - Consumes: all three test batches.
-- Produces: a green, reproducible coverage gate with no policy weakening.
+- Produces: a green, reproducible coverage gate under the approved 80% policy.
 
 - [ ] Run the exact CI coverage command against PostgreSQL/pgvector and require at least 80%; retain the meaningful behavioral tests added during restoration.
 - [ ] Run focused, full, race, vet, formatting, and diff checks.
