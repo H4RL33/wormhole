@@ -30,6 +30,21 @@ If the semantic provider or active index is unavailable, there is no lexical fal
 - Live request schema: `{"additionalProperties":false,"properties":{"capabilities":{"items":{"type":"string"},"type":"array"},"credential_profile":{"minLength":1,"type":"string"},"fabric_address":{"type":"string"},"idempotency_key":{"type":"string"},"model":{"type":"string"},"owner":{"type":"string"},"project_id":{"type":"string"},"repositories":{"items":{"type":"string"},"type":"array"},"requested_permissions":{"items":{"type":"string"},"type":"array"},"roles":{"items":{"type":"string"},"type":"array"},"version":{"type":"integer"}},"required":["version","project_id","owner","model","capabilities","repositories","roles","requested_permissions","fabric_address","idempotency_key","credential_profile"],"type":"object"}`
 - Misuse warning: Do not expose credential material or reuse an attempt key for a different enrollment.
 
+## `wormhole.agent.get_guidance`
+
+- Purpose: Read the current approved, role-applicable integration guidance and its lifecycle state from Gateway's local cache.
+- Use when: At session start or before relying on managed organisational guidance for this project.
+- Do not use when: Do not use it to approve, apply, update, remove, roll back, refresh, or repair guidance.
+- Mutates state: false
+- Required permissions: none
+- Prerequisites: An explicitly bound project and a compatible approved manifest cached by Gateway.
+- Freshness implications: The result is one local cached read; offline responses retain approved content while separately reporting newer unapproved pending state.
+- Source-access implications: This tool returns approved Markdown only; it does not read repository files or expose materialisation target paths.
+- Recommended follow-up: Use applicable returned guidance, or ask a human to inspect the integration CLI when approval, compatibility, drift, or recovery needs attention.
+- Minimal request example: `{"project_id":"example"}`
+- Live request schema: `{"additionalProperties":false,"properties":{"project_id":{"format":"uuid","type":"string"}},"required":["project_id"],"type":"object"}`
+- Misuse warning: Empty guidance can mean no approved cache, revocation, or incompatibility; never infer approval or trigger a mutation from this read.
+
 ## `wormhole.agent.list`
 
 - Purpose: List agents known to the local scheduler.

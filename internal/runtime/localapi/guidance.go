@@ -1,6 +1,203 @@
 package localapi
 
-import "sort"
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"sort"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// IntegrationGuidanceProvider is the read-only boundary implemented by Task
+// 20's project-scoped authoritative SQLite cache. Implementations must return
+// one internally consistent snapshot and perform no refresh or mutation.
+type IntegrationGuidanceProvider interface {
+	ReadIntegrationGuidance(context.Context, string) (IntegrationGuidanceSnapshot, error)
+}
+
+// IntegrationGuidanceSnapshot carries the authoritative lifecycle projection
+// and, when cached, the immutable approved manifest body used for role
+// selection. Repository files are deliberately absent from this boundary.
+type IntegrationGuidanceSnapshot struct {
+	State    IntegrationState
+	Manifest *IntegrationManifest
+}
+
+type integrationGuidanceArgs struct {
+	ProjectID string `json:"project_id" format:"uuid"`
+}
+
+type integrationGuidanceItem struct {
+	Kind          string `json:"kind" enum:"agents_bootstrap,reference,skill"`
+	Content       string `json:"content" format:"utf8-markdown"`
+	ContentDigest string `json:"content_digest" format:"sha256"`
+	Required      bool   `json:"required"`
+}
+
+func (integrationGuidanceItem) closedResponseSchema() {}
+
+type integrationGuidanceResult struct {
+	SchemaVersion          int                       `json:"schema_version" const:"1"`
+	ProjectID              string                    `json:"project_id" format:"uuid"`
+	ManifestID             *string                   `json:"manifest_id" format:"uuid"`
+	ManifestVersion        *int64                    `json:"manifest_version" minimum:"1"`
+	ManifestDigest         *string                   `json:"manifest_digest" format:"sha256"`
+	ResolvedRole           *string                   `json:"resolved_role" format:"role-slug"`
+	Guidance               []integrationGuidanceItem `json:"guidance" nonnull:"true"`
+	MaterializationState   string                    `json:"materialization_state" enum:"applied,drifted,not_applied,recovery_required,removal_required"`
+	ApprovalState          string                    `json:"approval_state" enum:"none,offered,verified,awaiting_approval,postponed,rejected,approved,revoked,verification_failed"`
+	PendingManifestVersion *int64                    `json:"pending_manifest_version" minimum:"1"`
+	PendingManifestDigest  *string                   `json:"pending_manifest_digest" format:"sha256"`
+	ConnectionState        string                    `json:"connection_state" enum:"online,offline,synchronizing,attention_required"`
+	LastVerifiedAt         *string                   `json:"last_verified_at" format:"date-time"`
+}
+
+func (integrationGuidanceResult) closedResponseSchema() {}
+
+func (s *Server) handleIntegrationGuidance(ctx context.Context, raw json.RawMessage) (integrationGuidanceResult, error) {
+	var args integrationGuidanceArgs
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&args); err != nil {
+		return integrationGuidanceResult{}, fmt.Errorf("integration guidance: invalid request: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return integrationGuidanceResult{}, errors.New("integration guidance: invalid request")
+	}
+	project, err := uuid.Parse(args.ProjectID)
+	if err != nil || project == uuid.Nil || project.String() != args.ProjectID {
+		return integrationGuidanceResult{}, errors.New("integration guidance: project_id must be a canonical non-nil UUID")
+	}
+	org, err := s.resolveOrgContext(args.ProjectID)
+	if err != nil || org.ProjectID != args.ProjectID {
+		if err != nil {
+			return integrationGuidanceResult{}, err
+		}
+		return integrationGuidanceResult{}, errors.New("integration guidance: project scope is not configured")
+	}
+	if s.integrationGuidance == nil {
+		return integrationGuidanceResult{}, errors.New("integration guidance: approved cache provider is unavailable")
+	}
+	snapshot, err := s.integrationGuidance.ReadIntegrationGuidance(ctx, args.ProjectID)
+	if err != nil {
+		return integrationGuidanceResult{}, fmt.Errorf("integration guidance: read approved cache: %w", err)
+	}
+	return resolveIntegrationGuidance(args.ProjectID, snapshot)
+}
+
+func resolveIntegrationGuidance(projectID string, snapshot IntegrationGuidanceSnapshot) (integrationGuidanceResult, error) {
+	state := snapshot.State
+	if state.SchemaVersion != 1 || state.ProjectID != projectID {
+		return integrationGuidanceResult{}, errors.New("integration guidance: cached state project or schema mismatch")
+	}
+	if !validIntegrationGuidanceState(state.ApprovalState, state.MaterializationState, state.ConnectionState) {
+		return integrationGuidanceResult{}, errors.New("integration guidance: cached lifecycle state is invalid")
+	}
+	if state.ResolvedRole != "" && !validSlug(state.ResolvedRole) {
+		return integrationGuidanceResult{}, errors.New("integration guidance: cached resolved role is invalid")
+	}
+	activeFields := presentPointerCount(state.ActiveManifestID, state.ActiveManifestVersion, state.ActiveManifestDigest)
+	if activeFields != 0 && activeFields != 3 {
+		return integrationGuidanceResult{}, errors.New("integration guidance: cached active manifest metadata is incomplete")
+	}
+	if activeFields == 3 {
+		activeID, parseErr := uuid.Parse(*state.ActiveManifestID)
+		if parseErr != nil || activeID == uuid.Nil || activeID.String() != *state.ActiveManifestID || *state.ActiveManifestVersion < 1 || !digestPattern.MatchString(*state.ActiveManifestDigest) {
+			return integrationGuidanceResult{}, errors.New("integration guidance: cached active manifest metadata is invalid")
+		}
+	}
+	pendingFields := presentPointerCount(state.PendingManifestVersion, state.PendingManifestDigest)
+	if pendingFields != 0 && pendingFields != 2 {
+		return integrationGuidanceResult{}, errors.New("integration guidance: cached pending manifest metadata is incomplete")
+	}
+	if pendingFields == 2 && (*state.PendingManifestVersion < 1 || !digestPattern.MatchString(*state.PendingManifestDigest)) {
+		return integrationGuidanceResult{}, errors.New("integration guidance: cached pending manifest metadata is invalid")
+	}
+
+	result := integrationGuidanceResult{
+		SchemaVersion: 1, ProjectID: projectID,
+		ManifestID: cloneStringPointer(state.ActiveManifestID), ManifestVersion: cloneInt64Pointer(state.ActiveManifestVersion),
+		ManifestDigest: cloneStringPointer(state.ActiveManifestDigest),
+		Guidance:       []integrationGuidanceItem{}, MaterializationState: state.MaterializationState,
+		ApprovalState: state.ApprovalState, PendingManifestVersion: cloneInt64Pointer(state.PendingManifestVersion),
+		PendingManifestDigest: cloneStringPointer(state.PendingManifestDigest), ConnectionState: state.ConnectionState,
+	}
+	if state.ResolvedRole != "" {
+		result.ResolvedRole = stringPointer(state.ResolvedRole)
+	}
+	if state.LastVerifiedAt != "" {
+		verified, parseErr := time.Parse(time.RFC3339Nano, state.LastVerifiedAt)
+		if parseErr != nil || verified.UTC().Format(time.RFC3339Nano) != state.LastVerifiedAt {
+			return integrationGuidanceResult{}, errors.New("integration guidance: cached verification time is not canonical UTC RFC3339Nano")
+		}
+		result.LastVerifiedAt = stringPointer(state.LastVerifiedAt)
+	}
+
+	compatible := state.CompatibilityState == "compatible"
+	if activeFields == 3 && !compatible {
+		result.ConnectionState = "attention_required"
+	}
+	if !state.GuidanceActive || state.ApprovalState == "revoked" || !compatible || activeFields == 0 {
+		return result, nil
+	}
+	if snapshot.Manifest == nil || state.ResolvedRole == "" {
+		return integrationGuidanceResult{}, errors.New("integration guidance: active approved manifest body or role is unavailable")
+	}
+	manifest := *snapshot.Manifest
+	if manifest.ProjectID != projectID || manifest.ManifestID != *state.ActiveManifestID || manifest.ManifestVersion != *state.ActiveManifestVersion || manifest.ManifestDigest != *state.ActiveManifestDigest {
+		return integrationGuidanceResult{}, errors.New("integration guidance: approved manifest does not match active state")
+	}
+	if err := validateMaterializationManifest(manifest, state.ResolvedRole); err != nil {
+		// Materialization validation errors may contain repository targets. The
+		// model-facing contract intentionally exposes content, never paths.
+		return integrationGuidanceResult{}, errors.New("integration guidance: cached approved manifest is invalid")
+	}
+	entries := append([]IntegrationManifestEntry(nil), manifest.Entries...)
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Target < entries[j].Target })
+	for _, entry := range entries {
+		if !matchesRole(entry.RoleFilters, state.ResolvedRole) {
+			continue
+		}
+		result.Guidance = append(result.Guidance, integrationGuidanceItem{
+			Kind: entry.Kind, Content: entry.Content, ContentDigest: entry.ContentDigest, Required: entry.Required,
+		})
+	}
+	return result, nil
+}
+
+func presentPointerCount(values ...any) int {
+	count := 0
+	for _, value := range values {
+		if value != nil && !reflectValueIsNil(value) {
+			count++
+		}
+	}
+	return count
+}
+
+func reflectValueIsNil(value any) bool {
+	switch typed := value.(type) {
+	case *string:
+		return typed == nil
+	case *int64:
+		return typed == nil
+	default:
+		return true
+	}
+}
+
+func validIntegrationGuidanceState(approval, materialization, connection string) bool {
+	validApproval := map[string]bool{"none": true, "offered": true, "verified": true, "awaiting_approval": true, "postponed": true, "rejected": true, "approved": true, "revoked": true, "verification_failed": true}
+	validMaterialization := map[string]bool{"applied": true, "drifted": true, "not_applied": true, "recovery_required": true, "removal_required": true}
+	validConnection := map[string]bool{"online": true, "offline": true, "synchronizing": true, "attention_required": true}
+	return validApproval[approval] && validMaterialization[materialization] && validConnection[connection]
+}
 
 // toolGuidance is the canonical, structured usage guidance for one live
 // Gateway descriptor. RequiredPermissions and MinimalExample are derived from
@@ -79,6 +276,8 @@ func gatewayGuidanceConcept(toolName string) string {
 	switch {
 	case toolName == "wormhole.sync.status":
 		return "local status and synchronisation"
+	case toolName == "wormhole.agent.get_guidance":
+		return "integration guidance"
 	case toolName == "wormhole.agent.enrol" || hasToolPrefix(toolName, "wormhole.agent."):
 		return "identity"
 	case hasToolPrefix(toolName, "wormhole.code_graph."):
@@ -113,6 +312,17 @@ func gatewayGuidanceText() map[string]guidanceText {
 			SourceAccessImplications: noSource,
 			RecommendedFollowUp:      "Use the reported permissions to select an allowed tool.",
 			MisuseWarning:            "Do not treat local identity information as a substitute for checking a specific operation's result.",
+		},
+		"wormhole.agent.get_guidance": {
+			Purpose:                  "Read the current approved, role-applicable integration guidance and its lifecycle state from Gateway's local cache.",
+			UseWhen:                  "At session start or before relying on managed organisational guidance for this project.",
+			DoNotUseWhen:             "Do not use it to approve, apply, update, remove, roll back, refresh, or repair guidance.",
+			MutatesState:             false,
+			Prerequisites:            "An explicitly bound project and a compatible approved manifest cached by Gateway.",
+			FreshnessImplications:    "The result is one local cached read; offline responses retain approved content while separately reporting newer unapproved pending state.",
+			SourceAccessImplications: "This tool returns approved Markdown only; it does not read repository files or expose materialisation target paths.",
+			RecommendedFollowUp:      "Use applicable returned guidance, or ask a human to inspect the integration CLI when approval, compatibility, drift, or recovery needs attention.",
+			MisuseWarning:            "Empty guidance can mean no approved cache, revocation, or incompatibility; never infer approval or trigger a mutation from this read.",
 		},
 		"wormhole.agent.register": {
 			Purpose:                  "Create a Passport-backed agent or register an existing agent's local presence.",

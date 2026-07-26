@@ -376,7 +376,7 @@ func TestMCP_ToolsList_AllToolsWithSchemas(t *testing.T) {
 	}
 
 	wantTools := []string{
-		"wormhole.agent.whoami", "wormhole.sync.status", EnrolmentToolName, "wormhole.task.list", "wormhole.task.get",
+		"wormhole.agent.whoami", "wormhole.agent.get_guidance", "wormhole.sync.status", EnrolmentToolName, "wormhole.task.list", "wormhole.task.get",
 		"wormhole.code_graph.query", "wormhole.code_graph.status", "wormhole.code_graph.rebuild",
 		"wormhole.task.create", "wormhole.task.route", "wormhole.channel.list",
 		"wormhole.channel.create",
@@ -463,6 +463,31 @@ func TestCodeGraphSchemasAreClosedAndBounded(t *testing.T) {
 	items := querySchema["properties"].(map[string]any)["include_edges"].(map[string]any)["items"].(map[string]any)
 	if got := items["enum"]; !reflect.DeepEqual(got, []any{"calls", "references", "uses_type"}) {
 		t.Fatalf("include_edges enum = %#v", got)
+	}
+}
+
+func TestIntegrationGuidanceDescriptorIsClosedReadOnlyContract(t *testing.T) {
+	registry := newLocalRegistry(&Server{})
+	tool, ok := registry.Get("wormhole.agent.get_guidance")
+	if !ok {
+		t.Fatal("registry missing wormhole.agent.get_guidance")
+	}
+	if len(tool.RequiredPermissions) != 0 {
+		t.Fatalf("get_guidance permissions = %v, want none", tool.RequiredPermissions)
+	}
+	schema := buildInputSchema(tool)
+	if additional, ok := schema["additionalProperties"].(bool); !ok || additional {
+		t.Fatalf("get_guidance additionalProperties = %#v, want false", schema["additionalProperties"])
+	}
+	if required, ok := schema["required"].([]string); !ok || !reflect.DeepEqual(required, []string{"project_id"}) {
+		t.Fatalf("get_guidance required fields = %#v", schema["required"])
+	}
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok || len(properties) != 1 {
+		t.Fatalf("get_guidance properties = %#v", schema["properties"])
+	}
+	if project, ok := properties["project_id"].(map[string]any); !ok || project["type"] != "string" || project["format"] != "uuid" {
+		t.Fatalf("get_guidance project_id schema = %#v", properties["project_id"])
 	}
 }
 

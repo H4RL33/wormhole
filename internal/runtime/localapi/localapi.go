@@ -149,6 +149,7 @@ type Server struct {
 	kb                    *localstore.KBRepo
 	qr                    *syncpkg.QueueRepo
 	statusProvider        SyncStatusProvider
+	integrationGuidance   IntegrationGuidanceProvider
 	recoveryOnlyProjects  sync.Map // map[projectID]struct{}
 	recoveryOnlyInventory atomic.Bool
 
@@ -243,6 +244,13 @@ func (s *Server) SetVersion(version string) {
 // SetSyncStatusProvider enables the read-only wormhole.sync.status tool.
 func (s *Server) SetSyncStatusProvider(provider SyncStatusProvider) {
 	s.statusProvider = provider
+}
+
+// SetIntegrationGuidanceProvider binds the project-scoped, read-only approved
+// manifest cache. Task 20 supplies the authoritative SQLite implementation;
+// localapi never treats the repository projection as authority.
+func (s *Server) SetIntegrationGuidanceProvider(provider IntegrationGuidanceProvider) {
+	s.integrationGuidance = provider
 }
 
 // SetRecoveryOnlyProjects restricts invalid or incomplete enrolments to the

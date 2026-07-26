@@ -133,7 +133,7 @@ func TestAlphaContractIntegrationManifestDesignCompleteness(t *testing.T) {
 	}
 }
 
-func TestAlphaContractIntegrationManifestV1MaterializationIsLiveAndGuidanceToolIsPlanned(t *testing.T) {
+func TestAlphaContractIntegrationManifestV1MaterializationAndGuidanceToolAreLive(t *testing.T) {
 	data, err := os.ReadFile("../../docs/contracts/alpha-contract.json")
 	if err != nil {
 		t.Fatal(err)
@@ -143,7 +143,7 @@ func TestAlphaContractIntegrationManifestV1MaterializationIsLiveAndGuidanceToolI
 		t.Fatal(err)
 	}
 	planned := inventory.DesignedInterfaces.IntegrationManifestV1
-	if planned.Status != "materialization_implemented_guidance_tool_planned" || planned.DesignDocument != "docs/architecture/integration-manifest-design.md" {
+	if planned.Status != "materialization_and_guidance_tool_implemented_cache_binding_planned" || planned.DesignDocument != "docs/architecture/integration-manifest-design.md" {
 		t.Fatalf("planned integration manifest status/document = %q/%q", planned.Status, planned.DesignDocument)
 	}
 	wantManifestFields := []string{
@@ -211,16 +211,16 @@ func TestAlphaContractIntegrationManifestV1MaterializationIsLiveAndGuidanceToolI
 			t.Errorf("implemented CLI command %q is missing from the live inventory", command.Name)
 		}
 	}
-	for surface, tools := range map[string][]struct {
-		Name string `json:"name"`
-	}{
-		"Gateway": inventory.MCPTools.Gateway,
-		"Fabric":  inventory.MCPTools.Fabric,
-	} {
-		for _, tool := range tools {
-			if tool.Name == planned.MCPTool.Name {
-				t.Errorf("planned MCP tool %q appears in the live %s inventory", tool.Name, surface)
-			}
+	foundGateway := false
+	for _, tool := range inventory.MCPTools.Gateway {
+		foundGateway = foundGateway || tool.Name == planned.MCPTool.Name
+	}
+	if !foundGateway {
+		t.Errorf("implemented MCP tool %q is missing from the live Gateway inventory", planned.MCPTool.Name)
+	}
+	for _, tool := range inventory.MCPTools.Fabric {
+		if tool.Name == planned.MCPTool.Name {
+			t.Errorf("local-only MCP tool %q appears in the live Fabric inventory", tool.Name)
 		}
 	}
 }

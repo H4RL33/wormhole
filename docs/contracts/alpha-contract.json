@@ -2,7 +2,7 @@
   "mode": "alpha-inventory",
   "designed_interfaces": {
     "integration_manifest_v1": {
-      "status": "materialization_implemented_guidance_tool_planned",
+      "status": "materialization_and_guidance_tool_implemented_cache_binding_planned",
       "design_document": "docs/architecture/integration-manifest-design.md",
       "manifest_schema": {
         "additional_properties": false,
@@ -4296,8 +4296,262 @@
           }
         ]
       },
-      {
-        "name": "wormhole.agent.list",
+    {
+      "name": "wormhole.agent.get_guidance",
+      "required_permissions": [],
+      "request_schemas": [
+        {
+          "variant": "default",
+          "schema": {
+            "type": "object",
+            "properties": [
+              {
+                "name": "project_id",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            ],
+            "required": [
+              "project_id"
+            ],
+            "additional_properties": false
+          }
+        }
+      ],
+      "response_schemas": [
+        {
+          "variant": "default",
+          "schema": {
+            "type": "object",
+            "properties": [
+              {
+                "name": "approval_state",
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "approved",
+                    "awaiting_approval",
+                    "none",
+                    "offered",
+                    "postponed",
+                    "rejected",
+                    "revoked",
+                    "verification_failed",
+                    "verified"
+                  ]
+                }
+              },
+              {
+                "name": "connection_state",
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "attention_required",
+                    "offline",
+                    "online",
+                    "synchronizing"
+                  ]
+                }
+              },
+              {
+                "name": "guidance",
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": [
+                      {
+                        "name": "content",
+                        "schema": {
+                          "type": "string",
+                          "format": "utf8-markdown"
+                        }
+                      },
+                      {
+                        "name": "content_digest",
+                        "schema": {
+                          "type": "string",
+                          "format": "sha256"
+                        }
+                      },
+                      {
+                        "name": "kind",
+                        "schema": {
+                          "type": "string",
+                          "enum": [
+                            "agents_bootstrap",
+                            "reference",
+                            "skill"
+                          ]
+                        }
+                      },
+                      {
+                        "name": "required",
+                        "schema": {
+                          "type": "boolean"
+                        }
+                      }
+                    ],
+                    "required": [
+                      "content",
+                      "content_digest",
+                      "kind",
+                      "required"
+                    ],
+                    "additional_properties": false
+                  }
+                }
+              },
+              {
+                "name": "last_verified_at",
+                "schema": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "manifest_digest",
+                "schema": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "sha256"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "manifest_id",
+                "schema": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "manifest_version",
+                "schema": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "materialization_state",
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "applied",
+                    "drifted",
+                    "not_applied",
+                    "recovery_required",
+                    "removal_required"
+                  ]
+                }
+              },
+              {
+                "name": "pending_manifest_digest",
+                "schema": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "sha256"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "pending_manifest_version",
+                "schema": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "project_id",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              {
+                "name": "resolved_role",
+                "schema": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "role-slug"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "schema_version",
+                "schema": {
+                  "type": "integer",
+                  "const": 1
+                }
+              }
+            ],
+            "required": [
+              "approval_state",
+              "connection_state",
+              "guidance",
+              "last_verified_at",
+              "manifest_digest",
+              "manifest_id",
+              "manifest_version",
+              "materialization_state",
+              "pending_manifest_digest",
+              "pending_manifest_version",
+              "project_id",
+              "resolved_role",
+              "schema_version"
+            ],
+            "additional_properties": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "wormhole.agent.list",
         "required_permissions": [],
         "request_schemas": [
           {

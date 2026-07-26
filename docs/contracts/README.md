@@ -8,13 +8,15 @@ protocol, migrations, and release artifacts.
 `designed_interfaces` is separate from those live inventories. It records
 decision-complete public contracts that have human design review and may be
 implemented in independently inventoried stages. `integration_manifest_v1` is
-currently `materialization_implemented_guidance_tool_planned`: its exact
+currently `materialization_and_guidance_tool_implemented_cache_binding_planned`:
+its exact
 manifest/entry constraints, managed markers, CLI names, and full closed
 read-only MCP request/response schemas are fixed by
 [`integration-manifest-design.md`](../architecture/integration-manifest-design.md).
-Its six repository-materialisation commands now appear under `cli.commands`.
-`wormhole.agent.get_guidance` must not appear under either live MCP registry
-until Task 16 updates both the runtime and inventory.
+Its six repository-materialisation commands appear under `cli.commands`, and
+its read-only `wormhole.agent.get_guidance` contract appears in the live Gateway
+registry. The authoritative SQLite cache/provider binding remains owned by the
+later persistence stage; an unbound provider fails closed.
 The design requires descriptor-relative, no-follow repository operations and
 immediate journaled removal of unchanged managed bytes after revocation; drift
 is preserved and reported as `removal_required`.
@@ -46,7 +48,7 @@ only `state` and `pending_writes`.
 
 ## Gateway tool-guidance inventory
 
-The live Gateway registry currently has 21 agent-facing tools and every one
+The live Gateway registry currently has 22 agent-facing tools and every one
 has exactly one structured guidance record. A record carries purpose, use and
 misuse boundaries, mutation behaviour, descriptor-derived permissions and
 minimal request example, prerequisites, freshness and source-access
@@ -57,10 +59,13 @@ another parameter inventory.
 
 The inventory covers only live descriptors. Git pointers have no live Gateway
 tool in this alpha and therefore have zero guidance records. Integration
-guidance is designed-only and also has zero live guidance records.
-`wormhole.agent.get_guidance` remains designed-only; Task 16 must register its
-live descriptor and add its record atomically. It must not appear in this
-inventory before that change.
+guidance has one live read-only record. `wormhole.agent.get_guidance` accepts
+only the bound project UUID, reads the cached approved state once, exposes
+applicable role-filtered content without repository targets or merge policy,
+and reports a newer unapproved version separately. Offline reads may continue
+to return compatible, non-revoked approved guidance; revoked or incompatible
+guidance is withheld. The call performs no refresh, approval, rendering,
+materialisation, filesystem, audit, or persistence mutation.
 
 The Code Graph records require agents to check graph freshness, then verify
 Git HEAD and working-tree state directly. Bounded source slices require

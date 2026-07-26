@@ -117,7 +117,7 @@ func TestRenderGatewayGuidanceTracksSchemaAndRejectsGuidanceDrift(t *testing.T) 
 	}{
 		{"missing", guidance[1:], guidance[0].ToolName},
 		{"duplicate", append(append([]toolGuidance{}, guidance...), guidance[0]), guidance[0].ToolName},
-		{"phantom", append(append([]toolGuidance{}, guidance...), toolGuidance{ToolName: "wormhole.agent.get_guidance"}), "wormhole.agent.get_guidance"},
+		{"phantom", append(append([]toolGuidance{}, guidance...), toolGuidance{ToolName: "wormhole.agent.mutate_guidance"}), "wormhole.agent.mutate_guidance"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -140,8 +140,8 @@ func assertGeneratedSkillShape(t *testing.T, file generatedGuidanceFile) {
 
 func assertToolUseSkill(t *testing.T, registry *localRegistry, content string) {
 	t.Helper()
-	if len(registry.List()) != 21 {
-		t.Fatalf("live tool count = %d, want 21", len(registry.List()))
+	if len(registry.List()) != 22 {
+		t.Fatalf("live tool count = %d, want 22", len(registry.List()))
 	}
 	guidance := map[string]toolGuidance{}
 	for _, record := range registry.Guidance() {

@@ -75,6 +75,8 @@ type generatedContractSchema struct {
 	AnyOf                []generatedContractSchema   `json:"anyOf,omitempty"`
 	AdditionalProperties *bool                       `json:"additional_properties,omitempty"`
 	MinLength            int                         `json:"min_length,omitempty"`
+	Minimum              int                         `json:"minimum,omitempty"`
+	Const                int                         `json:"const,omitempty"`
 }
 
 type generatedContractProperty struct {
@@ -428,6 +430,8 @@ func generatedSchemaSnapshot(schema map[string]any) (generatedContractSchema, er
 		out.AdditionalProperties = &value
 	}
 	out.MinLength, _ = schema["minLength"].(int)
+	out.Minimum, _ = schema["minimum"].(int)
+	out.Const, _ = schema["const"].(int)
 	if value, ok := schema["required"]; ok {
 		var requiredOK bool
 		out.Required, requiredOK = value.([]string)

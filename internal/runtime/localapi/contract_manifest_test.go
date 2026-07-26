@@ -61,6 +61,8 @@ type alphaSchema struct {
 	AnyOf                []alphaSchema         `json:"anyOf,omitempty"`
 	AdditionalProperties *bool                 `json:"additional_properties,omitempty"`
 	MinLength            int                   `json:"min_length,omitempty"`
+	Minimum              int                   `json:"minimum,omitempty"`
+	Const                int                   `json:"const,omitempty"`
 }
 
 type alphaSchemaProperty struct {
@@ -700,6 +702,8 @@ func schemaSnapshot(t *testing.T, schema map[string]any) alphaSchema {
 	if minLength, ok := schema["minLength"].(int); ok {
 		snapshot.MinLength = minLength
 	}
+	snapshot.Minimum, _ = schema["minimum"].(int)
+	snapshot.Const, _ = schema["const"].(int)
 	if rawItems, ok := schema["items"]; ok {
 		items, ok := rawItems.(map[string]any)
 		if !ok {

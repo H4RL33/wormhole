@@ -3,7 +3,7 @@
   "project_id": "e724dd25-5bc9-40db-bcad-0b21716d1ca4",
   "active_manifest_id": "52b860cd-0db7-4ee0-a3fd-672ad9da0c95",
   "active_manifest_version": 1,
-  "active_manifest_digest": "sha256:087db9b8663541ad663f3a9ad4e73397011cadd20975b81e8ef78bf174449a57",
+  "active_manifest_digest": "sha256:9d75f10f19363a51523ae3a9b57315b2548bb7d8e93d2714acc623970a315cdf",
   "pending_manifest_id": null,
   "pending_manifest_version": null,
   "pending_manifest_digest": null,
@@ -67,8 +67,8 @@
     {
       "kind": "skill",
       "target": ".agents/skills/wormhole-tool-use/SKILL.md",
-      "content_digest": "sha256:acc9f58e43f605f6fce5727aae69ff00dc946581e192b00d32e751044e8222dc",
-      "rendered_digest": "sha256:acc9f58e43f605f6fce5727aae69ff00dc946581e192b00d32e751044e8222dc",
+      "content_digest": "sha256:dddd8114435e1c7eaf53e42567aa94f699b69d18e28d7eb918a81ffee585cb5c",
+      "rendered_digest": "sha256:dddd8114435e1c7eaf53e42567aa94f699b69d18e28d7eb918a81ffee585cb5c",
       "ownership_mode": "managed_file",
       "file_mode": 420,
       "file_identity": {"device": 1, "inode": 6}

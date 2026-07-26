@@ -20,6 +20,7 @@ import (
 	"net"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -99,6 +100,9 @@ func newLocalRegistry(s *Server) *localRegistry {
 
 	reg("wormhole.agent.whoami", "Return the calling agent's identity, capabilities, and permissions.", whoAmIArgs{}, "", singleResult(whoAmIOutput{}), func(ctx context.Context, _ json.RawMessage) (any, error) {
 		return s.proxyWhoAmI(ctx)
+	})
+	reg("wormhole.agent.get_guidance", "Read this project's approved role-applicable integration guidance and lifecycle state from Gateway's local cache without mutation.", integrationGuidanceArgs{}, "", singleResult(integrationGuidanceResult{Guidance: []integrationGuidanceItem{}}), func(ctx context.Context, args json.RawMessage) (any, error) {
+		return s.handleIntegrationGuidance(ctx, args)
 	})
 
 	reg("wormhole.sync.status", "Return this project's Gateway-to-Fabric connection state and durable pending-write count.", syncStatusArgs{}, "", singleResult(localSyncStatusResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
@@ -236,8 +240,6 @@ func (r *localRegistry) Get(name string) (localTool, bool) {
 }
 
 // Guidance returns the generated guidance inventory for the live registry.
-// It intentionally has no MCP tool of its own: designed-only read guidance is
-// added atomically with its descriptor in Task 16.
 func (r *localRegistry) Guidance() []toolGuidance {
 	return gatewayToolGuidance(r)
 }
@@ -603,7 +605,7 @@ func buildInputSchemas(t localTool) map[string]map[string]any {
 			"properties": properties,
 			"required":   required,
 		}
-		if t.Name == EnrolmentToolName || strings.HasPrefix(t.Name, "wormhole.code_graph.") {
+		if t.Name == EnrolmentToolName || t.Name == "wormhole.agent.get_guidance" || strings.HasPrefix(t.Name, "wormhole.code_graph.") {
 			schema["additionalProperties"] = false
 		}
 		if t.Name == "wormhole.code_graph.query" {
@@ -648,6 +650,9 @@ func reflectStructSchema(t reflect.Type) (map[string]any, []string) {
 		}
 
 		schema := jsonSchemaForType(fieldType)
+		if format := field.Tag.Get("format"); format != "" {
+			schema["format"] = format
+		}
 		if enumTag := field.Tag.Get("enum"); enumTag != "" {
 			values := strings.Split(enumTag, ",")
 			enumValues := make([]any, len(values))
@@ -753,7 +758,12 @@ func jsonPresentResponseSchemaForType(t reflect.Type) map[string]any {
 		return map[string]any{"type": "object"}
 	case reflect.Struct:
 		properties, required := reflectResponseStructSchema(t)
-		return map[string]any{"type": "object", "properties": properties, "required": required}
+		schema := map[string]any{"type": "object", "properties": properties, "required": required}
+		closedType := reflect.TypeOf((*closedResponseObject)(nil)).Elem()
+		if t.Implements(closedType) || reflect.PointerTo(t).Implements(closedType) {
+			schema["additionalProperties"] = false
+		}
+		return schema
 	default:
 		return map[string]any{"type": "object"}
 	}
@@ -771,7 +781,7 @@ func reflectResponseStructSchema(t reflect.Type) (map[string]any, []string) {
 		}
 
 		schema := jsonResponseSchemaForType(field.Type)
-		if omitempty {
+		if omitempty || field.Tag.Get("nonnull") == "true" {
 			schema = jsonPresentResponseSchemaForType(field.Type)
 		}
 		if enumTag := field.Tag.Get("enum"); enumTag != "" {
@@ -780,7 +790,20 @@ func reflectResponseStructSchema(t reflect.Type) (map[string]any, []string) {
 			for i, v := range values {
 				enumValues[i] = v
 			}
-			schema["enum"] = enumValues
+			decoratePresentResponseSchema(schema, "enum", enumValues)
+		}
+		if format := field.Tag.Get("format"); format != "" {
+			decoratePresentResponseSchema(schema, "format", format)
+		}
+		if minimum := field.Tag.Get("minimum"); minimum != "" {
+			if value, err := strconv.Atoi(minimum); err == nil {
+				decoratePresentResponseSchema(schema, "minimum", value)
+			}
+		}
+		if constant := field.Tag.Get("const"); constant != "" {
+			if value, err := strconv.Atoi(constant); err == nil {
+				decoratePresentResponseSchema(schema, "const", value)
+			}
 		}
 		properties[name] = schema
 		if !omitempty {
@@ -789,6 +812,22 @@ func reflectResponseStructSchema(t reflect.Type) (map[string]any, []string) {
 	}
 
 	return properties, required
+}
+
+type closedResponseObject interface {
+	closedResponseSchema()
+}
+
+func decoratePresentResponseSchema(schema map[string]any, key string, value any) {
+	if alternatives, ok := schema["anyOf"].([]map[string]any); ok {
+		for _, alternative := range alternatives {
+			if alternative["type"] != "null" {
+				decoratePresentResponseSchema(alternative, key, value)
+			}
+		}
+		return
+	}
+	schema[key] = value
 }
 
 // handleToolsCall implements "tools/call" (design doc §1, §5). Dispatch
