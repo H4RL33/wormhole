@@ -1,9 +1,8 @@
 // Package localstore is Gateway's durable local state (RFC-0003 §6.3,
 // §7.2). It follows the Store-struct/sentinel-error/wrapped-error shape
-// established by internal/core/identity (docs/implementation-rules.md §5), adapted
-// for SQLite: no transactions needed yet (single-statement writes only,
-// P1 scope), schema applied on Open rather than via golang-migrate (that
-// tooling targets the Coordination Server's Postgres only).
+// established by internal/core/identity (docs/implementation-rules.md §5),
+// adapted for SQLite. Legacy schema remains applied on Open and Gateway-owned
+// portable state follows through its dedicated numbered migration ledger.
 package localstore
 
 import (
@@ -292,6 +291,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("localstore: migrate channel timestamp: %w", err)
 	}
+	if err := applyGatewayMigrations(context.Background(), db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("localstore: migrate gateway schema: %w", err)
+	}
 	return &Store{db: db}, nil
 }
 
@@ -331,6 +334,8 @@ func sqliteDSN(path string) string {
 	query := u.Query()
 	query.Add("_pragma", "busy_timeout(5000)")
 	query.Add("_pragma", "journal_mode(WAL)")
+	query.Add("_pragma", "synchronous(FULL)")
+	query.Add("_pragma", "foreign_keys(1)")
 	u.RawQuery = query.Encode()
 	return u.String()
 }

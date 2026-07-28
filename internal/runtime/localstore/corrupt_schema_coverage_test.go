@@ -212,3 +212,21 @@ func openRawCoverageDatabase(t *testing.T) *sql.DB {
 	t.Cleanup(func() { _ = db.Close() })
 	return db
 }
+
+func TestOpenRejectsCorruptGatewayMigrationLedger(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "corrupt-gateway.db")
+	db, err := sql.Open("sqlite", sqliteDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE gateway_schema_migrations (version TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if store, err := Open(path); err == nil {
+		_ = store.Close()
+		t.Fatal("Open succeeded with malformed gateway migration ledger")
+	}
+}
