@@ -217,7 +217,8 @@ architectural decision or claim an unimplemented target as shipped.
 | `internal/core/git` | Source-code pointers only: commit links and review requests; never repository source | `internal/types`, stdlib |
 | `internal/core/roles` | Immutable role templates and default task views | stdlib |
 | `internal/storage` | DB connection only (`Open`) | `internal/types`, `lib/pq` |
-| `internal/types` | Config, shared plain types | stdlib only |
+| `internal/types` | Config and shared plain cross-layer types | stdlib only |
+| `internal/types/projectstate` | Canonical snapshot schemas, codec, validator, digest, and typed reducer | `internal/types`, stdlib, BurntSushi TOML |
 | `internal/webui` | Human read projection and approved private-auth browser callbacks/session boundary | `internal/core/*`, stdlib |
 
 ### 4.1 Local Runtime Module Map
@@ -269,7 +270,11 @@ the same layering pattern and isolation discipline.
 - R2: `internal/core/*` packages never import each other, with one sanctioned exception:
   `tasks` → `events`, because task status transitions emit events (RFC-0001 §8.2).
   Need another cross-core import? Escalate; do not add it.
-- R3: `internal/types` imports nothing outside stdlib. It is the bottom of the graph.
+- R3: Parent-package `internal/types` imports nothing outside stdlib and remains the
+  bottom of the graph. Its `internal/types/projectstate` subpackage is the one exact
+  exception: it may import `internal/types`, stdlib, and BurntSushi TOML. Runtime and
+  Fabric code must consume `internal/types/projectstate` rather than duplicate the
+  canonical snapshot schemas, codec, validator, digest, or reducer.
 - R4: No new top-level packages or external Go dependencies without explicit human
   sign-off. Source code directly imports `github.com/BurntSushi/toml`,
   `github.com/lib/pq`, and `modernc.org/sqlite`; the complete locked module graph is
