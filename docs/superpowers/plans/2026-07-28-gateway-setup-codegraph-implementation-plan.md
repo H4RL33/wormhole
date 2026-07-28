@@ -21,7 +21,7 @@
 - Projectstate Snapshot/OperationV1 is the sole local domain write authority. Legacy task/KB/channel/event/Git replica tables are projections only and no public handler writes them directly.
 - Code Graph is private, derivative, per checkout, model-free, vector-free, and offline by default. It persists no source body and never writes into the approved checkout.
 - Linux service lifecycle uses systemd-user only when usable. Unsupported/no-manager returns exactly: gatewayd service manager unavailable; start gatewayd manually.
-- Connector mutation is forbidden until the prior entry is represented by a typed, round-trippable absent/stdio/http state and a rollback plan is durable.
+- Connector mutation is allowed only when the existing entry is absent or a fully reconstructable stdio entry. HTTP/SSE, OAuth, literal/env header variants, hidden-scope duplicates, unknown versions, and ambiguous output fail closed before backup or mutation.
 - Setup journals and connector backups are 0600 machine-private files; journals contain no raw credential. Connector backup contents are never logged or returned.
 - The public Codex desired command is exactly codex mcp add wormhole -- /absolute/path/to/wormhole mcp.
 - Keep merged statement coverage at or above 80 percent. Every task follows RED, GREEN, focused verification, then one explicit commit.
@@ -97,6 +97,7 @@ const (
 | internal/runtime/codegraph/worker | On-demand process manager, private protocol, sandbox policy, crash isolation. |
 | internal/runtime/codegraph/manager | Convert frozen bindings to stdlib-only graph scopes and supervise per-workspace workers. |
 | cmd/gatewayd/codegraph_worker.go | Hidden child-process entrypoint over inherited private configuration. |
+| internal/runtime/config/command.go | Shared no-shell, bounded-output command runner for service, Git identity, and connector primitives. |
 | internal/runtime/config/service*.go | systemd-user lifecycle primitive or exact manual-start diagnostic. |
 | internal/runtime/config/setup_journal.go | Durable setup stages and connector backup references only. |
 | internal/runtime/config/identity_suggestion.go | Read-only Git suggestions/attestation request. |
@@ -565,7 +566,11 @@ Schema version 3 is exact:
 - codegraph_config primary key project_id, workspace_id; columns checkout_path, checkout_device, checkout_inode, repository_identity_json, accepted_ref, accepted_commit_sha, accepted_tree_digest, enabled, source_byte_ceiling, active_revision_id, last_successful_build.
 - codegraph_revisions primary key project_id, workspace_id, revision_id; columns state, indexed_commit, source_fingerprint, analysis_fingerprint, dirty_tracked, graph_schema_version, adapter_version, toolchain_identity, created_at, completed_at.
 - every node/file/symbol/edge/diagnostic/lexical row includes project_id, workspace_id, revision_id in its key.
-- codegraph_lexical_docs stores node_id, stable_id, field lengths, and canonical tokens; no source body or function body.
+- codegraph_lexical_docs has composite project/workspace/revision/node key, algorithm version, exact normalized qualified/symbol names, canonical JSON token arrays, and six field lengths.
+- codegraph_lexical_terms has revision-scoped field/token/node/term-frequency inverted rows.
+- codegraph_lexical_stats has revision-scoped field/token document frequency plus revision document count and summed field lengths.
+
+All three lexical tables use composite foreign keys with `ON DELETE CASCADE`. Candidate failure, dead-build reclaim, retirement cleanup, and disable must leave zero orphan lexical rows. Task 3 owns this schema and cascading lifecycle; Task 6 owns analyzer metadata extraction, lexical population, pinned-revision query, and acceptance.
 
 - [ ] **Step 1: Write failing conversion/path/schema tests (RED).**
 
@@ -837,15 +842,49 @@ git commit -m "feat(codegraph): enforce offline analysis freshness"
 
 **Files:**
 
+- Modify: internal/runtime/codegraph/golang/analyzer.go
+- Modify: internal/runtime/codegraph/golang/analyzer_test.go
+- Modify: internal/runtime/codegraph/index/index.go
+- Modify: internal/runtime/codegraph/index/index_test.go
+- Modify: internal/runtime/codegraph/store/store.go
+- Modify: internal/runtime/codegraph/store/schema_test.go
 - Create: internal/runtime/codegraph/query/lexical.go
 - Create: internal/runtime/codegraph/query/lexical_test.go
 - Create: internal/runtime/codegraph/query/ranking_acceptance_test.go
 - Create: internal/runtime/codegraph/query/scale_acceptance_test.go
 - Create: internal/runtime/codegraph/query/testdata/heldout/documents.json
 - Create: internal/runtime/codegraph/query/testdata/heldout/queries.json
-- Modify: internal/runtime/codegraph/store/store.go
 - Modify: internal/runtime/codegraph/query/query.go
-- Modify: internal/runtime/codegraph/query/benchmark_test.go
+
+**Consumes:** Task 3's three revision-scoped lexical tables and cascading lifecycle; Task 5's pinned active-revision `ReadActive` callback and currentness gate.
+
+**Produces:**
+
+~~~go
+type LexicalDocument struct {
+    NodeID, StableID                 string
+    ExactQualified, ExactSymbol      string
+    QualifiedName, SymbolName        []string
+    SignatureType, PackagePath       []string
+    FilePath, Documentation          []string
+}
+func (s *Store) PutLexicalDocuments(
+    context.Context, string, []LexicalDocument,
+) error
+func (s *Snapshot) SearchLexical(
+    context.Context, LexicalRequest,
+) ([]LexicalHit, error)
+~~~
+
+Add `SelectedSourcePaths []string` to the existing `query.Request`.
+
+`PutLexicalDocuments` populates Task 3's docs, terms, and stats for one candidate revision. `SearchLexical` runs inside the same `ReadActive` callback as edges and source; `N`, per-field `df`, document counts, summed lengths, and average lengths come only from that pinned revision. Query tokens are deduplicated after canonical tokenization, while document length retains repeated tokens.
+
+Extend analyzer results with transient, non-source-body documentation metadata:
+
+Add an exported `Documentation string` field to both existing analyzer result types, `golang.Package` and `golang.Symbol`.
+
+The analyzer reads `ast.File.Doc`, `FuncDecl.Doc`, and declaration/spec docs. Package comments produce package lexical documents; declaration docs populate symbol documents. Persist only canonical documentation tokens, never raw comments or source bodies.
 
 **Algorithm contract:**
 
@@ -856,9 +895,24 @@ git commit -m "feat(codegraph): enforce offline analysis freshness"
 - IDF is ln(1+(N-df+0.5)/(df+0.5)).
 - Convert total score to fixedScore = floor(score*1,000,000+0.5), stored/compared as int64.
 - Sort: exact qualified tier first, exact unqualified symbol tier second, BM25 tier third; then fixedScore descending; then stable node ID bytewise ascending.
-- Compiler edges may rerank/expand only after lexical anchors; their fixed bonus table is versioned with LexicalAlgorithmVersion.
+- Compiler edges may rerank/expand only after lexical anchors. Expanded unanchored nodes may appear as structural relationships, never as lexical matches, and reranking never crosses the exact-qualified/exact-symbol tier boundary.
 
-- [ ] **Step 1: Write failing tokenizer/ranking/corpus tests (RED).**
+The versioned integer-only structural bonus table is:
+
+~~~go
+var structuralBonusV1 = map[int]int64{
+    1: 100000,
+    2: 50000,
+    3: 25000,
+    4: 12500,
+    5: 6250,
+    6: 3125,
+    7: 1562,
+    8: 781,
+}
+~~~
+
+- [ ] **Step 1: Write failing tokenizer, documentation, pinned-revision, lifecycle, and ranking tests (RED).**
 
 ~~~go
 func TestTokenizeLexicalContract(t *testing.T) {
@@ -867,7 +921,7 @@ func TestTokenizeLexicalContract(t *testing.T) {
     if !slices.Equal(got,want) { t.Fatalf("got=%v want=%v",got,want) }
 }
 func TestLexicalTieBreakIsStableID(t *testing.T) {
-    got := RankLexical([]string{"worker"},[]LexicalDocument{{StableID:"z",SymbolName:"Worker"},{StableID:"a",SymbolName:"Worker"}})
+    got := RankLexical([]string{"worker"},[]LexicalDocument{{StableID:"z",ExactSymbol:"worker",SymbolName:[]string{"worker"}},{StableID:"a",ExactSymbol:"worker",SymbolName:[]string{"worker"}}})
     if got[0].StableID != "a" || got[0].FixedScore != got[1].FixedScore { t.Fatalf("got=%+v",got) }
 }
 func TestHeldOutCorpusTenRunsAreByteIdentical(t *testing.T) {
@@ -877,17 +931,34 @@ func TestHeldOutCorpusTenRunsAreByteIdentical(t *testing.T) {
         if got := marshalResults(t,runCorpus(t,corpus)); !bytes.Equal(got,first) { t.Fatalf("run %d differs",run) }
     }
 }
+func TestDocumentationTermsRankPackageAndDeclarationSymbols(t *testing.T) {
+    fixture := analyzedDocumentedPackage(t)
+    got := fixture.Query("lease arbitration")
+    if got[0].QualifiedName != "example.LeaseManager" { t.Fatalf("got=%+v",got) }
+    assertStoreHasTokensButNoRawComments(t,fixture.Store())
+}
+func TestLexicalRowsCascadeAcrossFailedAndRetiredRevisions(t *testing.T) {
+    store := lexicalLifecycleStore(t)
+    failed, retired := store.BuildAndFailCandidate(t.Context()), store.BuildAndRetireRevision(t.Context())
+    store.ReclaimDeadBuild(t.Context(),failed)
+    store.CleanupRetired(t.Context(),retired)
+    assertNoLexicalRows(t,store,failed,retired)
+    store.Disable(t.Context())
+    assertLexicalTablesEmpty(t,store)
+}
 ~~~
 
 - [ ] **Step 2: Run RED tests.**
 
-Run: go test ./internal/runtime/codegraph/query -run 'Tokenize|BM25|TieBreak|HeldOut|Disclosure' -count=1
+Run: go test ./internal/runtime/codegraph/golang ./internal/runtime/codegraph/index ./internal/runtime/codegraph/store ./internal/runtime/codegraph/query -run 'Documentation|Lexical|Tokenize|BM25|TieBreak|HeldOut|Disclosure|Lifecycle' -count=1
 
 Expected: FAIL because lexical-bm25-v1 is absent.
 
-- [ ] **Step 3: Implement fixed retrieval and progressive disclosure (GREEN).**
+- [ ] **Step 3: Implement analyzer extraction, population, fixed retrieval, and progressive disclosure (GREEN).**
 
-Persist canonical field tokens/lengths per revision; compute document frequency only inside the pinned revision. Exact and BM25 ordering follows the algorithm contract. Responses expose in order: repository/package map and reasons; at most five candidate files and one-hop relationships; deterministic outlines; then hash-validated source for selected paths only. The default discovery response before correct path is at most five files and 8192 source bytes.
+Persist canonical field tokens/lengths per revision and compute statistics only inside the pinned revision. Exact and BM25 ordering follows the algorithm contract. Before explicit selection, responses expose in order the repository/package map and reasons, at most five distinct candidate files and one-hop relationships, deterministic outlines, and no more than 8192 source bytes. `SelectedSourcePaths` may request hash-validated source only for paths already present in the pinned ranked/traversal result; reject every other path.
+
+Do not modify or repurpose `benchmark_test.go` as acceptance evidence. The held-out corpus must be independent and entry-symbol-free. Add separate disclosure and deterministic generated scale fixtures. For the twenty-query scale gate, compute p95 with nearest-rank index `ceil(.95*20)-1`; measure post-GC peak `HeapAlloc` growth.
 
 - [ ] **Step 4: Run correctness, recall, disclosure, and scale gates.**
 
@@ -897,19 +968,47 @@ Expected: exact qualified top-1; unqualified top-3; primary-file recall@5 at lea
 
 Run: go test ./internal/runtime/codegraph/query -run TestScaleAcceptance250K -count=1 -timeout=10m
 
-Expected: fixture contains 250000 symbols and 2000000 edges; twenty warm queries have p95 at most 300ms and measured heap growth at most 128MiB.
+Expected: deterministic fixture contains 250000 symbols and 2000000 edges; twenty warm queries have nearest-rank p95 at most 300ms and post-GC peak HeapAlloc growth at most 128MiB.
 
 - [ ] **Step 5: Commit.**
 
 ~~~bash
-git add internal/runtime/codegraph/query/lexical.go internal/runtime/codegraph/query/lexical_test.go internal/runtime/codegraph/query/ranking_acceptance_test.go internal/runtime/codegraph/query/scale_acceptance_test.go internal/runtime/codegraph/query/testdata/heldout/documents.json internal/runtime/codegraph/query/testdata/heldout/queries.json internal/runtime/codegraph/store/store.go internal/runtime/codegraph/query/query.go internal/runtime/codegraph/query/benchmark_test.go
+git add internal/runtime/codegraph/golang/analyzer.go internal/runtime/codegraph/golang/analyzer_test.go internal/runtime/codegraph/index/index.go internal/runtime/codegraph/index/index_test.go internal/runtime/codegraph/store/store.go internal/runtime/codegraph/store/schema_test.go internal/runtime/codegraph/query/lexical.go internal/runtime/codegraph/query/lexical_test.go internal/runtime/codegraph/query/ranking_acceptance_test.go internal/runtime/codegraph/query/scale_acceptance_test.go internal/runtime/codegraph/query/testdata/heldout/documents.json internal/runtime/codegraph/query/testdata/heldout/queries.json internal/runtime/codegraph/query/query.go
 git commit -m "feat(codegraph): add deterministic bm25 retrieval"
 ~~~
+
+## Shared Slice C command contract
+
+Task 7 creates `internal/runtime/config/command.go` and freezes the only subprocess seam used by service lifecycle, Git identity/signing, and native connectors:
+
+~~~go
+type Command struct {
+    Executable string
+    Args       []string
+    Dir        string
+    Env        []string // nil inherits runner base environment
+    Stdin      []byte
+}
+type CommandResult struct {
+    ExitCode int
+    Stdout   []byte
+    Stderr   []byte
+}
+type CommandRunner interface {
+    LookPath(string) (string, error)
+    Run(context.Context, Command) (CommandResult, error)
+}
+func NewExecCommandRunner(baseEnvironment []string) CommandRunner
+~~~
+
+`Run` returns a nil error for a started process with any ordinary exit code; callers interpret `ExitCode`. Errors mean lookup, start, signal, context, or output-limit failure only and never include stdin, stdout, or stderr. Stdout and stderr are independently capped at 1 MiB. Context cancellation remains detectable with `errors.Is`. Callers provide exact argv and no shell is involved. Tasks 7, 9, and 10 consume this exact type. The connector subpackage imports parent `config`; parent `config` never imports the connector package.
 
 ### Task 7: Add the conservative Gateway service primitive
 
 **Files:**
 
+- Create: internal/runtime/config/command.go
+- Create: internal/runtime/config/command_test.go
 - Create: internal/runtime/config/service.go
 - Create: internal/runtime/config/service_linux.go
 - Create: internal/runtime/config/service_unsupported.go
@@ -930,6 +1029,28 @@ var ErrServiceManagerUnavailable = errors.New("gatewayd service manager unavaila
 func NewGatewayService(CommandRunner) GatewayService
 ~~~
 
+The unit name is `wormhole-gatewayd.service` under `$XDG_CONFIG_HOME/systemd/user`, else `~/.config/systemd/user`. Directories are `0700`; the unit is `0600`. `GatewayServiceSpec.SocketPath` must equal `config.ResolveRuntimePaths().SocketPath`. The effective runtime root is `$XDG_RUNTIME_DIR`, or `$TMPDIR/wormhole-runtime`; write that exact effective value as `XDG_RUNTIME_DIR` in the unit so `gatewayd` derives the same socket.
+
+Exact unit bytes, after escaping values, are:
+
+~~~ini
+[Unit]
+Description=Wormhole Gateway
+After=default.target
+
+[Service]
+Type=simple
+ExecStart="<escaped absolute gatewayd path>"
+Environment="XDG_RUNTIME_DIR=<escaped effective runtime root>"
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=default.target
+~~~
+
+Unit escaping quotes the whole argument, escapes backslash and quote, doubles `%`, and rejects NUL/control characters and unsafe `$` expansion.
+
 - [ ] **Step 1: Write failing service tests (RED).**
 
 ~~~go
@@ -945,28 +1066,52 @@ func TestSystemdUserInstallIsIdempotentAndVerifiesSocket(t *testing.T) {
     if err := service.Install(t.Context(),spec); err != nil { t.Fatal(err) }
     if runner.Count("enable","--now") != 1 { t.Fatalf("calls=%v",runner.Calls()) }
 }
+func TestSystemdUnitMatchesRuntimeSocketAndExactBytes(t *testing.T) {
+    fixture := systemdUnitFixture(t, fallbackRuntimeEnvironment(t))
+    if err := fixture.Service.Install(t.Context(),fixture.Spec); err != nil { t.Fatal(err) }
+    if got,want := fixture.UnitBytes(),fixture.ExpectedUnitBytes(); !bytes.Equal(got,want) { t.Fatalf("got=%q want=%q",got,want) }
+    if fixture.UnitRuntimeRoot() != fixture.EffectiveRuntimeRoot() { t.Fatalf("unit=%q runtime=%q",fixture.UnitRuntimeRoot(),fixture.EffectiveRuntimeRoot()) }
+}
+func TestReadyRPCRejectsWrongIdentityProtocolAndSocket(t *testing.T) {
+    fixture := readinessFixture(t)
+    for _, response := range fixture.InvalidResponses() {
+        if err := fixture.VerifyResponse(response); err == nil { t.Fatalf("accepted=%s",response) }
+    }
+    fixture.AssertSingleInitialize("wormhole-setup")
+}
 ~~~
+
+The RED suite also covers shared-runner exit semantics, independent 1 MiB stdout/stderr caps, `errors.Is` cancellation, exact argv/no-shell execution, fallback runtime path, every install idempotence branch, recognized disabled/inactive exits, unknown manager output, executable/unit file safety, exact readiness framing, context handling, and zero mutation on unavailable manager.
 
 - [ ] **Step 2: Run RED tests.**
 
-Run: go test ./internal/runtime/config -run 'Manager|Systemd|Service' -count=1
+Run: go test ./internal/runtime/config -run 'CommandRunner|Manager|Systemd|Service|ManualDiagnostic' -count=1
 
 Expected: FAIL because service primitives are absent.
 
-- [ ] **Step 3: Implement systemd-user only (GREEN).**
+- [ ] **Step 3: Implement the shared runner and systemd-user lifecycle (GREEN).**
 
-On Linux, require systemctl and a usable systemctl --user show-environment. Inspect is-enabled/is-active; Install validates absolute regular gatewayd executable, writes an owner-private user unit atomically, daemon-reload, and enable --now; Start starts only an installed unit; Verify dials the exact user socket and performs Gateway readiness RPC. Any unsupported OS or absent/unusable manager returns ErrServiceManagerUnavailable before mutation.
+Implement the shared no-shell runner exactly as frozen above. On Linux, availability requires a resolved `systemctl` and successful `systemctl --user show-environment` before any filesystem write or mutating command. Missing/unusable manager and unsupported OS return `ErrServiceManagerUnavailable` itself with the exact unchanged error string and no appended command output.
+
+`Inspect` accepts only recognized `is-enabled` and `is-active` exit/output combinations; unknown exit/output is unavailable, never inactive. `Install` branches exactly:
+
+- identical unit, enabled, active: no rewrite, reload, enable, or start;
+- identical, enabled, inactive: `start` only;
+- identical, disabled: `enable --now` only;
+- new or changed: atomic write, directory fsync, `daemon-reload`, then `enable --now`.
+
+Reject relative, symlink, directory, nonregular, non-owner executable or unit paths. `Start` requires the installed unit. `Verify` dials only the supplied Unix socket and sends one newline-terminated MCP `initialize` request with `clientInfo.name="wormhole-setup"`; it requires the matching ID, no RPC error, `serverInfo.name=="wormhole"`, and the expected protocol version. Service code imports no `localapi`.
 
 - [ ] **Step 4: Run GREEN tests.**
 
-Run: go test ./internal/runtime/config -run 'Manager|Systemd|Service|ManualDiagnostic' -count=1
+Run: go test ./internal/runtime/config -run 'CommandRunner|Manager|Systemd|Service|ManualDiagnostic' -count=1
 
 Expected: PASS.
 
 - [ ] **Step 5: Commit.**
 
 ~~~bash
-git add internal/runtime/config/service.go internal/runtime/config/service_linux.go internal/runtime/config/service_unsupported.go internal/runtime/config/service_test.go
+git add internal/runtime/config/command.go internal/runtime/config/command_test.go internal/runtime/config/service.go internal/runtime/config/service_linux.go internal/runtime/config/service_unsupported.go internal/runtime/config/service_test.go
 git commit -m "feat(setup): manage systemd user gateway"
 ~~~
 
@@ -975,50 +1120,112 @@ git commit -m "feat(setup): manage systemd user gateway"
 **Files:**
 
 - Create: internal/runtime/config/setup_journal.go
+- Create: internal/runtime/config/setup_journal_lock_unix.go
+- Create: internal/runtime/config/setup_journal_lock_windows.go
 - Create: internal/runtime/config/setup_journal_test.go
-- Modify: internal/runtime/config/paths.go
+- Create: internal/runtime/config/setup_journal_lock_test.go
+- Modify: internal/runtime/config/config.go
 - Modify: internal/runtime/config/config_test.go
 
 **Produces:**
 
 ~~~go
 type SetupStage string
-type SetupJournal struct {
-    ID string
-    RepositoryRoot string
-    WorkspaceID types.WorkspaceID
-    Completed []SetupStage
-    ConnectorBackupRefs []string
-    LastError string
+type SetupJournalState string
+const (
+    SetupJournalActive SetupJournalState = "active"
+    SetupJournalCompleted SetupJournalState = "completed"
+)
+type SetupSelection struct {
+    ConnectorAdapters []string // sorted unique codex|claude
+    CodeGraphMode string        // on|off
 }
+type SetupJournal struct {
+    SchemaVersion int                  `json:"schema_version"`
+    ID string                          `json:"id"`
+    State SetupJournalState            `json:"state"`
+    RepositoryRoot string              `json:"repository_root"`
+    WorkspaceID types.WorkspaceID      `json:"workspace_id,omitempty"`
+    Selection SetupSelection           `json:"selection"`
+    Completed []SetupStage             `json:"completed"`
+    ConnectorBackupRefs []BackupReference `json:"connector_backup_refs"`
+    LastErrorStage SetupStage          `json:"last_error_stage,omitempty"`
+    LastError string                   `json:"last_error,omitempty"`
+    CreatedAt time.Time                `json:"created_at"`
+    UpdatedAt time.Time                `json:"updated_at"`
+    CompletedAt time.Time              `json:"completed_at,omitempty"`
+}
+type BackupReference string
+// Valid values are connector-backup:v1:<codex|claude>:<canonical UUID>.
 var ErrJournalCredentialMaterial = errors.New("setup journal: credential material forbidden")
-func OpenSetupJournal(path string) (*SetupJournalStore, error)
+var ErrAmbiguousSetupJournal = errors.New("setup journal: ambiguous active journal")
+func OpenSetupJournalStore() (*SetupJournalStore, error)
+func OpenSetupJournalStoreAt(existingRoot string) (*SetupJournalStore, error)
 func (s *SetupJournalStore) Begin(context.Context, string) (SetupJournal, error)
+func (s *SetupJournalStore) BindWorkspace(context.Context, string, types.WorkspaceID) error
+func (s *SetupJournalStore) SetSelection(context.Context, string, SetupSelection) error
 func (s *SetupJournalStore) MarkCompleted(context.Context, string, SetupStage) error
-func (s *SetupJournalStore) RecordConnectorBackup(context.Context, string, string) error
-func (s *SetupJournalStore) Resumable(context.Context, string) (SetupJournal, error)
+func (s *SetupJournalStore) RecordConnectorBackup(context.Context, string, BackupReference) error
+func (s *SetupJournalStore) RecordLastError(context.Context, string, SetupStage, error) error
+func (s *SetupJournalStore) Complete(context.Context, string) error
+func (s *SetupJournalStore) Resumable(context.Context, string) (SetupJournal, bool, error)
 ~~~
+
+Stages form this exact ordered prefix:
+
+~~~text
+project_validated
+gateway_ready
+workspace_registered
+identity_selected
+base_imported
+connectors_applied
+fabric_resolved
+code_graph_resolved
+final_verified
+~~~
+
+`Complete` requires every stage, sets terminal state/time, and clears `LastError`; completed journals are never resumable. Exactly one active canonical-root match resumes. Multiple matches return `ErrAmbiguousSetupJournal`. `Begin` holds a store-index lock and refuses a second active journal for the same root.
 
 - [ ] **Step 1: Write failing durability/no-secret tests (RED).**
 
 ~~~go
 func TestSetupJournalResumesCompletedStagesAfterRestart(t *testing.T) {
-    path := filepath.Join(t.TempDir(),"setup-journal.json")
-    store, _ := OpenSetupJournal(path)
+    root := ownerOnlyExistingDirectory(t)
+    store, _ := OpenSetupJournalStoreAt(root)
     journal, _ := store.Begin(t.Context(),"/repo")
-    _ = store.MarkCompleted(t.Context(),journal.ID,SetupStage("workspace_imported"))
-    reopened, _ := OpenSetupJournal(path)
-    got, _ := reopened.Resumable(t.Context(),"/repo")
-    if !slices.Contains(got.Completed,SetupStage("workspace_imported")) { t.Fatalf("got=%+v",got) }
+    _ = store.MarkCompleted(t.Context(),journal.ID,SetupStage("project_validated"))
+    reopened, _ := OpenSetupJournalStoreAt(root)
+    got, ok, err := reopened.Resumable(t.Context(),"/repo")
+    if err != nil || !ok || !slices.Contains(got.Completed,SetupStage("project_validated")) { t.Fatalf("got=%+v ok=%v err=%v",got,ok,err) }
 }
 func TestSetupJournalRejectsRawCredential(t *testing.T) {
-    store, _ := OpenSetupJournal(filepath.Join(t.TempDir(),"journal.json"))
+    store, _ := OpenSetupJournalStoreAt(ownerOnlyExistingDirectory(t))
     const journalID = "99999999-9999-4999-8999-999999999999"
     seedSetupJournal(t,store,journalID)
-    err := store.RecordConnectorBackup(t.Context(),journalID,"{\"token\":\"secret\"}")
+    err := store.RecordConnectorBackup(t.Context(),journalID,BackupReference("{\"token\":\"secret\"}"))
     if !errors.Is(err,ErrJournalCredentialMaterial) { t.Fatalf("err=%v",err) }
 }
+func TestSetupJournalCompletionIsTerminalAndAmbiguityFailsClosed(t *testing.T) {
+    store := setupJournalStoreFixture(t)
+    journal := completeJournalThroughFinalVerified(t,store,"/repo")
+    if err := store.Complete(t.Context(),journal.ID); err != nil { t.Fatal(err) }
+    if _,ok,err := store.Resumable(t.Context(),"/repo"); err != nil || ok { t.Fatalf("ok=%v err=%v",ok,err) }
+    seedTwoActiveJournalsForRoot(t,store,"/other")
+    if _,_,err := store.Resumable(t.Context(),"/other"); !errors.Is(err,ErrAmbiguousSetupJournal) { t.Fatalf("err=%v",err) }
+}
+func TestSetupJournalRedactsNestedCredentialMaterial(t *testing.T) {
+    store,journal := setupJournalFixture(t)
+    source := errors.New(`request failed: {"Authorization":"Bearer visible","nested":{"PASSWORD":"visible"}} callback_code=visible`)
+    if err := store.RecordLastError(t.Context(),journal.ID,SetupStage("connectors_applied"),source); err != nil { t.Fatal(err) }
+    encoded := readJournalBytes(t,store,journal.ID)
+    for _, forbidden := range [][]byte{[]byte("Bearer visible"),[]byte("PASSWORD"),[]byte("callback_code=visible")} {
+        if bytes.Contains(encoded,forbidden) { t.Fatalf("journal=%s",encoded) }
+    }
+}
 ~~~
+
+The RED suite also covers workspace binding, canonical selection persistence, redacted `LastError`, completion exclusion from resume, multiple-incomplete ambiguity, duplicate/unknown/oversized/corrupt JSON, invalid root/ID/stage, symlink/nonregular/owner/mode failures, nested case-insensitive redaction, opaque-token and private-key redaction, invalid backup references, cross-process lock serialization, and atomic old-or-new fault recovery.
 
 - [ ] **Step 2: Run RED tests.**
 
@@ -1026,9 +1233,13 @@ Run: go test ./internal/runtime/config -run 'SetupJournal' -count=1
 
 Expected: FAIL because journal store is absent.
 
-- [ ] **Step 3: Implement atomic 0600 JSON journal (GREEN).**
+- [ ] **Step 3: Implement canonical owner-only journals, OS locks, and redaction (GREEN).**
 
-Use XDG data path wormhole/setup-journals/journal-ID.json, strict typed JSON, temp-file fsync/rename/directory-sync, 0700 parent, 0600 file, and per-journal locking. Persist stage names, stable workspace ID after registration, backup file references, and redacted errors only. Reject token/password/private-key/bearer-shaped fields. Record completion after a stage verifies its effect; retries skip verified completed stages.
+Production derives `$XDG_DATA_HOME/wormhole/setup-journals`, else `~/.local/share/wormhole/setup-journals`. `OpenSetupJournalStoreAt` accepts only an already-existing canonical owner-only directory and is the test/open-existing seam.
+
+Each record is at most 64 KiB and must have a canonical lowercase UUID, supported version/state, canonical root, valid optional workspace UUID, ordered stage prefix, and canonical selection. Reject duplicate/unknown JSON keys and any bytes unequal to canonical re-encoding. Enforce root, record, and lock ownership, regularity, no-follow behavior, and `0700`/`0600` modes. Serialize the store index and each journal with OS-level advisory locks, not process mutexes. Use temp-file/fsync/rename/directory-fsync writes; fault injection at every write boundary must recover an old-or-new whole JSON record.
+
+Accept only opaque backup references matching `connector-backup:v1:<codex|claude>:<canonical UUID>`. Reject everything else with `ErrJournalCredentialMaterial` without reflecting input. Journals never store backup contents, inline environment/header/config data, or credential-shaped fields. Redaction recursively replaces case-insensitive credential-shaped JSON keys and scrubs bearer values, authorization headers, token/password/secret/private-key assignments, callback codes, and PEM private-key blocks. Rejection errors never quote source input.
 
 - [ ] **Step 4: Run GREEN tests.**
 
@@ -1039,7 +1250,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit.**
 
 ~~~bash
-git add internal/runtime/config/setup_journal.go internal/runtime/config/setup_journal_test.go internal/runtime/config/paths.go internal/runtime/config/config_test.go
+git add internal/runtime/config/setup_journal.go internal/runtime/config/setup_journal_lock_unix.go internal/runtime/config/setup_journal_lock_windows.go internal/runtime/config/setup_journal_test.go internal/runtime/config/setup_journal_lock_test.go internal/runtime/config/config.go internal/runtime/config/config_test.go
 git commit -m "feat(setup): persist resumable setup journal"
 ~~~
 
@@ -1053,7 +1264,10 @@ git commit -m "feat(setup): persist resumable setup journal"
 **Produces:**
 
 ~~~go
-type IdentitySuggestion struct { Name, Email, SigningKey, Source string }
+type IdentitySuggestion struct {
+    Name, Email, SigningKey, SigningFormat, Source string
+}
+const IdentitySuggestionSourceGitConfig = "git-config"
 func SuggestGitIdentity(context.Context, string, CommandRunner) (IdentitySuggestion, error)
 func RequestSigningAttestation(context.Context, string, []byte, CommandRunner) ([]byte, error)
 ~~~
@@ -1073,7 +1287,23 @@ func TestSigningAttestationNeverReadsPrivateKey(t *testing.T) {
     if err != nil { t.Fatal(err) }
     if runner.ReadFileCalled() { t.Fatal("private key file read") }
 }
+func TestSigningAttestationUsesExactOpenPGPArgv(t *testing.T) {
+    runner := recordingCommandRunner(t,map[string]string{"user.signingkey":"KEY","gpg.format":"openpgp"})
+    runner.Result.Stdout = []byte("detached-signature")
+    got, err := RequestSigningAttestation(t.Context(),"/repo",[]byte("payload"),runner)
+    if err != nil || string(got) != "detached-signature" { t.Fatalf("got=%q err=%v",got,err) }
+    runner.AssertCommand(Command{Executable:"gpg",Args:[]string{"--batch","--no-tty","--status-fd=2","--local-user","KEY","--detach-sign","--output","-"},Dir:"/repo",Stdin:[]byte("payload")})
+}
+func TestSigningAttestationRejectsSSHX509AndPathKeys(t *testing.T) {
+    for _, config := range []gitSigningConfig{sshSigningConfig(),x509SigningConfig(),pathSigningKeyConfig()} {
+        runner := signingRunnerForConfig(t,config)
+        if _,err := RequestSigningAttestation(t.Context(),"/repo",[]byte("payload"),runner); err == nil { t.Fatalf("accepted=%+v",config) }
+        if runner.SignCount() != 0 || runner.ReadFileCalled() { t.Fatalf("calls=%v",runner.Calls()) }
+    }
+}
 ~~~
+
+Tests record exact executable, argv, cwd, environment, the four allowed Git config keys, unset exit-1 behavior, verbatim signature output, cancellation/failure, root mismatch, and absence of credential-helper reads, config writes, filesystem key reads, or network calls.
 
 - [ ] **Step 2: Run RED tests.**
 
@@ -1081,9 +1311,11 @@ Run: go test ./internal/runtime/config -run 'GitIdentity|SigningAttestation' -co
 
 Expected: FAIL because suggestion functions are absent.
 
-- [ ] **Step 3: Implement read-only suggestions (GREEN).**
+- [ ] **Step 3: Implement canonical-root Git reads and OpenPGP-only signing (GREEN).**
 
-Run only git -C root config --get user.name, user.email, user.signingkey, and gpg.format. Return self-declared suggestions; do not write Git config or publish email. RequestSigningAttestation delegates signing to git/gpg/ssh-agent based on existing config and accepts signature bytes from stdout; it never reads a key file or credential helper.
+Canonicalize and validate the repository root, then require `git rev-parse --show-toplevel` to return that same root. Read exactly `user.name`, `user.email`, `user.signingkey`, and `gpg.format` with `git -C root config --get`. Exit 1 with empty output means unset; exit 0 strips one trailing newline. Every other exit, oversized output, NUL, or root mismatch is an error. Set `Source` to `git-config` when any value is present, otherwise leave it empty. Suggestions remain self-declared and Task 9 never publishes or persists them.
+
+V1 signing requires explicit `gpg.format=openpgp` and a non-path signing-key selector. Invoke exactly `gpg --batch --no-tty --status-fd=2 --local-user <key> --detach-sign --output -`, with payload on stdin and signature on stdout. Absent format, `ssh`, `x509`, path-like signing keys, unknown formats, empty/oversized signatures, and signer failure return typed fail-closed errors before any key-file read. Never return signer stderr or an error containing key or signature material. This is a narrow OpenPGP initial scope, not an SSH file-key fallback.
 
 - [ ] **Step 4: Run GREEN tests.**
 
@@ -1098,42 +1330,66 @@ git add internal/runtime/config/identity_suggestion.go internal/runtime/config/i
 git commit -m "feat(setup): suggest local git identity"
 ~~~
 
-### Task 10: Implement full transactional Codex and Claude adapters
+### Task 10: Implement transactional native Codex and Claude stdio adapters
 
 **Files:**
 
 - Create: internal/runtime/config/connector/connector.go
 - Create: internal/runtime/config/connector/transaction.go
+- Create: internal/runtime/config/connector/backup.go
+- Create: internal/runtime/config/connector/operation_journal.go
+- Create: internal/runtime/config/connector/transaction_lock_unix.go
+- Create: internal/runtime/config/connector/transaction_lock_windows.go
 - Create: internal/runtime/config/connector/codex.go
 - Create: internal/runtime/config/connector/claude.go
 - Create: internal/runtime/config/connector/connector_test.go
-- Create: internal/runtime/config/connector/testdata/codex/get-stdio.json
-- Create: internal/runtime/config/connector/testdata/codex/get-http.json
-- Create: internal/runtime/config/connector/testdata/codex/get-absent.stderr
-- Create: internal/runtime/config/connector/testdata/codex/list.json
-- Create: internal/runtime/config/connector/testdata/claude/2.1.220/get-stdio.txt
-- Create: internal/runtime/config/connector/testdata/claude/2.1.220/get-http.txt
-- Create: internal/runtime/config/connector/testdata/claude/2.1.220/get-absent.txt
+- Create: internal/runtime/config/connector/transaction_test.go
+- Create: internal/runtime/config/connector/testdata/codex/0.145.0/get-stdio.json
+- Create: internal/runtime/config/connector/testdata/codex/0.145.0/get-http.json
+- Create: internal/runtime/config/connector/testdata/codex/0.145.0/get-absent.stderr
+- Create: internal/runtime/config/connector/testdata/codex/0.145.0/list-stdio.json
+- Create: internal/runtime/config/connector/testdata/claude/2.1.220/user-stdio.json
+- Create: internal/runtime/config/connector/testdata/claude/2.1.220/local-stdio.json
+- Create: internal/runtime/config/connector/testdata/claude/2.1.220/project-stdio.json
+- Create: internal/runtime/config/connector/testdata/claude/2.1.220/user-http.json
+- Create: internal/runtime/config/connector/testdata/claude/2.1.220/hidden-scope-duplicate-user.json
+- Create: internal/runtime/config/connector/testdata/claude/2.1.220/hidden-scope-duplicate-project.json
 
 **Produces:**
 
 ~~~go
+type AdapterName string
+type AvailabilityState string
+const (
+    AvailabilityAvailable AvailabilityState = "available"
+    AvailabilityUnavailable AvailabilityState = "unavailable"
+    AvailabilityUnsupported AvailabilityState = "unsupported"
+)
+type Availability struct {
+    Adapter AdapterName
+    State AvailabilityState
+    Version string
+}
 type EntryState string
 const (EntryAbsent EntryState = "absent"; EntryPresent EntryState = "present")
 type Transport string
-const (TransportStdio Transport = "stdio"; TransportHTTP Transport = "http")
+const TransportStdio Transport = "stdio"
+type Scope string
+const ScopeUser Scope = "user"
+type EnvironmentVariable struct { Name, Value string }
 type ConnectorEntry struct {
-    State EntryState
-    Scope string
+    State     EntryState
+    Scope     Scope
     Transport Transport
-    Command string
-    Args []string
-    Env []string
-    URL string
-    Headers []string
-    BearerTokenEnvVar string
+    Command   string
+    Args      []string
+    Env       []EnvironmentVariable // sorted by name
 }
 type ChangePlan struct { Action string; Prior ConnectorEntry; Desired ConnectorEntry; Mutates bool }
+type TransactionResult struct {
+    Mutated, Recovered bool
+    BackupRef config.BackupReference
+}
 type Adapter interface {
     Discover(context.Context) (Availability, error)
     Inspect(context.Context) (ConnectorEntry, error)
@@ -1143,10 +1399,18 @@ type Adapter interface {
     Rollback(context.Context, ChangePlan) error
     Remove(context.Context, ConnectorEntry) error
 }
-func ApplyTransactional(context.Context, Adapter, ConnectorEntry, BackupStore) error
+func ApplyTransactional(
+    context.Context, Adapter, ConnectorEntry, BackupStore, OperationJournal,
+) (TransactionResult, error)
+func RemoveTransactional(
+    context.Context, Adapter, BackupStore, OperationJournal,
+) (TransactionResult, error)
+func RecoverTransactions(
+    context.Context, Adapter, BackupStore, OperationJournal,
+) error
 ~~~
 
-Prior absent is a first-class state. Typed stdio/http entries must reconstruct command, args/env or URL/headers/token-env/scope exactly. Inspect returns ErrUnsupportedPriorEntry before mutation for unknown transport, hidden secret, unknown Claude output version, ambiguous scope, or any value that cannot round-trip. Rollback restores typed prior; prior absent rollback removes the newly added entry.
+Prior absence is first-class. Only an absent or fully reconstructable user-scope stdio entry can reach planning. HTTP/SSE/OAuth/header entries, hidden-scope duplicates, malformed/unknown fields or versions, and anything that cannot round-trip return `ErrUnsupportedPriorEntry` before backup, journal, or mutation.
 
 - [ ] **Step 1: Write failing lifecycle/round-trip tests (RED).**
 
@@ -1162,40 +1426,41 @@ func TestCodexLifecycleUsesSupportedJSONAndExactAdd(t *testing.T) {
     assertCallsContain(t,runner,[]string{"codex","mcp","list","--json"})
     assertCallsContain(t,runner,[]string{"codex","mcp","add","wormhole","--","/abs/wormhole","mcp"})
 }
-func TestRollbackRestoresPriorAbsentAndTypedHTTP(t *testing.T) {
-    for _, prior := range []ConnectorEntry{{State:EntryAbsent},typedHTTPFixture(t)} {
+func TestRollbackRestoresPriorAbsentAndSupportedStdio(t *testing.T) {
+    for _, prior := range []ConnectorEntry{{State:EntryAbsent},typedStdioPrior(t),typedStdioPriorWithArgsAndEnv(t)} {
         runner := failingVerifyRunner(t,prior)
-        err := ApplyTransactional(t.Context(),runner.Adapter(),desiredStdio("/abs/wormhole"),privateBackupStore(t))
+        _, err := ApplyTransactional(t.Context(),runner.Adapter(),desiredStdio("/abs/wormhole"),privateBackupStore(t),operationJournal(t))
         if err == nil { t.Fatal("verification failure hidden") }
         if got := runner.FinalEntry(); !reflect.DeepEqual(got,prior) { t.Fatalf("got=%+v prior=%+v",got,prior) }
     }
 }
 func TestUnsupportedPriorFailsBeforeMutation(t *testing.T) {
     runner := unsupportedPriorRunner(t)
-    err := ApplyTransactional(t.Context(),runner.Adapter(),desiredStdio("/abs/wormhole"),privateBackupStore(t))
-    if !errors.Is(err,ErrUnsupportedPriorEntry) || runner.MutationCount() != 0 { t.Fatalf("mutations=%d err=%v",runner.MutationCount(),err) }
+    backup, journal := privateBackupStore(t), operationJournal(t)
+    _, err := ApplyTransactional(t.Context(),runner.Adapter(),desiredStdio("/abs/wormhole"),backup,journal)
+    if !errors.Is(err,ErrUnsupportedPriorEntry) || backup.Count() != 0 || runner.MutationCount() != 0 { t.Fatalf("backups=%d mutations=%d err=%v",backup.Count(),runner.MutationCount(),err) }
 }
-func TestGetAbsentRequiresRecognizedDiagnosticAndExitCode(t *testing.T) {
-    for _, fixture := range []struct {
-        name string
-        adapter Adapter
-        absentDiagnostic string
-    }{
-        {"codex", codexAdapterWithGetResult(t, 1, "testdata/codex/get-absent.stderr"), "testdata/codex/get-absent.stderr"},
-        {"claude-2.1.220", claudeAdapterWithGetResult(t, 1, "testdata/claude/2.1.220/get-absent.txt"), "testdata/claude/2.1.220/get-absent.txt"},
-    } {
-        t.Run(fixture.name, func(t *testing.T) {
-            got, err := fixture.adapter.Inspect(t.Context())
-            if err != nil || got.State != EntryAbsent { t.Fatalf("got=%+v err=%v", got, err) }
-            for _, result := range []commandResult{
-                {ExitCode: 2, Stderr: readFixture(t, fixture.absentDiagnostic)},
-                {ExitCode: 1, Stderr: "permission denied"},
-            } {
-                adapter := adapterWithGetResult(t, fixture.name, result)
-                if _, err := adapter.Inspect(t.Context()); err == nil { t.Fatalf("accepted result=%+v", result) }
-            }
-        })
+func TestCodexAbsentRequiresVersionedRawDiagnostic(t *testing.T) {
+    fixture := "testdata/codex/0.145.0/get-absent.stderr"
+    got, err := codexAdapterWithGetResult(t,1,fixture).Inspect(t.Context())
+    if err != nil || got.State != EntryAbsent { t.Fatalf("got=%+v err=%v",got,err) }
+    for _, result := range []config.CommandResult{{ExitCode:2,Stderr:readFixture(t,fixture)},{ExitCode:1,Stderr:[]byte("permission denied")}} {
+        if _,err := codexAdapterWithRawGetResult(t,result).Inspect(t.Context()); err == nil { t.Fatalf("accepted=%+v",result) }
     }
+}
+func TestClaudeInspectParsesNativeFilesWithoutHealthCheck(t *testing.T) {
+    fixture := claudeNativeConfigFixture(t,"2.1.220","user-stdio.json")
+    got, err := fixture.Adapter.Inspect(t.Context())
+    if err != nil || got.State != EntryPresent || got.Transport != TransportStdio { t.Fatalf("got=%+v err=%v",got,err) }
+    if fixture.Runner.Called("claude","mcp","get") || fixture.Runner.Called("claude","mcp","list") { t.Fatalf("calls=%v",fixture.Runner.Calls()) }
+}
+func TestRecoveryRestoresAppliedPriorAndRejectsThirdPartyState(t *testing.T) {
+    fixture := crashedAfterApplyFixture(t,typedStdioPriorWithArgsAndEnv(t))
+    if err := RecoverTransactions(t.Context(),fixture.Adapter,fixture.Backups,fixture.Journal); err != nil { t.Fatal(err) }
+    if !reflect.DeepEqual(fixture.Entry(),fixture.Prior) { t.Fatalf("got=%+v prior=%+v",fixture.Entry(),fixture.Prior) }
+    conflict := recoveryConflictFixture(t)
+    if err := RecoverTransactions(t.Context(),conflict.Adapter,conflict.Backups,conflict.Journal); !errors.Is(err,ErrRecoveryConflict) { t.Fatalf("err=%v",err) }
+    if conflict.MutationCount() != 0 { t.Fatalf("mutations=%d",conflict.MutationCount()) }
 }
 ~~~
 
@@ -1205,13 +1470,17 @@ Run: go test ./internal/runtime/config/connector -run 'Codex|Claude|Rollback|Abs
 
 Expected: FAIL because connector package is absent.
 
-- [ ] **Step 3: Implement Codex and Claude exact command adapters (GREEN).**
+- [ ] **Step 3: Implement fail-closed native inspection and durable transaction recovery (GREEN).**
 
-Codex: Discover resolves codex and version. Inspect runs codex mcp get wormhole --json first. Exit zero parses a present entry; exit one is EntryAbsent only when stderr matches the checked-in get-absent.stderr not-found grammar; every other nonzero exit or malformed/changed diagnostic is an inspection error and forbids mutation. For a present result, also run codex mcp list --json and cross-check presence. Desired apply is exact stdio add. Remove uses codex mcp remove wormhole. Prior HTTP reconstruction uses codex mcp add wormhole --url URL plus represented bearer-token-env/oauth fields only.
+Codex 0.145.0: `Inspect` runs `codex mcp get wormhole --json` and cross-checks `codex mcp list --json`. Support absence or stdio with exact command/args and literal environment only. Reject nonempty `cwd`, `env_vars`, every HTTP entry, OAuth, headers, malformed/unknown keys, and unknown versions. Desired add is exactly `codex mcp add wormhole -- /absolute/path/to/wormhole mcp`; remove is exactly `codex mcp remove wormhole`. Exit 1 means absent only when raw stderr matches the checked-in versioned not-found fixture; every other exit/output fails closed. Codex HTTP is categorically unsupported in v1 because `get --json` omits persisted OAuth client/resource fields; do not claim arbitrary HTTP rollback.
 
-Claude: Discover runs claude --version. Inspect runs human-readable claude mcp get wormhole; there is no inspect command and no JSON flag. Select a versioned parser using the tested version fixture. Exit zero parses a present entry; exit one is EntryAbsent only when the selected version's get-absent fixture grammar matches; every other nonzero exit or malformed/unknown not-found diagnostic is an inspection error and forbids mutation. Desired apply is exactly claude mcp add --scope user wormhole -- /abs/wormhole mcp. Remove is exactly claude mcp remove --scope user wormhole. Prior stdio/http is reconstructed with its parsed scope/transport/env/header fields. Unknown output/version or a field that cannot round-trip returns ErrUnsupportedPriorEntry before Remove.
+Claude Code 2.1.220: production `Inspect` must not run `claude mcp get` or `claude mcp list`, because those commands health-check existing entries and text output loses argv boundaries. Parse bounded, duplicate-key-safe native files instead: user scope at `~/.claude.json` top-level `mcpServers`; local scope at `~/.claude.json` `projects[canonicalRoot].mcpServers`; project scope at `<canonicalRoot>/.mcp.json` `mcpServers`. Reject unsafe files, unknown target-entry fields/schema, HTTP/SSE/OAuth/header entries, and same-name presence in more than one scope. Reconstruct only exact stdio command, argument array, and string environment. Desired add is exactly `claude mcp add --scope user wormhole -- /absolute/path/to/wormhole mcp`; remove is exactly `claude mcp remove --scope user wormhole`. Mutation may use native commands only after file inspection proves the prior and never pre-removes a differing entry without a durable exact backup and operation journal.
 
-Transaction sequence is Discover, Inspect, Plan, durable 0600 typed backup, Apply, Verify, then success; any Apply/Verify error calls Rollback. Plan with Mutates=false performs no backup/mutation. Never log entry/env/header content.
+Backups are strict typed prior/desired entries in owner-only `0600` files; `BackupStore.Put` returns the opaque Task 8 reference. Operation journals contain only adapter, name, action, stage, prior/desired digests, and backup reference, never entry contents. Stages are `prepared`, `applied`, `verified`, `rolled_back`, and `complete`. A durable backup and durable `prepared` record precede mutation. No-op performs no backup, journal, or mutation. Apply/verify failure restores and verifies the exact prior or absence. Rollback first observes current state and refuses to overwrite concurrent third-party changes.
+
+Run recovery under a cross-process adapter/name lock before every operation. If a `prepared` operation still has its prior, complete without mutation. If `prepared` or `applied` has desired state, restore and verify prior. If `verified` has desired state, complete. Any third-party mismatch returns `ErrRecoveryConflict` without mutation. `RemoveTransactional` uses the same backup, journal, recovery, verification, and conflict rules.
+
+Raw stdout, stderr, and native-config fixtures live under exact supported-version directories. Unknown version/output/config shapes fail closed. Tests cover absence, exact desired no-op, supported stdio prior, HTTP/OAuth/header rejection, spaced and empty argv, malformed/unknown version/transport, hidden-scope duplicates, backup failure, partial apply, verify mismatch, rollback failure/conflict, crash after apply before verify, cancellation, output bounds, and secret redaction. Fake runners record exact argv. HTTP cases assert zero backup and zero mutation; they are never rollback-success cases.
 
 - [ ] **Step 4: Run GREEN tests without touching real harness config.**
 
@@ -1219,14 +1488,14 @@ Run: go test ./internal/runtime/config/connector -run 'Codex|Claude|Rollback|Abs
 
 Expected: PASS using fake runners and versioned fixtures only.
 
-Run: codex mcp get --help && codex mcp list --help && codex mcp add --help && codex mcp remove --help && claude mcp get --help && claude mcp add --help && claude mcp remove --help
+Run: codex --version && codex mcp get --help && codex mcp list --help && claude --version && claude mcp get --help && claude mcp list --help
 
-Expected: capability check exits zero; it does not add/remove any connector.
+Expected: isolated read-only version/help/get/list capability smoke exits zero; it never adds or removes a real entry.
 
 - [ ] **Step 5: Commit.**
 
 ~~~bash
-git add internal/runtime/config/connector/connector.go internal/runtime/config/connector/transaction.go internal/runtime/config/connector/codex.go internal/runtime/config/connector/claude.go internal/runtime/config/connector/connector_test.go internal/runtime/config/connector/testdata
+git add internal/runtime/config/connector/connector.go internal/runtime/config/connector/transaction.go internal/runtime/config/connector/backup.go internal/runtime/config/connector/operation_journal.go internal/runtime/config/connector/transaction_lock_unix.go internal/runtime/config/connector/transaction_lock_windows.go internal/runtime/config/connector/codex.go internal/runtime/config/connector/claude.go internal/runtime/config/connector/connector_test.go internal/runtime/config/connector/transaction_test.go internal/runtime/config/connector/testdata
 git commit -m "feat(setup): add transactional harness adapters"
 ~~~
 
@@ -1255,14 +1524,18 @@ type gatewayClient struct { SocketPath string }
 func (c gatewayClient) RegisterWorkspace(context.Context, string) (projectstate.RegisterWorkspaceResult, error)
 func (c gatewayClient) CreateLocalIdentity(context.Context, string, string) (localidentity.HumanProfile, error)
 func (c gatewayClient) SelectLocalIdentity(context.Context, string) error
+func (c gatewayClient) ImportWorkspace(context.Context) (projectstate.ImportResult, error)
 func (c gatewayClient) RebuildCodeGraph(context.Context) error
+func (c gatewayClient) DisableCodeGraph(context.Context) error
 func (c gatewayClient) VerifyWorkspace(context.Context) error
 func runConnector(context.Context, []string, io.Reader, io.Writer, io.Writer, connectorCommandDeps) int
 ~~~
 
-The exact standalone forms are wormhole connector list, wormhole connector install <codex|claude> [--yes], and wormhole connector remove <codex|claude> [--yes]. list calls Discover/Inspect and prints only adapter name, availability, state, scope, and transport. install plans, displays, confirms unless --yes, and calls ApplyTransactional with the private backup store. remove uses an equivalent RemoveTransactional sequence: Discover, Inspect, durable typed backup, Remove, verify EntryAbsent, and restore the exact prior entry on failure. No CLI output includes command environment, headers, bearer fields, private paths, or backup contents.
+The CLI sends only cwd/root or a selected human UUID to Gateway; it never sends a workspace binding or actor envelope. The exact standalone forms are wormhole connector list, wormhole connector install <codex|claude> [--yes], and wormhole connector remove <codex|claude> [--yes]. list calls Discover/Inspect and prints only adapter name, availability, state, scope, and transport. install and remove both invoke Task 10's durable recovery/transaction APIs. No CLI output includes command environment, headers, bearer fields, private paths, backup references, or backup contents.
 
 Fabric profile/login/attach and wormhole project/fabric commands are Slice D-owned. Setup exposes an optional Fabric stage only through D's Gateway RPC when that capability exists; otherwise it records local-only and succeeds. It never reintroduces legacy credential-profile enrollment.
+
+Task 11 may add setup and connector dispatch cases but must not edit or delete the legacy `init`/`join`/`connect` command files, variants, contracts, docs, or tests. Task 12 retains exclusive ownership of that deletion and cutover.
 
 - [ ] **Step 1: Write failing orchestration/recovery tests (RED).**
 
@@ -1275,9 +1548,14 @@ func TestSetupResumesAfterEveryInjectedStageFailure(t *testing.T) {
             if code := fixture.Run(); code == 0 { t.Fatal("injected failure succeeded") }
             completed := fixture.CompletedStages()
             if code := fixture.Run(); code != 0 { t.Fatalf("resume code=%d",code) }
-            if fixture.ReplayedAny(completed) { t.Fatalf("replayed=%v completed=%v",fixture.Calls(),completed) }
+            if !fixture.ReverifiedBeforeSkip(completed) { t.Fatalf("calls=%v completed=%v",fixture.Calls(),completed) }
         })
     }
+}
+func TestSetupRendersOnePlanAndConfirmsExactlyOnce(t *testing.T) {
+    fixture := setupFixture(t)
+    if code := fixture.RunWithInput("yes\n"); code != 0 { t.Fatalf("code=%d",code) }
+    if fixture.PlanCount() != 1 || fixture.ConfirmationCount() != 1 { t.Fatalf("plans=%d confirmations=%d",fixture.PlanCount(),fixture.ConfirmationCount()) }
 }
 func TestSetupNeverExecutesRepositoryContent(t *testing.T) {
     fixture := setupFixtureWithManifest(t,"hooks = [\"touch sentinel\"]")
@@ -1293,7 +1571,7 @@ func TestConnectorListInstallRemoveUseTransactionalAdapters(t *testing.T) {
     if code := runConnector(t.Context(),[]string{"list"},strings.NewReader(""),io.Discard,io.Discard,deps); code != 0 { t.Fatalf("list=%d",code) }
     if code := runConnector(t.Context(),[]string{"install","codex","--yes"},strings.NewReader(""),io.Discard,io.Discard,deps); code != 0 { t.Fatalf("install=%d",code) }
     if code := runConnector(t.Context(),[]string{"remove","codex","--yes"},strings.NewReader(""),io.Discard,io.Discard,deps); code != 0 { t.Fatalf("remove=%d",code) }
-    if !reflect.DeepEqual(deps.Actions(),[]string{"discover","inspect","plan","backup","apply","verify","discover","inspect","backup","remove","verify-absent"}) { t.Fatalf("actions=%v",deps.Actions()) }
+    if !deps.InstallAndRemoveUsedDurableRecovery() { t.Fatalf("actions=%v",deps.Actions()) }
     if deps.RealConfigTouched() || deps.OutputContainsSecret() { t.Fatal("connector command escaped fake/redacted boundary") }
 }
 ~~~
@@ -1304,11 +1582,26 @@ Run: go test ./cmd/wormhole -run 'Setup|GatewayClient|NonInteractive|NeverExecut
 
 Expected: FAIL because setup.go and Gateway client are absent.
 
-- [ ] **Step 3: Implement one-plan setup and RPC orchestration (GREEN).**
+- [ ] **Step 3: Implement ordered, resumable, one-confirmation orchestration (GREEN).**
 
-Exact stages: discover nearest .wormhole; decode/validate using internal/types/projectstate; inspect/install/start/verify service; Gateway RegisterWorkspace and consume result.Binding; create/select a Task-0 local human profile through Gateway; refresh/import base; connector Discover/Inspect/Plan display; one user confirmation; connector transactional apply; optional Slice D Fabric RPC or local-only; explicit Code Graph rebuild; Gateway final verification; journal complete. SelectLocalIdentity sends only the human UUID and updates the owner-only localidentity store; it never accepts an ActorEnvelope from the CLI.
+Execute this exact order:
 
-Interactive prints one plan and asks once. Noninteractive requires --code-graph=on|off unless a preference exists. Every completed stage is journalled after verification. Connector failure leaves workspace imported; Fabric unavailable leaves local-only; graph failure leaves workspace usable. Missing dependencies return the Task 5 offline error and explain that separate dependency-fetch consent is required; setup does not silently download.
+1. Find nearest `.wormhole`, canonicalize its root, and decode/validate canonical project state without executing repository content.
+2. Resume or begin the setup journal and mark `project_validated`.
+3. Inspect/install/start/verify `gatewayd`. Manager-unavailable may proceed only if direct Gateway verification already succeeds; otherwise return the exact manual diagnostic with the journal active.
+4. Register the workspace, consume only `RegisterWorkspaceResult.Binding`, and bind its workspace UUID in the journal.
+5. Suggest/create/select the local human identity through Gateway; the CLI sends only the selected UUID.
+6. Refresh/import the accepted base through Gateway using the selected Gateway-owned actor. This deliberate register → identity → actor-attributed import ordering resolves the architecture outline's import-before-identity conflict with Slice A's valid-actor requirement.
+7. Discover, inspect, and plan every selected connector, then render one complete plan.
+8. Obtain exactly one confirmation, then persist the sorted connector/code-graph `SetupSelection`.
+9. Apply connectors transactionally and record every nonempty opaque returned backup reference. Connector failure restores only connector state and leaves the imported workspace intact.
+10. Feature-detect Slice D's future Fabric RPC; when absent, record local-only resolution. Task 11 adds no Fabric schema, profile, command, or auth type.
+11. For code graph `on`, explicitly rebuild and require ready/current status; for `off`, explicitly disable and verify disabled status.
+12. Verify Gateway, workspace, identity, connectors, and graph; mark `final_verified`; call journal `Complete`.
+
+Persist confirmed connector and code-graph selections so resume never reprompts. Interactive setup renders one plan and confirms exactly once. Noninteractive setup exits 2 before mutation unless `--code-graph=on|off`, an active-journal selection, or an existing durable graph preference supplies the choice. Resume reverifies every completed stage before skipping it; mark a stage only after effect verification and record a redacted stage error on failure.
+
+Unavailable harnesses are reported and skipped. A supported adapter with an ambiguous/unsupported prior is a non-mutating incomplete connector stage; registration/import remains intact and retryable. Setup does not demand rollback of HTTP/OAuth/ambiguous transports rejected by Task 10 before mutation. Fabric unavailable resolves local-only; graph failure leaves the workspace usable. Missing dependencies return Task 5's offline error and explain that separate dependency-fetch consent is required; setup never silently downloads.
 
 - [ ] **Step 4: Run GREEN tests.**
 
@@ -1410,11 +1703,20 @@ func TestOneGatewayIsolatesTwoWorkspacesAcrossWorkerCrashAndRestart(t *testing.T
     fixture.RestartGateway()
     if got := fixture.WorkspaceStatus("a").WorkspaceID; got != fixture.Binding("a").Scope.WorkspaceID { t.Fatalf("got=%s",got) }
 }
-func TestConnectorFailureRestoresExactPriorOrAbsence(t *testing.T) {
-    for _, prior := range []connector.ConnectorEntry{{State:connector.EntryAbsent},typedStdioPrior(t),typedHTTPPrior(t)} {
+func TestConnectorFailureRestoresExactSupportedPriorOrAbsence(t *testing.T) {
+    for _, prior := range []connector.ConnectorEntry{{State:connector.EntryAbsent},typedStdioPrior(t),typedStdioPriorWithArgsAndEnv(t)} {
         fixture := setupConnectorFailureFixture(t,prior)
         if code := fixture.Run(); code == 0 { t.Fatal("verification failure succeeded") }
         if got := fixture.Entry(); !reflect.DeepEqual(got,prior) { t.Fatalf("got=%+v prior=%+v",got,prior) }
+        if !fixture.WorkspaceImported() { t.Fatal("workspace rolled back") }
+    }
+}
+func TestUnsupportedConnectorPriorFailsBeforeMutation(t *testing.T) {
+    for _, prior := range []unsupportedPrior{codexHTTPPrior(t),codexOAuthPrior(t),claudeHTTPPrior(t),claudeHiddenScopeDuplicate(t)} {
+        fixture := setupUnsupportedConnectorFixture(t,prior)
+        if code := fixture.Run(); code == 0 { t.Fatal("unsupported prior succeeded") }
+        if !errors.Is(fixture.Err(),connector.ErrUnsupportedPriorEntry) { t.Fatalf("err=%v",fixture.Err()) }
+        if fixture.BackupCount() != 0 || fixture.MutationCount() != 0 { t.Fatalf("backup=%d mutation=%d",fixture.BackupCount(),fixture.MutationCount()) }
         if !fixture.WorkspaceImported() { t.Fatal("workspace rolled back") }
     }
 }
@@ -1422,7 +1724,7 @@ func TestConnectorFailureRestoresExactPriorOrAbsence(t *testing.T) {
 
 - [ ] **Step 2: Run RED tests.**
 
-Run: go test ./cmd/wormhole ./cmd/gatewayd ./internal/runtime/localapi -run 'RemovedCommands|SemanticallyEqual|OneGatewayIsolates|ConnectorFailure|Contract' -count=1
+Run: go test ./cmd/wormhole ./cmd/gatewayd ./internal/runtime/localapi -run 'RemovedCommands|SemanticallyEqual|OneGatewayIsolates|ConnectorFailure|UnsupportedConnectorPrior|Contract' -count=1
 
 Expected: FAIL until cutover/integration is complete.
 
@@ -1430,7 +1732,7 @@ Expected: FAIL until cutover/integration is complete.
 
 Remove init/join/connect from dispatcher, runInit/runJoin/runConnect callers and helpers, usage, tests, guidance, docs, and JSON contract with no aliases. Remove the join-shaped wormhole.agent.register variant, agentJoinRegisterArgs, isJoinRegisterArgs, proxyRegister, and localJoinResult while preserving the unrelated MCP initialize handshake. Modify the Slice-A cmd/wormhole/workspace.go and workspace_test.go so status/diff/import/checkpoint/stash are top-level commands only; there is no wormhole workspace subcommand. Register final workspace/code-graph tools without cwd or machine-ID schema fields. CLI workspace and graph operations call Gateway from cwd and render the same semantic result as MCP. Dispatch connector list/install/remove to the tested connector.go implementation. Update docs only for tested B/C commands; mark project/fabric administration as Slice D-dependent.
 
-All automated adapter tests use fake runners/config roots. Real-client smoke is limited to read-only version/help/get capability checks against an isolated temporary config when supported; no test adds/removes an entry in the actual user config. There is no real mutation smoke in make check.
+All automated adapter tests use fake runners/config roots. Real-client smoke is limited to isolated read-only version/help/get/list capability checks; no test adds or removes a real entry. There is no real mutation smoke in make check. Supported stdio priors prove transactional rollback. HTTP/OAuth/ambiguous priors prove `ErrUnsupportedPriorEntry`, zero backup, zero mutation, and preservation of the already-imported workspace; they are not rollback-success cases.
 
 - [ ] **Step 4: Run focused, scale, and full verification (GREEN).**
 
@@ -1463,9 +1765,11 @@ git commit -m "feat(cli): complete gateway setup cutover"
 - Task 1 begins after Slice A localapi workspace operations and projectstate resolver exist.
 - Task 2 follows Task 1; its FabricRouter is local-only/legacy until Slice D supplies the final multi-Fabric implementation.
 - Task 3 follows Slice A shared binding freeze. Task 4 follows Task 3. Task 5 follows Tasks 3-4. Task 6 follows Task 5.
-- Tasks 7, 8, 9, and 10 are independent after runtime/config command-runner conventions are frozen.
-- Task 11 consumes Tasks 7-10 and Gateway RPCs from Tasks 1-6.
-- Task 12 consumes every prior task. Slice D owns project/fabric CLI and authenticated attach/login; Slice E owns private human authentication.
+- Task 7 first freezes and ships the shared `CommandRunner` contract.
+- Tasks 8 and 9 may then proceed independently.
+- Task 10 consumes Task 7's shared runner and Task 8's opaque `config.BackupReference` grammar, but owns connector backup contents and its operation journal.
+- Task 11 consumes completed Tasks 7-10 and Gateway RPCs from Tasks 1-6.
+- Task 12 consumes every prior task and retains all legacy deletion/cutover ownership. Slice D owns project/fabric CLI and authenticated attach/login; Slice E owns private human authentication.
 
 ## Self-review
 
@@ -1474,6 +1778,12 @@ git commit -m "feat(cli): complete gateway setup cutover"
 - Supervisor seams: FabricRouter and CodeGraphProvider have exact binding-scoped methods, non-nil fail-closed implementations, and errors.Is coverage for their typed unavailable errors.
 - Workers: separate process, DB, socket, private caches, offline/sanitized environment, read-only checkout, crash/restart/disable isolation.
 - Graph: exact schema/status fingerprints, manifest ordering/restart/failed-publish tests, explicit BM25/tokenizer constants, held-out recall/disclosure/determinism/scale gates.
+- Shared execution: one runner contract has exact exit/output/context semantics and is reused by service, Git identity, and connectors.
+- Lexical ownership: Task 3 owns scoped schema and cascading lifecycle; Task 6 owns documentation extraction, token population, BM25 query, and held-out/scale acceptance.
+- Service: one exact unit/socket/runtime-root contract, fail-closed manager probing, and byte-identical active idempotence.
+- Journals: canonical owner-only per-UUID files, OS locks, terminal completion, ambiguous-resume rejection, workspace/selection/error APIs, opaque backup references, and old-or-new fault recovery.
+- Git identity: exactly four read-only config keys, explicit unset behavior, canonical-root proof, and OpenPGP-only v1 signing without key-file access.
 - Setup: service, journal, identity, connector, and cmd orchestration are separate reviewable tasks; runtime/config does not call Gateway.
-- Connectors: complete seven-operation contract, absent/http/stdio round-trip, fail-before-mutation, exact Codex commands, versioned human-readable Claude get parser, recognized exit-one not-found fixtures only, exact add/remove commands, and read-only help smoke for both mutation subcommands.
+- Connectors: exact-version absent/provable-stdio support, native Claude config parsing without health checks, HTTP/OAuth rejection before mutation, durable backup/operation recovery, and exact transactional remove.
+- C12 boundary: legacy deletion, docs/contracts cutover, and final integration remain C12-owned; earlier tasks do not edit those legacy surfaces.
 - Verification: acceptance tests have executable assertions, normal tests never mutate real user connector state, the current rg -l cutover inventory is frozen, final add/rm staging lists every path explicitly, and the 80-percent gate is explicit.
