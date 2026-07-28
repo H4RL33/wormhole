@@ -377,6 +377,27 @@ func TestApplyOperationErrorLeavesInputUnchanged(t *testing.T) {
 	if snapshot.Tasks[taskID].Value != originalTask {
 		t.Fatal("ApplyOperation replaced input record pointer on error")
 	}
+
+	invalidTask := *snapshot.Tasks[taskID].Value
+	missingActorID := "88888888-8888-4888-8888-888888888888"
+	invalidTask.OwnerActorID = &missingActorID
+	postMutationFailure := OperationV1{
+		SchemaVersion: 1, ID: "99999999-9999-4999-8999-999999999998", Kind: OperationPutRecord,
+		ExpectedViewDigest: snapshot.Digest, Actor: operationActor(),
+		PutRecord: &PutRecordV1{Record: RecordValueV1{Task: &invalidTask}},
+	}
+	got, err = ApplyOperation(snapshot, postMutationFailure)
+	if !errors.Is(err, ErrBrokenReference) || !reflect.DeepEqual(got, snapshot) {
+		t.Fatalf("post-mutation ApplyOperation = (%+v, %v), want original and ErrBrokenReference", got, err)
+	}
+	afterPostMutationFailure, encodeErr := EncodeTree(snapshot)
+	if encodeErr != nil {
+		t.Fatal(encodeErr)
+	}
+	assertTreeEqual(t, before, afterPostMutationFailure)
+	if snapshot.Tasks[taskID].Value != originalTask {
+		t.Fatal("post-mutation failure replaced input record pointer")
+	}
 }
 
 func TestApplyOperationRejectsMalformedOperations(t *testing.T) {

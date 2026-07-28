@@ -131,6 +131,7 @@ func TestDigestTreeGoldenAndOrderIndependent(t *testing.T) {
 
 func TestDigestTreeRejectsUnsafeOrDuplicatePaths(t *testing.T) {
 	for _, tree := range []Tree{
+		{{Path: "..", Data: []byte("x")}},
 		{{Path: "../config.toml", Data: []byte("x")}},
 		{{Path: "/config.toml", Data: []byte("x")}},
 		{{Path: "state\\v1\\project.json", Data: []byte("x")}},
@@ -146,6 +147,29 @@ func TestRemotesRejectsCredentialShapedKey(t *testing.T) {
 	_, err := DecodeTree(readFixtureTree(t, "testdata/v1/bad-remotes/.wormhole"))
 	if !errors.Is(err, ErrTrackedSecret) {
 		t.Fatalf("DecodeTree error = %v, want ErrTrackedSecret", err)
+	}
+}
+
+func TestRemotesRejectsControlCharactersBeforeEncoding(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*FabricHintV1)
+	}{
+		{"instance id BEL", func(fabric *FabricHintV1) { fabric.InstanceID = "bad\a" }},
+		{"remote project id vertical tab", func(fabric *FabricHintV1) { fabric.RemoteProjectID = "bad\v" }},
+		{"remote project id DEL", func(fabric *FabricHintV1) { fabric.RemoteProjectID = "bad\x7f" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot, err := DecodeTree(readFixtureTree(t, "testdata/v1/valid/.wormhole"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(&snapshot.Remotes.Fabrics[0])
+			if _, err := EncodeTree(snapshot); !errors.Is(err, ErrInvalidSnapshot) {
+				t.Fatalf("EncodeTree error = %v, want ErrInvalidSnapshot", err)
+			}
+		})
 	}
 }
 

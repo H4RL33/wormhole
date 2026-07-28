@@ -668,7 +668,7 @@ func cloneAndSortTree(tree Tree) Tree {
 
 func validateTreePaths(files Tree) error {
 	for i, file := range files {
-		if file.Path == "" || strings.ContainsRune(file.Path, 0) || strings.Contains(file.Path, "\\") || strings.HasPrefix(file.Path, "/") || path.Clean(file.Path) != file.Path || file.Path == "." || strings.HasPrefix(file.Path, "../") {
+		if file.Path == "" || strings.ContainsRune(file.Path, 0) || strings.Contains(file.Path, "\\") || strings.HasPrefix(file.Path, "/") || path.Clean(file.Path) != file.Path || file.Path == "." || file.Path == ".." || strings.HasPrefix(file.Path, "../") {
 			return invalidPath(file.Path, "unsafe path")
 		}
 		if i > 0 && files[i-1].Path == file.Path {

@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/H4RL33/wormhole/internal/types"
 )
@@ -386,7 +387,7 @@ func validateRemotes(remotes RemotesV1) error {
 	}
 	seen := make(map[string]struct{}, len(remotes.Fabrics))
 	for _, fabric := range remotes.Fabrics {
-		if !fabricAliasPattern.MatchString(fabric.Alias) || !validateFabricURL(fabric.URL) || !requiredText(fabric.InstanceID) || !requiredText(fabric.RemoteProjectID) || (fabric.Mode != "public" && fabric.Mode != "private") {
+		if !fabricAliasPattern.MatchString(fabric.Alias) || !validateFabricURL(fabric.URL) || !safeTOMLText(fabric.InstanceID) || !safeTOMLText(fabric.RemoteProjectID) || (fabric.Mode != "public" && fabric.Mode != "private") {
 			return fmt.Errorf("%w: invalid fabric hint %q", ErrInvalidSnapshot, fabric.Alias)
 		}
 		if _, duplicate := seen[fabric.Alias]; duplicate {
@@ -514,6 +515,18 @@ func allTombstones(snapshot Snapshot) []*TombstoneV1 {
 
 func requiredText(value string) bool {
 	return value != "" && strings.TrimSpace(value) == value && !strings.ContainsRune(value, 0)
+}
+
+func safeTOMLText(value string) bool {
+	if !requiredText(value) {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
 }
 
 func validTimes(created, updated time.Time) bool {

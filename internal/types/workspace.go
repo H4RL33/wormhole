@@ -84,6 +84,10 @@ func (r RepositoryIdentity) Validate() error {
 	if remote.Scheme != strings.ToLower(remote.Scheme) || remote.Hostname() != strings.ToLower(remote.Hostname()) || remote.Path == "" || remote.Path == "/" {
 		return fmt.Errorf("%w: canonical remote is not normalized", ErrInvalidRepositoryIdentity)
 	}
+	canonicalRemote := (&url.URL{Scheme: remote.Scheme, Host: remote.Host, Path: remote.Path}).String()
+	if canonicalRemote != r.CanonicalRemote {
+		return fmt.Errorf("%w: canonical remote has an equivalent non-canonical serialization", ErrInvalidRepositoryIdentity)
+	}
 	if strings.HasSuffix(remote.Path, "/") || strings.HasSuffix(remote.Path, ".git") || path.Clean(remote.Path) != remote.Path || hasDotPathSegment(remote.EscapedPath()) {
 		return fmt.Errorf("%w: canonical remote path is not normalized", ErrInvalidRepositoryIdentity)
 	}

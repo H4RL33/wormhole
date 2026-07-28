@@ -20,6 +20,8 @@ func TestRepositoryIdentityValidate(t *testing.T) {
 		"https://github.com/acme/wormhole.git",
 		"https://github.com/acme/wormhole/",
 		"https://github.com/acme/wormhole#fragment",
+		"https://github.com/%61cme/wormhole",
+		"https://github.com/acme/%77ormhole",
 	} {
 		invalid := valid
 		invalid.CanonicalRemote = remote
