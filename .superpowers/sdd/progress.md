@@ -159,3 +159,21 @@ Task 5: complete (commit 46291b7..5fe2a42, doc-only README update, diff verified
 Task 6: complete (verification-only, no commit). go build ./... && go vet ./... && go test ./... all green, no known flake hit this run.
 
 Viewer key issuance plan (docs/superpowers/plans/2026-08-10-viewer-key-issuance.md) COMPLETE. All 6 tasks done, base febb384..5fe2a42. Branch worktree-viewer-key-issuance ready for merge, pending human decision (superpowers:finishing-a-development-branch).
+
+---
+
+# Git-Native Wormhole programme — subagent-driven-development progress
+
+Programme plan: `docs/superpowers/plans/2026-07-28-git-native-wormhole-programme-plan.md`
+
+Executable slice plans:
+
+- `docs/superpowers/plans/2026-07-28-git-native-portable-state-implementation-plan.md`
+- `docs/superpowers/plans/2026-07-28-gateway-setup-codegraph-implementation-plan.md`
+- `docs/superpowers/plans/2026-07-28-multifabric-identity-trial-implementation-plan.md`
+
+Plans reconciled and approved by fresh cross-slice review; committed as `08f10fe`.
+
+**Task A1** (portable state Task 1 — shared schemas, codec, validator, digest, reducer, and module map): complete. Base `08f10fe`; implementation `e43ef52`; review-fix `b3770c9`. Genuine RED recorded; focused/full packages, vet, race, and `go test ./...` green. Coverage: `internal/types` 88.5%, `internal/types/projectstate` 80.2%. Fresh task review approved after one fix round with no remaining findings. Follow-up plan durability correction committed separately as `dc4106c` before Task A2.
+
+**Task A2** (portable state Task 2 — scoped SQLite schema, durable migration ledger, workspace registration/resolution): in progress. Base `dc4106c`. Recon: `.superpowers/sdd/git-native-a2-recon.md`. RED/GREEN, head SHA, review result, and coverage pending.
