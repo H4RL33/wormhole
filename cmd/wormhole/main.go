@@ -55,6 +55,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runViewerKey(args[1:], stdout, stderr)
 	case "integration":
 		return runIntegrationCommand(args[1:], stdout, stderr)
+	case "trial-metrics":
+		return runTrialMetricsCommand(args[1:], stdout, stderr)
 	case "mcp":
 		return runMCP(args[1:], stdout, stderr)
 	case "-h", "--help", "help":
@@ -94,6 +96,8 @@ commands:
   wormhole integration update [flags]   explicitly apply a verified higher version
   wormhole integration remove [flags]   remove unchanged managed guidance
   wormhole integration rollback [flags]  apply the selected prior approved version
+  wormhole trial-metrics validate [flags] [FILE|-]  validate a local trial metrics export
+  wormhole trial-metrics format [flags] [FILE|-]    validate and format a local trial metrics export
   wormhole mcp                           stdio↔socket bridge for MCP harness (no flags)
   wormhole help                          show this message
 

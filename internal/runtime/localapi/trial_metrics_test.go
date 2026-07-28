@@ -17,7 +17,7 @@ func TestTrialMetricsMarshalProducesStrictStructuredExport(t *testing.T) {
 	}
 	for _, key := range []string{
 		`"installation_completed"`, `"time_to_first_gateway_mcp_call_ms"`, `"time_to_productive_work_ms"`,
-		`"tool_success_count"`, `"tool_denial_count"`, `"context_retrieved_at_session_start"`,
+		`"tool_success_count"`, `"tool_denial_count"`, `"tool_failure_count"`, `"context_retrieved_at_session_start"`,
 		`"human_coaching_interventions"`, `"model_handoff_succeeded"`, `"sync_recovery_succeeded"`,
 		`"kb_relevant_results"`, `"kb_results_considered"`, `"duplicate_or_low_value_kb_contributions"`,
 		`"code_graph_useful_queries"`, `"code_graph_queries"`, `"files_read_before_correct_edit"`,
@@ -61,6 +61,30 @@ func TestTrialMetricsParticipantExportPrecedesAggregateDecision(t *testing.T) {
 	}
 }
 
+func TestTrialParticipantPreviewAllowsReviewBeforeSubmissionConsent(t *testing.T) {
+	aggregate := validTrialMetricsExport()
+	export := TrialParticipantExport{
+		SchemaVersion: TrialMetricsSchemaVersion, ExportID: "participant-a-local-preview",
+		ReleaseCandidate: aggregate.ReleaseCandidate, GeneratedAt: aggregate.GeneratedAt,
+		Participant: aggregate.Participants[0],
+	}
+	export.Participant.Consent.ParticipantSubmission = false
+
+	data, err := MarshalTrialParticipantPreview(export)
+	if err != nil {
+		t.Fatalf("MarshalTrialParticipantPreview: %v", err)
+	}
+	if _, err := DecodeTrialParticipantPreview(data); err != nil {
+		t.Fatalf("DecodeTrialParticipantPreview: %v", err)
+	}
+	if err := ValidateTrialParticipantPreview(export); err != nil {
+		t.Fatalf("ValidateTrialParticipantPreview: %v", err)
+	}
+	if err := ValidateTrialParticipantExport(export); !errors.Is(err, ErrTrialMetricsInvalid) {
+		t.Fatalf("final export without submission consent error = %v, want ErrTrialMetricsInvalid", err)
+	}
+}
+
 func TestTrialMetricsRequiresThreeCompletedExternalComparisonsAndOneDecision(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -69,6 +93,7 @@ func TestTrialMetricsRequiresThreeCompletedExternalComparisonsAndOneDecision(t *
 		{"two participants", func(export *TrialMetricsExport) { export.Participants = export.Participants[:2] }},
 		{"one internal", func(export *TrialMetricsExport) { export.Participants[2].External = false }},
 		{"one incomplete", func(export *TrialMetricsExport) { export.Participants[2].Status = TrialParticipantIncomplete }},
+		{"one unsubmitted", func(export *TrialMetricsExport) { export.Participants[2].Consent.ParticipantSubmission = false }},
 		{"missing comparison", func(export *TrialMetricsExport) { export.Participants[1].Comparisons = nil }},
 		{"no decision", func(export *TrialMetricsExport) { export.GateDDecisions = nil }},
 		{"two decisions", func(export *TrialMetricsExport) {
@@ -179,13 +204,24 @@ func TestTrialPrivacyWithdrawnReceiptIsMinimalAndUnlinked(t *testing.T) {
 	export.Participants[3] = TrialParticipant{
 		Status: TrialParticipantWithdrawn,
 		Consent: TrialConsent{
-			Version: TrialConsentVersion, Collection: true, ParticipantSubmission: true,
+			Version: TrialConsentVersion, Collection: true, ParticipantSubmission: false,
 			RecordedAt: "2026-07-28T10:00:00Z", WithdrawnAt: "2026-07-28T11:00:00Z",
 			WithdrawnDataDeletedAt: "2026-07-28T11:30:00Z",
 		},
 	}
 	if err := ValidateTrialMetricsExport(export); err != nil {
 		t.Fatalf("minimal unlinked withdrawal: %v", err)
+	}
+	participantExport := TrialParticipantExport{
+		SchemaVersion: TrialMetricsSchemaVersion, ExportID: "withdrawal-local-receipt",
+		ReleaseCandidate: export.ReleaseCandidate, GeneratedAt: export.GeneratedAt,
+		Participant: export.Participants[3],
+	}
+	if err := ValidateTrialParticipantPreview(participantExport); err != nil {
+		t.Fatalf("pre-submission withdrawal preview: %v", err)
+	}
+	if err := ValidateTrialParticipantExport(participantExport); err != nil {
+		t.Fatalf("identifier-free final withdrawal receipt: %v", err)
 	}
 }
 
@@ -202,6 +238,30 @@ func TestTrialMetricsNullCountsRequireTypedOmissionCodes(t *testing.T) {
 	export.Participants[0].Metrics.ToolSuccessCount = trialIntPointer(1)
 	if err := ValidateTrialMetricsExport(export); !errors.Is(err, ErrTrialMetricsInvalid) {
 		t.Fatalf("contradictory omission error = %v, want ErrTrialMetricsInvalid", err)
+	}
+}
+
+func TestTrialMetricsToolFailureCountRequiresValueOrExactOmission(t *testing.T) {
+	export := validTrialMetricsExport()
+	export.Participants[0].Metrics.ToolFailureCount = nil
+	if err := ValidateTrialMetricsExport(export); !errors.Is(err, ErrTrialMetricsInvalid) {
+		t.Fatalf("missing failure-count omission error = %v, want ErrTrialMetricsInvalid", err)
+	}
+
+	export.Participants[0].Metrics.Omissions = append(export.Participants[0].Metrics.Omissions, TrialOmissionToolFailureCount)
+	if err := ValidateTrialMetricsExport(export); err != nil {
+		t.Fatalf("null failure count with omission: %v", err)
+	}
+
+	export.Participants[0].Metrics.ToolFailureCount = trialIntPointer(1)
+	if err := ValidateTrialMetricsExport(export); !errors.Is(err, ErrTrialMetricsInvalid) {
+		t.Fatalf("contradictory failure-count omission error = %v, want ErrTrialMetricsInvalid", err)
+	}
+
+	export.Participants[0].Metrics.Omissions = export.Participants[0].Metrics.Omissions[:len(export.Participants[0].Metrics.Omissions)-1]
+	export.Participants[0].Metrics.ToolFailureCount = trialIntPointer(-1)
+	if err := ValidateTrialMetricsExport(export); !errors.Is(err, ErrTrialMetricsInvalid) {
+		t.Fatalf("negative failure-count error = %v, want ErrTrialMetricsInvalid", err)
 	}
 }
 
@@ -297,6 +357,28 @@ func TestTrialMetricsRejectsDuplicateJSONKeys(t *testing.T) {
 	duplicate := []byte(strings.Replace(string(data), `"collection": true`, `"collection": true, "collection": false`, 1))
 	if _, err := DecodeTrialMetricsExport(duplicate); !errors.Is(err, ErrTrialMetricsInvalid) {
 		t.Fatalf("duplicate key error = %v, want ErrTrialMetricsInvalid", err)
+	}
+}
+
+func TestTrialMetricsDecoderErrorsDoNotEchoUnknownOrDuplicateKeys(t *testing.T) {
+	data, err := MarshalTrialMetricsExport(validTrialMetricsExport())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := map[string][]byte{
+		"unknown":   addTrialJSONField(data, `"participant-secret-key":true`),
+		"duplicate": addTrialJSONField(data, `"participant-secret-key":true,"participant-secret-key":false`),
+	}
+	for name, raw := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := DecodeTrialMetricsExport(raw)
+			if !errors.Is(err, ErrTrialMetricsInvalid) {
+				t.Fatalf("error = %v, want ErrTrialMetricsInvalid", err)
+			}
+			if strings.Contains(err.Error(), "participant-secret-key") {
+				t.Fatalf("decoder error leaked participant content: %q", err)
+			}
+		})
 	}
 }
 
@@ -444,8 +526,9 @@ func validTrialMetricsExport() TrialMetricsExport {
 			Metrics: &TrialParticipantMetrics{
 				InstallationCompleted: trialBoolPointer(true), TimeToFirstGatewayMCPCallMS: trialInt64Pointer(1200),
 				TimeToProductiveWorkMS: trialInt64Pointer(5000), ToolSuccessCount: trialIntPointer(10),
-				ToolDenialCount: trialIntPointer(1), ContextRetrievedAtSessionStart: trialBoolPointer(true),
-				HumanCoachingInterventions: trialIntPointer(1), ModelHandoffSucceeded: trialBoolPointer(true),
+				ToolDenialCount: trialIntPointer(1), ToolFailureCount: trialIntPointer(2),
+				ContextRetrievedAtSessionStart: trialBoolPointer(true),
+				HumanCoachingInterventions:     trialIntPointer(1), ModelHandoffSucceeded: trialBoolPointer(true),
 				SyncRecoverySucceeded: trialBoolPointer(true), KBRelevantResults: trialIntPointer(3),
 				KBResultsConsidered: trialIntPointer(4), DuplicateOrLowValueKBContributions: trialIntPointer(0),
 				CodeGraphUsefulQueries: trialIntPointer(2), CodeGraphQueries: trialIntPointer(3),

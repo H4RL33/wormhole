@@ -5,6 +5,11 @@ observable alpha interfaces. It records the current MCP descriptors, CLI
 surface, environment and path conventions, Gateway local protocol, sync wire
 protocol, migrations, and release artifacts.
 
+The CLI inventory includes the local-only `trial-metrics validate` and
+`trial-metrics format` commands. They accept participant previews, submitted
+participant exports, or aggregates from a file or stdin; they do not contact
+Gateway or Fabric.
+
 `designed_interfaces` is separate from those live inventories. It records
 decision-complete public contracts that have human design review and may be
 implemented in independently inventoried stages. `integration_manifest_v1` is

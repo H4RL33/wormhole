@@ -140,6 +140,7 @@ const (
 	TrialOmissionTimeToProductiveWork          TrialOmissionCode = "time_to_productive_work_ms"
 	TrialOmissionToolSuccessCount              TrialOmissionCode = "tool_success_count"
 	TrialOmissionToolDenialCount               TrialOmissionCode = "tool_denial_count"
+	TrialOmissionToolFailureCount              TrialOmissionCode = "tool_failure_count"
 	TrialOmissionContextAtSessionStart         TrialOmissionCode = "context_retrieved_at_session_start"
 	TrialOmissionHumanCoaching                 TrialOmissionCode = "human_coaching_interventions"
 	TrialOmissionModelHandoff                  TrialOmissionCode = "model_handoff_succeeded"
@@ -234,6 +235,7 @@ type TrialParticipantMetrics struct {
 	TimeToProductiveWorkMS             *int64              `json:"time_to_productive_work_ms"`
 	ToolSuccessCount                   *int                `json:"tool_success_count"`
 	ToolDenialCount                    *int                `json:"tool_denial_count"`
+	ToolFailureCount                   *int                `json:"tool_failure_count"`
 	ContextRetrievedAtSessionStart     *bool               `json:"context_retrieved_at_session_start"`
 	HumanCoachingInterventions         *int                `json:"human_coaching_interventions"`
 	ModelHandoffSucceeded              *bool               `json:"model_handoff_succeeded"`
@@ -310,6 +312,13 @@ func MarshalTrialParticipantExport(export TrialParticipantExport) ([]byte, error
 	return marshalTrialJSON(export)
 }
 
+func MarshalTrialParticipantPreview(export TrialParticipantExport) ([]byte, error) {
+	if err := ValidateTrialParticipantPreview(export); err != nil {
+		return nil, err
+	}
+	return marshalTrialJSON(export)
+}
+
 func marshalTrialJSON(value any) ([]byte, error) {
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
@@ -350,11 +359,25 @@ func DecodeTrialParticipantExport(data []byte) (TrialParticipantExport, error) {
 	return export, nil
 }
 
+func DecodeTrialParticipantPreview(data []byte) (TrialParticipantExport, error) {
+	if err := inspectTrialJSON(data); err != nil {
+		return TrialParticipantExport{}, err
+	}
+	var export TrialParticipantExport
+	if err := decodeStrictTrialJSON(data, &export); err != nil {
+		return TrialParticipantExport{}, err
+	}
+	if err := ValidateTrialParticipantPreview(export); err != nil {
+		return TrialParticipantExport{}, err
+	}
+	return export, nil
+}
+
 func decodeStrictTrialJSON(data []byte, target any) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
-		return invalidTrial("decode: %v", err)
+		return invalidTrial("decode failed")
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
@@ -382,7 +405,7 @@ func ValidateTrialMetricsExport(export TrialMetricsExport) error {
 	completedExternal := 0
 	ids := make(map[string]struct{}, len(export.Participants))
 	for i, participant := range export.Participants {
-		if err := validateTrialParticipant(participant, export.GeneratedAt); err != nil {
+		if err := validateTrialParticipant(participant, export.GeneratedAt, true); err != nil {
 			if errors.Is(err, ErrTrialPrivacy) {
 				return err
 			}
@@ -405,13 +428,21 @@ func ValidateTrialMetricsExport(export TrialMetricsExport) error {
 }
 
 func ValidateTrialParticipantExport(export TrialParticipantExport) error {
+	return validateTrialParticipantEnvelope(export, true)
+}
+
+func ValidateTrialParticipantPreview(export TrialParticipantExport) error {
+	return validateTrialParticipantEnvelope(export, false)
+}
+
+func validateTrialParticipantEnvelope(export TrialParticipantExport, requireSubmission bool) error {
 	if err := inspectTrialValue(export); err != nil {
 		return err
 	}
 	if err := validateTrialEnvelope(export.SchemaVersion, export.ExportID, export.ReleaseCandidate, export.GeneratedAt); err != nil {
 		return err
 	}
-	if err := validateTrialParticipant(export.Participant, export.GeneratedAt); err != nil {
+	if err := validateTrialParticipant(export.Participant, export.GeneratedAt, requireSubmission); err != nil {
 		if errors.Is(err, ErrTrialPrivacy) {
 			return err
 		}
@@ -478,7 +509,7 @@ func scanTrialJSONValue(decoder *json.Decoder, depth int) error {
 				return invalidTrial("object key is not a string")
 			}
 			if _, duplicate := seen[key]; duplicate {
-				return invalidTrial("duplicate JSON key %q", key)
+				return invalidTrial("duplicate JSON key")
 			}
 			seen[key] = struct{}{}
 			if err := scanTrialJSONValue(decoder, depth+1); err != nil {
@@ -587,9 +618,12 @@ func validateTrialEnvelope(version int, exportID, releaseCandidate, generatedAt 
 	return nil
 }
 
-func validateTrialParticipant(participant TrialParticipant, generatedAt string) error {
-	if participant.Consent.Version != TrialConsentVersion || !participant.Consent.Collection || !participant.Consent.ParticipantSubmission || !validTrialTimestamp(participant.Consent.RecordedAt) {
-		return errors.New("versioned collection and participant-submission consent are required")
+func validateTrialParticipant(participant TrialParticipant, generatedAt string, requireSubmission bool) error {
+	if participant.Consent.Version != TrialConsentVersion || !participant.Consent.Collection || !validTrialTimestamp(participant.Consent.RecordedAt) {
+		return errors.New("versioned collection consent is required")
+	}
+	if participant.Status != TrialParticipantWithdrawn && requireSubmission && !participant.Consent.ParticipantSubmission {
+		return errors.New("participant-submission consent is required")
 	}
 	if participant.Consent.PrivateQueryCollection {
 		if !validTrialTimestamp(participant.Consent.PrivateQueryConsentAt) {
@@ -781,6 +815,7 @@ func validateTrialMetrics(metrics TrialParticipantMetrics) error {
 		{metrics.TimeToProductiveWorkMS != nil, TrialOmissionTimeToProductiveWork},
 		{metrics.ToolSuccessCount != nil, TrialOmissionToolSuccessCount},
 		{metrics.ToolDenialCount != nil, TrialOmissionToolDenialCount},
+		{metrics.ToolFailureCount != nil, TrialOmissionToolFailureCount},
 		{metrics.ContextRetrievedAtSessionStart != nil, TrialOmissionContextAtSessionStart},
 		{metrics.HumanCoachingInterventions != nil, TrialOmissionHumanCoaching},
 		{metrics.ModelHandoffSucceeded != nil, TrialOmissionModelHandoff},
@@ -804,7 +839,7 @@ func validateTrialMetrics(metrics TrialParticipantMetrics) error {
 			return fmt.Errorf("measurement %s must have exactly one value or omission", check.code)
 		}
 	}
-	for _, value := range []*int{metrics.ToolSuccessCount, metrics.ToolDenialCount, metrics.HumanCoachingInterventions, metrics.KBRelevantResults, metrics.KBResultsConsidered, metrics.DuplicateOrLowValueKBContributions, metrics.CodeGraphUsefulQueries, metrics.CodeGraphQueries, metrics.FilesReadBeforeCorrectEdit, metrics.EventCount, metrics.EventNoiseCount, metrics.ContextReconstructionsAvoided} {
+	for _, value := range []*int{metrics.ToolSuccessCount, metrics.ToolDenialCount, metrics.ToolFailureCount, metrics.HumanCoachingInterventions, metrics.KBRelevantResults, metrics.KBResultsConsidered, metrics.DuplicateOrLowValueKBContributions, metrics.CodeGraphUsefulQueries, metrics.CodeGraphQueries, metrics.FilesReadBeforeCorrectEdit, metrics.EventCount, metrics.EventNoiseCount, metrics.ContextReconstructionsAvoided} {
 		if value != nil && *value < 0 {
 			return errors.New("measurement count cannot be negative")
 		}
@@ -823,7 +858,7 @@ func validateTrialMetrics(metrics TrialParticipantMetrics) error {
 func validTrialOmissionCode(code TrialOmissionCode) bool {
 	switch code {
 	case TrialOmissionInstallationCompleted, TrialOmissionTimeToFirstGatewayMCPCall, TrialOmissionTimeToProductiveWork,
-		TrialOmissionToolSuccessCount, TrialOmissionToolDenialCount, TrialOmissionContextAtSessionStart,
+		TrialOmissionToolSuccessCount, TrialOmissionToolDenialCount, TrialOmissionToolFailureCount, TrialOmissionContextAtSessionStart,
 		TrialOmissionHumanCoaching, TrialOmissionModelHandoff, TrialOmissionSyncRecovery,
 		TrialOmissionKBRelevantResults, TrialOmissionKBResultsConsidered, TrialOmissionLowValueKBContributions,
 		TrialOmissionCodeGraphUsefulQueries, TrialOmissionCodeGraphQueries, TrialOmissionFilesBeforeCorrectEdit,

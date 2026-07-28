@@ -94,8 +94,9 @@ rejected export as a redaction failure, not a reason to weaken the validator.
 ## Participant procedure
 
 Run each participant separately. Keep a timestamped operator worksheet outside
-the repository and preserve failed calls, denials, false leads, support, and
-missing measurements.
+the repository and preserve successful calls, permission/policy denials,
+non-denial tool failures, false leads, support, and missing measurements. Count
+each attempted tool call in exactly one of success, denial, or failure.
 
 ### 1. Install and enrol
 
@@ -160,9 +161,10 @@ Use the same Task in both arms. Counterbalance arm order across participants
 when practical and record the order in the operator worksheet. Measure tool
 selection, operating-loop adherence, useful shared-state writes, human
 correction, Task quality, unnecessary tool volume, source-discovery breadth,
-and review quality. Capture unsuccessful calls, incomplete or useless queries,
-false leads, and missing values. Do not restart or discard an arm to improve
-the outcome.
+and review quality. Capture successes, denials, and non-denial failures as
+separate counts so the tool-success denominator includes all attempts. Also
+capture incomplete or useless queries, false leads, and missing values. Do not
+restart or discard an arm to improve the outcome.
 
 During the alpha arm, observe context retrieval at session start, time from
 enrolment to productive work, KB relevance, low-value KB writes, Event noise,
@@ -199,25 +201,48 @@ record; do not coach around them and report the run as unassisted.
 
 ### 7. Export, review, and submission
 
-Populate `localapi.TrialParticipantExport` from this participant's worksheet.
-Use `localapi.MarshalTrialParticipantExport` to validate and generate indented
-JSON; the function returns bytes and performs no file or network I/O. Write
-those bytes to the participant-chosen local path with user-only permissions.
-This individual export contains no other participants and no Gate D decision.
+Populate `localapi.TrialParticipantExport` from this participant's worksheet
+with `consent.participant_submission: false`. Use
+`localapi.MarshalTrialParticipantPreview` to validate and generate the
+pre-submission preview. For an operator-runnable path, prepare the same strict
+JSON shape locally and run:
+
+```bash
+umask 077
+wormhole trial-metrics format --kind participant-preview draft.json > participant-preview.json
+wormhole trial-metrics validate --kind participant-preview participant-preview.json
+```
+
+The API and CLI perform no network I/O. The individual preview contains no
+other participants and no Gate D decision. `validate` prints only `valid` on
+success, and `format` writes no participant JSON when validation fails.
 
 The participant must inspect the entire export, confirm the consent version,
 timestamps, and flags, and
 choose whether to submit it. Submission must be an affirmative action through
 the agreed restricted channel. Silence, continued product use, or an existing
-Wormhole Passport is not trial consent.
+Wormhole Passport is not trial consent. Only after that affirmative choice, set
+`consent.participant_submission: true`, then format and validate the exact file
+as a submitted export:
 
-The receiving operator runs `localapi.DecodeTrialParticipantExport` over the
-exact submitted bytes, redacts them, and validates the redacted bytes again.
-After the real cohort completes, combine only the reviewed participant records
-into `localapi.TrialMetricsExport`, add the evidence-based Gate D choice, and
-run `localapi.DecodeTrialMetricsExport` over the final JSON. Do not copy raw
-exports into the repository. Real redacted evidence is created only in the
-later trial-evidence step.
+```bash
+wormhole trial-metrics format --kind participant participant-approved.json > participant-submitted.json
+wormhole trial-metrics validate --kind participant participant-submitted.json
+```
+
+The receiving operator runs `wormhole trial-metrics validate --kind
+participant` over the exact submitted bytes, redacts them, and validates the
+redacted bytes again. After the real cohort completes, combine only the
+reviewed participant records into `localapi.TrialMetricsExport`, add the
+evidence-based Gate D choice, and run:
+
+```bash
+wormhole trial-metrics format --kind aggregate aggregate-draft.json > aggregate.json
+wormhole trial-metrics validate --kind aggregate aggregate.json
+```
+
+Do not copy raw exports into the repository. Real redacted evidence is created
+only in the later trial-evidence step.
 
 ## Withdrawal and deletion
 
@@ -234,10 +259,12 @@ On withdrawal, stop collection immediately, acknowledge the request, and:
 A withdrawal cannot be counted as one of the three completed external
 participants. A retained withdrawal receipt must omit the participant ID,
 external flag, environment, metrics, comparisons, support, failures, omissions,
-and query categories. It may contain only status plus versioned consent,
-withdrawal, and deletion timestamps. The validator rejects a linked or full
-withdrawal record as a privacy violation. Otherwise retain only an unlinked
-aggregate withdrawal count.
+and query categories. It may contain only status plus versioned collection
+consent, the unchanged participant-submission flag, and consent, withdrawal,
+and deletion timestamps. The flag may remain `false` when withdrawal occurs
+before submission. The validator rejects a linked or full withdrawal record as
+a privacy violation. Otherwise retain only an unlinked aggregate withdrawal
+count.
 
 ## Gate D report checklist
 

@@ -7909,6 +7909,28 @@
         "help_exit": 2
       },
       {
+        "name": "trial-metrics format",
+        "usage": "trial-metrics format [flags] [FILE|-]",
+        "flags": [
+          "kind"
+        ],
+        "positionals": [
+          "[FILE|-]"
+        ],
+        "help_exit": 0
+      },
+      {
+        "name": "trial-metrics validate",
+        "usage": "trial-metrics validate [flags] [FILE|-]",
+        "flags": [
+          "kind"
+        ],
+        "positionals": [
+          "[FILE|-]"
+        ],
+        "help_exit": 0
+      },
+      {
         "name": "viewer-key create",
         "usage": "viewer-key create [flags]",
         "flags": [
