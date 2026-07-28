@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,8 +30,9 @@ func TestAlphaAcceptanceIncrementalTaskEventAndGitPropagationIsReplaySafe(t *tes
 		t.Fatal(err)
 	}
 	gitLinkID := uuid.NewString()
+	gatewayStatusEventID := uuid.NewString()
 	taskPayload := mustMarshal(t, map[string]any{
-		"task_id": task.ID, "new_status": "wip", "channel_id": channel.ID,
+		"task_id": task.ID, "from_status": "todo", "new_status": "wip", "channel_id": channel.ID, "event_id": gatewayStatusEventID,
 	})
 	gitPayload := mustMarshal(t, map[string]any{
 		"git_link_id": gitLinkID, "project_id": projectID, "task_id": task.ID,
@@ -84,6 +86,86 @@ func TestAlphaAcceptanceIncrementalTaskEventAndGitPropagationIsReplaySafe(t *tes
 	}
 	if statusEvents != 1 {
 		t.Fatalf("task status replay produced %d status events", statusEvents)
+	}
+	if statusEventID != gatewayStatusEventID {
+		t.Fatalf("central status event ID = %q, want Gateway stable ID %q", statusEventID, gatewayStatusEventID)
+	}
+	statusEvent, err := eventsStore.GetEvent(ctx, projectID, gatewayStatusEventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if statusEvent.AgentID != agentID {
+		t.Fatalf("central status event agent = %q, want authenticated caller %q", statusEvent.AgentID, agentID)
+	}
+	pushTaskOnly := func(t *testing.T, actor *identity.AuthenticatedScope, payload map[string]any) string {
+		t.Helper()
+		input := IncrementalPushInput{NamespaceID: projectID, Version: SyncProtocolVersion}
+		input.Items = append(input.Items, struct {
+			EntityType string          `json:"entity_type"`
+			EntityID   string          `json:"entity_id"`
+			Operation  string          `json:"operation"`
+			Payload    json.RawMessage `json:"payload"`
+		}{"task", task.ID, "update", mustMarshal(t, payload)})
+		result, err := push.Handler(ctx, actor, projectID, mustMarshal(t, input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		applied := result.(IncrementalPushOutput).Applied
+		if len(applied) != 1 {
+			t.Fatalf("single replay applied = %+v", applied)
+		}
+		return applied[0].Error
+	}
+	doneStatusEventID := uuid.NewString()
+	donePayload := map[string]any{"task_id": task.ID, "from_status": "wip", "new_status": "done", "channel_id": channel.ID, "event_id": doneStatusEventID}
+	if got := pushTaskOnly(t, scope, donePayload); got != "" {
+		t.Fatalf("later task transition error = %q", got)
+	}
+	originalPayload := map[string]any{"task_id": task.ID, "from_status": "todo", "new_status": "wip", "channel_id": channel.ID, "event_id": gatewayStatusEventID}
+	if got := pushTaskOnly(t, scope, originalPayload); got != "" {
+		t.Fatalf("exact historical replay after later transition error = %q", got)
+	}
+	otherAgentID, _ := mustRegisterAgent(t, projectID)
+	otherScope := &identity.AuthenticatedScope{
+		Agent: identity.Agent{ID: otherAgentID}, ProjectID: projectID,
+		Permissions: []string{"task.update_status"},
+	}
+	for _, replay := range []struct {
+		name      string
+		actor     *identity.AuthenticatedScope
+		payload   map[string]any
+		wantError string
+	}{
+		{
+			name: "same ID changed transition content", actor: scope,
+			payload:   map[string]any{"task_id": task.ID, "from_status": "blocked", "new_status": "wip", "channel_id": channel.ID, "event_id": gatewayStatusEventID},
+			wantError: "stable id conflict",
+		},
+		{
+			name: "same ID changed authenticated actor", actor: otherScope,
+			payload:   map[string]any{"task_id": task.ID, "from_status": "todo", "new_status": "wip", "channel_id": channel.ID, "event_id": gatewayStatusEventID},
+			wantError: "stable id conflict",
+		},
+		{
+			name: "different ID after applied transition", actor: scope,
+			payload:   map[string]any{"task_id": task.ID, "from_status": "todo", "new_status": "wip", "channel_id": channel.ID, "event_id": uuid.NewString()},
+			wantError: "stable id conflict",
+		},
+		{
+			name: "malformed event ID", actor: scope,
+			payload:   map[string]any{"task_id": task.ID, "from_status": "todo", "new_status": "wip", "channel_id": channel.ID, "event_id": "NOT-A-CANONICAL-UUID"},
+			wantError: "canonical UUID event_id",
+		},
+	} {
+		t.Run(replay.name, func(t *testing.T) {
+			if got := pushTaskOnly(t, replay.actor, replay.payload); !strings.Contains(got, replay.wantError) {
+				t.Fatalf("replay error = %q, want substring %q", got, replay.wantError)
+			}
+		})
+	}
+	var statusRows int
+	if err := testDB(t).QueryRowContext(ctx, `SELECT count(*) FROM events WHERE project_id = $1 AND event_type = 'task.status_changed'`, projectID).Scan(&statusRows); err != nil || statusRows != 2 {
+		t.Fatalf("historical/rejected replays left %d central status events, err %v; want 2 distinct transitions", statusRows, err)
 	}
 	var gitRows int
 	if err := testDB(t).QueryRowContext(ctx, `SELECT count(*) FROM git_links WHERE id = $1 AND project_id = $2`, gitLinkID, projectID).Scan(&gitRows); err != nil || gitRows != 1 {

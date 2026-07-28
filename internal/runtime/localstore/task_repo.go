@@ -187,8 +187,15 @@ func (r *TaskRepo) UpdateStatus(ctx context.Context, namespaceID, taskID, newSta
 // UpdateStatusTx performs the validated task transition and status event in
 // tx so Gateway can commit them atomically with its outbound sync entry.
 func (r *TaskRepo) UpdateStatusTx(ctx context.Context, tx *sql.Tx, namespaceID, taskID, newStatus, channelID, agentID string) (Task, error) {
+	task, _, err := r.UpdateStatusTxWithEvent(ctx, tx, namespaceID, taskID, newStatus, channelID, agentID)
+	return task, err
+}
+
+// UpdateStatusTxWithEvent returns the local status Event so callers can carry
+// its stable ID and exact transition content across Gateway-to-Fabric sync.
+func (r *TaskRepo) UpdateStatusTxWithEvent(ctx context.Context, tx *sql.Tx, namespaceID, taskID, newStatus, channelID, agentID string) (Task, DurableEvent, error) {
 	if !validTaskStatuses[newStatus] {
-		return Task{}, fmt.Errorf("localstore/task: invalid status %q", newStatus)
+		return Task{}, DurableEvent{}, fmt.Errorf("localstore/task: invalid status %q", newStatus)
 	}
 
 	// Lock the row for update.
@@ -198,10 +205,10 @@ func (r *TaskRepo) UpdateStatusTx(ctx context.Context, tx *sql.Tx, namespaceID, 
 		taskID, namespaceID,
 	).Scan(&currentStatus)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Task{}, ErrTaskNotFound
+		return Task{}, DurableEvent{}, ErrTaskNotFound
 	}
 	if err != nil {
-		return Task{}, fmt.Errorf("localstore/task: update status lookup: %w", err)
+		return Task{}, DurableEvent{}, fmt.Errorf("localstore/task: update status lookup: %w", err)
 	}
 
 	allowed := false
@@ -212,15 +219,15 @@ func (r *TaskRepo) UpdateStatusTx(ctx context.Context, tx *sql.Tx, namespaceID, 
 		}
 	}
 	if !allowed {
-		return Task{}, fmt.Errorf("localstore/task: invalid transition %s -> %s", currentStatus, newStatus)
+		return Task{}, DurableEvent{}, fmt.Errorf("localstore/task: invalid transition %s -> %s", currentStatus, newStatus)
 	}
 
 	task, err := updateTaskStatus(ctx, tx, taskID, namespaceID, newStatus)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Task{}, ErrTaskNotFound
+		return Task{}, DurableEvent{}, ErrTaskNotFound
 	}
 	if err != nil {
-		return Task{}, fmt.Errorf("localstore/task: update status: %w", err)
+		return Task{}, DurableEvent{}, fmt.Errorf("localstore/task: update status: %w", err)
 	}
 
 	// Emit task.status_changed event in the same transaction.
@@ -230,13 +237,14 @@ func (r *TaskRepo) UpdateStatusTx(ctx context.Context, tx *sql.Tx, namespaceID, 
 		ToStatus:   newStatus,
 	})
 	if err != nil {
-		return Task{}, fmt.Errorf("localstore/task: update status: marshal event payload: %w", err)
+		return Task{}, DurableEvent{}, fmt.Errorf("localstore/task: update status: marshal event payload: %w", err)
 	}
-	if _, err := r.er.publishEventInTx(ctx, tx, namespaceID, channelID, agentID, "task.status_changed", payload, nil); err != nil {
-		return Task{}, fmt.Errorf("localstore/task: update status: publish event: %w", err)
+	event, err := r.er.publishEventInTx(ctx, tx, namespaceID, channelID, agentID, "task.status_changed", payload, nil)
+	if err != nil {
+		return Task{}, DurableEvent{}, fmt.Errorf("localstore/task: update status: publish event: %w", err)
 	}
 
-	return task, nil
+	return task, event, nil
 }
 
 // Assign sets a task's owner_agent_id in namespaceID (an ownership change,

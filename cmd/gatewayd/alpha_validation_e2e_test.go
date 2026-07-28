@@ -175,7 +175,7 @@ func TestAlphaValidation_FullAutomatedAcceptanceLoop(t *testing.T) {
 	assertAlphaGuidance(t, a.client, fixture.Project.ID, fixture.Manifest.Digest, "contributor")
 	assertAlphaGuidance(t, b.client, fixture.Project.ID, fixture.Manifest.Digest, "reviewer")
 
-	var meaningfulEventID string
+	var meaningfulEventID, wipStatusEventID string
 	t.Run("Agent A follows the operating loop", func(t *testing.T) {
 		who := alphaMustGatewayCall(t, a.client, "wormhole.agent.whoami", map[string]interface{}{})
 		alphaJSONFieldEquals(t, who, "agent_id", a.credential.AgentID)
@@ -218,6 +218,7 @@ func TestAlphaValidation_FullAutomatedAcceptanceLoop(t *testing.T) {
 		alphaMustGatewayCall(t, a.client, "wormhole.task.update_status", map[string]interface{}{
 			"project_id": fixture.Project.ID, "task_id": fixture.Task.ID, "new_status": "wip", "channel_id": fixture.Channel.ID,
 		})
+		wipStatusEventID = alphaSQLiteStatusEventID(t, a.dbPath, fixture.Task.ID, "todo", "wip", a.credential.AgentID)
 		alphaMustGatewayCall(t, a.client, "wormhole.git.link_commit", map[string]interface{}{
 			"project_id": fixture.Project.ID, "task_id": fixture.Task.ID, "repo": remote,
 			"commit_sha": commitSHA, "summary": "Process path verified for reviewer handoff.",
@@ -266,6 +267,7 @@ func TestAlphaValidation_FullAutomatedAcceptanceLoop(t *testing.T) {
 	alphaMustGatewayCall(t, a.client, "wormhole.task.update_status", map[string]interface{}{
 		"project_id": fixture.Project.ID, "task_id": fixture.Task.ID, "new_status": "done", "channel_id": fixture.Channel.ID,
 	})
+	doneStatusEventID := alphaSQLiteStatusEventID(t, a.dbPath, fixture.Task.ID, "wip", "done", a.credential.AgentID)
 	alphaWaitSQLiteTaskStatus(t, b.dbPath, fixture.Task.ID, "done")
 	gitLinkID := alphaPostgresGitLinkID(t, db, fixture.Project.ID, fixture.Task.ID, commitSHA)
 	alphaWaitPostgresCount(t, db, "git_links", gitLinkID, 1)
@@ -347,6 +349,16 @@ func TestAlphaValidation_FullAutomatedAcceptanceLoop(t *testing.T) {
 	alphaAssertSQLiteCount(t, b.dbPath, "kb_articles", offlineKBID, 1)
 	alphaAssertSQLiteCount(t, b.dbPath, "events", offlineEventID, 1)
 	alphaAssertSQLiteCount(t, b.dbPath, "git_links", gitLinkID, 1)
+
+	// Reopen both durable replicas and force another pull/replay cycle. The
+	// Gateway-owned status Event ID must remain the sole ID for the exact
+	// transition in Gateway A, Fabric, and Gateway B after restart.
+	a.restart(t, gatewayBin)
+	b.restart(t, gatewayBin)
+	alphaWaitOnline(t, a)
+	alphaWaitOnline(t, b)
+	alphaAssertStatusEventStableEverywhere(t, db, a.dbPath, b.dbPath, fixture.Project.ID, fixture.Task.ID, "todo", "wip", fixture.Channel.ID, a.credential.AgentID, wipStatusEventID)
+	alphaAssertStatusEventStableEverywhere(t, db, a.dbPath, b.dbPath, fixture.Project.ID, fixture.Task.ID, "wip", "done", fixture.Channel.ID, a.credential.AgentID, doneStatusEventID)
 }
 
 type alphaSeedState struct {
@@ -799,6 +811,72 @@ func alphaWaitSQLiteTaskStatus(t *testing.T, dbPath, taskID, status string) {
 		err = db.QueryRow(`SELECT status FROM tasks WHERE id=?`, taskID).Scan(&got)
 		return got == status, err
 	})
+}
+
+func alphaSQLiteStatusEventID(t *testing.T, dbPath, taskID, fromStatus, toStatus, agentID string) string {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var id string
+	if err := db.QueryRow(`SELECT id FROM events
+		WHERE event_type='task.status_changed' AND agent_id=?
+		AND json_extract(payload, '$.task_id')=?
+		AND json_extract(payload, '$.from_status')=?
+		AND json_extract(payload, '$.to_status')=?`, agentID, taskID, fromStatus, toStatus).Scan(&id); err != nil {
+		t.Fatalf("read Gateway status Event %s -> %s: %v", fromStatus, toStatus, err)
+	}
+	return id
+}
+
+func alphaAssertStatusEventStableEverywhere(t *testing.T, fabric *sql.DB, gatewayAPath, gatewayBPath, projectID, taskID, fromStatus, toStatus, channelID, agentID, eventID string) {
+	t.Helper()
+	if eventID == "" {
+		t.Fatalf("empty stable status Event ID for %s -> %s", fromStatus, toStatus)
+	}
+	var fabricCount int
+	if err := fabric.QueryRow(`SELECT count(*) FROM events
+		WHERE id=$1 AND project_id=$2 AND channel_id=$3 AND agent_id=$4
+		AND event_type='task.status_changed' AND note IS NULL
+		AND payload->>'task_id'=$5 AND payload->>'from_status'=$6 AND payload->>'to_status'=$7`,
+		eventID, projectID, channelID, agentID, taskID, fromStatus, toStatus).Scan(&fabricCount); err != nil || fabricCount != 1 {
+		t.Fatalf("Fabric stable status Event %s (%s -> %s) count=%d err=%v, want 1", eventID, fromStatus, toStatus, fabricCount, err)
+	}
+	var fabricTransitionCount int
+	if err := fabric.QueryRow(`SELECT count(*) FROM events
+		WHERE project_id=$1 AND channel_id=$2 AND agent_id=$3
+		AND event_type='task.status_changed' AND note IS NULL
+		AND payload->>'task_id'=$4 AND payload->>'from_status'=$5 AND payload->>'to_status'=$6`,
+		projectID, channelID, agentID, taskID, fromStatus, toStatus).Scan(&fabricTransitionCount); err != nil || fabricTransitionCount != 1 {
+		t.Fatalf("Fabric status transition %s -> %s count=%d err=%v, want exactly 1", fromStatus, toStatus, fabricTransitionCount, err)
+	}
+	for name, path := range map[string]string{"Gateway A": gatewayAPath, "Gateway B": gatewayBPath} {
+		db, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var matchingIDCount, transitionCount int
+		matchingErr := db.QueryRow(`SELECT count(*) FROM events
+			WHERE id=? AND namespace_id=? AND channel_id=? AND agent_id=?
+			AND event_type='task.status_changed' AND note IS NULL
+			AND json_extract(payload, '$.task_id')=?
+			AND json_extract(payload, '$.from_status')=?
+			AND json_extract(payload, '$.to_status')=?`,
+			eventID, projectID, channelID, agentID, taskID, fromStatus, toStatus).Scan(&matchingIDCount)
+		transitionErr := db.QueryRow(`SELECT count(*) FROM events
+			WHERE namespace_id=? AND channel_id=? AND agent_id=?
+			AND event_type='task.status_changed' AND note IS NULL
+			AND json_extract(payload, '$.task_id')=?
+			AND json_extract(payload, '$.from_status')=?
+			AND json_extract(payload, '$.to_status')=?`,
+			projectID, channelID, agentID, taskID, fromStatus, toStatus).Scan(&transitionCount)
+		_ = db.Close()
+		if matchingErr != nil || transitionErr != nil || matchingIDCount != 1 || transitionCount != 1 {
+			t.Fatalf("%s stable status Event %s (%s -> %s): matching ID count=%d err=%v transition count=%d err=%v; want 1/1", name, eventID, fromStatus, toStatus, matchingIDCount, matchingErr, transitionCount, transitionErr)
+		}
+	}
 }
 
 func alphaPostgresGitLinkID(t *testing.T, db *sql.DB, projectID, taskID, commit string) string {

@@ -281,6 +281,29 @@ func (s *Store) GetChannel(ctx context.Context, projectID, channelID string) (Ch
 	return channel, nil
 }
 
+// GetEvent returns one project-scoped durable event for stable sync replay
+// validation.
+func (s *Store) GetEvent(ctx context.Context, projectID, eventID string) (Event, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Event{}, fmt.Errorf("events: get event: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "SELECT set_config('wormhole.project_id', $1, true)", projectID); err != nil {
+		return Event{}, fmt.Errorf("events: get event: set project id: %w", err)
+	}
+	var event Event
+	err = tx.QueryRowContext(ctx, `SELECT `+eventColumns+` FROM events WHERE id = $1 AND project_id = $2`, eventID, projectID).
+		Scan(&event.ID, &event.ProjectID, &event.ChannelID, &event.AgentID, &event.EventType, &event.Payload, &event.Note, &event.CreatedAt)
+	if err != nil {
+		return Event{}, fmt.Errorf("events: get event: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Event{}, fmt.Errorf("events: get event: commit: %w", err)
+	}
+	return event, nil
+}
+
 // PublishEvent inserts a new event, letting Postgres assign the id
 // (gen_random_uuid() default).
 func (s *Store) PublishEvent(ctx context.Context, projectID, channelID, agentID, eventType string, payload json.RawMessage, note *string) (Event, error) {
@@ -348,6 +371,15 @@ func (s *Store) PublishEventWithID(ctx context.Context, id, projectID, channelID
 // below.
 func (s *Store) PublishEventInTx(ctx context.Context, tx *sql.Tx, projectID, channelID, agentID, eventType string, payload json.RawMessage, note *string) (Event, error) {
 	return s.publishEventInTxWithOptionalID(ctx, tx, "", projectID, channelID, agentID, eventType, payload, note)
+}
+
+// PublishEventWithIDInTx preserves a Gateway-owned stable Event ID while the
+// caller atomically commits another authoritative Fabric mutation.
+func (s *Store) PublishEventWithIDInTx(ctx context.Context, tx *sql.Tx, id, projectID, channelID, agentID, eventType string, payload json.RawMessage, note *string) (Event, error) {
+	if id == "" {
+		return Event{}, errors.New("events: publish event: stable id is required")
+	}
+	return s.publishEventInTxWithOptionalID(ctx, tx, id, projectID, channelID, agentID, eventType, payload, note)
 }
 
 // publishEventInTxWithOptionalID is the shared validation/insert core of

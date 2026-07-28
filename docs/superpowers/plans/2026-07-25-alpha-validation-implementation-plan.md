@@ -1887,6 +1887,17 @@ git commit -m "test: add full alpha acceptance loop"
 - Create: `docs/testing/manual-alpha-validation-2026-07.md`
 - Create: `docs/testing/results/code-graph-baseline.json`
 - Create: `docs/testing/results/code-graph-enabled.json`
+- Modify after live Task 22 validation proved duplicate status Events: `internal/runtime/localapi/alpha_acceptance_gap_test.go`
+- Modify after live Task 22 validation proved the local status Event ID was absent from the queue: `internal/runtime/localapi/localapi.go`
+- Modify after live Task 22 validation required a caller-owned local status Event ID: `internal/runtime/localstore/task_repo.go`
+- Modify after live Task 22 validation required a stable-ID transactional local Event insert: `internal/runtime/localstore/event_repo.go`
+- Modify after live Task 22 validation proved Fabric generated a second status Event: `internal/mcp/alpha_acceptance_sync_test.go`
+- Modify after live Task 22 validation required the stable status Event ID on the sync wire: `internal/mcp/sync.go`
+- Modify after live Task 22 validation changed the reviewed sync payload fields: `internal/mcp/contract_manifest_test.go`
+- Modify after live Task 22 validation required stable-ID atomic task transitions: `internal/core/tasks/tasks.go`
+- Modify after live Task 22 validation required stable-ID transactional Event publication: `internal/core/events/events.go`
+- Modify after live Task 22 validation changed the reviewed sync payload: `docs/contracts/alpha-contract.json`
+- Modify after live Task 22 validation required an exact Gateway A/Gateway B/Fabric status Event ID invariant after restart: `cmd/gatewayd/alpha_validation_e2e_test.go`
 - Modify only when validation proves a guidance defect: `internal/runtime/localapi/guidance_render.go`
 - Modify only when validation proves a guidance defect: `internal/runtime/localapi/guidance_render_test.go`
 - Modify only when validation proves a guidance defect: the affected file in `testdata/alpha/manifests/generated-guidance/`, added by exact name before editing

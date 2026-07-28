@@ -225,6 +225,17 @@ func equalStringPointer(left, right *string) bool {
 // publishEventInTx inserts a durable event within an existing transaction.
 // Used by TaskRepo.UpdateStatus and other operations that emit events atomically.
 func (r *EventRepo) publishEventInTx(ctx context.Context, tx *sql.Tx, namespaceID, channelID, agentID, eventType string, payload json.RawMessage, note *string) (DurableEvent, error) {
+	return r.publishEventWithOptionalIDInTx(ctx, tx, "", namespaceID, channelID, agentID, eventType, payload, note)
+}
+
+func (r *EventRepo) publishEventWithIDInTx(ctx context.Context, tx *sql.Tx, eventID, namespaceID, channelID, agentID, eventType string, payload json.RawMessage, note *string) (DurableEvent, error) {
+	if _, err := uuid.Parse(eventID); err != nil {
+		return DurableEvent{}, fmt.Errorf("localstore/event: publish in tx: invalid stable event id: %w", err)
+	}
+	return r.publishEventWithOptionalIDInTx(ctx, tx, eventID, namespaceID, channelID, agentID, eventType, payload, note)
+}
+
+func (r *EventRepo) publishEventWithOptionalIDInTx(ctx context.Context, tx *sql.Tx, eventID, namespaceID, channelID, agentID, eventType string, payload json.RawMessage, note *string) (DurableEvent, error) {
 	if len(payload) == 0 {
 		payload = json.RawMessage(`{}`)
 	}
@@ -239,7 +250,9 @@ func (r *EventRepo) publishEventInTx(ctx context.Context, tx *sql.Tx, namespaceI
 		return DurableEvent{}, fmt.Errorf("localstore/event: publish in tx: channel lookup: %w", err)
 	}
 
-	eventID := uuid.New().String()
+	if eventID == "" {
+		eventID = uuid.New().String()
+	}
 	row := tx.QueryRowContext(ctx,
 		`INSERT INTO events (id, namespace_id, channel_id, agent_id, event_type, payload, note)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)

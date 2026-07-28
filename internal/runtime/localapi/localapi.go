@@ -1666,12 +1666,22 @@ func (s *Server) handleTaskUpdateStatus(ctx context.Context, args json.RawMessag
 		return nil, fmt.Errorf("localapi: task update status: begin transaction: %w", err)
 	}
 	defer tx.Rollback()
-	task, err := s.tr.UpdateStatusTx(ctx, tx, orgCtx.ProjectID, taskID, newStatus, channelID, cached.AgentID)
+	task, statusEvent, err := s.tr.UpdateStatusTxWithEvent(ctx, tx, orgCtx.ProjectID, taskID, newStatus, channelID, cached.AgentID)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: task update status: %w", err)
 	}
+	var transition struct {
+		FromStatus string `json:"from_status"`
+	}
+	if err := json.Unmarshal(statusEvent.Payload, &transition); err != nil {
+		return nil, fmt.Errorf("localapi: task update status: decode local status event: %w", err)
+	}
+	if transition.FromStatus == "" {
+		return nil, errors.New("localapi: task update status: local status event has empty from_status")
+	}
 	payload, err := json.Marshal(map[string]interface{}{
-		"task_id": task.ID, "new_status": task.Status, "channel_id": channelID,
+		"task_id": task.ID, "from_status": transition.FromStatus, "new_status": task.Status,
+		"channel_id": channelID, "event_id": statusEvent.ID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("localapi: task update status: marshal payload: %w", err)

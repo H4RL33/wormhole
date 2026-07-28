@@ -372,7 +372,7 @@ func TestIncrementalPushTool_RejectsMalformedUpdateAndUnsupportedDelete(t *testi
 	if out.Applied[0].ID != "update-item" || out.Applied[0].Error == "" {
 		t.Fatalf("Applied[0] (update item): got %+v, want a non-empty Error", out.Applied[0])
 	}
-	if out.Applied[0].Error != `task update payload must match entity_id and include new_status and channel_id` {
+	if out.Applied[0].Error != `task update payload must match entity_id and include from_status, new_status, channel_id, and a canonical UUID event_id` {
 		t.Fatalf("Applied[0].Error: got %q", out.Applied[0].Error)
 	}
 	// Second item: "delete" operation should be rejected

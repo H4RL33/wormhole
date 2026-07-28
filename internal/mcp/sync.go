@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"github.com/H4RL33/wormhole/internal/core/kb"
 	"github.com/H4RL33/wormhole/internal/core/tasks"
 	"github.com/H4RL33/wormhole/internal/types"
+	"github.com/google/uuid"
 )
 
 // SyncProtocolVersion is the current protocol version for wormhole.sync.* tools.
@@ -509,9 +511,11 @@ type syncKBCreatePayload struct {
 }
 
 type syncTaskUpdatePayload struct {
-	TaskID    string `json:"task_id"`
-	NewStatus string `json:"new_status"`
-	ChannelID string `json:"channel_id"`
+	TaskID     string `json:"task_id"`
+	FromStatus string `json:"from_status"`
+	NewStatus  string `json:"new_status"`
+	ChannelID  string `json:"channel_id"`
+	EventID    string `json:"event_id"`
 }
 
 type syncChannelPullPayload struct {
@@ -668,8 +672,18 @@ func incrementalPushTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore
 							applyErr = fmt.Errorf("decode task update payload: %w", err)
 							break
 						}
-						if payload.TaskID == "" || payload.TaskID != item.EntityID || payload.NewStatus == "" || payload.ChannelID == "" {
-							applyErr = errors.New("task update payload must match entity_id and include new_status and channel_id")
+						parsedEventID, eventIDErr := uuid.Parse(payload.EventID)
+						if payload.TaskID == "" || payload.TaskID != item.EntityID || payload.FromStatus == "" || payload.NewStatus == "" || payload.ChannelID == "" || eventIDErr != nil || parsedEventID.String() != payload.EventID {
+							applyErr = errors.New("task update payload must match entity_id and include from_status, new_status, channel_id, and a canonical UUID event_id")
+							break
+						}
+						existingEvent, eventErr := eventsStore.GetEvent(ctx, projectID, payload.EventID)
+						if eventErr == nil {
+							applyErr = validateTaskStatusEventReplay(existingEvent, projectID, callerAgentID, payload)
+							break
+						}
+						if !errors.Is(eventErr, sql.ErrNoRows) {
+							applyErr = eventErr
 							break
 						}
 						list, err := tasksStore.List(ctx, projectID, nil)
@@ -677,15 +691,21 @@ func incrementalPushTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore
 							applyErr = err
 							break
 						}
-						alreadyApplied := false
+						currentStatus := ""
 						for _, task := range list {
-							if task.ID == item.EntityID && task.Status == payload.NewStatus {
-								alreadyApplied = true
+							if task.ID == item.EntityID {
+								currentStatus = task.Status
 								break
 							}
 						}
-						if !alreadyApplied {
-							_, applyErr = tasksStore.UpdateStatus(ctx, projectID, item.EntityID, payload.NewStatus, payload.ChannelID, callerAgentID)
+						if currentStatus == "" {
+							applyErr = tasks.ErrTaskNotFound
+						} else if currentStatus == payload.NewStatus {
+							applyErr = fmt.Errorf("task update reached status %q without authoritative event %q: %w", currentStatus, payload.EventID, events.ErrStableIDConflict)
+						} else if currentStatus != payload.FromStatus {
+							applyErr = fmt.Errorf("task update current status %q does not match from_status %q: %w", currentStatus, payload.FromStatus, tasks.ErrStableIDConflict)
+						} else {
+							_, applyErr = tasksStore.UpdateStatusWithEventID(ctx, projectID, item.EntityID, payload.NewStatus, payload.ChannelID, callerAgentID, payload.EventID, payload.FromStatus)
 						}
 						break
 					}
@@ -762,6 +782,18 @@ func incrementalPushTool(tasksStore *tasks.Store, kbStore *kb.Store, eventsStore
 			}, nil
 		},
 	}
+}
+
+func validateTaskStatusEventReplay(event events.Event, projectID, agentID string, payload syncTaskUpdatePayload) error {
+	var transition types.TaskStatusChangedPayload
+	if err := json.Unmarshal(event.Payload, &transition); err != nil {
+		return fmt.Errorf("task update stable event replay payload: %w", err)
+	}
+	if event.ProjectID != projectID || event.ChannelID != payload.ChannelID || event.AgentID != agentID || event.EventType != "task.status_changed" || event.Note != nil ||
+		transition.TaskID != payload.TaskID || transition.FromStatus != payload.FromStatus || transition.ToStatus != payload.NewStatus {
+		return fmt.Errorf("task update stable event replay content mismatch: %w", events.ErrStableIDConflict)
+	}
+	return nil
 }
 
 // ConflictReportInput is the wormhole.sync.conflict_report argument shape (RFC-0003 §8.3).

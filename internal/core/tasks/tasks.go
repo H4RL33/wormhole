@@ -363,6 +363,19 @@ func (s *Store) ListBootstrapInTx(ctx context.Context, tx *sql.Tx, projectID str
 // crash can never produce a transition without its event, or vice versa
 // (RFC-0001 §8.2, architecture.md §9.1).
 func (s *Store) UpdateStatus(ctx context.Context, projectID, taskID, newStatus, channelID, agentID string) (Task, error) {
+	return s.updateStatus(ctx, projectID, taskID, newStatus, channelID, agentID, "", "")
+}
+
+// UpdateStatusWithEventID applies a Gateway-originated transition while
+// preserving its stable status Event ID and expected pre-transition state.
+func (s *Store) UpdateStatusWithEventID(ctx context.Context, projectID, taskID, newStatus, channelID, agentID, eventID, expectedFromStatus string) (Task, error) {
+	if eventID == "" || expectedFromStatus == "" {
+		return Task{}, errors.New("tasks: update status: stable event id and expected from status are required")
+	}
+	return s.updateStatus(ctx, projectID, taskID, newStatus, channelID, agentID, eventID, expectedFromStatus)
+}
+
+func (s *Store) updateStatus(ctx context.Context, projectID, taskID, newStatus, channelID, agentID, eventID, expectedFromStatus string) (Task, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Task{}, fmt.Errorf("tasks: update status: begin tx: %w", err)
@@ -384,6 +397,9 @@ func (s *Store) UpdateStatus(ctx context.Context, projectID, taskID, newStatus, 
 	}
 	if err != nil {
 		return Task{}, fmt.Errorf("tasks: update status lookup: %w", err)
+	}
+	if expectedFromStatus != "" && currentStatus != expectedFromStatus {
+		return Task{}, fmt.Errorf("tasks: update status: expected %s, found %s: %w", expectedFromStatus, currentStatus, ErrStableIDConflict)
 	}
 
 	allowed := false
@@ -421,8 +437,14 @@ func (s *Store) UpdateStatus(ctx context.Context, projectID, taskID, newStatus, 
 	if err != nil {
 		return Task{}, fmt.Errorf("tasks: update status: marshal event payload: %w", err)
 	}
-	if _, err := s.events.PublishEventInTx(ctx, tx, projectID, channelID, agentID, "task.status_changed", payload, nil); err != nil {
-		return Task{}, fmt.Errorf("tasks: update status: publish event: %w", err)
+	var publishErr error
+	if eventID == "" {
+		_, publishErr = s.events.PublishEventInTx(ctx, tx, projectID, channelID, agentID, "task.status_changed", payload, nil)
+	} else {
+		_, publishErr = s.events.PublishEventWithIDInTx(ctx, tx, eventID, projectID, channelID, agentID, "task.status_changed", payload, nil)
+	}
+	if publishErr != nil {
+		return Task{}, fmt.Errorf("tasks: update status: publish event: %w", publishErr)
 	}
 
 	if err := tx.Commit(); err != nil {

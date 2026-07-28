@@ -8419,6 +8419,8 @@
         "name": "sync_task_update_payload",
         "fields": [
           "channel_id",
+          "event_id",
+          "from_status",
           "new_status",
           "task_id"
         ]

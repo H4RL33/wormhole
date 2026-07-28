@@ -225,9 +225,29 @@ func TestAlphaAcceptanceTaskStatusUpdateIsLocalFirstAndQueued(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var localStatusEventID string
+	if err := srv.store.DB().QueryRowContext(ctx, `SELECT id FROM events WHERE namespace_id = ? AND event_type = 'task.status_changed'`, "ns-1").Scan(&localStatusEventID); err != nil {
+		t.Fatal(err)
+	}
 	found := false
 	for _, entry := range pending {
 		if entry.EntityType == "task" && entry.EntityID == task.ID && entry.Operation == "update" {
+			var payload struct {
+				TaskID     string `json:"task_id"`
+				FromStatus string `json:"from_status"`
+				NewStatus  string `json:"new_status"`
+				ChannelID  string `json:"channel_id"`
+				EventID    string `json:"event_id"`
+			}
+			if err := json.Unmarshal(entry.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.EventID != localStatusEventID {
+				t.Fatalf("queued status event_id = %q, want local stable ID %q", payload.EventID, localStatusEventID)
+			}
+			if payload.TaskID != task.ID || payload.FromStatus != "todo" || payload.NewStatus != "wip" || payload.ChannelID != channel.ID {
+				t.Fatalf("queued status transition = %+v, want exact local transition", payload)
+			}
 			found = true
 		}
 	}
