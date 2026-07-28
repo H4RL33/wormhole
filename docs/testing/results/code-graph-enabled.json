@@ -1,0 +1,311 @@
+{
+  "schema_version": 1,
+  "evidence_kind": "task22_code_graph_comparison_arm",
+  "arm": "code_graph_enabled_reviewer",
+  "comparison_envelope": {
+    "comparison_id": "gate-c-task22-2026-07-28-d48aea4",
+    "gate": "C",
+    "task_number": 22,
+    "recorded_date": "2026-07-28",
+    "repository": {
+      "commit": "d48aea494d3b41e9e5b2a7665d62bba4cf76948b",
+      "sync_source_sha256": "e3904b39ff33e8550c7ff656fddfafab431974f4225ed03367c1170260561802",
+      "gateway_binary_sha256": "45510b9e9b3f2cfe7ef13e88d3a1f03249b484a9d162f670153ec7511541a266"
+    },
+    "manifest": {
+      "id": "52b860cd-0db7-4ee0-a3fd-672ad9da0c95",
+      "version": 1,
+      "digest": "sha256:54996a31dacc73535be4fa2c9012bae090c4ed90e10b6c407739c7d1af0bcf97"
+    },
+    "task": {
+      "project_id": "e724dd25-5bc9-40db-bcad-0b21716d1ca4",
+      "task_id": "7a1f3654-cb45-4f27-bd34-8aef89b0ab21",
+      "channel_id": "b7831d55-df1f-49a3-91ae-3df53510cff5",
+      "title": "Validate the Gateway alpha handoff path"
+    },
+    "topology": {
+      "fabric": "real_process_with_dedicated_postgresql_database",
+      "gateways": 2,
+      "gateway_sqlite_replicas": 2,
+      "gateway_processes_distinct": true,
+      "gateway_sqlite_files_distinct": true,
+      "agent_facing_transport": "gateway_local_mcp_socket",
+      "shared_namespace": true
+    },
+    "validity": {
+      "final_run_valid": true,
+      "exact_commit_verified_before_ready": true,
+      "sync_source_verified_in_root_and_both_checkouts": true,
+      "provenance_mismatched_attempt_excluded": true,
+      "arms_have_different_roles": true,
+      "causal_efficiency_claim_supported": false,
+      "causal_efficiency_claim_reason": "The baseline contributor and enabled reviewer performed different roles, and the fixture supplied the intended path through KB and Event context. Timing and byte counts are descriptive, not a controlled causal estimate."
+    }
+  },
+  "participant": {
+    "gateway": "B",
+    "owner": "alpha-agent-b",
+    "model_label": "codex-real-code-graph-enabled",
+    "model_version": null,
+    "model_version_omission_reason": "The runtime did not expose a model build or version identifier.",
+    "harness": "Codex enabled reviewer",
+    "harness_version": null,
+    "harness_version_omission_reason": "The harness did not expose a version identifier.",
+    "role": "reviewer",
+    "capabilities": [
+      "code_review"
+    ],
+    "permissions": [
+      "task.list",
+      "kb.search",
+      "kb.get",
+      "kb.write",
+      "channel.list",
+      "channel.post",
+      "git.link_commit",
+      "git.request_review",
+      "code_graph.status",
+      "code_graph.query"
+    ]
+  },
+  "configuration": {
+    "code_graph_mode": "enabled",
+    "code_graph_project_config_rows": 1,
+    "code_graph_enabled_value": 1,
+    "physical_enablement_verified": true,
+    "revision": "cli-lifecycle-1785243134236423263",
+    "indexed_commit": "d48aea494d3b41e9e5b2a7665d62bba4cf76948b",
+    "final_health": "ready",
+    "repository_commit_verified": true,
+    "working_tree_source_changes": 0,
+    "working_tree_metadata_note": ".wormhole/config.toml contained the role-specific validation binding; no Go source was modified.",
+    "source_read_permission": false
+  },
+  "measurements": {
+    "measurement_anchor": "First exact Code Graph result for the relevant Gateway Run path; this reviewer task did not request a source edit.",
+    "measurement_started_at": "2026-07-28T12:55:49.753534Z",
+    "first_relevant_path_at": "2026-07-28T12:56:14.018159Z",
+    "elapsed_seconds_to_relevant_path": 24.264625,
+    "files_opened_before_or_at_relevant_path": null,
+    "files_opened_before_first_correct_edit": null,
+    "files_opened_omission_reason": "The reviewer made no edit, and direct-source file-open instrumentation was not retained.",
+    "source_bytes_exposed": null,
+    "source_bytes_omission_reason": "Code Graph returned zero source bytes because the reviewer lacked code_graph.source.read; direct verification byte counts were not instrumented.",
+    "code_graph_source_bytes_exposed": 0,
+    "direct_verification_source_bytes_exposed": null,
+    "broad_search_operations": 1,
+    "broad_code_graph_queries": 1,
+    "broad_filesystem_searches": 0,
+    "selected_files": [
+      "cmd/gatewayd/gatewayd.go",
+      "cmd/gatewayd/alpha_validation_e2e_test.go"
+    ],
+    "selected_files_correct": true,
+    "task_result": "review_pass",
+    "human_corrections": 0,
+    "misunderstandings": 0,
+    "manual_context_replay": 0,
+    "mcp_requests_total_including_restart_checks": 23,
+    "code_graph_calls": 6,
+    "code_graph_status_calls": 3,
+    "code_graph_queries": 3,
+    "useful_code_graph_queries": 2,
+    "non_useful_code_graph_queries": 1,
+    "useful_query_rate": {
+      "numerator": 2,
+      "denominator": 3
+    }
+  },
+  "code_graph_calls": [
+    {
+      "sequence": 1,
+      "at": "2026-07-28T12:56:13.471132Z",
+      "tool": "wormhole.code_graph.status",
+      "purpose": "Verify graph health, revision, and indexed commit before querying.",
+      "outcome": "ready",
+      "useful": true
+    },
+    {
+      "sequence": 2,
+      "at": "2026-07-28T12:56:13.662308Z",
+      "tool": "wormhole.code_graph.query",
+      "query_kind": "broad_intent",
+      "intent": "Trace Gateway Run lifecycle and local-first durable synchronization handoff path.",
+      "requested_source_bytes": 2048,
+      "minimum_confidence_requested": 0.6,
+      "outcome": "partial_budget_exhausted",
+      "returned_source_bytes": 0,
+      "useful": false,
+      "negative_evidence": "The broad query exhausted its budget and was not used as proof."
+    },
+    {
+      "sequence": 3,
+      "at": "2026-07-28T12:56:14.018159Z",
+      "tool": "wormhole.code_graph.query",
+      "query_kind": "exact_symbol",
+      "entry_symbols": [
+        "github.com/H4RL33/wormhole/cmd/gatewayd.Run"
+      ],
+      "requested_source_bytes": 2048,
+      "minimum_confidence_requested": 0.6,
+      "outcome": "relevant_path_found",
+      "returned_source_bytes": 0,
+      "useful": true,
+      "direct_source_confirmed": true
+    },
+    {
+      "sequence": 4,
+      "at": "2026-07-28T12:56:14.471369Z",
+      "tool": "wormhole.code_graph.query",
+      "query_kind": "exact_symbol",
+      "entry_symbols": [
+        "github.com/H4RL33/wormhole/cmd/gatewayd.alphaAssertStatusEventStableEverywhere"
+      ],
+      "requested_source_bytes": 2048,
+      "minimum_confidence_requested": 0.6,
+      "outcome": "relevant_invariant_path_found",
+      "returned_source_bytes": 0,
+      "useful": true,
+      "direct_source_confirmed": true
+    },
+    {
+      "sequence": 5,
+      "at": "2026-07-28T12:57:36.494702Z",
+      "tool": "wormhole.code_graph.status",
+      "purpose": "Verify graph revision remained ready after Gateway B restart.",
+      "outcome": "ready",
+      "useful": true
+    },
+    {
+      "sequence": 6,
+      "at": "2026-07-28T12:59:35.057690Z",
+      "tool": "wormhole.code_graph.status",
+      "purpose": "Verify graph revision remained ready after the sustained-health window.",
+      "outcome": "ready",
+      "useful": true
+    }
+  ],
+  "relationship_findings": [
+    {
+      "relationship": "Gateway Run is the process-level lifecycle entry used to verify local serving and sync-engine ownership.",
+      "graph_entry_symbol": "github.com/H4RL33/wormhole/cmd/gatewayd.Run",
+      "source_path": "cmd/gatewayd/gatewayd.go",
+      "returned_confidence": null,
+      "returned_confidence_omission_reason": "The response confidence value was not retained in the audit artifact.",
+      "minimum_confidence_requested": 0.6,
+      "provenance": [
+        "code_graph_exact_symbol_query",
+        "direct_git_head_verification",
+        "direct_source_verification"
+      ],
+      "direct_source_confirmed": true
+    },
+    {
+      "relationship": "alphaAssertStatusEventStableEverywhere verifies one exact status Event ID and one semantic transition in Gateway A, Fabric, and Gateway B.",
+      "graph_entry_symbol": "github.com/H4RL33/wormhole/cmd/gatewayd.alphaAssertStatusEventStableEverywhere",
+      "source_path": "cmd/gatewayd/alpha_validation_e2e_test.go",
+      "returned_confidence": null,
+      "returned_confidence_omission_reason": "The response confidence value was not retained in the audit artifact.",
+      "minimum_confidence_requested": 0.6,
+      "provenance": [
+        "code_graph_exact_symbol_query",
+        "direct_git_head_verification",
+        "direct_source_verification"
+      ],
+      "direct_source_confirmed": true
+    }
+  ],
+  "handoff": {
+    "reconstructed_independently_from_wormhole_and_git": true,
+    "human_prose_replay_provided": false,
+    "stable_ids_received_only_for_post_reconstruction_verification": true,
+    "task_status_understood": "done",
+    "implementation_intent_understood": true,
+    "task_id": "7a1f3654-cb45-4f27-bd34-8aef89b0ab21",
+    "todo_to_wip_event_id": "f96f5580-93cc-4180-b70d-682c12f07769",
+    "wip_to_done_event_id": "5efd0633-1b34-45e0-a83b-efdd5224d7c6",
+    "message_event_id": "dc3a637e-af64-4080-bfe3-bac61526cf52",
+    "discovery_event_id": "7f5b6e46-18ac-4089-a5b6-c2c814473f49",
+    "kb_article_id": "7e514e21-4ed3-42a9-aa63-ed6910a3d4fc",
+    "git_link_id": "dc41d462-6da4-40a4-ad4f-e02f4f0f4689",
+    "exact_cardinality_each_in_gateway_a_fabric_gateway_b": {
+      "task_done": 1,
+      "todo_to_wip_semantic_event": 1,
+      "wip_to_done_semantic_event": 1,
+      "kb_discovery": 1,
+      "git_link": 1,
+      "four_exact_event_ids_present": 4
+    }
+  },
+  "restart_and_sustained_health": {
+    "gateway_a_restart": {
+      "at": "2026-07-28T12:56:56.997015323Z",
+      "old_pid": 145028,
+      "new_pid": 147432
+    },
+    "gateway_b_restart": {
+      "at": "2026-07-28T12:56:57.011302261Z",
+      "old_pid": 145036,
+      "new_pid": 147440
+    },
+    "required_sustained_seconds": 75,
+    "final_cardinality_elapsed_seconds_after_gateway_b_restart": 149.318404306,
+    "gateway_a_online_zero_checkpoint_elapsed_seconds_after_gateway_b_restart": 96.477079739,
+    "gateway_b_final_online_zero_elapsed_seconds_after_restart": 157.527828739,
+    "gateway_b_final_graph_ready_elapsed_seconds_after_restart": 158.046387739,
+    "final_gateway_a_state": "online",
+    "final_gateway_a_pending_writes": 0,
+    "final_gateway_b_state": "online",
+    "final_gateway_b_pending_writes": 0,
+    "final_gateway_b_graph_health": "ready",
+    "final_gateway_b_graph_revision": "cli-lifecycle-1785243134236423263"
+  },
+  "rate_capacity": {
+    "namespace_limit_per_minute": 30,
+    "configured_pull_interval_seconds": 10,
+    "batch_tick_calls_incremental_pull": false,
+    "fabric_sync_calls_total": 116,
+    "fabric_sync_bootstrap_calls": 2,
+    "fabric_sync_incremental_pull_calls": 112,
+    "fabric_sync_incremental_push_calls": 2,
+    "maximum_coarse_60_second_sync_window": 16,
+    "non_200_mcp_responses": 0,
+    "rate_limit_exceeded_matches": 0,
+    "attention_required_matches": 0
+  },
+  "negative_evidence": {
+    "broad_query_partial_budget_exhausted": true,
+    "broad_query_used_as_proof": false,
+    "graph_source_access_available": false,
+    "graph_source_bytes_exposed": 0,
+    "direct_verification_byte_count_captured": false,
+    "stale_graph_omissions": 0,
+    "incorrect_confidence": false,
+    "human_corrections": 0,
+    "misunderstandings": 0,
+    "gateway_stderr_rate_limit_matches": 0,
+    "gateway_stderr_attention_required_matches": 0,
+    "gateway_stderr_panic_matches": 0,
+    "gateway_stderr_fatal_matches": 0,
+    "limitations": [
+      "Gateway B had no agent-facing Git-link read tool, so it could not retrieve the Git-link row by ID. KB frontmatter and direct Git independently confirmed d48aea4; controller cardinality checks verified the Git link exactly once in both replicas and Fabric.",
+      "The reviewer lacked code_graph.source.read, so all three Code Graph queries returned zero source bytes and required direct source verification.",
+      "The broad intent query was partial and budget-exhausted; only the two exact-symbol queries were useful.",
+      "Direct verification file-open and byte counts were not instrumented, so total enabled-arm source exposure is not claimed.",
+      "The contributor and reviewer arms were different workflow roles; elapsed time is descriptive rather than causal comparison evidence."
+    ]
+  },
+  "raw_artifacts": {
+    "committed_to_repository": false,
+    "external_artifact_root": "/tmp/wormhole-task22-final.wVdPDQ",
+    "checksum_manifest": "ARTIFACTS.sha256",
+    "files": {
+      "topology.json": "a49105db6645fd4ae395e2c6e93ca981d7c1158785dc2a3101cd33033a6067c3",
+      "final-state-before-stop.json": "087f4a1defc20b18bd78c3e3dea49df630affb2dc229b410b5a5377cbf9969cf",
+      "negative-evidence.json": "51e55072705f6e7ac9c69555fda9486fe9b5704300b9af7dd4371046885b1eaa",
+      "gateway-b-reviewer-mcp.jsonl": "914592f41cfeedcd9d9134197258ee0fa0f40320f7b84ad509122c8f88bf779a",
+      "gateway-b.stderr.log": "f741992fead0bacf8820614c7b9b6bfb3183f49e10673e0dca6ad0f3b3df66f7",
+      "fabric.stderr.log": "f3bdab2d9243526ac0dbab024b371e44e4cc49ae36a1e3e4dcb4cce7983cbb47"
+    }
+  }
+}

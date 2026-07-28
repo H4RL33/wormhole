@@ -1,0 +1,211 @@
+{
+  "schema_version": 1,
+  "evidence_kind": "task22_code_graph_comparison_arm",
+  "arm": "code_graph_off_baseline",
+  "comparison_envelope": {
+    "comparison_id": "gate-c-task22-2026-07-28-d48aea4",
+    "gate": "C",
+    "task_number": 22,
+    "recorded_date": "2026-07-28",
+    "repository": {
+      "commit": "d48aea494d3b41e9e5b2a7665d62bba4cf76948b",
+      "sync_source_sha256": "e3904b39ff33e8550c7ff656fddfafab431974f4225ed03367c1170260561802",
+      "gateway_binary_sha256": "45510b9e9b3f2cfe7ef13e88d3a1f03249b484a9d162f670153ec7511541a266"
+    },
+    "manifest": {
+      "id": "52b860cd-0db7-4ee0-a3fd-672ad9da0c95",
+      "version": 1,
+      "digest": "sha256:54996a31dacc73535be4fa2c9012bae090c4ed90e10b6c407739c7d1af0bcf97"
+    },
+    "task": {
+      "project_id": "e724dd25-5bc9-40db-bcad-0b21716d1ca4",
+      "task_id": "7a1f3654-cb45-4f27-bd34-8aef89b0ab21",
+      "channel_id": "b7831d55-df1f-49a3-91ae-3df53510cff5",
+      "title": "Validate the Gateway alpha handoff path"
+    },
+    "topology": {
+      "fabric": "real_process_with_dedicated_postgresql_database",
+      "gateways": 2,
+      "gateway_sqlite_replicas": 2,
+      "gateway_processes_distinct": true,
+      "gateway_sqlite_files_distinct": true,
+      "agent_facing_transport": "gateway_local_mcp_socket",
+      "shared_namespace": true
+    },
+    "validity": {
+      "final_run_valid": true,
+      "exact_commit_verified_before_ready": true,
+      "sync_source_verified_in_root_and_both_checkouts": true,
+      "provenance_mismatched_attempt_excluded": true,
+      "arms_have_different_roles": true,
+      "causal_efficiency_claim_supported": false,
+      "causal_efficiency_claim_reason": "The baseline contributor and enabled reviewer performed different roles, and the fixture supplied the intended path through KB and Event context. Timing and byte counts are descriptive, not a controlled causal estimate."
+    }
+  },
+  "participant": {
+    "gateway": "A",
+    "owner": "alpha-agent-a",
+    "model_label": "codex-real-code-graph-off",
+    "model_version": null,
+    "model_version_omission_reason": "The runtime did not expose a model build or version identifier.",
+    "harness": "Codex baseline controller",
+    "harness_version": null,
+    "harness_version_omission_reason": "The harness did not expose a version identifier.",
+    "role": "contributor",
+    "capabilities": [
+      "code"
+    ],
+    "permissions": [
+      "task.list",
+      "task.create",
+      "task.update_status",
+      "kb.search",
+      "kb.get",
+      "kb.write",
+      "channel.list",
+      "channel.post",
+      "git.link_commit",
+      "code_graph.status",
+      "code_graph.query",
+      "code_graph.source.read"
+    ]
+  },
+  "configuration": {
+    "code_graph_mode": "off",
+    "code_graph_project_config_rows": 0,
+    "physical_disablement_verified": true,
+    "guarded_client_refused_code_graph_calls": true,
+    "repository_commit_verified": true,
+    "working_tree_source_changes": 0,
+    "working_tree_metadata_note": ".wormhole/config.toml contained the role-specific validation binding; no Go source was modified."
+  },
+  "measurements": {
+    "measurement_anchor": "First correct implementation path; this validation task did not request a source edit.",
+    "measurement_started_at": "2026-07-28T12:53:12.766362Z",
+    "first_relevant_path_at": "2026-07-28T12:53:52.636641211Z",
+    "elapsed_seconds_to_relevant_path": 39.870279211,
+    "files_opened_before_or_at_relevant_path": 1,
+    "files_opened_before_first_correct_edit": null,
+    "files_opened_omission_reason": "No source edit was requested or made; the comparable anchor is the first correct implementation path.",
+    "source_bytes_exposed": 10092,
+    "selected_file_size_bytes": 17877,
+    "broad_search_operations": 0,
+    "broad_filesystem_searches": 0,
+    "selected_files": [
+      "cmd/gatewayd/gatewayd.go"
+    ],
+    "selected_files_correct": true,
+    "task_result": "done",
+    "human_corrections": 0,
+    "false_leads": 0,
+    "mcp_requests_through_task_completion": 14,
+    "mcp_requests_total_including_restart_checks": 17,
+    "code_graph_calls": 0
+  },
+  "operating_loop": {
+    "identity_inspected": true,
+    "sync_status_inspected": true,
+    "approved_guidance_inspected": true,
+    "task_inspected": true,
+    "semantic_kb_searches": 1,
+    "recent_events_inspected": true,
+    "task_transitioned_todo_to_wip_to_done": true,
+    "meaningful_message_events_written": 1,
+    "durable_discoveries_written": 1,
+    "git_links_written": 1,
+    "final_sync_state": "online",
+    "final_pending_writes": 0
+  },
+  "implementation_finding": {
+    "summary": "Gateway Run preserves the local-first process lifecycle: local API serving begins before incremental sync, only durable-checkpoint-ready engines start, and syncGroup owns cancellation and reverse-order engine shutdown.",
+    "source_path": "cmd/gatewayd/gatewayd.go",
+    "provenance": [
+      "direct_git_head_verification",
+      "direct_source_read"
+    ],
+    "direct_source_confirmed": true,
+    "graph_used": false
+  },
+  "handoff": {
+    "human_prose_replay_provided_to_reviewer": false,
+    "stable_ids_provided_for_post_reconstruction_verification": true,
+    "task_id": "7a1f3654-cb45-4f27-bd34-8aef89b0ab21",
+    "todo_to_wip_event_id": "f96f5580-93cc-4180-b70d-682c12f07769",
+    "wip_to_done_event_id": "5efd0633-1b34-45e0-a83b-efdd5224d7c6",
+    "message_event_id": "dc3a637e-af64-4080-bfe3-bac61526cf52",
+    "discovery_event_id": "7f5b6e46-18ac-4089-a5b6-c2c814473f49",
+    "kb_article_id": "7e514e21-4ed3-42a9-aa63-ed6910a3d4fc",
+    "git_link_id": "dc41d462-6da4-40a4-ad4f-e02f4f0f4689",
+    "exact_cardinality_each_in_gateway_a_fabric_gateway_b": {
+      "task_done": 1,
+      "todo_to_wip_semantic_event": 1,
+      "wip_to_done_semantic_event": 1,
+      "kb_discovery": 1,
+      "git_link": 1,
+      "four_exact_event_ids_present": 4
+    }
+  },
+  "restart_and_sustained_health": {
+    "gateway_a_restart": {
+      "at": "2026-07-28T12:56:56.997015323Z",
+      "old_pid": 145028,
+      "new_pid": 147432
+    },
+    "gateway_b_restart": {
+      "at": "2026-07-28T12:56:57.011302261Z",
+      "old_pid": 145036,
+      "new_pid": 147440
+    },
+    "required_sustained_seconds": 75,
+    "final_cardinality_elapsed_seconds_after_gateway_b_restart": 149.318404306,
+    "gateway_a_online_zero_checkpoint_elapsed_seconds_after_gateway_b_restart": 96.477079739,
+    "gateway_b_final_online_zero_elapsed_seconds_after_restart": 157.527828739,
+    "gateway_b_final_graph_ready_elapsed_seconds_after_restart": 158.046387739,
+    "final_gateway_a_state": "online",
+    "final_gateway_a_pending_writes": 0,
+    "final_gateway_b_state": "online",
+    "final_gateway_b_pending_writes": 0,
+    "final_gateway_b_graph_health": "ready",
+    "final_gateway_b_graph_revision": "cli-lifecycle-1785243134236423263"
+  },
+  "rate_capacity": {
+    "namespace_limit_per_minute": 30,
+    "configured_pull_interval_seconds": 10,
+    "batch_tick_calls_incremental_pull": false,
+    "fabric_sync_calls_total": 116,
+    "fabric_sync_bootstrap_calls": 2,
+    "fabric_sync_incremental_pull_calls": 112,
+    "fabric_sync_incremental_push_calls": 2,
+    "maximum_coarse_60_second_sync_window": 16,
+    "non_200_mcp_responses": 0,
+    "rate_limit_exceeded_matches": 0,
+    "attention_required_matches": 0
+  },
+  "negative_evidence": {
+    "useless_code_graph_calls": 0,
+    "stale_graph_omissions": 0,
+    "excessive_source": false,
+    "incorrect_confidence": false,
+    "gateway_stderr_rate_limit_matches": 0,
+    "gateway_stderr_attention_required_matches": 0,
+    "gateway_stderr_panic_matches": 0,
+    "gateway_stderr_fatal_matches": 0,
+    "limitations": [
+      "The fixture KB and seed Event explicitly identified cmd/gatewayd/gatewayd.go:Run, so the baseline was not a blind repository-discovery task.",
+      "The contributor and reviewer arms were different workflow roles; elapsed time is descriptive rather than causal comparison evidence."
+    ]
+  },
+  "raw_artifacts": {
+    "committed_to_repository": false,
+    "external_artifact_root": "/tmp/wormhole-task22-final.wVdPDQ",
+    "checksum_manifest": "ARTIFACTS.sha256",
+    "files": {
+      "topology.json": "a49105db6645fd4ae395e2c6e93ca981d7c1158785dc2a3101cd33033a6067c3",
+      "final-state-before-stop.json": "087f4a1defc20b18bd78c3e3dea49df630affb2dc229b410b5a5377cbf9969cf",
+      "negative-evidence.json": "51e55072705f6e7ac9c69555fda9486fe9b5704300b9af7dd4371046885b1eaa",
+      "gateway-a-mcp.jsonl": "79e4f5e74fcb124c3ebd5deca84a5f28fcd2096ec3c8585c3070d941f342a355",
+      "gateway-a.stderr.log": "a0c4fbc95de12020aa3b12750a851674076acdd13ec06885612f9e95c949845a",
+      "fabric.stderr.log": "f3bdab2d9243526ac0dbab024b371e44e4cc49ae36a1e3e4dcb4cce7983cbb47"
+    }
+  }
+}
