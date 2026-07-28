@@ -472,7 +472,7 @@ git commit -m "feat: freeze portable state v1 schemas"
 
 **Interfaces:**
 - Consumes: Task 1 shared types and DecodeTree.
-- Produces: Store workspace methods and Service RegisterWorkspace, Status.
+- Produces: Store workspace methods, Service RegisterWorkspace and Status, and the sole Gateway SQLite durability policy used by later materialization journals.
 
 Exact registration contract:
 
@@ -487,6 +487,10 @@ type RegisterWorkspaceResult struct {
     Binding types.WorkspaceBinding
     Created bool
 }
+type ServiceConfig struct {
+    LegacyIntegrationBackupRoot string
+}
+func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service, error)
 func (r *WorkspaceRepo) ResolveWorkingDirectory(ctx context.Context, observed types.WorkspaceContext) (types.WorkspaceBinding, error)
 func (r *WorkspaceRepo) RegisteredWorkspaces(ctx context.Context) ([]types.WorkspaceBinding, error)
 func (s *Service) RegisterWorkspace(ctx context.Context, req RegisterWorkspaceRequest) (RegisterWorkspaceResult, error)
@@ -496,6 +500,8 @@ func (s *Service) Status(ctx context.Context, scope types.WorkspaceScope) (Works
 ~~~
 
 Registration resolves a non-symlink canonical root, captures device/inode, independently verifies HEAD equals ExpectedCommit, reads the committed .wormhole tree, validates project/repository equality, and creates a UUID. It returns types.WorkspaceBinding with AcceptedCommitSHA=req.ExpectedCommit and AcceptedTreeDigest=string(decoded.Digest). Repeating the same project, checkout identity, canonical path, repository, commit, and digest returns the identical WorkspaceBinding with Created=false and performs no write. Same checkout identity with another project/repository returns ErrCheckoutCollision. Same project in another worktree or clone gets a distinct ID.
+
+ServiceConfig is process-private configuration. `LegacyIntegrationBackupRoot` is an absolute trusted XDG-derived path outside every repository; NewService canonicalizes it, creates it owner-only when non-empty, and rejects relative, symlinked, or repository-contained roots. Task 6 requires it before legacy migration; Tasks 2–5 may leave it empty in tests that never call that method. No public command, MCP argument, tracked file, or Fabric value may override it.
 
 ResolveWorkingDirectory validates the private observed WorkspaceContext, canonicalizes/evaluates its WorkingDirectory, chooses the longest boundary-aware registered checkout ancestor, then re-stats and requires the stored device/inode before returning the exact binding; a sibling path prefix, replaced checkout, ambiguous match, or unregistered directory fails closed. The repository exposes the same exact signature for deterministic scoped lookup and returns stored values only; Service owns filesystem canonicalization and identity revalidation. RegisteredWorkspaces returns every binding sorted by project_id then workspace_id and validates each value, enabling startup recovery without a current-workspace default.
 
@@ -607,15 +613,18 @@ CREATE TABLE legacy_integration_state_migrations (
   project_id TEXT NOT NULL,
   workspace_id TEXT NOT NULL,
   source_digest TEXT NOT NULL,
-  outcome TEXT NOT NULL,
+  outcome TEXT NOT NULL CHECK(outcome IN ('imported_move_pending','migrated_and_moved','migrated_tracked_source_retained','ignored_unsafe')),
+  backup_path TEXT NOT NULL DEFAULT '',
   detail TEXT NOT NULL,
   migrated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY(project_id,workspace_id,source_digest),
   FOREIGN KEY(project_id,workspace_id) REFERENCES workspace_bindings(project_id,workspace_id) ON DELETE CASCADE
 );
 CREATE INDEX workspace_overlay_generation ON workspace_overlay_operations(project_id,workspace_id,generation);
 CREATE INDEX workspace_open_conflicts ON workspace_conflicts(project_id,workspace_id,state);
 CREATE INDEX workspace_recovery ON workspace_materializations(state,project_id,workspace_id);
+CREATE UNIQUE INDEX legacy_integration_one_pending ON legacy_integration_state_migrations(project_id,workspace_id) WHERE outcome='imported_move_pending';
 ~~~
 
 - [ ] **Step 1: Write correct RED registration/isolation tests**
@@ -637,12 +646,14 @@ func TestValidWorkspacesRemainIsolated(t *testing.T) {
 }
 ~~~
 
-Run: go test ./internal/runtime/localstore ./internal/runtime/projectstate -run 'Test(GatewayMigrationLedger|GatewayMigrationRollback|GatewayMigrationRejectsFutureVersion|WorkspaceScopeMismatch|ValidWorkspacesRemainIsolated|RegisterWorkspaceIdempotent|RegisterWorkspaceCheckoutCollision|TwoWorktreesDistinct|ResolveWorkingDirectory|RegisteredWorkspaces)' -count=1
+Run: go test ./internal/runtime/localstore ./internal/runtime/projectstate -run 'Test(GatewayMigrationLedger|GatewayMigrationRollback|GatewayMigrationRejectsFutureVersion|GatewaySQLiteSynchronousFull|WorkspaceScopeMismatch|ValidWorkspacesRemainIsolated|RegisterWorkspaceIdempotent|RegisterWorkspaceCheckoutCollision|TwoWorktreesDistinct|ResolveWorkingDirectory|RegisteredWorkspaces)' -count=1
 Expected: FAIL because migration, repositories, and service are absent.
 
 - [ ] **Step 2: Implement migration, repositories, safe tree reader, and registration**
 
 Embed internal/runtime/localstore/migrations/*.sql and expose const GatewaySchemaVersion = 1 plus func applyGatewayMigrations(ctx context.Context, db *sql.DB) error. The function acquires one dedicated connection, executes BEGIN IMMEDIATE, creates and shape-checks gateway_schema_migrations, rejects a recorded version greater than GatewaySchemaVersion, applies each missing numbered file once, inserts its version row, and commits. Any DDL or ledger-write failure rolls back the entire version. This ledger name and API are the only Gateway SQLite migration mechanism; Slice B and Slice D append 000002 and later files rather than creating another ledger.
+
+Extend the existing SQLite DSN with `_pragma=synchronous(FULL)` while retaining WAL and the busy timeout, so every pooled and dedicated connection uses the same durability setting. `TestGatewaySQLiteSynchronousFull` opens and reopens a file-backed Store, checks `PRAGMA journal_mode` is `wal` and `PRAGMA synchronous` is `2` on both the ordinary database handle and a newly acquired dedicated connection, and proves a committed migration-ledger row survives reopen. Later journal preparation transactions rely on SQLite's WAL/FULL commit guarantee; they must not manually fsync the main database file while committed bytes may reside in the WAL.
 
 All repository SELECT/UPDATE/DELETE statements include WHERE project_id=? AND workspace_id=?; first verify binding existence. Serialize snapshots/trees with canonical EncodeTree plus a length-prefixed file-list codec. Use BEGIN IMMEDIATE for next overlay generation and registration collision checks.
 
@@ -1032,7 +1043,7 @@ Checkpoint algorithm:
 3. Import valid direct tree, Compose with active operations, reject open conflicts, EncodeTree complete candidate, validate DecodeTree round-trip.
 4. Create owner-only sibling stage and backup paths on the same filesystem; write every file with fsync, fsync every created directory, and fsync parent.
 5. Re-read live tree and compare digest. Mismatch returns ErrCheckpointCAS, preserves direct input/stage evidence, and performs no publication.
-6. Persist prepared journal containing complete canonical prior/candidate trees, accepted_base_digest, bound checkout_path/device/inode, and generation; commit and fsync SQLite before filesystem mutation.
+6. Persist the prepared journal containing complete canonical prior/candidate trees, accepted_base_digest, bound checkout_path/device/inode, and generation; commit it before filesystem mutation on the Task-2 WAL connection whose mandatory `synchronous=FULL` policy durably syncs the journal/WAL. Do not hand-fsync the main database file.
 7. Linux exchanges live .wormhole and stage with renameat2 RENAME_EXCHANGE, renames old tree to backup, and fsyncs parent. Darwin uses renameatx_np RENAME_SWAP when supported.
 8. Fallback never returns success after a partial sequence: rename live to backup, fsync parent, rename stage to live, fsync parent, then mark published. Each step is journal-state-derived and idempotent. Before examining or renaming any path, Recover requires the current binding accepted_digest to equal journal.accepted_base_digest and the canonical root/device/inode to equal the journal checkout preconditions. A mismatch returns ErrCheckpointRecoveryPrecondition and leaves the live tree, stage, backup, journal, candidate, and operations untouched. With matching preconditions, Recover examines live/stage/backup digests and deterministically restores old complete tree or finishes new complete tree; unknown digest returns ErrCheckpointRecoveryBlocked without deleting evidence.
 9. ErrCheckpointUnsupported occurs before step 4 only when regular files, directory fsync, same-filesystem rename, or owner-only staging cannot be guaranteed.
@@ -1068,15 +1079,22 @@ git commit -m "feat: checkpoint portable state durably"
 - Modify: internal/runtime/localapi/manifest.go
 - Modify: internal/runtime/localapi/materialize_test.go
 - Modify: internal/runtime/localapi/manifest_test.go
+- Modify: internal/runtime/projectstate/checkpoint.go
+- Modify: internal/runtime/projectstate/checkpoint_test.go
+- Modify: internal/runtime/projectstate/service.go
+- Modify: internal/runtime/projectstate/service_test.go
+- Modify: internal/runtime/localstore/workspace_repo.go
+- Modify: internal/runtime/localstore/workspace_repo_test.go
 - Modify: .gitignore
 
 **Interfaces:**
 - Consumes: Task 2 migration audit and existing private integration_manifest tables.
-- Produces: MigrateLegacyIntegrationState and ErrTrackedLegacyState.
+- Produces: MigrateLegacyIntegrationState, LegacyImportedMovePending, ErrLegacyStateRetained, and ErrTrackedLegacyState.
 
 ~~~go
 type LegacyMigrationOutcome string
 const (
+    LegacyImportedMovePending LegacyMigrationOutcome = "imported_move_pending"
     LegacyMigratedAndMoved LegacyMigrationOutcome = "migrated_and_moved"
     LegacyMigratedTrackedSourceRetained LegacyMigrationOutcome = "migrated_tracked_source_retained"
     LegacyIgnoredUnsafe LegacyMigrationOutcome = "ignored_unsafe"
@@ -1089,14 +1107,47 @@ type LegacyMigrationResult struct {
 func (s *Service) MigrateLegacyIntegrationState(ctx context.Context, scope types.WorkspaceScope, root string) (LegacyMigrationResult, error)
 ~~~
 
+The scoped localstore seam is exact:
+
+~~~go
+type LegacyIntegrationMigrationRow struct {
+    ProjectID string
+    WorkspaceID types.WorkspaceID
+    SourceDigest string
+    Outcome string
+    BackupPath string
+    Detail string
+    MigratedAt time.Time
+    UpdatedAt time.Time
+}
+type LegacyIntegrationPreparation struct {
+    StateJSON []byte
+    RepositoryRoot string
+    Row LegacyIntegrationMigrationRow
+}
+func (r *WorkspaceRepo) PrepareLegacyIntegrationMigration(context.Context, types.WorkspaceScope, LegacyIntegrationPreparation) (LegacyIntegrationMigrationRow, error)
+func (r *WorkspaceRepo) PendingLegacyIntegrationMigration(context.Context, types.WorkspaceScope) (LegacyIntegrationMigrationRow, error)
+func (r *WorkspaceRepo) LatestLegacyIntegrationMigration(context.Context, types.WorkspaceScope) (LegacyIntegrationMigrationRow, error)
+func (r *WorkspaceRepo) TransitionLegacyIntegrationMigration(context.Context, types.WorkspaceScope, sourceDigest, fromOutcome, toOutcome, detail string) (LegacyIntegrationMigrationRow, error)
+~~~
+
+Every method verifies the exact binding and scopes every query by project and workspace. Prepare owns one immediate transaction: safe tracked/untracked preparations require non-empty validated compatible StateJSON and atomically upsert `integration_manifest_project_state` plus the migration row; `ignored_unsafe` records no state JSON. Transition is a compare-and-swap on source digest and prior outcome. Pending lookup uses the unique partial index. Latest terminal lookup orders `updated_at DESC, source_digest DESC`, so historical rows are never selected nondeterministically.
+
+`ErrLegacyStateRetained` is the general checkpoint blocker for any exact legacy file still present. `ErrTrackedLegacyState` wraps it for the tracked-source result, so `errors.Is` matches both. The owner-only XDG backup root is an injected trusted Service dependency; no public request supplies or overrides it.
+
 Exact behavior:
 
 - Read exact .wormhole/integration-state.json with descriptor-relative no-follow, single-link regular-file checks; reject credential-shaped keys and project mismatch.
 - Query tracked status read-only with git ls-files --error-unmatch -- .wormhole/integration-state.json using GIT_OPTIONAL_LOCKS=0. Never run git add, rm, update-index, checkout, commit, or clean.
-- Persist safe durable fields into existing private integration_manifest_project_state plus source digest/outcome audit in one transaction.
-- If untracked, move the file to owner-only XDG workspace backup after durable import and fsync both directories; .gitignore prevents recurrence.
-- If tracked, leave bytes and index untouched, record migrated_tracked_source_retained, and return ErrTrackedLegacyState from Checkpoint until the human removes the tracked path through normal Git workflow. Canonical snapshot digest excludes this exact legacy path, but checkpoint never silently deletes or carries it into a staged canonical tree.
+- A safe tracked source atomically writes the compatible private integration state and `migrated_tracked_source_retained` row before returning ErrTrackedLegacyState. A restart test reopens the Store and proves both records committed together while source bytes and Git index remain unchanged.
+- For an untracked safe file, first persist the compatible private integration state plus an `imported_move_pending` migration row in one WAL/FULL transaction. The row contains the source digest and deterministic owner-only XDG workspace `backup_path`; `detail` is a non-sensitive reason code. Commit before copying, renaming, or unlinking source bytes.
+- Complete the pending move by copying through an owner-only temporary backup file, fsyncing the file, no-replace renaming it to the deterministic backup path, and fsyncing the backup directory. A pre-existing exact-digest backup is reusable; another type or digest blocks recovery. Revalidate the held source identity/digest and read-only tracked status. If it became tracked, retain it and transition to `migrated_tracked_source_retained`. Otherwise descriptor-relatively unlink only that exact source, fsync its parent, then CAS-update the pending row to `migrated_and_moved` in a second transaction. Cross-filesystem rename is never assumed.
+- Reconcile an existing pending row before requiring the source to exist: source exact/backup absent creates the backup; source exact/backup exact unlinks and finalizes; source absent/backup exact only finalizes. Unexpected type, identity, bytes, digest, or both paths absent fails closed and retains the row/evidence. An ambiguous final database commit is read back on a fresh connection. Failure after the first commit returns `LegacyImportedMovePending`, its BackupPath, and the error; no premature final outcome is exposed.
+- A final row with source absent returns idempotently. A tracked-retained row may return to pending only after normal Git removes the path from the index. If identical source bytes reappear after completion, transition the row back to pending and retire them again rather than silently succeeding.
+- If tracked, leave bytes and index untouched, record migrated_tracked_source_retained, and return ErrTrackedLegacyState from MigrateLegacyIntegrationState until the human removes the tracked path through normal Git workflow. Canonical snapshot digest excludes this exact legacy path, but checkpoint never silently deletes or carries it into a staged canonical tree.
 - Unsafe/malformed input remains untouched, records ignored_unsafe without sensitive detail, and returns a path-specific error.
+- When the source path is absent, first reconcile the unique pending row. If none exists, read the latest terminal row ordered by `updated_at DESC, source_digest DESC`; a final row returns its stored result idempotently, while no row and no source returns a zero LegacyMigrationResult and nil. This lookup order is mandatory even when multiple historical source digests exist.
+- Checkpoint checks exact-path presence during initial validation and its final CAS recheck. Any retained unsafe or move-pending legacy file returns ErrLegacyStateRetained before directory publication. When the scoped latest/pending ledger identifies a tracked-retained source, Checkpoint returns ErrTrackedLegacyState, whose definition wraps ErrLegacyStateRetained so `errors.Is` matches both.
 - Remove the current materializer write/rollback of the legacy file while retaining its returned IntegrationState and private SQLite journals.
 
 - [ ] **Step 1: Write RED tracked/untracked/unsafe migration tests**
@@ -1112,20 +1163,24 @@ func TestTrackedLegacyMigrationDoesNotChangeIndex(t *testing.T) {
 }
 ~~~
 
-Run: go test ./internal/runtime/projectstate ./internal/runtime/localapi -run 'Test(TrackedLegacy|UntrackedLegacy|UnsafeLegacy|IntegrationMaterializationDoesNotWriteLegacyState)' -count=1
+Add fault-injection cases after the pending database commit, backup-file fsync, backup-directory fsync, source unlink, source-directory fsync, and final database update/ambiguous commit. Every restart/rerun imports once, converges to `migrated_and_moved`, preserves divergent evidence, and never reports final early. Add checkpoint cases for tracked, unsafe, and move-pending retained sources.
+
+Add focused `WorkspaceRepo` cases for prepare atomic commit and rollback across reopen, cross-project/workspace rejection, unique pending lookup, deterministic latest-terminal ordering, and transition compare-and-swap failure/success.
+
+Run: go test ./internal/runtime/projectstate ./internal/runtime/localapi ./internal/runtime/localstore -run 'Test(TrackedLegacy|UntrackedLegacy|UnsafeLegacy|LegacyIntegrationMigrationRepo|LegacyMoveRecovery|CheckpointRejectsRetainedLegacy|IntegrationMaterializationDoesNotWriteLegacyState)' -count=1
 Expected: FAIL because migration and writer removal are absent.
 
 - [ ] **Step 2: Implement exact migration and writer removal**
 
-Add only .wormhole/integration-state.json to .gitignore. Do not introduce .wormhole/local. Preserve existing private integration tables and current compatible IDs.
+Add only .wormhole/integration-state.json to .gitignore. Do not introduce .wormhole/local. Preserve existing private integration tables and current compatible IDs. Implement the exact pending/copy/fsync/unlink/finalize recovery state machine above; never claim `migrated_and_moved` until its final CAS transition commits.
 
 - [ ] **Step 3: Run GREEN and commit**
 
-Run: go test ./internal/runtime/projectstate ./internal/runtime/localapi -run 'Test(TrackedLegacy|UntrackedLegacy|UnsafeLegacy|Integration)' -count=1
+Run: go test ./internal/runtime/projectstate ./internal/runtime/localapi ./internal/runtime/localstore -run 'Test(TrackedLegacy|UntrackedLegacy|UnsafeLegacy|LegacyIntegrationMigrationRepo|LegacyMoveRecovery|CheckpointRejectsRetainedLegacy|Integration)' -count=1
 Expected: PASS.
 
 ~~~bash
-git add internal/runtime/projectstate internal/runtime/localapi .gitignore
+git add internal/runtime/projectstate internal/runtime/localapi internal/runtime/localstore .gitignore
 git commit -m "fix: retire tracked integration state projection"
 ~~~
 
