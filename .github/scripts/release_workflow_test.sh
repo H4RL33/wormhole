@@ -3,6 +3,23 @@ set -eu
 
 workflow=.github/workflows/release.yml
 test -f "$workflow"
+fabric_verifier=.github/scripts/verify-fabric-image.sh
+cohere_mock_dockerfile=.github/scripts/fabric-image-cohere-mock/Dockerfile
+test -f "$cohere_mock_dockerfile"
+grep -Fxq "$(sed -n '1p' Dockerfile.fabric)" "$cohere_mock_dockerfile"
+grep -Fq 'docker network create --internal' "$fabric_verifier"
+grep -Fq -- '--network-alias api.cohere.com' "$fabric_verifier"
+grep -Fq -- '--network-alias fabric' "$fabric_verifier"
+grep -Fq 'SSL_CERT_FILE=/mock-ca/ca.pem' "$fabric_verifier"
+grep -Fq 'WORMHOLE_MOCK_COUNT_PATH=/run/mock/request-count' "$fabric_verifier"
+# shellcheck disable=SC2016 # Literal verifier shell source.
+grep -Fq 'docker exec "$mock_container" /mock probe-health' "$fabric_verifier"
+grep -Fq 'WORMHOLE_COHERE_API_KEY=release-image-smoke' "$fabric_verifier"
+grep -Fq 'expected exactly one startup embedding request' "$fabric_verifier"
+if grep -Eq -- '--publish|--network[= ]host|--release-smoke' "$fabric_verifier"; then
+	printf 'Fabric image verification must remain isolated and use the default entrypoint\n' >&2
+	exit 1
+fi
 
 grep -Fq 'workflow_dispatch:' "$workflow"
 grep -Fq "tags: ['v*']" "$workflow"
@@ -162,12 +179,12 @@ then
 fi
 
 for pin in \
-	c94ce9fb468520275223c153574b00df6fe4bcc9 \
-	c7c53464625b32c7a7e944ae62b3e17d2b600130 \
-	8d2750c68a42422c14e847fe6c8ac0403b4cbd6f \
-	10e90e3645eae34f1e60eeb005ba3a3d33f178e8 \
-	398d4b0eeef1380460a10c8013a76f728fb906ac \
-	e8998f949152b193b063cb0ec769d69d929409be
+	06fb636fac595d6fb4b28a5dfcb21a6f5091859c \
+	96fe6ef7f33517b61c61be40b68a1882f3264fb8 \
+	bb05f3f5519dd87d3ba754cc423b652a5edd6d2c \
+	53b7df96c91f9c12dcc8a07bcb9ccacbed38856a \
+	6f9f17788090df1f26f669e9d70d6ae9567deba6 \
+	0f67c3f4856b2e3261c31976d6725780e5e4c373
 do
 	grep -Fq "@$pin" "$workflow"
 done

@@ -38,6 +38,7 @@ coverage:
 	./.github/scripts/coverage-check.sh coverage.out docs/testing-coverage-exceptions.md
 
 release-test:
+	go test ./.github/scripts/fabric-image-cohere-mock
 	.github/scripts/release_cleanup_test.sh
 	.github/scripts/release_test.sh
 	.github/scripts/release_metadata_test.sh
