@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/types"
@@ -16,6 +17,8 @@ import (
 )
 
 var ErrInvalidRegistration = errors.New("projectstate: invalid workspace registration")
+
+const workspaceRegistrationTimeout = 30 * time.Second
 
 type RegisterWorkspaceRequest struct {
 	Root               string
@@ -40,15 +43,16 @@ type WorkspaceStatus struct {
 }
 
 type Service struct {
-	repo             *localstore.WorkspaceRepo
-	legacyBackupRoot string
+	repo                *localstore.WorkspaceRepo
+	legacyBackupRoot    string
+	registrationTimeout time.Duration
 }
 
 func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service, error) {
 	if repo == nil {
 		return nil, fmt.Errorf("projectstate: workspace repository is required")
 	}
-	service := &Service{repo: repo}
+	service := &Service{repo: repo, registrationTimeout: workspaceRegistrationTimeout}
 	if config.LegacyIntegrationBackupRoot == "" {
 		return service, nil
 	}
@@ -84,15 +88,17 @@ func (s *Service) RegisterWorkspace(ctx context.Context, req RegisterWorkspaceRe
 	if s == nil || s.repo == nil {
 		return RegisterWorkspaceResult{}, fmt.Errorf("projectstate: service is unavailable")
 	}
+	registrationCtx, cancel := registrationContext(ctx, s.registrationTimeout)
+	defer cancel()
 	if !types.CanonicalUUID(req.ExpectedProjectID) || !validCommit(req.ExpectedCommit) {
 		return RegisterWorkspaceResult{}, fmt.Errorf("%w: invalid project or commit identity", ErrInvalidRegistration)
 	}
 	if err := req.ExpectedRepository.Validate(); err != nil {
 		return RegisterWorkspaceResult{}, fmt.Errorf("%w: %v", ErrInvalidRegistration, err)
 	}
-	observed, err := inspectCommittedWorkspace(ctx, req.Root, req.ExpectedCommit)
+	observed, err := inspectCommittedWorkspace(registrationCtx, req.Root, req.ExpectedCommit)
 	if err != nil {
-		return RegisterWorkspaceResult{}, fmt.Errorf("%w: %v", ErrInvalidRegistration, err)
+		return RegisterWorkspaceResult{}, fmt.Errorf("%w: %w", ErrInvalidRegistration, err)
 	}
 	if s.legacyBackupRoot != "" && pathsOverlap(s.legacyBackupRoot, observed.root) {
 		return RegisterWorkspaceResult{}, fmt.Errorf("%w: process-private backup root overlaps repository", ErrInvalidRegistration)
@@ -121,11 +127,15 @@ func (s *Service) RegisterWorkspace(ctx context.Context, req RegisterWorkspaceRe
 		AcceptedRef: observed.acceptedRef, AcceptedCommitSHA: req.ExpectedCommit,
 		AcceptedTreeDigest: string(observed.snapshot.Digest),
 	}
-	persisted, created, err := s.repo.RegisterWorkspace(ctx, binding, canonicalTree)
+	persisted, created, err := s.repo.RegisterWorkspace(registrationCtx, binding, canonicalTree)
 	if err != nil {
 		return RegisterWorkspaceResult{}, err
 	}
 	return RegisterWorkspaceResult{Binding: persisted, Created: created}, nil
+}
+
+func registrationContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, timeout)
 }
 
 func (s *Service) ResolveWorkingDirectory(ctx context.Context, observed types.WorkspaceContext) (types.WorkspaceBinding, error) {

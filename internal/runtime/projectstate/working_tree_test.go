@@ -1,11 +1,18 @@
 package projectstate
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -178,10 +185,199 @@ func TestRegisteredWorkspacesStableAfterRestart(t *testing.T) {
 	}
 }
 
-func TestWorkingTreeGitReaderEnforcesOutputLimit(t *testing.T) {
+func TestBoundedGitOutput(t *testing.T) {
 	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
 	if _, err := readOnlyGitLimited(context.Background(), repository.root, 1, "rev-parse", "HEAD"); err == nil {
 		t.Fatal("read-only Git runner ignored its output limit")
+	}
+}
+
+func TestCommittedTreeUsesSingleBatchReader(t *testing.T) {
+	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "git.log")
+	wrapper := filepath.Join(bin, "git")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> \"$WORMHOLE_GIT_LOG\"\n" +
+		"exec \"$WORMHOLE_REAL_GIT\" \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("WORMHOLE_GIT_LOG", logPath)
+	t.Setenv("WORMHOLE_REAL_GIT", realGit)
+
+	if _, err := readCommittedTree(context.Background(), repository.root, repository.commit); err != nil {
+		t.Fatal(err)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catFileCommands := 0
+	usedBatch := false
+	for _, line := range strings.Split(string(logData), "\n") {
+		if strings.Contains(line, " cat-file ") {
+			catFileCommands++
+			usedBatch = usedBatch || strings.Contains(line, " cat-file --batch")
+		}
+	}
+	if catFileCommands != 1 || !usedBatch {
+		t.Fatalf("Git commands used %d cat-file processes (batch=%v):\n%s", catFileCommands, usedBatch, logData)
+	}
+}
+
+func TestPromisorMissingObjectFailsClosedWithoutNetwork(t *testing.T) {
+	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+	listing := strings.Fields(runGit(t, repository.root, "ls-tree", "-r", repository.commit, "--", ".wormhole"))
+	if len(listing) < 3 {
+		t.Fatalf("unexpected ls-tree output: %q", listing)
+	}
+	missingOID := listing[2]
+
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		http.Error(writer, "network access forbidden", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	runGit(t, repository.root, "config", "remote.origin.url", server.URL+"/repository")
+	runGit(t, repository.root, "config", "remote.origin.promisor", "true")
+	runGit(t, repository.root, "config", "remote.origin.partialclonefilter", "blob:none")
+	objectPath := filepath.Join(repository.root, ".git", "objects", missingOID[:2], missingOID[2:])
+	if err := os.Remove(objectPath); err != nil {
+		t.Fatalf("remove promised object %s: %v", missingOID, err)
+	}
+
+	_, service := openProjectStateService(t, "")
+	_, err := service.RegisterWorkspace(context.Background(), RegisterWorkspaceRequest{
+		Root: repository.root, ExpectedProjectID: repository.projectID,
+		ExpectedRepository: repository.identity, ExpectedCommit: repository.commit,
+	})
+	if !errors.Is(err, ErrInvalidRegistration) {
+		t.Fatalf("registration error=%v, want ErrInvalidRegistration", err)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("missing promised object caused %d network request(s)", got)
+	}
+}
+
+func TestNoNetworkGitEnvironment(t *testing.T) {
+	for key, value := range map[string]string{
+		"HTTPS_PROXY": "http://proxy.example", "http_proxy": "http://proxy.example",
+		"ALL_PROXY": "socks5://proxy.example", "NO_PROXY": "localhost",
+		"SSH_AUTH_SOCK": "/tmp/agent.sock", "SSH_AGENT_PID": "123",
+		"GIT_SSH_COMMAND": "ssh -i secret", "GIT_ASKPASS": "/tmp/askpass",
+		"GCM_CREDENTIAL_STORE": "secretservice",
+	} {
+		t.Setenv(key, value)
+	}
+	environment := make(map[string]string)
+	for _, entry := range sanitizedGitEnvironment() {
+		key, value, _ := strings.Cut(entry, "=")
+		environment[key] = value
+	}
+	for _, key := range []string{
+		"HTTPS_PROXY", "http_proxy", "ALL_PROXY", "NO_PROXY",
+		"SSH_AUTH_SOCK", "SSH_AGENT_PID", "GCM_CREDENTIAL_STORE",
+	} {
+		if _, found := environment[key]; found {
+			t.Errorf("sanitized Git environment retained %s", key)
+		}
+	}
+	for key, want := range map[string]string{
+		"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "",
+		"GIT_SSH_COMMAND": "/bin/false", "GIT_ASKPASS": "/bin/false",
+	} {
+		if got := environment[key]; got != want {
+			t.Errorf("%s=%q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestBoundedCommittedTreeListing(t *testing.T) {
+	oid := strings.Repeat("a", 40)
+	t.Run("file count", func(t *testing.T) {
+		var listing bytes.Buffer
+		for index := 0; index <= maxCommittedTreeFiles; index++ {
+			fmt.Fprintf(&listing, "100644 blob %s\t.wormhole/state/v1/%d.json%c", oid, index, 0)
+		}
+		if _, err := parseCommittedTreeListing(listing.Bytes()); err == nil || !strings.Contains(err.Error(), "file count") {
+			t.Fatalf("parse error=%v, want file-count limit", err)
+		}
+	})
+	t.Run("path size", func(t *testing.T) {
+		path := strings.Repeat("a", maxCommittedTreePathBytes+1)
+		listing := fmt.Sprintf("100644 blob %s\t.wormhole/%s%c", oid, path, 0)
+		if _, err := parseCommittedTreeListing([]byte(listing)); err == nil || !strings.Contains(err.Error(), "path") {
+			t.Fatalf("parse error=%v, want path-size limit", err)
+		}
+	})
+}
+
+func TestBoundedBatchObjectBytes(t *testing.T) {
+	oidA := strings.Repeat("a", 40)
+	oidB := strings.Repeat("b", 40)
+	objects := []committedTreeObject{{path: "a", oid: oidA}, {path: "b", oid: oidB}}
+
+	t.Run("single object", func(t *testing.T) {
+		output := fmt.Sprintf("%s blob 4\ndata\n", oidA)
+		_, err := decodeBatchObjects(bufio.NewReader(strings.NewReader(output)), objects[:1], 3, 10)
+		if err == nil || !strings.Contains(err.Error(), "object size") {
+			t.Fatalf("decode error=%v, want object-size limit", err)
+		}
+	})
+	t.Run("aggregate", func(t *testing.T) {
+		output := fmt.Sprintf("%s blob 3\none\n%s blob 3\ntwo\n", oidA, oidB)
+		_, err := decodeBatchObjects(bufio.NewReader(strings.NewReader(output)), objects, 3, 5)
+		if err == nil || !strings.Contains(err.Error(), "aggregate") {
+			t.Fatalf("decode error=%v, want aggregate limit", err)
+		}
+	})
+}
+
+func TestBoundedGitStderr(t *testing.T) {
+	bin := t.TempDir()
+	wrapper := filepath.Join(bin, "git")
+	script := fmt.Sprintf("#!/bin/sh\n/usr/bin/head -c %d /dev/zero | /usr/bin/tr '\\000' x >&2\nexit 1\n", maxGitStderrBytes+1024)
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	_, err := readOnlyGitLimited(context.Background(), t.TempDir(), 1, "rev-parse", "HEAD")
+	if err == nil {
+		t.Fatal("fake Git stderr overflow unexpectedly succeeded")
+	}
+	if len(err.Error()) > maxGitStderrBytes+256 || !strings.Contains(err.Error(), "truncated") {
+		t.Fatalf("stderr error was not bounded: length=%d suffix=%q", len(err.Error()), err.Error()[max(0, len(err.Error())-80):])
+	}
+}
+
+func TestDeadlineRegistrationGetsFiniteDeadline(t *testing.T) {
+	ctx, cancel := registrationContext(context.Background(), workspaceRegistrationTimeout)
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("registration context has no service-owned deadline")
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 || remaining > workspaceRegistrationTimeout {
+		t.Fatalf("registration deadline remaining=%v, limit=%v", remaining, workspaceRegistrationTimeout)
+	}
+
+	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+	_, service := openProjectStateService(t, "")
+	service.registrationTimeout = 0
+	_, err := service.RegisterWorkspace(context.Background(), RegisterWorkspaceRequest{
+		Root: repository.root, ExpectedProjectID: repository.projectID,
+		ExpectedRepository: repository.identity, ExpectedCommit: repository.commit,
+	})
+	if !errors.Is(err, ErrInvalidRegistration) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expired service deadline error=%v, want invalid registration and deadline identities", err)
 	}
 }
 

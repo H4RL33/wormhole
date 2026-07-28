@@ -35,11 +35,19 @@ type gatewayMigration struct {
 	sql     string
 }
 
-// applyGatewayMigrations applies the sole Gateway schema ledger under one
-// dedicated SQLite connection and one immediate writer transaction.
-func applyGatewayMigrations(ctx context.Context, db *sql.DB) (err error) {
+// applyGatewayMigrations applies the embedded Gateway schema migrations.
+func applyGatewayMigrations(ctx context.Context, db *sql.DB) error {
 	migrations, err := loadGatewayMigrations()
 	if err != nil {
+		return err
+	}
+	return applyGatewayMigrationSet(ctx, db, migrations)
+}
+
+// applyGatewayMigrationSet applies each missing version in a separate immediate
+// transaction so a later migration cannot roll back an already durable version.
+func applyGatewayMigrationSet(ctx context.Context, db *sql.DB, migrations []gatewayMigration) error {
+	if err := validateGatewayMigrationSet(migrations); err != nil {
 		return err
 	}
 	conn, err := db.Conn(ctx)
@@ -47,6 +55,51 @@ func applyGatewayMigrations(ctx context.Context, db *sql.DB) (err error) {
 		return fmt.Errorf("localstore: acquire migration connection: %w", err)
 	}
 	defer conn.Close()
+	if err := withGatewayMigrationTransaction(ctx, conn, func() error {
+		return prepareGatewayMigrationLedger(ctx, conn, len(migrations))
+	}); err != nil {
+		return err
+	}
+	for _, migration := range migrations {
+		if err := withGatewayMigrationTransaction(ctx, conn, func() error {
+			if err := prepareGatewayMigrationLedger(ctx, conn, len(migrations)); err != nil {
+				return err
+			}
+			applied, err := gatewayAppliedVersions(ctx, conn)
+			if err != nil {
+				return err
+			}
+			if applied[migration.version] {
+				return nil
+			}
+			for version := 1; version < migration.version; version++ {
+				if !applied[version] {
+					return fmt.Errorf("localstore: gateway migration %s requires missing version %d", migration.name, version)
+				}
+			}
+			migrationSQL := migration.sql
+			if migration.version == 1 {
+				var found bool
+				migrationSQL, found = strings.CutPrefix(migrationSQL, gatewayMigrationLedgerDDL)
+				if !found {
+					return fmt.Errorf("localstore: migration %s does not declare the canonical ledger", migration.name)
+				}
+			}
+			if _, err := conn.ExecContext(ctx, migrationSQL); err != nil {
+				return fmt.Errorf("localstore: apply gateway migration %s: %w", migration.name, err)
+			}
+			if _, err := conn.ExecContext(ctx, `INSERT INTO gateway_schema_migrations(version) VALUES (?)`, migration.version); err != nil {
+				return fmt.Errorf("localstore: record gateway migration %s: %w", migration.name, err)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func withGatewayMigrationTransaction(ctx context.Context, conn *sql.Conn, operation func() error) (err error) {
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
 		return fmt.Errorf("localstore: begin gateway migration: %w", err)
 	}
@@ -56,7 +109,17 @@ func applyGatewayMigrations(ctx context.Context, db *sql.DB) (err error) {
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
+	if err := operation(); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return fmt.Errorf("localstore: commit gateway migration: %w", err)
+	}
+	committed = true
+	return nil
+}
 
+func prepareGatewayMigrationLedger(ctx context.Context, conn *sql.Conn, supportedVersion int) error {
 	if _, err := conn.ExecContext(ctx, ensureGatewayMigrationLedgerDDL); err != nil {
 		return fmt.Errorf("localstore: create gateway migration ledger: %w", err)
 	}
@@ -67,37 +130,33 @@ func applyGatewayMigrations(ctx context.Context, db *sql.DB) (err error) {
 	if err != nil {
 		return err
 	}
+	maxApplied := 0
 	for version := range applied {
 		if version < 1 {
 			return fmt.Errorf("localstore: gateway migration ledger has invalid version %d", version)
 		}
-		if version > GatewaySchemaVersion {
-			return fmt.Errorf("localstore: gateway schema version %d is newer than supported version %d", version, GatewaySchemaVersion)
+		if version > supportedVersion {
+			return fmt.Errorf("localstore: gateway schema version %d is newer than supported version %d", version, supportedVersion)
+		}
+		maxApplied = max(maxApplied, version)
+	}
+	for version := 1; version <= maxApplied; version++ {
+		if !applied[version] {
+			return fmt.Errorf("localstore: gateway migration ledger has a gap at version %d", version)
 		}
 	}
-	for _, migration := range migrations {
-		if applied[migration.version] {
-			continue
-		}
-		migrationSQL := migration.sql
-		if migration.version == 1 {
-			var found bool
-			migrationSQL, found = strings.CutPrefix(migrationSQL, gatewayMigrationLedgerDDL)
-			if !found {
-				return fmt.Errorf("localstore: migration %s does not declare the canonical ledger", migration.name)
-			}
-		}
-		if _, err := conn.ExecContext(ctx, migrationSQL); err != nil {
-			return fmt.Errorf("localstore: apply gateway migration %s: %w", migration.name, err)
-		}
-		if _, err := conn.ExecContext(ctx, `INSERT INTO gateway_schema_migrations(version) VALUES (?)`, migration.version); err != nil {
-			return fmt.Errorf("localstore: record gateway migration %s: %w", migration.name, err)
+	return nil
+}
+
+func validateGatewayMigrationSet(migrations []gatewayMigration) error {
+	if len(migrations) == 0 {
+		return fmt.Errorf("localstore: gateway migration set is empty")
+	}
+	for index, migration := range migrations {
+		if migration.version != index+1 {
+			return fmt.Errorf("localstore: gateway migrations are not contiguous at version %d", index+1)
 		}
 	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return fmt.Errorf("localstore: commit gateway migrations: %w", err)
-	}
-	committed = true
 	return nil
 }
 
@@ -129,10 +188,8 @@ func loadGatewayMigrations() ([]gatewayMigration, error) {
 	if len(migrations) != GatewaySchemaVersion {
 		return nil, fmt.Errorf("localstore: embedded gateway migration count %d does not match schema version %d", len(migrations), GatewaySchemaVersion)
 	}
-	for index, migration := range migrations {
-		if migration.version != index+1 {
-			return nil, fmt.Errorf("localstore: gateway migrations are not contiguous at version %d", index+1)
-		}
+	if err := validateGatewayMigrationSet(migrations); err != nil {
+		return nil, err
 	}
 	return migrations, nil
 }

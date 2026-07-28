@@ -1,6 +1,7 @@
 package projectstate
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -17,7 +19,15 @@ import (
 	state "github.com/H4RL33/wormhole/internal/types/projectstate"
 )
 
-const maxCommittedTreeBytes = 64 << 20
+const (
+	maxCommittedTreeBytes        = 64 << 20
+	maxCommittedTreeFiles        = 10_000
+	maxCommittedTreePathBytes    = 4 << 10
+	maxCommittedObjectBytes      = 16 << 20
+	maxCommittedTreeListingBytes = 8 << 20
+	maxGitStderrBytes            = 64 << 10
+	maxGitBatchHeaderBytes       = 256
+)
 
 type committedWorkspace struct {
 	root        string
@@ -135,16 +145,43 @@ func symbolicHead(ctx context.Context, root string) (string, error) {
 }
 
 func readCommittedTree(ctx context.Context, root, commit string) (state.Tree, error) {
-	listing, err := readOnlyGitLimited(ctx, root, maxCommittedTreeBytes, "ls-tree", "-r", "-z", "--full-tree", commit, "--", ".wormhole")
+	listing, err := readOnlyGitLimited(ctx, root, maxCommittedTreeListingBytes, "ls-tree", "-r", "-z", "--full-tree", commit, "--", ".wormhole")
 	if err != nil {
 		return nil, fmt.Errorf("projectstate: list committed .wormhole tree: %w", err)
 	}
+	objects, err := parseCommittedTreeListing(listing)
+	if err != nil {
+		return nil, err
+	}
+	pathBytes := 0
+	for _, object := range objects {
+		pathBytes += len(object.path)
+		if pathBytes > maxCommittedTreeBytes {
+			return nil, fmt.Errorf("projectstate: committed .wormhole tree exceeds aggregate size limit")
+		}
+	}
+	tree, err := readCommittedBlobs(ctx, root, objects, maxCommittedTreeBytes-pathBytes)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(tree, func(i, j int) bool { return tree[i].Path < tree[j].Path })
+	return tree, nil
+}
+
+type committedTreeObject struct {
+	path string
+	oid  string
+}
+
+func parseCommittedTreeListing(listing []byte) ([]committedTreeObject, error) {
 	records := bytes.Split(listing, []byte{0})
-	tree := make(state.Tree, 0, len(records))
-	total := 0
+	objects := make([]committedTreeObject, 0, min(len(records), maxCommittedTreeFiles))
 	for _, record := range records {
 		if len(record) == 0 {
 			continue
+		}
+		if len(objects) >= maxCommittedTreeFiles {
+			return nil, fmt.Errorf("projectstate: committed .wormhole tree exceeds file count limit")
 		}
 		metadata, gitPath, found := bytes.Cut(record, []byte{'\t'})
 		fields := strings.Fields(string(metadata))
@@ -156,25 +193,136 @@ func readCommittedTree(ctx context.Context, root, commit string) (state.Tree, er
 			return nil, fmt.Errorf("projectstate: invalid committed .wormhole path %q", fullPath)
 		}
 		relative := strings.TrimPrefix(fullPath, ".wormhole/")
+		if len(relative) > maxCommittedTreePathBytes {
+			return nil, fmt.Errorf("projectstate: committed .wormhole path exceeds size limit")
+		}
 		if relative == "" || filepath.ToSlash(filepath.Clean(filepath.FromSlash(relative))) != relative || strings.ContainsRune(relative, 0) {
 			return nil, fmt.Errorf("projectstate: invalid committed .wormhole path %q", fullPath)
 		}
-		remaining := maxCommittedTreeBytes - total - len(relative)
-		if remaining < 0 {
-			return nil, fmt.Errorf("projectstate: committed .wormhole tree exceeds size limit")
+		if !validCommit(fields[2]) {
+			return nil, fmt.Errorf("projectstate: invalid committed .wormhole object ID")
 		}
-		contents, err := readOnlyGitLimited(ctx, root, remaining, "cat-file", "blob", fields[2])
-		if err != nil {
-			return nil, fmt.Errorf("projectstate: read committed .wormhole blob %q: %w", fullPath, err)
-		}
-		total += len(relative) + len(contents)
-		if total > maxCommittedTreeBytes {
-			return nil, fmt.Errorf("projectstate: committed .wormhole tree exceeds size limit")
-		}
-		tree = append(tree, state.File{Path: relative, Data: contents})
+		objects = append(objects, committedTreeObject{path: relative, oid: fields[2]})
 	}
-	sort.Slice(tree, func(i, j int) bool { return tree[i].Path < tree[j].Path })
+	return objects, nil
+}
+
+func readCommittedBlobs(ctx context.Context, root string, objects []committedTreeObject, aggregateLimit int) (state.Tree, error) {
+	command := newReadOnlyGitCommand(ctx, root, "cat-file", "--batch")
+	stdin, err := command.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("projectstate: open Git batch input: %w", err)
+	}
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("projectstate: open Git batch output: %w", err)
+	}
+	stderr := newBoundedGitStderr()
+	command.Stderr = stderr
+	if err := command.Start(); err != nil {
+		return nil, fmt.Errorf("projectstate: start Git batch reader: %w", err)
+	}
+	writeDone := make(chan error, 1)
+	go func() {
+		var writeErr error
+		for _, object := range objects {
+			if _, err := io.WriteString(stdin, object.oid+"\n"); err != nil {
+				writeErr = err
+				break
+			}
+		}
+		if err := stdin.Close(); writeErr == nil {
+			writeErr = err
+		}
+		writeDone <- writeErr
+	}()
+
+	tree, decodeErr := decodeBatchObjects(bufio.NewReader(stdout), objects, maxCommittedObjectBytes, aggregateLimit)
+	if decodeErr != nil {
+		_ = command.Process.Kill()
+	}
+	writeErr := <-writeDone
+	waitErr := command.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if decodeErr != nil {
+		return nil, fmt.Errorf("projectstate: decode Git batch output: %w", decodeErr)
+	}
+	if writeErr != nil {
+		return nil, fmt.Errorf("projectstate: write Git batch input: %w", writeErr)
+	}
+	if waitErr != nil {
+		return nil, gitWaitError(waitErr, stderr)
+	}
+	if stderr.truncated {
+		return nil, fmt.Errorf("projectstate: Git stderr exceeded size limit: %s", stderr.text())
+	}
 	return tree, nil
+}
+
+func decodeBatchObjects(reader *bufio.Reader, objects []committedTreeObject, objectLimit, aggregateLimit int) (state.Tree, error) {
+	if objectLimit < 0 || aggregateLimit < 0 {
+		return nil, fmt.Errorf("invalid Git batch size limit")
+	}
+	tree := make(state.Tree, 0, len(objects))
+	total := 0
+	for _, object := range objects {
+		header, err := readBoundedBatchHeader(reader)
+		if err != nil {
+			return nil, fmt.Errorf("read object %q header: %w", object.path, err)
+		}
+		fields := strings.Fields(header)
+		if len(fields) == 2 && fields[0] == object.oid && fields[1] == "missing" {
+			return nil, fmt.Errorf("committed object %s is missing", object.oid)
+		}
+		if len(fields) != 3 || fields[0] != object.oid || fields[1] != "blob" {
+			return nil, fmt.Errorf("unexpected Git batch header for %q", object.path)
+		}
+		size, err := strconv.ParseInt(fields[2], 10, 64)
+		if err != nil || size < 0 {
+			return nil, fmt.Errorf("invalid object size for %q", object.path)
+		}
+		if size > int64(objectLimit) {
+			return nil, fmt.Errorf("committed object size exceeds limit for %q", object.path)
+		}
+		if size > int64(aggregateLimit-total) {
+			return nil, fmt.Errorf("committed object aggregate exceeds size limit")
+		}
+		contents := make([]byte, int(size))
+		if _, err := io.ReadFull(reader, contents); err != nil {
+			return nil, fmt.Errorf("read object %q contents: %w", object.path, err)
+		}
+		terminator, err := reader.ReadByte()
+		if err != nil || terminator != '\n' {
+			return nil, fmt.Errorf("invalid Git batch terminator for %q", object.path)
+		}
+		total += len(contents)
+		tree = append(tree, state.File{Path: object.path, Data: contents})
+	}
+	if extra, err := reader.ReadByte(); err == nil {
+		return nil, fmt.Errorf("unexpected trailing Git batch output byte %q", extra)
+	} else if !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("finish Git batch output: %w", err)
+	}
+	return tree, nil
+}
+
+func readBoundedBatchHeader(reader *bufio.Reader) (string, error) {
+	header := make([]byte, 0, maxGitBatchHeaderBytes)
+	for {
+		fragment, prefix, err := reader.ReadLine()
+		if err != nil {
+			return "", err
+		}
+		if len(fragment) > maxGitBatchHeaderBytes-len(header) {
+			return "", fmt.Errorf("Git batch header exceeds size limit")
+		}
+		header = append(header, fragment...)
+		if !prefix {
+			return string(header), nil
+		}
+	}
 }
 
 type gitExitError struct {
@@ -197,21 +345,10 @@ func readOnlyGitLimited(ctx context.Context, root string, limit int, arguments .
 	if limit < 0 {
 		return nil, fmt.Errorf("projectstate: invalid Git output limit")
 	}
-	global := []string{
-		"--no-pager", "--no-optional-locks", "--no-replace-objects",
-		"-c", "core.hooksPath=/dev/null",
-		"-c", "core.fsmonitor=false",
-		"-c", "credential.helper=",
-		"-c", "protocol.file.allow=never",
-		"-c", "protocol.ext.allow=never",
-		"-c", "submodule.recurse=false",
-		"-C", root,
-	}
-	command := exec.CommandContext(ctx, "git", append(global, arguments...)...)
-	command.Env = sanitizedGitEnvironment()
+	command := newReadOnlyGitCommand(ctx, root, arguments...)
 	command.Stdin = bytes.NewReader(nil)
-	var stderr bytes.Buffer
-	command.Stderr = &stderr
+	stderr := newBoundedGitStderr()
+	command.Stderr = stderr
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -220,30 +357,99 @@ func readOnlyGitLimited(ctx context.Context, root string, limit int, arguments .
 		return nil, err
 	}
 	output, readErr := io.ReadAll(io.LimitReader(stdout, int64(limit)+1))
-	if len(output) > limit {
+	if len(output) > limit || readErr != nil {
 		_ = command.Process.Kill()
-		_ = command.Wait()
-		return nil, fmt.Errorf("projectstate: Git output exceeds size limit")
 	}
 	waitErr := command.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(output) > limit {
+		return nil, fmt.Errorf("projectstate: Git output exceeds size limit")
+	}
 	if readErr != nil {
 		return nil, readErr
 	}
-	if waitErr == nil {
-		return output, nil
+	if waitErr != nil {
+		return nil, gitWaitError(waitErr, stderr)
 	}
+	if stderr.truncated {
+		return nil, fmt.Errorf("projectstate: Git stderr exceeded size limit: %s", stderr.text())
+	}
+	return output, nil
+}
+
+func newReadOnlyGitCommand(ctx context.Context, root string, arguments ...string) *exec.Cmd {
+	global := []string{
+		"--no-pager", "--no-optional-locks", "--no-replace-objects",
+		"-c", "core.hooksPath=/dev/null",
+		"-c", "core.fsmonitor=false",
+		"-c", "core.sshCommand=/bin/false",
+		"-c", "credential.helper=",
+		"-c", "protocol.allow=never",
+		"-c", "protocol.file.allow=never",
+		"-c", "protocol.ext.allow=never",
+		"-c", "protocol.git.allow=never",
+		"-c", "protocol.http.allow=never",
+		"-c", "protocol.https.allow=never",
+		"-c", "protocol.ssh.allow=never",
+		"-c", "submodule.recurse=false",
+		"-C", root,
+	}
+	command := exec.CommandContext(ctx, "git", append(global, arguments...)...)
+	command.Env = sanitizedGitEnvironment()
+	return command
+}
+
+type boundedGitStderr struct {
+	buffer    bytes.Buffer
+	truncated bool
+}
+
+func newBoundedGitStderr() *boundedGitStderr {
+	stderr := &boundedGitStderr{}
+	stderr.buffer.Grow(maxGitStderrBytes)
+	return stderr
+}
+
+func (stderr *boundedGitStderr) Write(data []byte) (int, error) {
+	remaining := maxGitStderrBytes - stderr.buffer.Len()
+	if remaining > 0 {
+		retained := min(remaining, len(data))
+		_, _ = stderr.buffer.Write(data[:retained])
+	}
+	if len(data) > remaining {
+		stderr.truncated = true
+	}
+	return len(data), nil
+}
+
+func (stderr *boundedGitStderr) text() string {
+	text := strings.TrimSpace(stderr.buffer.String())
+	if stderr.truncated {
+		if text != "" {
+			text += " "
+		}
+		text += "[stderr truncated]"
+	}
+	return text
+}
+
+func gitWaitError(waitErr error, stderr *boundedGitStderr) error {
 	var exit *exec.ExitError
 	if errors.As(waitErr, &exit) {
-		return nil, &gitExitError{code: exit.ExitCode(), stderr: strings.TrimSpace(stderr.String())}
+		return &gitExitError{code: exit.ExitCode(), stderr: stderr.text()}
 	}
-	return nil, waitErr
+	return waitErr
 }
 
 func sanitizedGitEnvironment() []string {
-	environment := make([]string, 0, len(os.Environ())+9)
+	environment := make([]string, 0, len(os.Environ())+13)
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
-		if strings.HasPrefix(key, "GIT_") || key == "SSH_ASKPASS" || key == "SSH_ASKPASS_REQUIRE" || key == "GCM_INTERACTIVE" || key == "LC_ALL" {
+		upperKey := strings.ToUpper(key)
+		if strings.HasPrefix(upperKey, "GIT_") || strings.HasPrefix(upperKey, "SSH_") ||
+			strings.HasPrefix(upperKey, "GCM_") || strings.HasSuffix(upperKey, "_PROXY") || upperKey == "LC_ALL" {
 			continue
 		}
 		environment = append(environment, entry)
@@ -254,7 +460,12 @@ func sanitizedGitEnvironment() []string {
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_OPTIONAL_LOCKS=0",
 		"GIT_NO_REPLACE_OBJECTS=1",
+		"GIT_NO_LAZY_FETCH=1",
+		"GIT_ALLOW_PROTOCOL=",
 		"GIT_PROTOCOL_FROM_USER=0",
+		"GIT_SSH=/bin/false",
+		"GIT_SSH_COMMAND=/bin/false",
+		"GIT_ASKPASS=/bin/false",
 		"GCM_INTERACTIVE=never",
 		"SSH_ASKPASS=/bin/false",
 		"SSH_ASKPASS_REQUIRE=never",

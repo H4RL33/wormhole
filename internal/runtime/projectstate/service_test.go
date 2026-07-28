@@ -23,7 +23,11 @@ func TestRegisterWorkspaceIdempotent(t *testing.T) {
 	if err := first.Binding.Validate(); err != nil {
 		t.Fatalf("registered binding: %v", err)
 	}
-	if _, err := store.DB().Exec(`CREATE TRIGGER reject_workspace_rewrite BEFORE UPDATE ON workspace_bindings BEGIN SELECT RAISE(ABORT, 'idempotent registration wrote'); END`); err != nil {
+	if _, err := store.DB().Exec(`
+		CREATE TRIGGER reject_workspace_insert BEFORE INSERT ON workspace_bindings BEGIN SELECT RAISE(ABORT, 'idempotent registration inserted'); END;
+		CREATE TRIGGER reject_workspace_update BEFORE UPDATE ON workspace_bindings BEGIN SELECT RAISE(ABORT, 'idempotent registration updated'); END;
+		CREATE TRIGGER reject_workspace_delete BEFORE DELETE ON workspace_bindings BEGIN SELECT RAISE(ABORT, 'idempotent registration deleted'); END;
+	`); err != nil {
 		t.Fatal(err)
 	}
 	second, err := service.RegisterWorkspace(context.Background(), request)

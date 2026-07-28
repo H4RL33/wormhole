@@ -3,6 +3,7 @@ package localstore
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -66,6 +67,67 @@ func TestGatewayMigrationRollback(t *testing.T) {
 	}
 }
 
+func TestGatewayMigrationEachVersionCommitsIndependently(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "gateway.db")
+	db, err := sql.Open("sqlite", sqliteDSN(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	migrations := []gatewayMigration{
+		{
+			version: 1,
+			name:    "000001_first.sql",
+			sql:     gatewayMigrationLedgerDDL + "\nCREATE TABLE first_version (id INTEGER PRIMARY KEY);\n",
+		},
+		{
+			version: 2,
+			name:    "000002_broken.sql",
+			sql:     "CREATE TABLE second_version (id INTEGER PRIMARY KEY);\nTHIS IS NOT SQL;\n",
+		},
+	}
+	if err := applyGatewayMigrationSet(context.Background(), db, migrations); err == nil {
+		t.Fatal("applyGatewayMigrationSet succeeded with a broken second migration")
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close failed migration database: %v", err)
+	}
+
+	reopened, err := sql.Open("sqlite", sqliteDSN(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	var firstApplied int
+	if err := reopened.QueryRow(`SELECT count(*) FROM gateway_schema_migrations WHERE version=1`).Scan(&firstApplied); err != nil {
+		t.Fatalf("read first migration ledger row: %v", err)
+	}
+	if firstApplied != 1 {
+		t.Fatalf("first migration ledger row count=%d, want 1", firstApplied)
+	}
+	var secondApplied int
+	if err := reopened.QueryRow(`SELECT count(*) FROM gateway_schema_migrations WHERE version=2`).Scan(&secondApplied); err != nil {
+		t.Fatalf("read second migration ledger row: %v", err)
+	}
+	if secondApplied != 0 {
+		t.Fatalf("second migration ledger row count=%d, want 0", secondApplied)
+	}
+	for _, table := range []string{"first_version", "second_version"} {
+		var exists int
+		if err := reopened.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&exists); err != nil {
+			t.Fatalf("look up %s: %v", table, err)
+		}
+		want := 0
+		if table == "first_version" {
+			want = 1
+		}
+		if exists != want {
+			t.Fatalf("table %s exists=%d, want %d", table, exists, want)
+		}
+	}
+}
+
 func TestGatewayMigrationLedgerWriteRollback(t *testing.T) {
 	db := openRawGatewayDB(t)
 	if _, err := db.Exec(`
@@ -104,6 +166,49 @@ func TestGatewayMigrationRejectsFutureVersion(t *testing.T) {
 	}
 	if err := applyGatewayMigrations(context.Background(), db); err == nil || !strings.Contains(err.Error(), "newer") {
 		t.Fatalf("future migration error=%v, want newer-version rejection", err)
+	}
+}
+
+func TestGatewayMigrationRejectsLedgerGap(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		versions   []int
+		migrationN int
+	}{
+		{name: "missing first", versions: []int{2}, migrationN: 2},
+		{name: "missing middle", versions: []int{1, 3}, migrationN: 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db := openRawGatewayDB(t)
+			if _, err := db.Exec(gatewayMigrationLedgerDDL); err != nil {
+				t.Fatal(err)
+			}
+			for _, version := range test.versions {
+				if _, err := db.Exec(`INSERT INTO gateway_schema_migrations(version) VALUES (?)`, version); err != nil {
+					t.Fatal(err)
+				}
+			}
+			migrations := make([]gatewayMigration, 0, test.migrationN)
+			for version := 1; version <= test.migrationN; version++ {
+				script := fmt.Sprintf("CREATE TABLE migration_%d (id INTEGER PRIMARY KEY);", version)
+				if version == 1 {
+					script = gatewayMigrationLedgerDDL + "\n" + script
+				}
+				migrations = append(migrations, gatewayMigration{version: version, name: fmt.Sprintf("%06d_test.sql", version), sql: script})
+			}
+			if err := applyGatewayMigrationSet(context.Background(), db, migrations); err == nil || !strings.Contains(err.Error(), "gap") {
+				t.Fatalf("migration ledger gap error=%v, want gap rejection", err)
+			}
+			for version := 1; version <= test.migrationN; version++ {
+				var exists int
+				if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, fmt.Sprintf("migration_%d", version)).Scan(&exists); err != nil {
+					t.Fatal(err)
+				}
+				if exists != 0 {
+					t.Fatalf("migration_%d was applied before ledger gap rejection", version)
+				}
+			}
+		})
 	}
 }
 
