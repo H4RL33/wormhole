@@ -114,14 +114,14 @@ type Config struct {
 }
 
 // DefaultConfig returns conservative batching defaults: 5 sec interval, 50
-// item batch, 5 sec pull interval, and high-priority entries (priority >= 2)
+// item batch, 10 sec pull interval, and high-priority entries (priority >= 2)
 // checked every 500ms instead of waiting the full 5 sec.
 func DefaultConfig() Config {
 	return Config{
 		BatchInterval:         5 * time.Second,
 		BatchSize:             50,
 		LatencyCheckInterval:  500 * time.Millisecond,
-		PullInterval:          5 * time.Second,
+		PullInterval:          10 * time.Second,
 		HighPriorityThreshold: 2,
 	}
 }
@@ -222,9 +222,7 @@ func (e *Engine) syncLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := e.syncOnce(ctx); err != nil {
-				e.reportSyncError(ctx, err)
-			}
+			e.syncBatch(ctx)
 		case <-latencyTicker.C:
 			if err := e.checkLatencySensitive(ctx); err != nil {
 				e.reportSyncError(ctx, err)
@@ -242,6 +240,35 @@ func (e *Engine) reportSyncError(ctx context.Context, err error) {
 		return
 	}
 	e.syncErrorReporter(err)
+}
+
+// syncBatch drains durable outbound writes for a batch tick. It deliberately
+// does not pull: scheduled pulls and startup reconciliation use syncOnce.
+// An empty batch preserves the last state. A pending batch moves ordinary
+// states to synchronizing but preserves attention_required until a successful
+// scheduled pull; failures become visible before observers receive the error.
+func (e *Engine) syncBatch(ctx context.Context) {
+	pending, err := e.queueRepo.PendingCount(ctx, e.namespaceID)
+	if err != nil {
+		e.setConnectionState(StateAttentionRequired)
+		e.reportSyncError(ctx, fmt.Errorf("sync: inspect pending writes before batch: %w", err))
+		return
+	}
+	if pending == 0 {
+		return
+	}
+	e.stateMu.RLock()
+	priorState := e.connectionState
+	e.stateMu.RUnlock()
+	if priorState != StateAttentionRequired {
+		e.setConnectionState(StateSynchronizing)
+	}
+	if err := e.pushBatch(ctx); err != nil {
+		if ctx.Err() == nil {
+			e.setConnectionState(stateForSyncError(err))
+		}
+		e.reportSyncError(ctx, err)
+	}
 }
 
 func (e *Engine) syncOnce(ctx context.Context) error {

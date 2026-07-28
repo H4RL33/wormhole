@@ -46,6 +46,12 @@ func TestEngineNew(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigPullIntervalLeavesSharedNamespaceCapacity(t *testing.T) {
+	if got, want := DefaultConfig().PullInterval, 10*time.Second; got != want {
+		t.Fatalf("default PullInterval = %v, want %v to leave capacity under Fabric's shared 30/minute namespace limit", got, want)
+	}
+}
+
 // TestEnginePushBatchEmpty tests that pushBatch gracefully handles empty queues.
 func TestEnginePushBatchEmpty(t *testing.T) {
 	qRepo, aRepo := setupTestRepos(t)
@@ -553,6 +559,112 @@ func TestSyncLoopPullsWithEmptyQueue(t *testing.T) {
 	case <-pulled:
 	case <-time.After(time.Second):
 		t.Fatal("empty outbound queue did not receive periodic pull")
+	}
+}
+
+func TestSyncBatchTickDrainsWritesWithoutPullOrClearingAttention(t *testing.T) {
+	qRepo, aRepo := setupTestRepos(t)
+	defer qRepo.db.Close()
+
+	engine := mustNewEngine(t, "http://localhost:8080", qRepo, aRepo, nil, nil, DefaultConfig())
+	engine.setConnectionState(StateAttentionRequired)
+
+	var pushes atomic.Int64
+	engine.testCallSyncToolWithResultFn = func(_ context.Context, toolName string, _ map[string]interface{}) (interface{}, error) {
+		switch toolName {
+		case "wormhole.sync.incremental_push":
+			pushes.Add(1)
+			return pushResult(1, []map[string]interface{}{{"id": "task-1", "type": "task", "error": ""}}), nil
+		case "wormhole.sync.incremental_pull":
+			t.Fatal("batch tick must not call incremental_pull")
+			return nil, nil
+		default:
+			return nil, fmt.Errorf("unexpected tool %q", toolName)
+		}
+	}
+
+	if _, err := qRepo.Enqueue(context.Background(), "ns-1", "task", "task-1", "create", json.RawMessage(`{"title":"queued"}`), 0); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	engine.syncBatch(context.Background())
+	engine.syncBatch(context.Background()) // no-op batch must preserve attention too
+	if got := pushes.Load(); got != 1 {
+		t.Fatalf("incremental push calls = %d, want one queued-write drain", got)
+	}
+	pending, err := qRepo.PendingCount(context.Background(), "ns-1")
+	if err != nil {
+		t.Fatalf("PendingCount: %v", err)
+	}
+	if pending != 0 {
+		t.Fatalf("pending writes = %d, want 0 after batch drain", pending)
+	}
+	status, err := engine.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if status.State != StateAttentionRequired {
+		t.Fatalf("successful/no-op batch state = %q, want prior attention_required", status.State)
+	}
+}
+
+func TestSyncBatchTickFailureSetsStateBeforeReporting(t *testing.T) {
+	qRepo, aRepo := setupTestRepos(t)
+	defer qRepo.db.Close()
+	if _, err := qRepo.Enqueue(context.Background(), "ns-1", "task", "task-1", "create", json.RawMessage(`{"title":"queued"}`), 0); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	engine := mustNewEngine(t, "http://localhost:8080", qRepo, aRepo, nil, nil, DefaultConfig())
+	engine.setConnectionState(StateOnline)
+	engine.testCallSyncToolWithResultFn = func(context.Context, string, map[string]interface{}) (interface{}, error) {
+		return nil, ErrAttentionRequired
+	}
+	var reports atomic.Int64
+	engine.syncErrorReporter = func(err error) {
+		reports.Add(1)
+		if !errors.Is(err, ErrAttentionRequired) {
+			t.Errorf("reported error = %v, want attention-required error", err)
+		}
+		status, statusErr := engine.Status(context.Background())
+		if statusErr != nil {
+			t.Errorf("Status while reporting: %v", statusErr)
+			return
+		}
+		if status.State != StateAttentionRequired {
+			t.Errorf("state while reporting = %q, want attention_required", status.State)
+		}
+	}
+
+	engine.syncBatch(context.Background())
+	if got := reports.Load(); got != 1 {
+		t.Fatalf("sync error reports = %d, want 1", got)
+	}
+}
+
+func TestSyncBatchTickWithPendingWriteMovesOfflineToSynchronizing(t *testing.T) {
+	qRepo, aRepo := setupTestRepos(t)
+	defer qRepo.db.Close()
+	if _, err := qRepo.Enqueue(context.Background(), "ns-1", "task", "task-1", "create", json.RawMessage(`{"title":"queued"}`), 0); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	engine := mustNewEngine(t, "http://localhost:8080", qRepo, aRepo, nil, nil, DefaultConfig())
+	engine.setConnectionState(StateOffline)
+	engine.testCallSyncToolWithResultFn = func(_ context.Context, toolName string, _ map[string]interface{}) (interface{}, error) {
+		if toolName != "wormhole.sync.incremental_push" {
+			t.Fatalf("batch tick tool = %q, want incremental_push only", toolName)
+		}
+		return pushResult(1, []map[string]interface{}{{"id": "task-1", "type": "task", "error": ""}}), nil
+	}
+
+	engine.syncBatch(context.Background())
+	status, err := engine.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if status.State != StateSynchronizing || status.PendingWrites != 0 {
+		t.Fatalf("successful offline batch status = %q/%d, want synchronizing/0 pending until next pull", status.State, status.PendingWrites)
 	}
 }
 

@@ -1898,6 +1898,9 @@ git commit -m "test: add full alpha acceptance loop"
 - Modify after live Task 22 validation required stable-ID transactional Event publication: `internal/core/events/events.go`
 - Modify after live Task 22 validation changed the reviewed sync payload: `docs/contracts/alpha-contract.json`
 - Modify after live Task 22 validation required an exact Gateway A/Gateway B/Fabric status Event ID invariant after restart: `cmd/gatewayd/alpha_validation_e2e_test.go`
+- Modify after live Task 22 validation proved duplicate idle pulls can exhaust Fabric's namespace sync limit: `internal/runtime/sync/sync.go`
+- Modify after live Task 22 validation required batch-tick pull suppression and durable-write draining coverage: `internal/runtime/sync/sync_test.go`
+- Modify after live Task 22 validation required a deterministic shared-namespace capacity budget for the existing Fabric limiter: `internal/mcp/sync_ratelimit_test.go`
 - Modify only when validation proves a guidance defect: `internal/runtime/localapi/guidance_render.go`
 - Modify only when validation proves a guidance defect: `internal/runtime/localapi/guidance_render_test.go`
 - Modify only when validation proves a guidance defect: the affected file in `testdata/alpha/manifests/generated-guidance/`, added by exact name before editing

@@ -55,6 +55,68 @@ func TestSyncRateLimiter_WindowExpires(t *testing.T) {
 	}
 }
 
+// TestSyncRateLimiter_TwoDefaultGatewaysFitTask22CapacityBudget models the
+// shared Fabric namespace used by the two-Gateway Task 22 run. With the
+// Gateway's 10-second default pull cadence, two Gateways make 12 steady pulls
+// per minute. That leaves 18 of Fabric's fixed 30 calls for lifecycle and
+// write traffic; this scenario consumes 16 of those slots (two restart pulls,
+// ten pushes, and four conflict reports) and still leaves two calls available.
+func TestSyncRateLimiter_TwoDefaultGatewaysFitTask22CapacityBudget(t *testing.T) {
+	const (
+		limit                 = 30
+		gatewayCount          = 2
+		defaultPullInterval   = 10 * time.Second
+		startupPulls          = gatewayCount
+		restartPulls          = gatewayCount
+		task22PushBurst       = 10
+		task22ConflictReports = 4
+	)
+	steadyPulls := gatewayCount * int(time.Minute/defaultPullInterval)
+	sharedHeadroom := limit - steadyPulls
+	if steadyPulls != 12 || sharedHeadroom < 16 {
+		t.Fatalf("default two-Gateway budget = %d steady pulls and %d shared calls, want 12 and at least 16", steadyPulls, sharedHeadroom)
+	}
+	if sharedCalls := restartPulls + task22PushBurst + task22ConflictReports; sharedCalls > sharedHeadroom {
+		t.Fatalf("restart/push/conflict calls = %d exceed shared capacity %d", sharedCalls, sharedHeadroom)
+	}
+
+	rl := NewSyncRateLimiter(limit, time.Minute)
+	now := time.Date(2026, time.July, 28, 13, 0, 0, 0, time.UTC)
+	allow := func(label string, at time.Time) {
+		t.Helper()
+		if !rl.allow("task22-shared-namespace", at) {
+			t.Fatalf("%s at %s unexpectedly exceeded the 30/minute namespace limit", label, at.Format(time.RFC3339))
+		}
+	}
+
+	for range startupPulls {
+		allow("Gateway startup pull", now)
+	}
+	for tick := 1; tick <= 5; tick++ { // first five of six 10-second steady ticks
+		for range gatewayCount {
+			allow("steady Gateway pull", now.Add(time.Duration(tick)*defaultPullInterval))
+		}
+	}
+	for range restartPulls {
+		allow("Gateway restart pull", now.Add(55*time.Second))
+	}
+	for range task22PushBurst {
+		allow("Task 22 push burst", now.Add(59*time.Second))
+	}
+	for range task22ConflictReports {
+		allow("Task 22 conflict report", now.Add(59*time.Second))
+	}
+	for range gatewayCount { // sixth steady tick; startup calls expire at this boundary
+		allow("sixth steady Gateway pull", now.Add(time.Minute))
+	}
+	for range 2 {
+		allow("remaining shared capacity", now.Add(time.Minute))
+	}
+	if rl.allow("task22-shared-namespace", now.Add(time.Minute)) {
+		t.Fatal("31st shared namespace call was allowed; the 30/minute limiter must remain enforced")
+	}
+}
+
 // TestBootstrapTool_RateLimitRejectsCleanly confirms the handler itself
 // (not just the limiter struct in isolation) returns a clean error once the
 // per-namespace budget is exhausted.
