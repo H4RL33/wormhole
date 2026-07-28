@@ -305,11 +305,16 @@ and is never needed to bootstrap a clone.
 - Unknown optional fields are preserved only where the versioned schema explicitly
   defines an extension envelope; arbitrary ignored security fields are forbidden.
 
-Events are immutable and add-only. The same event ID with different bytes is an
-integrity conflict. Deleting a mutable record writes a typed tombstone at that
-record's stable path rather than silently removing the path. A tombstone carries
-the stable ID, entity kind, deleted-content digest, and deletion attribution;
-delete-versus-edit is an explicit merge conflict.
+Events and Git links are live-only, immutable, and add-only. Replaying the same ID
+and byte-identical canonical value is idempotent; the same ID with different
+canonical bytes is one generic immutable-record integrity conflict. Neither kind
+has a tombstone or resurrection path. Deleting any mutable actor, task, task-link,
+KB, or channel record writes a typed tombstone at that record's stable path rather
+than silently removing the path. A tombstone carries the stable ID, entity kind,
+deleted-content digest, and deletion attribution; delete-versus-edit is an explicit
+merge conflict. For an existing mutable record, `created_at` is immutable on
+ordinary update. An explicit digest-proven resurrection may supply a fresh valid
+`created_at` because the tombstone does not retain the prior record bytes.
 
 For a single-file entity, the tombstone replaces its JSON record. For a KB article,
 `record.json` becomes the tombstone and `body.md` is absent; a tombstoned KB directory
@@ -324,6 +329,14 @@ relationship-edge references, which resolve as deleted rather than dangling; it 
 not satisfy a live-required structural reference. This distinction is validated from
 the candidate tree and prevents deletion from erasing audit history or silently leaving
 a live hierarchy attached to a deleted record.
+
+Snapshot version, project ID, and canonical repository identity are immutable binding
+fields and must agree across every accepted base, direct candidate, composed view, and
+rebase input. Project handle and `remotes.toml` are Git-base-owned: overlay operations
+cannot change them, semantic diff omits them, and rebase requires the candidate to retain
+the old base values before taking the new base values. A normal candidate load still
+accepts old-base handle/remotes after Git advances; it validates the immutable binding
+fields rather than incorrectly comparing those Git-owned values with the newer base.
 
 Tracked actors are attribution claims, not authentication or membership. A clone
 or fork may create any actor claim just as it may edit any other repository file;
@@ -346,6 +359,9 @@ state materialised in the working tree but not yet accepted by a Git commit. The
 active overlay contains durable operations not yet materialised. Gateway stores
 the overlay and a private materialisation journal scoped by `workspace_id`,
 `project_id`, accepted-base digest, candidate digest, and checkout identity.
+Workspace status exposes both the exact composed candidate digest and the overlay
+generation through which that candidate was reproduced, separately from the accepted
+snapshot.
 
 Checkpoint publication never advances the accepted base. When Gateway observes a
 new checked-out Git commit containing the candidate tree, that Git tree becomes the
@@ -408,12 +424,43 @@ combined candidate-plus-overlay change:
 - conflicting changes to the same typed field are surfaced;
 - Markdown bodies use a deterministic three-way text merge and retain explicit
   conflict state when unresolved;
-- immutable-record byte disagreement is an integrity conflict; and
+- event or Git-link byte disagreement is the same generic immutable-record
+  integrity conflict; and
 - edit-versus-tombstone is always explicit.
 
-There is no last-write-wins fallback. A conflicted workspace remains locally usable
-for unaffected records but cannot checkpoint or push conflicting records to Fabric
-until resolved. Other workspaces and Fabric connections continue normally.
+Raw disappearance is not a valid one-sided semantic change. Removing an existing
+Event or Git link produces immutable-record conflict evidence; removing a mutable record
+without replacing its stable path with a valid tombstone rejects the rebase/import.
+
+Semantic fields use RFC 6901 JSON Pointer paths, with `""` as the record root and
+`/body` as a KB Markdown body. Object members merge recursively in sorted-key order;
+arrays are atomic. Field values carry an explicit present/absent envelope so absent is
+not confused with JSON `null`. Conflicts sort by entity kind, record ID, field path,
+kind, and a canonical SHA-256 ID derived from a versioned tuple containing the complete
+base/ours/theirs values. The same inputs therefore reproduce byte-identical conflict
+evidence and ordering.
+
+Markdown merge canonicalises LF first and computes deterministic minimum-edit,
+old-base-relative LCS hunks. Equal-cost choices prefer advancing the base/deletion side;
+hunks then sort by base start, base end, and inserted bytes. Non-overlapping hunks merge,
+identical insertions at one anchor coalesce, and unequal same-anchor insertions or
+overlapping replacement/deletion hunks conflict. Conflict markers never enter a
+snapshot.
+
+`updated_at` is post-semantic-merge metadata, never precedence: one semantic editor
+contributes its timestamp; two cleanly merged semantic editors contribute the later UTC
+timestamp; no semantic edit retains the old-base timestamp. Timestamp-only edits are
+ignored. `created_at` changes on an existing live mutable record are invalid ordinary
+updates and are never silently selected.
+
+There is no last-write-wins fallback. A conflict result retains a complete validated,
+byte-identical copy of the prior composed candidate, while deterministic triples retain
+the complete upstream/direct evidence; it never returns a partial merge. Persistence of
+the new direct tree, prior candidate surface, absorbed overlay generation, operation-row
+state transitions, conflict triples, and conflicted workspace state is atomic. A
+conflicted workspace remains locally usable for unaffected records but cannot checkpoint
+or use a writable Fabric path until resolved. Other workspaces and Fabric connections
+continue normally.
 
 A branch switch with an active overlay or uncommitted checkpoint candidate requires
 one explicit choice: checkpoint/commit as applicable, stash, or discard. Stashes
@@ -499,8 +546,8 @@ separate from a developer's local Git credentials.
 Fabric replication uses record versions and base preconditions. A remote operation
 that no longer applies to the workspace base becomes a durable conflict and enters
 the same semantic rebase path as an incoming Git base. Fabric cannot resolve a Git
-divergence by timestamp. Events remain add-only, and mutable records use explicit
-optimistic conflict detection.
+divergence by timestamp. Events and Git links remain add-only immutable records, and
+mutable records use explicit optimistic conflict detection.
 
 ## 10. Human identity, authentication, and agent accountability
 
@@ -852,8 +899,14 @@ legacy or unknown until explicitly linked.
   observed, then retires the materialisation journal without losing later overlay work.
 - Direct-edit/checkpoint races fail the digest compare-and-swap and preserve both inputs.
 - Three-way merges for disjoint fields, same-field conflict, Markdown conflict,
-  event ID collision, tombstone/record edit, tombstone/KB-body edit, explicit
-  resurrection, and crash recovery.
+  Event/Git-link ID collision, tombstone/record edit, tombstone/KB-body edit,
+  explicit resurrection, and crash recovery. Golden merge tests cover RFC 6901
+  escaping and root/body paths, absent versus JSON `null`, sorted object traversal,
+  atomic arrays, canonical conflict IDs/order, deterministic Markdown LCS ties and
+  hunks, `updated_at` metadata selection, and immutable `created_at` on update.
+- A conflicted rebase returns and persists the byte-identical complete prior candidate
+  plus both-side evidence atomically, reproduces it after restart, and blocks checkpoint
+  and writable Fabric delivery until explicit resolution.
 - A fork accepts and edits the base but cannot activate the copied upstream Fabric hint.
 
 ### 16.2 Identity and Fabric tests

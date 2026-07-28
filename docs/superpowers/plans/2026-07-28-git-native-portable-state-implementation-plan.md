@@ -20,7 +20,15 @@
 - New local writes require assurance=local through ValidateLocalAction. Legacy/unknown envelopes are accepted only through ValidateHistorical while decoding or migrating existing history; public-key-continuity and private-authenticated remain valid structurally but are issued and authorized by later Fabric/identity work.
 - Provider repository-ID discovery is deferred. A supplied immutable ID is validated against config; no provider network call occurs.
 - Linux uses atomic directory exchange. Every supported non-exchange filesystem uses the durable fallback journal. ErrCheckpointUnsupported is returned before mutation only when required durability primitives are proven unavailable.
-- Existing replica tables are read models only. Snapshot, imported candidate, and overlay operations are the only Compose inputs.
+- Existing replica tables are read models only. A strict-decoded snapshot start, its
+  explicit initial through-generation, and strict-decoded active overlay operations
+  are the only Compose inputs.
+- Events and Git links are live-only immutable add-only records. Exact canonical
+  same-ID replay is idempotent; unequal same-ID content uses one generic immutable-
+  record error/conflict/direct-delta contract. Neither kind has tombstone or
+  resurrection semantics.
+- Snapshot version, project ID, and repository identity are immutable binding fields.
+  Config.Handle and Remotes are Git-base-owned and never overlay-owned.
 - Focused RED precedes implementation, GREEN precedes each commit, and final merged statement coverage remains at least 80%.
 - No new dependency, ORM, singleton, init registration, panic control flow, project hook execution, repository-provided executable, or implicit network request.
 
@@ -107,7 +115,7 @@ func (b WorkspaceBinding) Validate() error
 
 WorkspaceContext is the final private observed-context type: it contains only WorkingDirectory, which must be absolute, clean, non-empty, and NUL-free. It is never part of a public CLI/MCP schema. WorkspaceBinding is the final shared name and exact field shape used by every later plan; no alternative WorkspaceBindingContext is permitted. Registration and the private resolver both return WorkspaceBinding. AcceptedTreeDigest is a string specifically to avoid an internal/types to internal/types/projectstate import cycle; Validate requires it to match ^sha256:[0-9a-f]{64}$ before runtime converts it to projectstate.Digest. The binding contains no actor, root alias, cwd, credential, profile, stream, or Fabric field. RepositoryIdentity requires a normalized remote without credentials, fragments, dot segments, or trailing .git/slash. Provider is empty only for local-only; otherwise ImmutableID is required and matches ^[A-Za-z0-9._:-]{1,255}$.
 
-All project, actor, task, task-link, article, channel, event, and Git-link IDs are canonical lower-case UUID strings; operation, conflict, stash, journal, and workspace IDs are newly generated canonical lower-case UUIDs. Handle namespace/name components match ^[a-z0-9][a-z0-9_-]{0,62}$ and are display aliases, never keys. Commit IDs are lower-case 40- or 64-hex object IDs, and observed branch refs are empty for detached HEAD or match refs/heads/<non-empty-refname>.
+All project, actor, task, task-link, article, channel, event, and Git-link IDs are canonical lower-case UUID strings; operation, stash, journal, and workspace IDs are newly generated canonical lower-case UUIDs. Conflict IDs are deterministic `sha256:<lowerhex>` values over the frozen canonical preimage, never UUIDs. Handle namespace/name components match ^[a-z0-9][a-z0-9_-]{0,62}$ and are display aliases, never keys. Commit IDs are lower-case 40- or 64-hex object IDs, and observed branch refs are empty for detached HEAD or match refs/heads/<non-empty-refname>.
 
 ### Canonical v1 schemas
 
@@ -264,7 +272,10 @@ Reference classes are frozen:
 - Missing targets always reject.
 - A tombstone satisfies only historical references. A live-required reference to a tombstone rejects.
 - Project ID must equal config project_id. Paths must equal entity IDs.
-- Events are immutable/add-only. Tombstones are allowed for actor, task, task_link, kb_article, channel, and git_link; never project or event.
+- Events and Git links are live-only immutable/add-only records. Their snapshot entries
+  must contain a live value; exact canonical same-ID replays coalesce and unequal
+  content conflicts. Tombstones are allowed only for actor, task, task_link,
+  kb_article, and channel; never project, event, or git_link.
 - KB tombstone requires DeletedBodyDigest and no body.md. Live KB requires one body.md.
 
 ### Canonical tree API
@@ -298,11 +309,22 @@ func Validate(snapshot Snapshot) error
 func DigestTree(tree Tree) (Digest, error)
 func CanonicalJSON(value any) ([]byte, error)
 func CanonicalMarkdown(body []byte) ([]byte, error)
+func DecodeOperation(raw []byte) (OperationV1, error)
+func DigestCanonicalJSON(value any) (Digest, error)
+func DigestCanonicalMarkdown(body []byte) (Digest, error)
 ~~~
 
 Paths are sorted slash-relative to .wormhole. Digest input per file is uint64 big-endian path length, path bytes, uint64 big-endian data length, canonical data bytes; SHA-256 result is sha256:<lowerhex>. Encoding uses struct field order and recursively sorted map keys, LF, one trailing LF. Config/remotes TOML uses fixed field ordering and sorted fabric hints.
 
-All operation content digests use the same `sha256:<lowerhex>` representation over one canonical byte sequence: record content hashes `CanonicalJSON` of the live typed record, KB body content hashes `CanonicalMarkdown` of the body independently, and a resurrection's expected tombstone hashes `CanonicalJSON` of the complete prior `TombstoneV1`. The tree-digest length-prefix framing is not used for these single-value digests. `ExpectedContentDigest`, `ExpectedBodyDigest`, and `ExpectedTombstoneDigest` must equal those exact values before mutation; tests assert fixed golden digests rather than recomputing expectations through the production helper.
+All operation content digests use the same `sha256:<lowerhex>` representation over one canonical byte sequence: `DigestCanonicalJSON` hashes `CanonicalJSON` of the live typed record or complete prior `TombstoneV1`, and `DigestCanonicalMarkdown` hashes `CanonicalMarkdown` of the KB body independently. The tree-digest length-prefix framing is not used for these single-value digests. `ExpectedContentDigest`, `ExpectedBodyDigest`, and `ExpectedTombstoneDigest` must equal those exact values before mutation; tests assert fixed golden digests rather than recomputing expectations through the production helper. `Digest` is declared in `internal/types/projectstate`; no `types.Digest` is introduced.
+
+`DecodeOperation` uses `json.Decoder.DisallowUnknownFields`, rejects trailing JSON,
+requires byte equality with a fresh canonical rendering, and validates schema version,
+canonical operation ID, digest syntax, actor envelope, exact operation kind/payload,
+and nested payload shape. It does not check a workspace's expected-view equality or
+call `ValidateLocalAction`; the reducer and local service own those context checks.
+`CanonicalOperation` validates the same envelope before returning canonical bytes.
+SQLite readers additionally require the row operation ID to equal the decoded ID.
 
 ### Typed operation and composition contract
 
@@ -352,20 +374,72 @@ type OperationV1 struct {
 func ApplyOperation(snapshot Snapshot, operation OperationV1) (Snapshot, error)
 ~~~
 
-Exactly one payload matches Kind. PutRecord contains exactly one typed pointer. ApplyOperation is stateless, clones its input, requires operation.ExpectedViewDigest to equal the input digest, calls operation.Actor.Validate, rejects legacy/unknown assurance for every new operation, rejects replacement of an existing unequal event, prevents project-ID change, computes TombstoneV1 from current canonical record/body bytes and the operation actor, requires resurrection to name the exact tombstone digest, validates the result, recomputes its digest, and returns it. Local Service.Apply/ApplyBatch and every local public domain mutation additionally call operation.Actor.ValidateLocalAction before persistence; later Fabric may accept public/private actors after its own authorization. Any error returns the original snapshot unchanged. CanonicalOperation uses CanonicalJSON. Runtime and Fabric must call this reducer rather than duplicate event/tombstone/resurrection logic.
+Exactly one payload matches Kind. PutRecord contains exactly one typed pointer.
+ApplyOperation is stateless, clones its input, requires
+operation.ExpectedViewDigest to equal the input digest, calls
+operation.Actor.Validate, and rejects legacy/unknown assurance for every new
+operation. It coalesces a byte-identical existing Event or Git link and returns
+`ErrImmutableRecord` for an unequal replacement of either kind. `ErrImmutableEvent`
+and an optional Git-link-specific name may remain aliases to `ErrImmutableRecord`
+while alpha callers migrate; they do not define separate behaviour. Event and Git-
+link tombstone/resurrection operations reject. Existing mutable Project, Task, KB-
+article, and Channel values retain their exact `created_at` on ordinary Put; an
+explicit digest-proven resurrection may carry a fresh valid `created_at` because a
+tombstone does not retain prior record bytes. ApplyOperation prevents project-ID
+change, computes TombstoneV1 from current canonical record/body bytes and the
+operation actor, requires resurrection to name the exact tombstone digest, validates
+the result, recomputes its digest, and returns it. Local Service.Apply/ApplyBatch and
+every local public domain mutation additionally call
+operation.Actor.ValidateLocalAction before persistence; later Fabric may accept
+public/private actors after its own authorization. Any error returns the original
+snapshot unchanged. Runtime and Fabric must call this reducer and the exported
+digest/operation decoders rather than duplicate immutable-record, digest, tombstone,
+resurrection, or strict-decoding logic.
 
 Runtime composition:
 
 ~~~go
+type StoredOperation struct {
+    Generation int64
+    Operation projectstate.OperationV1
+}
 type ComposedView struct {
     Snapshot projectstate.Snapshot
     AppliedOperationIDs []string
     ThroughGeneration int64
 }
-func Compose(base projectstate.Snapshot, imported *projectstate.Snapshot, operations []StoredOperation) (ComposedView, error)
+func Compose(start projectstate.Snapshot, initialThroughGeneration int64, operations []StoredOperation) (ComposedView, error)
 ~~~
 
-Compose starts from imported candidate when present, otherwise accepted base; operations apply in strictly increasing generation by calling projectstate.ApplyOperation for each row, and it never reads legacy replica tables. Fabric later persists/replays the exact same OperationV1 and encoded Snapshot values through ApplyOperation without importing internal/runtime/projectstate.
+`start` is already strict-decoded, canonically re-encodable, digest-checked, and
+binding-validated. `initialThroughGeneration` is zero for an accepted/direct start
+and `rebased_through_generation` for a rebased start. Stored operations have already
+passed `projectstate.DecodeOperation` plus row-ID/state checks; their generations
+must be strictly increasing and greater than the initial boundary. Compose calls
+`projectstate.ApplyOperation` in supplied order, rejects duplicate, unordered, or
+pre-boundary generations, starts `ThroughGeneration` at the supplied boundary, and
+advances it only to the last operation actually applied. It never chooses a
+candidate implicitly, depends on SQL's accidental row order, or reads legacy replica
+tables. Fabric later persists/replays the exact same OperationV1 and encoded Snapshot
+values through ApplyOperation without importing internal/runtime/projectstate.
+
+Task 2's status type is extended, not renamed or moved:
+
+~~~go
+type WorkspaceStatus struct {
+    Binding types.WorkspaceBinding
+    State string
+    AcceptedSnapshot projectstate.Snapshot
+    CandidateDigest projectstate.Digest
+    OverlayGeneration int64
+}
+~~~
+
+`CandidateDigest` is the exact composed snapshot digest. `OverlayGeneration` is
+the final `ThroughGeneration`: zero for an accepted/direct start with no applied
+overlay, and the retained non-zero replay boundary when a rebased candidate has
+already absorbed operations. `State` remains `string`; this plan introduces no
+`WorkspaceState` type.
 
 ---
 
@@ -410,7 +484,11 @@ The valid fixture uses project 00000000-0000-4000-8000-000000000001, actor 11111
 
 **Interfaces:**
 - Consumes: existing BurntSushi/toml dependency.
-- Produces: all frozen cross-layer types, canonical schema types, codec functions, OperationV1, ApplyOperation, and errors ErrInvalidSnapshot, ErrUnknownVersion, ErrUnknownKind, ErrBrokenReference, ErrTrackedSecret, ErrInvalidActorEnvelope, ErrOperationPrecondition, ErrImmutableEvent, ErrTombstoneDigest, and ErrResurrectionDigest.
+- Produces: all frozen cross-layer types, canonical schema types, codec functions,
+  OperationV1, ApplyOperation, and errors ErrInvalidSnapshot, ErrUnknownVersion,
+  ErrUnknownKind, ErrBrokenReference, ErrTrackedSecret, ErrInvalidActorEnvelope,
+  ErrOperationPrecondition, ErrImmutableRecord (with ErrImmutableEvent and an optional
+  Git-link compatibility alias), ErrTombstoneDigest, and ErrResurrectionDigest.
 
 - [ ] **Step 1: Write RED golden, schema, reference, remotes, and digest tests**
 
@@ -437,7 +515,7 @@ Expected: FAIL because shared types and package are absent.
 
 Use json.Decoder.DisallowUnknownFields for every struct, then require all exact kind/version/path invariants. Canonicalize extension Data and frontmatter map values with the same JSON encoder. Reject duplicate semantic IDs even if paths differ. Parse TOML with toml.Decode and reject undecoded keys using MetaData.Undecoded. Encode ConfigV1 and RemotesV1 with explicit ordered writers so bytes are stable. Implement ApplyOperation as copy-on-write over typed maps and run Validate plus EncodeTree/DigestTree before success.
 
-Shared RED cases are TestApplyOperationPutRecord, TestApplyOperationRejectsStaleDigest, TestApplyOperationRejectsUnequalEvent, TestApplyOperationCreatesExactTombstoneDigests, TestApplyOperationRejectsWrongTombstoneDigest, TestApplyOperationResurrectsMatchingTombstone, TestApplyOperationRejectsWrongResurrectionDigest, and TestApplyOperationErrorLeavesInputUnchanged.
+Shared RED cases are TestApplyOperationPutRecord, TestApplyOperationRejectsStaleDigest, TestApplyOperationRejectsUnequalImmutableRecord (covering Event and Git link), TestApplyOperationCreatesExactTombstoneDigests, TestApplyOperationRejectsWrongTombstoneDigest, TestApplyOperationResurrectsMatchingTombstone, TestApplyOperationRejectsWrongResurrectionDigest, and TestApplyOperationErrorLeavesInputUnchanged.
 
 Actor RED cases are TestActorEnvelopeValidateHuman, TestActorEnvelopeValidateLocalAgentRequiresAccountabilitySessionHarness, TestActorEnvelopeValidatePublicAndPrivateAgents, TestActorEnvelopeValidateHistoricalLegacyAllowsMissingProvenance, TestActorEnvelopeValidateHistoricalUnknownAllowsMissingProvenance, TestActorEnvelopeValidateLocalActionRejectsLegacyUnknownPublicPrivate, TestActorEnvelopePrincipalID, and TestActorEnvelopeHistoricalNeverUpgrades. Canonical decode/migration calls ValidateHistorical; Service.Apply/ApplyBatch and local domain writes call ValidateLocalAction.
 
@@ -672,6 +750,13 @@ git commit -m "feat: register durable workspace bases"
 ### Task 3: Typed operations, Compose, semantic diff, and merge primitives
 
 **Files:**
+- Modify: internal/types/projectstate/types.go
+- Modify: internal/types/projectstate/codec.go
+- Modify: internal/types/projectstate/codec_test.go
+- Modify: internal/types/projectstate/validate.go
+- Modify: internal/types/projectstate/validate_test.go
+- Modify: internal/types/projectstate/operation.go
+- Modify: internal/types/projectstate/operation_test.go
 - Create: internal/runtime/projectstate/compose.go
 - Create: internal/runtime/projectstate/compose_test.go
 - Create: internal/runtime/projectstate/diff.go
@@ -684,8 +769,11 @@ git commit -m "feat: register durable workspace bases"
 - Modify: internal/runtime/localstore/workspace_repo_test.go
 
 **Interfaces:**
-- Consumes: Task 1 OperationV1 and Task 2 persistence.
-- Produces: Compose, Apply, SemanticDiff, ThreeWayRebase, and exact conflict types used by Import, stash restore, Git observation, and later Fabric.
+- Consumes: landed Task 1 OperationV1/codec/reducer and Task 2 persistence.
+- Produces: the Task-1 immutable-record/strict-decoder correction,
+  caller-owned immediate transaction seam, Compose, Apply, SemanticDiff,
+  ThreeWayRebase, and exact conflict types used by Import, stash restore, Git
+  observation, checkpoint, and later Fabric.
 
 ~~~go
 type ChangeKind string
@@ -695,11 +783,16 @@ const (
     ChangeTombstone ChangeKind = "tombstone"
     ChangeResurrect ChangeKind = "resurrect"
 )
-type FieldChange struct { Path string; Before, After json.RawMessage }
+type FieldValue struct {
+    Present bool `json:"present"`
+    Value json.RawMessage `json:"value,omitempty"`
+}
+type FieldChange struct { Path string; Before, After FieldValue }
 type Change struct {
     Key projectstate.RecordKey
     Kind ChangeKind
     BeforeDigest, AfterDigest *projectstate.Digest
+    BeforeBodyDigest, AfterBodyDigest *projectstate.Digest
     Fields []FieldChange
     Actor *types.ActorEnvelope
 }
@@ -714,7 +807,7 @@ type ConflictKind string
 const (
     ConflictSameField ConflictKind = "same_field"
     ConflictMarkdown ConflictKind = "markdown"
-    ConflictImmutableEvent ConflictKind = "immutable_event"
+    ConflictImmutableRecord ConflictKind = "immutable_record"
     ConflictTombstoneEdit ConflictKind = "tombstone_edit"
     ConflictTombstoneBody ConflictKind = "tombstone_body"
     ConflictInvalidResurrection ConflictKind = "invalid_resurrection"
@@ -724,7 +817,7 @@ type Conflict struct {
     Key projectstate.RecordKey
     FieldPath string
     Kind ConflictKind
-    Base, Ours, Theirs json.RawMessage
+    Base, Ours, Theirs FieldValue
 }
 type MergeResult struct { Snapshot projectstate.Snapshot; Conflicts []Conflict }
 func ThreeWayRebase(oldBase, newBase, candidate projectstate.Snapshot) (MergeResult, error)
@@ -733,11 +826,79 @@ func (s *Service) ApplyBatch(ctx context.Context, scope types.WorkspaceScope, op
 func (s *Service) Diff(ctx context.Context, scope types.WorkspaceScope) (Diff, error)
 ~~~
 
-Compose starts from workspace_candidates.rebased_tree and state='active' operations newer than rebased_through_generation when present; otherwise it starts from direct_tree or accepted_snapshot and state='active' operations. That rule lets Task 4 mark absorbed rows state='rebased' without leaving their old whole-view ExpectedViewDigest preconditions active.
+The localstore transaction seam is exact and reusable by Task 4:
+
+~~~go
+type WorkspaceCandidateRecord struct {
+    AcceptedBaseDigest projectstate.Digest
+    WorkingTreeDigest projectstate.Digest
+    DirectSnapshot projectstate.Snapshot
+    RebasedSnapshot *projectstate.Snapshot
+    RebasedThroughGeneration int64
+}
+type WorkspaceOperationInsert struct {
+    Generation int64
+    OperationID string
+    OperationJSON []byte
+}
+type WorkspaceMutationTx struct { /* repository-owned connection and scope */ }
+func (r *WorkspaceRepo) WithImmediateWorkspace(
+    ctx context.Context,
+    scope types.WorkspaceScope,
+    fn func(*WorkspaceMutationTx) error,
+) error
+func (tx *WorkspaceMutationTx) Workspace(ctx context.Context) (WorkspaceRecord, error)
+func (tx *WorkspaceMutationTx) Candidate(ctx context.Context) (*WorkspaceCandidateRecord, error)
+func (tx *WorkspaceMutationTx) ActiveOperationsAfter(ctx context.Context, generation int64) ([]WorkspaceOperation, error)
+func (tx *WorkspaceMutationTx) NextGeneration(ctx context.Context) (int64, error)
+func (tx *WorkspaceMutationTx) InsertActiveOperations(ctx context.Context, operations []WorkspaceOperationInsert) error
+func (tx *WorkspaceMutationTx) SetStatus(ctx context.Context, state string) error
+~~~
+
+`WithImmediateWorkspace` owns one dedicated connection, `BEGIN IMMEDIATE`, and
+commit/rollback. Every method uses the callback's exact project/workspace scope and
+does not open a nested transaction. Candidate blobs pass the file-list decoder,
+`projectstate.DecodeTree`, canonical re-encoding, recorded-digest checks, and immutable
+snapshot-version/project/repository binding checks. `rebased_tree` requires a valid
+non-negative boundary and `direct_tree`; a direct start has boundary zero. Active rows
+are selected with `state='active' AND generation>? ORDER BY generation`. Runtime converts
+each row to `StoredOperation` only after `projectstate.DecodeOperation`, canonical-byte,
+row-ID, canonical UUID, positive generation, and exact state checks. The existing
+standalone `AppendWorkspaceOperation` is removed; it may not remain as a mutation bypass.
+
+The Service selects `rebased_tree` plus its `rebased_through_generation` when present,
+otherwise `direct_tree` with boundary zero, otherwise `accepted_snapshot` with boundary
+zero. It passes that explicit start/boundary plus only later active rows to Compose. This
+lets Task 4 absorb rows as `rebased` without replaying stale whole-view preconditions.
 
 Apply delegates to ApplyBatch with one element. ApplyBatch rejects an empty batch, duplicate operation IDs, and every actor that fails ValidateLocalAction; under one BEGIN IMMEDIATE it composes the current view, applies operations in caller order through projectstate.ApplyOperation (each ExpectedViewDigest must chain to the prior result), allocates consecutive generations, and appends every row or none. This is the atomic path for task-status-plus-event and every other multi-record local mutation.
 
-- [ ] **Step 1: Write RED operation, diff, and merge tests**
+- [ ] **Step 1: Write RED shared immutable-record, strict-codec, digest, and created-at tests**
+
+Add fixed-golden tests that `DecodeOperation` rejects unknown fields, trailing JSON,
+non-canonical bytes, malformed/extra payloads, invalid actor/ID/digest values, and that
+`DigestCanonicalJSON`/`DigestCanonicalMarkdown` produce the exact existing record/body/
+tombstone digests. Add Event and Git-link cases proving exact replay coalesces, unequal
+replay returns `ErrImmutableRecord`, and Git-link tombstone, resurrection, validation,
+and tree decode reject. Add ordinary Project/Task/KB/Channel update cases proving a
+changed `created_at` rejects and an explicit matching-digest resurrection can carry a
+fresh valid timestamp.
+
+Run: go test ./internal/types/projectstate -run 'Test(DecodeOperation|DigestCanonical|ApplyOperation.*Immutable|GitLink.*Tombstone|CreatedAt)' -count=1
+Expected: FAIL because the generic immutable contract, strict decoder, exported digests,
+Git-link live-only validation, and created-at guard are absent.
+
+- [ ] **Step 2: Implement the shared Task-1 corrections**
+
+Add `ErrImmutableRecord`; retain `ErrImmutableEvent` and, only if a caller needs it, a
+Git-link name as aliases. Implement the three exported APIs exactly as frozen above.
+Use the exported digest helpers inside ApplyOperation. Reject a Git-link tombstone in
+both strict decode and Validate, remove Git-link from tombstone lookup/clear/apply paths,
+and make existing Event/Git-link Put an exact-replay-only path. Compare `created_at`
+before replacement of an existing live mutable record, but do not compare against a
+tombstone during explicit resurrection.
+
+- [ ] **Step 3: Write RED composition, status, transaction, corruption, and isolation tests**
 
 ~~~go
 func TestApplyTransactionIsDurable(t *testing.T) {
@@ -754,40 +915,142 @@ func TestThreeWayRebaseTombstoneEditConflicts(t *testing.T) {
 }
 ~~~
 
-Run: go test ./internal/runtime/projectstate ./internal/runtime/localstore -run 'Test(Apply|Compose|SemanticDiff|ThreeWayRebase)' -count=1
-Expected: FAIL because composer/diff/merge are absent.
+Add `TestComposeRejectsUnorderedDuplicateAndPreBoundaryGenerations`,
+`TestComposeCandidateSelectionAndRebasedGeneration`,
+`TestComposeRejectsStalePersistedDigestChain`,
+`TestStatusExposesCandidateDigestAndOverlayGeneration`,
+`TestApplyBatchAppendsConsecutiveChainedOperationsAtomically`,
+`TestApplyBatchSecondOperationFailureRollsBackEverything`,
+`TestApplyBatchInsertOrStatusFailureRollsBackEverything`,
+`TestApplyBatchRejectsEmptyDuplicateAndNonLocalActorsWithoutWrites`,
+`TestApplyBatchExistingOperationIDCollisionRollsBackAll`, and
+`TestApplyBatchScopeIsolation`. Reopen the database after every injected failure.
+Corruption table tests inject malformed, unknown-field, trailing, non-canonical, row-ID-
+mismatched, bad-state operation rows and corrupt/non-canonical candidate file lists,
+wrong recorded digests, stale accepted-base digests, invalid rebased combinations, and
+cross-project/repository snapshots. Every case fails closed before exposing or appending
+a partial view. `TestNewOperationsPersistExactCanonicalBytes` compares fixed bytes.
 
-- [ ] **Step 2: Implement exact operation validation and Apply transaction**
+Run: go test ./internal/runtime/projectstate ./internal/runtime/localstore -run 'Test(Apply|Compose|StatusExposes|CandidateDecode|NewOperationsPersist)' -count=1
+Expected: FAIL because the composer, strict repository reads, status fields, and atomic
+batch transaction are absent.
+
+- [ ] **Step 4: Implement strict composition and the exact Apply transaction**
 
 Apply executes this transaction:
 
 ~~~text
 BEGIN IMMEDIATE
 binding = RequireWorkspace(project_id, workspace_id)
-candidate, rebasedThrough = ReadCandidate(binding)
-operations = ListOperationsAfter(rebasedThrough)
-view = Compose(binding.acceptedSnapshot, candidate, operations)
-require operation.ExpectedViewDigest == view.Snapshot.Digest
-require operation.Actor.ValidateLocalAction()
-nextSnapshot = projectstate.ApplyOperation(view.Snapshot, operation)
-INSERT workspace_overlay_operations(nextGeneration, CanonicalJSON(operation))
+candidate = StrictReadCandidate(binding)
+(start, initialThrough) = SelectExplicitStart(binding, candidate)
+rows = ListActiveOperationsAfter(initialThrough ORDER BY generation)
+operations = StrictDecodeStoredOperations(rows)
+view = Compose(start, initialThrough, operations)
+for operation in caller order:
+  require operation.Actor.ValidateLocalAction()
+  require operation.ExpectedViewDigest == current.Digest
+  current = projectstate.ApplyOperation(current, operation)
+  bytes = projectstate.CanonicalOperation(operation)
+INSERT every workspace_overlay_operation with consecutive generations
 UPDATE workspace_bindings SET status='pending'
 COMMIT
 ~~~
 
-OperationV1 has no issuer method; Apply requires operation.Actor.ValidateLocalAction before calling the shared reducer. Any scope, validation, canonicalization, duplicate operation ID, generation, precondition, or reducer error rolls back. The shared projectstate reducer owns exactly-one variant, event immutability, tombstone digest, resurrection digest, and final validation invariants.
+OperationV1 has no issuer method; Apply requires operation.Actor.ValidateLocalAction before calling the shared reducer. Any scope, binding, candidate, stored-row, validation, canonicalization, duplicate operation ID, generation, precondition, reducer, insert, or status error rolls back. Status and Diff read binding/candidate/active rows from one SQLite snapshot and use the same strict start-selection/DecodeOperation/Compose path. The shared projectstate reducer owns exact-one variant, immutable-record replay, created-at update guards, tombstone/resurrection digests, and final validation invariants.
 
-- [ ] **Step 3: Implement diff and merge algorithms**
+- [ ] **Step 5: Write RED structural diff, deterministic merge, Markdown, and no-loss tests**
 
-SemanticDiff orders project, actor, task, task_link, kb_article, channel, event, git_link, then UUID and field path. ThreeWayRebase accepts one-sided/equal changes; recursively merges disjoint typed JSON paths; uses normalized-LF deterministic old-base anchors for Markdown; and returns explicit conflicts for overlapping Markdown, same field, unequal immutable event, tombstone/edit, tombstone/body, and invalid resurrection. It never inserts conflict markers, compares timestamps for precedence, or returns a partial unvalidated snapshot.
+Add golden tests for add/modify/tombstone/resurrect and KB record/body digests; absent
+versus present JSON `null`; `~0`/`~1` RFC 6901 escaping; `""` root and `/body`; recursive
+sorted objects; atomic arrays; deep-copy/alias safety; stable entity/UUID/path ordering;
+and actor attribution from the last active operation affecting a key. Add fixed conflict
+preimage/ID/order tests across reversed map insertion and repeated runs. Cover disjoint
+typed fields, same field, Event and Git-link exact replay/divergence, tombstone record and
+KB-body edits, differing tombstones, and resurrection cases. Raw disappearance of an
+old Event or Git link must produce sorted `immutable_record` evidence with an absent
+FieldValue; raw disappearance of a mutable record must return ErrRawRecordDeletion, and
+the corresponding direct-import test must require a tombstone. Add binding/version/project/
+repository mismatch and candidate Config.Handle/Remotes mutation rejection, successful
+new-base handle/remotes adoption, and SemanticDiff exclusion for those Git-owned fields.
+Add `updated_at` cases for one semantic editor, two clean semantic editors, no semantic
+editor, and a same-field semantic conflict; add immutable `created_at` input rejection.
+`TestThreeWayRebaseConflictResultIsValidatedAndLossless` must compare EncodeTree bytes and
+digest with the prior candidate, mutate the returned result/evidence to prove no aliases,
+and prove no partially clean changes entered the conflict result.
 
-- [ ] **Step 4: Run GREEN and commit**
+Markdown cases cover LF/final newline canonicalisation, deterministic equal-cost LCS
+ties with repeated anchors, non-overlapping hunks, identical and unequal shared-anchor
+insertions, overlapping replacements/deletions, stable IDs, and absence of conflict
+markers.
 
-Run: go test ./internal/runtime/projectstate ./internal/runtime/localstore -run 'Test(Apply|Compose|SemanticDiff|ThreeWayRebase|Operation)' -count=1
+Run: go test ./internal/runtime/projectstate -run 'Test(SemanticDiff|ThreeWayRebase|Markdown)' -count=1
+Expected: FAIL because diff/rebase and their deterministic representation are absent.
+
+- [ ] **Step 6: Implement the exact diff and merge algorithms**
+
+`FieldValue{Present:false}` has nil Value. Present values contain exactly one canonical
+JSON value without CanonicalJSON's trailing LF; present JSON null is exactly `null`.
+Markdown field values are the canonical body represented as a JSON string. RFC 6901
+uses `""` for a root, `/body` for Markdown, and `~0`/`~1` escaping. Objects recurse in
+sorted-key order and arrays are atomic. `BeforeDigest`/`AfterDigest` are shared canonical
+JSON digests of the complete record or tombstone; the body digest fields independently
+use `DigestCanonicalMarkdown` for a live KB body. Missing surfaces have nil digests.
+SemanticDiff excludes Config.Handle, Remotes, and `/updated_at`, and orders project,
+actor, task, task_link, kb_article, channel, event, git_link, then UUID and field path.
+
+Conflict IDs are `string(projectstate.DigestCanonicalJSON(conflictIDPreimageV1))` over:
+
+~~~go
+type conflictIDPreimageV1 struct {
+    SchemaVersion int `json:"schema_version"`
+    Key projectstate.RecordKey `json:"key"`
+    FieldPath string `json:"field_path"`
+    Kind ConflictKind `json:"kind"`
+    Base FieldValue `json:"base"`
+    Ours FieldValue `json:"ours"`
+    Theirs FieldValue `json:"theirs"`
+}
+~~~
+
+Conflicts sort by the canonical entity-kind order above, record ID, field path, kind,
+then ID. A KB body-only tombstone collision emits `tombstone_body`, not a duplicate
+record conflict. Event/Git-link disagreement emits `immutable_record`.
+
+ThreeWayRebase validates and deep-copies all inputs, requires equal immutable snapshot
+version/project/repository binding fields, and requires candidate Config.Handle/Remotes
+to equal oldBase before taking newBase's values. It accepts equal and one-sided changes,
+except that disappearance is never a valid one-sided change. Removing an old Event or
+Git link yields `ConflictImmutableRecord` with explicit present-to-absent evidence;
+removing an old mutable record without a valid tombstone returns ErrRawRecordDeletion.
+It coalesces exact immutable records and recursively merges only the frozen compatible
+typed fields. SemanticDiff likewise rejects a raw mutable disappearance rather than
+representing path removal as deletion. For an existing mutable record, changed
+`created_at` is an invalid input;
+an explicit one-sided resurrection may have a fresh valid value because prior bytes are
+not in the tombstone. `/updated_at` never selects semantics: take one semantic editor's
+value, the later UTC value only after two-sided semantics merge cleanly, or oldBase when
+neither side changed semantics.
+
+Markdown canonicalises both inputs first and computes base-relative minimum-edit LCS
+hunks without a synthetic terminal line. Equal-cost script choices advance the base/
+deletion side before insertion; hunks sort by base start, base end, inserted bytes.
+Non-overlapping hunks merge; identical same-anchor insertions coalesce; unequal shared-
+anchor insertions and overlapping replacement/deletion hunks conflict. No conflict
+marker is emitted.
+
+If any conflict exists, MergeResult.Snapshot is a deep copy whose EncodeTree bytes and
+digest are byte-identical to the complete prior composed `candidate`; clean partial
+merges are discarded. Sorted conflict triples retain all new-base/direct evidence.
+With no conflict, the result is fully validated, canonically encoded, and digested.
+
+- [ ] **Step 7: Run GREEN and commit**
+
+Run: go test ./internal/types/projectstate ./internal/runtime/projectstate ./internal/runtime/localstore -run 'Test(DecodeOperation|DigestCanonical|ApplyOperation|GitLink|CreatedAt|Apply|Compose|SemanticDiff|ThreeWayRebase|Markdown|Operation)' -count=1
 Expected: PASS.
 
 ~~~bash
-git add internal/runtime/projectstate internal/runtime/localstore
+git add internal/types/projectstate internal/runtime/projectstate internal/runtime/localstore
 git commit -m "feat: compose and merge portable state"
 ~~~
 
@@ -882,14 +1145,23 @@ RefreshWorkspace validates and revalidates binding checkout identity, invokes Ob
 
 Direct delta rules are exact. Relative to the previously imported candidate, or accepted base when no candidate exists, a direct tree:
 
-- returns ErrDirectEventMutation for an existing event ID with unequal bytes;
+- returns ErrDirectImmutableRecordMutation for any changed or removed existing Event
+  or Git-link ID; an exact canonical replay is unchanged;
 - returns ErrDirectPathDeletion when any prior record path disappears instead of becoming a valid TombstoneV1;
 - returns ErrTombstoneDigest when DeletedContentDigest is not the digest of the prior canonical record or DeletedBodyDigest is absent/wrong for KB;
 - returns ErrDirectEditTombstone when an existing tombstone changes or a correct direct tombstone conflicts with an active overlay edit;
 - returns ErrDirectResurrection when a tombstone becomes live;
+- returns ErrDirectImmutableFieldMutation when an existing live mutable record changes
+  `created_at`; explicit matching-materialization resurrection is exempt because a
+  tombstone has no prior record bytes;
 - may bypass these direct-edit errors only when its digest and bytes equal the candidate_tree of a published materialization journal bound to the same accepted base and checkout. That exception is how a typed Resurrect operation becomes importable after checkpoint; callers cannot claim the exception.
 
-Import returns the scope/checkout/working-tree/project/repository errors already frozen plus these direct-delta sentinels. No error replaces workspace_candidates or conflicts.
+Git-link tombstones/resurrections fail strict DecodeTree before delta comparison. Snapshot
+version, project ID, and repository identity must match the binding. Direct Config.Handle
+and Remotes changes are Git-base input, not overlay mutations; ThreeWayRebase owns them by
+requiring the composed candidate to retain the prior surface and taking the direct values.
+Import returns the scope/checkout/working-tree/project/repository errors already frozen
+plus these direct-delta sentinels. No error replaces workspace_candidates or conflicts.
 
 Import executes:
 
@@ -906,7 +1178,7 @@ ValidateDirectDelta(priorSurface, liveSnapshot, journalMatch.candidate_tree)
 oldComposed = Compose(binding.accepted_snapshot, candidate, activeOperations)
 merged = ThreeWayRebase(priorSurface, liveSnapshot, oldComposed.Snapshot)
 DELETE existing open conflicts for this import generation
-INSERT merged.Conflicts
+INSERT CanonicalJSON(merged.Conflicts FieldValue envelopes)
 UPSERT workspace_candidates(
   direct_tree=EncodeTree(liveSnapshot),
   rebased_tree=EncodeTree(merged.Snapshot),
@@ -917,7 +1189,17 @@ UPDATE workspace_bindings SET status = conflicted when conflicts exist else pend
 COMMIT
 ~~~
 
-Operations through RebasedThroughGeneration remain immutable audit rows but Compose skips them. Later operations precondition against the new rebased_tree digest. A correct direct tombstone versus an active overlay edit persists ConflictTombstoneEdit and returns a conflicted ImportResult; no silent overwrite occurs.
+On a clean merge, `merged.Snapshot` is the merged candidate. On a conflict it is the
+complete byte-identical `oldComposed.Snapshot` (`ours`), while `direct_tree` retains the
+complete `liveSnapshot` (`theirs`) and canonical conflict triples retain base/ours/theirs
+field evidence. The direct tree, ours surface, open conflicts, absorbed row-state
+transitions, rebased generation, and conflicted binding status commit atomically or not
+at all. Operations through RebasedThroughGeneration remain immutable audit rows but
+Compose skips them. Later operations precondition against the persisted rebased-tree
+digest. A correct direct tombstone versus an active overlay edit persists
+ConflictTombstoneEdit and returns a conflicted ImportResult; no silent overwrite occurs.
+After restart Status and Compose must return the same candidate digest/generation and
+conflict evidence. Checkpoint and writable Fabric are blocked while any conflict is open.
 
 Stash persists complete canonical bytes, not only digests:
 
@@ -938,7 +1220,19 @@ UPDATE workspace_overlay_operations SET state='stashed'
 COMMIT
 ~~~
 
-RestoreStash decodes and digest-checks source_tree/composed_tree, verifies operations_json exactly matches the existing state='stashed' rows through stash.through_generation and replays from source_tree to composed_tree, computes current = Compose(current base/candidate/active overlay), then ThreeWayRebase(stash source, current snapshot, stash composed). It updates those existing stashed rows and current active rows absorbed by the merge to state='rebased', persists the merge snapshot as rebased_tree with rebased_through_generation equal to the greatest absorbed generation, and stores conflicts atomically; it never reinserts operation UUIDs. On a clean merge it deletes the stash and returns StashRetained=false. On conflicts it retains the stash and returns StashRetained=true so resolution/retry cannot lose the source. A tree/replay/digest mismatch returns ErrStashCorrupt before mutation; missing or altered stashed operation rows return ErrStashOperationMismatch before mutation.
+RestoreStash strict-decodes and digest-checks source_tree/composed_tree, verifies
+operations_json exactly matches the existing state='stashed' rows through
+stash.through_generation, decodes every operation only with DecodeOperation, and replays
+from source_tree to composed_tree with the explicit start/boundary Compose contract. It
+computes current from the strict selected current start/candidate/active overlay, then
+ThreeWayRebase(stash source, current snapshot, stash composed). It updates those existing
+stashed rows and current active rows absorbed by the merge to state='rebased', persists
+the result as rebased_tree with the greatest absorbed generation, and stores complete
+ours/current/theirs evidence atomically; it never reinserts operation UUIDs. On a clean
+merge it deletes the stash and returns StashRetained=false. On conflicts it retains the
+stash and returns StashRetained=true so resolution/retry cannot lose either source. A
+tree/replay/digest mismatch returns ErrStashCorrupt before mutation; missing, noncanonical,
+or altered stashed operation rows return ErrStashOperationMismatch before mutation.
 
 Git observation remains independent:
 
@@ -948,7 +1242,10 @@ Git observation remains independent:
 4. Re-read HEAD and checkout identity. Race returns ErrGitObservationChanged without DB writes.
 5. BEGIN IMMEDIATE and CAS accepted_commit. Ref change with pending state and no matching materialized candidate returns ErrBranchSwitchPending unless explicit stash/discard.
 6. Matching published materialization advances base only when its accepted_base_digest and checkout path/device/inode still equal the binding, marks journal accepted, and preserves operations newer than its through_generation. A bound-precondition mismatch returns ErrGitMaterializationPrecondition and retains the journal.
-7. Nonmatching same-ref base uses ThreeWayRebase and persists conflicts. Candidate mismatch never retires a journal.
+7. Nonmatching same-ref base uses ThreeWayRebase. It enforces immutable version/project/
+   repository binding fields, requires the candidate to retain old-base Handle/Remotes,
+   takes new-base Handle/Remotes, and persists the complete ours/theirs conflict surfaces
+   and row transitions atomically. Candidate mismatch never retires a journal.
 
 - [ ] **Step 1: Write RED direct-delta and semantic overlay-import tests**
 
@@ -970,7 +1267,19 @@ func TestImportRebasesOverlayOntoDirectCandidate(t *testing.T) {
 }
 ~~~
 
-Add named cases TestImportRejectsUnequalImmutableEvent, TestImportRejectsPathDeletionWithoutTombstone, TestImportRejectsIncorrectTombstoneContentDigest, TestImportRejectsIncorrectTombstoneBodyDigest, TestImportPersistsOverlayTombstoneConflict, TestImportRejectsDirectResurrection, and TestImportAcceptsMatchingMaterializedResurrection.
+Add named cases TestImportRejectsUnequalImmutableEventAndGitLink,
+TestImportRejectsImmutableRecordDeletion,
+TestImportRejectsPathDeletionWithoutTombstone,
+TestImportRejectsIncorrectTombstoneContentDigest,
+TestImportRejectsIncorrectTombstoneBodyDigest,
+TestImportRejectsChangedCreatedAt,
+TestImportPersistsOverlayTombstoneConflict,
+TestImportRejectsDirectResurrection, and
+TestImportAcceptsMatchingMaterializedResurrection. Add
+TestImportConflictPersistsOursTheirsAtomicallyAcrossRestart: inject a failure at each
+candidate/conflict/row-state/status write, prove the prior state remains byte-identical,
+then prove a successful conflict retains the old complete composed candidate, new direct
+tree, canonical FieldValue triples, absorbed generation, and blocked status after reopen.
 
 Run: go test ./internal/runtime/projectstate -run 'Test(Import|ValidateDirectDelta)' -count=1
 Expected: FAIL because Import is absent.
@@ -984,14 +1293,28 @@ Expected: FAIL because complete stash persistence/restore are absent.
 
 - [ ] **Step 3: Write RED Git observation and branch tests**
 
-Cover HEAD race, invalid committed tree, materialized candidate match/mismatch, base advance atomicity, same-ref semantic rebase, branch reject/stash/discard, and two-workspace isolation.
+Cover HEAD race, invalid committed tree, immutable version/project/repository mismatch,
+old-candidate Handle/Remotes mutation, valid new-base Handle/Remotes adoption,
+materialized candidate match/mismatch, base advance atomicity, same-ref semantic rebase,
+conflict no-loss restart, branch reject/stash/discard, and two-workspace isolation.
 
 Run: go test ./internal/runtime/projectstate -run 'TestObserveGitBase|TestBranchSwitch|TestRefreshWorkspace' -count=1
 Expected: FAIL because observer is absent.
 
 - [ ] **Step 4: Implement the exact transactions and algorithms above**
 
-Every filesystem read precedes BEGIN IMMEDIATE; every transaction revalidates binding state/digests before mutation. Import, Stash, RestoreStash, and any actor-attributed branch action call ValidateLocalAction before mutation, so legacy/unknown can never create new state. Encoding or merge failure rolls back. Stash/restore and import never delete evidence on a conflict. ObserveGitBase never accepts a caller-provided tree/ref. TestRefreshWorkspaceCallsObserveGitBase, TestRefreshBeforeStatus, TestRefreshBeforeWrite, TestRefreshBeforeCheckpoint, TestStartupRecoversThenRefreshesEveryRegisteredWorkspace, and TestStashAfterBranchPendingRefreshesThenRecovers freeze the orchestration seam; the last five are completed by Slice B when it wires startup and requests.
+Every filesystem read precedes BEGIN IMMEDIATE; every transaction revalidates binding
+state/digests before mutation and reuses Task 3's caller-owned transaction helpers.
+Import, Stash, RestoreStash, and any actor-attributed branch action call
+ValidateLocalAction before mutation, so legacy/unknown can never create new state.
+Every stored operation uses DecodeOperation; every stored tree uses strict canonical
+decode. Encoding, merge, conflict serialization, row transition, or status failure rolls
+back. Stash/restore and import never delete evidence on a conflict. ObserveGitBase never
+accepts a caller-provided tree/ref. TestRefreshWorkspaceCallsObserveGitBase,
+TestRefreshBeforeStatus, TestRefreshBeforeWrite, TestRefreshBeforeCheckpoint,
+TestStartupRecoversThenRefreshesEveryRegisteredWorkspace, and
+TestStashAfterBranchPendingRefreshesThenRecovers freeze the orchestration seam; the last
+five are completed by Slice B when it wires startup and requests.
 
 - [ ] **Step 5: Run GREEN and commit**
 
@@ -1040,7 +1363,11 @@ Checkpoint algorithm:
 
 1. Acquire per-workspace in-process mutex and BEGIN IMMEDIATE journal preparation transaction.
 2. Validate scope/root/actor; read allowed live tree; require digest equals ExpectedWorkingTreeDigest.
-3. Import valid direct tree, Compose with active operations, reject open conflicts, EncodeTree complete candidate, validate DecodeTree round-trip.
+3. Strict-decode/import the valid direct tree, select the explicit Compose start and
+   initial generation, DecodeOperation every later active row, compose, and reject any
+   open conflict before staging. Return WorkspaceStatus with the unchanged exact
+   CandidateDigest/OverlayGeneration on rejection. Otherwise EncodeTree the complete
+   candidate and validate a DecodeTree round trip.
 4. Create owner-only sibling stage and backup paths on the same filesystem; write every file with fsync, fsync every created directory, and fsync parent.
 5. Re-read live tree and compare digest. Mismatch returns ErrCheckpointCAS, preserves direct input/stage evidence, and performs no publication.
 6. Persist the prepared journal containing complete canonical prior/candidate trees, accepted_base_digest, bound checkout_path/device/inode, and generation; commit it before filesystem mutation on the Task-2 WAL connection whose mandatory `synchronous=FULL` policy durably syncs the journal/WAL. Do not hand-fsync the main database file.
@@ -1051,14 +1378,14 @@ Checkpoint algorithm:
 
 - [ ] **Step 1: Write RED fault-injection matrix**
 
-Create table tests injecting failure after stage fsync, prepared journal, live-to-backup rename, stage-to-live rename, directory fsync, exchange, and published-row update. Each restart Recover must yield byte-exact old or candidate tree, preserve later overlay generations, and retain evidence on unknown digest. TestCheckpointRecoverRejectsChangedCheckout replaces the bound directory inode; TestCheckpointRecoverRejectsChangedAcceptedBase advances the binding base. Both assert ErrCheckpointRecoveryPrecondition and byte-identical journal/stage/backup evidence.
+Create table tests injecting failure after stage fsync, prepared journal, live-to-backup rename, stage-to-live rename, directory fsync, exchange, and published-row update. Each restart Recover must yield byte-exact old or candidate tree, preserve later overlay generations, and retain evidence on unknown digest. TestCheckpointRecoverRejectsChangedCheckout replaces the bound directory inode; TestCheckpointRecoverRejectsChangedAcceptedBase advances the binding base. Both assert ErrCheckpointRecoveryPrecondition and byte-identical journal/stage/backup evidence. TestCheckpointRejectsOpenConflictPreservesEvidence creates the Task-4 conflict surface, asserts checkpoint returns the open-conflict sentinel before stage/journal/publication mutation, compares complete direct/ours/conflict/row bytes across reopen, and proves Status retains the same CandidateDigest and OverlayGeneration. A downstream writable-Fabric gate test consumes the same open-conflict predicate and proves no queue/delivery write occurs.
 
 Run: go test ./internal/runtime/projectstate -run 'TestCheckpoint(CAS|LinuxExchange|Fallback|Recover|RecoverRejectsChangedCheckout|RecoverRejectsChangedAcceptedBase|DoesNotAdvanceBase|PreservesLaterOverlay)' -count=1
 Expected: FAIL because checkpoint implementation is absent.
 
 - [ ] **Step 2: Implement platform publishers and journal state machine**
 
-Reuse the descriptor-relative/no-follow discipline from localapi materialization but define projectstate-local primitives for a complete .wormhole directory. Do not import localapi. Use exact prepared/published/accepted/recovered_old/recovered_new states from Task 2 DDL.
+Reuse the descriptor-relative/no-follow discipline from localapi materialization but define projectstate-local primitives for a complete .wormhole directory. Do not import localapi. Use exact prepared/published/accepted/recovered_old/recovered_new states from Task 2 DDL. Open conflicts are a hard pre-publication gate shared with later writable Fabric; the check and candidate composition occur inside the caller-owned immediate transaction so a conflict cannot race publication.
 
 - [ ] **Step 3: Run GREEN and commit**
 
@@ -1315,20 +1642,41 @@ Slice B injects/strips types.WorkspaceContext, calls Service.ResolveWorkingDirec
 
 1. Task 1 freezes shared bytes and package ownership.
 2. Task 2 persists an independently observed accepted base and stable workspace identity.
-3. Task 3 introduces typed local mutations plus the semantic diff/merge primitives required before import.
-4. Task 4 validates direct deltas, rebases overlays onto imported candidates, persists/restores complete stashes, makes Git the only base-advance authority, and guards branch switches.
-5. Task 5 materializes a candidate with crash recovery while leaving base unchanged.
+3. Task 3 first corrects the landed shared immutable-record/created-at/strict-codec
+   contracts, then introduces atomic typed local mutations plus the deterministic
+   semantic diff/merge primitives required before import.
+4. Task 4 validates direct deltas, rebases overlays onto imported candidates,
+   atomically retains complete ours/theirs conflict evidence, persists/restores
+   complete stashes, makes Git the only base-advance authority, and guards branch
+   switches.
+5. Task 5 materializes a candidate with crash recovery while leaving base unchanged
+   and blocks publication while Task-4 conflicts remain open.
 6. Task 6 removes the tracked/private legacy leak without touching the Git index.
 7. Task 7 replaces local pillar replica reads/writes with a rebuildable composed projection and typed-operation domain adapters.
 8. Task 8 adds binding-aware workspace operations and the five top-level CLI parsers; the downstream runtime/setup seam registers routes and updates every public inventory surface atomically.
 
-The runtime plan consumes WorkspaceContext, WorkspaceScope, WorkspaceBinding, RegisterWorkspaceResult, ResolveWorkingDirectory, RegisteredWorkspaces, RefreshWorkspace, registration, Status, Recover, observation results, Projection, and the single workspace.go domain; its private resolver returns the exact shared WorkspaceBinding and it exclusively owns bridge transport, Gateway wiring, and MCP registration. The setup/runtime plan modifies and stages the Slice-A-owned cmd/wormhole/workspace.go parser when it makes routes live. Slice D/Fabric consumes the exact shared internal/types ActorEnvelope, WorkspaceBinding, and RepositoryIdentity plus internal/types/projectstate Digest, DecodeTree(Tree), EncodeTree(Snapshot), Validate(Snapshot), DigestTree(Tree), OperationV1, and ApplyOperation(Snapshot, OperationV1); it does not import runtime types or redefine canonical records/reducer logic. Slice E validates/creates public/private ActorEnvelope values through Validate; local issuance/writes use ValidateLocalAction, historical imports use ValidateHistorical, and neither rewrites legacy/unknown assurance.
+The runtime plan consumes WorkspaceContext, WorkspaceScope, WorkspaceBinding, RegisterWorkspaceResult, ResolveWorkingDirectory, RegisteredWorkspaces, RefreshWorkspace, registration, Status, Recover, observation results, Projection, and the single workspace.go domain; its private resolver returns the exact shared WorkspaceBinding and it exclusively owns bridge transport, Gateway wiring, and MCP registration. The setup/runtime plan modifies and stages the Slice-A-owned cmd/wormhole/workspace.go parser when it makes routes live. Slice D/Fabric consumes the exact shared internal/types ActorEnvelope, WorkspaceBinding, and RepositoryIdentity plus internal/types/projectstate Digest, DecodeTree(Tree), EncodeTree(Snapshot), Validate(Snapshot), DigestTree(Tree), DecodeOperation([]byte), DigestCanonicalJSON, DigestCanonicalMarkdown, OperationV1, and ApplyOperation(Snapshot, OperationV1); it does not import runtime types or redefine canonical records/reducer/digest/strict-decoding logic. Slice E validates/creates public/private ActorEnvelope values through Validate; local issuance/writes use ValidateLocalAction, historical imports use ValidateHistorical, and neither rewrites legacy/unknown assurance.
 
 ## Self-review
 
 - Type reconciliation: one final internal/types ActorEnvelope has PrincipalID, Validate, ValidateLocalAction, and ValidateHistorical; new writes reject legacy/unknown, all non-legacy agent assurances require accountability and session/harness provenance, and Fabric consumes the same type without importing runtime.
-- Import/rebase: strict direct-delta errors cover immutable events, raw deletion, tombstone digests, tombstone/edit, and direct resurrection; matching journals are the only exception; active overlays are semantically rebased and absorbed before later operation preconditions are evaluated.
+- Immutable/content contracts: Events and Git links are live-only exact-replay records
+  with generic immutable errors/conflicts/direct-delta handling; mutable-record
+  `created_at` is update-immutable but explicit resurrection may supply a fresh valid
+  value; one shared strict operation decoder and canonical JSON/Markdown digest API is
+  used by runtime and later Fabric.
+- Import/rebase: strict direct-delta errors cover immutable records, raw deletion,
+  immutable `created_at`, tombstone digests, tombstone/edit, and direct resurrection;
+  matching journals are the only exception. RFC 6901 FieldValue changes, atomic arrays,
+  sorted objects/conflicts, canonical SHA-256 IDs, deterministic Markdown LCS hunks,
+  Git-base-owned Handle/Remotes, and post-semantic `updated_at` metadata are frozen.
+  Conflicts retain the byte-identical complete prior candidate plus direct/both-side
+  evidence atomically before absorbed operations stop replaying.
 - Durability: stashes retain canonical source/composed Tree bytes and operations with exact restore semantics; journals bind accepted-base digest and checkout identity; recovery precondition failures retain all evidence; gateway_schema_migrations is the one extensible local ledger.
 - Projection/routing seam: all current local pillar reads/writes use Projection/OperationV1 with no legacy-table bypass; public args expose no project/workspace/cwd/root/actor data; Slice A owns both workspace.go files, and runtime/setup later modifies and stages them with private binding resolution, startup/request refresh, live routes, and atomic alpha inventory changes. CLI names are the top-level status/diff/import/checkpoint/stash forms only.
-- Existing requirements remain covered: strict schemas/remotes/references, idempotent registration, correct isolation, durable fallback, tracked legacy index preservation, concrete UUID fixtures, exact SQL/API/error algorithms, and the 80% gate.
+- Existing requirements remain covered: strict schemas/remotes/references/operation
+  rows, explicit Compose start/generation, CandidateDigest/OverlayGeneration status,
+  idempotent registration, correct isolation, conflict checkpoint/Fabric gates, durable
+  fallback, tracked legacy index preservation, concrete UUID fixtures, exact SQL/API/
+  error algorithms, and the 80% gate.
 - No task grants merge authority to legacy replica tables, discovers provider IDs over network, stages/commits/pushes Git, upgrades actor assurance, or leaves a public contract outside alpha inventory tests.

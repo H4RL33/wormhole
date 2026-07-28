@@ -218,7 +218,7 @@ architectural decision or claim an unimplemented target as shipped.
 | `internal/core/roles` | Immutable role templates and default task views | stdlib |
 | `internal/storage` | DB connection only (`Open`) | `internal/types`, `lib/pq` |
 | `internal/types` | Config and shared plain cross-layer types | stdlib only |
-| `internal/types/projectstate` | Canonical snapshot schemas, codec, validator, digest, and typed reducer | `internal/types`, stdlib, BurntSushi TOML |
+| `internal/types/projectstate` | Canonical snapshot schemas, strict tree/operation codecs, canonical JSON/Markdown digests, validator, and typed reducer | `internal/types`, stdlib, BurntSushi TOML |
 | `internal/webui` | Human read projection and approved private-auth browser callbacks/session boundary | `internal/core/*`, stdlib |
 
 ### 4.1 Local Runtime Module Map
@@ -274,7 +274,9 @@ the same layering pattern and isolation discipline.
   bottom of the graph. Its `internal/types/projectstate` subpackage is the one exact
   exception: it may import `internal/types`, stdlib, and BurntSushi TOML. Runtime and
   Fabric code must consume `internal/types/projectstate` rather than duplicate the
-  canonical snapshot schemas, codec, validator, digest, or reducer.
+  canonical snapshot schemas, strict `DecodeOperation`, codec, validator,
+  `DigestCanonicalJSON`/`DigestCanonicalMarkdown`, or reducer. `Digest` lives in
+  `internal/types/projectstate`, not the parent `internal/types` package.
 - R4: No new top-level packages or external Go dependencies without explicit human
   sign-off. Source code directly imports `github.com/BurntSushi/toml`,
   `github.com/lib/pq`, and `modernc.org/sqlite`; the complete locked module graph is
@@ -481,6 +483,68 @@ the same layering pattern and isolation discipline.
   absent. Missing targets are broken, while only schema-declared historical
   references may resolve to tombstones. Tombstone/edit and tombstone/KB-body
   changes conflict; resurrection must explicitly name the tombstone digest.
+- Portable Events and Git links are both live-only, immutable, and add-only. An
+  exact canonical same-ID replay coalesces; any unequal same-ID value uses the
+  generic immutable-record error, conflict, and direct-delta sentinel. Neither kind
+  may be tombstoned or resurrected. `ErrImmutableEvent` and a Git-link-specific name
+  may remain compatibility aliases to `ErrImmutableRecord`, but they are not distinct
+  normative behaviours. Raw disappearance of an old Event or Git link produces
+  immutable-record evidence; raw disappearance of a mutable record is invalid unless
+  its stable path contains the valid typed tombstone.
+- For an existing live mutable record, `created_at` is immutable on ordinary update
+  through the reducer, direct import, and rebase. An explicit digest-proven
+  resurrection may carry a fresh valid `created_at` because tombstones retain content
+  digests, not prior record bytes. `updated_at` is excluded from semantic conflict
+  detection: after semantic resolution, take the only semantic editor's timestamp,
+  the later UTC timestamp when both sides merge cleanly, or the old-base timestamp
+  when neither side changed semantics. A timestamp never selects or suppresses a
+  semantic change.
+- Snapshot version, project ID, and repository identity are immutable binding
+  invariants on every accepted/candidate/composed/rebased snapshot. `Config.Handle`
+  and `Remotes` are Git-base-owned: operations and semantic diff exclude them; rebase
+  requires the candidate values to equal the old base and takes the new base values.
+  Candidate loading after a Git advance validates the binding invariants but must not
+  reject retained old-base handle/remotes merely because the accepted base is newer.
+
+### Portable state replay, diff, and merge
+
+- Persisted operation JSON is untrusted. Decode it only with the shared strict
+  `projectstate.DecodeOperation`, reject non-canonical bytes, trailing JSON, unknown
+  fields, malformed envelopes/payloads, invalid IDs/digests, and any row-ID/operation-ID
+  mismatch, then replay with the shared reducer. Persisted trees likewise require the
+  strict file-list decoder, `DecodeTree`, canonical re-encoding, recorded-digest checks,
+  and the complete binding predicate. There is no legacy-table or malformed-row
+  fallback.
+- Composition receives an explicit strict-decoded start snapshot, an explicit initial
+  through-generation, and strictly increasing active stored operations whose generation
+  is greater than that boundary. Rebased, stashed, and materialized rows do not replay.
+  Status exposes the exact composed `CandidateDigest` and final `OverlayGeneration`
+  while retaining the accepted snapshot separately. `WorkspaceStatus.State` remains a
+  string until an approved plan introduces another type.
+- All append/rebase mutations use one caller-owned dedicated SQLite connection and one
+  `BEGIN IMMEDIATE`: read exact binding/candidate/active rows, decode and compose, apply
+  the shared reducer, write all rows/candidate/conflict state and the binding status,
+  then commit or roll back together. Helpers must not open nested transactions. A
+  standalone append API that bypasses composition, status, generation, or candidate
+  validation is forbidden.
+- Diff and conflict paths use RFC 6901 escaping, `""` for a record root, and `/body`
+  for KB Markdown. `FieldValue` has `Present bool` tagged `json:"present"` and
+  `Value json.RawMessage` tagged `json:"value,omitempty"`: false requires nil Value;
+  true requires exactly one canonical JSON value, including literal `null`. Objects recurse
+  in sorted-key order; arrays are atomic. Diff attribution comes from the last applied
+  active operation affecting the record key. Conflict IDs are the shared canonical
+  `sha256:<lowerhex>` digest of a versioned key/path/kind/base/ours/theirs tuple, and
+  conflicts sort by entity kind, record ID, field path, conflict kind, then ID.
+- Markdown merge canonicalizes LF, computes deterministic minimum-edit old-base LCS
+  hunks, prefers the base/deletion-side step for equal-cost choices, and orders hunks
+  by base start, base end, and inserted bytes. Non-overlapping hunks merge; identical
+  same-anchor insertions coalesce; unequal same-anchor insertions and overlapping
+  replacement/deletion hunks conflict. Never put conflict markers in a candidate.
+- A conflicted three-way rebase returns the complete validated prior composed candidate
+  byte-identically, never a partial merge. The importer atomically persists that `ours`
+  surface with the complete new direct `theirs` tree, both-side conflict evidence,
+  absorbed generation/row states, and conflicted status. Restart reproduces it.
+  Checkpoint and writable Fabric delivery remain blocked until explicit resolution.
 
 ---
 
