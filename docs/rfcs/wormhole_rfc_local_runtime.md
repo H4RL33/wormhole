@@ -1,38 +1,76 @@
 # RFC-0003: Wormhole Local Runtime
 
-**Local execution. Remote coordination.**
+**Git-native local execution. Optional remote coordination.**
 
 | | |
 |---|---|
-| Status | Draft |
+| Status | Draft — revised architecture, 2026-07-28 |
 | Author | Harley |
-| Date | 2026-07-13 |
-| Supersedes | Nothing directly; amends RFC-0001 transport assumptions (see §4) |
-| Related | [RFC-0001: Wormhole Core](wormhole_rfc.md), [RFC-0002: Wormhole Governance](wormhole_rfc_governance.md) |
+| Original date | 2026-07-13 |
+| Supersedes | Nothing directly; amends RFC-0001 local-runtime, transport, workspace, and optional-coordination assumptions (see §4) |
+| Related | [RFC-0001: Wormhole Core](wormhole_rfc.md), [RFC-0002: Wormhole Governance](wormhole_rfc_governance.md), [Git-Native Architecture Design](../superpowers/specs/2026-07-28-git-native-wormhole-architecture-design.md) |
+
+> **Revision note (2026-07-28).** This revision replaces the profile-per-daemon
+> and Fabric-first joining model. `gatewayd` is one passive, non-interactive
+> user-level supervisor with a stable local socket. Git carries the portable
+> project base; Gateway retains a durable machine-local overlay; Fabric is an
+> optional coordination service. `wormhole setup` replaces `join` and
+> `connect`. Legacy alpha implementation contracts are migration inputs only.
+> Prior alpha specifications and trial outputs remain unchanged historical
+> evidence, not current architectural authority. Migration preserves stable
+> IDs and historical attribution while deliberately replacing those contracts.
 
 ---
 
 ## 1. Abstract
 
-RFC-0001 defines Wormhole as a single MCP-exposed backend: one Postgres database, one server, coding harnesses talking MCP directly to it. That model has an availability and latency ceiling — every tool call is a network round-trip, and the whole platform is unreachable the moment the server is unreachable.
+RFC-0001 defines Wormhole's pillars and keeps Git as the source of truth for
+code. This RFC makes that boundary operational. A checked-out repository
+contains a typed, mergeable Wormhole base under `.wormhole/`; a single local
+`gatewayd` supervises durable machine-private overlays for every registered
+workspace; and an optional Fabric coordinates only the workspaces explicitly
+bound to it.
 
-This RFC introduces a local-first runtime, **`wormholed`**: a long-running per-user daemon that becomes the sole integration point for coding harnesses on a machine. Harnesses talk to `wormholed` over a local IPC transport; `wormholed` holds a durable local replica of the user's project state (tasks, KB, events, identity) and synchronises incrementally with one or more **Coordination Servers** — the existing `wormhole-server`, retrofitted into this narrower role.
+MCP is an agent-only, stateless tool surface. It does not install software,
+hold user configuration, perform human login, or decide a project binding.
+The human-first `wormhole` CLI installs and configures `gatewayd`, connector
+launchers, workspace bindings, and optional Fabric access. Agents may invoke
+the CLI where a workflow permits it, but its authority and UX remain human
+first.
 
-**Local execution. Remote coordination.** The daemon executes; the server coordinates multiple daemons. Neither pillar semantics (RFC-0001 §8) nor MCP tool naming grammar (RFC-0001 §9, M2) change. What changes is where the MCP surface terminates and how state gets there.
+`gatewayd` is passive deterministic infrastructure: it ingests local MCP
+operations, CLI commands, Git workspace observations, and optional Fabric
+messages. It makes no model calls and owns no autonomous planning. Git review
+and merge remain the way an open-source contributor proposes and upstream
+accepts change; Wormhole accelerates that workflow rather than introducing a
+second permission system for it.
 
 ---
 
 ## 2. Motivation
 
-RFC-0001 §2.3 promises an agent can "retrieve the state of a project" and that "losing a laptop... does not cost the project its accumulated knowledge." Read literally today that requires the coordination server to always be reachable — RFC-0001 as implemented has no offline story, no multi-org story on one machine, and puts every MCP call on the network critical path.
+The earlier local-runtime model correctly sought offline durability and low
+latency, but coupled first use to remote enrolment and treated a Gateway
+snapshot as a private replica. That is a poor fit for normal Git work:
+contributors can clone a public repository, create a branch, edit anything,
+and submit a pull request without being admitted to a separate collaboration
+service.
 
-Three gaps this RFC closes:
+This architecture closes four gaps:
 
-1. **Availability.** Single Postgres + single server means a server outage halts every agent globally, not just the ones touching the down project.
-2. **Latency.** Agent workloads are call-heavy (many small MCP calls per session). Round-tripping every call to a remote server is the wrong default when most reads are servable from a local replica.
-3. **Multi-org / multi-server.** RFC-0001 has no concept of one machine, one user, participating in more than one organisation or coordination server at once. This RFC makes that capability first-class through explicit project bindings and per-organisation credentials.
-
-This is a genuine architecture pivot, not an incremental feature. It roughly doubles system complexity (sync engine, two storage engines, two isolation models) in exchange for offline capability, lower latency, and multi-org support. That trade is judged worth it because RFC-0001's own target user (many agents, many machines, intermittent connectivity, multiple orgs) requires it — a single-org-always-online deployment would not need this pivot, and should not attempt it.
+1. **Portable context.** A clone must contain enough non-secret Wormhole
+   context to work immediately, just as it contains code and project
+   instructions.
+2. **Git-native collaboration.** Context needs meaningful diff, merge,
+   rebase, branch, fork, review, and rollback semantics rather than opaque
+   SQLite-copy semantics.
+3. **One local control plane.** Multiple checkouts, worktrees, projects,
+   agents, and optional Fabric accounts must not require competing daemon
+   processes or mutable per-connector configuration.
+4. **Accountability without gatekeeping public contribution.** A stable human
+   can own and sponsor agents where remote authority is needed, while Git
+   authorship and pull-request review remain sufficient for an unaffiliated
+   public contributor.
 
 ---
 
@@ -40,138 +78,399 @@ This is a genuine architecture pivot, not an incremental feature. It roughly dou
 
 ### 3.1 Goals
 
-- G1: A coding harness on a user's machine talks to exactly one local integration point (`wormholed`), never directly to a remote coordination server.
-- G2: `wormholed` remains fully functional (read and write, within local scope) when the coordination server is unreachable.
-- G3: One `wormholed` instance supports multiple simultaneous organisations, coordination servers, projects, and identities, with deterministic routing between them.
-- G4: State becomes durable locally before synchronisation is attempted; sync is incremental, not full-state re-transfer.
-- G5: The coordination server's role narrows to what only a central authority can do: identity issuance, org onboarding, cross-runtime discovery, policy distribution, multi-user conflict authority.
-- G6: All RFC-0001 pillar semantics (event bus, task graph, KB, identity/permissions) are preserved; this RFC changes transport and storage topology, not what the pillars mean.
+- G1: One background, non-interactive `gatewayd` supervisor runs per
+  user/system installation and owns one stable same-user IPC endpoint.
+- G2: A public clone can hydrate a local workspace from tracked `.wormhole/`
+  content with no Wormhole account, Passport, or reachable Fabric.
+- G3: Git is the authoritative history, transport, diff, merge, review, and
+  acceptance mechanism for code and tracked Wormhole context.
+- G4: Gateway stores every local operation durably before any optional remote
+  work, and survives Fabric loss or restart without dropping the overlay.
+- G5: Multiple checkouts and Git worktrees are separate immutable workspaces,
+  even when they name the same Wormhole project.
+- G6: Reconciliation is a semantic three-way rebase with explicit conflicts;
+  no last-write-wins rule may silently discard local or upstream meaning.
+- G7: Fabric is optional. Canonical public projects may use identification-only
+  coordination, while private projects use authenticated membership for
+  coordination, project bootstrap, and approved skills.
+- G8: Human identity, authentication, agent ownership, Git authorship, and
+  Fabric permissions are separate concepts with auditable links.
+- G9: Code Graph computation is model-free and isolated per checkout.
 
-### 3.2 Non-goals (this RFC, this phase)
+### 3.2 Non-goals
 
-- NG1: Advanced scheduling algorithms, distributed consensus, or CRDTs for conflict resolution. Sync conflict handling in v1 is last-write-wins at the field/row level with a durable audit trail. CRDTs and operational transforms are outside this RFC and require a future amendment.
-- NG2: Full peer-to-peer operation. All synchronisation flows through a coordination server; runtimes do not sync with each other directly.
-- NG3: Autonomous planning or LLM reasoning inside `wormholed`. The runtime is deterministic infrastructure, matching RFC-0001 G-line intent — no model calls inside the daemon.
-- NG4: Governance (RFC-0002) integration. Constitution/Congress concepts do not appear in `wormholed`; if governance ships, it is a coordination-server-side concern proxied through, not reasoned about locally.
-- NG5: Complex permission inheritance across orgs. Each (runtime, org) pair gets an independently resolved capability set; no cross-org permission composition.
+- NG1: Replacing Git hosting, branch protection, code review, or pull
+  requests.
+- NG2: Making an arbitrary public fork a member of, or a writable client of,
+  the upstream project's Fabric namespace.
+- NG3: Full peer-to-peer synchronization, CRDTs, operational transforms, or
+  distributed consensus.
+- NG4: Model calls, autonomous planning, or policy reasoning inside Gateway or
+  a Code Graph worker.
+- NG5: Compute-warning screens, compute profiles, or Warpspeed. The model-free
+  worker uses normal OS scheduling and observable status.
+- NG6: Persisting code bodies in Fabric or using Wormhole data as code truth.
+- NG7: Broad governance integration; RFC-0002 remains opt-in and Fabric-side.
 
 ---
 
 ## 4. Relationship to RFC-0001
 
-RFC-0001 §5.5 ("Everything via MCP") and §9 (indicative MCP interface) assumed the MCP server *is* the coordination server and harnesses call it directly. This RFC **amends that transport assumption**:
+RFC-0001's pillars, MCP naming grammar, Git-source-of-truth rule, and
+project-scoped security remain authoritative. This RFC amends only local
+runtime, transport, workspace, and optional-coordination assumptions:
 
-- The MCP tool surface (names, grammar `wormhole.<pillar-noun>.<verb>`, schemas) is unchanged and still the sole platform surface — G5/M3 hold.
-- What changes: the process terminating harness MCP connections is now `wormholed`, not the coordination server. The coordination server still exposes an MCP-shaped surface, but its clients are `wormholed` instances (and human/admin tooling), not coding harnesses directly.
-- One new pillar prefix is introduced: `wormhole.sync.*`, for runtime-to-server synchronization operations (bootstrap pull, incremental push/pull, conflict reporting). This RFC ratifies that addition.
-- All other RFC-0001 pillar rules (event categories, task state machine, KB compliance checks, identity/passport model) apply unchanged to data as it lives in the coordination server, and apply *analogously* to the local replica, with isolation enforcement details in §7.
-
-RFC-0001 itself is not being rewritten. Where this RFC is silent, RFC-0001 governs.
+- Coding harnesses call the local Gateway over MCP; they do not call Fabric
+  directly.
+- MCP remains the agent contract for pillar operations, but is not a human
+  setup, account, or connector-management surface.
+- `wormhole.sync.*` remains the Gateway-to-Fabric protocol when a workspace is
+  Fabric-bound. It is not required for Git-native public workspaces.
+- `wormhole.workspace.*` exposes local status, diff, import, checkpoint, and
+  stash project operations, while `wormhole.code_graph.*` exposes local
+  derivative graph operations. Neither namespace is a new Core pillar.
+- Git-tracked Wormhole records are project content. They are not credentials,
+  Passport grants, nor a substitute for server RLS.
+- Where a Fabric namespace exists, RFC-0001's server-side RLS, permissions,
+  audit, and Passport rules apply unchanged.
 
 ---
 
 ## 5. Architecture Overview
 
+```text
+human: wormhole setup / status / connector install
+        │ records immutable workspace binding and local credentials
+        ▼
+one gatewayd supervisor ─── stable same-user socket
+        │
+        ├── agent MCP bridge (stateless, agent-only)
+        │        └── local durable workspace overlay
+        │
+        ├── Git observer
+        │        ├── tracked .wormhole/state/v1 base
+        │        ├── semantic rebase and deterministic checkpoints
+        │        └── per-checkout model-free Code Graph worker
+        │
+        └── optional, explicitly bound Fabric stream
+                 └── identified public or authenticated private coordination
+                     / bootstrap / approved skills
 ```
-Coding harnesses (Claude Code, OpenCode, Goose, ...)
-        │  MCP, over local IPC only
-        ▼
-wormholed  (per-user daemon)
-        │  local API (Unix domain socket / Windows named pipe)
-        │  local storage: SQLite, repository-interface abstracted
-        │  local event bus: in-memory + SQLite durable tier
-        │  sync engine: outbound queue + incremental pull
-        ▼
-        │  wormhole.sync.* over network (auth'd, versioned)
-        ▼
-Coordination Server(s)  (existing wormhole-server, retrofitted)
-        │  internal/core/* pillars, unchanged
-        ▼
-Postgres + pgvector  (unchanged, sole coordination-server datastore)
+
+There is one `gatewayd` process, not one daemon per credential profile,
+project, harness, or checkout. It contains many namespace-scoped workspace
+records and may hold many Fabric profiles. The socket is stable for the user;
+only the supervisor owns it. A connector launches the stateless bridge, which
+resolves an already registered workspace binding and forwards MCP traffic.
+
+---
+
+## 6. Components and Responsibilities
+
+### 6.1 `wormhole` CLI
+
+The CLI is the human-first installation and lifecycle surface. Its primary
+command is `wormhole setup`, which:
+
+1. discovers the repository root and tracked `.wormhole/` snapshot;
+2. validates its schema, digests, project reference, and Git context;
+3. creates or reuses an immutable local workspace binding;
+4. activates an eligible identification-only public Fabric hint, requests
+   login/profile selection for private Fabric, or remains local-only;
+5. starts or upgrades the one `gatewayd` supervisor as necessary;
+6. installs or repairs supported harness connector launchers; and
+7. asks whether to enable Code Graph and, if selected, completes its full
+   initial model-free build; and
+8. verifies local readiness without requiring Fabric for a Git-only workspace.
+
+`join` and `connect` are replaced by this one coherent flow. Connector setup
+is transactional: failed replacement restores the prior harness configuration
+where possible and reports the remaining repair action. The CLI may be called
+by an agent, but an agent does not gain authority to bypass the human action
+or authentication that a particular setup step requires.
+
+The first-party Codex adapter implements discover, inspect, plan, apply, verify,
+rollback, and remove using Codex's supported command:
+
+```text
+codex mcp add wormhole -- /absolute/path/to/wormhole mcp
 ```
 
-A single `wormholed` may hold concurrent connections to multiple Coordination Servers (multi-org), each with its own sync queue, namespace, and Passport.
+It installs the common stateless bridge, not a Codex-specific Gateway protocol.
+Other supported harness adapters follow the same transactional lifecycle.
+
+Human CLI workspace operations have equivalent MCP operations at
+`wormhole.workspace.status|diff|import|checkpoint|stash`. Setup, private login,
+Fabric and connector administration, and Code Graph disablement remain human
+control-plane operations; ordinary project operations do not split into a
+human and an agent model.
+
+### 6.2 Gateway supervisor
+
+Gateway is a passive data layer and supervisor, not an agent. It owns:
+
+- the stable local socket and stateless MCP bridge endpoint;
+- namespace- and workspace-scoped durable local storage;
+- import of tracked bases, local overlays, semantic rebases, and checkpoints;
+- optional Fabric streams, credentials, and retry/recovery state;
+- routing to model-free per-workspace Code Graph workers; and
+- same-user local IPC and credential-file security boundaries.
+
+It does not own connector configuration, a human UI, an LLM, a mutable
+workspace default, or a hidden remote fallback.
+
+### 6.3 Git workspace and snapshot
+
+The repository carries the portable base. Version one uses canonical typed
+files rather than a tracked database:
+
+```text
+.wormhole/
+  config.toml                    # tracked bootstrap manifest
+  remotes.toml                   # optional non-secret Fabric hints
+  state/v1/
+    project.json
+    actors/<stable-id>.json
+    tasks/<stable-id>.json
+    tasks/links/<stable-id>.json
+    kb/<stable-id>/record.json
+    kb/<stable-id>/body.md
+    channels/<stable-id>.json
+    events/<stable-id>.json
+    git-links/<stable-id>.json
+```
+
+The file inventory may evolve only through a versioned snapshot schema. Every
+record has an immutable stable ID and canonical serialization. Events and Git
+links are add-only; mutable records use semantic three-way merges; deletion
+writes a typed tombstone at the record's stable path rather than silently
+removing history. A single-file tombstone replaces its JSON record. A KB
+tombstone replaces `record.json`, records the deleted body digest, and requires
+`body.md` to be absent; a retained body makes the snapshot invalid. Tombstones
+record entity kind, deleted-content digest, and deletion attribution.
+
+The versioned schema marks references as live-required or historical. Missing
+targets are always broken. Historical event, Git-link, attribution, and
+relationship-edge references may resolve to a tombstone as deleted; a
+live-required structural reference may not. Delete-versus-record or KB-body
+edit conflicts, and same-ID resurrection requires an explicit operation naming
+the tombstone digest. Gateway computes the tree digest from sorted paths and
+canonical bytes. No generated digest or index file is tracked. Unknown future
+schemas, duplicate IDs, broken references, path/record mismatches, and invalid
+canonical form fail closed.
+
+Tracked bases contain project metadata and deliberately publishable context:
+tasks, KB, channels, durable events, Git pointers, and non-secret actor
+references. They never contain bearer tokens, Passport IDs or permissions,
+credential profiles, Fabric cursors, sync queues, local audit/recovery state,
+absolute paths, socket state, connector backups, file identities, or Code
+Graph state. Those belong outside the repository in Gateway-managed local
+storage. In particular, legacy `.wormhole/integration-state.json` is migrated
+into local Gateway state and ignored; it is not snapshot authority.
+
+### 6.4 Per-checkout Code Graph workers
+
+When Code Graph is enabled, its immutable workspace binding gets an isolated,
+model-free worker and derivative store. The worker receives only that
+checkout's root, Git revision, declared source limits, and binding identity. It
+may build, replace, or discard a graph without affecting another checkout or
+worktree.
+It never persists source bodies as Wormhole truth, calls Fabric, or accesses
+another workspace's files. It uses no model download or inference, embedding,
+vector storage/search/call, or implicit network access. Build progress and
+failures are reported in status under normal OS scheduling; there are no compute
+warnings, profiles, or Warpspeed. The checkout view is read-only.
+
+The CLI exposes `wormhole code-graph status|query|rebuild|disable`; MCP exposes
+equivalent project operations for status, query, and rebuild. Every revision
+stores a source fingerprint plus an analysis fingerprint over the source
+fingerprint, all tracked non-source inputs declared by the adapter, normalised
+build/target/configuration, graph/adapter schema version, and compiler/toolchain
+identity. Every status and query recomputes and compares the analysis
+fingerprint, including tracked dirty changes. A mismatch reports indexed and
+current analysis fingerprints, source fingerprints where different, dirty
+state, `graph_not_current`, and `rebuild_recommended`, and query fails closed
+without returning matches, edges, or source. Rebuild explicitly indexes that
+exact analysis view and publishes copy-on-write only if its fingerprint remains
+unchanged. A failed rebuild preserves the prior revision for recovery but never
+serves it as current. Restart or adapter/toolchain upgrade repeats this freshness
+check; disable removes only that workspace's derivative graph and machine-local
+enablement. No watcher or automatic rebuild is required.
+
+### 6.5 Optional Fabric
+
+Fabric is a coordination service, not a prerequisite for Wormhole. A
+Fabric-bound workspace may use identified public or authenticated private
+bootstrap, shared coordination, project policy, and separately approved skill
+distribution. Fabric remains
+the authority for its own project membership, Passport permissions, audit,
+and server-side RLS; Gateway cannot infer or manufacture that authority from
+Git files.
+
+Public repositories work from their tracked base alone. A canonical public
+repository may also commit an identification-only Fabric hint. Gateway
+activates it only when `origin` matches the canonical repository identity; the
+caller proves continuity of a self-issued public identity key but needs no
+Wormhole account or membership. Canonical branches receive isolated streams.
+
+A fork inherits the base as Git content but **cannot use the upstream Fabric
+namespace** merely by copying its manifest, remote URL, project ID, or history.
+It has no upstream Fabric stream; it may remain local-only or bind an independent
+Fabric realm. Contributions return upstream through normal Git commits and pull
+requests. Private repositories may use Fabric, but require both Git access and
+authenticated project membership before Fabric context is disclosed.
 
 ---
 
-## 6. Components
+## 7. Workspace Binding, Namespaces, and Isolation
 
-### 6.1 `wormholed` (new)
+### 7.1 Immutable workspace binding
 
-Long-running user-level system service (conceptually parallel to an ssh-agent or local database daemon — RFC-0001's own comparison class). Its responsibilities are:
+A workspace is one checked-out repository root or Git worktree, not merely a
+project UUID. `wormhole setup` creates a local binding whose identity and routing
+fields are immutable, with associated observed state:
 
-Identity management, authentication, local scheduling, local event bus, local API, synchronisation, presence, task routing, knowledge replication, artifact management, storage, configuration, security enforcement.
+- a generated workspace ID;
+- stable filesystem/worktree identity and canonical root recorded at setup;
+- the tracked project ID, current display handle, base tree digest, and snapshot
+  schema;
+- the canonical Git remote and canonical accepted ref, if declared;
+- the selected optional immutable Fabric instance ID, remote project ID, stream
+  ID, and credential reference, if any; and
+- whether that one binding is read-only or writable.
 
-Explicitly **not** a reasoning component: no LLM calls, deterministic behavior only (NG3).
+The workspace, project, checkout, Fabric-instance, remote-project, and writable-
+stream identities are created once and never silently retargeted by a changed
+current directory, branch, remote, copied config, or MCP request. The observed
+base digest, checked-out ref, display handle, and credential contents may evolve
+under their validation rules without selecting a different route. A moved
+checkout, changed remote, changed project identity, or incompatible snapshot
+requires a human CLI rebind/re-setup action. Multiple worktrees therefore
+receive separate overlays and Code Graph workers even when their project IDs
+match.
 
-### 6.2 Coordination Server (retrofit of `wormhole-server`)
+Every localstore operation carries both project namespace and workspace ID.
+SQLite has no RLS, so repository methods must scope queries explicitly and
+ship cross-namespace and cross-workspace rejection tests. Fabric profiles are
+also explicit: no profile is chosen from ambient environment, connector
+configuration, or the last workspace used. Every remote queue and cursor key
+includes the immutable Fabric instance ID.
 
-Everything in `internal/core/*` today (identity, tasks, events, kb, permissions, git) keeps its current shape and dependency rules (`docs/implementation-rules.md` §§4-5) — this RFC does not touch those packages' internals. What changes is who calls them: `internal/mcp` now authenticates and serves `wormholed` sync sessions as its primary client class, in addition to (or instead of, over time) direct harness sessions.
+### 7.2 Identity, authentication, and agent ownership
 
-New server-side responsibilities: org onboarding lifecycle, bootstrap manifests (§8), policy/manifest distribution, cross-runtime discovery for multi-user collaboration.
+Human identity is stable; authenticators are replaceable; agents are durable
+accountability principals. A human may have browser/SSO, passkey, SSH, or
+other authenticators, but those authenticate the human rather than becoming
+the human's ID. Every agent action captures the durable agent ID, accountable
+human at action time, harness/model session, and assurance. The accountable
+human may be self-declared locally or in public mode; private remote ownership
+is membership-backed and transfer is an audited human action. An agent Passport
+grants only project-scoped Fabric capability and is distinct from both the human
+session and Git authorship.
 
-### 6.3 New package tree: `internal/runtime/*`
+An unauthenticated public contributor may create a local workspace agent or
+actor record and use all local Git-backed capability. That record has no
+private Fabric authority. A canonical-public Fabric may accept the contributor's
+self-issued key for pseudonymous continuity; this is identification, not verified
+human identity. Git commit identity/signature and pull-request identity remain
+separate from Wormhole attribution. Login is required only for private Fabric
+identity or resources. Private authentication, ownership transfer, membership
+and permission administration, and policy activation remain human-authorized
+control-plane actions; ordinary project operations retain human-agent parity.
 
-Local-daemon-side code, entirely new, living outside `internal/core/*` (which stays coordination-server-only). Proposed shape, following the identity-package layering pattern (`docs/implementation-rules.md` §5) adapted for SQLite:
+### 7.3 Local secret boundary
 
-| Package | Owns |
-|---|---|
-| `internal/runtime/localapi` | Socket/pipe server, MCP tool registry mirroring server-side tool names, request routing to local store or sync engine |
-| `internal/runtime/localstore` | SQLite-backed repositories per pillar shape (tasks, events, kb, identity metadata), `Store` struct + sentinel errors, same pattern as `internal/core/identity` |
-| `internal/runtime/eventbus` | In-memory pub/sub for ephemeral events; durable events flow through `localstore` |
-| `internal/runtime/sync` | Outbound queue, incremental pull, bootstrap client, conflict surfacing |
-| `internal/runtime/scheduler` | Agent registration, presence, capability matching, task routing decisions |
-| `internal/runtime/config` | XDG-compliant local storage layout, per-org connection config |
-
-`cmd/wormholed` wires these together, analogous to how `cmd/wormhole-server` wires `internal/core/*` today.
+Raw tokens are never placed in Git, snapshots, MCP results, logs, events, or
+diagnostics. Gateway stores credentials beneath its protected local credential
+root with owner-only permissions and no-follow, atomic replacement rules.
+Credential profiles, Fabric refresh/session material, connector rollback data,
+and workspace overlays are local state. Fabric stores token hashes, never raw
+tokens. The same-user local socket is the v1 pre-credential and MCP transport
+boundary; Gateway is not shared across OS users.
 
 ---
 
-## 7. Identity, Namespaces, and Isolation
+## 8. Local Durability, Git Rebase, and Optional Synchronisation
 
-### 7.1 Identity model additions
+### 8.1 Base, overlay, checkpoint
 
-New relationships beyond RFC-0001's agent/Passport model:
+Gateway operates on three durable layers:
 
-- A `wormholed` instance is not itself an identity; it is a host for zero or more (agent, org, project) Passport bindings.
-- **Project binding**: explicit, not inferred. `wormholed` routes an incoming harness MCP call to a specific (org, project, identity) tuple based on configured bindings, never an implicit default.
-- **Namespace**: isolation boundary for organisation/project/knowledge/tasks/artifacts/identity, both server- and runtime-side.
+1. **Accepted base:** the exact tracked snapshot at the workspace's observed
+   checked-out Git commit.
+2. **Overlay:** private durable operations not yet materialised, plus a private
+   journal for operations already materialised but not yet accepted by Git.
+3. **Checkpoint candidate:** deterministic materialisation into a complete
+   canonical `.wormhole/state/v1/` working tree for Git diff, commit, and review.
+   It is not a new accepted base until Gateway observes a Git commit containing it.
 
-### 7.2 Isolation enforcement — the real gap
+Gateway atomically records an operation and the resulting overlay before it
+reports local success. `wormhole checkpoint` records the expected live tree
+digest, stages and validates the candidate, then rechecks that digest as a
+compare-and-swap precondition. A raced direct edit aborts publication without
+overwriting either input. Publication uses atomic directory exchange where
+available or a durable all-or-recover journal elsewhere. The accepted base does
+not move; the included overlay generation becomes materialised-pending-commit.
+When Gateway observes a matching Git commit, it advances the accepted base and
+retires that journal while preserving any later overlay. A restart recovers the
+previous or new complete working tree and the correct overlay state.
 
-RFC-0001 §13 enforces project isolation via Postgres Row-Level Security. **SQLite has no RLS.** Local isolation must be enforced in the `internal/runtime/localstore` repository layer itself: every query is namespace-scoped by construction (namespace/org/project ID is a mandatory parameter on every repository method, never optional, never inferred from ambient state), not by a database-level policy, as required by `docs/implementation-rules.md` §4.1 LR3.
+### 8.2 Semantic three-way rebase
 
-This is weaker than RLS in one specific way: a bug in repository code can leak across namespaces with no second line of defense, where Postgres RLS would catch it even if the WHERE clause were wrong. Mitigation is process, not architecture: every `localstore` repository ships an explicit cross-namespace rejection test (mirroring T3), and code review treats a missing namespace parameter as a security bug, not a style issue. This is stated here as an accepted, documented risk, not resolved by database enforcement — flagged per the ambiguity-ladder discipline in `docs/implementation-rules.md` §2.4 rung 5.
+When Git advances, Gateway reconciles `(old accepted base, checkpointed
+candidate + local overlay, new base)` by entity semantics. It does not use
+timestamp or row-level last-write-wins.
 
-### 7.3 Credentials vs identity records
+- Independent records merge automatically.
+- Add-only event and Git-link IDs deduplicate exact replays and conflict on
+  same-ID different-content claims.
+- Mutable task and KB fields merge only when the changed semantic fields do
+  not overlap; Markdown/body conflicts are explicit three-way content
+  conflicts.
+- A tombstone conflicts with a concurrent edit or re-creation unless the
+  change explicitly resolves it.
+- Dangling references, schema/digest failure, or incompatible entity changes
+  are explicit conflicts.
 
-Identity *records* (who an agent is, its org memberships) are recoverable; *credentials* (raw Passport tokens, keys) are not redistributed on recovery and must be regenerated instead. The Coordination Server's Postgres store and Gateway's SQLite store do not persist raw Passport tokens; the server stores token hashes. Gateway owns credential persistence beneath `~/.wormhole/credentials/`, using a validated profile identifier, mode `0600` for a newly created profile file, mode `0700` for a newly created parent directory, and an atomic rename. The local enrolment response never contains the raw token. A lost, wiped, or interrupted pre-persistence machine recovers through coordination-server re-issuance, not token replay or credential replication.
+An unresolved conflict blocks checkpoint, writable Fabric delivery, and accepted
+state advancement for that workspace while preserving both sides and the
+diagnostic. An authorised participant resolves it through equivalent CLI/MCP
+Gateway project operations or Git; only authentication, ownership transfer,
+connector installation, and machine administration are reserved to the human
+control plane. Gateway then records a new deterministic checkpoint. There is no
+silent loss and no automatic overwrite rule.
 
----
+### 8.3 Canonical branches and acceptance
 
-## 8. Organisation Bootstrap and Synchronisation
+Checkouts and worktrees are isolated workspaces. A branch's overlay and any
+checkpointed working-tree change are proposal state, not upstream acceptance.
+Switching one workspace to another branch with an active overlay or uncommitted
+candidate requires checkpoint/commit as applicable, stash, or discard. A local
+merge, branch name, PR status, or claimed commit SHA is insufficient evidence of
+canonical acceptance.
 
-### 8.1 Bootstrap lifecycle
+Consequently, the accepted public `main` Fabric stream advances only after
+Fabric independently observes the canonical repository's default ref move to a
+commit containing a valid tracked snapshot. This prevents a fork, stale checkout,
+or arbitrary local branch from masquerading as upstream state. Each canonical
+branch has an isolated stream, while each local workspace has at most one
+writable Fabric binding. Fabric delivery is asynchronous and never gates a
+durable local operation.
 
-`wormhole join` and `wormhole connect` (existing CLI concepts, RFC-0001 §8.5) target Gateway's local `wormhole.agent.enrol` MCP tool. Gateway makes this same-user, OS-protected local endpoint available before any credential profile exists, then executes: **Authentication → Enrolment → Credential persistence → Bootstrap → Synchronisation → Normal operation.** The CLI performs no direct Fabric follow-on call. Gateway owns Fabric registration and persists the issued raw token before returning a token-free local result.
+### 8.4 Fabric bootstrap and synchronization
 
-Bootstrap pulls a complete project working environment before the runtime switches to incremental sync: project metadata, authenticated Agent and Passport identity, permissions, Channels, Events, Tasks, and KB articles. This is one `wormhole.sync.bootstrap` bulk pull, not N individual pillar calls. Fabric composes it in a repeatable-read project transaction; Gateway validates it before mutation and commits the full snapshot plus the `ready` checkpoint in one SQLite transaction. A failed validation or write rolls back the snapshot and moves the durable enrolment attempt to `recovery_required` in a separate transaction executed with a bounded context detached from request cancellation. Gateway reports recoverability only after that checkpoint commits; a checkpoint write failure instead returns `checkpoint_persistence_failed` in `attention_required` state. The frozen version-1 outer response contains exactly `org_config`, `project_list`, `task_list`, `kb_list`, `timestamp`, and `version`; `project_list` is a non-null empty array, while the top-level Task and KB lists exactly mirror their nested values. Integration-manifest metadata must be exactly JSON `null` until the separate storage and distribution design is implemented.
+For an explicitly Fabric-bound workspace, Gateway may bootstrap identified
+public or authenticated private Fabric state into its local overlay and
+incrementally push/pull that overlay.
+The binding is checked on every operation; Fabric state from a different
+project, profile, or workspace is rejected. Push happens only after the local
+operation is durable and does not block local work during an outage. Failed
+delivery remains queued in protected local state and is retried from the
+checkpointed stream.
 
-### 8.2 Steady-state sync
-
-- Local writes become durable in SQLite first (G4). Sync is a separate, asynchronous step — never blocking a local write's success on network reachability.
-- On restart Gateway opens credentials, opens and validates the SQLite ready
-  checkpoint, serves the local socket, then starts incremental sync in the
-  background. Bootstrap is an enrollment transition and is not repeated on
-  ordinary restarts. A sync cycle pushes durable outbound work before pulling;
-  pull is deferred while outbound work remains pending.
-- Outbound queue in `internal/runtime/sync` persists across restarts and network interruptions (SQLite-backed, not in-memory-only).
-- Delivery classes are explicit: ephemeral events never sync; durable events (task/KB changes) queue and sync reliably; persistent state syncs via the incremental pull/push cycle.
-- Batching is time-, queue-size-, and priority-based, with an explicit bypass for latency-sensitive event classes; exact thresholds are tunable configuration, not hardcoded.
-
-### 8.3 Conflict handling (v1 answer)
-
-Last-write-wins per row/field, coordination-server-timestamp authoritative, every overwrite logged to the append-only audit trail (never silently dropped). CRDTs and operational transforms are outside this RFC and require a future amendment.
+Fabric bootstrap does not replace the tracked Git base, and a tracked base
+does not grant Fabric access. Where a public project chooses not to bind
+Fabric, this section is simply absent from its setup path.
 
 ---
 
@@ -179,81 +478,117 @@ Last-write-wins per row/field, coordination-server-timestamp authoritative, ever
 
 ### Decided
 
-- **Local sync status:** The M2-compatible read-only local tool
-  `wormhole.sync.status` accepts exactly `project_id` and returns exactly
-  `state` plus `pending_writes`. State is one of `online`, `offline`,
-  `synchronizing`, or `attention_required`; it is maintained by Gateway and
-  does not synchronously probe Fabric.
+- **Supervisor:** `gatewayd` is one non-interactive user-level supervisor with
+  one stable same-user socket, not a process per profile or project.
+- **MCP:** MCP is agent-only and stateless. It owns neither human login nor
+  persistent connector/project configuration.
+- **Setup:** `wormhole setup` is the human-first lifecycle command and
+  replaces `join` and `connect`.
+- **Portable state:** `.wormhole/state/v1/` is typed, tracked, canonical,
+  versioned project content. SQLite, credentials, queues, cursors, and
+  integration state remain private.
+- **Workspace routing:** bindings are explicit and immutable; every operation
+  is project-namespace and workspace scoped.
+- **Conflict resolution:** semantic three-way rebase with surfaced conflicts;
+  no last-write-wins authority exists in this architecture.
+- **Fabric:** optional for public projects, membership-controlled for private
+  projects, and unavailable to a fork unless independently bound.
+- **Accepted state:** the accepted default-branch Fabric stream advances only
+  after Fabric independently observes the canonical Git ref.
+- **Code Graph:** one isolated, model-free worker per workspace; no model
+  download/inference, embeddings, vectors, implicit network, compute warnings,
+  compute profiles, or Warpspeed. Status and query verify a current analysis
+  fingerprint covering tracked inputs plus adapter/toolchain/config identity;
+  stale queries fail closed, and rebuild is explicit and copy-on-write.
+- **Identity:** every agent has an accountable human and typed action envelope;
+  local/public ownership may be self-declared, while private ownership is
+  membership-backed. Authenticators, Passport grants, and Git authorship are
+  distinct and auditable.
 
-- **Gateway-owned enrolment:** Local protocol version 1 uses the M2-compatible
-  `wormhole.agent.enrol` tool. It is available over the protected local socket
-  before credentials exist, requires a Gateway-configured local permission
-  envelope, accepts only a validated profile identifier beneath Gateway's
-  credential root, and never returns a raw token. Gateway owns all Fabric
-  registration, credential persistence, bootstrap, and recovery follow-on
-  work. The legacy local `proxyRegister` token-return path is superseded for
-  enrolment and is not a permitted CLI fallback.
+### Contract details
 
-- **Conflict resolution:** V1 uses coordination-server-timestamp-authoritative
-  last-write-wins with a durable audit trail. CRDTs, operational transforms,
-  and distributed consensus are outside RFC-0003.
-- **Sync wire contract:** The version-1 request and response shapes implemented
-  by `wormhole.sync.bootstrap`, `incremental_pull`, `incremental_push`, and
-  `conflict_report` are the frozen v1 contract.
-- **Local IPC authentication:** V1 trusts processes able to connect through the
-  same-user OS-protected socket or named pipe. It adds no local bearer-token
-  layer and does not support sharing one daemon across OS users.
-- **Version skew:** Every sync request and response carries integer protocol
-  version `1`. Peers accept exactly that version and reject incompatible
-  versions; backward-compatible negotiation is deferred until a second
-  protocol version exists. The outstanding `wormholed` response-validation
-  gap is tracked in
-  [GitHub issue #35](https://github.com/H4RL33/wormhole/issues/35).
+The approved [Git-Native Wormhole Architecture Design](../superpowers/specs/2026-07-28-git-native-wormhole-architecture-design.md)
+defines the version-one layout, canonicalisation boundary, actor assurance,
+authenticator families, routing keys, merge rules, setup flow, and delivery
+slices. Platform-specific filesystem identity, atomic publication mechanisms,
+and public wire encodings are implementation-plan decisions; none may weaken
+these RFC invariants or reintroduce last-write-wins.
 
-### Open
+### Transition constraints
 
-- **Cross-runtime discovery:** The Coordination Server owns discovery, but the
-  protocol for advertising runtimes, projects, capabilities, and presence has
-  not been selected. Bootstrap version 1 deliberately returns an empty
-  `project_list`; its strict non-empty `org_config` is the enrolled project's
-  snapshot and does not define cross-runtime discovery.
-- **Integration-manifest enforcement:** Bootstrap may eventually distribute
-  approved integration manifests, but signature verification, allow-listing,
-  installation, update, revocation, and sandbox boundaries have not been
-  selected. `wormholed` must not install or execute manifests until a separate
-  approved design defines those controls.
+- The implemented version-one `wormhole.sync.bootstrap`, incremental pull/push,
+  and conflict-report envelopes remain frozen compatibility inventory until an
+  approved delivery slice introduces and tests a new protocol version. New
+  semantics must not be smuggled into version one.
+- Local IPC continues to trust only processes able to connect through the
+  same-user OS-protected socket or named pipe; it gains no ambient cross-user
+  sharing or connector bearer-token fallback.
+- Raw legacy Passport tokens remain hashed server-side, written atomically to
+  owner-only local storage when retained for migration, and excluded from MCP
+  results and logs.
+- Existing integration manifests remain declarative, human-approved
+  materialisation input. Neither they nor the new tracked project base may
+  install or execute arbitrary repository content.
+
+### Verification and acceptance
+
+Every delivery slice requires focused tests followed by the repository's full
+check gate. Relevant changes add cross-project, cross-workspace, cross-Fabric,
+fork/upstream, connector rollback, migration, race, and security tests. Merged
+statement coverage remains at or above 80%. The architecture is not externally
+validated until the three-Gateway/one-Fabric VM trial and every issue #56
+subsidiary gate pass.
 
 ---
 
 ## 10. Security Considerations
 
-- The Coordination Server's Postgres store and Gateway's SQLite store do not persist raw Passport tokens; the server stores token hashes. Gateway writes the raw-token profile beneath `~/.wormhole/credentials/<profile>.json` atomically and permission-restricts it. Raw tokens are not logged, placed in local results, events, diagnostics, or model-facing responses. `wormhole.agent.enrol` is the deliberate pre-credential local API exception: it is callable through the same-user protected socket without a Passport, but fails closed unless trusted local Gateway policy permits the requested roles and permissions. The former `proxyRegister` response that exposed the issued token to the CLI is superseded for enrolment.
-- The local API (Unix socket/named pipe) has no additional bearer-token layer in v1. Its same-user trust boundary depends on OS filesystem permissions for the socket path and parent directory; users must restrict those paths accordingly.
-- Multi-org isolation is application-enforced, not database-enforced, in `wormholed` (§7.2) — the single biggest security-relevant departure from the coordination server's RLS guarantee, and the top implementation review priority for any `internal/runtime/localstore` change.
-- The sync channel (`wormholed` ↔ Coordination Server) is authenticated per organisation with the existing Passport-derived bearer token; no new auth primitive is introduced beyond RFC-0001 §8.4. Transport encryption exists only when the configured Coordination Server URL uses HTTPS. The current implementation accepts HTTP URLs and sends the bearer token in the `Authorization` header, so deployments must require HTTPS for every non-loopback Coordination Server. Plain HTTP is suitable only for loopback development.
+- Git-tracked snapshots are content, not authorization. Treat public snapshot
+  data as public and validate every imported byte before use.
+- The snapshot must never include secrets or machine-specific state. Git
+  history makes accidental disclosure durable.
+- Fabric requires HTTPS for every non-loopback endpoint. Canonical-public
+  requests prove identification-only key continuity; private requests
+  authenticate with the binding's credential. HTTP is development-only on
+  loopback.
+- Server-side Postgres RLS remains the authoritative second line of defense
+  for Fabric. Gateway's SQLite isolation is application-enforced and therefore
+  requires mandatory scoped repository methods and cross-scope tests.
+- A copied `.wormhole/config.toml` cannot authorize a fork against upstream
+  Fabric. Gateway validates immutable workspace identity, canonical Git
+  relationship, and explicit local binding before creating a stream.
+- Integration manifests and their local projection remain separately designed
+  human-approved materialisation. No tracked snapshot entry may cause Gateway
+  to install or execute arbitrary code.
+- MCP's same-user socket trusts processes running as that OS user. Connector
+  installation must not relax its socket/parent-directory permissions.
 
 ---
 
-## 11. Non-Goals Recap
+## 11. Glossary
 
-Advanced scheduling algorithms, distributed consensus, CRDTs, complex permission inheritance, autonomous planning, language-model orchestration inside the runtime, global optimisation, full peer-to-peer operation. Priority is a robust, extensible foundation — not solving every long-term concern in v1.
+- **Gateway supervisor:** the single passive `gatewayd` process for one
+  user/system installation.
+- **Workspace:** one immutable local binding to a repository checkout or Git
+  worktree, distinct from a project namespace.
+- **Accepted base:** the typed `.wormhole/state/v1/` state at the exact Git
+  commit observed by a workspace.
+- **Overlay:** private, durable Gateway operations layered over the accepted
+  base, including recovery metadata for materialised-pending-commit operations.
+- **Checkpoint:** deterministic working-tree materialisation of an overlay, with
+  private durable recovery evidence; it does not advance the accepted base.
+- **Canonical ref:** the declared upstream Git ref whose observed advance is
+  the only way a workspace accepts new canonical state.
+- **Fabric stream:** one explicit optional synchronization path bound to a
+  workspace and Fabric namespace; at most one is writable per workspace.
+- **Passport:** a project-scoped Fabric capability grant to an agent; never a
+  Git or human-login credential.
 
 ---
 
-## 12. Glossary Additions
-
-- **`wormholed`** — the local runtime daemon; working name, one per user machine.
-- **Coordination Server** — RFC-0003's name for the retrofitted `wormhole-server`; coordinates multiple `wormholed` instances, remains identity authority.
-- **Local API** — the stable IPC surface `wormholed` exposes to coding harnesses.
-- **Namespace** — isolation boundary (org/project/knowledge/tasks/artifacts/identity), enforced by RLS server-side and by repository-layer scoping client-side.
-- **Project Binding** — explicit local configuration mapping a harness/project context to a specific (org, project, identity) tuple; never inferred.
-- **Sync Queue** — durable, restart-surviving outbound work queue in `wormholed` awaiting coordination-server delivery.
-- **Bootstrap** — the one-time bulk-pull lifecycle stage on org enrolment, distinct from steady-state incremental sync.
-
----
-
-## 13. References
+## 12. References
 
 - [RFC-0001: Wormhole Core](wormhole_rfc.md)
 - [RFC-0002: Wormhole Governance](wormhole_rfc_governance.md)
+- [Git-Native Wormhole Architecture Design](../superpowers/specs/2026-07-28-git-native-wormhole-architecture-design.md)
 - [`docs/implementation-rules.md`](../implementation-rules.md) — implementation guardrails.

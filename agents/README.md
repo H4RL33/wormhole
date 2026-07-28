@@ -2,44 +2,78 @@
 
 ## Mission and State
 
-Wormhole gives agents shared, durable organisational context. Git owns code truth.
-Wormhole owns typed events, task state, KB records, identity, permissions, and links to
-code. Current repo builds local runtime, coordination server, and CLI.
+Wormhole gives humans and agents shared, durable organisational context. Git is
+the sole code truth and accepts tracked Wormhole project state. Wormhole gives
+typed semantics to events, task state, KB records, identities, permissions, and
+links to code. The repository builds the CLI, local Gateway, and optional Fabric.
 
 ## Authority Order
 
 Authority order: RFC-0001, with RFC-0003 overriding it only where RFC-0003
-explicitly amends local-runtime or transport assumptions; RFC-0002 governs optional
-Governance; `docs/implementation-rules.md`; existing code.
+explicitly amends local-runtime, transport, workspace, or optional-coordination
+assumptions; RFC-0002 governs optional Governance; the approved
+`docs/superpowers/specs/2026-07-28-git-native-wormhole-architecture-design.md`
+defines their version-one contract details; `docs/implementation-rules.md`;
+existing code.
 
 RFC tool shapes are indicative unless code freezes them. Governance is optional and
 must not leak into Core code.
 
-## Two-Layer Architecture
+## Layer Architecture
 
-Harnesses call `gatewayd` (Gateway) by local MCP IPC. Gateway writes local SQLite first, then
-syncs incrementally with `fabric` (Fabric). Fabric owns authoritative Postgres plus
-pgvector state. Core pillars: event bus, task graph, KB, identity and permissions, git
-pointers. No code copies in Wormhole.
+- Stateless harness connectors call the one user-level `gatewayd` supervisor by
+  local MCP IPC.
+- The human-first `wormhole` CLI installs and configures Gateway, workspaces,
+  identities, optional Fabrics, and harness connectors.
+- A tracked, typed `.wormhole/state/v1/` tree at an observed Git commit is the
+  accepted base. Gateway writes a private per-workspace overlay durably before
+  optional sync and materialises it as an uncommitted working-tree candidate
+  with `wormhole checkpoint`; checkpoint alone never advances the base.
+- One Gateway supports many projects, worktrees, and explicit Fabric profiles.
+  Each workspace has zero or one writable Fabric stream.
+- Fabric is optional for public and private projects. It owns its Postgres plus
+  pgvector projection, membership, and remote audit; it cannot overwrite a
+  divergent Git base. A canonical-public hint activates only when `origin`
+  matches the canonical repository identity; a fork/mismatch makes no upstream
+  Fabric contact, read, or write and may bind only an independent realm.
+- Isolated on-demand Code Graph workers are local, deterministic, model-free,
+  and per checkout. They do not sync through Fabric.
+
+Core pillars remain Event Bus, Task Graph, Knowledge Base, and Identity &
+Permissions. Wormhole stores no competing copy of repository source.
+
+## Transition State
+
+The 2026-07-28 architecture is authoritative but not yet fully implemented.
+Current code still contains legacy `join`/`connect`, single-profile bootstrap,
+Passport-only attribution, and pre-snapshot assumptions. Implementation plans
+must migrate those paths in tested slices. Do not document a target command or
+schema as shipped until its implementation and contract checks pass.
 
 ## Binaries
 
-- `wormhole`: join, configure, connect harnesses, and bridge stdio MCP.
-- `gatewayd`: Gateway, the per-user local daemon, Unix socket API, SQLite replica, sync queue.
-- `fabric`: Fabric, the coordination server, HTTP MCP boundary, Postgres-backed Core.
+- `wormhole`: setup, identity/auth, project/Fabric/connector administration,
+  first-party Codex/Claude connector lifecycle, checkpointing, and stdio MCP
+  bridge.
+- `gatewayd`: one per-user passive supervisor, stable Unix socket API, SQLite
+  control/read model, durable overlays and queues, and worker lifecycle.
+- `fabric`: optional public/private coordination service, HTTP MCP boundary,
+  Git-aware stream verifier, and Postgres-backed Core.
 
 ## Package Ownership and Dependency Bans
 
 - `cmd/*`: process wiring only.
 - `internal/mcp`: server MCP registry, envelopes, auth, tool handlers.
 - `internal/core/identity`, `events`, `tasks`, `kb`, `permissions`, `git`, `roles`:
-  server pillars.
+  server pillars. Identity separates humans, authenticators, memberships,
+  durable agents, ownership, sessions, Passports, credentials, and audit.
 - `internal/runtime/localapi`, `localstore`, `eventbus`, `scheduler`, `sync`, `config`:
-  local runtime.
-- `internal/runtime/codegraph/{config,store,index,query,source}`: Gateway-local Code
-  Graph configuration, derivative SQLite state, revision publication, bounded query,
-  and transient hash-validated source assembly only; never Fabric state or persisted
-  source bodies.
+  local runtime, including explicit project/workspace routing, Git bases,
+  private overlays, checkpoints, and multiple Fabric profiles.
+- `internal/runtime/codegraph/{config,golang,store,index,query,source}`: Gateway-local
+  Code Graph configuration, compiler analysis, derivative SQLite state, revision
+  publication, bounded query, and transient hash-validated source assembly only;
+  never Fabric state or persisted source bodies.
 - `internal/storage`: server DB open only. `internal/types`: shared plain types/config.
 - `internal/webui`: read-oriented human dashboard.
 - `internal/core/*` never imports `internal/mcp`; core-to-core imports are banned except
@@ -47,32 +81,55 @@ pointers. No code copies in Wormhole.
 - `internal/runtime/*` never imports `internal/core/*` or `internal/mcp`. `localapi`
   may import all sibling runtime packages because it wires them together; other runtime
   packages must not import `localapi`.
-- Code Graph dependencies flow `query` → `source`/`store` → Code Graph `config` and
-  `index` → `store` → Code Graph `config`. These packages do not import `localapi`,
-  `sync`, Core, or MCP and do not use Fabric migrations.
+- Code Graph dependencies are `store` → `config`, `index` →
+  `config`/`golang`/`store`, and `query` → `config`/`source`/`store`;
+  `config` and `source` use only the standard library, while `golang` uses the
+  standard library plus `golang.org/x/tools/go/packages`. These packages do not
+  import `localapi`, `sync`, Core, or MCP and do not use Fabric migrations,
+  models, embeddings, vectors, or implicit network access. Status and query fail
+  closed unless the graph's analysis fingerprint matches tracked source and
+  adapter-declared inputs plus build, adapter, and toolchain identity.
 - `internal/types` imports stdlib only. No new top-level package or external dependency
   without human approval. No ORM, global singleton, `init()` registration, or control-flow
   `panic`.
 
 ## Data and Security Invariants
 
-- Git remains sole code truth. Store commit SHA, PR URL, and commentary only.
-- Server data is project-scoped by Postgres RLS. Always preserve project scope.
-- Localstore queries require explicit namespace scope. Add cross-namespace tests for
-  localstore changes.
+- Git remains sole code truth. Source integration stores commit SHA, PR URL,
+  and commentary only. Typed Wormhole project records may be tracked beneath
+  `.wormhole/`; source bodies may not.
+- Tracked `.wormhole/` files are repository-visible project content, visible to
+  every principal with Git access; they are never credentials or authority.
+  Machine-private state and secrets stay outside the repository.
+- All project-scoped Fabric data is protected by Postgres RLS. Only explicitly
+  project-agnostic principal, authenticator, and agent records, plus explicitly
+  global registration configuration such as `role_templates`, are global (see
+  `docs/implementation-rules.md` D3).
+- Localstore queries require explicit project namespace and workspace scope.
+  Add cross-namespace and cross-workspace tests for localstore changes.
 - Local writes become durable before sync. Ephemeral presence/heartbeat events stay in
   eventbus; durable state uses localstore and a restart-surviving sync queue.
 - Passport tokens and credentials are secrets. Do not log them. Server stores token
   hashes. Keep socket and credential file permissions restrictive.
-- Human-only destructive or policy actions stay human-only. Governance activation is
-  explicit per project.
+- Humans and agents have parity for project operations through CLI and MCP.
+  Human authentication, ownership transfer, credential recovery, membership,
+  and policy administration remain human control-plane operations.
+- Git/Fabric divergence uses semantic three-way rebase with explicit conflicts;
+  never introduce last-write-wins.
 
 ## MCP Surface
 
-MCP is the platform contract. Core names use `wormhole.<pillar>.<verb>` for agent,
-channel, task, KB, and git operations. `wormhole.sync.*` is runtime-to-server sync.
-Harnesses use local Gateway; do not add a direct remote harness path. Keep auth and
-permission enforcement at the MCP boundary.
+MCP is the stateless agent-facing project-operation contract. Core names use
+`wormhole.<pillar>.<verb>` for agent, channel, task, KB, and git operations.
+`wormhole.sync.*` is Gateway-to-Fabric sync;
+`wormhole.workspace.{status,diff,import,checkpoint,stash}` provides equivalent
+local project-state operations for agents; and
+`wormhole.code_graph.{status,query,rebuild}` is the RFC-0003 Gateway-local
+derivative namespace. The latter two are not Core pillars. Harnesses use local
+Gateway; do not add a direct remote harness path. Human CLI project operations
+must share the same Gateway domain semantics. Private remote auth and
+permission enforcement remain at the Fabric boundary; local/public assurance
+is explicit in the actor envelope.
 
 ## Development Protocol
 
@@ -82,28 +139,33 @@ Core store shape. Run focused tests first, then required full checks. Do not gue
 an RFC open question: use conservative documented behavior or escalate. Do not alter
 unrelated worktree changes.
 
-## Alpha Session Decision
+## Identity and Session Decision
 
-Passports identify agents.
-Credential profiles authorise local runtime access.
-Harness process sessions are ephemeral during alpha.
-Durable session records are deferred until a demonstrated use case requires them.
+Humans and agents are separate durable principals. Authenticators prove a human
+identity; project memberships authorise private Fabric access; ownership records
+make a human accountable for an agent. Passports are project-scoped Fabric
+capability grants, not the human identity or the agent itself. Agent actions
+capture agent, accountable human, harness/model session, and assurance at action
+time. Local/fork actors are self-declared, public Fabric uses key continuity,
+and private Fabric uses authenticated membership.
 
 ## Build and Test Commands
 
 ```bash
-make build
-make test
-make vet
-go test ./...
+# focused package or behavior tests first
+make check
 ```
 
-Use `make build`; binaries go to `dist/`. Integration tests use Postgres when available
-and may skip when it is unavailable unless `WORMHOLE_INTEGRATION_REQUIRED=1`.
+Merged statement coverage must remain at or above 80%. Before a milestone or
+release claim, also run the repository release test and rehearsal gates. Use
+`make build` for binaries in `dist/`. Integration tests use Postgres when
+available and may skip unless `WORMHOLE_INTEGRATION_REQUIRED=1`.
 
 ## Config and Credential Paths
 
-- Project config: nearest `.wormhole/config.toml` from current directory upward.
+- Project base: nearest `.wormhole/config.toml`, optional
+  `.wormhole/remotes.toml`, and
+  `.wormhole/state/v1/` from current directory upward.
 - Global config: `$XDG_CONFIG_HOME/wormhole/config.toml`, else
   `~/.config/wormhole/config.toml`.
 - CLI and runtime credential profiles: `~/.wormhole/credentials/*.json`.
@@ -111,6 +173,11 @@ and may skip when it is unavailable unless `WORMHOLE_INTEGRATION_REQUIRED=1`.
   `$TMPDIR/wormhole-runtime/wormhole/wormholed.sock`.
 - Runtime SQLite: `$XDG_DATA_HOME/wormhole/wormholed.db`, else
   `~/.local/share/wormhole/wormholed.db`.
+
+Workspace IDs, overlays, stashes, recovery journals, Fabric credentials,
+connector backups, and Code Graph databases are machine-private and remain
+outside the repository. Legacy `.wormhole/integration-state.json` must be
+migrated/ignored, never committed.
 
 `wormholed.sock` and `wormholed.db` are retained local-state filenames, not
 legacy executable aliases. Invoke `gatewayd`, never a former daemon name.
@@ -131,8 +198,14 @@ policy; no beta compatibility promise exists.
 ## Live-Doc Map
 
 - RFCs: `docs/rfcs/`.
+- Current architecture contract:
+  `docs/superpowers/specs/2026-07-28-git-native-wormhole-architecture-design.md`.
 - Implementation guardrails: `docs/implementation-rules.md`.
 - Data entities: `docs/db-entities.md`; KB rules: `docs/kb-schema.md`.
 - MCP transport/auth: `docs/mcp-protocol.md`.
-- Product connector setup: `docs/claude-code-connector.md`.
+- Product connector setup: `docs/claude-code-connector.md`; the first-party
+  Codex lifecycle contract and smoke-test target are in the current architecture
+  design until a dedicated Codex document ships. Codex uses
+  `codex mcp add wormhole -- /absolute/path/to/wormhole mcp`, with transactional
+  inspect/apply/verify/rollback/remove.
 - Contributor and security entrypoints: `CONTRIBUTING.md`, `SECURITY.md`, `README.md`.

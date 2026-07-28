@@ -2,8 +2,11 @@
 
 **Audience:** implementation agents (any model tier) making changes to this repo.
 Authority order: RFC-0001, with RFC-0003 overriding it only where RFC-0003
-explicitly amends local-runtime or transport assumptions; RFC-0002 governs optional
-Governance; `docs/implementation-rules.md`; existing code.
+explicitly amends local-runtime, transport, workspace, or optional-coordination
+assumptions; RFC-0002 governs optional Governance; the approved
+`docs/superpowers/specs/2026-07-28-git-native-wormhole-architecture-design.md`
+defines their version-one contract details; `docs/implementation-rules.md`;
+existing code.
 This document derives from the RFCs and current code; if it conflicts with an RFC, the RFC
 wins and this file has a bug — flag it, don't silently pick one.
 
@@ -65,6 +68,7 @@ doing each thing, and it is written down. Before editing, read:
 | Any core package | `internal/core/identity/identity.go` (the canonical pattern) + the package you're editing |
 | DB schema | `docs/db-entities.md` + the latest migration pair in `migrations/` |
 | MCP tools | `internal/mcp/registry.go` + RFC-0001 §9 |
+| Git-native workspace, setup, identity, Fabric routing, or Code Graph | `docs/superpowers/specs/2026-07-28-git-native-wormhole-architecture-design.md` + RFC-0003 |
 | Tests | `internal/core/identity/identity_test.go` |
 | Anything at all | The RFC section the task cites; §1–2 of this document |
 
@@ -91,17 +95,18 @@ defined before a second implementation exists.
 Ambiguity is normal; guessing is the failure. Resolve in this exact order, stopping at the
 first rung that answers the question:
 
-1. **RFC text.** Does RFC-0001 state it, does RFC-0002 state it for optional
-   Governance, or does RFC-0003 explicitly amend a local-runtime or transport
-   assumption? Then it is decided; follow that authority. RFC-0003 does not
-   otherwise supersede RFC-0001.
-2. **`docs/db-entities.md`** for anything entity-shaped.
-3. **Existing code.** Does the repo already embody an answer? Match it.
-4. **This document's rules.** Do §4–§7 constrain it to one option?
-5. **RFC Decision Registers (§15 Core / §9 Governance / §9 Local Runtime).** If the
-   entry is decided, follow it. If it is listed under **Open**, do not resolve it:
-   pick the most conservative behavior consistent with the settled decisions,
-   state what you did and why, and flag it.
+1. **RFC text and Decision Registers.** Does RFC-0001 state it, does RFC-0002
+   state it for optional Governance, or does RFC-0003 explicitly amend a
+   local-runtime, transport, workspace, or optional-coordination assumption?
+   A decided entry binds. An entry listed as open remains open and may not be
+   resolved as a side effect. RFC-0003 does not otherwise supersede RFC-0001.
+2. **Approved architecture contract.** For the 2026-07-28 migration, does the
+   Git-native architecture design specify the version-one detail? Follow it.
+3. **`docs/db-entities.md`** for anything entity-shaped.
+4. **Existing code.** Does the repo already embody a compatible answer? Match it.
+   Legacy code that the architecture explicitly supersedes is migration input,
+   not precedent.
+5. **This document's rules.** Do §4–§7 constrain it to one option?
 6. **None of the above** → stop and escalate with a concrete question and your
    recommended answer. "Should `task.assign` accept a human owner? RFC §8.2 says owner
    is 'agent or human' but the agents table has no human rows — I recommend X because Y"
@@ -162,38 +167,37 @@ unverified, because ___", stated exactly that way.
 
 ## 3. System in One Paragraph
 
-Wormhole is a two-layer system (RFC-0003): a per-user Gateway (`gatewayd`) with a
-SQLite replica plus Fabric (`fabric`) with a Postgres database. Coding harnesses talk only to
-Gateway over local IPC (MCP tools); Gateway syncs incrementally with Fabric. The platform
-exposes four pillars — Event Bus,
-Task Graph, Knowledge Base, Identity & Permissions — exclusively through MCP. Git stays
-the sole source of truth for code; Wormhole stores pointers (commit SHAs, PR URLs) and
-commentary only. There is no message broker or second coordination datastore. The current
-read-only human dashboard is the narrow RFC-0001 §14 V2 exception to MCP-only product
-capabilities; no broader human application is in scope. Governance (Constitution, Congress;
-RFC-0002) is optional and must not leak into Core code.
+Wormhole has four layers: stateless harness MCP connectors, the human-first
+`wormhole` CLI, one user-level Gateway supervisor, and optional public/private
+Fabrics. A repository's typed `.wormhole/state/v1/` tree at an observed commit is
+the accepted Git base; Gateway stores a durable private overlay per
+checkout/worktree and materialises an uncommitted candidate through deterministic,
+compare-and-swap checkpoints. Checkpoint alone never advances the base. Gateway
+may connect different workspaces to
+different Fabrics, but each workspace has at most one writable stream. Git is the
+sole code truth and accepts project-state changes. Fabric accelerates live
+collaboration without overwriting divergent Git state. The four Core pillars remain
+Event Bus, Task Graph, Knowledge Base, and Identity & Permissions. Governance is
+optional and must not leak into Core.
 
+```text
+Human CLI                         Harness MCP bridges
+    \                                 /
+     +---- one gatewayd supervisor --+
+           | bases + overlays + queues
+           | explicit workspace routes
+           +---- isolated model-free Code Graph workers
+           |
+           +---- optional Fabric A / Fabric B / ...
+                      |
+               Postgres + pgvector per Fabric
+
+Git checkout: .wormhole/state/v1/ <-> checkpoint/review/merge
 ```
-Coding harnesses (Claude Code, OpenCode, Goose, ...)
-        │  MCP tools, local IPC only
-        ▼
-Gateway (gatewayd, per-user daemon, RFC-0003 §5)
-        │  internal/runtime/* packages: local API, SQLite store, sync engine, scheduler
-        │
-        ├─► localapi (MCP tool registry + org routing)
-        ├─► localstore (SQLite tasks, events, KB, namespace-scoped)
-        ├─► sync (outbound queue, bootstrap/incremental pull/push)
-        ├─► scheduler (agent presence, task routing)
-        └─► eventbus (ephemeral pub/sub)
-        │
-        ▼  wormhole.sync.* tools over HTTP
-        │
-Fabric (cmd/fabric)
-        │  internal/mcp (tool registry + auth boundary)
-        │  internal/core/* (identity, tasks, events, kb, permissions)
-        ▼
-Postgres + pgvector (single Coordination Server datastore)
-```
+
+The 2026-07-28 target is authoritative but migration is incomplete. Match the
+approved slice plan and tests; do not mistake legacy current code for a new
+architectural decision or claim an unimplemented target as shipped.
 
 ---
 
@@ -202,21 +206,21 @@ Postgres + pgvector (single Coordination Server datastore)
 | Package | Owns | May import |
 |---|---|---|
 | `cmd/fabric` | Process wiring: config, HTTP server, registry construction | `internal/core/*`, `internal/mcp`, `internal/storage`, `internal/types`, `internal/webui` |
-| `cmd/wormhole` | CLI entrypoint (`wormhole join` etc.) | `internal/config`, client-side code, stdlib |
+| `cmd/wormhole` | Human-first CLI entrypoint (`setup`, identity/auth, project/Fabric/connector lifecycle, checkpoint, MCP bridge) | `internal/config`, client-side code, stdlib |
 | `internal/config` | CLI global/project TOML configuration | stdlib, BurntSushi TOML |
 | `internal/mcp` | MCP tool descriptors, registry, request/response schemas, auth middleware | `internal/core/*`, `internal/types` |
-| `internal/core/identity` | Agents, tokens, passports, whoami, audit trail | `internal/types`, stdlib |
+| `internal/core/identity` | Human and agent principals, authenticators, memberships, ownership, sessions, Passports/tokens, whoami, audit trail | `internal/types`, stdlib |
 | `internal/core/tasks` | Task graph: CRUD, status machine, task links | `internal/types`, `internal/core/events` (to emit transition events) |
 | `internal/core/events` | Channels, append-only event log, typed event payloads | `internal/types`, stdlib |
 | `internal/core/kb` | KB articles, links, embeddings, compliance checks, semantic search | `internal/types`, stdlib |
 | `internal/core/permissions` | Permission resolution/enforcement helpers | `internal/types`, stdlib |
-| `internal/core/git` | Git integration pointers: commit links, review requests (manual-link only, RFC-0001 §8.6) | `internal/types`, stdlib |
+| `internal/core/git` | Source-code pointers only: commit links and review requests; never repository source | `internal/types`, stdlib |
 | `internal/core/roles` | Immutable role templates and default task views | stdlib |
 | `internal/storage` | DB connection only (`Open`) | `internal/types`, `lib/pq` |
 | `internal/types` | Config, shared plain types | stdlib only |
-| `internal/webui` | Read-only dashboard and viewer/admin-key HTTP boundary | `internal/core/*`, stdlib |
+| `internal/webui` | Human read projection and approved private-auth browser callbacks/session boundary | `internal/core/*`, stdlib |
 
-### 4.1 Local Runtime Module Map (RFC-0003 §6.3)
+### 4.1 Local Runtime Module Map
 
 The local-first Gateway (`gatewayd`) uses `internal/runtime/*` packages, separate from and
 parallel to `internal/core/*` (which stays Fabric-only). Local packages follow
@@ -225,27 +229,39 @@ the same layering pattern and isolation discipline.
 | Package | Owns | May import |
 |---|---|---|
 | `cmd/gatewayd` | Process wiring: config load, localstore, localapi, sync engine, graceful shutdown | `internal/runtime/*`, `internal/types` |
-| `internal/runtime/config` | XDG-compliant local paths, org connection config, project bindings (RFC-0003 §7.1, §8.1) | `internal/types`, stdlib |
-| `internal/runtime/localstore` | SQLite-backed repositories for tasks, events, KB, namespaced per project (RFC-0003 §7.2) | `internal/types`, stdlib, modernc SQLite driver |
-| `internal/runtime/localapi` | Local IPC server (Unix domain socket), tool registry, request routing, org context resolution (RFC-0003 §6.1) | All sibling `internal/runtime/*` packages, `internal/types`, stdlib |
-| `internal/runtime/eventbus` | In-memory pub/sub for ephemeral events (presence, heartbeats); never persists (RFC-0003 §8.2) | `internal/types`, stdlib |
-| `internal/runtime/scheduler` | Agent registration, presence tracking, capability matching, local task routing (RFC-0003 §6.3) | `internal/types`, stdlib |
-| `internal/runtime/sync` | Outbound queue (durable, SQLite-backed), bootstrap/incremental pull/push clients, conflict audit logging (RFC-0003 §8.2, §8.3) | `internal/runtime/localstore`, `internal/types`, stdlib |
-| `internal/runtime/codegraph/config` | Disabled-by-default, project-scoped local Code Graph configuration | stdlib |
+| `internal/runtime/config` | XDG-compliant paths, immutable workspace bindings, identity refs, and multiple Fabric profiles | `internal/types`, stdlib |
+| `internal/runtime/localstore` | SQLite-backed bases, overlays, domain records, queues, conflicts, and checkpoints scoped by project and workspace | `internal/types`, stdlib, modernc SQLite driver |
+| `internal/runtime/localapi` | Stable local IPC, project-operation registry, cwd/workspace routing, and actor-envelope resolution | All sibling `internal/runtime/*` packages, `internal/types`, stdlib |
+| `internal/runtime/eventbus` | In-memory pub/sub for ephemeral events (presence, heartbeats); never persists | `internal/types`, stdlib |
+| `internal/runtime/scheduler` | Agent registration, presence tracking, capability matching, local task routing | `internal/types`, stdlib |
+| `internal/runtime/sync` | Explicit per-binding Fabric clients, durable queues, bootstrap/incremental streams, Git-base preconditions, and conflict audit | `internal/runtime/localstore`, `internal/types`, stdlib |
+| `internal/runtime/codegraph/config` | Disabled-by-default, workspace-scoped local Code Graph configuration | stdlib |
+| `internal/runtime/codegraph/golang` | Read-only Go compiler analysis into the language-neutral graph model | `golang.org/x/tools/go/packages`, stdlib |
 | `internal/runtime/codegraph/store` | Component-local SQLite schema, revision payloads, snapshot reads, and atomic publication | `internal/runtime/codegraph/config`, stdlib |
-| `internal/runtime/codegraph/index` | Candidate invariant validation and publication orchestration | `internal/runtime/codegraph/store`, stdlib |
+| `internal/runtime/codegraph/index` | Canonical source inventory, compiler-backed candidate construction, invariant validation, and publication | `internal/runtime/codegraph/config`, `internal/runtime/codegraph/golang`, `internal/runtime/codegraph/store`, stdlib |
+| `internal/runtime/codegraph/query` | Deterministic lexical and structural retrieval with freshness-gated source access | `internal/runtime/codegraph/config`, `internal/runtime/codegraph/source`, `internal/runtime/codegraph/store`, stdlib |
+| `internal/runtime/codegraph/source` | Bounded, hash-validated transient source assembly | stdlib |
 
-**Local runtime hard dependency rules (RFC-0003 §6.3):**
+**Local runtime hard dependency rules:**
 
 - LR1: `internal/runtime/*` packages never import `internal/core/*` or `internal/mcp`. Local storage and coordination are strictly separated.
 - LR2: `internal/runtime/localapi` may import all other `internal/runtime/*` packages (it wires them together). Other runtime packages may not import `localapi`.
-- LR3: `internal/runtime/localstore` repository methods enforce namespace isolation by construction: every query is namespace-scoped via mandatory parameters, never inferred from ambient state (RFC-0003 §7.2 — accepted RLS-gap risk with process discipline).
+- LR3: `internal/runtime/localstore` repository methods enforce project and workspace isolation by construction: every query is scoped through mandatory parameters, never inferred from ambient state. Every change ships cross-project and cross-workspace rejection tests.
 - LR4: Ephemeral events (presence, heartbeats) are eventbus-only; durable events (task/KB changes) go through localstore. Never persist ephemeral state.
-- LR5: Sync queue is SQLite-backed and restart-surviving (RFC-0003 G4). Local writes become durable before sync is attempted; sync never blocks local writes.
-- LR6: Code Graph is Gateway-local derivative state. Its dependencies flow
-  `index` → `store` → Code Graph `config`; none imports `localapi`, `sync`, Core,
-  or MCP. Stores bind one explicit Gate A project at `Open`, every payload SQL
-  remains project- and revision-scoped, and no Code Graph state enters Fabric.
+- LR5: Sync queues are SQLite-backed, restart-surviving, and keyed by explicit Fabric instance/project/stream binding. Local writes become durable before sync; one Fabric failure never blocks local work or another binding.
+- LR6: Code Graph is Gateway-local derivative state. Dependencies are `store` →
+  `config`, `index` → `config`/`golang`/`store`, and `query` →
+  `config`/`source`/`store`; none imports `localapi`, `sync`, Core, or MCP.
+  Stores bind one explicit workspace at `Open`, every payload SQL remains project-,
+  workspace-, and revision-scoped, and no Code Graph state enters Fabric or
+  `.wormhole/`. Before serving status or query, the runtime compares the active
+  analysis fingerprint with a recomputed fingerprint over tracked source and
+  adapter-declared non-source inputs plus normalised build/target/configuration,
+  graph/adapter schema version, and compiler/toolchain identity. A mismatch
+  reports stale state and query fails closed until an explicit successful rebuild.
+  Source bytes remain separately hash-validated. Code Graph uses no model,
+  embedding, vector query, compute profile, Warpspeed path, or implicit network
+  access.
 
 **Hard dependency rules (Coordination Server):**
 
@@ -259,12 +275,13 @@ the same layering pattern and isolation discipline.
   `github.com/lib/pq`, and `modernc.org/sqlite`; the complete locked module graph is
   recorded in `go.mod`/`go.sum`. `golang-migrate` remains external schema tooling rather
   than a linked Go module.
-- R5: The Coordination Server has one datastore: Postgres + pgvector. RFC-0003 separately
+- R5: Each Fabric instance has one datastore: Postgres + pgvector. RFC-0003 separately
   requires Gateway's local SQLite replica and durable sync queue; that SQLite database
   is not a Fabric datastore. Do not add Redis, NATS, another datastore, or
   another storage service without explicit human approval. RFC-0001 §15 decides that
-  durable Fabric change discovery is "Postgres table, polled by Gateway". Harnesses consume
-  local SQLite/runtime state; ephemeral local
+  durable Fabric change discovery is "Postgres table, polled by Gateway". Multiple
+  Fabric profiles in one Gateway do not create another Fabric datastore or merge
+  namespaces. Harnesses consume local SQLite/runtime state; ephemeral local
   notifications and the in-memory eventbus remain permitted under LR4.
 
 ---
@@ -282,8 +299,8 @@ the same layering pattern and isolation discipline.
    return a bare driver error; never swallow one.
 4. **Security-relevant lookups collapse to one error.** Forged, unknown, and
    wrong-project tokens all return `ErrInvalidToken` — callers must not be able to
-   distinguish failure modes (RFC-0001 §13). Apply the same principle to any future
-   auth-adjacent lookup.
+   distinguish failure modes. This is a retained identity security contract; apply
+   the same principle to any future auth-adjacent lookup.
 5. **Multi-statement writes use a transaction** with `defer tx.Rollback()` then explicit
    `tx.Commit()`. Single inserts don't need a tx.
 6. **Secrets are hashed at rest.** Raw tokens returned exactly once; only SHA-256 hex
@@ -306,14 +323,17 @@ the same layering pattern and isolation discipline.
   actually revert. Never edit an already-committed migration; add a new one.
 - D2: Entity shapes come from `docs/db-entities.md`. Deviating from it means updating
   that file in the same change, with the reason.
-- D3: Every project-scoped table gets RLS. The only global application tables
-  are project-agnostic `agents` and registration configuration `role_templates`.
+- D3: Every project-scoped table gets RLS. Global application tables are limited
+  to project-agnostic principals/authenticators, agents, and registration
+  configuration such as `role_templates`; memberships, ownership grants,
+  credentials, and actor actions are project-scoped unless the approved schema
+  explicitly records a project-agnostic relationship.
   The `projects` root scopes on its `id`; child tables get a
   `project_id uuid NOT NULL REFERENCES projects(id)` column and an index on it.
   Every scoped table gets `ENABLE ROW LEVEL SECURITY` and a policy comparing
   its scope column (`projects.id` or child `project_id`) to
   `current_setting('wormhole.project_id', true)::uuid`.
-  This is the multi-tenancy guarantee (RFC-0001 §13); it is not optional per table.
+  This is the Fabric-tenancy guarantee in RFC-0001 §15; it is not optional per table.
 - D4: Conventions already in force: `uuid` PKs via `gen_random_uuid()` (pgcrypto),
   `timestamptz NOT NULL DEFAULT now()` timestamps, `text` not `varchar`, `jsonb` with
   `DEFAULT '[]'` for list-shaped columns, snake_case names, header comment citing the
@@ -326,7 +346,9 @@ the same layering pattern and isolation discipline.
   provider may compute vectors but is never the vector datastore. The legacy
   nullable `kb_articles.embedding` column is compatibility-only and must not be
   used for production ranking or new writes.
-- D7: D1 governs Fabric's Postgres schema. Gateway Code Graph tables use their
+- D7: D1 governs Fabric's Postgres schema. The currently implemented legacy
+  Code Graph schema is migration input, not the final per-workspace worker
+  schema. Its tables use their
   own `codegraph_schema_migrations` SQLite ledger, fail closed on a schema newer
   than the binary, and never enter the Fabric migration sequence. They may store
   paths, indexed hashes, signatures, ranges, edges, and diagnostics, but never
@@ -337,37 +359,50 @@ the same layering pattern and isolation discipline.
   writer barrier across lifecycle inspection and cleanup; ordinary build
   admission may reclaim only an exactly matched, positively dead owner, while
   uncertain liveness fails closed. Completed disablement removes its project row
-  together with all derivative graph/configuration rows.
+  together with all derivative graph/configuration rows. The target migration
+  must key store identity and lifecycle by workspace/checkout before claiming
+  worker isolation. Code Graph lexical
+  retrieval may index identifiers, signatures, paths, and documentation terms,
+  but it never downloads or invokes a model, stores vectors, or treats enabling
+  the graph as network consent. KB embeddings under D6 are a separate Fabric
+  capability.
 
 ---
 
 ## 7. MCP Surface Rules
 
-- M1: The MCP tool list in RFC-0001 §9 is **indicative, not finalised**. Tool *names*
-  (`wormhole.agent.register`, `wormhole.task.create`, `wormhole.kb.search`, ...) are
-  fixed; exact request/response schemas get designed at implementation time and frozen
-  in `internal/mcp`. When a schema decision isn't obvious, propose it in the PR/task
-  notes rather than inventing silently.
-- M2: Naming grammar is `wormhole.<pillar-noun>.<verb>`. Core pillars are `agent`,
-  `channel`, `task`, `kb`, and `git`; RFC-0003 also ratifies `sync` for runtime-to-server
-  operations. No other pillar prefixes; `wormhole.governance.*` is RFC-0002 and out of
-  scope.
-- M3: Every capability ships as an MCP tool or it doesn't exist (RFC-0001 §5.5).
-  No REST-only endpoints for platform write capabilities. `/healthz` and similar
-  operational endpoints are exceptions, as is the current read-only human dashboard
-  projection ratified by RFC-0001 §14 V2. Do not extend that exception into a parallel
-  write API.
-- M4: Auth happens at the MCP boundary (`internal/mcp` middleware resolves bearer token
-  via `identity.Store.WhoAmI`, yielding `AuthenticatedScope`), then core packages
-  receive the already-resolved scope. Core packages never re-parse tokens.
+- M1: MCP tool names and schemas are governed by the checked-in alpha contract
+  inventory. The 2026-07-28 migration may intentionally revise that inventory in
+  its approved slice, with compatibility tests and documentation changed together.
+  Outside such a slice, do not invent or silently drift a tool contract.
+- M2: Naming grammar is `wormhole.<namespace-noun>.<verb>`. Core pillar namespaces
+  are `agent`, `channel`, `task`, `kb`, and `git`; RFC-0003 additionally ratifies
+  `sync` for Gateway-to-Fabric operations, `workspace` for Gateway-local status,
+  diff, import, checkpoint, and stash operations, and `code_graph` for
+  Gateway-local derivative status, query, and rebuild operations. `workspace`
+  and `code_graph` are not Core pillars. Their contract-inventory changes ship
+  atomically with the approved migration slice. No other namespace prefix may be
+  added without an RFC change; `wormhole.governance.*` is governed by optional
+  RFC-0002 and remains out of Core.
+- M3: Every ordinary project operation available through the human CLI has an
+  equivalent agent MCP operation over the same Gateway domain semantics. Human
+  authentication/recovery, ownership transfer, membership/policy administration,
+  service installation, and connector configuration are control-plane exceptions,
+  not a second project-write model. Do not add an unrelated REST-only project API.
+- M4: Fabric authentication is resolved at its boundary: private requests resolve
+  the human/agent credential, membership, ownership, and assurance into an actor
+  scope before Core executes; public requests resolve key continuity and label it
+  identification-only. Core packages never re-parse raw credentials. Local Gateway
+  operations carry a typed actor envelope and do not fabricate private assurance.
 - M5: Every authenticated capability-gated tool declares `Tool.RequiredPermission`.
   Current values match the tool name without the `wormhole.` prefix (for example,
   `task.create`, `channel.post`, and `kb.write`). Deliberate auth-only exceptions declare
   an empty permission. When adding a tool, update the registry invariant, role-template
   migration, and permission documentation together.
-- M6: Destructive or policy actions such as deleting a project, revoking all access, or
-  changing permissions are human-only by default (RFC-0001 §13). Never wire a code path
-  that lets an agent identity perform them.
+- M6: Authentication recovery, ownership transfer, membership changes, deleting a
+  project, revoking all access, and changing policy are human control-plane actions
+  by default. This must not be used to deny agents ordinary project operations or
+  Git-proposable `.wormhole/` changes.
 
 ---
 
@@ -395,28 +430,52 @@ the same layering pattern and isolation discipline.
 
 ### Knowledge Base
 - Atomic articles: one fact/decision/procedure each. Markdown body + jsonb frontmatter.
-- Compliance checks run **server-side** on write (RFC-0001 §13): semantic dedup against
-  existing embeddings, length ceiling, required links where applicable. Rejection style
-  is soft-reject-with-rewrite-suggestion, not hard block (decided by RFC-0001 §15;
-  exact thresholds are tunable config, not hardcoded constants).
+- Compliance uses soft rejection with structured rewrite guidance under
+  RFC-0001 §15. Fabric revalidates remote writes rather than trusting a client;
+  local Git-only operation must not depend on Fabric availability or remote
+  embeddings. Deterministic local checks and any pending remote-only semantic
+  advice must remain distinguishable. Thresholds are tunable configuration,
+  not hardcoded architecture.
 - Linking via `kb_links` rows (graph), never folder/path hierarchy.
-- Search is semantic (pgvector similarity) and strictly project-scoped (decided
-  by RFC-0001 §15). A multi-project runtime keeps separate namespaces and never
-  constructs an implicit merged KB.
+- The current Fabric KB contract supports semantic pgvector search, distinct
+  from model-free Code Graph retrieval. KB reads are strictly project-scoped
+  under RFC-0001 §15; a multi-project runtime never constructs an implicit
+  merged KB. Changing semantic-search requirements needs a focused contract.
 
 ### Identity
-- Agent identity is project-agnostic; project access flows through passports +
-  scoped tokens. Do not add `project_id` to `agents`.
-- Passport = the join-time credential carrying repositories, roles, resolved
-  permissions (RFC-0001 §8.4). One passport per (agent, project), enforced by the
-  existing UNIQUE constraint.
-- Every action attributable: audit log rows are append-only and written by the server,
-  not the client.
+- Human and agent principals are distinct and durable. Authenticators, project
+  memberships, agent ownership/sponsorship, sessions, Passports, and credentials
+  are separate records; do not collapse them into one token row.
+- Agent identity remains project-agnostic; do not add `project_id` to `agents`.
+  Local/fork operations require no Fabric grant, canonical-public participation
+  uses identification-only key continuity, and private Fabric access uses project
+  membership plus accountable ownership-bound grants.
+- Passport is a project-scoped Fabric capability grant to an agent, not a human
+  identity, local actor record, or Git credential. Legacy uniqueness constraints
+  may be migrated only through an approved plan preserving history.
+- Every action is attributable through a typed actor envelope. Agent actions record
+  agent, accountable human at action time, harness/model session, and assurance.
+  Audit rows are append-only and server/Gateway generated, not client-trusted.
 
 ### Git integration
-- Alpha scope is a manual link field only (`git_links`, `wormhole.git.link_commit`).
-  No webhooks, no CI hooks, no repo cloning, no diff storage — Wormhole never stores
-  or mirrors code, only `repo` + `commit_sha`/`pr_url` + `summary`.
+- Source integration remains pointers only (`git_links`, commit SHA, PR URL,
+  summary); Wormhole never stores or mirrors code bodies. Separately, typed
+  Wormhole project records live under `.wormhole/state/v1/` and use a private
+  Gateway overlay plus deterministic checkpoint. Fabric may inspect Git refs and
+  the `.wormhole/` subtree for canonical acceptance but must not ingest or execute
+  repository source. Canonical-public activation requires `origin` to match the
+  canonical repository identity. A fork/mismatch leaves the upstream hint inactive,
+  makes no upstream Fabric contact/read/write, and remains local or binds an
+  independent realm. Worktree isolation is mandatory.
+- Checkpoint publication must compare-and-swap the expected live `.wormhole/`
+  digest so direct edits cannot be overwritten. It records materialised-pending-
+  commit state privately and advances the accepted base only after observing a
+  matching Git commit.
+- Snapshot deletion is canonical: single-file records become tombstones at their
+  stable path; a KB tombstone replaces `record.json` and requires `body.md` to be
+  absent. Missing targets are broken, while only schema-declared historical
+  references may resolve to tombstones. Tombstone/edit and tombstone/KB-body
+  changes conflict; resurrection must explicitly name the tombstone digest.
 
 ---
 
@@ -428,9 +487,12 @@ the same layering pattern and isolation discipline.
   error, and the security property the package guards (isolation, forgery,
   scope preservation — whatever applies).
 - T3: RLS and project isolation get explicit cross-project rejection tests whenever a
-  new project-scoped table or query lands.
-- T4: Do not claim done without `go build ./...`, `go vet ./...`, and `go test ./...`
-  passing, run and output observed.
+  new project-scoped table or query lands. Gateway workspace changes also require
+  cross-workspace, cross-Fabric, and fork/upstream rejection tests as applicable.
+- T4: Run focused tests first. Do not claim an implementation slice done without
+  `make check` passing and its output observed. Before a milestone handoff or
+  release claim, also run the repository's release test and rehearsal gates.
+- T5: Merged statement coverage must remain at or above 80%.
 
 Release and compatibility policy live in `docs/releasing.md` and
 `docs/compatibility.md`. Those documents describe repository workflow behavior;
@@ -442,15 +504,18 @@ do not infer that external GitHub controls are active without an API read-back.
 
 - Storing, diffing, or mirroring code contents.
 - Any RFC-0002 concept in Core code paths (Constitution, Congress, proposals, stances).
-- A new Coordination Server datastore, message broker, or background worker process beyond
-  RFC-0003's existing local runtime and sync loop.
-- A human-facing UI beyond a minimal read-only surface.
+- A new Fabric datastore or message broker. RFC-0003's approved isolated
+  per-workspace Code Graph workers are allowed; any other worker class needs design.
+- A human-facing product UI beyond the current read projection and explicitly
+  approved authentication callbacks/session flows.
 - Human-to-human messaging, rich media, presence.
 - Resolving an RFC Decision Register entry listed under **Open** as a side
   effect of an implementation choice.
 - New vocabulary: event types, permission actions, statuses, or glossary terms not in
   the RFCs or `docs/db-entities.md`.
-- Agent-invocable destructive or policy-level actions.
+- Agent-invocable human authentication, credential recovery, ownership transfer,
+  membership administration, or policy-level actions. Do not misclassify ordinary
+  project edits or Git proposals as policy administration.
 
 Escalation cost is one message; an embedded wrong assumption costs days. When in doubt,
 the RFCs' "indicative, not final" markers mean *design is open*, not *pick anything*.
@@ -492,12 +557,11 @@ The task doesn't say what similarity threshold blocks a write.
 **Wrong reasoning:** "0.9 cosine similarity is a common cutoff." Hardcode `0.9`, done.
 Two guesses smuggled in as facts: the number, and hard-blocking as the behaviour.
 
-**Ladder walk (§2.4):** RFC §8.3 mandates the check exists, server-side, but no number —
-rung 1 gives behaviour, not threshold. Not entity-shaped (rung 2). No precedent in code
-(rung 3). §8 KB rules (rung 4) answer more than expected: *soft-reject-with-rewrite-
-suggestion, not hard block*, and *thresholds are tunable config, not hardcoded constants*.
-Remaining ambiguity, the default value, is a genuine free variable → pick conservatively,
-flag it.
+**Ladder walk (§2.4):** RFC §8.3 permits compliance checks, and the RFC §15
+decision requires soft rejection with a tunable threshold. The Git-native design
+also forbids making local operation depend on Fabric. Existing Fabric code supplies
+the remote semantic-check precedent. The numeric default is still a genuine free
+variable: choose it conservatively, label it tunable, and flag the choice.
 
 **Right shape:** threshold in `types.Config` with a documented default; over-threshold
 write returns a structured soft rejection carrying the closest existing article and a
