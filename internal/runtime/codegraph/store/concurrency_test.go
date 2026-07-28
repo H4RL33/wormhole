@@ -80,46 +80,135 @@ func TestCandidateInsertCannotCommitAfterConcurrentPublication(t *testing.T) {
 
 func TestConcurrentOpenSerializesFreshMigration(t *testing.T) {
 	const workers = 8
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	path := filepath.Join(t.TempDir(), "gateway.db")
+	dsn := migrationSQLiteDSN(path)
+	bootstrapDB, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var journalMode string
+	if err := bootstrapDB.QueryRowContext(ctx, `PRAGMA journal_mode=WAL`).Scan(&journalMode); err != nil {
+		_ = bootstrapDB.Close()
+		t.Fatalf("preinitialize WAL: %v", err)
+	}
+	if !strings.EqualFold(journalMode, "wal") {
+		_ = bootstrapDB.Close()
+		t.Fatalf("preinitialized journal mode = %q, want WAL", journalMode)
+	}
+	var existingSchemaTables int
+	if err := bootstrapDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name LIKE 'codegraph_%'`).Scan(&existingSchemaTables); err != nil {
+		_ = bootstrapDB.Close()
+		t.Fatalf("inspect preinitialized schema: %v", err)
+	}
+	if existingSchemaTables != 0 {
+		_ = bootstrapDB.Close()
+		t.Fatalf("preinitialized codegraph tables = %d, want 0", existingSchemaTables)
+	}
+	if err := bootstrapDB.Close(); err != nil {
+		t.Fatalf("close WAL bootstrap database: %v", err)
+	}
+
 	migrationBarrier := &driverCallBarrier{
 		queryContains: "BEGIN IMMEDIATE",
-		entered:       make(chan struct{}, workers),
+		entered:       make(chan struct{}, 1),
 		release:       make(chan struct{}),
 	}
-	driverName := registerBarrierDriver(&barrierDriver{
-		inner:       &sqlite.Driver{},
-		execBarrier: migrationBarrier,
+	followerBarrier := &driverCallBarrier{
+		queryContains: "BEGIN IMMEDIATE",
+		entered:       make(chan struct{}, workers-1),
+		release:       make(chan struct{}),
+	}
+	leaderDriverName := registerBarrierDriver(&barrierDriver{
+		inner:            &sqlite.Driver{},
+		afterExecBarrier: migrationBarrier,
 	})
-	dsn := wrappedSQLiteDSN(filepath.Join(t.TempDir(), "gateway.db"))
-	start := make(chan struct{})
-	errorsByWorker := make(chan error, workers)
+	followerDriverName := registerBarrierDriver(&barrierDriver{
+		inner:       &sqlite.Driver{},
+		execBarrier: followerBarrier,
+	})
+	type workerResult struct {
+		worker int
+		err    error
+	}
+	results := make(chan workerResult, workers)
 	var group sync.WaitGroup
-	for worker := 0; worker < workers; worker++ {
+	startWorker := func(worker int, driverName string) {
 		group.Add(1)
 		go func(worker int) {
 			defer group.Done()
-			<-start
 			db, err := sql.Open(driverName, dsn)
 			if err == nil {
 				db.SetMaxOpenConns(2)
-				_, err = store.Open(context.Background(), db, fmt.Sprintf("project-%d", worker))
+				_, err = store.Open(ctx, db, fmt.Sprintf("project-%d", worker))
 			}
 			if db != nil {
 				_ = db.Close()
 			}
-			errorsByWorker <- err
+			results <- workerResult{worker: worker, err: err}
 		}(worker)
 	}
-	close(start)
-	for range workers {
-		waitForBarrier(t, migrationBarrier.entered)
-	}
-	close(migrationBarrier.release)
-	group.Wait()
-	close(errorsByWorker)
-	for err := range errorsByWorker {
-		if err != nil {
-			t.Errorf("concurrent Open() error = %v", err)
+	var releaseLeaderOnce, releaseFollowersOnce sync.Once
+	releaseLeader := func() { releaseLeaderOnce.Do(func() { close(migrationBarrier.release) }) }
+	releaseFollowers := func() { releaseFollowersOnce.Do(func() { close(followerBarrier.release) }) }
+	runErr := func() (runErr error) {
+		defer func() {
+			releaseFollowers()
+			releaseLeader()
+			if runErr != nil {
+				cancel()
+			}
+			group.Wait()
+		}()
+
+		startWorker(0, leaderDriverName)
+		select {
+		case <-migrationBarrier.entered:
+		case result := <-results:
+			return fmt.Errorf("leader completed before acquiring migration lock: worker=%d err=%v", result.worker, result.err)
+		case <-ctx.Done():
+			return fmt.Errorf("wait for leader migration lock: %w", ctx.Err())
 		}
+		for worker := 1; worker < workers; worker++ {
+			startWorker(worker, followerDriverName)
+		}
+		for parked := 0; parked < workers-1; parked++ {
+			select {
+			case <-followerBarrier.entered:
+			case result := <-results:
+				return fmt.Errorf("follower completed before reaching migration gate: worker=%d err=%v", result.worker, result.err)
+			case <-ctx.Done():
+				return fmt.Errorf("wait for followers at migration gate: %w", ctx.Err())
+			}
+		}
+		releaseFollowers()
+		serializationWindow := time.NewTimer(100 * time.Millisecond)
+		defer serializationWindow.Stop()
+		select {
+		case result := <-results:
+			return fmt.Errorf("worker completed while leader held migration lock: worker=%d err=%v", result.worker, result.err)
+		case <-serializationWindow.C:
+		case <-ctx.Done():
+			return fmt.Errorf("prove migration serialization: %w", ctx.Err())
+		}
+
+		releaseLeader()
+		for completed := 0; completed < workers; completed++ {
+			select {
+			case result := <-results:
+				if result.err != nil {
+					return fmt.Errorf("worker %d Open(): %w", result.worker, result.err)
+				}
+			case <-ctx.Done():
+				return fmt.Errorf("collect migration workers: %w", ctx.Err())
+			}
+		}
+		return nil
+	}()
+	if runErr != nil {
+		t.Fatal(runErr)
 	}
 
 	db, err := sql.Open("sqlite", dsn)
@@ -127,12 +216,36 @@ func TestConcurrentOpenSerializesFreshMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	var versionRows int
-	if err := db.QueryRow("SELECT COUNT(*) FROM codegraph_schema_migrations WHERE version = 1").Scan(&versionRows); err != nil {
+	for _, version := range []int{1, 2} {
+		var versionRows int
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM codegraph_schema_migrations WHERE version = ?", version).Scan(&versionRows); err != nil {
+			t.Fatal(err)
+		}
+		if versionRows != 1 {
+			t.Fatalf("version %d ledger rows = %d, want 1", version, versionRows)
+		}
+	}
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(codegraph_lifecycle)`)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if versionRows != 1 {
-		t.Fatalf("version 1 ledger rows = %d, want 1", versionRows)
+	defer rows.Close()
+	var lifecycleColumns []string
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		lifecycleColumns = append(lifecycleColumns, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	wantLifecycleColumns := "project_id,state,build_token,owner_pid,owner_start,build_owner_pid,build_owner_start"
+	if got := strings.Join(lifecycleColumns, ","); got != wantLifecycleColumns {
+		t.Fatalf("codegraph_lifecycle columns = %q, want %q", got, wantLifecycleColumns)
 	}
 }
 
@@ -165,8 +278,9 @@ func requireOneNode(ctx context.Context, snapshot *store.Snapshot) error {
 }
 
 type barrierDriver struct {
-	inner       driver.Driver
-	execBarrier *driverCallBarrier
+	inner            driver.Driver
+	execBarrier      *driverCallBarrier
+	afterExecBarrier *driverCallBarrier
 }
 
 func (wrapped *barrierDriver) Open(name string) (driver.Conn, error) {
@@ -174,19 +288,29 @@ func (wrapped *barrierDriver) Open(name string) (driver.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &barrierConn{Conn: connection, execBarrier: wrapped.execBarrier}, nil
+	return &barrierConn{
+		Conn:             connection,
+		execBarrier:      wrapped.execBarrier,
+		afterExecBarrier: wrapped.afterExecBarrier,
+	}, nil
 }
 
 type barrierConn struct {
 	driver.Conn
-	execBarrier *driverCallBarrier
+	execBarrier      *driverCallBarrier
+	afterExecBarrier *driverCallBarrier
 }
 
 func (connection *barrierConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	if connection.execBarrier.matches(query, args) {
 		connection.execBarrier.wait()
 	}
-	return connection.Conn.(driver.ExecerContext).ExecContext(ctx, query, args)
+	afterExecMatches := connection.afterExecBarrier.matches(query, args)
+	result, err := connection.Conn.(driver.ExecerContext).ExecContext(ctx, query, args)
+	if err == nil && afterExecMatches {
+		connection.afterExecBarrier.waitOnce()
+	}
+	return result, err
 }
 
 func (connection *barrierConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
@@ -206,6 +330,7 @@ type driverCallBarrier struct {
 	argument      string
 	entered       chan struct{}
 	release       chan struct{}
+	once          sync.Once
 }
 
 func (barrier *driverCallBarrier) matches(query string, args []driver.NamedValue) bool {
@@ -226,6 +351,10 @@ func (barrier *driverCallBarrier) matches(query string, args []driver.NamedValue
 func (barrier *driverCallBarrier) wait() {
 	barrier.entered <- struct{}{}
 	<-barrier.release
+}
+
+func (barrier *driverCallBarrier) waitOnce() {
+	barrier.once.Do(barrier.wait)
 }
 
 func waitForBarrier(t *testing.T, entered <-chan struct{}) {
@@ -262,6 +391,14 @@ func wrappedSQLiteDSN(path string) string {
 	query := u.Query()
 	query.Add("_pragma", "busy_timeout(5000)")
 	query.Add("_pragma", "journal_mode(WAL)")
+	u.RawQuery = query.Encode()
+	return u.String()
+}
+
+func migrationSQLiteDSN(path string) string {
+	u := &url.URL{Scheme: "file", Path: path, OmitHost: true}
+	query := u.Query()
+	query.Add("_pragma", "busy_timeout(15000)")
 	u.RawQuery = query.Encode()
 	return u.String()
 }
