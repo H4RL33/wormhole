@@ -11,7 +11,10 @@
 ## Global constraints
 
 - RFC-0001, RFC-0003, and `docs/superpowers/specs/2026-07-28-git-native-wormhole-architecture-design.md` are authoritative.
-- Consume `types.RepositoryIdentity`, `types.WorkspaceBinding`, the complete `types.ActorEnvelope`, and `internal/types/projectstate`; do not define parallel repository, binding, actor, snapshot, digest, operation, or canonicalization types.
+- Consume `types.RepositoryIdentity`, `types.WorkspaceBinding`, the complete
+  `types.ActorEnvelope`, and the strict `internal/types/projectstate` tree/operation/
+  canonical-digest APIs; do not define parallel repository, binding, actor, snapshot,
+  digest, operation, decoder, or canonicalization types.
 - `internal/types/projectstate` may use the repository's existing `github.com/BurntSushi/toml`; other `internal/types` files remain standard-library-only.
 - Git remains code truth and tracked-state acceptance authority. Fabric stores Git metadata and canonical `.wormhole/` tree bytes, never repository source bodies.
 - One workspace has zero or one writable Fabric binding. Profile, Fabric instance, remote project, stream, repository, and canonical ref identifiers never retarget silently.
@@ -82,10 +85,19 @@ func EncodeTree(Snapshot) (Tree, error)
 func Validate(Snapshot) error
 func DigestTree(Tree) (Digest, error)
 func CanonicalJSON(any) ([]byte, error)
+func DecodeOperation([]byte) (OperationV1, error)
+func CanonicalOperation(OperationV1) ([]byte, error)
+func DigestCanonicalJSON(any) (Digest, error)
+func DigestCanonicalMarkdown([]byte) (Digest, error)
 func ApplyOperation(Snapshot, OperationV1) (Snapshot, error)
 ```
 
 Fabric persists `Tree` with one server-local, deterministic length-prefixed binary container; it does not create another semantic codec. On every read it decodes the container to `Tree`, calls `DecodeTree`, `Validate`, and `DigestTree`, and rejects a mismatch before serving or applying an operation.
+Persisted operation JSON is equally untrusted: every insert uses `CanonicalOperation` and
+`DigestCanonicalJSON`, while every read/restart uses `DecodeOperation`, requires the
+decoded ID to equal its `operation_id` column, requires `CanonicalOperation(decoded)` to
+byte-match the stored bytes, and requires `DigestCanonicalJSON(decoded)` to equal the
+stored digest before serving, replaying, or reconstructing a transition.
 
 ## New shared routing and authorization records
 
@@ -252,7 +264,6 @@ Repository signatures are exact:
 type WorkspaceConflictGate interface {
     HasOpenConflicts(context.Context, types.WorkspaceScope) (bool, error)
 }
-var ErrWorkspaceConflicted = errors.New("localstore: workspace has open conflicts")
 
 type FabricRouteRepo struct { db *sql.DB }
 func (r *FabricRouteRepo) CreateProfile(context.Context, types.FabricProfile) error
@@ -287,6 +298,8 @@ returns `localstore.ErrWorkspaceConflicted`; the pending queue row remains byte-
 including operation bytes/digest, priority, timestamps, and NULL delivered_at. Resolved
 rows and another project/workspace never block. A storage/check failure also rolls back
 without updating queue, cursor, or audit state.
+`localstore.ErrWorkspaceConflicted` is consumed directly; this plan adds no sentinel
+declaration or runtime alias.
 
 - [ ] **Step 1: Write failing migration, direct-SQL, and repository tests**
 
@@ -480,7 +493,7 @@ The runner embeds only files matching `^[0-9]{6}_[a-z0-9_]+\.sql$`, sorts by num
 
 - [ ] **Step 5: Implement repositories and engine identity**
 
-All repository queries bind every component of `WorkspaceScope` or `RemoteBindingKey`. `AttachWorkspace` loads the canonical `types.WorkspaceBinding` and profile in the same transaction, compares repository/ref/instance values, and inserts one complete row; it never inserts a recovery row. `UpdateProfile` permits base-URL and credential-reference rotation only when `expectedInstanceID` still matches. `sync.Engine` stores binding/profile IDs and the required exact conflict gate, calls `GetRoute` for each network cycle, resolves `profile.CredentialRef` immediately before the HTTP call, and excludes credential material from keys, equality, status, and errors. Implement `MarkDelivered` with the immediate recheck/complete-key update transaction above; `ErrWorkspaceConflicted` maps to `StateAttentionRequired` as a typed non-transient local block, never `ErrFabricUnavailable` or a network retry classification.
+All repository queries bind every component of `WorkspaceScope` or `RemoteBindingKey`. `AttachWorkspace` loads the canonical `types.WorkspaceBinding` and profile in the same transaction, compares repository/ref/instance values, and inserts one complete row; it never inserts a recovery row. `UpdateProfile` permits base-URL and credential-reference rotation only when `expectedInstanceID` still matches. `sync.Engine` stores binding/profile IDs and the required exact conflict gate, calls `GetRoute` for each network cycle, resolves `profile.CredentialRef` immediately before the HTTP call, and excludes credential material from keys, equality, status, and errors. Implement `MarkDelivered` with the immediate recheck/complete-key update transaction above; `localstore.ErrWorkspaceConflicted` maps to `StateAttentionRequired` as a typed non-transient local block, never `ErrFabricUnavailable` or a network retry classification.
 
 - [ ] **Step 6: Run GREEN, one-way loader, and isolation tests**
 
@@ -526,6 +539,9 @@ func TestMigration21DownLeavesVersion20Shape(t *testing.T)
 ```
 
 Seed two projects, two Fabric UUIDs, two streams, and two workspace UUIDs. Attempt direct inserts pairing project A with project B's repository binding, stream, workspace binding, version, public key, and nonce. Each insert must fail with SQLSTATE `23503`. Run reads and writes as the ordinary non-superuser table owner and prove cross-project rows are invisible/rejected. Update/delete version and request rows and expect SQLSTATE `55000`.
+`TestMigration21StoresEveryVersionTreeAndOperationBytes` also proves an operation
+transition requires `operation_id`, canonical bytes, digest, and actor together, while
+initial/accepted-ref transitions require all four to be null.
 
 - [ ] **Step 2: Run RED from an explicit version-20 database**
 
@@ -586,6 +602,7 @@ CREATE TABLE fabric_stream_versions (
   live_tree_digest text NOT NULL CHECK(live_tree_digest ~ '^sha256:[0-9a-f]{64}$'),
   canonical_accepted_tree bytea NOT NULL,
   accepted_tree_digest text NOT NULL CHECK(accepted_tree_digest ~ '^sha256:[0-9a-f]{64}$'),
+  operation_id uuid,
   canonical_operation_json bytea,
   operation_digest text CHECK(operation_digest ~ '^sha256:[0-9a-f]{64}$'),
   actor_envelope_json bytea,
@@ -594,6 +611,7 @@ CREATE TABLE fabric_stream_versions (
   FOREIGN KEY(project_id,fabric_instance_id,stream_id)
     REFERENCES fabric_streams(project_id,fabric_instance_id,stream_id) ON DELETE CASCADE,
   CHECK((transition_kind='operation') = (canonical_operation_json IS NOT NULL)),
+  CHECK((canonical_operation_json IS NULL) = (operation_id IS NULL)),
   CHECK((canonical_operation_json IS NULL) = (operation_digest IS NULL)),
   CHECK((transition_kind='operation') = (actor_envelope_json IS NOT NULL))
 );
@@ -778,7 +796,9 @@ git commit -m "feat: add durable Git-aware streams"
 - Create: `internal/core/git/streams_test.go`
 
 **Interfaces:**
-- Consumes: migration 21 and the exact `projectstate` API.
+- Consumes: migration 21 and the exact `projectstate` API, including strict
+  `DecodeOperation`, `CanonicalOperation`, `DigestCanonicalJSON`, and
+  `DigestCanonicalMarkdown`.
 - Produces: restart-safe `StreamStore` and transaction methods used by MCP mutation coordination.
 
 ```go
@@ -828,7 +848,28 @@ func (s *StreamStore) AdvanceAcceptedDefaultInTx(context.Context, *sql.Tx, types
 
 - [ ] **Step 1: Write failing codec/restart/reducer tests**
 
-Add `TestStoredTreeRoundTripPreservesCanonicalBytes`, `TestAttachPersistsVersionZeroLiveAndAcceptedTrees`, `TestApplyOperationPersistsCanonicalOperationAndResultTree`, `TestReadReconstructsEveryVersionAfterRestart`, `TestApplyOperationReplayReturnsOriginalResult`, `TestApplyOperationChangedBodyReplayRejects`, `TestApplyOperationStaleVersionPersistsConflict`, `TestAdvanceAcceptedUsesExactObservedCommit`, and `TestAdvanceAcceptedDivergencePreservesLiveAndPersistsConflict`. For every stored version, close/reopen the DB, `DecodeStoredTree`, `DecodeTree`, `Validate`, and compare both `DigestTree` values and every file byte.
+Add `TestStoredTreeRoundTripPreservesCanonicalBytes`,
+`TestAttachPersistsVersionZeroLiveAndAcceptedTrees`,
+`TestApplyOperationPersistsCanonicalOperationAndResultTree`,
+`TestReadReconstructsEveryVersionAfterRestart`,
+`TestApplyOperationReplayReturnsOriginalResult`,
+`TestApplyOperationChangedBodyReplayRejects`,
+`TestApplyOperationStaleVersionPersistsConflict`,
+`TestAdvanceAcceptedUsesExactObservedCommit`, and
+`TestAdvanceAcceptedDivergencePreservesLiveAndPersistsConflict`. For every stored
+version, close/reopen the DB, `DecodeStoredTree`, `DecodeTree`, `Validate`, and compare
+both `DigestTree` values and every file byte.
+
+Add `TestReadRejectsCorruptStoredOperation` and
+`TestApplyOperationReplayRejectsCorruptStoredRequest` as corruption tables over
+`fabric_stream_versions` and `fabric_stream_requests`: malformed operation JSON, unknown
+field, trailing JSON, noncanonical bytes, decoded operation ID unequal to the row
+`operation_id`, and stored digest unequal to `DigestCanonicalJSON(decoded)`. Each case
+closes/reopens the database and proves `Read` and exact-operation replay reject before
+returning a transition, serving a snapshot, applying a later operation, or taking an
+idempotency result. Fixed goldens compare the stored bytes to
+`CanonicalOperation(operation)` and the stored digest to
+`DigestCanonicalJSON(operation)` rather than recomputing through store-private logic.
 
 - [ ] **Step 2: Run RED**
 
@@ -842,7 +883,27 @@ The container is `uint32 file-count`, then for each path-sorted file `uint32 pat
 
 - [ ] **Step 4: Implement the transaction state machine**
 
-`AttachInTx` locks the repository binding and rejects repository/ref/instance mismatches; version 0 stores identical live and accepted trees. `ApplyOperationInTx` locks the stream, checks workspace composite binding, canonicalizes the operation with `projectstate.CanonicalJSON`, compares the operation's actor envelope to `scope.Actor`, replaces it with `scope.Actor`, checks the expected version/digest, loads and verifies the latest stored live tree, calls `projectstate.ApplyOperation`, encodes the result with `projectstate.EncodeTree`, computes `DigestTree`, inserts immutable request and version rows, and updates the stream. An identical operation ID/digest returns the recorded result; a changed digest returns `ErrOperationReplay`.
+`AttachInTx` locks the repository binding and rejects repository/ref/instance mismatches;
+version 0 stores identical live and accepted trees. `ApplyOperationInTx` locks the stream,
+checks workspace composite binding, structurally reconciles the operation actor with
+`scope.Actor`, and uses the authoritative server actor before persistence. It calls
+`projectstate.CanonicalOperation` for the exact bytes and
+`projectstate.DigestCanonicalJSON` for their digest, requires the decoded operation ID to
+equal each request/version row's `operation_id`, checks expected version/tree digest,
+strictly loads the latest stored live tree, calls `projectstate.ApplyOperation`, encodes
+the result with `projectstate.EncodeTree`, computes `DigestTree`, inserts the same
+canonical operation bytes/digest in the immutable request and version rows, and updates
+the stream. An
+identical operation ID is idempotent only after strict decoding and complete byte/digest/
+ID verification of both persisted rows; a changed canonical digest returns
+`ErrOperationReplay`.
+
+Every operation-bearing read path, including `Read`, restart reconstruction, duplicate-ID
+lookup, request-result replay, and the prior-version load before another transition,
+strict-decodes with `projectstate.DecodeOperation`. It rejects malformed, unknown-field,
+trailing, or noncanonical JSON; decoded-ID/row-ID mismatch; canonical-byte mismatch; and
+`DigestCanonicalJSON`/stored-digest mismatch before serving or replaying anything. There
+is no trusted-row shortcut, permissive extraction, or store-private canonicalization.
 
 `AdvanceAcceptedDefaultInTx` accepts only a `RefObservation` and tree returned by Task 5, verifies exact repository/ref/commit, persists a new version with the new accepted tree. If prior live equals prior accepted, new live equals new accepted. Otherwise prior live remains byte-identical and an open `git_base_diverged` conflict records old accepted, live, and new accepted digests. It never chooses by timestamp or discards either tree.
 
@@ -1050,7 +1111,7 @@ if success: QueueRepo.MarkDelivered(ctx, key, operation.ID)
 
 The first gate precedes credential resolution, DNS, client/transport construction,
 signing, and every network call. A true result is a typed non-transient local block:
-wrap the shared `ErrWorkspaceConflicted`, set `StateAttentionRequired`, retain the exact
+wrap `localstore.ErrWorkspaceConflicted`, set `StateAttentionRequired`, retain the exact
 pending row, and do not consume retry budget as Fabric unavailability. Storage gate
 errors also fail closed before side effects. Task 2's `MarkDelivered` transaction is the
 mandatory post-network recheck; an in-flight conflict makes it return the same sentinel
@@ -2126,7 +2187,14 @@ git commit -m "feat: recover legacy local Fabric state"
 
 - [ ] **Step 1: Add failing contract assertions**
 
-Assert exact canonical type package/API names, local schema version 4, Postgres migrations 21–23, profile-only credential authority, v1 request/result/error/descriptor-branch compatibility, v2 routes, token prefixes, first-owner/invitation/member/project-list/ownership/PAT/recovery commands, GitHub-only v1 observer, and absence of live `join`, `connect`, admin-key, WebAuthn, duplicate codec, or duplicate legacy integration-state migration claims.
+Assert exact canonical type package/API names, including `DecodeOperation`,
+`CanonicalOperation`, `DigestCanonicalJSON`, and `DigestCanonicalMarkdown`; local schema
+version 4; Postgres migrations 21–23; strict stored operation ID/bytes/digest verification;
+profile-only credential authority; v1 request/result/error/descriptor-branch compatibility;
+v2 routes; token prefixes; first-owner/invitation/member/project-list/ownership/PAT/
+recovery commands; GitHub-only v1 observer; and absence of live `join`, `connect`,
+admin-key, WebAuthn, duplicate codec/canonicalizer, or duplicate legacy integration-state
+migration claims.
 
 - [ ] **Step 2: Run RED**
 
@@ -2347,8 +2415,19 @@ Expected: all PASS; Postgres 20→23, safe 23→22, empty 22→21, and fresh ful
 
 ## Plan self-review
 
-- **Canonical contracts:** the plan consumes `types.RepositoryIdentity`, the exact Slice-A `types.WorkspaceBinding`, full `types.ActorEnvelope`, `projectstate.Digest`, `DecodeTree`, `EncodeTree`, `Validate`, `DigestTree`, `CanonicalJSON`, and `ApplyOperation`; it defines no second semantic codec/reducer.
-- **Durability/security:** every stream version stores complete canonical live/accepted trees and operation bytes; observer reads one exact commit; all tenant relationships have direct-SQL composite-FK tests; every handler derives scope server-side; mutation and provenance share one transaction.
+- **Canonical contracts:** the plan consumes `types.RepositoryIdentity`, the exact
+  Slice-A `types.WorkspaceBinding`, full `types.ActorEnvelope`, `projectstate.Digest`,
+  `DecodeTree`, `EncodeTree`, `Validate`, `DigestTree`, `CanonicalJSON`,
+  `DecodeOperation`, `CanonicalOperation`, `DigestCanonicalJSON`,
+  `DigestCanonicalMarkdown`, and `ApplyOperation`; it defines no second semantic codec,
+  operation parser/canonicalizer, digest rule, or reducer.
+- **Durability/security:** every stream version stores complete canonical live/accepted
+  trees plus operation ID/canonical bytes/digest. Every read/restart strict-decodes the
+  operation, checks decoded ID against the row, checks canonical byte equality and
+  `DigestCanonicalJSON`, and rejects malformed, unknown-field, trailing, noncanonical,
+  ID-mismatched, or digest-mismatched corruption before serving/replay. The observer reads
+  one exact commit; all tenant relationships have direct-SQL composite-FK tests; every
+  handler derives scope server-side; mutation and provenance share one transaction.
 - **Identity cutover:** first owner is an operator-provisioned one-use OIDC grant, later membership is invitation/admin controlled, PAT scopes are subsets, refresh/device/recovery replay defenses are fixed, and migration 23 revokes legacy authority before resolver cutover and cannot resurrect it on down.
 - **Migration ownership:** local schema v4 owns Fabric profile/binding/queue quarantine. Task 14 consumes Slice A's legacy integration-state outcome and performs no second rename, ignore, or repository-state edit.
 - **Compatibility/gates:** v1 compatibility covers request/result/error/handler and the v1 descriptor branch; WebAuthn remains absent; issue #56 uses the exact twelve prerequisite and six acceptance codes and requires real non-fabricated four-VM evidence.

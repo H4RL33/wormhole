@@ -274,7 +274,8 @@ the same layering pattern and isolation discipline.
   bottom of the graph. Its `internal/types/projectstate` subpackage is the one exact
   exception: it may import `internal/types`, stdlib, and BurntSushi TOML. Runtime and
   Fabric code must consume `internal/types/projectstate` rather than duplicate the
-  canonical snapshot schemas, strict `DecodeOperation`, codec, validator,
+  canonical snapshot schemas, strict `DecodeOperation`/`CanonicalOperation` byte
+  authority, codec, validator,
   `DigestCanonicalJSON`/`DigestCanonicalMarkdown`, or reducer. `Digest` lives in
   `internal/types/projectstate`, not the parent `internal/types` package.
 - R4: No new top-level packages or external Go dependencies without explicit human
@@ -477,7 +478,11 @@ the same layering pattern and isolation discipline.
 - Checkpoint publication must compare-and-swap the expected live `.wormhole/`
   digest so direct edits cannot be overwritten. It records materialised-pending-
   commit state privately and advances the accepted base only after observing a
-  matching Git commit.
+  matching Git commit. After the prepared journal commits, checkpoint must open a
+  second `BEGIN IMMEDIATE`, recheck the exact live digest, binding, candidate,
+  overlay generation/rows, and open-conflict gate, and hold that transaction through
+  filesystem publication plus the published journal/candidate/row update. Recovery
+  accepts either the recorded old or new complete live tree.
 - Snapshot deletion is canonical: single-file records become tombstones at their
   stable path; a KB tombstone replaces `record.json` and requires `body.md` to be
   absent. Missing targets are broken, while only schema-declared historical
@@ -506,33 +511,43 @@ the same layering pattern and isolation discipline.
   Candidate loading after a Git advance validates the binding invariants but must not
   reject retained old-base handle/remotes merely because the accepted base is newer.
 - Direct-delta validation compares only the prior direct surface, the next direct tree,
-  and a bound materialisation exception. It accepts a correct new tombstone and never
-  inspects an overlay. `ThreeWayRebase` alone owns the overlay-versus-direct
-  tombstone/edit conflict and its persisted evidence.
+  and a bound materialisation exception. It accepts a correct new tombstone, rejects a
+  changed prior tombstone, and never inspects an overlay. `ThreeWayRebase` alone owns
+  the overlay-versus-direct tombstone/edit conflict and its persisted evidence.
 
 ### Portable state replay, diff, and merge
 
 - Persisted operation JSON is untrusted. Decode it only with the shared strict
   `projectstate.DecodeOperation`, reject non-canonical bytes, trailing JSON, unknown
   fields, malformed envelopes/payloads, invalid IDs/digests, and any row-ID/operation-ID
-  mismatch, then replay with the shared reducer. Persisted trees likewise require the
-  strict file-list decoder, `DecodeTree`, canonical re-encoding, recorded-digest checks,
-  and the complete binding predicate. There is no legacy-table or malformed-row
-  fallback.
+  mismatch, require byte equality with `projectstate.CanonicalOperation`, then replay
+  with the shared reducer. Any recorded operation digest must equal
+  `projectstate.DigestCanonicalJSON(decoded)` before serving or replay. Persisted trees
+  likewise require the strict file-list decoder, `DecodeTree`, canonical re-encoding,
+  recorded-digest checks, and the complete binding predicate. There is no legacy-table
+  or malformed-row fallback.
 - Composition receives an explicit strict-decoded start snapshot, an explicit initial
   through-generation, and strictly increasing active stored operations whose generation
   is greater than that boundary. Rebased, stashed, and materialized rows do not replay.
   Status exposes the exact composed `CandidateDigest` and final `OverlayGeneration`
   while retaining the accepted snapshot separately. `WorkspaceStatus.State` remains a
   string until an approved plan introduces another type.
-- Stash serialisation preserves that exact selected start plus a strict versioned
-  canonical envelope containing the initial boundary and only active StoredOperation
-  rows above it. It must not add a competing migration merely to persist the boundary,
-  transition already-rebased rows at/below it, or expect those rows during restore. An
-  empty envelope with initial boundary equal to final through-generation is valid. A
-  retained conflicted stash is an evidence/idempotency anchor: exact repeat may return
-  the already-persisted outcome read-only, but mixed rows or changed candidate/conflict
-  evidence fail closed instead of blindly replaying.
+- Stash serialisation keeps `source_tree`/`source_base_digest` as the semantic pre-stash
+  rebase base. The existing `operations_json` column is a strict canonical
+  `StashReplayV1` containing schema version, selected-start tree/digest, initial boundary,
+  and only active StoredOperation rows above it; no competing `000002` migration is
+  added. Restore must prove `Compose(selectedStart,boundary,operations)` equals the
+  recorded composed tree, then call `ThreeWayRebase(sourceBase,current,stashComposed)`.
+  Already-rebased rows at/below the boundary remain untouched. Stash rejects any open
+  exact-workspace conflict with `localstore.ErrWorkspaceConflicted` and zero mutation;
+  successful stash sets status `clean`.
+- Only a clean stash restore may persist a candidate, transition absorbed stash/current
+  operation rows, delete the stash, and set status `pending`. A conflicted restore leaves
+  the candidate, every operation row, and full stash byte-identical; it persists only
+  deterministic conflict evidence and status `conflicted`. Exact repeat strict-composes
+  current rows and replay rows again and returns read-only only when all evidence matches;
+  corruption or drift fails closed. The retained stash is resolution/audit evidence, not
+  a blind replay instruction.
 - All append/rebase mutations use one caller-owned dedicated SQLite connection and one
   `BEGIN IMMEDIATE`: read exact binding/candidate/active rows, decode and compose, apply
   the shared reducer, write all rows/candidate/conflict state and the binding status,
@@ -544,8 +559,9 @@ the same layering pattern and isolation discipline.
   `WorkspaceRepo.HasOpenConflicts` uses that signature and
   `WorkspaceMutationTx.HasOpenConflicts(context.Context) (bool, error)` is restricted to
   its callback's bound scope. Both query exact project/workspace plus `state='open'`;
-  resolved or other-workspace rows do not block. The one sentinel is
-  `localstore.ErrWorkspaceConflicted`; aliases must preserve the same error value.
+  resolved or other-workspace rows do not block. The sole sentinel is
+  `localstore.ErrWorkspaceConflicted`; no runtime alias or alternate declaration is
+  permitted.
 - Diff and conflict paths use RFC 6901 escaping, `""` for a record root, and `/body`
   for KB Markdown. `FieldValue` has `Present bool` tagged `json:"present"` and
   `Value json.RawMessage` tagged `json:"value,omitempty"`: false requires nil Value;
@@ -563,7 +579,8 @@ the same layering pattern and isolation discipline.
   byte-identically, never a partial merge. The importer atomically persists that `ours`
   surface with the complete new direct `theirs` tree, both-side conflict evidence,
   absorbed generation/row states, and conflicted status. Restart reproduces it.
-  Checkpoint returns zero `CheckpointResult` plus `ErrWorkspaceConflicted`; callers use
+  Checkpoint returns zero `CheckpointResult` plus
+  `localstore.ErrWorkspaceConflicted`; callers use
   Status separately to prove preserved candidate digest/generation. Writable v2 Fabric
   push checks the same exact-scope gate before credential resolution, client/DNS/signing,
   or network. Delivery marking rechecks inside one local `BEGIN IMMEDIATE` immediately

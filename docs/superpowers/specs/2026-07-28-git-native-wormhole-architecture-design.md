@@ -369,13 +369,16 @@ new workspace base and the matching materialisation journal can retire. Direct
 `.wormhole/` edits are allowed, but Gateway validates and imports their working-tree
 delta before composing it with an overlay.
 
-A machine-private stash records the exact selected composition start tree, its explicit
-initial through-generation, and a strict versioned canonical envelope containing only
-active operations above that boundary. Already-rebased rows at or below the boundary
-remain rebased because their effect is in the start tree. An immediate post-rebase stash
-therefore has an empty operation list with initial and final through-generations equal;
-a later stash stores only later active rows. Restore verifies that exact boundary, rows,
-and composed result across restart rather than reconstructing a hidden start.
+A machine-private stash records its semantic pre-stash rebase base separately from replay
+selection. `source_tree` and `source_base_digest` identify that semantic base, normally
+the accepted snapshot. A strict canonical `StashReplayV1` in the existing operations
+column records schema version, the exact selected composition start tree/digest, its
+explicit initial through-generation, and only active operations above that boundary.
+Already-rebased rows at or below the boundary remain rebased because their effect is in
+the selected start tree. An immediate post-rebase stash therefore has an empty operation
+list with initial and final through-generations equal; a later stash stores only later
+active rows. Restore proves replay from that selected start reproduces the composed stash,
+then semantically rebases it with the separately retained source base.
 
 Two worktrees of the same project have different workspace IDs, base digests,
 overlays, Fabric stream bindings, and Code Graph revisions. They cannot leak pending
@@ -402,25 +405,38 @@ and including actor attribution and tombstones.
 
 `wormhole checkpoint`:
 
-1. locks the workspace checkpoint operation and records the expected current
-   `.wormhole/` working-tree digest;
-2. validates the accepted base, any imported working-tree delta, and overlay;
-3. renders a complete canonical candidate tree in a sibling staging location;
-4. validates the candidate and computes its tree digest;
-5. rechecks the live working-tree digest as a compare-and-swap precondition and
-   aborts without mutation if a direct edit raced with the checkpoint;
-6. publishes the candidate with an atomic directory exchange where supported, or
-   a durable recovery journal with equivalent all-or-recover semantics elsewhere;
-7. marks the included overlay generation as materialised in a private journal,
+1. locks the workspace checkpoint operation and opens an immediate preparation
+   transaction against the expected current `.wormhole/` working-tree digest;
+2. validates the accepted base, any imported working-tree delta, overlay, and exact
+   open-conflict gate;
+3. renders, fsyncs, validates, and digests a complete canonical candidate tree in a
+   sibling staging location;
+4. rechecks the live working-tree digest as a compare-and-swap precondition and aborts
+   without publication if a direct edit raced with the checkpoint;
+5. commits a prepared journal containing both complete trees, the accepted-base and
+   candidate digests, checkout identity, included operation bytes/states, and exact
+   through-generation before mutating the live tree;
+6. opens a second `BEGIN IMMEDIATE` after that prepared commit and, before rename or
+   exchange, reloads and rechecks the exact live digest, binding, candidate, overlay
+   generation/rows, and open-conflict gate;
+7. holds the second transaction across atomic directory exchange where supported (or
+   durable fallback publication), parent-directory fsync, and the published journal,
+   candidate, and included-operation-row updates;
+8. commits those database updates only after the new complete live tree is durable,
    while leaving the accepted Git base unchanged; and
-8. retains enough private recovery information to restore the prior complete tree,
-   reconstitute the overlay, or recognise the later accepting Git commit.
+9. retains enough prepared-journal information for restart recovery to recognise either
+   the old or new complete live tree, restore/finalise its matching database state, or
+   recognise the later accepting Git commit.
 
 Before staging or journal creation, checkpoint queries open conflicts with the exact
-project/workspace predicate inside its local immediate transaction. An open conflict
-returns a zero checkpoint result and the shared `ErrWorkspaceConflicted` sentinel; the
+project/workspace predicate inside its preparation transaction. After the prepared row
+commits, the second immediate transaction repeats that gate and every publication
+precondition and holds the SQLite writer barrier through filesystem and database
+publication. Thus a conflict opened in the post-journal/pre-rename window yields zero
+publication, a zero checkpoint result, and `localstore.ErrWorkspaceConflicted`; the
 caller obtains preserved candidate digest/generation separately from status. Resolved
-conflicts and conflicts in another workspace do not block.
+conflicts and conflicts in another workspace do not block. There is no second sentinel
+or runtime alias.
 
 Gateway never commits or pushes Git unless a separately explicit future command is
 designed. The resulting files enter the user's normal diff, commit, push, and pull
@@ -482,11 +498,19 @@ continue normally.
 
 A branch switch with an active overlay or uncommitted checkpoint candidate requires
 one explicit choice: checkpoint/commit as applicable, stash, or discard. Stashes
-remain machine-private and retain the selected start tree, initial replay boundary,
-only later active stored operations, and candidate digest. A conflicted restore retains
-the stash as evidence; an exact repeat is read-only and idempotent only when its rebased
-rows, candidate surfaces, and conflicts still match. Gateway never guesses that pending
-state belongs on the destination branch.
+remain machine-private and retain the semantic source base, the selected start tree and
+digest, initial replay boundary, only later active stored operations, and candidate
+digest. Stash itself rejects any exact-workspace open conflict with
+`localstore.ErrWorkspaceConflicted` and zero mutation; success atomically leaves the
+binding `clean`. Restore first proves the selected replay composes to the stored candidate,
+then calls the semantic equivalent of
+`ThreeWayRebase(sourceBase,current,stashComposed)`. Only a clean restore transitions
+absorbed rows, persists the merged candidate, deletes the stash, and leaves status
+`pending`. A conflicted restore leaves candidate and every operation row byte-identical,
+persists only deterministic conflict evidence plus `conflicted` status, and retains the
+full stash for resolution/audit. Exact repeat strict-composes current rows again and is
+read-only only while every byte and conflict still matches; it is never blind replay.
+Gateway never guesses that pending state belongs on the destination branch.
 
 ## 9. Multi-Fabric routing and Git-aware streams
 
@@ -570,9 +594,17 @@ the same semantic rebase path as an incoming Git base. Fabric cannot resolve a G
 divergence by timestamp. Events and Git links remain add-only immutable records, and
 mutable records use explicit optimistic conflict detection.
 
+Every Fabric operation transition persists the operation ID, shared canonical
+`OperationV1` bytes, and shared canonical JSON digest. Every read, restart reconstruction,
+and duplicate-ID replay uses `projectstate.DecodeOperation`, requires decoded ID to match
+the row, requires `CanonicalOperation` byte equality, and checks
+`DigestCanonicalJSON`; malformed, unknown-field, trailing, noncanonical, ID-mismatched,
+or digest-mismatched rows fail closed before any state is served or replayed.
+
 Before a v2 writable push resolves credentials, constructs a client, performs DNS, signs,
 or contacts Fabric, Gateway checks the shared exact-project/workspace open-conflict gate.
-An open conflict returns the typed non-transient `ErrWorkspaceConflicted`, reports
+An open conflict returns the typed non-transient
+`localstore.ErrWorkspaceConflicted`, reports
 attention required, and leaves the complete queue row byte-identical and pending. After
 a successful remote response, delivery marking uses one local `BEGIN IMMEDIATE` to
 recheck the same predicate immediately before its complete-key queue update. No local
@@ -858,6 +890,7 @@ cannot close.
 | v2 push sees an open workspace conflict before or during delivery | make no credential/network contact when known before push; otherwise retain the byte-identical pending row after the atomic delivery recheck and retry the same operation only after resolution |
 | checkpoint interruption | recover either previous complete tree or new complete tree from durable journal |
 | concurrent direct `.wormhole/` edit | fail checkpoint compare-and-swap without overwriting the edit; validate/import then retry |
+| conflict opens after checkpoint prepared commit | second immediate recheck returns `localstore.ErrWorkspaceConflicted` with zero publication and retains recoverable prepared evidence |
 | private authentication failure | local setup succeeds; remote stage remains incomplete and retryable |
 | copied upstream hint in fork | leave hint inactive; do not contact or write upstream Fabric |
 
@@ -933,6 +966,9 @@ legacy or unknown until explicitly linked.
 - Checkpoint leaves the accepted base unchanged until a matching Git commit is
   observed, then retires the materialisation journal without losing later overlay work.
 - Direct-edit/checkpoint races fail the digest compare-and-swap and preserve both inputs.
+- A conflict opened after prepared-journal commit but before checkpoint rename is caught
+  by the second immediate transaction and causes zero filesystem/database publication;
+  restart recovery accepts recorded old or new live-tree states at every later fault.
 - Three-way merges for disjoint fields, same-field conflict, Markdown conflict,
   Event/Git-link ID collision, tombstone/record edit, tombstone/KB-body edit,
   explicit resurrection, and crash recovery. Golden merge tests cover RFC 6901
@@ -942,10 +978,14 @@ legacy or unknown until explicitly linked.
 - A conflicted rebase returns and persists the byte-identical complete prior candidate
   plus both-side evidence atomically, reproduces it after restart, and blocks checkpoint
   and writable Fabric delivery until explicit resolution.
-- Stash restart tests cover a rebased start with no later operations and with only later
-  active operations, strict boundary/envelope corruption, and idempotent repeated access
-  to an already-persisted conflicted restore.
-- Checkpoint conflict tests require zero `CheckpointResult`, `ErrWorkspaceConflicted`,
+- Stash restart tests distinguish semantic source base from selected replay start, cover
+  a rebased start with no later operations and with only later active operations, and
+  prove the absorbed prefix plus later operations survive clean and conflicting paths.
+  They also cover strict boundary/envelope/current-row corruption, open-conflict rejection
+  with zero mutation, exact clean/pending/conflicted statuses, and read-only repeated
+  access to retained conflicted evidence without candidate or operation-row changes.
+- Checkpoint conflict tests require zero `CheckpointResult`,
+  `localstore.ErrWorkspaceConflicted`,
   separate unchanged status digest/generation proof, and exact-scope isolation.
 - A fork accepts and edits the base but cannot activate the copied upstream Fabric hint.
 
@@ -960,6 +1000,9 @@ legacy or unknown until explicitly linked.
 - One workspace cannot acquire two writable streams.
 - Canonical branches isolate live state; accepted default-branch state advances only
   after independently observed Git ref movement and valid snapshot import.
+- Fabric stream restart/replay rejects malformed, unknown-field, trailing, noncanonical,
+  operation-ID-mismatched, and digest-mismatched stored operation rows before serving a
+  version or applying a later transition.
 - Fabric outage or one-profile failure does not block local work or another profile.
 - V2 push conflict gates run before credential/network side effects and atomically before
   delivery marking; tests cover exact scope, an in-flight conflict, byte-identical pending
