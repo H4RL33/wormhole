@@ -249,3 +249,20 @@ repository-wide tests, formatting, and diff checks were GREEN; projectstate stat
 coverage was 84.4%. Fresh re-review found no remaining Critical, Important, or Minor
 findings. Complete materialization ownership proof is done; Import, stash/restore, Git
 observation, branch guard, and the complete merged A4 coverage gate remain pending.
+
+A4 Direct Import `4f97320`: causal RED first proved that `Service.Import` and
+`ImportRequest` were absent; a later combined-invalid request RED exposed the required
+actor-before-digest-before-scope validation precedence. The implemented contract uses a
+secure initial capture plus exact second capture and final checkout-identity validation,
+preserves raw-deletion error precedence, proves the complete materialization disposition,
+and applies exact operation-state transitions. Conflicts are successful imports with
+durable semantic evidence; every mutation is atomic with rollback on error and explicit
+commit-unknown handling. Candidate provenance records the importing principal and UTC
+time, and the result reports the exact direct semantic-change count. Review found four
+Minor test/precedence gaps; all were fixed, and two final fresh reviews approved the
+corrected diff with no remaining Critical, Important, or Minor findings. Focused tests,
+full projectstate and localstore tests in normal and race modes, vet, `make check`, and
+the full repository suite were GREEN; projectstate statement coverage was 84.3% and
+aggregate statement coverage was 85.3%. Formatting and diff checks were clean. Remaining
+A4 work is stash/restore, the Git observer and branch guard, and the checkpoint,
+recovery, and merged coverage gates.
