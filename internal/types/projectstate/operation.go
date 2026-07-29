@@ -2,8 +2,6 @@ package projectstate
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 
@@ -65,27 +63,44 @@ type OperationV1 struct {
 }
 
 func CanonicalOperation(operation OperationV1) ([]byte, error) {
+	if err := validateOperation(operation); err != nil {
+		return nil, err
+	}
 	return CanonicalJSON(operation)
 }
 
+func DecodeOperation(raw []byte) (OperationV1, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var operation OperationV1
+	if err := decoder.Decode(&operation); err != nil {
+		return OperationV1{}, fmt.Errorf("%w: strict operation JSON: %v", ErrOperationPrecondition, err)
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return OperationV1{}, fmt.Errorf("%w: strict operation JSON: %v", ErrOperationPrecondition, err)
+	}
+	if err := validateOperation(operation); err != nil {
+		return OperationV1{}, err
+	}
+	canonical, err := CanonicalOperation(operation)
+	if err != nil {
+		return OperationV1{}, err
+	}
+	if !bytes.Equal(canonical, raw) {
+		return OperationV1{}, fmt.Errorf("%w: non-canonical operation JSON", ErrOperationPrecondition)
+	}
+	return operation, nil
+}
+
 func ApplyOperation(snapshot Snapshot, operation OperationV1) (Snapshot, error) {
-	if operation.SchemaVersion != 1 {
-		return snapshot, fmt.Errorf("%w: operation schema_version=%d", ErrUnknownVersion, operation.SchemaVersion)
-	}
-	if !types.CanonicalUUID(operation.ID) {
-		return snapshot, fmt.Errorf("%w: invalid operation ID", ErrOperationPrecondition)
-	}
-	if !contentDigestPattern.MatchString(string(operation.ExpectedViewDigest)) || operation.ExpectedViewDigest != snapshot.Digest {
-		return snapshot, fmt.Errorf("%w: expected view digest", ErrOperationPrecondition)
-	}
-	if err := operation.Actor.Validate(); err != nil {
+	if err := validateOperation(operation); err != nil {
 		return snapshot, err
+	}
+	if operation.ExpectedViewDigest != snapshot.Digest {
+		return snapshot, fmt.Errorf("%w: expected view digest", ErrOperationPrecondition)
 	}
 	if operation.Actor.Assurance == types.AssuranceLegacy || operation.Actor.Assurance == types.AssuranceUnknown {
 		return snapshot, fmt.Errorf("%w: historical assurance cannot issue operations", ErrInvalidActorEnvelope)
-	}
-	if err := validateOperationPayload(operation); err != nil {
-		return snapshot, err
 	}
 	next := cloneSnapshot(snapshot)
 	var err error
@@ -118,7 +133,19 @@ func ApplyOperation(snapshot Snapshot, operation OperationV1) (Snapshot, error) 
 	return next, nil
 }
 
-func validateOperationPayload(operation OperationV1) error {
+func validateOperation(operation OperationV1) error {
+	if operation.SchemaVersion != 1 {
+		return fmt.Errorf("%w: operation schema_version=%d", ErrUnknownVersion, operation.SchemaVersion)
+	}
+	if !types.CanonicalUUID(operation.ID) {
+		return fmt.Errorf("%w: invalid operation ID", ErrOperationPrecondition)
+	}
+	if !contentDigestPattern.MatchString(string(operation.ExpectedViewDigest)) {
+		return fmt.Errorf("%w: malformed expected view digest", ErrOperationPrecondition)
+	}
+	if err := operation.Actor.Validate(); err != nil {
+		return err
+	}
 	payloads := 0
 	if operation.PutRecord != nil {
 		payloads++
@@ -140,22 +167,105 @@ func validateOperationPayload(operation OperationV1) error {
 		if operation.PutRecord == nil || recordValueCount(operation.PutRecord.Record) != 1 {
 			return fmt.Errorf("%w: invalid put_record payload", ErrOperationPrecondition)
 		}
+		return validateRecordValue(operation.PutRecord.Record)
 	case OperationPutKBArticle:
 		if operation.PutKBArticle == nil {
 			return fmt.Errorf("%w: invalid put_kb_article payload", ErrOperationPrecondition)
+		}
+		if err := validateArticle(operation.PutKBArticle.Record); err != nil {
+			return err
+		}
+		if _, err := CanonicalMarkdown([]byte(operation.PutKBArticle.Body)); err != nil {
+			return err
 		}
 	case OperationTombstone:
 		if operation.Tombstone == nil {
 			return fmt.Errorf("%w: invalid tombstone payload", ErrOperationPrecondition)
 		}
+		return validateTombstoneOperation(*operation.Tombstone)
 	case OperationResurrect:
 		if operation.Resurrect == nil {
 			return fmt.Errorf("%w: invalid resurrect payload", ErrOperationPrecondition)
 		}
+		return validateResurrectOperation(*operation.Resurrect)
 	default:
 		return fmt.Errorf("%w: operation kind %q", ErrUnknownKind, operation.Kind)
 	}
 	return nil
+}
+
+func validateRecordValue(value RecordValueV1) error {
+	switch {
+	case value.Project != nil:
+		return validateProject(*value.Project)
+	case value.Actor != nil:
+		return validateActor(*value.Actor)
+	case value.Task != nil:
+		return validateTask(*value.Task)
+	case value.TaskLink != nil:
+		return validateTaskLink(*value.TaskLink)
+	case value.Channel != nil:
+		return validateChannel(*value.Channel)
+	case value.Event != nil:
+		return validateEvent(*value.Event)
+	case value.GitLink != nil:
+		return validateGitLink(*value.GitLink)
+	default:
+		return fmt.Errorf("%w: empty record", ErrOperationPrecondition)
+	}
+}
+
+func validateTombstoneOperation(operation TombstoneOperationV1) error {
+	if !types.CanonicalUUID(operation.Key.ID) || !contentDigestPattern.MatchString(string(operation.ExpectedContentDigest)) {
+		return fmt.Errorf("%w: malformed tombstone precondition", ErrTombstoneDigest)
+	}
+	switch operation.Key.Kind {
+	case "kb_article":
+		if operation.ExpectedBodyDigest == nil || !contentDigestPattern.MatchString(string(*operation.ExpectedBodyDigest)) {
+			return fmt.Errorf("%w: kb_article body digest", ErrTombstoneDigest)
+		}
+	case "actor", "task", "task_link", "channel":
+		if operation.ExpectedBodyDigest != nil {
+			return fmt.Errorf("%w: body digest on non-KB record", ErrTombstoneDigest)
+		}
+	case "project", "event", "git_link":
+		return fmt.Errorf("%w: %s cannot be tombstoned", ErrUnknownKind, operation.Key.Kind)
+	default:
+		return fmt.Errorf("%w: tombstone entity %q", ErrUnknownKind, operation.Key.Kind)
+	}
+	return nil
+}
+
+func validateResurrectOperation(operation ResurrectOperationV1) error {
+	if !types.CanonicalUUID(operation.Key.ID) || !contentDigestPattern.MatchString(string(operation.ExpectedTombstoneDigest)) {
+		return fmt.Errorf("%w: malformed resurrection precondition", ErrResurrectionDigest)
+	}
+	switch operation.Key.Kind {
+	case "kb_article":
+		if operation.KBRecord == nil || operation.KBBody == nil || recordValueCount(operation.Record) != 0 || operation.KBRecord.ID != operation.Key.ID {
+			return fmt.Errorf("%w: invalid kb_article resurrection", ErrOperationPrecondition)
+		}
+		if err := validateArticle(*operation.KBRecord); err != nil {
+			return err
+		}
+		if _, err := CanonicalMarkdown([]byte(*operation.KBBody)); err != nil {
+			return err
+		}
+		return nil
+	case "actor", "task", "task_link", "channel":
+		if operation.KBRecord != nil || operation.KBBody != nil || recordValueCount(operation.Record) != 1 {
+			return fmt.Errorf("%w: invalid record resurrection", ErrOperationPrecondition)
+		}
+		kind, id := recordValueKey(operation.Record)
+		if kind != operation.Key.Kind || id != operation.Key.ID {
+			return fmt.Errorf("%w: resurrection record does not match key", ErrOperationPrecondition)
+		}
+		return validateRecordValue(operation.Record)
+	case "project", "event", "git_link":
+		return fmt.Errorf("%w: %s cannot be resurrected", ErrUnknownKind, operation.Key.Kind)
+	default:
+		return fmt.Errorf("%w: resurrection entity %q", ErrUnknownKind, operation.Key.Kind)
+	}
 }
 
 func applyPutRecord(snapshot *Snapshot, value RecordValueV1) error {
@@ -163,6 +273,9 @@ func applyPutRecord(snapshot *Snapshot, value RecordValueV1) error {
 	case value.Project != nil:
 		if value.Project.ID != snapshot.Config.ProjectID || value.Project.ID != snapshot.Project.ID {
 			return fmt.Errorf("%w: project ID is immutable", ErrOperationPrecondition)
+		}
+		if value.Project.CreatedAt != snapshot.Project.CreatedAt {
+			return fmt.Errorf("%w: project.created_at is immutable", ErrOperationPrecondition)
 		}
 		snapshot.Project = cloneProject(*value.Project)
 	case value.Actor != nil:
@@ -172,8 +285,13 @@ func applyPutRecord(snapshot *Snapshot, value RecordValueV1) error {
 		record := cloneActor(*value.Actor)
 		snapshot.Actors[record.ID] = Record[ActorV1]{Value: &record}
 	case value.Task != nil:
-		if existing, ok := snapshot.Tasks[value.Task.ID]; ok && existing.Tombstone != nil {
-			return fmt.Errorf("%w: task requires resurrection", ErrOperationPrecondition)
+		if existing, ok := snapshot.Tasks[value.Task.ID]; ok {
+			if existing.Tombstone != nil {
+				return fmt.Errorf("%w: task requires resurrection", ErrOperationPrecondition)
+			}
+			if existing.Value != nil && value.Task.CreatedAt != existing.Value.CreatedAt {
+				return fmt.Errorf("%w: task.%s.created_at is immutable", ErrOperationPrecondition, value.Task.ID)
+			}
 		}
 		record := cloneTask(*value.Task)
 		snapshot.Tasks[record.ID] = Record[TaskV1]{Value: &record}
@@ -184,8 +302,13 @@ func applyPutRecord(snapshot *Snapshot, value RecordValueV1) error {
 		record := cloneTaskLink(*value.TaskLink)
 		snapshot.TaskLinks[record.ID] = Record[TaskLinkV1]{Value: &record}
 	case value.Channel != nil:
-		if existing, ok := snapshot.Channels[value.Channel.ID]; ok && existing.Tombstone != nil {
-			return fmt.Errorf("%w: channel requires resurrection", ErrOperationPrecondition)
+		if existing, ok := snapshot.Channels[value.Channel.ID]; ok {
+			if existing.Tombstone != nil {
+				return fmt.Errorf("%w: channel requires resurrection", ErrOperationPrecondition)
+			}
+			if existing.Value != nil && value.Channel.CreatedAt != existing.Value.CreatedAt {
+				return fmt.Errorf("%w: channel.%s.created_at is immutable", ErrOperationPrecondition, value.Channel.ID)
+			}
 		}
 		record := cloneChannel(*value.Channel)
 		snapshot.Channels[record.ID] = Record[ChannelV1]{Value: &record}
@@ -193,15 +316,35 @@ func applyPutRecord(snapshot *Snapshot, value RecordValueV1) error {
 		if existing, ok := snapshot.Events[value.Event.ID]; ok {
 			existingJSON, existingErr := CanonicalJSON(existing)
 			incomingJSON, incomingErr := CanonicalJSON(*value.Event)
-			if existingErr != nil || incomingErr != nil || !bytes.Equal(existingJSON, incomingJSON) {
-				return ErrImmutableEvent
+			if existingErr != nil {
+				return existingErr
+			}
+			if incomingErr != nil {
+				return incomingErr
+			}
+			if !bytes.Equal(existingJSON, incomingJSON) {
+				return ErrImmutableRecord
 			}
 			return nil
 		}
 		snapshot.Events[value.Event.ID] = cloneEvent(*value.Event)
 	case value.GitLink != nil:
-		if existing, ok := snapshot.GitLinks[value.GitLink.ID]; ok && existing.Tombstone != nil {
-			return fmt.Errorf("%w: git_link requires resurrection", ErrOperationPrecondition)
+		if existing, ok := snapshot.GitLinks[value.GitLink.ID]; ok {
+			if existing.Value == nil {
+				return ErrImmutableRecord
+			}
+			existingJSON, existingErr := CanonicalJSON(*existing.Value)
+			incomingJSON, incomingErr := CanonicalJSON(*value.GitLink)
+			if existingErr != nil {
+				return existingErr
+			}
+			if incomingErr != nil {
+				return incomingErr
+			}
+			if !bytes.Equal(existingJSON, incomingJSON) {
+				return ErrImmutableRecord
+			}
+			return nil
 		}
 		record := cloneGitLink(*value.GitLink)
 		snapshot.GitLinks[record.ID] = Record[GitLinkV1]{Value: &record}
@@ -212,8 +355,13 @@ func applyPutRecord(snapshot *Snapshot, value RecordValueV1) error {
 }
 
 func applyPutKBArticle(snapshot *Snapshot, put PutKBArticleV1) error {
-	if existing, ok := snapshot.Articles[put.Record.ID]; ok && existing.Tombstone != nil {
-		return fmt.Errorf("%w: kb_article requires resurrection", ErrOperationPrecondition)
+	if existing, ok := snapshot.Articles[put.Record.ID]; ok {
+		if existing.Tombstone != nil {
+			return fmt.Errorf("%w: kb_article requires resurrection", ErrOperationPrecondition)
+		}
+		if existing.Value != nil && put.Record.CreatedAt != existing.Value.CreatedAt {
+			return fmt.Errorf("%w: kb_article.%s.created_at is immutable", ErrOperationPrecondition, put.Record.ID)
+		}
 	}
 	body, err := CanonicalMarkdown([]byte(put.Body))
 	if err != nil {
@@ -261,18 +409,12 @@ func applyTombstone(snapshot *Snapshot, actor types.ActorEnvelope, operation Tom
 			return fmt.Errorf("%w: channel is not live", ErrOperationPrecondition)
 		}
 		value = *record.Value
-	case "git_link":
-		record, ok := snapshot.GitLinks[operation.Key.ID]
-		if !ok || record.Value == nil {
-			return fmt.Errorf("%w: git_link is not live", ErrOperationPrecondition)
-		}
-		value = *record.Value
-	case "project", "event":
+	case "project", "event", "git_link":
 		return fmt.Errorf("%w: %s cannot be tombstoned", ErrUnknownKind, operation.Key.Kind)
 	default:
 		return fmt.Errorf("%w: tombstone entity %q", ErrUnknownKind, operation.Key.Kind)
 	}
-	contentDigest, err := digestJSON(value)
+	contentDigest, err := DigestCanonicalJSON(value)
 	if err != nil {
 		return err
 	}
@@ -281,11 +423,10 @@ func applyTombstone(snapshot *Snapshot, actor types.ActorEnvelope, operation Tom
 	}
 	var bodyDigest *Digest
 	if operation.Key.Kind == "kb_article" {
-		canonicalBody, markdownErr := CanonicalMarkdown(body)
+		digest, markdownErr := DigestCanonicalMarkdown(body)
 		if markdownErr != nil {
 			return markdownErr
 		}
-		digest := digestBytes(canonicalBody)
 		if operation.ExpectedBodyDigest == nil || *operation.ExpectedBodyDigest != digest {
 			return fmt.Errorf("%w: body digest got %s", ErrTombstoneDigest, digest)
 		}
@@ -309,8 +450,6 @@ func applyTombstone(snapshot *Snapshot, actor types.ActorEnvelope, operation Tom
 		snapshot.Articles[operation.Key.ID] = KBRecord{Tombstone: tombstone}
 	case "channel":
 		snapshot.Channels[operation.Key.ID] = Record[ChannelV1]{Tombstone: tombstone}
-	case "git_link":
-		snapshot.GitLinks[operation.Key.ID] = Record[GitLinkV1]{Tombstone: tombstone}
 	}
 	return nil
 }
@@ -323,7 +462,7 @@ func applyResurrection(snapshot *Snapshot, operation ResurrectOperationV1) error
 	if tombstone == nil {
 		return fmt.Errorf("%w: no matching tombstone", ErrOperationPrecondition)
 	}
-	digest, err := digestJSON(*tombstone)
+	digest, err := DigestCanonicalJSON(*tombstone)
 	if err != nil {
 		return err
 	}
@@ -363,8 +502,6 @@ func clearTombstone(snapshot *Snapshot, key RecordKey) {
 		delete(snapshot.TaskLinks, key.ID)
 	case "channel":
 		delete(snapshot.Channels, key.ID)
-	case "git_link":
-		delete(snapshot.GitLinks, key.ID)
 	}
 }
 
@@ -380,8 +517,6 @@ func findTombstone(snapshot Snapshot, key RecordKey) *TombstoneV1 {
 		return snapshot.Articles[key.ID].Tombstone
 	case "channel":
 		return snapshot.Channels[key.ID].Tombstone
-	case "git_link":
-		return snapshot.GitLinks[key.ID].Tombstone
 	default:
 		return nil
 	}
@@ -416,19 +551,6 @@ func recordValueKey(value RecordValueV1) (string, string) {
 	default:
 		return "", ""
 	}
-}
-
-func digestJSON(value any) (Digest, error) {
-	canonical, err := CanonicalJSON(value)
-	if err != nil {
-		return "", err
-	}
-	return digestBytes(canonical), nil
-}
-
-func digestBytes(value []byte) Digest {
-	digest := sha256.Sum256(value)
-	return Digest("sha256:" + hex.EncodeToString(digest[:]))
 }
 
 func cloneSnapshot(snapshot Snapshot) Snapshot {

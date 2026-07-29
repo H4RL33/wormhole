@@ -103,8 +103,20 @@ func Validate(snapshot Snapshot) error {
 		}
 		targets[id] = referenceTarget{kind: "event"}
 	}
-	if err := validateRecordMap(snapshot.GitLinks, "git_link", targets, validateGitLink); err != nil {
-		return err
+	for id, record := range snapshot.GitLinks {
+		if !types.CanonicalUUID(id) || record.Value == nil || record.Tombstone != nil {
+			return fmt.Errorf("%w: invalid live git_link record %q", ErrInvalidSnapshot, id)
+		}
+		if _, duplicate := targets[id]; duplicate {
+			return fmt.Errorf("%w: duplicate semantic ID %s", ErrInvalidSnapshot, id)
+		}
+		if record.Value.ID != id {
+			return fmt.Errorf("%w: git_link map key and ID differ", ErrInvalidSnapshot)
+		}
+		if err := validateGitLink(*record.Value); err != nil {
+			return err
+		}
+		targets[id] = referenceTarget{kind: "git_link"}
 	}
 	return validateReferences(snapshot, targets)
 }
@@ -316,7 +328,7 @@ func validateTombstone(tombstone TombstoneV1) error {
 		return err
 	}
 	switch tombstone.EntityKind {
-	case "actor", "task", "task_link", "kb_article", "channel", "git_link":
+	case "actor", "task", "task_link", "kb_article", "channel":
 	default:
 		return fmt.Errorf("%w: invalid tombstone entity kind", ErrInvalidSnapshot)
 	}
@@ -501,11 +513,6 @@ func allTombstones(snapshot Snapshot) []*TombstoneV1 {
 		}
 	}
 	for _, record := range snapshot.Channels {
-		if record.Tombstone != nil {
-			tombstones = append(tombstones, record.Tombstone)
-		}
-	}
-	for _, record := range snapshot.GitLinks {
 		if record.Tombstone != nil {
 			tombstones = append(tombstones, record.Tombstone)
 		}

@@ -130,7 +130,7 @@ func TestWorkspaceOperationGenerationAndIsolation(t *testing.T) {
 		"00000000-0000-4000-8000-000000000091",
 		"00000000-0000-4000-8000-000000000092",
 	} {
-		got, err := repo.AppendWorkspaceOperation(context.Background(), binding.Scope, state.OperationV1{ID: operationID})
+		got, err := repo.AppendWorkspaceOperation(context.Background(), binding.Scope, validWorkspaceOperation(operationID))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -147,7 +147,7 @@ func TestWorkspaceOperationGenerationAndIsolation(t *testing.T) {
 	}
 	wrong := binding.Scope
 	wrong.ProjectID = "00000000-0000-4000-8000-000000000002"
-	if _, err := repo.AppendWorkspaceOperation(context.Background(), wrong, state.OperationV1{ID: "00000000-0000-4000-8000-000000000093"}); !errors.Is(err, ErrNotFound) {
+	if _, err := repo.AppendWorkspaceOperation(context.Background(), wrong, validWorkspaceOperation("00000000-0000-4000-8000-000000000093")); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("wrong-scope append error=%v, want ErrNotFound", err)
 	}
 }
@@ -232,14 +232,40 @@ func workspaceTree(t *testing.T, projectID string, repository types.RepositoryId
 
 func appendOperation(t *testing.T, store *Store, binding types.WorkspaceBinding, generation int64) {
 	t.Helper()
-	_, err := store.DB().Exec(`
+	operation := validWorkspaceOperation("00000000-0000-4000-8000-000000000099")
+	operationJSON, err := state.CanonicalOperation(operation)
+	if err != nil {
+		t.Fatalf("canonical operation: %v", err)
+	}
+	_, err = store.DB().Exec(`
 		INSERT INTO workspace_overlay_operations
 		(project_id, workspace_id, generation, operation_id, operation_json, state)
 		VALUES (?, ?, ?, ?, ?, 'active')
 	`, binding.Scope.ProjectID, binding.Scope.WorkspaceID, generation,
-		"00000000-0000-4000-8000-000000000099", `{"schema_version":1}`)
+		operation.ID, operationJSON)
 	if err != nil {
 		t.Fatalf("append operation: %v", err)
+	}
+}
+
+func validWorkspaceOperation(operationID string) state.OperationV1 {
+	const (
+		humanID = "00000000-0000-4000-8000-000000000061"
+		actorID = "00000000-0000-4000-8000-000000000062"
+	)
+	now := time.Date(2026, 7, 28, 13, 0, 0, 0, time.UTC)
+	actor := state.ActorV1{
+		SchemaVersion: 1, Kind: "actor", ID: actorID, ActorKind: types.ActorHuman,
+		DisplayName: "Workspace Fixture", PublicKeys: []state.PublicKeyV1{}, Extensions: state.ExtensionsV1{},
+	}
+	return state.OperationV1{
+		SchemaVersion: 1, ID: operationID, Kind: state.OperationPutRecord,
+		ExpectedViewDigest: state.Digest("sha256:" + strings.Repeat("a", 64)),
+		Actor: types.ActorEnvelope{
+			ActorKind: types.ActorHuman, HumanPrincipalID: humanID,
+			Assurance: types.AssuranceLocal, OccurredAt: now,
+		},
+		PutRecord: &state.PutRecordV1{Record: state.RecordValueV1{Actor: &actor}},
 	}
 }
 

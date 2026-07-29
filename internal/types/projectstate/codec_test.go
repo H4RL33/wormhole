@@ -109,6 +109,68 @@ func TestCanonicalV1CanonicalizesDynamicJSON(t *testing.T) {
 	}
 }
 
+func TestDigestCanonicalGoldenValues(t *testing.T) {
+	snapshot := operationSnapshot(t)
+	articleBodyDigest := Digest("sha256:d036295b58150d384216c6757df413e01ea54f0e3f04f15e69eab0630586c71e")
+	taskTombstone := TombstoneV1{
+		SchemaVersion: 1, Kind: "tombstone", ID: taskID, EntityKind: "task",
+		DeletedContentDigest: "sha256:87f7972dc4c0a198ece460bc094d35a981dc03c352ccfc2e0fb0280a60f5f3b0",
+		DeletedBy:            operationActor(), DeletedAt: operationActor().OccurredAt, Extensions: ExtensionsV1{},
+	}
+	articleTombstone := TombstoneV1{
+		SchemaVersion: 1, Kind: "tombstone", ID: articleID, EntityKind: "kb_article",
+		DeletedContentDigest: "sha256:d4c95b4bf2332b5f815d0ee45f3bd0bfe1811530e61ad1e47e5f40c709cab08b",
+		DeletedBodyDigest:    &articleBodyDigest, DeletedBy: operationActor(), DeletedAt: operationActor().OccurredAt, Extensions: ExtensionsV1{},
+	}
+	tests := []struct {
+		name  string
+		value any
+		want  Digest
+	}{
+		{"task", *snapshot.Tasks[taskID].Value, "sha256:87f7972dc4c0a198ece460bc094d35a981dc03c352ccfc2e0fb0280a60f5f3b0"},
+		{"KB article", *snapshot.Articles[articleID].Value, "sha256:d4c95b4bf2332b5f815d0ee45f3bd0bfe1811530e61ad1e47e5f40c709cab08b"},
+		{"GitLink", *snapshot.GitLinks[gitLinkID].Value, "sha256:46922078bd9d327fb4179236b47a8c77f05ddca8bd701b09b8e446a07c9590a3"},
+		{"task tombstone", taskTombstone, "sha256:523f076ef867ea483ab7bffa532bffdca9ad3b0dfcda66ec73d91b130f1304a9"},
+		{"KB tombstone", articleTombstone, "sha256:d43bc01d07c43897c6905eb5c974e45c955c5ce4ff9741c6dd10dfb8a06a13e5"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := DigestCanonicalJSON(test.value)
+			if err != nil || got != test.want {
+				t.Fatalf("DigestCanonicalJSON = %q, %v; want %q", got, err, test.want)
+			}
+		})
+	}
+
+	for _, body := range [][]byte{snapshot.Articles[articleID].Body, []byte(strings.ReplaceAll(string(snapshot.Articles[articleID].Body), "\n", "\r\n"))} {
+		got, err := DigestCanonicalMarkdown(body)
+		if err != nil || got != articleBodyDigest {
+			t.Fatalf("DigestCanonicalMarkdown = %q, %v; want %q", got, err, articleBodyDigest)
+		}
+	}
+}
+
+func TestGitLinkTombstoneRejectedByDecodeTree(t *testing.T) {
+	tree := readFixtureTree(t, "testdata/v1/valid/.wormhole")
+	tombstone := TombstoneV1{
+		SchemaVersion: 1, Kind: "tombstone", ID: gitLinkID, EntityKind: "git_link",
+		DeletedContentDigest: "sha256:46922078bd9d327fb4179236b47a8c77f05ddca8bd701b09b8e446a07c9590a3",
+		DeletedBy:            operationActor(), DeletedAt: operationActor().OccurredAt, Extensions: ExtensionsV1{},
+	}
+	data, err := CanonicalJSON(tombstone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range tree {
+		if tree[index].Path == "state/v1/git-links/"+gitLinkID+".json" {
+			tree[index].Data = data
+		}
+	}
+	if _, err := DecodeTree(tree); err == nil {
+		t.Fatal("DecodeTree accepted canonical GitLink tombstone")
+	}
+}
+
 func TestDigestTreeGoldenAndOrderIndependent(t *testing.T) {
 	tree := readFixtureTree(t, "testdata/v1/valid/.wormhole")
 	digest, err := DigestTree(tree)

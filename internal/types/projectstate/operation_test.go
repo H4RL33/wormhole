@@ -1,6 +1,8 @@
 package projectstate
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -14,7 +16,9 @@ const (
 	actorID   = "11111111-1111-4111-8111-111111111111"
 	taskID    = "22222222-2222-4222-8222-222222222222"
 	articleID = "44444444-4444-4444-8444-444444444444"
+	channelID = "55555555-5555-4555-8555-555555555555"
 	eventID   = "66666666-6666-4666-8666-666666666666"
+	gitLinkID = "77777777-7777-4777-8777-777777777777"
 )
 
 func operationSnapshot(t *testing.T) Snapshot {
@@ -30,6 +34,16 @@ func operationActor() types.ActorEnvelope {
 	return types.ActorEnvelope{
 		ActorKind: types.ActorHuman, HumanPrincipalID: actorID, Assurance: types.AssuranceLocal,
 		OccurredAt: time.Date(2026, 7, 28, 13, 0, 0, 0, time.UTC),
+	}
+}
+
+func validPutTaskOperation(snapshot Snapshot) OperationV1 {
+	record := cloneTask(*snapshot.Tasks[taskID].Value)
+	record.Description = "Updated through operation"
+	return OperationV1{
+		SchemaVersion: 1, ID: "99999999-9999-4999-8999-999999999991", Kind: OperationPutRecord,
+		ExpectedViewDigest: snapshot.Digest, Actor: operationActor(),
+		PutRecord: &PutRecordV1{Record: RecordValueV1{Task: &record}},
 	}
 }
 
@@ -88,13 +102,6 @@ func TestApplyOperationPutRecordVariants(t *testing.T) {
 			value := snapshot.Events[eventID]
 			return RecordValueV1{Event: &value}
 		}, func(snapshot Snapshot) bool { return snapshot.Events[eventID].ID == eventID }},
-		{"git link", func(snapshot Snapshot) RecordValueV1 {
-			value := *snapshot.GitLinks["77777777-7777-4777-8777-777777777777"].Value
-			value.Summary = "Updated"
-			return RecordValueV1{GitLink: &value}
-		}, func(snapshot Snapshot) bool {
-			return snapshot.GitLinks["77777777-7777-4777-8777-777777777777"].Value.Summary == "Updated"
-		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -227,9 +234,6 @@ func TestApplyOperationTombstonesOtherAllowedKinds(t *testing.T) {
 		{"channel", "55555555-5555-4555-8555-555555555555", "sha256:eb745a82241101a0cc39363674b58d6ed1d48e44276845efc03ac78f1d9b4828", func(snapshot Snapshot) bool {
 			return snapshot.Channels["55555555-5555-4555-8555-555555555555"].Tombstone != nil
 		}},
-		{"git_link", "77777777-7777-4777-8777-777777777777", "sha256:46922078bd9d327fb4179236b47a8c77f05ddca8bd701b09b8e446a07c9590a3", func(snapshot Snapshot) bool {
-			return snapshot.GitLinks["77777777-7777-4777-8777-777777777777"].Tombstone != nil
-		}},
 	}
 	for _, test := range tests {
 		t.Run(test.kind, func(t *testing.T) {
@@ -287,6 +291,8 @@ func TestApplyOperationResurrectsMatchingTombstone(t *testing.T) {
 	const tombstoneDigest Digest = "sha256:523f076ef867ea483ab7bffa532bffdca9ad3b0dfcda66ec73d91b130f1304a9"
 	record := *snapshot.Tasks[taskID].Value
 	record.Title = "Resurrected task"
+	record.CreatedAt = operationActor().OccurredAt
+	record.UpdatedAt = operationActor().OccurredAt
 	result, err := ApplyOperation(tombstoned, OperationV1{
 		SchemaVersion: 1, ID: "99999999-9999-4999-8999-999999999992", Kind: OperationResurrect,
 		ExpectedViewDigest: tombstoned.Digest, Actor: operationActor(),
@@ -295,7 +301,7 @@ func TestApplyOperationResurrectsMatchingTombstone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Tasks[taskID].Value == nil || result.Tasks[taskID].Value.Title != record.Title || result.Tasks[taskID].Tombstone != nil {
+	if result.Tasks[taskID].Value == nil || result.Tasks[taskID].Value.Title != record.Title || result.Tasks[taskID].Value.CreatedAt != record.CreatedAt || result.Tasks[taskID].Tombstone != nil {
 		t.Fatalf("resurrected task = %+v", result.Tasks[taskID])
 	}
 }
@@ -336,6 +342,8 @@ func TestApplyOperationResurrectsKBArticle(t *testing.T) {
 	}
 	record := *snapshot.Articles[articleID].Value
 	record.Title = "Resurrected article"
+	record.CreatedAt = operationActor().OccurredAt
+	record.UpdatedAt = operationActor().OccurredAt
 	body := "resurrected body\n"
 	result, err := ApplyOperation(tombstoned, OperationV1{
 		SchemaVersion: 1, ID: "99999999-9999-4999-8999-999999999992", Kind: OperationResurrect,
@@ -348,7 +356,7 @@ func TestApplyOperationResurrectsKBArticle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Articles[articleID].Value == nil || result.Articles[articleID].Value.Title != "Resurrected article" || string(result.Articles[articleID].Body) != body {
+	if result.Articles[articleID].Value == nil || result.Articles[articleID].Value.Title != "Resurrected article" || result.Articles[articleID].Value.CreatedAt != record.CreatedAt || string(result.Articles[articleID].Body) != body {
 		t.Fatalf("resurrected article = %+v body=%q", result.Articles[articleID].Value, result.Articles[articleID].Body)
 	}
 }
@@ -454,5 +462,334 @@ func TestApplyOperationRejectsForbiddenTombstonesAndBodyMismatch(t *testing.T) {
 		})
 	}
 }
+
+func TestDecodeOperationRoundTripAndCanonicalBytes(t *testing.T) {
+	snapshot := operationSnapshot(t)
+	want := validPutTaskOperation(snapshot)
+	raw, err := CanonicalOperation(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := DecodeOperation(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("DecodeOperation = %+v, want %+v", got, want)
+	}
+	reencoded, err := CanonicalOperation(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(reencoded, raw) {
+		t.Fatalf("reencoded operation differs\ngot=%q\nwant=%q", reencoded, raw)
+	}
+}
+
+func TestDecodeOperationRejectsNonCanonicalAndUnknownJSON(t *testing.T) {
+	snapshot := operationSnapshot(t)
+	raw, err := CanonicalOperation(validPutTaskOperation(snapshot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var generic map[string]any
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		t.Fatal(err)
+	}
+	reordered, err := json.Marshal(generic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reordered = append(reordered, '\n')
+	tests := []struct {
+		name string
+		raw  []byte
+	}{
+		{"unknown top-level field", bytes.Replace(raw, []byte(`"schema_version":1,`), []byte(`"schema_version":1,"unexpected":true,`), 1)},
+		{"unknown nested field", bytes.Replace(raw, []byte(`"actor_kind":"human",`), []byte(`"actor_kind":"human","unexpected":true,`), 1)},
+		{"duplicate known field", bytes.Replace(raw, []byte(`"schema_version":1,`), []byte(`"schema_version":1,"schema_version":1,`), 1)},
+		{"trailing JSON value", append(bytes.Clone(raw), []byte("{}\n")...)},
+		{"field order", reordered},
+		{"whitespace", bytes.Replace(raw, []byte(`"schema_version":1`), []byte(`"schema_version": 1`), 1)},
+		{"missing final newline", bytes.TrimSuffix(raw, []byte("\n"))},
+		{"extra final newline", append(bytes.Clone(raw), '\n')},
+		{"explicit omitted field", bytes.Replace(raw, []byte(`"human_principal_id":"`+actorID+`",`), []byte(`"human_principal_id":"`+actorID+`","agent_id":"",`), 1)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := DecodeOperation(test.raw); err == nil {
+				t.Fatalf("DecodeOperation accepted %q", test.raw)
+			}
+		})
+	}
+}
+
+func TestDecodeOperationRejectsStructuralInvalidity(t *testing.T) {
+	snapshot := operationSnapshot(t)
+	valid := validPutTaskOperation(snapshot)
+	validArticle := *snapshot.Articles[articleID].Value
+	validEvent := cloneEvent(snapshot.Events[eventID])
+	validGitLink := cloneGitLink(*snapshot.GitLinks[gitLinkID].Value)
+	validDigest := Digest("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	tests := []struct {
+		name   string
+		mutate func(*OperationV1)
+	}{
+		{"unsupported schema", func(operation *OperationV1) { operation.SchemaVersion = 2 }},
+		{"noncanonical operation UUID", func(operation *OperationV1) { operation.ID = "BAD" }},
+		{"malformed expected view digest", func(operation *OperationV1) { operation.ExpectedViewDigest = "sha256:BAD" }},
+		{"invalid actor envelope", func(operation *OperationV1) { operation.Actor.HumanPrincipalID = "BAD" }},
+		{"zero payloads", func(operation *OperationV1) { operation.PutRecord = nil }},
+		{"multiple payloads", func(operation *OperationV1) {
+			operation.PutKBArticle = &PutKBArticleV1{Record: validArticle, Body: "body\n"}
+		}},
+		{"kind payload mismatch", func(operation *OperationV1) { operation.Kind = OperationTombstone }},
+		{"zero record variants", func(operation *OperationV1) { operation.PutRecord.Record = RecordValueV1{} }},
+		{"multiple record variants", func(operation *OperationV1) { operation.PutRecord.Record.Event = &validEvent }},
+		{"malformed typed record", func(operation *OperationV1) { operation.PutRecord.Record.Task.Title = "" }},
+		{"event tombstone", func(operation *OperationV1) {
+			operation.Kind, operation.PutRecord = OperationTombstone, nil
+			operation.Tombstone = &TombstoneOperationV1{Key: RecordKey{Kind: "event", ID: eventID}, ExpectedContentDigest: validDigest}
+		}},
+		{"git link tombstone", func(operation *OperationV1) {
+			operation.Kind, operation.PutRecord = OperationTombstone, nil
+			operation.Tombstone = &TombstoneOperationV1{Key: RecordKey{Kind: "git_link", ID: gitLinkID}, ExpectedContentDigest: validDigest}
+		}},
+		{"event resurrection", func(operation *OperationV1) {
+			operation.Kind, operation.PutRecord = OperationResurrect, nil
+			operation.Resurrect = &ResurrectOperationV1{Key: RecordKey{Kind: "event", ID: eventID}, ExpectedTombstoneDigest: validDigest, Record: RecordValueV1{Event: &validEvent}}
+		}},
+		{"git link resurrection", func(operation *OperationV1) {
+			operation.Kind, operation.PutRecord = OperationResurrect, nil
+			operation.Resurrect = &ResurrectOperationV1{Key: RecordKey{Kind: "git_link", ID: gitLinkID}, ExpectedTombstoneDigest: validDigest, Record: RecordValueV1{GitLink: &validGitLink}}
+		}},
+		{"malformed tombstone key", func(operation *OperationV1) {
+			operation.Kind, operation.PutRecord = OperationTombstone, nil
+			operation.Tombstone = &TombstoneOperationV1{Key: RecordKey{Kind: "task", ID: "BAD"}, ExpectedContentDigest: validDigest}
+		}},
+		{"malformed tombstone digest", func(operation *OperationV1) {
+			operation.Kind, operation.PutRecord = OperationTombstone, nil
+			operation.Tombstone = &TombstoneOperationV1{Key: RecordKey{Kind: "task", ID: taskID}, ExpectedContentDigest: "BAD"}
+		}},
+		{"body digest on non-KB tombstone", func(operation *OperationV1) {
+			operation.Kind, operation.PutRecord = OperationTombstone, nil
+			operation.Tombstone = &TombstoneOperationV1{Key: RecordKey{Kind: "task", ID: taskID}, ExpectedContentDigest: validDigest, ExpectedBodyDigest: &validDigest}
+		}},
+		{"missing body digest on KB tombstone", func(operation *OperationV1) {
+			operation.Kind, operation.PutRecord = OperationTombstone, nil
+			operation.Tombstone = &TombstoneOperationV1{Key: RecordKey{Kind: "kb_article", ID: articleID}, ExpectedContentDigest: validDigest}
+		}},
+		{"malformed resurrection key", func(operation *OperationV1) {
+			record := operation.PutRecord.Record.Task
+			operation.Kind, operation.PutRecord = OperationResurrect, nil
+			operation.Resurrect = &ResurrectOperationV1{Key: RecordKey{Kind: "task", ID: "BAD"}, ExpectedTombstoneDigest: validDigest, Record: RecordValueV1{Task: record}}
+		}},
+		{"malformed resurrection digest", func(operation *OperationV1) {
+			record := operation.PutRecord.Record.Task
+			operation.Kind, operation.PutRecord = OperationResurrect, nil
+			operation.Resurrect = &ResurrectOperationV1{Key: RecordKey{Kind: "task", ID: taskID}, ExpectedTombstoneDigest: "BAD", Record: RecordValueV1{Task: record}}
+		}},
+		{"KB payload on non-KB resurrection", func(operation *OperationV1) {
+			operation.Kind, operation.PutRecord = OperationResurrect, nil
+			body := "body\n"
+			operation.Resurrect = &ResurrectOperationV1{Key: RecordKey{Kind: "task", ID: taskID}, ExpectedTombstoneDigest: validDigest, KBRecord: &validArticle, KBBody: &body}
+		}},
+		{"record payload on KB resurrection", func(operation *OperationV1) {
+			record := operation.PutRecord.Record.Task
+			operation.Kind, operation.PutRecord = OperationResurrect, nil
+			operation.Resurrect = &ResurrectOperationV1{Key: RecordKey{Kind: "kb_article", ID: articleID}, ExpectedTombstoneDigest: validDigest, Record: RecordValueV1{Task: record}}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			operation := valid
+
+			// Restore an independent nested payload before each mutation.
+			record := cloneTask(*valid.PutRecord.Record.Task)
+			operation.PutRecord = &PutRecordV1{Record: RecordValueV1{Task: &record}}
+			test.mutate(&operation)
+			raw, err := CanonicalJSON(operation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := DecodeOperation(raw); err == nil {
+				t.Fatal("DecodeOperation accepted structurally invalid operation")
+			}
+			if _, err := CanonicalOperation(operation); err == nil {
+				t.Fatal("CanonicalOperation accepted structurally invalid operation")
+			}
+		})
+	}
+}
+
+func TestDecodeOperationAcceptsStructuralAssurancesWhileApplyRejectsOnlyHistorical(t *testing.T) {
+	for _, assurance := range []types.Assurance{
+		types.AssuranceLocal,
+		types.AssuranceLegacy,
+		types.AssuranceUnknown,
+		types.AssurancePublicKeyContinuity,
+		types.AssurancePrivateAuthenticated,
+	} {
+		t.Run(string(assurance), func(t *testing.T) {
+			snapshot := operationSnapshot(t)
+			operation := validPutTaskOperation(snapshot)
+			operation.Actor.Assurance = assurance
+			raw, err := CanonicalOperation(operation)
+			if err != nil {
+				t.Fatalf("CanonicalOperation: %v", err)
+			}
+			if _, err := DecodeOperation(raw); err != nil {
+				t.Fatalf("DecodeOperation: %v", err)
+			}
+			got, err := ApplyOperation(snapshot, operation)
+			if assurance == types.AssuranceLegacy || assurance == types.AssuranceUnknown {
+				if !errors.Is(err, ErrInvalidActorEnvelope) || !reflect.DeepEqual(got, snapshot) {
+					t.Fatalf("ApplyOperation = (%+v, %v), want unchanged historical rejection", got, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ApplyOperation rejected structurally valid %q assurance: %v", assurance, err)
+			}
+		})
+	}
+}
+
+func TestApplyOperationImmutableRecordReplayAndCollision(t *testing.T) {
+	tests := []struct {
+		name      string
+		replay    func(Snapshot) RecordValueV1
+		collision func(Snapshot) RecordValueV1
+		event     bool
+	}{
+		{"event", func(snapshot Snapshot) RecordValueV1 {
+			value := cloneEvent(snapshot.Events[eventID])
+			return RecordValueV1{Event: &value}
+		}, func(snapshot Snapshot) RecordValueV1 {
+			value := cloneEvent(snapshot.Events[eventID])
+			value.Note = stringPointer("changed")
+			return RecordValueV1{Event: &value}
+		}, true},
+		{"git link", func(snapshot Snapshot) RecordValueV1 {
+			value := cloneGitLink(*snapshot.GitLinks[gitLinkID].Value)
+			return RecordValueV1{GitLink: &value}
+		}, func(snapshot Snapshot) RecordValueV1 {
+			value := cloneGitLink(*snapshot.GitLinks[gitLinkID].Value)
+			value.Summary = "changed"
+			return RecordValueV1{GitLink: &value}
+		}, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := operationSnapshot(t)
+			before, err := EncodeTree(snapshot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			replay := validPutTaskOperation(snapshot)
+			replay.PutRecord.Record = test.replay(snapshot)
+			got, err := ApplyOperation(snapshot, replay)
+			if err != nil {
+				t.Fatalf("exact replay: %v", err)
+			}
+			if got.Digest != snapshot.Digest {
+				t.Fatalf("exact replay digest = %s, want %s", got.Digest, snapshot.Digest)
+			}
+			afterReplay, err := EncodeTree(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertTreeEqual(t, before, afterReplay)
+
+			collision := validPutTaskOperation(snapshot)
+			collision.PutRecord.Record = test.collision(snapshot)
+			unchanged, err := ApplyOperation(snapshot, collision)
+			if !errors.Is(err, ErrImmutableRecord) || !reflect.DeepEqual(unchanged, snapshot) {
+				t.Fatalf("collision = (%+v, %v), want unchanged ErrImmutableRecord", unchanged, err)
+			}
+			if test.event && !errors.Is(err, ErrImmutableEvent) {
+				t.Fatalf("event collision error = %v, want ErrImmutableEvent alias", err)
+			}
+			afterCollision, encodeErr := EncodeTree(snapshot)
+			if encodeErr != nil {
+				t.Fatal(encodeErr)
+			}
+			assertTreeEqual(t, before, afterCollision)
+		})
+	}
+}
+
+func TestGitLinkTombstoneAndResurrectionOperationsRejected(t *testing.T) {
+	snapshot := operationSnapshot(t)
+	tombstone := validPutTaskOperation(snapshot)
+	tombstone.Kind, tombstone.PutRecord = OperationTombstone, nil
+	tombstone.Tombstone = &TombstoneOperationV1{
+		Key:                   RecordKey{Kind: "git_link", ID: gitLinkID},
+		ExpectedContentDigest: "sha256:46922078bd9d327fb4179236b47a8c77f05ddca8bd701b09b8e446a07c9590a3",
+	}
+	if got, err := ApplyOperation(snapshot, tombstone); !errors.Is(err, ErrUnknownKind) || !reflect.DeepEqual(got, snapshot) {
+		t.Fatalf("GitLink tombstone = (%+v, %v), want unchanged rejection", got, err)
+	}
+
+	link := cloneGitLink(*snapshot.GitLinks[gitLinkID].Value)
+	resurrection := validPutTaskOperation(snapshot)
+	resurrection.Kind, resurrection.PutRecord = OperationResurrect, nil
+	resurrection.Resurrect = &ResurrectOperationV1{
+		Key:                     RecordKey{Kind: "git_link", ID: gitLinkID},
+		ExpectedTombstoneDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Record:                  RecordValueV1{GitLink: &link},
+	}
+	if got, err := ApplyOperation(snapshot, resurrection); !errors.Is(err, ErrUnknownKind) || !reflect.DeepEqual(got, snapshot) {
+		t.Fatalf("GitLink resurrection = (%+v, %v), want unchanged rejection", got, err)
+	}
+}
+
+func TestApplyOperationCreatedAtImmutableOnOrdinaryUpdate(t *testing.T) {
+	tests := []struct {
+		name      string
+		operation func(Snapshot) OperationV1
+	}{
+		{"project", func(snapshot Snapshot) OperationV1 {
+			value := cloneProject(snapshot.Project)
+			value.CreatedAt = value.CreatedAt.Add(-time.Minute)
+			operation := validPutTaskOperation(snapshot)
+			operation.PutRecord.Record = RecordValueV1{Project: &value}
+			return operation
+		}},
+		{"task", func(snapshot Snapshot) OperationV1 {
+			value := cloneTask(*snapshot.Tasks[taskID].Value)
+			value.CreatedAt = value.CreatedAt.Add(-time.Minute)
+			operation := validPutTaskOperation(snapshot)
+			operation.PutRecord.Record = RecordValueV1{Task: &value}
+			return operation
+		}},
+		{"kb article", func(snapshot Snapshot) OperationV1 {
+			value := cloneArticle(*snapshot.Articles[articleID].Value)
+			value.CreatedAt = value.CreatedAt.Add(-time.Minute)
+			operation := validPutTaskOperation(snapshot)
+			operation.Kind, operation.PutRecord = OperationPutKBArticle, nil
+			operation.PutKBArticle = &PutKBArticleV1{Record: value, Body: string(snapshot.Articles[articleID].Body)}
+			return operation
+		}},
+		{"channel", func(snapshot Snapshot) OperationV1 {
+			value := cloneChannel(*snapshot.Channels[channelID].Value)
+			value.CreatedAt = value.CreatedAt.Add(-time.Minute)
+			operation := validPutTaskOperation(snapshot)
+			operation.PutRecord.Record = RecordValueV1{Channel: &value}
+			return operation
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := operationSnapshot(t)
+			got, err := ApplyOperation(snapshot, test.operation(snapshot))
+			if !errors.Is(err, ErrOperationPrecondition) || !strings.Contains(err.Error(), "created_at is immutable") || !reflect.DeepEqual(got, snapshot) {
+				t.Fatalf("ApplyOperation = (%+v, %v), want unchanged created_at rejection", got, err)
+			}
+		})
+	}
+}
+
+func stringPointer(value string) *string { return &value }
 
 func digestPointer(value Digest) *Digest { return &value }

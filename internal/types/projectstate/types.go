@@ -16,7 +16,8 @@ var (
 	ErrTrackedSecret         = errors.New("projectstate: tracked secret")
 	ErrInvalidActorEnvelope  = types.ErrInvalidActorEnvelope
 	ErrOperationPrecondition = errors.New("projectstate: operation precondition failed")
-	ErrImmutableEvent        = errors.New("projectstate: immutable event")
+	ErrImmutableRecord       = errors.New("projectstate: immutable record")
+	ErrImmutableEvent        = ErrImmutableRecord
 	ErrTombstoneDigest       = errors.New("projectstate: tombstone digest mismatch")
 	ErrResurrectionDigest    = errors.New("projectstate: resurrection digest mismatch")
 )

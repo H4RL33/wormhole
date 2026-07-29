@@ -39,6 +39,27 @@ func CanonicalMarkdown(body []byte) ([]byte, error) {
 	return []byte(canonical), nil
 }
 
+func DigestCanonicalJSON(value any) (Digest, error) {
+	canonical, err := CanonicalJSON(value)
+	if err != nil {
+		return "", err
+	}
+	return digestCanonicalBytes(canonical), nil
+}
+
+func DigestCanonicalMarkdown(body []byte) (Digest, error) {
+	canonical, err := CanonicalMarkdown(body)
+	if err != nil {
+		return "", err
+	}
+	return digestCanonicalBytes(canonical), nil
+}
+
+func digestCanonicalBytes(value []byte) Digest {
+	digest := sha256.Sum256(value)
+	return Digest("sha256:" + hex.EncodeToString(digest[:]))
+}
+
 func DigestTree(tree Tree) (Digest, error) {
 	files := cloneAndSortTree(tree)
 	if err := validateTreePaths(files); err != nil {
@@ -156,7 +177,7 @@ func DecodeTree(tree Tree) (Snapshot, error) {
 		case matchPath(file.Path, "state/v1/git-links/", ".json") != "":
 			id := matchPath(file.Path, "state/v1/git-links/", ".json")
 			var record Record[GitLinkV1]
-			record, err = decodeRecord[GitLinkV1](file.Path, file.Data, "git_link", id, true)
+			record, err = decodeRecord[GitLinkV1](file.Path, file.Data, "git_link", id, false)
 			if err == nil {
 				snapshot.GitLinks[id] = record
 			}

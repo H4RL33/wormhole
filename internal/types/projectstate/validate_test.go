@@ -80,6 +80,13 @@ func TestRejectsStructuralSchemaViolations(t *testing.T) {
 			value := "ABC"
 			snapshot.GitLinks["77777777-7777-4777-8777-777777777777"].Value.CommitSHA = &value
 		}, ErrInvalidSnapshot},
+		{"GitLink tombstone", func(snapshot *Snapshot) {
+			snapshot.GitLinks[gitLinkID] = Record[GitLinkV1]{Tombstone: &TombstoneV1{
+				SchemaVersion: 1, Kind: "tombstone", ID: gitLinkID, EntityKind: "git_link",
+				DeletedContentDigest: "sha256:46922078bd9d327fb4179236b47a8c77f05ddca8bd701b09b8e446a07c9590a3",
+				DeletedBy:            operationActor(), DeletedAt: operationActor().OccurredAt, Extensions: ExtensionsV1{},
+			}}
+		}, ErrInvalidSnapshot},
 		{"extension key", func(snapshot *Snapshot) {
 			snapshot.Project.Extensions["invalid"] = ExtensionV1{SchemaVersion: 1, Data: json.RawMessage(`{}`)}
 		}, ErrInvalidSnapshot},
