@@ -49,13 +49,18 @@ type Service struct {
 	repo                *localstore.WorkspaceRepo
 	legacyBackupRoot    string
 	registrationTimeout time.Duration
+	readWorkingTree     func(string) (state.Tree, error)
+	now                 func() time.Time
 }
 
 func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service, error) {
 	if repo == nil {
 		return nil, fmt.Errorf("projectstate: workspace repository is required")
 	}
-	service := &Service{repo: repo, registrationTimeout: workspaceRegistrationTimeout}
+	service := &Service{
+		repo: repo, registrationTimeout: workspaceRegistrationTimeout,
+		readWorkingTree: ReadWorkingTreeNoFollow, now: time.Now,
+	}
 	if config.LegacyIntegrationBackupRoot == "" {
 		return service, nil
 	}
@@ -353,15 +358,7 @@ func readComposedWorkspace(ctx context.Context, tx *localstore.WorkspaceMutation
 	if err != nil {
 		return WorkspaceStatus{}, ComposedView{}, nil, err
 	}
-	start := record.Snapshot
-	var boundary int64
-	if candidate != nil {
-		start = candidate.DirectSnapshot
-		if candidate.RebasedSnapshot != nil {
-			start = *candidate.RebasedSnapshot
-			boundary = candidate.RebasedThroughGeneration
-		}
-	}
+	start, boundary := selectCandidateStart(record.Snapshot, candidate)
 	rows, err := tx.ActiveOperationsAfter(ctx, boundary)
 	if err != nil {
 		return WorkspaceStatus{}, ComposedView{}, nil, err
@@ -378,6 +375,16 @@ func readComposedWorkspace(ctx context.Context, tx *localstore.WorkspaceMutation
 		Binding: record.Binding, State: record.State, AcceptedSnapshot: record.Snapshot,
 		CandidateDigest: view.Snapshot.Digest, OverlayGeneration: view.ThroughGeneration,
 	}, view, operations, nil
+}
+
+func selectCandidateStart(accepted state.Snapshot, candidate *localstore.WorkspaceCandidateRecord) (state.Snapshot, int64) {
+	if candidate == nil {
+		return accepted, 0
+	}
+	if candidate.RebasedSnapshot == nil {
+		return candidate.DirectSnapshot, 0
+	}
+	return *candidate.RebasedSnapshot, candidate.RebasedThroughGeneration
 }
 
 func decodeStoredOperations(rows []localstore.WorkspaceOperation) ([]StoredOperation, error) {

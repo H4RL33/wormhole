@@ -2,10 +2,14 @@ package projectstate
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
+	"github.com/H4RL33/wormhole/internal/runtime/localstore"
+	"github.com/H4RL33/wormhole/internal/types"
 	state "github.com/H4RL33/wormhole/internal/types/projectstate"
 )
 
@@ -16,6 +20,405 @@ var (
 	ErrDirectResurrection            = errors.New("projectstate: direct resurrection")
 	ErrDirectImmutableFieldMutation  = errors.New("projectstate: direct immutable field mutation")
 )
+
+type ImportRequest struct {
+	Scope                     types.WorkspaceScope
+	Root                      string
+	ExpectedWorkingTreeDigest *state.Digest
+	Actor                     types.ActorEnvelope
+}
+
+type ImportResult struct {
+	PreviousCandidateDigest  *state.Digest
+	ImportedCandidateDigest  state.Digest
+	ComposedViewDigest       state.Digest
+	ImportedChangeCount      int
+	RebasedThroughGeneration int64
+	Conflicts                []Conflict
+}
+
+func (s *Service) Import(ctx context.Context, req ImportRequest) (ImportResult, error) {
+	if s == nil || s.repo == nil || s.readWorkingTree == nil || s.now == nil {
+		return ImportResult{}, fmt.Errorf("projectstate: service is unavailable")
+	}
+	if err := req.Actor.ValidateLocalAction(); err != nil {
+		return ImportResult{}, err
+	}
+	if req.ExpectedWorkingTreeDigest != nil && !validImportDigest(*req.ExpectedWorkingTreeDigest) {
+		return ImportResult{}, fmt.Errorf("projectstate: invalid expected working-tree digest")
+	}
+	if !types.CanonicalUUID(req.Scope.ProjectID) || !types.CanonicalUUID(string(req.Scope.WorkspaceID)) {
+		return ImportResult{}, localstore.ErrNotFound
+	}
+	root, err := canonicalNonSymlinkDirectory(req.Root)
+	if err != nil || root != req.Root {
+		if err == nil {
+			err = fmt.Errorf("root is not canonical")
+		}
+		return ImportResult{}, fmt.Errorf("projectstate: invalid import root: %w", err)
+	}
+	capturedTree, err := s.readWorkingTree(root)
+	if err != nil {
+		return ImportResult{}, err
+	}
+	capturedTree = cloneCheckpointTree(capturedTree)
+	capturedDigest, err := state.DigestTree(capturedTree)
+	if err != nil {
+		return ImportResult{}, err
+	}
+	if req.ExpectedWorkingTreeDigest != nil && *req.ExpectedWorkingTreeDigest != capturedDigest {
+		return ImportResult{}, fmt.Errorf("%w: expected %s, captured %s", ErrWorkingTreeChanged, *req.ExpectedWorkingTreeDigest, capturedDigest)
+	}
+
+	var result ImportResult
+	err = s.repo.WithImmediateWorkspace(ctx, req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+		workspace, err := tx.Workspace(ctx)
+		if err != nil {
+			return err
+		}
+		workspace, err = cloneImportWorkspace(workspace)
+		if err != nil {
+			return err
+		}
+		if workspace.Binding.Scope != req.Scope {
+			return fmt.Errorf("projectstate: workspace scope differs from import request")
+		}
+		if err := validateImportCheckout(workspace.Binding, root); err != nil {
+			return err
+		}
+		openConflicts, err := tx.OpenConflictOccurrences(ctx)
+		if err != nil {
+			return err
+		}
+		openConflicts = cloneImportOccurrences(openConflicts)
+		if _, err := decodeWorkspaceConflictOccurrences(openConflicts); err != nil {
+			return err
+		}
+		if (workspace.State == "conflicted") != (len(openConflicts) != 0) {
+			return fmt.Errorf("projectstate: workspace conflict state does not match open conflict evidence")
+		}
+		candidate, err := tx.Candidate(ctx)
+		if err != nil {
+			return err
+		}
+		candidate, err = cloneImportCandidate(candidate)
+		if err != nil {
+			return err
+		}
+		priorSurface := workspace.Snapshot
+		if candidate != nil {
+			priorSurface = candidate.DirectSnapshot
+		}
+		priorTree, err := state.EncodeTree(priorSurface)
+		if err != nil {
+			return err
+		}
+
+		disposition, err := tx.MaterializationDisposition(ctx)
+		if err != nil {
+			return err
+		}
+		disposition = cloneImportDisposition(disposition)
+		proof, err := proveMaterializationDisposition(disposition)
+		if err != nil {
+			return err
+		}
+		if err := rawDirectDeletionPreflight(priorSurface, capturedTree); err != nil {
+			return err
+		}
+		liveSnapshot, err := state.DecodeTree(capturedTree)
+		if err != nil {
+			return err
+		}
+		canonicalLiveTree, err := state.EncodeTree(liveSnapshot)
+		if err != nil {
+			return err
+		}
+		if !equalCheckpointTree(canonicalLiveTree, capturedTree) || liveSnapshot.Digest != capturedDigest {
+			return fmt.Errorf("projectstate: captured working tree is not exact canonical state")
+		}
+		directDiff, err := SemanticDiff(priorSurface, liveSnapshot, nil)
+		if err != nil {
+			return err
+		}
+
+		eligible, err := tx.AcceptanceEligibleMaterializationByCandidateDigest(ctx, capturedDigest)
+		if err != nil {
+			return err
+		}
+		if eligible != nil {
+			cloned := cloneMaterializationRecord(*eligible)
+			eligible = &cloned
+			if _, err := requireMatchingMaterialization(proof, eligible, workspace.Binding, priorTree, capturedTree, capturedDigest); err != nil {
+				return err
+			}
+		} else if err := ValidateDirectDelta(priorSurface, liveSnapshot); err != nil {
+			return err
+		}
+
+		start, boundary := selectCandidateStart(workspace.Snapshot, candidate)
+		activeRows := make([]localstore.WorkspaceOperation, 0)
+		for _, row := range disposition.Operations {
+			switch row.State {
+			case "active":
+				if row.Generation <= boundary {
+					return fmt.Errorf("projectstate: active operation does not exceed selected candidate boundary")
+				}
+				activeRows = append(activeRows, cloneImportOperation(row))
+			case "rebased":
+				if row.Generation > boundary {
+					return fmt.Errorf("projectstate: rebased operation exceeds selected candidate boundary")
+				}
+			}
+		}
+		operations, err := decodeStoredOperations(activeRows)
+		if err != nil {
+			return err
+		}
+		oldComposed, err := Compose(start, boundary, operations)
+		if err != nil {
+			return err
+		}
+		merged, err := ThreeWayRebase(priorSurface, liveSnapshot, oldComposed.Snapshot)
+		if err != nil {
+			return err
+		}
+		evidence, err := encodeWorkspaceConflictEvidence(merged.Conflicts)
+		if err != nil {
+			return err
+		}
+		mutationTime := s.now().UTC()
+		importedBy := req.Actor.PrincipalID()
+		rebasedSnapshot, err := cloneImportSnapshot(merged.Snapshot)
+		if err != nil {
+			return err
+		}
+		directSnapshot, err := cloneImportSnapshot(liveSnapshot)
+		if err != nil {
+			return err
+		}
+
+		liveTree, err := s.readWorkingTree(root)
+		if err != nil {
+			return err
+		}
+		liveTree = cloneCheckpointTree(liveTree)
+		liveDigest, err := state.DigestTree(liveTree)
+		if err != nil {
+			return err
+		}
+		if !equalCheckpointTree(liveTree, capturedTree) || liveDigest != capturedDigest {
+			return fmt.Errorf("%w: second capture differs", ErrWorkingTreeChanged)
+		}
+		if err := validateImportCheckout(workspace.Binding, root); err != nil {
+			return err
+		}
+
+		if _, err := tx.ReplaceOpenConflictOccurrences(ctx, evidence, mutationTime); err != nil {
+			return err
+		}
+		if err := tx.UpsertCandidate(ctx, localstore.WorkspaceCandidateRecord{
+			AcceptedBaseDigest: state.Digest(workspace.Binding.AcceptedTreeDigest),
+			WorkingTreeDigest:  capturedDigest, DirectSnapshot: directSnapshot,
+			RebasedSnapshot: &rebasedSnapshot, RebasedThroughGeneration: oldComposed.ThroughGeneration,
+			ImportedBy: importedBy, ImportedAt: mutationTime,
+		}); err != nil {
+			return err
+		}
+		if err := tx.TransitionOperations(ctx, activeRows, "rebased", nil); err != nil {
+			return err
+		}
+		workspaceState := "pending"
+		if len(merged.Conflicts) != 0 {
+			workspaceState = "conflicted"
+		}
+		if err := tx.SetStatus(ctx, workspaceState); err != nil {
+			return err
+		}
+
+		var previous *state.Digest
+		if candidate != nil || len(activeRows) != 0 {
+			digest := oldComposed.Snapshot.Digest
+			previous = &digest
+		}
+		result = ImportResult{
+			PreviousCandidateDigest: previous, ImportedCandidateDigest: liveSnapshot.Digest,
+			ComposedViewDigest: merged.Snapshot.Digest, ImportedChangeCount: len(directDiff.Changes),
+			RebasedThroughGeneration: oldComposed.ThroughGeneration, Conflicts: cloneImportConflicts(merged.Conflicts),
+		}
+		return nil
+	})
+	if err != nil {
+		return ImportResult{}, err
+	}
+	return result, nil
+}
+
+func validImportDigest(value state.Digest) bool {
+	raw := string(value)
+	if len(raw) != len("sha256:")+64 || !strings.HasPrefix(raw, "sha256:") {
+		return false
+	}
+	for _, char := range raw[len("sha256:"):] {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validateImportCheckout(binding types.WorkspaceBinding, root string) error {
+	if err := binding.Validate(); err != nil {
+		return err
+	}
+	canonical, err := canonicalNonSymlinkDirectory(root)
+	if err != nil || canonical != root || canonical != binding.Checkout.CanonicalPath {
+		if err == nil {
+			err = fmt.Errorf("checkout root differs from binding")
+		}
+		return fmt.Errorf("%w: %w", ErrWorkingTreeChanged, err)
+	}
+	identity, err := checkoutIdentity(canonical)
+	if err != nil || identity != binding.Checkout {
+		if err == nil {
+			err = fmt.Errorf("checkout identity differs from binding")
+		}
+		return fmt.Errorf("%w: %w", ErrWorkingTreeChanged, err)
+	}
+	return nil
+}
+
+func rawDirectDeletionPreflight(prior state.Snapshot, captured state.Tree) error {
+	paths := make(map[string]struct{}, len(captured))
+	for _, file := range captured {
+		paths[file.Path] = struct{}{}
+	}
+	type stablePath struct {
+		key  state.RecordKey
+		path string
+	}
+	stable := []stablePath{{key: state.RecordKey{Kind: "project", ID: prior.Project.ID}, path: "state/v1/project.json"}}
+	appendRecords := func(kind, prefix, suffix string, ids []string) {
+		for _, id := range ids {
+			stable = append(stable, stablePath{key: state.RecordKey{Kind: kind, ID: id}, path: prefix + id + suffix})
+		}
+	}
+	appendRecords("actor", "state/v1/actors/", ".json", sortedImportIDs(prior.Actors))
+	appendRecords("task", "state/v1/tasks/", ".json", sortedImportIDs(prior.Tasks))
+	appendRecords("task_link", "state/v1/tasks/links/", ".json", sortedImportIDs(prior.TaskLinks))
+	appendRecords("kb_article", "state/v1/kb/", "/record.json", sortedImportIDs(prior.Articles))
+	appendRecords("channel", "state/v1/channels/", ".json", sortedImportIDs(prior.Channels))
+	appendRecords("event", "state/v1/events/", ".json", sortedImportIDs(prior.Events))
+	appendRecords("git_link", "state/v1/git-links/", ".json", sortedImportIDs(prior.GitLinks))
+	sort.Slice(stable, func(i, j int) bool {
+		left, right := diffKindRank(stable[i].key.Kind), diffKindRank(stable[j].key.Kind)
+		if left != right {
+			return left < right
+		}
+		return stable[i].key.ID < stable[j].key.ID
+	})
+	for _, record := range stable {
+		if _, ok := paths[record.path]; ok {
+			continue
+		}
+		if record.key.Kind == "event" || record.key.Kind == "git_link" {
+			return fmt.Errorf("%w: %s %s", ErrDirectImmutableRecordMutation, record.key.Kind, record.key.ID)
+		}
+		return directPathDeletion(record.key)
+	}
+	return nil
+}
+
+func sortedImportIDs[T any](records map[string]T) []string {
+	ids := make([]string, 0, len(records))
+	for id := range records {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func cloneImportWorkspace(record localstore.WorkspaceRecord) (localstore.WorkspaceRecord, error) {
+	cloned := record
+	var err error
+	cloned.Snapshot, err = cloneImportSnapshot(record.Snapshot)
+	return cloned, err
+}
+
+func cloneImportCandidate(record *localstore.WorkspaceCandidateRecord) (*localstore.WorkspaceCandidateRecord, error) {
+	if record == nil {
+		return nil, nil
+	}
+	cloned := *record
+	var err error
+	cloned.DirectSnapshot, err = cloneImportSnapshot(record.DirectSnapshot)
+	if err != nil {
+		return nil, err
+	}
+	if record.RebasedSnapshot != nil {
+		rebased, err := cloneImportSnapshot(*record.RebasedSnapshot)
+		if err != nil {
+			return nil, err
+		}
+		cloned.RebasedSnapshot = &rebased
+	}
+	return &cloned, nil
+}
+
+func cloneImportSnapshot(snapshot state.Snapshot) (state.Snapshot, error) {
+	tree, err := state.EncodeTree(snapshot)
+	if err != nil {
+		return state.Snapshot{}, err
+	}
+	return state.DecodeTree(cloneCheckpointTree(tree))
+}
+
+func cloneImportDisposition(value localstore.WorkspaceMaterializationDisposition) localstore.WorkspaceMaterializationDisposition {
+	cloned := localstore.WorkspaceMaterializationDisposition{}
+	if value.Journals != nil {
+		cloned.Journals = make([]localstore.WorkspaceMaterializationRecord, len(value.Journals))
+		for index, journal := range value.Journals {
+			cloned.Journals[index] = cloneMaterializationRecord(journal)
+		}
+	}
+	if value.Operations != nil {
+		cloned.Operations = make([]localstore.WorkspaceOperation, len(value.Operations))
+		for index, operation := range value.Operations {
+			cloned.Operations[index] = cloneImportOperation(operation)
+		}
+	}
+	return cloned
+}
+
+func cloneImportOperation(value localstore.WorkspaceOperation) localstore.WorkspaceOperation {
+	cloned := value
+	cloned.OperationJSON = bytes.Clone(value.OperationJSON)
+	if value.StashedByStashID != nil {
+		owner := *value.StashedByStashID
+		cloned.StashedByStashID = &owner
+	}
+	return cloned
+}
+
+func cloneImportOccurrences(value []localstore.WorkspaceConflictOccurrence) []localstore.WorkspaceConflictOccurrence {
+	if value == nil {
+		return nil
+	}
+	cloned := make([]localstore.WorkspaceConflictOccurrence, len(value))
+	copy(cloned, value)
+	return cloned
+}
+
+func cloneImportConflicts(value []Conflict) []Conflict {
+	cloned := make([]Conflict, len(value))
+	for index, conflict := range value {
+		cloned[index] = conflict
+		cloned[index].Base.Value = bytes.Clone(conflict.Base.Value)
+		cloned[index].Ours.Value = bytes.Clone(conflict.Ours.Value)
+		cloned[index].Theirs.Value = bytes.Clone(conflict.Theirs.Value)
+	}
+	return cloned
+}
 
 // ValidateDirectDelta verifies that next is a permitted direct successor to
 // prior. It is pure: neither input is modified or retained.
