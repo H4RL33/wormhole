@@ -458,3 +458,17 @@ blocking findings. Focused reader/golden tests, full `internal/runtime/localstor
 agent's full localstore race evidence completed in 81.580s. No migration or schema change
 was introduced. Next: private RestoreStash proof helpers and `Service.RestoreStash` consume
 this exact reader.
+
+A4 workspace stash-restore planner `28d2fb6` (`feat: plan workspace stash restores`):
+causal RED first proved the private restore-plan/proof helpers were absent. The planner now
+strictly proves the stash binding, source/composed trees, replay envelope, replayed candidate,
+and complete operation audit before composing the current accepted/direct/rebased state and
+performing the semantic three-way rebase. It returns either a clean owned merged snapshot or
+conflicted result/evidence that retains the stash, rejects corrupt stash material and mismatched
+operation ownership, preserves sequential stash owners while ignoring disjoint terminal history,
+and deep-owns nested results. Requested adversarial additions cover swapped owner membership,
+sequential owners with terminal history, sparse active suffixes, wrong-side/nil audit rows, and
+nested-result aliasing. Fresh focused planner PASS, focused race PASS, full projectstate PASS
+at 85.4% statement coverage, `go vet ./...` PASS, and diff-check PASS. Fresh final review
+approved with no remaining blocking findings. This commit is the private planner/proof slice
+only; `Service.RestoreStash` and retry codec work remain outside it.
