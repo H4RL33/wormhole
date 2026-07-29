@@ -206,3 +206,25 @@ coverage is 81.7%. Review-driven gate routing now validates every selected open 
 one repository read snapshot, with no remaining Critical/Important findings. Runtime
 conflict semantic codec, materialization proof, Import, stash/restore, Git observation,
 branch guard, and the complete merged A4 coverage gate remain pending.
+
+A4 conflict semantic codec `61e8679`: genuine focused RED/GREEN, full projectstate,
+race, vet, and repository-wide tests GREEN; projectstate statement coverage was 85.1%.
+The immutable conflict payload now round-trips exact semantic conflicts and rejects
+non-canonical or aliased input. Fresh review found no Critical/Important issues.
+
+A4 materialization-reader foundation `b337af2`, following the frozen flow contract in
+`62ebb86`: genuine focused RED/GREEN, full-set validation before digest filtering,
+canonical trees/digests, exact binding and scope checks, safe paths/timestamps, opaque
+nullable raw envelopes, and alias-safe results. Full localstore and repository tests,
+race, and vet were GREEN; localstore statement coverage was 82.4%. Fresh review found
+no Critical/Important issues.
+
+A4 secure working-tree reader `01d1ae7`: genuine focused RED/GREEN plus review-driven
+TOCTOU hardening. Descriptor-relative no-follow reads now capture exact sorted
+`.wormhole`-relative bytes, reject symlinks/non-regular files/hardlinks/unsafe paths,
+bound enumeration, and verify exact cross-pass file and directory identity. Full
+projectstate and repository tests, race, vet, Darwin amd64/arm64 cross-builds, and the
+unsupported-platform build were GREEN; projectstate statement coverage was 84.0%.
+Fresh security re-review found no Critical/Important issues. Strict complete journal/
+operation disposition, materialization ownership proof, Import, stash/restore, Git
+observation, branch guard, and the complete merged A4 coverage gate remain pending.
