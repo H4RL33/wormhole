@@ -51,6 +51,7 @@ type Service struct {
 	registrationTimeout time.Duration
 	readWorkingTree     func(string) (state.Tree, error)
 	now                 func() time.Time
+	newStashID          func() (string, error)
 }
 
 func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service, error) {
@@ -59,7 +60,7 @@ func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service,
 	}
 	service := &Service{
 		repo: repo, registrationTimeout: workspaceRegistrationTimeout,
-		readWorkingTree: ReadWorkingTreeNoFollow, now: time.Now,
+		readWorkingTree: ReadWorkingTreeNoFollow, now: time.Now, newStashID: newCanonicalStashID,
 	}
 	if config.LegacyIntegrationBackupRoot == "" {
 		return service, nil
