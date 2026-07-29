@@ -325,3 +325,27 @@ strict present-stash preflight and TEXT-qualified exact delete fixed both; fresh
 approved with no remaining Critical, Important, or Minor findings. Focused/full
 localstore tests, race, and vet were GREEN; statement coverage was 82.9%, with formatting
 and diff checks clean. The next A4 tranche is the pure stash planner.
+
+A4 pure stash planner `07cb5bf`: causal REDs first exposed the absent planner API and
+then the accepted complete-inventory contract while the implementation still required
+two prefiltered row slices. The planner now receives one non-nil, complete operation
+inventory, validates globally ordered generations, unique canonical operation IDs and
+bytes, every state, and stash-owner metadata, and derives the absorbed
+`rebased <= boundary` prefix and later `active > boundary` suffix without omission. It
+rejects an active row at/below the boundary or a rebased row above it, validates but
+ignores terminal materialized/stashed/discarded audit rows, composes only the derived
+active suffix from the selected accepted/direct/rebased start, and returns only exact
+cloned transition memberships. An early Important review found that separate filtered
+readers could hide a wrong-side row; the complete-inventory correction and explicit
+hidden-row/terminal regression cases fixed that no-loss defect. A final Important review
+found missing successful accepted-source-plus-active and direct-candidate-plus-active
+shapes; real reducer-operation tests now cover both, with the direct case proving the
+operation fails from the accepted source and succeeds from the selected direct start.
+Fresh re-review approved the correction. Focused/full projectstate tests, race, and vet
+were GREEN; projectstate statement coverage was 85.2%, with formatting and diff checks
+clean. The next A4 tranche is the complete same-transaction `OperationAudit` localstore
+reader plus the localstore retry-reader seam required before `Service.Stash`.
+`OperationAudit` will return non-nil `WorkspaceOperationAuditRecord` values so
+`CreatedAt` remains available to `RestoreRetryState`; Stash must map every embedded
+`WorkspaceOperation` in returned order, without filtering and with equal cardinality,
+into the non-nil planner inventory while excluding `CreatedAt` from planner input.

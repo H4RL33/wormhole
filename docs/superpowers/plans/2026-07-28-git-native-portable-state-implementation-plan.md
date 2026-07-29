@@ -886,6 +886,7 @@ func (r *WorkspaceRepo) WithImmediateWorkspace(
 func (r *WorkspaceRepo) HasOpenConflicts(ctx context.Context, scope types.WorkspaceScope) (bool, error)
 func (tx *WorkspaceMutationTx) Workspace(ctx context.Context) (WorkspaceRecord, error)
 func (tx *WorkspaceMutationTx) Candidate(ctx context.Context) (*WorkspaceCandidateRecord, error)
+func (tx *WorkspaceMutationTx) OperationAudit(ctx context.Context) ([]WorkspaceOperationAuditRecord, error)
 func (tx *WorkspaceMutationTx) ActiveOperationsAfter(ctx context.Context, generation int64) ([]WorkspaceOperation, error)
 func (tx *WorkspaceMutationTx) NextGeneration(ctx context.Context) (int64, error)
 func (tx *WorkspaceMutationTx) InsertActiveOperations(ctx context.Context, operations []WorkspaceOperationInsert) error
@@ -903,6 +904,17 @@ are selected with `state='active' AND generation>? ORDER BY generation`. Runtime
 each row to `StoredOperation` only after `projectstate.DecodeOperation`, canonical-byte,
 row-ID, canonical UUID, positive generation, and exact state checks. The existing
 standalone `AppendWorkspaceOperation` is removed; it may not remain as a mutation bypass.
+`OperationAudit` instead returns a non-nil complete slice of
+`WorkspaceOperationAuditRecord` across active, rebased, materialized, stashed, and
+discarded states in stable increasing-generation order. Each record embeds the exact
+`WorkspaceOperation` and retains its `CreatedAt`. Before returning anything the reader
+validates every row's positive and globally increasing generation, globally unique
+canonical operation ID, canonical operation bytes, known state, state-appropriate
+stash-owner metadata, and timestamp; any corrupt row fails the complete read. Mutations
+that require no-loss classification, including Stash, must project every embedded
+operation in returned order without filtering or omission rather than composing
+separately filtered reads. `CreatedAt` remains retry/audit evidence and is not a planner
+input.
 `WorkspaceConflictGate` is declared in `internal/runtime/localstore`. The repository
 method binds both supplied scope components; the transaction method has no scope
 argument because it can query only the callback's already-bound exact workspace. Both
@@ -1898,44 +1910,28 @@ if tx.HasOpenConflicts(ctx):
   ROLLBACK and return StashResult{}, localstore.ErrWorkspaceConflicted
 candidate = tx.Candidate(ctx)
 (sourceBase, sourceBaseTree) = (workspace.Snapshot, canonical accepted tree)
-(selectedStart, initialThroughGeneration) = SelectExplicitStart(workspace.Snapshot, candidate)
-absorbedRows = tx.RebasedOperationsAtOrBefore(ctx, initialThroughGeneration) // ORDER BY generation
-laterRows = tx.ActiveOperationsAfter(ctx, initialThroughGeneration) // ORDER BY generation
-absorbedOperations = StrictDecodeStoredOperations(absorbedRows)
-laterOperations = StrictDecodeStoredOperations(laterRows)
-composed = Compose(selectedStart, initialThroughGeneration, laterOperations)
-sourceTree = EncodeFileList(sourceBaseTree)
-selectedStartTree = projectstate.EncodeTree(selectedStart)
-composedCanonicalTree = projectstate.EncodeTree(composed.Snapshot)
-composedTree = EncodeFileList(composedCanonicalTree)
-replayEnvelope = StashReplayV1{
-  SchemaVersion: 1,
-  SelectedStartTree: selectedStartTree,
-  SelectedStartDigest: selectedStart.Digest,
-  InitialThroughGeneration: initialThroughGeneration,
-  AbsorbedOperations: absorbedOperations,
-  Operations: laterOperations,
-}
-INSERT workspace_stashes(stash_id=stashID, source_tree=sourceTree,
-  composed_tree=composedTree,
-  operations_json=projectstate.CanonicalJSON(replayEnvelope),
-  through_generation=composed.ThroughGeneration,
-  source_base_digest=sourceBase.Digest,
-  candidate_digest=composed.Snapshot.Digest,
+auditRecords = tx.OperationAudit(ctx) // non-nil complete all-state records, stable order, strict rows
+operationInventory = make non-nil []WorkspaceOperation with capacity len(auditRecords)
+for auditRecord in auditRecords in returned order:
+  operationInventory.append(owned clone of auditRecord.WorkspaceOperation) // no filtering or omission
+require len(operationInventory) == len(auditRecords)
+// auditRecord.CreatedAt remains retained retry/audit evidence; it is not planner input
+plan = buildStashPlan(workspace.Binding, sourceBase, candidate, operationInventory)
+require plan.SourceTree == sourceBaseTree // canonical accepted semantic source evidence
+INSERT workspace_stashes(stash_id=stashID, source_tree=EncodeFileList(plan.SourceTree),
+  composed_tree=EncodeFileList(plan.ComposedTree),
+  operations_json=plan.OperationsJSON,
+  through_generation=plan.ThroughGeneration,
+  source_base_digest=plan.SourceDigest,
+  candidate_digest=plan.CandidateDigest,
   actor_json=CanonicalJSON(req.Actor), label=req.Label)
 DELETE workspace_candidates
-UPDATE workspace_overlay_operations SET state='stashed', stashed_by_stash_id=stashID
-  WHERE project_id=req.Scope.ProjectID AND workspace_id=req.Scope.WorkspaceID
-    AND generation <= initialThroughGeneration
-    AND state='rebased'
-UPDATE workspace_overlay_operations SET state='stashed', stashed_by_stash_id=stashID
-  WHERE project_id=req.Scope.ProjectID AND workspace_id=req.Scope.WorkspaceID
-    AND generation > initialThroughGeneration
-    AND generation <= composed.ThroughGeneration
-    AND state='active'
+tx.TransitionOperations(ctx, plan.AbsorbedRows, "stashed", &stashID) // exact preloaded membership
+tx.TransitionOperations(ctx, plan.LaterRows, "stashed", &stashID) // exact preloaded membership
 UPDATE workspace_bindings SET status='clean'
 INSERT canonical clean stash transition receipt with actor_json=CanonicalJSON(req.Actor)
-  and result StashID=stashID
+  and result StashID=stashID, SourceDigest=plan.SourceDigest,
+  CandidateDigest=plan.CandidateDigest, OperationCount=plan.OperationCount
 COMMIT
 if COMMIT result is indeterminate: return error wrapping ErrCommitOutcomeUnknown
 ~~~
@@ -1947,6 +1943,21 @@ selected Compose start is embedded as `SelectedStartTree` plus
 `operations_json` column. Strict decode requires schema version 1, non-nil absorbed and
 later operation arrays, an embedded tree that passes the file-list-equivalent path/order limits,
 `DecodeTree`, canonical re-encoding, digest, and exact project/repository binding checks.
+
+`OperationAudit` is the sole Stash operation source. It returns every exact-workspace row
+as a `WorkspaceOperationAuditRecord` in stable increasing-generation order and
+strict-validates global generation and operation-ID uniqueness, canonical operation
+bytes, state, owner metadata, and `CreatedAt` before the planner sees anything. Stash
+maps every record's embedded `WorkspaceOperation`, in order and with equal input/output
+cardinality, into a non-nil `[]WorkspaceOperation`; it performs no filtering or omission.
+`CreatedAt` remains retained in the audit record for `RestoreRetryState` and is not a
+`buildStashPlan` input. The planner derives all ownerless `rebased` rows at or below the
+selected boundary and all ownerless `active` rows above it, rejects any active row
+at/below the boundary or rebased row above it, and validates but ignores terminal
+`materialized`, `stashed`, and `discarded` rows. Stash must not use
+`RebasedOperationsAtOrBefore`, `ActiveOperationsAfter`, a pair of other filtered reads,
+or generation-range updates. Only the two exact cloned memberships returned by the
+planner may transition.
 
 The replay envelope's non-nil, strictly generation-sorted `AbsorbedOperations` array
 records every current candidate row already `state='rebased'` at or below the explicit
@@ -1964,8 +1975,8 @@ restore deletion of the stash row.
 Any exact-scope open conflict returns `StashResult{}` plus
 `localstore.ErrWorkspaceConflicted` and changes no candidate, operation, stash, conflict,
 receipt, or binding row. `StashResult.SourceDigest` is `sourceBase.Digest`, CandidateDigest is
-`composed.Snapshot.Digest`, and OperationCount is exactly
-`len(absorbedOperations)+len(laterOperations)`.
+`plan.CandidateDigest` (the composed snapshot digest), and OperationCount is exactly
+`len(plan.AbsorbedRows)+len(plan.LaterRows)` (the planner's `OperationCount`).
 
 RestoreStash first requires a valid scope, canonical request/stash UUIDs, and
 `Actor.ValidateLocalAction`, computes the canonical restore request digest, and opens one
@@ -2204,7 +2215,14 @@ Test restart byte equality for source_tree, composed_tree, and the canonical ver
 operations_json envelope, including the semantic source-base/selected-start split; clean
 restore onto a changed base; conflicting restore retains the complete stash/evidence
 while preserving candidate and every operation row; and restored operations do not fail
-stale whole-view preconditions. Add
+stale whole-view preconditions. Planner tests use real reducer operations and cover an
+accepted source plus active suffix, a direct candidate plus active suffix that cannot
+compose from the accepted source, a rebased candidate with an empty suffix, and a rebased
+candidate with sparse later generations. They pass one complete projected operation
+inventory, reject
+otherwise-hidden active rows at/below the boundary and rebased rows above it, and prove
+valid materialized/stashed/discarded terminal rows are strictly validated, preserved,
+and absent from replay and transition memberships. Add
 `TestStashAfterRebaseWithNoLaterOperationsPersistsBoundaryAcrossRestart`, proving an empty
 row list, `initial_through_generation == through_generation == G`, a selected-start tree
 that contains the absorbed prefix, a distinct accepted `source_tree`, and unchanged

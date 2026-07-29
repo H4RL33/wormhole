@@ -546,6 +546,22 @@ the same layering pattern and isolation discipline.
   rebase base. The existing `operations_json` column is a strict canonical
   `StashReplayV1` containing schema version, selected-start tree/digest, initial boundary,
   a non-nil absorbed-rebased prefix array, and a separate non-nil active suffix array.
+  Inside the same immediate transaction, Stash reads one non-nil complete
+  `OperationAudit` of `WorkspaceOperationAuditRecord` values containing every
+  exact-workspace operation in stable increasing-generation order across active, rebased,
+  materialized, stashed, and discarded states. Each record embeds its exact
+  `WorkspaceOperation` and retains `CreatedAt` for `RestoreRetryState`. The reader strictly
+  validates every row's positive generation, globally unique canonical operation ID,
+  canonical operation bytes, state, stash-owner metadata, and timestamp. Stash maps every
+  embedded operation in returned order into a non-nil `[]WorkspaceOperation`, preserving
+  count and performing no filtering or omission, then passes only that operation inventory
+  to `buildStashPlan`; `CreatedAt` is not a planner input. The planner
+  derives all ownerless rebased rows at/below the selected boundary and all ownerless
+  active rows above it, rejects active rows at/below the boundary and rebased rows above
+  it, and validates but ignores terminal materialized/stashed/discarded rows. Only the
+  two exact cloned memberships returned by the planner may be passed to
+  `TransitionOperations`; filtered stash readers and generation-range updates are
+  forbidden.
   All and only rows attributed by `stashed_by_stash_id` must match those arrays byte for
   byte. Portable transitions own Gateway
   migration `000002_portable_transitions.sql` and `GatewaySchemaVersion = 2`; committed

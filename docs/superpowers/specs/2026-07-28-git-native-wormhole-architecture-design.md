@@ -444,6 +444,21 @@ the accepted snapshot. A strict canonical `StashReplayV1` in the existing operat
 column records schema version, the exact selected composition start tree/digest, its
 explicit initial through-generation, the absorbed rebased prefix, and active operations
 above that boundary.
+Stash obtains those memberships from one same-transaction, non-nil complete operation
+audit, not separate filtered reads. The audit contains every exact-workspace active,
+rebased, materialized, stashed, and discarded row as a stable
+increasing-generation sequence of records that embed the exact operation and retain its
+creation time. It fails closed on any invalid generation, duplicate or noncanonical
+operation identity, noncanonical operation bytes, unknown state, invalid owner metadata,
+or invalid timestamp. Stash maps every embedded operation, in returned order and without
+filtering or omission, into a non-nil count-preserving operation inventory for the pure
+planner. Audit creation times remain retry evidence and are not planner inputs. The
+planner derives ownerless rebased rows at/below the selected boundary and ownerless active
+rows above it, and rejects active rows at/below the boundary or rebased rows above it.
+Terminal materialized/stashed/discarded rows are strictly validated but remain unchanged
+and do not enter the replay or transition sets.
+Only the planner's exact derived cloned memberships transition; filtered reads and
+generation-range updates cannot define Stash ownership.
 Already-rebased rows at or below the boundary move to terminal stashed state because
 their effect is in the selected start tree; they appear in a non-nil absorbed-prefix
 array, while later active rows appear in a separate non-nil suffix array. All and only
@@ -1141,8 +1156,12 @@ legacy or unknown until explicitly linked.
   plus both-side evidence atomically, reproduces it after restart, and blocks checkpoint
   and writable Fabric delivery until explicit resolution.
 - Stash restart tests distinguish semantic source base from selected replay start, cover
-  a rebased start with no later operations and with an absorbed rebased prefix plus only
-  later active operations, and
+  accepted and direct selected starts with real active reducer-operation suffixes, a
+  rebased start with no later operations, and an absorbed rebased prefix plus only later
+  active operations. The direct-start case proves its suffix cannot compose from the
+  accepted source. Complete-audit tests reject otherwise-hidden active rows at/below the
+  boundary and rebased rows above it while proving valid terminal
+  materialized/stashed/discarded rows are validated, preserved, and ignored. Restart tests
   prove the absorbed prefix plus later operations survive clean and conflicting paths.
   They also cover strict boundary/envelope/current-row corruption, open-conflict rejection
   with zero mutation, exact clean/pending/conflicted statuses, and read-only repeated
