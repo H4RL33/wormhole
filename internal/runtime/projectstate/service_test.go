@@ -3,9 +3,11 @@ package projectstate
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1250,12 +1252,14 @@ func insertServiceCandidate(t *testing.T, store *localstore.Store, scope types.W
 
 func insertServiceConflict(t *testing.T, store *localstore.Store, scope types.WorkspaceScope, conflictID string, key state.RecordKey, conflictState string) {
 	t.Helper()
+	digest := sha256.Sum256([]byte(conflictID))
+	semanticID := fmt.Sprintf("sha256:%x", digest)
 	if _, err := store.DB().Exec(`
 		INSERT INTO workspace_conflicts
 		(project_id, workspace_id, occurrence_id, conflict_id, record_kind, record_id, field_path,
 		 conflict_kind, base_json, ours_json, theirs_json, state)
 		VALUES (?, ?, ?, ?, ?, ?, '/title', 'same_field', '{}', '{}', '{}', ?)
-	`, scope.ProjectID, scope.WorkspaceID, conflictID, conflictID, key.Kind, key.ID, conflictState); err != nil {
+	`, scope.ProjectID, scope.WorkspaceID, semanticID, semanticID, key.Kind, key.ID, conflictState); err != nil {
 		t.Fatal(err)
 	}
 }

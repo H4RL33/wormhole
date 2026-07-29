@@ -3,6 +3,7 @@ package localstore
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -183,6 +184,59 @@ func TestWorkspaceRepoHasOpenConflictsQueryFailure(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRepoHasOpenConflictsAbsentAndInvalidScopes(t *testing.T) {
+	_, repo := openWorkspaceStore(t)
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+	if got, err := repo.HasOpenConflicts(context.Background(), binding.Scope); err != nil || got {
+		t.Fatalf("registered no-open gate=(%v,%v), want (false,nil)", got, err)
+	}
+	var nilRepo *WorkspaceRepo
+	for _, test := range []struct {
+		name  string
+		repo  *WorkspaceRepo
+		scope types.WorkspaceScope
+	}{
+		{name: "nil repo", repo: nilRepo, scope: binding.Scope},
+		{name: "nil database", repo: &WorkspaceRepo{}, scope: binding.Scope},
+		{name: "invalid project", repo: repo, scope: types.WorkspaceScope{ProjectID: "BAD", WorkspaceID: binding.Scope.WorkspaceID}},
+		{name: "invalid workspace", repo: repo, scope: types.WorkspaceScope{ProjectID: binding.Scope.ProjectID, WorkspaceID: "BAD"}},
+		{name: "unregistered scope", repo: repo, scope: types.WorkspaceScope{ProjectID: "00000000-0000-4000-8000-000000000099", WorkspaceID: "00000000-0000-4000-8000-000000000098"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got, err := test.repo.HasOpenConflicts(context.Background(), test.scope); !errors.Is(err, ErrNotFound) || got {
+				t.Fatalf("HasOpenConflicts invalid=(%v,%v), want (false,ErrNotFound)", got, err)
+			}
+		})
+	}
+}
+
+func TestWorkspaceConflictGatesFailClosedOnCorruptOpenEvidence(t *testing.T) {
+	store, repo := openWorkspaceStore(t)
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+	key := state.RecordKey{Kind: "task", ID: "00000000-0000-4000-8000-000000000021"}
+	insertWorkspaceConflict(t, store, binding.Scope, "corrupt-gate-evidence", key, "open")
+	if _, err := store.DB().Exec(`
+		UPDATE workspace_conflicts SET base_json=''
+		WHERE project_id=? AND workspace_id=?
+	`, binding.Scope.ProjectID, binding.Scope.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := repo.HasOpenConflicts(context.Background(), binding.Scope); err == nil || got {
+		t.Fatalf("repo corrupt conflict gate=(%v,%v), want (false,error)", got, err)
+	}
+	if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		if got, err := tx.HasOpenConflicts(context.Background()); err == nil || got {
+			t.Fatalf("tx corrupt conflict gate=(%v,%v), want (false,error)", got, err)
+		}
+		if got, err := tx.HasOpenConflictForKeys(context.Background(), []state.RecordKey{key}); err == nil || got {
+			t.Fatalf("key corrupt conflict gate=(%v,%v), want (false,error)", got, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestWorkspaceMutationTxHasOpenConflictsExactScope(t *testing.T) {
 	store, repo := openWorkspaceStore(t)
 	a := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout-a", 1, 11)
@@ -201,7 +255,9 @@ func TestWorkspaceMutationTxHasOpenConflictsExactScope(t *testing.T) {
 			INSERT INTO workspace_conflicts
 			(project_id, workspace_id, occurrence_id, conflict_id, record_kind, record_id, field_path,
 			 conflict_kind, base_json, ours_json, theirs_json, state)
-			VALUES (?, ?, 'conflict-a-open', 'conflict-a-open', 'task', ?, '/title', 'same_field', '{}', '{}', '{}', 'open')
+			VALUES (?, ?, '00000000-0000-4000-8000-000000000031',
+			 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+			 'task', ?, '/title', 'same_field', '{}', '{}', '{}', 'open')
 		`, a.Scope.ProjectID, a.Scope.WorkspaceID, "00000000-0000-4000-8000-000000000022")
 		if err != nil {
 			return err
@@ -273,7 +329,9 @@ func TestWorkspaceMutationTxHasOpenConflictForKeys(t *testing.T) {
 			INSERT INTO workspace_conflicts
 			(project_id, workspace_id, occurrence_id, conflict_id, record_kind, record_id, field_path,
 			 conflict_kind, base_json, ours_json, theirs_json, state)
-			VALUES (?, ?, 'conflict-transaction-open', 'conflict-transaction-open', ?, ?, '', 'immutable_record', '{}', '{}', '{}', 'open')
+			VALUES (?, ?, '00000000-0000-4000-8000-000000000032',
+			 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+			 ?, ?, '', 'immutable_record', '{}', '{}', '{}', 'open')
 		`, binding.Scope.ProjectID, binding.Scope.WorkspaceID, transactionKey.Kind, transactionKey.ID)
 		if err != nil {
 			return err
@@ -1938,12 +1996,14 @@ func withOperationIdentity(operation WorkspaceOperation, operationID string, ope
 
 func insertWorkspaceConflict(t *testing.T, store *Store, scope types.WorkspaceScope, conflictID string, key state.RecordKey, conflictState string) {
 	t.Helper()
+	digest := sha256.Sum256([]byte(conflictID))
+	semanticID := fmt.Sprintf("sha256:%x", digest)
 	_, err := store.DB().Exec(`
 		INSERT INTO workspace_conflicts
 		(project_id, workspace_id, occurrence_id, conflict_id, record_kind, record_id, field_path,
 		 conflict_kind, base_json, ours_json, theirs_json, state)
 		VALUES (?, ?, ?, ?, ?, ?, '/title', 'same_field', '{}', '{}', '{}', ?)
-	`, scope.ProjectID, scope.WorkspaceID, conflictID, conflictID, key.Kind, key.ID, conflictState)
+	`, scope.ProjectID, scope.WorkspaceID, semanticID, semanticID, key.Kind, key.ID, conflictState)
 	if err != nil {
 		t.Fatalf("insert workspace conflict: %v", err)
 	}

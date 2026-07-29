@@ -116,38 +116,43 @@ func (r *WorkspaceRepo) HasOpenConflicts(ctx context.Context, scope types.Worksp
 	if r == nil || r.db == nil || !validWorkspaceScope(scope) {
 		return false, ErrNotFound
 	}
-	if _, _, err := queryWorkspaceByScope(ctx, r.db, scope); errors.Is(err, sql.ErrNoRows) {
+	conn, err := r.db.Conn(ctx)
+	if err != nil {
+		return false, fmt.Errorf("localstore: acquire conflict read connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN`); err != nil {
+		return false, fmt.Errorf("localstore: begin conflict read snapshot: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+	if _, _, err := queryWorkspaceByScope(ctx, conn, scope); errors.Is(err, sql.ErrNoRows) {
 		return false, ErrNotFound
 	} else if err != nil {
 		return false, fmt.Errorf("localstore: verify conflict workspace: %w", err)
 	}
-	var exists bool
-	if err := r.db.QueryRowContext(ctx, `
-		SELECT EXISTS(
-			SELECT 1 FROM workspace_conflicts
-			WHERE project_id=? AND workspace_id=? AND state='open'
-		)
-	`, scope.ProjectID, scope.WorkspaceID).Scan(&exists); err != nil {
-		return false, fmt.Errorf("localstore: query open workspace conflicts: %w", err)
+	occurrences, err := (&WorkspaceMutationTx{conn: conn, scope: scope}).OpenConflictOccurrences(ctx)
+	if err != nil {
+		return false, err
 	}
-	return exists, nil
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return false, fmt.Errorf("localstore: commit conflict read snapshot: %w", err)
+	}
+	committed = true
+	return len(occurrences) != 0, nil
 }
 
 // HasOpenConflicts reports only unresolved evidence in this transaction's scope.
 func (tx *WorkspaceMutationTx) HasOpenConflicts(ctx context.Context) (bool, error) {
-	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
-		return false, ErrNotFound
+	occurrences, err := tx.OpenConflictOccurrences(ctx)
+	if err != nil {
+		return false, err
 	}
-	var exists bool
-	if err := tx.conn.QueryRowContext(ctx, `
-		SELECT EXISTS(
-			SELECT 1 FROM workspace_conflicts
-			WHERE project_id=? AND workspace_id=? AND state='open'
-		)
-	`, tx.scope.ProjectID, tx.scope.WorkspaceID).Scan(&exists); err != nil {
-		return false, fmt.Errorf("localstore: query open workspace conflicts: %w", err)
-	}
-	return exists, nil
+	return len(occurrences) != 0, nil
 }
 
 // Workspace returns the strictly decoded workspace bound to this transaction.
@@ -634,33 +639,16 @@ func (tx *WorkspaceMutationTx) HasOpenConflictForKeys(ctx context.Context, keys 
 		}
 		targets[key] = struct{}{}
 	}
-	rows, err := tx.conn.QueryContext(ctx, `
-		SELECT record_kind, record_id
-		FROM workspace_conflicts
-		WHERE project_id=? AND workspace_id=? AND state='open'
-		ORDER BY conflict_id
-	`, tx.scope.ProjectID, tx.scope.WorkspaceID)
+	occurrences, err := tx.OpenConflictOccurrences(ctx)
 	if err != nil {
-		return false, fmt.Errorf("localstore: query open conflict keys: %w", err)
+		return false, err
 	}
-	defer rows.Close()
-	matched := false
-	for rows.Next() {
-		var key projectstate.RecordKey
-		if err := rows.Scan(&key.Kind, &key.ID); err != nil {
-			return false, fmt.Errorf("localstore: scan open conflict key: %w", err)
-		}
-		if !validConflictRecordKey(tx.scope, key) {
-			return false, fmt.Errorf("localstore: malformed open conflict key %+v", key)
-		}
-		if _, ok := targets[key]; ok {
-			matched = true
+	for _, occurrence := range occurrences {
+		if _, ok := targets[occurrence.Key]; ok {
+			return true, nil
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("localstore: iterate open conflict keys: %w", err)
-	}
-	return matched, nil
+	return false, nil
 }
 
 func (tx *WorkspaceMutationTx) validateWorkspaceOperationMetadata(ctx context.Context) error {
