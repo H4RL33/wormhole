@@ -22,9 +22,9 @@
 - Code Graph is private, derivative, per checkout, model-free, vector-free, and offline by default. It persists no source body and never writes into the approved checkout.
 - Linux service lifecycle uses systemd-user only when usable. Unsupported/no-manager returns exactly: gatewayd service manager unavailable; start gatewayd manually.
 - Connector mutation is allowed only when the existing entry is absent or a fully reconstructable stdio entry. HTTP/SSE, OAuth, literal/env header variants, hidden-scope duplicates, unknown versions, and ambiguous output fail closed before backup or mutation.
-- Setup journals and connector backups are 0600 machine-private files; journals contain no raw credential. Connector backup contents are never logged or returned.
+- Setup journals and connector backups are 0600 machine-private files; journals contain no raw credential. The one deliberate PII-not-secret exception is the final confirmed identity display name and optional email needed for crash-safe execution; it remains owner-private and is never logged or returned by a public API. Connector backup contents are never logged or returned.
 - Interactive setup renders one complete plan and confirms once before any external mutation; the finalized optional journal selection is durable before service, Gateway, identity, connector, Fabric, graph, user-config, or repository effects.
-- Confirmation persists only config-owned SHA-256 plan/prior/desired digests plus safe action metadata. Resume never derives an unconfirmed action; drift fails with `ErrConfirmedPlanDrift` and zero external mutation.
+- Confirmation persists config-owned SHA-256 plan/prior/desired digests, safe action metadata, and the required bounded `ConfirmedIdentitySelection`. Resume never derives an unconfirmed action; drift fails with `ErrConfirmedPlanDrift` and performs zero write of any kind, including no journal error update.
 - Private setup/connector stores enforce effective-UID ownership and exact modes on Unix. V1 explicitly returns `ErrPrivateStateUnsupported` on non-Unix rather than claiming unimplemented ACL equivalence.
 - The public Codex desired command is exactly codex mcp add wormhole -- /absolute/path/to/wormhole mcp.
 - Keep merged statement coverage at or above 80 percent. Every task follows RED, GREEN, focused verification, then one explicit commit.
@@ -91,8 +91,9 @@ const (
 | Path | Responsibility |
 | --- | --- |
 | internal/runtime/localapi/workspace.go | Extend Slice A handlers with private context binding; keep public schemas machine-ID-free. |
-| internal/runtime/localidentity | Owner-only human, Ed25519 key, durable agent, selection, and connection-session records. |
+| internal/runtime/localidentity | Owner-only human, Ed25519 key, durable agent, selection, connection-session, and setup-intent receipt records. |
 | internal/runtime/localapi/actor.go | Resolve CLI selection and MCP clientInfo into server-owned local ActorEnvelope values. |
+| internal/runtime/localapi/setup.go | Private, non-MCP setup-control RPCs for journal-keyed identity execution and cached graph inspection. |
 | internal/runtime/localapi/request_scope.go | Strip bridge context and attach one validated binding to request context. |
 | cmd/wormhole/mcp.go | Observe cwd and inject bridge-only context. |
 | cmd/gatewayd/gatewayd.go | Construct all local dependencies and recover one supervisor. |
@@ -102,7 +103,7 @@ const (
 | cmd/gatewayd/codegraph_worker.go | Hidden child-process entrypoint over inherited private configuration. |
 | internal/runtime/config/command.go | Shared no-shell, bounded-output command runner for service, Git identity, and connector primitives. |
 | internal/runtime/config/service*.go | systemd-user lifecycle primitive or exact manual-start diagnostic. |
-| internal/runtime/config/setup_journal.go | Durable setup stages and connector backup references only. |
+| internal/runtime/config/setup_journal.go | Durable setup stages, required confirmed identity execution intent, digests, and connector backup references. |
 | internal/runtime/config/identity_suggestion.go | Read-only Git suggestions/attestation request. |
 | internal/runtime/config/connector | Full transactional adapter contract and Codex/Claude implementations. |
 | cmd/wormhole/setup.go | Human interaction, setup orchestration, and Gateway RPC calls. |
@@ -113,12 +114,19 @@ const (
 
 **Files:**
 
+- Modify: internal/types/identity.go
+- Modify: internal/types/identity_test.go
 - Create: internal/runtime/localidentity/store.go
 - Create: internal/runtime/localidentity/files.go
 - Create: internal/runtime/localidentity/keys.go
+- Create: internal/runtime/localidentity/setup.go
 - Create: internal/runtime/localidentity/store_test.go
+- Create: internal/runtime/localidentity/setup_test.go
 - Create: internal/runtime/localapi/actor.go
 - Create: internal/runtime/localapi/actor_test.go
+- Create: internal/runtime/localapi/setup.go
+- Create: internal/runtime/localapi/setup_test.go
+- Modify: internal/runtime/localapi/localapi.go
 - Modify: internal/runtime/localapi/mcp.go
 - Modify: internal/runtime/localapi/mcp_test.go
 - Modify: docs/implementation-rules.md
@@ -126,6 +134,22 @@ const (
 **Produces:**
 
 ~~~go
+// package internal/types
+const (
+    ConfirmedIdentityActionEnsureSelected = "ensure-selected"
+    ConfirmedIdentityKeyPolicyEnsureEd25519 = "ensure-ed25519"
+    MaxConfirmedIdentityDisplayNameBytes = 128
+    MaxConfirmedIdentityEmailBytes = 254
+)
+type ConfirmedIdentitySelection struct {
+    Action string `json:"action"`
+    DisplayName string `json:"display_name"`
+    Email string `json:"email,omitempty"`
+    KeyPolicy string `json:"key_policy"`
+}
+func (s ConfirmedIdentitySelection) Validate() error
+
+// package internal/runtime/localidentity
 type HumanProfile struct {
     SchemaVersion int `json:"schema_version"`
     HumanPrincipalID string `json:"human_principal_id"`
@@ -164,16 +188,31 @@ func (s *Store) StartHumanSession(context.Context, string, string) (ConnectionSe
 func (s *Store) StartAgentSession(context.Context, AgentProfile, MCPClientInfo) (ConnectionSession, error)
 func (s *Store) Session(context.Context, string) (ConnectionSession, error)
 func (s *Store) Sign(context.Context, string, []byte) ([]byte, error)
+var ErrSetupIdentityConflict = errors.New("local identity: setup intent conflict")
+func (s *Store) EnsureSelectedForSetup(
+    context.Context, string, types.ConfirmedIdentitySelection,
+) (HumanProfile, error)
 
+// package internal/runtime/localapi
 type LocalActorResolver struct { /* localidentity store plus UTC clock */ }
 func NewLocalActorResolver(*localidentity.Store, string) (*LocalActorResolver, error)
 func (r *LocalActorResolver) SelectLocalIdentity(context.Context, string) error
 func (r *LocalActorResolver) ResolveCLI(context.Context) (types.ActorEnvelope, error)
 func (r *LocalActorResolver) OpenMCP(context.Context, MCPClientInfo) (string, error)
 func (r *LocalActorResolver) ResolveMCP(context.Context, string) (types.ActorEnvelope, error)
+func (r *LocalActorResolver) EnsureSelectedForSetup(
+    context.Context, string, types.ConfirmedIdentitySelection,
+) (localidentity.HumanProfile, error)
+const PrivateSetupEnsureIdentityRPC = "wormhole.private.setup.ensure_identity"
 ~~~
 
-The root is dataHome/wormhole/identities, mode 0700. Profiles, the selected-human pointer, agents, and sessions are canonical JSON files written by temp-file/fsync/rename/fsync-dir with mode 0600. Each human has identity.ed25519.public and identity.ed25519.private outside every repository; both local copies are 0600, the private file is PKCS#8 PEM, and only Sign reads it. CreateHuman uses crypto/ed25519 and crypto/rand. Human, agent, and session IDs are canonical UUIDs generated from crypto/rand. EnsureAgent is idempotent and unique by accountable-human UUID plus normalized harness name; a version change creates a new session, not a new durable agent.
+`ConfirmedIdentitySelection.Validate` accepts only action `ensure-selected` and key policy `ensure-ed25519`. `DisplayName` must be valid UTF-8, 1-128 bytes, equal to its `strings.TrimSpace` result, contain no repeated spaces, and use only Unicode letters/marks/numbers, ASCII space, apostrophe, typographic apostrophe, hyphen, period, comma, or parentheses. Reject case-insensitive credential/key sentinels (`private key`, `token`, `password`, `secret`, `credential`, `authorization`, `bearer`, and PEM begin/end markers) as well. Together those rules exclude `/`, `\\`, `:`, `=`, `@`, JSON delimiters, control characters, PEM text, assignments, credential/path encodings, and raw Git-config syntax. `Email` is absent or 3-254 bytes, contains no control/whitespace, and `mail.ParseAddress` must return the identical address with no display phrase. Validation never normalizes a different value: the displayed value the human confirms is the canonical execution value.
+
+The root is dataHome/wormhole/identities, mode 0700. Profiles, the selected-human pointer, setup-intent receipts, agents, and sessions are canonical JSON files written by temp-file/fsync/rename/fsync-dir with mode 0600. Each human has identity.ed25519.public and identity.ed25519.private outside every repository; both local copies are 0600, the private file is PKCS#8 PEM, and only Sign reads it. CreateHuman uses crypto/ed25519 and crypto/rand. Human, agent, and session IDs are canonical UUIDs generated from crypto/rand; the setup API accepts but never generates Task 8's canonical journal UUID. EnsureAgent is idempotent and unique by accountable-human UUID plus normalized harness name; a version change creates a new session, not a new durable agent.
+
+`EnsureSelectedForSetup` is the sole setup identity mutation. Under the identity-store cross-process lock it validates the journal UUID and confirmed selection, then uses `setup-intents/<journal UUID>.json` as a durable idempotency receipt. A matching completed receipt reloads the same human profile, verifies the same Ed25519 public/private key pair, reselects it idempotently, and returns only the public profile. A receipt with a different selection returns `ErrSetupIdentityConflict` before mutation and without echoing either value. For a new receipt, reuse the selected exact valid profile; otherwise reuse one unique exact valid profile; if two or more unselected exact profiles exist, return `ErrSetupIdentityConflict` without a write; if none exists, reserve one new human UUID. Durably write that UUID and the exact confirmed selection to the receipt before creating its key; key creation is create-if-absent at that UUID, so recovery derives the same public key from the same private key rather than generating a replacement. Then durably write/verify the profile, selected-human pointer, and completed receipt in order. Recovery completes any prefix under the same lock. No crash point can create a second human, change the profile/key, or select a different human.
+
+`PrivateSetupEnsureIdentityRPC` is a same-user Gateway setup-control method, not an MCP tool and absent from `tools/list`, public contract manifests, logs, and normal status output. It accepts only setup journal UUID plus `types.ConfirmedIdentitySelection`, calls the resolver method above, and returns the resulting public `HumanProfile`; it never returns the confirmed selection, private key, signature, receipt path, raw Git config, or credential material.
 
 ResolveCLI uses the selected human and opens a wormhole-cli/version session; it returns ActorHuman, the selected HumanPrincipalID, assurance local, session/harness, and current UTC time. OpenMCP accepts only initialize clientInfo name/version/model metadata, rejects actor/human/agent/session/assurance claims, resolves the selected human, ensures that human's harness agent, and persists a fresh connection session. ResolveMCP reconstructs ActorAgent with that server-owned AgentID, AccountableHumanID, SessionID, harness/model fields, assurance local, and fresh OccurredAt. No issuance path emits legacy, unknown, public-key-continuity, or private-authenticated assurance. Private key bytes/paths never enter an ActorEnvelope, log, Git tree, MCP response, or tracked actor record.
 
@@ -207,24 +246,67 @@ func TestNewActorIssuanceCannotUseLegacyUnknownOrSecrets(t *testing.T) {
     if bytes.Contains(encoded, privateKeyBytes(t,resolver)) || bytes.Contains(encoded, []byte("identity.ed25519.private")) { t.Fatalf("envelope=%s",encoded) }
     assertNoIdentitySecretLoggedOrWrittenToRepo(t,resolver)
 }
+func TestConfirmedIdentitySelectionValidationIsStrictAndBounded(t *testing.T) {
+    valid := types.ConfirmedIdentitySelection{Action:"ensure-selected",DisplayName:"Alice Example",Email:"alice@example.test",KeyPolicy:"ensure-ed25519"}
+    if err := valid.Validate(); err != nil { t.Fatal(err) }
+    for _, invalid := range invalidConfirmedIdentitySelections(valid) {
+        if err := invalid.Validate(); err == nil { t.Fatalf("accepted=%+v",invalid) }
+    }
+    for _, forbidden := range []string{"/home/alice/.ssh/id_ed25519",`C:\\Users\\alice\\credentials`,"TOKEN=visible","user.name=Alice","-----BEGIN PRIVATE KEY-----"} {
+        changed := valid
+        changed.DisplayName = forbidden
+        if err := changed.Validate(); err == nil { t.Fatalf("forbidden display name accepted=%q",forbidden) }
+    }
+}
+func TestSetupIdentitySurvivesRealProcessCrashAndReopen(t *testing.T) {
+    for _, point := range []string{"receipt-durable","key-durable","profile-durable","selected-durable","completed-durable"} {
+        fixture := onDiskSetupIdentityFixture(t)
+        fixture.RunHelperProcessUntilHardExit(point) // child reads the owner-only on-disk request fixture
+        reopened := mustOpenIdentityStore(t,fixture.Root)
+        first, err := reopened.EnsureSelectedForSetup(t.Context(),fixture.JournalID,fixture.Selection)
+        if err != nil { t.Fatalf("%s: %v",point,err) }
+        reopenedAgain := mustOpenIdentityStore(t,fixture.Root)
+        second, err := reopenedAgain.EnsureSelectedForSetup(t.Context(),fixture.JournalID,fixture.Selection)
+        if err != nil || !reflect.DeepEqual(first,second) { t.Fatalf("%s first=%+v second=%+v err=%v",point,first,second,err) }
+        fixture.AssertExactlyOneHumanAndSamePrivateKey(first.HumanPrincipalID)
+    }
+}
+func TestSetupIdentityIntentMismatchFailsWithoutWrite(t *testing.T) {
+    store,fixture := setupIdentityFixture(t)
+    _, _ = store.EnsureSelectedForSetup(t.Context(),fixture.JournalID,fixture.Selection)
+    before := fixture.IdentityTreeBytes()
+    _, err := store.EnsureSelectedForSetup(t.Context(),fixture.JournalID,fixture.DifferentSelection())
+    if !errors.Is(err,ErrSetupIdentityConflict) || !bytes.Equal(before,fixture.IdentityTreeBytes()) { t.Fatalf("err=%v",err) }
+
+    ambiguous := setupIdentityFixtureWithTwoUnselectedExactHumans(t)
+    ambiguousBefore := ambiguous.IdentityTreeBytes()
+    _, err = ambiguous.Store.EnsureSelectedForSetup(t.Context(),ambiguous.JournalID,ambiguous.Selection)
+    if !errors.Is(err,ErrSetupIdentityConflict) || !bytes.Equal(ambiguousBefore,ambiguous.IdentityTreeBytes()) { t.Fatalf("ambiguous err=%v",err) }
+}
+func TestPrivateSetupIdentityRPCIsNotAnMCPTool(t *testing.T) {
+    server := setupControlFixture(t)
+    got := callPrivateSetupIdentityRPC(t,server,server.JournalID,server.Selection)
+    if got.HumanPrincipalID == "" || slices.Contains(server.MCPToolNames(),PrivateSetupEnsureIdentityRPC) { t.Fatalf("got=%+v tools=%v",got,server.MCPToolNames()) }
+    server.AssertConfirmedIdentityAbsentFromLogsAndPublicResponses()
+}
 ~~~
 
-Run: go test ./internal/runtime/localidentity ./internal/runtime/localapi -run 'Test(LocalIdentity|MCPActor|CLIActor|NewActorIssuance|IdentityKey)' -count=1
+Run: go test ./internal/types ./internal/runtime/localidentity ./internal/runtime/localapi -run 'Test(ConfirmedIdentity|LocalIdentity|SetupIdentity|PrivateSetupIdentity|MCPActor|CLIActor|NewActorIssuance|IdentityKey)' -count=1
 
 Expected: FAIL because the store and resolver are absent.
 
 - [ ] **Step 2: Implement the file store and resolver, then run GREEN.**
 
-Run: go test ./internal/runtime/localidentity ./internal/runtime/localapi -run 'Test(LocalIdentity|MCPActor|CLIActor|NewActorIssuance|IdentityKey)' -count=1
+Run: go test ./internal/types ./internal/runtime/localidentity ./internal/runtime/localapi -run 'Test(ConfirmedIdentity|LocalIdentity|SetupIdentity|PrivateSetupIdentity|MCPActor|CLIActor|NewActorIssuance|IdentityKey)' -count=1
 
-Expected: PASS across close/reopen, mode, sign/verify, human+harness isolation, initialize-forgery, local-assurance, and no-secret assertions.
+Expected: PASS across real helper-process crash/reopen at every identity receipt/key/profile/selection boundary, same-profile/key idempotency, mismatch/ambiguity no-write conflicts, private-RPC exclusion, mode, sign/verify, human+harness isolation, initialize-forgery, local-assurance, and no-secret assertions.
 
 - [ ] **Step 3: Update the module map and commit.**
 
 Add internal/runtime/localidentity as internal/types+stdlib-only and state that only localapi constructs ActorEnvelope values from it.
 
 ~~~bash
-git add internal/runtime/localidentity internal/runtime/localapi/actor.go internal/runtime/localapi/actor_test.go internal/runtime/localapi/mcp.go internal/runtime/localapi/mcp_test.go docs/implementation-rules.md
+git add internal/types/identity.go internal/types/identity_test.go internal/runtime/localidentity internal/runtime/localapi/actor.go internal/runtime/localapi/actor_test.go internal/runtime/localapi/setup.go internal/runtime/localapi/setup_test.go internal/runtime/localapi/localapi.go internal/runtime/localapi/mcp.go internal/runtime/localapi/mcp_test.go docs/implementation-rules.md
 git commit -m "feat(runtime): persist accountable local identities"
 ~~~
 
@@ -653,10 +735,11 @@ git commit -m "feat(codegraph): scope databases by workspace"
 - Modify: cmd/gatewayd/main.go
 - Modify: internal/runtime/localapi/localapi.go
 - Modify: internal/runtime/localapi/codegraph.go
-- Create: internal/runtime/localapi/codegraph_setup_test.go
+- Modify: internal/runtime/localapi/setup.go
+- Modify: internal/runtime/localapi/setup_test.go
 - Modify: docs/implementation-rules.md
 
-**Consumes:** Task 3 Scope/store and existing index/query services.
+**Consumes:** Task 0's private setup-control RPC file and Task 3 Scope/store plus existing index/query services.
 
 **Produces:**
 
@@ -707,13 +790,16 @@ func (m *Manager) Query(context.Context, codegraphconfig.Scope, query.Request) (
 func (m *Manager) Rebuild(context.Context, codegraphconfig.Scope) (Status, error)
 func (m *Manager) Disable(context.Context, codegraphconfig.Scope) error
 func (m *Manager) Recover(context.Context, codegraphconfig.Scope) error
+
+// package internal/runtime/localapi
+const PrivateSetupInspectCodeGraphRPC = "wormhole.private.setup.inspect_code_graph"
 ~~~
 
 These declarations live in package codegraphmanager. Worker protocol structs are private wire records converted by Manager and may not define another exported Status. `Inspection.CachedStatus` is only the last durable status projection already present in the per-workspace database; it does not claim recomputed freshness. localapi status/rebuild responses are projections of codegraphmanager.Status without inventing a lifecycle type.
 
 Each workspace uses dataHome/wormhole/codegraph/workspace-ID.db and runtimeRoot/wormhole/codegraph/workspace-ID.sock. Manager starts a child on first status/query/rebuild, passes scope over an inherited private descriptor, and communicates over the owner-only socket. The hidden child entrypoint activates only when the inherited descriptor and internal marker both validate; ordinary gatewayd still accepts no arguments.
 
-`InspectCached` reads only the durable preference/config row, last cached status fields, and the manager process table; it never calls the child-start path, opens a worker socket, recomputes fingerprints, analyzes source, or changes preference. Task 4 exposes it through a private Gateway setup-control RPC that consumes the resolved binding and is absent from MCP `tools/list` and the public contract inventory. Worker-backed `Status` remains the public currentness read and may start a child, but setup may call it only after consent is finalized.
+`InspectCached` reads only the durable preference/config row, last cached status fields, and the manager process table; it never calls the child-start path, opens a worker socket, recomputes fingerprints, analyzes source, or changes preference. Task 4 extends Task 0's `internal/runtime/localapi/setup.go` with exact method `PrivateSetupInspectCodeGraphRPC`; it consumes the resolved binding and is absent from MCP `tools/list` and the public contract inventory. The Task 0 identity method and this graph inspection are the complete private setup-control RPC surface at this point. Worker-backed `Status` remains the public currentness read and may start a child, but setup may call it only after consent is finalized.
 
 - [ ] **Step 1: Write failing worker isolation tests (RED).**
 
@@ -731,7 +817,7 @@ func TestInspectCachedPreferenceNeverStartsWorker(t *testing.T) {
     got, err := manager.InspectCached(t.Context(),scopeFor(t,workspaceA))
     if err != nil || got.Preference != PreferenceOn || !got.HasCachedStatus { t.Fatalf("got=%+v err=%v",got,err) }
     if probe.Starts() != 0 || got.WorkerRunning { t.Fatalf("starts=%d got=%+v",probe.Starts(),got) }
-    callPrivateSetupGraphInspectionRPC(t,manager,scopeFor(t,workspaceA))
+    callPrivateSetupGraphInspectionRPC(t,PrivateSetupInspectCodeGraphRPC,manager,scopeFor(t,workspaceA))
     if probe.Starts() != 0 { t.Fatalf("RPC started worker: %d",probe.Starts()) }
 }
 func TestWorkerCrashDoesNotAffectGatewayOrOtherWorkspace(t *testing.T) {
@@ -775,7 +861,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit.**
 
 ~~~bash
-git add internal/runtime/codegraph/worker/protocol.go internal/runtime/codegraph/worker/child.go internal/runtime/codegraph/worker/child_test.go internal/runtime/codegraph/worker/environment.go internal/runtime/codegraph/worker/environment_test.go internal/runtime/codegraph/manager/scope.go internal/runtime/codegraph/manager/scope_test.go internal/runtime/codegraph/manager/manager.go internal/runtime/codegraph/manager/manager_test.go internal/runtime/codegraph/manager/inspection_test.go cmd/gatewayd/codegraph_worker.go cmd/gatewayd/codegraph_worker_test.go cmd/gatewayd/main.go internal/runtime/localapi/localapi.go internal/runtime/localapi/codegraph.go internal/runtime/localapi/codegraph_setup_test.go docs/implementation-rules.md
+git add internal/runtime/codegraph/worker/protocol.go internal/runtime/codegraph/worker/child.go internal/runtime/codegraph/worker/child_test.go internal/runtime/codegraph/worker/environment.go internal/runtime/codegraph/worker/environment_test.go internal/runtime/codegraph/manager/scope.go internal/runtime/codegraph/manager/scope_test.go internal/runtime/codegraph/manager/manager.go internal/runtime/codegraph/manager/manager_test.go internal/runtime/codegraph/manager/inspection_test.go cmd/gatewayd/codegraph_worker.go cmd/gatewayd/codegraph_worker_test.go cmd/gatewayd/main.go internal/runtime/localapi/localapi.go internal/runtime/localapi/codegraph.go internal/runtime/localapi/setup.go internal/runtime/localapi/setup_test.go docs/implementation-rules.md
 git commit -m "feat(codegraph): isolate on-demand workers"
 ~~~
 
@@ -1181,6 +1267,8 @@ git commit -m "feat(setup): manage systemd user gateway"
 - Modify: internal/runtime/config/config.go
 - Modify: internal/runtime/config/config_test.go
 
+**Consumes:** Task 0's `types.ConfirmedIdentitySelection` and its exact validation constants; Task 8 owns its required owner-private persistence inside unshipped journal schema v1.
+
 **Produces:**
 
 ~~~go
@@ -1204,6 +1292,7 @@ type ConfirmedChange struct {
 type SetupSelection struct {
     ConnectorAdapters []string      `json:"connector_adapters"` // sorted unique codex|claude
     CodeGraphMode string             `json:"code_graph_mode"` // on|off
+    Identity types.ConfirmedIdentitySelection `json:"identity"`
     PlanDigest StateDigest           `json:"plan_digest"`
     Changes []ConfirmedChange        `json:"changes"` // sorted by stage, subject
 }
@@ -1258,9 +1347,11 @@ code_graph_resolved
 final_verified
 ~~~
 
-`StateDigest` is the config-owned digest boundary: callers strict-canonicalize state, `SHA256StateDigest` returns `sha256:` plus lowercase SHA-256 hex, and `ParseStateDigest` rejects every other representation. `SetupSelection` is the canonical confirmation record. Its sorted `Changes` contains safe stage/subject/action enums and prior/desired digests for the resolved service executable/action/unit/socket, workspace registration and base import, selected identity, each connector independently, Fabric/local-only resolution, and Code Graph mode/preference. `PlanDigest` hashes the strict canonical confirmation envelope: finalized safe choices plus the ordered change metadata and its already-computed prior/desired digests. It never embeds the raw state preimages. This makes the overall digest reproducible on resume from revalidated stable inputs, freshly derived desired digests, fixed bounded-predicate encodings, and the frozen exact-prior digests without replacing a post-effect prior with the current desired state. The journal stores no executable/private path, identity attributes, connector command/argv/env/header/credential, Fabric credential/binding secret, or raw graph path/status; only safe enums, adapter names, mode, and digests survive.
+`StateDigest` is the config-owned digest boundary: callers strict-canonicalize state, `SHA256StateDigest` returns `sha256:` plus lowercase SHA-256 hex, and `ParseStateDigest` rejects every other representation. `SetupSelection` is the canonical confirmation record. `Identity` is required and must pass Task 0's exact bounded validation; because this schema has not shipped, it is part of journal schema v1 rather than a migration or optional compatibility field. Its sorted `Changes` contains safe stage/subject/action enums and prior/desired digests for the resolved service executable/action/unit/socket, workspace registration and base import, selected identity, each connector independently, Fabric/local-only resolution, and Code Graph mode/preference. `PlanDigest` hashes the strict canonical confirmation envelope: finalized connector/graph choices, the complete canonical `Identity`, and the ordered change metadata with its already-computed prior/desired digests. It never embeds the other raw state preimages. This makes the overall digest reproducible on resume from persisted identity execution intent, revalidated stable inputs, freshly derived desired digests, fixed bounded-predicate encodings, and the frozen exact-prior digests without replacing a post-effect prior with the current desired state.
 
-`Begin` writes no `selection` member: `Selection` remains nil until the caller has rendered the complete plan and received confirmation. Before calling `SetSelection`, `setupPlan.ValidateConfirmation` recomputes the overall and per-change digests from the in-memory canonical plan. `SetSelection` strict-validates subject/action vocabulary, exact required stage coverage, adapter correspondence, digest syntax, ordering, and uniqueness, then durably finalizes once; repeating the exact value is idempotent and a different value fails closed. `RecordConnectorBackup` rejects a missing selection or an adapter absent from its finalized changes. `MarkCompleted` rejects `connectors_applied` or any later stage unless selection is finalized, and `Complete` requires a finalized selection plus every stage, sets terminal state/time, and clears `LastError`. Completed and superseded journals are never resumable. Exactly one active canonical-root match resumes. Multiple matches return `ErrAmbiguousSetupJournal`. `Begin` holds a store-index lock and refuses a second active journal for the same root.
+The confirmed display name and optional email are the single narrow PII-not-secret exception to the digest-only rule because a new process must be able to execute the already-confirmed identity action. The owner-private journal may persist exactly those two bounded final values plus `ensure-selected` and `ensure-ed25519`. It still forbids private/public key bytes, signatures, key or credential paths, raw Git config/output, connector command/argv/env/header/credential, Fabric credential/binding secret, executable/private paths, and raw graph path/status. `SetupSelection` and its identity values are never logged, emitted by status, returned through MCP, or included in a public contract response.
+
+`Begin` writes no `selection` member: `Selection` remains nil until the caller has rendered the complete plan and received confirmation. Before calling `SetSelection`, `setupPlan.ValidateConfirmation` recomputes the overall and per-change digests from the in-memory canonical plan. `SetSelection` requires and validates `Identity`, strict-validates subject/action vocabulary, exact required stage coverage, adapter correspondence, digest syntax, ordering, uniqueness, and a `PlanDigest` that covers the exact identity selection, then durably finalizes once; repeating the exact value is idempotent and a different value fails closed. `RecordConnectorBackup` rejects a missing selection or an adapter absent from its finalized changes. `MarkCompleted` rejects `connectors_applied` or any later stage unless selection is finalized, and `Complete` requires a finalized selection plus every stage, sets terminal state/time, and clears `LastError`. Completed and superseded journals are never resumable. Exactly one active canonical-root match resumes. Multiple matches return `ErrAmbiguousSetupJournal`. `Begin` holds a store-index lock and refuses a second active journal for the same root.
 
 `BeginConfirmedReplacement` is callable only after the caller has recomputed, rendered, and newly confirmed a drifted plan. Under the store-index lock it verifies the named old journal is still active with a finalized different selection, marks it `superseded`, and creates a new active journal for the same canonical root with only `project_validated` complete and the newly confirmed selection durable. It never copies completed effects, workspace/identity bindings, backup references, or errors from the old journal. Detection of drift itself only returns `ErrConfirmedPlanDrift` and performs no write; a replacement is a separate explicitly confirmed action.
 
@@ -1329,9 +1420,28 @@ func TestConfirmedSelectionStoresDigestsWithoutRawPlanState(t *testing.T) {
     }
     assertOnlySafeConfirmationFields(t,encoded)
 }
+func TestSetupSelectionRequiresCanonicalConfirmedIdentityInV1(t *testing.T) {
+    store,journal := setupJournalFixture(t)
+    identity := types.ConfirmedIdentitySelection{Action:"ensure-selected",DisplayName:"Alice Example",Email:"alice@example.test",KeyPolicy:"ensure-ed25519"}
+    valid := confirmedSelectionFixtureWithIdentity(t,"codex","on",identity)
+    if err := store.SetSelection(t.Context(),journal.ID,valid); err != nil { t.Fatal(err) }
+    reopened, _ := OpenSetupJournalStoreAt(store.Root())
+    got,ok,err := reopened.Resumable(t.Context(),journal.RepositoryRoot)
+    if err != nil || !ok || !reflect.DeepEqual(got.Selection.Identity,valid.Identity) { t.Fatalf("got=%+v ok=%v err=%v",got,ok,err) }
+    changedIdentity := identity
+    changedIdentity.Email = "other@example.test"
+    changed := confirmedSelectionFixtureWithIdentity(t,"codex","on",changedIdentity)
+    if changed.PlanDigest == valid.PlanDigest || confirmedIdentityChange(t,changed).DesiredDigest == confirmedIdentityChange(t,valid).DesiredDigest { t.Fatal("identity not bound into plan/desired digest") }
+
+    for _, invalid := range invalidRequiredIdentitySelections(t) {
+        otherStore,otherJournal := setupJournalFixture(t)
+        selection := confirmedSelectionFixtureWithIdentity(t,"codex","on",invalid)
+        if err := otherStore.SetSelection(t.Context(),otherJournal.ID,selection); err == nil { t.Fatalf("accepted=%+v",invalid) }
+    }
+}
 ~~~
 
-The RED suite also covers canonical StateDigest parse/hash vectors, exact confirmed-change coverage/order/uniqueness, safe-enum-only confirmation encoding, absence of raw plan secrets/paths, workspace and selected-human binding, nil-before-confirmation and immutable canonical selection persistence, confirmed replacement after explicit reconfirmation, selection-required connector/final completion, redacted `LastError`, completed/superseded exclusion from resume, multiple-incomplete ambiguity, duplicate/unknown/oversized/corrupt JSON, invalid root/ID/stage, symlink/nonregular/owner/mode failures, nested case-insensitive redaction, opaque-token/private-key/credential-path redaction, invalid backup references, cross-process lock serialization, atomic old-or-new fault recovery, and the unsupported-platform sentinel before filesystem mutation.
+The RED suite also covers canonical StateDigest parse/hash vectors, exact confirmed-change coverage/order/uniqueness, required bounded identity selection and its inclusion in `PlanDigest`, safe-enum-only confirmation encoding, the explicit final display-name/optional-email exception, absence of every forbidden raw plan secret/key/signature/config/path, workspace and selected-human binding, nil-before-confirmation and immutable canonical selection persistence across real close/reopen, confirmed replacement after explicit reconfirmation, selection-required connector/final completion, redacted `LastError`, completed/superseded exclusion from resume, multiple-incomplete ambiguity, duplicate/unknown/oversized/corrupt JSON, invalid root/ID/stage, symlink/nonregular/owner/mode failures, nested case-insensitive redaction, opaque-token/private-key/credential-path redaction, invalid backup references, cross-process lock serialization, atomic old-or-new fault recovery, and the unsupported-platform sentinel before filesystem mutation.
 
 - [ ] **Step 2: Run RED tests.**
 
@@ -1343,7 +1453,7 @@ Expected: FAIL because journal store is absent.
 
 Production derives `$XDG_DATA_HOME/wormhole/setup-journals`, else `~/.local/share/wormhole/setup-journals`. `OpenSetupJournalStoreAt` accepts only an already-existing canonical owner-only directory and is the test/open-existing seam.
 
-Each record is at most 64 KiB and must have a canonical lowercase UUID, supported version/state, canonical root, valid optional workspace and selected-human UUIDs, ordered stage prefix, and absent-or-finalized canonical selection with valid plan/change digests and safe sorted unique metadata. Reject duplicate/unknown JSON keys and any bytes unequal to canonical re-encoding. On Unix, open roots/records/locks/temp files without following symlinks, require directory/file ownership by the effective UID, reject nonregular files and group/other permission bits, and require exact `0700` directories and `0600` records/locks. Serialize the store index and each journal with OS-level advisory locks, not process mutexes. Use temp-file/fsync/rename/directory-fsync writes; fault injection at every write boundary must recover an old-or-new whole JSON record. V1 does not claim Windows ACL equivalence: non-Unix constructors return `ErrPrivateStateUnsupported` before creating, opening, locking, or mutating a path; the unsupported build file and a `GOOS=windows` compile gate freeze that behavior.
+Each record is at most 64 KiB and must have a canonical lowercase UUID, supported version/state, canonical root, valid optional workspace and selected-human UUIDs, ordered stage prefix, and absent-or-finalized canonical selection with the required validated identity, matching plan/change digests, and safe sorted unique metadata. Reject duplicate/unknown JSON keys and any bytes unequal to canonical re-encoding. On Unix, open roots/records/locks/temp files without following symlinks, require directory/file ownership by the effective UID, reject nonregular files and group/other permission bits, and require exact `0700` directories and `0600` records/locks. Serialize the store index and each journal with OS-level advisory locks, not process mutexes. Use temp-file/fsync/rename/directory-fsync writes; fault injection at every write boundary must recover an old-or-new whole JSON record. V1 does not claim Windows ACL equivalence: non-Unix constructors return `ErrPrivateStateUnsupported` before creating, opening, locking, or mutating a path; the unsupported build file and a `GOOS=windows` compile gate freeze that behavior.
 
 Accept only opaque backup references matching `connector-backup:v1:<codex|claude>:<canonical UUID>`. Reject everything else with `ErrJournalCredentialMaterial` without reflecting input. Journals never store backup contents, inline environment/header/config data, or credential-shaped fields. Redaction recursively replaces case-insensitive credential-shaped JSON keys and scrubs bearer values, authorization headers, token/password/secret/private-key assignments, callback codes, PEM private-key blocks, assignments named `credential_path`, `credentials_path`, `credential_file`, `credentials_file`, `token_file`, `private_key_path`, `key_path`, or `identity_file`, and path values beneath `.ssh`, `.gnupg`, `.aws`, `.config/gcloud`, or `.wormhole/credentials` or naming `id_rsa`, `id_ed25519`, `identity.ed25519.private`, or `credentials`. Rejection errors never quote source input.
 
@@ -1573,6 +1683,7 @@ type ConfirmedConnectorChange struct {
 }
 
 type Adapter interface {
+    AdapterName() AdapterName
     Discover(context.Context) (Availability, error)
     Inspect(context.Context) (ConnectorEntry, error)
     Plan(context.Context, ConnectorEntry, ConnectorEntry) (ChangePlan, error)
@@ -1590,7 +1701,8 @@ func RemoveTransactional(
     BackupStore, OperationJournal, OperationCoordinator,
 ) (TransactionResult, error)
 func RecoverTransactions(
-    context.Context, Adapter, BackupStore, OperationJournal, OperationCoordinator,
+    ctx context.Context, adapter Adapter, connectorName string,
+    backups BackupStore, operations OperationJournal, coordinator OperationCoordinator,
 ) error
 ~~~
 
@@ -1598,11 +1710,11 @@ Prior absence is first-class. Only an absent or fully reconstructable user-scope
 
 Production backup and operation roots are `$XDG_DATA_HOME/wormhole/connector-backups` and `$XDG_DATA_HOME/wormhole/connector-operations`, else `~/.local/share/wormhole/connector-backups` and `~/.local/share/wormhole/connector-operations`. The `At` constructors accept only already-existing canonical private roots. Backup references are `connector-backup:v1:<adapter>:<backup UUID>`; operation files are named by canonical operation UUID. `DigestConnectorEntry` returns Task 8's `config.StateDigest` over the strict canonical JSON entry encoding.
 
-`OpenOperationCoordinator` uses the operation root's `locks/` directory; its `At` form reuses the exact validated operations root. `WithOperationLock` derives one filename from the canonical adapter/name pair, opens it with the same Unix no-follow/owner/`0600` policy, waits on a context-cancellable OS advisory exclusive lock, and holds the file descriptor and lock continuously until the callback returns. It is non-reentrant for the same adapter/name. The callback context carries an unexported lock proof used by transaction internals; no external inspect, mutation, verification, rollback, or journal transition may occur without that proof.
+`AdapterName` returns the adapter's immutable canonical `codex|claude` identity without discovery or subprocess work. The only connector name in this slice is exact lowercase `wormhole`. `OpenOperationCoordinator` uses the operation root's `locks/` directory; its `At` form reuses the exact validated operations root. `WithOperationLock` derives one filename from the validated `adapter.AdapterName()`/connector-name pair, opens it with the same Unix no-follow/owner/`0600` policy, waits on a context-cancellable OS advisory exclusive lock, and holds the file descriptor and lock continuously until the callback returns. It is non-reentrant for the same adapter/name. The callback context carries an unexported lock proof used by transaction internals; no external inspect, mutation, verification, rollback, or journal transition may occur without that proof.
 
-Every public apply/remove call executes one `WithOperationLock` callback spanning, without unlock gaps: incomplete-operation recovery; native `Inspect`; strict digest of the inspected entry; expected-prior CAS against `ConfirmedConnectorChange`; confirmation/action/desired-digest validation; no-op decision; durable backup; durable `prepared` journal; external apply/remove; durable `applied`; exact desired verification; durable `verified`; and `complete`. Failure rollback, exact prior verification, and `rolled_back→complete` advancement occur under the same lock. Public `RecoverTransactions` acquires the same lock and calls the internal lock-required recovery path, so recovery and a new process can never interleave.
+Every public apply/remove call first requires `ConfirmedConnectorChange.Adapter == adapter.AdapterName()` and exact name `wormhole`, then executes one `WithOperationLock` callback for that same pair spanning, without unlock gaps: incomplete-operation recovery; native `Inspect`; strict digest of the inspected entry; expected-prior CAS against `ConfirmedConnectorChange`; confirmation/action/desired-digest validation; no-op decision; durable backup; durable `prepared` journal; external apply/remove; durable `applied`; exact desired verification; durable `verified`; and `complete`. Failure rollback, exact prior verification, and `rolled_back→complete` advancement occur under the same lock. Public `RecoverTransactions(ctx, adapter, connectorName, stores...)` validates `adapter.AdapterName()` and `connectorName`, acquires that exact pair's lock, queries `Active` for that exact pair, and calls the internal lock-required recovery path, so recovery and a new process can never interleave or select an operation through ambient/default names.
 
-Both stores cap each record at 64 KiB; reject duplicate/unknown JSON keys, unsupported versions/enums, noncanonical UUID/reference/digest/time values, unsorted or duplicate environment names, invalid typed entries, and bytes unequal to canonical re-encoding. The reference adapter/UUID must match backup contents. A backup contains only the strict prior/desired entries and metadata above; an operation contains no entry content. `Prepare` creates one durable `prepared` record only after its referenced backup is durably readable, rejects a second active adapter/name operation, and `Advance` permits only `prepared→applied|rolled_back|complete`, `applied→verified|rolled_back`, `verified→complete`, or `rolled_back→complete`; exact repeated advances are idempotent.
+Both stores cap each record at 64 KiB; reject duplicate/unknown JSON keys, unsupported versions/enums, noncanonical UUID/reference/digest/time values, unsorted or duplicate environment names, invalid typed entries, and bytes unequal to canonical re-encoding. The reference adapter/UUID must match backup contents. Recovery additionally requires operation adapter/name == requested lock pair == `adapter.AdapterName()`/connectorName and backup adapter/name == that same operation pair; any mismatch is `ErrRecoveryConflict` before external mutation or stage advance. A backup contains only the strict prior/desired entries and metadata above; an operation contains no entry content. `Prepare` creates one durable `prepared` record only after its referenced backup is durably readable, rejects a second active adapter/name operation, and `Advance` permits only `prepared→applied|rolled_back|complete`, `applied→verified|rolled_back`, `verified→complete`, or `rolled_back→complete`; exact repeated advances are idempotent.
 
 On Unix, both stores use no-follow opens, effective-UID ownership checks, exact `0700` roots and `0600` record/lock modes, regular single-link files, OS advisory adapter/name locks, and temp-file/fsync/rename/directory-fsync writes. Startup removes only validated orphan temporary files; it never guesses about malformed records. On non-Unix, constructors return Task 8's `config.ErrPrivateStateUnsupported` before touching a path. Fault injection proves old-or-new whole records at every write boundary. V1 retains completed operation records and every referenced backup indefinitely; transaction/recovery APIs never prune or delete them, so forensic rollback evidence cannot disappear implicitly. Backup contents, environment values, record paths, and credential-bearing errors are never logged or returned.
 
@@ -1612,6 +1724,7 @@ On Unix, both stores use no-follow opens, effective-UID ownership checks, exact 
 func TestCodexLifecycleUsesSupportedJSONAndExactAdd(t *testing.T) {
     runner := connectorRunner(t)
     adapter := NewCodexAdapter(runner)
+    if adapter.AdapterName() != AdapterName("codex") { t.Fatalf("adapter=%q",adapter.AdapterName()) }
     prior, err := adapter.Inspect(t.Context())
     if err != nil { t.Fatal(err) }
     plan, _ := adapter.Plan(t.Context(),prior,desiredStdio("/abs/wormhole"))
@@ -1652,10 +1765,10 @@ func TestClaudeInspectParsesNativeFilesWithoutHealthCheck(t *testing.T) {
 }
 func TestRecoveryRestoresAppliedPriorAndRejectsThirdPartyState(t *testing.T) {
     fixture := crashedAfterApplyFixture(t,typedStdioPriorWithArgsAndEnv(t))
-    if err := RecoverTransactions(t.Context(),fixture.Adapter,fixture.Backups,fixture.Journal,fixture.Coordinator); err != nil { t.Fatal(err) }
+    if err := RecoverTransactions(t.Context(),fixture.Adapter,fixture.Name,fixture.Backups,fixture.Journal,fixture.Coordinator); err != nil { t.Fatal(err) }
     if !reflect.DeepEqual(fixture.Entry(),fixture.Prior) { t.Fatalf("got=%+v prior=%+v",fixture.Entry(),fixture.Prior) }
     conflict := recoveryConflictFixture(t)
-    if err := RecoverTransactions(t.Context(),conflict.Adapter,conflict.Backups,conflict.Journal,conflict.Coordinator); !errors.Is(err,ErrRecoveryConflict) { t.Fatalf("err=%v",err) }
+    if err := RecoverTransactions(t.Context(),conflict.Adapter,conflict.Name,conflict.Backups,conflict.Journal,conflict.Coordinator); !errors.Is(err,ErrRecoveryConflict) { t.Fatalf("err=%v",err) }
     if conflict.MutationCount() != 0 { t.Fatalf("mutations=%d",conflict.MutationCount()) }
 }
 func TestApplyAndRemoveRecoverAfterEveryDurableCrashPoint(t *testing.T) {
@@ -1663,7 +1776,7 @@ func TestApplyAndRemoveRecoverAfterEveryDurableCrashPoint(t *testing.T) {
         for _, stage := range []OperationStage{OperationStage("prepared"),OperationStage("applied"),OperationStage("verified"),OperationStage("rolled_back")} {
             t.Run(string(action)+"/"+string(stage),func(t *testing.T) {
                 fixture := transactionCrashFixture(t,action,stage)
-                if err := RecoverTransactions(t.Context(),fixture.Adapter,fixture.Backups,fixture.Journal,fixture.Coordinator); err != nil { t.Fatal(err) }
+                if err := RecoverTransactions(t.Context(),fixture.Adapter,fixture.Name,fixture.Backups,fixture.Journal,fixture.Coordinator); err != nil { t.Fatal(err) }
                 fixture.AssertExactRecoveredState(stage)
                 fixture.AssertOperationComplete()
             })
@@ -1672,17 +1785,17 @@ func TestApplyAndRemoveRecoverAfterEveryDurableCrashPoint(t *testing.T) {
 }
 func TestRolledBackRecoveryRequiresExactPrior(t *testing.T) {
     exact := rolledBackFixture(t,true)
-    if err := RecoverTransactions(t.Context(),exact.Adapter,exact.Backups,exact.Journal,exact.Coordinator); err != nil { t.Fatal(err) }
+    if err := RecoverTransactions(t.Context(),exact.Adapter,exact.Name,exact.Backups,exact.Journal,exact.Coordinator); err != nil { t.Fatal(err) }
     if exact.MutationCount() != 0 || exact.ActiveOperation() { t.Fatalf("mutation=%d active=%v",exact.MutationCount(),exact.ActiveOperation()) }
     mismatch := rolledBackFixture(t,false)
-    if err := RecoverTransactions(t.Context(),mismatch.Adapter,mismatch.Backups,mismatch.Journal,mismatch.Coordinator); !errors.Is(err,ErrRecoveryConflict) { t.Fatalf("err=%v",err) }
+    if err := RecoverTransactions(t.Context(),mismatch.Adapter,mismatch.Name,mismatch.Backups,mismatch.Journal,mismatch.Coordinator); !errors.Is(err,ErrRecoveryConflict) { t.Fatalf("err=%v",err) }
     if mismatch.MutationCount() != 0 { t.Fatalf("mutations=%d",mismatch.MutationCount()) }
 }
 func TestRecoveryAfterExternalRollbackBeforeJournalAdvance(t *testing.T) {
     for _, action := range []OperationAction{OperationAction("apply"),OperationAction("remove")} {
         for _, stage := range []OperationStage{OperationStage("prepared"),OperationStage("applied")} {
             fixture := crashAfterExternalRollbackFixture(t,action,stage)
-            if err := RecoverTransactions(t.Context(),fixture.Adapter,fixture.Backups,fixture.Journal,fixture.Coordinator); err != nil { t.Fatalf("%s/%s: %v",action,stage,err) }
+            if err := RecoverTransactions(t.Context(),fixture.Adapter,fixture.Name,fixture.Backups,fixture.Journal,fixture.Coordinator); err != nil { t.Fatalf("%s/%s: %v",action,stage,err) }
             if !reflect.DeepEqual(fixture.Entry(),fixture.Prior) || fixture.ExternalMutationCount() != 0 { t.Fatalf("%s/%s fixture=%+v",action,stage,fixture) }
             want := []OperationStage{OperationStage("complete")}
             if stage == OperationStage("applied") { want = []OperationStage{OperationStage("rolled_back"),OperationStage("complete")} }
@@ -1705,6 +1818,14 @@ func TestConfirmedConnectorPriorDriftFailsBeforeBackupOrMutation(t *testing.T) {
     _, err := ApplyTransactional(t.Context(),fixture.Adapter,fixture.Desired,fixture.Confirmation,fixture.Backups,fixture.Journal,fixture.Coordinator)
     if !errors.Is(err,config.ErrConfirmedPlanDrift) { t.Fatalf("err=%v",err) }
     if fixture.BackupCount() != 0 || fixture.OperationCount() != 0 || fixture.ExternalMutationCount() != 0 { t.Fatalf("fixture=%+v",fixture) }
+}
+func TestRecoveryRejectsAdapterNameOperationAndBackupPairMismatch(t *testing.T) {
+    for _, fixture := range recoveryPairMismatchFixtures(t) {
+        err := RecoverTransactions(t.Context(),fixture.Adapter,fixture.RequestedName,fixture.Backups,fixture.Journal,fixture.Coordinator)
+        if !errors.Is(err,ErrRecoveryConflict) { t.Fatalf("%s err=%v",fixture.Case,err) }
+        if fixture.ExternalMutationCount() != 0 || fixture.StageAdvanceCount() != 0 { t.Fatalf("%s fixture=%+v",fixture.Case,fixture) }
+        fixture.AssertNoLockOrActiveQueryUsedAnyPairOtherThanRequested()
+    }
 }
 func TestConnectorPrivateStoresFailClosedAndRetainEvidence(t *testing.T) {
     backups, operations := privateStoreFixtures(t)
@@ -1741,7 +1862,7 @@ Use the frozen stores, coordinator, confirmed change, and stage machine above. U
 
 Recovery uses the same continuous cross-process adapter/name lock and exact digest comparisons. `prepared+prior` advances directly to complete without mutation, covering both no external mutation and a partial apply already rolled back before its journal advance. `applied+prior` advances `rolled_back→complete`. `prepared+desired` and `applied+desired` restore and verify exact prior, then advance `rolled_back→complete`. `verified+desired` advances complete. `rolled_back+prior` advances complete without mutation. At every stage, any other state/digest is a third-party mismatch: return `ErrRecoveryConflict` without mutation or stage advance. A `complete` record is terminal and not active. `RemoveTransactional` uses the same confirmed CAS, coordinator, backup, journal, crash recovery, verification, and conflict rules; tests crash both apply and remove after every durable stage and after external rollback but before the journal records it.
 
-Raw stdout, stderr, and native-config fixtures live under exact supported-version directories. Unknown version/output/config shapes fail closed. Tests cover absence, exact desired no-op, supported stdio prior, HTTP/OAuth/header rejection, spaced and empty argv, malformed/unknown version/transport, hidden-scope duplicates, confirmed-prior/desired digest CAS, backup failure, strict backup/journal decode and canonical-size limits, no-follow/ownership/mode/platform enforcement, atomic write faults, indefinite retention, partial apply, verify mismatch, rollback failure/conflict, apply/remove crashes after every durable stage and rollback-before-advance, real two-process apply/remove serialization across the entire coordinator callback, cancellation while waiting for the lock, output bounds, secret and credential-path redaction. Fake runners record exact argv. HTTP cases assert zero backup and zero mutation; they are never rollback-success cases.
+Raw stdout, stderr, and native-config fixtures live under exact supported-version directories. Unknown version/output/config shapes fail closed. Tests cover absence, exact desired no-op, supported stdio prior, HTTP/OAuth/header rejection, spaced and empty argv, malformed/unknown version/transport, hidden-scope duplicates, immutable `AdapterName`, adapter/request/operation/backup pair mismatch, confirmed-prior/desired digest CAS, backup failure, strict backup/journal decode and canonical-size limits, no-follow/ownership/mode/platform enforcement, atomic write faults, indefinite retention, partial apply, verify mismatch, rollback failure/conflict, apply/remove crashes after every durable stage and rollback-before-advance, real two-process apply/remove serialization across the entire coordinator callback, cancellation while waiting for the lock, output bounds, secret and credential-path redaction. Fake runners record exact argv. HTTP cases assert zero backup and zero mutation; they are never rollback-success cases.
 
 - [ ] **Step 4: Run GREEN tests without touching real harness config.**
 
@@ -1777,7 +1898,7 @@ git commit -m "feat(setup): add transactional harness adapters"
 - Modify: cmd/wormhole/main.go
 - Modify: cmd/wormhole/cli_main_test.go
 
-**Consumes:** Tasks 7-10 primitives; internal/types/projectstate codec; internal/types/identity; Gateway RPCs backed by projectstate and worker manager. Runtime/config contains no setup orchestration and makes no Gateway RPC.
+**Consumes:** Task 0's validated confirmed-identity type plus journal-keyed private identity RPC; Task 4's private non-starting graph inspection; Tasks 7-10 primitives; internal/types/projectstate codec; and Gateway RPCs backed by projectstate and worker manager. Runtime/config contains no setup orchestration and makes no Gateway RPC.
 
 **Produces:**
 
@@ -1787,7 +1908,7 @@ type setupPlan struct {
     Root string
     ServiceExecutable string
     ServiceAction string
-    IdentityAction string
+    Identity types.ConfirmedIdentitySelection
     ConnectorPlans []connector.ChangePlan
     FabricAction string
     CodeGraphMode string
@@ -1801,8 +1922,9 @@ func newGatewayClient(socketPath, canonicalRoot string) (gatewayClient, error)
 func (c gatewayClient) Readiness(context.Context) error
 func (c gatewayClient) RegisterWorkspace(context.Context) (projectstate.RegisterWorkspaceResult, error)
 func (c gatewayClient) WorkspaceStatus(context.Context) (projectstate.WorkspaceStatus, error)
-func (c gatewayClient) CreateLocalIdentity(context.Context, string, string) (localidentity.HumanProfile, error)
-func (c gatewayClient) SelectLocalIdentity(context.Context, string) error
+func (c gatewayClient) EnsureSelectedSetupIdentity(
+    context.Context, string, types.ConfirmedIdentitySelection,
+) (localidentity.HumanProfile, error)
 func (c gatewayClient) SelectedLocalIdentity(context.Context) (localidentity.HumanProfile, error)
 func (c gatewayClient) ImportWorkspace(context.Context) (projectstate.ImportResult, error)
 func (c gatewayClient) RebuildCodeGraph(context.Context) error
@@ -1812,7 +1934,7 @@ func (c gatewayClient) CodeGraphStatus(context.Context) (codegraphmanager.Status
 func runConnector(context.Context, []string, io.Reader, io.Writer, io.Writer, connectorCommandDeps) int
 ~~~
 
-`newGatewayClient` canonicalizes and validates the root once, stores it immutably in the unexported `canonicalRoot` field, and rejects an empty, relative, symlink-aliased, or nonrepository root. Every scoped RPC injects that exact root; no method accepts a replacement root, consults a later ambient cwd, or sends a workspace binding or actor envelope. The only identity mutation argument is a selected human UUID. The exact standalone forms are wormhole connector list, wormhole connector install <codex|claude> [--yes], and wormhole connector remove <codex|claude> [--yes]. list calls Discover/Inspect and prints only adapter name, availability, state, scope, and transport. install and remove render/confirm one exact change, derive its `ConfirmedConnectorChange` prior/desired/plan digests, and invoke Task 10's coordinated durable transaction APIs; `--yes` supplies that command-local confirmation but never bypasses expected-prior CAS. No CLI output includes command environment, headers, bearer fields, private paths, backup references, or backup contents.
+`newGatewayClient` canonicalizes and validates the root once, stores it immutably in the unexported `canonicalRoot` field, and rejects an empty, relative, symlink-aliased, or nonrepository root. Every scoped RPC injects that exact root; no method accepts a replacement root, consults a later ambient cwd, or sends a workspace binding or actor envelope. The sole setup identity mutation is the private `EnsureSelectedSetupIdentity` call, which sends the exact setup journal UUID and journal-owned `ConfirmedIdentitySelection` to Task 0's idempotent RPC; the CLI never calls independent create/select methods. The RPC returns only the public profile. The interactive confirmation deliberately renders the final display name/optional email to the same human, but machine-readable status, MCP/public APIs, diagnostics, and logs never emit that selection. The exact standalone forms are wormhole connector list, wormhole connector install <codex|claude> [--yes], and wormhole connector remove <codex|claude> [--yes]. list calls Discover/Inspect and prints only adapter name, availability, state, scope, and transport. install and remove render/confirm one exact change, derive its `ConfirmedConnectorChange` prior/desired/plan digests, and invoke Task 10's coordinated durable transaction APIs; `--yes` supplies that command-local confirmation but never bypasses expected-prior CAS. No CLI output includes command environment, headers, bearer fields, private paths, backup references, or backup contents.
 
 Fabric profile/login/attach and wormhole project/fabric commands are Slice D-owned. Setup exposes an optional Fabric stage only through D's Gateway RPC when that capability exists; otherwise it records local-only and succeeds. It never reintroduces legacy credential-profile enrollment.
 
@@ -1903,10 +2025,13 @@ func TestResumeReverifiesIdentityReadinessAndCodeGraphBeforeSkip(t *testing.T) {
 func TestConfirmedPlanDriftBeforeEffectFailsWithZeroMutation(t *testing.T) {
     for _, subject := range []string{"gateway-service","identity","connector:codex","fabric","code-graph"} {
         fixture := confirmedSetupFixture(t)
+        before := fixture.JournalBytes()
+        fixture.ResetWriteCounters()
         fixture.DriftConfirmedSubjectOutsidePriorAndDesired(subject)
         code := fixture.ContinueAfterConfirmation()
         if code == 0 || !errors.Is(fixture.Err(),config.ErrConfirmedPlanDrift) { t.Fatalf("%s code=%d err=%v",subject,code,fixture.Err()) }
-        if fixture.ExternalMutationCount() != 0 || fixture.BackupCount() != 0 || fixture.OperationCount() != 0 { t.Fatalf("%s calls=%v",subject,fixture.Calls()) }
+        if fixture.AnyWriteCount() != 0 || fixture.ExternalMutationCount() != 0 || fixture.BackupCount() != 0 || fixture.OperationCount() != 0 || fixture.RecordLastErrorCalls() != 0 { t.Fatalf("%s calls=%v",subject,fixture.Calls()) }
+        if !bytes.Equal(before,fixture.JournalBytes()) { t.Fatalf("%s journal changed",subject) }
     }
 }
 func TestCrashResumeUsesConfirmedDesiredWithoutReplanning(t *testing.T) {
@@ -1928,11 +2053,26 @@ func TestSetupResumeAfterServiceAndConnectorEffectsDoesNotFalseDrift(t *testing.
     if fixture.ConfirmationCount() != 1 || fixture.ReplannedAction("gateway-service") || fixture.ReplannedAction("connector:codex") { t.Fatalf("calls=%v",fixture.Calls()) }
     fixture.AssertResumeComparedFrozenPriorOrDesired("gateway-service","connector:codex")
 }
+func TestSetupIdentityCrashResumeAcrossFreshProcessesIsExactlyOnce(t *testing.T) {
+    for _, point := range []string{"after-confirmation-before-rpc","after-identity-receipt","after-identity-key-profile","after-identity-selected","after-rpc-before-bind","after-bind-before-stage-mark"} {
+        fixture := newOnDiskSetupProcessFixture(t)
+        fixture.RunFirstCLIProcessUntilHardExit(point,"yes\n")
+        confirmed := fixture.ReopenJournalStore().MustSelection().Identity
+        second := fixture.RunResumeInFreshCLIAndGatewayProcesses()
+        third := fixture.CallEnsureSetupIdentityInAnotherFreshGatewayProcess(confirmed)
+        if second.ExitCode != 0 || third.Err != nil { t.Fatalf("%s second=%+v third=%+v",point,second,third) }
+        fixture.AssertExactlyOneHumanProfile()
+        fixture.AssertSameHumanProfilePublicKeyAndSigningContinuity(second,third)
+        fixture.AssertSelectedProfileMatches(confirmed)
+        fixture.AssertJournalBindsSameSelectedHumanID(second.HumanPrincipalID)
+        fixture.AssertConfirmationCount(1)
+    }
+}
 ~~~
 
 - [ ] **Step 2: Run RED tests.**
 
-Run: go test ./cmd/wormhole -run 'Setup|GatewayClient|NonInteractive|NeverExecutes|ResumeReverifies|ConfirmedPlanDrift|CrashResume' -count=1
+Run: go test ./cmd/wormhole -run 'Setup|GatewayClient|NonInteractive|NeverExecutes|ResumeReverifies|ConfirmedPlanDrift|CrashResume|PreConsentGraphInspection|GatewayInitiallyUnavailable' -count=1
 
 Expected: FAIL because setup.go and Gateway client are absent.
 
@@ -1943,12 +2083,12 @@ Execute this exact order:
 1. Find nearest `.wormhole`, canonicalize its root, and decode/validate canonical project state without executing repository content.
 2. Resume or begin the setup journal and mark `project_validated`; this owner-private journal write is the only pre-consent state change and `Selection` remains nil.
 3. Perform read-only discovery: resolve and validate the exact Gateway executable and service action; call direct Gateway readiness/workspace/identity reads only when already reachable; read Git identity suggestions; connector `Discover`/`Inspect`/`Plan`; derive Slice D capability from the resolved executable/version; and, only when Gateway is reachable, call the private non-starting `InspectCodeGraphPreference`. Pre-consent setup never calls worker-backed `CodeGraphStatus`. Resolve unsupported/ambiguous connector blockers before consent.
-4. Resolve every choice and construct/render one complete `setupPlan` describing the service, registration, identity, base import, every connector action, Fabric/local-only action, and graph mode. Build its canonical `SetupSelection`: hash the overall strict plan and each confirmed prior predicate/desired state, validate it, and retain raw plan values only in memory. Noninteractive setup exits 2 here unless `--code-graph=on|off`, an already-finalized active-journal selection, or an existing durable graph preference supplies the choice.
+4. Resolve every choice and construct/render one complete `setupPlan` describing the service, registration, final identity display name/optional email plus `ensure-selected`/`ensure-ed25519`, base import, every connector action, Fabric/local-only action, and graph mode. Build its canonical `SetupSelection`: persist that required bounded `ConfirmedIdentitySelection`, hash the overall strict confirmation envelope and each confirmed prior predicate/desired state, and validate it. All other raw plan values remain memory-only. Noninteractive setup exits 2 here unless `--code-graph=on|off`, an already-finalized active-journal selection, or an existing durable graph preference supplies the choice.
 5. Interactive setup obtains exactly one confirmation for that whole plan. A decline leaves only the active `project_validated` journal with nil selection and performs zero external mutation. Resume with an already-finalized selection never reprompts.
 6. Immediately after consent, durably call `SetSelection` with the exact safe confirmation/digests and read the journal back byte-for-byte before proceeding. This finalized record is the recovery authority. No service, Gateway, identity, connector, Fabric, graph, user-config, or repository mutation occurs before that durable readback.
 7. Inspect/install/start/verify `gatewayd`. Manager-unavailable may proceed only if direct Gateway `Readiness` already succeeds; otherwise return the exact manual diagnostic with the journal active.
 8. Register the workspace, consume only `RegisterWorkspaceResult.Binding`, and bind its workspace UUID in the journal.
-9. Suggest/create/select the local human identity through Gateway, bind its human UUID in the journal, and read it back with `SelectedLocalIdentity`; the CLI sends only that UUID.
+9. Call `EnsureSelectedSetupIdentity` with the setup journal UUID and its exact finalized `Selection.Identity`; the private Gateway/localidentity receipt creates or reuses and selects exactly one matching Ed25519 human idempotently. Then bind the returned human UUID in the setup journal and read it back with `SelectedLocalIdentity`. A crash before or after the RPC, selection, return, or bind repeats the same intent and cannot create a second profile/key.
 10. Refresh/import the accepted base through Gateway using the selected Gateway-owned actor. This deliberate register → identity → actor-attributed import ordering resolves the architecture outline's import-before-identity conflict with Slice A's valid-actor requirement.
 11. Apply connectors transactionally and record every nonempty opaque returned backup reference. Connector failure restores only connector state and leaves the imported workspace intact.
 12. Feature-detect Slice D's future Fabric RPC; when absent, record local-only resolution. Task 11 adds no Fabric schema, profile, command, or auth type.
@@ -1959,7 +2099,7 @@ Planning does not depend on unknowable post-start state when Gateway is initiall
 
 - service: exact resolved executable identity, exact unit/socket bytes, and `noop|start|install` action; both its observed pre-consent state and ready desired state are hashed;
 - workspace: `register` the exact immutable root/project/accepted commit/tree, whose prior predicate is `absent-or-exact` and whose desired predicate requires those exact semantic fields plus one canonical Gateway-owned workspace UUID, bound in the journal on first success rather than guessed before consent;
-- identity: `ensure-selected` for the confirmed normalized identity input/key policy, allowing any strictly valid local identity-store state as prior and requiring those exact attributes/policy plus one valid Gateway-owned human UUID/public-key result as desired; the first successful UUID is bound and read back rather than guessed before consent;
+- identity: the exact durable `ConfirmedIdentitySelection` (`ensure-selected`, final bounded display name, optional email, `ensure-ed25519`) is both execution input and part of `PlanDigest`; any strictly valid local identity-store state is the bounded prior, while the desired predicate requires the receipt-bound human to have exactly those attributes, one valid matching Ed25519 keypair, and selected status. The first successful UUID is bound and read back rather than guessed before consent;
 - base import: exact registered workspace with `unimported-or-already-imported-exact` prior and exact accepted commit/tree desired;
 - connectors: exact inspected typed prior and exact desired entry per adapter; no bounded wildcard is permitted;
 - Fabric: a capability/action derived from the confirmed Gateway executable; C11's desired state is local-only and does not invent or attach a binding;
@@ -1969,7 +2109,7 @@ These predicate descriptions have fixed canonical encodings and are what `PriorD
 
 The post-confirmation external effect order is therefore fixed as service → workspace registration → identity selection → actor-attributed base import → connectors → Fabric/local-only resolution → code graph → final verification. Journal validation and finalized-selection writes do not broaden that order into product or user-config mutation.
 
-On every resume, load the finalized selection as the action authority and revalidate only stable planning inputs: the immutable root/project state, finalized user choices, resolved executable identity, normalized identity input/key policy, adapter availability/version plus desired-entry rendering, and safe Fabric/graph capability inputs. `ValidateResumeConfirmation` freshly hashes every derivable desired state and every fixed bounded-predicate encoding, carries forward each stored exact-prior digest, rebuilds the canonical confirmation envelope, and requires the same safe actions, per-change digests, and `PlanDigest`. It must not run `Plan(current,current-desired)`, replace a confirmed action with `noop`, or hash post-effect service/connector state as a new prior. Current mutable readbacks are evidence for the next paragraph, not inputs that choose a new plan. Drift in any stable input, desired state, bounded predicate, or action legality returns `ErrConfirmedPlanDrift`, creates no backup/operation, and performs zero external mutation. The old journal remains unchanged. A different action may run only after a separately rendered confirmation calls `BeginConfirmedReplacement` to create a new journal; setup never silently replans inside the old confirmation.
+On every resume, load the finalized selection as the action authority and revalidate only stable planning inputs: the immutable root/project state, finalized user choices, resolved executable identity, the persisted validated `ConfirmedIdentitySelection`, adapter availability/version plus desired-entry rendering, and safe Fabric/graph capability inputs. Never reread a changed Git identity suggestion to replace the confirmed identity. `ValidateResumeConfirmation` freshly hashes every derivable desired state and every fixed bounded-predicate encoding, carries forward each stored exact-prior digest, rebuilds the canonical confirmation envelope, and requires the same safe actions, identity selection, per-change digests, and `PlanDigest`. It must not run `Plan(current,current-desired)`, replace a confirmed action with `noop`, or hash post-effect service/connector state as a new prior. Current mutable readbacks are evidence for the next paragraph, not inputs that choose a new plan. Drift in any stable input, desired state, bounded predicate, or action legality returns `ErrConfirmedPlanDrift`, creates no backup/operation, performs no external mutation, and performs no journal/store write—not even `RecordLastError`; compare the old journal bytes unchanged. A different action may run only after a separately rendered confirmation calls `BeginConfirmedReplacement` to create a new journal; setup never silently replans inside the old confirmation.
 
 Immediately before every stage, whether its journal marker is incomplete or complete, compare the current readback against the frozen confirmed predicates. If it matches the confirmed prior, run or rerun only the confirmed idempotent action and verify the confirmed desired state. If it already matches confirmed desired, verify it and mark or skip the stage without replay. Any other state is `ErrConfirmedPlanDrift`. A completed marker never authorizes a skip by itself. These checks never synthesize a new action from observed state, and service startup or a completed connector mutation therefore cannot create false drift merely because the current state is now desired.
 
@@ -1978,20 +2118,20 @@ Before skipping any completed stage on resume, run its exact read-only predicate
 - `project_validated`: the client's immutable canonical root equals the journal root and the current tracked project state still strict-decodes and validates without executing repository content.
 - `gateway_ready`: direct `gatewayClient.Readiness` succeeds; when systemd-user is usable, `GatewayService.Inspect` also reports `Installed`, `Running`, and `Ready`, while manual mode requires only direct readiness.
 - `workspace_registered`: `WorkspaceStatus` reports the client's canonical root and the exact journal workspace UUID.
-- `identity_selected`: `SelectedLocalIdentity` reports the exact journal `SelectedHumanID` and its public profile validates.
+- `identity_selected`: `SelectedLocalIdentity` reports the exact journal `SelectedHumanID`; Task 0's receipt for that journal UUID names the same human/public key, and the profile exactly matches finalized `Selection.Identity` with a valid Ed25519 keypair.
 - `base_imported`: `WorkspaceStatus` reports the validated project's accepted commit/tree digest and a recovered imported base with no unresolved import conflict.
 - `connectors_applied`: each adapter in finalized `Selection.ConnectorAdapters` re-inspects as the exact desired user-scope stdio entry and has no active Task 10 operation; skipped unavailable adapters are absent from the finalized selection.
 - `fabric_resolved`: when Slice D is absent, capability detection still proves local-only; when present later, its readback must match the planned binding before this predicate can pass.
 - `code_graph_resolved`: `CodeGraphStatus` is disabled for `off`; for `on` it is enabled, `StateReady`, current, `GraphNotCurrent==false`, and not rebuild-required.
 - `final_verified`: every preceding predicate succeeds in order in the same run.
 
-A failed desired-state predicate is never silently skipped: rerun that stage's frozen idempotent effect only when the readback matches its confirmed prior; when it matches neither prior nor desired, return its typed conflict/error while recording a redacted `LastError`. Mark each stage only after its desired predicate passes. Persisted selections make resume deterministic and prevent reprompting.
+A failed desired-state predicate is never silently skipped: rerun that stage's frozen idempotent effect only when the readback matches its confirmed prior; when it matches neither prior nor desired, return its typed conflict/error. `ErrConfirmedPlanDrift` is the no-write exception and must return without `RecordLastError` or any other journal/store update; other operational errors may record a redacted `LastError`. Mark each stage only after its desired predicate passes. Persisted selections make resume deterministic and prevent reprompting.
 
 Unavailable harnesses are reported and skipped. A supported adapter with an ambiguous/unsupported prior is a non-mutating incomplete connector stage; registration/import remains intact and retryable. Setup does not demand rollback of HTTP/OAuth/ambiguous transports rejected by Task 10 before mutation. Fabric unavailable resolves local-only; graph failure leaves the workspace usable. Missing dependencies return Task 5's offline error and explain that separate dependency-fetch consent is required; setup never silently downloads.
 
 - [ ] **Step 4: Run GREEN tests.**
 
-Run: go test ./cmd/wormhole -run 'Setup|GatewayClient|JournalResume|ResumeReverifies|ConfirmedPlanDrift|CrashResume|LocalOnly|ConnectorFailure|CodeGraphFailure|NeverExecutes|NonInteractive' -count=1
+Run: go test ./cmd/wormhole -run 'Setup|GatewayClient|JournalResume|ResumeReverifies|ConfirmedPlanDrift|CrashResume|PreConsentGraphInspection|GatewayInitiallyUnavailable|LocalOnly|ConnectorFailure|CodeGraphFailure|NeverExecutes|NonInteractive' -count=1
 
 Expected: PASS.
 
@@ -2150,9 +2290,9 @@ git commit -m "feat(cli): complete gateway setup cutover"
 
 - Task 1 begins after Slice A localapi workspace operations and projectstate resolver exist.
 - Task 2 follows Task 1; its FabricRouter is local-only/legacy until Slice D supplies the final multi-Fabric implementation.
-- Task 3 follows Slice A shared binding freeze. Task 4 follows Task 3. Task 5 follows Tasks 3-4. Task 6 follows Task 5.
+- Task 3 follows Slice A shared binding freeze. Task 4 follows Task 0's private setup-control RPC and Task 3. Task 5 follows Tasks 3-4. Task 6 follows Task 5.
 - Task 7 first freezes and ships the shared `CommandRunner` contract.
-- Tasks 8 and 9 may then proceed independently.
+- Tasks 8 and 9 may then proceed independently after Task 0 freezes `types.ConfirmedIdentitySelection`; Task 8 consumes that exact validated type in journal v1.
 - Task 10 consumes Task 7's shared runner plus Task 8's `StateDigest`, confirmed-plan error, opaque `config.BackupReference`, redaction, and private-platform contracts, but owns the cross-process operation coordinator, fully specified connector backup contents, operation journal, retention, and recovery.
 - Task 11 consumes completed Tasks 7-10 and Gateway RPCs from Tasks 1-6.
 - Task 12 consumes every prior task and retains all legacy deletion/cutover ownership. Slice D owns project/fabric CLI and authenticated attach/login; Slice E owns private human authentication.
@@ -2162,14 +2302,14 @@ git commit -m "feat(cli): complete gateway setup cutover"
 - Shared ownership: the exact Slice-A types.WorkspaceBinding flows from registration/resolution/enumeration; types.RepositoryIdentity is reused, its digest remains a validated string, and only codegraphmanager.ScopeFromBinding copies it into the stdlib-only string Scope.
 - Routing: the bridge overwrites forged private cwd before forwarding, Gateway strips it before schema validation, and every project/sync/graph/auth path records the resolved binding in forged/cross-workspace coverage.
 - Supervisor seams: FabricRouter and CodeGraphProvider have exact binding-scoped methods, non-nil fail-closed implementations, and errors.Is coverage for their typed unavailable errors.
-- Workers: separate process, DB, socket, private caches, offline/sanitized environment, read-only checkout, crash/restart/disable isolation, plus one private cached-preference inspection RPC that never starts a worker.
+- Workers: separate process, DB, socket, private caches, offline/sanitized environment, read-only checkout, crash/restart/disable isolation, plus the Task 4 extension to Task 0's private setup-control RPC for cached preference inspection that never starts a worker.
 - Graph: exact schema/status fingerprints, manifest ordering/restart/failed-publish tests, explicit BM25/tokenizer constants, held-out recall/disclosure/determinism/scale gates.
 - Shared execution: one runner contract has exact exit/output/context semantics and is reused by service, Git identity, and connectors.
 - Lexical ownership: Task 3 owns scoped schema and cascading lifecycle; Task 6 populates lexical rows in `index/build.go` before publication, validates exact completeness in the publication transaction, and owns documentation extraction, BM25 query, and held-out/scale acceptance.
 - Service: one exact unit/socket/runtime-root contract, positive fixtures derived from configured `ResolveRuntimePaths`, fail-closed manager probing, and byte-identical active idempotence.
-- Journals: config-owned `StateDigest`, safe overall/per-change confirmed digests, canonical owner-only per-UUID files, OS locks, nil-before-confirmation immutable selection, explicit drift replacement, selected identity, terminal completion, ambiguous-resume rejection, credential-path redaction, Unix enforcement/non-Unix rejection, opaque backup references, and old-or-new fault recovery.
+- Journals: config-owned `StateDigest`, safe overall/per-change confirmed digests, required bounded `types.ConfirmedIdentitySelection` in unshipped v1 as the sole PII exception, canonical owner-only per-UUID files, OS locks, nil-before-confirmation immutable selection, explicit drift replacement, selected identity, terminal completion, ambiguous-resume rejection, credential-path redaction, Unix enforcement/non-Unix rejection, opaque backup references, and old-or-new fault recovery.
 - Git identity: exactly four read-only config keys, explicit unset behavior, canonical-root proof, and OpenPGP-only v1 signing without key-file access.
-- Setup: the Gateway client binds one immutable canonical root; one full plan/confirmation and durable digest-only selection precede external effects; initially unavailable Gateway state is represented by confirmed bounded idempotent predicates; resume revalidates stable inputs and the frozen confirmation envelope, then compares mutable state with confirmed prior-or-desired predicates without replanning from post-effect state; every completed stage has an exact readiness/workspace/identity/connector/Fabric/graph readback predicate; runtime/config does not call Gateway.
-- Connectors: exact-version absent/provable-stdio support, native Claude config parsing without health checks, HTTP/OAuth rejection before mutation, one `WithOperationLock` critical section covering recovery/CAS/backup/journal/external mutation/verify/rollback, two-process apply/remove serialization, fully specified strict private stores with indefinite retention, exact prepared/applied/verified/rolled-back recovery, and independently availability-gated isolated real-client smoke.
+- Setup: the Gateway client binds one immutable canonical root; one full plan/confirmation and durable digest-plus-identity execution selection precede external effects; the journal-keyed private identity RPC survives real process crash/reopen without duplicate human/profile/key; initially unavailable Gateway state is represented by confirmed bounded idempotent predicates; resume revalidates stable inputs and the frozen confirmation envelope, then compares mutable state with confirmed prior-or-desired predicates without replanning from post-effect state; `ErrConfirmedPlanDrift` leaves old journal bytes unchanged; every completed stage has an exact readiness/workspace/identity/connector/Fabric/graph readback predicate; runtime/config does not call Gateway.
+- Connectors: exact-version absent/provable-stdio support, native Claude config parsing without health checks, HTTP/OAuth rejection before mutation, immutable `AdapterName` plus exact requested connector name, one pair-scoped `WithOperationLock` critical section covering recovery/CAS/backup/journal/external mutation/verify/rollback, adapter/request/operation/backup mismatch rejection, two-process apply/remove serialization, fully specified strict private stores with indefinite retention, exact prepared/applied/verified/rolled-back recovery, and independently availability-gated isolated real-client smoke.
 - C12 boundary: legacy deletion, docs/contracts cutover, and final integration remain C12-owned; earlier tasks do not edit those legacy surfaces.
 - Verification: acceptance tests have executable assertions, normal tests never mutate real user connector state, the current rg -l cutover inventory is frozen, final add/rm staging lists every path explicitly, and the 80-percent gate is explicit.
