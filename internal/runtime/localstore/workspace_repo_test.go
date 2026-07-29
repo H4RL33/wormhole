@@ -1138,6 +1138,29 @@ func TestWorkspaceMutationTxCandidateDecode(t *testing.T) {
 	}
 }
 
+func TestWorkspaceMutationTxCandidateReadsGitObservationOrigin(t *testing.T) {
+	store, repo := openWorkspaceStore(t)
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+	direct, directBytes := encodedWorkspaceSnapshot(t, binding.Scope.ProjectID, binding.Repository)
+	insertWorkspaceCandidate(t, store, binding.Scope, state.Digest(binding.AcceptedTreeDigest), direct.Digest, directBytes, nil, 0)
+	if _, err := store.DB().Exec(`UPDATE workspace_candidates SET imported_by=? WHERE project_id=? AND workspace_id=?`,
+		types.CandidateImportOriginGitObservationRebaseV1, binding.Scope.ProjectID, binding.Scope.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		candidate, err := tx.Candidate(context.Background())
+		if err != nil {
+			return err
+		}
+		if candidate == nil || candidate.ImportedBy != types.CandidateImportOriginGitObservationRebaseV1 {
+			t.Fatalf("candidate=%+v, want exact Git observation origin", candidate)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestWorkspaceMutationTxCandidateRejectsInvalidProvenance(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -1145,6 +1168,8 @@ func TestWorkspaceMutationTxCandidateRejectsInvalidProvenance(t *testing.T) {
 		value  any
 	}{
 		{name: "principal", column: "imported_by", value: "not-a-principal"},
+		{name: "near system principal suffix", column: "imported_by", value: "system:git-observation-rebase-v1 "},
+		{name: "near system principal version", column: "imported_by", value: "system:git-observation-rebase-v2"},
 		{name: "timestamp", column: "imported_at", value: ""},
 		{name: "non UTC timestamp", column: "imported_at", value: time.Date(2026, 7, 28, 14, 0, 0, 0, time.FixedZone("offset", 3600))},
 	} {
@@ -1235,7 +1260,7 @@ func TestWorkspaceMutationTxUpsertCandidateClearsRebasedAndReplacesProvenance(t 
 	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
 	first := workspaceCandidateRecord(t, binding, true, 3)
 	second := workspaceCandidateRecord(t, binding, false, 0)
-	second.ImportedBy = "00000000-0000-4000-8000-000000000072"
+	second.ImportedBy = types.CandidateImportOriginGitObservationRebaseV1
 	second.ImportedAt = time.Date(2026, 7, 28, 15, 0, 0, 123456789, time.FixedZone("zero offset", 0))
 
 	if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
@@ -1323,6 +1348,9 @@ func TestWorkspaceMutationTxUpsertCandidateRejectsInvalidRecord(t *testing.T) {
 		}},
 		{name: "negative rebased boundary", mutate: func(record *WorkspaceCandidateRecord) { record.RebasedThroughGeneration = -1 }},
 		{name: "principal", mutate: func(record *WorkspaceCandidateRecord) { record.ImportedBy = "invalid" }},
+		{name: "near system principal", mutate: func(record *WorkspaceCandidateRecord) {
+			record.ImportedBy = "system:git-observation-rebase-v1 "
+		}},
 		{name: "zero timestamp", mutate: func(record *WorkspaceCandidateRecord) { record.ImportedAt = time.Time{} }},
 		{name: "non UTC timestamp", mutate: func(record *WorkspaceCandidateRecord) {
 			record.ImportedAt = record.ImportedAt.In(time.FixedZone("offset", 3600))

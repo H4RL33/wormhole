@@ -179,7 +179,7 @@ func composeRestoreCurrent(retry localstore.WorkspaceRestoreRetryState) (current
 	if err := validateStashCandidate(retry.Candidate, accepted.Digest, binding); err != nil {
 		return currentProof{}, fmt.Errorf("projectstate: invalid restore current candidate: %w", err)
 	}
-	if retry.Candidate != nil && (!types.CanonicalUUID(retry.Candidate.ImportedBy) || retry.Candidate.ImportedAt.IsZero() || !zeroOffsetTime(retry.Candidate.ImportedAt)) {
+	if retry.Candidate != nil && (!types.ValidCandidateImportOrigin(retry.Candidate.ImportedBy) || retry.Candidate.ImportedAt.IsZero() || !zeroOffsetTime(retry.Candidate.ImportedAt)) {
 		return currentProof{}, fmt.Errorf("projectstate: invalid restore current candidate attribution")
 	}
 	start, boundary := selectCandidateStart(accepted, retry.Candidate)

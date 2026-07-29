@@ -161,6 +161,71 @@ func TestServiceRestoreStashCleanPreservesCurrentProvenanceAndOperationOwnership
 	assertStashOperationState(t, fixture.service, req.Scope, 2, "rebased", "", currentOperation)
 }
 
+func TestServiceRestoreStashCleanPreservesSystemCurrentProvenanceAndOperationOwnership(t *testing.T) {
+	fixture := newStashServiceFixture(t)
+	stashedOperation := servicePutTaskOperation(fixture.accepted,
+		"90000000-0000-4000-8000-000000000011", "80000000-0000-4000-8000-000000000011", "stashed task")
+	stashedSnapshot, err := state.ApplyOperation(fixture.accepted, stashedOperation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertStashServiceOperation(t, fixture.store, fixture.req.Scope, 1, stashedOperation, "active")
+	if _, err := fixture.service.Stash(context.Background(), fixture.req); err != nil {
+		t.Fatal(err)
+	}
+
+	insertServiceCandidate(t, fixture.store, fixture.req.Scope, fixture.accepted.Digest, fixture.accepted, nil, 0)
+	if _, err := fixture.store.DB().Exec(`UPDATE workspace_candidates SET imported_by=? WHERE project_id=? AND workspace_id=?`,
+		types.CandidateImportOriginGitObservationRebaseV1, fixture.req.Scope.ProjectID, fixture.req.Scope.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	currentOperation := servicePutTaskOperation(fixture.accepted,
+		"90000000-0000-4000-8000-000000000012", "80000000-0000-4000-8000-000000000012", "current task")
+	currentSnapshot, err := state.ApplyOperation(fixture.accepted, currentOperation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertStashServiceOperation(t, fixture.store, fixture.req.Scope, 2, currentOperation, "active")
+	setServiceWorkspaceState(t, fixture.store, fixture.req.Scope, "pending")
+	req := RestoreStashRequest{
+		Scope: fixture.req.Scope, RequestID: "50000000-0000-4000-8000-000000000012",
+		StashID: fixture.stashID, Actor: diffActorEnvelope(),
+	}
+
+	got, err := fixture.service.RestoreStash(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantMerge, err := ThreeWayRebase(fixture.accepted, currentSnapshot, stashedSnapshot)
+	if err != nil || len(wantMerge.Conflicts) != 0 {
+		t.Fatalf("fixture merge=(%+v,%v)", wantMerge, err)
+	}
+	if got.RestoredDigest != wantMerge.Snapshot.Digest || got.RebasedThroughGeneration != 2 ||
+		got.Conflicts == nil || len(got.Conflicts) != 0 || got.StashRetained {
+		t.Fatalf("RestoreStash()=%+v", got)
+	}
+	var candidate *localstore.WorkspaceCandidateRecord
+	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+		var err error
+		candidate, err = tx.Candidate(context.Background())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wantImportedAt := time.Date(2026, 7, 28, 14, 0, 0, 0, time.UTC)
+	if candidate == nil || candidate.DirectSnapshot.Digest != fixture.accepted.Digest ||
+		candidate.RebasedSnapshot == nil || candidate.RebasedSnapshot.Digest != wantMerge.Snapshot.Digest ||
+		candidate.RebasedThroughGeneration != 2 || candidate.ImportedBy != types.CandidateImportOriginGitObservationRebaseV1 ||
+		!candidate.ImportedAt.Equal(wantImportedAt) {
+		t.Fatalf("restored candidate=%+v", candidate)
+	}
+	if candidate.ImportedBy == req.Actor.PrincipalID() || candidate.ImportedAt.Equal(req.Actor.OccurredAt) {
+		t.Fatalf("restore substituted operation actor provenance: candidate=%+v actor=%+v", candidate, req.Actor)
+	}
+	assertStashOperationState(t, fixture.service, req.Scope, 1, "stashed", fixture.stashID, stashedOperation)
+	assertStashOperationState(t, fixture.service, req.Scope, 2, "rebased", "", currentOperation)
+}
+
 func TestServiceRestoreStashCleanResolvesOpenConflictsAndSetsPending(t *testing.T) {
 	fixture := newRestoreServiceFixture(t)
 	insertRestoreValidStaleConflict(t, fixture.store, fixture.req.Scope)

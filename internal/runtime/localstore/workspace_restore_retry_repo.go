@@ -209,7 +209,7 @@ func (tx *WorkspaceMutationTx) restoreRetryCandidate(ctx context.Context, bindin
 	if matching != 1 || projectID != tx.scope.ProjectID || workspaceID != string(tx.scope.WorkspaceID) || !equalRestoreStorageClasses(classes, wantClasses) {
 		return nil, nil, nil, fmt.Errorf("localstore: malformed or ambiguous restore retry candidate")
 	}
-	if acceptedBase != binding.AcceptedTreeDigest || !types.CanonicalUUID(importedBy) || !validUTCTimestamp(importedAt) {
+	if acceptedBase != binding.AcceptedTreeDigest || !types.ValidCandidateImportOrigin(importedBy) || !validUTCTimestamp(importedAt) {
 		return nil, nil, nil, fmt.Errorf("localstore: invalid restore retry candidate metadata")
 	}
 	direct, err := decodeCandidateSnapshot(directRaw, binding)

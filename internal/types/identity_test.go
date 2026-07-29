@@ -137,3 +137,27 @@ func TestActorEnvelopeRejectsUnknownKindAssuranceAndNonUTC(t *testing.T) {
 		t.Fatalf("unknown-kind PrincipalID = %q, want empty", got)
 	}
 }
+
+func TestValidCandidateImportOriginAcceptsExactUnion(t *testing.T) {
+	for _, value := range []string{
+		testHumanID,
+		CandidateImportOriginGitObservationRebaseV1,
+	} {
+		if !ValidCandidateImportOrigin(value) {
+			t.Errorf("ValidCandidateImportOrigin(%q) = false, want true", value)
+		}
+	}
+	for _, value := range []string{
+		"",
+		"SYSTEM:git-observation-rebase-v1",
+		"system:git-observation-rebase-v1 ",
+		"system:git-observation-rebase-v2",
+	} {
+		if ValidCandidateImportOrigin(value) {
+			t.Errorf("ValidCandidateImportOrigin(%q) = true, want false", value)
+		}
+	}
+	if CanonicalUUID(CandidateImportOriginGitObservationRebaseV1) {
+		t.Fatal("fixed candidate import origin unexpectedly broadened CanonicalUUID")
+	}
+}

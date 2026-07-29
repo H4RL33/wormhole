@@ -94,6 +94,40 @@ func TestBuildStashPlanDirectCandidate(t *testing.T) {
 	}
 }
 
+func TestBuildStashPlanPreservesGitObservationCandidateOrigin(t *testing.T) {
+	source, binding, candidate, absorbed := stashPlanRebasedFixture(t, 4)
+	candidate.ImportedBy = types.CandidateImportOriginGitObservationRebaseV1
+	wantImportedAt := candidate.ImportedAt
+	if absorbed.Actor.PrincipalID() == candidate.ImportedBy {
+		t.Fatal("operation actor unexpectedly equals non-authority candidate origin")
+	}
+	if _, err := buildStashPlan(binding, source, candidate, []localstore.WorkspaceOperation{
+		stashPlanOperationRow(t, 4, absorbed, "rebased"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if candidate.ImportedBy != types.CandidateImportOriginGitObservationRebaseV1 || !candidate.ImportedAt.Equal(wantImportedAt) {
+		t.Fatalf("stash planning changed candidate provenance: %+v", candidate)
+	}
+}
+
+func TestValidateStashCandidateRejectsNearGitObservationOriginOnDirectPath(t *testing.T) {
+	source, binding, candidate, _ := stashPlanRebasedFixture(t, 4)
+	candidate.RebasedSnapshot = nil
+	candidate.RebasedThroughGeneration = 0
+	for _, origin := range []string{
+		"system:git-observation-rebase-v1 ",
+		"system:git-observation-rebase-v2",
+	} {
+		t.Run(origin, func(t *testing.T) {
+			candidate.ImportedBy = origin
+			if err := validateStashCandidate(candidate, source.Digest, binding); err == nil {
+				t.Fatalf("validateStashCandidate accepted near-token %q", origin)
+			}
+		})
+	}
+}
+
 func TestBuildStashPlanAcceptedSourceWithActiveSuffix(t *testing.T) {
 	source := composeFixtureSnapshot(t)
 	binding := stashPlanBinding(source)

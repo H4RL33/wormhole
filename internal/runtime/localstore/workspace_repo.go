@@ -741,7 +741,7 @@ func (tx *WorkspaceMutationTx) Candidate(ctx context.Context) (*WorkspaceCandida
 	if acceptedBaseDigest != workspace.Binding.AcceptedTreeDigest {
 		return nil, fmt.Errorf("localstore: candidate accepted base differs from workspace binding")
 	}
-	if !types.CanonicalUUID(importedBy) {
+	if !types.ValidCandidateImportOrigin(importedBy) {
 		return nil, fmt.Errorf("localstore: candidate has invalid import principal")
 	}
 	if !validUTCTimestamp(importedAt) {
@@ -796,7 +796,7 @@ func (tx *WorkspaceMutationTx) UpsertCandidate(ctx context.Context, candidate Wo
 	if candidate.AcceptedBaseDigest != projectstate.Digest(workspace.Binding.AcceptedTreeDigest) {
 		return fmt.Errorf("localstore: candidate accepted base differs from workspace binding")
 	}
-	if !types.CanonicalUUID(candidate.ImportedBy) {
+	if !types.ValidCandidateImportOrigin(candidate.ImportedBy) {
 		return fmt.Errorf("localstore: candidate has invalid import principal")
 	}
 	if !validUTCTimestamp(candidate.ImportedAt) {

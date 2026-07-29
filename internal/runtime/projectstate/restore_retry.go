@@ -264,7 +264,7 @@ func projectRestoreRetryCandidate(persisted localstore.WorkspaceRestoreRetryStat
 	if err := validateStashCandidate(candidate, state.Digest(persisted.Workspace.Binding.AcceptedTreeDigest), persisted.Workspace.Binding); err != nil {
 		return nil, fmt.Errorf("projectstate: invalid restore retry candidate: %w", err)
 	}
-	if !types.CanonicalUUID(candidate.ImportedBy) || !validRetryTime(candidate.ImportedAt) {
+	if !types.ValidCandidateImportOrigin(candidate.ImportedBy) || !validRetryTime(candidate.ImportedAt) {
 		return nil, fmt.Errorf("projectstate: invalid restore retry candidate attribution")
 	}
 	projected := &restoreRetryCandidateV1{

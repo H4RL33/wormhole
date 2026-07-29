@@ -13,6 +13,8 @@ const (
 	ActorAgent ActorKind = "agent"
 )
 
+const CandidateImportOriginGitObservationRebaseV1 = "system:git-observation-rebase-v1"
+
 type Assurance string
 
 const (
@@ -124,4 +126,10 @@ func CanonicalUUID(value string) bool {
 		}
 	}
 	return true
+}
+
+// ValidCandidateImportOrigin reports whether value is valid persisted candidate
+// provenance: either a canonical principal UUID or the fixed Git observer token.
+func ValidCandidateImportOrigin(value string) bool {
+	return CanonicalUUID(value) || value == CandidateImportOriginGitObservationRebaseV1
 }

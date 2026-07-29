@@ -50,6 +50,43 @@ func TestBuildRestorePlanCleanChangedBase(t *testing.T) {
 	}
 }
 
+func TestBuildRestorePlanPreservesGitObservationCandidateOrigin(t *testing.T) {
+	fixture := newRestorePlanFixture(t)
+	configureRestoreCurrent(t, &fixture, "rebased-sparse")
+	fixture.retry.Candidate.ImportedBy = types.CandidateImportOriginGitObservationRebaseV1
+	wantImportedAt := fixture.retry.Candidate.ImportedAt
+	operation, err := state.DecodeOperation(fixture.retry.Operations[0].OperationJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operation.Actor.PrincipalID() == types.CandidateImportOriginGitObservationRebaseV1 {
+		t.Fatal("operation actor unexpectedly equals non-authority candidate origin")
+	}
+	if _, err := buildRestorePlan(fixture.retry); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.retry.Candidate.ImportedBy != types.CandidateImportOriginGitObservationRebaseV1 ||
+		!fixture.retry.Candidate.ImportedAt.Equal(wantImportedAt) {
+		t.Fatalf("restore planning changed candidate provenance: %+v", fixture.retry.Candidate)
+	}
+}
+
+func TestBuildRestorePlanRejectsNearGitObservationCandidateOrigin(t *testing.T) {
+	for _, origin := range []string{
+		"system:git-observation-rebase-v1 ",
+		"system:git-observation-rebase-v2",
+	} {
+		t.Run(origin, func(t *testing.T) {
+			fixture := newRestorePlanFixture(t)
+			configureRestoreCurrent(t, &fixture, "direct-empty")
+			fixture.retry.Candidate.ImportedBy = origin
+			if got, err := buildRestorePlan(fixture.retry); err == nil || !reflect.DeepEqual(got, restorePlan{}) {
+				t.Fatalf("buildRestorePlan()=(%+v,%v), want zero,error", got, err)
+			}
+		})
+	}
+}
+
 func TestBuildRestorePlanConflictUsesStashAsOursAndCurrentAsTheirs(t *testing.T) {
 	fixture := newRestorePlanFixture(t)
 	current := composeCloneSnapshot(t, fixture.source)
@@ -497,7 +534,11 @@ func newRestoreShapeFixture(t *testing.T, shape string) restorePlanFixture {
 		direct.Project.Name = "direct project"
 		direct.Project.UpdatedAt = direct.Project.UpdatedAt.Add(time.Minute)
 		direct = stashPlanRefreshSnapshot(t, direct)
-		candidate = &localstore.WorkspaceCandidateRecord{AcceptedBaseDigest: source.Digest, WorkingTreeDigest: direct.Digest, DirectSnapshot: direct}
+		candidate = &localstore.WorkspaceCandidateRecord{
+			AcceptedBaseDigest: source.Digest, WorkingTreeDigest: direct.Digest, DirectSnapshot: direct,
+			ImportedBy: "88888888-8888-4888-8888-888888888888",
+			ImportedAt: time.Date(2026, 7, 29, 9, 0, 0, 0, time.UTC),
+		}
 		if shape == "direct-sparse" {
 			op := composeTaskOperation(direct, "90000000-0000-4000-8000-000000000007", func(task *state.TaskV1) {
 				task.Title = "stashed title"

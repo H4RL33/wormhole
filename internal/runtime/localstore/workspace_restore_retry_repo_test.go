@@ -194,6 +194,16 @@ func TestWorkspaceMutationTxRestoreRetryStateCandidateNullabilityAndEmptySlices(
 	}
 }
 
+func TestWorkspaceMutationTxRestoreRetryStateReadsGitObservationOrigin(t *testing.T) {
+	store, repo, binding, stash := restoreRetryCorruptionFixture(t)
+	execRestoreCorruption(t, store, `UPDATE workspace_candidates SET imported_by=? WHERE project_id=? AND workspace_id=?`,
+		types.CandidateImportOriginGitObservationRebaseV1, binding.Scope.ProjectID, binding.Scope.WorkspaceID)
+	got := mustRestoreRetryState(t, repo, binding.Scope, stash.StashID)
+	if got.Candidate == nil || got.Candidate.ImportedBy != types.CandidateImportOriginGitObservationRebaseV1 {
+		t.Fatalf("restore retry candidate=%+v, want exact Git observation origin", got.Candidate)
+	}
+}
+
 func TestWorkspaceMutationTxRestoreRetryStateSameAndCrossProjectIsolation(t *testing.T) {
 	store, repo := openWorkspaceStore(t)
 	a := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout-a", 1, 11)
@@ -303,6 +313,9 @@ func TestWorkspaceMutationTxRestoreRetryStateRejectsAbsentAndCorruptState(t *tes
 		}},
 		{"candidate timestamp", func(t *testing.T, store *Store, binding types.WorkspaceBinding, _ WorkspaceStashInsert) {
 			execRestoreCorruption(t, store, `UPDATE workspace_candidates SET imported_at=1 WHERE project_id=? AND workspace_id=?`, binding.Scope.ProjectID, binding.Scope.WorkspaceID)
+		}},
+		{"candidate near system importer", func(t *testing.T, store *Store, binding types.WorkspaceBinding, _ WorkspaceStashInsert) {
+			execRestoreCorruption(t, store, `UPDATE workspace_candidates SET imported_by='system:git-observation-rebase-v1 ' WHERE project_id=? AND workspace_id=?`, binding.Scope.ProjectID, binding.Scope.WorkspaceID)
 		}},
 		{"stash source storage", func(t *testing.T, store *Store, binding types.WorkspaceBinding, stash WorkspaceStashInsert) {
 			execRestoreCorruption(t, store, `UPDATE workspace_stashes SET source_tree=CAST(source_tree AS TEXT) WHERE project_id=? AND workspace_id=? AND stash_id=?`, binding.Scope.ProjectID, binding.Scope.WorkspaceID, stash.StashID)

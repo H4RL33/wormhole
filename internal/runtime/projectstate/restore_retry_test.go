@@ -94,6 +94,43 @@ func TestBuildRestoreStashRetryPreimageProjectsCompletePersistedState(t *testing
 	}
 }
 
+func TestBuildRestoreStashRetryPreimagePreservesGitObservationCandidateOrigin(t *testing.T) {
+	req, requestDigest, persisted := restoreRetryFixture(t)
+	persisted.Candidate.ImportedBy = types.CandidateImportOriginGitObservationRebaseV1
+	preimage, err := buildRestoreStashRetryPreimage(req, requestDigest, persisted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preimage.Candidate == nil || preimage.Candidate.ImportedBy != types.CandidateImportOriginGitObservationRebaseV1 {
+		t.Fatalf("retry candidate=%+v, want exact Git observation origin", preimage.Candidate)
+	}
+	operation, err := state.DecodeOperation([]byte(preimage.Operations[0].OperationJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operation.Actor.PrincipalID() == preimage.Candidate.ImportedBy {
+		t.Fatal("retry projection substituted an operation actor for candidate origin")
+	}
+	if persisted.Candidate.ImportedBy != types.CandidateImportOriginGitObservationRebaseV1 {
+		t.Fatalf("retry projection mutated persisted candidate: %+v", persisted.Candidate)
+	}
+}
+
+func TestBuildRestoreStashRetryPreimageRejectsNearGitObservationCandidateOrigin(t *testing.T) {
+	for _, origin := range []string{
+		"system:git-observation-rebase-v1 ",
+		"system:git-observation-rebase-v2",
+	} {
+		t.Run(origin, func(t *testing.T) {
+			req, requestDigest, persisted := restoreRetryFixture(t)
+			persisted.Candidate.ImportedBy = origin
+			if got, err := buildRestoreStashRetryPreimage(req, requestDigest, persisted); err == nil || !reflect.DeepEqual(got, restoreStashRetryPreimageV1{}) {
+				t.Fatalf("buildRestoreStashRetryPreimage()=(%+v,%v), want zero,error", got, err)
+			}
+		})
+	}
+}
+
 func TestRestoreStashRetryPreimageRestartEquivalentAndBidirectionallyOwned(t *testing.T) {
 	req, requestDigest, persisted := restoreRetryTwoConflictFixture(t)
 	persisted.Operations = append(persisted.Operations, restoreAuditRow(t, 10,
@@ -236,6 +273,40 @@ func TestRestoreStashRetryPreimageGolden(t *testing.T) {
 	const wantBuiltDigest = state.Digest("sha256:3f4ae0060a5bd184a3917a8ed89b0dbdc4efd2e34475567282e481be0b8fff14")
 	if got != wantBuiltDigest {
 		t.Fatalf("built retry digest=%q, want hard-coded %q", got, wantBuiltDigest)
+	}
+
+	systemPreimage := preimage
+	systemCandidate := *preimage.Candidate
+	systemCandidate.ImportedBy = "system:git-observation-rebase-v1"
+	systemPreimage.Candidate = &systemCandidate
+	systemCanonical, err := state.CanonicalJSON(systemPreimage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	systemDigest, err := state.DigestCanonicalJSON(systemPreimage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const wantSystemCanonical = `{"schema_version":1,"action":"restore","outcome":"conflicted","scope":{"project_id":"00000000-0000-4000-8000-000000000001","workspace_id":"77777777-7777-4777-8777-777777777777"},"request_id":"99999999-9999-4999-8999-999999999991","request_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","stash_id":"20000000-0000-4000-8000-000000000001","binding":{"binding":{"scope":{"project_id":"00000000-0000-4000-8000-000000000001","workspace_id":"77777777-7777-4777-8777-777777777777"},"checkout":{"canonical_path":"/checkout","device":1,"inode":2},"repository":{"provider":"","immutable_id":"","canonical_remote":""},"accepted_ref":"refs/heads/main","accepted_commit_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","accepted_tree_digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},"status":"conflicted","created_at":"2026-07-29T09:00:00Z","updated_at":"2026-07-29T12:00:00Z","accepted_snapshot_blob_digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},"candidate":{"accepted_base_digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","working_tree_digest":"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","direct_tree_blob_digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","rebased_tree_blob_digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","rebased_through_generation":4,"imported_by":"system:git-observation-rebase-v1","imported_at":"2026-07-29T10:00:00Z"},"operations":[{"generation":4,"operation_id":"99999999-9999-4999-8999-999999999991","operation_json":"{}\n","state":"stashed","stashed_by_stash_id":"22222222-2222-4222-8222-222222222222","created_at":"2026-07-29T10:30:00Z"}],"stash":{"stash_id":"20000000-0000-4000-8000-000000000001","source_base_digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","candidate_digest":"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","source_tree_blob_digest":"sha256:4444444444444444444444444444444444444444444444444444444444444444","composed_tree_blob_digest":"sha256:5555555555555555555555555555555555555555555555555555555555555555","operations_json":"{}\n","through_generation":4,"actor_json":"{}\n","label":"branch work","created_at":"2026-07-29T11:00:00Z"},"open_conflicts":[{"occurrence_id":"00000000-0000-4000-8000-000000000071","conflict_id":"sha256:6666666666666666666666666666666666666666666666666666666666666666","record_kind":"task","record_id":"22222222-2222-4222-8222-222222222222","field_path":"/title","conflict_kind":"same_field","base_json":"{\"present\":true}\n","ours_json":"{\"present\":true}\n","theirs_json":"{\"present\":true}\n","created_at":"2026-07-29T11:30:00Z"}]}` + "\n"
+	if string(systemCanonical) != wantSystemCanonical {
+		t.Fatalf("system-token retry preimage=%q, want literal %q", systemCanonical, wantSystemCanonical)
+	}
+	const wantSystemDigest = state.Digest("sha256:79ee783498024f5f921b3cdd466e0bf00d8d5e255d7b60757c2affb815b9ca20")
+	if systemDigest != wantSystemDigest {
+		t.Fatalf("system-token retry digest=%q, want hard-coded %q", systemDigest, wantSystemDigest)
+	}
+	if systemPreimage.Operations[0].StashedByStashID == nil || *systemPreimage.Operations[0].StashedByStashID == systemPreimage.Candidate.ImportedBy {
+		t.Fatal("system candidate origin was substituted from operation attribution")
+	}
+	systemReq, systemRequestDigest, systemPersisted := restoreRetryFixture(t)
+	systemPersisted.Candidate.ImportedBy = "system:git-observation-rebase-v1"
+	systemBuiltDigest, err := restoreStashRetryDigest(systemReq, systemRequestDigest, systemPersisted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const wantSystemBuiltDigest = state.Digest("sha256:4d5df13ff039bc49c38911caa4dc94cfe4db325004355b64fedcf23229dad1e6")
+	if systemBuiltDigest != wantSystemBuiltDigest {
+		t.Fatalf("built system-token retry digest=%q, want hard-coded %q", systemBuiltDigest, wantSystemBuiltDigest)
 	}
 }
 

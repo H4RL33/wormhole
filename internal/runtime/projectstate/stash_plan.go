@@ -99,6 +99,9 @@ func validateStashCandidate(candidate *localstore.WorkspaceCandidateRecord, acce
 	if candidate == nil {
 		return nil
 	}
+	if !types.ValidCandidateImportOrigin(candidate.ImportedBy) {
+		return fmt.Errorf("projectstate: stash candidate has invalid import origin")
+	}
 	if candidate.AcceptedBaseDigest != acceptedDigest {
 		return fmt.Errorf("projectstate: stash candidate accepted base digest differs")
 	}
