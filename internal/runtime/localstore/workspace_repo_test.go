@@ -198,9 +198,9 @@ func TestWorkspaceMutationTxHasOpenConflictsExactScope(t *testing.T) {
 		}
 		_, err = tx.conn.ExecContext(context.Background(), `
 			INSERT INTO workspace_conflicts
-			(project_id, workspace_id, conflict_id, record_kind, record_id, field_path,
+			(project_id, workspace_id, occurrence_id, conflict_id, record_kind, record_id, field_path,
 			 conflict_kind, base_json, ours_json, theirs_json, state)
-			VALUES (?, ?, 'conflict-a-open', 'task', ?, '/title', 'same_field', '{}', '{}', '{}', 'open')
+			VALUES (?, ?, 'conflict-a-open', 'conflict-a-open', 'task', ?, '/title', 'same_field', '{}', '{}', '{}', 'open')
 		`, a.Scope.ProjectID, a.Scope.WorkspaceID, "00000000-0000-4000-8000-000000000022")
 		if err != nil {
 			return err
@@ -270,9 +270,9 @@ func TestWorkspaceMutationTxHasOpenConflictForKeys(t *testing.T) {
 		}
 		_, err := tx.conn.ExecContext(context.Background(), `
 			INSERT INTO workspace_conflicts
-			(project_id, workspace_id, conflict_id, record_kind, record_id, field_path,
+			(project_id, workspace_id, occurrence_id, conflict_id, record_kind, record_id, field_path,
 			 conflict_kind, base_json, ours_json, theirs_json, state)
-			VALUES (?, ?, 'conflict-transaction-open', ?, ?, '', 'immutable_record', '{}', '{}', '{}', 'open')
+			VALUES (?, ?, 'conflict-transaction-open', 'conflict-transaction-open', ?, ?, '', 'immutable_record', '{}', '{}', '{}', 'open')
 		`, binding.Scope.ProjectID, binding.Scope.WorkspaceID, transactionKey.Kind, transactionKey.ID)
 		if err != nil {
 			return err
@@ -325,9 +325,9 @@ func TestWithImmediateWorkspaceRollsBackCallbackFailure(t *testing.T) {
 	err = repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
 		_, err := tx.conn.ExecContext(context.Background(), `
 			INSERT INTO workspace_conflicts
-			(project_id, workspace_id, conflict_id, record_kind, record_id, field_path,
+			(project_id, workspace_id, occurrence_id, conflict_id, record_kind, record_id, field_path,
 			 conflict_kind, base_json, ours_json, theirs_json, state)
-			VALUES (?, ?, 'rolled-back-conflict', 'task', ?, '/title', 'same_field', '{}', '{}', '{}', 'open')
+			VALUES (?, ?, 'rolled-back-conflict', 'rolled-back-conflict', 'task', ?, '/title', 'same_field', '{}', '{}', '{}', 'open')
 		`, binding.Scope.ProjectID, binding.Scope.WorkspaceID, "00000000-0000-4000-8000-000000000021")
 		if err != nil {
 			return err
@@ -386,9 +386,9 @@ func TestWithImmediateWorkspaceRollsBackCommitFailure(t *testing.T) {
 		}
 		_, err := tx.conn.ExecContext(context.Background(), `
 			INSERT INTO workspace_conflicts
-			(project_id, workspace_id, conflict_id, record_kind, record_id, field_path,
+			(project_id, workspace_id, occurrence_id, conflict_id, record_kind, record_id, field_path,
 			 conflict_kind, base_json, ours_json, theirs_json, state)
-			VALUES (?, ?, 'deferred-invalid-fk', 'task', ?, '/title',
+			VALUES (?, ?, 'deferred-invalid-fk', 'deferred-invalid-fk', 'task', ?, '/title',
 			 'same_field', '{}', '{}', '{}', 'open')
 		`, "00000000-0000-4000-8000-000000000002", "00000000-0000-4000-8000-000000000012",
 			"00000000-0000-4000-8000-000000000021")
@@ -1158,10 +1158,10 @@ func insertWorkspaceConflict(t *testing.T, store *Store, scope types.WorkspaceSc
 	t.Helper()
 	_, err := store.DB().Exec(`
 		INSERT INTO workspace_conflicts
-		(project_id, workspace_id, conflict_id, record_kind, record_id, field_path,
+		(project_id, workspace_id, occurrence_id, conflict_id, record_kind, record_id, field_path,
 		 conflict_kind, base_json, ours_json, theirs_json, state)
-		VALUES (?, ?, ?, ?, ?, '/title', 'same_field', '{}', '{}', '{}', ?)
-	`, scope.ProjectID, scope.WorkspaceID, conflictID, key.Kind, key.ID, conflictState)
+		VALUES (?, ?, ?, ?, ?, ?, '/title', 'same_field', '{}', '{}', '{}', ?)
+	`, scope.ProjectID, scope.WorkspaceID, conflictID, conflictID, key.Kind, key.ID, conflictState)
 	if err != nil {
 		t.Fatalf("insert workspace conflict: %v", err)
 	}

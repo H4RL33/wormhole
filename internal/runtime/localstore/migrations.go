@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-const GatewaySchemaVersion = 1
+const GatewaySchemaVersion = 2
 
 const gatewayMigrationLedgerDDL = `CREATE TABLE gateway_schema_migrations (
   version INTEGER PRIMARY KEY,
@@ -88,6 +88,9 @@ func applyGatewayMigrationSet(ctx context.Context, db *sql.DB, migrations []gate
 			if _, err := conn.ExecContext(ctx, migrationSQL); err != nil {
 				return fmt.Errorf("localstore: apply gateway migration %s: %w", migration.name, err)
 			}
+			if err := validateGatewayForeignKeys(ctx, conn); err != nil {
+				return fmt.Errorf("localstore: validate gateway migration %s foreign keys: %w", migration.name, err)
+			}
 			if _, err := conn.ExecContext(ctx, `INSERT INTO gateway_schema_migrations(version) VALUES (?)`, migration.version); err != nil {
 				return fmt.Errorf("localstore: record gateway migration %s: %w", migration.name, err)
 			}
@@ -97,6 +100,24 @@ func applyGatewayMigrationSet(ctx context.Context, db *sql.DB, migrations []gate
 		}
 	}
 	return nil
+}
+
+func validateGatewayForeignKeys(ctx context.Context, conn *sql.Conn) error {
+	rows, err := conn.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return fmt.Errorf("inspect foreign keys: %w", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return rows.Err()
+	}
+	var table, parent string
+	var rowID any
+	var foreignKeyID int
+	if err := rows.Scan(&table, &rowID, &parent, &foreignKeyID); err != nil {
+		return fmt.Errorf("scan foreign key violation: %w", err)
+	}
+	return fmt.Errorf("foreign key violation table=%s rowid=%v parent=%s foreign_key=%d", table, rowID, parent, foreignKeyID)
 }
 
 func withGatewayMigrationTransaction(ctx context.Context, conn *sql.Conn, operation func() error) (err error) {

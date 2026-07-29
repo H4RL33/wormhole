@@ -1251,10 +1251,10 @@ func insertServiceConflict(t *testing.T, store *localstore.Store, scope types.Wo
 	t.Helper()
 	if _, err := store.DB().Exec(`
 		INSERT INTO workspace_conflicts
-		(project_id, workspace_id, conflict_id, record_kind, record_id, field_path,
+		(project_id, workspace_id, occurrence_id, conflict_id, record_kind, record_id, field_path,
 		 conflict_kind, base_json, ours_json, theirs_json, state)
-		VALUES (?, ?, ?, ?, ?, '/title', 'same_field', '{}', '{}', '{}', ?)
-	`, scope.ProjectID, scope.WorkspaceID, conflictID, key.Kind, key.ID, conflictState); err != nil {
+		VALUES (?, ?, ?, ?, ?, ?, '/title', 'same_field', '{}', '{}', '{}', ?)
+	`, scope.ProjectID, scope.WorkspaceID, conflictID, conflictID, key.Kind, key.ID, conflictState); err != nil {
 		t.Fatal(err)
 	}
 }
