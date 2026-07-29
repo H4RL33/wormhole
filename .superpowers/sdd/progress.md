@@ -292,3 +292,18 @@ whitespace before decode. Directly mutating the conflicted golden receipt preser
 noncanonical persisted bytes; the exact regression changed from decoder success to
 GREEN rejection, and fresh re-review approved with no remaining findings. The next A4
 tranche is stash replay.
+
+A4 stash replay codec `cedf205`: added exactly
+`internal/runtime/projectstate/stash_replay.go` and `stash_replay_test.go`, defining
+public `StashReplayV1` and strict private `encodeStashReplay`/`decodeStashReplay`
+helpers. The schema-v1 envelope preserves an exact binding-validated selected-start
+tree/digest, non-nil absorbed-prefix and later-suffix arrays, strict positive ordered
+generation/boundary and globally unique canonical operation-ID invariants, and composes
+only the later suffix without sorting or repair; decoding and round trips are alias-safe.
+The causal RED sequence began with absent type/helper compile failures, reached a minimal
+canonical-round-trip GREEN, then separately exposed accepted invalid schema, array,
+boundary/order, ID, binding/tree/digest, and stale-operation Compose cases before each
+invariant slice turned GREEN. Focused and full projectstate tests, race, and vet were
+GREEN; statement coverage was 85.1%, with formatting and diff checks clean. Fresh review
+approved with no Critical, Important, or Minor findings. The next A4 tranche is
+localstore stash CRUD.
