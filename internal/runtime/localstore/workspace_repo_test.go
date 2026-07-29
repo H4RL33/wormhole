@@ -3,6 +3,7 @@ package localstore
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -500,6 +501,7 @@ func TestWorkspaceMutationTxCandidateRejectsInvalidProvenance(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store, repo := openWorkspaceStore(t)
+			store.DB().SetMaxOpenConns(1)
 			binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
 			direct, directBytes := encodedWorkspaceSnapshot(t, binding.Scope.ProjectID, binding.Repository)
 			insertWorkspaceCandidate(t, store, binding.Scope, state.Digest(binding.AcceptedTreeDigest), direct.Digest, directBytes, nil, 0)
@@ -940,6 +942,417 @@ func TestWorkspaceMutationTxWorkspaceAndActiveOperationsAfter(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWorkspaceMutationTxActiveOperationsAfterToleratesDiscardedHistory(t *testing.T) {
+	store, repo := openWorkspaceStore(t)
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+	insertWorkspaceOperation(t, store, binding.Scope, 1, validWorkspaceOperation("00000000-0000-4000-8000-000000000091"), "discarded")
+	want := insertWorkspaceOperation(t, store, binding.Scope, 2, validWorkspaceOperation("00000000-0000-4000-8000-000000000092"), "active")
+
+	err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		got, err := tx.ActiveOperationsAfter(context.Background(), 0)
+		if err != nil {
+			return err
+		}
+		if len(got) != 1 || got[0].Generation != 2 || !bytes.Equal(got[0].OperationJSON, want) {
+			t.Fatalf("active operations=%+v, want only generation 2", got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkspaceMutationTxActiveOperationsAfterIgnoresCorruptTerminalPayload(t *testing.T) {
+	store, repo := openWorkspaceStore(t)
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+	insertWorkspaceOperationRaw(t, store, binding.Scope, 1, "00000000-0000-4000-8000-000000000091", []byte("{"), "discarded")
+	want := insertWorkspaceOperation(t, store, binding.Scope, 2, validWorkspaceOperation("00000000-0000-4000-8000-000000000092"), "active")
+
+	err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		got, err := tx.ActiveOperationsAfter(context.Background(), 0)
+		if err != nil {
+			return err
+		}
+		if len(got) != 1 || got[0].Generation != 2 || !bytes.Equal(got[0].OperationJSON, want) {
+			t.Fatalf("active operations=%+v, want only generation 2", got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkspaceMutationTxActiveOperationsAfterRejectsInvalidHistoricalOwnerMetadata(t *testing.T) {
+	for _, test := range []struct {
+		name, state, owner string
+	}{
+		{name: "owner on discarded", state: "discarded", owner: "10000000-0000-4000-8000-000000000001"},
+		{name: "invalid stashed owner", state: "stashed", owner: "10000000-0000-1000-8000-000000000001"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, repo := openWorkspaceStore(t)
+			store.DB().SetMaxOpenConns(1)
+			binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+			if _, err := store.DB().Exec(`PRAGMA ignore_check_constraints=ON`); err != nil {
+				t.Fatal(err)
+			}
+			insertWorkspaceOperationRawOwned(t, store, binding.Scope, 1, "00000000-0000-4000-8000-000000000091", []byte("{"), test.state, &test.owner)
+			insertWorkspaceOperation(t, store, binding.Scope, 2, validWorkspaceOperation("00000000-0000-4000-8000-000000000092"), "active")
+			err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+				_, err := tx.ActiveOperationsAfter(context.Background(), 0)
+				return err
+			})
+			if err == nil {
+				t.Fatal("ActiveOperationsAfter ignored invalid historical owner metadata")
+			}
+		})
+	}
+}
+
+func TestWorkspaceMutationTxOperationReadersAreStrictScopedAndNonAliasing(t *testing.T) {
+	store, repo := openWorkspaceStore(t)
+	a := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout-a", 1, 11)
+	b := createBinding(t, repo, a.Scope.ProjectID, "00000000-0000-4000-8000-000000000012", "/checkout-b", 2, 12)
+	stashID := "10000000-0000-4000-8000-000000000001"
+	otherStashID := "20000000-0000-4000-8000-000000000002"
+	bytes1 := insertWorkspaceOperation(t, store, a.Scope, 1, validWorkspaceOperation("00000000-0000-4000-8000-000000000091"), "rebased")
+	insertWorkspaceOperationOwned(t, store, a.Scope, 2, validWorkspaceOperation("00000000-0000-4000-8000-000000000092"), "stashed", &stashID)
+	insertWorkspaceOperation(t, store, a.Scope, 3, validWorkspaceOperation("00000000-0000-4000-8000-000000000093"), "discarded")
+	insertWorkspaceOperationOwned(t, store, a.Scope, 4, validWorkspaceOperation("00000000-0000-4000-8000-000000000094"), "stashed", &otherStashID)
+	insertWorkspaceOperation(t, store, b.Scope, 1, validWorkspaceOperation("00000000-0000-4000-8000-000000000095"), "rebased")
+
+	err := repo.WithImmediateWorkspace(context.Background(), a.Scope, func(tx *WorkspaceMutationTx) error {
+		rebased, err := tx.RebasedOperationsAtOrBefore(context.Background(), 2)
+		if err != nil {
+			return err
+		}
+		if len(rebased) != 1 || rebased[0].Generation != 1 || rebased[0].StashedByStashID != nil || !bytes.Equal(rebased[0].OperationJSON, bytes1) {
+			t.Fatalf("rebased operations=%+v", rebased)
+		}
+		stashed, err := tx.StashedOperationsByStashID(context.Background(), stashID)
+		if err != nil {
+			return err
+		}
+		if len(stashed) != 1 || stashed[0].Generation != 2 || stashed[0].StashedByStashID == nil || *stashed[0].StashedByStashID != stashID {
+			t.Fatalf("stashed operations=%+v", stashed)
+		}
+		*stashed[0].StashedByStashID = otherStashID
+		stashedAgain, err := tx.StashedOperationsByStashID(context.Background(), stashID)
+		if err != nil {
+			return err
+		}
+		if len(stashedAgain) != 1 || stashedAgain[0].StashedByStashID == nil || *stashedAgain[0].StashedByStashID != stashID {
+			t.Fatal("operation reader aliased the returned stash-owner pointer")
+		}
+		exact, err := tx.OperationsByGenerations(context.Background(), []int64{1, 3, 4})
+		if err != nil {
+			return err
+		}
+		if len(exact) != 3 || exact[0].Generation != 1 || exact[1].Generation != 3 || exact[2].Generation != 4 {
+			t.Fatalf("exact operations=%+v", exact)
+		}
+		rebased[0].OperationJSON[0] ^= 0xff
+		again, err := tx.RebasedOperationsAtOrBefore(context.Background(), 1)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(again[0].OperationJSON, bytes1) {
+			t.Fatal("operation reader aliased persisted or prior result bytes")
+		}
+		for name, empty := range map[string][]WorkspaceOperation{
+			"rebased": mustReadRebasedOperations(t, tx, 0),
+			"stashed": mustReadStashedOperations(t, tx, "30000000-0000-4000-8000-000000000003"),
+			"exact":   mustReadExactOperations(t, tx, []int64{}),
+		} {
+			if empty == nil || len(empty) != 0 {
+				t.Fatalf("%s empty=%#v, want non-nil empty", name, empty)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkspaceMutationTxOperationReadersTolerateUnrelatedLegacyOwnerlessStash(t *testing.T) {
+	store, repo := openWorkspaceStore(t)
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+	insertWorkspaceOperation(t, store, binding.Scope, 1, validWorkspaceOperation("00000000-0000-4000-8000-000000000091"), "stashed")
+	insertWorkspaceOperation(t, store, binding.Scope, 2, validWorkspaceOperation("00000000-0000-4000-8000-000000000092"), "active")
+	stashID := "10000000-0000-4000-8000-000000000001"
+
+	err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		active, err := tx.ActiveOperationsAfter(context.Background(), 0)
+		if err != nil || len(active) != 1 || active[0].Generation != 2 {
+			t.Fatalf("active=%+v err=%v", active, err)
+		}
+		// Generic audit reads retain migrated history. A later stash replay/member
+		// validator must reject this row if an envelope attempts to claim it.
+		legacy, err := tx.OperationsByGenerations(context.Background(), []int64{1})
+		if err != nil || len(legacy) != 1 || legacy[0].State != "stashed" || legacy[0].StashedByStashID != nil {
+			t.Fatalf("legacy=%+v err=%v", legacy, err)
+		}
+		owned, err := tx.StashedOperationsByStashID(context.Background(), stashID)
+		if err != nil || owned == nil || len(owned) != 0 {
+			t.Fatalf("owned=%#v err=%v", owned, err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkspaceMutationTxOperationReadersRejectInvalidInputAndMembership(t *testing.T) {
+	_, repo := openWorkspaceStore(t)
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+	err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		for _, generation := range []int64{-1} {
+			if _, err := tx.RebasedOperationsAtOrBefore(context.Background(), generation); err == nil {
+				t.Fatalf("RebasedOperationsAtOrBefore accepted %d", generation)
+			}
+		}
+		for _, stashID := range []string{"", "00000000-0000-0000-0000-000000000000", "10000000-0000-1000-8000-000000000001", "10000000-0000-4000-7000-000000000001"} {
+			if _, err := tx.StashedOperationsByStashID(context.Background(), stashID); err == nil {
+				t.Fatalf("StashedOperationsByStashID accepted %q", stashID)
+			}
+		}
+		for _, generations := range [][]int64{{0}, {-1}, {2, 1}, {1, 1}, {1}} {
+			if _, err := tx.OperationsByGenerations(context.Background(), generations); err == nil {
+				t.Fatalf("OperationsByGenerations accepted missing/invalid %+v", generations)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkspaceMutationTxOperationReadersRejectCorruptSelectedRows(t *testing.T) {
+	canonicalOperation := validWorkspaceOperation("00000000-0000-4000-8000-000000000091")
+	canonicalBytes, err := state.CanonicalOperation(canonicalOperation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := "10000000-0000-4000-8000-000000000001"
+	for _, test := range []struct {
+		name, operationID, rowState string
+		operation                   []byte
+		owner                       *string
+	}{
+		{name: "malformed JSON", operationID: canonicalOperation.ID, operation: []byte("{"), rowState: "rebased"},
+		{name: "row ID mismatch", operationID: "00000000-0000-4000-8000-000000000092", operation: canonicalBytes, rowState: "rebased"},
+		{name: "invalid row ID", operationID: "BAD", operation: canonicalBytes, rowState: "rebased"},
+		{name: "noncanonical JSON", operationID: canonicalOperation.ID, operation: bytes.TrimSuffix(bytes.Clone(canonicalBytes), []byte("\n")), rowState: "rebased"},
+		{name: "invalid state", operationID: canonicalOperation.ID, operation: canonicalBytes, rowState: "poison"},
+		{name: "owner on non-stashed", operationID: canonicalOperation.ID, operation: canonicalBytes, rowState: "rebased", owner: &owner},
+		{name: "invalid stash owner", operationID: canonicalOperation.ID, operation: canonicalBytes, rowState: "stashed", owner: stringPointer("10000000-0000-1000-8000-000000000001")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, repo := openWorkspaceStore(t)
+			store.DB().SetMaxOpenConns(1)
+			binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+			if test.rowState == "poison" || (test.owner != nil && test.rowState != "stashed") {
+				if _, err := store.DB().Exec(`PRAGMA ignore_check_constraints=ON`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			insertWorkspaceOperationRawOwned(t, store, binding.Scope, 1, test.operationID, test.operation, test.rowState, test.owner)
+			err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+				_, err := tx.OperationsByGenerations(context.Background(), []int64{1})
+				return err
+			})
+			if err == nil {
+				t.Fatal("OperationsByGenerations served a corrupt row")
+			}
+		})
+	}
+}
+
+func TestWorkspaceMutationTxTransitionOperationsMatrix(t *testing.T) {
+	states := []string{"active", "rebased", "stashed", "materialized", "discarded"}
+	allowed := map[string]map[string]bool{
+		"active":       {"rebased": true, "stashed": true, "materialized": true, "discarded": true},
+		"rebased":      {"stashed": true, "materialized": true, "discarded": true},
+		"materialized": {"active": true, "rebased": true},
+	}
+	for _, source := range states {
+		for _, target := range states {
+			t.Run(source+"_to_"+target, func(t *testing.T) {
+				store, repo := openWorkspaceStore(t)
+				binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+				owner := "10000000-0000-4000-8000-000000000001"
+				var sourceOwner *string
+				if source == "stashed" {
+					sourceOwner = &owner
+				}
+				insertWorkspaceOperationOwned(t, store, binding.Scope, 1, validWorkspaceOperation("00000000-0000-4000-8000-000000000091"), source, sourceOwner)
+				before := readWorkspaceOperations(t, store, binding.Scope)
+				var targetOwner *string
+				if target == "stashed" {
+					targetOwner = &owner
+				}
+				err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+					return tx.TransitionOperations(context.Background(), before, target, targetOwner)
+				})
+				wantAllowed := allowed[source][target]
+				if wantAllowed && err != nil {
+					t.Fatalf("allowed transition failed: %v", err)
+				}
+				if !wantAllowed && err == nil {
+					t.Fatal("illegal transition succeeded")
+				}
+				after := readWorkspaceOperations(t, store, binding.Scope)
+				wantState := source
+				wantOwner := sourceOwner
+				if wantAllowed {
+					wantState, wantOwner = target, targetOwner
+				}
+				if len(after) != 1 || after[0].State != wantState || !equalOptionalString(after[0].StashedByStashID, wantOwner) {
+					t.Fatalf("after=%+v, want state=%s owner=%v", after, wantState, wantOwner)
+				}
+			})
+		}
+	}
+}
+
+func TestWorkspaceMutationTxTransitionOperationsValidatesBatchAndOwner(t *testing.T) {
+	store, repo := openWorkspaceStore(t)
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+	insertWorkspaceOperation(t, store, binding.Scope, 1, validWorkspaceOperation("00000000-0000-4000-8000-000000000091"), "active")
+	insertWorkspaceOperation(t, store, binding.Scope, 2, validWorkspaceOperation("00000000-0000-4000-8000-000000000092"), "active")
+	rows := readWorkspaceOperations(t, store, binding.Scope)
+	err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		if err := tx.TransitionOperations(context.Background(), nil, "not-a-state", stringPointer("bad")); err != nil {
+			t.Fatalf("empty transition was not a no-op: %v", err)
+		}
+		for _, test := range []struct {
+			name, target string
+			rows         []WorkspaceOperation
+			owner        *string
+		}{
+			{name: "unsorted", target: "rebased", rows: []WorkspaceOperation{rows[1], rows[0]}},
+			{name: "duplicate generation", target: "rebased", rows: []WorkspaceOperation{rows[0], rows[0]}},
+			{name: "duplicate ID", target: "rebased", rows: []WorkspaceOperation{rows[0], withOperationIdentity(rows[1], rows[0].OperationID, rows[0].OperationJSON)}},
+			{name: "stash missing owner", target: "stashed", rows: rows},
+			{name: "stash invalid owner", target: "stashed", rows: rows, owner: stringPointer("10000000-0000-1000-8000-000000000001")},
+			{name: "stash invalid variant", target: "stashed", rows: rows, owner: stringPointer("10000000-0000-4000-7000-000000000001")},
+			{name: "nonstash owner", target: "rebased", rows: rows, owner: stringPointer("10000000-0000-4000-8000-000000000001")},
+			{name: "invalid target", target: "invalid", rows: rows},
+		} {
+			if err := tx.TransitionOperations(context.Background(), test.rows, test.target, test.owner); err == nil {
+				t.Fatalf("%s transition succeeded", test.name)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := readWorkspaceOperations(t, store, binding.Scope)
+	if after[0].State != "active" || after[1].State != "active" {
+		t.Fatalf("invalid transition mutated rows: %+v", after)
+	}
+}
+
+func TestWorkspaceMutationTxTransitionOperationsCASAndRollback(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		prepare func(*testing.T, *Store, types.WorkspaceScope, *WorkspaceOperation)
+	}{
+		{name: "stale state", prepare: func(_ *testing.T, _ *Store, _ types.WorkspaceScope, row *WorkspaceOperation) { row.State = "rebased" }},
+		{name: "stale owner", prepare: func(t *testing.T, store *Store, scope types.WorkspaceScope, _ *WorkspaceOperation) {
+			if _, err := store.DB().Exec(`PRAGMA ignore_check_constraints=ON`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.DB().Exec(`UPDATE workspace_overlay_operations SET stashed_by_stash_id=? WHERE project_id=? AND workspace_id=? AND generation=1`, "10000000-0000-4000-8000-000000000001", scope.ProjectID, scope.WorkspaceID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "stale bytes", prepare: func(t *testing.T, _ *Store, _ types.WorkspaceScope, row *WorkspaceOperation) {
+			operation := validWorkspaceOperation(row.OperationID)
+			operation.ExpectedViewDigest = state.Digest("sha256:" + strings.Repeat("b", 64))
+			canonical, err := state.CanonicalOperation(operation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			row.OperationJSON = canonical
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, repo := openWorkspaceStore(t)
+			binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+			insertWorkspaceOperation(t, store, binding.Scope, 1, validWorkspaceOperation("00000000-0000-4000-8000-000000000091"), "active")
+			row := readWorkspaceOperations(t, store, binding.Scope)[0]
+			test.prepare(t, store, binding.Scope, &row)
+			if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+				return tx.TransitionOperations(context.Background(), []WorkspaceOperation{row}, "discarded", nil)
+			}); err == nil {
+				t.Fatal("stale CAS input succeeded")
+			}
+			if got := readWorkspaceOperations(t, store, binding.Scope); got[0].State != "active" {
+				t.Fatalf("stale CAS mutated row: %+v", got)
+			}
+		})
+	}
+
+	store, repo := openWorkspaceStore(t)
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+	insertWorkspaceOperation(t, store, binding.Scope, 1, validWorkspaceOperation("00000000-0000-4000-8000-000000000091"), "active")
+	insertWorkspaceOperation(t, store, binding.Scope, 2, validWorkspaceOperation("00000000-0000-4000-8000-000000000092"), "active")
+	rows := readWorkspaceOperations(t, store, binding.Scope)
+	if _, err := store.DB().Exec(`UPDATE workspace_overlay_operations SET state='rebased' WHERE project_id=? AND workspace_id=? AND generation=2`, binding.Scope.ProjectID, binding.Scope.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		return tx.TransitionOperations(context.Background(), rows, "discarded", nil)
+	}); err == nil {
+		t.Fatal("second-row CAS mismatch succeeded")
+	}
+	after := readWorkspaceOperations(t, store, binding.Scope)
+	if after[0].State != "active" || after[1].State != "rebased" {
+		t.Fatalf("failed second-row CAS did not roll back first: %+v", after)
+	}
+}
+
+func TestWorkspaceMutationTxTransitionOperationsExactScopeAndRecoverOldSplit(t *testing.T) {
+	store, repo := openWorkspaceStore(t)
+	a := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout-a", 1, 11)
+	b := createBinding(t, repo, a.Scope.ProjectID, "00000000-0000-4000-8000-000000000012", "/checkout-b", 2, 12)
+	c := createBinding(t, repo, "00000000-0000-4000-8000-000000000002", string(a.Scope.WorkspaceID), "/checkout-c", 3, 13)
+	for _, binding := range []types.WorkspaceBinding{a, b, c} {
+		insertWorkspaceOperation(t, store, binding.Scope, 1, validWorkspaceOperation("00000000-0000-4000-8000-000000000091"), "materialized")
+		insertWorkspaceOperation(t, store, binding.Scope, 2, validWorkspaceOperation("00000000-0000-4000-8000-000000000092"), "materialized")
+	}
+	err := repo.WithImmediateWorkspace(context.Background(), a.Scope, func(tx *WorkspaceMutationTx) error {
+		rows, err := tx.OperationsByGenerations(context.Background(), []int64{1, 2})
+		if err != nil {
+			return err
+		}
+		if err := tx.TransitionOperations(context.Background(), rows[:1], "active", nil); err != nil {
+			return err
+		}
+		return tx.TransitionOperations(context.Background(), rows[1:], "rebased", nil)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotA, gotB, gotC := readWorkspaceOperations(t, store, a.Scope), readWorkspaceOperations(t, store, b.Scope), readWorkspaceOperations(t, store, c.Scope)
+	if gotA[0].State != "active" || gotA[1].State != "rebased" {
+		t.Fatalf("workspace A recover-old=%+v", gotA)
+	}
+	if gotB[0].State != "materialized" || gotB[1].State != "materialized" {
+		t.Fatalf("workspace B was mutated=%+v", gotB)
+	}
+	if gotC[0].State != "materialized" || gotC[1].State != "materialized" {
+		t.Fatalf("project C with same workspace ID was mutated=%+v", gotC)
 	}
 }
 
@@ -1417,22 +1830,30 @@ func workspaceTree(t *testing.T, projectID string, repository types.RepositoryId
 }
 
 func insertWorkspaceOperation(t *testing.T, store *Store, scope types.WorkspaceScope, generation int64, operation state.OperationV1, operationState string) []byte {
+	return insertWorkspaceOperationOwned(t, store, scope, generation, operation, operationState, nil)
+}
+
+func insertWorkspaceOperationOwned(t *testing.T, store *Store, scope types.WorkspaceScope, generation int64, operation state.OperationV1, operationState string, stashID *string) []byte {
 	t.Helper()
 	operationJSON, err := state.CanonicalOperation(operation)
 	if err != nil {
 		t.Fatalf("canonical operation: %v", err)
 	}
-	insertWorkspaceOperationRaw(t, store, scope, generation, operation.ID, operationJSON, operationState)
+	insertWorkspaceOperationRawOwned(t, store, scope, generation, operation.ID, operationJSON, operationState, stashID)
 	return operationJSON
 }
 
 func insertWorkspaceOperationRaw(t *testing.T, store *Store, scope types.WorkspaceScope, generation int64, operationID string, operationJSON []byte, operationState string) {
+	insertWorkspaceOperationRawOwned(t, store, scope, generation, operationID, operationJSON, operationState, nil)
+}
+
+func insertWorkspaceOperationRawOwned(t *testing.T, store *Store, scope types.WorkspaceScope, generation int64, operationID string, operationJSON []byte, operationState string, stashID *string) {
 	t.Helper()
 	_, err := store.DB().Exec(`
 		INSERT INTO workspace_overlay_operations
-		(project_id, workspace_id, generation, operation_id, operation_json, state)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, scope.ProjectID, scope.WorkspaceID, generation, operationID, operationJSON, operationState)
+		(project_id, workspace_id, generation, operation_id, operation_json, state, stashed_by_stash_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, scope.ProjectID, scope.WorkspaceID, generation, operationID, string(operationJSON), operationState, stashID)
 	if err != nil {
 		t.Fatalf("insert workspace operation: %v", err)
 	}
@@ -1441,7 +1862,7 @@ func insertWorkspaceOperationRaw(t *testing.T, store *Store, scope types.Workspa
 func readWorkspaceOperations(t *testing.T, store *Store, scope types.WorkspaceScope) []WorkspaceOperation {
 	t.Helper()
 	rows, err := store.DB().Query(`
-		SELECT generation, operation_id, operation_json, state
+		SELECT generation, operation_id, operation_json, state, stashed_by_stash_id
 		FROM workspace_overlay_operations
 		WHERE project_id=? AND workspace_id=?
 		ORDER BY generation
@@ -1454,16 +1875,65 @@ func readWorkspaceOperations(t *testing.T, store *Store, scope types.WorkspaceSc
 	for rows.Next() {
 		var operation WorkspaceOperation
 		var operationJSON []byte
-		if err := rows.Scan(&operation.Generation, &operation.OperationID, &operationJSON, &operation.State); err != nil {
+		var stashID sql.NullString
+		if err := rows.Scan(&operation.Generation, &operation.OperationID, &operationJSON, &operation.State, &stashID); err != nil {
 			t.Fatal(err)
 		}
 		operation.OperationJSON = bytes.Clone(operationJSON)
+		if stashID.Valid {
+			value := stashID.String
+			operation.StashedByStashID = &value
+		}
 		operations = append(operations, operation)
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
 	return operations
+}
+
+func mustReadRebasedOperations(t *testing.T, tx *WorkspaceMutationTx, generation int64) []WorkspaceOperation {
+	t.Helper()
+	operations, err := tx.RebasedOperationsAtOrBefore(context.Background(), generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return operations
+}
+
+func mustReadStashedOperations(t *testing.T, tx *WorkspaceMutationTx, stashID string) []WorkspaceOperation {
+	t.Helper()
+	operations, err := tx.StashedOperationsByStashID(context.Background(), stashID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return operations
+}
+
+func mustReadExactOperations(t *testing.T, tx *WorkspaceMutationTx, generations []int64) []WorkspaceOperation {
+	t.Helper()
+	operations, err := tx.OperationsByGenerations(context.Background(), generations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return operations
+}
+
+func stringPointer(value string) *string {
+	return &value
+}
+
+func equalOptionalString(left, right *string) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func withOperationIdentity(operation WorkspaceOperation, operationID string, operationJSON []byte) WorkspaceOperation {
+	operation.OperationID = operationID
+	operation.OperationJSON = bytes.Clone(operationJSON)
+	return operation
 }
 
 func insertWorkspaceConflict(t *testing.T, store *Store, scope types.WorkspaceScope, conflictID string, key state.RecordKey, conflictState string) {

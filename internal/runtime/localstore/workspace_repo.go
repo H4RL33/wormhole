@@ -42,10 +42,11 @@ type WorkspaceRecord struct {
 }
 
 type WorkspaceOperation struct {
-	Generation    int64
-	OperationID   string
-	OperationJSON json.RawMessage
-	State         string
+	Generation       int64
+	OperationID      string
+	OperationJSON    json.RawMessage
+	State            string
+	StashedByStashID *string
 }
 
 type WorkspaceCandidateRecord struct {
@@ -173,57 +174,166 @@ func (tx *WorkspaceMutationTx) ActiveOperationsAfter(ctx context.Context, genera
 	if generation < 0 {
 		return nil, fmt.Errorf("localstore: active workspace operations: invalid generation")
 	}
-	var corrupt bool
-	if err := tx.conn.QueryRowContext(ctx, `
-		SELECT EXISTS(
-			SELECT 1 FROM workspace_overlay_operations
-			WHERE project_id=? AND workspace_id=?
-			  AND (generation<=0 OR state NOT IN ('active','rebased','stashed','materialized'))
-		)
-	`, tx.scope.ProjectID, tx.scope.WorkspaceID).Scan(&corrupt); err != nil {
-		return nil, fmt.Errorf("localstore: validate workspace operation metadata: %w", err)
+	if err := tx.validateWorkspaceOperationMetadata(ctx); err != nil {
+		return nil, err
 	}
-	if corrupt {
-		return nil, fmt.Errorf("localstore: invalid workspace operation metadata")
-	}
-	rows, err := tx.conn.QueryContext(ctx, `
-		SELECT generation, operation_id, operation_json, state
+	operations, err := tx.queryWorkspaceOperations(ctx, `
+		SELECT generation, operation_id, operation_json, state, stashed_by_stash_id
 		FROM workspace_overlay_operations
 		WHERE project_id=? AND workspace_id=? AND state='active' AND generation>?
 		ORDER BY generation
 	`, tx.scope.ProjectID, tx.scope.WorkspaceID, generation)
 	if err != nil {
-		return nil, fmt.Errorf("localstore: query active workspace operations: %w", err)
-	}
-	defer rows.Close()
-	operations := make([]WorkspaceOperation, 0)
-	for rows.Next() {
-		var operation WorkspaceOperation
-		var operationJSON []byte
-		if err := rows.Scan(&operation.Generation, &operation.OperationID, &operationJSON, &operation.State); err != nil {
-			return nil, fmt.Errorf("localstore: scan active workspace operation: %w", err)
-		}
-		if operation.Generation <= generation || operation.Generation <= 0 || operation.State != "active" || !types.CanonicalUUID(operation.OperationID) {
-			return nil, fmt.Errorf("localstore: invalid active workspace operation metadata")
-		}
-		decoded, err := projectstate.DecodeOperation(operationJSON)
-		if err != nil {
-			return nil, fmt.Errorf("localstore: decode active workspace operation: %w", err)
-		}
-		if decoded.ID != operation.OperationID {
-			return nil, fmt.Errorf("localstore: active workspace operation row ID mismatch")
-		}
-		canonical, err := projectstate.CanonicalOperation(decoded)
-		if err != nil || !bytes.Equal(canonical, operationJSON) {
-			return nil, fmt.Errorf("localstore: active workspace operation bytes are not canonical")
-		}
-		operation.OperationJSON = bytes.Clone(operationJSON)
-		operations = append(operations, operation)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("localstore: iterate active workspace operations: %w", err)
+		return nil, err
 	}
 	return operations, nil
+}
+
+// RebasedOperationsAtOrBefore returns the exact workspace's rebased prefix in
+// ascending generation order.
+func (tx *WorkspaceMutationTx) RebasedOperationsAtOrBefore(ctx context.Context, generation int64) ([]WorkspaceOperation, error) {
+	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
+		return nil, ErrNotFound
+	}
+	if generation < 0 {
+		return nil, fmt.Errorf("localstore: rebased workspace operations: invalid generation")
+	}
+	if err := tx.validateWorkspaceOperationMetadata(ctx); err != nil {
+		return nil, err
+	}
+	operations, err := tx.queryWorkspaceOperations(ctx, `
+		SELECT generation, operation_id, operation_json, state, stashed_by_stash_id
+		FROM workspace_overlay_operations
+		WHERE project_id=? AND workspace_id=? AND state='rebased' AND generation<=?
+		ORDER BY generation
+	`, tx.scope.ProjectID, tx.scope.WorkspaceID, generation)
+	if err != nil {
+		return nil, err
+	}
+	return operations, nil
+}
+
+// StashedOperationsByStashID returns only terminal rows explicitly owned by
+// the supplied canonical v4 stash ID. Migrated ownerless rows are audit-only.
+func (tx *WorkspaceMutationTx) StashedOperationsByStashID(ctx context.Context, stashID string) ([]WorkspaceOperation, error) {
+	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
+		return nil, ErrNotFound
+	}
+	if !validCanonicalUUIDv4(stashID) {
+		return nil, fmt.Errorf("localstore: invalid workspace stash ID")
+	}
+	if err := tx.validateWorkspaceOperationMetadata(ctx); err != nil {
+		return nil, err
+	}
+	operations, err := tx.queryWorkspaceOperations(ctx, `
+		SELECT generation, operation_id, operation_json, state, stashed_by_stash_id
+		FROM workspace_overlay_operations
+		WHERE project_id=? AND workspace_id=? AND state='stashed' AND stashed_by_stash_id=?
+		ORDER BY generation
+	`, tx.scope.ProjectID, tx.scope.WorkspaceID, stashID)
+	if err != nil {
+		return nil, err
+	}
+	return operations, nil
+}
+
+// OperationsByGenerations returns the complete exact membership requested by
+// a strictly increasing list of positive generations.
+func (tx *WorkspaceMutationTx) OperationsByGenerations(ctx context.Context, generations []int64) ([]WorkspaceOperation, error) {
+	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
+		return nil, ErrNotFound
+	}
+	for index, generation := range generations {
+		if generation <= 0 || (index > 0 && generation <= generations[index-1]) {
+			return nil, fmt.Errorf("localstore: workspace operation generations are not strictly increasing positive values")
+		}
+	}
+	operations := make([]WorkspaceOperation, 0, len(generations))
+	if len(generations) == 0 {
+		return operations, nil
+	}
+	if err := tx.validateWorkspaceOperationMetadata(ctx); err != nil {
+		return nil, err
+	}
+	for _, generation := range generations {
+		operation, err := scanWorkspaceOperation(tx.conn.QueryRowContext(ctx, `
+			SELECT generation, operation_id, operation_json, state, stashed_by_stash_id
+			FROM workspace_overlay_operations
+			WHERE project_id=? AND workspace_id=? AND generation=?
+		`, tx.scope.ProjectID, tx.scope.WorkspaceID, generation))
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("localstore: workspace operation generation membership mismatch")
+		}
+		if err != nil {
+			return nil, fmt.Errorf("localstore: read exact workspace operation: %w", err)
+		}
+		operations = append(operations, operation)
+	}
+	return operations, nil
+}
+
+// TransitionOperations compare-and-swaps one caller-selected, fully described
+// operation batch without inferring a generation range.
+func (tx *WorkspaceMutationTx) TransitionOperations(ctx context.Context, operations []WorkspaceOperation, targetState string, targetStashID *string) error {
+	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
+		return ErrNotFound
+	}
+	if len(operations) == 0 {
+		return nil
+	}
+	if targetState == "stashed" {
+		if targetStashID == nil || !validCanonicalUUIDv4(*targetStashID) {
+			return fmt.Errorf("localstore: stashed operation transition requires a canonical v4 stash ID")
+		}
+	} else if targetStashID != nil {
+		return fmt.Errorf("localstore: non-stashed operation transition has a stash owner")
+	}
+	seenIDs := make(map[string]struct{}, len(operations))
+	for index, operation := range operations {
+		if err := validateWorkspaceOperation(operation); err != nil {
+			return fmt.Errorf("localstore: validate operation transition: %w", err)
+		}
+		if index > 0 && operation.Generation <= operations[index-1].Generation {
+			return fmt.Errorf("localstore: operation transition batch is not strictly increasing")
+		}
+		if _, duplicate := seenIDs[operation.OperationID]; duplicate {
+			return fmt.Errorf("localstore: operation transition batch has a duplicate operation ID")
+		}
+		seenIDs[operation.OperationID] = struct{}{}
+		if !legalOperationTransition(operation.State, targetState) {
+			return fmt.Errorf("localstore: illegal workspace operation transition %q to %q", operation.State, targetState)
+		}
+	}
+	var targetOwner any
+	if targetStashID != nil {
+		targetOwner = *targetStashID
+	}
+	for _, operation := range operations {
+		var sourceOwner any
+		if operation.StashedByStashID != nil {
+			sourceOwner = *operation.StashedByStashID
+		}
+		result, err := tx.conn.ExecContext(ctx, `
+			UPDATE workspace_overlay_operations
+			SET state=?, stashed_by_stash_id=?
+			WHERE project_id=? AND workspace_id=? AND generation=? AND operation_id=?
+			  AND operation_json=? AND state=?
+			  AND ((stashed_by_stash_id IS NULL AND ? IS NULL) OR stashed_by_stash_id=?)
+		`, targetState, targetOwner, tx.scope.ProjectID, tx.scope.WorkspaceID,
+			operation.Generation, operation.OperationID, string(operation.OperationJSON), operation.State,
+			sourceOwner, sourceOwner)
+		if err != nil {
+			return fmt.Errorf("localstore: transition workspace operation: %w", err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("localstore: inspect workspace operation transition: %w", err)
+		}
+		if affected != 1 {
+			return fmt.Errorf("localstore: workspace operation transition affected %d rows", affected)
+		}
+	}
+	return nil
 }
 
 // NextGeneration allocates after the greatest generation in every persisted
@@ -551,6 +661,142 @@ func (tx *WorkspaceMutationTx) HasOpenConflictForKeys(ctx context.Context, keys 
 		return false, fmt.Errorf("localstore: iterate open conflict keys: %w", err)
 	}
 	return matched, nil
+}
+
+func (tx *WorkspaceMutationTx) validateWorkspaceOperationMetadata(ctx context.Context) error {
+	rows, err := tx.conn.QueryContext(ctx, `
+		SELECT generation, state, stashed_by_stash_id
+		FROM workspace_overlay_operations
+		WHERE project_id=? AND workspace_id=?
+		ORDER BY generation
+	`, tx.scope.ProjectID, tx.scope.WorkspaceID)
+	if err != nil {
+		return fmt.Errorf("localstore: query workspace operation metadata: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var generation int64
+		var state string
+		var stashID sql.NullString
+		if err := rows.Scan(&generation, &state, &stashID); err != nil {
+			return fmt.Errorf("localstore: scan workspace operation metadata: %w", err)
+		}
+		if generation <= 0 {
+			return fmt.Errorf("localstore: invalid workspace operation generation")
+		}
+		switch state {
+		case "active", "rebased", "materialized", "discarded":
+			if stashID.Valid {
+				return fmt.Errorf("localstore: non-stashed workspace operation has a stash owner")
+			}
+		case "stashed":
+			if stashID.Valid && !validCanonicalUUIDv4(stashID.String) {
+				return fmt.Errorf("localstore: stashed workspace operation has an invalid stash owner")
+			}
+		default:
+			return fmt.Errorf("localstore: invalid workspace operation state %q", state)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("localstore: iterate workspace operation metadata: %w", err)
+	}
+	return nil
+}
+
+func (tx *WorkspaceMutationTx) queryWorkspaceOperations(ctx context.Context, query string, args ...any) ([]WorkspaceOperation, error) {
+	rows, err := tx.conn.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("localstore: query workspace operations: %w", err)
+	}
+	defer rows.Close()
+	operations := make([]WorkspaceOperation, 0)
+	for rows.Next() {
+		operation, err := scanWorkspaceOperation(rows)
+		if err != nil {
+			return nil, fmt.Errorf("localstore: scan workspace operation: %w", err)
+		}
+		operations = append(operations, operation)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("localstore: iterate workspace operations: %w", err)
+	}
+	return operations, nil
+}
+
+func scanWorkspaceOperation(scanner workspaceScanner) (WorkspaceOperation, error) {
+	var operation WorkspaceOperation
+	var operationJSON []byte
+	var stashID sql.NullString
+	if err := scanner.Scan(&operation.Generation, &operation.OperationID, &operationJSON, &operation.State, &stashID); err != nil {
+		return WorkspaceOperation{}, err
+	}
+	operation.OperationJSON = bytes.Clone(operationJSON)
+	if stashID.Valid {
+		owner := stashID.String
+		operation.StashedByStashID = &owner
+	}
+	if err := validateWorkspaceOperation(operation); err != nil {
+		return WorkspaceOperation{}, err
+	}
+	return operation, nil
+}
+
+func validateWorkspaceOperation(operation WorkspaceOperation) error {
+	if operation.Generation <= 0 || !types.CanonicalUUID(operation.OperationID) {
+		return fmt.Errorf("invalid workspace operation metadata")
+	}
+	switch operation.State {
+	case "active", "rebased", "materialized", "discarded":
+		if operation.StashedByStashID != nil {
+			return fmt.Errorf("non-stashed workspace operation has a stash owner")
+		}
+	case "stashed":
+		if operation.StashedByStashID != nil && !validCanonicalUUIDv4(*operation.StashedByStashID) {
+			return fmt.Errorf("stashed workspace operation has an invalid stash owner")
+		}
+	default:
+		return fmt.Errorf("invalid workspace operation state %q", operation.State)
+	}
+	decoded, err := projectstate.DecodeOperation(operation.OperationJSON)
+	if err != nil {
+		return fmt.Errorf("decode operation JSON: %w", err)
+	}
+	if decoded.ID != operation.OperationID {
+		return fmt.Errorf("workspace operation row ID mismatch")
+	}
+	canonical, err := projectstate.CanonicalOperation(decoded)
+	if err != nil {
+		return fmt.Errorf("canonicalize operation JSON: %w", err)
+	}
+	if !bytes.Equal(canonical, operation.OperationJSON) {
+		return fmt.Errorf("workspace operation bytes are not canonical")
+	}
+	return nil
+}
+
+func legalOperationTransition(source, target string) bool {
+	switch source {
+	case "active":
+		return target == "rebased" || target == "stashed" || target == "materialized" || target == "discarded"
+	case "rebased":
+		return target == "stashed" || target == "materialized" || target == "discarded"
+	case "materialized":
+		return target == "active" || target == "rebased"
+	default:
+		return false
+	}
+}
+
+func validCanonicalUUIDv4(value string) bool {
+	if !types.CanonicalUUID(value) || value[14] != '4' {
+		return false
+	}
+	switch value[19] {
+	case '8', '9', 'a', 'b':
+		return true
+	default:
+		return false
+	}
 }
 
 func validWorkspaceScope(scope types.WorkspaceScope) bool {
