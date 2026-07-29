@@ -182,4 +182,13 @@ Plans reconciled and approved by fresh cross-slice review; committed as `08f10fe
 
 **Task A3** (portable state Task 3 — typed operations, Compose, semantic diff, and merge primitives): complete. Base `effd70f`; implementation `f64fb25`. Recon: `.superpowers/sdd/git-native-a3-recon.md`. Genuine tranche-level RED/GREEN recorded; focused/full packages, vet, race, `go test ./...`, and canonical `make check` green. Merged statement coverage: 85.1%. Fresh whole-diff review approved after documentation reconciliation with no remaining Critical or Important findings.
 
-**Task A4** (portable state Task 4 — direct import, stash restore, Git-base observation, and branch guard): in progress. Base `b21de10`. Recon: `.superpowers/sdd/git-native-a4-recon.md`. RED/GREEN, implementation SHA, review result, and coverage pending.
+**Task A4** (portable state Task 4 — direct import, stash restore, Git-base observation,
+and branch guard): in progress. Base `b21de10`. Recon:
+`.superpowers/sdd/git-native-a4-recon.md`. Architecture hardening `4b9b9bc`. A4.2 Gateway
+v2 migration prerequisite `a0e6224`: behavioral RED on absent transition schema; focused,
+full localstore, race, vet, and repository-wide `go test ./...` GREEN; fresh read-only
+review found no Critical/Important issues. A4.1 direct-delta implementation `097b43c`:
+focused RED/GREEN, full projectstate, race, vet, formatting,
+repository-wide `go test ./...`, and 84.8% package coverage GREEN; fresh read-only review
+found no Critical/Important issues. Later service tranches and complete A4 coverage gate
+pending.
