@@ -519,30 +519,39 @@ func (tx *WorkspaceMutationTx) InsertActiveOperations(ctx context.Context, opera
 
 // SetStatus changes only the binding owned by this immediate transaction.
 func (tx *WorkspaceMutationTx) SetStatus(ctx context.Context, state string) error {
+	_, err := tx.SetStatusReturningUpdatedAt(ctx, state)
+	return err
+}
+
+// SetStatusReturningUpdatedAt changes the exact binding and returns the timestamp
+// produced by that update.
+func (tx *WorkspaceMutationTx) SetStatusReturningUpdatedAt(ctx context.Context, state string) (time.Time, error) {
 	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
-		return ErrNotFound
+		return time.Time{}, ErrNotFound
 	}
 	switch state {
 	case "clean", "pending", "conflicted", "blocked":
 	default:
-		return fmt.Errorf("localstore: invalid workspace state %q", state)
+		return time.Time{}, fmt.Errorf("localstore: invalid workspace state %q", state)
 	}
-	result, err := tx.conn.ExecContext(ctx, `
+	var updatedAt time.Time
+	var updatedAtClass string
+	err := tx.conn.QueryRowContext(ctx, `
 		UPDATE workspace_bindings
 		SET status=?, updated_at=CURRENT_TIMESTAMP
 		WHERE project_id=? AND workspace_id=?
-	`, state, tx.scope.ProjectID, tx.scope.WorkspaceID)
+		RETURNING updated_at, typeof(updated_at)
+	`, state, tx.scope.ProjectID, tx.scope.WorkspaceID).Scan(&updatedAt, &updatedAtClass)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, ErrNotFound
+	}
 	if err != nil {
-		return fmt.Errorf("localstore: set workspace status: %w", err)
+		return time.Time{}, fmt.Errorf("localstore: set workspace status: %w", err)
 	}
-	updated, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("localstore: inspect workspace status update: %w", err)
+	if updatedAtClass != "text" || !validUTCTimestamp(updatedAt) {
+		return time.Time{}, fmt.Errorf("localstore: invalid workspace status update timestamp")
 	}
-	if updated != 1 {
-		return ErrNotFound
-	}
-	return nil
+	return updatedAt.UTC(), nil
 }
 
 // Candidate strictly decodes the stored direct and optional rebased snapshots

@@ -2049,6 +2049,274 @@ func TestWorkspaceMutationTxSetStatusValidStatesAndExactScope(t *testing.T) {
 	}
 }
 
+func TestWorkspaceMutationTxSetStatusReturningUpdatedAtAPI(t *testing.T) {
+	var tx *WorkspaceMutationTx
+	got, err := tx.SetStatusReturningUpdatedAt(context.Background(), "pending")
+	if err == nil || !got.IsZero() {
+		t.Fatalf("SetStatusReturningUpdatedAt nil tx=(%v,%v), want zero,error", got, err)
+	}
+}
+
+func TestWorkspaceMutationTxSetStatusReturningUpdatedAtMatchesStrictStateAndScope(t *testing.T) {
+	_, repo := openWorkspaceStore(t)
+	a := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout-a", 1, 11)
+	b := createBinding(t, repo, a.Scope.ProjectID, "00000000-0000-4000-8000-000000000012", "/checkout-b", 2, 12)
+	c := createBinding(t, repo, "00000000-0000-4000-8000-000000000002", string(a.Scope.WorkspaceID), "/checkout-c", 3, 13)
+	stashID := "00000000-0000-4000-8000-000000000031"
+	stash := validWorkspaceStash(t, a, stashID)
+	if err := repo.WithImmediateWorkspace(context.Background(), a.Scope, func(tx *WorkspaceMutationTx) error {
+		return tx.InsertStash(context.Background(), stash)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var first, second time.Time
+	if err := repo.WithImmediateWorkspace(context.Background(), a.Scope, func(tx *WorkspaceMutationTx) error {
+		var err error
+		first, err = tx.SetStatusReturningUpdatedAt(context.Background(), "pending")
+		if err != nil {
+			return err
+		}
+		strict, err := tx.RestoreRetryState(context.Background(), stashID)
+		if err != nil {
+			return err
+		}
+		if strict.Workspace.State != "pending" || !strict.BindingUpdatedAt.Equal(first) || first.Location() != time.UTC {
+			t.Fatalf("strict state=%q updated_at=%v, returned %v in %v", strict.Workspace.State, strict.BindingUpdatedAt, first, first.Location())
+		}
+		second, err = tx.SetStatusReturningUpdatedAt(context.Background(), "conflicted")
+		if err != nil {
+			return err
+		}
+		if second.Before(first) {
+			t.Fatalf("same-second update moved backwards: first=%v second=%v", first, second)
+		}
+		return tx.SetStatus(context.Background(), "blocked")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	strict := mustRestoreRetryState(t, repo, a.Scope, stashID)
+	if strict.Workspace.State != "blocked" || strict.BindingUpdatedAt.Before(second) {
+		t.Fatalf("wrapper strict state=%q updated_at=%v, prior returned=%v", strict.Workspace.State, strict.BindingUpdatedAt, second)
+	}
+	for _, neighbor := range []types.WorkspaceBinding{b, c} {
+		workspace, err := repo.Workspace(context.Background(), neighbor.Scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if workspace.State != "clean" {
+			t.Fatalf("neighbor %+v state=%q, want clean", neighbor.Scope, workspace.State)
+		}
+	}
+}
+
+func TestWorkspaceMutationTxSetStatusReturningUpdatedAtRejectsInvalidInputs(t *testing.T) {
+	var nilTx *WorkspaceMutationTx
+	if got, err := nilTx.SetStatusReturningUpdatedAt(context.Background(), "pending"); !got.IsZero() || !errors.Is(err, ErrNotFound) {
+		t.Fatalf("nil tx=(%v,%v), want zero,ErrNotFound", got, err)
+	}
+	_, repo := openWorkspaceStore(t)
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+	var closed *WorkspaceMutationTx
+	if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		closed = tx
+		invalidScope := &WorkspaceMutationTx{conn: tx.conn}
+		if got, err := invalidScope.SetStatusReturningUpdatedAt(context.Background(), "pending"); !got.IsZero() || !errors.Is(err, ErrNotFound) {
+			t.Fatalf("invalid scope=(%v,%v), want zero,ErrNotFound", got, err)
+		}
+		missing := &WorkspaceMutationTx{conn: tx.conn, scope: types.WorkspaceScope{
+			ProjectID: "00000000-0000-4000-8000-000000000099", WorkspaceID: "00000000-0000-4000-8000-000000000098",
+		}}
+		if got, err := missing.SetStatusReturningUpdatedAt(context.Background(), "pending"); !got.IsZero() || !errors.Is(err, ErrNotFound) {
+			t.Fatalf("missing binding=(%v,%v), want zero,ErrNotFound", got, err)
+		}
+		if got, err := tx.SetStatusReturningUpdatedAt(context.Background(), "unknown"); !got.IsZero() || err == nil || errors.Is(err, ErrNotFound) {
+			t.Fatalf("invalid status=(%v,%v), want zero,validation error", got, err)
+		}
+		canceled, cancel := context.WithCancel(context.Background())
+		cancel()
+		if got, err := tx.SetStatusReturningUpdatedAt(canceled, "pending"); !got.IsZero() || !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled context=(%v,%v), want zero,context.Canceled", got, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := closed.SetStatusReturningUpdatedAt(context.Background(), "pending"); !got.IsZero() || err == nil {
+		t.Fatalf("closed tx=(%v,%v), want zero,error", got, err)
+	}
+	workspace, err := repo.Workspace(context.Background(), binding.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workspace.State != "clean" {
+		t.Fatalf("invalid calls changed state to %q", workspace.State)
+	}
+}
+
+func TestWorkspaceMutationTxSetStatusReturningUpdatedAtCallbackRollback(t *testing.T) {
+	_, repo := openWorkspaceStore(t)
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+	stashID := "00000000-0000-4000-8000-000000000031"
+	if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		return tx.InsertStash(context.Background(), validWorkspaceStash(t, binding, stashID))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := mustRestoreRetryState(t, repo, binding.Scope, stashID)
+	callbackErr := errors.New("status timestamp rollback fixture")
+	err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		updatedAt, err := tx.SetStatusReturningUpdatedAt(context.Background(), "pending")
+		if err != nil {
+			return err
+		}
+		strict, err := tx.RestoreRetryState(context.Background(), stashID)
+		if err != nil {
+			return err
+		}
+		if strict.Workspace.State != "pending" || !strict.BindingUpdatedAt.Equal(updatedAt) {
+			t.Fatalf("transaction-local state=%q updated_at=%v, returned=%v", strict.Workspace.State, strict.BindingUpdatedAt, updatedAt)
+		}
+		return callbackErr
+	})
+	if !errors.Is(err, callbackErr) || errors.Is(err, ErrCommitOutcomeUnknown) {
+		t.Fatalf("callback error=%v, want rollback fixture without unknown-commit sentinel", err)
+	}
+	after := mustRestoreRetryState(t, repo, binding.Scope, stashID)
+	if after.Workspace.State != "clean" || !after.BindingUpdatedAt.Equal(before.BindingUpdatedAt) {
+		t.Fatalf("rolled-back state=%q updated_at=%v, want clean/%v", after.Workspace.State, after.BindingUpdatedAt, before.BindingUpdatedAt)
+	}
+}
+
+func TestWorkspaceMutationTxSetStatusReturningUpdatedAtIgnoredUpdateIsNotFound(t *testing.T) {
+	store, repo := openWorkspaceStore(t)
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+	if _, err := store.DB().Exec(`
+		CREATE TRIGGER ignore_workspace_pending
+		BEFORE UPDATE OF status ON workspace_bindings
+		WHEN NEW.project_id='00000000-0000-4000-8000-000000000001'
+		 AND NEW.workspace_id='00000000-0000-4000-8000-000000000011'
+		 AND NEW.status='pending'
+		BEGIN SELECT RAISE(IGNORE); END
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		got, err := tx.SetStatusReturningUpdatedAt(context.Background(), "pending")
+		if !got.IsZero() || !errors.Is(err, ErrNotFound) {
+			t.Fatalf("ignored update=(%v,%v), want zero,ErrNotFound", got, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := repo.Workspace(context.Background(), binding.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workspace.State != "clean" {
+		t.Fatalf("ignored update changed state to %q", workspace.State)
+	}
+}
+
+func TestWorkspaceMutationTxSetStatusReturningUpdatedAtPrecedesAfterTriggerAndRollsBack(t *testing.T) {
+	store, repo := openWorkspaceStore(t)
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+	stashID := "00000000-0000-4000-8000-000000000031"
+	if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		return tx.InsertStash(context.Background(), validWorkspaceStash(t, binding, stashID))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := mustRestoreRetryState(t, repo, binding.Scope, stashID)
+	wantRewritten := time.Date(2040, 1, 2, 3, 4, 5, 0, time.UTC)
+	if _, err := store.DB().Exec(`
+		CREATE TRIGGER rewrite_workspace_status_timestamp
+		AFTER UPDATE OF status ON workspace_bindings
+		WHEN NEW.project_id='00000000-0000-4000-8000-000000000001'
+		 AND NEW.workspace_id='00000000-0000-4000-8000-000000000011'
+		 AND NEW.status='pending'
+		BEGIN
+			UPDATE workspace_bindings SET updated_at='2040-01-02 03:04:05+00:00'
+			WHERE project_id=NEW.project_id AND workspace_id=NEW.workspace_id;
+		END
+	`); err != nil {
+		t.Fatal(err)
+	}
+	callbackErr := errors.New("after trigger rollback fixture")
+	err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		returned, err := tx.SetStatusReturningUpdatedAt(context.Background(), "pending")
+		if err != nil {
+			return err
+		}
+		strict, err := tx.RestoreRetryState(context.Background(), stashID)
+		if err != nil {
+			return err
+		}
+		if strict.BindingUpdatedAt.Equal(returned) || !strict.BindingUpdatedAt.Equal(wantRewritten) {
+			t.Fatalf("RETURNING=%v later strict updated_at=%v, want distinct rewritten timestamp", returned, strict.BindingUpdatedAt)
+		}
+		return callbackErr
+	})
+	if !errors.Is(err, callbackErr) || errors.Is(err, ErrCommitOutcomeUnknown) {
+		t.Fatalf("callback error=%v, want after-trigger rollback fixture", err)
+	}
+	after := mustRestoreRetryState(t, repo, binding.Scope, stashID)
+	if after.Workspace.State != "clean" || !after.BindingUpdatedAt.Equal(before.BindingUpdatedAt) {
+		t.Fatalf("after-trigger rollback state=%q updated_at=%v, want clean/%v", after.Workspace.State, after.BindingUpdatedAt, before.BindingUpdatedAt)
+	}
+}
+
+func TestWorkspaceMutationTxSetStatusReturningUpdatedAtCommitFailureKeepsSentinel(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "gateway.db")
+	store, err := Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := NewWorkspaceRepo(store.DB())
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+	err = repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		updatedAt, err := tx.SetStatusReturningUpdatedAt(context.Background(), "pending")
+		if err != nil {
+			return err
+		}
+		if !validUTCTimestamp(updatedAt) {
+			t.Fatalf("returned updated_at=%v, want non-zero UTC", updatedAt)
+		}
+		if _, err := tx.conn.ExecContext(context.Background(), `PRAGMA defer_foreign_keys=ON`); err != nil {
+			return err
+		}
+		_, err = tx.conn.ExecContext(context.Background(), `
+			INSERT INTO workspace_conflicts
+			(project_id,workspace_id,occurrence_id,conflict_id,record_kind,record_id,field_path,
+			 conflict_kind,base_json,ours_json,theirs_json,state)
+			VALUES ('00000000-0000-4000-8000-000000000099','00000000-0000-4000-8000-000000000098',
+			 'deferred-status-timestamp','deferred-status-timestamp','task',
+			 '00000000-0000-4000-8000-000000000097','/title','same_field','{}','{}','{}','open')
+		`)
+		return err
+	})
+	if !errors.Is(err, ErrCommitOutcomeUnknown) {
+		t.Fatalf("commit error=%v, want ErrCommitOutcomeUnknown", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	repo = NewWorkspaceRepo(store.DB())
+	workspace, err := repo.Workspace(context.Background(), binding.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workspace.State != "clean" {
+		t.Fatalf("failed commit persisted state=%q, want clean", workspace.State)
+	}
+}
+
 func TestWorkspaceMutationTxSetStatusFailureRollsBackPriorWrites(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "gateway.db")
 	store, err := Open(databasePath)
