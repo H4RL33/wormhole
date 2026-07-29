@@ -197,17 +197,28 @@ func projectRestoreRetryBinding(persisted localstore.WorkspaceRestoreRetryState)
 		return restoreRetryBindingV1{}, err
 	}
 	binding := persisted.Workspace.Binding
+	projectedBinding, err := workspaceBindingDigest(binding)
+	if err != nil {
+		return restoreRetryBindingV1{}, err
+	}
 	return restoreRetryBindingV1{
-		Binding: workspaceBindingDigestV1{
-			Scope: binding.Scope,
-			Checkout: checkoutIdentityDigestV1{
-				CanonicalPath: binding.Checkout.CanonicalPath, Device: binding.Checkout.Device, Inode: binding.Checkout.Inode,
-			},
-			Repository: binding.Repository, AcceptedRef: binding.AcceptedRef,
-			AcceptedCommitSHA: binding.AcceptedCommitSHA, AcceptedTreeDigest: binding.AcceptedTreeDigest,
-		},
-		Status: persisted.Workspace.State, CreatedAt: persisted.BindingCreatedAt.UTC(),
+		Binding: projectedBinding,
+		Status:  persisted.Workspace.State, CreatedAt: persisted.BindingCreatedAt.UTC(),
 		UpdatedAt: persisted.BindingUpdatedAt.UTC(), AcceptedSnapshotBlobDigest: persisted.AcceptedSnapshotBlobDigest,
+	}, nil
+}
+
+func workspaceBindingDigest(binding types.WorkspaceBinding) (workspaceBindingDigestV1, error) {
+	if err := binding.Validate(); err != nil {
+		return workspaceBindingDigestV1{}, fmt.Errorf("projectstate: invalid workspace binding digest projection: %w", err)
+	}
+	return workspaceBindingDigestV1{
+		Scope: binding.Scope,
+		Checkout: checkoutIdentityDigestV1{
+			CanonicalPath: binding.Checkout.CanonicalPath, Device: binding.Checkout.Device, Inode: binding.Checkout.Inode,
+		},
+		Repository: binding.Repository, AcceptedRef: binding.AcceptedRef,
+		AcceptedCommitSHA: binding.AcceptedCommitSHA, AcceptedTreeDigest: binding.AcceptedTreeDigest,
 	}, nil
 }
 

@@ -26,6 +26,26 @@ func TestRestoreRetryPrivateAPIExists(t *testing.T) {
 	var _ restoreStashRetryPreimageV1
 }
 
+func TestWorkspaceBindingDigestProjectionCopiesCompleteBinding(t *testing.T) {
+	_, _, persisted := restoreRetryFixture(t)
+	got, err := workspaceBindingDigest(persisted.Workspace.Binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := persisted.Workspace.Binding
+	if got.Scope != want.Scope || got.Checkout.CanonicalPath != want.Checkout.CanonicalPath ||
+		got.Checkout.Device != want.Checkout.Device || got.Checkout.Inode != want.Checkout.Inode ||
+		got.Repository != want.Repository || got.AcceptedRef != want.AcceptedRef ||
+		got.AcceptedCommitSHA != want.AcceptedCommitSHA || got.AcceptedTreeDigest != want.AcceptedTreeDigest {
+		t.Fatalf("workspace binding projection=%+v, want %+v", got, want)
+	}
+	invalid := persisted.Workspace.Binding
+	invalid.Checkout.Inode = 0
+	if got, err := workspaceBindingDigest(invalid); err == nil || got != (workspaceBindingDigestV1{}) {
+		t.Fatalf("invalid binding projection=(%+v,%v), want zero and error", got, err)
+	}
+}
+
 func TestBuildRestoreStashRetryPreimageProjectsCompletePersistedState(t *testing.T) {
 	req, requestDigest, persisted := restoreRetryFixture(t)
 	preimage, err := buildRestoreStashRetryPreimage(req, requestDigest, persisted)
