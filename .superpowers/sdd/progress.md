@@ -178,4 +178,6 @@ Plans reconciled and approved by fresh cross-slice review; committed as `08f10fe
 
 **Task A2** (portable state Task 2 — scoped SQLite schema, durable migration ledger, workspace registration/resolution): complete. Base `4a37433`; implementation `bb58162`; review-fix `2917032`. Genuine RED recorded; focused/full packages, vet, race, `go test ./...`, and `make check` green. Merged statement coverage: 85.0%. Fresh task review approved after one fix round with no remaining Critical or Important findings. Deferred Minor: decompose `internal/runtime/projectstate/working_tree.go` during final branch cleanup. Follow-up runtime/setup contract correction committed separately as `23f4e9f` before Task A3.
 
+**Task A3 prerequisite** (shared ProjectState operation/immutable-record contract hardening required before portable Task 3): complete. Base `f78b600`; implementation `aa569c6`. Genuine focused RED recorded; focused GREEN, changed packages, `go test ./...`, `make race`, `make coverage`, and `make check` green; merged coverage 85.0%; independent review approved with no findings.
+
 **Task A3** (portable state Task 3 — typed operations, Compose, semantic diff, and merge primitives): in progress. Base `PENDING_LEDGER_COMMIT`. Recon: `.superpowers/sdd/git-native-a3-recon.md`. RED/GREEN, implementation SHA, review result, and coverage pending.
