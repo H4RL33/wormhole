@@ -194,5 +194,15 @@ found no Critical/Important issues. Candidate persistence and COMMIT-outcome han
 `21bc549`, followed by exact v2 operation readers/transitions `6a95648`: genuine focused
 RED/GREEN, full localstore/projectstate and repository tests, race, vet, formatting, and
 diff checks GREEN; both fresh read-only reviews found no Critical/Important issues.
-Conflict/materialization persistence, Import, stash/restore, Git observation, branch
-guard, and the complete A4 coverage gate remain pending.
+Transition-receipt persistence `bca94db`: focused RED/GREEN, full localstore and
+repository tests, race, vet, formatting, and diff checks GREEN; two Important review
+findings (single-snapshot workspace/receipt lookup and immutable collision proof) were
+fixed and the re-review approved with no remaining Critical/Important findings. Future
+checkpoint bytes and cross-plan dependency corrections landed separately as `6ae6645`.
+Neutral conflict-occurrence persistence and strict conflict gates `ccaebe9`: genuine API
+and trigger-mutation RED/GREEN, focused/full localstore and projectstate tests,
+repository-wide tests, race, vet, formatting, and diff checks GREEN; localstore statement
+coverage is 81.7%. Review-driven gate routing now validates every selected open row in
+one repository read snapshot, with no remaining Critical/Important findings. Runtime
+conflict semantic codec, materialization proof, Import, stash/restore, Git observation,
+branch guard, and the complete merged A4 coverage gate remain pending.
