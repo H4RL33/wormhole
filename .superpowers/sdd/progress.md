@@ -586,3 +586,36 @@ coverage was 92.3% for `AdvanceAcceptedBase` and 84.6% for `AcceptMaterializatio
 stored/monotonic timestamp helpers were 100%. The next A4 tranche is the strict discard
 request-digest/receipt codec, followed by `ObserveGitBase` and `RefreshWorkspace`; Task A4
 remains in progress.
+
+A4 discard observer contract codec `b1c7610`
+(`feat(projectstate): encode discard receipts`): complete. The new `git_observer`
+contract types and sentinels freeze the strict BranchSwitchDiscard request, result, and
+receipt codec plus the exact binding projection. Request IDs are validated but are not
+hashed into the request digest. Clean receipts enforce their strict candidate-not-accepted,
+nil-journal, no-rebase, and no-conflict semantics. Ref validation now admits Git-valid refs,
+including `refs/heads/foo./bar`, while retaining the required invalid-ref rejection.
+
+Causal tests and corrected fixed goldens cover the codec, digest, binding, receipt, and ref
+contracts. Two independent v3 reviews gave final approval. Fresh focused, race, and full
+tests passed; ProjectState statement coverage was 86.0%. `go vet ./...`, gofmt, and diff
+checks also passed. The commit was pushed and exact SHA
+`b1c76103da58560090a17eec89425eb3c2761464` was verified. This checkpoint supplies contract
+and codec prerequisites only; it does not claim that `Service.ObserveGitBase` exists.
+
+A4 normative observer-transition reconciliation `4492026`
+(`docs(architecture): resolve observer transitions`): complete. The RFC, architecture
+design, portable-state implementation plan, and implementation rules now consistently
+freeze receipt-first binding-free retries and the new exact localstore APIs;
+proof-before-applicability recovery/corruption blockers; Reject-only branch pending;
+Discard never accepting a materialization; and same-symbolic-ref Reject/Refresh-only
+materialization acceptance. They also freeze the terminal-only applicability matrix,
+unknown-COMMIT zero-result behavior, trusted importer token
+`system:git-observation-rebase-v1`, driver-proxy SELECT-order proof, and the rule that
+publication alone never advances the accepted base.
+
+Final authority and feasibility reviews approved the reconciled normative contract. A full
+`make check` passed during reconciliation, covering build, vet, integration-required tests,
+race, and coverage enforcement; total statement coverage was 85.8% against the 80% floor.
+The commit was pushed and exact SHA `4492026083f2f4de95382351b2b274707dfe18de` was
+verified. This documentation checkpoint does not claim an `ObserveGitBase` service
+implementation.
