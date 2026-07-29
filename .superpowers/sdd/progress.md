@@ -498,3 +498,26 @@ full `go test ./... -count=1` PASS, `go vet ./...` PASS, and gofmt/diff PASS. Fi
 reviews approved with no remaining findings. `Service.RestoreStash` remains next and must
 create and compare its write timestamp explicitly because the current `SetStatus` seam does
 not expose timestamp provenance; no service wiring is claimed by this commit.
+
+A4 status-timestamp prerequisite `c20fcd9` (`feat: return workspace status timestamps`):
+the causal missing-method RED first proved `SetStatusReturningUpdatedAt` was absent. The
+existing `SetStatus` API remains compatible as a wrapper that delegates to the new method and
+discards its timestamp. The new transaction method performs one exact project/workspace-scoped
+`UPDATE`, assigns `CURRENT_TIMESTAMP`, and uses `RETURNING updated_at, typeof(updated_at)`;
+nil/invalid/missing transactions and a zero-row update return a zero time with `ErrNotFound`,
+while success requires SQLite TEXT storage and returns a nonzero normalized UTC timestamp.
+Same-second status updates are valid and need not advance the timestamp.
+
+The trigger regressions make SQLite's boundary explicit: `RETURNING` observes the pre-`AFTER`
+trigger timestamp, so an `AFTER UPDATE` rewrite intentionally diverges from the later strict
+state read; that mismatch is detectable and the enclosing callback rollback restores the prior
+status/timestamp. Coverage also proves callback rollback, same-project/cross-project workspace
+isolation, ignored-update zero-row behavior, invalid and closed transaction handling, and
+commit-failure preservation of `ErrCommitOutcomeUnknown` with no persisted status change.
+Fresh focused PASS; focused and full localstore race PASS per reviewer; full localstore PASS at
+83.5% statement coverage; full `go test ./...` PASS; `go vet ./...`, gofmt, and diff checks
+PASS. Two fresh reviews approved with no remaining findings.
+
+This commit is the timestamp-returning prerequisite only. `Service.RestoreStash` remains next
+and must exact-compare this returned write timestamp with the subsequent strict-state reread;
+no restore-service wiring is claimed here.
