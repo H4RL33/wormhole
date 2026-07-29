@@ -49,6 +49,11 @@ type WorkspaceOperation struct {
 	StashedByStashID *string
 }
 
+type WorkspaceOperationAuditRecord struct {
+	WorkspaceOperation
+	CreatedAt time.Time
+}
+
 type WorkspaceCandidateRecord struct {
 	AcceptedBaseDigest       projectstate.Digest
 	WorkingTreeDigest        projectstate.Digest
@@ -168,6 +173,93 @@ func (tx *WorkspaceMutationTx) Workspace(ctx context.Context) (WorkspaceRecord, 
 		return WorkspaceRecord{}, fmt.Errorf("localstore: read workspace mutation binding: %w", err)
 	}
 	return record, nil
+}
+
+// OperationAudit returns every operation for this transaction's exact
+// workspace in persisted generation order.
+func (tx *WorkspaceMutationTx) OperationAudit(ctx context.Context) ([]WorkspaceOperationAuditRecord, error) {
+	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
+		return nil, ErrNotFound
+	}
+	if _, err := tx.Workspace(ctx); err != nil {
+		return nil, err
+	}
+	rows, err := tx.conn.QueryContext(ctx, `
+		SELECT project_id, workspace_id, generation, operation_id, operation_json,
+		       state, stashed_by_stash_id, created_at,
+		       typeof(project_id), typeof(workspace_id), typeof(generation),
+		       typeof(operation_id), typeof(operation_json), typeof(state),
+		       typeof(stashed_by_stash_id), typeof(created_at)
+		FROM workspace_overlay_operations
+		WHERE CAST(project_id AS TEXT)=? AND CAST(workspace_id AS TEXT)=?
+		ORDER BY generation
+	`, tx.scope.ProjectID, tx.scope.WorkspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("localstore: query workspace operation audit: %w", err)
+	}
+	defer rows.Close()
+	records := make([]WorkspaceOperationAuditRecord, 0)
+	seenIDs := make(map[string]struct{})
+	for rows.Next() {
+		var (
+			projectID, workspaceID, operationID, operationJSON, operationState sql.NullString
+			stashID                                                            sql.NullString
+			generation                                                         sql.NullInt64
+			createdAt                                                          sql.NullTime
+			projectType, workspaceType, generationType                         string
+			operationIDType, operationJSONType, stateType                      string
+			stashIDType, createdAtType                                         string
+		)
+		if err := rows.Scan(
+			&projectID, &workspaceID, &generation, &operationID, &operationJSON,
+			&operationState, &stashID, &createdAt,
+			&projectType, &workspaceType, &generationType, &operationIDType,
+			&operationJSONType, &stateType, &stashIDType, &createdAtType,
+		); err != nil {
+			return nil, fmt.Errorf("localstore: scan workspace operation audit: %w", err)
+		}
+		if projectType != "text" || workspaceType != "text" || generationType != "integer" ||
+			operationIDType != "text" || operationJSONType != "text" || stateType != "text" ||
+			(stashIDType != "null" && stashIDType != "text") || createdAtType != "text" {
+			return nil, fmt.Errorf("localstore: invalid workspace operation audit storage class")
+		}
+		if !projectID.Valid || !workspaceID.Valid || !generation.Valid || !operationID.Valid ||
+			!operationJSON.Valid || !operationState.Valid || !createdAt.Valid ||
+			projectID.String != tx.scope.ProjectID || workspaceID.String != string(tx.scope.WorkspaceID) {
+			return nil, fmt.Errorf("localstore: invalid workspace operation audit scope or value")
+		}
+		operation := WorkspaceOperation{
+			Generation:    generation.Int64,
+			OperationID:   operationID.String,
+			OperationJSON: bytes.Clone([]byte(operationJSON.String)),
+			State:         operationState.String,
+		}
+		if stashID.Valid {
+			owner := stashID.String
+			operation.StashedByStashID = &owner
+		}
+		if err := validateWorkspaceOperation(operation); err != nil {
+			return nil, fmt.Errorf("localstore: validate workspace operation audit: %w", err)
+		}
+		if len(records) > 0 && operation.Generation <= records[len(records)-1].Generation {
+			return nil, fmt.Errorf("localstore: workspace operation audit generations are not strictly increasing")
+		}
+		if _, duplicate := seenIDs[operation.OperationID]; duplicate {
+			return nil, fmt.Errorf("localstore: workspace operation audit has a duplicate operation ID")
+		}
+		seenIDs[operation.OperationID] = struct{}{}
+		if !validUTCTimestamp(createdAt.Time) {
+			return nil, fmt.Errorf("localstore: invalid workspace operation audit timestamp")
+		}
+		records = append(records, WorkspaceOperationAuditRecord{
+			WorkspaceOperation: operation,
+			CreatedAt:          createdAt.Time.UTC(),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("localstore: iterate workspace operation audit: %w", err)
+	}
+	return records, nil
 }
 
 // ActiveOperationsAfter returns only strictly decoded active rows above the
