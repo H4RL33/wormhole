@@ -537,26 +537,63 @@ the same layering pattern and isolation discipline.
   or malformed-row fallback.
 - Composition receives an explicit strict-decoded start snapshot, an explicit initial
   through-generation, and strictly increasing active stored operations whose generation
-  is greater than that boundary. Rebased, stashed, and materialized rows do not replay.
+  is greater than that boundary. Rebased, stashed, materialized, and discarded rows do
+  not replay.
   Status exposes the exact composed `CandidateDigest` and final `OverlayGeneration`
   while retaining the accepted snapshot separately. `WorkspaceStatus.State` remains a
   string until an approved plan introduces another type.
 - Stash serialisation keeps `source_tree`/`source_base_digest` as the semantic pre-stash
   rebase base. The existing `operations_json` column is a strict canonical
   `StashReplayV1` containing schema version, selected-start tree/digest, initial boundary,
-  and only active StoredOperation rows above it; no competing `000002` migration is
-  added. Restore must prove `Compose(selectedStart,boundary,operations)` equals the
+  a non-nil absorbed-rebased prefix array, and a separate non-nil active suffix array.
+  All and only rows attributed by `stashed_by_stash_id` must match those arrays byte for
+  byte. Portable transitions own Gateway
+  migration `000002_portable_transitions.sql` and `GatewaySchemaVersion = 2`; committed
+  `000001` is immutable, Code Graph invalidation is `000003`, and multi-Fabric routing/
+  sync are `000004`/`000005`. Restore must prove `Compose(selectedStart,boundary,operations)` equals the
   recorded composed tree, then call `ThreeWayRebase(sourceBase,current,stashComposed)`.
-  Already-rebased rows at/below the boundary remain untouched. Stash rejects any open
+  Already-rebased rows at/below the boundary and later active rows move to terminal
+  owner-attributed stashed state in their respective envelope arrays. Stash rejects any open
   exact-workspace conflict with `localstore.ErrWorkspaceConflicted` and zero mutation;
   successful stash sets status `clean`.
-- Only a clean stash restore may persist a candidate, transition absorbed stash/current
-  operation rows, delete the stash, and set status `pending`. A conflicted restore leaves
+- Only a clean stash restore may persist a candidate, transition absorbed current-active
+  operation rows, delete the stash, and set status `pending`; original stash rows remain
+  terminal stashed. A conflicted restore leaves
   the candidate, every operation row, and full stash byte-identical; it persists only
   deterministic conflict evidence and status `conflicted`. Exact repeat strict-composes
   current rows and replay rows again and returns read-only only when all evidence matches;
   corruption or drift fails closed. The retained stash is resolution/audit evidence, not
   a blind replay instruction.
+- Stash, restore, and discard require canonical UUID request IDs and immutable canonical
+  transition receipts. The request digest binds schema/action/scope plus the complete
+  strict canonical actor envelope and
+  the label, stash ID, or discard checkout/root/expected commit. Same ID and digest is a
+  retry; a different digest returns `ErrIdempotencyConflict`. Clean retries use receipts
+  read-only, while conflicted restore recomputes current/stash/evidence before matching.
+  An unknown commit outcome wraps `ErrCommitOutcomeUnknown`; retry uses the same request
+  or operation ID and reads back the receipt before attempting an insert.
+- Persisted conflicts have UUIDv4 occurrence IDs separate from recomputed deterministic
+  semantic conflict IDs. One open semantic ID per exact workspace is enforced; repeated
+  evidence reuses its occurrence, absent evidence resolves it, and reopening allocates a
+  new occurrence. Strict reads validate canonical envelopes, typed roots, recomputed IDs,
+  ordering, and row metadata before serving or mutation.
+- Import performs a canonical no-follow capture before `BEGIN IMMEDIATE`, then an exact
+  second read under the writer barrier immediately before its first database mutation.
+  Raw path deletion is classified in canonical kind/UUID order before next-tree decode.
+  `ValidateDirectDelta(prior,next)` accepts no proof; only a repository-owned exact
+  published-materialization match may bypass it.
+- ObserveGitBase supports Reject and Discard only. It performs a full outside observation,
+  then inside one immediate transaction compares the complete old binding and reobserves
+  checkout identity, symbolic ref, and HEAD at the linearization boundary. Discard marks
+  active/rebased rows discarded, preserves stashed and accepted-journal materialized rows,
+  deletes candidate, resolves open conflicts, records its receipt, and advances base;
+  prepared, published, or recovered-new journals and orphan/nonterminal materialized
+  rows require recovery or matching Git acceptance first.
+- At most one Git-acceptance-eligible checkpoint exists per workspace. Checkpoint checks
+  inside its first immediate transaction and returns `ErrCheckpointPendingAcceptance`
+  with zero staging or mutation while a published or recovered-new journal remains.
+  Later active generations remain overlay until that journal is accepted; checkpoints
+  are never silently superseded.
 - All append/rebase mutations use one caller-owned dedicated SQLite connection and one
   `BEGIN IMMEDIATE`: read exact binding/candidate/active rows, decode and compose, apply
   the shared reducer, write all rows/candidate/conflict state and the binding status,

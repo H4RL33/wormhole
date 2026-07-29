@@ -580,7 +580,7 @@ git commit -m "feat(gateway): wire one recovered supervisor"
 - Create: internal/runtime/codegraph/store/path_test.go
 - Create: internal/runtime/codegraph/store/migration.go
 - Create: internal/runtime/codegraph/store/migration_test.go
-- Create: internal/runtime/localstore/migrations/000002_invalidate_legacy_codegraph.sql
+- Create: internal/runtime/localstore/migrations/000003_invalidate_legacy_codegraph.sql
 - Create: internal/runtime/localstore/codegraph_invalidation.go
 - Create: internal/runtime/localstore/codegraph_invalidation_test.go
 - Modify: internal/runtime/localstore/migrations.go
@@ -589,9 +589,9 @@ git commit -m "feat(gateway): wire one recovered supervisor"
 - Modify: internal/runtime/codegraph/store/store.go
 - Modify: internal/runtime/codegraph/store/schema_test.go
 
-**Consumes:** Slice-A's single `gateway_schema_migrations` ledger at `GatewaySchemaVersion = 1`; stdlib strings only for graph configuration. Task 3 introduces the conversion in the manager package before Task 4 builds the full manager; config never owns it.
+**Consumes:** Slice-A's single `gateway_schema_migrations` ledger after portable transitions at `GatewaySchemaVersion = 2`; stdlib strings only for graph configuration. Task 3 introduces the conversion in the manager package before Task 4 builds the full manager; config never owns it.
 
-**Produces:** the same `internal/runtime/localstore` migration constant advanced to `GatewaySchemaVersion = 2` after `000002_invalidate_legacy_codegraph.sql`, plus:
+**Produces:** the same `internal/runtime/localstore` migration constant advanced to `GatewaySchemaVersion = 3` after `000003_invalidate_legacy_codegraph.sql`, plus:
 
 ~~~go
 type Scope struct {
@@ -622,7 +622,7 @@ type FreshnessRecord struct {
 
 config/scope.go and every other config file import only stdlib. They do not import internal/types or internal/types/projectstate; AcceptedTreeDigest remains the validated sha256 string used in fingerprints and SQL.
 
-Gateway migration 000002 uses the existing gateway_schema_migrations ledger, advances the sole localstore `GatewaySchemaVersion` constant from 1 to 2, and uses exact DDL:
+Gateway migration 000003 uses the existing gateway_schema_migrations ledger, advances the sole localstore `GatewaySchemaVersion` constant from 2 to 3, and uses exact DDL:
 
 ~~~sql
 CREATE TABLE legacy_codegraph_invalidations (
@@ -678,13 +678,13 @@ func TestDerivativePathRejectsTraversalAndSeparatesWorkspaces(t *testing.T) {
     b, _ := DerivativePath(root, string(workspaceB))
     if a == b || filepath.Dir(a) != filepath.Join(root,"wormhole","codegraph") { t.Fatalf("a=%q b=%q",a,b) }
 }
-func TestGatewayMigration2InvalidatesLegacyGraphIdempotently(t *testing.T) {
+func TestGatewayMigration3InvalidatesLegacyGraphIdempotently(t *testing.T) {
     store := legacyGraphControlStore(t)
     first, err := store.InvalidateLegacyCodeGraph(t.Context())
     if err != nil { t.Fatal(err) }
     second, err := store.InvalidateLegacyCodeGraph(t.Context())
     if err != nil || !reflect.DeepEqual(first,second) { t.Fatalf("first=%+v second=%+v err=%v",first,second,err) }
-    assertGatewayMigrationVersion(t,store,2)
+    assertGatewayMigrationVersion(t,store,3)
     assertLegacyGraphEvidenceIntact(t,store)
 }
 func TestSchemaV3ContainsWorkspaceAndFingerprints(t *testing.T) {
@@ -695,13 +695,13 @@ func TestSchemaV3ContainsWorkspaceAndFingerprints(t *testing.T) {
 
 - [ ] **Step 2: Run RED tests.**
 
-Run: go test ./internal/runtime/localstore ./internal/runtime/codegraph/config ./internal/runtime/codegraph/store ./internal/runtime/codegraph/manager -run 'ScopeFromBinding|DerivativePath|SchemaV3|GatewayMigration2|LegacyProjectGraph' -count=1
+Run: go test ./internal/runtime/localstore ./internal/runtime/codegraph/config ./internal/runtime/codegraph/store ./internal/runtime/codegraph/manager -run 'ScopeFromBinding|DerivativePath|SchemaV3|GatewayMigration3|LegacyProjectGraph' -count=1
 
 Expected: FAIL because scope conversion and schema v3 are absent.
 
 - [ ] **Step 3: Implement scoped database and legacy invalidation (GREEN).**
 
-manager.ScopeFromBinding first calls binding.Validate, then copies its fields into the string-only config.Scope. DerivativePath requires a canonical UUID string, creates dataHome/wormhole/codegraph with 0700, and returns workspace-UUID.db beneath that exact directory. Open creates an owner-only file-backed SQLite DB and retains Scope. All SQL predicates and insert keys use scope.ProjectID, scope.WorkspaceID, and revision_id. The localstore loader still embeds the same numbered one-way files and now requires and applies the contiguous sequence `000001` through `000002`; no second ledger or graph-specific migration constant is introduced.
+manager.ScopeFromBinding first calls binding.Validate, then copies its fields into the string-only config.Scope. DerivativePath requires a canonical UUID string, creates dataHome/wormhole/codegraph with 0700, and returns workspace-UUID.db beneath that exact directory. Open creates an owner-only file-backed SQLite DB and retains Scope. All SQL predicates and insert keys use scope.ProjectID, scope.WorkspaceID, and revision_id. The localstore loader still embeds the same numbered one-way files and now requires and applies the contiguous sequence `000001` through `000003`; no second ledger or graph-specific migration constant is introduced.
 
 The supervisor translates localstore invalidation records into rebuild-required flags without mapping ambiguous legacy rows to a checkout. A new workspace graph starts disabled/rebuild-required. Restart repeats safely without deleting diagnostic evidence.
 
@@ -714,7 +714,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit.**
 
 ~~~bash
-git add internal/runtime/localstore/migrations/000002_invalidate_legacy_codegraph.sql internal/runtime/localstore/codegraph_invalidation.go internal/runtime/localstore/codegraph_invalidation_test.go internal/runtime/localstore/migrations.go internal/runtime/localstore/migrations_test.go internal/runtime/codegraph/config/scope.go internal/runtime/codegraph/config/scope_test.go internal/runtime/codegraph/config/config.go internal/runtime/codegraph/manager/scope.go internal/runtime/codegraph/manager/scope_test.go internal/runtime/codegraph/store/path.go internal/runtime/codegraph/store/path_test.go internal/runtime/codegraph/store/migration.go internal/runtime/codegraph/store/migration_test.go internal/runtime/codegraph/store/store.go internal/runtime/codegraph/store/schema_test.go
+git add internal/runtime/localstore/migrations/000003_invalidate_legacy_codegraph.sql internal/runtime/localstore/codegraph_invalidation.go internal/runtime/localstore/codegraph_invalidation_test.go internal/runtime/localstore/migrations.go internal/runtime/localstore/migrations_test.go internal/runtime/codegraph/config/scope.go internal/runtime/codegraph/config/scope_test.go internal/runtime/codegraph/config/config.go internal/runtime/codegraph/manager/scope.go internal/runtime/codegraph/manager/scope_test.go internal/runtime/codegraph/store/path.go internal/runtime/codegraph/store/path_test.go internal/runtime/codegraph/store/migration.go internal/runtime/codegraph/store/migration_test.go internal/runtime/codegraph/store/store.go internal/runtime/codegraph/store/schema_test.go
 git commit -m "feat(codegraph): scope databases by workspace"
 ~~~
 

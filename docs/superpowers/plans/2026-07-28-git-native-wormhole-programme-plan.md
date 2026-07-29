@@ -35,7 +35,7 @@ Gate: forged transport context is overwritten; every operation refreshes its Git
 
 ### Stage 3: Multi-Fabric routing and accountable identity
 
-Execute Tasks 1–9 in `2026-07-28-multifabric-identity-trial-implementation-plan.md` in order. This establishes immutable routing, one-way local schemas v3/v4, canonical durable Fabric streams, exact Git observation, public key-continuity proofs, zero-contact fork behavior, and the private identity/control-plane schema.
+Execute Tasks 1–9 in `2026-07-28-multifabric-identity-trial-implementation-plan.md` in order. This establishes immutable routing, one-way local schemas v4/v5 after portable transitions v2 and Code Graph invalidation v3, canonical durable Fabric streams, exact Git observation, public key-continuity proofs, zero-contact fork behavior, and the private identity/control-plane schema.
 
 Task 10 is a hard human approval gate. Do not modify `go.mod`, `go.sum`, or implement OIDC until approval explicitly names:
 

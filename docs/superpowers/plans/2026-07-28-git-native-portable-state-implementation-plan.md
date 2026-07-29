@@ -25,8 +25,9 @@
   are the only Compose inputs.
 - A stash persists the semantic pre-stash base separately from the selected Compose
   start. Its existing `operations_json` column holds the selected start tree/digest,
-  explicit initial through-generation, and only active stored operations above that
-  boundary; it never reclassifies already-absorbed rows at or below the boundary.
+  explicit initial through-generation, the current rebased prefix, and the later active
+  suffix in separate canonical arrays. Both arrays become terminal stashed rows owned by
+  that stash ID; clean restore never reclassifies them.
 - Events and Git links are live-only immutable add-only records. Exact canonical
   same-ID replay is idempotent; unequal same-ID content uses one generic immutable-
   record error/conflict/direct-delta contract. Neither kind has tombstone or
@@ -738,7 +739,7 @@ Expected: FAIL because migration, repositories, and service are absent.
 
 - [ ] **Step 2: Implement migration, repositories, safe tree reader, and registration**
 
-Embed internal/runtime/localstore/migrations/*.sql and expose const GatewaySchemaVersion = 1 plus func applyGatewayMigrations(ctx context.Context, db *sql.DB) error. The function acquires one dedicated connection, executes BEGIN IMMEDIATE, creates and shape-checks gateway_schema_migrations, rejects a recorded version greater than GatewaySchemaVersion, applies each missing numbered file once, inserts its version row, and commits. Any DDL or ledger-write failure rolls back the entire version. This ledger name and API are the only Gateway SQLite migration mechanism; Slice B/C owns `000002`, and Slice D appends `000003` and later files rather than creating another ledger or reusing a number.
+Embed internal/runtime/localstore/migrations/*.sql and expose const GatewaySchemaVersion = 1 plus func applyGatewayMigrations(ctx context.Context, db *sql.DB) error. The function acquires one dedicated connection, executes BEGIN IMMEDIATE, creates and shape-checks gateway_schema_migrations, rejects a recorded version greater than GatewaySchemaVersion, applies each missing numbered file once, inserts its version row, and commits. Any DDL or ledger-write failure rolls back the entire version. This ledger name and API are the only Gateway SQLite migration mechanism. Task 4 advances it with `000002_portable_transitions.sql`; Slice B Code Graph invalidation uses `000003`, and Slice C multi-Fabric routing/sync uses `000004` and `000005`. No slice creates another ledger or reuses a number.
 
 Extend the existing SQLite DSN with `_pragma=synchronous(FULL)` while retaining WAL and the busy timeout, so every pooled and dedicated connection uses the same durability setting. `TestGatewaySQLiteSynchronousFull` opens and reopens a file-backed Store, checks `PRAGMA journal_mode` is `wal` and `PRAGMA synchronous` is `2` on both the ordinary database handle and a newly acquired dedicated connection, and proves a committed migration-ledger row survives reopen. Later journal preparation transactions rely on SQLite's WAL/FULL commit guarantee; they must not manually fsync the main database file while committed bytes may reside in the WAL.
 
@@ -1163,6 +1164,9 @@ git commit -m "feat: compose and merge portable state"
 ### Task 4: Direct import, stash restore, Git-base observation, and branch guard
 
 **Files:**
+- Create: internal/runtime/localstore/migrations/000002_portable_transitions.sql
+- Modify: internal/runtime/localstore/migrations.go
+- Modify: internal/runtime/localstore/migrations_test.go
 - Create: internal/runtime/projectstate/import.go
 - Create: internal/runtime/projectstate/import_test.go
 - Create: internal/runtime/projectstate/stash.go
@@ -1193,25 +1197,43 @@ type ImportResult struct {
     RebasedThroughGeneration int64
     Conflicts []Conflict
 }
-type DirectImportJournalMatch struct {
-    AcceptedBaseDigest projectstate.Digest
-    Checkout types.CheckoutIdentity
-    CandidateTree projectstate.Tree
-}
 type WorkspaceMaterializationRecord struct {
     JournalID string
+    ExpectedLiveDigest projectstate.Digest
     AcceptedBaseDigest projectstate.Digest
     Checkout types.CheckoutIdentity
+    PriorTreeDigest projectstate.Digest
+    CandidateDigest projectstate.Digest
+    ThroughGeneration int64
+    PriorTree projectstate.Tree
     CandidateTree projectstate.Tree
+    IncludedOperations CheckpointOperationsV1 // strict-decoded included_operations_json
     State string
 }
-func (tx *WorkspaceMutationTx) PublishedMaterializationByCandidateDigest(
+type CheckpointOperationV1 struct {
+    Generation int64 `json:"generation"`
+    OperationID string `json:"operation_id"`
+    OperationJSON json.RawMessage `json:"operation_json"`
+    PrepublicationState string `json:"prepublication_state"`
+}
+type CheckpointOperationsV1 struct {
+    SchemaVersion int `json:"schema_version"`
+    InitialThroughGeneration int64 `json:"initial_through_generation"`
+    Operations []CheckpointOperationV1 `json:"operations"`
+}
+func (tx *WorkspaceMutationTx) AcceptanceEligibleMaterializationByCandidateDigest(
     ctx context.Context,
     digest projectstate.Digest,
 ) (*WorkspaceMaterializationRecord, error)
-func ValidateDirectDelta(prior, next projectstate.Snapshot, matchingMaterialization *DirectImportJournalMatch) error
+func ValidateDirectDelta(prior, next projectstate.Snapshot) error
 func (s *Service) Import(ctx context.Context, req ImportRequest) (ImportResult, error)
 
+type StashRequest struct {
+    Scope types.WorkspaceScope
+    RequestID string
+    Actor types.ActorEnvelope
+    Label string
+}
 type StashResult struct {
     StashID string
     SourceDigest projectstate.Digest
@@ -1223,10 +1245,12 @@ type StashReplayV1 struct {
     SelectedStartTree projectstate.Tree `json:"selected_start_tree"`
     SelectedStartDigest projectstate.Digest `json:"selected_start_digest"`
     InitialThroughGeneration int64 `json:"initial_through_generation"`
+    AbsorbedOperations []StoredOperation `json:"absorbed_operations"`
     Operations []StoredOperation `json:"operations"`
 }
 type RestoreStashRequest struct {
     Scope types.WorkspaceScope
+    RequestID string
     StashID string
     Actor types.ActorEnvelope
 }
@@ -1236,13 +1260,12 @@ type RestoreStashResult struct {
     Conflicts []Conflict
     StashRetained bool
 }
-func (s *Service) Stash(ctx context.Context, scope types.WorkspaceScope, actor types.ActorEnvelope, label string) (StashResult, error)
+func (s *Service) Stash(ctx context.Context, req StashRequest) (StashResult, error)
 func (s *Service) RestoreStash(ctx context.Context, req RestoreStashRequest) (RestoreStashResult, error)
 
 type BranchSwitchAction string
 const (
     BranchSwitchReject BranchSwitchAction = ""
-    BranchSwitchStash BranchSwitchAction = "stash"
     BranchSwitchDiscard BranchSwitchAction = "discard"
 )
 type ObserveGitBaseRequest struct {
@@ -1250,6 +1273,7 @@ type ObserveGitBaseRequest struct {
     Root string
     ExpectedCommit string
     BranchAction BranchSwitchAction
+    RequestID string
     Actor types.ActorEnvelope
 }
 type ObserveGitBaseResult struct {
@@ -1257,7 +1281,7 @@ type ObserveGitBaseResult struct {
     PreviousRef, ObservedRef string
     PreviousBaseDigest, ObservedBaseDigest projectstate.Digest
     CandidateAccepted bool
-    RetiredJournalID *string
+    AcceptedJournalID *string
     Rebased bool
     Conflicts []Conflict
 }
@@ -1265,59 +1289,175 @@ func (s *Service) ObserveGitBase(ctx context.Context, req ObserveGitBaseRequest)
 func (s *Service) RefreshWorkspace(ctx context.Context, binding types.WorkspaceBinding) (types.WorkspaceBinding, error)
 ~~~
 
-RefreshWorkspace validates and revalidates binding checkout identity, invokes ObserveGitBase with BranchSwitchReject against the independently observed HEAD/tree, then resolves and returns the updated exact WorkspaceBinding. It is the single refresh seam consumed by Slice B. Gateway startup first calls Recover(binding.Scope), then RefreshWorkspace(binding), for every RegisteredWorkspaces result. Request orchestration calls RefreshWorkspace before every subsequent scoped status, diff, pillar/workspace write, import, checkpoint, and graph operation. The sole exception is Stash after RefreshWorkspace returns ErrBranchSwitchPending: Stash runs against the still-validated pre-refresh binding, then the caller must immediately call RefreshWorkspace(binding) and Recover(refreshed.Scope); the stash call is not reported successful unless both follow-up calls succeed. Any other branch action or invalid committed tree fails closed before the requested operation; no caller-supplied ref/tree can bypass ObserveGitBase.
+RefreshWorkspace validates and revalidates binding checkout identity, invokes ObserveGitBase with BranchSwitchReject and an empty RequestID against the independently observed HEAD/tree, then resolves and returns the updated exact WorkspaceBinding. It is the single refresh seam consumed by Slice B. Gateway startup first calls Recover(binding.Scope), then RefreshWorkspace(binding), for every RegisteredWorkspaces result. Request orchestration calls RefreshWorkspace before every subsequent scoped status, diff, pillar/workspace write, import, checkpoint, and graph operation. The sole exception is Stash after RefreshWorkspace returns ErrBranchSwitchPending: Stash runs against the still-validated pre-refresh binding with one stable RequestID, then the caller must immediately call RefreshWorkspace(binding) and Recover(refreshed.Scope). Its committed receipt lets a retry resume those follow-up calls, and the stash call is not reported successful unless both succeed. ObserveGitBase never invokes Stash or nests a stash transaction. Any invalid branch action or committed tree fails closed before the requested operation; no caller-supplied ref/tree can bypass ObserveGitBase.
 
-Direct delta rules are exact. Relative to the previously imported candidate, or accepted base when no candidate exists, a direct tree:
+Task 4 owns the one-way Gateway migration `000002_portable_transitions.sql` and advances
+the sole `GatewaySchemaVersion` from 1 to 2. Never edit committed migration `000001`.
+Migration 000002 has this exact logical schema and preserves every existing row:
+
+~~~sql
+-- Rebuild workspace_conflicts with the same columns plus occurrence_id.
+CREATE TABLE workspace_conflicts_v2 (
+  project_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  occurrence_id TEXT NOT NULL,
+  conflict_id TEXT NOT NULL,
+  record_kind TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  field_path TEXT NOT NULL,
+  conflict_kind TEXT NOT NULL,
+  base_json TEXT NOT NULL,
+  ours_json TEXT NOT NULL,
+  theirs_json TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('open','resolved')),
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  resolved_at TIMESTAMP,
+  PRIMARY KEY(project_id,workspace_id,occurrence_id),
+  FOREIGN KEY(project_id,workspace_id)
+    REFERENCES workspace_bindings(project_id,workspace_id) ON DELETE CASCADE
+);
+-- Copy every v1 row with occurrence_id=conflict_id, then replace the v1 table.
+CREATE UNIQUE INDEX workspace_one_open_semantic_conflict
+  ON workspace_conflicts(project_id,workspace_id,conflict_id)
+  WHERE state='open';
+CREATE INDEX workspace_open_conflicts
+  ON workspace_conflicts(project_id,workspace_id,state);
+
+-- Rebuild workspace_overlay_operations with all existing keys/columns plus nullable
+-- stashed_by_stash_id and these checks:
+-- CHECK(state IN ('active','rebased','stashed','materialized','discarded'));
+-- CHECK(state='stashed' OR stashed_by_stash_id IS NULL).
+-- Copy every v1 row, replace the v1 table, and recreate workspace_overlay_generation.
+-- Do not add a foreign key from stashed_by_stash_id: owned audit rows outlive deletion
+-- of their workspace_stashes row. New stashes require a non-null owner in application
+-- code; migrated legacy stashed rows may remain NULL and are corruption if used.
+
+-- Add a nullable legacy-compatible column to workspace_materializations. Every new
+-- checkpoint row requires a strict canonical CheckpointOperationsV1 value.
+ALTER TABLE workspace_materializations
+  ADD COLUMN included_operations_json TEXT;
+
+CREATE TABLE workspace_transition_receipts (
+  project_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  action TEXT NOT NULL CHECK(action IN ('stash','restore','discard')),
+  request_digest TEXT NOT NULL,
+  actor_json TEXT NOT NULL,
+  result_json TEXT NOT NULL,
+  outcome TEXT NOT NULL CHECK(outcome IN ('clean','conflicted')),
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(project_id,workspace_id,request_id),
+  FOREIGN KEY(project_id,workspace_id)
+    REFERENCES workspace_bindings(project_id,workspace_id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX workspace_one_acceptance_eligible_candidate
+  ON workspace_materializations(project_id,workspace_id)
+  WHERE state IN ('published','recovered_new');
+~~~
+
+The migration runner performs both table rebuilds and copies inside migration 000002's
+single immediate transaction, verifies affected counts, and leaves all v1 constraints,
+foreign keys, history, and indexes represented above intact. Existing conflict rows use
+their semantic `conflict_id` as `occurrence_id`. Every new occurrence ID is a canonical
+UUIDv4; the only accepted legacy non-UUID occurrence is a migrated row whose
+`occurrence_id == conflict_id` and whose semantic ID recomputes exactly. Exact repeated
+open evidence retains its occurrence; evidence absent from a later
+replacement is resolved with `resolved_at`, and reopening a resolved semantic conflict
+creates a fresh occurrence. `conflict_id` remains the recomputed deterministic semantic
+ID and is never used as the history primary key. Migration runs `PRAGMA foreign_key_check`
+before ledger advancement. More than one pre-v2 acceptance-eligible row in a workspace
+makes the partial unique-index creation fail and roll back 000002; migration never
+chooses or deletes one.
+
+`request_id` is a canonical UUID. A canonical request digest binds schema version,
+action, exact scope, the complete strict canonical actor envelope, and the action payload (`label` for stash,
+`stash_id` for restore, or checkout identity, canonical root, and ExpectedCommit for
+discard). Reusing an ID with the same
+digest is a retry; reuse with another digest returns `ErrIdempotencyConflict` without
+mutation. Clean stash/restore returns the receipt result read-only on retry, and the
+receipt survives clean restore's stash deletion. A conflicted restore always reloads and
+strict-recomputes the current view, stash replay, merge, and open evidence before it may
+match and return the receipt. Receipt `actor_json` is immutable canonical JSON; every
+read strict-decodes it, requires byte-identical re-encoding, calls `ValidateHistorical`,
+and matches it to the actor envelope bound into the request digest. Receipt `result_json`
+uses one strict canonical result codec. Each mutation first reads any receipt and compares its action/digest, inserts the
+receipt in the same transaction as the state transition, and requires exactly one row.
+If COMMIT returns an error, the service reads back that exact scope/request ID on a fresh
+connection: an exact receipt proves success, absence proves failure, and any unavailable,
+malformed, or mismatched readback wraps `ErrCommitOutcomeUnknown`. The caller retries
+with the same request or operation ID.
+
+Direct delta rules are exact. Relative to the previously imported candidate, or accepted
+base when no candidate exists, Import first compares the prior canonical path inventory
+with the captured raw tree, in canonical entity-kind and UUID order, before attempting to
+DecodeTree the next surface. A missing mutable record path returns
+`ErrDirectPathDeletion`; a missing existing Event or Git-link path returns
+`ErrDirectImmutableRecordMutation`. A valid mutable tombstone retains the stable record
+path, and a KB tombstone removes only its body. Malformed values at present paths then
+receive the strict typed DecodeTree/validation error. After decode,
+`ValidateDirectDelta(prior,next)`:
 
 - returns ErrDirectImmutableRecordMutation for any changed or removed existing Event
   or Git-link ID; an exact canonical replay is unchanged;
-- returns ErrDirectPathDeletion when any prior record path disappears instead of becoming a valid TombstoneV1;
 - returns ErrTombstoneDigest when DeletedContentDigest is not the digest of the prior canonical record or DeletedBodyDigest is absent/wrong for KB;
 - returns ErrDirectEditTombstone when a prior tombstone is changed directly rather than
   replayed exactly; it does not inspect or classify any active overlay edit;
 - returns ErrDirectResurrection when a tombstone becomes live;
 - returns ErrDirectImmutableFieldMutation when an existing live mutable record changes
-  `created_at`; explicit matching-materialization resurrection is exempt because a
-  tombstone has no prior record bytes;
-- may bypass these direct-edit errors only when its digest and bytes equal the candidate_tree of a published materialization journal bound to the same accepted base and checkout. That exception is how a typed Resurrect operation becomes importable after checkpoint; callers cannot claim the exception.
+  `created_at`.
+
+The exported validator receives no materialization proof and never bypasses these rules.
+Inside the repository-owned Import transaction only, a private helper may bypass the
+direct-edit errors when `AcceptanceEligibleMaterializationByCandidateDigest` returns exactly one
+row whose state is `published` or `recovered_new`, accepted-base digest and complete
+checkout identity equal the current binding, candidate bytes strict-decode and canonicalize
+byte-identically, and recorded candidate digest equals both those bytes and the captured
+live-tree digest. The strict canonical checkpoint-operation envelope must enumerate the
+exact operation rows, bytes, generations, prepublication states, and selected initial
+boundary; missing legacy `included_operations_json`, extra or missing rows, or any mismatch
+fails closed.
+That exception makes a typed resurrection importable after checkpoint; callers cannot
+construct or claim it.
 
 Git-link tombstones/resurrections fail strict DecodeTree before delta comparison. Snapshot
 version, project ID, and repository identity must match the binding. Direct Config.Handle
 and Remotes changes are Git-base input, not overlay mutations; ThreeWayRebase owns them by
 requiring the composed candidate to retain the prior surface and taking the direct values.
-`ValidateDirectDelta(prior, next, matchingMaterialization)` owns only the direct-versus-
-prior surface and the bound materialization exception. A correct new direct tombstone is
-valid at this stage. `ThreeWayRebase(oldBase, newBase, candidate)` alone compares that
+`ValidateDirectDelta(prior,next)` owns only the decoded direct-versus-prior surface. A
+correct new direct tombstone is valid at this stage. `ThreeWayRebase(oldBase, newBase, candidate)` alone compares that
 tombstone with the overlay candidate and emits `ConflictTombstoneEdit` when the overlay
 edited the live record; the direct validator never returns an overlay conflict.
-Import returns the scope/checkout/working-tree/project/repository errors already frozen
-plus these direct-delta sentinels. No error replaces workspace_candidates or conflicts.
+Import returns the scope/checkout/project/repository errors already frozen plus these
+direct-delta sentinels. A nil `ExpectedWorkingTreeDigest` supplies no caller precondition;
+a non-nil value must be canonical and equal the initially captured `DigestTree`, or
+Import returns `ErrWorkingTreeChanged` with zero writes. No error replaces
+workspace_candidates or conflicts.
 
 Import executes:
 
 ~~~text
 require req.Actor.ValidateLocalAction()
-liveTree = ReadWorkingTree(req.Root)
-liveSnapshot = projectstate.DecodeTree(liveTree)
-canonicalLiveTree = projectstate.EncodeTree(liveSnapshot)
-require canonicalLiveTree byte-equals liveTree
-liveTreeBytes = EncodeFileList(canonicalLiveTree)
+require req.ExpectedWorkingTreeDigest == nil || canonical(req.ExpectedWorkingTreeDigest)
+capturedTree = ReadWorkingTreeNoFollow(req.Root) // bounded, sorted canonical paths/bytes
+capturedDigest = projectstate.DigestTree(capturedTree)
+require req.ExpectedWorkingTreeDigest == nil || *req.ExpectedWorkingTreeDigest == capturedDigest
 BEGIN IMMEDIATE
 workspace = tx.Workspace(ctx) // localstore.WorkspaceRecord for req.Scope
-require RevalidateCheckout(workspace.Binding, req.Root)
+require exact complete old binding and RevalidateCheckout(workspace.Binding, req.Root)
 binding = workspace.Binding // types.WorkspaceBinding
 acceptedSnapshot = workspace.Snapshot // projectstate.Snapshot
 candidate = tx.Candidate(ctx) // *WorkspaceCandidateRecord
 priorSurface = candidate.DirectSnapshot if candidate != nil else acceptedSnapshot
-journalRow = tx.PublishedMaterializationByCandidateDigest(ctx, liveSnapshot.Digest)
-journalMatch = nil if journalRow == nil else &DirectImportJournalMatch{
-  AcceptedBaseDigest: journalRow.AcceptedBaseDigest,
-  Checkout: journalRow.Checkout,
-  CandidateTree: journalRow.CandidateTree,
-}
-require journalMatch == nil || journalMatch.AcceptedBaseDigest == projectstate.Digest(binding.AcceptedTreeDigest)
-require journalMatch == nil || journalMatch.Checkout == binding.Checkout
-ValidateDirectDelta(priorSurface, liveSnapshot, journalMatch)
+RawDirectDeletionPreflight(projectstate.EncodeTree(priorSurface), capturedTree)
+liveSnapshot = projectstate.DecodeTree(capturedTree)
+canonicalLiveTree = projectstate.EncodeTree(liveSnapshot)
+require canonicalLiveTree byte-equals capturedTree and liveSnapshot.Digest == capturedDigest
+liveTreeBytes = EncodeFileList(canonicalLiveTree)
+journalRow = tx.AcceptanceEligibleMaterializationByCandidateDigest(ctx, capturedDigest)
+if journalRow != nil: require StrictMatchingAcceptanceEligibleMaterialization(binding, capturedTree, journalRow)
+if journalRow == nil: ValidateDirectDelta(priorSurface, liveSnapshot)
 (start, initialThroughGeneration) = SelectExplicitStart(acceptedSnapshot, candidate)
 rows = tx.ActiveOperationsAfter(ctx, initialThroughGeneration) // state=active, ORDER BY generation
 storedOperations = StrictDecodeStoredOperations(rows)
@@ -1325,10 +1465,9 @@ oldComposed = Compose(start, initialThroughGeneration, storedOperations)
 merged = ThreeWayRebase(priorSurface, liveSnapshot, oldComposed.Snapshot)
 rebasedTree = projectstate.EncodeTree(merged.Snapshot)
 rebasedTreeBytes = EncodeFileList(rebasedTree)
-DELETE FROM workspace_conflicts
-  WHERE project_id=req.Scope.ProjectID AND workspace_id=req.Scope.WorkspaceID
-    AND state='open'
-INSERT each CanonicalJSON(merged.Conflicts FieldValue envelope) as state='open'
+liveTree = ReadWorkingTreeNoFollow(req.Root) // exact second read immediately before first DB mutation
+require liveTree byte-equals capturedTree and projectstate.DigestTree(liveTree) == capturedDigest
+StrictReplaceOpenConflicts(merged.Conflicts) // reuse exact occurrence, resolve absent, UUIDv4 on reopen/new
 UPSERT workspace_candidates with every non-null column:
   project_id=req.Scope.ProjectID,
   workspace_id=req.Scope.WorkspaceID,
@@ -1345,20 +1484,26 @@ UPDATE workspace_overlay_operations SET state='rebased'
 UPDATE workspace_bindings SET status = 'conflicted' when conflicts exist else 'pending'
   WHERE project_id=req.Scope.ProjectID AND workspace_id=req.Scope.WorkspaceID
 COMMIT
+if COMMIT result is indeterminate: return error wrapping ErrCommitOutcomeUnknown
 ~~~
 
-Canonical JSON encoding of a `json.RawMessage` may normalize root object member order.
-Task 4 persistence must therefore rehydrate every root conflict `FieldValue` through its
-strict concrete record type on read before exposing or re-encoding evidence; `/body` and
-recursive non-root values remain generic. Restart tests compare the resulting conflict
-triples byte-for-byte with the in-memory Task 3 result.
+Conflict persistence accepts only Task 3's globally sorted conflicts. Before insert and
+after every read it strict-decodes each `FieldValue` envelope, requires absent values to
+have no bytes and present values to contain exactly one canonical JSON value, rehydrates
+every root value through its concrete typed record codec, leaves `/body` and recursive
+non-root values generic, recomputes `conflict_id`, and rejects row/key/path/kind/ID or
+sort-order mismatch as corruption. Canonical JSON encoding of a `json.RawMessage` may
+normalize object member order, so restart tests compare the rehydrated triples
+byte-for-byte with the in-memory Task 3 result. Failure-injection and corruption tests
+cover occurrence reuse, resolve, reopen-with-new-UUID, duplicate-open rejection, semantic
+ID mismatch, unsorted rows, malformed envelopes, and noncanonical or wrong typed roots.
 
 The candidate upsert writes all Task-2 non-null fields explicitly; it does not rely on a
-default to supply actor, time, binding, or digest provenance. Replacing conflicts means
-only deleting prior `state='open'` rows for the exact `(project_id, workspace_id)` before
-inserting the new sorted set in the same transaction. Resolved history and every other
-workspace remain untouched. `ImportResult.PreviousCandidateDigest` is the prior composed
-candidate digest when one existed, `ImportedCandidateDigest` is `liveSnapshot.Digest`,
+default to supply actor, time, binding, or digest provenance. Conflict replacement
+resolves or reuses only exact-workspace open occurrences and leaves resolved history and
+every other workspace untouched. `ImportResult.PreviousCandidateDigest` is non-nil iff a
+candidate row or active overlay existed before Import and equals that pre-import composed
+digest. `ImportedCandidateDigest` is `liveSnapshot.Digest`,
 `ComposedViewDigest` is `merged.Snapshot.Digest`, `ImportedChangeCount` is the stable
 direct semantic-change count, and `RebasedThroughGeneration` is
 `oldComposed.ThroughGeneration`.
@@ -1378,16 +1523,25 @@ conflict evidence. Checkpoint and writable Fabric are blocked while any conflict
 Stash persists complete canonical bytes, not only digests:
 
 ~~~text
-BEGIN IMMEDIATE for scope
+require req.Scope valid, req.RequestID canonical UUID, req.Actor.ValidateLocalAction()
+require req.Label is valid UTF-8, 1..256 bytes, and contains no NUL/CR/LF
+requestDigest = DigestCanonicalJSON(stash request preimage v1)
+stashID = NewCanonicalUUIDv4() // generated before any mutation
+BEGIN IMMEDIATE for req.Scope
+if receipt for RequestID exists:
+  require action='stash' and request_digest=requestDigest else ErrIdempotencyConflict
+  return strict-decoded receipt result read-only
 workspace = tx.Workspace(ctx)
 if tx.HasOpenConflicts(ctx):
   ROLLBACK and return StashResult{}, localstore.ErrWorkspaceConflicted
 candidate = tx.Candidate(ctx)
 (sourceBase, sourceBaseTree) = (workspace.Snapshot, canonical accepted tree)
 (selectedStart, initialThroughGeneration) = SelectExplicitStart(workspace.Snapshot, candidate)
-rows = tx.ActiveOperationsAfter(ctx, initialThroughGeneration) // ORDER BY generation
-storedOperations = StrictDecodeStoredOperations(rows)
-composed = Compose(selectedStart, initialThroughGeneration, storedOperations)
+absorbedRows = tx.RebasedOperationsAtOrBefore(ctx, initialThroughGeneration) // ORDER BY generation
+laterRows = tx.ActiveOperationsAfter(ctx, initialThroughGeneration) // ORDER BY generation
+absorbedOperations = StrictDecodeStoredOperations(absorbedRows)
+laterOperations = StrictDecodeStoredOperations(laterRows)
+composed = Compose(selectedStart, initialThroughGeneration, laterOperations)
 sourceTree = EncodeFileList(sourceBaseTree)
 selectedStartTree = projectstate.EncodeTree(selectedStart)
 composedCanonicalTree = projectstate.EncodeTree(composed.Snapshot)
@@ -1397,71 +1551,105 @@ replayEnvelope = StashReplayV1{
   SelectedStartTree: selectedStartTree,
   SelectedStartDigest: selectedStart.Digest,
   InitialThroughGeneration: initialThroughGeneration,
-  Operations: storedOperations,
+  AbsorbedOperations: absorbedOperations,
+  Operations: laterOperations,
 }
-INSERT workspace_stashes(source_tree=sourceTree,
+INSERT workspace_stashes(stash_id=stashID, source_tree=sourceTree,
   composed_tree=composedTree,
   operations_json=projectstate.CanonicalJSON(replayEnvelope),
   through_generation=composed.ThroughGeneration,
   source_base_digest=sourceBase.Digest,
   candidate_digest=composed.Snapshot.Digest,
-  actor_json=CanonicalJSON(actor), label)
+  actor_json=CanonicalJSON(req.Actor), label=req.Label)
 DELETE workspace_candidates
-UPDATE workspace_overlay_operations SET state='stashed'
-  WHERE project_id=scope.ProjectID AND workspace_id=scope.WorkspaceID
+UPDATE workspace_overlay_operations SET state='stashed', stashed_by_stash_id=stashID
+  WHERE project_id=req.Scope.ProjectID AND workspace_id=req.Scope.WorkspaceID
+    AND generation <= initialThroughGeneration
+    AND state='rebased'
+UPDATE workspace_overlay_operations SET state='stashed', stashed_by_stash_id=stashID
+  WHERE project_id=req.Scope.ProjectID AND workspace_id=req.Scope.WorkspaceID
     AND generation > initialThroughGeneration
     AND generation <= composed.ThroughGeneration
     AND state='active'
 UPDATE workspace_bindings SET status='clean'
+INSERT canonical clean stash transition receipt with actor_json=CanonicalJSON(req.Actor)
+  and result StashID=stashID
 COMMIT
+if COMMIT result is indeterminate: return error wrapping ErrCommitOutcomeUnknown
 ~~~
 
 `source_tree` and `source_base_digest` are the semantic pre-stash rebase base, normally
 the accepted snapshot, and are deliberately independent of replay selection. The exact
 selected Compose start is embedded as `SelectedStartTree` plus
 `SelectedStartDigest` in the canonical `StashReplayV1` stored in the existing
-`operations_json` column. Do not add local migration `000002`; Slice B/C already owns
-that number. Strict decode requires the embedded tree to pass the file-list-equivalent
-path/order limits, `DecodeTree`, canonical re-encoding, digest, and binding checks.
+`operations_json` column. Strict decode requires schema version 1, non-nil absorbed and
+later operation arrays, an embedded tree that passes the file-list-equivalent path/order limits,
+`DecodeTree`, canonical re-encoding, digest, and exact project/repository binding checks.
 
-The replay envelope stores only active `StoredOperation` rows above its explicit
-boundary. Rows already `state='rebased'` at or below that boundary remain rebased because
-their effect is present in `SelectedStartTree`; stash never expects, serializes, or
-transitions them. An immediate post-rebase stash is valid with an empty `Operations`
+The replay envelope's non-nil, strictly generation-sorted `AbsorbedOperations` array
+records every current candidate row already `state='rebased'` at or below the explicit
+boundary; their effect is present in `SelectedStartTree`. Its separate non-nil
+`Operations` array records only active rows above that boundary. An immediate
+post-rebase stash is valid with an empty `Operations`
 array and `InitialThroughGeneration == through_generation == G`. A later stash contains
 exactly `G < generation <= through_generation`. `Operations` is always a non-nil JSON
-array (`[]` when empty), never `null`. Successful stash atomically deletes the candidate,
-transitions only those later active rows to stashed, and sets the binding to `clean`.
+array (`[]` when empty), never `null`; `AbsorbedOperations` follows the same rule.
+Successful stash atomically deletes the candidate, transitions exactly both recorded
+arrays to terminal stashed rows owned by `stashed_by_stash_id=stashID`, and sets the
+binding to `clean`. A later stash can therefore never claim rows owned by an earlier
+stash. The owner has no foreign key because the terminal operation audit survives clean
+restore deletion of the stash row.
 Any exact-scope open conflict returns `StashResult{}` plus
 `localstore.ErrWorkspaceConflicted` and changes no candidate, operation, stash, conflict,
-or binding row. `StashResult.SourceDigest` is `sourceBase.Digest`, CandidateDigest is
-`composed.Snapshot.Digest`, and OperationCount is exactly `len(storedOperations)`.
+receipt, or binding row. `StashResult.SourceDigest` is `sourceBase.Digest`, CandidateDigest is
+`composed.Snapshot.Digest`, and OperationCount is exactly
+`len(absorbedOperations)+len(laterOperations)`.
 
-RestoreStash strict-decodes and digest-checks the semantic `source_tree`,
+RestoreStash first requires a valid scope, canonical request/stash UUIDs, and
+`Actor.ValidateLocalAction`, computes the canonical restore request digest, and opens one
+immediate transaction. A same-ID different-digest receipt returns
+`ErrIdempotencyConflict`. A matching clean receipt returns its strict canonical result
+read-only even though the stash has been deleted. A matching conflicted receipt is not a
+cached answer: restore continues through the complete strict recomputation below and
+only returns read-only when the recomputed result and persisted evidence match it.
+
+Within that same transaction RestoreStash strict-decodes and digest-checks the semantic `source_tree`,
 `composed_tree`, and `StashReplayV1`. It rejects unknown fields, trailing or
 noncanonical JSON, a noncanonical embedded selected-start tree, selected-start digest
-mismatch, a negative boundary, and unordered or duplicate rows. The final row generation
-must equal `stash.through_generation`; an empty list instead requires the initial
-boundary to equal it. Every envelope row must byte-for-byte match the exact persisted
-`state='stashed'` row for this workspace, generation, operation ID, and canonical
-operation JSON. Rows at or below the boundary are not queried or expected. Restore calls
+mismatch, a negative boundary, and unordered, overlapping, or duplicate rows. The final
+later-row generation must equal `stash.through_generation`; an empty later list instead
+requires the initial boundary to equal it. `AbsorbedOperations` must contain exactly the
+rebased prefix captured through the initial boundary, and `Operations` exactly the active
+suffix above it. Restore selects all and only persisted rows whose
+`stashed_by_stash_id=stash.stash_id`; their count, generation, operation ID, canonical
+operation JSON, ordering, and membership must byte-for-byte equal the concatenated two
+arrays, and every selected row must be `state='stashed'`. An ownerless migrated legacy
+stashed row or any swapped, extra, or missing owner/member is `ErrStashOperationMismatch`.
+Restore calls
 `Compose(selectedStart, replay.InitialThroughGeneration, replay.Operations)` and requires
 the result's encoded tree bytes, digest, and ThroughGeneration to equal `composed_tree`,
 `candidate_digest`, and `stash.through_generation` before considering current state.
+Every query, recomputation, evidence comparison, affected-count check, and mutation in a
+restore uses this one caller-owned transaction.
 
 Restore then strict-selects and composes the current start/boundary/later active rows and
 calls `ThreeWayRebase(sourceBase, current.Snapshot, stashComposed.Snapshot)`. On a clean
 merge only, one immediate transaction preserves the current direct surface, persists the
 merged rebased candidate with the greatest absorbed generation, transitions exactly the
-stash rows and current active rows absorbed by that candidate to `state='rebased'`,
-replaces exact-workspace open conflict evidence with the empty set, sets binding status
-to `pending`, and deletes the stash. It never reinserts an operation UUID or rewrites a
-pre-boundary rebased row.
+current active rows absorbed by that candidate to `state='rebased'`, leaves every
+original stash row terminal `state='stashed'` with its immutable owner,
+resolves every exact-workspace open conflict occurrence, sets binding status
+to `pending`, deletes the stash, and records a canonical clean receipt. When a candidate
+row existed, its `imported_by` and `imported_at` are preserved; otherwise the new
+candidate uses the restore actor principal and transaction UTC time. It never reinserts
+an operation UUID or rewrites an original stash row. Every transition/delete/update
+requires its exact expected affected count; a mismatch rolls back.
 
 On conflict, candidate bytes/columns and every operation row remain byte-identical. The
 transaction writes only the deterministic sorted open conflict evidence for
 `ThreeWayRebase(sourceBase, current.Snapshot, stashComposed.Snapshot)`, sets binding
-status to `conflicted`, and retains the complete stash unchanged. The returned
+status to `conflicted`, records a canonical conflicted receipt, and retains the complete
+stash unchanged. The returned
 `RestoredDigest` and `RebasedThroughGeneration` describe the unchanged current composed
 view and `StashRetained` is true; the stash-composed surface remains in the retained stash
 as resolution/audit evidence, not as a silently installed candidate.
@@ -1474,20 +1662,63 @@ Changed or corrupt current rows (including a row the failed merge would have abs
 changed candidate/stash/conflict evidence, resolved conflicts, or a non-conflicted
 binding fail closed without mutation. `ErrStashCorrupt` covers tree/envelope/replay/digest
 corruption; `ErrStashOperationMismatch` covers missing, altered, extra, noncanonical, or
-wrongly stated persisted stash-operation rows.
+wrongly stated persisted stash-operation rows. An indeterminate commit outcome wraps
+`ErrCommitOutcomeUnknown`; retry uses the same RequestID.
 
 Git observation remains independent:
 
-1. Validate binding/root/actor with ActorEnvelope.ValidateLocalAction.
-2. Run read-only git with GIT_OPTIONAL_LOCKS=0 and hooks disabled: rev-parse HEAD^{commit}, symbolic-ref -q HEAD, ls-tree -rz --full-tree HEAD for canonical .wormhole paths, then cat-file --batch.
-3. Require HEAD equals ExpectedCommit; DecodeTree; validate project/repository.
-4. Re-read HEAD and checkout identity. Race returns ErrGitObservationChanged without DB writes.
-5. BEGIN IMMEDIATE and CAS accepted_commit. Ref change with pending state and no matching materialized candidate returns ErrBranchSwitchPending unless explicit stash/discard.
-6. Matching published materialization advances base only when its accepted_base_digest and checkout path/device/inode still equal the binding, marks journal accepted, and preserves operations newer than its through_generation. A bound-precondition mismatch returns ErrGitMaterializationPrecondition and retains the journal.
-7. Nonmatching same-ref base uses ThreeWayRebase. It enforces immutable version/project/
+1. Validate scope/root/actor and the action shape. `BranchSwitchReject` requires an empty
+   RequestID; `BranchSwitchDiscard` requires a canonical UUID RequestID. No other action
+   is valid, and ObserveGitBase never calls Stash.
+2. Perform one full observation outside the transaction. Run read-only Git with
+   `GIT_OPTIONAL_LOCKS=0` and hooks disabled: `rev-parse HEAD^{commit}`,
+   `symbolic-ref -q HEAD` (empty means detached), `ls-tree -rz --full-tree HEAD` for the
+   canonical `.wormhole` paths, then `cat-file --batch`. Require HEAD equals
+   ExpectedCommit, strict-decode the exact observed bytes, and validate project,
+   repository, and digest.
+3. Re-read HEAD and checkout identity outside the transaction. A race returns
+   `ErrGitObservationChanged` without DB writes.
+4. Open one immediate transaction, load and compare the complete old binding supplied by
+   the caller (scope, checkout, repository, accepted ref, commit, and digest), then
+   reobserve checkout identity, symbolic ref, and HEAD immediately before mutation. Any
+   mismatch with the outside observation returns `ErrGitObservationChanged`. This point
+   is the Git-observation linearization boundary. A same-SHA symbolic-ref change is still
+   a branch change. External Git changes after this boundary are detected by the next
+   mandatory RefreshWorkspace.
+5. A ref change with proposal state returns `ErrBranchSwitchPending` under Reject unless
+   the exact observed tree accepts a matching acceptance-eligible materialization. Under Discard,
+   compute the canonical discard request digest and check its receipt. A same-digest
+   receipt returns read-only; another digest returns `ErrIdempotencyConflict`.
+   Unless the exact observed tree takes the matching acceptance path below, any prepared,
+   published, or recovered-new journal blocks discard pending Recover. Materialized rows
+   not owned by an accepted journal also block.
+   Otherwise discard first loads the exact operation/candidate/conflict sets and their
+   generation boundaries, then atomically marks every exact-workspace proposal operation in
+   `active` or `rebased` state as `discarded`, leaves stashed and accepted-journal
+   `materialized` rows
+   unchanged, deletes the candidate, resolves all open conflict occurrences, records a
+   clean discard receipt, and advances the accepted ref/commit/digest/snapshot. Every
+   transition, delete, resolve, receipt insert, and binding update must affect its exact
+   preloaded count; any mismatch rolls back.
+6. A matching acceptance-eligible materialization advances the base only when its state
+   is exactly `published` or `recovered_new`, accepted-base digest and complete checkout equal the current binding,
+   and the observed canonical bytes and digest equal `CandidateTree` and
+   `CandidateDigest`. `ExpectedLiveDigest`, `PriorTreeDigest`, `PriorTree`, and
+   `ThroughGeneration` must also strict-match their persisted preconditions. Strict-decode
+   `included_operations_json` and prove that its selected initial boundary plus exact
+   generation/ID/canonical-operation-bytes/prepublication-state rows are the complete
+   checkpoint membership; a missing legacy envelope or inferred generation range is not
+   proof. Mark the journal `accepted` rather than deleting it, delete the now-accepted
+   candidate, retain its materialized operation rows as immutable history, return its ID
+   as `AcceptedJournalID`, and preserve only later `active` operations whose generation
+   is greater than `ThroughGeneration`. A mismatch returns
+   `ErrGitMaterializationPrecondition` and retains the journal.
+7. A nonmatching same-ref base uses ThreeWayRebase. It enforces immutable version/project/
    repository binding fields, requires the candidate to retain old-base Handle/Remotes,
-   takes new-base Handle/Remotes, and persists the complete ours/theirs conflict surfaces
-   and row transitions atomically. Candidate mismatch never retires a journal.
+   takes new-base Handle/Remotes, and persists the complete ours/theirs conflict surfaces,
+   row transitions, binding, and exact affected counts atomically. Candidate mismatch
+   never accepts a journal. An indeterminate commit outcome wraps
+   `ErrCommitOutcomeUnknown`; Discard retry uses the same RequestID.
 
 - [ ] **Step 1: Write RED direct-delta and semantic overlay-import tests**
 
@@ -1512,6 +1743,7 @@ func TestImportRebasesOverlayOntoDirectCandidate(t *testing.T) {
 Add named cases TestImportRejectsUnequalImmutableEventAndGitLink,
 TestImportRejectsImmutableRecordDeletion,
 TestImportRejectsPathDeletionWithoutTombstone,
+TestImportRawDeletionPrecedesMalformedPresentValueInCanonicalOrder,
 TestImportRejectsIncorrectTombstoneContentDigest,
 TestImportRejectsIncorrectTombstoneBodyDigest,
 TestImportRejectsChangedCreatedAt,
@@ -1519,6 +1751,10 @@ TestValidateDirectDeltaAcceptsCorrectTombstoneWithoutOverlay,
 TestImportPersistsOverlayTombstoneConflict,
 TestImportRejectsDirectResurrection, and
 TestImportAcceptsMatchingMaterializedResurrection. Add
+TestValidateDirectDeltaHasNoMaterializationBypass,
+TestImportExpectedWorkingTreeDigestOptionalAndCanonical,
+TestImportSecondNoFollowReadDetectsSameDigestRace, and
+TestImportMatchingMaterializationRequiresAcceptanceEligibleBoundCanonicalBytes.
 `TestImportPersistsOverlayTombstoneConflict` must first prove direct/prior validation
 succeeds, then prove only ThreeWayRebase emits `ConflictTombstoneEdit`; no direct-delta
 sentinel may substitute for the persisted merge evidence. Add
@@ -1526,6 +1762,13 @@ TestImportConflictPersistsOursTheirsAtomicallyAcrossRestart: inject a failure at
 candidate/conflict/row-state/status write, prove the prior state remains byte-identical,
 then prove a successful conflict retains the old complete composed candidate, new direct
 tree, canonical FieldValue triples, absorbed generation, and blocked status after reopen.
+Add migration tests that open v1 fixtures through 000002, prove conflict occurrence
+history/open uniqueness, discarded operation state plus nullable stash ownership,
+receipt actor constraints, acceptance-eligible candidate uniqueness, nullable legacy
+checkpoint envelopes, rollback on each rebuild/copy/index failure, and
+`GatewaySchemaVersion == 2` without modifying 000001. Add strict conflict codec tests for
+wrong semantic IDs, duplicate/unsorted rows, malformed envelopes, and typed-root
+rehydration after restart.
 
 Run: go test ./internal/runtime/projectstate -run 'Test(Import|ValidateDirectDelta)' -count=1
 Expected: FAIL because Import is absent.
@@ -1540,15 +1783,25 @@ stale whole-view preconditions. Add
 `TestStashAfterRebaseWithNoLaterOperationsPersistsBoundaryAcrossRestart`, proving an empty
 row list, `initial_through_generation == through_generation == G`, a selected-start tree
 that contains the absorbed prefix, a distinct accepted `source_tree`, and unchanged
-rebased rows at/below G. Add
-`TestStashAfterRebasePersistsOnlyLaterActiveOperationsAcrossRestart`, proving only
-generations greater than G enter the envelope/transition to stashed and both the absorbed
-prefix and later operations survive a clean restore. Add
+operation bytes transitioned from rebased to terminal stashed state at/below G. Add
+`TestStashAfterRebasePersistsOnlyLaterActiveOperationsAcrossRestart`, proving the absorbed
+prefix and later active suffix occupy their distinct non-nil envelope arrays, receive the
+same stash owner, and survive clean restore as terminal owned audit rows. Add
 `TestRestoreStashConflictPreservesAbsorbedPrefixAndLaterOperationsAcrossRestart`, proving
 the same two layers remain in the retained stash while current candidate/rows stay
 byte-identical. Reject unknown envelope versions/fields, trailing/noncanonical bytes,
 selected-start or source-base digest mismatch, boundary/through mismatch, and missing,
-extra, altered, or wrongly stated persisted rows without mutation.
+extra, altered, or wrongly stated persisted rows without mutation. Add two sequential
+stashes and prove their row-owner sets are disjoint; swapped ownership, an extra owned
+row, a missing owned row, and an ownerless legacy row must each fail closed without
+mutation.
+
+Add request/receipt cases for invalid UUIDs, actor assurance, empty/oversize/control-byte
+labels, nil versus empty operations arrays, cross-binding trees, same-ID same-digest clean
+retry, same-ID different-digest rejection, receipt survival after clean restore deletion,
+strict historical actor-envelope decoding, audit/restart reads after clean restore stash
+deletion and discard, conflicted retry strict recomputation, exact affected-count rollback, and an injected
+unknown commit outcome followed by successful same-ID retry.
 
 Add `TestStashRejectsOpenConflictWithoutMutation`, requiring `StashResult{}`,
 `errors.Is(err, localstore.ErrWorkspaceConflicted)`, and byte-identical candidate,
@@ -1573,24 +1826,41 @@ Expected: FAIL because complete stash persistence/restore are absent.
 Cover HEAD race, invalid committed tree, immutable version/project/repository mismatch,
 old-candidate Handle/Remotes mutation, valid new-base Handle/Remotes adoption,
 materialized candidate match/mismatch, base advance atomicity, same-ref semantic rebase,
-conflict no-loss restart, branch reject/stash/discard, and two-workspace isolation.
+conflict no-loss restart, branch reject/discard, same-SHA ref change, detached HEAD,
+complete-binding CAS, inside-transaction reobservation, post-linearization next-refresh
+detection, any prepared/published/recovered-new journal discard block,
+discarded-versus-stashed/
+historical-materialized row disposition, discard receipt retry/conflict, accepted-journal
+retention, acceptance from both published and recovered-new states, candidate deletion,
+exact included-operation membership, later active generations above ThroughGeneration,
+commit-outcome retry, and two-workspace isolation. Add
+`TestObserveGitBaseAcceptsRecoveredNewAfterPublishRestart`: restart after filesystem
+publication but before the original process observes the accepting commit, run Recover
+to `recovered_new`, then prove Git observation accepts that journal, deletes the candidate,
+retains materialized history, and preserves only exact later active rows. Prove Reject
+forbids a RequestID, Discard requires one, and ObserveGitBase has no stash path.
 
 Run: go test ./internal/runtime/projectstate -run 'TestObserveGitBase|TestBranchSwitch|TestRefreshWorkspace' -count=1
 Expected: FAIL because observer is absent.
 
 - [ ] **Step 4: Implement the exact transactions and algorithms above**
 
-Every filesystem read precedes BEGIN IMMEDIATE; every transaction revalidates binding
-state/digests before mutation and reuses Task 3's caller-owned transaction helpers.
+Import performs its initial filesystem read before BEGIN IMMEDIATE and its exact second
+no-follow read under the writer barrier before mutation. ObserveGitBase performs its
+initial full observation before BEGIN IMMEDIATE and reobserves checkout/ref/HEAD at its
+transaction linearization boundary. Every transaction revalidates binding state/digests
+before mutation and reuses Task 3's caller-owned transaction helpers.
 Import, Stash, RestoreStash, and any actor-attributed branch action call
 ValidateLocalAction before mutation, so legacy/unknown can never create new state.
 Every stored operation uses DecodeOperation; every stored tree uses strict canonical
-decode. Encoding, merge, conflict serialization, row transition, or status failure rolls
-back. Stash rejects an existing open conflict without mutation. A newly conflicted
+decode. Encoding, merge, receipt/conflict serialization, affected-count verification,
+row transition, or status failure rolls back. Stash rejects an existing open conflict
+without mutation. A newly conflicted
 restore persists only exact conflict evidence plus `conflicted` status and leaves its
 candidate, every operation row, and retained stash unchanged; only a clean restore may
 transition rows, persist a candidate, delete the stash, and set `pending`. Import never
-deletes conflict evidence outside its exact atomic replacement contract. ObserveGitBase
+deletes conflict history; its exact atomic replacement only reuses, resolves, or opens
+occurrences. ObserveGitBase
 never accepts a caller-provided tree/ref. TestRefreshWorkspaceCallsObserveGitBase,
 TestRefreshBeforeStatus, TestRefreshBeforeWrite, TestRefreshBeforeCheckpoint,
 TestStartupRecoversThenRefreshesEveryRegisteredWorkspace, and
@@ -1599,11 +1869,11 @@ five are completed by Slice B when it wires startup and requests.
 
 - [ ] **Step 5: Run GREEN and commit**
 
-Run: go test ./internal/runtime/projectstate ./internal/runtime/localstore -run 'Test(Import|ValidateDirectDelta|Stash|RestoreStash|ObserveGitBase|BranchSwitch)' -count=1
+Run: go test ./internal/runtime/projectstate ./internal/runtime/localstore -run 'Test(GatewayMigration2|Import|ValidateDirectDelta|ConflictCodec|Stash|RestoreStash|TransitionReceipt|ObserveGitBase|BranchSwitch|Discard)' -count=1
 Expected: PASS.
 
 ~~~bash
-git add internal/runtime/projectstate internal/runtime/localstore
+git add internal/runtime/projectstate internal/runtime/localstore/migrations/000002_portable_transitions.sql internal/runtime/localstore/migrations.go internal/runtime/localstore/migrations_test.go internal/runtime/localstore/workspace_repo.go internal/runtime/localstore/workspace_repo_test.go
 git commit -m "feat: import and observe portable workspace state"
 ~~~
 
@@ -1641,12 +1911,18 @@ func (s *Service) Recover(ctx context.Context, scope types.WorkspaceScope) (Work
 ~~~
 
 Checkpoint returns `localstore.ErrWorkspaceConflicted` directly. Runtime/projectstate
-declares no alias or alternate sentinel.
+declares no alias or alternate sentinel. It declares
+`ErrCheckpointPendingAcceptance` for the exact zero-mutation case where this workspace
+already has one `published` or `recovered_new` journal awaiting Git acceptance.
 
 Checkpoint algorithm:
 
 1. Acquire the per-workspace in-process mutex and begin the first `BEGIN IMMEDIATE`
-   journal-preparation transaction.
+   journal-preparation transaction. Strict-load the workspace's acceptance-eligible
+   journal set; if one `published` or `recovered_new` row exists, return
+   `CheckpointResult{}` plus `ErrCheckpointPendingAcceptance` before filesystem staging
+   or database mutation. More than one is corruption. A checkpoint never supersedes an
+   unaccepted journal.
 2. Validate scope/root/actor; read allowed live tree; require digest equals ExpectedWorkingTreeDigest.
 3. Strict-decode/import the valid direct tree, select the explicit Compose start and
    initial generation, DecodeOperation every later active row, compose, and reject any
@@ -1660,14 +1936,18 @@ Checkpoint algorithm:
 5. Re-read live tree and compare digest. Mismatch returns ErrCheckpointCAS, preserves direct input/stage evidence, and performs no publication.
 6. Persist the prepared journal containing complete canonical prior/candidate trees,
    accepted_base_digest, bound checkout_path/device/inode, exact candidate digest, and
-   through-generation; commit the first transaction before filesystem publication on the
+   through-generation. Its required canonical `CheckpointOperationsV1` envelope records
+   the selected initial boundary and, for every included row, exact generation, operation
+   ID, canonical operation bytes, and prepublication `active` or `rebased` state; store it
+   in `included_operations_json`. Commit the first transaction before filesystem publication on the
    Task-2 WAL connection whose mandatory `synchronous=FULL` policy durably syncs the
    journal/WAL. Do not hand-fsync the main database file.
 7. After that commit and before any live-tree rename/exchange, acquire a second dedicated
    connection and `BEGIN IMMEDIATE`. Reload the prepared journal and exact workspace,
    then recheck the live working-tree digest, binding accepted digest and checkout
-   identity, selected candidate bytes/digest, composed through-generation, complete
-   included operation IDs/bytes/states, absence of unexpected later generations, and
+   identity, selected candidate bytes/digest, composed through-generation, the strict
+   canonical included-operation envelope and every exact listed row/state, absence of
+   omitted or unexpected included rows or changed later generations, and
    `tx.HasOpenConflicts(ctx)`. Any mismatch rolls back with no publication; an open
    conflict returns `CheckpointResult{}` plus `localstore.ErrWorkspaceConflicted`.
 8. Hold that second immediate transaction across filesystem publication and the complete
@@ -1676,16 +1956,27 @@ Checkpoint algorithm:
    `renameatx_np` `RENAME_SWAP` when supported. Fallback renames live to backup, fsyncs
    parent, renames stage to live, and fsyncs parent. Before committing, mark the journal
    published, persist `candidate_tree` as the workspace candidate, transition exactly
-   the included operations to `materialized`, and leave verified later operations active.
+   the envelope-listed operations to `materialized`, and leave verified later operations active.
    A failure rolls back database finalization while the durable prepared row remains the
    recovery authority.
-9. Recover handles a prepared or published journal with either the old or new live tree.
+9. Recover handles a prepared or published journal with either the old or new live tree;
+   a recovered-new journal is strict-validated and returned as an acceptance-eligible
+   no-op.
    Before examining or renaming a path, it requires the current binding accepted digest
    and checkout identity to match the journal. With matching preconditions it compares
    live/stage/backup against both recorded digests and deterministically restores the old
    complete tree or finishes the new complete tree and matching database state. Unknown
    digest returns ErrCheckpointRecoveryBlocked without deleting evidence; a binding
    mismatch returns ErrCheckpointRecoveryPrecondition and leaves all evidence untouched.
+   Both recovery directions strict-decode the envelope and validate all and only its exact
+   persisted operation membership rather than inferring a generation range. Recover-old
+   restores each listed row to its recorded prepublication `active`/`rebased` state before
+   marking the journal terminal `recovered_old`; no orphan materialized row remains.
+   Recover-new retains exactly the listed materialized rows as historical and marks the
+   journal terminal `recovered_new`, which remains Git-acceptance-eligible after restart.
+   Later Git acceptance leaves materialized rows historical, deletes the now-accepted
+   candidate, preserves later active rows, and marks the `published` or `recovered_new`
+   journal `accepted`.
 10. ErrCheckpointUnsupported occurs before step 4 only when regular files, directory
     fsync, same-filesystem rename, or owner-only staging cannot be guaranteed. Accepted
     base stays unchanged until Task 4 observes the matching Git commit.
@@ -1724,7 +2015,13 @@ zero. Reopen and Recover must recognize the old live tree and prepared evidence 
 publishing the staged candidate. The downstream multi-Fabric Task 2/6 tests consume the
 same gate and sentinel.
 
-Run: go test ./internal/runtime/projectstate -run 'TestCheckpoint(CAS|LinuxExchange|Fallback|Recover|RecoverRejectsChangedCheckout|RecoverRejectsChangedAcceptedBase|DoesNotAdvanceBase|PreservesLaterOverlay|RejectsOpenConflictPreservesEvidence|ConflictAfterPreparedCommitPublishesNothing)' -count=1
+Add `TestCheckpointRejectsSecondPendingAcceptanceBeforeStaging`: publish checkpoint A,
+append a later active generation, attempt checkpoint B, require
+`ErrCheckpointPendingAcceptance`, zero publisher calls, and byte-identical journal,
+candidate, operation, and working-tree state across reopen. After Git accepts A, prove
+the later active generation remains and a new checkpoint can proceed.
+
+Run: go test ./internal/runtime/projectstate -run 'TestCheckpoint(CAS|LinuxExchange|Fallback|Recover|RecoverRejectsChangedCheckout|RecoverRejectsChangedAcceptedBase|DoesNotAdvanceBase|PreservesLaterOverlay|RejectsOpenConflictPreservesEvidence|ConflictAfterPreparedCommitPublishesNothing|RejectsSecondPendingAcceptanceBeforeStaging)' -count=1
 Expected: FAIL because checkpoint implementation is absent.
 
 - [ ] **Step 2: Implement platform publishers and journal state machine**

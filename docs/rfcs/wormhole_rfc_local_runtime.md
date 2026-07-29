@@ -411,9 +411,12 @@ compare-and-swap precondition. A raced direct edit aborts publication without
 overwriting either input. Publication uses atomic directory exchange where
 available or a durable all-or-recover journal elsewhere. The accepted base does
 not move; the included overlay generation becomes materialised-pending-commit.
-When Gateway observes a matching Git commit, it advances the accepted base and
-retires that journal while preserving any later overlay. A restart recovers the
+When Gateway observes a matching Git commit, it advances the accepted base and marks
+that retained journal accepted while preserving any later overlay. A restart recovers the
 previous or new complete working tree and the correct overlay state.
+Only one acceptance-eligible checkpoint may exist per workspace: another checkpoint
+returns `ErrCheckpointPendingAcceptance` before staging until the published or
+recovered-new journal is accepted. Later overlay remains available and is not superseded.
 
 ### 8.2 Semantic three-way rebase
 
@@ -439,6 +442,11 @@ Conflict triples are oriented `Base=old accepted base`, `Ours=candidate plus
 local overlay`, and `Theirs=new base`. Any conflict returns the byte-identical
 complete candidate with the full sorted evidence set; no clean subset or Git-owned
 field is partially merged into that fallback.
+The semantic conflict digest is not its history key: Gateway stores a UUIDv4
+occurrence, permits only one open occurrence for a semantic digest and workspace,
+resolves absent evidence without deleting it, and allocates a new occurrence if the
+same semantic conflict later reopens. Persisted evidence is strict-decoded, typed-root
+rehydrated, ID-recomputed, and sort-checked before use.
 
 An unresolved conflict blocks checkpoint, writable Fabric delivery, and accepted
 state advancement for that workspace while preserving both sides and the
@@ -453,9 +461,28 @@ silent loss and no automatic overwrite rule.
 Checkouts and worktrees are isolated workspaces. A branch's overlay and any
 checkpointed working-tree change are proposal state, not upstream acceptance.
 Switching one workspace to another branch with an active overlay or uncommitted
-candidate requires checkpoint/commit as applicable, stash, or discard. A local
+candidate requires checkpoint/commit as applicable, stash, or discard. Git observation
+itself supports Reject or Discard only. Stash follows a rejected refresh as a separate
+receipt-backed transaction and is followed by Refresh and Recover; it is never nested in
+observation. Stash moves the absorbed rebased prefix and later active suffix to terminal
+stashed state; clean restore leaves those original rows terminal and moves only newly
+absorbed current active rows to rebased. Discard uses a canonical request ID, marks active/rebased
+proposal rows discarded, preserves stashed and accepted-journal materialized rows,
+deletes the candidate, resolves open
+conflicts, records an immutable receipt, and advances the independently observed base in
+one immediate transaction. Nonmatching prepared, published, or recovered-new journals
+block discard pending recovery or matching Git acceptance; orphan/nonterminal
+materialized rows also block.
+Same request IDs are retry-safe only for the same canonical digest; ambiguous
+commit outcomes are retried with that same ID. A local
 merge, branch name, PR status, or claimed commit SHA is insufficient evidence of
 canonical acceptance.
+
+Import captures the canonical no-follow working tree before its transaction and repeats
+the exact read under the writer barrier immediately before mutation. Git observation
+likewise performs a full outside read, then compares the complete old binding and
+reobserves checkout/ref/HEAD at its in-transaction linearization point. Same-SHA ref
+changes count; later external changes are caught by the next refresh.
 
 Consequently, the accepted public `main` Fabric stream advances only after
 Fabric independently observes the canonical repository's default ref move to a

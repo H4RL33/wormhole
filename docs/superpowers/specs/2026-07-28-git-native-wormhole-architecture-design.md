@@ -406,20 +406,39 @@ snapshot.
 
 Checkpoint publication never advances the accepted base. When Gateway observes a
 new checked-out Git commit containing the candidate tree, that Git tree becomes the
-new workspace base and the matching materialisation journal can retire. Direct
+new workspace base and the matching materialisation journal is retained in terminal
+accepted state. Direct
 `.wormhole/` edits are allowed, but Gateway validates and imports their working-tree
 delta before composing it with an overlay.
+Only one published or recovered-new checkpoint may await Git acceptance per workspace.
+A second Checkpoint returns `ErrCheckpointPendingAcceptance` before staging and preserves
+all later overlay; Wormhole never silently supersedes the first journal.
+
+Import performs a bounded canonical no-follow capture before its database transaction,
+honours an optional canonical expected digest, then repeats the exact read under one
+immediate transaction before mutation. A byte or digest change returns
+`ErrWorkingTreeChanged` with zero writes. Missing prior record paths are classified in
+canonical kind/UUID order before the next typed decode: mutable disappearance is
+`ErrDirectPathDeletion`, while Event/Git-link disappearance is
+`ErrDirectImmutableRecordMutation`. The exported direct-delta validator accepts no
+materialisation proof; only a private repository-owned match against an
+acceptance-eligible published or recovered-new journal, accepted base, checkout, and
+exact candidate bytes/digest may authorize its exception.
 
 A machine-private stash records its semantic pre-stash rebase base separately from replay
 selection. `source_tree` and `source_base_digest` identify that semantic base, normally
 the accepted snapshot. A strict canonical `StashReplayV1` in the existing operations
 column records schema version, the exact selected composition start tree/digest, its
-explicit initial through-generation, and only active operations above that boundary.
-Already-rebased rows at or below the boundary remain rebased because their effect is in
-the selected start tree. An immediate post-rebase stash therefore has an empty operation
-list with initial and final through-generations equal; a later stash stores only later
-active rows. Restore proves replay from that selected start reproduces the composed stash,
-then semantically rebases it with the separately retained source base.
+explicit initial through-generation, the absorbed rebased prefix, and active operations
+above that boundary.
+Already-rebased rows at or below the boundary move to terminal stashed state because
+their effect is in the selected start tree; they appear in a non-nil absorbed-prefix
+array, while later active rows appear in a separate non-nil suffix array. All and only
+rows with that stash's immutable ownership ID must match the two arrays byte for byte. An
+immediate post-rebase stash therefore has an empty suffix array with initial and final
+through-generations equal. Restore proves suffix replay from that selected start
+reproduces the composed stash, then semantically rebases it with the separately retained
+source base; clean restore leaves both original arrays terminal and owner-attributed.
 
 Two worktrees of the same project have different workspace IDs, base digests,
 overlays, Fabric stream bindings, and Code Graph revisions. They cannot leak pending
@@ -519,6 +538,11 @@ carry an explicit present/absent envelope so absent is not confused with JSON `n
 Conflicts sort by entity kind, record ID, field path, kind, and a canonical SHA-256 ID
 derived from a versioned tuple containing the complete base/ours/theirs values. The
 same inputs therefore reproduce byte-identical conflict evidence and ordering.
+Persisted evidence separates deterministic semantic `conflict_id` from UUIDv4
+`occurrence_id`. One open occurrence per workspace and semantic ID is allowed; identical
+open evidence retains its occurrence, absent evidence resolves it without deleting
+history, and a later reopening receives a new occurrence. Reads strict-decode every
+envelope, rehydrate typed roots, recompute IDs, and require canonical sort order.
 
 Markdown merge canonicalises LF first and computes deterministic minimum-edit,
 old-base-relative LCS hunks. Equal-cost choices prefer advancing the base/deletion side;
@@ -544,9 +568,16 @@ or use a writable Fabric path until resolved. Other workspaces and Fabric connec
 continue normally.
 
 A branch switch with an active overlay or uncommitted checkpoint candidate requires
-one explicit choice: checkpoint/commit as applicable, stash, or discard. Stashes
+one explicit choice: checkpoint/commit as applicable, stash, or discard. Git observation
+offers only Reject and Discard; stash is a separate operation performed after
+`ErrBranchSwitchPending`, followed by Refresh and Recover. Stash, restore, and discard
+use canonical UUID request IDs and immutable canonical transition receipts. Same-ID,
+same-request retries are read-only; changed request content returns
+`ErrIdempotencyConflict`. An indeterminate database commit wraps
+`ErrCommitOutcomeUnknown`, and retry reuses the same request or operation ID. Stashes
 remain machine-private and retain the semantic source base, the selected start tree and
-digest, initial replay boundary, only later active stored operations, and candidate
+digest, initial replay boundary, absorbed rebased operations, later active stored
+operations, and candidate
 digest. Stash itself rejects any exact-workspace open conflict with
 `localstore.ErrWorkspaceConflicted` and zero mutation; success atomically leaves the
 binding `clean`. Restore first proves the selected replay composes to the stored candidate,
@@ -557,6 +588,24 @@ absorbed rows, persists the merged candidate, deletes the stash, and leaves stat
 persists only deterministic conflict evidence plus `conflicted` status, and retains the
 full stash for resolution/audit. Exact repeat strict-composes current rows again and is
 read-only only while every byte and conflict still matches; it is never blind replay.
+Clean restore receipts survive stash deletion; conflicted retries recompute and match the
+retained stash, current rows, and evidence rather than trust cached output. Clean restore
+builds its candidate from the self-contained stash, leaves original stash rows terminal
+stashed, and moves only newly absorbed current active rows to rebased. Discard marks
+active and rebased proposal rows discarded, deletes the candidate, resolves open
+conflicts, leaves stashed and accepted-journal materialized rows untouched, records its
+receipt, and advances the observed base atomically. A prepared, published, or
+recovered-new nonmatching materialisation blocks discard pending recovery or matching Git
+acceptance. Orphan/nonterminal materialized rows also block discard pending recovery.
+
+Git observation performs a full read outside the transaction, then under one immediate
+transaction compares the complete old binding and reobserves checkout identity,
+symbolic ref (empty means detached), and HEAD immediately before mutation. That is the
+linearization boundary; same-SHA ref changes count, and external changes afterward are
+caught by the next mandatory refresh. A matching acceptance-eligible published or
+recovered-new journal is marked accepted, not deleted, only on exact observed
+bytes/digest and complete journal/binding
+preconditions, while generations above its recorded boundary survive.
 Gateway never guesses that pending state belongs on the destination branch.
 
 ## 9. Multi-Fabric routing and Git-aware streams
@@ -1011,7 +1060,8 @@ legacy or unknown until explicitly linked.
   to deleted targets.
 - Two-clone and two-worktree base/overlay/checkpoint isolation.
 - Checkpoint leaves the accepted base unchanged until a matching Git commit is
-  observed, then retires the materialisation journal without losing later overlay work.
+  observed, then marks the retained materialisation journal accepted without losing
+  later overlay work.
 - Direct-edit/checkpoint races fail the digest compare-and-swap and preserve both inputs.
 - A conflict opened after prepared-journal commit but before checkpoint rename is caught
   by the second immediate transaction and causes zero filesystem/database publication;
@@ -1026,7 +1076,8 @@ legacy or unknown until explicitly linked.
   plus both-side evidence atomically, reproduces it after restart, and blocks checkpoint
   and writable Fabric delivery until explicit resolution.
 - Stash restart tests distinguish semantic source base from selected replay start, cover
-  a rebased start with no later operations and with only later active operations, and
+  a rebased start with no later operations and with an absorbed rebased prefix plus only
+  later active operations, and
   prove the absorbed prefix plus later operations survive clean and conflicting paths.
   They also cover strict boundary/envelope/current-row corruption, open-conflict rejection
   with zero mutation, exact clean/pending/conflicted statuses, and read-only repeated
