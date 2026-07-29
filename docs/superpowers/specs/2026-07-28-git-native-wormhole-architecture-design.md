@@ -417,13 +417,26 @@ all later overlay; Wormhole never silently supersedes the first journal.
 Import performs a bounded canonical no-follow capture before its database transaction,
 honours an optional canonical expected digest, then repeats the exact read under one
 immediate transaction before mutation. A byte or digest change returns
-`ErrWorkingTreeChanged` with zero writes. Missing prior record paths are classified in
+`ErrWorkingTreeChanged` with zero writes. Import immediately deep-clones every retained
+filesystem/repository reader result and, after that second capture matches, revalidates
+canonical root and checkout identity immediately before conflict replacement, its first
+write; byte-identical checkout replacement still fails when device/inode changes. It also
+requires pre-existing open-conflict evidence and `conflicted` workspace status to agree
+before replacement. Missing prior record paths are classified in
 canonical kind/UUID order before the next typed decode: mutable disappearance is
 `ErrDirectPathDeletion`, while Event/Git-link disappearance is
 `ErrDirectImmutableRecordMutation`. The exported direct-delta validator accepts no
 materialisation proof; only a private repository-owned match against an
 acceptance-eligible published or recovered-new journal, accepted base, checkout, and
-exact candidate bytes/digest may authorize its exception.
+exact candidate bytes/digest may authorize its exception. That match receives the
+complete disposition proof, eligible row, binding, canonical prior tree, captured tree,
+and captured digest explicitly. The same disposition is the sole operation inventory:
+active at/below the selected boundary or rebased above it is corruption; every valid
+active row is composed and only that exact preloaded membership transitions to rebased.
+Import never uses a filtered active-row read or generation-range update.
+Import has no request ID or receipt. Indeterminate COMMIT returns a zero result plus
+`ErrCommitOutcomeUnknown`; retry repeats the full capture/recomputation and never infers
+the original result from readback state.
 
 A machine-private stash records its semantic pre-stash rebase base separately from replay
 selection. `source_tree` and `source_base_digest` identify that semantic base, normally
@@ -527,7 +540,9 @@ without replacing its stable path with a valid tombstone rejects the rebase/impo
 Direct-delta validation compares only the prior direct surface with the new direct tree
 and any bound materialisation exception. It accepts a correctly formed new tombstone;
 the three-way rebase alone compares that tombstone with the overlay and owns the explicit
-tombstone/edit conflict.
+tombstone/edit conflict. `ImportResult.ImportedChangeCount` is exactly
+`len(SemanticDiff(priorSurface, liveSnapshot, nil).Changes)`; overlay changes, the merged
+result, and use of the matching-materialisation exception do not alter this direct count.
 
 Semantic fields use RFC 6901 JSON Pointer paths, with `""` as the record root and
 `/body` as a KB Markdown body. A complete root `FieldValue` contains canonical JSON for
@@ -573,8 +588,14 @@ offers only Reject and Discard; stash is a separate operation performed after
 `ErrBranchSwitchPending`, followed by Refresh and Recover. Stash, restore, and discard
 use canonical UUID request IDs and immutable canonical transition receipts. Same-ID,
 same-request retries are read-only; changed request content returns
-`ErrIdempotencyConflict`. An indeterminate database commit wraps
-`ErrCommitOutcomeUnknown`, and retry reuses the same request or operation ID. Stashes
+`ErrIdempotencyConflict`. Dedicated tagged v1 request-digest projections bind the exact
+scope and actor plus label or stash ID; discard also binds the complete private
+adapter-supplied resolved expected binding,
+canonical root, and expected commit. Golden tests freeze their canonical bytes and
+digests. An indeterminate database commit wraps `ErrCommitOutcomeUnknown`, and retry
+reuses the same request or operation ID. An exact clean receipt may prove its commit;
+a conflicted restore receipt must pass complete retry-state verification before proving
+success. Stashes
 remain machine-private and retain the semantic source base, the selected start tree and
 digest, initial replay boundary, absorbed rebased operations, later active stored
 operations, and candidate
@@ -586,10 +607,38 @@ then calls the semantic equivalent of
 absorbed rows, persists the merged candidate, deletes the stash, and leaves status
 `pending`. A conflicted restore leaves candidate and every operation row byte-identical,
 persists only deterministic conflict evidence plus `conflicted` status, and retains the
-full stash for resolution/audit. Exact repeat strict-composes current rows again and is
-read-only only while every byte and conflict still matches; it is never blind replay.
-Clean restore receipts survive stash deletion; conflicted retries recompute and match the
-retained stash, current rows, and evidence rather than trust cached output. Clean restore
+full stash for resolution/audit. Stash, restore, and discard use explicit action-specific
+private tagged v1 codecs: `stashResultV1`/`stashReceiptV1`,
+`restoreStashResultV1`/`restoreStashReceiptV1`, and
+`discardResultV1`/`discardReceiptV1`. Each receipt contains schema version, action,
+outcome, and result; restore alone also carries its conflict retry digest. Conflict
+arrays are non-nil (`[]`, never `null`), optional pointers encode explicit `null`, and
+golden result/receipt bytes and hard-coded canonical digests cover every action/outcome.
+The conflicted restore receipt binds explicit action/outcome, its tagged result, and a canonical digest
+over scope, request ID/digest, stash ID, and the complete post-conflict
+binding/status/accepted snapshot, candidate, all operation
+rows including creation times, retained stash, and sorted open occurrences/evidence.
+That state includes binding `created_at` and `updated_at` plus localstore-computed
+exact-byte digests for the raw accepted-snapshot, candidate direct/rebased, and stash
+source/composed canonical file-list BLOBs. Each BLOB digest is `"sha256:" +
+lowerhex(SHA256(raw))` over the complete raw BLOB, with no canonicalization, framing,
+prefix, or separator in the hash input, after strict decode and byte-equal canonical
+re-encoding; runtime copies the fields rather than recomputing them from decoded trees,
+and literal-byte golden vectors freeze the domain. This requires no schema change.
+The envelope action/outcome equal the receipt row and uses the existing `result_json`
+column without a schema or migration change.
+The first conflicted attempt rereads post-state and proves the accepted snapshot, every
+non-status binding field, binding `created_at`, candidate, operations, and stash equal
+their prewrite values. Only the exact status/`updated_at` change caused by
+`SetStatus("conflicted")` and deterministic open-conflict replacement may differ; their
+post-values must equal the computed mutation. Exact repeat strict-composes current rows,
+recomputes semantic evidence and the digest, and is read-only with zero writes only when
+the retry-time state, including both binding timestamps, equals the recorded post-state;
+a same-status timestamp rewrite fails closed. It is never blind replay. This is a
+cryptographic commitment at the retry linearization point, not proof that no intermediate
+mutation was later reversed. Clean restore receipts survive stash deletion; conflicted
+retries verify the retained stash, complete current rows, and evidence rather than trust
+cached output. Clean restore
 builds its candidate from the self-contained stash, leaves original stash rows terminal
 stashed, and moves only newly absorbed current active rows to rebased. Discard marks
 active and rebased proposal rows discarded, deletes the candidate, resolves open
@@ -598,15 +647,31 @@ receipt, and advances the observed base atomically. A prepared, published, or
 recovered-new nonmatching materialisation blocks discard pending recovery or matching Git
 acceptance. Orphan/nonterminal materialized rows also block discard pending recovery.
 
+Import, Git observation, recovery, and discard obtain one complete exact-workspace
+materialization disposition in their transaction before matching an eligible journal.
+Accepted, published, and recovered-new journals own materialized rows; prepared blocks a
+stable proof and drives recovery, while recovered-old is excluded. Globally unique
+generation and operation-ID claims must byte-match an ownerless materialized row and form
+a bijection with every materialized row. A nil legacy accepted envelope contributes no
+claim and is permitted only without dependent residual materialized history. Each owning
+journal also rejects an omitted active/rebased row at or below its boundary; terminal
+stashed/discarded gaps and later active rows are allowed. Historical prepublication state
+is established by the exact checkpoint transition plus its envelope, not reconstructed
+from a later row. This proof adds no database schema or migration.
+
 Git observation performs a full read outside the transaction, then under one immediate
-transaction compares the complete old binding and reobserves checkout identity,
+transaction validates the private adapter-supplied resolved expected binding, requires equal scope
+and a root matching its checkout, compares the complete loaded binding for equality, and
+reobserves checkout identity,
 symbolic ref (empty means detached), and HEAD immediately before mutation. That is the
 linearization boundary; same-SHA ref changes count, and external changes afterward are
 caught by the next mandatory refresh. A matching acceptance-eligible published or
 recovered-new journal is marked accepted, not deleted, only on exact observed
 bytes/digest and complete journal/binding
 preconditions, while generations above its recorded boundary survive.
-Gateway never guesses that pending state belongs on the destination branch.
+Refresh injects the validated resolved binding; private adapters do likewise, and no
+CLI/MCP client supplies binding or routing context. Gateway never guesses that pending
+state belongs on the destination branch.
 
 ## 9. Multi-Fabric routing and Git-aware streams
 

@@ -1215,6 +1215,10 @@ type WorkspaceMaterializationRecord struct {
     IncludedOperationsJSON *string // raw nullable included_operations_json TEXT
     State string
 }
+type WorkspaceMaterializationDisposition struct {
+    Journals []WorkspaceMaterializationRecord
+    Operations []WorkspaceOperation
+}
 type CheckpointOperationV1 struct {
     Generation int64 `json:"generation"`
     OperationID string `json:"operation_id"`
@@ -1233,6 +1237,9 @@ func (tx *WorkspaceMutationTx) AcceptanceEligibleMaterializationByCandidateDiges
     ctx context.Context,
     digest projectstate.Digest,
 ) (*WorkspaceMaterializationRecord, error)
+func (tx *WorkspaceMutationTx) MaterializationDisposition(
+    ctx context.Context,
+) (WorkspaceMaterializationDisposition, error)
 func ValidateDirectDelta(prior, next projectstate.Snapshot) error
 func (s *Service) Import(ctx context.Context, req ImportRequest) (ImportResult, error)
 
@@ -1268,6 +1275,42 @@ type RestoreStashResult struct {
     Conflicts []Conflict
     StashRetained bool
 }
+type WorkspaceOperationAuditRecord struct {
+    WorkspaceOperation
+    CreatedAt time.Time
+}
+type WorkspaceStashRecord struct {
+    StashID string
+    SourceBaseDigest projectstate.Digest
+    CandidateDigest projectstate.Digest
+    SourceTree projectstate.Tree
+    ComposedTree projectstate.Tree
+    OperationsJSON string
+    ThroughGeneration int64
+    Actor types.ActorEnvelope
+    ActorJSON string
+    Label string
+    CreatedAt time.Time
+}
+type WorkspaceRestoreRetryState struct {
+    Workspace WorkspaceRecord
+    BindingCreatedAt time.Time
+    BindingUpdatedAt time.Time
+    AcceptedSnapshotBlobDigest projectstate.Digest
+    Candidate *WorkspaceCandidateRecord
+    CandidateDirectTreeBlobDigest *projectstate.Digest
+    CandidateRebasedTreeBlobDigest *projectstate.Digest
+    Operations []WorkspaceOperationAuditRecord
+    Stash WorkspaceStashRecord
+    StashSourceTreeBlobDigest projectstate.Digest
+    StashComposedTreeBlobDigest projectstate.Digest
+    OpenConflicts []WorkspaceConflictOccurrence
+}
+func (tx *WorkspaceMutationTx) RestoreRetryState(
+    ctx context.Context,
+    stashID string,
+) (WorkspaceRestoreRetryState, error)
+func digestWorkspaceBlobBytesV1(raw []byte) projectstate.Digest
 func (s *Service) Stash(ctx context.Context, req StashRequest) (StashResult, error)
 func (s *Service) RestoreStash(ctx context.Context, req RestoreStashRequest) (RestoreStashResult, error)
 
@@ -1278,6 +1321,7 @@ const (
 )
 type ObserveGitBaseRequest struct {
     Scope types.WorkspaceScope
+    ExpectedBinding types.WorkspaceBinding
     Root string
     ExpectedCommit string
     BranchAction BranchSwitchAction
@@ -1297,15 +1341,64 @@ func (s *Service) ObserveGitBase(ctx context.Context, req ObserveGitBaseRequest)
 func (s *Service) RefreshWorkspace(ctx context.Context, binding types.WorkspaceBinding) (types.WorkspaceBinding, error)
 ~~~
 
+`RestoreRetryState` is an all-or-error localstore boundary on the caller's
+exact-workspace transaction. It returns stable-ordered non-nil operation and open-conflict
+slices, strictly validates every selected row, and retains exact canonical operation,
+stash replay, and actor JSON. It also returns strict binding `created_at`/`updated_at` and
+explicit exact-byte digests computed by localstore while it owns the raw accepted-snapshot,
+candidate direct/rebased, and stash source/composed file-list BLOBs. A candidate direct
+digest is non-nil exactly when Candidate is non-nil; its rebased digest is non-nil exactly
+when that candidate's persisted `rebased_tree` is non-null. Persisted BLOBs must
+strict-decode and byte-equal their canonical re-encoding before localstore computes the
+digest. Runtime maps only these returned digests into the private retry projection; it
+never attempts to call localstore's private file-list encoder or substitutes a semantic
+tree digest.
+
+The BLOB digest domain is exact and separate from `DigestTree`:
+`digestWorkspaceBlobBytesV1(raw)` is
+`"sha256:" + lowerhex(SHA256(raw))` over the complete raw bytes of one strictly validated
+persisted canonical file-list BLOB, with no JSON canonicalization, length framing, prefix,
+or separator added to the hash input. Fixed golden tests use literal canonical BLOB bytes
+and hard-coded expected digests for accepted snapshot, candidate direct/rebased, and stash
+source/composed columns; tests never calculate the expected value through the production
+helper. This adds no column, schema version, or migration.
+
+The runtime copies `AcceptedSnapshotBlobDigest`, candidate direct/rebased blob-digest
+fields, and stash source/composed blob-digest fields verbatim from
+`WorkspaceRestoreRetryState` into their namesake private v1 projections. Pointer
+nullability must match the reader invariants above. Recomputing any of these values from
+the decoded `Snapshot` or `Tree` is forbidden.
+
 `WorkspaceMaterializationRecord` is a localstore boundary. Localstore preserves a
 non-null `IncludedOperationsJSON` string byte-for-byte and rejects only empty, non-UTF-8,
 or NUL-containing TEXT; it never parses, canonicalizes, or defaults that runtime-owned
-envelope. Nil represents a migrated v1 SQL NULL. It still blocks a second checkpoint,
-but Import, ObserveGitBase, and Recover reject it as missing acceptance proof.
+envelope. Nil represents a migrated v1 SQL NULL. A nil prepared, published, or
+recovered-new envelope blocks recovery/checkpoint/acceptance as missing proof; a nil
+historical accepted envelope contributes no ownership and is tolerated only under the
+complete no-residual rule below.
 Runtime/projectstate alone strict-decodes `CheckpointOperationsV1`, rejects unknown fields,
 requires a non-nil ordered operation array and exact persisted-row membership, and
 requires every `OperationJSON` string to equal the canonical operation bytes including
-their final LF.
+their final LF. `MaterializationDisposition` returns non-nil, stable-ordered, cloned
+complete journal and operation slices or an error from the caller's exact-workspace
+immediate transaction; it requires no schema or migration change.
+
+One private runtime proof consumes that complete disposition before Import,
+ObserveGitBase, Recover, or Discard may match an acceptance-eligible journal. `accepted`,
+`published`, and `recovered_new` journals own current materialized rows. A `prepared`
+journal blocks a stable proof and must drive Recover; `recovered_old` is excluded from
+ownership. A nil legacy `accepted` envelope contributes no claims and is permitted only
+when no residual materialized row depends on it; nil `published` or `recovered_new`
+envelopes fail closed. Across all owning journals, claimed generations and operation IDs
+are globally unique. Every claim must byte-match exactly one ownerless persisted row in
+`materialized` state, and every materialized row must have exactly one claim. For each
+owning journal, any persisted `active` or `rebased` row at or below its
+`ThroughGeneration` must be claimed, in which case the claim-to-row rule requires the
+current row to be materialized. Stashed/discarded gaps and active rows later than the
+journal boundary are allowed. Historical prepublication state is established by the
+checkpoint transaction's exact state transition plus its durable envelope; a later proof
+validates that envelope, its boundary, and current row identity rather than pretending to
+reconstruct an independent historical column.
 
 Both materialization lookups select only exact-workspace `published` or `recovered_new`
 rows. They share one strict full-set scan which validates every selected row and proves
@@ -1315,7 +1408,27 @@ strict read validates the complete current workspace binding, canonical tree byt
 digests, checkout identity, timestamps, paths, and `ExpectedLiveDigest ==
 PriorTreeDigest`; both fields name the same complete prepublication live tree.
 
-RefreshWorkspace validates and revalidates binding checkout identity, invokes ObserveGitBase with BranchSwitchReject, an empty RequestID, and the zero ActorEnvelope against the independently observed HEAD/tree, then resolves and returns the updated exact WorkspaceBinding. It is the single refresh seam consumed by Slice B. Gateway startup first calls Recover(binding.Scope), then RefreshWorkspace(binding), for every RegisteredWorkspaces result. Request orchestration calls RefreshWorkspace before every subsequent scoped status, diff, pillar/workspace write, import, checkpoint, and graph operation. The sole exception is Stash after RefreshWorkspace returns ErrBranchSwitchPending: Stash runs against the still-validated pre-refresh binding with one stable RequestID, then the caller must immediately call RefreshWorkspace(binding) and Recover(refreshed.Scope). Its committed receipt lets a retry resume those follow-up calls, and the stash call is not reported successful unless both succeed. ObserveGitBase never invokes Stash or nests a stash transaction. Any invalid branch action or committed tree fails closed before the requested operation; no caller-supplied ref/tree can bypass ObserveGitBase.
+RefreshWorkspace requires `binding.Validate()`, injects both `Scope: binding.Scope` and
+`ExpectedBinding: binding`, revalidates the binding checkout identity, and invokes
+ObserveGitBase with BranchSwitchReject, an empty RequestID, and the zero ActorEnvelope
+against the independently observed HEAD/tree. ObserveGitBase requires
+`req.ExpectedBinding.Validate()`, `req.Scope == req.ExpectedBinding.Scope`, and the
+canonical Root to match that expected checkout. Inside its immediate transaction it
+requires complete equality between the loaded binding and `ExpectedBinding` before Git
+reobservation or mutation. The binding is private resolved runtime context: CLI/MCP
+clients never supply it, and adapters copy it only from workspace resolution.
+RefreshWorkspace then resolves and returns the updated exact WorkspaceBinding. It is the
+single refresh seam consumed by Slice B. Gateway startup first calls
+Recover(binding.Scope), then RefreshWorkspace(binding), for every RegisteredWorkspaces
+result. Request orchestration calls RefreshWorkspace before every subsequent scoped
+status, diff, pillar/workspace write, import, checkpoint, and graph operation. The sole
+exception is Stash after RefreshWorkspace returns ErrBranchSwitchPending: Stash runs
+against the still-validated pre-refresh binding with one stable RequestID, then the caller
+must immediately call RefreshWorkspace(binding) and Recover(refreshed.Scope). Its
+committed receipt lets a retry resume those follow-up calls, and the stash call is not
+reported successful unless both succeed. ObserveGitBase never invokes Stash or nests a
+stash transaction. Any invalid branch action or committed tree fails closed before the
+requested operation; no caller-supplied ref/tree can bypass ObserveGitBase.
 
 Migration `000002_portable_transitions.sql`, `GatewaySchemaVersion=2`, candidate
 persistence, transition receipts, and conflict-occurrence history have already landed.
@@ -1400,23 +1513,215 @@ before ledger advancement. More than one pre-v2 acceptance-eligible row in a wor
 makes the partial unique-index creation fail and roll back 000002; migration never
 chooses or deletes one.
 
-`request_id` is a canonical UUID. A canonical request digest binds schema version,
-action, exact scope, the complete strict canonical actor envelope, and the action payload (`label` for stash,
-`stash_id` for restore, or checkout identity, canonical root, and ExpectedCommit for
-discard). Reusing an ID with the same
-digest is a retry; reuse with another digest returns `ErrIdempotencyConflict` without
-mutation. Clean stash/restore returns the receipt result read-only on retry, and the
-receipt survives clean restore's stash deletion. A conflicted restore always reloads and
-strict-recomputes the current view, stash replay, merge, and open evidence before it may
-match and return the receipt. Receipt `actor_json` is immutable canonical JSON; every
-read strict-decodes it, requires byte-identical re-encoding, calls `ValidateHistorical`,
-and matches it to the actor envelope bound into the request digest. Receipt `result_json`
-uses one strict canonical result codec. Each mutation first reads any receipt and compares its action/digest, inserts the
-receipt in the same transaction as the state transition, and requires exactly one row.
-If COMMIT returns an error, the service reads back that exact scope/request ID on a fresh
-connection: an exact receipt proves success, absence proves failure, and any unavailable,
-malformed, or mismatched readback wraps `ErrCommitOutcomeUnknown`. The caller retries
-with the same request or operation ID.
+Runtime owns these exact private versioned digest and receipt projections; they are not
+CLI/MCP request schemas:
+
+~~~go
+type checkoutIdentityDigestV1 struct {
+    CanonicalPath string `json:"canonical_path"`
+    Device uint64 `json:"device"`
+    Inode uint64 `json:"inode"`
+}
+type workspaceBindingDigestV1 struct {
+    Scope types.WorkspaceScope `json:"scope"`
+    Checkout checkoutIdentityDigestV1 `json:"checkout"`
+    Repository types.RepositoryIdentity `json:"repository"`
+    AcceptedRef string `json:"accepted_ref"`
+    AcceptedCommitSHA string `json:"accepted_commit_sha"`
+    AcceptedTreeDigest string `json:"accepted_tree_digest"`
+}
+type stashRequestDigestV1 struct {
+    SchemaVersion int `json:"schema_version"`
+    Action string `json:"action"`
+    Scope types.WorkspaceScope `json:"scope"`
+    Actor types.ActorEnvelope `json:"actor"`
+    Label string `json:"label"`
+}
+type restoreRequestDigestV1 struct {
+    SchemaVersion int `json:"schema_version"`
+    Action string `json:"action"`
+    Scope types.WorkspaceScope `json:"scope"`
+    Actor types.ActorEnvelope `json:"actor"`
+    StashID string `json:"stash_id"`
+}
+type discardRequestDigestV1 struct {
+    SchemaVersion int `json:"schema_version"`
+    Action string `json:"action"`
+    Scope types.WorkspaceScope `json:"scope"`
+    Actor types.ActorEnvelope `json:"actor"`
+    ExpectedBinding workspaceBindingDigestV1 `json:"expected_binding"`
+    CanonicalRoot string `json:"canonical_root"`
+    ExpectedCommit string `json:"expected_commit"`
+}
+type transitionRecordKeyV1 struct {
+    Kind string `json:"kind"`
+    ID string `json:"id"`
+}
+type transitionConflictV1 struct {
+    ID string `json:"id"`
+    Key transitionRecordKeyV1 `json:"key"`
+    FieldPath string `json:"field_path"`
+    Kind ConflictKind `json:"kind"`
+    Base FieldValue `json:"base"`
+    Ours FieldValue `json:"ours"`
+    Theirs FieldValue `json:"theirs"`
+}
+type restoreStashResultV1 struct {
+    RestoredDigest projectstate.Digest `json:"restored_digest"`
+    RebasedThroughGeneration int64 `json:"rebased_through_generation"`
+    Conflicts []transitionConflictV1 `json:"conflicts"`
+    StashRetained bool `json:"stash_retained"`
+}
+type restoreStashReceiptV1 struct {
+    SchemaVersion int `json:"schema_version"`
+    Action string `json:"action"`
+    Outcome string `json:"outcome"`
+    Result restoreStashResultV1 `json:"result"`
+    ConflictRetryDigest *projectstate.Digest `json:"conflict_retry_digest"`
+}
+type stashResultV1 struct {
+    StashID string `json:"stash_id"`
+    SourceDigest projectstate.Digest `json:"source_digest"`
+    CandidateDigest projectstate.Digest `json:"candidate_digest"`
+    OperationCount int `json:"operation_count"`
+}
+type stashReceiptV1 struct {
+    SchemaVersion int `json:"schema_version"`
+    Action string `json:"action"`
+    Outcome string `json:"outcome"`
+    Result stashResultV1 `json:"result"`
+}
+type discardResultV1 struct {
+    PreviousCommit string `json:"previous_commit"`
+    ObservedCommit string `json:"observed_commit"`
+    PreviousRef string `json:"previous_ref"`
+    ObservedRef string `json:"observed_ref"`
+    PreviousBaseDigest projectstate.Digest `json:"previous_base_digest"`
+    ObservedBaseDigest projectstate.Digest `json:"observed_base_digest"`
+    CandidateAccepted bool `json:"candidate_accepted"`
+    AcceptedJournalID *string `json:"accepted_journal_id"`
+    Rebased bool `json:"rebased"`
+    Conflicts []transitionConflictV1 `json:"conflicts"`
+}
+type discardReceiptV1 struct {
+    SchemaVersion int `json:"schema_version"`
+    Action string `json:"action"`
+    Outcome string `json:"outcome"`
+    Result discardResultV1 `json:"result"`
+}
+type restoreRetryBindingV1 struct {
+    Binding workspaceBindingDigestV1 `json:"binding"`
+    Status string `json:"status"`
+    CreatedAt time.Time `json:"created_at"`
+    UpdatedAt time.Time `json:"updated_at"`
+    AcceptedSnapshotBlobDigest projectstate.Digest `json:"accepted_snapshot_blob_digest"`
+}
+type restoreRetryCandidateV1 struct {
+    AcceptedBaseDigest projectstate.Digest `json:"accepted_base_digest"`
+    WorkingTreeDigest projectstate.Digest `json:"working_tree_digest"`
+    DirectTreeBlobDigest projectstate.Digest `json:"direct_tree_blob_digest"`
+    RebasedTreeBlobDigest *projectstate.Digest `json:"rebased_tree_blob_digest"`
+    RebasedThroughGeneration int64 `json:"rebased_through_generation"`
+    ImportedBy string `json:"imported_by"`
+    ImportedAt time.Time `json:"imported_at"`
+}
+type restoreRetryOperationV1 struct {
+    Generation int64 `json:"generation"`
+    OperationID string `json:"operation_id"`
+    OperationJSON string `json:"operation_json"`
+    State string `json:"state"`
+    StashedByStashID *string `json:"stashed_by_stash_id"`
+    CreatedAt time.Time `json:"created_at"`
+}
+type restoreRetryStashV1 struct {
+    StashID string `json:"stash_id"`
+    SourceBaseDigest projectstate.Digest `json:"source_base_digest"`
+    CandidateDigest projectstate.Digest `json:"candidate_digest"`
+    SourceTreeBlobDigest projectstate.Digest `json:"source_tree_blob_digest"`
+    ComposedTreeBlobDigest projectstate.Digest `json:"composed_tree_blob_digest"`
+    OperationsJSON string `json:"operations_json"`
+    ThroughGeneration int64 `json:"through_generation"`
+    ActorJSON string `json:"actor_json"`
+    Label string `json:"label"`
+    CreatedAt time.Time `json:"created_at"`
+}
+type restoreRetryConflictOccurrenceV1 struct {
+    OccurrenceID string `json:"occurrence_id"`
+    ConflictID string `json:"conflict_id"`
+    RecordKind string `json:"record_kind"`
+    RecordID string `json:"record_id"`
+    FieldPath string `json:"field_path"`
+    ConflictKind string `json:"conflict_kind"`
+    BaseJSON string `json:"base_json"`
+    OursJSON string `json:"ours_json"`
+    TheirsJSON string `json:"theirs_json"`
+    CreatedAt time.Time `json:"created_at"`
+}
+type restoreStashRetryPreimageV1 struct {
+    SchemaVersion int `json:"schema_version"`
+    Action string `json:"action"`
+    Outcome string `json:"outcome"`
+    Scope types.WorkspaceScope `json:"scope"`
+    RequestID string `json:"request_id"`
+    RequestDigest projectstate.Digest `json:"request_digest"`
+    StashID string `json:"stash_id"`
+    Binding restoreRetryBindingV1 `json:"binding"`
+    Candidate *restoreRetryCandidateV1 `json:"candidate"`
+    Operations []restoreRetryOperationV1 `json:"operations"`
+    Stash restoreRetryStashV1 `json:"stash"`
+    OpenConflicts []restoreRetryConflictOccurrenceV1 `json:"open_conflicts"`
+}
+~~~
+
+`request_id` is a canonical UUID. Each request digest is
+`DigestCanonicalJSON` of its dedicated v1 projection above, so it binds schema version,
+action, exact scope, the complete strict canonical actor envelope, and the action payload.
+Discard additionally binds the complete private adapter-supplied resolved expected binding, canonical root,
+and ExpectedCommit; serializing `types.WorkspaceBinding` directly is forbidden because
+the dedicated tagged projection is the frozen digest contract. Request-digest golden
+tests freeze the exact canonical bytes and digest for stash, restore, and discard.
+Reusing an ID with the same digest is a retry; reuse with another digest returns
+`ErrIdempotencyConflict` without mutation. Clean stash/restore returns the receipt result
+read-only on retry, and the receipt survives clean restore's stash deletion. A conflicted
+restore always reloads and strict-recomputes the current view, stash replay, merge, open
+evidence, and retry digest before it may match and return the receipt. Receipt
+`actor_json` is immutable canonical JSON; every read strict-decodes it, requires
+byte-identical re-encoding, calls `ValidateHistorical`, and matches it to the actor
+envelope bound into the request digest. Receipt `result_json` contains exactly one strict
+canonical private `restoreStashReceiptV1` for restore. Its tagged private `Result` maps
+exactly to the public `RestoreStashResult`, its explicit `Action` and `Outcome` must equal
+the receipt row (`Action == "restore"`, `Outcome == "clean" || Outcome == "conflicted"`),
+and `ConflictRetryDigest` is nil exactly for clean restore and a canonical non-nil digest
+exactly for conflicted restore. Unknown fields, trailing JSON, a noncanonical
+re-encoding, an invalid or unequal action/outcome in any preimage or envelope, or
+disagreement with the receipt row outcome fails closed. The private result requires a
+non-nil canonically sorted conflict array, strict conflict-value rehydration, and exact
+mapping to the returned public result and persisted open evidence. Clean restore requires
+`Conflicts == []` and `StashRetained == false`; conflicted restore requires a non-empty
+conflict array and `StashRetained == true`.
+
+Stash `result_json` is exactly canonical `stashReceiptV1`, with Action `"stash"`, Outcome
+`"clean"`, and a tagged Result that maps exactly to public `StashResult`. Discard
+`result_json` is exactly canonical `discardReceiptV1`, with Action `"discard"`, Outcome
+`"clean"`, and a tagged Result that maps exactly to the public ObserveGitBase result for
+the actual discard. Discard requires `CandidateAccepted == false`,
+`AcceptedJournalID == nil`, `Rebased == false`, and a non-nil empty `Conflicts` array.
+Every conflict array in these private codecs is non-nil; empty is encoded as `[]`, never
+`null`. Optional pointers have no `omitempty` and nil is encoded explicitly as `null`.
+Each action's strict decoder rejects unknown fields, trailing values, noncanonical bytes,
+wrong action/outcome, invalid result invariants, and any noncanonical/unsorted conflict.
+Fixed golden tests freeze literal canonical result and receipt bytes plus their
+hard-coded `DigestCanonicalJSON` digests for stash, clean/conflicted restore, and discard;
+expected bytes/digests are not generated through the production codec under test.
+These envelopes use the existing `result_json` TEXT and do not change
+`GatewaySchemaVersion` or any migration. Each mutation
+first reads any receipt and compares its action/digest, inserts the receipt in the same
+transaction as the state transition, and requires exactly one row. If COMMIT returns an
+error, the service reads back that exact scope/request ID on a fresh connection: an exact
+clean receipt proves success and absence proves failure. A conflicted restore receipt
+must pass the complete conflicted-retry state and semantic verification before proving
+success; unavailable, malformed, mismatched, or unverifiable readback wraps
+`ErrCommitOutcomeUnknown`. The caller retries with the same request or operation ID.
 
 Direct delta rules are exact. Relative to the previously imported candidate, or accepted
 base when no candidate exists, Import first compares the prior canonical path inventory
@@ -1438,9 +1743,10 @@ receive the strict typed DecodeTree/validation error. After decode,
   `created_at`.
 
 The exported validator receives no materialization proof and never bypasses these rules.
-Inside the repository-owned Import transaction only, a private helper may bypass the
-direct-edit errors when `AcceptanceEligibleMaterializationByCandidateDigest` returns exactly one
-row whose state is `published` or `recovered_new`, accepted-base digest and complete
+Inside the repository-owned Import transaction only, runtime first obtains and proves one
+complete `MaterializationDisposition`; a private helper may bypass the direct-edit errors
+only when `AcceptanceEligibleMaterializationByCandidateDigest` returns exactly one row
+that byte-matches the proved disposition, whose state is `published` or `recovered_new`, accepted-base digest and complete
 checkout identity equal the current binding, candidate bytes strict-decode and canonicalize
 byte-identically, and recorded candidate digest equals both those bytes and the captured
 live-tree digest. `ExpectedLiveDigest` must equal `PriorTreeDigest`, which must match the
@@ -1464,40 +1770,66 @@ Import returns the scope/checkout/project/repository errors already frozen plus 
 direct-delta sentinels. A nil `ExpectedWorkingTreeDigest` supplies no caller precondition;
 a non-nil value must be canonical and equal the initially captured `DigestTree`, or
 Import returns `ErrWorkingTreeChanged` with zero writes. No error replaces
-workspace_candidates or conflicts.
+workspace_candidates or conflicts. Import immediately deep-clones every filesystem or
+repository reader result that it retains across another call. Its active replay set comes
+only from the already-proved complete disposition: any active row at/below the selected
+boundary or rebased row above it is corruption, every remaining active row is decoded and
+composed, and `TransitionOperations` changes exactly those preloaded rows. It never uses
+`ActiveOperationsAfter` or a generation-range UPDATE. After the second cloned no-follow
+capture matches bytes and digest, Import repeats canonical-root and checkout-identity
+validation immediately before `ReplaceOpenConflictOccurrences`, its first database write;
+this rejects a byte-identical checkout replacement whose device/inode changed. Before any
+replacement it also strict-reads open conflict occurrences and requires exact consistency
+between their presence and the pre-existing workspace `conflicted` status. Mismatch fails
+closed with zero writes. Import has no RequestID or transition receipt. An indeterminate
+COMMIT therefore always returns `ImportResult{}` plus an error wrapping
+`ErrCommitOutcomeUnknown`; retry performs the complete capture/transaction/recomputation
+again and never guesses the original result from readback state.
 
 Import executes:
 
 ~~~text
 require req.Actor.ValidateLocalAction()
 require req.ExpectedWorkingTreeDigest == nil || canonical(req.ExpectedWorkingTreeDigest)
-capturedTree = ReadWorkingTreeNoFollow(req.Root) // bounded, sorted canonical paths/bytes
+capturedTree = owned deep clone of ReadWorkingTreeNoFollow(req.Root) result // bounded, sorted canonical paths/bytes
 capturedDigest = projectstate.DigestTree(capturedTree)
 require req.ExpectedWorkingTreeDigest == nil || *req.ExpectedWorkingTreeDigest == capturedDigest
 BEGIN IMMEDIATE
-workspace = tx.Workspace(ctx) // localstore.WorkspaceRecord for req.Scope
+workspace = owned deep clone of tx.Workspace(ctx) result // localstore.WorkspaceRecord for req.Scope
 require exact complete old binding and RevalidateCheckout(workspace.Binding, req.Root)
 binding = workspace.Binding // types.WorkspaceBinding
 acceptedSnapshot = workspace.Snapshot // projectstate.Snapshot
-candidate = tx.Candidate(ctx) // *WorkspaceCandidateRecord
+openConflicts = owned deep clone of tx.OpenConflictOccurrences(ctx) result
+require (workspace.State == "conflicted") == (len(openConflicts) != 0) before replacement
+candidate = owned deep clone of tx.Candidate(ctx) result // *WorkspaceCandidateRecord
 priorSurface = candidate.DirectSnapshot if candidate != nil else acceptedSnapshot
-RawDirectDeletionPreflight(projectstate.EncodeTree(priorSurface), capturedTree)
+priorTree = projectstate.EncodeTree(priorSurface)
+materializationDisposition = owned deep clone of tx.MaterializationDisposition(ctx) result
+materializationProof = StrictProveMaterializationDisposition(materializationDisposition)
+RawDirectDeletionPreflight(priorTree, capturedTree)
 liveSnapshot = projectstate.DecodeTree(capturedTree)
 canonicalLiveTree = projectstate.EncodeTree(liveSnapshot)
 require canonicalLiveTree byte-equals capturedTree and liveSnapshot.Digest == capturedDigest
+directDiff = SemanticDiff(priorSurface, liveSnapshot, nil)
+importedChangeCount = len(directDiff.Changes)
 liveTreeBytes = EncodeFileList(canonicalLiveTree)
 journalRow = tx.AcceptanceEligibleMaterializationByCandidateDigest(ctx, capturedDigest)
-if journalRow != nil: require StrictMatchingAcceptanceEligibleMaterialization(binding, capturedTree, journalRow)
+if journalRow != nil: journalRow = owned deep clone of journalRow
+if journalRow != nil: matchingProof = requireMatchingMaterialization(materializationProof, journalRow, binding, priorTree, capturedTree, capturedDigest)
 if journalRow == nil: ValidateDirectDelta(priorSurface, liveSnapshot)
 (start, initialThroughGeneration) = SelectExplicitStart(acceptedSnapshot, candidate)
-rows = tx.ActiveOperationsAfter(ctx, initialThroughGeneration) // state=active, ORDER BY generation
-storedOperations = StrictDecodeStoredOperations(rows)
+require materializationDisposition.Operations contains no active row at/below initialThroughGeneration
+require materializationDisposition.Operations contains no rebased row above initialThroughGeneration
+activeRows = every materializationDisposition.Operations row whose state is active // stable generation order, all are above boundary
+storedOperations = StrictDecodeStoredOperations(activeRows)
 oldComposed = Compose(start, initialThroughGeneration, storedOperations)
 merged = ThreeWayRebase(priorSurface, liveSnapshot, oldComposed.Snapshot)
 rebasedTree = projectstate.EncodeTree(merged.Snapshot)
 rebasedTreeBytes = EncodeFileList(rebasedTree)
-liveTree = ReadWorkingTreeNoFollow(req.Root) // exact second read immediately before first DB mutation
+liveTree = owned deep clone of ReadWorkingTreeNoFollow(req.Root) result // exact second read immediately before first DB mutation
 require liveTree byte-equals capturedTree and projectstate.DigestTree(liveTree) == capturedDigest
+require CanonicalRoot(req.Root) == binding.Checkout.CanonicalPath
+require RevalidateCheckout(binding, req.Root) // exact final root/identity check before first write
 StrictReplaceOpenConflicts(merged.Conflicts) // reuse exact occurrence, resolve absent, UUIDv4 on reopen/new
 UPSERT workspace_candidates with every non-null column:
   project_id=req.Scope.ProjectID,
@@ -1509,13 +1841,11 @@ UPSERT workspace_candidates with every non-null column:
   rebased_through_generation=oldComposed.ThroughGeneration,
   imported_by=req.Actor.PrincipalID(),
   imported_at=clock.Now().UTC()
-UPDATE workspace_overlay_operations SET state='rebased'
-  WHERE project_id=req.Scope.ProjectID AND workspace_id=req.Scope.WorkspaceID
-    AND generation <= oldComposed.ThroughGeneration AND state='active'
+tx.TransitionOperations(ctx, activeRows, "rebased", nil) // exact preloaded membership and affected count
 UPDATE workspace_bindings SET status = 'conflicted' when conflicts exist else 'pending'
   WHERE project_id=req.Scope.ProjectID AND workspace_id=req.Scope.WorkspaceID
 COMMIT
-if COMMIT result is indeterminate: return error wrapping ErrCommitOutcomeUnknown
+if COMMIT result is indeterminate: return ImportResult{} plus error wrapping ErrCommitOutcomeUnknown
 ~~~
 
 Conflict persistence accepts only Task 3's globally sorted conflicts. Before insert and
@@ -1535,8 +1865,9 @@ resolves or reuses only exact-workspace open occurrences and leaves resolved his
 every other workspace untouched. `ImportResult.PreviousCandidateDigest` is non-nil iff a
 candidate row or active overlay existed before Import and equals that pre-import composed
 digest. `ImportedCandidateDigest` is `liveSnapshot.Digest`,
-`ComposedViewDigest` is `merged.Snapshot.Digest`, `ImportedChangeCount` is the stable
-direct semantic-change count, and `RebasedThroughGeneration` is
+`ComposedViewDigest` is `merged.Snapshot.Digest`, `ImportedChangeCount` is exactly
+`len(SemanticDiff(priorSurface, liveSnapshot, nil).Changes)`, and
+`RebasedThroughGeneration` is
 `oldComposed.ThroughGeneration`.
 
 On a clean merge, `merged.Snapshot` is the merged candidate. On a conflict it is the
@@ -1642,7 +1973,8 @@ immediate transaction. A same-ID different-digest receipt returns
 `ErrIdempotencyConflict`. A matching clean receipt returns its strict canonical result
 read-only even though the stash has been deleted. A matching conflicted receipt is not a
 cached answer: restore continues through the complete strict recomputation below and
-only returns read-only when the recomputed result and persisted evidence match it.
+only returns read-only when the recomputed tagged result, persisted semantic evidence,
+and complete retry-state digest match it.
 
 Within that same transaction RestoreStash strict-decodes and digest-checks the semantic `source_tree`,
 `composed_tree`, and `StashReplayV1`. It rejects unknown fields, trailing or
@@ -1676,29 +2008,51 @@ candidate uses the restore actor principal and transaction UTC time. It never re
 an operation UUID or rewrites an original stash row. Every transition/delete/update
 requires its exact expected affected count; a mismatch rolls back.
 
-On conflict, candidate bytes/columns and every operation row remain byte-identical. The
-transaction writes only the deterministic sorted open conflict evidence for
-`ThreeWayRebase(sourceBase, current.Snapshot, stashComposed.Snapshot)`, sets binding
-status to `conflicted`, records a canonical conflicted receipt, and retains the complete
-stash unchanged. The returned
+On conflict, candidate bytes/columns and every operation row remain byte-identical. Before
+the allowed writes, `RestoreRetryState` strict-loads the complete binding/status and
+accepted snapshot, every candidate field and canonical blob, every operation logical
+field plus `created_at`, every stash field/blob/replay envelope/actor plus `created_at`,
+and every sorted open conflict occurrence/evidence plus `created_at`. The transaction
+writes only the deterministic sorted open conflict evidence for
+`ThreeWayRebase(sourceBase, current.Snapshot, stashComposed.Snapshot)` and binding status
+`conflicted`, then rereads that complete state. It requires the protected
+accepted-snapshot blob digest, every non-status binding field, binding `created_at`,
+candidate, operation, and stash projection to equal its prewrite value. Only the exact
+status/`updated_at` mutation produced by this `SetStatus("conflicted")` call and the exact
+open-conflict replacement may differ; the post-write status/evidence and `updated_at`
+must equal that computed mutation. Both binding timestamps enter the post-state digest.
+It computes `DigestCanonicalJSON` over a
+`restoreStashRetryPreimageV1` whose Action is `"restore"` and Outcome is `"conflicted"`,
+using the complete post-write state, and
+records that canonical digest in the non-nil `ConflictRetryDigest` of the conflicted
+receipt in the same transaction. It retains the complete stash unchanged. The returned
 `RestoredDigest` and `RebasedThroughGeneration` describe the unchanged current composed
 view and `StashRetained` is true; the stash-composed surface remains in the retained stash
 as resolution/audit evidence, not as a silently installed candidate.
 
 An exact repeated conflicted RestoreStash strict-decodes and composes the stash replay
-and the current persisted rows again, recomputes the same three-way rebase, and requires
-the unchanged candidate, every operation row, binding state, retained stash bytes, and
-sorted open conflicts to match the prior outcome. It returns the same result read-only.
+and the current persisted rows again, recomputes the same three-way rebase and semantic
+evidence, rereads the complete `WorkspaceRestoreRetryState`, and requires both the public
+result and recomputed retry digest to match the receipt. It returns the same result with
+zero writes only when the candidate, every operation row, binding/status, retained stash,
+accepted-snapshot blob digest, both binding timestamps, and sorted open conflicts equal
+the first conflicted post-state at this retry
+transaction's linearization point.
 Changed or corrupt current rows (including a row the failed merge would have absorbed),
 changed candidate/stash/conflict evidence, resolved conflicts, or a non-conflicted
 binding fail closed without mutation. `ErrStashCorrupt` covers tree/envelope/replay/digest
 corruption; `ErrStashOperationMismatch` covers missing, altered, extra, noncanonical, or
-wrongly stated persisted stash-operation rows. An indeterminate commit outcome wraps
-`ErrCommitOutcomeUnknown`; retry uses the same RequestID.
+wrongly stated persisted stash-operation rows. The digest cryptographically commits to
+canonical persisted state at those two linearization points; it does not prove that no
+intermediate mutation occurred and was later reversed. An indeterminate commit outcome
+wraps `ErrCommitOutcomeUnknown`; retry uses the same RequestID, and a conflicted readback
+must pass this same semantic and retry-digest verification before success may be returned.
 
 Git observation remains independent:
 
-1. Validate scope/root and the action shape. `BranchSwitchReject` requires an empty
+1. Validate scope/root and the action shape. Require `ExpectedBinding.Validate()`, exact
+   `Scope == ExpectedBinding.Scope`, and canonical Root matching
+   `ExpectedBinding.Checkout`. `BranchSwitchReject` requires an empty
    RequestID and the zero ActorEnvelope; it is trusted Git observation, not an
    actor-attributed local write. `BranchSwitchDiscard` requires a canonical UUID RequestID
    and `Actor.ValidateLocalAction()`. No other action is valid, and ObserveGitBase never
@@ -1711,16 +2065,19 @@ Git observation remains independent:
    repository, and digest.
 3. Re-read HEAD and checkout identity outside the transaction. A race returns
    `ErrGitObservationChanged` without DB writes.
-4. Open one immediate transaction, load and compare the complete old binding supplied by
-   the caller (scope, checkout, repository, accepted ref, commit, and digest), then
+4. Open one immediate transaction, load and compare complete equality with the caller's
+   `ExpectedBinding` (scope, checkout, repository, accepted ref, commit, and digest), then
    reobserve checkout identity, symbolic ref, and HEAD immediately before mutation. Any
    mismatch with the outside observation returns `ErrGitObservationChanged`. This point
    is the Git-observation linearization boundary. A same-SHA symbolic-ref change is still
    a branch change. External Git changes after this boundary are detected by the next
    mandatory RefreshWorkspace.
 5. A ref change with proposal state returns `ErrBranchSwitchPending` under Reject unless
-   the exact observed tree accepts a matching acceptance-eligible materialization. Under Discard,
-   compute the canonical discard request digest and check its receipt. A same-digest
+   the exact observed tree accepts a matching acceptance-eligible materialization. Read
+   and prove one complete same-transaction `MaterializationDisposition` before any
+   eligible match or discard decision. Under Discard, compute the canonical discard
+   request digest, including the dedicated tagged complete `ExpectedBinding` projection,
+   canonical Root, and ExpectedCommit, and check its receipt. A same-digest
    receipt returns read-only; another digest returns `ErrIdempotencyConflict`.
    Unless the exact observed tree takes the matching acceptance path below, any prepared,
    published, or recovered-new journal blocks discard pending Recover. Materialized rows
@@ -1733,7 +2090,8 @@ Git observation remains independent:
    clean discard receipt, and advances the accepted ref/commit/digest/snapshot. Every
    transition, delete, resolve, receipt insert, and binding update must affect its exact
    preloaded count; any mismatch rolls back.
-6. A matching acceptance-eligible materialization advances the base only when its state
+6. A matching acceptance-eligible materialization advances the base only when it is the
+   byte-identical eligible record retained by that complete ownership proof, its state
    is exactly `published` or `recovered_new`, accepted-base digest and complete checkout equal the current binding,
    and the observed canonical bytes and digest equal `CandidateTree` and
    `CandidateDigest`. `ExpectedLiveDigest` must equal `PriorTreeDigest`; that digest,
@@ -1790,19 +2148,45 @@ TestImportAcceptsMatchingMaterializedResurrection. Add
 TestValidateDirectDeltaHasNoMaterializationBypass,
 TestImportExpectedWorkingTreeDigestOptionalAndCanonical,
 TestImportSecondNoFollowReadDetectsSameDigestRace, and
-TestImportMatchingMaterializationRequiresAcceptanceEligibleBoundCanonicalBytes.
+TestImportMatchingMaterializationRequiresAcceptanceEligibleBoundCanonicalBytes. The
+matching test passes the proved eligible row, complete binding, canonical prior tree,
+captured candidate tree, and captured digest independently and rejects mutation of each.
+Add `TestImportChangeCountIsDirectSemanticDiffOnly`: use multiple direct changes plus
+independent overlay changes and require
+`ImportedChangeCount == len(SemanticDiff(priorSurface, liveSnapshot, nil).Changes)`, with
+overlay changes excluded.
+Repeat that assertion for the matching-materialization exception and require the nil actor
+map passed to `SemanticDiff`; neither path may substitute merged changes or operation count.
+Add reader-alias fixtures proving Import clones retained filesystem/localstore values
+before the next read. Add exact operation-disposition cases rejecting active rows at or
+below the selected boundary and rebased rows above it, while proving every valid active
+row is composed and only the exact preloaded active membership transitions to rebased.
+Inject checkout replacement after the matching second no-follow capture but before the
+first write and require the final canonical-root/identity revalidation to roll back with
+zero candidate, operation, conflict, or binding mutation even when tracked bytes/digest
+are unchanged. Add both pre-existing status/evidence mismatch directions (`conflicted`
+without open evidence and open evidence without `conflicted`) and require zero writes.
+Inject indeterminate Import COMMIT, require `ImportResult{}` plus
+`ErrCommitOutcomeUnknown`, prove no receipt/readback inference occurs, and verify retry
+recomputes from fresh state.
 Add localstore reader cases for the unfiltered pending-acceptance lookup, digest
 match/mismatch, migrated nil versus byte-exact non-nil operation TEXT, complete-set
 duplicate detection, restart/non-aliasing, and corruption of every bound field. In
 particular, unequal `ExpectedLiveDigest` and `PriorTreeDigest` must fail the reader and
-the Import acceptance exception without mutation.
+the Import acceptance exception without mutation. Add complete-disposition ownership
+cases for multiple disjoint owning journals, prepared blocking, recovered-old exclusion,
+nil legacy accepted history, duplicate generation/operation-ID claims, claimed-row
+byte/state/owner mismatch, an unclaimed materialized row, and an omitted active or
+rebased row at/below an owning journal boundary. Stashed/discarded gaps and later active
+rows must remain valid.
 `TestImportPersistsOverlayTombstoneConflict` must first prove direct/prior validation
 succeeds, then prove only ThreeWayRebase emits `ConflictTombstoneEdit`; no direct-delta
 sentinel may substitute for the persisted merge evidence. Add
 TestImportConflictPersistsOursTheirsAtomicallyAcrossRestart: inject a failure at each
 candidate/conflict/row-state/status write, prove the prior state remains byte-identical,
 then prove a successful conflict retains the old complete composed candidate, new direct
-tree, canonical FieldValue triples, absorbed generation, and blocked status after reopen.
+tree, canonical FieldValue triples, absorbed generation, and exact `conflicted` status
+after reopen.
 Add migration tests that open v1 fixtures through 000002, prove conflict occurrence
 history/open uniqueness, discarded operation state plus nullable stash ownership,
 receipt actor constraints, acceptance-eligible candidate uniqueness, nullable legacy
@@ -1842,7 +2226,27 @@ labels, nil versus empty operations arrays, cross-binding trees, same-ID same-di
 retry, same-ID different-digest rejection, receipt survival after clean restore deletion,
 strict historical actor-envelope decoding, audit/restart reads after clean restore stash
 deletion and discard, conflicted retry strict recomputation, exact affected-count rollback, and an injected
-unknown commit outcome followed by successful same-ID retry.
+unknown commit outcome followed by successful same-ID retry. Freeze the exact canonical
+stash/restore/discard request preimages and digests with golden tests. Also freeze literal
+canonical bytes and hard-coded digests for `stashResultV1`/`stashReceiptV1`, clean and
+conflicted `restoreStashResultV1`/`restoreStashReceiptV1`, and
+`discardResultV1`/`discardReceiptV1`; reject null conflict arrays, invalid pointer/slice
+combinations, action/outcome mismatch, unknown/trailing/noncanonical fields, and unsorted
+conflicts. Add localstore fixed goldens for `digestWorkspaceBlobBytesV1` over literal
+accepted-snapshot, candidate direct/rebased, and stash source/composed canonical BLOBs,
+then prove `RestoreRetryState` returns those exact digests without runtime re-encoding.
+Corrupt or drift
+each retry-preimage component independently, including an unrelated operation and its
+`created_at`, candidate/stash canonical blob bytes, every binding field/status/accepted
+snapshot, binding `created_at` and `updated_at`,
+stash actor/envelope/timestamp, and conflict occurrence/evidence/timestamp. Every change
+must fail closed with zero writes; an exact conflicted restart retry must match the
+receipt digest and public result. Unknown conflicted COMMIT readback must run that same
+verification rather than trust the receipt alone. First-conflict fault tests require the
+accepted snapshot, all non-status binding fields, and binding `created_at` to remain exact;
+only the expected status/`updated_at` mutation from SetStatus and open-conflict replacement
+may differ. Zero-write retry must reject drift in either persisted binding timestamp,
+including a later same-status rewrite that changes only `updated_at`.
 
 Add `TestStashRejectsOpenConflictWithoutMutation`, requiring `StashResult{}`,
 `errors.Is(err, localstore.ErrWorkspaceConflicted)`, and byte-identical candidate,
@@ -1881,7 +2285,10 @@ ExpectedLiveDigest/PriorTreeDigest rejection, commit-outcome retry, and two-work
 publication but before the original process observes the accepting commit, run Recover
 to `recovered_new`, then prove Git observation accepts that journal, deletes the candidate,
 retains materialized history, and preserves only exact later active rows. Prove Reject
-forbids a RequestID, Discard requires one, and ObserveGitBase has no stash path.
+forbids a RequestID, Discard requires one, and ObserveGitBase has no stash path. Reject
+invalid `ExpectedBinding`, unequal Scope, a Root differing from its checkout, or any
+inside-transaction complete-binding mismatch. Prove RefreshWorkspace injects its resolved
+binding and the discard golden digest changes for every expected-binding field.
 
 Run: go test ./internal/runtime/projectstate -run 'TestObserveGitBase|TestBranchSwitch|TestRefreshWorkspace' -count=1
 Expected: FAIL because observer is absent.
@@ -1889,7 +2296,10 @@ Expected: FAIL because observer is absent.
 - [ ] **Step 4: Implement the exact transactions and algorithms above**
 
 Import performs its initial filesystem read before BEGIN IMMEDIATE and its exact second
-no-follow read under the writer barrier before mutation. ObserveGitBase performs its
+no-follow read under the writer barrier before mutation, clones retained reader results,
+revalidates canonical root/checkout identity immediately before its first write, derives
+all operation disposition from the complete proof, and uses an exact
+`TransitionOperations` call rather than a range UPDATE. ObserveGitBase performs its
 initial full observation before BEGIN IMMEDIATE and reobserves checkout/ref/HEAD at its
 transaction linearization boundary. Every transaction revalidates binding state/digests
 before mutation and reuses Task 3's caller-owned transaction helpers.
@@ -2009,9 +2419,11 @@ Checkpoint algorithm:
    the envelope-listed operations to `materialized`, and leave verified later operations active.
    A failure rolls back database finalization while the durable prepared row remains the
    recovery authority.
-9. Recover handles a prepared or published journal with either the old or new live tree;
-   a recovered-new journal is strict-validated and returned as an acceptance-eligible
-   no-op.
+9. Recover reads one complete `MaterializationDisposition` in its immediate transaction.
+   A prepared journal intentionally blocks a stable ownership proof and drives recovery;
+   after either recovery transition, Recover rereads and proves the complete disposition
+   before returning or matching a recovered-new acceptance-eligible no-op. It handles a
+   prepared or published journal with either the old or new live tree.
    Before examining or renaming a path, it requires the current binding accepted digest,
    checkout identity, and `expected_live_digest == prior_tree_digest` to match the journal. With matching preconditions it compares
    live/stage/backup against both recorded digests and deterministically restores the old

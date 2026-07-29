@@ -238,3 +238,14 @@ tests, vet, formatting, and diff checks were GREEN; localstore statement coverag
 82.5%. Fresh read-only review found no Critical, Important, or Minor findings.
 Materialization ownership proof, Import, stash/restore, Git observation, branch guard,
 and the complete merged A4 coverage gate remain pending.
+
+A4 materialization ownership proof `6961cca`: causal TDD covered strict canonical
+checkpoint envelopes, complete multi-journal claim ownership, matching-materialization
+binding/tree checks, and restart/non-aliasing behavior. Review found one Important gap:
+an owning journal could omit an `active` or `rebased` row at or below its recorded
+boundary. The fix now rejects that omission while permitting stashed/discarded gaps and
+later active rows. Focused/full projectstate and localstore tests, race, vet,
+repository-wide tests, formatting, and diff checks were GREEN; projectstate statement
+coverage was 84.4%. Fresh re-review found no remaining Critical, Important, or Minor
+findings. Complete materialization ownership proof is done; Import, stash/restore, Git
+observation, branch guard, and the complete merged A4 coverage gate remain pending.

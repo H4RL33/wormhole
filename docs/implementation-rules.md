@@ -560,35 +560,105 @@ the same layering pattern and isolation discipline.
   operation rows, delete the stash, and set status `pending`; original stash rows remain
   terminal stashed. A conflicted restore leaves
   the candidate, every operation row, and full stash byte-identical; it persists only
-  deterministic conflict evidence and status `conflicted`. Exact repeat strict-composes
-  current rows and replay rows again and returns read-only only when all evidence matches;
-  corruption or drift fails closed. The retained stash is resolution/audit evidence, not
-  a blind replay instruction.
+  deterministic conflict evidence and status `conflicted`. Before writing those allowed
+  fields it captures the protected state, including every non-status binding field,
+  binding `created_at`/`updated_at`, and the accepted snapshot. Afterward it rereads the
+  complete state. The accepted snapshot, all non-status binding fields, binding
+  `created_at`, every candidate field/blob, every operation logical field plus
+  `created_at`, and every stash field/blob/envelope/actor plus `created_at` must be
+  unchanged; only the exact
+  status/`updated_at` mutation produced by `SetStatus("conflicted")` and deterministic
+  open-conflict replacement may differ. The post-state must contain that exact status,
+  timestamp, and evidence. It rejects every other change and
+  stores a canonical retry digest over explicit restore/conflicted action/outcome, scope,
+  request ID/digest, stash ID, and that post-state, including both binding timestamps, in
+  the same transaction. Exact
+  repeat strict-composes current and replay rows, recomputes semantic evidence and that
+  digest, and returns the same public result with zero writes only when both binding
+  timestamps and every other committed field still match; a same-status rewrite of
+  `updated_at` therefore fails closed. Localstore supplies explicit exact-byte digests for
+  the raw accepted-snapshot, candidate direct/rebased, and stash source/composed canonical
+  file-list BLOBs while those bytes are available. Each digest is `"sha256:" +
+  lowerhex(SHA256(raw))` over the complete raw BLOB with no canonicalization, framing,
+  prefix, or separator in the hash input, after strict decode and byte-equal canonical
+  re-encoding. Runtime copies these fields and never re-encodes decoded trees to recreate
+  them. Literal-byte golden vectors freeze every BLOB digest;
+  corruption or drift fails closed. The digest cryptographically commits to equality at
+  the retry transaction's linearization point, not to absence of an intermediate
+  mutation-and-reversal. The retained stash is resolution/audit evidence, not a blind
+  replay instruction.
 - Stash, restore, and discard require canonical UUID request IDs and immutable canonical
-  transition receipts. The request digest binds schema/action/scope plus the complete
-  strict canonical actor envelope and
-  the label, stash ID, or discard checkout/root/expected commit. Same ID and digest is a
-  retry; a different digest returns `ErrIdempotencyConflict`. Clean retries use receipts
-  read-only, while conflicted restore recomputes current/stash/evidence before matching.
-  An unknown commit outcome wraps `ErrCommitOutcomeUnknown`; retry uses the same request
-  or operation ID and reads back the receipt before attempting an insert.
+  transition receipts. Each request digest is canonical JSON of a dedicated tagged v1
+  projection binding schema/action/scope, the complete strict canonical actor envelope,
+  and label or stash ID; discard additionally binds a dedicated tagged projection of the
+  complete private adapter-supplied resolved expected binding, canonical root, and expected commit. Golden
+  tests freeze all three preimages and digests. Stash, restore, and discard use explicit
+  action-specific private tagged v1 codecs: `stashResultV1`/`stashReceiptV1`,
+  `restoreStashResultV1`/`restoreStashReceiptV1`, and
+  `discardResultV1`/`discardReceiptV1`. Each receipt contains schema version, action,
+  outcome, and result; restore alone additionally carries a
+  retry digest that is nil exactly for clean and non-nil exactly for conflicted.
+  Action/outcome must equal the receipt row. Conflict arrays are always non-nil (`[]`, never
+  `null`), optional pointers are emitted as explicit `null`, and no digest-bearing field
+  uses `omitempty`. Fixed golden bytes and hard-coded canonical-JSON digests cover stash,
+  clean/conflicted restore, and discard result/receipt encodings. They use the existing
+  TEXT column and require no schema version or migration change. Same ID and digest is a retry; a
+  different digest returns
+  `ErrIdempotencyConflict`. Clean retries use receipts read-only, while conflicted restore
+  recomputes current/stash/evidence and retry digest before matching. An unknown clean
+  commit may be proved by an exact receipt; an unknown conflicted commit must pass the same
+  retry-state verification or remain `ErrCommitOutcomeUnknown`. Retry uses the same
+  request or operation ID and reads back the receipt before attempting an insert.
 - Persisted conflicts have UUIDv4 occurrence IDs separate from recomputed deterministic
   semantic conflict IDs. One open semantic ID per exact workspace is enforced; repeated
   evidence reuses its occurrence, absent evidence resolves it, and reopening allocates a
   new occurrence. Strict reads validate canonical envelopes, typed roots, recomputed IDs,
   ordering, and row metadata before serving or mutation.
 - Import performs a canonical no-follow capture before `BEGIN IMMEDIATE`, then an exact
-  second read under the writer barrier immediately before its first database mutation.
+  second read under the writer barrier immediately before its first database mutation;
+  every retained filesystem/localstore reader result is deep-cloned immediately. After
+  second-capture byte/digest equality it revalidates canonical root and checkout identity
+  immediately before conflict replacement, its first write, so a byte-identical checkout
+  replacement still fails on changed device/inode. Before replacement it requires exact
+  consistency between pre-existing open-conflict evidence and workspace `conflicted`
+  status; either mismatch fails closed.
   Raw path deletion is classified in canonical kind/UUID order before next-tree decode.
   `ValidateDirectDelta(prior,next)` accepts no proof; only a repository-owned exact
-  published-materialization match may bypass it.
+  published or recovered-new materialization match may bypass it. The matcher receives
+  the complete disposition proof, eligible row, binding, canonical prior tree, captured
+  candidate tree, and captured digest; no input is inferred or omitted.
+- Import, ObserveGitBase, Recover, and Discard read one complete same-transaction
+  materialization disposition before an eligible match. Accepted, published, and
+  recovered-new journals own materialized rows; prepared blocks a stable proof and drives
+  Recover; recovered-old owns none. Claims are globally generation/operation-ID unique
+  and form an exact byte/state/ownerless bijection with all materialized rows. Nil legacy
+  accepted history contributes no claim and is valid only without a dependent residual
+  materialized row. Each owning journal also rejects any unclaimed active/rebased row at
+  or below its boundary; stashed/discarded gaps and later active rows are allowed.
+  Historical prepublication state comes from the exact checkpoint transition and durable
+  envelope, not an independently reconstructable later column. This boundary requires no
+  schema or migration change. Import also uses the disposition operations as its sole
+  replay/transition inventory: active at/below the selected boundary or rebased above it
+  is corruption; all valid active rows are composed and then passed as exact preloaded
+  membership to `TransitionOperations`. `ActiveOperationsAfter` and generation-range
+  updates are forbidden for this mutation.
+  Import has no request ID or receipt: indeterminate COMMIT always returns
+  `ImportResult{}` plus `ErrCommitOutcomeUnknown`, and retry recomputes from fresh capture
+  and transaction state rather than inferring an original result from database readback.
+  Its `ImportedChangeCount` is exactly
+  `len(SemanticDiff(priorSurface, liveSnapshot, nil).Changes)`: overlay changes, merge
+  results, and materialization-exception status never alter that direct semantic count.
 - ObserveGitBase supports Reject and Discard only. It performs a full outside observation,
-  then inside one immediate transaction compares the complete old binding and reobserves
+  requires a valid private adapter-supplied resolved `ExpectedBinding`, equal request scope, and root matching
+  that checkout, then inside one immediate transaction compares the complete loaded
+  binding for equality and reobserves
   checkout identity, symbolic ref, and HEAD at the linearization boundary. Discard marks
   active/rebased rows discarded, preserves stashed and accepted-journal materialized rows,
   deletes candidate, resolves open conflicts, records its receipt, and advances base;
   prepared, published, or recovered-new journals and orphan/nonterminal materialized
   rows require recovery or matching Git acceptance first.
+  RefreshWorkspace injects its validated resolved binding as `ExpectedBinding`; private
+  adapters do the same, and no CLI/MCP client supplies binding or routing context.
 - At most one Git-acceptance-eligible checkpoint exists per workspace. Checkpoint checks
   inside its first immediate transaction and returns `ErrCheckpointPendingAcceptance`
   with zero staging or mutation while a published or recovered-new journal remains.
