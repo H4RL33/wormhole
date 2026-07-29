@@ -277,3 +277,18 @@ projectstate statement coverage was 84.5%, with formatting and diff checks clean
 review approved with no Critical, Important, or Minor findings. The next A4 tranche is
 the restore action codec; stash replay/persistence, discard, Git observation and branch
 guard, and the checkpoint, recovery, and merged coverage gates remain.
+
+A4 restore action codec `b44bc7a`: added exactly
+`internal/runtime/projectstate/restore_codec.go` and `restore_codec_test.go`, defining
+public `RestoreStashRequest`/`RestoreStashResult`, frozen private request/result/receipt
+and conflict wire projections, and strict `restoreRequestDigest`,
+`encodeCleanRestoreReceipt`, `encodeConflictedRestoreReceipt`, and
+`decodeRestoreReceipt` helpers. The focused compile RED reported absent
+`restoreRequestDigestV1`, `restoreRequestDigest`, and `RestoreStashRequest`; focused and
+full projectstate tests, race, and vet were GREEN, with 84.9% statement coverage and
+clean formatting/diff checks. Fresh review found one Important test-fixture defect: the
+noncanonical nested conflict value passed through `CanonicalJSON`, which normalized its
+whitespace before decode. Directly mutating the conflicted golden receipt preserved the
+noncanonical persisted bytes; the exact regression changed from decoder success to
+GREEN rejection, and fresh re-review approved with no remaining findings. The next A4
+tranche is stash replay.
