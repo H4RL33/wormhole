@@ -307,3 +307,21 @@ invariant slice turned GREEN. Focused and full projectstate tests, race, and vet
 GREEN; statement coverage was 85.1%, with formatting and diff checks clean. Fresh review
 approved with no Critical, Important, or Minor findings. The next A4 tranche is
 localstore stash CRUD.
+
+A4 localstore stash CRUD `8ae643e`: added exactly
+`internal/runtime/localstore/workspace_stash_repo.go` and
+`workspace_stash_repo_test.go`, defining flat public `WorkspaceStashInsert`/
+`WorkspaceStashRecord` and transaction-scoped `InsertStash`, `Stash`, and `DeleteStash`.
+The plain exact-scope insert, strict LEFT-JOIN read, canonical-v4 ID/digest checks,
+shared strict tree validation, runtime-owned operation-byte preservation, local actor
+write/historical actor read split, storage classes/UTC timestamps, deep ownership, and
+owner-row-preserving exact delete are covered across restart, isolation, rollback, and
+corruption matrices. Causal REDs first exposed the absent API, then the unimplemented
+round trip, and then a BLOB stash ID falsely reported as an absent stash. Fresh review
+found two Important gaps: inserts admitted historical/non-local actors, and delete lacked
+a strict preflight, allowing a TEXT+BLOB logical duplicate to be partially deleted while
+missing workspaces returned a generic affected-count error. `ValidateLocalAction` plus a
+strict present-stash preflight and TEXT-qualified exact delete fixed both; fresh re-review
+approved with no remaining Critical, Important, or Minor findings. Focused/full
+localstore tests, race, and vet were GREEN; statement coverage was 82.9%, with formatting
+and diff checks clean. The next A4 tranche is the pure stash planner.
