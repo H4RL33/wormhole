@@ -873,7 +873,7 @@ idempotency result. Fixed goldens compare the stored bytes to
 
 - [ ] **Step 2: Run RED**
 
-Run: `WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'Test(StoredTree|Attach|ApplyOperation|ReadReconstructs|AdvanceAccepted)' -count=1`
+Run: `WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'Test(StoredTree|Attach|ApplyOperation|Read(Reconstructs|Rejects)|AdvanceAccepted)' -count=1`
 
 Expected: FAIL because codec and store are absent.
 
@@ -912,7 +912,7 @@ is no trusted-row shortcut, permissive extraction, or store-private canonicaliza
 Run:
 
 ```bash
-WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'Test(StoredTree|Attach|ApplyOperation|ReadReconstructs|AdvanceAccepted)' -count=1
+WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'Test(StoredTree|Attach|ApplyOperation|Read(Reconstructs|Rejects)|AdvanceAccepted)' -count=1
 WORMHOLE_INTEGRATION_REQUIRED=1 go test -race ./internal/core/git -run 'Test(ApplyOperation|AdvanceAccepted)' -count=1
 ```
 
