@@ -472,3 +472,29 @@ nested-result aliasing. Fresh focused planner PASS, focused race PASS, full proj
 at 85.4% statement coverage, `go vet ./...` PASS, and diff-check PASS. Fresh final review
 approved with no remaining blocking findings. This commit is the private planner/proof slice
 only; `Service.RestoreStash` and retry codec work remain outside it.
+
+A4 conflicted restore-retry binding `4b39733` (`feat: bind conflicted restore retries`):
+the causal missing-API RED first proved the private v1 retry-preimage, digest, and transition
+validator seam was absent. A causal review RED then exposed four incoherent pre-state shapes:
+`clean`, `pending`, or `blocked` with open conflicts, and `conflicted` without open conflicts;
+the validator now enforces the exact state/open-conflict iff invariant.
+
+The frozen private `restoreStashRetryPreimageV1` maps the exact restore request identity and
+digest plus complete binding, nullable candidate, operation audit, named stash, and ordered
+open-conflict occurrence projections into canonical JSON and its digest. It preserves the
+localstore-provided raw persisted blob digests and exact operation, actor, replay, and conflict
+JSON strings instead of semantically re-encoding them. `buildRestorePlan` independently proves
+the restore semantics, and its ordered `ConflictEvidence` must equal the complete persisted
+open-conflict semantic evidence. The transition validator permits only the expected status,
+open-conflict, and non-backwards `updated_at` delta while protecting every other field; an
+unchanged same-second timestamp is explicitly valid. Exhaustive tests bind every persisted and
+request field, every protected transition field, two-conflict membership/order/substitution,
+restart-equivalent strict-state clone bytes/digests, and bidirectional deep ownership. Localstore
+separately proves actual database close/reopen; this seam proves byte- and digest-equivalent
+projection from an equivalent strict-state clone.
+
+Fresh focused PASS, focused race PASS, full projectstate PASS at 85.9% statement coverage,
+full `go test ./... -count=1` PASS, `go vet ./...` PASS, and gofmt/diff PASS. Final fresh
+reviews approved with no remaining findings. `Service.RestoreStash` remains next and must
+create and compare its write timestamp explicitly because the current `SetStatus` seam does
+not expose timestamp provenance; no service wiring is claimed by this commit.
