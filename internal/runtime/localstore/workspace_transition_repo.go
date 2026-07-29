@@ -237,11 +237,15 @@ func decodeCanonicalTransitionActor(data []byte) (types.ActorEnvelope, error) {
 }
 
 func canonicalTransitionResult(data json.RawMessage) ([]byte, error) {
-	canonical, err := projectstate.CanonicalJSON(json.RawMessage(bytes.Clone(data)))
-	if err != nil {
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, data); err != nil {
 		return nil, err
 	}
-	return canonical, nil
+	compact.WriteByte('\n')
+	if !bytes.Equal(compact.Bytes(), data) {
+		return nil, fmt.Errorf("transition result is not compact JSON with one trailing newline")
+	}
+	return bytes.Clone(data), nil
 }
 
 func validWorkspaceTransitionDigest(digest projectstate.Digest) bool {

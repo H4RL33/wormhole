@@ -35,6 +35,26 @@ func TestWorkspaceTransitionReceiptTransactionRoundTrip(t *testing.T) {
 	}
 }
 
+func TestWorkspaceTransitionReceiptPreservesActionOwnedFieldOrder(t *testing.T) {
+	_, repo := openWorkspaceStore(t)
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+	receipt := validWorkspaceTransitionReceipt(t, "00000000-0000-1000-8000-000000000031", "stash", "clean")
+	receipt.ResultJSON = json.RawMessage("{\"schema_version\":1,\"action\":\"stash\",\"outcome\":\"clean\",\"result\":{\"stash_id\":\"22222222-2222-4222-8222-222222222222\"}}\n")
+
+	if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		return tx.InsertTransitionReceipt(context.Background(), receipt)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := repo.TransitionReceipt(context.Background(), binding.Scope, receipt.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || !bytes.Equal(got.ResultJSON, receipt.ResultJSON) {
+		t.Fatalf("ResultJSON=%q, want byte-exact %q", got.ResultJSON, receipt.ResultJSON)
+	}
+}
+
 func TestWorkspaceTransitionReceiptRepoReadbackRestartAndNonAliasing(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "gateway.db")
 	store, err := Open(databasePath)
@@ -190,7 +210,7 @@ func TestWorkspaceTransitionReceiptRejectsMalformedInputWithoutWrites(t *testing
 		{name: "nil result", edit: func(r *WorkspaceTransitionReceiptInsert) { r.ResultJSON = nil }},
 		{name: "malformed result", edit: func(r *WorkspaceTransitionReceiptInsert) { r.ResultJSON = json.RawMessage("{\n") }},
 		{name: "trailing result", edit: func(r *WorkspaceTransitionReceiptInsert) { r.ResultJSON = json.RawMessage("{}\n{}\n") }},
-		{name: "noncanonical result", edit: func(r *WorkspaceTransitionReceiptInsert) { r.ResultJSON = json.RawMessage("{\"z\":1,\"a\":2}\n") }},
+		{name: "noncanonical result", edit: func(r *WorkspaceTransitionReceiptInsert) { r.ResultJSON = json.RawMessage("{\"z\": 1,\"a\":2}\n") }},
 		{name: "outcome", edit: func(r *WorkspaceTransitionReceiptInsert) { r.Outcome = "pending" }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -451,7 +471,7 @@ func TestWorkspaceTransitionReceiptCorruptionFailsClosedAfterReopen(t *testing.T
 		{name: "action", column: "action", value: "publish"},
 		{name: "digest", column: "request_digest", value: "sha256:" + strings.Repeat("A", 64)},
 		{name: "actor", column: "actor_json", value: "{\"actor_kind\":\"human\",\"assurance\":\"local\",\"human_principal_id\":\"BAD\",\"occurred_at\":\"2026-07-29T12:00:00Z\"}\n"},
-		{name: "result", column: "result_json", value: "{\"z\":1,\"a\":2}\n"},
+		{name: "result", column: "result_json", value: "{\"z\": 1,\"a\":2}\n"},
 		{name: "outcome", column: "outcome", value: "pending"},
 		{name: "time", column: "created_at", value: "not-a-time"},
 	} {
