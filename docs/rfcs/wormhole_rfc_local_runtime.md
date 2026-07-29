@@ -411,9 +411,10 @@ compare-and-swap precondition. A raced direct edit aborts publication without
 overwriting either input. Publication uses atomic directory exchange where
 available or a durable all-or-recover journal elsewhere. The accepted base does
 not move; the included overlay generation becomes materialised-pending-commit.
-When Gateway observes a matching Git commit, it advances the accepted base and marks
-that retained journal accepted while preserving any later overlay. A restart recovers the
-previous or new complete working tree and the correct overlay state.
+Only when a same-symbolic-ref Reject/Refresh observation sees a matching Git commit does
+Gateway advance the accepted base and mark that retained journal accepted while
+preserving any later overlay. Publication alone never advances the accepted base. A
+restart recovers the previous or new complete working tree and the correct overlay state.
 Only one acceptance-eligible checkpoint may exist per workspace: another checkpoint
 returns `ErrCheckpointPendingAcceptance` before staging until the published or
 recovered-new journal is accepted. Later overlay remains available and is not superseded.
@@ -460,29 +461,80 @@ silent loss and no automatic overwrite rule.
 
 Checkouts and worktrees are isolated workspaces. A branch's overlay and any
 checkpointed working-tree change are proposal state, not upstream acceptance.
-Switching one workspace to another branch with an active overlay or uncommitted
-candidate requires checkpoint/commit as applicable, stash, or discard. Git observation
-itself supports Reject or Discard only. Stash follows a rejected refresh as a separate
-receipt-backed transaction and is followed by Refresh and Recover; it is never nested in
-observation. Stash moves the absorbed rebased prefix and later active suffix to terminal
-stashed state; clean restore leaves those original rows terminal and moves only newly
-absorbed current active rows to rebased. Discard uses a canonical request ID, marks active/rebased
-proposal rows discarded, preserves stashed and accepted-journal materialized rows,
-deletes the candidate, resolves open
-conflicts, records an immutable receipt, and advances the independently observed base in
-one immediate transaction. Nonmatching prepared, published, or recovered-new journals
-block discard pending recovery or matching Git acceptance; orphan/nonterminal
-materialized rows also block.
-Same request IDs are retry-safe only for the same canonical digest; ambiguous
-commit outcomes are retried with that same ID. A local
-merge, branch name, PR status, or claimed commit SHA is insufficient evidence of
-canonical acceptance.
+Switching one workspace to another branch with proposal state requires checkpoint/commit
+as applicable, stash, or discard. Discardable proposal state is exactly a candidate, an
+active or rebased operation, or open conflict evidence. Git observation supports Reject
+or Discard only. Stash follows a rejected refresh as a separate receipt-backed
+transaction and is followed by Refresh and Recover; it is never nested in observation.
+
+BranchSwitchDiscard first validates and digests only its request, then reads the exact
+receipt through binding-free `TransitionReceiptByKey` before any filesystem, Git, or
+current-binding check. That API syntactically validates scope/request ID, queries only
+`workspace_transition_receipts`, CAST-matches the exact textual key, requires raw TEXT
+storage/equality, and selects `COUNT(rowid) OVER()` with exact columns/types.
+`sql.ErrNoRows` returns nil, count one returns a strict record, and every other returned
+count is corruption/ambiguity. It never queries `workspace_bindings`. An exact receipt
+returns read-only with zero Git calls and writes; another action or digest returns
+`ErrIdempotencyConflict`, while corrupt or ambiguous state fails closed.
+
+Only absence permits outside observation. Discard then uses
+`WithImmediateWorkspaceTransition`: after syntactic validation and `BEGIN IMMEDIATE`, its
+first SQL read is the same receipt-table-only lookup. It passes the receipt and bound-scope
+transaction to the callback. Only nil permits any workspace/state read, complete binding
+equality, complete state/materialization preloads, and in-transaction checkout/ref/HEAD
+reobservation. Existing Stash/Restore receipt and immediate-workspace seams are unchanged.
+
+After that Git-position recheck, Gateway strictly proves and classifies the complete
+materialization disposition before Discard applicability. Prepared, orphan/unclaimed or
+nonterminal materialized, corrupt/ambiguous terminal ownership, and any other incomplete
+ownership proof fail first as recovery/corruption blockers. Historical `accepted` and
+`recovered_old` rows are nonblocking only after a complete proof. Only a proved-safe
+disposition reaches applicability.
+
+Discard applies only to an actual symbolic-ref change, including a same-SHA ref change,
+with discardable proposal state. Otherwise it returns zero result plus
+`ErrBranchSwitchDiscardNotApplicable`, with no mutation or receipt; an exact prior receipt
+still wins. Reject may advance a ref change without proposal normally, and same-ref
+changes use normal acceptance or semantic rebase under Reject. Under Reject, any
+symbolic-ref change with proposal always returns `ErrBranchSwitchPending` and cannot
+accept a materialization. Discard instead proceeds through the proved applicability and
+materialization-match rules above and below. Applicable discard keeps
+the established order: mark exact active/rebased rows discarded, preserve stashed and
+accepted-journal materialized rows, delete the candidate, resolve open conflicts, record
+the receipt, and advance the independently observed base atomically.
+Stashed-only, discarded-only, accepted-journal historical-materialized-only, and
+resolved-conflict-history-only state is terminal history, not proposal state.
+
+Only same-symbolic-ref Reject/Refresh may accept an exact proved `published` or
+`recovered_new` materialization. Discard never accepts one: an exact match returns zero plus
+`ErrBranchSwitchDiscardNotApplicable`, with no receipt/base change and byte-identical
+state. A nonmatching proved acceptance-eligible row blocks same-ref Reject rebase and
+applicable discard with `ErrGitMaterializationPrecondition`, retaining journal, candidate,
+and materialized history byte-identically. `prepared` still requires recovery;
+historical `accepted` and `recovered_old` do not block. No new journal state or migration
+is introduced. Orphan or nonterminal materialized rows remain recovery blockers. The
+clean-discard receipt remains candidate-not-accepted, with nil journal, no rebase, and no
+conflicts.
+
+Trusted zero-actor same-ref rebase preserves an existing candidate's importer and time.
+Without a candidate it uses `system:git-observation-rebase-v1` and the single UTC
+transaction observation time captured after in-transaction Git reobservation and before
+the first write. Candidate importer validation, including stash and retry reads, accepts
+exactly a canonical UUID or that fixed non-authority token. It never borrows an operation
+actor or fabricates actor authority.
+
+If an applicable Discard COMMIT is unknown, a fresh exact receipt read without Git proves
+success only when its complete result equals the attempted transition; every other
+readback returns zero plus `ErrCommitOutcomeUnknown`. Non-discard observation never
+infers an unknown COMMIT from receipt or state, and Refresh returns no binding on that
+error. Same request IDs remain retry-safe only for the same canonical digest. A local
+merge, branch name, PR status, or claimed commit SHA is insufficient acceptance evidence.
 
 Import captures the canonical no-follow working tree before its transaction and repeats
-the exact read under the writer barrier immediately before mutation. Git observation
-likewise performs a full outside read, then compares the complete old binding and
-reobserves checkout/ref/HEAD at its in-transaction linearization point. Same-SHA ref
-changes count; later external changes are caught by the next refresh.
+the exact read under the writer barrier immediately before mutation. Reject and a
+Discard no-receipt path perform a full outside observation, then compare the complete old
+binding and reobserve checkout/ref/HEAD at the in-transaction linearization point. Later
+external changes are caught by the next refresh.
 
 Consequently, the accepted public `main` Fabric stream advances only after
 Fabric independently observes the canonical repository's default ref move to a
@@ -573,6 +625,13 @@ fork/upstream, connector rollback, migration, race, and security tests. Merged
 statement coverage remains at or above 80%. The architecture is not externally
 validated until the three-Gateway/one-Fabric VM trial and every issue #56
 subsidiary gate pass.
+
+Observer tests additionally freeze the binding-free table-only receipt API and a
+query-recorded first-read transaction seam; receipt-before-Git and concurrent retry;
+terminal-only discard applicability; Reject/Refresh-only materialization acceptance;
+exact-match Discard non-applicability; nonmatching materialization; fixed/preserved
+candidate provenance; rollback/restart; and both discard and non-discard unknown-COMMIT
+behavior. Every negative case proves zero result where required and byte-identical state.
 
 ---
 

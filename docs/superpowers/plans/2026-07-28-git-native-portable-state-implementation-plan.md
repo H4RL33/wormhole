@@ -868,6 +868,8 @@ type WorkspaceCandidateRecord struct {
     DirectSnapshot projectstate.Snapshot
     RebasedSnapshot *projectstate.Snapshot
     RebasedThroughGeneration int64
+    ImportedBy string
+    ImportedAt time.Time
 }
 type WorkspaceOperationInsert struct {
     Generation int64
@@ -899,7 +901,10 @@ commit/rollback. Every method uses the callback's exact project/workspace scope 
 does not open a nested transaction. Candidate blobs pass the file-list decoder,
 `projectstate.DecodeTree`, canonical re-encoding, recorded-digest checks, and immutable
 snapshot-version/project/repository binding checks. `rebased_tree` requires a valid
-non-negative boundary and `direct_tree`; a direct start has boundary zero. Active rows
+non-negative boundary and `direct_tree`; a direct start has boundary zero. `ImportedBy`
+is exactly either a canonical UUID or `system:git-observation-rebase-v1`, and
+`ImportedAt` is a valid UTC timestamp. Candidate, stash, and retry readers apply this
+same union and never widen it. Active rows
 are selected with `state='active' AND generation>? ORDER BY generation`. Runtime converts
 each row to `StoredOperation` only after `projectstate.DecodeOperation`, canonical-byte,
 row-ID, canonical UUID, positive generation, and exact state checks. The existing
@@ -1190,8 +1195,16 @@ git commit -m "feat: compose and merge portable state"
 - Modify: internal/runtime/projectstate/working_tree_test.go
 - Modify: internal/runtime/projectstate/service.go
 - Modify: internal/runtime/projectstate/service_test.go
+- Modify: internal/runtime/projectstate/restore_plan.go
+- Modify: internal/runtime/projectstate/restore_plan_test.go
+- Modify: internal/runtime/projectstate/restore_retry.go
+- Modify: internal/runtime/projectstate/restore_retry_test.go
+- Modify: internal/runtime/projectstate/stash_plan.go
+- Modify: internal/runtime/projectstate/stash_plan_test.go
 - Modify: internal/runtime/localstore/workspace_repo.go
 - Modify: internal/runtime/localstore/workspace_repo_test.go
+- Modify: internal/runtime/localstore/workspace_restore_retry_repo.go
+- Modify: internal/runtime/localstore/workspace_restore_retry_repo_test.go
 - Modify: internal/runtime/localstore/workspace_transition_repo.go
 - Modify: internal/runtime/localstore/workspace_transition_repo_test.go
 
@@ -1252,6 +1265,17 @@ func (tx *WorkspaceMutationTx) AcceptanceEligibleMaterializationByCandidateDiges
 func (tx *WorkspaceMutationTx) MaterializationDisposition(
     ctx context.Context,
 ) (WorkspaceMaterializationDisposition, error)
+func (r *WorkspaceRepo) TransitionReceiptByKey(
+    ctx context.Context,
+    scope types.WorkspaceScope,
+    requestID string,
+) (*WorkspaceTransitionReceiptRecord, error)
+func (r *WorkspaceRepo) WithImmediateWorkspaceTransition(
+    ctx context.Context,
+    scope types.WorkspaceScope,
+    requestID string,
+    fn func(*WorkspaceMutationTx, *WorkspaceTransitionReceiptRecord) error,
+) error
 func ValidateDirectDelta(prior, next projectstate.Snapshot) error
 func (s *Service) Import(ctx context.Context, req ImportRequest) (ImportResult, error)
 
@@ -1331,6 +1355,9 @@ const (
     BranchSwitchReject BranchSwitchAction = ""
     BranchSwitchDiscard BranchSwitchAction = "discard"
 )
+var ErrBranchSwitchDiscardNotApplicable = errors.New(
+    "projectstate: branch switch discard not applicable",
+)
 type ObserveGitBaseRequest struct {
     Scope types.WorkspaceScope
     ExpectedBinding types.WorkspaceBinding
@@ -1352,6 +1379,24 @@ type ObserveGitBaseResult struct {
 func (s *Service) ObserveGitBase(ctx context.Context, req ObserveGitBaseRequest) (ObserveGitBaseResult, error)
 func (s *Service) RefreshWorkspace(ctx context.Context, binding types.WorkspaceBinding) (types.WorkspaceBinding, error)
 ~~~
+
+The importer-origin union update surface is exact:
+
+- `internal/runtime/localstore/workspace_repo.go`: candidate read validation near current
+  line 744 and `UpsertCandidate` write validation near current line 799;
+- `internal/runtime/localstore/workspace_restore_retry_repo.go`: retry candidate metadata
+  validation near current line 212;
+- `internal/runtime/projectstate/restore_plan.go`: current-proof candidate attribution
+  validation near current line 182;
+- `internal/runtime/projectstate/restore_retry.go`: retry-preimage candidate projection
+  validation near current line 267; and
+- `internal/runtime/projectstate/stash_plan.go`: `validateStashCandidate` near current
+  line 98.
+
+Every surface accepts exactly canonical UUID or `system:git-observation-rebase-v1` and
+rejects every other value on read and write. The existing UUID retry golden remains, and
+`restore_retry_test.go` adds a separate literal system-token retry preimage with a
+hard-coded digest; neither expected digest is produced by the codec under test.
 
 `RestoreRetryState` is an all-or-error localstore boundary on the caller's
 exact-workspace transaction. It returns stable-ordered non-nil operation and open-conflict
@@ -1396,8 +1441,10 @@ complete journal and operation slices or an error from the caller's exact-worksp
 immediate transaction; it requires no schema or migration change.
 
 One private runtime proof consumes that complete disposition before Import,
-ObserveGitBase, Recover, or Discard may match an acceptance-eligible journal. `accepted`,
-`published`, and `recovered_new` journals own current materialized rows. A `prepared`
+ObserveGitBase, or Recover may classify an acceptance-eligible journal. ObserveGitBase
+acceptance is Reject/Refresh-only; Discard uses an exact match solely to return
+`ErrBranchSwitchDiscardNotApplicable`. `accepted`, `published`, and `recovered_new`
+journals own current materialized rows. A `prepared`
 journal blocks a stable proof and must drive Recover; `recovered_old` is excluded from
 ownership. A nil legacy `accepted` envelope contributes no claims and is permitted only
 when no residual materialized row depends on it; nil `published` or `recovered_new`
@@ -1441,6 +1488,9 @@ committed receipt lets a retry resume those follow-up calls, and the stash call 
 reported successful unless both succeed. ObserveGitBase never invokes Stash or nests a
 stash transaction. Any invalid branch action or committed tree fails closed before the
 requested operation; no caller-supplied ref/tree can bypass ObserveGitBase.
+If its Reject observation has an indeterminate COMMIT, RefreshWorkspace returns no
+binding (`types.WorkspaceBinding{}`) and the error wraps `ErrCommitOutcomeUnknown`; it
+never resolves or infers the possibly committed binding.
 
 Migration `000002_portable_transitions.sql`, `GatewaySchemaVersion=2`, candidate
 persistence, transition receipts, and conflict-occurrence history have already landed.
@@ -1706,7 +1756,25 @@ requires exactly one match, exact raw key values, and TEXT storage for every sel
 column; zero matches must satisfy the strict all-null absence shape, and multiple matches
 fail as ambiguity. `InsertTransitionReceipt` strict-preflights that same logical key in
 the caller-owned `BEGIN IMMEDIATE`, so no hidden logical duplicate can be inserted. This
-requires no schema or migration change. Localstore treats receipt `result_json` as
+requires no schema or migration change.
+
+`TransitionReceiptByKey` syntactically validates the scope and canonical request ID, then
+queries only `workspace_transition_receipts`; it never queries `workspace_bindings`.
+It CAST-matches the exact textual project/workspace/request key, counts every logical
+match, and requires exact raw-key equality plus TEXT storage class for every selected
+column. Its table-only SELECT projects `COUNT(rowid) OVER()` plus the exact receipt
+columns and `typeof` values over the CAST-matched rows. `sql.ErrNoRows` returns nil;
+count exactly one returns the existing fully strict-decoded
+`WorkspaceTransitionReceiptRecord`; any other returned count is corruption/ambiguity.
+`WithImmediateWorkspaceTransition` performs the same syntactic validation, opens a
+dedicated connection and `BEGIN IMMEDIATE`, and makes that same table-only lookup its
+first SQL read. It passes the bound-scope `WorkspaceMutationTx` and receipt to the
+callback. A present receipt permits no prior or implicit workspace read; only nil permits
+the callback to call `tx.Workspace` or another state method. Existing
+`WithImmediateWorkspace` and `TransitionReceipt` semantics remain unchanged for Stash and
+RestoreStash.
+
+Localstore treats receipt `result_json` as
 action-opaque: it requires exactly one valid compact JSON value followed by exactly one
 LF, preserves the bytes and object-member order, and never schema-decodes or generic-map
 re-encodes it. The action-specific ProjectState codec owns schema, tags, member order,
@@ -2089,69 +2157,96 @@ must pass this same semantic and retry-digest verification before success may be
 
 Git observation remains independent:
 
-1. Validate scope/root and the action shape. Require `ExpectedBinding.Validate()`, exact
-   `Scope == ExpectedBinding.Scope`, and canonical Root matching
-   `ExpectedBinding.Checkout`. `BranchSwitchReject` requires an empty
-   RequestID and the zero ActorEnvelope; it is trusted Git observation, not an
-   actor-attributed local write. `BranchSwitchDiscard` requires a canonical UUID RequestID
+1. Validate the request without reading the filesystem, Git, or current binding. Require
+   `ExpectedBinding.Validate()`, exact `Scope == ExpectedBinding.Scope`, and a structurally
+   canonical Root matching `ExpectedBinding.Checkout`. ExpectedCommit is exactly 40 or 64
+   lowercase hexadecimal characters. `BranchSwitchReject` requires an empty RequestID
+   and the zero ActorEnvelope. `BranchSwitchDiscard` requires a canonical UUID RequestID
    and `Actor.ValidateLocalAction()`. No other action is valid, and ObserveGitBase never
-   calls Stash.
-2. Perform one full observation outside the transaction. Run read-only Git with
+   calls Stash. Compute the discard digest from only this validated request, including the
+   tagged complete expected-binding projection, Root, and ExpectedCommit.
+2. Before any filesystem, Git, or current-binding check, a Discard request reads the exact
+   receipt key through `TransitionReceiptByKey(ctx, Scope, RequestID)`. An exact strict
+   discard receipt with the same action and digest returns its complete result read-only
+   with zero Git calls and zero writes. The same ID with another action or digest returns
+   `ErrIdempotencyConflict`; corrupt, hidden-alias, duplicate, or otherwise ambiguous
+   receipt state fails closed. Only exact absence continues.
+3. The no-receipt path performs one full outside observation. Run read-only Git with
    `GIT_OPTIONAL_LOCKS=0` and hooks disabled: `rev-parse HEAD^{commit}`,
    `symbolic-ref -q HEAD` (empty means detached), `ls-tree -rz --full-tree HEAD` for the
    canonical `.wormhole` paths, then `cat-file --batch`. Require HEAD equals
-   ExpectedCommit, strict-decode the exact observed bytes, and validate project,
-   repository, and digest.
-3. Re-read HEAD and checkout identity outside the transaction. A race returns
+   ExpectedCommit, strict-decode the observed bytes, and validate project, repository,
+   and digest. Re-read HEAD and checkout identity; a race returns
    `ErrGitObservationChanged` without DB writes.
-4. Open one immediate transaction, load and compare complete equality with the caller's
-   `ExpectedBinding` (scope, checkout, repository, accepted ref, commit, and digest), then
-   reobserve checkout identity, symbolic ref, and HEAD immediately before mutation. Any
-   mismatch with the outside observation returns `ErrGitObservationChanged`. This point
-   is the Git-observation linearization boundary. A same-SHA symbolic-ref change is still
-   a branch change. External Git changes after this boundary are detected by the next
-   mandatory RefreshWorkspace.
-5. A ref change with proposal state returns `ErrBranchSwitchPending` under Reject unless
-   the exact observed tree accepts a matching acceptance-eligible materialization. Read
-   and prove one complete same-transaction `MaterializationDisposition` before any
-   eligible match or discard decision. Under Discard, compute the canonical discard
-   request digest, including the dedicated tagged complete `ExpectedBinding` projection,
-   canonical Root, and ExpectedCommit, and check its receipt. A same-digest
-   receipt returns read-only; another digest returns `ErrIdempotencyConflict`.
-   Unless the exact observed tree takes the matching acceptance path below, any prepared,
-   published, or recovered-new journal blocks discard pending Recover. Materialized rows
-   not owned by an accepted journal also block.
-   Otherwise discard first loads the exact operation/candidate/conflict sets and their
-   generation boundaries, then atomically marks every exact-workspace proposal operation in
-   `active` or `rebased` state as `discarded`, leaves stashed and accepted-journal
-   `materialized` rows
-   unchanged, deletes the candidate, resolves all open conflict occurrences, records a
-   clean discard receipt, and advances the accepted ref/commit/digest/snapshot. Every
-   transition, delete, resolve, receipt insert, and binding update must affect its exact
-   preloaded count; any mismatch rolls back.
-6. A matching acceptance-eligible materialization advances the base only when it is the
-   byte-identical eligible record retained by that complete ownership proof, its state
-   is exactly `published` or `recovered_new`, accepted-base digest and complete checkout equal the current binding,
-   and the observed canonical bytes and digest equal `CandidateTree` and
-   `CandidateDigest`. `ExpectedLiveDigest` must equal `PriorTreeDigest`; that digest,
-   `PriorTree`, and `ThroughGeneration` must also strict-match their persisted preconditions. Strict-decode
-   `included_operations_json` and prove that its selected initial boundary plus exact
-   generation/ID/canonical-operation-bytes/prepublication-state rows are the complete
-   checkpoint membership; a missing legacy envelope or inferred generation range is not
-   proof. Mark the journal `accepted` rather than deleting it, delete the now-accepted
-   candidate, retain its materialized operation rows as immutable history, return its ID
-   as `AcceptedJournalID`, and preserve only later `active` operations whose generation
-   is greater than `ThroughGeneration`. Set binding status to `pending` iff at least one
-   such later active operation remains; otherwise set it to `clean`. Stashed and
-   materialized historical rows do not make a workspace pending, and acceptance leaves
-   neither a candidate row nor an open conflict. A mismatch returns
-   `ErrGitMaterializationPrecondition` and retains the journal.
-7. A nonmatching same-ref base uses ThreeWayRebase. It enforces immutable version/project/
-   repository binding fields, requires the candidate to retain old-base Handle/Remotes,
-   takes new-base Handle/Remotes, and persists the complete ours/theirs conflict surfaces,
-   row transitions, binding, and exact affected counts atomically. Candidate mismatch
-   never accepts a journal. An indeterminate commit outcome wraps
-   `ErrCommitOutcomeUnknown`; Discard retry uses the same RequestID.
+4. Reject uses the existing `WithImmediateWorkspace`. Discard uses
+   `WithImmediateWorkspaceTransition(ctx, Scope, RequestID, callback)`, whose enforced
+   first SQL read re-reads only the receipt table and passes that receipt to the callback.
+   A concurrent exact first commit returns its strict result read-only; another
+   action/digest conflicts, and corrupt or ambiguous state fails closed. Only exact
+   absence lets the callback call `tx.Workspace`, require complete equality with
+   `ExpectedBinding`, and then preload the complete candidate, operation audit,
+   open-conflict evidence, accepted state, and `MaterializationDisposition`.
+5. Reobserve checkout identity, symbolic ref, and HEAD after those preloads and before the
+   first write. Any difference from the outside observation returns
+   `ErrGitObservationChanged`. This is the linearization boundary; a same-SHA ref change
+   counts, and later external changes are caught by the next mandatory RefreshWorkspace.
+   Capture one UTC transaction observation time after this reobservation and before the
+   first write.
+6. Strict-prove and classify the complete preloaded `MaterializationDisposition` before
+   Discard applicability or any eligible match, rebase, or mutation. A `prepared` row,
+   orphan/unclaimed/nonterminal materialized row, duplicate ownership, corrupt or
+   ambiguous terminal ownership, invalid envelope/boundary, or any other incomplete proof
+   fails first as its existing recovery/corruption blocker. Historical `accepted` and
+   `recovered_old` rows are nonblocking only after their complete ownership proof passes.
+   Only a proved-safe disposition reaches applicability.
+7. Discard applies only when the symbolic ref actually changed and the proved preloaded
+   state has at least one candidate, exact `active`/`rebased` proposal operation, or open
+   conflict occurrence. Otherwise return `ObserveGitBaseResult{}` plus
+   `ErrBranchSwitchDiscardNotApplicable` with zero mutation and no receipt. Exact receipt
+   paths in steps 2 and 4 remain the only earlier outcome. Reject advances a ref change
+   with no proposal normally. Under Reject, any actual symbolic-ref change with proposal
+   always returns `ErrBranchSwitchPending`, even for an exact eligible materialization
+   match. Discard instead proceeds through the proved applicability and match rules in
+   steps 7 and 8. Only a same-symbolic-ref Reject/Refresh observation may accept or rebase.
+8. Classify a proved acceptance-eligible row. An exact match requires the byte-identical
+   row to be `published` or `recovered_new`; accepted-base digest and checkout to equal
+   the current binding; observed canonical bytes/digest to equal `CandidateTree` and
+   `CandidateDigest`; `ExpectedLiveDigest == PriorTreeDigest`; and `PriorTree`,
+   `ThroughGeneration`, and strict included-operation membership to match.
+
+   Discard never accepts that match. It returns `ObserveGitBaseResult{}` plus
+   `ErrBranchSwitchDiscardNotApplicable`, with no receipt or mutation and byte-identical
+   journal, candidate, materialized rows, conflicts, operations, and binding. A
+   nonmatching proved acceptance-eligible row blocks applicable Discard with
+   `ErrGitMaterializationPrecondition` and the same retention.
+
+   Only same-symbolic-ref Reject/Refresh may accept an exact match: mark the journal
+   `accepted`, delete the accepted candidate, retain materialized history, preserve exact
+   later active generations, and set status `pending` iff later active rows remain,
+   otherwise `clean`; no candidate or open conflict remains. A nonmatching eligible row
+   blocks same-ref Reject rebase with `ErrGitMaterializationPrecondition`. No new journal
+   state or migration is introduced.
+9. A nonmatching same-ref base under Reject uses `ThreeWayRebase`. It enforces immutable
+   version/project/repository fields, requires an existing candidate to retain old-base
+   Handle/Remotes, adopts new-base Handle/Remotes, and atomically persists complete
+   evidence, row transitions, binding, and exact affected counts. Preserve an existing
+   candidate's `ImportedBy` and `ImportedAt` exactly. If no candidate exists, set
+   `ImportedBy` to `system:git-observation-rebase-v1` and `ImportedAt` to the single
+   transaction observation time from step 5. Never select an operation actor or fabricate
+   an ActorEnvelope or UUID. Every candidate/stash/retry validation accepts importer
+   provenance only as canonical UUID or that fixed token.
+10. Applicable Discard keeps the existing write order: transition the exact preloaded
+   active/rebased rows to `discarded`, leave stashed and accepted-journal materialized
+   rows unchanged, delete the candidate, resolve the exact open conflicts, insert the
+   clean receipt, and advance accepted ref/commit/digest/snapshot. Exact affected-count
+   mismatch rolls back everything.
+11. If the Discard COMMIT result is unknown, read the fresh exact receipt without any Git
+    call. Return success only when its strict action, digest, and complete result equal the
+    attempted transition; otherwise return `ObserveGitBaseResult{}` plus the original
+    error wrapping `ErrCommitOutcomeUnknown`. A mismatch is not an idempotency conflict.
+    Every non-discard ObserveGitBase unknown COMMIT returns the same zero result and
+    sentinel without receipt or state inference; RefreshWorkspace consequently returns
+    `types.WorkspaceBinding{}` on that error.
 
 - [ ] **Step 1: Write RED direct-delta and semantic overlay-import tests**
 
@@ -2330,24 +2425,100 @@ old-candidate Handle/Remotes mutation, valid new-base Handle/Remotes adoption,
 materialized candidate match/mismatch, base advance atomicity, same-ref semantic rebase,
 conflict no-loss restart, branch reject/discard, same-SHA ref change, detached HEAD,
 complete-binding CAS, inside-transaction reobservation, post-linearization next-refresh
-detection, any prepared/published/recovered-new journal discard block,
-discarded-versus-stashed/
-historical-materialized row disposition, discard receipt retry/conflict, accepted-journal
-retention, acceptance from both published and recovered-new states, candidate deletion,
-exact included-operation membership, later active generations above ThroughGeneration,
-zero-actor Reject versus actor-attributed Discard, acceptance status `clean` with no
-later active row and `pending` with one or more later active rows, unequal
-ExpectedLiveDigest/PriorTreeDigest rejection, commit-outcome retry, and two-workspace isolation. Add
-`TestObserveGitBaseAcceptsRecoveredNewAfterPublishRestart`: restart after filesystem
-publication but before the original process observes the accepting commit, run Recover
-to `recovered_new`, then prove Git observation accepts that journal, deletes the candidate,
-retains materialized history, and preserves only exact later active rows. Prove Reject
-forbids a RequestID, Discard requires one, and ObserveGitBase has no stash path. Reject
-invalid `ExpectedBinding`, unequal Scope, a Root differing from its checkout, or any
-inside-transaction complete-binding mismatch. Prove RefreshWorkspace injects its resolved
-binding and the discard golden digest changes for every expected-binding field.
+detection, discarded-versus-stashed/historical-materialized row disposition,
+accepted-journal retention, exact included-operation membership, later active generations,
+zero-actor Reject versus actor-attributed Discard, acceptance status, unequal
+ExpectedLiveDigest/PriorTreeDigest rejection, and two-workspace isolation.
 
-Run: go test ./internal/runtime/projectstate -run 'TestObserveGitBase|TestBranchSwitch|TestRefreshWorkspace' -count=1
+Add `TestBranchSwitchDiscardExactRetryPrecedesGitAndBinding`: install an exact strict
+receipt, make every Git/filesystem/current-binding dependency fail if called, and require
+the complete prior result with zero writes. Its action/digest-conflict cases return
+`ErrIdempotencyConflict` before Git; hidden-alias, duplicate, malformed, corrupt, and
+noncanonical receipts fail closed before Git. Add
+`TestTransitionReceiptByKeyReadsOnlyReceiptTable`: a rejecting/query-recording
+`database/sql` driver proxy proves present and absent lookups never touch
+`workspace_bindings`; it rejects any unexpected table or SELECT. Real SQLite exact-TEXT,
+hidden-alias, zero/one/multiple-match, and strict-record cases freeze query semantics. Add
+`TestWithImmediateWorkspaceTransitionReceiptIsFirstRead`: invalid syntax issues no SQL;
+the recording driver/proxy shows an exact retry's first and only SELECT is the receipt
+table and an absent trace reads it before the callback's first `tx.Workspace`/binding
+SELECT. Triggers are not accepted as SELECT-order evidence. Existing
+`TransitionReceipt` and `WithImmediateWorkspace` stash/restore tests remain unchanged.
+Add
+`TestBranchSwitchDiscardConcurrentReceiptRecheckWins`: return absent outside the
+transaction, commit the same request concurrently, and require the transaction's first
+read to return the exact result before binding/state/Git reads or writes. A concurrent
+different action/digest conflicts, and corruption fails closed.
+
+Add a table-driven `TestBranchSwitchDiscardApplicability`. No ref change with any one or
+combination of candidate, active row, rebased row, or open conflict is not applicable;
+an actual ref change with none is also not applicable. Each returns
+`ObserveGitBaseResult{}`, `ErrBranchSwitchDiscardNotApplicable`, no receipt, and
+byte-identical state after restart. An actual ref change with each proposal kind applies;
+same-SHA branch-to-branch, branch-to-detached, and detached-to-branch changes count.
+Changed-ref cases with only stashed rows, only discarded rows, only accepted-journal
+historical materialized rows, or only resolved conflict history are also not applicable;
+each leaves no receipt or base change and is byte-identical after restart. An exact prior
+receipt wins for every now-not-applicable row and every blocker fixture. Separate
+changed-ref cases with orphan materialized rows, nonterminal materialized rows, unclaimed
+rows, or corrupt/ambiguous terminal ownership must fail with their recovery/corruption
+error before applicability; they produce no receipt/base change and remain byte-identical
+after restart. Add Reject cases proving a ref switch without proposal advances normally
+and every ref switch with proposal returns `ErrBranchSwitchPending` even for an exact
+eligible match. Prove separately that applicable Discard follows its discard path and only
+a same-ref Reject/Refresh commit change takes acceptance/rebase.
+
+Add `TestObserveGitBaseRejectSameRefAcceptsMatchingPublished` and
+`TestObserveGitBaseRejectSameRefAcceptsRecoveredNewAfterPublishRestart`. Both keep the
+symbolic ref unchanged. The latter restarts after filesystem publication, runs Recover to
+`recovered_new`, accepts the exact Git tree under Reject, deletes the candidate, retains
+materialized history, and preserves only exact later active rows. Add a
+published/recovered-new table proving applicable Discard never accepts an exact match: it
+returns `ObserveGitBaseResult{}` plus
+`ErrBranchSwitchDiscardNotApplicable`, writes no receipt, does not advance the base, and
+preserves journal, candidate, materialized rows, conflicts, operations, and binding
+byte-identically after restart. Negative tests prove a nonmatching `published` row blocks
+same-ref Reject rebase and a nonmatching `recovered_new` row blocks applicable Discard
+with `ErrGitMaterializationPrecondition`, retaining the same bytes. Prepared requires
+recovery. Historical `accepted` and `recovered_old` rows do not block either path, and no
+case creates a journal state or migration.
+
+Add `TestObserveGitBaseSameRefRebasePreservesCandidateProvenance`, comparing
+`ImportedBy` and `ImportedAt` bytes before/after success, conflict, rollback, and restart.
+Add `TestObserveGitBaseSameRefRebaseUsesSystemProvenanceWithoutCandidate`: require exact
+`system:git-observation-rebase-v1`, require `ImportedAt` to equal the single UTC time
+captured after in-transaction Git reobservation, and prove no operation actor,
+ActorEnvelope, or generated UUID is used. Candidate, stash, and retry readers accept only
+a canonical UUID or the fixed token and reject every other string without mutation.
+Keep the UUID retry golden and add a literal system-token retry preimage plus hard-coded
+digest, exercising every exact read/write/restore/stash validator listed above.
+
+Add fault injection after each discard and same-ref-rebase write. Every failure rolls back
+operation, candidate, conflict, receipt, journal, and binding state byte-identically; a
+successful restart reproduces the exact result and provenance. Add
+`TestBranchSwitchDiscardUnknownCommitConfirmsExactReceiptWithoutGit`: only a fresh strict
+receipt whose action, digest, and result equal the attempted transition returns success,
+without Git. Absent, unavailable, malformed, corrupt, ambiguous, or mismatched readback
+returns `ObserveGitBaseResult{}` plus the original error wrapping
+`ErrCommitOutcomeUnknown`; mismatch is not `ErrIdempotencyConflict`. Add
+`TestObserveGitBaseRejectUnknownCommitReturnsZeroWithoutInference` and
+`TestRefreshWorkspaceUnknownCommitReturnsNoBinding`, requiring
+`types.WorkspaceBinding{}` and using readback traps to prove neither path reads a receipt,
+binding, or Git state to infer success.
+
+Reject forbids a RequestID, Discard requires one, and ObserveGitBase has no stash path.
+Reject invalid `ExpectedBinding`, unequal Scope, a Root differing from its checkout, or
+any inside-transaction complete-binding mismatch. Prove RefreshWorkspace injects its
+resolved binding and the discard golden digest changes for every expected-binding field.
+
+Run:
+
+~~~bash
+go test ./internal/runtime/projectstate ./internal/runtime/localstore \
+  -run 'Test(ObserveGitBase|BranchSwitch|RefreshWorkspace|'\
+'TransitionReceiptByKey|WithImmediateWorkspaceTransition)' -count=1
+~~~
+
 Expected: FAIL because observer is absent.
 
 - [ ] **Step 4: Implement the exact transactions and algorithms above**
@@ -2356,13 +2527,21 @@ Import performs its initial filesystem read before BEGIN IMMEDIATE and its exact
 no-follow read under the writer barrier before mutation, clones retained reader results,
 revalidates canonical root/checkout identity immediately before its first write, derives
 all operation disposition from the complete proof, and uses an exact
-`TransitionOperations` call rather than a range UPDATE. ObserveGitBase performs its
-initial full observation before BEGIN IMMEDIATE and reobserves checkout/ref/HEAD at its
-transaction linearization boundary. Every transaction revalidates binding state/digests
-before mutation and reuses Task 3's caller-owned transaction helpers.
+`TransitionOperations` call rather than a range UPDATE. Reject and a Discard no-receipt
+path perform the initial full observation before BEGIN IMMEDIATE; Discard performs both
+receipt reads through `TransitionReceiptByKey` and
+`WithImmediateWorkspaceTransition` at the exact earlier boundaries above. The new seams
+query only the receipt table before absence, add no schema, and do not change
+`TransitionReceipt` or `WithImmediateWorkspace`. ObserveGitBase reobserves
+checkout/ref/HEAD at its transaction linearization boundary, strictly proves the complete
+materialization disposition before applicability, and never lets Discard execute matching
+acceptance writes. Only same-ref Reject/Refresh may accept. Every mutation revalidates the
+required binding state/digests and reuses Task 3's caller-owned transaction helpers.
 Import, Stash, RestoreStash, and `BranchSwitchDiscard` call ValidateLocalAction before
 mutation, so legacy/unknown can never create new state. Reject/Refresh are trusted Git
 observations: they require the zero actor and create no actor attribution.
+Trusted zero-actor same-ref rebase uses only the fixed system importer provenance or
+preserves the existing candidate provenance; it never borrows an operation actor.
 Every stored operation uses DecodeOperation; every stored tree uses strict canonical
 decode. Encoding, merge, receipt/conflict serialization, affected-count verification,
 row transition, or status failure rolls back. Stash rejects an existing open conflict
@@ -2493,14 +2672,16 @@ Checkpoint algorithm:
    marking the journal terminal `recovered_old`; no orphan materialized row remains.
    Recover-new retains exactly the listed materialized rows as historical and marks the
    journal terminal `recovered_new`, which remains Git-acceptance-eligible after restart.
-   Later Git acceptance leaves materialized rows historical, deletes the now-accepted
-   candidate, preserves later active rows, and marks the `published` or `recovered_new`
-   journal `accepted`. It sets binding status to `pending` iff at least one later active
-   row remains, otherwise to `clean`; stashed and materialized history do not make it
-   pending.
+   Later same-symbolic-ref Reject/Refresh acceptance leaves materialized rows historical,
+   deletes the now-accepted candidate, preserves later active rows, and marks the
+   `published` or `recovered_new` journal `accepted`. It sets binding status to `pending`
+   iff at least one later active row remains, otherwise to `clean`; stashed and
+   materialized history do not make it pending. Publication alone never advances the
+   accepted base.
 10. ErrCheckpointUnsupported occurs before step 4 only when regular files, directory
     fsync, same-filesystem rename, or owner-only staging cannot be guaranteed. Accepted
-    base stays unchanged until Task 4 observes the matching Git commit.
+    base stays unchanged until Task 4 performs a same-symbolic-ref Reject/Refresh
+    observation that accepts the matching Git commit.
 
 The open-conflict predicate is exact `(project_id, workspace_id, state='open')`.
 Resolved conflicts and an open conflict in any other project/workspace do not block this
@@ -2868,6 +3049,15 @@ satisfy the final gate.
   identity, and a second immediate transaction rechecks/holds publication through final
   database state; recovery precondition failures retain all evidence;
   gateway_schema_migrations is the one extensible local ledger.
+- Git observation: binding-free `TransitionReceiptByKey` and first-read
+  `WithImmediateWorkspaceTransition` make exact Discard receipt retry precede every
+  Git/current-binding check at both boundaries without changing Stash/Restore seams;
+  strict disposition ownership/blocker proof follows the in-transaction Git recheck and
+  precedes applicability; applicability then requires ref change plus exact nonterminal
+  proposal state; only same-ref Reject/Refresh accepts matching materialization, while
+  Discard never does and a nonmatch blocks same-ref rebase/discard without new state;
+  trusted rebase preserves provenance or uses only the fixed system token/time; and
+  unknown non-discard COMMIT never infers a result or binding.
 - Projection/routing seam: all current local pillar reads/writes use Projection/OperationV1 with no legacy-table bypass; public args expose no project/workspace/cwd/root/actor data; Slice A owns both workspace.go files, and runtime/setup later modifies and stages them with private binding resolution, startup/request refresh, live routes, and atomic alpha inventory changes. CLI names are the top-level status/diff/import/checkpoint/stash forms only.
 - Existing requirements remain covered: strict schemas/remotes/references/operation
   rows, explicit Compose start/generation, CandidateDigest/OverlayGeneration status,
