@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,596 @@ import (
 	"github.com/H4RL33/wormhole/internal/types"
 	state "github.com/H4RL33/wormhole/internal/types/projectstate"
 )
+
+func TestWorkspaceMutationTxAdvanceAcceptedBaseAPI(t *testing.T) {
+	_, repo := openWorkspaceStore(t)
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout-a", 1, 11)
+	observedTree := workspaceTree(t, binding.Scope.ProjectID, binding.Repository)
+	observedSnapshot, err := state.DecodeTree(observedTree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observedSnapshot.Project.Name = "Observed"
+	observedSnapshot.Project.UpdatedAt = observedSnapshot.Project.UpdatedAt.Add(time.Minute)
+	observedTree, err = state.EncodeTree(observedSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observedSnapshot, err = state.DecodeTree(observedTree)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got WorkspaceRecord
+	err = repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		expected, err := tx.Workspace(context.Background())
+		if err != nil {
+			return err
+		}
+		got, err = tx.AdvanceAcceptedBase(context.Background(), WorkspaceAcceptedBaseTransition{
+			Expected: expected, ObservedRef: "refs/heads/next",
+			ObservedCommitSHA: strings.Repeat("c", 40), ObservedTree: observedTree,
+			NextState: "pending",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Binding.AcceptedRef != "refs/heads/next" || got.Binding.AcceptedCommitSHA != strings.Repeat("c", 40) ||
+		got.Binding.AcceptedTreeDigest != string(observedSnapshot.Digest) || got.Snapshot.Digest != observedSnapshot.Digest || got.State != "pending" {
+		t.Fatalf("advanced workspace=%+v", got)
+	}
+}
+
+func TestWorkspaceMutationTxAdvanceAcceptedBaseRejectsStaleExpectedStateWithoutMutation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*WorkspaceAcceptedBaseTransition)
+	}{
+		{"scope", func(value *WorkspaceAcceptedBaseTransition) {
+			value.Expected.Binding.Scope.WorkspaceID = "00000000-0000-4000-8000-000000000099"
+		}},
+		{"project scope", func(value *WorkspaceAcceptedBaseTransition) {
+			value.Expected.Binding.Scope.ProjectID = "00000000-0000-4000-8000-000000000099"
+		}},
+		{"checkout path", func(value *WorkspaceAcceptedBaseTransition) { value.Expected.Binding.Checkout.CanonicalPath = "/other" }},
+		{"checkout device", func(value *WorkspaceAcceptedBaseTransition) { value.Expected.Binding.Checkout.Device++ }},
+		{"checkout inode", func(value *WorkspaceAcceptedBaseTransition) { value.Expected.Binding.Checkout.Inode++ }},
+		{"repository identity", func(value *WorkspaceAcceptedBaseTransition) {
+			value.Expected.Binding.Repository = types.RepositoryIdentity{Provider: "github", ImmutableID: "other", CanonicalRemote: "https://github.com/acme/other"}
+		}},
+		{"accepted ref", func(value *WorkspaceAcceptedBaseTransition) { value.Expected.Binding.AcceptedRef = "refs/heads/stale" }},
+		{"accepted commit", func(value *WorkspaceAcceptedBaseTransition) {
+			value.Expected.Binding.AcceptedCommitSHA = strings.Repeat("d", 40)
+		}},
+		{"accepted digest", func(value *WorkspaceAcceptedBaseTransition) {
+			value.Expected.Binding.AcceptedTreeDigest = "sha256:" + strings.Repeat("d", 64)
+		}},
+		{"status", func(value *WorkspaceAcceptedBaseTransition) { value.Expected.State = "pending" }},
+		{"snapshot", func(value *WorkspaceAcceptedBaseTransition) { value.Expected.Snapshot.Project.Name = "stale" }},
+		{"snapshot digest", func(value *WorkspaceAcceptedBaseTransition) {
+			value.Expected.Snapshot.Digest = state.Digest("sha256:" + strings.Repeat("d", 64))
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, repo := openWorkspaceStore(t)
+			binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout-a", 1, 11)
+			before, err := repo.Workspace(context.Background(), binding.Scope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			transition := WorkspaceAcceptedBaseTransition{
+				Expected: before, ObservedRef: "refs/heads/next", ObservedCommitSHA: strings.Repeat("c", 40),
+				ObservedTree: changedWorkspaceTree(t, binding, "Observed"), NextState: "pending",
+			}
+			test.mutate(&transition)
+			err = repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+				got, err := tx.AdvanceAcceptedBase(context.Background(), transition)
+				if err == nil || !reflect.DeepEqual(got, WorkspaceRecord{}) {
+					t.Fatalf("stale transition=(%+v,%v), want zero,error", got, err)
+				}
+				return err
+			})
+			if err == nil {
+				t.Fatal("stale accepted-base transition succeeded")
+			}
+			after, err := repo.Workspace(context.Background(), binding.Scope)
+			if err != nil || !equalWorkspaceRecords(after, before) {
+				t.Fatalf("failed transition state=(%+v,%v), want %+v", after, err, before)
+			}
+		})
+	}
+}
+
+func TestWorkspaceMutationTxAdvanceAcceptedBaseRejectsInvalidObservedInputs(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*WorkspaceAcceptedBaseTransition)
+	}{
+		{"ref", func(value *WorkspaceAcceptedBaseTransition) { value.ObservedRef = "main" }},
+		{"commit", func(value *WorkspaceAcceptedBaseTransition) { value.ObservedCommitSHA = "bad" }},
+		{"next state", func(value *WorkspaceAcceptedBaseTransition) { value.NextState = "bad" }},
+		{"noncanonical tree", func(value *WorkspaceAcceptedBaseTransition) {
+			value.ObservedTree[0], value.ObservedTree[1] = value.ObservedTree[1], value.ObservedTree[0]
+		}},
+		{"wrong project tree", func(value *WorkspaceAcceptedBaseTransition) {
+			value.ObservedTree = workspaceTree(t, "00000000-0000-4000-8000-000000000099", value.Expected.Binding.Repository)
+		}},
+		{"wrong repository tree", func(value *WorkspaceAcceptedBaseTransition) {
+			value.ObservedTree = workspaceTree(t, value.Expected.Binding.Scope.ProjectID, types.RepositoryIdentity{
+				Provider: "github", ImmutableID: "other", CanonicalRemote: "https://github.com/acme/other",
+			})
+		}},
+		{"nil tree", func(value *WorkspaceAcceptedBaseTransition) { value.ObservedTree = nil }},
+		{"missing tree file", func(value *WorkspaceAcceptedBaseTransition) { value.ObservedTree = value.ObservedTree[1:] }},
+		{"malformed tree bytes", func(value *WorkspaceAcceptedBaseTransition) {
+			value.ObservedTree[0].Data = []byte("not canonical state")
+		}},
+		{"invalid tree path", func(value *WorkspaceAcceptedBaseTransition) {
+			value.ObservedTree[0].Path = "../config.toml"
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, repo := openWorkspaceStore(t)
+			binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout-a", 1, 11)
+			before, err := repo.Workspace(context.Background(), binding.Scope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			transition := WorkspaceAcceptedBaseTransition{
+				Expected: before, ObservedRef: "refs/heads/next", ObservedCommitSHA: strings.Repeat("c", 40),
+				ObservedTree: changedWorkspaceTree(t, binding, "Observed"), NextState: "pending",
+			}
+			test.mutate(&transition)
+			err = repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+				_, err := tx.AdvanceAcceptedBase(context.Background(), transition)
+				return err
+			})
+			if err == nil {
+				t.Fatal("invalid observed accepted-base transition succeeded")
+			}
+			after, readErr := repo.Workspace(context.Background(), binding.Scope)
+			if readErr != nil || !equalWorkspaceRecords(after, before) {
+				t.Fatalf("invalid transition state=(%+v,%v), want %+v", after, readErr, before)
+			}
+		})
+	}
+}
+
+func TestWorkspaceMutationTxAdvanceAcceptedBaseDetectsTriggerDriftAndRollsBack(t *testing.T) {
+	for _, test := range []struct {
+		name, trigger string
+	}{
+		{"write failure", `CREATE TRIGGER fail_accepted_base BEFORE UPDATE OF accepted_commit ON workspace_bindings BEGIN SELECT RAISE(ABORT,'injected accepted-base failure'); END`},
+		{"after trigger drift", `CREATE TRIGGER drift_accepted_base AFTER UPDATE OF accepted_commit ON workspace_bindings BEGIN UPDATE workspace_bindings SET accepted_ref='refs/heads/drifted' WHERE project_id=NEW.project_id AND workspace_id=NEW.workspace_id; END`},
+		{"after trigger hidden timestamp drift", `CREATE TRIGGER drift_accepted_base_timestamp AFTER UPDATE OF accepted_commit ON workspace_bindings BEGIN UPDATE workspace_bindings SET updated_at='2099-01-01 00:00:00+00:00' WHERE project_id=NEW.project_id AND workspace_id=NEW.workspace_id; END`},
+		{"after trigger created timestamp drift", `CREATE TRIGGER drift_accepted_base_created AFTER UPDATE OF accepted_commit ON workspace_bindings BEGIN UPDATE workspace_bindings SET created_at='2000-01-01 00:00:00+00:00' WHERE project_id=NEW.project_id AND workspace_id=NEW.workspace_id; END`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, repo := openWorkspaceStore(t)
+			binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout-a", 1, 11)
+			before, err := repo.Workspace(context.Background(), binding.Scope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.DB().Exec(test.trigger); err != nil {
+				t.Fatal(err)
+			}
+			err = repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+				_, err := tx.AdvanceAcceptedBase(context.Background(), WorkspaceAcceptedBaseTransition{
+					Expected: before, ObservedRef: "refs/heads/next", ObservedCommitSHA: strings.Repeat("c", 40),
+					ObservedTree: changedWorkspaceTree(t, binding, "Observed"), NextState: "pending",
+				})
+				return err
+			})
+			if err == nil {
+				t.Fatal("triggered accepted-base transition succeeded")
+			}
+			after, readErr := repo.Workspace(context.Background(), binding.Scope)
+			if readErr != nil || !equalWorkspaceRecords(after, before) {
+				t.Fatalf("trigger failure state=(%+v,%v), want %+v", after, readErr, before)
+			}
+		})
+	}
+}
+
+func TestWorkspaceMutationTxAdvanceAcceptedBaseRejectsTimestampRegression(t *testing.T) {
+	store, repo := openWorkspaceStore(t)
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout-a", 1, 11)
+	if _, err := store.DB().Exec(`
+		UPDATE workspace_bindings
+		SET created_at='2000-01-01 00:00:00+00:00', updated_at='2099-01-01 00:00:00+00:00'
+		WHERE project_id=? AND workspace_id=?
+	`, binding.Scope.ProjectID, binding.Scope.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := repo.Workspace(context.Background(), binding.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := readAtomicWorkspaceRawSnapshot(t, store.DB())
+	err = repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		_, err := tx.AdvanceAcceptedBase(context.Background(), WorkspaceAcceptedBaseTransition{
+			Expected: expected, ObservedRef: "refs/heads/next", ObservedCommitSHA: strings.Repeat("c", 40),
+			ObservedTree: changedWorkspaceTree(t, binding, "Observed"), NextState: "pending",
+		})
+		return err
+	})
+	if err == nil {
+		t.Fatal("accepted-base transition moved updated_at backwards")
+	}
+	after := readAtomicWorkspaceRawSnapshot(t, store.DB())
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("timestamp regression changed raw state: got %#v want %#v", after, before)
+	}
+}
+
+func TestWorkspaceMutationTxAdvanceAcceptedBaseIgnoredUpdateRollsBackRawStateAndReleasesWriter(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "gateway.db")
+	store, err := Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := NewWorkspaceRepo(store.DB())
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout-a", 1, 11)
+	raw := "{\"schema_version\":1,\"initial_through_generation\":3,\"operations\":[]}\n"
+	fixture := makeMaterializationFixture(t, store, repo, binding, "published", &raw)
+	seedAtomicWorkspaceAdjacency(t, store, repo, fixture)
+	expected, err := repo.Workspace(context.Background(), binding.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := readAtomicWorkspaceRawSnapshot(t, store.DB())
+	if _, err := store.DB().Exec(`
+		CREATE TRIGGER ignore_accepted_base_update
+		BEFORE UPDATE OF accepted_commit ON workspace_bindings
+		WHEN OLD.project_id='00000000-0000-4000-8000-000000000001'
+		 AND OLD.workspace_id='00000000-0000-4000-8000-000000000011'
+		BEGIN SELECT RAISE(IGNORE); END
+	`); err != nil {
+		t.Fatal(err)
+	}
+	err = repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		got, err := tx.AdvanceAcceptedBase(context.Background(), WorkspaceAcceptedBaseTransition{
+			Expected: expected, ObservedRef: "refs/heads/next", ObservedCommitSHA: strings.Repeat("c", 40),
+			ObservedTree: changedWorkspaceTree(t, binding, "Observed"), NextState: "pending",
+		})
+		if err == nil || !reflect.DeepEqual(got, WorkspaceRecord{}) {
+			t.Fatalf("ignored update=(%+v,%v), want zero,error", got, err)
+		}
+		return err
+	})
+	if err == nil || errors.Is(err, ErrNotFound) || errors.Is(err, ErrCommitOutcomeUnknown) {
+		t.Fatalf("ignored update error=%v, want ordinary mutation error", err)
+	}
+	if after := readAtomicWorkspaceRawSnapshot(t, store.DB()); !reflect.DeepEqual(after, before) {
+		t.Fatalf("ignored update raw state changed immediately: got %#v want %#v", after, before)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	if after := readAtomicWorkspaceRawSnapshot(t, restarted.DB()); !reflect.DeepEqual(after, before) {
+		t.Fatalf("ignored update raw state changed after reopen: got %#v want %#v", after, before)
+	}
+	if _, err := restarted.DB().Exec(`DROP TRIGGER ignore_accepted_base_update`); err != nil {
+		t.Fatal(err)
+	}
+	restartedRepo := NewWorkspaceRepo(restarted.DB())
+	err = restartedRepo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		current, err := tx.Workspace(context.Background())
+		if err != nil {
+			return err
+		}
+		_, err = tx.AdvanceAcceptedBase(context.Background(), WorkspaceAcceptedBaseTransition{
+			Expected: current, ObservedRef: "refs/heads/next", ObservedCommitSHA: strings.Repeat("c", 40),
+			ObservedTree: changedWorkspaceTree(t, binding, "Observed"), NextState: "pending",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("next accepted-base transaction failed: %v", err)
+	}
+}
+
+func TestWorkspaceMutationTxAdvanceAcceptedBaseSameStatementTimestampRawAtomicDelta(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "gateway.db")
+	store, err := Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := NewWorkspaceRepo(store.DB())
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout-a", 1, 11)
+	proof := "{\"schema_version\":1,\"initial_through_generation\":3,\"operations\":[]}\n"
+	fixture := makeMaterializationFixture(t, store, repo, binding, "published", &proof)
+	seedAtomicWorkspaceAdjacency(t, store, repo, fixture)
+	if _, err := store.DB().Exec(`
+		CREATE TABLE accepted_base_timestamp_probe(value TEXT NOT NULL);
+		CREATE TRIGGER accepted_base_same_second
+		BEFORE UPDATE OF accepted_commit ON workspace_bindings
+		WHEN OLD.project_id='00000000-0000-4000-8000-000000000001'
+		 AND OLD.workspace_id='00000000-0000-4000-8000-000000000011'
+		BEGIN
+			INSERT INTO accepted_base_timestamp_probe(value) VALUES (CURRENT_TIMESTAMP);
+			UPDATE workspace_bindings SET updated_at=CURRENT_TIMESTAMP
+			WHERE project_id=OLD.project_id AND workspace_id=OLD.workspace_id;
+		END
+	`); err != nil {
+		t.Fatal(err)
+	}
+	before := readAtomicWorkspaceRawSnapshot(t, store.DB())
+	observedTree := changedWorkspaceTree(t, binding, "Observed")
+	observedSnapshot, err := state.DecodeTree(observedTree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observedBytes, err := encodeFileList(observedTree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		expected, err := tx.Workspace(context.Background())
+		if err != nil {
+			return err
+		}
+		_, err = tx.AdvanceAcceptedBase(context.Background(), WorkspaceAcceptedBaseTransition{
+			Expected: expected, ObservedRef: "refs/heads/next", ObservedCommitSHA: strings.Repeat("c", 40),
+			ObservedTree: observedTree, NextState: "pending",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := readAtomicWorkspaceRawSnapshot(t, store.DB())
+	targetKeys := map[string]string{
+		"project_id":   quoteSQLiteTextLiteral(binding.Scope.ProjectID),
+		"workspace_id": quoteSQLiteTextLiteral(string(binding.Scope.WorkspaceID)),
+	}
+	assertAtomicWorkspaceRawDelta(t, before, after, "workspace_bindings", targetKeys, "accepted_ref", "accepted_commit",
+		"accepted_digest", "accepted_snapshot", "status", "updated_at")
+	target := findAtomicWorkspaceRawRow(t, after, "workspace_bindings", targetKeys)
+	assertRawAtomicCell(t, target, "accepted_ref", quoteSQLiteTextLiteral("refs/heads/next"), "text")
+	assertRawAtomicCell(t, target, "accepted_commit", quoteSQLiteTextLiteral(strings.Repeat("c", 40)), "text")
+	assertRawAtomicCell(t, target, "accepted_digest", quoteSQLiteTextLiteral(string(observedSnapshot.Digest)), "text")
+	assertRawAtomicCell(t, target, "accepted_snapshot", fmt.Sprintf("X'%X'", observedBytes), "blob")
+	assertRawAtomicCell(t, target, "status", quoteSQLiteTextLiteral("pending"), "text")
+	var probe, persisted string
+	if err := store.DB().QueryRow(`SELECT value FROM accepted_base_timestamp_probe`).Scan(&probe); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRow(`SELECT CAST(updated_at AS TEXT) FROM workspace_bindings WHERE project_id=? AND workspace_id=?`, binding.Scope.ProjectID, binding.Scope.WorkspaceID).Scan(&persisted); err != nil {
+		t.Fatal(err)
+	}
+	if probe != persisted {
+		t.Fatalf("same-statement timestamp probe=%v persisted=%v", probe, persisted)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	if reopened := readAtomicWorkspaceRawSnapshot(t, restarted.DB()); !reflect.DeepEqual(reopened, after) {
+		t.Fatalf("accepted-base raw state changed after reopen: got %#v want %#v", reopened, after)
+	}
+}
+
+func TestWorkspaceMutationTxAdvanceAcceptedBaseTimestampPredicate(t *testing.T) {
+	previous := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name     string
+		returned time.Time
+		raw      string
+		class    string
+		want     bool
+	}{
+		{"equal is monotonic", previous, "2026-07-29 12:00:00+00:00", "text", true},
+		{"later is monotonic", previous.Add(time.Second), "2026-07-29 12:00:01+00:00", "text", true},
+		{"regression", previous.Add(-time.Nanosecond), "2026-07-29 11:59:59.999999999+00:00", "text", false},
+		{"invalid storage class", previous, "2026-07-29 12:00:00+00:00", "integer", false},
+		{"empty raw timestamp", previous, "", "text", false},
+		{"zero timestamp", time.Time{}, "0001-01-01 00:00:00+00:00", "text", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := validMonotonicWorkspaceMutationTimestamp(test.returned, test.raw, test.class, previous); got != test.want {
+				t.Fatalf("validMonotonicWorkspaceMutationTimestamp()=%v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestWorkspaceMutationTxAdvanceAcceptedBaseInvalidAPIHasNoMutation(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		prepare func(*testing.T, *Store, *WorkspaceRepo, types.WorkspaceBinding, WorkspaceAcceptedBaseTransition) (*WorkspaceMutationTx, context.Context, WorkspaceAcceptedBaseTransition)
+	}{
+		{"nil transaction", func(_ *testing.T, _ *Store, _ *WorkspaceRepo, _ types.WorkspaceBinding, transition WorkspaceAcceptedBaseTransition) (*WorkspaceMutationTx, context.Context, WorkspaceAcceptedBaseTransition) {
+			return nil, context.Background(), transition
+		}},
+		{"empty transaction", func(_ *testing.T, _ *Store, _ *WorkspaceRepo, _ types.WorkspaceBinding, transition WorkspaceAcceptedBaseTransition) (*WorkspaceMutationTx, context.Context, WorkspaceAcceptedBaseTransition) {
+			return &WorkspaceMutationTx{}, context.Background(), transition
+		}},
+		{"invalid scope", func(t *testing.T, store *Store, _ *WorkspaceRepo, _ types.WorkspaceBinding, transition WorkspaceAcceptedBaseTransition) (*WorkspaceMutationTx, context.Context, WorkspaceAcceptedBaseTransition) {
+			conn, err := store.DB().Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+			return &WorkspaceMutationTx{conn: conn, scope: types.WorkspaceScope{}}, context.Background(), transition
+		}},
+		{"missing workspace", func(t *testing.T, store *Store, _ *WorkspaceRepo, _ types.WorkspaceBinding, _ WorkspaceAcceptedBaseTransition) (*WorkspaceMutationTx, context.Context, WorkspaceAcceptedBaseTransition) {
+			missing := workspaceBinding("00000000-0000-4000-8000-000000000099", "00000000-0000-4000-8000-000000000098", "/missing", 9, 98)
+			tree := workspaceTree(t, missing.Scope.ProjectID, missing.Repository)
+			missing = bindingWithTreeDigest(t, missing, tree)
+			snapshot, err := state.DecodeTree(tree)
+			if err != nil {
+				t.Fatal(err)
+			}
+			conn, err := store.DB().Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+			return &WorkspaceMutationTx{conn: conn, scope: missing.Scope}, context.Background(), WorkspaceAcceptedBaseTransition{
+				Expected:    WorkspaceRecord{Binding: missing, Snapshot: snapshot, State: "clean"},
+				ObservedRef: "refs/heads/next", ObservedCommitSHA: strings.Repeat("c", 40),
+				ObservedTree: changedWorkspaceTree(t, missing, "Observed"), NextState: "pending",
+			}
+		}},
+		{"closed connection", func(t *testing.T, store *Store, _ *WorkspaceRepo, binding types.WorkspaceBinding, transition WorkspaceAcceptedBaseTransition) (*WorkspaceMutationTx, context.Context, WorkspaceAcceptedBaseTransition) {
+			conn, err := store.DB().Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Fatal(err)
+			}
+			return &WorkspaceMutationTx{conn: conn, scope: binding.Scope}, context.Background(), transition
+		}},
+		{"canceled context", func(t *testing.T, store *Store, _ *WorkspaceRepo, binding types.WorkspaceBinding, transition WorkspaceAcceptedBaseTransition) (*WorkspaceMutationTx, context.Context, WorkspaceAcceptedBaseTransition) {
+			conn, err := store.DB().Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return &WorkspaceMutationTx{conn: conn, scope: binding.Scope}, ctx, transition
+		}},
+		{"retained closed transaction", func(t *testing.T, _ *Store, repo *WorkspaceRepo, binding types.WorkspaceBinding, transition WorkspaceAcceptedBaseTransition) (*WorkspaceMutationTx, context.Context, WorkspaceAcceptedBaseTransition) {
+			var retained *WorkspaceMutationTx
+			if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+				retained = tx
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			return retained, context.Background(), transition
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, repo := openWorkspaceStore(t)
+			binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout-a", 1, 11)
+			expected, err := repo.Workspace(context.Background(), binding.Scope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			transition := WorkspaceAcceptedBaseTransition{
+				Expected: expected, ObservedRef: "refs/heads/next", ObservedCommitSHA: strings.Repeat("c", 40),
+				ObservedTree: changedWorkspaceTree(t, binding, "Observed"), NextState: "pending",
+			}
+			tx, ctx, transition := test.prepare(t, store, repo, binding, transition)
+			before := readAtomicWorkspaceRawSnapshot(t, store.DB())
+			got, err := tx.AdvanceAcceptedBase(ctx, transition)
+			if err == nil || !reflect.DeepEqual(got, WorkspaceRecord{}) {
+				t.Fatalf("invalid API=(%+v,%v), want zero,error", got, err)
+			}
+			if after := readAtomicWorkspaceRawSnapshot(t, store.DB()); !reflect.DeepEqual(after, before) {
+				t.Fatalf("invalid API changed raw state: got %#v want %#v", after, before)
+			}
+		})
+	}
+}
+
+func TestWorkspaceMutationTxAdvanceAcceptedBaseMetadataHelperErrors(t *testing.T) {
+	store, repo := openWorkspaceStore(t)
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout-a", 1, 11)
+	conn, err := store.DB().Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing := &WorkspaceMutationTx{conn: conn, scope: types.WorkspaceScope{
+		ProjectID: "00000000-0000-4000-8000-000000000099", WorkspaceID: "00000000-0000-4000-8000-000000000098",
+	}}
+	if _, err := missing.workspaceBindingMutationMetadata(context.Background()); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing metadata error=%v, want ErrNotFound", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	closed := &WorkspaceMutationTx{conn: conn, scope: binding.Scope}
+	if _, err := closed.workspaceBindingMutationMetadata(context.Background()); err == nil || errors.Is(err, ErrNotFound) {
+		t.Fatalf("closed metadata error=%v, want ordinary query error", err)
+	}
+	if _, err := store.DB().Exec(`UPDATE workspace_bindings SET updated_at=CAST(1 AS INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	conn, err = store.DB().Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	invalid := &WorkspaceMutationTx{conn: conn, scope: binding.Scope}
+	if _, err := invalid.workspaceBindingMutationMetadata(context.Background()); err == nil {
+		t.Fatal("invalid metadata storage succeeded")
+	}
+}
+
+func TestWorkspaceMutationTxAdvanceAcceptedBaseRestartIsolationAndOwnership(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "gateway.db")
+	store, err := Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := NewWorkspaceRepo(store.DB())
+	a := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout-a", 1, 11)
+	b := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000012", "/checkout-b", 2, 12)
+	beforeB, err := repo.Workspace(context.Background(), b.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got WorkspaceRecord
+	err = repo.WithImmediateWorkspace(context.Background(), a.Scope, func(tx *WorkspaceMutationTx) error {
+		expected, err := tx.Workspace(context.Background())
+		if err != nil {
+			return err
+		}
+		got, err = tx.AdvanceAcceptedBase(context.Background(), WorkspaceAcceptedBaseTransition{
+			Expected: expected, ObservedRef: "", ObservedCommitSHA: expected.Binding.AcceptedCommitSHA,
+			ObservedTree: changedWorkspaceTree(t, a, "Detached"), NextState: "clean",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDigest := got.Snapshot.Digest
+	got.Snapshot.Project.Name = "caller mutation"
+	got.Binding.AcceptedRef = "refs/heads/caller"
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	restartedRepo := NewWorkspaceRepo(restarted.DB())
+	afterA, err := restartedRepo.Workspace(context.Background(), a.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterB, err := restartedRepo.Workspace(context.Background(), b.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterA.Binding.AcceptedRef != "" || afterA.Binding.AcceptedCommitSHA != a.AcceptedCommitSHA || afterA.Snapshot.Digest != wantDigest || afterA.State != "clean" {
+		t.Fatalf("restarted workspace A=%+v", afterA)
+	}
+	if !equalWorkspaceRecords(afterB, beforeB) {
+		t.Fatalf("workspace B changed: got %+v want %+v", afterB, beforeB)
+	}
+}
 
 func TestWorkspaceScopeMismatchIsRejected(t *testing.T) {
 	_, repo := openWorkspaceStore(t)
@@ -2400,6 +2991,176 @@ func openWorkspaceStore(t *testing.T) (*Store, *WorkspaceRepo) {
 	return store, NewWorkspaceRepo(store.DB())
 }
 
+type rawAtomicWorkspaceCell struct {
+	Quoted       string
+	StorageClass string
+}
+
+type rawAtomicWorkspaceRow map[string]rawAtomicWorkspaceCell
+
+type rawAtomicWorkspaceSnapshot map[string][]rawAtomicWorkspaceRow
+
+func readAtomicWorkspaceRawSnapshot(t *testing.T, db *sql.DB) rawAtomicWorkspaceSnapshot {
+	t.Helper()
+	snapshot := make(rawAtomicWorkspaceSnapshot)
+	for _, table := range []string{
+		"workspace_bindings",
+		"workspace_candidates",
+		"workspace_overlay_operations",
+		"workspace_materializations",
+		"workspace_stashes",
+		"workspace_conflicts",
+		"workspace_transition_receipts",
+	} {
+		columns := readAtomicWorkspaceColumns(t, db, table)
+		projections := make([]string, 0, len(columns)*2)
+		for _, column := range columns {
+			identifier := quoteSQLiteTestIdentifier(column)
+			projections = append(projections, "quote("+identifier+")", "typeof("+identifier+")")
+		}
+		rows, err := db.Query(`SELECT ` + strings.Join(projections, ",") + ` FROM ` + quoteSQLiteTestIdentifier(table) + ` ORDER BY rowid`)
+		if err != nil {
+			t.Fatalf("read raw %s rows: %v", table, err)
+		}
+		for rows.Next() {
+			values := make([]string, len(projections))
+			destinations := make([]any, len(values))
+			for index := range values {
+				destinations[index] = &values[index]
+			}
+			if err := rows.Scan(destinations...); err != nil {
+				_ = rows.Close()
+				t.Fatalf("scan raw %s row: %v", table, err)
+			}
+			row := make(rawAtomicWorkspaceRow, len(columns))
+			for index, column := range columns {
+				row[column] = rawAtomicWorkspaceCell{Quoted: values[index*2], StorageClass: values[index*2+1]}
+			}
+			snapshot[table] = append(snapshot[table], row)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			t.Fatalf("iterate raw %s rows: %v", table, err)
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatalf("close raw %s rows: %v", table, err)
+		}
+		if snapshot[table] == nil {
+			snapshot[table] = make([]rawAtomicWorkspaceRow, 0)
+		}
+	}
+	return snapshot
+}
+
+func readAtomicWorkspaceColumns(t *testing.T, db *sql.DB, table string) []string {
+	t.Helper()
+	rows, err := db.Query(`PRAGMA table_info(` + quoteSQLiteTestIdentifier(table) + `)`)
+	if err != nil {
+		t.Fatalf("read %s columns: %v", table, err)
+	}
+	defer rows.Close()
+	columns := make([]string, 0)
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatalf("scan %s column: %v", table, err)
+		}
+		columns = append(columns, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate %s columns: %v", table, err)
+	}
+	if len(columns) == 0 {
+		t.Fatalf("table %s has no columns", table)
+	}
+	return columns
+}
+
+func quoteSQLiteTestIdentifier(value string) string {
+	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+}
+
+func quoteSQLiteTextLiteral(value string) string {
+	return `'` + strings.ReplaceAll(value, `'`, `''`) + `'`
+}
+
+func assertAtomicWorkspaceRawDelta(t *testing.T, before, after rawAtomicWorkspaceSnapshot, targetTable string, targetKeys map[string]string, allowedColumns ...string) {
+	t.Helper()
+	allowed := make(map[string]struct{}, len(allowedColumns))
+	for _, column := range allowedColumns {
+		allowed[column] = struct{}{}
+	}
+	targetFound := false
+	if len(before) != len(after) {
+		t.Fatalf("raw table count changed: got %d want %d", len(after), len(before))
+	}
+	for table, beforeRows := range before {
+		afterRows, ok := after[table]
+		if !ok || len(afterRows) != len(beforeRows) {
+			t.Fatalf("raw %s row count changed: got %d want %d", table, len(afterRows), len(beforeRows))
+		}
+		for rowIndex, beforeRow := range beforeRows {
+			afterRow := afterRows[rowIndex]
+			isTarget := table == targetTable && atomicWorkspaceRawRowMatches(beforeRow, targetKeys)
+			if isTarget {
+				targetFound = true
+			}
+			if len(afterRow) != len(beforeRow) {
+				t.Fatalf("raw %s row %d column count changed", table, rowIndex)
+			}
+			for column, beforeCell := range beforeRow {
+				afterCell, ok := afterRow[column]
+				if !ok {
+					t.Fatalf("raw %s row %d lost column %s", table, rowIndex, column)
+				}
+				if isTarget {
+					if _, permitted := allowed[column]; permitted {
+						if afterCell.StorageClass != beforeCell.StorageClass {
+							t.Fatalf("raw %s.%s storage class changed: got %s want %s", table, column, afterCell.StorageClass, beforeCell.StorageClass)
+						}
+						continue
+					}
+				}
+				if afterCell != beforeCell {
+					t.Fatalf("unpermitted raw delta %s row %d column %s: got %+v want %+v", table, rowIndex, column, afterCell, beforeCell)
+				}
+			}
+		}
+	}
+	if !targetFound {
+		t.Fatalf("raw target %s keys=%v not found", targetTable, targetKeys)
+	}
+}
+
+func findAtomicWorkspaceRawRow(t *testing.T, snapshot rawAtomicWorkspaceSnapshot, table string, targetKeys map[string]string) rawAtomicWorkspaceRow {
+	t.Helper()
+	for _, row := range snapshot[table] {
+		if atomicWorkspaceRawRowMatches(row, targetKeys) {
+			return row
+		}
+	}
+	t.Fatalf("raw target %s keys=%v not found", table, targetKeys)
+	return nil
+}
+
+func atomicWorkspaceRawRowMatches(row rawAtomicWorkspaceRow, targetKeys map[string]string) bool {
+	for column, quoted := range targetKeys {
+		if row[column].Quoted != quoted {
+			return false
+		}
+	}
+	return true
+}
+
+func assertRawAtomicCell(t *testing.T, row rawAtomicWorkspaceRow, column, quoted, storageClass string) {
+	t.Helper()
+	if got := row[column]; got.Quoted != quoted || got.StorageClass != storageClass {
+		t.Fatalf("raw %s=%+v, want quoted=%s class=%s", column, got, quoted, storageClass)
+	}
+}
+
 func createBinding(t *testing.T, repo *WorkspaceRepo, projectID, workspaceID, path string, device, inode uint64) types.WorkspaceBinding {
 	t.Helper()
 	binding := workspaceBinding(projectID, workspaceID, path, device, inode)
@@ -2449,6 +3210,22 @@ func workspaceTree(t *testing.T, projectID string, repository types.RepositoryId
 	tree, err := state.EncodeTree(snapshot)
 	if err != nil {
 		t.Fatalf("EncodeTree: %v", err)
+	}
+	return tree
+}
+
+func changedWorkspaceTree(t *testing.T, binding types.WorkspaceBinding, name string) state.Tree {
+	t.Helper()
+	tree := workspaceTree(t, binding.Scope.ProjectID, binding.Repository)
+	snapshot, err := state.DecodeTree(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Project.Name = name
+	snapshot.Project.UpdatedAt = snapshot.Project.UpdatedAt.Add(time.Minute)
+	tree, err = state.EncodeTree(snapshot)
+	if err != nil {
+		t.Fatal(err)
 	}
 	return tree
 }

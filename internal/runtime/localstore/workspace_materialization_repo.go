@@ -28,11 +28,25 @@ type WorkspaceMaterializationRecord struct {
 	CandidateTree          projectstate.Tree
 	IncludedOperationsJSON *string
 	State                  string
+	mutationMetadata       workspaceMaterializationMutationMetadata
 }
 
 type WorkspaceMaterializationDisposition struct {
 	Journals   []WorkspaceMaterializationRecord
 	Operations []WorkspaceOperation
+}
+
+type workspaceMaterializationMutationMetadata struct {
+	StagePath    string
+	BackupPath   string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	CreatedRaw   string
+	UpdatedRaw   string
+	StageClass   string
+	BackupClass  string
+	CreatedClass string
+	UpdatedClass string
 }
 
 // MaterializationDisposition returns the complete strictly validated journal
@@ -57,7 +71,9 @@ func (tx *WorkspaceMutationTx) MaterializationDisposition(ctx context.Context) (
 		SELECT project_id,workspace_id,journal_id,expected_live_digest,accepted_base_digest,
 		       checkout_path,checkout_device,checkout_inode,prior_tree_digest,candidate_digest,
 		       through_generation,prior_tree,candidate_tree,stage_path,backup_path,state,
-		       created_at,updated_at,included_operations_json,typeof(included_operations_json)
+		       created_at,updated_at,CAST(created_at AS TEXT),CAST(updated_at AS TEXT),
+		       typeof(stage_path),typeof(backup_path),typeof(created_at),typeof(updated_at),
+		       included_operations_json,typeof(included_operations_json)
 		FROM workspace_materializations
 		WHERE project_id=? AND workspace_id=?
 		ORDER BY journal_id
@@ -113,6 +129,126 @@ func (tx *WorkspaceMutationTx) AcceptanceEligibleMaterializationByCandidateDiges
 	return record, nil
 }
 
+// AcceptMaterialization compare-and-swaps one exact published or recovered-new
+// journal into accepted history without changing its owned operation rows.
+func (tx *WorkspaceMutationTx) AcceptMaterialization(ctx context.Context, expected WorkspaceMaterializationRecord) (WorkspaceMaterializationRecord, error) {
+	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
+		return WorkspaceMaterializationRecord{}, ErrNotFound
+	}
+	if expected.State != "published" && expected.State != "recovered_new" {
+		return WorkspaceMaterializationRecord{}, fmt.Errorf("localstore: materialization is not acceptance eligible")
+	}
+	if expected.IncludedOperationsJSON == nil {
+		return WorkspaceMaterializationRecord{}, fmt.Errorf("localstore: materialization operation proof is missing")
+	}
+	current, err := tx.acceptanceEligibleMaterialization(ctx)
+	if err != nil {
+		return WorkspaceMaterializationRecord{}, err
+	}
+	if current == nil || !equalWorkspaceMaterializationRecords(*current, expected) {
+		return WorkspaceMaterializationRecord{}, fmt.Errorf("localstore: materialization acceptance precondition mismatch")
+	}
+	metadata, err := tx.materializationMutationMetadata(ctx, expected.JournalID)
+	if err != nil {
+		return WorkspaceMaterializationRecord{}, err
+	}
+	if !equalWorkspaceMaterializationMutationMetadata(metadata, expected.mutationMetadata) {
+		return WorkspaceMaterializationRecord{}, fmt.Errorf("localstore: materialization acceptance metadata precondition mismatch")
+	}
+	priorBytes, err := encodeFileList(expected.PriorTree)
+	if err != nil {
+		return WorkspaceMaterializationRecord{}, fmt.Errorf("localstore: encode accepted materialization prior tree: %w", err)
+	}
+	candidateBytes, err := encodeFileList(expected.CandidateTree)
+	if err != nil {
+		return WorkspaceMaterializationRecord{}, fmt.Errorf("localstore: encode accepted materialization candidate tree: %w", err)
+	}
+	included := *expected.IncludedOperationsJSON
+	var returnedAt time.Time
+	var returnedRaw, returnedClass string
+	err = tx.conn.QueryRowContext(ctx, `
+		UPDATE workspace_materializations
+		SET state='accepted', updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND workspace_id=? AND journal_id=?
+		  AND expected_live_digest=? AND accepted_base_digest=?
+		  AND checkout_path=? AND checkout_device=? AND checkout_inode=?
+		  AND prior_tree_digest=? AND candidate_digest=? AND through_generation=?
+		  AND prior_tree=? AND candidate_tree=? AND stage_path=? AND backup_path=? AND state=?
+		  AND created_at=? AND updated_at=? AND included_operations_json=?
+		RETURNING updated_at, CAST(updated_at AS TEXT), typeof(updated_at)
+	`, tx.scope.ProjectID, tx.scope.WorkspaceID, expected.JournalID,
+		expected.ExpectedLiveDigest, expected.AcceptedBaseDigest, expected.Checkout.CanonicalPath,
+		expected.Checkout.Device, expected.Checkout.Inode, expected.PriorTreeDigest,
+		expected.CandidateDigest, expected.ThroughGeneration, priorBytes, candidateBytes,
+		metadata.StagePath, metadata.BackupPath, expected.State, metadata.CreatedRaw,
+		metadata.UpdatedRaw, included).Scan(&returnedAt, &returnedRaw, &returnedClass)
+	if errors.Is(err, sql.ErrNoRows) {
+		return WorkspaceMaterializationRecord{}, fmt.Errorf("localstore: materialization acceptance precondition mismatch")
+	}
+	if err != nil {
+		return WorkspaceMaterializationRecord{}, fmt.Errorf("localstore: accept materialization: %w", err)
+	}
+	if !validMonotonicWorkspaceMutationTimestamp(returnedAt, returnedRaw, returnedClass, metadata.UpdatedAt) {
+		return WorkspaceMaterializationRecord{}, fmt.Errorf("localstore: invalid materialization acceptance timestamp")
+	}
+
+	disposition, err := tx.MaterializationDisposition(ctx)
+	if err != nil {
+		return WorkspaceMaterializationRecord{}, fmt.Errorf("localstore: reread accepted materialization: %w", err)
+	}
+	for _, record := range disposition.Journals {
+		if record.JournalID != expected.JournalID {
+			continue
+		}
+		want := expected
+		want.State = "accepted"
+		want.mutationMetadata.UpdatedAt = returnedAt.UTC()
+		want.mutationMetadata.UpdatedRaw = returnedRaw
+		want.mutationMetadata.UpdatedClass = returnedClass
+		if !equalWorkspaceMaterializationRecords(record, want) {
+			return WorkspaceMaterializationRecord{}, fmt.Errorf("localstore: materialization acceptance post-state mismatch")
+		}
+		postMetadata, err := tx.materializationMutationMetadata(ctx, expected.JournalID)
+		if err != nil {
+			return WorkspaceMaterializationRecord{}, fmt.Errorf("localstore: reread accepted materialization metadata: %w", err)
+		}
+		if !equalWorkspaceMaterializationMutationMetadata(postMetadata, want.mutationMetadata) {
+			return WorkspaceMaterializationRecord{}, fmt.Errorf("localstore: materialization acceptance metadata drift")
+		}
+		return cloneWorkspaceMaterializationRecord(record), nil
+	}
+	return WorkspaceMaterializationRecord{}, fmt.Errorf("localstore: accepted materialization disappeared")
+}
+
+func (tx *WorkspaceMutationTx) materializationMutationMetadata(ctx context.Context, journalID string) (workspaceMaterializationMutationMetadata, error) {
+	var metadata workspaceMaterializationMutationMetadata
+	var matching int64
+	err := tx.conn.QueryRowContext(ctx, `
+		SELECT stage_path, backup_path, created_at, updated_at,
+		       CAST(created_at AS TEXT), CAST(updated_at AS TEXT),
+		       typeof(stage_path), typeof(backup_path), typeof(created_at), typeof(updated_at),
+		       COUNT(*) OVER ()
+		FROM workspace_materializations
+		WHERE project_id=? AND workspace_id=? AND journal_id=?
+	`, tx.scope.ProjectID, tx.scope.WorkspaceID, journalID).Scan(
+		&metadata.StagePath, &metadata.BackupPath, &metadata.CreatedAt, &metadata.UpdatedAt,
+		&metadata.CreatedRaw, &metadata.UpdatedRaw, &metadata.StageClass, &metadata.BackupClass,
+		&metadata.CreatedClass, &metadata.UpdatedClass, &matching,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return workspaceMaterializationMutationMetadata{}, ErrNotFound
+	}
+	if err != nil {
+		return workspaceMaterializationMutationMetadata{}, fmt.Errorf("localstore: read materialization acceptance metadata: %w", err)
+	}
+	if matching != 1 || !validWorkspaceMaterializationMutationMetadata(metadata) {
+		return workspaceMaterializationMutationMetadata{}, fmt.Errorf("localstore: invalid materialization acceptance metadata")
+	}
+	metadata.CreatedAt = metadata.CreatedAt.UTC()
+	metadata.UpdatedAt = metadata.UpdatedAt.UTC()
+	return metadata, nil
+}
+
 func (tx *WorkspaceMutationTx) acceptanceEligibleMaterialization(ctx context.Context) (*WorkspaceMaterializationRecord, error) {
 	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
 		return nil, ErrNotFound
@@ -128,7 +264,9 @@ func (tx *WorkspaceMutationTx) acceptanceEligibleMaterialization(ctx context.Con
 		SELECT project_id,workspace_id,journal_id,expected_live_digest,accepted_base_digest,
 		       checkout_path,checkout_device,checkout_inode,prior_tree_digest,candidate_digest,
 		       through_generation,prior_tree,candidate_tree,stage_path,backup_path,state,
-		       created_at,updated_at,included_operations_json,typeof(included_operations_json)
+		       created_at,updated_at,CAST(created_at AS TEXT),CAST(updated_at AS TEXT),
+		       typeof(stage_path),typeof(backup_path),typeof(created_at),typeof(updated_at),
+		       included_operations_json,typeof(included_operations_json)
 		FROM workspace_materializations
 		WHERE project_id=? AND workspace_id=? AND state IN ('published','recovered_new')
 		ORDER BY journal_id
@@ -169,8 +307,6 @@ func scanWorkspaceMaterialization(scanner workspaceMaterializationScanner, scope
 	var (
 		projectID, workspaceID     string
 		priorBytes, candidateBytes []byte
-		stagePath, backupPath      string
-		createdAt, updatedAt       time.Time
 		included                   sql.NullString
 		includedStorageClass       string
 	)
@@ -179,8 +315,12 @@ func scanWorkspaceMaterialization(scanner workspaceMaterializationScanner, scope
 		&projectID, &workspaceID, &record.JournalID, &record.ExpectedLiveDigest, &record.AcceptedBaseDigest,
 		&record.Checkout.CanonicalPath, &record.Checkout.Device, &record.Checkout.Inode,
 		&record.PriorTreeDigest, &record.CandidateDigest, &record.ThroughGeneration,
-		&priorBytes, &candidateBytes, &stagePath, &backupPath, &record.State,
-		&createdAt, &updatedAt, &included, &includedStorageClass,
+		&priorBytes, &candidateBytes, &record.mutationMetadata.StagePath, &record.mutationMetadata.BackupPath, &record.State,
+		&record.mutationMetadata.CreatedAt, &record.mutationMetadata.UpdatedAt,
+		&record.mutationMetadata.CreatedRaw, &record.mutationMetadata.UpdatedRaw,
+		&record.mutationMetadata.StageClass, &record.mutationMetadata.BackupClass,
+		&record.mutationMetadata.CreatedClass, &record.mutationMetadata.UpdatedClass,
+		&included, &includedStorageClass,
 	); err != nil {
 		return nil, fmt.Errorf("scan materialization row: %w", err)
 	}
@@ -211,12 +351,11 @@ func scanWorkspaceMaterialization(scanner workspaceMaterializationScanner, scope
 	if record.ThroughGeneration < 0 {
 		return nil, fmt.Errorf("invalid materialization generation")
 	}
-	if !validUTCTimestamp(createdAt) || !validUTCTimestamp(updatedAt) || updatedAt.Before(createdAt) {
-		return nil, fmt.Errorf("invalid materialization timestamps")
+	if !validWorkspaceMaterializationMutationMetadata(record.mutationMetadata) {
+		return nil, fmt.Errorf("invalid materialization mutation metadata")
 	}
-	if !validMaterializationPath(stagePath) || !validMaterializationPath(backupPath) || stagePath == backupPath {
-		return nil, fmt.Errorf("invalid materialization stage or backup path")
-	}
+	record.mutationMetadata.CreatedAt = record.mutationMetadata.CreatedAt.UTC()
+	record.mutationMetadata.UpdatedAt = record.mutationMetadata.UpdatedAt.UTC()
 	switch record.State {
 	case "prepared", "published", "recovered_new":
 		if record.AcceptedBaseDigest != projectstate.Digest(binding.AcceptedTreeDigest) {
@@ -289,6 +428,51 @@ func cloneMaterializationTree(tree projectstate.Tree) projectstate.Tree {
 	cloned := make(projectstate.Tree, len(tree))
 	for index, file := range tree {
 		cloned[index] = projectstate.File{Path: file.Path, Data: bytes.Clone(file.Data)}
+	}
+	return cloned
+}
+
+func equalWorkspaceMaterializationRecords(left, right WorkspaceMaterializationRecord) bool {
+	return left.JournalID == right.JournalID && left.ExpectedLiveDigest == right.ExpectedLiveDigest &&
+		left.AcceptedBaseDigest == right.AcceptedBaseDigest && left.Checkout == right.Checkout &&
+		left.PriorTreeDigest == right.PriorTreeDigest && left.CandidateDigest == right.CandidateDigest &&
+		left.ThroughGeneration == right.ThroughGeneration && left.State == right.State &&
+		equalWorkspaceTrees(left.PriorTree, right.PriorTree) && equalWorkspaceTrees(left.CandidateTree, right.CandidateTree) &&
+		equalOptionalMaterializationString(left.IncludedOperationsJSON, right.IncludedOperationsJSON) &&
+		equalWorkspaceMaterializationMutationMetadata(left.mutationMetadata, right.mutationMetadata)
+}
+
+func validWorkspaceMaterializationMutationMetadata(metadata workspaceMaterializationMutationMetadata) bool {
+	return metadata.StageClass == "text" && metadata.BackupClass == "text" &&
+		validMaterializationPath(metadata.StagePath) && validMaterializationPath(metadata.BackupPath) &&
+		metadata.StagePath != metadata.BackupPath &&
+		validStoredWorkspaceTimestamp(metadata.CreatedAt, metadata.CreatedRaw, metadata.CreatedClass) &&
+		validStoredWorkspaceTimestamp(metadata.UpdatedAt, metadata.UpdatedRaw, metadata.UpdatedClass) &&
+		!metadata.UpdatedAt.Before(metadata.CreatedAt)
+}
+
+func equalWorkspaceMaterializationMutationMetadata(left, right workspaceMaterializationMutationMetadata) bool {
+	return left.StagePath == right.StagePath && left.BackupPath == right.BackupPath &&
+		left.CreatedAt.Equal(right.CreatedAt) && left.UpdatedAt.Equal(right.UpdatedAt) &&
+		left.CreatedRaw == right.CreatedRaw && left.UpdatedRaw == right.UpdatedRaw &&
+		left.StageClass == right.StageClass && left.BackupClass == right.BackupClass &&
+		left.CreatedClass == right.CreatedClass && left.UpdatedClass == right.UpdatedClass
+}
+
+func equalOptionalMaterializationString(left, right *string) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func cloneWorkspaceMaterializationRecord(record WorkspaceMaterializationRecord) WorkspaceMaterializationRecord {
+	cloned := record
+	cloned.PriorTree = cloneMaterializationTree(record.PriorTree)
+	cloned.CandidateTree = cloneMaterializationTree(record.CandidateTree)
+	if record.IncludedOperationsJSON != nil {
+		value := *record.IncludedOperationsJSON
+		cloned.IncludedOperationsJSON = &value
 	}
 	return cloned
 }

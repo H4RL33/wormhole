@@ -41,6 +41,23 @@ type WorkspaceRecord struct {
 	State    string
 }
 
+// WorkspaceAcceptedBaseTransition describes one exact accepted-base compare-and-swap.
+// Expected must be the complete record read in the caller-owned transaction.
+type WorkspaceAcceptedBaseTransition struct {
+	Expected          WorkspaceRecord
+	ObservedRef       string
+	ObservedCommitSHA string
+	ObservedTree      projectstate.Tree
+	NextState         string
+}
+
+type workspaceBindingMutationMetadata struct {
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+	CreatedRaw string
+	UpdatedRaw string
+}
+
 type WorkspaceOperation struct {
 	Generation       int64
 	OperationID      string
@@ -173,6 +190,140 @@ func (tx *WorkspaceMutationTx) Workspace(ctx context.Context) (WorkspaceRecord, 
 		return WorkspaceRecord{}, fmt.Errorf("localstore: read workspace mutation binding: %w", err)
 	}
 	return record, nil
+}
+
+// AdvanceAcceptedBase compare-and-swaps the complete binding, accepted snapshot,
+// and status owned by this transaction, then returns a strict post-write reread.
+func (tx *WorkspaceMutationTx) AdvanceAcceptedBase(ctx context.Context, transition WorkspaceAcceptedBaseTransition) (WorkspaceRecord, error) {
+	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
+		return WorkspaceRecord{}, ErrNotFound
+	}
+	if err := transition.Expected.Binding.Validate(); err != nil || transition.Expected.Binding.Scope != tx.scope {
+		return WorkspaceRecord{}, fmt.Errorf("localstore: invalid expected accepted-base binding")
+	}
+	if !validWorkspaceBindingState(transition.Expected.State) || !validWorkspaceBindingState(transition.NextState) {
+		return WorkspaceRecord{}, fmt.Errorf("localstore: invalid accepted-base transition state")
+	}
+	_, expectedBytes, err := canonicalWorkspaceRecordSnapshot(transition.Expected)
+	if err != nil {
+		return WorkspaceRecord{}, fmt.Errorf("localstore: validate expected accepted-base snapshot: %w", err)
+	}
+	current, err := tx.Workspace(ctx)
+	if err != nil {
+		return WorkspaceRecord{}, err
+	}
+	if !equalWorkspaceRecords(current, transition.Expected) {
+		return WorkspaceRecord{}, fmt.Errorf("localstore: accepted-base transition precondition mismatch")
+	}
+	metadata, err := tx.workspaceBindingMutationMetadata(ctx)
+	if err != nil {
+		return WorkspaceRecord{}, err
+	}
+
+	observedSnapshot, observedBytes, err := canonicalObservedWorkspaceTree(transition.ObservedTree)
+	if err != nil {
+		return WorkspaceRecord{}, fmt.Errorf("localstore: validate observed accepted-base tree: %w", err)
+	}
+	if observedSnapshot.Config.ProjectID != transition.Expected.Binding.Scope.ProjectID ||
+		observedSnapshot.Config.Repository != transition.Expected.Binding.Repository {
+		return WorkspaceRecord{}, fmt.Errorf("localstore: observed accepted-base tree differs from workspace binding")
+	}
+	nextBinding := transition.Expected.Binding
+	nextBinding.AcceptedRef = transition.ObservedRef
+	nextBinding.AcceptedCommitSHA = transition.ObservedCommitSHA
+	nextBinding.AcceptedTreeDigest = string(observedSnapshot.Digest)
+	if err := nextBinding.Validate(); err != nil {
+		return WorkspaceRecord{}, fmt.Errorf("localstore: invalid observed accepted-base binding: %w", err)
+	}
+	repositoryJSON, err := json.Marshal(transition.Expected.Binding.Repository)
+	if err != nil {
+		return WorkspaceRecord{}, fmt.Errorf("localstore: encode expected accepted-base repository: %w", err)
+	}
+
+	var returnedAt time.Time
+	var returnedRaw, returnedClass string
+	err = tx.conn.QueryRowContext(ctx, `
+		UPDATE workspace_bindings
+		SET accepted_ref=?, accepted_commit=?, accepted_digest=?, accepted_snapshot=?,
+		    status=?, updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND workspace_id=?
+		  AND checkout_path=? AND checkout_device=? AND checkout_inode=?
+		  AND repository_identity_json=? AND accepted_ref=? AND accepted_commit=?
+		  AND accepted_digest=? AND accepted_snapshot=? AND status=?
+		  AND created_at=? AND updated_at=?
+		RETURNING updated_at, CAST(updated_at AS TEXT), typeof(updated_at)
+	`, nextBinding.AcceptedRef, nextBinding.AcceptedCommitSHA, nextBinding.AcceptedTreeDigest,
+		observedBytes, transition.NextState, tx.scope.ProjectID, tx.scope.WorkspaceID,
+		transition.Expected.Binding.Checkout.CanonicalPath, transition.Expected.Binding.Checkout.Device,
+		transition.Expected.Binding.Checkout.Inode, string(repositoryJSON), transition.Expected.Binding.AcceptedRef,
+		transition.Expected.Binding.AcceptedCommitSHA, transition.Expected.Binding.AcceptedTreeDigest,
+		expectedBytes, transition.Expected.State, metadata.CreatedRaw, metadata.UpdatedRaw).Scan(
+		&returnedAt, &returnedRaw, &returnedClass,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return WorkspaceRecord{}, fmt.Errorf("localstore: accepted-base transition precondition mismatch")
+	}
+	if err != nil {
+		return WorkspaceRecord{}, fmt.Errorf("localstore: advance accepted base: %w", err)
+	}
+	if !validMonotonicWorkspaceMutationTimestamp(returnedAt, returnedRaw, returnedClass, metadata.UpdatedAt) {
+		return WorkspaceRecord{}, fmt.Errorf("localstore: invalid accepted-base transition timestamp")
+	}
+
+	post, err := tx.Workspace(ctx)
+	if err != nil {
+		return WorkspaceRecord{}, fmt.Errorf("localstore: reread accepted-base advance: %w", err)
+	}
+	want := WorkspaceRecord{Binding: nextBinding, Snapshot: observedSnapshot, State: transition.NextState}
+	if !equalWorkspaceRecords(post, want) {
+		return WorkspaceRecord{}, fmt.Errorf("localstore: accepted-base transition post-state mismatch")
+	}
+	postMetadata, err := tx.workspaceBindingMutationMetadata(ctx)
+	if err != nil {
+		return WorkspaceRecord{}, fmt.Errorf("localstore: reread accepted-base metadata: %w", err)
+	}
+	if postMetadata.CreatedRaw != metadata.CreatedRaw || !postMetadata.CreatedAt.Equal(metadata.CreatedAt) ||
+		postMetadata.UpdatedRaw != returnedRaw || !postMetadata.UpdatedAt.Equal(returnedAt) {
+		return WorkspaceRecord{}, fmt.Errorf("localstore: accepted-base transition metadata drift")
+	}
+	return post, nil
+}
+
+func (tx *WorkspaceMutationTx) workspaceBindingMutationMetadata(ctx context.Context) (workspaceBindingMutationMetadata, error) {
+	var metadata workspaceBindingMutationMetadata
+	var createdClass, updatedClass string
+	var matching int64
+	err := tx.conn.QueryRowContext(ctx, `
+		SELECT created_at, updated_at, CAST(created_at AS TEXT), CAST(updated_at AS TEXT),
+		       typeof(created_at), typeof(updated_at), COUNT(*) OVER ()
+		FROM workspace_bindings
+		WHERE project_id=? AND workspace_id=?
+	`, tx.scope.ProjectID, tx.scope.WorkspaceID).Scan(
+		&metadata.CreatedAt, &metadata.UpdatedAt, &metadata.CreatedRaw, &metadata.UpdatedRaw,
+		&createdClass, &updatedClass, &matching,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return workspaceBindingMutationMetadata{}, ErrNotFound
+	}
+	if err != nil {
+		return workspaceBindingMutationMetadata{}, fmt.Errorf("localstore: read accepted-base transition metadata: %w", err)
+	}
+	if matching != 1 || !validStoredWorkspaceTimestamp(metadata.CreatedAt, metadata.CreatedRaw, createdClass) ||
+		!validStoredWorkspaceTimestamp(metadata.UpdatedAt, metadata.UpdatedRaw, updatedClass) ||
+		metadata.UpdatedAt.Before(metadata.CreatedAt) {
+		return workspaceBindingMutationMetadata{}, fmt.Errorf("localstore: invalid accepted-base transition metadata")
+	}
+	metadata.CreatedAt = metadata.CreatedAt.UTC()
+	metadata.UpdatedAt = metadata.UpdatedAt.UTC()
+	return metadata, nil
+}
+
+func validStoredWorkspaceTimestamp(value time.Time, raw, storageClass string) bool {
+	return storageClass == "text" && raw != "" && validUTCTimestamp(value)
+}
+
+func validMonotonicWorkspaceMutationTimestamp(returned time.Time, raw, storageClass string, previous time.Time) bool {
+	return validStoredWorkspaceTimestamp(returned, raw, storageClass) && !returned.Before(previous)
 }
 
 // OperationAudit returns every operation for this transaction's exact
@@ -964,6 +1115,67 @@ func validUTCTimestamp(value time.Time) bool {
 	}
 	_, offset := value.Zone()
 	return offset == 0
+}
+
+func validWorkspaceBindingState(value string) bool {
+	switch value {
+	case "clean", "pending", "conflicted", "blocked":
+		return true
+	default:
+		return false
+	}
+}
+
+func canonicalWorkspaceRecordSnapshot(record WorkspaceRecord) (projectstate.Snapshot, []byte, error) {
+	tree, err := projectstate.EncodeTree(record.Snapshot)
+	if err != nil {
+		return projectstate.Snapshot{}, nil, err
+	}
+	snapshot, encoded, err := canonicalStoredTree(tree)
+	if err != nil {
+		return projectstate.Snapshot{}, nil, err
+	}
+	if snapshot.Digest != record.Snapshot.Digest || snapshot.Config.ProjectID != record.Binding.Scope.ProjectID ||
+		snapshot.Config.Repository != record.Binding.Repository || string(snapshot.Digest) != record.Binding.AcceptedTreeDigest {
+		return projectstate.Snapshot{}, nil, fmt.Errorf("snapshot differs from binding")
+	}
+	return snapshot, encoded, nil
+}
+
+func canonicalObservedWorkspaceTree(tree projectstate.Tree) (projectstate.Snapshot, []byte, error) {
+	snapshot, encoded, err := canonicalStoredTree(tree)
+	if err != nil {
+		return projectstate.Snapshot{}, nil, err
+	}
+	canonical, err := projectstate.EncodeTree(snapshot)
+	if err != nil {
+		return projectstate.Snapshot{}, nil, err
+	}
+	if !equalWorkspaceTrees(canonical, tree) {
+		return projectstate.Snapshot{}, nil, fmt.Errorf("observed tree is not canonical")
+	}
+	return snapshot, encoded, nil
+}
+
+func equalWorkspaceRecords(left, right WorkspaceRecord) bool {
+	if left.Binding != right.Binding || left.State != right.State {
+		return false
+	}
+	leftTree, leftErr := projectstate.EncodeTree(left.Snapshot)
+	rightTree, rightErr := projectstate.EncodeTree(right.Snapshot)
+	return leftErr == nil && rightErr == nil && left.Snapshot.Digest == right.Snapshot.Digest && equalWorkspaceTrees(leftTree, rightTree)
+}
+
+func equalWorkspaceTrees(left, right projectstate.Tree) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index].Path != right[index].Path || !bytes.Equal(left[index].Data, right[index].Data) {
+			return false
+		}
+	}
+	return true
 }
 
 // RegisterWorkspace atomically checks checkout identity collisions and stores

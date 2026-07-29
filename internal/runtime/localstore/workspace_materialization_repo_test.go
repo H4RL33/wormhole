@@ -14,6 +14,529 @@ import (
 	state "github.com/H4RL33/wormhole/internal/types/projectstate"
 )
 
+func TestWorkspaceMutationTxAcceptMaterializationAPI(t *testing.T) {
+	raw := "{\"schema_version\":1,\"initial_through_generation\":3,\"operations\":[]}\n"
+	fixture := newMaterializationFixture(t, "published", &raw)
+	var got WorkspaceMaterializationRecord
+	err := fixture.repo.WithImmediateWorkspace(context.Background(), fixture.binding.Scope, func(tx *WorkspaceMutationTx) error {
+		expected, err := tx.AcceptanceEligibleMaterialization(context.Background())
+		if err != nil {
+			return err
+		}
+		got, err = tx.AcceptMaterialization(context.Background(), *expected)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != "accepted" || got.JournalID != "legacy-journal" || got.IncludedOperationsJSON == nil || *got.IncludedOperationsJSON != raw {
+		t.Fatalf("accepted materialization=%+v", got)
+	}
+}
+
+func TestWorkspaceMutationTxAcceptMaterializationRejectsIneligibleAndStaleRows(t *testing.T) {
+	for _, materializationState := range []string{"published", "recovered_new"} {
+		t.Run("missing proof "+materializationState, func(t *testing.T) {
+			fixture := newMaterializationFixture(t, materializationState, nil)
+			before := readMaterializationDisposition(t, fixture.repo, fixture.binding.Scope)
+			err := fixture.repo.WithImmediateWorkspace(context.Background(), fixture.binding.Scope, func(tx *WorkspaceMutationTx) error {
+				_, err := tx.AcceptMaterialization(context.Background(), before.Journals[0])
+				return err
+			})
+			if err == nil {
+				t.Fatal("materialization without operation proof accepted")
+			}
+			after := readMaterializationDisposition(t, fixture.repo, fixture.binding.Scope)
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("missing-proof acceptance changed state: got %+v want %+v", after, before)
+			}
+		})
+	}
+
+	for _, materializationState := range []string{"prepared", "accepted", "recovered_old"} {
+		t.Run(materializationState, func(t *testing.T) {
+			fixture := newMaterializationFixture(t, materializationState, nil)
+			disposition := readMaterializationDisposition(t, fixture.repo, fixture.binding.Scope)
+			err := fixture.repo.WithImmediateWorkspace(context.Background(), fixture.binding.Scope, func(tx *WorkspaceMutationTx) error {
+				got, err := tx.AcceptMaterialization(context.Background(), disposition.Journals[0])
+				if err == nil || !reflect.DeepEqual(got, WorkspaceMaterializationRecord{}) {
+					t.Fatalf("ineligible acceptance=(%+v,%v), want zero,error", got, err)
+				}
+				return err
+			})
+			if err == nil {
+				t.Fatal("ineligible materialization accepted")
+			}
+			after := readMaterializationDisposition(t, fixture.repo, fixture.binding.Scope)
+			if !reflect.DeepEqual(after, disposition) {
+				t.Fatalf("ineligible acceptance changed state: got %+v want %+v", after, disposition)
+			}
+		})
+	}
+
+	mutations := []struct {
+		name   string
+		mutate func(*WorkspaceMaterializationRecord)
+	}{
+		{"journal", func(value *WorkspaceMaterializationRecord) { value.JournalID = "other" }},
+		{"expected digest", func(value *WorkspaceMaterializationRecord) {
+			value.ExpectedLiveDigest = state.Digest("sha256:" + strings.Repeat("f", 64))
+		}},
+		{"accepted digest", func(value *WorkspaceMaterializationRecord) {
+			value.AcceptedBaseDigest = state.Digest("sha256:" + strings.Repeat("f", 64))
+		}},
+		{"checkout path", func(value *WorkspaceMaterializationRecord) { value.Checkout.CanonicalPath = "/other" }},
+		{"checkout device", func(value *WorkspaceMaterializationRecord) { value.Checkout.Device++ }},
+		{"checkout inode", func(value *WorkspaceMaterializationRecord) { value.Checkout.Inode++ }},
+		{"prior digest", func(value *WorkspaceMaterializationRecord) {
+			value.PriorTreeDigest = state.Digest("sha256:" + strings.Repeat("f", 64))
+		}},
+		{"candidate digest", func(value *WorkspaceMaterializationRecord) {
+			value.CandidateDigest = state.Digest("sha256:" + strings.Repeat("f", 64))
+		}},
+		{"generation", func(value *WorkspaceMaterializationRecord) { value.ThroughGeneration++ }},
+		{"state", func(value *WorkspaceMaterializationRecord) { value.State = "recovered_new" }},
+		{"prior tree data", func(value *WorkspaceMaterializationRecord) {
+			value.PriorTree[0].Data = append(bytes.Clone(value.PriorTree[0].Data), ' ')
+		}},
+		{"prior tree path", func(value *WorkspaceMaterializationRecord) { value.PriorTree[0].Path = "other.toml" }},
+		{"candidate tree data", func(value *WorkspaceMaterializationRecord) {
+			value.CandidateTree[0].Data = append(bytes.Clone(value.CandidateTree[0].Data), ' ')
+		}},
+		{"candidate tree path", func(value *WorkspaceMaterializationRecord) { value.CandidateTree[0].Path = "other.toml" }},
+		{"included", func(value *WorkspaceMaterializationRecord) {
+			other := "{\"other\":true}\n"
+			value.IncludedOperationsJSON = &other
+		}},
+		{"missing included", func(value *WorkspaceMaterializationRecord) { value.IncludedOperationsJSON = nil }},
+	}
+	for _, test := range mutations {
+		t.Run("stale "+test.name, func(t *testing.T) {
+			raw := "{\"schema_version\":1,\"initial_through_generation\":3,\"operations\":[]}\n"
+			fixture := newMaterializationFixture(t, "published", &raw)
+			before := readMaterializationDisposition(t, fixture.repo, fixture.binding.Scope)
+			expected := cloneWorkspaceMaterializationRecord(before.Journals[0])
+			test.mutate(&expected)
+			err := fixture.repo.WithImmediateWorkspace(context.Background(), fixture.binding.Scope, func(tx *WorkspaceMutationTx) error {
+				_, err := tx.AcceptMaterialization(context.Background(), expected)
+				return err
+			})
+			if err == nil {
+				t.Fatal("stale materialization accepted")
+			}
+			after := readMaterializationDisposition(t, fixture.repo, fixture.binding.Scope)
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("stale acceptance changed state: got %+v want %+v", after, before)
+			}
+		})
+	}
+}
+
+func TestWorkspaceMutationTxAcceptMaterializationDetectsFailuresAndTriggerDrift(t *testing.T) {
+	for _, test := range []struct {
+		name, trigger string
+	}{
+		{"write failure", `CREATE TRIGGER fail_materialization_accept BEFORE UPDATE OF state ON workspace_materializations BEGIN SELECT RAISE(ABORT,'injected materialization failure'); END`},
+		{"after trigger drift", `CREATE TRIGGER drift_materialization_accept AFTER UPDATE OF state ON workspace_materializations BEGIN UPDATE workspace_materializations SET through_generation=through_generation+1 WHERE project_id=NEW.project_id AND workspace_id=NEW.workspace_id AND journal_id=NEW.journal_id; END`},
+		{"after trigger hidden path drift", `CREATE TRIGGER drift_materialization_path AFTER UPDATE OF state ON workspace_materializations BEGIN UPDATE workspace_materializations SET stage_path='/drifted-stage' WHERE project_id=NEW.project_id AND workspace_id=NEW.workspace_id AND journal_id=NEW.journal_id; END`},
+		{"after trigger hidden timestamp drift", `CREATE TRIGGER drift_materialization_timestamp AFTER UPDATE OF state ON workspace_materializations BEGIN UPDATE workspace_materializations SET updated_at='2099-01-01 00:00:00+00:00' WHERE project_id=NEW.project_id AND workspace_id=NEW.workspace_id AND journal_id=NEW.journal_id; END`},
+		{"after trigger created timestamp drift", `CREATE TRIGGER drift_materialization_created AFTER UPDATE OF state ON workspace_materializations BEGIN UPDATE workspace_materializations SET created_at='2000-01-01 00:00:00+00:00' WHERE project_id=NEW.project_id AND workspace_id=NEW.workspace_id AND journal_id=NEW.journal_id; END`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			raw := "{\"schema_version\":1,\"initial_through_generation\":3,\"operations\":[]}\n"
+			fixture := newMaterializationFixture(t, "published", &raw)
+			before := readMaterializationDisposition(t, fixture.repo, fixture.binding.Scope)
+			if _, err := fixture.store.DB().Exec(test.trigger); err != nil {
+				t.Fatal(err)
+			}
+			err := fixture.repo.WithImmediateWorkspace(context.Background(), fixture.binding.Scope, func(tx *WorkspaceMutationTx) error {
+				_, err := tx.AcceptMaterialization(context.Background(), before.Journals[0])
+				return err
+			})
+			if err == nil {
+				t.Fatal("triggered materialization acceptance succeeded")
+			}
+			after := readMaterializationDisposition(t, fixture.repo, fixture.binding.Scope)
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("triggered acceptance changed state: got %+v want %+v", after, before)
+			}
+		})
+	}
+}
+
+func TestWorkspaceMutationTxAcceptMaterializationRejectsTimestampRegression(t *testing.T) {
+	raw := "{\"schema_version\":1,\"initial_through_generation\":3,\"operations\":[]}\n"
+	fixture := newMaterializationFixture(t, "published", &raw)
+	mustExecMaterialization(t, fixture.store, `
+		UPDATE workspace_materializations
+		SET created_at='2000-01-01 00:00:00+00:00', updated_at='2099-01-01 00:00:00+00:00'
+	`)
+	expected := readMaterializationDisposition(t, fixture.repo, fixture.binding.Scope).Journals[0]
+	before := readAtomicWorkspaceRawSnapshot(t, fixture.store.DB())
+	err := fixture.repo.WithImmediateWorkspace(context.Background(), fixture.binding.Scope, func(tx *WorkspaceMutationTx) error {
+		_, err := tx.AcceptMaterialization(context.Background(), expected)
+		return err
+	})
+	if err == nil {
+		t.Fatal("materialization acceptance moved updated_at backwards")
+	}
+	after := readAtomicWorkspaceRawSnapshot(t, fixture.store.DB())
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("timestamp regression changed raw state: got %#v want %#v", after, before)
+	}
+}
+
+func TestWorkspaceMutationTxAcceptMaterializationRejectsStaleHiddenState(t *testing.T) {
+	proof := "{\"schema_version\":1,\"initial_through_generation\":3,\"operations\":[]}\n"
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, *materializationFixture)
+	}{
+		{"stage path", updateMaterialization("stage_path", "/stale-stage")},
+		{"backup path", updateMaterialization("backup_path", "/stale-backup")},
+		{"created timestamp", updateMaterialization("created_at", "2026-07-28 11:59:59+00:00")},
+		{"updated timestamp", updateMaterialization("updated_at", "2026-07-28 12:00:02+00:00")},
+		{"stage storage class", func(t *testing.T, fixture *materializationFixture) {
+			mustExecMaterialization(t, fixture.store, `UPDATE workspace_materializations SET stage_path=CAST(stage_path AS BLOB)`)
+		}},
+		{"backup storage class", func(t *testing.T, fixture *materializationFixture) {
+			mustExecMaterialization(t, fixture.store, `UPDATE workspace_materializations SET backup_path=CAST(backup_path AS BLOB)`)
+		}},
+		{"created storage class", func(t *testing.T, fixture *materializationFixture) {
+			mustExecMaterialization(t, fixture.store, `UPDATE workspace_materializations SET created_at=1`)
+		}},
+		{"updated storage class", func(t *testing.T, fixture *materializationFixture) {
+			mustExecMaterialization(t, fixture.store, `UPDATE workspace_materializations SET updated_at=1`)
+		}},
+		{"operation envelope", updateMaterialization("included_operations_json", "{\"stale\":true}\n")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newMaterializationFixture(t, "published", &proof)
+			expected := readMaterializationDisposition(t, fixture.repo, fixture.binding.Scope).Journals[0]
+			test.mutate(t, fixture)
+			before := readAtomicWorkspaceRawSnapshot(t, fixture.store.DB())
+			err := fixture.repo.WithImmediateWorkspace(context.Background(), fixture.binding.Scope, func(tx *WorkspaceMutationTx) error {
+				got, err := tx.AcceptMaterialization(context.Background(), expected)
+				if err == nil || !reflect.DeepEqual(got, WorkspaceMaterializationRecord{}) {
+					t.Fatalf("stale hidden acceptance=(%+v,%v), want zero,error", got, err)
+				}
+				return err
+			})
+			if err == nil {
+				t.Fatal("stale hidden materialization accepted")
+			}
+			after := readAtomicWorkspaceRawSnapshot(t, fixture.store.DB())
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("stale hidden acceptance changed raw state: got %#v want %#v", after, before)
+			}
+		})
+	}
+}
+
+func TestWorkspaceMutationTxAcceptMaterializationIgnoredUpdateRollsBackRawStateAndReleasesWriter(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "gateway.db")
+	store, err := Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := NewWorkspaceRepo(store.DB())
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout-a", 1, 11)
+	raw := "{\"schema_version\":1,\"initial_through_generation\":3,\"operations\":[]}\n"
+	fixture := makeMaterializationFixture(t, store, repo, binding, "published", &raw)
+	seedAtomicWorkspaceAdjacency(t, store, repo, fixture)
+	expected := readMaterializationDisposition(t, repo, binding.Scope).Journals[1]
+	if expected.JournalID != "legacy-journal" {
+		t.Fatalf("target journal=%q, want legacy-journal", expected.JournalID)
+	}
+	before := readAtomicWorkspaceRawSnapshot(t, store.DB())
+	if _, err := store.DB().Exec(`
+		CREATE TRIGGER ignore_materialization_accept
+		BEFORE UPDATE OF state ON workspace_materializations
+		WHEN OLD.project_id='00000000-0000-4000-8000-000000000001'
+		 AND OLD.workspace_id='00000000-0000-4000-8000-000000000011'
+		 AND OLD.journal_id='legacy-journal'
+		BEGIN SELECT RAISE(IGNORE); END
+	`); err != nil {
+		t.Fatal(err)
+	}
+	err = repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		got, err := tx.AcceptMaterialization(context.Background(), expected)
+		if err == nil || !reflect.DeepEqual(got, WorkspaceMaterializationRecord{}) {
+			t.Fatalf("ignored acceptance=(%+v,%v), want zero,error", got, err)
+		}
+		return err
+	})
+	if err == nil || errors.Is(err, ErrNotFound) || errors.Is(err, ErrCommitOutcomeUnknown) {
+		t.Fatalf("ignored acceptance error=%v, want ordinary mutation error", err)
+	}
+	if after := readAtomicWorkspaceRawSnapshot(t, store.DB()); !reflect.DeepEqual(after, before) {
+		t.Fatalf("ignored acceptance raw state changed immediately: got %#v want %#v", after, before)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	if after := readAtomicWorkspaceRawSnapshot(t, restarted.DB()); !reflect.DeepEqual(after, before) {
+		t.Fatalf("ignored acceptance raw state changed after reopen: got %#v want %#v", after, before)
+	}
+	if _, err := restarted.DB().Exec(`DROP TRIGGER ignore_materialization_accept`); err != nil {
+		t.Fatal(err)
+	}
+	restartedRepo := NewWorkspaceRepo(restarted.DB())
+	err = restartedRepo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		eligible, err := tx.AcceptanceEligibleMaterialization(context.Background())
+		if err != nil {
+			return err
+		}
+		_, err = tx.AcceptMaterialization(context.Background(), *eligible)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("next materialization transaction failed: %v", err)
+	}
+}
+
+func TestWorkspaceMutationTxAcceptMaterializationSameStatementTimestampRawAtomicDelta(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "gateway.db")
+	store, err := Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := NewWorkspaceRepo(store.DB())
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout-a", 1, 11)
+	proof := "{\"schema_version\":1,\"initial_through_generation\":3,\"operations\":[]}\n"
+	fixture := makeMaterializationFixture(t, store, repo, binding, "published", &proof)
+	seedAtomicWorkspaceAdjacency(t, store, repo, fixture)
+	if _, err := store.DB().Exec(`
+		CREATE TABLE materialization_timestamp_probe(value TEXT NOT NULL);
+		CREATE TRIGGER materialization_same_second
+		BEFORE UPDATE OF state ON workspace_materializations
+		WHEN OLD.project_id='00000000-0000-4000-8000-000000000001'
+		 AND OLD.workspace_id='00000000-0000-4000-8000-000000000011'
+		 AND OLD.journal_id='legacy-journal'
+		BEGIN
+			INSERT INTO materialization_timestamp_probe(value) VALUES (CURRENT_TIMESTAMP);
+			UPDATE workspace_materializations SET updated_at=CURRENT_TIMESTAMP
+			WHERE project_id=OLD.project_id AND workspace_id=OLD.workspace_id AND journal_id=OLD.journal_id;
+		END
+	`); err != nil {
+		t.Fatal(err)
+	}
+	before := readAtomicWorkspaceRawSnapshot(t, store.DB())
+	err = repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		expected, err := tx.AcceptanceEligibleMaterialization(context.Background())
+		if err != nil {
+			return err
+		}
+		_, err = tx.AcceptMaterialization(context.Background(), *expected)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := readAtomicWorkspaceRawSnapshot(t, store.DB())
+	targetKeys := map[string]string{
+		"project_id":   quoteSQLiteTextLiteral(binding.Scope.ProjectID),
+		"workspace_id": quoteSQLiteTextLiteral(string(binding.Scope.WorkspaceID)),
+		"journal_id":   quoteSQLiteTextLiteral("legacy-journal"),
+	}
+	assertAtomicWorkspaceRawDelta(t, before, after, "workspace_materializations", targetKeys, "state", "updated_at")
+	target := findAtomicWorkspaceRawRow(t, after, "workspace_materializations", targetKeys)
+	assertRawAtomicCell(t, target, "state", quoteSQLiteTextLiteral("accepted"), "text")
+	var probe, persisted string
+	if err := store.DB().QueryRow(`SELECT value FROM materialization_timestamp_probe`).Scan(&probe); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRow(`SELECT CAST(updated_at AS TEXT) FROM workspace_materializations WHERE project_id=? AND workspace_id=? AND journal_id='legacy-journal'`, binding.Scope.ProjectID, binding.Scope.WorkspaceID).Scan(&persisted); err != nil {
+		t.Fatal(err)
+	}
+	if probe != persisted {
+		t.Fatalf("same-statement timestamp probe=%v persisted=%v", probe, persisted)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	if reopened := readAtomicWorkspaceRawSnapshot(t, restarted.DB()); !reflect.DeepEqual(reopened, after) {
+		t.Fatalf("materialization raw state changed after reopen: got %#v want %#v", reopened, after)
+	}
+}
+
+func TestWorkspaceMutationTxAcceptMaterializationInvalidAPIHasNoMutation(t *testing.T) {
+	proof := "{\"schema_version\":1,\"initial_through_generation\":3,\"operations\":[]}\n"
+	for _, test := range []struct {
+		name    string
+		prepare func(*testing.T, *materializationFixture, WorkspaceMaterializationRecord) (*WorkspaceMutationTx, context.Context, WorkspaceMaterializationRecord)
+	}{
+		{"nil transaction", func(_ *testing.T, _ *materializationFixture, expected WorkspaceMaterializationRecord) (*WorkspaceMutationTx, context.Context, WorkspaceMaterializationRecord) {
+			return nil, context.Background(), expected
+		}},
+		{"empty transaction", func(_ *testing.T, _ *materializationFixture, expected WorkspaceMaterializationRecord) (*WorkspaceMutationTx, context.Context, WorkspaceMaterializationRecord) {
+			return &WorkspaceMutationTx{}, context.Background(), expected
+		}},
+		{"invalid scope", func(t *testing.T, fixture *materializationFixture, expected WorkspaceMaterializationRecord) (*WorkspaceMutationTx, context.Context, WorkspaceMaterializationRecord) {
+			conn, err := fixture.store.DB().Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+			return &WorkspaceMutationTx{conn: conn, scope: types.WorkspaceScope{}}, context.Background(), expected
+		}},
+		{"missing workspace", func(t *testing.T, fixture *materializationFixture, expected WorkspaceMaterializationRecord) (*WorkspaceMutationTx, context.Context, WorkspaceMaterializationRecord) {
+			conn, err := fixture.store.DB().Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+			return &WorkspaceMutationTx{conn: conn, scope: types.WorkspaceScope{
+				ProjectID: "00000000-0000-4000-8000-000000000099", WorkspaceID: "00000000-0000-4000-8000-000000000098",
+			}}, context.Background(), expected
+		}},
+		{"closed connection", func(t *testing.T, fixture *materializationFixture, expected WorkspaceMaterializationRecord) (*WorkspaceMutationTx, context.Context, WorkspaceMaterializationRecord) {
+			conn, err := fixture.store.DB().Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Fatal(err)
+			}
+			return &WorkspaceMutationTx{conn: conn, scope: fixture.binding.Scope}, context.Background(), expected
+		}},
+		{"canceled context", func(t *testing.T, fixture *materializationFixture, expected WorkspaceMaterializationRecord) (*WorkspaceMutationTx, context.Context, WorkspaceMaterializationRecord) {
+			conn, err := fixture.store.DB().Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return &WorkspaceMutationTx{conn: conn, scope: fixture.binding.Scope}, ctx, expected
+		}},
+		{"retained closed transaction", func(t *testing.T, fixture *materializationFixture, expected WorkspaceMaterializationRecord) (*WorkspaceMutationTx, context.Context, WorkspaceMaterializationRecord) {
+			var retained *WorkspaceMutationTx
+			if err := fixture.repo.WithImmediateWorkspace(context.Background(), fixture.binding.Scope, func(tx *WorkspaceMutationTx) error {
+				retained = tx
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			return retained, context.Background(), expected
+		}},
+		{"no eligible row", func(t *testing.T, fixture *materializationFixture, expected WorkspaceMaterializationRecord) (*WorkspaceMutationTx, context.Context, WorkspaceMaterializationRecord) {
+			mustExecMaterialization(t, fixture.store, `UPDATE workspace_materializations SET state='recovered_old'`)
+			conn, err := fixture.store.DB().Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+			return &WorkspaceMutationTx{conn: conn, scope: fixture.binding.Scope}, context.Background(), expected
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newMaterializationFixture(t, "published", &proof)
+			expected := readMaterializationDisposition(t, fixture.repo, fixture.binding.Scope).Journals[0]
+			tx, ctx, expected := test.prepare(t, fixture, expected)
+			before := readAtomicWorkspaceRawSnapshot(t, fixture.store.DB())
+			got, err := tx.AcceptMaterialization(ctx, expected)
+			if err == nil || !reflect.DeepEqual(got, WorkspaceMaterializationRecord{}) {
+				t.Fatalf("invalid API=(%+v,%v), want zero,error", got, err)
+			}
+			if after := readAtomicWorkspaceRawSnapshot(t, fixture.store.DB()); !reflect.DeepEqual(after, before) {
+				t.Fatalf("invalid API changed raw state: got %#v want %#v", after, before)
+			}
+		})
+	}
+}
+
+func TestWorkspaceMutationTxAcceptMaterializationMetadataHelperErrors(t *testing.T) {
+	proof := "{\"schema_version\":1,\"initial_through_generation\":3,\"operations\":[]}\n"
+	fixture := newMaterializationFixture(t, "published", &proof)
+	conn, err := fixture.store.DB().Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx := &WorkspaceMutationTx{conn: conn, scope: fixture.binding.Scope}
+	if _, err := tx.materializationMutationMetadata(context.Background(), "missing-journal"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing metadata error=%v, want ErrNotFound", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.materializationMutationMetadata(context.Background(), "legacy-journal"); err == nil || errors.Is(err, ErrNotFound) {
+		t.Fatalf("closed metadata error=%v, want ordinary query error", err)
+	}
+	mustExecMaterialization(t, fixture.store, `UPDATE workspace_materializations SET stage_path=CAST(stage_path AS BLOB)`)
+	conn, err = fixture.store.DB().Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	tx = &WorkspaceMutationTx{conn: conn, scope: fixture.binding.Scope}
+	if _, err := tx.materializationMutationMetadata(context.Background(), "legacy-journal"); err == nil {
+		t.Fatal("invalid metadata storage succeeded")
+	}
+}
+
+func TestWorkspaceMutationTxAcceptMaterializationPreservesHistoryAcrossRestartAndIsolation(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "gateway.db")
+	store, err := Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := NewWorkspaceRepo(store.DB())
+	a := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout-a", 1, 11)
+	b := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000012", "/checkout-b", 2, 12)
+	raw := "{\"schema_version\":1,\"initial_through_generation\":3,\"operations\":[]}\n"
+	makeMaterializationFixture(t, store, repo, a, "recovered_new", &raw)
+	makeMaterializationFixture(t, store, repo, b, "published", &raw)
+	insertWorkspaceOperation(t, store, a.Scope, 1, validWorkspaceOperation("00000000-0000-4000-8000-000000000091"), "materialized")
+	beforeOperations := readWorkspaceOperations(t, store, a.Scope)
+	var got WorkspaceMaterializationRecord
+	err = repo.WithImmediateWorkspace(context.Background(), a.Scope, func(tx *WorkspaceMutationTx) error {
+		expected, err := tx.AcceptanceEligibleMaterialization(context.Background())
+		if err != nil {
+			return err
+		}
+		got, err = tx.AcceptMaterialization(context.Background(), *expected)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPrior := bytes.Clone(got.PriorTree[0].Data)
+	got.PriorTree[0].Data[0] ^= 0xff
+	*got.IncludedOperationsJSON = "caller mutation"
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	restartedRepo := NewWorkspaceRepo(restarted.DB())
+	afterA := readMaterializationDisposition(t, restartedRepo, a.Scope)
+	afterB := readMaterializationDisposition(t, restartedRepo, b.Scope)
+	if len(afterA.Journals) != 1 || afterA.Journals[0].State != "accepted" || afterA.Journals[0].IncludedOperationsJSON == nil ||
+		*afterA.Journals[0].IncludedOperationsJSON != raw || !bytes.Equal(afterA.Journals[0].PriorTree[0].Data, wantPrior) {
+		t.Fatalf("restarted accepted journal=%+v", afterA.Journals)
+	}
+	if !reflect.DeepEqual(afterA.Operations, beforeOperations) {
+		t.Fatalf("materialized history changed: got %+v want %+v", afterA.Operations, beforeOperations)
+	}
+	if len(afterB.Journals) != 1 || afterB.Journals[0].State != "published" {
+		t.Fatalf("sibling journal changed=%+v", afterB.Journals)
+	}
+}
+
 func TestWorkspaceMaterializationDispositionReturnsOrderedCompleteIsolatedState(t *testing.T) {
 	store, repo := openWorkspaceStore(t)
 	a := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout-a", 1, 11)
@@ -723,6 +1246,28 @@ func makeMaterializationFixture(t *testing.T, store *Store, repo *WorkspaceRepo,
 	}
 	insertMaterializationRow(t, store, binding, "legacy-journal", materializationState, priorTree, candidateTree, priorDigest, candidateDigest, included)
 	return &materializationFixture{store: store, repo: repo, binding: binding, priorTree: priorTree, candidateTree: candidateTree, priorDigest: priorDigest, candidateDigest: candidateDigest}
+}
+
+func seedAtomicWorkspaceAdjacency(t *testing.T, store *Store, repo *WorkspaceRepo, fixture *materializationFixture) {
+	t.Helper()
+	snapshot, encoded := encodedWorkspaceSnapshot(t, fixture.binding.Scope.ProjectID, fixture.binding.Repository)
+	insertWorkspaceCandidate(t, store, fixture.binding.Scope, state.Digest(fixture.binding.AcceptedTreeDigest), snapshot.Digest, encoded, nil, 0)
+	insertWorkspaceOperation(t, store, fixture.binding.Scope, 1, validWorkspaceOperation("00000000-0000-4000-8000-000000000091"), "active")
+	insertWorkspaceConflict(t, store, fixture.binding.Scope, "atomic-adjacent-conflict", state.RecordKey{Kind: "task", ID: "00000000-0000-4000-8000-000000000021"}, "open")
+	proof := "{\"schema_version\":1,\"initial_through_generation\":0,\"operations\":[]}\n"
+	insertMaterializationRow(t, store, fixture.binding, "historical-journal", "accepted", fixture.priorTree, fixture.candidateTree, fixture.priorDigest, fixture.candidateDigest, &proof)
+	stash := validWorkspaceStash(t, fixture.binding, "00000000-0000-4000-8000-000000000031")
+	receipt := validWorkspaceTransitionReceipt(t, "00000000-0000-4000-8000-000000000041", "stash", "clean")
+	if err := repo.WithImmediateWorkspace(context.Background(), fixture.binding.Scope, func(tx *WorkspaceMutationTx) error {
+		if err := tx.InsertStash(context.Background(), stash); err != nil {
+			return err
+		}
+		return tx.InsertTransitionReceipt(context.Background(), receipt)
+	}); err != nil {
+		t.Fatalf("seed atomic stash and transition receipt: %v", err)
+	}
+	createBinding(t, repo, fixture.binding.Scope.ProjectID, "00000000-0000-4000-8000-000000000012", "/checkout-b", 2, 12)
+	createBinding(t, repo, "00000000-0000-4000-8000-000000000002", "00000000-0000-4000-8000-000000000013", "/checkout-c", 3, 13)
 }
 
 func insertMaterializationRow(t *testing.T, store *Store, binding types.WorkspaceBinding, journalID, materializationState string, priorTree, candidateTree state.Tree, priorDigest, candidateDigest state.Digest, included *string) {
