@@ -228,3 +228,13 @@ unsupported-platform build were GREEN; projectstate statement coverage was 84.0%
 Fresh security re-review found no Critical/Important issues. Strict complete journal/
 operation disposition, materialization ownership proof, Import, stash/restore, Git
 observation, branch guard, and the complete merged A4 coverage gate remain pending.
+
+A4 complete materialization disposition `ba2a132`: genuine API, SQLite BLOB-storage,
+and partial-error-result RED/GREEN. The exact-scope transaction reader now returns every
+journal and operation in stable order, validates current versus historical base-binding
+rules, requires nullable envelopes to be actual SQL NULL/TEXT, and returns cloned,
+non-nil, all-or-error results. Focused/full localstore, focused race, repository-wide
+tests, vet, formatting, and diff checks were GREEN; localstore statement coverage was
+82.5%. Fresh read-only review found no Critical, Important, or Minor findings.
+Materialization ownership proof, Import, stash/restore, Git observation, branch guard,
+and the complete merged A4 coverage gate remain pending.
