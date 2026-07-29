@@ -419,3 +419,42 @@ full `internal/runtime/localstore`, focused race, `go vet ./...`, and `go test .
 were GREEN; the approved project-wide merged statement-coverage floor remains 80%.
 `RestoreRetryState` is the next A4 tranche and remains the prerequisite for
 `RestoreStash`.
+
+A4 `RestoreRetryState` localstore seam `076f953`: complete. Base `0dbd70c`; the causal
+RED first proved the frozen transaction-scoped reader and exact raw-BLOB digest helper were
+absent. The GREEN reader is an all-or-zero boundary on the caller-owned exact-workspace
+transaction: it strict-loads the binding (including both UTC timestamps and accepted
+snapshot), optional candidate, named stash, complete `OperationAudit`, and sorted open
+conflicts before returning any state. Scope-bearing readers use CAST matching to detect
+logical aliases and then require exact TEXT-backed raw keys; the stash's exact raw-BLOB
+read follows its strict logical-key preflight in the same transaction. Selected columns
+require their exact SQLite storage classes and scope; binding/repository, tree/file-list, actor,
+and operation data pass their localstore-owned canonicality and timestamp checks. Stash
+`operations_json` remains action-opaque valid TEXT preserved byte-for-byte, and conflict
+evidence remains subject to its existing localstore invariants; ProjectState owns strict
+`StashReplayV1` and semantic conflict decoding. Missing, duplicate, aliased, malformed,
+or corrupt state returns the zero projection plus an error.
+
+The reader returns stable non-nil operation/conflict slices and deeply owned values across
+restart; it preserves canonical operation and actor bytes plus the opaque stash operation
+bytes for ProjectState validation. Candidate pointer semantics are explicit: no candidate
+means both candidate BLOB-digest pointers are
+nil, a direct candidate makes only its direct digest non-nil, and a persisted rebased tree
+makes the rebased digest non-nil. `digestWorkspaceBlobBytesV1` is fixed as
+`sha256:` plus lower-case SHA-256 over the complete, already strictly validated raw BLOB
+with no semantic-tree or JSON re-encoding, framing, prefix, or separator. Literal fixed
+goldens cover accepted snapshot, direct/rebased candidate, and stash source/composed bytes;
+independent calculations prove returned values commit to exactly those selected bytes.
+
+The corruption and isolation matrices cover storage-class drift, trailing/corrupt canonical
+BLOBs, noncanonical actor JSON, invalid opaque stash-operation TEXT, invalid timestamps and
+timestamp order,
+CAST-equivalent duplicate scope rows, duplicate semantic conflicts, absent state,
+same-project/different-workspace and cross-project siblings, deep ownership, and restart.
+Fresh review rounds accepted the strict alias/storage/timestamp/raw-byte hardening and the
+complete non-nil projection contract; final spec and quality review found no remaining
+blocking findings. Focused reader/golden tests, full `internal/runtime/localstore` tests
+(83.4% statement coverage), focused race, and `go vet ./...` were GREEN; the implementation
+agent's full localstore race evidence completed in 81.580s. No migration or schema change
+was introduced. Next: private RestoreStash proof helpers and `Service.RestoreStash` consume
+this exact reader.
