@@ -266,3 +266,14 @@ the full repository suite were GREEN; projectstate statement coverage was 84.3% 
 aggregate statement coverage was 85.3%. Formatting and diff checks were clean. Remaining
 A4 work is stash/restore, the Git observer and branch guard, and the checkpoint,
 recovery, and merged coverage gates.
+
+A4 stash action codec `b3b1c1c`: added exactly
+`internal/runtime/projectstate/stash_codec.go` and `stash_codec_test.go`, defining public
+`StashRequest`/`StashResult`, frozen private `stashRequestDigestV1`/`stashResultV1`/
+`stashReceiptV1`, and strict `stashRequestDigest`, `encodeStashReceipt`, and
+`decodeStashReceipt` helpers. The focused RED failed to compile because those types and
+functions were absent. Focused and full projectstate tests, race, and vet were GREEN;
+projectstate statement coverage was 84.5%, with formatting and diff checks clean. Fresh
+review approved with no Critical, Important, or Minor findings. The next A4 tranche is
+the restore action codec; stash replay/persistence, discard, Git observation and branch
+guard, and the checkpoint, recovery, and merged coverage gates remain.
