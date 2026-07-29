@@ -337,6 +337,9 @@ func TestWithImmediateWorkspaceRollsBackCallbackFailure(t *testing.T) {
 	if !errors.Is(err, rollbackErr) {
 		t.Fatalf("WithImmediateWorkspace error=%v, want rollback fixture", err)
 	}
+	if errors.Is(err, ErrCommitOutcomeUnknown) {
+		t.Fatalf("callback error %v matched ErrCommitOutcomeUnknown", err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -396,6 +399,9 @@ func TestWithImmediateWorkspaceRollsBackCommitFailure(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("WithImmediateWorkspace hid a deferred foreign-key COMMIT failure")
+	}
+	if !errors.Is(err, ErrCommitOutcomeUnknown) {
+		t.Fatalf("COMMIT error=%v, want ErrCommitOutcomeUnknown", err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -472,10 +478,316 @@ func TestWorkspaceMutationTxCandidateDecode(t *testing.T) {
 		if candidate == nil || candidate.AcceptedBaseDigest != state.Digest(binding.AcceptedTreeDigest) ||
 			candidate.WorkingTreeDigest != directSnapshot.Digest || candidate.DirectSnapshot.Digest != directSnapshot.Digest ||
 			candidate.RebasedSnapshot == nil || candidate.RebasedSnapshot.Digest != rebasedSnapshot.Digest ||
-			candidate.RebasedThroughGeneration != 3 {
+			candidate.RebasedThroughGeneration != 3 || candidate.ImportedBy != workspaceCandidateImporter ||
+			!candidate.ImportedAt.Equal(workspaceCandidateImportedAt) || candidate.ImportedAt.Location() != time.UTC {
 			t.Fatalf("candidate=%+v", candidate)
 		}
 		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkspaceMutationTxCandidateRejectsInvalidProvenance(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		column string
+		value  any
+	}{
+		{name: "principal", column: "imported_by", value: "not-a-principal"},
+		{name: "timestamp", column: "imported_at", value: ""},
+		{name: "non UTC timestamp", column: "imported_at", value: time.Date(2026, 7, 28, 14, 0, 0, 0, time.FixedZone("offset", 3600))},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, repo := openWorkspaceStore(t)
+			binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+			direct, directBytes := encodedWorkspaceSnapshot(t, binding.Scope.ProjectID, binding.Repository)
+			insertWorkspaceCandidate(t, store, binding.Scope, state.Digest(binding.AcceptedTreeDigest), direct.Digest, directBytes, nil, 0)
+			if _, err := store.DB().Exec("UPDATE workspace_candidates SET "+test.column+"=? WHERE project_id=? AND workspace_id=?", test.value, binding.Scope.ProjectID, binding.Scope.WorkspaceID); err != nil {
+				t.Fatal(err)
+			}
+			err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+				_, err := tx.Candidate(context.Background())
+				return err
+			})
+			if err == nil {
+				t.Fatal("Candidate served invalid provenance")
+			}
+		})
+	}
+}
+
+func TestWorkspaceMutationTxUpsertCandidateRoundTripAndRepeat(t *testing.T) {
+	store, repo := openWorkspaceStore(t)
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+	record := workspaceCandidateRecord(t, binding, true, 3)
+
+	if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		if err := tx.UpsertCandidate(context.Background(), record); err != nil {
+			return err
+		}
+		return tx.UpsertCandidate(context.Background(), record)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var accepted, working, importedBy string
+	var direct, rebased []byte
+	var boundary int64
+	var importedAt time.Time
+	if err := store.DB().QueryRow(`
+		SELECT accepted_base_digest, working_tree_digest, direct_tree, rebased_tree,
+		       rebased_through_generation, imported_by, imported_at
+		FROM workspace_candidates WHERE project_id=? AND workspace_id=?
+	`, binding.Scope.ProjectID, binding.Scope.WorkspaceID).Scan(
+		&accepted, &working, &direct, &rebased, &boundary, &importedBy, &importedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	wantDirect, err := encodeFileList(mustEncodeWorkspaceSnapshot(t, record.DirectSnapshot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRebased, err := encodeFileList(mustEncodeWorkspaceSnapshot(t, *record.RebasedSnapshot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted != binding.AcceptedTreeDigest || working != string(record.WorkingTreeDigest) ||
+		!bytes.Equal(direct, wantDirect) || !bytes.Equal(rebased, wantRebased) || boundary != 3 ||
+		importedBy != record.ImportedBy || !importedAt.Equal(record.ImportedAt) {
+		t.Fatalf("persisted candidate accepted=%q working=%q boundary=%d imported_by=%q imported_at=%v", accepted, working, boundary, importedBy, importedAt)
+	}
+
+	if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		got, err := tx.Candidate(context.Background())
+		if err != nil {
+			return err
+		}
+		if got == nil || got.ImportedBy != record.ImportedBy || !got.ImportedAt.Equal(record.ImportedAt) ||
+			got.DirectSnapshot.Digest != record.DirectSnapshot.Digest || got.RebasedSnapshot == nil ||
+			got.RebasedSnapshot.Digest != record.RebasedSnapshot.Digest || got.RebasedThroughGeneration != record.RebasedThroughGeneration {
+			t.Fatalf("candidate round trip=%+v", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkspaceMutationTxUpsertCandidateClearsRebasedAndReplacesProvenance(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "gateway.db")
+	store, err := Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := NewWorkspaceRepo(store.DB())
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+	first := workspaceCandidateRecord(t, binding, true, 3)
+	second := workspaceCandidateRecord(t, binding, false, 0)
+	second.ImportedBy = "00000000-0000-4000-8000-000000000072"
+	second.ImportedAt = time.Date(2026, 7, 28, 15, 0, 0, 123456789, time.FixedZone("zero offset", 0))
+
+	if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		return tx.UpsertCandidate(context.Background(), first)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		return tx.UpsertCandidate(context.Background(), second)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	repo = NewWorkspaceRepo(store.DB())
+	var rebasedIsNull bool
+	var boundary int64
+	var importedBy string
+	var importedAt time.Time
+	if err := store.DB().QueryRow(`
+		SELECT rebased_tree IS NULL, rebased_through_generation, imported_by, imported_at
+		FROM workspace_candidates WHERE project_id=? AND workspace_id=?
+	`, binding.Scope.ProjectID, binding.Scope.WorkspaceID).Scan(&rebasedIsNull, &boundary, &importedBy, &importedAt); err != nil {
+		t.Fatal(err)
+	}
+	if !rebasedIsNull || boundary != 0 || importedBy != second.ImportedBy || !importedAt.Equal(second.ImportedAt) {
+		t.Fatalf("replacement columns null=%v boundary=%d imported_by=%q imported_at=%v", rebasedIsNull, boundary, importedBy, importedAt)
+	}
+
+	if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		candidate, err := tx.Candidate(context.Background())
+		if err != nil {
+			return err
+		}
+		if candidate == nil || candidate.RebasedSnapshot != nil || candidate.RebasedThroughGeneration != 0 ||
+			candidate.ImportedBy != second.ImportedBy || !candidate.ImportedAt.Equal(second.ImportedAt) ||
+			candidate.ImportedAt.Location() != time.UTC {
+			t.Fatalf("replaced candidate=%+v", candidate)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkspaceMutationTxUpsertCandidateRejectsInvalidRecord(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*WorkspaceCandidateRecord)
+	}{
+		{name: "accepted base", mutate: func(record *WorkspaceCandidateRecord) {
+			record.AcceptedBaseDigest = state.Digest("sha256:" + strings.Repeat("a", 64))
+		}},
+		{name: "working digest", mutate: func(record *WorkspaceCandidateRecord) {
+			record.WorkingTreeDigest = state.Digest("sha256:" + strings.Repeat("a", 64))
+		}},
+		{name: "stale direct snapshot", mutate: func(record *WorkspaceCandidateRecord) {
+			record.DirectSnapshot.Digest = state.Digest("sha256:" + strings.Repeat("a", 64))
+		}},
+		{name: "cross project direct snapshot", mutate: func(record *WorkspaceCandidateRecord) {
+			record.DirectSnapshot.Config.ProjectID = "00000000-0000-4000-8000-000000000002"
+			record.DirectSnapshot.Project.ID = "00000000-0000-4000-8000-000000000002"
+			record.DirectSnapshot.Digest = ""
+		}},
+		{name: "cross repository direct snapshot", mutate: func(record *WorkspaceCandidateRecord) {
+			record.DirectSnapshot.Config.Repository = types.RepositoryIdentity{
+				Provider: "github", ImmutableID: "R_other", CanonicalRemote: "https://github.com/acme/other",
+			}
+			tree, _ := state.EncodeTree(record.DirectSnapshot)
+			record.DirectSnapshot.Digest, _ = state.DigestTree(tree)
+			record.WorkingTreeDigest = record.DirectSnapshot.Digest
+		}},
+		{name: "stale rebased snapshot", mutate: func(record *WorkspaceCandidateRecord) {
+			record.RebasedSnapshot.Digest = state.Digest("sha256:" + strings.Repeat("a", 64))
+		}},
+		{name: "boundary without rebased snapshot", mutate: func(record *WorkspaceCandidateRecord) {
+			record.RebasedSnapshot = nil
+			record.RebasedThroughGeneration = 1
+		}},
+		{name: "negative rebased boundary", mutate: func(record *WorkspaceCandidateRecord) { record.RebasedThroughGeneration = -1 }},
+		{name: "principal", mutate: func(record *WorkspaceCandidateRecord) { record.ImportedBy = "invalid" }},
+		{name: "zero timestamp", mutate: func(record *WorkspaceCandidateRecord) { record.ImportedAt = time.Time{} }},
+		{name: "non UTC timestamp", mutate: func(record *WorkspaceCandidateRecord) {
+			record.ImportedAt = record.ImportedAt.In(time.FixedZone("offset", 3600))
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, repo := openWorkspaceStore(t)
+			binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+			record := workspaceCandidateRecord(t, binding, true, 1)
+			test.mutate(&record)
+			err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+				return tx.UpsertCandidate(context.Background(), record)
+			})
+			if err == nil {
+				t.Fatal("UpsertCandidate accepted invalid record")
+			}
+			err = repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+				candidate, err := tx.Candidate(context.Background())
+				if err == nil && candidate != nil {
+					t.Fatalf("invalid upsert persisted candidate %+v", candidate)
+				}
+				return err
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestWorkspaceMutationTxCandidateMutationCountsAndScope(t *testing.T) {
+	_, repo := openWorkspaceStore(t)
+	a := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout-a", 1, 11)
+	b := createBinding(t, repo, a.Scope.ProjectID, "00000000-0000-4000-8000-000000000012", "/checkout-b", 2, 12)
+	c := createBinding(t, repo, "00000000-0000-4000-8000-000000000002", string(a.Scope.WorkspaceID), "/checkout-c", 3, 13)
+	if err := repo.WithImmediateWorkspace(context.Background(), c.Scope, func(tx *WorkspaceMutationTx) error {
+		return tx.UpsertCandidate(context.Background(), workspaceCandidateRecord(t, c, false, 0))
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := repo.WithImmediateWorkspace(context.Background(), a.Scope, func(tx *WorkspaceMutationTx) error {
+		if err := tx.DeleteCandidate(context.Background(), false); err != nil {
+			return err
+		}
+		return tx.UpsertCandidate(context.Background(), workspaceCandidateRecord(t, a, false, 0))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.WithImmediateWorkspace(context.Background(), b.Scope, func(tx *WorkspaceMutationTx) error {
+		candidate, err := tx.Candidate(context.Background())
+		if err != nil {
+			return err
+		}
+		if candidate != nil {
+			t.Fatalf("workspace B observed workspace A candidate %+v", candidate)
+		}
+		return tx.DeleteCandidate(context.Background(), false)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := repo.WithImmediateWorkspace(context.Background(), a.Scope, func(tx *WorkspaceMutationTx) error {
+		return tx.DeleteCandidate(context.Background(), false)
+	})
+	if err == nil {
+		t.Fatal("DeleteCandidate expected absence despite a present row")
+	}
+	if err := repo.WithImmediateWorkspace(context.Background(), a.Scope, func(tx *WorkspaceMutationTx) error {
+		candidate, err := tx.Candidate(context.Background())
+		if err != nil || candidate == nil {
+			t.Fatalf("count mismatch removed candidate: candidate=%+v err=%v", candidate, err)
+		}
+		return tx.DeleteCandidate(context.Background(), true)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err = repo.WithImmediateWorkspace(context.Background(), a.Scope, func(tx *WorkspaceMutationTx) error {
+		return tx.DeleteCandidate(context.Background(), true)
+	})
+	if err == nil {
+		t.Fatal("DeleteCandidate expected a present row despite absence")
+	}
+	if err := repo.WithImmediateWorkspace(context.Background(), c.Scope, func(tx *WorkspaceMutationTx) error {
+		candidate, err := tx.Candidate(context.Background())
+		if err != nil {
+			return err
+		}
+		if candidate == nil {
+			t.Fatal("other project's same workspace ID candidate was deleted")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkspaceMutationTxUpsertCandidateRollsBackCallbackFailure(t *testing.T) {
+	_, repo := openWorkspaceStore(t)
+	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+	rollbackErr := errors.New("candidate rollback fixture")
+	err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		if err := tx.UpsertCandidate(context.Background(), workspaceCandidateRecord(t, binding, false, 0)); err != nil {
+			return err
+		}
+		return rollbackErr
+	})
+	if !errors.Is(err, rollbackErr) {
+		t.Fatalf("rollback error=%v, want fixture", err)
+	}
+	if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		candidate, err := tx.Candidate(context.Background())
+		if err == nil && candidate != nil {
+			t.Fatalf("rolled-back candidate persisted: %+v", candidate)
+		}
+		return err
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1198,17 +1510,51 @@ func encodedSnapshot(t *testing.T, snapshot state.Snapshot) (state.Snapshot, []b
 	return decoded, encoded
 }
 
+const workspaceCandidateImporter = "00000000-0000-4000-8000-000000000071"
+
+var workspaceCandidateImportedAt = time.Date(2026, 7, 28, 14, 0, 0, 0, time.UTC)
+
 func insertWorkspaceCandidate(t *testing.T, store *Store, scope types.WorkspaceScope, acceptedBase, working state.Digest, direct, rebased []byte, boundary int64) {
 	t.Helper()
 	_, err := store.DB().Exec(`
 		INSERT INTO workspace_candidates
 		(project_id, workspace_id, accepted_base_digest, working_tree_digest, direct_tree,
-		 rebased_tree, rebased_through_generation, imported_by)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 'test')
-	`, scope.ProjectID, scope.WorkspaceID, acceptedBase, working, direct, rebased, boundary)
+		 rebased_tree, rebased_through_generation, imported_by, imported_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, scope.ProjectID, scope.WorkspaceID, acceptedBase, working, direct, rebased, boundary,
+		workspaceCandidateImporter, workspaceCandidateImportedAt)
 	if err != nil {
 		t.Fatalf("insert workspace candidate: %v", err)
 	}
+}
+
+func workspaceCandidateRecord(t *testing.T, binding types.WorkspaceBinding, withRebased bool, boundary int64) WorkspaceCandidateRecord {
+	t.Helper()
+	direct, _ := encodedWorkspaceSnapshot(t, binding.Scope.ProjectID, binding.Repository)
+	record := WorkspaceCandidateRecord{
+		AcceptedBaseDigest:       state.Digest(binding.AcceptedTreeDigest),
+		WorkingTreeDigest:        direct.Digest,
+		DirectSnapshot:           direct,
+		RebasedThroughGeneration: boundary,
+		ImportedBy:               workspaceCandidateImporter,
+		ImportedAt:               workspaceCandidateImportedAt,
+	}
+	if withRebased {
+		rebased := direct
+		rebased.Config.Handle = types.ProjectHandle{Namespace: "acme", Name: "rebased"}
+		rebased, _ = encodedSnapshot(t, rebased)
+		record.RebasedSnapshot = &rebased
+	}
+	return record
+}
+
+func mustEncodeWorkspaceSnapshot(t *testing.T, snapshot state.Snapshot) state.Tree {
+	t.Helper()
+	tree, err := state.EncodeTree(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tree
 }
 
 func validWorkspaceOperation(operationID string) state.OperationV1 {

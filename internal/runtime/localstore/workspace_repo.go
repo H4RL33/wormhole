@@ -13,14 +13,16 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/H4RL33/wormhole/internal/types"
 	projectstate "github.com/H4RL33/wormhole/internal/types/projectstate"
 )
 
 var (
-	ErrCheckoutCollision   = errors.New("localstore: checkout collision")
-	ErrWorkspaceConflicted = errors.New("localstore: workspace conflicted")
+	ErrCheckoutCollision    = errors.New("localstore: checkout collision")
+	ErrWorkspaceConflicted  = errors.New("localstore: workspace conflicted")
+	ErrCommitOutcomeUnknown = errors.New("localstore: commit outcome unknown")
 )
 
 type WorkspaceConflictGate interface {
@@ -52,6 +54,8 @@ type WorkspaceCandidateRecord struct {
 	DirectSnapshot           projectstate.Snapshot
 	RebasedSnapshot          *projectstate.Snapshot
 	RebasedThroughGeneration int64
+	ImportedBy               string
+	ImportedAt               time.Time
 }
 
 type WorkspaceOperationInsert struct {
@@ -100,7 +104,7 @@ func (r *WorkspaceRepo) WithImmediateWorkspace(ctx context.Context, scope types.
 		return err
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return fmt.Errorf("localstore: commit workspace mutation: %w", err)
+		return fmt.Errorf("%w: localstore: commit workspace mutation: %w", ErrCommitOutcomeUnknown, err)
 	}
 	committed = true
 	return nil
@@ -350,14 +354,16 @@ func (tx *WorkspaceMutationTx) Candidate(ctx context.Context) (*WorkspaceCandida
 	var acceptedBaseDigest, workingTreeDigest string
 	var directBytes, rebasedBytes []byte
 	var rebasedThroughGeneration int64
+	var importedBy string
+	var importedAt time.Time
 	err = tx.conn.QueryRowContext(ctx, `
 		SELECT accepted_base_digest, working_tree_digest, direct_tree,
-		       rebased_tree, rebased_through_generation
+		       rebased_tree, rebased_through_generation, imported_by, imported_at
 		FROM workspace_candidates
 		WHERE project_id=? AND workspace_id=?
 	`, tx.scope.ProjectID, tx.scope.WorkspaceID).Scan(
 		&acceptedBaseDigest, &workingTreeDigest, &directBytes,
-		&rebasedBytes, &rebasedThroughGeneration,
+		&rebasedBytes, &rebasedThroughGeneration, &importedBy, &importedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -368,6 +374,13 @@ func (tx *WorkspaceMutationTx) Candidate(ctx context.Context) (*WorkspaceCandida
 	if acceptedBaseDigest != workspace.Binding.AcceptedTreeDigest {
 		return nil, fmt.Errorf("localstore: candidate accepted base differs from workspace binding")
 	}
+	if !types.CanonicalUUID(importedBy) {
+		return nil, fmt.Errorf("localstore: candidate has invalid import principal")
+	}
+	if !validUTCTimestamp(importedAt) {
+		return nil, fmt.Errorf("localstore: candidate has invalid import timestamp")
+	}
+	importedAt = importedAt.UTC()
 	direct, err := decodeCandidateSnapshot(directBytes, workspace.Binding)
 	if err != nil {
 		return nil, fmt.Errorf("localstore: decode direct candidate: %w", err)
@@ -380,6 +393,8 @@ func (tx *WorkspaceMutationTx) Candidate(ctx context.Context) (*WorkspaceCandida
 		WorkingTreeDigest:        projectstate.Digest(workingTreeDigest),
 		DirectSnapshot:           direct,
 		RebasedThroughGeneration: rebasedThroughGeneration,
+		ImportedBy:               importedBy,
+		ImportedAt:               importedAt,
 	}
 	if rebasedBytes == nil {
 		if rebasedThroughGeneration != 0 {
@@ -396,6 +411,104 @@ func (tx *WorkspaceMutationTx) Candidate(ctx context.Context) (*WorkspaceCandida
 	}
 	candidate.RebasedSnapshot = &rebased
 	return candidate, nil
+}
+
+// UpsertCandidate stores one fully validated candidate for this transaction's
+// exact workspace, including explicit immutable import provenance.
+func (tx *WorkspaceMutationTx) UpsertCandidate(ctx context.Context, candidate WorkspaceCandidateRecord) error {
+	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
+		return ErrNotFound
+	}
+	workspace, _, err := queryWorkspaceByScope(ctx, tx.conn, tx.scope)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("localstore: read candidate upsert workspace: %w", err)
+	}
+	if candidate.AcceptedBaseDigest != projectstate.Digest(workspace.Binding.AcceptedTreeDigest) {
+		return fmt.Errorf("localstore: candidate accepted base differs from workspace binding")
+	}
+	if !types.CanonicalUUID(candidate.ImportedBy) {
+		return fmt.Errorf("localstore: candidate has invalid import principal")
+	}
+	if !validUTCTimestamp(candidate.ImportedAt) {
+		return fmt.Errorf("localstore: candidate has invalid import timestamp")
+	}
+	directBytes, directDigest, err := encodeCandidateSnapshot(candidate.DirectSnapshot, workspace.Binding)
+	if err != nil {
+		return fmt.Errorf("localstore: encode direct candidate: %w", err)
+	}
+	if candidate.WorkingTreeDigest != directDigest {
+		return fmt.Errorf("localstore: candidate working-tree digest mismatch")
+	}
+	var rebasedBytes []byte
+	if candidate.RebasedSnapshot == nil {
+		if candidate.RebasedThroughGeneration != 0 {
+			return fmt.Errorf("localstore: direct candidate has a rebased generation")
+		}
+	} else {
+		if candidate.RebasedThroughGeneration < 0 {
+			return fmt.Errorf("localstore: candidate has a negative rebased generation")
+		}
+		rebasedBytes, _, err = encodeCandidateSnapshot(*candidate.RebasedSnapshot, workspace.Binding)
+		if err != nil {
+			return fmt.Errorf("localstore: encode rebased candidate: %w", err)
+		}
+	}
+	result, err := tx.conn.ExecContext(ctx, `
+		INSERT INTO workspace_candidates
+		(project_id, workspace_id, accepted_base_digest, working_tree_digest, direct_tree,
+		 rebased_tree, rebased_through_generation, imported_by, imported_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(project_id,workspace_id) DO UPDATE SET
+		 accepted_base_digest=excluded.accepted_base_digest,
+		 working_tree_digest=excluded.working_tree_digest,
+		 direct_tree=excluded.direct_tree,
+		 rebased_tree=excluded.rebased_tree,
+		 rebased_through_generation=excluded.rebased_through_generation,
+		 imported_by=excluded.imported_by,
+		 imported_at=excluded.imported_at
+	`, tx.scope.ProjectID, tx.scope.WorkspaceID, candidate.AcceptedBaseDigest,
+		candidate.WorkingTreeDigest, directBytes, rebasedBytes, candidate.RebasedThroughGeneration,
+		candidate.ImportedBy, candidate.ImportedAt.UTC())
+	if err != nil {
+		return fmt.Errorf("localstore: upsert workspace candidate: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("localstore: inspect workspace candidate upsert: %w", err)
+	}
+	if affected != 1 {
+		return fmt.Errorf("localstore: workspace candidate upsert affected %d rows", affected)
+	}
+	return nil
+}
+
+// DeleteCandidate removes the candidate from this transaction's exact
+// workspace and verifies the caller's presence precondition.
+func (tx *WorkspaceMutationTx) DeleteCandidate(ctx context.Context, expectedPresent bool) error {
+	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
+		return ErrNotFound
+	}
+	result, err := tx.conn.ExecContext(ctx, `
+		DELETE FROM workspace_candidates WHERE project_id=? AND workspace_id=?
+	`, tx.scope.ProjectID, tx.scope.WorkspaceID)
+	if err != nil {
+		return fmt.Errorf("localstore: delete workspace candidate: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("localstore: inspect workspace candidate delete: %w", err)
+	}
+	want := int64(0)
+	if expectedPresent {
+		want = 1
+	}
+	if affected != want {
+		return fmt.Errorf("localstore: workspace candidate delete affected %d rows, want %d", affected, want)
+	}
+	return nil
 }
 
 // HasOpenConflictForKeys reports whether unresolved evidence targets any key.
@@ -482,6 +595,40 @@ func decodeCandidateSnapshot(encoded []byte, binding types.WorkspaceBinding) (pr
 		return projectstate.Snapshot{}, fmt.Errorf("candidate snapshot differs from workspace binding")
 	}
 	return snapshot, nil
+}
+
+func encodeCandidateSnapshot(snapshot projectstate.Snapshot, binding types.WorkspaceBinding) ([]byte, projectstate.Digest, error) {
+	tree, err := projectstate.EncodeTree(snapshot)
+	if err != nil {
+		return nil, "", err
+	}
+	digest, err := projectstate.DigestTree(tree)
+	if err != nil {
+		return nil, "", err
+	}
+	if snapshot.Digest != digest {
+		return nil, "", fmt.Errorf("candidate snapshot digest is stale")
+	}
+	encoded, err := encodeFileList(tree)
+	if err != nil {
+		return nil, "", err
+	}
+	decoded, err := decodeCandidateSnapshot(encoded, binding)
+	if err != nil {
+		return nil, "", err
+	}
+	if decoded.Digest != digest {
+		return nil, "", fmt.Errorf("candidate snapshot digest changed during canonical encoding")
+	}
+	return encoded, digest, nil
+}
+
+func validUTCTimestamp(value time.Time) bool {
+	if value.IsZero() {
+		return false
+	}
+	_, offset := value.Zone()
+	return offset == 0
 }
 
 // RegisterWorkspace atomically checks checkout identity collisions and stores

@@ -1079,10 +1079,10 @@ func TestStatusAndApplyFailClosedOnCorruptPersistedState(t *testing.T) {
 				if _, err := store.DB().Exec(`
 					INSERT INTO workspace_candidates
 					(project_id, workspace_id, accepted_base_digest, working_tree_digest,
-					 direct_tree, rebased_tree, rebased_through_generation, imported_by)
-					VALUES (?, ?, ?, ?, ?, NULL, 0, 'corrupt-service-test')
+					 direct_tree, rebased_tree, rebased_through_generation, imported_by, imported_at)
+					VALUES (?, ?, ?, ?, ?, NULL, 0, '00000000-0000-4000-8000-000000000071', ?)
 				`, binding.Scope.ProjectID, binding.Scope.WorkspaceID,
-					binding.AcceptedTreeDigest, binding.AcceptedTreeDigest, []byte{1}); err != nil {
+					binding.AcceptedTreeDigest, binding.AcceptedTreeDigest, []byte{1}, time.Date(2026, 7, 28, 14, 0, 0, 0, time.UTC)); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -1240,9 +1240,10 @@ func insertServiceCandidate(t *testing.T, store *localstore.Store, scope types.W
 	if _, err := store.DB().Exec(`
 		INSERT INTO workspace_candidates
 		(project_id, workspace_id, accepted_base_digest, working_tree_digest, direct_tree,
-		 rebased_tree, rebased_through_generation, imported_by)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 'service-test')
-	`, scope.ProjectID, scope.WorkspaceID, accepted, direct.Digest, directBytes, rebasedBytes, boundary); err != nil {
+		 rebased_tree, rebased_through_generation, imported_by, imported_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, '00000000-0000-4000-8000-000000000071', ?)
+	`, scope.ProjectID, scope.WorkspaceID, accepted, direct.Digest, directBytes, rebasedBytes, boundary,
+		time.Date(2026, 7, 28, 14, 0, 0, 0, time.UTC)); err != nil {
 		t.Fatal(err)
 	}
 }
