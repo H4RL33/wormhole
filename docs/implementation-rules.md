@@ -614,7 +614,15 @@ the same layering pattern and isolation discipline.
   `discardResultV1`/`discardReceiptV1`. Each receipt contains schema version, action,
   outcome, and result; restore alone additionally carries a
   retry digest that is nil exactly for clean and non-nil exactly for conflicted.
-  Action/outcome must equal the receipt row. Localstore treats `result_json` as
+  Action/outcome must equal the receipt row. A transition receipt's logical key is the
+  exact textual project/workspace/request triple. For detection only, readers CAST-match
+  all three persisted key columns so a BLOB alias cannot hide: a present key requires
+  exactly one match, exact raw key values, and TEXT storage for every selected column;
+  zero matches must satisfy the strict all-null absence shape, and multiple matches are
+  corruption. `InsertTransitionReceipt` strict-preflights that same logical key inside
+  its caller-owned `BEGIN IMMEDIATE`, so it cannot insert beside a hidden alias. This
+  hardening uses the existing table and requires no schema change. Localstore treats
+  `result_json` as
   action-opaque: it requires exactly one valid compact JSON value followed by exactly one
   LF, preserves those bytes and object-member order, and never schema-decodes or
   generic-map re-encodes the value. The action-specific ProjectState codec owns schema,

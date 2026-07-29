@@ -629,6 +629,13 @@ private tagged v1 codecs: `stashResultV1`/`stashReceiptV1`,
 outcome, and result; restore alone also carries its conflict retry digest. Conflict
 arrays are non-nil (`[]`, never `null`), optional pointers encode explicit `null`, and
 golden result/receipt bytes and hard-coded canonical digests cover every action/outcome.
+A transition receipt's logical key is the exact textual project/workspace/request triple.
+For detection only, localstore readers CAST-match all three persisted key columns so BLOB
+aliases are exposed. A present key requires exactly one match, exact raw key values, and
+TEXT storage for every selected column; zero matches must satisfy the strict all-null
+absence shape, and multiple matches are corruption. Inserts strict-preflight the same
+logical key inside the caller-owned immediate transaction, preventing hidden logical
+duplicates without a schema change.
 Localstore treats `result_json` as action-opaque: it requires exactly one valid compact
 JSON value followed by exactly one LF, preserves those bytes and object-member order, and
 never schema-decodes or generic-map re-encodes the value. The action-specific ProjectState
@@ -1172,6 +1179,10 @@ legacy or unknown until explicitly linked.
   They also cover strict boundary/envelope/current-row corruption, open-conflict rejection
   with zero mutation, exact clean/pending/conflicted statuses, and read-only repeated
   access to retained conflicted evidence without candidate or operation-row changes.
+  Before the Stash tranche commits, a hidden-BLOB receipt-key retry must fail with zero
+  mutation, sibling isolation must include the same project with different workspaces,
+  and unrestricted update-blocking triggers must prove an idempotent retry cannot rewrite
+  owner, timestamp, or any other column.
 - Checkpoint conflict tests require zero `CheckpointResult`,
   `localstore.ErrWorkspaceConflicted`,
   separate unchanged status digest/generation proof, and exact-scope isolation.

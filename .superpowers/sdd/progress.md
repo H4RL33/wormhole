@@ -377,3 +377,19 @@ clean, and package statement coverage was 83.2%. Fresh review approved with no r
 findings, and formatting/diff checks were clean. The next A4 tranche resumes
 `Service.Stash`; `RestoreRetryState` remains a RestoreStash prerequisite and may follow
 Stash.
+
+A4 transition receipt logical-key hardening `d6f583d`: causal REDs proved that a BLOB
+request key was invisible as absence, a CAST-equivalent TEXT+BLOB duplicate served one
+row, and a direct repository insert succeeded beside a hidden BLOB key. The strict reader
+now CAST-matches the complete project/workspace/request logical key for detection, counts
+matches, validates exact raw keys and every selected storage class, requires the strict
+all-null shape for absence, and rejects ambiguity. `InsertTransitionReceipt` now
+strict-preflights the same logical key under its caller-owned immediate transaction, so it
+cannot create a hidden logical duplicate; no schema change was required. The causal tests,
+review, and fix round completed; full localstore tests were GREEN, the race suite completed
+in 68.078s, vet was clean, package statement coverage was 83.2%, and formatting/diff
+checks were clean. Fresh review approved with no remaining findings. The next A4 tranche
+resumes `Service.Stash`; before commit it must add a hidden-BLOB receipt-key zero-mutation
+regression, extend sibling isolation to the same project with different workspaces, and
+replace state/status-specific retry write blockers with unrestricted `BEFORE UPDATE`
+triggers so owner, timestamp, and other-column rewrites cannot evade them.

@@ -1699,7 +1699,14 @@ restore always reloads and strict-recomputes the current view, stash replay, mer
 evidence, and retry digest before it may match and return the receipt. Receipt
 `actor_json` is immutable canonical JSON; every read strict-decodes it, requires
 byte-identical re-encoding, calls `ValidateHistorical`, and matches it to the actor
-envelope bound into the request digest. Localstore treats receipt `result_json` as
+envelope bound into the request digest. A transition receipt's logical key is the exact
+textual project/workspace/request triple. For detection only, localstore readers
+CAST-match all three persisted key columns to expose storage-class aliases. A present key
+requires exactly one match, exact raw key values, and TEXT storage for every selected
+column; zero matches must satisfy the strict all-null absence shape, and multiple matches
+fail as ambiguity. `InsertTransitionReceipt` strict-preflights that same logical key in
+the caller-owned `BEGIN IMMEDIATE`, so no hidden logical duplicate can be inserted. This
+requires no schema or migration change. Localstore treats receipt `result_json` as
 action-opaque: it requires exactly one valid compact JSON value followed by exactly one
 LF, preserves the bytes and object-member order, and never schema-decodes or generic-map
 re-encodes it. The action-specific ProjectState codec owns schema, tags, member order,
@@ -2291,6 +2298,12 @@ accepted snapshot, all non-status binding fields, and binding `created_at` to re
 only the expected status/`updated_at` mutation from SetStatus and open-conflict replacement
 may differ. Zero-write retry must reject drift in either persisted binding timestamp,
 including a later same-status rewrite that changes only `updated_at`.
+
+Before committing `Service.Stash`, add a hidden-BLOB receipt-key retry that returns zero
+and leaves every row byte-identical, extend sibling isolation to the same project ID with
+different workspace IDs, and make the idempotent read-only retry's write-blocking triggers
+unrestricted `BEFORE UPDATE` triggers so owner, timestamp, and other-column rewrites
+cannot evade them.
 
 Add `TestStashRejectsOpenConflictWithoutMutation`, requiring `StashResult{}`,
 `errors.Is(err, localstore.ErrWorkspaceConflicted)`, and byte-identical candidate,
