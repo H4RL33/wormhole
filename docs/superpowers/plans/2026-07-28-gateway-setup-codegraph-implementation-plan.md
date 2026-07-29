@@ -1725,10 +1725,14 @@ func TestCodexLifecycleUsesSupportedJSONAndExactAdd(t *testing.T) {
     runner := connectorRunner(t)
     adapter := NewCodexAdapter(runner)
     if adapter.AdapterName() != AdapterName("codex") { t.Fatalf("adapter=%q",adapter.AdapterName()) }
-    prior, err := adapter.Inspect(t.Context())
+    prior := ConnectorEntry{State:EntryAbsent}
+    desired := desiredStdio("/abs/wormhole")
+    confirmed := confirmedApplyChange(t,prior,desired)
+    _, err := ApplyTransactional(
+        t.Context(),adapter,desired,confirmed,
+        privateBackupStore(t),operationJournal(t),operationCoordinator(t),
+    )
     if err != nil { t.Fatal(err) }
-    plan, _ := adapter.Plan(t.Context(),prior,desiredStdio("/abs/wormhole"))
-    if err := adapter.Apply(t.Context(),plan); err != nil { t.Fatal(err) }
     assertCallsContain(t,runner,[]string{"codex","mcp","get","wormhole","--json"})
     assertCallsContain(t,runner,[]string{"codex","mcp","list","--json"})
     assertCallsContain(t,runner,[]string{"codex","mcp","add","wormhole","--","/abs/wormhole","mcp"})
