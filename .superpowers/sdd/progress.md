@@ -190,5 +190,9 @@ full localstore, race, vet, and repository-wide `go test ./...` GREEN; fresh rea
 review found no Critical/Important issues. A4.1 direct-delta implementation `097b43c`:
 focused RED/GREEN, full projectstate, race, vet, formatting,
 repository-wide `go test ./...`, and 84.8% package coverage GREEN; fresh read-only review
-found no Critical/Important issues. Later service tranches and complete A4 coverage gate
-pending.
+found no Critical/Important issues. Candidate persistence and COMMIT-outcome handling
+`21bc549`, followed by exact v2 operation readers/transitions `6a95648`: genuine focused
+RED/GREEN, full localstore/projectstate and repository tests, race, vet, formatting, and
+diff checks GREEN; both fresh read-only reviews found no Critical/Important issues.
+Conflict/materialization persistence, Import, stash/restore, Git observation, branch
+guard, and the complete A4 coverage gate remain pending.
