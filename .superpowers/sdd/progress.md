@@ -553,3 +553,36 @@ Complete stash persistence and restore are now implemented. The next A4 tranche 
 localstore prerequisites for atomic Git observation and branch guards, followed by the observer,
 branch reject/discard, and complete linearization/restart proof; Task A4 as a whole remains in
 progress.
+
+A4 accepted-base localstore prerequisite `c6de39c` (`feat: add accepted-base transaction
+seams`): complete. `AdvanceAcceptedBase` compare-and-swaps the exact complete expected binding,
+canonical accepted snapshot bytes, status, and private raw timestamp predicates; it strictly
+validates the observed canonical tree and project/repository identity, atomically advances the
+accepted ref/commit/digest/snapshot/status, and returns only an exact strict post-write reread.
+`AcceptMaterialization` accepts only an exactly matching `published` or `recovered_new` journal
+with a non-nil included-operation proof. Its full-record CAS covers canonical prior/candidate
+trees, every digest and checkout/generation field, proof bytes, and an unexported raw metadata
+token containing paths plus timestamp values, raw text, and storage classes. It changes only
+the journal state/timestamp to `accepted`, strictly postreads the complete disposition and
+metadata, leaves owned operations untouched, and preserves the accepted journal as immutable
+historical evidence.
+
+Fresh review exposed and fixed two Important defects: `CURRENT_TIMESTAMP` could move an
+existing future timestamp backwards, and public-field equality could miss stale hidden
+materialization path/timestamp/storage-class metadata. Both seams now reject backwards returned
+timestamps, and materialization acceptance binds the complete private raw metadata token before
+mutation. Adversarial coverage proves stale full/public/private preconditions, missing proof,
+both eligible states, invalid canonical trees and identities, ignored/aborted writes, `AFTER`
+trigger drift, timestamp regression and same-second acceptance, exact raw-row deltas, complete
+rollback with writer release, sibling-workspace isolation, deep ownership, restart persistence,
+and immutable journal/operation history. Two independent final reviews approved with no
+remaining findings.
+
+Fresh verification from the repository root passed the focused accepted-base tests, full
+ProjectState tests, full `go test ./... -count=1`, focused and full localstore race runs,
+`go vet ./...`, formatting, and diff checks. Localstore statement coverage was 84.0%; method
+coverage was 92.3% for `AdvanceAcceptedBase` and 84.6% for `AcceptMaterialization`,
+`workspaceBindingMutationMetadata` was 92.3%, and the materialization metadata/equality plus
+stored/monotonic timestamp helpers were 100%. The next A4 tranche is the strict discard
+request-digest/receipt codec, followed by `ObserveGitBase` and `RefreshWorkspace`; Task A4
+remains in progress.
