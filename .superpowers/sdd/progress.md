@@ -521,3 +521,35 @@ PASS. Two fresh reviews approved with no remaining findings.
 This commit is the timestamp-returning prerequisite only. `Service.RestoreStash` remains next
 and must exact-compare this returned write timestamp with the subsequent strict-state reread;
 no restore-service wiring is claimed here.
+
+A4 `Service.RestoreStash` `26fe16a` (`feat: restore workspace stashes`): complete. The
+causal RED first proved the service method was absent. A new request runs in one immediate
+exact-workspace transaction after strict request and status/open-conflict coherence validation.
+A clean semantic rebase persists the merged candidate while preserving current candidate
+provenance where present, transitions exactly the current active suffix to `rebased`, resolves
+open conflicts, sets `pending`, consumes the immutable stash, and writes the exact clean
+receipt. Its exact receipt retry is read-only.
+
+A conflicted rebase persists only the exact semantic conflict occurrences and `conflicted`
+status, retains the complete stash, candidate, and operation inventory unchanged, exact-compares
+the returned status timestamp with the same-transaction strict reread, validates the permitted
+transition delta, and binds the resulting complete persisted-state retry digest into the
+receipt. An exact conflicted retry strictly recomputes the plan/result and retry digest before
+returning read-only; request-ID/action/digest collisions and any result, protected-state,
+membership, ordering, raw-byte, timestamp, or semantic-evidence drift fail closed without
+mutation.
+
+Adversarial proof covers exact clean/conflicted write order, rollback at every write stage,
+status-timestamp trigger divergence, same-project sibling isolation, absorbed-prefix and sparse
+later-row preservation, stash-owned-row drift, deep-owned results, database close/reopen and
+byte-identical conflicted state, clean and conflicted idempotent retries, cross-action collision,
+and both successful and failed unknown-commit confirmation matrices. Two independent fresh
+reviews approved with no remaining findings. Fresh full repository tests, focused race and
+full localstore race, and `go vet ./...` passed; ProjectState statement coverage was 85.9% and
+localstore statement coverage was 83.5%, both above the accepted 80% threshold. Formatting and
+diff checks were clean.
+
+Complete stash persistence and restore are now implemented. The next A4 tranche is the
+localstore prerequisites for atomic Git observation and branch guards, followed by the observer,
+branch reject/discard, and complete linearization/restart proof; Task A4 as a whole remains in
+progress.
