@@ -487,23 +487,32 @@ the same layering pattern and isolation discipline.
   stable path; a KB tombstone replaces `record.json` and requires `body.md` to be
   absent. Missing targets are broken, while only schema-declared historical
   references may resolve to tombstones. Tombstone/edit and tombstone/KB-body
-  changes conflict; resurrection must explicitly name the tombstone digest.
+  changes conflict; resurrection must explicitly name the tombstone digest. Merge
+  lifecycle equality is byte-exact. From an old tombstone, exact endpoints coalesce
+  and one unchanged endpoint yields to the other; only divergent non-base endpoints
+  conflict. From an old live mutable record, exact dual tombstones coalesce and unequal
+  dual tombstones conflict. KB root and `/body` evidence are independent.
 - Portable Events and Git links are both live-only, immutable, and add-only. An
   exact canonical same-ID replay coalesces; any unequal same-ID value uses the
   generic immutable-record error, conflict, and direct-delta sentinel. Neither kind
   may be tombstoned or resurrected. `ErrImmutableEvent` and a Git-link-specific name
   may remain compatibility aliases to `ErrImmutableRecord`, but they are not distinct
-  normative behaviours. Raw disappearance of an old Event or Git link produces
-  immutable-record evidence; raw disappearance of a mutable record is invalid unless
-  its stable path contains the valid typed tombstone.
+  normative behaviours. An old-live immutable record is clean only when both endpoints
+  still equal the old record. Valid disappearance produces immutable-record evidence;
+  a side made reference-invalid by disappearance returns its typed validation error.
+  After old-base validation, raw mutable disappearance is preflighted in new-base then
+  candidate order before either side validates and is invalid unless its stable path
+  contains the valid typed tombstone.
 - For an existing live mutable record, `created_at` is immutable on ordinary update
   through the reducer, direct import, and rebase. An explicit digest-proven
   resurrection may carry a fresh valid `created_at` because tombstones retain content
-  digests, not prior record bytes. `updated_at` is excluded from semantic conflict
-  detection: after semantic resolution, take the only semantic editor's timestamp,
-  the later UTC timestamp when both sides merge cleanly, or the old-base timestamp
-  when neither side changed semantics. A timestamp never selects or suppresses a
-  semantic change.
+  digests, not prior record bytes. Exact lifecycle endpoint comparisons include
+  `updated_at`. For old-live/live-live semantic resolution, take the only semantic
+  editor's timestamp, the later UTC timestamp when both sides merge cleanly, or the
+  old-base timestamp when neither side changed semantics. For an old-live tombstone
+  racing a live endpoint, a timestamp-only live difference is not a semantic edit, so
+  the tombstone wins without timestamp selection. A timestamp never selects or
+  suppresses a semantic change.
 - Snapshot version, project ID, and repository identity are immutable binding
   invariants on every accepted/candidate/composed/rebased snapshot. `Config.Handle`
   and `Remotes` are Git-base-owned: operations and semantic diff exclude them; rebase
@@ -565,19 +574,25 @@ the same layering pattern and isolation discipline.
 - Diff and conflict paths use RFC 6901 escaping, `""` for a record root, and `/body`
   for KB Markdown. `FieldValue` has `Present bool` tagged `json:"present"` and
   `Value json.RawMessage` tagged `json:"value,omitempty"`: false requires nil Value;
-  true requires exactly one canonical JSON value, including literal `null`. Objects recurse
-  in sorted-key order; arrays are atomic. Diff attribution comes from the last applied
-  active operation affecting the record key. Conflict IDs are the shared canonical
-  `sha256:<lowerhex>` digest of a versioned key/path/kind/base/ours/theirs tuple, and
-  conflicts sort by entity kind, record ID, field path, conflict kind, then ID.
+  true requires exactly one canonical JSON value, including literal `null`. Complete
+  root values use the concrete typed record's canonical schema field order. Generic
+  sorted-map JSON exists only transiently while recursively merging object members;
+  roots are rehydrated through their strict concrete type before assignment, evidence
+  comparison, or exposure. Persisted conflict reads must perform the same rehydration
+  because canonical encoding of a `json.RawMessage` may normalize root member order.
+  Arrays are atomic. Diff attribution comes from the last applied active operation
+  affecting the record key. Conflict IDs are the shared canonical `sha256:<lowerhex>`
+  digest of a versioned key/path/kind/base/ours/theirs tuple, and conflicts sort by
+  entity kind, record ID, field path, conflict kind, then ID.
 - Markdown merge canonicalizes LF, computes deterministic minimum-edit old-base LCS
   hunks, prefers the base/deletion-side step for equal-cost choices, and orders hunks
   by base start, base end, and inserted bytes. Non-overlapping hunks merge; identical
   same-anchor insertions coalesce; unequal same-anchor insertions and overlapping
   replacement/deletion hunks conflict. Never put conflict markers in a candidate.
 - A conflicted three-way rebase returns the complete validated prior composed candidate
-  byte-identically, never a partial merge. The importer atomically persists that `ours`
-  surface with the complete new direct `theirs` tree, both-side conflict evidence,
+  byte-identically, never a partial merge. Evidence orientation is always
+  `Base=oldBase`, `Ours=candidate`, and `Theirs=newBase`. The importer atomically persists
+  that `ours` surface with the complete new direct `theirs` tree, both-side evidence,
   absorbed generation/row states, and conflicted status. Restart reproduces it.
   Checkpoint returns zero `CheckpointResult` plus
   `localstore.ErrWorkspaceConflicted`; callers use

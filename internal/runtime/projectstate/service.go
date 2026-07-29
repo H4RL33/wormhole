@@ -1,6 +1,7 @@
 package projectstate
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"errors"
@@ -37,9 +38,11 @@ type ServiceConfig struct {
 }
 
 type WorkspaceStatus struct {
-	Binding          types.WorkspaceBinding
-	State            string
-	AcceptedSnapshot state.Snapshot
+	Binding           types.WorkspaceBinding
+	State             string
+	AcceptedSnapshot  state.Snapshot
+	CandidateDigest   state.Digest
+	OverlayGeneration int64
 }
 
 type Service struct {
@@ -175,14 +178,225 @@ func (s *Service) Status(ctx context.Context, scope types.WorkspaceScope) (Works
 	if s == nil || s.repo == nil {
 		return WorkspaceStatus{}, localstore.ErrNotFound
 	}
-	record, err := s.repo.Workspace(ctx, scope)
+	var status WorkspaceStatus
+	err := s.repo.WithImmediateWorkspace(ctx, scope, func(tx *localstore.WorkspaceMutationTx) error {
+		var err error
+		status, _, _, err = readComposedWorkspace(ctx, tx)
+		return err
+	})
 	if err != nil {
 		return WorkspaceStatus{}, err
 	}
-	if err := verifyBindingCheckout(record.Binding); err != nil {
+	return status, nil
+}
+
+func (s *Service) Diff(ctx context.Context, scope types.WorkspaceScope) (Diff, error) {
+	if s == nil || s.repo == nil {
+		return Diff{}, localstore.ErrNotFound
+	}
+	var result Diff
+	err := s.repo.WithImmediateWorkspace(ctx, scope, func(tx *localstore.WorkspaceMutationTx) error {
+		status, view, operations, err := readComposedWorkspace(ctx, tx)
+		if err != nil {
+			return err
+		}
+		actors := make(map[state.RecordKey]types.ActorEnvelope, len(operations))
+		for _, stored := range operations {
+			key := operationTargetKey(stored.Operation)
+			if key.Kind == "" || key.ID == "" {
+				return fmt.Errorf("projectstate: active operation has no target key")
+			}
+			actors[key] = stored.Operation.Actor
+		}
+		result, err = SemanticDiff(status.AcceptedSnapshot, view.Snapshot, actors)
+		return err
+	})
+	if err != nil {
+		return Diff{}, err
+	}
+	return result, nil
+}
+
+func (s *Service) Apply(ctx context.Context, scope types.WorkspaceScope, operation state.OperationV1) (WorkspaceStatus, error) {
+	return s.ApplyBatch(ctx, scope, []state.OperationV1{operation})
+}
+
+func (s *Service) ApplyBatch(ctx context.Context, scope types.WorkspaceScope, operations []state.OperationV1) (WorkspaceStatus, error) {
+	if s == nil || s.repo == nil {
 		return WorkspaceStatus{}, localstore.ErrNotFound
 	}
-	return WorkspaceStatus{Binding: record.Binding, State: record.State, AcceptedSnapshot: record.Snapshot}, nil
+	if len(operations) == 0 {
+		return WorkspaceStatus{}, fmt.Errorf("projectstate: operation batch is empty")
+	}
+	canonical := make([][]byte, len(operations))
+	targets := make([]state.RecordKey, len(operations))
+	seen := make(map[string]struct{}, len(operations))
+	for index, operation := range operations {
+		if err := operation.Actor.ValidateLocalAction(); err != nil {
+			return WorkspaceStatus{}, err
+		}
+		encoded, err := state.CanonicalOperation(operation)
+		if err != nil {
+			return WorkspaceStatus{}, err
+		}
+		if _, duplicate := seen[operation.ID]; duplicate {
+			return WorkspaceStatus{}, fmt.Errorf("projectstate: duplicate operation ID %s", operation.ID)
+		}
+		seen[operation.ID] = struct{}{}
+		canonical[index] = encoded
+		targets[index] = operationTargetKey(operation)
+	}
+
+	var result WorkspaceStatus
+	err := s.repo.WithImmediateWorkspace(ctx, scope, func(tx *localstore.WorkspaceMutationTx) error {
+		status, view, _, err := readComposedWorkspace(ctx, tx)
+		if err != nil {
+			return err
+		}
+		workspaceState := "pending"
+		openConflicts, err := tx.HasOpenConflicts(ctx)
+		if err != nil {
+			return err
+		}
+		if openConflicts {
+			targeted, err := tx.HasOpenConflictForKeys(ctx, targets)
+			if err != nil {
+				return err
+			}
+			if targeted {
+				return localstore.ErrWorkspaceConflicted
+			}
+			workspaceState = "conflicted"
+		}
+		nextGeneration, err := tx.NextGeneration(ctx)
+		if err != nil {
+			return err
+		}
+		if nextGeneration <= view.ThroughGeneration {
+			return fmt.Errorf("projectstate: next operation generation %d does not follow composed generation %d", nextGeneration, view.ThroughGeneration)
+		}
+		inserts := make([]localstore.WorkspaceOperationInsert, 0, len(operations))
+		current := view.Snapshot
+		for index, operation := range operations {
+			current, err = state.ApplyOperation(current, operation)
+			if err != nil {
+				return err
+			}
+			inserts = append(inserts, localstore.WorkspaceOperationInsert{
+				Generation: nextGeneration + int64(index), OperationID: operation.ID, OperationJSON: canonical[index],
+			})
+		}
+		if err := tx.InsertActiveOperations(ctx, inserts); err != nil {
+			return err
+		}
+		if err := tx.SetStatus(ctx, workspaceState); err != nil {
+			return err
+		}
+		status.State = workspaceState
+		status.CandidateDigest = current.Digest
+		status.OverlayGeneration = nextGeneration + int64(len(operations)) - 1
+		result = status
+		return nil
+	})
+	if err != nil {
+		return WorkspaceStatus{}, err
+	}
+	return result, nil
+}
+
+func operationTargetKey(operation state.OperationV1) state.RecordKey {
+	switch operation.Kind {
+	case state.OperationPutRecord:
+		value := operation.PutRecord.Record
+		switch {
+		case value.Project != nil:
+			return state.RecordKey{Kind: "project", ID: value.Project.ID}
+		case value.Actor != nil:
+			return state.RecordKey{Kind: "actor", ID: value.Actor.ID}
+		case value.Task != nil:
+			return state.RecordKey{Kind: "task", ID: value.Task.ID}
+		case value.TaskLink != nil:
+			return state.RecordKey{Kind: "task_link", ID: value.TaskLink.ID}
+		case value.Channel != nil:
+			return state.RecordKey{Kind: "channel", ID: value.Channel.ID}
+		case value.Event != nil:
+			return state.RecordKey{Kind: "event", ID: value.Event.ID}
+		case value.GitLink != nil:
+			return state.RecordKey{Kind: "git_link", ID: value.GitLink.ID}
+		}
+	case state.OperationPutKBArticle:
+		return state.RecordKey{Kind: "kb_article", ID: operation.PutKBArticle.Record.ID}
+	case state.OperationTombstone:
+		return operation.Tombstone.Key
+	case state.OperationResurrect:
+		return operation.Resurrect.Key
+	}
+	return state.RecordKey{}
+}
+
+func readComposedWorkspace(ctx context.Context, tx *localstore.WorkspaceMutationTx) (WorkspaceStatus, ComposedView, []StoredOperation, error) {
+	record, err := tx.Workspace(ctx)
+	if err != nil {
+		return WorkspaceStatus{}, ComposedView{}, nil, err
+	}
+	if err := verifyBindingCheckout(record.Binding); err != nil {
+		return WorkspaceStatus{}, ComposedView{}, nil, localstore.ErrNotFound
+	}
+	openConflicts, err := tx.HasOpenConflicts(ctx)
+	if err != nil {
+		return WorkspaceStatus{}, ComposedView{}, nil, err
+	}
+	if (record.State == "conflicted") != openConflicts {
+		return WorkspaceStatus{}, ComposedView{}, nil, fmt.Errorf("projectstate: workspace conflict state does not match open conflict evidence")
+	}
+	candidate, err := tx.Candidate(ctx)
+	if err != nil {
+		return WorkspaceStatus{}, ComposedView{}, nil, err
+	}
+	start := record.Snapshot
+	var boundary int64
+	if candidate != nil {
+		start = candidate.DirectSnapshot
+		if candidate.RebasedSnapshot != nil {
+			start = *candidate.RebasedSnapshot
+			boundary = candidate.RebasedThroughGeneration
+		}
+	}
+	rows, err := tx.ActiveOperationsAfter(ctx, boundary)
+	if err != nil {
+		return WorkspaceStatus{}, ComposedView{}, nil, err
+	}
+	operations, err := decodeStoredOperations(rows)
+	if err != nil {
+		return WorkspaceStatus{}, ComposedView{}, nil, err
+	}
+	view, err := Compose(start, boundary, operations)
+	if err != nil {
+		return WorkspaceStatus{}, ComposedView{}, nil, err
+	}
+	return WorkspaceStatus{
+		Binding: record.Binding, State: record.State, AcceptedSnapshot: record.Snapshot,
+		CandidateDigest: view.Snapshot.Digest, OverlayGeneration: view.ThroughGeneration,
+	}, view, operations, nil
+}
+
+func decodeStoredOperations(rows []localstore.WorkspaceOperation) ([]StoredOperation, error) {
+	operations := make([]StoredOperation, 0, len(rows))
+	for _, row := range rows {
+		if row.Generation <= 0 || row.State != "active" || !types.CanonicalUUID(row.OperationID) {
+			return nil, fmt.Errorf("projectstate: invalid active workspace operation metadata")
+		}
+		operation, err := state.DecodeOperation(row.OperationJSON)
+		if err != nil {
+			return nil, fmt.Errorf("projectstate: decode active workspace operation: %w", err)
+		}
+		canonical, err := state.CanonicalOperation(operation)
+		if err != nil || operation.ID != row.OperationID || !bytes.Equal(canonical, row.OperationJSON) {
+			return nil, fmt.Errorf("projectstate: active workspace operation does not match its row")
+		}
+		operations = append(operations, StoredOperation{Generation: row.Generation, Operation: operation})
+	}
+	return operations, nil
 }
 
 func verifyBindingCheckout(binding types.WorkspaceBinding) error {

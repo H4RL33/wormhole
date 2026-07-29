@@ -917,7 +917,7 @@ lets Task 4 absorb rows as `rebased` without replaying stale whole-view precondi
 
 Apply delegates to ApplyBatch with one element. ApplyBatch rejects an empty batch, duplicate operation IDs, and every actor that fails ValidateLocalAction; under one BEGIN IMMEDIATE it composes the current view, applies operations in caller order through projectstate.ApplyOperation (each ExpectedViewDigest must chain to the prior result), allocates consecutive generations, and appends every row or none. This is the atomic path for task-status-plus-event and every other multi-record local mutation.
 
-- [ ] **Step 1: Write RED shared immutable-record, strict-codec, digest, and created-at tests**
+- [x] **Step 1: Write RED shared immutable-record, strict-codec, digest, and created-at tests**
 
 Add fixed-golden tests that `DecodeOperation` rejects unknown fields, trailing JSON,
 non-canonical bytes, malformed/extra payloads, invalid actor/ID/digest values, and that
@@ -932,7 +932,7 @@ Run: go test ./internal/types/projectstate -run 'Test(DecodeOperation|DigestCano
 Expected: FAIL because the generic immutable contract, strict decoder, exported digests,
 Git-link live-only validation, and created-at guard are absent.
 
-- [ ] **Step 2: Implement the shared Task-1 corrections**
+- [x] **Step 2: Implement the shared Task-1 corrections**
 
 Add `ErrImmutableRecord`; retain `ErrImmutableEvent` and, only if a caller needs it, a
 Git-link name as aliases. Implement the three exported APIs exactly as frozen above.
@@ -942,7 +942,7 @@ and make existing Event/Git-link Put an exact-replay-only path. Compare `created
 before replacement of an existing live mutable record, but do not compare against a
 tombstone during explicit resurrection.
 
-- [ ] **Step 3: Write RED composition, status, transaction, corruption, and isolation tests**
+- [x] **Step 3: Write RED composition, status, transaction, corruption, and isolation tests**
 
 ~~~go
 func TestApplyTransactionIsDurable(t *testing.T) {
@@ -983,7 +983,7 @@ Run: go test ./internal/runtime/projectstate ./internal/runtime/localstore -run 
 Expected: FAIL because the composer, strict repository reads, status fields, and atomic
 batch transaction are absent.
 
-- [ ] **Step 4: Implement strict composition and the exact Apply transaction**
+- [x] **Step 4: Implement strict composition and the exact Apply transaction**
 
 Apply executes this transaction:
 
@@ -995,37 +995,41 @@ candidate = StrictReadCandidate(binding)
 rows = ListActiveOperationsAfter(initialThrough ORDER BY generation)
 operations = StrictDecodeStoredOperations(rows)
 view = Compose(start, initialThrough, operations)
+openConflicts = HasOpenConflicts()
+if openConflicts and HasOpenConflictForKeys(operation targets): reject ErrWorkspaceConflicted
 for operation in caller order:
   require operation.Actor.ValidateLocalAction()
   require operation.ExpectedViewDigest == current.Digest
   current = projectstate.ApplyOperation(current, operation)
   bytes = projectstate.CanonicalOperation(operation)
 INSERT every workspace_overlay_operation with consecutive generations
-UPDATE workspace_bindings SET status='pending'
+UPDATE workspace_bindings SET status=(openConflicts ? 'conflicted' : 'pending')
 COMMIT
 ~~~
 
 OperationV1 has no issuer method; Apply requires operation.Actor.ValidateLocalAction before calling the shared reducer. Any scope, binding, candidate, stored-row, validation, canonicalization, duplicate operation ID, generation, precondition, reducer, insert, or status error rolls back. Status and Diff read binding/candidate/active rows from one SQLite snapshot and use the same strict start-selection/DecodeOperation/Compose path. The shared projectstate reducer owns exact-one variant, immutable-record replay, created-at update guards, tombstone/resurrection digests, and final validation invariants.
 
-- [ ] **Step 5: Write RED structural diff, deterministic merge, Markdown, and no-loss tests**
+- [x] **Step 5: Write RED structural diff, deterministic merge, Markdown, and no-loss tests**
 
 Add golden tests for add/modify/tombstone/resurrect and KB record/body digests; absent
 versus present JSON `null`; `~0`/`~1` RFC 6901 escaping; `""` root and `/body`; recursive
 sorted objects; atomic arrays; deep-copy/alias safety; stable entity/UUID/path ordering;
 and actor attribution from the last active operation affecting a key. Add fixed conflict
 preimage/ID/order tests across reversed map insertion and repeated runs. Cover disjoint
-typed fields, same field, Event and Git-link exact replay/divergence, tombstone record and
-KB-body edits, differing tombstones, and resurrection cases. Raw disappearance of an
+typed fields, same field, frozen existing-live Event/Git-link endpoint mutation and
+disappearance, absent immutable additions, tombstone record and KB-body edits, differing
+tombstones, and resurrection cases. Raw disappearance of an
 old Event or Git link must produce sorted `immutable_record` evidence with an absent
 FieldValue; raw disappearance of a mutable record must return ErrRawRecordDeletion, and
-the corresponding direct-import test must require a tombstone. Add binding/version/project/
+the corresponding direct-import acceptance test in Task 4 must require a tombstone; that
+test owns direct-import provenance and is intentionally deferred. Add binding/version/project/
 repository mismatch and candidate Config.Handle/Remotes mutation rejection, successful
 new-base handle/remotes adoption, and SemanticDiff exclusion for those Git-owned fields.
 Add `updated_at` cases for one semantic editor, two clean semantic editors, no semantic
 editor, and a same-field semantic conflict; add immutable `created_at` input rejection.
-`TestThreeWayRebaseConflictResultIsValidatedAndLossless` must compare EncodeTree bytes and
-digest with the prior candidate, mutate the returned result/evidence to prove no aliases,
-and prove no partially clean changes entered the conflict result.
+`TestThreeWayRebaseMultiRecordConflictsReturnLosslessOwnedCandidate` must compare
+EncodeTree bytes and digest with the prior candidate, mutate the returned result/evidence
+to prove no aliases, and prove no partially clean changes entered the conflict result.
 
 Markdown cases cover LF/final newline canonicalisation, deterministic equal-cost LCS
 ties with repeated anchors, non-overlapping hunks, identical and unequal shared-anchor
@@ -1035,10 +1039,13 @@ markers.
 Run: go test ./internal/runtime/projectstate -run 'Test(SemanticDiff|ThreeWayRebase|Markdown)' -count=1
 Expected: FAIL because diff/rebase and their deterministic representation are absent.
 
-- [ ] **Step 6: Implement the exact diff and merge algorithms**
+- [x] **Step 6: Implement the exact diff and merge algorithms**
 
 `FieldValue{Present:false}` has nil Value. Present values contain exactly one canonical
 JSON value without CanonicalJSON's trailing LF; present JSON null is exactly `null`.
+A complete root value uses the concrete typed record's canonical schema field order.
+Generic sorted-map JSON is only a transient recursive merge representation; rehydrate a
+complete root through its strict typed record before assignment or evidence emission.
 Markdown field values are the canonical body represented as a JSON string. RFC 6901
 uses `""` for a root, `/body` for Markdown, and `~0`/`~1` escaping. Objects recurse in
 sorted-key order and arrays are atomic. `BeforeDigest`/`AfterDigest` are shared canonical
@@ -1063,36 +1070,87 @@ type conflictIDPreimageV1 struct {
 
 Conflicts sort by the canonical entity-kind order above, record ID, field path, kind,
 then ID. A KB body-only tombstone collision emits `tombstone_body`, not a duplicate
-record conflict. Event/Git-link disagreement emits `immutable_record`.
+record conflict. When both the live KB record and body changed against a tombstone,
+emit root `tombstone_edit` and `/body` `tombstone_body` evidence; each conflict exists
+only for its competing semantic surface. Event/Git-link disagreement emits
+`immutable_record`.
 
-ThreeWayRebase validates and deep-copies all inputs, requires equal immutable snapshot
-version/project/repository binding fields, and requires candidate Config.Handle/Remotes
-to equal oldBase before taking newBase's values. It accepts equal and one-sided changes,
-except that disappearance is never a valid one-sided change. Removing an old Event or
-Git link yields `ConflictImmutableRecord` with explicit present-to-absent evidence;
-removing an old mutable record without a valid tombstone returns ErrRawRecordDeletion.
+ThreeWayRebase deep-copies all inputs and first validates `oldBase`. It then preflights
+raw mutable disappearance in `newBase` and `candidate`, in that side order and canonical
+kind/UUID order, before validating either side. After both sides validate, it requires
+equal immutable snapshot version/project/repository binding fields and requires candidate
+Config.Handle/Remotes to equal oldBase before taking newBase's values. Equal and one-sided
+changes are accepted only where lifecycle, immutable-record, and existing-record
+`created_at` invariants permit them. Removing an old Event or Git link yields
+`ConflictImmutableRecord` with explicit present-to-absent evidence only after that side
+passes typed/reference validation; removing an old mutable record without a valid
+tombstone returns ErrRawRecordDeletion.
 It coalesces exact immutable records and recursively merges only the frozen compatible
 typed fields. SemanticDiff likewise rejects a raw mutable disappearance rather than
 representing path removal as deletion. For an existing mutable record, changed
-`created_at` is an invalid input;
-an explicit one-sided resurrection may have a fresh valid value because prior bytes are
-not in the tombstone. `/updated_at` never selects semantics: take one semantic editor's
+`created_at` is an invalid input. An explicit one-sided resurrection may have a fresh
+valid value because prior bytes are not in the tombstone. `/updated_at` never selects semantics: take one semantic editor's
 value, the later UTC value only after two-sided semantics merge cleanly, or oldBase when
 neither side changed semantics.
+
+For an old tombstone, coalesce exact endpoints and accept whichever endpoint differs when
+the other remains byte-equal to oldBase, whether that endpoint is a resurrection or a
+changed tombstone. When both endpoints diverge, divergent resurrection or resurrection
+opposed by a changed tombstone emits `invalid_resurrection`: root evidence for unequal
+record/tombstone surfaces and `/body` evidence for unequal KB body presence or content,
+with both conflicts when both surfaces differ. Only divergent non-base tombstones emit
+root `same_field`. From an old-live mutable record, exact dual tombstones coalesce and
+unequal dual tombstones emit root `same_field`. For an ID absent from oldBase, accept a
+one-sided live or tombstone
+addition and coalesce exact dual additions. Unequal dual mutable live additions emit
+root `same_field`, plus `/body` `same_field` for an unequal KB body. A concurrent live
+addition versus tombstone emits root `tombstone_edit` and, for KB, `/body`
+`tombstone_body`. Unequal immutable Event/Git-link additions remain
+`immutable_record`. No absent object is invented as a field-merge base.
+
+Lifecycle `exact` means byte-exact canonical endpoint surfaces, including `updated_at`.
+The metadata timestamp-selection rule applies only to old-live/live-live semantic
+merging. In an old-live tombstone race, a timestamp-only live difference is not a
+semantic edit, so the tombstone wins without selecting a timestamp. Concurrent KB
+additions and resurrection conflicts are surface-aware: emit root evidence only when
+record JSON differs and `/body` evidence only when body presence/content differs. For an
+old-live immutable Event or Git link, only endpoints equal to the old record are clean;
+equal side mutations still emit `immutable_record`.
+An immutable disappearance that leaves its side snapshot referentially invalid returns
+the validation error instead of conflict evidence. Mutable raw disappearance retains
+`ErrRawRecordDeletion` precedence.
+
+Reducer replay and direct-import/materialisation validation own tombstone and
+resurrection provenance. ThreeWayRebase does not compare a new tombstone's deleted
+digests with oldBase because the endpoint may represent an authorised edit-then-delete;
+it reconciles validated endpoints only. Existing-live `created_at` mutation returns an
+error wrapping `projectstate.ErrOperationPrecondition`. If independently valid side
+changes combine into an invalid typed/reference graph, final canonical validation
+returns that typed error and no conflict kind is invented.
 
 Markdown canonicalises both inputs first and computes base-relative minimum-edit LCS
 hunks without a synthetic terminal line. Equal-cost script choices advance the base/
 deletion side before insertion; hunks sort by base start, base end, inserted bytes.
 Non-overlapping hunks merge; identical same-anchor insertions coalesce; unequal shared-
 anchor insertions and overlapping replacement/deletion hunks conflict. No conflict
-marker is emitted.
+marker is emitted. Ranges are half-open: insertion strictly inside a replacement
+conflicts, while insertion at its start/end boundary is emitted before/after it.
+Equality and one-sided fast paths run before hunk construction. Each remaining
+base-versus-side DP grid is limited to 100,000,000 cells with checked line-count and
+allocation arithmetic; excess returns `ErrMarkdownMergeLimit` before allocation and
+never falls back to an approximate merge. ThreeWayRebase returns `MergeResult{}` with
+that error; retaining the prior candidate means the caller's input and persistent state
+remain untouched, not that a non-zero result accompanies an error.
 
-If any conflict exists, MergeResult.Snapshot is a deep copy whose EncodeTree bytes and
-digest are byte-identical to the complete prior composed `candidate`; clean partial
-merges are discarded. Sorted conflict triples retain all new-base/direct evidence.
-With no conflict, the result is fully validated, canonically encoded, and digested.
+Conflict evidence is always oriented `Base=oldBase`, `Ours=candidate`, and
+`Theirs=newBase`. If any conflict exists, MergeResult.Snapshot is a deep copy whose
+EncodeTree bytes and digest are byte-identical to the complete prior composed `candidate`;
+clean partial merges are discarded. Sorted conflict triples retain all new-base/direct
+evidence.
+Only with no conflict is the assembled shell fully typed/reference validated, canonically
+encoded, and digested.
 
-- [ ] **Step 7: Run GREEN and commit**
+- [x] **Step 7: Run GREEN and commit**
 
 Run: go test ./internal/types/projectstate ./internal/runtime/projectstate ./internal/runtime/localstore -run 'Test(DecodeOperation|DigestCanonical|ApplyOperation|GitLink|CreatedAt|Apply|Compose|SemanticDiff|ThreeWayRebase|Markdown|Operation)' -count=1
 Expected: PASS.
@@ -1288,6 +1346,12 @@ UPDATE workspace_bindings SET status = 'conflicted' when conflicts exist else 'p
   WHERE project_id=req.Scope.ProjectID AND workspace_id=req.Scope.WorkspaceID
 COMMIT
 ~~~
+
+Canonical JSON encoding of a `json.RawMessage` may normalize root object member order.
+Task 4 persistence must therefore rehydrate every root conflict `FieldValue` through its
+strict concrete record type on read before exposing or re-encoding evidence; `/body` and
+recursive non-root values remain generic. Restart tests compare the resulting conflict
+triples byte-for-byte with the in-memory Task 3 result.
 
 The candidate upsert writes all Task-2 non-null fields explicitly; it does not rely on a
 default to supply actor, time, binding, or digest provenance. Replacing conflicts means

@@ -316,12 +316,53 @@ merge conflict. For an existing mutable record, `created_at` is immutable on
 ordinary update. An explicit digest-proven resurrection may supply a fresh valid
 `created_at` because the tombstone does not retain the prior record bytes.
 
+Three-way reconciliation treats lifecycle evidence conservatively. From an old
+tombstone, exact endpoints coalesce and a side that remains equal to the old tombstone
+yields to the other endpoint, including a changed tombstone or live resurrection. Only
+two divergent non-base endpoints conflict: divergent resurrection, or resurrection
+opposed by a changed tombstone, is `invalid_resurrection`; divergent changed tombstones
+are root `same_field`. From an old live mutable record, exact dual tombstones coalesce
+and unequal dual tombstones are root `same_field`. Concurrent unequal mutable additions
+at one previously absent ID conflict rather than synthesising an absent object as a
+merge base. Tombstones are never selected by timestamp. For KB articles, conflict
+evidence is emitted independently for `record.json` and `/body` whenever both surfaces
+carry competing meaning, so neither side's body can disappear from the audit evidence.
+
+Endpoint provenance remains outside the snapshot-only merge. Reducer replay and direct
+import/materialisation journals prove that a tombstone or resurrection was authorised;
+three-way reconciliation compares only the validated endpoint lifecycle. Existing
+immutable Events and Git links are clean only when both endpoints equal the old record,
+even if both sides made the same mutation. After validating `oldBase`, reconciliation
+preflights raw mutable disappearance in `newBase` and then `candidate` before validating
+either side, preserving the dedicated raw-deletion error and deterministic side/kind/ID
+precedence. Event and Git-link disappearance is instead side-validated first: an invalid
+reference graph returns its typed validation error, while a valid disappearance becomes
+immutable-record conflict evidence.
+
+Lifecycle equality is byte-exact, including `updated_at`. Timestamp metadata selection
+applies only when merging two live versions of an old-live record. In an old-live
+tombstone race, a timestamp-only live difference is not a semantic edit, so the tombstone
+wins without selecting a timestamp. Concurrent KB adds and resurrections are
+surface-aware: root evidence exists only when record JSON differs, and `/body` evidence
+only when body presence or content differs. Final typed/reference validation runs only
+on a conflict-free assembled shell; if that shell is invalid, the typed error is returned
+rather than inventing a conflict kind.
+
+Markdown merge hunks use half-open base-line ranges. An insertion strictly inside a
+replacement conflicts; an insertion at its start or end boundary remains independent
+and is emitted before or after that replacement respectively. After equality and
+one-sided fast paths, exact minimum-edit reconstruction refuses a side comparison above
+100,000,000 dynamic-programming cells before allocation. It returns a typed merge-limit
+error and a zero in-memory merge result; the caller's already-held prior candidate and
+persistent state remain unchanged. It never substitutes an approximate merge.
+
 For a single-file entity, the tombstone replaces its JSON record. For a KB article,
 `record.json` becomes the tombstone and `body.md` is absent; a tombstoned KB directory
 that still contains `body.md` is invalid. The KB tombstone also records the deleted
-body digest. Deletion racing any record or body edit conflicts, and re-creation at the
-same stable ID requires an explicit resurrection operation that names the tombstone
-digest.
+body digest. From an old live KB article, a one-sided tombstone is clean when the
+opposing live endpoint has no semantic edit; deletion racing a record or body edit
+conflicts, with root and `/body` evidence emitted independently. Re-creation at the same
+stable ID requires an explicit resurrection operation that names the tombstone digest.
 
 Versioned schemas classify references as live-required or historical. A missing target
 is always broken. A tombstone satisfies historical event, Git-link, attribution, and
@@ -446,10 +487,13 @@ request workflow.
 
 When Git changes the accepted base while a checkpointed candidate or overlay is
 pending, Gateway performs a three-way rebase using old base, new base, and the
-combined candidate-plus-overlay change:
+combined candidate-plus-overlay change. Conflict evidence is always oriented as
+`Base=oldBase`, `Ours=candidate`, and `Theirs=newBase`:
 
-- a change on only one side is accepted;
-- identical changes on both sides coalesce;
+- a change on only one side is accepted except where lifecycle, immutable-record, or
+  existing-record `created_at` invariants forbid it;
+- identical changes on both sides coalesce except mutations of an existing immutable
+  Event or Git link;
 - disjoint typed fields merge deterministically;
 - conflicting changes to the same typed field are surfaced;
 - Markdown bodies use a deterministic three-way text merge and retain explicit
@@ -467,12 +511,14 @@ the three-way rebase alone compares that tombstone with the overlay and owns the
 tombstone/edit conflict.
 
 Semantic fields use RFC 6901 JSON Pointer paths, with `""` as the record root and
-`/body` as a KB Markdown body. Object members merge recursively in sorted-key order;
-arrays are atomic. Field values carry an explicit present/absent envelope so absent is
-not confused with JSON `null`. Conflicts sort by entity kind, record ID, field path,
-kind, and a canonical SHA-256 ID derived from a versioned tuple containing the complete
-base/ours/theirs values. The same inputs therefore reproduce byte-identical conflict
-evidence and ordering.
+`/body` as a KB Markdown body. A complete root `FieldValue` contains canonical JSON for
+the concrete typed record in schema field order. Generic sorted-map JSON exists only
+transiently while recursively merging object members; roots are rehydrated into their
+typed record before assignment or evidence emission. Arrays are atomic. Field values
+carry an explicit present/absent envelope so absent is not confused with JSON `null`.
+Conflicts sort by entity kind, record ID, field path, kind, and a canonical SHA-256 ID
+derived from a versioned tuple containing the complete base/ours/theirs values. The
+same inputs therefore reproduce byte-identical conflict evidence and ordering.
 
 Markdown merge canonicalises LF first and computes deterministic minimum-edit,
 old-base-relative LCS hunks. Equal-cost choices prefer advancing the base/deletion side;
@@ -488,8 +534,9 @@ ignored. `created_at` changes on an existing live mutable record are invalid ord
 updates and are never silently selected.
 
 There is no last-write-wins fallback. A conflict result retains a complete validated,
-byte-identical copy of the prior composed candidate, while deterministic triples retain
-the complete upstream/direct evidence; it never returns a partial merge. Persistence of
+byte-identical copy of the prior composed candidate, while deterministic
+`Base=oldBase`, `Ours=candidate`, `Theirs=newBase` triples retain the complete evidence;
+it never returns a partial merge or partially adopted Git-owned state. Persistence of
 the new direct tree, prior candidate surface, absorbed overlay generation, operation-row
 state transitions, conflict triples, and conflicted workspace state is atomic. A
 conflicted workspace remains locally usable for unaffected records but cannot checkpoint

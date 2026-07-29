@@ -422,15 +422,23 @@ candidate + local overlay, new base)` by entity semantics. It does not use
 timestamp or row-level last-write-wins.
 
 - Independent records merge automatically.
-- Add-only event and Git-link IDs deduplicate exact replays and conflict on
-  same-ID different-content claims.
-- Mutable task and KB fields merge only when the changed semantic fields do
-  not overlap; Markdown/body conflicts are explicit three-way content
-  conflicts.
-- A tombstone conflicts with a concurrent edit or re-creation unless the
-  change explicitly resolves it.
-- Dangling references, schema/digest failure, or incompatible entity changes
-  are explicit conflicts.
+- For an absent immutable ID, one-sided and byte-exact dual additions are
+  accepted; unequal dual additions conflict. For an old-live Event or Git link,
+  both endpoints must still equal the old record: mutation or valid
+  disappearance conflicts even when both sides made the same change.
+- Mutable fields merge only when changed semantic fields do not overlap.
+  Lifecycle reconciliation accepts exact endpoints and a single non-base
+  endpoint. Only divergent non-base tombstones/resurrections or a tombstone
+  racing a semantic edit conflict; KB root and Markdown body are independent
+  evidence surfaces.
+- Schema, digest, and reference-invalid inputs return typed errors. After the
+  old base validates, raw mutable disappearance returns its dedicated error
+  before side validation; immutable disappearance is side-validated first.
+
+Conflict triples are oriented `Base=old accepted base`, `Ours=candidate plus
+local overlay`, and `Theirs=new base`. Any conflict returns the byte-identical
+complete candidate with the full sorted evidence set; no clean subset or Git-owned
+field is partially merged into that fallback.
 
 An unresolved conflict blocks checkpoint, writable Fabric delivery, and accepted
 state advancement for that workspace while preserving both sides and the
