@@ -1177,6 +1177,8 @@ git commit -m "feat: compose and merge portable state"
 - Modify: internal/runtime/projectstate/service_test.go
 - Modify: internal/runtime/localstore/workspace_repo.go
 - Modify: internal/runtime/localstore/workspace_repo_test.go
+- Create: internal/runtime/localstore/workspace_transition_repo.go
+- Create: internal/runtime/localstore/workspace_transition_repo_test.go
 
 **Interfaces:**
 - Consumes: Task 3 Compose and ThreeWayRebase.
@@ -1213,7 +1215,7 @@ type WorkspaceMaterializationRecord struct {
 type CheckpointOperationV1 struct {
     Generation int64 `json:"generation"`
     OperationID string `json:"operation_id"`
-    OperationJSON json.RawMessage `json:"operation_json"`
+    OperationJSON string `json:"operation_json"`
     PrepublicationState string `json:"prepublication_state"`
 }
 type CheckpointOperationsV1 struct {
@@ -1873,7 +1875,7 @@ Run: go test ./internal/runtime/projectstate ./internal/runtime/localstore -run 
 Expected: PASS.
 
 ~~~bash
-git add internal/runtime/projectstate internal/runtime/localstore/migrations/000002_portable_transitions.sql internal/runtime/localstore/migrations.go internal/runtime/localstore/migrations_test.go internal/runtime/localstore/workspace_repo.go internal/runtime/localstore/workspace_repo_test.go
+git add internal/runtime/projectstate internal/runtime/localstore/migrations/000002_portable_transitions.sql internal/runtime/localstore/migrations.go internal/runtime/localstore/migrations_test.go internal/runtime/localstore/workspace_repo.go internal/runtime/localstore/workspace_repo_test.go internal/runtime/localstore/workspace_transition_repo.go internal/runtime/localstore/workspace_transition_repo_test.go
 git commit -m "feat: import and observe portable workspace state"
 ~~~
 
@@ -1938,8 +1940,10 @@ Checkpoint algorithm:
    accepted_base_digest, bound checkout_path/device/inode, exact candidate digest, and
    through-generation. Its required canonical `CheckpointOperationsV1` envelope records
    the selected initial boundary and, for every included row, exact generation, operation
-   ID, canonical operation bytes, and prepublication `active` or `rebased` state; store it
-   in `included_operations_json`. Commit the first transaction before filesystem publication on the
+   ID, canonical operation bytes including the final LF encoded as a JSON string, and
+   prepublication `active` or `rebased` state. Strict decoding reconstructs those bytes
+   and requires exact equality with both `CanonicalOperation(decoded)` and the database
+   row; store the envelope in `included_operations_json`. Commit the first transaction before filesystem publication on the
    Task-2 WAL connection whose mandatory `synchronous=FULL` policy durably syncs the
    journal/WAL. Do not hand-fsync the main database file.
 7. After that commit and before any live-tree rename/exchange, acquire a second dedicated
@@ -2004,6 +2008,10 @@ asserts `CheckpointResult{}` and
 mutation, compares complete direct/ours/conflict/row bytes across reopen, then calls
 Status separately and proves the same CandidateDigest and OverlayGeneration. Add
 exact-scope subtests proving resolved-only and another project/workspace do not block.
+`TestCheckpointOperationEnvelopePreservesCanonicalBytes` requires each canonical
+operation payload to end in LF, proves the outer envelope represents that LF as `\n`,
+strict-decodes back to byte-identical operation JSON, and rejects missing-LF or otherwise
+noncanonical operation strings before operation-membership validation or recovery.
 
 Add `TestCheckpointConflictAfterPreparedCommitPublishesNothing`: a deterministic hook
 runs after the prepared journal commits but before the publication connection begins,
@@ -2021,7 +2029,7 @@ append a later active generation, attempt checkpoint B, require
 candidate, operation, and working-tree state across reopen. After Git accepts A, prove
 the later active generation remains and a new checkpoint can proceed.
 
-Run: go test ./internal/runtime/projectstate -run 'TestCheckpoint(CAS|LinuxExchange|Fallback|Recover|RecoverRejectsChangedCheckout|RecoverRejectsChangedAcceptedBase|DoesNotAdvanceBase|PreservesLaterOverlay|RejectsOpenConflictPreservesEvidence|ConflictAfterPreparedCommitPublishesNothing|RejectsSecondPendingAcceptanceBeforeStaging)' -count=1
+Run: go test ./internal/runtime/projectstate -run 'TestCheckpoint(CAS|LinuxExchange|Fallback|Recover|RecoverRejectsChangedCheckout|RecoverRejectsChangedAcceptedBase|DoesNotAdvanceBase|PreservesLaterOverlay|RejectsOpenConflictPreservesEvidence|ConflictAfterPreparedCommitPublishesNothing|RejectsSecondPendingAcceptanceBeforeStaging|OperationEnvelopePreservesCanonicalBytes)' -count=1
 Expected: FAIL because checkpoint implementation is absent.
 
 - [ ] **Step 2: Implement platform publishers and journal state machine**

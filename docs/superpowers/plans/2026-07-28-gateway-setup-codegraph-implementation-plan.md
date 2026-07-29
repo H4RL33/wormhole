@@ -965,7 +965,7 @@ git commit -m "feat(codegraph): enforce offline analysis freshness"
 - Modify: internal/runtime/codegraph/index/index.go
 - Modify: internal/runtime/codegraph/index/index_test.go
 - Modify: internal/runtime/codegraph/index/build.go
-- Modify: internal/runtime/codegraph/index/build_test.go
+- Create: internal/runtime/codegraph/index/build_test.go
 - Modify: internal/runtime/codegraph/store/store.go
 - Modify: internal/runtime/codegraph/store/schema_test.go
 - Create: internal/runtime/codegraph/query/lexical.go

@@ -152,7 +152,7 @@ func (s ActorScope) Validate() error
 func (s ActorScope) HasPermission(string) bool
 ```
 
-`FabricBinding.ValidateWithProfile` requires `Workspace.Validate`, full non-empty UUID identifiers, `FabricInstanceID == profile.FabricInstanceID`, exact repository/ref equality with the workspace binding, and no credential field. `ActorScope.Validate` calls `Actor.Validate` and checks structural scope consistency only. `identity.ResolvePrivateIssuedScope` and `mcp.ResolvePublicIssuedScope` derive fresh scopes from server records and perform issuer-specific validation.
+`FabricBinding.ValidateWithProfile` requires `Workspace.Validate`, full non-empty UUID identifiers, `FabricInstanceID == profile.FabricInstanceID`, exact repository/ref equality with the workspace binding, and no credential field. `ActorScope.Validate` calls `Actor.Validate` and checks structural scope consistency only. Task 9's `identity.Store.ResolvePrivateCredential` and `mcp.ResolvePublicIssuedScope` derive fresh scopes from server records and perform issuer-specific validation.
 
 ## File ownership map
 
@@ -187,12 +187,10 @@ func (s ActorScope) HasPermission(string) bool
 - Create: `internal/types/routing_test.go`
 - Modify: `internal/types/identity.go`
 - Modify: `internal/types/identity_test.go`
-- Create: `internal/core/identity/issuer_validation.go`
-- Create: `internal/core/identity/issuer_validation_test.go`
 
 **Interfaces:**
 - Consumes: the canonical Slice-A APIs above.
-- Produces: `FabricProfile`, `RemoteBindingKey`, `FabricBinding`, `ActorScope`, `ErrInvalidFabricRoute`, `identity.ResolvePrivateIssuedScope`.
+- Produces: `FabricProfile`, `RemoteBindingKey`, `FabricBinding`, `ActorScope`, and `ErrInvalidFabricRoute`.
 
 - [ ] **Step 1: Add failing canonical-boundary tests**
 
@@ -203,27 +201,26 @@ func TestFabricBindingRequiresCanonicalWorkspaceAndMatchingInstance(t *testing.T
 func TestFabricBindingHasNoCredentialAuthority(t *testing.T)
 func TestRemoteBindingKeyRejectsEveryPartialCombination(t *testing.T)
 func TestActorScopeValidateDoesNotUpgradeAssurance(t *testing.T)
-func TestResolvePrivateIssuedScopeDerivesActiveServerRecords(t *testing.T)
 ```
 
-The first test mutates each UUID, repository identity, canonical ref, and instance equality independently. The second uses reflection to fail if `FabricBinding` or `RemoteBindingKey` gains a field containing `credential`, `token`, or `secret`. The actor tests prove `ValidateLocalAction` accepts only a newly issued local envelope, `ValidateHistorical` accepts structurally valid persisted assurances, and private scope derivation rejects inactive membership, ended ownership, expired Passport, revoked credential, and mismatched accountable human.
+The first test mutates each UUID, repository identity, canonical ref, and instance equality independently. The second uses reflection to fail if `FabricBinding` or `RemoteBindingKey` gains a field containing `credential`, `token`, or `secret`. The actor tests prove `ValidateLocalAction` accepts only a newly issued local envelope and `ValidateHistorical` accepts structurally valid persisted assurances without upgrading them.
 
 - [ ] **Step 2: Run RED**
 
-Run: `go test ./internal/types ./internal/core/identity -run 'Test(FabricBinding|RemoteBindingKey|ActorScope|ResolvePrivateIssuedScope)' -count=1`
+Run: `go test ./internal/types -run 'Test(FabricBinding|RemoteBindingKey|ActorScope)' -count=1`
 
-Expected: FAIL because routing, actor scope, and private issuer validation are absent; existing Slice-A actor tests remain PASS.
+Expected: FAIL because routing and actor-scope contracts are absent; existing Slice-A actor tests remain PASS.
 
 - [ ] **Step 3: Implement the exact records and validators**
 
-Implement only the records shown above. `ResolvePrivateIssuedScope(ctx, tx, projectID, credentialID) (types.ActorScope, error)` executes one joined query over credential, Passport, ownership, membership, human, and session rows, compares every project/agent/human composite key, and returns the same `ErrInvalidToken` for missing, cross-project, expired, ended, disabled, or revoked state. It constructs a new private-authenticated `ActorEnvelope` and sorted roles/permissions exclusively from those rows, calls `Actor.Validate`, and returns the derived scope. It accepts no by-value `ActorScope` to validate or mutate.
+Implement only the routing and structural actor-scope records shown above. Database-backed private scope derivation depends on migration 22 and is implemented in Task 9; Task 1 must not invent authority from tables that do not yet exist.
 
 - [ ] **Step 4: Run GREEN and the shared-package import guard**
 
 Run:
 
 ```bash
-go test ./internal/types ./internal/core/identity -run 'Test(FabricBinding|RemoteBindingKey|Actor|ResolvePrivateIssuedScope)' -count=1
+go test ./internal/types -run 'Test(FabricBinding|RemoteBindingKey|Actor)' -count=1
 go list -deps ./internal/types/... | rg 'internal/runtime|internal/core|internal/mcp' && exit 1 || true
 ```
 
@@ -232,7 +229,7 @@ Expected: tests PASS; the dependency scan prints nothing. `internal/types/projec
 - [ ] **Step 5: Commit**
 
 ```bash
-git add internal/types/routing.go internal/types/routing_test.go internal/types/identity.go internal/types/identity_test.go internal/core/identity/issuer_validation.go internal/core/identity/issuer_validation_test.go
+git add internal/types/routing.go internal/types/routing_test.go internal/types/identity.go internal/types/identity_test.go
 git commit -m "feat: freeze Fabric routing contracts"
 ```
 
@@ -242,7 +239,7 @@ git commit -m "feat: freeze Fabric routing contracts"
 - Create: `internal/runtime/localstore/migrations/000004_fabric_routes.sql`
 - Create: `internal/runtime/localstore/migrations/000005_sync_binding.sql`
 - Modify: `internal/runtime/localstore/migrations.go`
-- Modify: `internal/runtime/localstore/migration_test.go`
+- Modify: `internal/runtime/localstore/migrations_test.go`
 - Create: `internal/runtime/localstore/fabric_routes.go`
 - Create: `internal/runtime/localstore/fabric_routes_test.go`
 - Modify: `internal/runtime/sync/queue_repo.go`
@@ -1153,8 +1150,8 @@ git commit -m "feat: add identified sync protocol v2"
 - Create: `internal/runtime/sync/attach_test.go`
 - Modify: `internal/runtime/localapi/bootstrap.go`
 - Modify: `internal/runtime/localapi/bootstrap_test.go`
-- Modify: `cmd/wormhole/fabric.go`
-- Modify: `cmd/wormhole/fabric_test.go`
+- Create: `cmd/wormhole/fabric.go`
+- Create: `cmd/wormhole/fabric_test.go`
 - Modify: `cmd/gatewayd/gatewayd.go`
 
 **Interfaces:**
@@ -1660,11 +1657,13 @@ git commit -m "feat: add private identity schema"
 - Create: `internal/core/identity/credentials_test.go`
 - Create: `internal/core/identity/actors.go`
 - Create: `internal/core/identity/actors_test.go`
+- Create: `internal/core/identity/issuer_validation.go`
+- Create: `internal/core/identity/issuer_validation_test.go`
 - Modify: `internal/core/identity/identity.go`
 - Create: `cmd/wormhole/project_members.go`
 - Create: `cmd/wormhole/project_members_test.go`
-- Modify: `cmd/wormhole/fabric_auth.go`
-- Modify: `cmd/wormhole/fabric_auth_test.go`
+- Create: `cmd/wormhole/fabric_auth.go`
+- Create: `cmd/wormhole/fabric_auth_test.go`
 
 **Interfaces:**
 - Consumes: migration 22 and Task 1 `types.ActorScope`.
@@ -1690,11 +1689,11 @@ func (s *Store) RecordActorActionInTx(context.Context, *sql.Tx, types.ActorScope
 
 - [ ] **Step 1: Write failing policy/lifecycle tests**
 
-Add `TestFirstOwnerRequiresExactUnexpiredOneUseOIDCGrantAndEmptyProject`, `TestExistingProjectRequiresInvitation`, `TestInvitationAdminRequiresActingHumanMemberAdmin`, `TestInvitationBoundSubjectRejectsOtherHuman`, `TestProjectListReturnsOnlyActingHumanMemberships`, `TestMemberListAndRevokeRequireMemberAdmin`, `TestMembershipRevokeRevokesDerivedAuthority`, `TestOwnershipTransferRequiresActingHumanOwnershipAdmin`, `TestOwnershipTransferRevokesPriorPassportAndCredentials`, `TestMultipleAgentsPerHuman`, `TestPATScopesMustBeSubsetOfActiveMembership`, `TestPATMaxTTLIs90Days`, and `TestHistoricalAuditRetainsTransferredOwner`.
+Add `TestFirstOwnerRequiresExactUnexpiredOneUseOIDCGrantAndEmptyProject`, `TestExistingProjectRequiresInvitation`, `TestInvitationAdminRequiresActingHumanMemberAdmin`, `TestInvitationBoundSubjectRejectsOtherHuman`, `TestProjectListReturnsOnlyActingHumanMemberships`, `TestMemberListAndRevokeRequireMemberAdmin`, `TestMembershipRevokeRevokesDerivedAuthority`, `TestOwnershipTransferRequiresActingHumanOwnershipAdmin`, `TestOwnershipTransferRevokesPriorPassportAndCredentials`, `TestMultipleAgentsPerHuman`, `TestPATScopesMustBeSubsetOfActiveMembership`, `TestPATMaxTTLIs90Days`, `TestResolvePrivateCredentialDerivesActiveServerRecords`, and `TestHistoricalAuditRetainsTransferredOwner`.
 
 - [ ] **Step 2: Run RED**
 
-Run: `WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/identity ./cmd/wormhole -run 'Test(FirstOwner|ExistingProject|Invitation|ProjectList|Member|Ownership|MultipleAgents|PAT|HistoricalAudit)' -count=1`
+Run: `WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/identity ./cmd/wormhole -run 'Test(FirstOwner|ExistingProject|Invitation|ProjectList|Member|Ownership|MultipleAgents|PAT|ResolvePrivateCredential|HistoricalAudit)' -count=1`
 
 Expected: FAIL because lifecycle APIs/commands are absent.
 
@@ -1703,6 +1702,13 @@ Expected: FAIL because lifecycle APIs/commands are absent.
 The first owner is never “first login wins.” An operator-created, one-use, maximum-24-hour grant binds exact project, normalized OIDC issuer, and subject. Consumption locks the grant and project, requires zero active memberships, creates one owner membership, and marks the grant consumed in the same transaction. Thereafter membership creation requires an invitation issued by an authenticated acting human whose active membership contains `member.admin`; bound issuer/subject invitations reject all other humans. `project list` sets only `wormhole.human_id` and uses the self-membership SELECT policy; member list/revoke set both human and project context and require `member.admin`.
 
 Ownership transfer requires `ownership.admin`, locks old ownership and target membership, ends old ownership, creates the successor, revokes prior Passport/agent credentials, ends old agent sessions, issues a successor Passport, and records one audit row in that transaction. PAT scopes must be a sorted unique subset of the acting membership's current permissions and the fixed automation allowlist; TTL is positive and at most 90 days. Raw invitation, agent credential, recovery, and PAT values use 32 random bytes, prefix-distinct encodings, SHA-256 at rest, and one-time output.
+
+`ResolvePrivateCredential` executes one joined query over credential, Passport,
+ownership, membership, human, and session rows; compares every
+project/agent/human composite key; and returns the same `ErrInvalidToken` for
+missing, cross-project, expired, ended, disabled, or revoked state. It derives a
+new private-authenticated `ActorEnvelope` and sorted roles/permissions only from
+those rows, calls `Actor.Validate`, and accepts no caller-supplied `ActorScope`.
 
 - [ ] **Step 4: Add exact human commands**
 
@@ -1723,9 +1729,9 @@ Every `wormhole` command requires the current human session, sends no claimed hu
 
 - [ ] **Step 5: Run GREEN**
 
-Run: `WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/identity ./cmd/wormhole -run 'Test(FirstOwner|ExistingProject|Invitation|ProjectList|Member|Ownership|MultipleAgents|PAT|HistoricalAudit)' -count=1`
+Run: `WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/identity ./cmd/wormhole -run 'Test(FirstOwner|ExistingProject|Invitation|ProjectList|Member|Ownership|MultipleAgents|PAT|ResolvePrivateCredential|HistoricalAudit)' -count=1`
 
-Expected: PASS, including concurrent first-owner and invitation redemption tests with exactly one winner.
+Expected: PASS, including concurrent first-owner and invitation redemption tests with exactly one winner and fail-closed private credential derivation.
 
 - [ ] **Step 6: Commit**
 
@@ -1800,8 +1806,8 @@ git commit -m "build: approve OIDC dependencies"
 - Modify: `cmd/fabric/main_test.go`
 - Modify: `cmd/wormhole/fabric_auth.go`
 - Modify: `cmd/wormhole/fabric_auth_test.go`
-- Modify: `internal/runtime/config/credentials.go`
-- Modify: `internal/runtime/config/credentials_test.go`
+- Create: `internal/runtime/config/credentials.go`
+- Create: `internal/runtime/config/credentials_test.go`
 
 **Interfaces:**
 - Consumes: Tasks 8–10.
