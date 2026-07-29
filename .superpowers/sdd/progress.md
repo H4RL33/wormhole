@@ -365,3 +365,15 @@ vet was clean, package statement coverage was 83.2%, and `OperationAudit` method
 was 91.4%. Two fresh reviews approved with no remaining findings, and formatting/diff
 checks were clean. The next A4 tranche is `Service.Stash`. `RestoreRetryState` remains a
 RestoreStash prerequisite and may follow Stash.
+
+A4 action-opaque transition result prerequisite `607e826`: the causal RED proved that
+localstore rejected a frozen struct-order stash receipt because generic map re-encoding
+reordered its members alphabetically. Localstore now requires only exactly one valid
+compact JSON value followed by exactly one LF and preserves `result_json` bytes and member
+order; action-specific ProjectState codecs retain ownership of schema, tags, exact member
+order/re-encoding, semantic canonicality, and rejection of noncanonical bytes. Focused and
+full localstore tests were GREEN; the focused race suite completed in 7.094s, vet was
+clean, and package statement coverage was 83.2%. Fresh review approved with no remaining
+findings, and formatting/diff checks were clean. The next A4 tranche resumes
+`Service.Stash`; `RestoreRetryState` remains a RestoreStash prerequisite and may follow
+Stash.

@@ -614,14 +614,19 @@ the same layering pattern and isolation discipline.
   `discardResultV1`/`discardReceiptV1`. Each receipt contains schema version, action,
   outcome, and result; restore alone additionally carries a
   retry digest that is nil exactly for clean and non-nil exactly for conflicted.
-  Action/outcome must equal the receipt row. Conflict arrays are always non-nil (`[]`, never
-  `null`), optional pointers are emitted as explicit `null`, and no digest-bearing field
-  uses `omitempty`. Fixed golden bytes and hard-coded canonical-JSON digests cover stash,
-  clean/conflicted restore, and discard result/receipt encodings. They use the existing
-  TEXT column and require no schema version or migration change. Same ID and digest is a retry; a
-  different digest returns
-  `ErrIdempotencyConflict`. Clean retries use receipts read-only, while conflicted restore
-  recomputes current/stash/evidence and retry digest before matching. An unknown clean
+  Action/outcome must equal the receipt row. Localstore treats `result_json` as
+  action-opaque: it requires exactly one valid compact JSON value followed by exactly one
+  LF, preserves those bytes and object-member order, and never schema-decodes or
+  generic-map re-encodes the value. The action-specific ProjectState codec owns schema,
+  tags, member order, exact re-encoding, and semantic canonicality and rejects any
+  noncanonical bytes. Conflict arrays are always non-nil (`[]`, never `null`), optional
+  pointers are emitted as explicit `null`, and no digest-bearing field uses `omitempty`.
+  Fixed golden bytes and hard-coded canonical-JSON digests cover stash, clean/conflicted
+  restore, and discard result/receipt encodings. They use the existing TEXT column and
+  require no schema version or migration change. Same ID and digest is a retry; a
+  different digest returns `ErrIdempotencyConflict`. Clean retries use receipts read-only,
+  while conflicted restore recomputes current/stash/evidence and retry digest before
+  matching. An unknown clean
   commit may be proved by an exact receipt; an unknown conflicted commit must pass the same
   retry-state verification or remain `ErrCommitOutcomeUnknown`. Retry uses the same
   request or operation ID and reads back the receipt before attempting an insert.

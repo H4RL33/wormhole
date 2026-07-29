@@ -1699,18 +1699,23 @@ restore always reloads and strict-recomputes the current view, stash replay, mer
 evidence, and retry digest before it may match and return the receipt. Receipt
 `actor_json` is immutable canonical JSON; every read strict-decodes it, requires
 byte-identical re-encoding, calls `ValidateHistorical`, and matches it to the actor
-envelope bound into the request digest. Receipt `result_json` contains exactly one strict
-canonical private `restoreStashReceiptV1` for restore. Its tagged private `Result` maps
-exactly to the public `RestoreStashResult`, its explicit `Action` and `Outcome` must equal
-the receipt row (`Action == "restore"`, `Outcome == "clean" || Outcome == "conflicted"`),
-and `ConflictRetryDigest` is nil exactly for clean restore and a canonical non-nil digest
-exactly for conflicted restore. Unknown fields, trailing JSON, a noncanonical
-re-encoding, an invalid or unequal action/outcome in any preimage or envelope, or
-disagreement with the receipt row outcome fails closed. The private result requires a
-non-nil canonically sorted conflict array, strict conflict-value rehydration, and exact
-mapping to the returned public result and persisted open evidence. Clean restore requires
-`Conflicts == []` and `StashRetained == false`; conflicted restore requires a non-empty
-conflict array and `StashRetained == true`.
+envelope bound into the request digest. Localstore treats receipt `result_json` as
+action-opaque: it requires exactly one valid compact JSON value followed by exactly one
+LF, preserves the bytes and object-member order, and never schema-decodes or generic-map
+re-encodes it. The action-specific ProjectState codec owns schema, tags, member order,
+exact re-encoding, and semantic canonicality and rejects noncanonical bytes. Restore
+`result_json` therefore contains exactly one strict canonical private
+`restoreStashReceiptV1`. Its tagged private `Result` maps exactly to the public
+`RestoreStashResult`, its explicit `Action` and `Outcome` must equal the receipt row
+(`Action == "restore"`, `Outcome == "clean" || Outcome == "conflicted"`), and
+`ConflictRetryDigest` is nil exactly for clean restore and a canonical non-nil digest
+exactly for conflicted restore. Unknown fields, trailing JSON, a noncanonical re-encoding,
+an invalid or unequal action/outcome in any preimage or envelope, or disagreement with
+the receipt row outcome fails closed. The private result requires a non-nil canonically
+sorted conflict array, strict conflict-value rehydration, and exact mapping to the returned
+public result and persisted open evidence. Clean restore requires `Conflicts == []` and
+`StashRetained == false`; conflicted restore requires a non-empty conflict array and
+`StashRetained == true`.
 
 Stash `result_json` is exactly canonical `stashReceiptV1`, with Action `"stash"`, Outcome
 `"clean"`, and a tagged Result that maps exactly to public `StashResult`. Discard

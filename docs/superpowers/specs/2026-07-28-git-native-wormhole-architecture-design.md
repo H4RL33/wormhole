@@ -629,6 +629,12 @@ private tagged v1 codecs: `stashResultV1`/`stashReceiptV1`,
 outcome, and result; restore alone also carries its conflict retry digest. Conflict
 arrays are non-nil (`[]`, never `null`), optional pointers encode explicit `null`, and
 golden result/receipt bytes and hard-coded canonical digests cover every action/outcome.
+Localstore treats `result_json` as action-opaque: it requires exactly one valid compact
+JSON value followed by exactly one LF, preserves those bytes and object-member order, and
+never schema-decodes or generic-map re-encodes the value. The action-specific ProjectState
+codec owns schema, tags, member order, exact re-encoding, and semantic canonicality and
+rejects noncanonical bytes.
+
 The conflicted restore receipt binds explicit action/outcome, its tagged result, and a canonical digest
 over scope, request ID/digest, stash ID, and the complete post-conflict
 binding/status/accepted snapshot, candidate, all operation
