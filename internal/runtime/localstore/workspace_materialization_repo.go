@@ -30,6 +30,68 @@ type WorkspaceMaterializationRecord struct {
 	State                  string
 }
 
+type WorkspaceMaterializationDisposition struct {
+	Journals   []WorkspaceMaterializationRecord
+	Operations []WorkspaceOperation
+}
+
+// MaterializationDisposition returns the complete strictly validated journal
+// and operation history for this transaction's exact workspace.
+func (tx *WorkspaceMutationTx) MaterializationDisposition(ctx context.Context) (WorkspaceMaterializationDisposition, error) {
+	empty := WorkspaceMaterializationDisposition{
+		Journals:   make([]WorkspaceMaterializationRecord, 0),
+		Operations: make([]WorkspaceOperation, 0),
+	}
+	disposition := empty
+	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
+		return empty, ErrNotFound
+	}
+	workspace, _, err := queryWorkspaceByScope(ctx, tx.conn, tx.scope)
+	if errors.Is(err, sql.ErrNoRows) {
+		return empty, ErrNotFound
+	}
+	if err != nil {
+		return empty, fmt.Errorf("localstore: validate materialization disposition workspace: %w", err)
+	}
+	rows, err := tx.conn.QueryContext(ctx, `
+		SELECT project_id,workspace_id,journal_id,expected_live_digest,accepted_base_digest,
+		       checkout_path,checkout_device,checkout_inode,prior_tree_digest,candidate_digest,
+		       through_generation,prior_tree,candidate_tree,stage_path,backup_path,state,
+		       created_at,updated_at,included_operations_json,typeof(included_operations_json)
+		FROM workspace_materializations
+		WHERE project_id=? AND workspace_id=?
+		ORDER BY journal_id
+	`, tx.scope.ProjectID, tx.scope.WorkspaceID)
+	if err != nil {
+		return empty, fmt.Errorf("localstore: query materialization disposition journals: %w", err)
+	}
+	for rows.Next() {
+		record, err := scanWorkspaceMaterialization(rows, tx.scope, workspace.Binding, false)
+		if err != nil {
+			_ = rows.Close()
+			return empty, fmt.Errorf("localstore: validate materialization disposition journal: %w", err)
+		}
+		disposition.Journals = append(disposition.Journals, *record)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return empty, fmt.Errorf("localstore: iterate materialization disposition journals: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return empty, fmt.Errorf("localstore: close materialization disposition journals: %w", err)
+	}
+	disposition.Operations, err = tx.queryWorkspaceOperations(ctx, `
+		SELECT generation, operation_id, operation_json, state, stashed_by_stash_id
+		FROM workspace_overlay_operations
+		WHERE project_id=? AND workspace_id=?
+		ORDER BY generation
+	`, tx.scope.ProjectID, tx.scope.WorkspaceID)
+	if err != nil {
+		return empty, fmt.Errorf("localstore: read materialization disposition operations: %w", err)
+	}
+	return disposition, nil
+}
+
 func (tx *WorkspaceMutationTx) AcceptanceEligibleMaterialization(ctx context.Context) (*WorkspaceMaterializationRecord, error) {
 	return tx.acceptanceEligibleMaterialization(ctx)
 }
@@ -66,7 +128,7 @@ func (tx *WorkspaceMutationTx) acceptanceEligibleMaterialization(ctx context.Con
 		SELECT project_id,workspace_id,journal_id,expected_live_digest,accepted_base_digest,
 		       checkout_path,checkout_device,checkout_inode,prior_tree_digest,candidate_digest,
 		       through_generation,prior_tree,candidate_tree,stage_path,backup_path,state,
-		       created_at,updated_at,included_operations_json
+		       created_at,updated_at,included_operations_json,typeof(included_operations_json)
 		FROM workspace_materializations
 		WHERE project_id=? AND workspace_id=? AND state IN ('published','recovered_new')
 		ORDER BY journal_id
@@ -78,7 +140,7 @@ func (tx *WorkspaceMutationTx) acceptanceEligibleMaterialization(ctx context.Con
 
 	records := make([]*WorkspaceMaterializationRecord, 0, 1)
 	for rows.Next() {
-		record, err := scanWorkspaceMaterialization(rows, tx.scope, workspace.Binding)
+		record, err := scanWorkspaceMaterialization(rows, tx.scope, workspace.Binding, true)
 		if err != nil {
 			return nil, fmt.Errorf("localstore: validate acceptance-eligible materialization: %w", err)
 		}
@@ -103,13 +165,14 @@ type workspaceMaterializationScanner interface {
 	Scan(...any) error
 }
 
-func scanWorkspaceMaterialization(scanner workspaceMaterializationScanner, scope types.WorkspaceScope, binding types.WorkspaceBinding) (*WorkspaceMaterializationRecord, error) {
+func scanWorkspaceMaterialization(scanner workspaceMaterializationScanner, scope types.WorkspaceScope, binding types.WorkspaceBinding, eligibleOnly bool) (*WorkspaceMaterializationRecord, error) {
 	var (
 		projectID, workspaceID     string
 		priorBytes, candidateBytes []byte
 		stagePath, backupPath      string
 		createdAt, updatedAt       time.Time
 		included                   sql.NullString
+		includedStorageClass       string
 	)
 	record := &WorkspaceMaterializationRecord{}
 	if err := scanner.Scan(
@@ -117,7 +180,7 @@ func scanWorkspaceMaterialization(scanner workspaceMaterializationScanner, scope
 		&record.Checkout.CanonicalPath, &record.Checkout.Device, &record.Checkout.Inode,
 		&record.PriorTreeDigest, &record.CandidateDigest, &record.ThroughGeneration,
 		&priorBytes, &candidateBytes, &stagePath, &backupPath, &record.State,
-		&createdAt, &updatedAt, &included,
+		&createdAt, &updatedAt, &included, &includedStorageClass,
 	); err != nil {
 		return nil, fmt.Errorf("scan materialization row: %w", err)
 	}
@@ -130,8 +193,8 @@ func scanWorkspaceMaterialization(scanner workspaceMaterializationScanner, scope
 	if !validMaterializationDigest(record.ExpectedLiveDigest) {
 		return nil, fmt.Errorf("invalid expected live digest")
 	}
-	if !validMaterializationDigest(record.AcceptedBaseDigest) || record.AcceptedBaseDigest != projectstate.Digest(binding.AcceptedTreeDigest) {
-		return nil, fmt.Errorf("accepted base digest differs from workspace binding")
+	if !validMaterializationDigest(record.AcceptedBaseDigest) {
+		return nil, fmt.Errorf("invalid accepted base digest")
 	}
 	if record.Checkout != binding.Checkout {
 		return nil, fmt.Errorf("materialization checkout differs from workspace binding")
@@ -154,8 +217,20 @@ func scanWorkspaceMaterialization(scanner workspaceMaterializationScanner, scope
 	if !validMaterializationPath(stagePath) || !validMaterializationPath(backupPath) || stagePath == backupPath {
 		return nil, fmt.Errorf("invalid materialization stage or backup path")
 	}
-	if record.State != "published" && record.State != "recovered_new" {
+	switch record.State {
+	case "prepared", "published", "recovered_new":
+		if record.AcceptedBaseDigest != projectstate.Digest(binding.AcceptedTreeDigest) {
+			return nil, fmt.Errorf("accepted base digest differs from workspace binding")
+		}
+	case "accepted", "recovered_old":
+	default:
+		return nil, fmt.Errorf("invalid materialization state")
+	}
+	if eligibleOnly && record.State != "published" && record.State != "recovered_new" {
 		return nil, fmt.Errorf("invalid acceptance-eligible materialization state")
+	}
+	if includedStorageClass != "null" && includedStorageClass != "text" {
+		return nil, fmt.Errorf("invalid included operations storage class")
 	}
 	if included.Valid {
 		if included.String == "" || !utf8.ValidString(included.String) || strings.ContainsRune(included.String, 0) {
