@@ -505,6 +505,10 @@ the same layering pattern and isolation discipline.
   requires the candidate values to equal the old base and takes the new base values.
   Candidate loading after a Git advance validates the binding invariants but must not
   reject retained old-base handle/remotes merely because the accepted base is newer.
+- Direct-delta validation compares only the prior direct surface, the next direct tree,
+  and a bound materialisation exception. It accepts a correct new tombstone and never
+  inspects an overlay. `ThreeWayRebase` alone owns the overlay-versus-direct
+  tombstone/edit conflict and its persisted evidence.
 
 ### Portable state replay, diff, and merge
 
@@ -521,12 +525,27 @@ the same layering pattern and isolation discipline.
   Status exposes the exact composed `CandidateDigest` and final `OverlayGeneration`
   while retaining the accepted snapshot separately. `WorkspaceStatus.State` remains a
   string until an approved plan introduces another type.
+- Stash serialisation preserves that exact selected start plus a strict versioned
+  canonical envelope containing the initial boundary and only active StoredOperation
+  rows above it. It must not add a competing migration merely to persist the boundary,
+  transition already-rebased rows at/below it, or expect those rows during restore. An
+  empty envelope with initial boundary equal to final through-generation is valid. A
+  retained conflicted stash is an evidence/idempotency anchor: exact repeat may return
+  the already-persisted outcome read-only, but mixed rows or changed candidate/conflict
+  evidence fail closed instead of blindly replaying.
 - All append/rebase mutations use one caller-owned dedicated SQLite connection and one
   `BEGIN IMMEDIATE`: read exact binding/candidate/active rows, decode and compose, apply
   the shared reducer, write all rows/candidate/conflict state and the binding status,
   then commit or roll back together. Helpers must not open nested transactions. A
   standalone append API that bypasses composition, status, generation, or candidate
   validation is forbidden.
+- `localstore.WorkspaceConflictGate` has exactly
+  `HasOpenConflicts(context.Context, types.WorkspaceScope) (bool, error)`;
+  `WorkspaceRepo.HasOpenConflicts` uses that signature and
+  `WorkspaceMutationTx.HasOpenConflicts(context.Context) (bool, error)` is restricted to
+  its callback's bound scope. Both query exact project/workspace plus `state='open'`;
+  resolved or other-workspace rows do not block. The one sentinel is
+  `localstore.ErrWorkspaceConflicted`; aliases must preserve the same error value.
 - Diff and conflict paths use RFC 6901 escaping, `""` for a record root, and `/body`
   for KB Markdown. `FieldValue` has `Present bool` tagged `json:"present"` and
   `Value json.RawMessage` tagged `json:"value,omitempty"`: false requires nil Value;
@@ -544,7 +563,14 @@ the same layering pattern and isolation discipline.
   byte-identically, never a partial merge. The importer atomically persists that `ours`
   surface with the complete new direct `theirs` tree, both-side conflict evidence,
   absorbed generation/row states, and conflicted status. Restart reproduces it.
-  Checkpoint and writable Fabric delivery remain blocked until explicit resolution.
+  Checkpoint returns zero `CheckpointResult` plus `ErrWorkspaceConflicted`; callers use
+  Status separately to prove preserved candidate digest/generation. Writable v2 Fabric
+  push checks the same exact-scope gate before credential resolution, client/DNS/signing,
+  or network. Delivery marking rechecks inside one local `BEGIN IMMEDIATE` immediately
+  before the complete-key queue update. No transaction spans the network: an in-flight
+  conflict may follow remote acceptance, in which case the byte-identical row stays
+  pending and retries the same operation after resolution. Checkpoint and writable Fabric
+  delivery remain blocked until explicit resolution.
 
 ---
 

@@ -242,12 +242,18 @@ git commit -m "feat: freeze Fabric routing contracts"
 - Modify: `cmd/gatewayd/gatewayd_test.go`
 
 **Interfaces:**
-- Consumes: `types.WorkspaceBinding`, Task 1 routing types, Slice-A `000001` portable schema, Slice-B/C `000002` runtime legacy-graph schema, and the single `gateway_schema_migrations` ledger.
-- Produces: `GatewaySchemaVersion = 3` after `000003_fabric_routes.sql`, then `GatewaySchemaVersion = 4` after `000004_sync_binding.sql`, `FabricRouteRepo`, complete-key `QueueRepo`, quarantine repositories, and profile-only `CredentialSource`.
+- Consumes: `types.WorkspaceBinding`, Task 1 routing types, Slice-A `000001` portable schema, Slice-A's exact `localstore.WorkspaceConflictGate` and shared `localstore.ErrWorkspaceConflicted`, Slice-B/C `000002` runtime legacy-graph schema, and the single `gateway_schema_migrations` ledger.
+- Produces: `GatewaySchemaVersion = 3` after `000003_fabric_routes.sql`, then `GatewaySchemaVersion = 4` after `000004_sync_binding.sql`, `FabricRouteRepo`, complete-key `QueueRepo`, quarantine repositories, profile-only `CredentialSource`, and the conflict-aware atomic `MarkDelivered` boundary used by Task 6.
 
 Repository signatures are exact:
 
 ```go
+// Consumed from internal/runtime/localstore; do not redeclare another shape/error.
+type WorkspaceConflictGate interface {
+    HasOpenConflicts(context.Context, types.WorkspaceScope) (bool, error)
+}
+var ErrWorkspaceConflicted = errors.New("localstore: workspace has open conflicts")
+
 type FabricRouteRepo struct { db *sql.DB }
 func (r *FabricRouteRepo) CreateProfile(context.Context, types.FabricProfile) error
 func (r *FabricRouteRepo) UpdateProfile(context.Context, profileID, expectedInstanceID, baseURL, credentialRef string) error
@@ -270,13 +276,25 @@ func (r *QueueRepo) GetEntry(context.Context, types.RemoteBindingKey, string) (Q
 func (r *QueueRepo) DeleteEntry(context.Context, types.RemoteBindingKey, string) error
 ```
 
+`cmd/gatewayd` wires the same non-nil `*localstore.WorkspaceRepo` as the v2 sync
+engine's `WorkspaceConflictGate`; no project-only, workspace-only, ambient-current, or
+optional permissive implementation is allowed. `QueueRepo.MarkDelivered` owns the local
+post-network concurrency boundary: on one dedicated SQLite connection it executes
+`BEGIN IMMEDIATE`, rechecks `workspace_conflicts` with the queue key's exact
+`(project_id, workspace_id)` and `state='open'`, and only then updates the exact complete
+remote key plus operation ID from pending to delivered. An open row rolls back and
+returns `localstore.ErrWorkspaceConflicted`; the pending queue row remains byte-identical,
+including operation bytes/digest, priority, timestamps, and NULL delivered_at. Resolved
+rows and another project/workspace never block. A storage/check failure also rolls back
+without updating queue, cursor, or audit state.
+
 - [ ] **Step 1: Write failing migration, direct-SQL, and repository tests**
 
-Add `TestGatewayMigration3Fresh`, `TestGatewayMigration2To3Routes`, `TestGatewayMigration4QuarantinesLegacyRows`, `TestGatewayMigration3FailureRollsBackWithoutLedgerAdvance`, `TestGatewayMigration4FailureRollsBackWithoutLedgerAdvance`, `TestGatewayMigrationLoaderAcceptsOnlyNumberedSQL`, `TestGatewayMigrationsAreOneWay`, `TestFabricProfileIsSoleCredentialAuthority`, `TestFabricBindingRejectsWorkspaceMismatchByDirectSQL`, `TestCursorRejectsBindingMismatchByDirectSQL`, `TestQueueRejectsBindingMismatchByDirectSQL`, `TestCompleteKeyQueueIsolation`, `TestCredentialRotationKeepsOneEngine`, and `TestFabricFailureDoesNotBlockLocalWriteOrOtherFabric`. Direct SQL tests expect SQLite `SQLITE_CONSTRAINT_FOREIGNKEY`, not repository validation errors. The loader test rejects `.up.sql`, `.down.sql`, unnumbered files, duplicate versions, and version gaps; it embeds only `^[0-9]{6}_[a-z0-9_]+\.sql$`.
+Add `TestGatewayMigration3Fresh`, `TestGatewayMigration2To3Routes`, `TestGatewayMigration4QuarantinesLegacyRows`, `TestGatewayMigration3FailureRollsBackWithoutLedgerAdvance`, `TestGatewayMigration4FailureRollsBackWithoutLedgerAdvance`, `TestGatewayMigrationLoaderAcceptsOnlyNumberedSQL`, `TestGatewayMigrationsAreOneWay`, `TestFabricProfileIsSoleCredentialAuthority`, `TestFabricBindingRejectsWorkspaceMismatchByDirectSQL`, `TestCursorRejectsBindingMismatchByDirectSQL`, `TestQueueRejectsBindingMismatchByDirectSQL`, `TestCompleteKeyQueueIsolation`, `TestCredentialRotationKeepsOneEngine`, and `TestFabricFailureDoesNotBlockLocalWriteOrOtherFabric`. Add `TestQueueMarkDeliveredRechecksOpenConflictAtomically`, `TestQueueMarkDeliveredConflictScopeIsolation`, and `TestGatewayWiresExactWorkspaceConflictGate`. The first captures the complete pending row, inserts an exact-workspace open conflict before delivery, requires `errors.Is(err, localstore.ErrWorkspaceConflicted)`, and compares every row byte/field after reopen. The isolation table covers resolved-only, same project/different workspace, different project, and exact open conflict. Direct SQL tests expect SQLite `SQLITE_CONSTRAINT_FOREIGNKEY`, not repository validation errors. The loader test rejects `.up.sql`, `.down.sql`, unnumbered files, duplicate versions, and version gaps; it embeds only `^[0-9]{6}_[a-z0-9_]+\.sql$`.
 
 - [ ] **Step 2: Run RED**
 
-Run: `go test ./internal/runtime/localstore ./internal/runtime/sync ./cmd/gatewayd -run 'Test(GatewayMigration|FabricProfile|FabricBinding|Cursor|Queue|CredentialRotation|FabricFailure)' -count=1`
+Run: `go test ./internal/runtime/localstore ./internal/runtime/sync ./cmd/gatewayd -run 'Test(GatewayMigration|FabricProfile|FabricBinding|Cursor|Queue|CredentialRotation|FabricFailure|GatewayWiresExactWorkspaceConflictGate)' -count=1`
 
 Expected: FAIL because migrations 3/4 and complete-key APIs are absent.
 
@@ -462,14 +480,14 @@ The runner embeds only files matching `^[0-9]{6}_[a-z0-9_]+\.sql$`, sorts by num
 
 - [ ] **Step 5: Implement repositories and engine identity**
 
-All repository queries bind every component of `WorkspaceScope` or `RemoteBindingKey`. `AttachWorkspace` loads the canonical `types.WorkspaceBinding` and profile in the same transaction, compares repository/ref/instance values, and inserts one complete row; it never inserts a recovery row. `UpdateProfile` permits base-URL and credential-reference rotation only when `expectedInstanceID` still matches. `sync.Engine` stores binding/profile IDs, calls `GetRoute` for each network cycle, resolves `profile.CredentialRef` immediately before the HTTP call, and excludes credential material from keys, equality, status, and errors.
+All repository queries bind every component of `WorkspaceScope` or `RemoteBindingKey`. `AttachWorkspace` loads the canonical `types.WorkspaceBinding` and profile in the same transaction, compares repository/ref/instance values, and inserts one complete row; it never inserts a recovery row. `UpdateProfile` permits base-URL and credential-reference rotation only when `expectedInstanceID` still matches. `sync.Engine` stores binding/profile IDs and the required exact conflict gate, calls `GetRoute` for each network cycle, resolves `profile.CredentialRef` immediately before the HTTP call, and excludes credential material from keys, equality, status, and errors. Implement `MarkDelivered` with the immediate recheck/complete-key update transaction above; `ErrWorkspaceConflicted` maps to `StateAttentionRequired` as a typed non-transient local block, never `ErrFabricUnavailable` or a network retry classification.
 
 - [ ] **Step 6: Run GREEN, one-way loader, and isolation tests**
 
 Run:
 
 ```bash
-go test ./internal/runtime/localstore ./internal/runtime/sync ./cmd/gatewayd -run 'Test(GatewayMigration|FabricProfile|FabricBinding|Cursor|Queue|CredentialRotation|FabricFailure)' -count=1
+go test ./internal/runtime/localstore ./internal/runtime/sync ./cmd/gatewayd -run 'Test(GatewayMigration|FabricProfile|FabricBinding|Cursor|Queue|CredentialRotation|FabricFailure|GatewayWiresExactWorkspaceConflictGate)' -count=1
 go test -race ./internal/runtime/localstore ./internal/runtime/sync -run 'Test(CompleteKeyQueueIsolation|CredentialRotationKeepsOneEngine)' -count=1
 ```
 
@@ -933,7 +951,9 @@ git commit -m "feat: observe exact canonical GitHub commits"
 - Modify: `docs/mcp-protocol.md`
 
 **Interfaces:**
-- Consumes: Tasks 1–5.
+- Consumes: Tasks 1–5 plus Slice-A `localstore.WorkspaceConflictGate`, the shared
+  `localstore.ErrWorkspaceConflicted`, and Task 2's conflict-aware
+  `QueueRepo.MarkDelivered`.
 - Produces: public key-continuity scopes, v2 attach/bootstrap/pull/push/conflict variants, and frozen v1 branch compatibility.
 
 ```go
@@ -972,6 +992,21 @@ Attach carries the same scope without stream ID before server allocation; bootst
 
 For each of `wormhole.sync.bootstrap`, `incremental_pull`, `incremental_push`, and `conflict_report`, preserve fixtures for strict v1 request decode, result JSON bytes, documented error strings, and the exact v1 descriptor branch. Add `TestSyncDescriptorV1BranchUnchangedWhenV2Added`; compare the normalized `oneOf[version=1]` branch to the frozen legacy schema, not the complete descriptor. Add public tests for padded base64, non-URL alphabet, nonce lengths 31/33, wrong key ID, stale `now-5m-1ns`, future `now+30s+1ns`, replay, body tamper, wrong Fabric/project/tool, and noncanonical timestamp.
 
+Add `TestSyncV2PushOpenConflictStopsBeforeCredentialOrNetwork`,
+`TestSyncV2PushConflictOpenedInFlightLeavesQueueRowByteIdenticalPending`,
+`TestSyncV2PushConflictScopeIsolation`,
+`TestSyncV2PushGateFailureHasNoSideEffects`, and
+`TestSyncV2PushRetriesExactOperationAfterResolution`. Instrument workspace/profile reads,
+credential source, signer, DNS/client construction, HTTP transport, cursor, audit, and
+queue writes. An exact-workspace open conflict must return an error satisfying
+`errors.Is(err, localstore.ErrWorkspaceConflicted)`, classify as non-transient
+`StateAttentionRequired`, and leave every credential/network/remote/cursor/audit/delivery
+counter at zero. Same-project/different-workspace, different-project, and resolved-only
+fixtures must not block. The in-flight case opens a conflict after the server accepts the
+operation but before local delivery marking, then compares the complete queue row before/
+after reopen. After explicit resolution, retry must send the identical canonical
+operation ID/bytes and then deliver that same row once.
+
 - [ ] **Step 2: Run RED**
 
 Run: `go test ./internal/mcp ./internal/runtime/sync -run 'Test(SyncV1|SyncDescriptorV1|SyncV2|PublicProof)' -count=1`
@@ -996,7 +1031,39 @@ Add `ArgumentVariants` and `ResultVariants` to `Tool`. Registry generation emits
 
 - [ ] **Step 5: Implement Gateway v2 transport**
 
-New complete bindings use v2. Gateway loads `types.WorkspaceBinding` immediately before each call, fills repository/ref/commit/digest from that trusted binding, loads the current stream cursor, and signs canonical params. Push sends one canonical `OperationV1`; a stale result persists its conflict and leaves the queue row undelivered. Pull calls the server observer path and imports only a validated accepted tree. No recovery/quarantine row can construct a v2 request. V1 remains available only to a valid newly resolved credential during the explicit compatibility window; it cannot attach a new stream or bypass v2 preconditions.
+New complete bindings use v2. Gateway loads `types.WorkspaceBinding` immediately before each call, fills repository/ref/commit/digest from that trusted binding, loads the current stream cursor, and signs canonical params. Pull calls the server observer path and imports only a validated accepted tree. No recovery/quarantine row can construct a v2 request. V1 remains available only to a valid newly resolved credential during the explicit compatibility window; it cannot attach a new stream or bypass v2 preconditions.
+
+Every v2 push uses this exact order for the pending row's complete `RemoteBindingKey`:
+
+```text
+scope = types.WorkspaceScope{ProjectID: key.ProjectID, WorkspaceID: key.WorkspaceID}
+open = conflictGate.HasOpenConflicts(ctx, scope)
+if gate error: fail closed; leave row byte-identical pending
+if open: return localstore.ErrWorkspaceConflicted; leave row byte-identical pending
+load current WorkspaceBinding/route/cursor
+resolve profile credential; construct/sign request; perform network call
+if stale/precondition result: persist its conflict; leave row pending
+if success: QueueRepo.MarkDelivered(ctx, key, operation.ID)
+  // MarkDelivered atomically rechecks the same exact workspace for open conflicts
+  // immediately before its complete-key delivery UPDATE.
+```
+
+The first gate precedes credential resolution, DNS, client/transport construction,
+signing, and every network call. A true result is a typed non-transient local block:
+wrap the shared `ErrWorkspaceConflicted`, set `StateAttentionRequired`, retain the exact
+pending row, and do not consume retry budget as Fabric unavailability. Storage gate
+errors also fail closed before side effects. Task 2's `MarkDelivered` transaction is the
+mandatory post-network recheck; an in-flight conflict makes it return the same sentinel
+without changing the row, cursor, or audit state.
+
+No SQLite transaction or workspace lock is held across the network. Therefore a remote
+server may accept an operation just before a local conflict opens. In that case the
+atomic delivery recheck intentionally leaves the canonical row pending. After explicit
+resolution, retry sends the same operation ID and bytes; server-side OperationV1 exact
+replay/preconditions make that retry idempotent. If `MarkDelivered` commits first and a
+conflict opens later, the later conflict belongs to subsequent local state and does not
+retroactively undeliver the completed operation. This is the complete concurrency
+boundary; no implementation may omit either check or claim a distributed transaction.
 
 - [ ] **Step 6: Run GREEN**
 
