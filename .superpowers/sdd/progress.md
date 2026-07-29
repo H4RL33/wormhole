@@ -343,9 +343,25 @@ shapes; real reducer-operation tests now cover both, with the direct case provin
 operation fails from the accepted source and succeeds from the selected direct start.
 Fresh re-review approved the correction. Focused/full projectstate tests, race, and vet
 were GREEN; projectstate statement coverage was 85.2%, with formatting and diff checks
-clean. The next A4 tranche is the complete same-transaction `OperationAudit` localstore
-reader plus the localstore retry-reader seam required before `Service.Stash`.
-`OperationAudit` will return non-nil `WorkspaceOperationAuditRecord` values so
-`CreatedAt` remains available to `RestoreRetryState`; Stash must map every embedded
-`WorkspaceOperation` in returned order, without filtering and with equal cardinality,
-into the non-nil planner inventory while excluding `CreatedAt` from planner input.
+clean. The complete same-transaction `OperationAudit` reader was the remaining operation
+inventory prerequisite for `Service.Stash`; `RestoreRetryState` is independently required
+by RestoreStash and need not precede Stash.
+
+A4 complete operation audit `3d243a4`: a causal compile RED first proved the frozen
+`WorkspaceOperationAuditRecord`/`OperationAudit` API was absent. The initial empty-case
+implementation returned the required non-nil zero-length slice and that test was GREEN;
+the next populated all-state behavioral RED returned length 0, wanted 6. The final reader
+strict-loads the exact workspace, executes one all-state query in stable generation order,
+and returns embedded deep-owned `WorkspaceOperation` values plus normalized nonzero UTC
+`CreatedAt` evidence.
+It validates every selected SQLite storage class and exact scope, all five operation
+states including owned and migrated ownerless stashes, canonical row bytes/metadata,
+globally strictly increasing positive generations, and globally unique operation IDs.
+CAST-qualified scope selection exposes BLOB scope corruption and duplicate textual scope
+keys instead of silently omitting them; sibling workspaces remain isolated across restart,
+and unavailable, missing, malformed, aliased, or corrupt reads fail all-or-error. Focused
+and full localstore tests were GREEN; the localstore race suite completed in 88.616s,
+vet was clean, package statement coverage was 83.2%, and `OperationAudit` method coverage
+was 91.4%. Two fresh reviews approved with no remaining findings, and formatting/diff
+checks were clean. The next A4 tranche is `Service.Stash`. `RestoreRetryState` remains a
+RestoreStash prerequisite and may follow Stash.

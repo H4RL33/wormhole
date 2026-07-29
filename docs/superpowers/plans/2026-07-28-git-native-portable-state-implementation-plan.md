@@ -1729,11 +1729,18 @@ These envelopes use the existing `result_json` TEXT and do not change
 `GatewaySchemaVersion` or any migration. Each mutation
 first reads any receipt and compares its action/digest, inserts the receipt in the same
 transaction as the state transition, and requires exactly one row. If COMMIT returns an
-error, the service reads back that exact scope/request ID on a fresh connection: an exact
-clean receipt proves success and absence proves failure. A conflicted restore receipt
-must pass the complete conflicted-retry state and semantic verification before proving
-success; unavailable, malformed, mismatched, or unverifiable readback wraps
-`ErrCommitOutcomeUnknown`. The caller retries with the same request or operation ID.
+error, the service reads back that exact scope/request ID on a fresh connection; readback
+never proves failure. For Stash, only an available, strictly decoded clean stash receipt
+whose action, request digest, and complete result exactly match the attempted transition
+may promote the indeterminate outcome to success. An absent, unavailable, malformed,
+corrupt, or mismatched Stash readback returns `StashResult{}` and preserves an error
+wrapping `ErrCommitOutcomeUnknown`. A post-COMMIT readback mismatch is not
+`ErrIdempotencyConflict`; that sentinel is reserved for the ordinary pre-mutation lookup
+of a reused request ID with a different request digest. The caller retries Stash with the
+same request ID. A conflicted restore receipt must pass the complete conflicted-retry
+state and semantic verification before proving success; unavailable, malformed,
+mismatched, or unverifiable readback wraps `ErrCommitOutcomeUnknown`. Other actions use
+their separately frozen action-specific proof and retry rules.
 
 Direct delta rules are exact. Relative to the previously imported candidate, or accepted
 base when no candidate exists, Import first compares the prior canonical path inventory
@@ -1918,6 +1925,8 @@ require len(operationInventory) == len(auditRecords)
 // auditRecord.CreatedAt remains retained retry/audit evidence; it is not planner input
 plan = buildStashPlan(workspace.Binding, sourceBase, candidate, operationInventory)
 require plan.SourceTree == sourceBaseTree // canonical accepted semantic source evidence
+result = StashResult{StashID: stashID, SourceDigest: plan.SourceDigest,
+  CandidateDigest: plan.CandidateDigest, OperationCount: plan.OperationCount}
 INSERT workspace_stashes(stash_id=stashID, source_tree=EncodeFileList(plan.SourceTree),
   composed_tree=EncodeFileList(plan.ComposedTree),
   operations_json=plan.OperationsJSON,
@@ -1930,10 +1939,17 @@ tx.TransitionOperations(ctx, plan.AbsorbedRows, "stashed", &stashID) // exact pr
 tx.TransitionOperations(ctx, plan.LaterRows, "stashed", &stashID) // exact preloaded membership
 UPDATE workspace_bindings SET status='clean'
 INSERT canonical clean stash transition receipt with actor_json=CanonicalJSON(req.Actor)
-  and result StashID=stashID, SourceDigest=plan.SourceDigest,
-  CandidateDigest=plan.CandidateDigest, OperationCount=plan.OperationCount
+  and result=result
 COMMIT
-if COMMIT result is indeterminate: return error wrapping ErrCommitOutcomeUnknown
+if COMMIT succeeds: return result
+if COMMIT result is indeterminate:
+  readback = read exact scope/request ID on a fresh connection
+  if readback is available and strictly decodes as action='stash', outcome='clean',
+     with request_digest=requestDigest and complete result exactly equal to result:
+    return decoded StashResult success
+  // absent/unavailable/malformed/corrupt/mismatched is not ErrIdempotencyConflict
+  // caller retries with the same RequestID
+  return StashResult{} plus original error wrapping ErrCommitOutcomeUnknown
 ~~~
 
 `source_tree` and `source_base_digest` are the semantic pre-stash rebase base, normally
@@ -2244,7 +2260,12 @@ labels, nil versus empty operations arrays, cross-binding trees, same-ID same-di
 retry, same-ID different-digest rejection, receipt survival after clean restore deletion,
 strict historical actor-envelope decoding, audit/restart reads after clean restore stash
 deletion and discard, conflicted retry strict recomputation, exact affected-count rollback, and an injected
-unknown commit outcome followed by successful same-ID retry. Freeze the exact canonical
+unknown Stash commit outcome. Only an exact strictly decoded clean receipt with matching
+action, request digest, and complete result may turn that outcome into success; absent,
+unavailable, malformed, corrupt, or mismatched readback must return `StashResult{}` plus
+an error wrapping `ErrCommitOutcomeUnknown`, and mismatch must not become
+`ErrIdempotencyConflict`. Prove a
+subsequent retry uses the same request ID. Freeze the exact canonical
 stash/restore/discard request preimages and digests with golden tests. Also freeze literal
 canonical bytes and hard-coded digests for `stashResultV1`/`stashReceiptV1`, clean and
 conflicted `restoreStashResultV1`/`restoreStashReceiptV1`, and
