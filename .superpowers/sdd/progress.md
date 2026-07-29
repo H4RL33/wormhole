@@ -393,3 +393,29 @@ resumes `Service.Stash`; before commit it must add a hidden-BLOB receipt-key zer
 regression, extend sibling isolation to the same project with different workspaces, and
 replace state/status-specific retry write blockers with unrestricted `BEFORE UPDATE`
 triggers so owner, timestamp, and other-column rewrites cannot evade them.
+
+A4 `Service.Stash` `50bab44`: complete. Causal TDD first proved the service action was
+absent, then covered accepted, direct, and rebased selected starts; complete all-state
+`OperationAudit` projection; terminal-history preservation; conflict rejection; receipt
+replay/collision behavior; each write-stage rollback; and COMMIT-outcome confirmation.
+The service validates the request and a generated canonical v4 stash ID before one
+`BEGIN IMMEDIATE` callback. It reads the transition receipt first: only the exact
+`stash` action/request-digest receipt is strictly decoded and served read-only, while a
+different action or digest returns `ErrIdempotencyConflict`. A new request reads the
+accepted source, conflict gate, candidate, and complete audit, builds the frozen stash
+plan, then writes in order: stash, candidate deletion, absorbed transitions, later
+transitions, `clean` binding status, and finally the receipt. Any failure rolls back.
+Only `ErrCommitOutcomeUnknown` performs a fresh exact receipt readback; absent,
+malformed, mismatched, unavailable, or unequal results return zero result and continue
+to wrap the original unknown outcome rather than becoming an idempotency conflict.
+
+The action depends on receipt result-byte preservation `607e826` and logical-key
+hardening `d6f583d`. Its final regressions prove a logically matching hidden-BLOB receipt
+key fails closed with byte-identical state, same-project/different-workspace and
+cross-project sibling isolation, and unrestricted `BEFORE UPDATE` retry blockers. Fresh
+spec and test reviews approved with no remaining blocking findings. Focused Stash and
+confirmation tests, full `internal/runtime/projectstate` (85.4% statement coverage),
+full `internal/runtime/localstore`, focused race, `go vet ./...`, and `go test ./...`
+were GREEN; the approved project-wide merged statement-coverage floor remains 80%.
+`RestoreRetryState` is the next A4 tranche and remains the prerequisite for
+`RestoreStash`.
