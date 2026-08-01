@@ -52,12 +52,20 @@ type withImmediateWorkspaceTransitionFunc func(
 	func(*localstore.WorkspaceMutationTx, *localstore.WorkspaceTransitionReceiptRecord) error,
 ) error
 
+type withImmediateWorkspaceFunc func(
+	context.Context,
+	types.WorkspaceScope,
+	func(*localstore.WorkspaceMutationTx) error,
+) error
+
 type Service struct {
 	repo                             *localstore.WorkspaceRepo
 	legacyBackupRoot                 string
 	registrationTimeout              time.Duration
 	readWorkingTree                  func(string) (state.Tree, error)
 	observeGitBase                   func(context.Context, ObserveGitBaseRequest) (gitBaseObservation, error)
+	observePublicationOrigin         func(context.Context, string) (publicationOriginObservation, error)
+	withImmediateWorkspace           withImmediateWorkspaceFunc
 	withImmediateWorkspaceTransition withImmediateWorkspaceTransitionFunc
 	now                              func() time.Time
 	newStashID                       func() (string, error)
@@ -70,6 +78,8 @@ func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service,
 	service := &Service{
 		repo: repo, registrationTimeout: workspaceRegistrationTimeout,
 		readWorkingTree: ReadWorkingTreeNoFollow, observeGitBase: observeGitBaseOutside,
+		observePublicationOrigin:         observePublicationOrigin,
+		withImmediateWorkspace:           repo.WithImmediateWorkspace,
 		withImmediateWorkspaceTransition: repo.WithImmediateWorkspaceTransition,
 		now:                              time.Now,
 		newStashID:                       newCanonicalStashID,
