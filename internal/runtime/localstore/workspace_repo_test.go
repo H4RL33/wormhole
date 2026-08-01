@@ -3033,6 +3033,8 @@ func readAtomicWorkspaceRawSnapshot(t *testing.T, db *sql.DB) rawAtomicWorkspace
 	snapshot := make(rawAtomicWorkspaceSnapshot)
 	for _, table := range []string{
 		"workspace_bindings",
+		"workspace_publication_policies",
+		"workspace_publication_policy_history",
 		"workspace_candidates",
 		"workspace_overlay_operations",
 		"workspace_materializations",

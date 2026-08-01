@@ -38,6 +38,270 @@ func TestGatewayMigrationLedger(t *testing.T) {
 	}
 }
 
+func TestWorkspacePublicationMigrationFreshSchema(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	var version, count int
+	if err := store.DB().QueryRow(`SELECT max(version), count(*) FROM gateway_schema_migrations`).Scan(&version, &count); err != nil {
+		t.Fatal(err)
+	}
+	if version != 3 || count != 3 {
+		t.Fatalf("migration ledger=(%d,%d), want (3,3)", version, count)
+	}
+	for _, table := range []string{"workspace_publication_policies", "workspace_publication_policy_history"} {
+		var got string
+		if err := store.DB().QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&got); err != nil {
+			t.Fatalf("publication table %s: %v", table, err)
+		}
+	}
+	if got := tableColumns(t, store.DB(), "workspace_publication_policies"); !reflect.DeepEqual(got, []string{
+		"project_id", "workspace_id", "repository_identity_json", "origin_digest", "classification",
+		"policy_revision", "transition_kind", "changed_actor_json", "changed_at", "created_at", "updated_at",
+	}) {
+		t.Fatalf("workspace_publication_policies columns=%v", got)
+	}
+	if got := tableColumns(t, store.DB(), "workspace_publication_policy_history"); !reflect.DeepEqual(got, []string{
+		"project_id", "workspace_id", "policy_revision", "repository_identity_json", "origin_digest",
+		"classification", "transition_kind", "changed_actor_json", "changed_at", "recorded_at",
+	}) {
+		t.Fatalf("workspace_publication_policy_history columns=%v", got)
+	}
+}
+
+func TestWorkspacePublicationMigrationBackfillsV2Bindings(t *testing.T) {
+	db := openRawGatewayDB(t)
+	applyGatewayV1(t, db)
+	v2, err := gatewayMigrationFiles.ReadFile("migrations/000002_portable_transitions.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(v2)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO gateway_schema_migrations(version) VALUES (2)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		UPDATE gateway_schema_migrations SET applied_at='2026-07-28 09:00:00' WHERE version=1;
+		UPDATE gateway_schema_migrations SET applied_at='2026-07-29 10:00:00' WHERE version=2;
+	`); err != nil {
+		t.Fatal(err)
+	}
+	insertPortableTransitionBindings(t, db)
+
+	if err := applyGatewayMigrations(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	for version, want := range map[int]string{1: "2026-07-28T09:00:00Z", 2: "2026-07-29T10:00:00Z"} {
+		var got time.Time
+		if err := db.QueryRow(`SELECT applied_at FROM gateway_schema_migrations WHERE version=?`, version).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got.UTC().Format(time.RFC3339) != want {
+			t.Fatalf("v%d applied_at=%s, want preserved %s", version, got.UTC().Format(time.RFC3339), want)
+		}
+	}
+	for _, table := range []string{"workspace_publication_policies", "workspace_publication_policy_history"} {
+		rows, err := db.Query(`
+			SELECT workspace_id,repository_identity_json,coalesce(origin_digest,''),classification,
+			       policy_revision,transition_kind,changed_actor_json,changed_at
+			FROM ` + table + ` ORDER BY project_id,workspace_id,policy_revision`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got [][8]any
+		for rows.Next() {
+			var workspaceID, repositoryJSON, origin, classification, kind string
+			var revision int64
+			var actor, changedAt any
+			if err := rows.Scan(&workspaceID, &repositoryJSON, &origin, &classification, &revision, &kind, &actor, &changedAt); err != nil {
+				_ = rows.Close()
+				t.Fatal(err)
+			}
+			got = append(got, [8]any{workspaceID, repositoryJSON, origin, classification, revision, kind, actor, changedAt})
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatal(err)
+		}
+		want := [][8]any{
+			{"00000000-0000-4000-8000-000000000011", `{}`, "", "unclassified", int64(1), "bootstrap", nil, nil},
+			{"00000000-0000-4000-8000-000000000012", `{}`, "", "unclassified", int64(1), "bootstrap", nil, nil},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s backfill=%v, want %v", table, got, want)
+		}
+	}
+}
+
+func TestWorkspacePublicationSchemaConstraintsForeignKeysAndCascade(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	db := store.DB()
+	insertPortableTransitionBindings(t, db)
+	const projectID = "00000000-0000-4000-8000-000000000001"
+	const workspaceID = "00000000-0000-4000-8000-000000000011"
+	digest := "sha256:" + strings.Repeat("a", 64)
+	actor := `{"actor_kind":"human"}`
+
+	for _, row := range []struct {
+		revision       int
+		origin, class  string
+		kind           string
+		actor, changed any
+	}{
+		{1, "", "unclassified", "bootstrap", nil, nil},
+		{2, digest, "unclassified", "configured", actor, "2026-08-01 12:00:00"},
+		{3, digest, "unclassified", "origin_invalidated", nil, "2026-08-01 12:01:00"},
+		{4, digest, "unclassified", "repository_invalidated", nil, "2026-08-01 12:02:00"},
+	} {
+		var origin any
+		if row.origin != "" {
+			origin = row.origin
+		}
+		if _, err := db.Exec(`
+			INSERT INTO workspace_publication_policy_history
+			(project_id,workspace_id,policy_revision,repository_identity_json,origin_digest,
+			 classification,transition_kind,changed_actor_json,changed_at)
+			VALUES (?,?,?,?,?,?,?,?,?)
+		`, projectID, workspaceID, row.revision, `{}`, origin, row.class, row.kind, row.actor, row.changed); err != nil {
+			t.Fatalf("insert valid %s row: %v", row.kind, err)
+		}
+	}
+	for _, args := range [][]any{
+		{5, nil, "public_git", "bootstrap", nil, nil},
+		{6, nil, "public_git", "configured", actor, "2026-08-01 12:03:00"},
+		{7, digest, "public_git", "configured", nil, "2026-08-01 12:03:00"},
+		{8, digest, "public_git", "origin_invalidated", nil, "2026-08-01 12:03:00"},
+		{9, digest, "unclassified", "origin_invalidated", actor, "2026-08-01 12:03:00"},
+		{10, digest, "future", "configured", actor, "2026-08-01 12:03:00"},
+		{11, digest, "public_git", "future", actor, "2026-08-01 12:03:00"},
+		{0, nil, "unclassified", "bootstrap", nil, nil},
+	} {
+		assertSQLFails(t, db, `
+			INSERT INTO workspace_publication_policy_history
+			(project_id,workspace_id,policy_revision,repository_identity_json,origin_digest,
+			 classification,transition_kind,changed_actor_json,changed_at)
+			VALUES (?,?,?,?,?,?,?,?,?)
+		`, projectID, workspaceID, args[0], `{}`, args[1], args[2], args[3], args[4], args[5])
+	}
+	assertSQLFails(t, db, `
+		INSERT INTO workspace_publication_policies
+		(project_id,workspace_id,repository_identity_json,origin_digest,classification,
+		 policy_revision,transition_kind,changed_actor_json,changed_at)
+		VALUES (?,?,?,?,?,?,?,?,?)
+	`, projectID, "00000000-0000-4000-8000-000000000099", `{}`, nil,
+		"unclassified", 1, "bootstrap", nil, nil)
+	assertSQLFails(t, db, `
+		INSERT INTO workspace_publication_policy_history
+		(project_id,workspace_id,policy_revision,repository_identity_json,origin_digest,
+		 classification,transition_kind,changed_actor_json,changed_at)
+		VALUES (?,?,?,?,?,?,?,?,?)
+	`, projectID, "00000000-0000-4000-8000-000000000099", 1, `{}`, nil,
+		"unclassified", "bootstrap", nil, nil)
+
+	if _, err := db.Exec(`
+		INSERT INTO workspace_publication_policies
+		(project_id,workspace_id,repository_identity_json,origin_digest,classification,
+		 policy_revision,transition_kind,changed_actor_json,changed_at)
+		VALUES (?,?,?,NULL,'unclassified',1,'bootstrap',NULL,NULL)
+	`, projectID, workspaceID, `{}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM workspace_bindings WHERE project_id=? AND workspace_id=?`, projectID, workspaceID); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"workspace_publication_policies", "workspace_publication_policy_history"} {
+		var count int
+		if err := db.QueryRow(`SELECT count(*) FROM `+table+` WHERE project_id=? AND workspace_id=?`, projectID, workspaceID).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("cascade retained %d %s rows", count, table)
+		}
+	}
+}
+
+func TestWorkspacePublicationMigrationV3RollsBackAtomically(t *testing.T) {
+	v3Bytes, err := gatewayMigrationFiles.ReadFile("migrations/000003_workspace_publication.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name    string
+		prepare func(t *testing.T, db *sql.DB)
+		script  string
+	}{
+		{
+			name:   "DDL",
+			script: `CREATE TABLE v3_partial (id INTEGER); CREATE TABLE broken (`,
+		},
+		{
+			name:   "backfill",
+			script: strings.Replace(string(v3Bytes), "FROM workspace_bindings;", "FROM missing_workspace_bindings;", 1),
+		},
+		{
+			name: "ledger",
+			prepare: func(t *testing.T, db *sql.DB) {
+				if _, err := db.Exec(`
+					CREATE TRIGGER reject_v3_ledger BEFORE INSERT ON gateway_schema_migrations
+					WHEN NEW.version=3 BEGIN SELECT RAISE(ABORT,'reject v3 ledger'); END;
+				`); err != nil {
+					t.Fatal(err)
+				}
+			},
+			script: string(v3Bytes),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db := openRawGatewayDB(t)
+			applyGatewayV2(t, db)
+			insertPortableTransitionBindings(t, db)
+			if test.prepare != nil {
+				test.prepare(t, db)
+			}
+			migrations, err := loadGatewayMigrations()
+			if err != nil {
+				t.Fatal(err)
+			}
+			migrations[2].sql = test.script
+			if err := applyGatewayMigrationSet(context.Background(), db, migrations); err == nil {
+				t.Fatal("broken v3 migration succeeded")
+			}
+			assertPublicationV3AbsentWithLedgerV2(t, db)
+		})
+	}
+}
+
+func TestWorkspacePublicationMigrationV3ForeignKeyCheckRollsBack(t *testing.T) {
+	db := openRawGatewayDB(t)
+	db.SetMaxOpenConns(1)
+	applyGatewayV2(t, db)
+	if _, err := db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO workspace_candidates
+		(project_id,workspace_id,accepted_base_digest,working_tree_digest,direct_tree,imported_by)
+		VALUES ('orphan-project','orphan-workspace',?,?,?,?)
+	`, "sha256:"+strings.Repeat("a", 64), "sha256:"+strings.Repeat("b", 64), []byte("tree"), "fixture"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyGatewayMigrations(context.Background(), db); err == nil || !strings.Contains(err.Error(), "foreign key violation") {
+		t.Fatalf("foreign-key-invalid v3 error=%v", err)
+	}
+	assertPublicationV3AbsentWithLedgerV2(t, db)
+}
+
 func TestGatewayMigrationRollback(t *testing.T) {
 	db := openRawGatewayDB(t)
 	if _, err := db.Exec(`
@@ -163,7 +427,7 @@ func TestGatewayMigrationRejectsFutureVersion(t *testing.T) {
 		  version INTEGER PRIMARY KEY,
 		  applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
-		INSERT INTO gateway_schema_migrations(version) VALUES (3);
+		INSERT INTO gateway_schema_migrations(version) VALUES (4);
 	`); err != nil {
 		t.Fatal(err)
 	}
@@ -224,8 +488,8 @@ func TestPortableTransitionsMigrationPreservesV1Rows(t *testing.T) {
 	if err := db.QueryRow(`SELECT count(*) FROM gateway_schema_migrations`).Scan(&ledgerRows); err != nil {
 		t.Fatal(err)
 	}
-	if ledgerRows != 2 {
-		t.Fatalf("migration ledger rows=%d, want 2", ledgerRows)
+	if ledgerRows != 3 {
+		t.Fatalf("migration ledger rows=%d, want 3", ledgerRows)
 	}
 	var firstApplied time.Time
 	if err := db.QueryRow(`SELECT applied_at FROM gateway_schema_migrations WHERE version=1`).Scan(&firstApplied); err != nil {
@@ -791,6 +1055,37 @@ func applyGatewayV1(t *testing.T, db *sql.DB) {
 	}
 	if _, err := db.Exec(`INSERT INTO gateway_schema_migrations(version) VALUES (1)`); err != nil {
 		t.Fatalf("record v1 fixture: %v", err)
+	}
+}
+
+func applyGatewayV2(t *testing.T, db *sql.DB) {
+	t.Helper()
+	migrations, err := loadGatewayMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyGatewayMigrationSet(context.Background(), db, migrations[:2]); err != nil {
+		t.Fatalf("apply v2 fixture: %v", err)
+	}
+}
+
+func assertPublicationV3AbsentWithLedgerV2(t *testing.T, db *sql.DB) {
+	t.Helper()
+	var maxVersion, count int
+	if err := db.QueryRow(`SELECT max(version),count(*) FROM gateway_schema_migrations`).Scan(&maxVersion, &count); err != nil {
+		t.Fatal(err)
+	}
+	if maxVersion != 2 || count != 2 {
+		t.Fatalf("ledger=(%d,%d), want durable v2 only", maxVersion, count)
+	}
+	for _, table := range []string{"workspace_publication_policies", "workspace_publication_policy_history", "v3_partial"} {
+		var exists int
+		if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&exists); err != nil {
+			t.Fatal(err)
+		}
+		if exists != 0 {
+			t.Fatalf("failed v3 retained table %s", table)
+		}
 	}
 }
 

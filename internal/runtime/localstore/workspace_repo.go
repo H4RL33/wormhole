@@ -1223,6 +1223,9 @@ func (r *WorkspaceRepo) RegisterWorkspace(ctx context.Context, candidate types.W
 		if !exact {
 			return types.WorkspaceBinding{}, false, ErrCheckoutCollision
 		}
+		if _, _, err := (&WorkspaceMutationTx{conn: conn, scope: existing.Binding.Scope}).publicationPolicyState(ctx); err != nil {
+			return types.WorkspaceBinding{}, false, fmt.Errorf("localstore: validate repeated workspace publication policy: %w", err)
+		}
 		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 			return types.WorkspaceBinding{}, false, fmt.Errorf("localstore: commit repeated workspace registration: %w", err)
 		}
@@ -1242,6 +1245,23 @@ func (r *WorkspaceRepo) RegisterWorkspace(ctx context.Context, candidate types.W
 		candidate.Checkout.Device, candidate.Checkout.Inode, string(repositoryJSON), candidate.AcceptedRef,
 		candidate.AcceptedCommitSHA, candidate.AcceptedTreeDigest, encodedTree); err != nil {
 		return types.WorkspaceBinding{}, false, fmt.Errorf("localstore: insert workspace binding: %w", err)
+	}
+	if err := insertBootstrapPublicationPolicy(ctx, conn, candidate.Scope, string(repositoryJSON)); err != nil {
+		return types.WorkspaceBinding{}, false, err
+	}
+	publication, history, err := (&WorkspaceMutationTx{conn: conn, scope: candidate.Scope}).publicationPolicyState(ctx)
+	wantPublication := WorkspacePublicationPolicyRecord{
+		Repository: candidate.Repository, Classification: types.PublicationUnclassified,
+		PolicyRevision: 1, TransitionKind: "bootstrap",
+	}
+	if err != nil || publication.RepositoryJSON != string(repositoryJSON) ||
+		!equalWorkspacePublicationPolicyRecords(publication.Record, wantPublication) || len(history) != 1 ||
+		history[0].RepositoryJSON != string(repositoryJSON) ||
+		!equalWorkspacePublicationPolicyRecords(history[0].Record, wantPublication) {
+		if err == nil {
+			err = fmt.Errorf("bootstrap publication policy differs from registration")
+		}
+		return types.WorkspaceBinding{}, false, fmt.Errorf("localstore: validate registered workspace publication policy: %w", err)
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return types.WorkspaceBinding{}, false, fmt.Errorf("localstore: commit workspace registration: %w", err)
