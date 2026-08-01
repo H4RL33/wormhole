@@ -741,3 +741,32 @@ vet, integration-required tests, the complete race suite, and merged statement c
 at 85.8% against the accepted 80% floor. The next publication tranche is the service
 control plane that observes and reconfigures this persisted policy before checkpoint and
 recovery publication work begins.
+
+Publication service control plane `cdedfa6`
+(`feat(projectstate): control publication policy`): complete. The exact machine-private
+`PublicationConfiguration` and `ReconfigurePublication` APIs now double-observe the
+registered checkout's credential-free semantic origin around one immediate workspace
+transaction. They strict-load the complete binding and policy/history, reject origin or
+checkout races before mutation, resolve repository drift before origin drift, and
+stickily append an actorless unclassified revision before considering caller CAS input.
+Bootstrap's nil origin remains a valid never-configured state.
+
+Explicit reconfiguration validates the complete binding, configuration, publication-
+binding digest, desired class, and local human actor before I/O. Same-class retries by the
+same human principal are exact no-write/no-clock reads; a different human or any genuine
+configuration change appends revision+1 with fresh accountability. Revision 1 is reserved
+exclusively for bootstrap. Unknown COMMIT is never replayed: a fresh real transaction must
+prove the exact prior history prefix plus attempted next current/history row; exact
+absence retains the original ambiguity and every third state fails closed. Confirmed
+invalidation returns the updated configuration with the exact invalidated sentinel.
+
+Causal REDs covered the absent APIs, stale effective-policy resolution, ambiguous commits,
+and malformed revision-1 projections. The final matrix covers all four classifications,
+complete CAS, principal attribution, explicit unclassified transitions, origin and class
+reversion, public forks, secret-safe invalid SSH users, corruption/rollback, restart,
+cross-scope isolation, and concurrent same-Expected writers. Three independent final
+reviews approved after one P2 validation amendment. A fresh repository-wide `make check`
+passed build, vet, integration-required tests, the complete race suite, and 85.8% merged
+statement coverage. The hard gate's next and final tranche is the canonical semantic-diff
+and publication-review codec plus Status/Diff integration; checkpoint publication remains
+blocked until that tranche is reviewed and committed.
