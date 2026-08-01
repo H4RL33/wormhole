@@ -45,13 +45,22 @@ type WorkspaceStatus struct {
 	OverlayGeneration int64
 }
 
+type withImmediateWorkspaceTransitionFunc func(
+	context.Context,
+	types.WorkspaceScope,
+	string,
+	func(*localstore.WorkspaceMutationTx, *localstore.WorkspaceTransitionReceiptRecord) error,
+) error
+
 type Service struct {
-	repo                *localstore.WorkspaceRepo
-	legacyBackupRoot    string
-	registrationTimeout time.Duration
-	readWorkingTree     func(string) (state.Tree, error)
-	now                 func() time.Time
-	newStashID          func() (string, error)
+	repo                             *localstore.WorkspaceRepo
+	legacyBackupRoot                 string
+	registrationTimeout              time.Duration
+	readWorkingTree                  func(string) (state.Tree, error)
+	observeGitBase                   func(context.Context, ObserveGitBaseRequest) (gitBaseObservation, error)
+	withImmediateWorkspaceTransition withImmediateWorkspaceTransitionFunc
+	now                              func() time.Time
+	newStashID                       func() (string, error)
 }
 
 func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service, error) {
@@ -60,7 +69,10 @@ func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service,
 	}
 	service := &Service{
 		repo: repo, registrationTimeout: workspaceRegistrationTimeout,
-		readWorkingTree: ReadWorkingTreeNoFollow, now: time.Now, newStashID: newCanonicalStashID,
+		readWorkingTree: ReadWorkingTreeNoFollow, observeGitBase: observeGitBaseOutside,
+		withImmediateWorkspaceTransition: repo.WithImmediateWorkspaceTransition,
+		now:                              time.Now,
+		newStashID:                       newCanonicalStashID,
 	}
 	if config.LegacyIntegrationBackupRoot == "" {
 		return service, nil

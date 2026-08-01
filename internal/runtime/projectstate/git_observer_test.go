@@ -4,15 +4,1244 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/types"
 	state "github.com/H4RL33/wormhole/internal/types/projectstate"
 )
+
+func TestObserveGitBaseAndRefreshWorkspacePublicMethodsExist(t *testing.T) {
+	t.Helper()
+	_ = (*Service).ObserveGitBase
+	_ = (*Service).RefreshWorkspace
+}
+
+func TestBranchSwitchDiscardNotApplicableSentinelText(t *testing.T) {
+	const want = "projectstate: branch switch discard not applicable"
+	if got := ErrBranchSwitchDiscardNotApplicable.Error(); got != want {
+		t.Fatalf("ErrBranchSwitchDiscardNotApplicable=%q, want %q", got, want)
+	}
+}
+
+func TestObserveGitBaseAdvancesCleanBranchSwitch(t *testing.T) {
+	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+	_, service := openProjectStateService(t, "")
+	registered := registerGitRepository(t, service, repository)
+	runGit(t, repository.root, "switch", "-c", "next")
+
+	got, err := service.ObserveGitBase(context.Background(), ObserveGitBaseRequest{
+		Scope: registered.Binding.Scope, ExpectedBinding: registered.Binding,
+		Root: repository.root, ExpectedCommit: repository.commit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PreviousRef != "refs/heads/main" || got.ObservedRef != "refs/heads/next" ||
+		got.PreviousCommit != repository.commit || got.ObservedCommit != repository.commit ||
+		got.PreviousBaseDigest != state.Digest(registered.Binding.AcceptedTreeDigest) ||
+		got.ObservedBaseDigest != got.PreviousBaseDigest || got.CandidateAccepted || got.Rebased ||
+		got.AcceptedJournalID != nil || got.Conflicts == nil || len(got.Conflicts) != 0 {
+		t.Fatalf("ObserveGitBase()=%+v", got)
+	}
+	status := mustServiceStatus(t, service, registered.Binding.Scope)
+	if status.Binding.AcceptedRef != "refs/heads/next" || status.Binding.AcceptedCommitSHA != repository.commit || status.State != "clean" {
+		t.Fatalf("Status()=%+v", status)
+	}
+}
+
+func TestObserveGitBaseRejectsAndDiscardsBranchSwitchProposal(t *testing.T) {
+	for _, action := range []BranchSwitchAction{BranchSwitchReject, BranchSwitchDiscard} {
+		t.Run(string(action), func(t *testing.T) {
+			repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+			_, service := openProjectStateService(t, "")
+			registered := registerGitRepository(t, service, repository)
+			actor := prepareObserveGitBaseCandidate(t, service, registered.Binding, repository.root)
+			runGit(t, repository.root, "switch", "-c", "next")
+			req := ObserveGitBaseRequest{
+				Scope: registered.Binding.Scope, ExpectedBinding: registered.Binding,
+				Root: repository.root, ExpectedCommit: repository.commit, BranchAction: action,
+			}
+			if action == BranchSwitchDiscard {
+				req.RequestID = "10000000-0000-4000-8000-a00000000001"
+				req.Actor = actor
+			}
+
+			got, err := service.ObserveGitBase(context.Background(), req)
+			if action == BranchSwitchReject {
+				if !errors.Is(err, ErrBranchSwitchPending) || !reflect.DeepEqual(got, ObserveGitBaseResult{}) {
+					t.Fatalf("ObserveGitBase()=(%+v,%v)", got, err)
+				}
+				status := mustServiceStatus(t, service, registered.Binding.Scope)
+				if status.Binding != registered.Binding || status.State != "pending" {
+					t.Fatalf("rejected Status()=%+v", status)
+				}
+				return
+			}
+			if err != nil || got.PreviousRef != "refs/heads/main" || got.ObservedRef != "refs/heads/next" ||
+				got.CandidateAccepted || got.Rebased || got.Conflicts == nil || len(got.Conflicts) != 0 {
+				t.Fatalf("ObserveGitBase()=(%+v,%v)", got, err)
+			}
+			status := mustServiceStatus(t, service, registered.Binding.Scope)
+			if status.Binding.AcceptedRef != "refs/heads/next" || status.State != "clean" ||
+				status.CandidateDigest != status.AcceptedSnapshot.Digest {
+				t.Fatalf("discarded Status()=%+v", status)
+			}
+			if err := os.Rename(repository.root, repository.root+"-unavailable"); err != nil {
+				t.Fatal(err)
+			}
+			service.now = nil
+			retry, err := service.ObserveGitBase(context.Background(), req)
+			if err != nil || !reflect.DeepEqual(retry, got) || retry.Conflicts == nil {
+				t.Fatalf("retry ObserveGitBase()=(%+v,%v), want %+v", retry, err, got)
+			}
+		})
+	}
+}
+
+func TestBranchSwitchDiscardApplicabilityAndDetachedSameSHA(t *testing.T) {
+	for _, test := range []struct {
+		name                 string
+		proposal, activeOnly bool
+		rebasedOnly          bool
+		changeRef            func(*testing.T, gitRepository)
+		applicable           bool
+		wantRef              string
+	}{
+		{name: "same ref with proposal", proposal: true, wantRef: "refs/heads/main"},
+		{name: "changed ref without proposal", changeRef: func(t *testing.T, repository gitRepository) {
+			runGit(t, repository.root, "switch", "-c", "next")
+		}, wantRef: "refs/heads/next"},
+		{name: "branch to detached with proposal", proposal: true, changeRef: func(t *testing.T, repository gitRepository) {
+			runGit(t, repository.root, "checkout", "--detach", repository.commit)
+		}, applicable: true, wantRef: ""},
+		{name: "changed ref with active row only", activeOnly: true, changeRef: func(t *testing.T, repository gitRepository) {
+			runGit(t, repository.root, "switch", "-c", "next")
+		}, applicable: true, wantRef: "refs/heads/next"},
+		{name: "changed ref with rebased row only", rebasedOnly: true, changeRef: func(t *testing.T, repository gitRepository) {
+			runGit(t, repository.root, "switch", "-c", "next")
+		}, applicable: true, wantRef: "refs/heads/next"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+			_, service := openProjectStateService(t, "")
+			registered := registerGitRepository(t, service, repository)
+			actor := diffActorEnvelope()
+			if test.proposal {
+				actor = prepareObserveGitBaseCandidate(t, service, registered.Binding, repository.root)
+			}
+			if test.activeOnly || test.rebasedOnly {
+				accepted := mustServiceStatus(t, service, registered.Binding.Scope).AcceptedSnapshot
+				operation := servicePutTaskOperation(accepted,
+					"99999999-9999-4999-8999-999999999991", "22222222-2222-4222-8222-222222222222", "row-only proposal")
+				actor = operation.Actor
+				if _, err := service.Apply(context.Background(), registered.Binding.Scope, operation); err != nil {
+					t.Fatal(err)
+				}
+				if test.rebasedOnly {
+					if err := service.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+						audit, err := tx.OperationAudit(context.Background())
+						if err != nil {
+							return err
+						}
+						if len(audit) != 1 {
+							return fmt.Errorf("operation audit has %d rows", len(audit))
+						}
+						return tx.TransitionOperations(context.Background(), []localstore.WorkspaceOperation{audit[0].WorkspaceOperation}, "rebased", nil)
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if test.changeRef != nil {
+				test.changeRef(t, repository)
+			}
+			req := ObserveGitBaseRequest{
+				Scope: registered.Binding.Scope, ExpectedBinding: registered.Binding,
+				Root: repository.root, ExpectedCommit: repository.commit,
+				BranchAction: BranchSwitchDiscard, RequestID: "10000000-0000-4000-8000-a00000000002", Actor: actor,
+			}
+			got, err := service.ObserveGitBase(context.Background(), req)
+			if test.applicable {
+				if err != nil || got.ObservedRef != test.wantRef || got.Conflicts == nil {
+					t.Fatalf("ObserveGitBase()=(%+v,%v)", got, err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrBranchSwitchDiscardNotApplicable) || !reflect.DeepEqual(got, ObserveGitBaseResult{}) {
+				t.Fatalf("ObserveGitBase()=(%+v,%v), want not applicable", got, err)
+			}
+			workspace, readErr := service.repo.Workspace(context.Background(), registered.Binding.Scope)
+			if readErr != nil || workspace.Binding != registered.Binding {
+				t.Fatalf("workspace after not-applicable=(%+v,%v)", workspace, readErr)
+			}
+			receipt, readErr := service.repo.TransitionReceiptByKey(context.Background(), req.Scope, req.RequestID)
+			if readErr != nil || receipt != nil {
+				t.Fatalf("receipt after not-applicable=(%+v,%v)", receipt, readErr)
+			}
+		})
+	}
+}
+
+func TestBranchSwitchDiscardExactRetryPrecedesMissingGitBindingAndClock(t *testing.T) {
+	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+	_, service := openProjectStateService(t, "")
+	registered := registerGitRepository(t, service, repository)
+	actor := prepareObserveGitBaseCandidate(t, service, registered.Binding, repository.root)
+	runGit(t, repository.root, "switch", "-c", "next")
+	req := ObserveGitBaseRequest{
+		Scope: registered.Binding.Scope, ExpectedBinding: registered.Binding,
+		Root: repository.root, ExpectedCommit: repository.commit,
+		BranchAction: BranchSwitchDiscard, RequestID: "10000000-0000-4000-8000-a00000000003", Actor: actor,
+	}
+	want, err := service.ObserveGitBase(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(repository.root, repository.root+"-missing"); err != nil {
+		t.Fatal(err)
+	}
+	service.now = nil
+	got, err := service.ObserveGitBase(context.Background(), req)
+	if err != nil || !reflect.DeepEqual(got, want) || got.Conflicts == nil {
+		t.Fatalf("receipt-first retry=(%+v,%v), want %+v", got, err, want)
+	}
+	collision := req
+	collision.Actor.OccurredAt = collision.Actor.OccurredAt.Add(time.Second)
+	got, err = service.ObserveGitBase(context.Background(), collision)
+	if !errors.Is(err, ErrIdempotencyConflict) || !reflect.DeepEqual(got, ObserveGitBaseResult{}) {
+		t.Fatalf("receipt-first collision=(%+v,%v)", got, err)
+	}
+}
+
+func TestConfirmDiscardCommitUsesExactReceiptWithoutGitAndPreservesUnknownOnFailure(t *testing.T) {
+	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+	_, service := openProjectStateService(t, "")
+	registered := registerGitRepository(t, service, repository)
+	req := ObserveGitBaseRequest{
+		Scope: registered.Binding.Scope, ExpectedBinding: registered.Binding,
+		Root: repository.root, ExpectedCommit: repository.commit,
+		BranchAction: BranchSwitchDiscard, RequestID: "10000000-0000-4000-8000-a00000000009", Actor: diffActorEnvelope(),
+	}
+	result := ObserveGitBaseResult{
+		PreviousCommit:     registered.Binding.AcceptedCommitSHA,
+		ObservedCommit:     repository.commit,
+		PreviousRef:        registered.Binding.AcceptedRef,
+		ObservedRef:        "refs/heads/next",
+		PreviousBaseDigest: state.Digest(registered.Binding.AcceptedTreeDigest),
+		ObservedBaseDigest: state.Digest(registered.Binding.AcceptedTreeDigest),
+		Conflicts:          []Conflict{},
+	}
+	digest, err := discardRequestDigest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := encodeDiscardReceipt(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+		return tx.InsertTransitionReceipt(context.Background(), localstore.WorkspaceTransitionReceiptInsert{
+			RequestID: req.RequestID, Action: "discard", RequestDigest: digest,
+			Actor: req.Actor, ResultJSON: encoded, Outcome: "clean",
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(repository.root, repository.root+"-missing"); err != nil {
+		t.Fatal(err)
+	}
+	commitErr := fmt.Errorf("%w: synthetic commit ambiguity", localstore.ErrCommitOutcomeUnknown)
+
+	got, err := confirmDiscardCommit(context.Background(), service.repo, req, digest, result, commitErr)
+	if err != nil || !reflect.DeepEqual(got, result) || got.Conflicts == nil {
+		t.Fatalf("exact confirmation=(%+v,%v), want %+v", got, err, result)
+	}
+
+	for _, test := range []struct {
+		name     string
+		request  ObserveGitBaseRequest
+		expected ObserveGitBaseResult
+	}{
+		{name: "absent", request: editObserveRequest(req, func(value *ObserveGitBaseRequest) {
+			value.RequestID = "10000000-0000-4000-8000-a0000000000a"
+		}), expected: result},
+		{name: "attempted result mismatch", request: req, expected: func() ObserveGitBaseResult {
+			mismatched := result
+			mismatched.ObservedRef = "refs/heads/other"
+			return mismatched
+		}()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requestDigest, digestErr := discardRequestDigest(test.request)
+			if digestErr != nil {
+				t.Fatal(digestErr)
+			}
+			got, confirmErr := confirmDiscardCommit(
+				context.Background(), service.repo, test.request, requestDigest, test.expected, commitErr,
+			)
+			if !errors.Is(confirmErr, commitErr) || !errors.Is(confirmErr, localstore.ErrCommitOutcomeUnknown) ||
+				errors.Is(confirmErr, ErrIdempotencyConflict) || !reflect.DeepEqual(got, ObserveGitBaseResult{}) {
+				t.Fatalf("failed confirmation=(%+v,%v), want original unknown without idempotency", got, confirmErr)
+			}
+		})
+	}
+}
+
+func TestBranchSwitchDiscardUnknownCommitConfirmsExactReceiptWithoutGit(t *testing.T) {
+	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+	_, service := openProjectStateService(t, "")
+	registered := registerGitRepository(t, service, repository)
+	actor := prepareObserveGitBaseCandidate(t, service, registered.Binding, repository.root)
+	runGit(t, repository.root, "switch", "-c", "next")
+	req := ObserveGitBaseRequest{
+		Scope: registered.Binding.Scope, ExpectedBinding: registered.Binding,
+		Root: repository.root, ExpectedCommit: repository.commit,
+		BranchAction: BranchSwitchDiscard, RequestID: "10000000-0000-4000-8000-a0000000000c", Actor: actor,
+	}
+	realTransition := service.withImmediateWorkspaceTransition
+	if realTransition == nil {
+		t.Fatal("service has no real workspace-transition dependency")
+	}
+	service.withImmediateWorkspaceTransition = func(
+		ctx context.Context,
+		scope types.WorkspaceScope,
+		requestID string,
+		callback func(*localstore.WorkspaceMutationTx, *localstore.WorkspaceTransitionReceiptRecord) error,
+	) error {
+		if err := realTransition(ctx, scope, requestID, callback); err != nil {
+			return err
+		}
+		if err := os.Rename(repository.root, repository.root+"-missing"); err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: synthetic post-commit ambiguity", localstore.ErrCommitOutcomeUnknown)
+	}
+
+	got, err := service.ObserveGitBase(context.Background(), req)
+	if err != nil || got.PreviousCommit != registered.Binding.AcceptedCommitSHA ||
+		got.ObservedCommit != repository.commit || got.PreviousRef != registered.Binding.AcceptedRef ||
+		got.ObservedRef != "refs/heads/next" || got.PreviousBaseDigest != state.Digest(registered.Binding.AcceptedTreeDigest) ||
+		got.ObservedBaseDigest != state.Digest(registered.Binding.AcceptedTreeDigest) || got.CandidateAccepted ||
+		got.AcceptedJournalID != nil || got.Rebased || got.Conflicts == nil || len(got.Conflicts) != 0 {
+		t.Fatalf("unknown-commit confirmation=(%+v,%v)", got, err)
+	}
+	digest, err := discardRequestDigest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := service.repo.TransitionReceiptByKey(context.Background(), req.Scope, req.RequestID)
+	if err != nil || receipt == nil {
+		t.Fatalf("confirmed receipt=(%+v,%v)", receipt, err)
+	}
+	decoded, err := decodeDiscardReceipt(receipt, req, digest)
+	if err != nil || !reflect.DeepEqual(decoded, got) {
+		t.Fatalf("confirmed receipt result=(%+v,%v), want %+v", decoded, err, got)
+	}
+}
+
+func TestBranchSwitchDiscardConcurrentReceiptInsideWriterBarrierWins(t *testing.T) {
+	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+	store, service := openProjectStateService(t, "")
+	registered := registerGitRepository(t, service, repository)
+	actor := prepareObserveGitBaseCandidate(t, service, registered.Binding, repository.root)
+	runGit(t, repository.root, "switch", "-c", "next")
+	req := ObserveGitBaseRequest{
+		Scope: registered.Binding.Scope, ExpectedBinding: registered.Binding,
+		Root: repository.root, ExpectedCommit: repository.commit,
+		BranchAction: BranchSwitchDiscard, RequestID: "10000000-0000-4000-8000-a0000000000b", Actor: actor,
+	}
+	if receipt, err := service.repo.TransitionReceiptByKey(context.Background(), req.Scope, req.RequestID); err != nil || receipt != nil {
+		t.Fatalf("initial receipt=(%+v,%v), want absent", receipt, err)
+	}
+	competitor, err := NewService(localstore.NewWorkspaceRepo(store.DB()), ServiceConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want ObserveGitBaseResult
+	service.observeGitBase = func(ctx context.Context, observedRequest ObserveGitBaseRequest) (gitBaseObservation, error) {
+		outside, observeErr := observeGitBaseOutside(ctx, observedRequest)
+		if observeErr != nil {
+			return gitBaseObservation{}, observeErr
+		}
+		want, observeErr = competitor.ObserveGitBase(ctx, observedRequest)
+		if observeErr != nil {
+			return gitBaseObservation{}, observeErr
+		}
+		if renameErr := os.Rename(repository.root, repository.root+"-missing"); renameErr != nil {
+			return gitBaseObservation{}, renameErr
+		}
+		service.now = nil
+		return outside, nil
+	}
+
+	got, err := service.ObserveGitBase(context.Background(), req)
+	if err != nil || !reflect.DeepEqual(got, want) || got.Conflicts == nil {
+		t.Fatalf("concurrent receipt path=(%+v,%v), want %+v", got, err, want)
+	}
+}
+
+func TestObserveGitBaseRequiresCompleteExpectedBindingCAS(t *testing.T) {
+	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+	_, service := openProjectStateService(t, "")
+	registered := registerGitRepository(t, service, repository)
+	mismatched := registered.Binding
+	mismatched.AcceptedRef = "refs/heads/other"
+	got, err := service.ObserveGitBase(context.Background(), ObserveGitBaseRequest{
+		Scope: mismatched.Scope, ExpectedBinding: mismatched,
+		Root: repository.root, ExpectedCommit: repository.commit,
+	})
+	if err == nil || !reflect.DeepEqual(got, ObserveGitBaseResult{}) {
+		t.Fatalf("ObserveGitBase()=(%+v,%v), want complete-binding mismatch", got, err)
+	}
+	workspace, err := service.repo.Workspace(context.Background(), registered.Binding.Scope)
+	if err != nil || workspace.Binding != registered.Binding || workspace.State != "clean" {
+		t.Fatalf("workspace after CAS mismatch=(%+v,%v)", workspace, err)
+	}
+}
+
+func TestObserveGitBaseDispositionBlockerPrecedesDiscardApplicability(t *testing.T) {
+	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+	store, service := openProjectStateService(t, "")
+	registered := registerGitRepository(t, service, repository)
+	workspace, err := service.repo.Workspace(context.Background(), registered.Binding.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := encodeCheckpointOperations(CheckpointOperationsV1{
+		SchemaVersion: 1, InitialThroughGeneration: 0, Operations: []CheckpointOperationV1{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded := encodeServiceSnapshot(t, workspace.Snapshot)
+	if _, err := store.DB().Exec(`
+		INSERT INTO workspace_materializations
+		(project_id,workspace_id,journal_id,expected_live_digest,accepted_base_digest,
+		 checkout_path,checkout_device,checkout_inode,prior_tree_digest,candidate_digest,
+		 through_generation,prior_tree,candidate_tree,stage_path,backup_path,state,included_operations_json)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	`, registered.Binding.Scope.ProjectID, registered.Binding.Scope.WorkspaceID, "prepared-blocker",
+		workspace.Snapshot.Digest, workspace.Snapshot.Digest, registered.Binding.Checkout.CanonicalPath,
+		registered.Binding.Checkout.Device, registered.Binding.Checkout.Inode, workspace.Snapshot.Digest, workspace.Snapshot.Digest,
+		int64(0), encoded, encoded, filepath.Join(repository.root, ".wormhole-stage"),
+		filepath.Join(repository.root, ".wormhole-backup"), "prepared", envelope); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repository.root, "switch", "-c", "next")
+	req := ObserveGitBaseRequest{
+		Scope: registered.Binding.Scope, ExpectedBinding: registered.Binding,
+		Root: repository.root, ExpectedCommit: repository.commit,
+		BranchAction: BranchSwitchDiscard, RequestID: "10000000-0000-4000-8000-a00000000004", Actor: diffActorEnvelope(),
+	}
+	got, err := service.ObserveGitBase(context.Background(), req)
+	if err == nil || errors.Is(err, ErrBranchSwitchDiscardNotApplicable) || !strings.Contains(err.Error(), "prepared") ||
+		!reflect.DeepEqual(got, ObserveGitBaseResult{}) {
+		t.Fatalf("ObserveGitBase()=(%+v,%v), want disposition blocker precedence", got, err)
+	}
+	if after, readErr := service.repo.Workspace(context.Background(), registered.Binding.Scope); readErr != nil || after.Binding != registered.Binding {
+		t.Fatalf("workspace after blocker=(%+v,%v)", after, readErr)
+	}
+	if receipt, readErr := service.repo.TransitionReceiptByKey(context.Background(), req.Scope, req.RequestID); readErr != nil || receipt != nil {
+		t.Fatalf("receipt after blocker=(%+v,%v)", receipt, readErr)
+	}
+}
+
+func TestObserveGitBaseSameRefAcceptsExactMaterialization(t *testing.T) {
+	for _, test := range []struct {
+		name                 string
+		materializationState string
+		restart              bool
+	}{
+		{name: "published", materializationState: "published"},
+		{name: "recovered_new after restart", materializationState: "recovered_new", restart: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := prepareObserveExactMaterialization(t, test.materializationState)
+			if test.restart {
+				if err := fixture.store.Close(); err != nil {
+					t.Fatal(err)
+				}
+				fixture.store, fixture.service = openProjectStateServiceAt(t, fixture.databasePath)
+			}
+
+			got, err := fixture.service.ObserveGitBase(context.Background(), ObserveGitBaseRequest{
+				Scope: fixture.registered.Binding.Scope, ExpectedBinding: fixture.registered.Binding,
+				Root: fixture.repository.root, ExpectedCommit: fixture.newCommit,
+			})
+			if err != nil || !got.CandidateAccepted || got.Rebased || got.AcceptedJournalID == nil ||
+				*got.AcceptedJournalID != "observe-journal" || got.Conflicts == nil || len(got.Conflicts) != 0 {
+				t.Fatalf("ObserveGitBase()=(%+v,%v)", got, err)
+			}
+			status := mustServiceStatus(t, fixture.service, fixture.registered.Binding.Scope)
+			if status.Binding.AcceptedCommitSHA != fixture.newCommit || status.Binding.AcceptedTreeDigest != string(fixture.materialized.Digest) ||
+				status.State != "clean" || status.CandidateDigest != fixture.materialized.Digest {
+				t.Fatalf("accepted Status()=%+v", status)
+			}
+			var candidate *localstore.WorkspaceCandidateRecord
+			var eligible *localstore.WorkspaceMaterializationRecord
+			if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+				var err error
+				candidate, err = tx.Candidate(context.Background())
+				if err != nil {
+					return err
+				}
+				eligible, err = tx.AcceptanceEligibleMaterialization(context.Background())
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if candidate != nil || eligible != nil {
+				t.Fatalf("candidate=%+v eligible=%+v, want consumed candidate and accepted journal", candidate, eligible)
+			}
+		})
+	}
+}
+
+func TestObserveGitBaseMaterializationCandidateMismatchIsPrecondition(t *testing.T) {
+	fixture := prepareObserveExactMaterialization(t, "published")
+	if _, err := fixture.store.DB().Exec(`
+		UPDATE workspace_candidates SET rebased_through_generation=1
+		WHERE project_id=? AND workspace_id=?
+	`, fixture.registered.Binding.Scope.ProjectID, fixture.registered.Binding.Scope.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := fixture.service.ObserveGitBase(context.Background(), ObserveGitBaseRequest{
+		Scope: fixture.registered.Binding.Scope, ExpectedBinding: fixture.registered.Binding,
+		Root: fixture.repository.root, ExpectedCommit: fixture.newCommit,
+	})
+	if !errors.Is(err, ErrGitMaterializationPrecondition) || !reflect.DeepEqual(got, ObserveGitBaseResult{}) {
+		t.Fatalf("ObserveGitBase()=(%+v,%v), want materialization precondition", got, err)
+	}
+	workspace, err := fixture.service.repo.Workspace(context.Background(), fixture.registered.Binding.Scope)
+	if err != nil || workspace.Binding != fixture.registered.Binding || workspace.State != "pending" {
+		t.Fatalf("workspace after mismatch=(%+v,%v)", workspace, err)
+	}
+	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+		candidate, err := tx.Candidate(context.Background())
+		if err != nil {
+			return err
+		}
+		eligible, err := tx.AcceptanceEligibleMaterialization(context.Background())
+		if err != nil {
+			return err
+		}
+		if candidate == nil || candidate.RebasedThroughGeneration != 1 || eligible == nil || eligible.State != "published" {
+			return fmt.Errorf("candidate=%+v eligible=%+v", candidate, eligible)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestObserveGitBaseExactAcceptanceRejectsRebasedRowAboveBoundary(t *testing.T) {
+	fixture := prepareObserveExactMaterialization(t, "published")
+	seed, err := readObserveGitBaseAdjacentState(fixture.service.repo, fixture.registered.Binding.Scope)
+	if err != nil || seed.candidate == nil {
+		t.Fatalf("candidate seed=(%+v,%v)", seed, err)
+	}
+	operation := servicePutTaskOperation(seed.candidate.DirectSnapshot,
+		"99999999-9999-4999-8999-999999999994", "22222222-2222-4222-8222-222222222225", "stranded rebased task")
+	if _, err := fixture.service.Apply(context.Background(), fixture.registered.Binding.Scope, operation); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+		audit, err := tx.OperationAudit(context.Background())
+		if err != nil {
+			return err
+		}
+		if len(audit) != 1 || audit[0].State != "active" || audit[0].Generation != 1 {
+			return fmt.Errorf("active audit fixture=%+v", audit)
+		}
+		return tx.TransitionOperations(context.Background(), []localstore.WorkspaceOperation{audit[0].WorkspaceOperation}, "rebased", nil)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	beforeWorkspace, err := fixture.service.repo.Workspace(context.Background(), fixture.registered.Binding.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := readObserveGitBaseAdjacentState(fixture.service.repo, fixture.registered.Binding.Scope)
+	if err != nil || len(before.audit) != 1 || before.audit[0].State != "rebased" ||
+		before.audit[0].Generation <= before.candidate.RebasedThroughGeneration {
+		t.Fatalf("rebased-above-boundary fixture=(%+v,%v)", before, err)
+	}
+
+	got, err := fixture.service.ObserveGitBase(context.Background(), ObserveGitBaseRequest{
+		Scope: fixture.registered.Binding.Scope, ExpectedBinding: fixture.registered.Binding,
+		Root: fixture.repository.root, ExpectedCommit: fixture.newCommit,
+	})
+	if !errors.Is(err, ErrGitMaterializationPrecondition) || !reflect.DeepEqual(got, ObserveGitBaseResult{}) {
+		t.Fatalf("ObserveGitBase()=(%+v,%v), want exact-classification precondition", got, err)
+	}
+	afterWorkspace, err := fixture.service.repo.Workspace(context.Background(), fixture.registered.Binding.Scope)
+	if err != nil || !reflect.DeepEqual(afterWorkspace, beforeWorkspace) {
+		t.Fatalf("workspace changed after failed exact classification\nbefore=%+v\nafter=(%+v,%v)", beforeWorkspace, afterWorkspace, err)
+	}
+	after, err := readObserveGitBaseAdjacentState(fixture.service.repo, fixture.registered.Binding.Scope)
+	if err != nil || !reflect.DeepEqual(after, before) {
+		t.Fatalf("journal/candidate/operations/conflicts changed after failed exact classification\nbefore=%+v\nafter=(%+v,%v)", before, after, err)
+	}
+}
+
+func TestBranchSwitchDiscardNonmatchingEligibleIsPreconditionAndRetained(t *testing.T) {
+	fixture := prepareObserveExactMaterialization(t, "published")
+	workspace, err := fixture.service.repo.Workspace(context.Background(), fixture.registered.Binding.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeImportSnapshot(t, fixture.repository.root, workspace.Snapshot)
+	runGit(t, fixture.repository.root, "add", ".wormhole")
+	runGit(t, fixture.repository.root, "commit", "-m", "different observed candidate")
+	newCommit := strings.TrimSpace(runGit(t, fixture.repository.root, "rev-parse", "HEAD"))
+	runGit(t, fixture.repository.root, "switch", "-c", "next")
+	req := ObserveGitBaseRequest{
+		Scope: fixture.registered.Binding.Scope, ExpectedBinding: fixture.registered.Binding,
+		Root: fixture.repository.root, ExpectedCommit: newCommit,
+		BranchAction: BranchSwitchDiscard, RequestID: "10000000-0000-4000-8000-a00000000005", Actor: diffActorEnvelope(),
+	}
+	got, err := fixture.service.ObserveGitBase(context.Background(), req)
+	if !errors.Is(err, ErrGitMaterializationPrecondition) || errors.Is(err, ErrIdempotencyConflict) ||
+		!reflect.DeepEqual(got, ObserveGitBaseResult{}) {
+		t.Fatalf("ObserveGitBase()=(%+v,%v), want materialization precondition", got, err)
+	}
+	after, err := fixture.service.repo.Workspace(context.Background(), fixture.registered.Binding.Scope)
+	if err != nil || after.Binding != fixture.registered.Binding || after.State != "pending" {
+		t.Fatalf("workspace after mismatch=(%+v,%v)", after, err)
+	}
+	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+		candidate, err := tx.Candidate(context.Background())
+		if err != nil {
+			return err
+		}
+		eligible, err := tx.AcceptanceEligibleMaterialization(context.Background())
+		if err != nil {
+			return err
+		}
+		if candidate == nil || eligible == nil || eligible.State != "published" {
+			return fmt.Errorf("candidate=%+v eligible=%+v", candidate, eligible)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if receipt, err := fixture.service.repo.TransitionReceiptByKey(context.Background(), req.Scope, req.RequestID); err != nil || receipt != nil {
+		t.Fatalf("receipt after mismatch=(%+v,%v)", receipt, err)
+	}
+}
+
+func TestBranchSwitchDiscardExactEligibleIsNotApplicableAndRetained(t *testing.T) {
+	fixture := prepareObserveExactMaterialization(t, "published")
+	runGit(t, fixture.repository.root, "switch", "-c", "next")
+	req := ObserveGitBaseRequest{
+		Scope: fixture.registered.Binding.Scope, ExpectedBinding: fixture.registered.Binding,
+		Root: fixture.repository.root, ExpectedCommit: fixture.newCommit,
+		BranchAction: BranchSwitchDiscard, RequestID: "10000000-0000-4000-8000-a00000000007", Actor: diffActorEnvelope(),
+	}
+	got, err := fixture.service.ObserveGitBase(context.Background(), req)
+	if !errors.Is(err, ErrBranchSwitchDiscardNotApplicable) || errors.Is(err, ErrGitMaterializationPrecondition) ||
+		!reflect.DeepEqual(got, ObserveGitBaseResult{}) {
+		t.Fatalf("ObserveGitBase()=(%+v,%v), want exact eligible not-applicable", got, err)
+	}
+	workspace, err := fixture.service.repo.Workspace(context.Background(), fixture.registered.Binding.Scope)
+	if err != nil || workspace.Binding != fixture.registered.Binding || workspace.State != "pending" {
+		t.Fatalf("workspace after exact not-applicable=(%+v,%v)", workspace, err)
+	}
+	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+		candidate, err := tx.Candidate(context.Background())
+		if err != nil {
+			return err
+		}
+		eligible, err := tx.AcceptanceEligibleMaterialization(context.Background())
+		if err != nil {
+			return err
+		}
+		audit, err := tx.OperationAudit(context.Background())
+		if err != nil {
+			return err
+		}
+		if candidate == nil || eligible == nil || eligible.State != "published" || len(audit) != 0 {
+			return fmt.Errorf("candidate=%+v eligible=%+v audit=%+v", candidate, eligible, audit)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if receipt, err := fixture.service.repo.TransitionReceiptByKey(context.Background(), req.Scope, req.RequestID); err != nil || receipt != nil {
+		t.Fatalf("receipt after exact not-applicable=(%+v,%v)", receipt, err)
+	}
+}
+
+func TestObserveGitBaseExactAcceptancePreservesLaterActiveRows(t *testing.T) {
+	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+	store, service := openProjectStateService(t, "")
+	registered := registerGitRepository(t, service, repository)
+	prepareObserveGitBaseCandidate(t, service, registered.Binding, repository.root)
+	var candidate *localstore.WorkspaceCandidateRecord
+	if err := service.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+		var err error
+		candidate, err = tx.Candidate(context.Background())
+		return err
+	}); err != nil || candidate == nil {
+		t.Fatalf("candidate=(%+v,%v)", candidate, err)
+	}
+	first := servicePutTaskOperation(candidate.DirectSnapshot,
+		"99999999-9999-4999-8999-999999999992", "22222222-2222-4222-8222-222222222223", "materialized task")
+	materialized, err := state.ApplyOperation(candidate.DirectSnapshot, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialized = diffCanonicalSnapshot(t, materialized)
+	second := servicePutTaskOperation(materialized,
+		"99999999-9999-4999-8999-999999999993", "22222222-2222-4222-8222-222222222224", "later task")
+	composed, err := state.ApplyOperation(materialized, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	composed = diffCanonicalSnapshot(t, composed)
+	if _, err := service.ApplyBatch(context.Background(), registered.Binding.Scope, []state.OperationV1{first, second}); err != nil {
+		t.Fatal(err)
+	}
+	var firstRow, secondRow localstore.WorkspaceOperation
+	if err := service.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+		audit, err := tx.OperationAudit(context.Background())
+		if err != nil {
+			return err
+		}
+		if len(audit) != 2 {
+			return fmt.Errorf("operation audit has %d rows", len(audit))
+		}
+		firstRow, secondRow = audit[0].WorkspaceOperation, audit[1].WorkspaceOperation
+		rebased := materialized
+		if err := tx.UpsertCandidate(context.Background(), localstore.WorkspaceCandidateRecord{
+			AcceptedBaseDigest: state.Digest(registered.Binding.AcceptedTreeDigest),
+			WorkingTreeDigest:  candidate.WorkingTreeDigest, DirectSnapshot: candidate.DirectSnapshot,
+			RebasedSnapshot: &rebased, RebasedThroughGeneration: 1,
+			ImportedBy: candidate.ImportedBy, ImportedAt: candidate.ImportedAt,
+		}); err != nil {
+			return err
+		}
+		return tx.TransitionOperations(context.Background(), []localstore.WorkspaceOperation{firstRow}, "materialized", nil)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	firstJSON, err := state.CanonicalOperation(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := encodeCheckpointOperations(CheckpointOperationsV1{
+		SchemaVersion: 1, InitialThroughGeneration: 0,
+		Operations: []CheckpointOperationV1{{
+			Generation: 1, OperationID: first.ID, OperationJSON: string(firstJSON), PrepublicationState: "active",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`
+		INSERT INTO workspace_materializations
+		(project_id,workspace_id,journal_id,expected_live_digest,accepted_base_digest,
+		 checkout_path,checkout_device,checkout_inode,prior_tree_digest,candidate_digest,
+		 through_generation,prior_tree,candidate_tree,stage_path,backup_path,state,included_operations_json)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	`, registered.Binding.Scope.ProjectID, registered.Binding.Scope.WorkspaceID, "observe-with-later",
+		candidate.DirectSnapshot.Digest, state.Digest(registered.Binding.AcceptedTreeDigest), registered.Binding.Checkout.CanonicalPath,
+		registered.Binding.Checkout.Device, registered.Binding.Checkout.Inode, candidate.DirectSnapshot.Digest, materialized.Digest,
+		int64(1), encodeServiceSnapshot(t, candidate.DirectSnapshot), encodeServiceSnapshot(t, materialized),
+		filepath.Join(repository.root, ".wormhole-stage"), filepath.Join(repository.root, ".wormhole-backup"), "published", envelope); err != nil {
+		t.Fatal(err)
+	}
+	writeImportSnapshot(t, repository.root, materialized)
+	runGit(t, repository.root, "add", ".wormhole")
+	runGit(t, repository.root, "commit", "-m", "materialized candidate with later overlay")
+	newCommit := strings.TrimSpace(runGit(t, repository.root, "rev-parse", "HEAD"))
+
+	got, err := service.ObserveGitBase(context.Background(), ObserveGitBaseRequest{
+		Scope: registered.Binding.Scope, ExpectedBinding: registered.Binding,
+		Root: repository.root, ExpectedCommit: newCommit,
+	})
+	if err != nil || !got.CandidateAccepted || got.AcceptedJournalID == nil || *got.AcceptedJournalID != "observe-with-later" {
+		t.Fatalf("ObserveGitBase()=(%+v,%v)", got, err)
+	}
+	status := mustServiceStatus(t, service, registered.Binding.Scope)
+	if status.State != "pending" || status.AcceptedSnapshot.Digest != materialized.Digest ||
+		status.CandidateDigest != composed.Digest || status.OverlayGeneration != 2 {
+		t.Fatalf("Status()=%+v, want accepted=%s composed=%s", status, materialized.Digest, composed.Digest)
+	}
+	if err := service.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+		audit, err := tx.OperationAudit(context.Background())
+		if err != nil {
+			return err
+		}
+		if len(audit) != 2 || audit[0].State != "materialized" ||
+			audit[1].State != "active" || !reflect.DeepEqual(audit[1].WorkspaceOperation, secondRow) {
+			return fmt.Errorf("post-acceptance audit=%+v", audit)
+		}
+		candidate, err := tx.Candidate(context.Background())
+		if err != nil {
+			return err
+		}
+		if candidate != nil {
+			return fmt.Errorf("candidate remains after acceptance")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestObserveGitBaseCommitOnlyChangeRebasesProposal(t *testing.T) {
+	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+	_, service := openProjectStateService(t, "")
+	registered := registerGitRepository(t, service, repository)
+	prepareObserveGitBaseCandidate(t, service, registered.Binding, repository.root)
+	var before *localstore.WorkspaceCandidateRecord
+	if err := service.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+		var err error
+		before, err = tx.Candidate(context.Background())
+		return err
+	}); err != nil || before == nil {
+		t.Fatalf("candidate before rebase=(%+v,%v)", before, err)
+	}
+	runGit(t, repository.root, "commit", "--allow-empty", "-m", "metadata-only base change")
+	newCommit := strings.TrimSpace(runGit(t, repository.root, "rev-parse", "HEAD"))
+
+	got, err := service.ObserveGitBase(context.Background(), ObserveGitBaseRequest{
+		Scope: registered.Binding.Scope, ExpectedBinding: registered.Binding,
+		Root: repository.root, ExpectedCommit: newCommit,
+	})
+	if err != nil || !got.Rebased || got.CandidateAccepted || got.Conflicts == nil || len(got.Conflicts) != 0 ||
+		got.ObservedCommit != newCommit || got.ObservedBaseDigest != got.PreviousBaseDigest {
+		t.Fatalf("ObserveGitBase()=(%+v,%v)", got, err)
+	}
+	status := mustServiceStatus(t, service, registered.Binding.Scope)
+	if status.Binding.AcceptedCommitSHA != newCommit || status.State != "pending" {
+		t.Fatalf("Status()=%+v", status)
+	}
+	var after *localstore.WorkspaceCandidateRecord
+	if err := service.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+		var err error
+		after, err = tx.Candidate(context.Background())
+		return err
+	}); err != nil || after == nil {
+		t.Fatalf("candidate after rebase=(%+v,%v)", after, err)
+	}
+	if after.ImportedBy != before.ImportedBy || !after.ImportedAt.Equal(before.ImportedAt) ||
+		after.WorkingTreeDigest != before.WorkingTreeDigest || !reflect.DeepEqual(after.DirectSnapshot, before.DirectSnapshot) ||
+		after.AcceptedBaseDigest != got.ObservedBaseDigest {
+		t.Fatalf("candidate provenance/direct representation changed\nbefore=%+v\nafter=%+v", before, after)
+	}
+}
+
+func TestObserveGitBaseRebaseWithoutCandidateUsesSystemProvenance(t *testing.T) {
+	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+	_, service := openProjectStateService(t, "")
+	registered := registerGitRepository(t, service, repository)
+	accepted := mustServiceStatus(t, service, registered.Binding.Scope).AcceptedSnapshot
+	operation := servicePutTaskOperation(accepted,
+		"99999999-9999-4999-8999-999999999991", "22222222-2222-4222-8222-222222222222", "overlay only")
+	if _, err := service.Apply(context.Background(), registered.Binding.Scope, operation); err != nil {
+		t.Fatal(err)
+	}
+	fixedNow := time.Date(2026, 8, 1, 17, 30, 0, 123, time.FixedZone("fixture", -4*60*60))
+	service.now = func() time.Time { return fixedNow }
+	runGit(t, repository.root, "commit", "--allow-empty", "-m", "metadata-only base change")
+	newCommit := strings.TrimSpace(runGit(t, repository.root, "rev-parse", "HEAD"))
+
+	got, err := service.ObserveGitBase(context.Background(), ObserveGitBaseRequest{
+		Scope: registered.Binding.Scope, ExpectedBinding: registered.Binding,
+		Root: repository.root, ExpectedCommit: newCommit,
+	})
+	if err != nil || !got.Rebased || got.Conflicts == nil || len(got.Conflicts) != 0 {
+		t.Fatalf("ObserveGitBase()=(%+v,%v)", got, err)
+	}
+	if err := service.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+		candidate, err := tx.Candidate(context.Background())
+		if err != nil {
+			return err
+		}
+		audit, err := tx.OperationAudit(context.Background())
+		if err != nil {
+			return err
+		}
+		if candidate == nil || candidate.ImportedBy != types.CandidateImportOriginGitObservationRebaseV1 ||
+			!candidate.ImportedAt.Equal(fixedNow.UTC()) || candidate.WorkingTreeDigest != accepted.Digest ||
+			!reflect.DeepEqual(candidate.DirectSnapshot, accepted) || candidate.RebasedThroughGeneration != 1 ||
+			len(audit) != 1 || audit[0].State != "rebased" {
+			return fmt.Errorf("candidate=%+v audit=%+v", candidate, audit)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestObserveGitBaseRebaseRepresentativeWriteFailuresRollback(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		trigger string
+	}{
+		{
+			name: "accepted base advance first write",
+			trigger: `CREATE TRIGGER observe_rebase_fail_base BEFORE UPDATE ON workspace_bindings
+				BEGIN SELECT RAISE(ABORT,'reject accepted base advance'); END`,
+		},
+		{
+			name: "candidate upsert after accepted base advance",
+			trigger: `CREATE TRIGGER observe_rebase_fail_candidate BEFORE UPDATE ON workspace_candidates
+				BEGIN SELECT RAISE(ABORT,'reject candidate update'); END`,
+		},
+		{
+			name: "operation transition after candidate upsert",
+			trigger: `CREATE TRIGGER observe_rebase_fail_operation BEFORE UPDATE OF state ON workspace_overlay_operations
+				BEGIN SELECT RAISE(ABORT,'reject operation transition'); END`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+			store, service := openProjectStateService(t, "")
+			registered := registerGitRepository(t, service, repository)
+			prepareObserveGitBaseCandidate(t, service, registered.Binding, repository.root)
+			seed, seedErr := readObserveGitBaseAdjacentState(service.repo, registered.Binding.Scope)
+			if seedErr != nil || seed.candidate == nil {
+				t.Fatalf("candidate seed=(%+v,%v)", seed, seedErr)
+			}
+			operation := servicePutTaskOperation(seed.candidate.DirectSnapshot,
+				"99999999-9999-4999-8999-999999999992", "22222222-2222-4222-8222-222222222223", "later active task")
+			if _, err := service.Apply(context.Background(), registered.Binding.Scope, operation); err != nil {
+				t.Fatal(err)
+			}
+			beforeWorkspace, err := service.repo.Workspace(context.Background(), registered.Binding.Scope)
+			if err != nil || beforeWorkspace.State != "pending" {
+				t.Fatalf("workspace before failure=(%+v,%v)", beforeWorkspace, err)
+			}
+			before, err := readObserveGitBaseAdjacentState(service.repo, registered.Binding.Scope)
+			if err != nil || before.candidate == nil || len(before.audit) == 0 {
+				t.Fatalf("adjacent state before failure=(%+v,%v)", before, err)
+			}
+			if _, err := store.DB().Exec(test.trigger); err != nil {
+				t.Fatal(err)
+			}
+			runGit(t, repository.root, "commit", "--allow-empty", "-m", "metadata-only base change")
+			newCommit := strings.TrimSpace(runGit(t, repository.root, "rev-parse", "HEAD"))
+			got, err := service.ObserveGitBase(context.Background(), ObserveGitBaseRequest{
+				Scope: registered.Binding.Scope, ExpectedBinding: registered.Binding,
+				Root: repository.root, ExpectedCommit: newCommit,
+			})
+			if err == nil || errors.Is(err, localstore.ErrCommitOutcomeUnknown) || !reflect.DeepEqual(got, ObserveGitBaseResult{}) {
+				t.Fatalf("ObserveGitBase()=(%+v,%v), want deterministic rollback", got, err)
+			}
+			afterWorkspace, err := service.repo.Workspace(context.Background(), registered.Binding.Scope)
+			if err != nil || !reflect.DeepEqual(afterWorkspace, beforeWorkspace) {
+				t.Fatalf("workspace changed across rollback\nbefore=%+v\nafter=(%+v,%v)", beforeWorkspace, afterWorkspace, err)
+			}
+			after, err := readObserveGitBaseAdjacentState(service.repo, registered.Binding.Scope)
+			if err != nil || !reflect.DeepEqual(after, before) {
+				t.Fatalf("adjacent state changed across rollback\nbefore=%+v\nafter=(%+v,%v)", before, after, err)
+			}
+		})
+	}
+}
+
+func TestObserveGitBaseRejectAndRefreshUnknownCommitReturnZero(t *testing.T) {
+	for _, refresh := range []bool{false, true} {
+		name := "observe"
+		if refresh {
+			name = "refresh"
+		}
+		t.Run(name, func(t *testing.T) {
+			repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+			store, service := openProjectStateService(t, "")
+			registered := registerGitRepository(t, service, repository)
+			runGit(t, repository.root, "switch", "-c", "next")
+			if _, err := store.DB().Exec(`
+				CREATE TABLE observe_reject_deferred_failure(
+				 project_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+				 FOREIGN KEY(project_id,workspace_id) REFERENCES workspace_bindings(project_id,workspace_id)
+				 DEFERRABLE INITIALLY DEFERRED);
+				CREATE TRIGGER observe_reject_fail_commit AFTER UPDATE OF accepted_ref ON workspace_bindings BEGIN
+				 INSERT INTO observe_reject_deferred_failure(project_id,workspace_id)
+				 VALUES ('00000000-0000-4000-8000-000000000099','00000000-0000-4000-8000-000000000098');
+				END;
+			`); err != nil {
+				t.Fatal(err)
+			}
+			if refresh {
+				got, err := service.RefreshWorkspace(context.Background(), registered.Binding)
+				if !errors.Is(err, localstore.ErrCommitOutcomeUnknown) || !reflect.DeepEqual(got, types.WorkspaceBinding{}) {
+					t.Fatalf("RefreshWorkspace()=(%+v,%v)", got, err)
+				}
+			} else {
+				got, err := service.ObserveGitBase(context.Background(), ObserveGitBaseRequest{
+					Scope: registered.Binding.Scope, ExpectedBinding: registered.Binding,
+					Root: repository.root, ExpectedCommit: repository.commit,
+				})
+				if !errors.Is(err, localstore.ErrCommitOutcomeUnknown) || !reflect.DeepEqual(got, ObserveGitBaseResult{}) {
+					t.Fatalf("ObserveGitBase()=(%+v,%v)", got, err)
+				}
+			}
+			workspace, err := service.repo.Workspace(context.Background(), registered.Binding.Scope)
+			if err != nil || workspace.Binding != registered.Binding || workspace.State != "clean" {
+				t.Fatalf("workspace after unknown commit=(%+v,%v)", workspace, err)
+			}
+		})
+	}
+}
+
+func TestBranchSwitchDiscardUnknownCommitReturnsZeroAndRollsBack(t *testing.T) {
+	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+	store, service := openProjectStateService(t, "")
+	registered := registerGitRepository(t, service, repository)
+	actor := prepareObserveGitBaseCandidate(t, service, registered.Binding, repository.root)
+	runGit(t, repository.root, "switch", "-c", "next")
+	if _, err := store.DB().Exec(`
+		CREATE TABLE observe_discard_deferred_failure(
+		 project_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+		 FOREIGN KEY(project_id,workspace_id) REFERENCES workspace_bindings(project_id,workspace_id)
+		 DEFERRABLE INITIALLY DEFERRED);
+		CREATE TRIGGER observe_discard_fail_commit AFTER INSERT ON workspace_transition_receipts
+		WHEN NEW.action='discard' BEGIN
+		 INSERT INTO observe_discard_deferred_failure(project_id,workspace_id)
+		 VALUES ('00000000-0000-4000-8000-000000000099','00000000-0000-4000-8000-000000000098');
+		END;
+	`); err != nil {
+		t.Fatal(err)
+	}
+	req := ObserveGitBaseRequest{
+		Scope: registered.Binding.Scope, ExpectedBinding: registered.Binding,
+		Root: repository.root, ExpectedCommit: repository.commit,
+		BranchAction: BranchSwitchDiscard, RequestID: "10000000-0000-4000-8000-a00000000006", Actor: actor,
+	}
+	got, err := service.ObserveGitBase(context.Background(), req)
+	if !errors.Is(err, localstore.ErrCommitOutcomeUnknown) || errors.Is(err, ErrIdempotencyConflict) ||
+		!reflect.DeepEqual(got, ObserveGitBaseResult{}) {
+		t.Fatalf("ObserveGitBase()=(%+v,%v), want unknown commit", got, err)
+	}
+	workspace, err := service.repo.Workspace(context.Background(), registered.Binding.Scope)
+	if err != nil || workspace.Binding != registered.Binding || workspace.State != "pending" {
+		t.Fatalf("workspace after unknown discard=(%+v,%v)", workspace, err)
+	}
+	if receipt, err := service.repo.TransitionReceiptByKey(context.Background(), req.Scope, req.RequestID); err != nil || receipt != nil {
+		t.Fatalf("receipt after unknown discard=(%+v,%v)", receipt, err)
+	}
+	if err := service.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+		candidate, err := tx.Candidate(context.Background())
+		if err != nil {
+			return err
+		}
+		if candidate == nil {
+			return fmt.Errorf("discard rollback lost candidate")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBranchSwitchDiscardRepresentativeWriteFailuresRollback(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		trigger string
+	}{
+		{
+			name: "operation transition first write",
+			trigger: `CREATE TRIGGER observe_discard_fail_operation BEFORE UPDATE OF state ON workspace_overlay_operations
+				BEGIN SELECT RAISE(ABORT,'reject operation transition'); END`,
+		},
+		{
+			name: "candidate delete after operation transition",
+			trigger: `CREATE TRIGGER observe_discard_fail_candidate BEFORE DELETE ON workspace_candidates
+				BEGIN SELECT RAISE(ABORT,'reject candidate delete'); END`,
+		},
+		{
+			name: "receipt insert after conflict resolution",
+			trigger: `CREATE TRIGGER observe_discard_fail_receipt BEFORE INSERT ON workspace_transition_receipts
+				WHEN NEW.action='discard' BEGIN SELECT RAISE(ABORT,'reject receipt insert'); END`,
+		},
+		{
+			name: "accepted base advance after receipt insert",
+			trigger: `CREATE TRIGGER observe_discard_fail_base BEFORE UPDATE ON workspace_bindings
+				BEGIN SELECT RAISE(ABORT,'reject final accepted base'); END`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := prepareConflictingImportFixture(t)
+			if _, err := fixture.service.Import(context.Background(), fixture.request); err != nil {
+				t.Fatal(err)
+			}
+			workspace, err := fixture.service.repo.Workspace(context.Background(), fixture.request.Scope)
+			if err != nil || workspace.State != "conflicted" {
+				t.Fatalf("conflicted workspace fixture=(%+v,%v)", workspace, err)
+			}
+			before, err := readObserveGitBaseAdjacentState(fixture.service.repo, fixture.request.Scope)
+			if err != nil || before.candidate == nil || len(before.audit) == 0 || len(before.conflicts) == 0 {
+				t.Fatalf("adjacent fixture=(%+v,%v)", before, err)
+			}
+			runGit(t, fixture.request.Root, "switch", "-c", "next")
+			if _, err := fixture.store.DB().Exec(test.trigger); err != nil {
+				t.Fatal(err)
+			}
+			req := ObserveGitBaseRequest{
+				Scope: fixture.request.Scope, ExpectedBinding: workspace.Binding,
+				Root: fixture.request.Root, ExpectedCommit: workspace.Binding.AcceptedCommitSHA,
+				BranchAction: BranchSwitchDiscard, RequestID: "10000000-0000-4000-8000-a00000000008", Actor: fixture.request.Actor,
+			}
+			got, err := fixture.service.ObserveGitBase(context.Background(), req)
+			if err == nil || errors.Is(err, localstore.ErrCommitOutcomeUnknown) || !reflect.DeepEqual(got, ObserveGitBaseResult{}) {
+				t.Fatalf("ObserveGitBase()=(%+v,%v), want deterministic write failure", got, err)
+			}
+			afterWorkspace, err := fixture.service.repo.Workspace(context.Background(), fixture.request.Scope)
+			if err != nil || !reflect.DeepEqual(afterWorkspace, workspace) {
+				t.Fatalf("workspace changed across rollback\nbefore=%+v\nafter=(%+v,%v)", workspace, afterWorkspace, err)
+			}
+			after, err := readObserveGitBaseAdjacentState(fixture.service.repo, fixture.request.Scope)
+			if err != nil || !reflect.DeepEqual(after, before) {
+				t.Fatalf("adjacent state changed across rollback\nbefore=%+v\nafter=(%+v,%v)", before, after, err)
+			}
+			if receipt, err := fixture.service.repo.TransitionReceiptByKey(context.Background(), req.Scope, req.RequestID); err != nil || receipt != nil {
+				t.Fatalf("receipt survived rollback=(%+v,%v)", receipt, err)
+			}
+		})
+	}
+}
+
+func TestRefreshWorkspaceReadsHEADAndReturnsUpdatedBinding(t *testing.T) {
+	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+	_, service := openProjectStateService(t, "")
+	registered := registerGitRepository(t, service, repository)
+	runGit(t, repository.root, "switch", "-c", "next")
+
+	got, err := service.RefreshWorkspace(context.Background(), registered.Binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Scope != registered.Binding.Scope || got.Checkout != registered.Binding.Checkout ||
+		got.Repository != registered.Binding.Repository || got.AcceptedRef != "refs/heads/next" ||
+		got.AcceptedCommitSHA != repository.commit || got.AcceptedTreeDigest != registered.Binding.AcceptedTreeDigest {
+		t.Fatalf("RefreshWorkspace()=%+v", got)
+	}
+}
+
+type observeGitBaseAdjacentState struct {
+	candidate   *localstore.WorkspaceCandidateRecord
+	audit       []localstore.WorkspaceOperationAuditRecord
+	conflicts   []localstore.WorkspaceConflictOccurrence
+	disposition localstore.WorkspaceMaterializationDisposition
+}
+
+func readObserveGitBaseAdjacentState(
+	repo *localstore.WorkspaceRepo,
+	scope types.WorkspaceScope,
+) (observeGitBaseAdjacentState, error) {
+	var got observeGitBaseAdjacentState
+	err := repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
+		var err error
+		got.candidate, err = tx.Candidate(context.Background())
+		if err != nil {
+			return err
+		}
+		got.audit, err = tx.OperationAudit(context.Background())
+		if err != nil {
+			return err
+		}
+		got.conflicts, err = tx.OpenConflictOccurrences(context.Background())
+		if err != nil {
+			return err
+		}
+		got.disposition, err = tx.MaterializationDisposition(context.Background())
+		return err
+	})
+	return got, err
+}
+
+type observeExactMaterializationFixture struct {
+	repository   gitRepository
+	store        *localstore.Store
+	service      *Service
+	registered   RegisterWorkspaceResult
+	materialized state.Snapshot
+	newCommit    string
+	databasePath string
+}
+
+func prepareObserveExactMaterialization(t *testing.T, materializationState string) observeExactMaterializationFixture {
+	t.Helper()
+	if materializationState != "published" && materializationState != "recovered_new" {
+		t.Fatalf("unsupported exact materialization state %q", materializationState)
+	}
+	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+	databasePath := filepath.Join(t.TempDir(), "gateway.db")
+	store, service := openProjectStateServiceAt(t, databasePath)
+	registered := registerGitRepository(t, service, repository)
+	prepareObserveGitBaseCandidate(t, service, registered.Binding, repository.root)
+	var candidate *localstore.WorkspaceCandidateRecord
+	if err := service.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+		var err error
+		candidate, err = tx.Candidate(context.Background())
+		return err
+	}); err != nil || candidate == nil || candidate.RebasedSnapshot == nil {
+		t.Fatalf("candidate fixture=(%+v,%v)", candidate, err)
+	}
+	materialized := *candidate.RebasedSnapshot
+	envelope, err := encodeCheckpointOperations(CheckpointOperationsV1{
+		SchemaVersion: 1, InitialThroughGeneration: 0, Operations: []CheckpointOperationV1{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded := encodeServiceSnapshot(t, materialized)
+	if _, err := store.DB().Exec(`
+		INSERT INTO workspace_materializations
+		(project_id,workspace_id,journal_id,expected_live_digest,accepted_base_digest,
+		 checkout_path,checkout_device,checkout_inode,prior_tree_digest,candidate_digest,
+		 through_generation,prior_tree,candidate_tree,stage_path,backup_path,state,included_operations_json)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	`, registered.Binding.Scope.ProjectID, registered.Binding.Scope.WorkspaceID, "observe-journal",
+		candidate.DirectSnapshot.Digest, state.Digest(registered.Binding.AcceptedTreeDigest), registered.Binding.Checkout.CanonicalPath,
+		registered.Binding.Checkout.Device, registered.Binding.Checkout.Inode, candidate.DirectSnapshot.Digest, materialized.Digest,
+		int64(0), encodeServiceSnapshot(t, candidate.DirectSnapshot), encoded,
+		filepath.Join(repository.root, ".wormhole-stage"), filepath.Join(repository.root, ".wormhole-backup"),
+		materializationState, envelope); err != nil {
+		t.Fatal(err)
+	}
+	writeImportSnapshot(t, repository.root, materialized)
+	runGit(t, repository.root, "add", ".wormhole")
+	runGit(t, repository.root, "commit", "-m", "materialized candidate")
+	return observeExactMaterializationFixture{
+		repository: repository, store: store, service: service, registered: registered,
+		materialized: materialized,
+		newCommit:    strings.TrimSpace(runGit(t, repository.root, "rev-parse", "HEAD")),
+		databasePath: databasePath,
+	}
+}
+
+func prepareObserveGitBaseCandidate(t *testing.T, service *Service, binding types.WorkspaceBinding, root string) types.ActorEnvelope {
+	t.Helper()
+	accepted := mustServiceStatus(t, service, binding.Scope).AcceptedSnapshot
+	operation := servicePutTaskOperation(
+		accepted,
+		"99999999-9999-4999-8999-999999999991",
+		"22222222-2222-4222-8222-222222222222",
+		"candidate task",
+	)
+	direct, err := state.ApplyOperation(accepted, operation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	direct = diffCanonicalSnapshot(t, direct)
+	writeImportSnapshot(t, root, direct)
+	if _, err := service.Import(context.Background(), ImportRequest{Scope: binding.Scope, Root: root, Actor: operation.Actor}); err != nil {
+		t.Fatal(err)
+	}
+	return operation.Actor
+}
 
 func TestValidateObserveGitBaseRequestMatrixWithoutIO(t *testing.T) {
 	validReject := observeRequestFixture(t, filepath.Join(t.TempDir(), "does-not-exist"))
