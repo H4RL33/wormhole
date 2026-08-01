@@ -12,9 +12,9 @@
 supervisor, setup, and native Codex/Claude connector path required for the portable-loop
 trial, with Code Graph disabled. Tasks 3–6 (Code Graph) move to a separate branch after
 that trial, whole-branch review, explicit human go/no-go, and the shared local schema has
-landed through multi-Fabric migration `000005_sync_binding.sql`. Their detailed contracts
+landed through multi-Fabric migration `000007_sync_binding.sql`. Their detailed contracts
 remain future implementation input, not work authorised on this branch; the Code Graph
-branch consumes schema version 5 and owns only migration `000006`.
+branch consumes schema version 7 and owns only migration `000008`.
 
 ## Global Constraints
 
@@ -611,7 +611,7 @@ git commit -m "feat(gateway): wire one recovered supervisor"
 - Create: internal/runtime/codegraph/store/path_test.go
 - Create: internal/runtime/codegraph/store/migration.go
 - Create: internal/runtime/codegraph/store/migration_test.go
-- Create: internal/runtime/localstore/migrations/000006_invalidate_legacy_codegraph.sql
+- Create: internal/runtime/localstore/migrations/000008_invalidate_legacy_codegraph.sql
 - Create: internal/runtime/localstore/codegraph_invalidation.go
 - Create: internal/runtime/localstore/codegraph_invalidation_test.go
 - Modify: internal/runtime/localstore/migrations.go
@@ -621,13 +621,14 @@ git commit -m "feat(gateway): wire one recovered supervisor"
 - Modify: internal/runtime/codegraph/store/schema_test.go
 
 **Consumes:** the single `gateway_schema_migrations` ledger after
-`000003_workspace_activity.sql`, `000004_fabric_routes.sql`, and
-`000005_sync_binding.sql` at `GatewaySchemaVersion = 5`; stdlib strings only for graph
+`000003_workspace_publication.sql`, `000004_checkpoint_publication_review.sql`,
+`000005_workspace_activity.sql`, `000006_fabric_routes.sql`, and
+`000007_sync_binding.sql` at `GatewaySchemaVersion = 7`; stdlib strings only for graph
 configuration. Task 3 introduces the conversion in the manager package before Task 4
 builds the full manager; config never owns it.
 
 **Produces:** the same `internal/runtime/localstore` migration constant advanced to
-`GatewaySchemaVersion = 6` after `000006_invalidate_legacy_codegraph.sql`, plus:
+`GatewaySchemaVersion = 8` after `000008_invalidate_legacy_codegraph.sql`, plus:
 
 ~~~go
 type Scope struct {
@@ -658,8 +659,8 @@ type FreshnessRecord struct {
 
 config/scope.go and every other config file import only stdlib. They do not import internal/types or internal/types/projectstate; AcceptedTreeDigest remains the validated sha256 string used in fingerprints and SQL.
 
-Gateway migration `000006` uses the existing `gateway_schema_migrations` ledger,
-advances the sole localstore `GatewaySchemaVersion` constant from 5 to 6, and uses exact
+Gateway migration `000008` uses the existing `gateway_schema_migrations` ledger,
+advances the sole localstore `GatewaySchemaVersion` constant from 7 to 8, and uses exact
 DDL:
 
 ~~~sql
@@ -716,13 +717,13 @@ func TestDerivativePathRejectsTraversalAndSeparatesWorkspaces(t *testing.T) {
     b, _ := DerivativePath(root, string(workspaceB))
     if a == b || filepath.Dir(a) != filepath.Join(root,"wormhole","codegraph") { t.Fatalf("a=%q b=%q",a,b) }
 }
-func TestGatewayMigration6InvalidatesLegacyGraphIdempotently(t *testing.T) {
+func TestGatewayMigration8InvalidatesLegacyGraphIdempotently(t *testing.T) {
     store := legacyGraphControlStore(t)
     first, err := store.InvalidateLegacyCodeGraph(t.Context())
     if err != nil { t.Fatal(err) }
     second, err := store.InvalidateLegacyCodeGraph(t.Context())
     if err != nil || !reflect.DeepEqual(first,second) { t.Fatalf("first=%+v second=%+v err=%v",first,second,err) }
-    assertGatewayMigrationVersion(t,store,6)
+    assertGatewayMigrationVersion(t,store,8)
     assertLegacyGraphEvidenceIntact(t,store)
 }
 func TestSchemaV3ContainsWorkspaceAndFingerprints(t *testing.T) {
@@ -733,13 +734,13 @@ func TestSchemaV3ContainsWorkspaceAndFingerprints(t *testing.T) {
 
 - [ ] **Step 2: Run RED tests.**
 
-Run: go test ./internal/runtime/localstore ./internal/runtime/codegraph/config ./internal/runtime/codegraph/store ./internal/runtime/codegraph/manager -run 'ScopeFromBinding|DerivativePath|SchemaV3|GatewayMigration6|LegacyProjectGraph' -count=1
+Run: go test ./internal/runtime/localstore ./internal/runtime/codegraph/config ./internal/runtime/codegraph/store ./internal/runtime/codegraph/manager -run 'ScopeFromBinding|DerivativePath|SchemaV3|GatewayMigration8|LegacyProjectGraph' -count=1
 
 Expected: FAIL because scope conversion and schema v3 are absent.
 
 - [ ] **Step 3: Implement scoped database and legacy invalidation (GREEN).**
 
-manager.ScopeFromBinding first calls binding.Validate, then copies its fields into the string-only config.Scope. DerivativePath requires a canonical UUID string, creates dataHome/wormhole/codegraph with 0700, and returns workspace-UUID.db beneath that exact directory. Open creates an owner-only file-backed SQLite DB and retains Scope. All SQL predicates and insert keys use scope.ProjectID, scope.WorkspaceID, and revision_id. The localstore loader still embeds the same numbered one-way files and now requires and applies the contiguous sequence `000001` through `000006`; no second ledger or graph-specific migration constant is introduced.
+manager.ScopeFromBinding first calls binding.Validate, then copies its fields into the string-only config.Scope. DerivativePath requires a canonical UUID string, creates dataHome/wormhole/codegraph with 0700, and returns workspace-UUID.db beneath that exact directory. Open creates an owner-only file-backed SQLite DB and retains Scope. All SQL predicates and insert keys use scope.ProjectID, scope.WorkspaceID, and revision_id. The localstore loader still embeds the same numbered one-way files and now requires and applies the contiguous sequence `000001` through `000008`; no second ledger or graph-specific migration constant is introduced.
 
 The supervisor translates localstore invalidation records into rebuild-required flags without mapping ambiguous legacy rows to a checkout. A new workspace graph starts disabled/rebuild-required. Restart repeats safely without deleting diagnostic evidence.
 
@@ -752,7 +753,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit.**
 
 ~~~bash
-git add internal/runtime/localstore/migrations/000006_invalidate_legacy_codegraph.sql internal/runtime/localstore/codegraph_invalidation.go internal/runtime/localstore/codegraph_invalidation_test.go internal/runtime/localstore/migrations.go internal/runtime/localstore/migrations_test.go internal/runtime/codegraph/config/scope.go internal/runtime/codegraph/config/scope_test.go internal/runtime/codegraph/config/config.go internal/runtime/codegraph/manager/scope.go internal/runtime/codegraph/manager/scope_test.go internal/runtime/codegraph/store/path.go internal/runtime/codegraph/store/path_test.go internal/runtime/codegraph/store/migration.go internal/runtime/codegraph/store/migration_test.go internal/runtime/codegraph/store/store.go internal/runtime/codegraph/store/schema_test.go
+git add internal/runtime/localstore/migrations/000008_invalidate_legacy_codegraph.sql internal/runtime/localstore/codegraph_invalidation.go internal/runtime/localstore/codegraph_invalidation_test.go internal/runtime/localstore/migrations.go internal/runtime/localstore/migrations_test.go internal/runtime/codegraph/config/scope.go internal/runtime/codegraph/config/scope_test.go internal/runtime/codegraph/config/config.go internal/runtime/codegraph/manager/scope.go internal/runtime/codegraph/manager/scope_test.go internal/runtime/codegraph/store/path.go internal/runtime/codegraph/store/path_test.go internal/runtime/codegraph/store/migration.go internal/runtime/codegraph/store/migration_test.go internal/runtime/codegraph/store/store.go internal/runtime/codegraph/store/schema_test.go
 git commit -m "feat(codegraph): scope databases by workspace"
 ~~~
 
@@ -1330,8 +1331,8 @@ type ConfirmedChange struct {
 type SetupSelection struct {
     ConnectorAdapters []string      `json:"connector_adapters"` // sorted unique codex|claude
     CodeGraphMode string             `json:"code_graph_mode"` // on|off
-    PublicationVisibility string     `json:"publication_visibility"` // local_only|public_git|private_git
-    PublicationRepositoryDigest StateDigest `json:"publication_repository_digest"`
+    PublicationVisibility string     `json:"publication_visibility"` // unclassified|local_only|public_git|private_git
+    PublicationBindingDigest StateDigest `json:"publication_binding_digest"`
     Identity types.ConfirmedIdentitySelection `json:"identity"`
     PlanDigest StateDigest           `json:"plan_digest"`
     Changes []ConfirmedChange        `json:"changes"` // sorted by stage, subject
@@ -1379,8 +1380,8 @@ Stages form this exact ordered prefix:
 project_validated
 gateway_ready
 workspace_registered
-publication_classified
 identity_selected
+publication_classified
 base_imported
 connectors_applied
 fabric_resolved
@@ -1388,19 +1389,38 @@ code_graph_resolved
 final_verified
 ~~~
 
-`PublicationVisibility` accepts exactly `local_only`, `public_git`, or `private_git`;
-absence/unknown remains `unclassified` in Gateway and blocks checkpoint. It is trusted
-owner-private setup intent, independent of canonical/fork routing and Fabric mode; setup
-for a public fork must explicitly select `public_git`, and checkpoint callers cannot
+`PublicationVisibility` accepts exactly `unclassified`, `local_only`, `public_git`, or
+`private_git`; empty/unknown is unresolved and invalid. An explicitly confirmed
+`unclassified` setup succeeds for inspection but reports that checkpoint is blocked. It is
+trusted owner-private setup intent, independent of canonical/fork routing and Fabric mode;
+setup for a public fork must explicitly select `public_git`, and checkpoint callers cannot
 override it.
-`PublicationRepositoryDigest` is the digest of the trusted canonical repository/origin
-identity observed for this workspace at confirmation. Gateway persists classification
-against that identity and invalidates it to `unclassified` on any identity/origin change.
-`StateDigest` is the config-owned digest boundary: callers strict-canonicalize state, `SHA256StateDigest` returns `sha256:` plus lowercase SHA-256 hex, and `ParseStateDigest` rejects every other representation. `SetupSelection` is the canonical confirmation record. `Identity` is required and must pass Task 0's exact bounded validation; because this schema has not shipped, it is part of journal schema v1 rather than a migration or optional compatibility field. Its sorted `Changes` contains safe stage/subject/action enums and prior/desired digests for the resolved service executable/action/unit/socket, workspace registration and base import, publication visibility, selected identity, each connector independently, Fabric/local-only resolution, and Code Graph mode/preference. `PlanDigest` hashes the strict canonical confirmation envelope: finalized connector/graph/publication choices, the repository-identity digest, the complete canonical `Identity`, and the ordered change metadata with its already-computed prior/desired digests. It never embeds the other raw state preimages. This makes the overall digest reproducible on resume from persisted identity execution intent, revalidated stable inputs, freshly derived desired digests, fixed bounded-predicate encodings, and the frozen exact-prior digests without replacing a post-effect prior with the current desired state.
+
+The confirmation constraint has this exact private preimage:
+
+~~~go
+type setupPublicationBindingV1 struct {
+    SchemaVersion int                      `json:"schema_version"` // exactly 1
+    Kind string                            `json:"kind"` // setup_publication_binding
+    Repository types.RepositoryIdentity    `json:"repository_identity"`
+    OriginDigest state.Digest              `json:"origin_digest"`
+}
+~~~
+
+`PublicationBindingDigest` is
+`SHA256StateDigest("dev.wormhole.setup-publication-binding.v1\x00" ||
+state.CanonicalJSON(setupPublicationBindingV1))`. Before confirmation, setup obtains the
+repository from validated tracked project state and the origin digest from the same bounded,
+offline `runtimeprojectstate.InspectPublicationOrigin` frozen by the publication amendment;
+raw origin data is never returned or persisted. This CLI-side value is only a confirmed
+expected-state constraint.
+Gateway independently re-observes the registered binding/origin and is the sole authority;
+it rejects a different recomputed constraint and never trusts the caller digest.
+`StateDigest` is the config-owned digest boundary: callers strict-canonicalize state, `SHA256StateDigest` returns `sha256:` plus lowercase SHA-256 hex, and `ParseStateDigest` rejects every other representation. `SetupSelection` is the canonical confirmation record. `Identity` is required and must pass Task 0's exact bounded validation; because this schema has not shipped, it is part of journal schema v1 rather than a migration or optional compatibility field. Its sorted `Changes` contains safe stage/subject/action enums and prior/desired digests for the resolved service executable/action/unit/socket, workspace registration and base import, publication visibility, selected identity, each connector independently, Fabric/local-only resolution, and Code Graph mode/preference. `PlanDigest` hashes the strict canonical confirmation envelope: finalized connector/graph/publication choices, the publication-binding digest, the complete canonical `Identity`, and the ordered change metadata with its already-computed prior/desired digests. It never embeds the other raw state preimages. This makes the overall digest reproducible on resume from persisted identity execution intent, revalidated stable inputs, freshly derived desired digests, fixed bounded-predicate encodings, and the frozen exact-prior digests without replacing a post-effect prior with the current desired state.
 
 The confirmed display name and optional email are the single narrow PII-not-secret exception to the digest-only rule because a new process must be able to execute the already-confirmed identity action. The owner-private journal may persist exactly those two bounded final values plus `ensure-selected` and `ensure-ed25519`. It still forbids private/public key bytes, signatures, key or credential paths, raw Git config/output, connector command/argv/env/header/credential, Fabric credential/binding secret, executable/private paths, and raw graph path/status. `SetupSelection` and its identity values are never logged, emitted by status, returned through MCP, or included in a public contract response.
 
-`Begin` writes no `selection` member: `Selection` remains nil until the caller has rendered the complete plan and received confirmation. Before calling `SetSelection`, `setupPlan.ValidateConfirmation` recomputes the overall and per-change digests from the in-memory canonical plan. `SetSelection` requires and validates `Identity` and `PublicationRepositoryDigest`, strict-validates subject/action vocabulary, exact required stage coverage, adapter correspondence, digest syntax, ordering, uniqueness, and a `PlanDigest` that covers the exact repository digest and identity selection, then durably finalizes once; repeating the exact value is idempotent and a different value fails closed. `RecordConnectorBackup` rejects a missing selection or an adapter absent from its finalized changes. `MarkCompleted` rejects `connectors_applied` or any later stage unless selection is finalized, and `Complete` requires a finalized selection plus every stage, sets terminal state/time, and clears `LastError`. Completed and superseded journals are never resumable. Exactly one active canonical-root match resumes. Multiple matches return `ErrAmbiguousSetupJournal`. `Begin` holds a store-index lock and refuses a second active journal for the same root.
+`Begin` writes no `selection` member: `Selection` remains nil until the caller has rendered the complete plan and received confirmation. Before calling `SetSelection`, `setupPlan.ValidateConfirmation` recomputes the overall and per-change digests from the in-memory canonical plan. `SetSelection` requires and validates `Identity` and `PublicationBindingDigest`, strict-validates subject/action vocabulary, exact required stage coverage, adapter correspondence, digest syntax, ordering, uniqueness, and a `PlanDigest` that covers the exact publication-binding digest and identity selection, then durably finalizes once; repeating the exact value is idempotent and a different value fails closed. `RecordConnectorBackup` rejects a missing selection or an adapter absent from its finalized changes. `MarkCompleted` rejects `connectors_applied` or any later stage unless selection is finalized, and `Complete` requires a finalized selection plus every stage, sets terminal state/time, and clears `LastError`. Completed and superseded journals are never resumable. Exactly one active canonical-root match resumes. Multiple matches return `ErrAmbiguousSetupJournal`. `Begin` holds a store-index lock and refuses a second active journal for the same root.
 
 `BeginConfirmedReplacement` is callable only after the caller has recomputed, rendered, and newly confirmed a drifted plan. Under the store-index lock it verifies the named old journal is still active with a finalized different selection, marks it `superseded`, and creates a new active journal for the same canonical root with only `project_validated` complete and the newly confirmed selection durable. It never copies completed effects, workspace/identity bindings, backup references, or errors from the old journal. Detection of drift itself only returns `ErrConfirmedPlanDrift` and performs no write; a replacement is a separate explicitly confirmed action.
 
@@ -1967,6 +1987,10 @@ type setupPlan struct {
     CodeGraphMode string
     Confirmation config.SetupSelection
 }
+type setupPublicationState struct {
+    Configuration projectstate.PublicationConfiguration `json:"configuration"`
+    BindingDigest config.StateDigest `json:"binding_digest"`
+}
 func (p setupPlan) ValidateConfirmation() error
 func (p setupPlan) ValidateResumeConfirmation(config.SetupSelection) error
 func runSetup(context.Context, []string, io.Reader, io.Writer, io.Writer) int
@@ -1979,6 +2003,13 @@ func (c gatewayClient) EnsureSelectedSetupIdentity(
     context.Context, string, types.ConfirmedIdentitySelection,
 ) (localidentity.HumanProfile, error)
 func (c gatewayClient) SelectedLocalIdentity(context.Context) (localidentity.HumanProfile, error)
+func (c gatewayClient) PublicationConfiguration(context.Context) (setupPublicationState, error)
+func (c gatewayClient) ReconfigurePublication(
+    context.Context,
+    setupPublicationState,
+    types.PublicationClassification,
+    config.StateDigest, // exact finalized PublicationBindingDigest
+) (setupPublicationState, error)
 func (c gatewayClient) ImportWorkspace(context.Context) (projectstate.ImportResult, error)
 func (c gatewayClient) RebuildCodeGraph(context.Context) error
 func (c gatewayClient) DisableCodeGraph(context.Context) error
@@ -1987,7 +2018,13 @@ func (c gatewayClient) CodeGraphStatus(context.Context) (codegraphmanager.Status
 func runConnector(context.Context, []string, io.Reader, io.Writer, io.Writer, connectorCommandDeps) int
 ~~~
 
-`newGatewayClient` canonicalizes and validates the root once, stores it immutably in the unexported `canonicalRoot` field, and rejects an empty, relative, symlink-aliased, or nonrepository root. Every scoped RPC injects that exact root; no method accepts a replacement root, consults a later ambient cwd, or sends a workspace binding or actor envelope. The sole setup identity mutation is the private `EnsureSelectedSetupIdentity` call, which sends the exact setup journal UUID and journal-owned `ConfirmedIdentitySelection` to Task 0's idempotent RPC; the CLI never calls independent create/select methods. The RPC returns only the public profile. The interactive confirmation deliberately renders the final display name/optional email to the same human, but machine-readable status, MCP/public APIs, diagnostics, and logs never emit that selection. The exact standalone forms are wormhole connector list, wormhole connector install <codex|claude> [--yes], and wormhole connector remove <codex|claude> [--yes]. list calls Discover/Inspect and prints only adapter name, availability, state, scope, and transport. install and remove render/confirm one exact change, derive its `ConfirmedConnectorChange` prior/desired/plan digests, and invoke Task 10's coordinated durable transaction APIs; `--yes` supplies that command-local confirmation but never bypasses expected-prior CAS. No CLI output includes command environment, headers, bearer fields, private paths, backup references, or backup contents.
+`newGatewayClient` canonicalizes and validates the root once, stores it immutably in the unexported `canonicalRoot` field, and rejects an empty, relative, symlink-aliased, or nonrepository root. Every scoped RPC injects that exact root; no method accepts a replacement root, consults a later ambient cwd, or sends a workspace binding or actor envelope. The sole setup identity mutation is the private `EnsureSelectedSetupIdentity` call, which sends the exact setup journal UUID and journal-owned `ConfirmedIdentitySelection` to Task 0's idempotent RPC; the CLI never calls independent create/select methods. The RPC returns only the public profile. The two publication methods are private local Gateway control-plane calls: they resolve the registered binding and selected human inside Gateway, construct the locally assured human actor there, and expose the amendment's complete machine-private configuration plus recomputed binding-digest readback. Reconfiguration receives that complete prior state plus the desired enum. Gateway calls the same `runtimeprojectstate.DigestPublicationBindingConstraint` codec as pre-consent setup against its independently observed binding/origin, requires the prior digest and finalized `Selection.PublicationBindingDigest` to match, and never accepts caller actor/binding/origin authority. The interactive confirmation deliberately renders the final display name/optional email to the same human, but machine-readable status, MCP/public APIs, diagnostics, and logs never emit that selection. The exact standalone forms are wormhole connector list, wormhole connector install <codex|claude> [--yes], and wormhole connector remove <codex|claude> [--yes]. list calls Discover/Inspect and prints only adapter name, availability, state, scope, and transport. install and remove render/confirm one exact change, derive its `ConfirmedConnectorChange` prior/desired/plan digests, and invoke Task 10's coordinated durable transaction APIs; `--yes` supplies that command-local confirmation but never bypasses expected-prior CAS. No CLI output includes command environment, headers, bearer fields, private paths, backup references, or backup contents.
+
+The reconfiguration method's fourth argument is mandatory and carries the exact finalized
+`PublicationBindingDigest`. The CLI checks its prior readback against the finalized
+selection before RPC; Gateway independently recomputes the constraint and requires both
+the prior state's digest and that fourth argument to match. Neither value is origin
+authority.
 
 Fabric profile/login/attach and wormhole project/fabric commands are Slice D-owned. Setup exposes an optional Fabric stage only through D's Gateway RPC when that capability exists; otherwise it records local-only and succeeds. It never reintroduces legacy credential-profile enrollment.
 
@@ -2043,7 +2080,7 @@ func TestGatewayInitiallyUnavailableStillUsesOneConfirmedPlan(t *testing.T) {
     fixture.SetGatewayInitiallyUnavailable()
     if code := fixture.RunWithInput("yes\n"); code != 0 { t.Fatalf("code=%d calls=%v",code,fixture.Calls()) }
     if fixture.PlanCount() != 1 || fixture.ConfirmationCount() != 1 { t.Fatalf("plans=%d confirmations=%d",fixture.PlanCount(),fixture.ConfirmationCount()) }
-    fixture.AssertBoundedPreconditionsUsed("workspace_registered","identity_selected","base_imported","code_graph_resolved")
+    fixture.AssertBoundedPreconditionsUsed("workspace_registered","identity_selected","publication_classified","base_imported","code_graph_resolved")
     fixture.AssertNoWorkerStatusBeforeSelection()
     fixture.AssertConfirmationEnvelopeUnchangedAfterGatewayStart()
     fixture.AssertExactPostConfirmationOrder()
@@ -2076,7 +2113,7 @@ func TestResumeReverifiesIdentityReadinessAndCodeGraphBeforeSkip(t *testing.T) {
     fixture.AssertCodeGraphReadyAndCurrent()
 }
 func TestConfirmedPlanDriftBeforeEffectFailsWithZeroMutation(t *testing.T) {
-    for _, subject := range []string{"gateway-service","identity","connector:codex","fabric","code-graph"} {
+    for _, subject := range []string{"gateway-service","identity","publication","connector:codex","fabric","code-graph"} {
         fixture := confirmedSetupFixture(t)
         before := fixture.JournalBytes()
         fixture.ResetWriteCounters()
@@ -2088,7 +2125,7 @@ func TestConfirmedPlanDriftBeforeEffectFailsWithZeroMutation(t *testing.T) {
     }
 }
 func TestCrashResumeUsesConfirmedDesiredWithoutReplanning(t *testing.T) {
-    for _, subject := range []string{"gateway-service","identity","connector:codex","fabric","code-graph"} {
+    for _, subject := range []string{"gateway-service","identity","publication","connector:codex","fabric","code-graph"} {
         fixture := setupFixture(t)
         fixture.CrashAfterDesiredBeforeStageMark(subject)
         if code := fixture.RunWithInput("yes\n"); code == 0 { t.Fatalf("%s first run succeeded",subject) }
@@ -2099,7 +2136,7 @@ func TestCrashResumeUsesConfirmedDesiredWithoutReplanning(t *testing.T) {
 }
 func TestSetupResumeAfterServiceAndConnectorEffectsDoesNotFalseDrift(t *testing.T) {
     fixture := setupFixture(t)
-    fixture.CrashAfterStagesMarked("gateway_ready","workspace_registered","identity_selected","base_imported","connectors_applied")
+    fixture.CrashAfterStagesMarked("gateway_ready","workspace_registered","identity_selected","publication_classified","base_imported","connectors_applied")
     if code := fixture.RunWithInput("yes\n"); code == 0 { t.Fatal("injected crash succeeded") }
     fixture.AssertCurrentStateEqualsConfirmedDesired("gateway-service","connector:codex")
     if code := fixture.Resume(); code != 0 { t.Fatalf("resume=%d err=%v calls=%v",code,fixture.Err(),fixture.Calls()) }
@@ -2136,14 +2173,26 @@ Execute this exact order:
 1. Find nearest `.wormhole`, canonicalize its root, and decode/validate canonical project state without executing repository content.
 2. Resume or begin the setup journal and mark `project_validated`; this owner-private journal write is the only pre-consent state change and `Selection` remains nil.
 3. Perform read-only discovery: resolve and validate the exact Gateway executable and service action; call direct Gateway readiness/workspace/identity reads only when already reachable; read Git identity suggestions; inspect repository visibility evidence without treating canonical/fork/Fabric mode as visibility; connector `Discover`/`Inspect`/`Plan`; derive Slice D capability from the resolved executable/version; and, only when Gateway is reachable, call the private non-starting `InspectCodeGraphPreference`. Pre-consent setup never calls worker-backed `CodeGraphStatus`. Resolve unsupported/ambiguous connector blockers before consent.
-4. Resolve every choice and construct/render one complete `setupPlan` describing the service, registration, exact publication visibility (`local_only|public_git|private_git`), final identity display name/optional email plus `ensure-selected`/`ensure-ed25519`, base import, every connector action, Fabric/local-only action, and graph mode. Unknown visibility must be explicitly resolved during setup or remains `unclassified`; `public_git` shows the confidentiality warning and applies equally to canonical repositories and public forks. Build its canonical `SetupSelection`: persist publication visibility plus the digest of the trusted repository/origin identity and the required bounded `ConfirmedIdentitySelection`, hash the overall strict confirmation envelope and each confirmed prior predicate/desired state, and validate it. All other raw plan values remain memory-only. On this branch Code Graph is fixed `off`; the `on` path is executed only on its later branch. Noninteractive setup exits 2 if publication visibility or any other required choice is unresolved, unless an already-finalized active-journal selection supplies it.
+4. Resolve every choice and construct/render one complete `setupPlan` describing the service, registration, exact publication visibility (`unclassified|local_only|public_git|private_git`), final identity display name/optional email plus `ensure-selected`/`ensure-ed25519`, base import, every connector action, Fabric/local-only action, and graph mode. Empty/unknown visibility must be explicitly resolved; deliberate `unclassified` is valid but the plan warns that checkpoint remains blocked. `public_git` shows the confidentiality warning and applies equally to canonical repositories and public forks. Build its canonical `SetupSelection`: persist publication visibility plus the exact publication-binding constraint digest and the required bounded `ConfirmedIdentitySelection`, hash the overall strict confirmation envelope and each confirmed prior predicate/desired state, and validate it. All other raw plan values remain memory-only. On this branch Code Graph is fixed `off`; the `on` path is executed only on its later branch. Noninteractive setup exits 2 if publication visibility or any other required choice is unresolved, unless an already-finalized active-journal selection supplies it.
 5. Interactive setup obtains exactly one confirmation for that whole plan. A decline leaves only the active `project_validated` journal with nil selection and performs zero external mutation. Resume with an already-finalized selection never reprompts.
 6. Immediately after consent, durably call `SetSelection` with the exact safe confirmation/digests and read the journal back byte-for-byte before proceeding. This finalized record is the recovery authority. No service, Gateway, identity, connector, Fabric, graph, user-config, or repository mutation occurs before that durable readback.
 7. Inspect/install/start/verify `gatewayd`. Manager-unavailable may proceed only if direct Gateway `Readiness` already succeeds; otherwise return the exact manual diagnostic with the journal active.
 8. Register the workspace, consume only `RegisterWorkspaceResult.Binding`, and bind its workspace UUID in the journal.
-9. Persist the finalized publication visibility and exact repository/origin-identity digest through the gate-frozen private Gateway setup RPC, read both back from the workspace, and mark `publication_classified`. The RPC accepts only the finalized owner-private setup journal intent; ordinary/public checkpoint arguments cannot set either value. A digest mismatch or changed origin leaves the workspace `unclassified`.
-10. Call `EnsureSelectedSetupIdentity` with the setup journal UUID and its exact finalized `Selection.Identity`; the private Gateway/localidentity receipt creates or reuses and selects exactly one matching Ed25519 human idempotently. Then bind the returned human UUID in the setup journal and read it back with `SelectedLocalIdentity`. A crash before or after the RPC, selection, return, or bind repeats the same intent and cannot create a second profile/key.
-11. Refresh/import the accepted base through Gateway using the selected Gateway-owned actor. This deliberate register → publication classification → identity → actor-attributed import ordering resolves the architecture outline's import-before-identity conflict with Slice A's valid-actor requirement.
+9. Call `EnsureSelectedSetupIdentity` with the setup journal UUID and its exact finalized `Selection.Identity`; the private Gateway/localidentity receipt creates or reuses and selects exactly one matching Ed25519 human idempotently. Then bind the returned human UUID in the setup journal and read it back with `SelectedLocalIdentity`. A crash before or after the RPC, selection, return, or bind repeats the same intent and cannot create a second profile/key.
+10. Read the complete private publication configuration, recompute the finalized
+    publication-binding constraint inside Gateway, and persist the finalized visibility
+    through `ReconfigurePublication` when needed. Gateway resolves the selected human's
+    locally assured actor; the caller never supplies actor, binding, or origin authority.
+    Current-exact class/binding plus the same human principal is the only no-op. A different
+    selected human advances the policy revision and records new attribution even when class
+    is unchanged. A finalized constraint mismatch is confirmed-plan drift. A stable origin
+    change that the service discovers commits sticky `unclassified` invalidation, returns
+    `ErrPublicationConfigurationInvalidated`, leaves this stage incomplete, and requires a
+    newly rendered/confirmed replacement rather than an in-place retry. Read the complete
+    policy back and mark `publication_classified` only when class, binding constraint, and
+    configured human equal the finalized selection. Ordinary/public checkpoint arguments
+    cannot set classification.
+11. Refresh/import the accepted base through Gateway using the selected Gateway-owned actor. This deliberate register → identity → human-attributed publication classification → actor-attributed import ordering resolves both the architecture outline's import-before-identity conflict and the publication amendment's human-only control-plane rule.
 12. Apply connectors transactionally and record every nonempty opaque returned backup reference. Connector failure restores only connector state and leaves the imported workspace intact.
 13. Feature-detect Slice D's future Fabric RPC; when absent, record local-only resolution. Task 11 adds no Fabric schema, profile, command, or auth type.
 14. On this branch, explicitly persist/read back Code Graph disabled. The separate Code Graph branch owns the `on` rebuild/readiness path.
@@ -2153,8 +2202,10 @@ Planning does not depend on unknowable post-start state when Gateway is initiall
 
 - service: exact resolved executable identity, exact unit/socket bytes, and `noop|start|install` action; both its observed pre-consent state and ready desired state are hashed;
 - workspace: `register` the exact immutable root/project/accepted commit/tree, whose prior predicate is `absent-or-exact` and whose desired predicate requires those exact semantic fields plus one canonical Gateway-owned workspace UUID, bound in the journal on first success rather than guessed before consent;
-- publication: set the exact finalized `local_only|public_git|private_git` visibility in
-  trusted workspace state; unclassified is a blocking prior, not a checkpoint-call choice;
+- publication: set the exact finalized
+  `unclassified|local_only|public_git|private_git` visibility in trusted workspace state;
+  explicit unclassified is an inspect-only desired state, while an unresolved choice is a
+  planning blocker and classification is never a checkpoint-call choice;
 - identity: the exact durable `ConfirmedIdentitySelection` (`ensure-selected`, final bounded display name, optional email, `ensure-ed25519`) is both execution input and part of `PlanDigest`; any strictly valid local identity-store state is the bounded prior, while the desired predicate requires the receipt-bound human to have exactly those attributes, one valid matching Ed25519 keypair, and selected status. The first successful UUID is bound and read back rather than guessed before consent;
 - base import: exact registered workspace with `unimported-or-already-imported-exact` prior and exact accepted commit/tree desired;
 - connectors: exact inspected typed prior and exact desired entry per adapter; no bounded wildcard is permitted;
@@ -2166,7 +2217,7 @@ Planning does not depend on unknowable post-start state when Gateway is initiall
 These predicate descriptions have fixed canonical encodings and are what `PriorDigest`/`DesiredDigest` hash; a bounded digest is not the digest of an unavailable guessed value. After service readiness, each evaluator accepts only the exact alternatives its confirmed predicate names. Thus service start does not itself cause workspace/identity/base/graph plan drift, while malformed or out-of-bound state still fails closed. The initially-unavailable acceptance fixture has no pre-existing workspace/identity conflict and completes under one confirmation.
 
 The post-confirmation external effect order is therefore fixed as service → workspace
-registration → publication classification → identity selection → actor-attributed base
+registration → identity selection → human-attributed publication classification → actor-attributed base
 import → connectors → Fabric/local-only resolution → graph-disabled readback → final
 verification. Journal validation and finalized-selection writes do not broaden that
 order into product or user-config mutation.
@@ -2180,10 +2231,13 @@ Before skipping any completed stage on resume, run its exact read-only predicate
 - `project_validated`: the client's immutable canonical root equals the journal root and the current tracked project state still strict-decodes and validates without executing repository content.
 - `gateway_ready`: direct `gatewayClient.Readiness` succeeds; when systemd-user is usable, `GatewayService.Inspect` also reports `Installed`, `Running`, and `Ready`, while manual mode requires only direct readiness.
 - `workspace_registered`: `WorkspaceStatus` reports the client's canonical root and the exact journal workspace UUID.
-- `publication_classified`: the private Gateway readback reports the exact finalized
-  `Selection.PublicationVisibility` and `Selection.PublicationRepositoryDigest`; no
-  public request or Fabric hint can substitute.
 - `identity_selected`: `SelectedLocalIdentity` reports the exact journal `SelectedHumanID`; Task 0's receipt for that journal UUID names the same human/public key, and the profile exactly matches finalized `Selection.Identity` with a valid Ed25519 keypair.
+- `publication_classified`: the private Gateway readback reports the exact finalized
+  `Selection.PublicationVisibility`, current trusted binding/origin digest, monotonic policy
+  revision, `transition_kind=configured`, and `ChangedBy.ActorKind=ActorHuman` with
+  `ChangedBy.HumanPrincipalID == Journal.SelectedHumanID`. The recomputed exact constraint
+  must equal `Selection.PublicationBindingDigest`; no public request, caller-supplied
+  authority, or Fabric hint can substitute.
 - `base_imported`: `WorkspaceStatus` reports the validated project's accepted commit/tree digest and a recovered imported base with no unresolved import conflict.
 - `connectors_applied`: each adapter in finalized `Selection.ConnectorAdapters` re-inspects as the exact desired user-scope stdio entry and has no active Task 10 operation; skipped unavailable adapters are absent from the finalized selection.
 - `fabric_resolved`: when Slice D is absent, capability detection still proves local-only; when present later, its readback must match the planned binding before this predicate can pass.
@@ -2373,8 +2427,8 @@ git commit -m "feat(cli): complete gateway setup cutover"
 - Task 1 begins after Slice A localapi workspace operations and projectstate resolver exist.
 - Task 2 follows Task 1; its FabricRouter is local-only/legacy until Slice D supplies the final multi-Fabric implementation.
 - Tasks 3–6 follow the portable-loop human go/no-go and the shared multi-Fabric schema
-  through version 5 on a separate Code Graph branch; their internal order remains
-  3 → 4 → 5 → 6 and they own only local migration `000006`.
+  through version 7 on a separate Code Graph branch; their internal order remains
+  3 → 4 → 5 → 6 and they own only local migration `000008`.
 - Task 7 first freezes and ships the shared `CommandRunner` contract.
 - Tasks 8 and 9 may then proceed independently after Task 0 freezes `types.ConfirmedIdentitySelection`; Task 8 consumes that exact validated type in journal v1.
 - Task 10 consumes Task 7's shared runner plus Task 8's `StateDigest`, confirmed-plan error, opaque `config.BackupReference`, redaction, and private-platform contracts, but owns the cross-process operation coordinator, fully specified connector backup contents, operation journal, retention, and recovery.

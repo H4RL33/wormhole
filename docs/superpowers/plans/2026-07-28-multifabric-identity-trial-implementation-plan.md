@@ -5,7 +5,7 @@
 **Goal:** Implement Slices D, E, and F so each registered workspace can bind immutably to one Git-aware Fabric stream, public callers have key-continuity identification only, private actions derive authenticated human and accountable-agent provenance at the server, legacy alpha state migrates without authority invention, and issue #56 closes only from reviewed real four-VM evidence.
 
 **Architecture:** Slice A owns portable repository, workspace, actor, tree, snapshot,
-digest, and reducer contracts. Gateway schema version 5 adds explicit Fabric profiles and
+digest, and reducer contracts. Gateway schema version 7 adds explicit Fabric profiles and
 complete bindings after the activity migration. Fabric may cache canonical
 portable proposal/accepted trees for validated reconstruction, but Git observation alone
 accepts them. Separate branch/stream-scoped `ActivityV1` transport/store/queue carries
@@ -187,8 +187,8 @@ issuer-specific validation.
 | Path | Responsibility |
 |---|---|
 | `internal/types/routing.go` | plain profile, binding, and immutable remote-key types |
-| `internal/runtime/localstore/migrations/000004_fabric_routes.sql` | one-way local v4 profile/binding/cursor/hint-recovery migration |
-| `internal/runtime/localstore/migrations/000005_sync_binding.sql` | one-way local v5 complete-key queue/audit quarantine migration |
+| `internal/runtime/localstore/migrations/000006_fabric_routes.sql` | one-way local v6 profile/binding/cursor/hint-recovery migration |
+| `internal/runtime/localstore/migrations/000007_sync_binding.sql` | one-way local v7 complete-key queue/audit quarantine migration |
 | `internal/runtime/localstore/fabric_routes.go` | profile and binding repositories; profile-only credential resolution |
 | `internal/runtime/sync/queue_repo.go` | complete-key durable queue and conflict audit |
 | `internal/core/git/stream_codec.go` | deterministic storage container for canonical `projectstate.Tree` |
@@ -261,11 +261,11 @@ git add internal/types/routing.go internal/types/routing_test.go internal/types/
 git commit -m "feat: freeze Fabric routing contracts"
 ```
 
-### Task 2: Install one-way local schemas v4/v5 and complete-key repositories
+### Task 2: Install one-way local schemas v6/v7 and complete-key repositories
 
 **Files:**
-- Create: `internal/runtime/localstore/migrations/000004_fabric_routes.sql`
-- Create: `internal/runtime/localstore/migrations/000005_sync_binding.sql`
+- Create: `internal/runtime/localstore/migrations/000006_fabric_routes.sql`
+- Create: `internal/runtime/localstore/migrations/000007_sync_binding.sql`
 - Modify: `internal/runtime/localstore/migrations.go`
 - Modify: `internal/runtime/localstore/migrations_test.go`
 - Create: `internal/runtime/localstore/fabric_routes.go`
@@ -280,13 +280,14 @@ git commit -m "feat: freeze Fabric routing contracts"
 
 **Interfaces:**
 - Consumes: `types.WorkspaceBinding`, Task 1 routing types, committed Slice-A
-  `000001`/`000002`, the reviewed Task-6A
-  `000003_workspace_activity.sql` implementation commit and its exact activity/policy/
+  `000001`/`000002`, the amendment-owned `000003_workspace_publication.sql`, Task-5-owned
+  `000004_checkpoint_publication_review.sql`, the reviewed Task-6A
+  `000005_workspace_activity.sql` implementation commit, and its exact activity/policy/
   promotion interfaces, Slice-A's conflict gate/sentinel, and the single
   `gateway_schema_migrations` ledger. It has no Code Graph dependency; that separate
   branch consumes the schema produced here. Task 2 must not begin from schema version 2.
-- Produces: `GatewaySchemaVersion = 4` after `000004_fabric_routes.sql`, then
-  `GatewaySchemaVersion = 5` after `000005_sync_binding.sql`, `FabricRouteRepo`,
+- Produces: `GatewaySchemaVersion = 6` after `000006_fabric_routes.sql`, then
+  `GatewaySchemaVersion = 7` after `000007_sync_binding.sql`, `FabricRouteRepo`,
   complete-key `QueueRepo`, quarantine repositories, profile-only `CredentialSource`,
   and the conflict-aware atomic `MarkDelivered` boundary used by Task 6.
 
@@ -336,17 +337,17 @@ declaration or runtime alias.
 
 - [ ] **Step 1: Write failing migration, direct-SQL, and repository tests**
 
-Add `TestGatewayMigration4Fresh`, `TestGatewayMigration3To4Routes`, `TestGatewayMigration5QuarantinesLegacyRows`, `TestGatewayMigration4FailureRollsBackWithoutLedgerAdvance`, `TestGatewayMigration5FailureRollsBackWithoutLedgerAdvance`, `TestGatewayMigrationLoaderAcceptsOnlyNumberedSQL`, `TestGatewayMigrationsAreOneWay`, `TestFabricProfileIsSoleCredentialAuthority`, `TestFabricBindingRejectsWorkspaceMismatchByDirectSQL`, `TestCursorRejectsBindingMismatchByDirectSQL`, `TestQueueRejectsBindingMismatchByDirectSQL`, `TestCompleteKeyQueueIsolation`, `TestCredentialRotationKeepsOneEngine`, and `TestFabricFailureDoesNotBlockLocalWriteOrOtherFabric`. Add `TestQueueMarkDeliveredRechecksOpenConflictAtomically`, `TestQueueMarkDeliveredConflictScopeIsolation`, and `TestGatewayWiresExactWorkspaceConflictGate`. The first captures the complete pending row, inserts an exact-workspace open conflict before delivery, requires `errors.Is(err, localstore.ErrWorkspaceConflicted)`, and compares every row byte/field after reopen. The isolation table covers resolved-only, same project/different workspace, different project, and exact open conflict. Direct SQL tests expect SQLite `SQLITE_CONSTRAINT_FOREIGNKEY`, not repository validation errors. The loader test rejects `.up.sql`, `.down.sql`, unnumbered files, duplicate versions, and version gaps; it embeds only `^[0-9]{6}_[a-z0-9_]+\.sql$`.
+Add `TestGatewayMigration6Fresh`, `TestGatewayMigration5To6Routes`, `TestGatewayMigration7QuarantinesLegacyRows`, `TestGatewayMigration6FailureRollsBackWithoutLedgerAdvance`, `TestGatewayMigration7FailureRollsBackWithoutLedgerAdvance`, `TestGatewayMigrationLoaderAcceptsOnlyNumberedSQL`, `TestGatewayMigrationsAreOneWay`, `TestFabricProfileIsSoleCredentialAuthority`, `TestFabricBindingRejectsWorkspaceMismatchByDirectSQL`, `TestCursorRejectsBindingMismatchByDirectSQL`, `TestQueueRejectsBindingMismatchByDirectSQL`, `TestCompleteKeyQueueIsolation`, `TestCredentialRotationKeepsOneEngine`, and `TestFabricFailureDoesNotBlockLocalWriteOrOtherFabric`. Add `TestQueueMarkDeliveredRechecksOpenConflictAtomically`, `TestQueueMarkDeliveredConflictScopeIsolation`, and `TestGatewayWiresExactWorkspaceConflictGate`. The first captures the complete pending row, inserts an exact-workspace open conflict before delivery, requires `errors.Is(err, localstore.ErrWorkspaceConflicted)`, and compares every row byte/field after reopen. The isolation table covers resolved-only, same project/different workspace, different project, and exact open conflict. Direct SQL tests expect SQLite `SQLITE_CONSTRAINT_FOREIGNKEY`, not repository validation errors. The loader test rejects `.up.sql`, `.down.sql`, unnumbered files, duplicate versions, and version gaps; it embeds only `^[0-9]{6}_[a-z0-9_]+\.sql$`.
 
 - [ ] **Step 2: Run RED**
 
 Run: `go test ./internal/runtime/localstore ./internal/runtime/sync ./cmd/gatewayd -run 'Test(GatewayMigration|FabricProfile|FabricBinding|Cursor|Queue|CredentialRotation|FabricFailure|GatewayWiresExactWorkspaceConflictGate)' -count=1`
 
-Expected: FAIL because migrations 4/5 and complete-key APIs are absent.
+Expected: FAIL because migrations 6/7 and complete-key APIs are absent.
 
-- [ ] **Step 3: Add the complete one-way migration-4 route SQL**
+- [ ] **Step 3: Add the complete one-way migration-6 route SQL**
 
-`000004_fabric_routes.sql` is exactly the following route/profile portion; it contains no queue rename or queue copy:
+`000006_fabric_routes.sql` is exactly the following route/profile portion; it contains no queue rename or queue copy:
 
 ```sql
 PRAGMA foreign_keys = ON;
@@ -438,12 +439,12 @@ CREATE TABLE legacy_fabric_hint_recoveries (
 ```
 
 The migration runner owns `BEGIN IMMEDIATE`, foreign-key enablement, statement rollback,
-and inserting ledger version 4 only after this script completes. It shape-checks versions
-1–3 before applying version 4.
+and inserting ledger version 6 only after this script completes. It shape-checks versions
+1–5 before applying version 6.
 
-- [ ] **Step 4: Add the complete one-way migration-5 sync-binding SQL**
+- [ ] **Step 4: Add the complete one-way migration-7 sync-binding SQL**
 
-`000005_sync_binding.sql` is exactly:
+`000007_sync_binding.sql` is exactly:
 
 ```sql
 PRAGMA foreign_keys = ON;
@@ -541,8 +542,8 @@ go test ./internal/runtime/localstore ./internal/runtime/sync ./cmd/gatewayd -ru
 go test -race ./internal/runtime/localstore ./internal/runtime/sync -run 'Test(CompleteKeyQueueIsolation|CredentialRotationKeepsOneEngine)' -count=1
 ```
 
-Expected: PASS; an injected migration-4 failure leaves version 3 byte-equivalent, an
-injected migration-5 failure leaves version 4 and the legacy queue byte-equivalent, the
+Expected: PASS; an injected migration-6 failure leaves version 5 byte-equivalent, an
+injected migration-7 failure leaves version 6 and the legacy queue byte-equivalent, the
 loader ignores/rejects noncanonical filenames, and no quarantine row is returned by
 `ListPending`.
 
@@ -2349,13 +2350,13 @@ git commit -m "feat: recover legacy local Fabric state"
 
 **Interfaces:**
 - Consumes: shipped Tasks 1–14 and Slice-C setup.
-- Produces: truthful live command/schema/auth inventory plus reproducible SQLite-v5 and Postgres-21–23 migration gates.
+- Produces: truthful live command/schema/auth inventory plus reproducible SQLite-v7 and Postgres-21–23 migration gates.
 
 - [ ] **Step 1: Add failing contract assertions**
 
 Assert exact canonical type package/API names, including `DecodeOperation`,
 `CanonicalOperation`, `DigestCanonicalJSON`, and `DigestCanonicalMarkdown`; local schema
-version 5; Postgres migrations 21–23; strict stored operation ID/bytes/digest verification;
+version 7; Postgres migrations 21–23; strict stored operation ID/bytes/digest verification;
 profile-only credential authority; private-credential v1 request/result/error/descriptor-
 branch compatibility plus public exclusion; ID-free v2 routes; token prefixes;
 first-owner/invitation/member/project-list/ownership/PAT/
@@ -2375,7 +2376,7 @@ Document public continuity as pseudonymous, private assurance as server-issued, 
 
 - [ ] **Step 4: Replace migration scripts with explicit version transitions**
 
-`test-alpha-upgrade.sh` creates a fresh database, runs full `up`, full `down`, then seeds fixtures at version 20 with `migrate ... goto 20`, runs `migrate ... up`, asserts version 23 and preserved IDs/audit plus revoked legacy tokens, runs 23→22 and proves old `WhoAmI` rejection, and tests 22→21 only on an empty private-identity fixture. SQLite tests construct exact schema versions 1, 2, and 3, open through one-way `000004_fabric_routes.sql` and `000005_sync_binding.sql`, verify per-file transactional rollback and quarantine copy, and reject noncanonical migration filenames; they do not claim a reverse migration. No command uses `up 1`, assumes the current version, edits committed SQLite migrations 1–3, or edits Postgres migrations 1–20.
+`test-alpha-upgrade.sh` creates a fresh database, runs full `up`, full `down`, then seeds fixtures at version 20 with `migrate ... goto 20`, runs `migrate ... up`, asserts version 23 and preserved IDs/audit plus revoked legacy tokens, runs 23→22 and proves old `WhoAmI` rejection, and tests 22→21 only on an empty private-identity fixture. SQLite tests construct exact schema versions 1 through 5, open through one-way `000006_fabric_routes.sql` and `000007_sync_binding.sql`, verify per-file transactional rollback and quarantine copy, and reject noncanonical migration filenames; they do not claim a reverse migration. No command uses `up 1`, assumes the current version, edits committed SQLite migrations 1–5, or edits Postgres migrations 1–20.
 
 - [ ] **Step 5: Run GREEN contract/release gates**
 
@@ -2578,7 +2579,7 @@ make release-test
 make release-rehearsal
 ```
 
-Expected: all PASS; Postgres 20→23, safe 23→22, empty 22→21, and fresh full up/down pass; SQLite 1→2→3→4→5, migration-4/5 transactional failure rollback, canonical filename enforcement, and quarantine copy pass without a reverse-migration claim; v1 branch compatibility, v2 preconditions, effective finite activity-retention handshake, exact-commit observation, restart reconstruction, composite-FK direct SQL rejection, actor forgery, atomic audit rollback, revocation, zero-contact fork, OIDC allowlist/SSRF/replay/rotation/throttling, secret redaction, and issue-56 schema tests pass; merged statement coverage is at least 80%.
+Expected: all PASS; Postgres 20→23, safe 23→22, empty 22→21, and fresh full up/down pass; SQLite 1→2→3→4→5→6→7, migration-6/7 transactional failure rollback, canonical filename enforcement, and quarantine copy pass without a reverse-migration claim; v1 branch compatibility, v2 preconditions, effective finite activity-retention handshake, exact-commit observation, restart reconstruction, composite-FK direct SQL rejection, actor forgery, atomic audit rollback, revocation, zero-contact fork, OIDC allowlist/SSRF/replay/rotation/throttling, secret redaction, and issue-56 schema tests pass; merged statement coverage is at least 80%.
 
 ## Plan self-review
 
@@ -2599,5 +2600,5 @@ Expected: all PASS; Postgres 20→23, safe 23→22, empty 22→21, and fresh ful
   ActivityV1 is a separate finite-retention store/queue with an effective-policy handshake
   and cannot enter portable tree reconstruction or advance accepted state.
 - **Identity cutover:** first owner is an operator-provisioned one-use OIDC grant, later membership is invitation/admin controlled, PAT scopes are subsets, refresh/device/recovery replay defenses are fixed, and migration 23 revokes legacy authority before resolver cutover and cannot resurrect it on down.
-- **Migration ownership:** local schema v5 owns Fabric profile/binding/queue quarantine. Task 14 consumes Slice A's legacy integration-state outcome and performs no second rename, ignore, or repository-state edit.
+- **Migration ownership:** local schema v7 owns Fabric profile/binding/queue quarantine. Task 14 consumes Slice A's legacy integration-state outcome and performs no second rename, ignore, or repository-state edit.
 - **Compatibility/gates:** v1 compatibility covers request/result/error/handler and the v1 descriptor branch; WebAuthn remains absent; issue #56 uses the exact twelve prerequisite and six acceptance codes and requires real non-fabricated four-VM evidence.

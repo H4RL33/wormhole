@@ -741,7 +741,7 @@ Expected: FAIL because migration, repositories, and service are absent.
 
 - [ ] **Step 2: Implement migration, repositories, safe tree reader, and registration**
 
-Embed internal/runtime/localstore/migrations/*.sql and expose const GatewaySchemaVersion = 1 plus func applyGatewayMigrations(ctx context.Context, db *sql.DB) error. The function acquires one dedicated connection, executes BEGIN IMMEDIATE, creates and shape-checks gateway_schema_migrations, rejects a recorded version greater than GatewaySchemaVersion, applies each missing numbered file once, inserts its version row, and commits. Any DDL or ledger-write failure rolls back the entire version. This ledger name and API are the only Gateway SQLite migration mechanism. Task 4 advances it with `000002_portable_transitions.sql`. Mandatory Task 6A owns `000003_workspace_activity.sql` after its focused activity/retention/promotion artifact is reviewed and approved; Task 7 and every migration-4 consumer wait for its reviewed implementation commit. Multi-Fabric routing/sync own `000004`/`000005` on the issue-56 path, and the later Code Graph branch owns `000006`. No slice edits committed `000001` or `000002`, creates another ledger, or reuses a number.
+Embed internal/runtime/localstore/migrations/*.sql and expose const GatewaySchemaVersion = 1 plus func applyGatewayMigrations(ctx context.Context, db *sql.DB) error. The function acquires one dedicated connection, executes BEGIN IMMEDIATE, creates and shape-checks gateway_schema_migrations, rejects a recorded version greater than GatewaySchemaVersion, applies each missing numbered file once, inserts its version row, and commits. Any DDL or ledger-write failure rolls back the entire version. This ledger name and API are the only Gateway SQLite migration mechanism. Task 4 advances it with `000002_portable_transitions.sql`. The approved 2026-08-01 publication amendment owns `000003_workspace_publication.sql`; Task 5 owns `000004_checkpoint_publication_review.sql`; mandatory Task 6A owns `000005_workspace_activity.sql` after its focused activity/retention/promotion artifact is reviewed and approved. Task 7 and every migration-6 consumer wait for the reviewed activity commit. Multi-Fabric routing/sync own `000006`/`000007` on the issue-56 path, and the later Code Graph branch owns `000008`. No slice edits committed `000001` or `000002`, creates another ledger, or reuses a number.
 
 Extend the existing SQLite DSN with `_pragma=synchronous(FULL)` while retaining WAL and the busy timeout, so every pooled and dedicated connection uses the same durability setting. `TestGatewaySQLiteSynchronousFull` opens and reopens a file-backed Store, checks `PRAGMA journal_mode` is `wal` and `PRAGMA synchronous` is `2` on both the ordinary database handle and a newly acquired dedicated connection, and proves a committed migration-ledger row survives reopen. Later journal preparation transactions rely on SQLite's WAL/FULL commit guarantee; they must not manually fsync the main database file while committed bytes may reside in the WAL.
 
@@ -2571,34 +2571,31 @@ git commit -m "feat: import and observe portable workspace state"
 
 ### Hard gate before Task 5: trusted publication classification and review CAS
 
-Task 5 is blocked until a focused approved amendment freezes the machine-private
-workspace publication-classification record/API and publication-review digest codec.
-The service—not the caller—must resolve exactly `unclassified`, `local_only`,
-`public_git`, or `private_git`; caller arguments, actor assurance, canonical/fork status,
-Fabric mode, and copied hints are never classification authority. A public fork is
-`public_git`. Classification is explicit user policy bound to the exact workspace and
-repository identity, not continuous host-visibility detection. An origin/repository
-identity change invalidates it to `unclassified`; a same-identity visibility change
-requires explicit reconfiguration and invalidates earlier review digests. Unclassified
-permits status/diff but blocks checkpoint. Status/diff must
-return an exact digest over a versioned canonical envelope
-binding project/repository/classification, accepted ref/commit/tree, candidate tree,
-canonical semantic diff, and overlay generation.
+The required focused amendment is approved at
+`docs/superpowers/specs/2026-08-01-publication-classification-review-cas-amendment.md`.
+Its contracts override this plan wherever publication policy, origin identity, canonical
+diff/review encoding, service status/diff types, checkpoint/recovery review proof, or
+successor migration numbering is more precise. Task 5 remains implementation-blocked until
+the amendment's causal slices 1-4—origin observation, migration-v3 policy/history, trusted
+reconfiguration/resolution, and canonical status/diff review—are implemented, independently
+reviewed, and committed.
 
-`public_git` checkpoint arguments carry that exact digest, never a boolean. The
-service recomputes and compare-and-swaps it before staging, journal creation, or
-publication, then persists the exact acknowledging actor and digest in the durable
-prepared checkpoint journal/receipt. Missing/stale/mismatched acknowledgement returns a
-zero result with zero filesystem/database mutation. CLI and MCP have the same capability.
-`local_only` and `private_git` follow their respective Git boundary. Tests must cover
-public-fork `public_git`, private resolution, identity-change invalidation, explicit
-same-identity reclassification, forged mode/assurance/hint, unclassified inspect/diff versus
-checkpoint, human and agent acknowledgement parity, stale semantic diff/candidate/base/
-classification, restart receipt fidelity, and zero staging/journal/publication.
+In particular, the service—not the caller—resolves exactly `unclassified`, `local_only`,
+`public_git`, or `private_git`; a public fork may be explicitly `public_git`; classification
+is independent of fork/Fabric/actor hints; configured origin/repository changes stickily
+invalidate at revision+1; and review digests bind exact workspace, semantic origin, policy
+revision, independently observed Git base, candidate, canonical per-field-attributed diff,
+and overlay generation. Public checkpoint requires the exact digest from either human or
+accountable agent. With a current policy binding, missing/stale/mismatched acknowledgement
+returns a zero result with no durable domain-row or project/stage/backup mutation. A stable
+binding mismatch first commits only the amendment's exact policy/history invalidation pair,
+then blocks checkpoint without any other mutation. The amendment's recovery three-way
+matrix preserves later Git acceptance and never advances the accepted base itself.
 
 ### Task 5: Checkpoint CAS, Linux exchange, durable fallback, and recovery
 
 **Files:**
+- Create: internal/runtime/localstore/migrations/000004_checkpoint_publication_review.sql
 - Create: internal/runtime/projectstate/checkpoint.go
 - Create: internal/runtime/projectstate/checkpoint_linux.go
 - Create: internal/runtime/projectstate/checkpoint_darwin.go
@@ -2609,6 +2606,8 @@ classification, restart receipt fidelity, and zero staging/journal/publication.
 - Modify: internal/runtime/localstore/workspace_repo_test.go
 - Modify: internal/runtime/localstore/workspace_materialization_repo.go
 - Modify: internal/runtime/localstore/workspace_materialization_repo_test.go
+- Modify: internal/runtime/localstore/migrations.go
+- Modify: internal/runtime/localstore/migrations_test.go
 
 **Interfaces:**
 - Consumes: Task 3 Compose and Task 4 conflicts.
@@ -2645,8 +2644,11 @@ Checkpoint algorithm:
    `CheckpointResult{}` plus `ErrCheckpointPendingAcceptance` before filesystem staging
    or database mutation. More than one is corruption. A checkpoint never supersedes an
    unaccepted journal.
-2. Validate scope/root/actor; privately resolve the trusted publication classification;
-   reject unclassified; read the allowed live tree; require digest equals
+2. Validate scope/root/actor with `Actor.ValidateLocalAction`; perform the amendment's
+   outside/inside complete Git-base plus semantic-origin observation; require it stable and
+   byte-exactly equal to the accepted binding; privately resolve the trusted publication
+   classification; process only the amendment's exact sticky policy/history invalidation
+   outcome; reject unclassified; read the allowed live tree; require digest equals
    ExpectedWorkingTreeDigest; compute the exact semantic diff/publication-review digest;
    and, for `public_git`, require exact equality with PublicationReviewDigest before
    staging or mutation. Caller data never selects classification.
@@ -2660,7 +2662,8 @@ Checkpoint algorithm:
    validate a DecodeTree round trip.
 4. Create owner-only sibling stage and backup paths on the same filesystem; write every file with fsync, fsync every created directory, and fsync parent.
 5. Re-read live tree and compare digest. Mismatch returns ErrCheckpointCAS, preserves direct input/stage evidence, and performs no publication.
-6. Persist the prepared journal containing complete canonical prior/candidate trees,
+6. Apply migration `000004_checkpoint_publication_review.sql` and persist the prepared
+   journal containing complete canonical prior/candidate trees,
    accepted_base_digest, bound checkout_path/device/inode, exact candidate digest, and
    through-generation. Its required canonical `CheckpointOperationsV1` envelope records
    the selected initial boundary and, for every included row, exact generation, operation
@@ -2668,8 +2671,13 @@ Checkpoint algorithm:
    prepublication `active` or `rebased` state. Strict decoding reconstructs those bytes
    and requires exact equality with both `CanonicalOperation(decoded)` and the database
    row; store the envelope in `included_operations_json`. For `public_git` the
-   same prepared record/receipt also stores the exact acknowledging actor and matching
-   publication-review digest. Both `expected_live_digest` and
+   same prepared record/receipt also stores the amendment's strict canonical
+   `publication_review_proof_version=1` and non-null `publication_review_json`, including
+   the exact acknowledging actor and matching publication-review envelope/digest. Every
+   new local/private journal stores the same version-1 review proof and checkpoint actor
+   without requiring a caller acknowledgement. Version 0/null exists only as the
+   amendment's explicitly blocked pre-v4 proof state. Both
+   `expected_live_digest` and
    `prior_tree_digest` must equal the recomputed digest of the complete canonical prior
    tree. Commit the first transaction before filesystem publication on the
    Task-2 WAL connection whose mandatory `synchronous=FULL` policy durably syncs the
@@ -2682,8 +2690,13 @@ Checkpoint algorithm:
    omitted or unexpected included rows or changed later generations, and
    `tx.HasOpenConflicts(ctx)`. Any mismatch rolls back with no publication; an open
    conflict returns `CheckpointResult{}` plus `localstore.ErrWorkspaceConflicted`. It
-   privately re-resolves classification and recomputes/rechecks the exact publication
-   review envelope and persisted acknowledgement before any publication.
+   repeats the complete Git-base/origin observation, privately re-resolves classification,
+   and recomputes/rechecks the exact publication review envelope and persisted proof before
+   any publication. Git-base/materialisation/branch-action mismatch rolls back with policy
+   and prepared evidence untouched. Only after those preconditions succeed may a stable
+   origin-policy mismatch commit the policy/history invalidation while retaining the
+   prepared journal and every project/filesystem byte, then return unclassified; unknown
+   policy-commit outcome uses the amendment's exact confirmation.
 8. Hold that second immediate transaction across filesystem publication and the complete
    database finalization. Linux exchanges live `.wormhole` and stage with `renameat2`
    `RENAME_EXCHANGE`, renames the old tree to backup, and fsyncs the parent. Darwin uses
@@ -2693,17 +2706,24 @@ Checkpoint algorithm:
    the envelope-listed operations to `materialized`, and leave verified later operations active.
    A failure rolls back database finalization while the durable prepared row remains the
    recovery authority.
-9. Recover reads one complete `MaterializationDisposition` in its immediate transaction.
+9. Recover reads one complete `MaterializationDisposition` in its immediate transaction
+   and follows the amendment's three-way Git-base recovery matrix.
    A prepared journal intentionally blocks a stable ownership proof and drives recovery;
    after either recovery transition, Recover rereads and proves the complete disposition
    before returning or matching a recovered-new acceptance-eligible no-op. It handles a
    prepared or published journal with either the old or new live tree.
-   Before examining or renaming a path, it requires the current binding accepted digest,
-   checkout identity, and `expected_live_digest == prior_tree_digest` to match the journal. With matching preconditions it compares
-   live/stage/backup against both recorded digests and deterministically restores the old
-   complete tree or finishes the new complete tree and matching database state. Unknown
-   digest returns ErrCheckpointRecoveryBlocked without deleting evidence; a binding
-   mismatch returns ErrCheckpointRecoveryPrecondition and leaves all evidence untouched.
+   Before examining or renaming a path, it double-observes exact root, checkout,
+   semantic-origin, and committed Git base. Exact stored base permits normal recovery; an
+   exact later committed journal candidate permits only recovered-new finalisation while
+   leaving accepted-base advance to the following Refresh/Observe call; any other Git-base
+   mismatch returns ErrCheckpointRecoveryPrecondition with policy and evidence untouched.
+   In either proven base case, a stable origin mismatch may commit only the sticky
+   policy/history invalidation and cannot strand bytes already proven live/committed; the
+   stored version-1 review proof remains historical evidence, not current authorization. With matching
+   preconditions it requires `expected_live_digest == prior_tree_digest`, compares
+   live/stage/backup against both recorded digests, and deterministically restores the old
+   complete tree or finishes the already-published new complete tree and matching database
+   state. Unknown digest returns ErrCheckpointRecoveryBlocked without deleting evidence.
    Both recovery directions strict-decode the envelope and validate all and only its exact
    persisted operation membership rather than inferring a generation range. Recover-old
    restores each listed row to its recorded prepublication `active`/`rebased` state before
@@ -2908,16 +2928,16 @@ git commit -m "fix: retire tracked integration state projection"
 ### Task 6A: Implement workspace activity, finite retention, and explicit promotion
 
 This is a mandatory sequential implementation task after Task 6 and before Task 7. It
-owns Gateway migration `000003_workspace_activity.sql` and the local operational seam;
-multi-Fabric migrations `000004`/`000005` may consume version 3 only after this task's
-reviewed commit lands. The optional Code Graph branch remains later at `000006`.
+owns Gateway migration `000005_workspace_activity.sql` and the local operational seam;
+multi-Fabric migrations `000006`/`000007` may consume version 5 only after this task's
+reviewed commit lands. The optional Code Graph branch remains later at `000008`.
 
 **Required approved artifact:**
 `docs/superpowers/plans/2026-08-01-workspace-activity-retention-promotion-implementation-plan.md`.
 That focused plan must be written, independently reviewed, and explicitly approved before
 this task's RED step. It must declare the exact files and APIs, including ownership of:
 
-- Create: `internal/runtime/localstore/migrations/000003_workspace_activity.sql`
+- Create: `internal/runtime/localstore/migrations/000005_workspace_activity.sql`
 - Modify: `internal/runtime/localstore/migrations.go`
 - Modify: `internal/runtime/localstore/migrations_test.go`
 - Create/modify: the strict stdlib-only `ActivityV1`/effective-policy types selected by
@@ -2928,18 +2948,18 @@ this task's RED step. It must declare the exact files and APIs, including owners
   the approved artifact
 
 **Produces:** one reviewed commit that advances the sole
-`GatewaySchemaVersion` from 2 to 3, installs the strict workspace-scoped ActivityV1 store
+`GatewaySchemaVersion` from 4 to 5, installs the strict workspace-scoped ActivityV1 store
 and finite policy, implements atomic terminal/pruning transactions, and implements the
 single explicit activity-to-EventV1 promotion boundary. The commit must include causal
 RED evidence, focused GREEN, restart/isolation/race/fault tests, migration rollback and
-fresh/v2→v3 upgrade proof, `git diff --check`, and `make check` at the approved coverage
+fresh/v4→v5 upgrade proof, `git diff --check`, and `make check` at the approved coverage
 floor. The SDD ledger records the artifact approval, base/head SHAs, test evidence, and
-fresh review approval. No placeholder schema or partial v3 ledger advance may land.
+fresh review approval. No placeholder schema or partial v5 ledger advance may land.
 
 #### Design approval gate
 
 Before this task's RED step, the focused approved artifact must freeze
-`000003_workspace_activity.sql`, `ActivityV1`, exact repository/service interfaces, the
+`000005_workspace_activity.sql`, `ActivityV1`, exact repository/service interfaces, the
 effective-policy handshake, terminal/pruning transactions, and public schemas. The gate
 must prove all of the following before Task 7 becomes executable:
 
@@ -2969,28 +2989,28 @@ The approved artifact and implementation must include causal RED/GREEN, restart,
 isolation, cap/age, protected-row,
 promotion replay/collision, actor attribution, rollback-at-every-write, and CLI/MCP parity
 tests. Neither the current codec nor a legacy event table satisfies this gate. Task 7
-must fail closed at its dependency check unless migration version 3 and the exact approved
+must fail closed at its dependency check unless migration version 5 and the exact approved
 ActivityV1/promotion interfaces are present.
 
 - [ ] **Step 1: Write, review, and obtain explicit approval for the required focused artifact.**
 
-Record its review and approval in the SDD ledger. Do not create migration `000003` before
+Record its review and approval in the SDD ledger. Do not create migration `000005` before
 that record exists.
 
 - [ ] **Step 2: Run the artifact's causal RED suite.**
 
-The RED must fail because migration version 3 and/or one named ActivityV1, retention,
+The RED must fail because migration version 5 and/or one named ActivityV1, retention,
 terminal/pruning, or promotion boundary is absent—not because of an unrelated compile or
 fixture defect.
 
-- [ ] **Step 3: Implement only the approved v3 schema and seams, then run focused GREEN,
+- [ ] **Step 3: Implement only the approved v5 schema and seams, then run focused GREEN,
 race, rollback, restart, isolation, and fault tests.**
 
 - [ ] **Step 4: Run `make check`, obtain fresh implementation and security reviews, and
 commit exactly the artifact-declared files.**
 
 The commit message is `feat(localstore): add workspace activity`. Verify the exact commit
-SHA and update the SDD ledger before Task 7 or any migration-4 consumer begins.
+SHA and update the SDD ledger before Task 7 or any migration-6 consumer begins.
 
 ### Task 7: Snapshot-backed pillar projection and bound local domain adapters
 
@@ -3112,8 +3132,47 @@ type WorkspaceCheckpointArgs struct {
     PublicationReviewDigest *projectstate.Digest `json:"publication_review_digest,omitempty"`
 }
 type WorkspaceStashArgs struct { Label string `json:"label"` }
-func (d *WorkspaceDomain) Status(context.Context, types.WorkspaceBinding, WorkspaceStatusArgs) (runtimeprojectstate.WorkspaceStatus, error)
-func (d *WorkspaceDomain) Diff(context.Context, types.WorkspaceBinding, WorkspaceDiffArgs) (runtimeprojectstate.Diff, error)
+type WorkspaceStatusResult struct {
+    State string `json:"state"`
+    AcceptedRef string `json:"accepted_ref"`
+    AcceptedCommitSHA string `json:"accepted_commit_sha"`
+    AcceptedTreeDigest projectstate.Digest `json:"accepted_tree_digest"`
+    CandidateTreeDigest projectstate.Digest `json:"candidate_tree_digest"`
+    OverlayGeneration int64 `json:"overlay_generation"`
+    PublicationClassification types.PublicationClassification `json:"publication_classification"`
+    PublicationReviewDigest projectstate.Digest `json:"publication_review_digest"`
+}
+type WorkspaceFieldValueResult struct {
+    Present bool `json:"present"`
+    Value json.RawMessage `json:"value,omitempty"`
+}
+type WorkspaceFieldChangeResult struct {
+    Path string `json:"path"`
+    Before WorkspaceFieldValueResult `json:"before"`
+    After WorkspaceFieldValueResult `json:"after"`
+    Actor *types.ActorEnvelope `json:"actor"`
+}
+type WorkspaceChangeResult struct {
+    Kind string `json:"record_kind"`
+    ID string `json:"record_id"`
+    ChangeKind runtimeprojectstate.ChangeKind `json:"change_kind"`
+    BeforeDigest *projectstate.Digest `json:"before_digest"`
+    AfterDigest *projectstate.Digest `json:"after_digest"`
+    BeforeBodyDigest *projectstate.Digest `json:"before_body_digest"`
+    AfterBodyDigest *projectstate.Digest `json:"after_body_digest"`
+    Fields []WorkspaceFieldChangeResult `json:"fields"`
+    Actor *types.ActorEnvelope `json:"actor"`
+}
+type WorkspaceDiffResult struct {
+    AcceptedTreeDigest projectstate.Digest `json:"accepted_tree_digest"`
+    CandidateTreeDigest projectstate.Digest `json:"candidate_tree_digest"`
+    Changes []WorkspaceChangeResult `json:"changes"`
+    OverlayGeneration int64 `json:"overlay_generation"`
+    PublicationClassification types.PublicationClassification `json:"publication_classification"`
+    PublicationReviewDigest projectstate.Digest `json:"publication_review_digest"`
+}
+func (d *WorkspaceDomain) Status(context.Context, types.WorkspaceBinding, WorkspaceStatusArgs) (WorkspaceStatusResult, error)
+func (d *WorkspaceDomain) Diff(context.Context, types.WorkspaceBinding, WorkspaceDiffArgs) (WorkspaceDiffResult, error)
 func (d *WorkspaceDomain) Import(context.Context, types.WorkspaceBinding, types.ActorEnvelope, WorkspaceImportArgs) (runtimeprojectstate.ImportResult, error)
 func (d *WorkspaceDomain) Checkpoint(context.Context, types.WorkspaceBinding, types.ActorEnvelope, WorkspaceCheckpointArgs) (runtimeprojectstate.CheckpointResult, error)
 func (d *WorkspaceDomain) Stash(context.Context, types.WorkspaceBinding, types.ActorEnvelope, WorkspaceStashArgs) (runtimeprojectstate.StashResult, error)
@@ -3122,6 +3181,13 @@ func runWorkspaceCommand(context.Context, string, []string, io.Writer, io.Writer
 ~~~
 
 Mutations call ValidateLocalAction. Every adapter validates the binding, requires the registered checkout path/device/inode to match, and copies only binding-derived scope/root plus operation-specific args. Runtime startup calls Recover before RefreshWorkspace for every RegisteredWorkspaces result. Runtime calls RefreshWorkspace before every later scoped operation except that Stash may proceed only after ErrBranchSwitchPending and must be followed immediately by successful RefreshWorkspace plus Recover on the refreshed scope. RestoreStash stays private.
+
+Status and diff are explicit public projections. Their mappers deep-copy canonical raw
+field values and actor envelopes, require non-nil ordered change/field slices, and expose
+only the fields above. They never serialize the internal `WorkspaceStatus`,
+`WorkspaceDiff`, `WorkspaceBinding`, checkout path/device/inode, accepted snapshot,
+publication-policy actor/history, or origin preimage. Adapter tests marshal the results and
+reject every machine-private field name and sentinel value.
 
 Public MCP names remain wormhole.workspace.status, wormhole.workspace.diff,
 wormhole.workspace.import, wormhole.workspace.checkpoint, and wormhole.workspace.stash
@@ -3171,10 +3237,10 @@ Slice B injects/strips types.WorkspaceContext, calls Service.ResolveWorkingDirec
 5. Task 5 materializes a candidate with crash recovery while leaving base unchanged
    and blocks publication while Task-4 conflicts remain open.
 6. Task 6 removes the tracked/private legacy leak without touching the Git index.
-7. Mandatory Task 6A lands the reviewed migration-v3 ActivityV1, finite-retention, and
+7. Mandatory Task 6A lands the reviewed migration-v5 ActivityV1, finite-retention, and
    explicit-promotion implementation commit after its focused artifact is independently
    reviewed and explicitly approved.
-8. Task 7 consumes those exact reviewed v3 interfaces and replaces local pillar replica
+8. Task 7 consumes those exact reviewed v5 interfaces and replaces local pillar replica
    reads/writes with a rebuildable composed projection plus portable-operation and
    operational-activity domain adapters.
 9. Task 8 adds binding-aware workspace operations and the five top-level CLI parsers; the downstream runtime/setup seam registers routes and updates every public inventory surface atomically.

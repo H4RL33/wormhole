@@ -568,7 +568,7 @@ the same layering pattern and isolation discipline.
 ### Portable state replay, diff, and merge
 
 - Task 7/domain projection is hard-blocked until a focused approved plan freezes
-  `000003_workspace_activity.sql`, strict `ActivityV1`, finite effective-policy storage,
+  `000005_workspace_activity.sql`, strict `ActivityV1`, finite effective-policy storage,
   atomic terminal/pruning rules, and the promotion receipt seam. Promotion must use one
   ProjectState-owned immediate transaction to strict-read an exact source activity ID and
   digest, append an attributed `EventV1` `OperationV1` with extension key
@@ -580,15 +580,21 @@ the same layering pattern and isolation discipline.
   canonical/fork routing and Fabric mode. A public fork is `public_git`. A caller, actor
   assurance, or copied remote hint never selects classification. Unclassified workspaces
   permit status/diff but not checkpoint.
-  Status/diff bind project/repository/classification, candidate tree, canonical semantic
-  diff, and Git/base inputs into the publication-review digest. `public_git`
+  Status/diff bind exact workspace, repository, credential-free semantic origin,
+  classification plus monotonic policy revision, candidate tree, canonical semantic diff,
+  and independently observed Git/base inputs into the publication-review digest. `public_git`
   checkpoint accepts that exact digest (not a boolean), rechecks it before staging, and
   persists the exact acknowledging actor/digest in the prepared journal/receipt. CLI and
   MCP are equivalent.
 - Classification is explicit user policy, not continuous host-visibility evidence. Bind
-  it to the exact workspace/repository identity, invalidate it after an identity/origin
-  change, surface it on status/diff, and require explicit reconfiguration for a
-  same-identity visibility change; never add an implicit network visibility probe.
+  it to the exact workspace/repository/semantic-origin identity. After first configuration,
+  a stable observed identity/origin change atomically and stickily transitions the current
+  row plus append-only history to `unclassified` at revision+1; returning to the old origin
+  never revives the old digest. Surface the effective class on status/diff and require an
+  explicit human `ValidateLocalAction` reconfiguration for a same-identity visibility
+  change; never add an implicit network visibility probe. The exact schema, origin codec,
+  diff/review goldens, checkpoint/recovery CAS, and zero-domain-mutation rules are frozen in
+  `docs/superpowers/specs/2026-08-01-publication-classification-review-cas-amendment.md`.
 
 - Persisted operation JSON is untrusted. Decode it only with the shared strict
   `projectstate.DecodeOperation`, reject non-canonical bytes, trailing JSON, unknown
@@ -629,12 +635,14 @@ the same layering pattern and isolation discipline.
   All and only rows attributed by `stashed_by_stash_id` must match those arrays byte for
   byte. Portable transitions own Gateway
   migration `000002_portable_transitions.sql` and `GatewaySchemaVersion = 2`; committed
-  `000001`/`000002` are immutable. Mandatory portable-plan Task 6A owns append-only
-  `000003_workspace_activity.sql` after its focused operational activity/retention/
-  promotion artifact is reviewed and explicitly approved. Task 7 and migration 4 are
-  blocked until the reviewed v3 implementation commit lands. Multi-Fabric
-  routing/sync own `000004`/`000005`; the later, separately gated Code Graph branch
-  consumes that schema and owns `000006_invalidate_legacy_codegraph.sql`. Restore must
+  `000001`/`000002` are immutable. The reviewed publication amendment owns
+  `000003_workspace_publication.sql`; Task 5 owns
+  `000004_checkpoint_publication_review.sql`. Mandatory portable-plan Task 6A owns
+  append-only `000005_workspace_activity.sql` after its focused operational
+  activity/retention/promotion artifact is reviewed and explicitly approved. Task 7 and
+  migration 6 are blocked until the reviewed v5 implementation commit lands. Multi-Fabric
+  routing/sync own `000006`/`000007`; the later, separately gated Code Graph branch
+  consumes that schema and owns `000008_invalidate_legacy_codegraph.sql`. Restore must
   prove `Compose(selectedStart,boundary,operations)` equals the
   recorded composed tree, then call `ThreeWayRebase(sourceBase,current,stashComposed)`.
   Already-rebased rows at/below the boundary and later active rows move to terminal

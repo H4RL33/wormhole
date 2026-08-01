@@ -4,7 +4,7 @@
 
 **Goal:** Deliver and validate the Git-native portable project loop first, then pursue
 multi-Fabric/accountable identity and the real issue-56 four-VM trial through separately
-approved branches. Optional Code Graph follows shared schema version 5 on its own branch
+approved branches. Optional Code Graph follows shared schema version 7 on its own branch
 and is not a trial prerequisite.
 
 **Architecture:** Git accepts explicitly curated portable project context. A repository
@@ -43,7 +43,7 @@ Execute Tasks 1–6, mandatory Task 6A, then Tasks 7–8 in
 `2026-07-28-git-native-portable-state-implementation-plan.md` in order. This stage freezes
 shared identity/workspace types and the canonical codec/reducer before any consumer is
 implemented, then adds scoped persistence, composition, import/stash, checkpoint recovery,
-legacy migration, the version-3 operational activity boundary, snapshot-backed pillar
+legacy migration, the version-5 operational activity boundary, snapshot-backed pillar
 projections, and top-level project commands.
 
 Gate: all Slice-A focused tests, migration tests, crash/recovery tests, `go test -race`
@@ -51,7 +51,7 @@ targets, and `make check` pass at or above 80 percent merged coverage. Status/di
 do not advance Git; checkpoint does not stage, commit, push, advance the base, or promote
 operational activity. Task 6A cannot start until its focused activity/retention/promotion
 artifact is reviewed and explicitly approved; Task 7 cannot start until Task 6A's reviewed
-SQLite migration `000003` implementation commit lands.
+SQLite migration `000005` implementation commit lands.
 
 ### Stage 2: Minimal Gateway, setup, and native connectors
 
@@ -73,11 +73,11 @@ After the Stage-2 go/no-go, first create the multi-Fabric/private-identity branc
 must freeze its separate
 branch/stream-scoped `ActivityV1` transport/store/queue and effective finite-retention
 handshake; operational activity is not `OperationV1` or complete-tree authority. That
-branch owns shared Gateway migrations `000004_fabric_routes.sql` and
-`000005_sync_binding.sql` and has no Code Graph dependency.
+branch owns shared Gateway migrations `000006_fabric_routes.sql` and
+`000007_sync_binding.sql` and has no Code Graph dependency.
 
 The optional model-free Code Graph proceeds only on another separately approved branch
-based after shared schema version 5. It owns `000006_invalidate_legacy_codegraph.sql`,
+based after shared schema version 7. It owns `000008_invalidate_legacy_codegraph.sql`,
 remains disabled by default, and is not a prerequisite for Stage 4 or issue #56.
 
 Task 10 is a hard human approval gate. Do not modify `go.mod`, `go.sum`, or implement OIDC until approval explicitly names:

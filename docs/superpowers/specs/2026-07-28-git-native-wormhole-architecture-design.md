@@ -544,11 +544,13 @@ and machine/security control without reserving ordinary project operations to hu
 
 ### 8.3 Diff and checkpoint
 
-`wormhole status` and `wormhole diff` expose the exact `candidate_digest` and an exact
-`publication_review_digest`. The latter is the SHA-256 digest of a versioned canonical
-review envelope binding project, repository identity, trusted publication classification,
-acceptance ref and commit, accepted-tree digest, candidate tree digest, canonical semantic
-diff digest, and overlay generation. It changes if any publication-relevant input changes.
+`wormhole status` and `wormhole diff` expose the exact `candidate_tree_digest` and an exact
+`publication_review_digest`. The latter is the SHA-256 digest of the versioned canonical
+envelope frozen by the 2026-08-01 publication-classification/review-CAS amendment. It binds
+exact workspace scope, canonical repository identity, trusted semantic-origin digest,
+publication classification and monotonic policy revision, acceptance ref and commit,
+accepted-tree digest, candidate tree digest, canonical semantic-diff digest, and overlay
+generation. It changes if any publication-relevant input changes.
 
 `wormhole diff` renders the semantic accepted-base-versus-current-view diff in
 stable entity order, combining a checkpointed working-tree delta and active overlay
@@ -570,13 +572,16 @@ inspect/status/diff but blocks checkpoint; `local_only` and `private_git` remain
 by their respective Git visibility boundaries.
 
 Publication visibility is an explicit user policy, not a claim that Wormhole continuously
-knows a Git host's access controls. Its private record is bound to the exact workspace and
-repository identity. An origin/repository-identity change invalidates it to
-`unclassified`; changing visibility otherwise requires an explicit setup reconfiguration,
-which invalidates every earlier publication-review digest. Status/diff always display the
-current classification. Wormhole performs no implicit network visibility probe and cannot
-detect a same-identity host changing from private to public; the operator must reclassify
-before publishing through Git.
+knows a Git host's access controls. Its private record is bound to the exact workspace,
+repository identity, and credential-free semantic-origin digest. After first
+configuration, an observed origin/repository-identity change stickily invalidates it to
+`unclassified` and advances its policy revision; changing visibility otherwise requires an
+explicit setup reconfiguration, which also advances the revision and invalidates every
+earlier publication-review digest. Status/diff always display the current classification.
+Wormhole performs no implicit network visibility probe and cannot detect a same-identity
+host changing from private to public; the operator must reclassify before publishing
+through Git. Exact storage, canonical codecs, race behavior, and migration ownership are
+frozen by the 2026-08-01 amendment.
 
 `wormhole checkpoint`:
 
@@ -590,9 +595,10 @@ before publishing through Git.
    without publication if a direct edit raced with the checkpoint;
 5. commits a prepared journal containing both complete trees, the accepted-base and
    candidate digests, checkout identity, included operation bytes/states, exact
-   through-generation, and—for `public_git`—the exact acknowledging actor and
-   matching publication-review digest in its durable prepared record/receipt before
-   mutating the live tree;
+   through-generation, and the canonical version-1 publication-review envelope/digest plus
+   checkpoint actor in its durable prepared record/receipt before mutating the live tree;
+   `public_git` additionally requires that exact digest as the caller acknowledgement,
+   while every new local/private journal retains the same proof without requiring it;
 6. opens a second `BEGIN IMMEDIATE` after that prepared commit and, before rename or
    exchange, reloads and rechecks the exact live digest, binding, candidate, overlay
    generation/rows, and open-conflict gate;
@@ -1071,18 +1077,24 @@ single discoverable, idempotent lifecycle:
 
 1. discover the nearest `.wormhole/` directory;
 2. parse it as data and validate schema, project ID, repository identity, references,
-   and computed tree digest;
-3. install or start the one user-level `gatewayd` service;
-4. register the checkout and import its Git base;
-5. create or select a local human identity using optional Git metadata suggestions;
-6. create a local identity key if needed;
-7. detect supported harnesses and transactionally install approved connectors;
-8. activate an eligible public Fabric hint, request private authentication, or remain
-   local-only according to repository mode;
-9. fetch a compatible remote delta and bootstrap content when connected;
-10. ask whether to enable Code Graph and, if selected, complete its initial build; and
-11. verify Gateway, workspace, connectors, optional Fabric, and optional Code Graph
-    readiness.
+   and computed tree digest without executing repository content;
+3. resolve all choices, render one complete plan, and obtain its single confirmation
+   before external mutation;
+4. install or start the one user-level `gatewayd` service;
+5. register the checkout without importing its base;
+6. create or select a local human identity using optional Git metadata suggestions and
+   create its local identity key if needed;
+7. have that locally assured human configure the trusted publication class as exactly
+   `unclassified`, `local_only`, `public_git`, or `private_git`, bound to Gateway's own
+   current repository/origin observation;
+8. refresh and import the Git base through Gateway using the selected accountable actor;
+9. detect supported harnesses and transactionally install approved connectors;
+10. activate an independently eligible public Fabric binding, request private
+    authentication, or remain local-only; repository mode and hints never authorize it;
+11. fetch a compatible remote delta and bootstrap content when connected;
+12. ask whether to enable Code Graph and, if selected, complete its initial build; and
+13. verify Gateway, workspace, publication policy, selected identity, connectors,
+    optional Fabric, and optional Code Graph readiness.
 
 Interactive setup presents one plan and confirmation, then reports each stage. A
 machine-readable journal makes stages independently retryable. Repository manifests
@@ -1543,8 +1555,8 @@ This branch stops after Slice A plus the minimum Slice-B/C supervisor, setup, an
 connector path proves the portable loop and passes a fresh whole-branch review. The
 result is an experimental/internal capability and requires an explicit human go/no-go.
 Slice D multi-Fabric and Slice E private identity/OIDC proceed on the issue-56 path only
-after that decision. They own shared Gateway schema through version 5. Optional Code
-Graph proceeds on a separate branch based after version 5, owns migration `000006`, and
+after that decision. They own shared Gateway schema through version 7. Optional Code
+Graph proceeds on a separate branch based after version 7, owns migration `000008`, and
 is not an issue-56 prerequisite. Slice F and issue #56 retain their ultimate gates and
 integrate only explicitly approved, completed contracts.
 

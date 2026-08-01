@@ -16,7 +16,10 @@ Authority order: RFC-0001, with RFC-0003 overriding it only where RFC-0003
 explicitly amends local-runtime, transport, workspace, or optional-coordination
 assumptions; RFC-0002 governs optional Governance; the approved
 `docs/superpowers/specs/2026-07-28-git-native-wormhole-architecture-design.md`
-defines their version-one contract details; `docs/implementation-rules.md`;
+defines their version-one contract details, with
+`docs/superpowers/specs/2026-08-01-publication-classification-review-cas-amendment.md`
+governing the trusted publication-policy/origin/review-CAS boundary and successor
+migration numbering; `docs/implementation-rules.md`;
 existing code.
 
 RFC tool shapes are indicative unless code freezes them. Governance is optional and
@@ -109,8 +112,9 @@ schema as shipped until its implementation and contract checks pass.
   requires an exact attributed publication-review digest
   acknowledgement from either CLI or MCP; Wormhole makes no DLP claim.
   Classification is explicit user policy bound to workspace/repository identity, not
-  continuous host-visibility detection; repository-identity changes invalidate it and
-  same-identity visibility changes require explicit setup reconfiguration.
+  continuous host-visibility detection. After first configuration, observed semantic
+  origin or repository-identity changes stickily invalidate it with a monotonic policy
+  revision; same-identity visibility changes require explicit setup reconfiguration.
   Machine-private state and secrets stay outside the repository.
 - All project-scoped Fabric data is protected by Postgres RLS. Only explicitly
   project-agnostic principal, authenticator, and agent records, plus explicitly
