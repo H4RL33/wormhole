@@ -673,3 +673,38 @@ build, vet, integration-required tests, the complete race suite, and merged stat
 coverage at 85.9% against the accepted 80% floor. This checkpoint intentionally keeps
 `Service.ObserveGitBase` and `RefreshWorkspace` absent; their atomic SQLite transition
 matrix is the next A4 tranche.
+
+A4 atomic Git observation and refresh `7db9179`
+(`feat(projectstate): observe git base atomically`): complete. The public
+`Service.ObserveGitBase` and `RefreshWorkspace` paths now validate before I/O, perform
+binding-free receipt-first Discard retries, observe Git outside the writer barrier, and
+revalidate checkout/ref/HEAD after the complete persisted-state preload. One immediate
+transaction proves the full materialization and operation disposition before
+applicability, enforces complete-binding equality, accepts only an exact same-ref
+published/recovered-new candidate, semantically rebases pending state with preserved or
+fixed-system provenance, or executes the ordered atomic branch Discard transition.
+Successful clean results own a non-nil empty conflict slice. Reject/Refresh never infer
+an indeterminate COMMIT; Discard confirms one only from a fresh exact receipt without
+consulting Git.
+
+Adversarial service coverage freezes clean and pending ref switches, same-SHA named and
+detached transitions, active-only and rebased-only applicability, receipt retries before
+missing Git/binding/clock dependencies, concurrent receipt recheck, complete-binding CAS,
+proof-blocker precedence, exact/nonmatching materialization retention, published and
+seeded recovered-new restart acceptance, later-active preservation, both rebase
+provenance modes, representative ordered-write rollback, and Reject/Discard/Refresh
+unknown-COMMIT behavior. Formal review found one trust-boundary defect: exact acceptance
+could leave a `rebased` row above the accepted boundary while deleting the candidate and
+setting `clean`. The amended implementation rejects that state before any write; its
+regression proves byte-equivalent workspace, candidate, operation, conflict, and complete
+materialization disposition. Spec, quality, and atomicity re-reviews approved the amended
+commit with no remaining findings.
+
+Fresh repository-wide `make check` passed build, vet, integration-required tests, the
+complete race suite, and merged statement coverage at 85.7% against the accepted 80%
+floor. Full publication -> restart -> `Recover` -> observer acceptance remains explicitly
+deferred to portable-state Task 5 because Task 4 has no production recovery service to
+invoke; exhaustive primitive receipt-order and rollback matrices remain owned by the
+reviewed localstore seams. Portable-state Task 4 is now complete. The next portable-state
+work is the trusted publication-classification/review-CAS hard gate, followed by Task 5
+checkpoint publication and recovery toward the clone-to-second-clone loop.
