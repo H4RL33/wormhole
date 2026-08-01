@@ -45,32 +45,8 @@ type discardReceiptV1 struct {
 }
 
 func discardRequestDigestProjection(req ObserveGitBaseRequest) (discardRequestDigestV1, error) {
-	if req.BranchAction != BranchSwitchDiscard {
-		return discardRequestDigestV1{}, fmt.Errorf("projectstate: invalid discard branch action")
-	}
-	if !types.CanonicalUUID(req.Scope.ProjectID) || !types.CanonicalUUID(string(req.Scope.WorkspaceID)) || !types.CanonicalUUID(req.RequestID) {
-		return discardRequestDigestV1{}, fmt.Errorf("projectstate: invalid discard scope or request ID")
-	}
-	if err := validateDiscardRequestUTF8(req); err != nil {
+	if err := validateObserveGitBaseRequest(req); err != nil {
 		return discardRequestDigestV1{}, err
-	}
-	if err := req.Actor.ValidateLocalAction(); err != nil {
-		return discardRequestDigestV1{}, err
-	}
-	if err := req.ExpectedBinding.Validate(); err != nil {
-		return discardRequestDigestV1{}, fmt.Errorf("projectstate: invalid discard expected binding: %w", err)
-	}
-	if req.Scope != req.ExpectedBinding.Scope {
-		return discardRequestDigestV1{}, fmt.Errorf("projectstate: discard scope differs from expected binding")
-	}
-	if !validDiscardRef(req.ExpectedBinding.AcceptedRef) {
-		return discardRequestDigestV1{}, fmt.Errorf("projectstate: invalid discard expected branch ref")
-	}
-	if err := (types.WorkspaceContext{WorkingDirectory: req.Root}).Validate(); err != nil || req.Root != req.ExpectedBinding.Checkout.CanonicalPath {
-		return discardRequestDigestV1{}, fmt.Errorf("projectstate: discard root differs from expected binding")
-	}
-	if !validCommit(req.ExpectedCommit) {
-		return discardRequestDigestV1{}, fmt.Errorf("projectstate: invalid discard expected commit")
 	}
 	binding, err := workspaceBindingDigest(req.ExpectedBinding)
 	if err != nil {
@@ -264,7 +240,7 @@ func validDiscardRef(value string) bool {
 	return true
 }
 
-func validateDiscardRequestUTF8(req ObserveGitBaseRequest) error {
+func validateObserveGitBaseRequestUTF8(req ObserveGitBaseRequest) error {
 	values := []string{
 		req.Root, req.ExpectedCommit,
 		req.Scope.ProjectID, string(req.Scope.WorkspaceID), req.RequestID,
@@ -280,7 +256,7 @@ func validateDiscardRequestUTF8(req ObserveGitBaseRequest) error {
 	}
 	for _, value := range values {
 		if !utf8.ValidString(value) {
-			return fmt.Errorf("projectstate: discard request contains invalid UTF-8")
+			return fmt.Errorf("projectstate: Git observation request contains invalid UTF-8")
 		}
 	}
 	return nil

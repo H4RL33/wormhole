@@ -644,3 +644,32 @@ independent reviews approved with no remaining findings. Fresh `make check` pass
 85.8% merged statement coverage, with race, vet, formatting, and diff checks clean. The
 next implementation tranche remains `Service.ObserveGitBase`/`RefreshWorkspace`; neither
 is claimed by this seam.
+
+A4 Git-observation trust boundary (current checkpoint): complete. A causal focused RED
+first failed on the absent private request validator, owned full-observation type/read,
+and position-only reobservation seam. Reject now requires an empty RequestID and the exact
+zero `ActorEnvelope`; Discard requires a canonical RequestID and local-action actor; both
+share one pure validation boundary for the complete expected binding, exact scope/root,
+lowercase SHA-1/SHA-256 commit, ref, and UTF-8 contract. The existing discard request
+digest consumes that same validation without changing its canonical projection or goldens.
+
+The outside observer reuses the bounded, hookless, network-disabled committed-tree reader,
+strict-decodes an independently owned tree, and verifies checkout, HEAD, ref, project, and
+repository identity. Its final HEAD and checkout rereads map races to
+`ErrGitObservationChanged` while preserving underlying causes; registration retains its
+prior error behavior. The transaction-boundary position reader revalidates the canonical
+root and checkout identity after reading symbolic ref and HEAD, so a checkout replacement
+cannot combine an old inode with a new repository tuple. A causal review RED froze the
+new production-used injection seams before those fixes landed.
+
+Adversarial coverage includes pure validation before I/O, exact zero-time/location actor
+rejection, SHA-1/SHA-256, invalid UTF-8, branch and detached observations, tree/snapshot
+non-aliasing, project/repository/ref/HEAD mismatch, same-SHA ref movement, final root and
+inode replacement, final-reader errors, sentinel/cause preservation, and unchanged
+registration semantics. Two independent final reviews approved with no remaining
+findings. Focused, full ProjectState, focused race, vet, formatting, diff, and full
+repository tests passed before the final gate. A fresh full `make check` then passed
+build, vet, integration-required tests, the complete race suite, and merged statement
+coverage at 85.9% against the accepted 80% floor. This checkpoint intentionally keeps
+`Service.ObserveGitBase` and `RefreshWorkspace` absent; their atomic SQLite transition
+matrix is the next A4 tranche.

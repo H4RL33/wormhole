@@ -38,7 +38,31 @@ type committedWorkspace struct {
 	snapshot    state.Snapshot
 }
 
+type committedWorkspaceFinalReaders struct {
+	headCommit       func(context.Context, string) (string, error)
+	checkoutIdentity func(string) (types.CheckoutIdentity, error)
+}
+
 func inspectCommittedWorkspace(ctx context.Context, requestedRoot, expectedCommit string) (committedWorkspace, error) {
+	return inspectCommittedWorkspaceWithRaceSentinel(ctx, requestedRoot, expectedCommit, false)
+}
+
+func inspectCommittedWorkspaceForGitBase(ctx context.Context, requestedRoot, expectedCommit string) (committedWorkspace, error) {
+	return inspectCommittedWorkspaceWithRaceSentinel(ctx, requestedRoot, expectedCommit, true)
+}
+
+func inspectCommittedWorkspaceWithRaceSentinel(ctx context.Context, requestedRoot, expectedCommit string, observation bool) (committedWorkspace, error) {
+	return inspectCommittedWorkspaceWithFinalReaders(ctx, requestedRoot, expectedCommit, observation, committedWorkspaceFinalReaders{
+		headCommit: readCommittedWorkspaceHead, checkoutIdentity: checkoutIdentity,
+	})
+}
+
+func inspectCommittedWorkspaceWithFinalReaders(
+	ctx context.Context,
+	requestedRoot, expectedCommit string,
+	observation bool,
+	finalReaders committedWorkspaceFinalReaders,
+) (committedWorkspace, error) {
 	root, err := canonicalNonSymlinkDirectory(requestedRoot)
 	if err != nil {
 		return committedWorkspace{}, err
@@ -76,18 +100,41 @@ func inspectCommittedWorkspace(ctx context.Context, requestedRoot, expectedCommi
 	if err != nil {
 		return committedWorkspace{}, fmt.Errorf("projectstate: decode committed .wormhole tree: %w", err)
 	}
-	finalHeadOutput, err := readOnlyGit(ctx, root, "rev-parse", "--verify", "HEAD^{commit}")
-	if err != nil || trimGitLine(finalHeadOutput) != expectedCommit {
+	finalHead, err := finalReaders.headCommit(ctx, root)
+	if err != nil {
+		if observation {
+			return committedWorkspace{}, fmt.Errorf("%w: re-read Git HEAD: %w", ErrGitObservationChanged, err)
+		}
 		return committedWorkspace{}, fmt.Errorf("projectstate: Git HEAD changed during registration")
 	}
-	revalidated, err := checkoutIdentity(root)
+	if finalHead != expectedCommit {
+		if observation {
+			return committedWorkspace{}, fmt.Errorf("%w: Git HEAD changed during committed-tree read", ErrGitObservationChanged)
+		}
+		return committedWorkspace{}, fmt.Errorf("projectstate: Git HEAD changed during registration")
+	}
+	revalidated, err := finalReaders.checkoutIdentity(root)
 	if err != nil {
+		if observation {
+			return committedWorkspace{}, fmt.Errorf("%w: revalidate checkout identity: %w", ErrGitObservationChanged, err)
+		}
 		return committedWorkspace{}, err
 	}
 	if revalidated != checkout {
+		if observation {
+			return committedWorkspace{}, fmt.Errorf("%w: checkout identity changed during committed-tree read", ErrGitObservationChanged)
+		}
 		return committedWorkspace{}, fmt.Errorf("projectstate: checkout identity changed during registration")
 	}
 	return committedWorkspace{root: root, checkout: checkout, acceptedRef: acceptedRef, commit: head, tree: tree, snapshot: snapshot}, nil
+}
+
+func readCommittedWorkspaceHead(ctx context.Context, root string) (string, error) {
+	output, err := readOnlyGit(ctx, root, "rev-parse", "--verify", "HEAD^{commit}")
+	if err != nil {
+		return "", err
+	}
+	return trimGitLine(output), nil
 }
 
 func canonicalNonSymlinkDirectory(value string) (string, error) {
