@@ -2,11 +2,13 @@
 
 **Date:** 2026-07-28
 
-**Status:** Architecture approved; document review pending
+**Reviewed:** 2026-08-01
+
+**Status:** Architecture approved; Git-nativity review reconciled
 
 **Decision owner:** Harley Welsh
 
-**Scope:** Project bootstrap, Gateway topology, Git-native collaboration,
+**Scope:** V1 project/repository-lineage bootstrap, Gateway topology, Git-native collaboration,
 multi-Fabric routing, human and agent identity, harness connectors, and local
 Code Graph operation
 
@@ -19,9 +21,10 @@ durable working overlay for every checkout, exposes the same project operations
 to humans and agents, and optionally synchronises a workspace with one explicitly
 bound Fabric stream.
 
-Git remains the acceptance and merge authority. Fabric accelerates live
-collaboration and bootstraps connected Gateways; it does not become a second Git
-host or an authority that can overwrite divergent repository state.
+Git remains the acceptance and merge authority for explicitly curated portable
+project context. Gateway and Fabric own operational collaboration and bootstrap
+connected Gateways; neither becomes a second Git host, silently promotes live
+activity into `.wormhole/`, or overwrites divergent repository state.
 
 The resulting product has four distinct layers:
 
@@ -40,9 +43,12 @@ assumptions do not constrain the implementation.
 ## 2. Goals
 
 - A public repository clone is fully usable without a Wormhole account or Fabric.
-- Humans and agents have parity for project work: either can inspect and change
+- Humans and agents have operational parity for project work: either can inspect and change
   tasks, knowledge, events, links, and other project context and submit the result
   through the repository's normal Git workflow.
+- Keep Wormhole agent-first: typed schemas, progressive retrieval, autonomous local
+  durability, attribution, and handoff are designed primarily for agent work; the
+  human CLI supplies setup, review, and control over the same authorised operations.
 - `.wormhole/` contains everything another checkout needs to reconstruct the
   accepted project context, but no machine secrets or private runtime state.
 - Project context is human-reviewable, deterministically serialised, diffable,
@@ -72,6 +78,9 @@ assumptions do not constrain the implementation.
 - Reading, copying, or exposing Git HTTPS tokens, SSH private keys, credential
   helper output, or signing secrets.
 - Replacing GitHub, GitLab, or another Git host's branch, review, and merge policy.
+- Defining an organisation-wide or cross-repository graph, inherited policy, merged
+  knowledge base, or cross-project authority. V1 is project/repository-lineage scoped;
+  organisation-wide semantics require a separate RFC.
 
 ## 4. Authority and invariants
 
@@ -96,7 +105,9 @@ authority.
 ### 4.2 System invariants
 
 - Git is the sole source of truth for code and the acceptance authority for
-  tracked Wormhole project state.
+  explicitly curated tracked Wormhole project state.
+- The version-one `Snapshot` and `OperationV1` are the portable representation, not a log of all
+  collaboration. Gateway/Fabric retain operational activity under finite policy.
 - Gateway is local-first: a successful project write is durable locally before
   any remote synchronisation is attempted.
 - Harnesses communicate with Gateway, never directly with Fabric.
@@ -108,7 +119,9 @@ authority.
 - A fork never activates a copied upstream Fabric hint.
 - Agent actions preserve the agent, accountable human, session, and assurance
   level at action time.
-- No secret is committed beneath `.wormhole/`.
+- No secret is committed beneath `.wormhole/`; structural secret checks make content
+  eligible for tracking but do not prove that it is non-confidential or suitable for
+  a public repository.
 - Gateway performs no generative inference. Code Graph performs no model
   inference or vector retrieval.
 - Unsupported schema versions, ambiguous routes, integrity mismatches, and
@@ -190,9 +203,10 @@ Fabric is optional and server-side. It synchronises connected workspace streams,
 provides bootstrap content such as project skills, and authenticates private
 projects. Public projects may offer identification-only Fabric access.
 
-Fabric stores organisational state and Git metadata, not code bodies. It may read
-Git refs and the `.wormhole/` subtree to verify branch and accepted-main state. It
-must not execute repository content.
+Fabric stores finite-retention operational collaboration, bootstrap material, and Git
+metadata—not code bodies or an independent accepted project truth. It may cache validated
+portable proposals/accepted trees for reconstruction and read Git refs plus the
+`.wormhole/` subtree to verify accepted state. It must not execute repository content.
 
 ## 6. Projects, repositories, and human-friendly identifiers
 
@@ -260,18 +274,53 @@ The `state/v1/` tree is typed and normalised by entity. Stable IDs, not titles,
 handles, or slugs, determine paths. Relationship edges use their own stable files
 so unrelated entities do not conflict in one aggregate document.
 
-### 7.2 Tracked versus private state
+Optional Governance adds no ad hoc path: RFC-0002 owns strict schema-version-1
+`dev.wormhole.governance.realm` on `project.json` and
+`dev.wormhole.governance.adoption` on the Constitution KB article record. Core preserves
+their canonical extension objects; Governance strict-decodes their closed schemas and
+domain-separated digests/signature before activation. Canonical/shared and remote-fork
+realms require server/provider observation of the exact configured repository/ref/commit;
+only an explicitly local-only realm may use Gateway local-ref observation.
 
-Safe tracked state includes:
+### 7.2 Portable versus operational state
+
+Structurally eligible portable state includes:
 
 - project metadata and aliases;
 - self-declared actor display records and public identity keys;
-- tasks and task links;
-- KB records and Markdown bodies;
-- channel definitions and immutable events;
+- task definitions, portable task state, and stable task links;
+- curated KB records and Markdown bodies;
+- channel definitions and explicitly selected audit-significant `EventV1` evidence;
 - Git commit, branch, and pull-request links;
 - explicit tombstones; and
 - non-secret Fabric discovery hints.
+
+An `EventV1` is explicitly promoted portable evidence. It is not the persistence
+format for every event observed by Gateway or Fabric. Task-transition chatter,
+progress messages, generic channel posts/status activity, presence, runtime/session
+attribution, subscriptions, delivery queues, telemetry, conflicts and receipts, and
+discoveries awaiting curation remain operational. A task mutation may update the
+portable task state without automatically creating an
+`EventV1`; generic channel activity must not create one automatically.
+
+Promotion from operational activity is a distinct typed operation available through
+equivalent CLI and MCP capabilities. In one ProjectState service-owned immediate
+transaction it strict-reads the exact canonical source activity and digest. Only an
+`ActivityV1` with a complete promotable-event projection is eligible. `EventV1.ID` is
+the promotion's stable generated ID; `ChannelID`, `ActorID`, `EventType`, `Payload`,
+`Note`, and `CreatedAt` are exact deep-owned copies of the source projection. The source
+actor remains `EventV1.ActorID`; the distinct curating actor is the enclosing
+`OperationV1.Actor`. No caller may replace either attribution or any copied semantic
+field. The event has no caller-supplied extensions: its sole extension key is
+`dev.wormhole.promotion`; its schema-version-1 data contains only
+`source_activity_id` and `source_activity_digest`. The transaction atomically
+marks/receipts the promotion with the event ID, operation ID, promoter envelope, source
+activity ID, and source digest. Sources
+without the complete projection require a separate typed curation design and cannot be
+promoted by this operation. It never nests the existing portable `ApplyBatch`. The result
+is visible in status/diff for review. Checkpoint only
+materialises operations that are already portable; it never performs promotion. Direct
+Git editing and import remain an explicit alternative publication path.
 
 Machine-private state remains outside the repository in Gateway's XDG-scoped
 configuration, data, and runtime roots:
@@ -305,7 +354,8 @@ and is never needed to bootstrap a clone.
 - Unknown optional fields are preserved only where the versioned schema explicitly
   defines an extension envelope; arbitrary ignored security fields are forbidden.
 
-Events and Git links are live-only, immutable, and add-only. Replaying the same ID
+Portable `EventV1` records and Git links are live-only, immutable, and add-only.
+Replaying the same ID
 and byte-identical canonical value is idempotent; the same ID with different
 canonical bytes is one generic immutable-record integrity conflict. Neither kind
 has a tombstone or resurrection path. Deleting any mutable actor, task, task-link,
@@ -486,11 +536,47 @@ transfer, and local service/connector installation remain CLI control-plane
 operations because they handle human secrets or machine administration. This does
 not restrict what an agent can change in a fork or propose through Git.
 
+Parity means equivalent authorised project operations, not equal product-priority
+weighting. MCP remains a first-class agent contract rather than a thin CLI adapter:
+schemas, bounded retrieval/progressive disclosure, autonomous durability, attribution,
+and handoff are agent-first. Human CLI workflows provide comprehensible setup, review,
+and machine/security control without reserving ordinary project operations to humans.
+
 ### 8.3 Diff and checkpoint
+
+`wormhole status` and `wormhole diff` expose the exact `candidate_digest` and an exact
+`publication_review_digest`. The latter is the SHA-256 digest of a versioned canonical
+review envelope binding project, repository identity, trusted publication classification,
+acceptance ref and commit, accepted-tree digest, candidate tree digest, canonical semantic
+diff digest, and overlay generation. It changes if any publication-relevant input changes.
 
 `wormhole diff` renders the semantic accepted-base-versus-current-view diff in
 stable entity order, combining a checkpointed working-tree delta and active overlay
 and including actor attribution and tombstones.
+
+Publication visibility is trusted machine-private setup/workspace state resolved by the
+service with exact values `unclassified`, `local_only`, `public_git`, or `private_git`;
+it is independent of canonical/fork routing and Fabric mode and is never selected by a
+checkpoint caller, actor assurance, or copied hint. Unknown visibility remains
+`unclassified`. `public_git` setup warns that structurally valid context can still disclose
+incidents, customer information, security weaknesses, roadmaps, or personal discussion.
+For `public_git`—including canonical repositories and public forks—checkpoint requires an
+attributed explicit acknowledgement
+whose digest exactly equals the freshly recomputed `publication_review_digest` before
+staging, journal creation, or filesystem publication. The CLI and MCP expose the same
+acknowledgement capability; it records intent and supplies a compare-and-swap
+precondition, not extra authority or a human-only approval. `unclassified` permits
+inspect/status/diff but blocks checkpoint; `local_only` and `private_git` remain governed
+by their respective Git visibility boundaries.
+
+Publication visibility is an explicit user policy, not a claim that Wormhole continuously
+knows a Git host's access controls. Its private record is bound to the exact workspace and
+repository identity. An origin/repository-identity change invalidates it to
+`unclassified`; changing visibility otherwise requires an explicit setup reconfiguration,
+which invalidates every earlier publication-review digest. Status/diff always display the
+current classification. Wormhole performs no implicit network visibility probe and cannot
+detect a same-identity host changing from private to public; the operator must reclassify
+before publishing through Git.
 
 `wormhole checkpoint`:
 
@@ -503,8 +589,10 @@ and including actor attribution and tombstones.
 4. rechecks the live working-tree digest as a compare-and-swap precondition and aborts
    without publication if a direct edit raced with the checkpoint;
 5. commits a prepared journal containing both complete trees, the accepted-base and
-   candidate digests, checkout identity, included operation bytes/states, and exact
-   through-generation before mutating the live tree;
+   candidate digests, checkout identity, included operation bytes/states, exact
+   through-generation, and—for `public_git`—the exact acknowledging actor and
+   matching publication-review digest in its durable prepared record/receipt before
+   mutating the live tree;
 6. opens a second `BEGIN IMMEDIATE` after that prepared commit and, before rename or
    exchange, reloads and rechecks the exact live digest, binding, candidate, overlay
    generation/rows, and open-conflict gate;
@@ -516,6 +604,9 @@ and including actor attribution and tombstones.
 9. retains enough prepared-journal information for restart recovery to recognise either
    the old or new complete live tree, restore/finalise its matching database state, or
    recognise the later accepting Git commit.
+
+Checkpoint materialises only operations already classified as portable. It never scans,
+selects, summarises, or promotes operational activity as a side effect.
 
 Before staging or journal creation, checkpoint queries open conflicts with the exact
 project/workspace predicate inside its preparation transaction. After the prepared row
@@ -866,6 +957,31 @@ server replay. If delivery commits before a later conflict opens, that later con
 does not retroactively undeliver the earlier operation. Other workspaces and resolved
 conflicts do not block or share this gate.
 
+### 9.6 Operational retention
+
+Operational storage has three V1 retention classes:
+
+1. **Ephemeral presence:** presence and heartbeat state is memory-only and may be
+   discarded on restart.
+2. **Bounded activity:** task-transition chatter, progress, generic channel activity,
+   subscriptions, runtime attribution, telemetry, and uncurated discoveries default to
+   30 days and the newest 10,000 unprotected records per workspace. A row is eligible
+   when either its UTC `created_at` is older than 30 days or it falls outside that newest
+   10,000 set. Pruning is deterministic in `(created_at, activity_id)` ascending order;
+   the stable ID breaks timestamp ties.
+3. **Lifecycle evidence:** pending queues, open conflicts, recovery state, and receipts
+   are excluded from both age and rank pruning until terminal. The default post-terminal
+   duration is exactly 30 days; a project/Fabric may advertise a longer duration only if
+   it is finite. After that deadline the row is eligible regardless of rank. Protected
+   rows may temporarily make the workspace exceed the activity cap.
+
+Gateway and Fabric must expose the effective finite policy before accepting live
+activity. There is no indefinite catch-all class. Expiry and pruning never mutate an
+accepted Git base, a working-tree candidate, or any other portable state; only an
+explicit typed promotion can copy selected operational meaning into portable state.
+The exact operational schema, policy handshake, and atomic terminal/pruning seam are a
+hard design-and-TDD gate before portable projection/domain work begins.
+
 ## 10. Human identity, authentication, and agent accountability
 
 ### 10.1 Separation of concerns
@@ -1161,6 +1277,10 @@ credential paths where sensitive, and repository-private data not needed for the
   automation tokens are encrypted or stored in a permission-restricted secret store.
 - Raw tokens are returned only across the credential-establishment boundary and never
   enter tracked project state, event payloads, MCP output, or logs.
+- Secret-shape validation is not confidentiality detection. `public_git` setup must warn
+  before use, and checkpoint must enforce the matching publication acknowledgement
+  CAS described in §8.3 for human and agent callers alike. Wormhole makes no DLP claim;
+  direct Git edits and commits remain possible outside Wormhole.
 - Private agent credentials derive from an accountable human and membership;
   revocation is enforced on subsequent remote requests.
 - Repository content is untrusted data. Setup parses declarative schemas and never runs
@@ -1170,6 +1290,8 @@ credential paths where sensitive, and repository-private data not needed for the
 - Fabric validates canonical Git state independently before advancing accepted streams.
 - Cross-project, cross-workspace, cross-Fabric, and fork/upstream isolation each require
   explicit negative tests.
+- V1 authority is repository-lineage scoped. No repository implicitly imports an
+  organisation-wide graph, KB, Constitution, or permission from another project.
 
 ## 15. Compatibility and migration
 
@@ -1210,6 +1332,16 @@ legacy or unknown until explicitly linked.
 - Stable tree digest under repeated renders and filesystem enumeration order changes.
 - Full-tree rejection for duplicate IDs, broken references, path/ID mismatch, secrets,
   and unknown versions.
+- Public-Git status/diff return a stable publication-review digest; human CLI and
+  agent MCP checkpoint both reject a missing, stale, or mismatched acknowledgement before
+  staging/journalling/publication, while local/private modes preserve their Git boundary.
+- Generic channel activity, status chatter, presence, queues, receipts, telemetry, and
+  uncurated discoveries do not appear in the version-one `Snapshot`; only explicit typed promotion can
+  add selected `EventV1` evidence, and checkpoint itself never promotes it.
+- Retention tests cover restart-discarded presence, age-**or**-rank eligibility outside
+  the newest 10,000 unprotected rows with stable-ID tie-breaking, exact default-30-day/
+  configured-finite-longer terminal retention, policy negotiation before
+  live acceptance, and pruning that cannot change portable Git state.
 - Golden deletion/reimport tests cover single-file and KB tombstones, reject residual
   KB bodies, preserve valid historical references, and reject live-required references
   to deleted targets.
@@ -1342,6 +1474,8 @@ legacy or unknown until explicitly linked.
   connector/CLI contract checks pass.
 - Merged statement coverage remains at or above the approved 80% floor.
 - Documentation and compatibility inventories match shipped commands and schemas.
+- The portable loop is proven from clone through second-clone reconstruction before any
+  Code Graph, multi-Fabric, private identity, or OIDC delivery branch proceeds.
 - The external four-VM trial uses three independent Gateway/harness installations and a
   fourth Fabric VM, exercises public or private identity as configured, proves shared
   context and branch isolation, records recovery evidence, and closes issue #56 only
@@ -1369,10 +1503,10 @@ implementation plans are written only after this design document is reviewed.
 
 ### Slice B — Gateway supervisor and workers
 
-- One service/socket with persisted multi-workspace and multi-Fabric binding registry.
+- One service/socket with persisted multi-workspace routing and the minimal local-only
+  provider needed by setup.
 - Explicit request routing and cross-workspace isolation.
-- Isolated Code Graph worker lifecycle and per-checkout graph stores.
-- Deterministic lexical retrieval, graph-aware expansion, and progressive disclosure.
+- Code Graph remains disabled for the portable-loop validation.
 
 ### Slice C — Setup and native connectors
 
@@ -1381,7 +1515,7 @@ implementation plans are written only after this design document is reviewed.
 - Local Git identity suggestions and optional signing attestation.
 - Transactional Codex, Claude Code, and other supported harness adapters.
 - Removal of legacy `join` and `connect` flows.
-- Optional normal Code Graph initial build with no compute profiles.
+- Clone/setup/inspect/mutate/diff/checkpoint/reconstruct trial with Code Graph disabled.
 
 ### Slice D — Git-aware multi-Fabric
 
@@ -1405,10 +1539,14 @@ implementation plans are written only after this design document is reviewed.
 - Packaging and installation rehearsal across supported systems.
 - Three harness/Gateway VMs plus one Fabric VM trial and issue #56 Gate D evidence.
 
-Slices B and C may proceed in parallel after Slice A freezes their workspace and Gateway
-interfaces. Slice D depends on A and Gateway routing from B. Slice E may develop its
-Fabric schema behind frozen identity interfaces but cannot integrate before D's stream
-binding exists. Slice F integrates only completed contracts.
+This branch stops after Slice A plus the minimum Slice-B/C supervisor, setup, and native
+connector path proves the portable loop and passes a fresh whole-branch review. The
+result is an experimental/internal capability and requires an explicit human go/no-go.
+Slice D multi-Fabric and Slice E private identity/OIDC proceed on the issue-56 path only
+after that decision. They own shared Gateway schema through version 5. Optional Code
+Graph proceeds on a separate branch based after version 5, owns migration `000006`, and
+is not an issue-56 prerequisite. Slice F and issue #56 retain their ultimate gates and
+integrate only explicitly approved, completed contracts.
 
 ## 18. Rejected alternatives
 
@@ -1465,19 +1603,26 @@ future evidence-driven option, not an assumed dependency.
 - Managed-cloud billing and organisation administration beyond required private identity.
 - Automatic Git commit or push from `wormhole checkpoint`.
 - Cross-Fabric replication of one workspace.
+- Organisation-wide/cross-repository graphs, merged KBs, inherited policy, and
+  cross-project authority.
 
 Each deferred feature requires a separate approved design. None should leave placeholder
 flags, dormant schema, or speculative dependencies in the current implementation.
 
 ## 20. Definition of complete
 
-This architecture is implemented when a new engineer can clone a canonical public,
-forked public, private, or local-only repository; run `wormhole setup`; use a human or
-agent surface against the same local project operations; optionally connect to the one
-correct Fabric stream; collaborate through typed durable context; checkpoint a clean
-reviewable `.wormhole/` diff; and submit or accept that state through normal Git policy.
+The experimental portable-loop gate is satisfied when a new engineer can clone a
+canonical public, forked public, private, or local-only repository; run `wormhole setup`;
+use a human or agent surface against the same local project operations; inspect, mutate,
+diff and publication-review that context; checkpoint a clean reviewable `.wormhole/`
+diff without staging, committing, pushing, or advancing Git; accept it through normal
+Git policy; and reconstruct the accepted state from a second clean clone/setup. Status,
+diff, and import must not advance Git, and operational activity must not enter the second
+clone unless it was explicitly promoted.
 
-Completion also requires private actions to retain authenticated human and accountable
-agent provenance, Code Graph to improve navigation without any ML dependency, all
-failure/isolation gates to pass, coverage to remain at least 80%, and the four-VM external
-trial plus all issue #56 subsidiary gates to be passing.
+That gate ends this branch as an experimental/internal capability and requires an
+explicit human go/no-go. The issue-56 path still requires private actions to retain
+authenticated human and accountable agent provenance, all failure/isolation gates, at
+least 80% coverage, and the four-VM external trial plus every subsidiary gate. The
+model-free Code Graph may improve navigation on its separately approved branch but is
+not part of that closure condition.

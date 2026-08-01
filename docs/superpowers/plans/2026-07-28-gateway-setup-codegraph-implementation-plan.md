@@ -8,6 +8,14 @@
 
 **Tech Stack:** Go 1.26.5, standard library, existing modernc.org/sqlite, existing golang.org/x/tools/go/packages, Unix sockets, MCP JSON-RPC, Git, Codex CLI, and Claude Code CLI. Add no dependency.
 
+**Current-branch delivery boundary:** After Slice A, execute only the minimum Gateway
+supervisor, setup, and native Codex/Claude connector path required for the portable-loop
+trial, with Code Graph disabled. Tasks 3–6 (Code Graph) move to a separate branch after
+that trial, whole-branch review, explicit human go/no-go, and the shared local schema has
+landed through multi-Fabric migration `000005_sync_binding.sql`. Their detailed contracts
+remain future implementation input, not work authorised on this branch; the Code Graph
+branch consumes schema version 5 and owns only migration `000006`.
+
 ## Global Constraints
 
 - RFC-0003 and docs/superpowers/specs/2026-07-28-git-native-wormhole-architecture-design.md are authoritative over legacy alpha code.
@@ -18,7 +26,10 @@
 - Every local project, sync, graph, and authorization operation consumes the binding resolved from the private request context.
 - Every newly generated project, operation, actor, workspace, agent, session, graph fixture, and journal ID is a canonical lower-case UUID. Intentionally invalid negative-test inputs are the only exception.
 - New local actions are issued only with assurance=local from Gateway-owned human/agent/session records. Legacy and unknown envelopes remain readable historical data and are never issuable for a new action.
-- Projectstate Snapshot/OperationV1 is the sole local domain write authority. Legacy task/KB/channel/event/Git replica tables are projections only and no public handler writes them directly.
+- Projectstate Snapshot/OperationV1 is the sole portable-state write authority. Generic
+  task/channel/progress/runtime activity uses the Slice-A-gated `ActivityV1` seam and
+  never automatically creates `EventV1`; legacy task/KB/channel/event/Git replica tables
+  are not public write authority.
 - Code Graph is private, derivative, per checkout, model-free, vector-free, and offline by default. It persists no source body and never writes into the approved checkout.
 - Linux service lifecycle uses systemd-user only when usable. Unsupported/no-manager returns exactly: gatewayd service manager unavailable; start gatewayd manually.
 - Connector mutation is allowed only when the existing entry is absent or a fully reconstructable stdio entry. HTTP/SSE, OAuth, literal/env header variants, hidden-scope duplicates, unknown versions, and ambiguous output fail closed before backup or mutation.
@@ -389,9 +400,29 @@ The bridge reads os.Getwd once per call. overwriteBridgeWorkspaceContext parses 
 
 Change these call-site families to use workspaceBindingFromContext and the server-owned actor: Slice A workspace handlers; task/channel/KB/event/Git reads and writes; sync status and queue selection; proxyAuthenticatedTool/Fabric selection; permission authorization; integration guidance; and Code Graph status/query/rebuild. Reject project_id, workspace_id, checkout_id, working_directory, actor, agent_id, assurance, session_id, accountable_human_id, and Fabric identifiers in public arguments. tools/list schemas must not contain those properties.
 
-Delete direct write authority from internal/runtime/localapi/localapi.go. Exact delegation is: wormhole.task.create -> WorkspaceDomain.CreateTask; wormhole.task.update_status -> WorkspaceDomain.UpdateTaskStatus, which alone constructs the portable atomic ApplyBatch of updated TaskV1 plus immutable EventV1; wormhole.task.route -> WorkspaceDomain.RouteTask after scheduler selection; wormhole.channel.create -> WorkspaceDomain.CreateChannel; wormhole.channel.post -> WorkspaceDomain.PostChannelEvent; wormhole.kb.write -> WorkspaceDomain.WriteArticle; and wormhole.git.link_commit -> WorkspaceDomain.LinkCommit. The seven public mutations therefore append eight OperationV1 rows. The task-status result returns the exact EventID generated for its persisted EventV1; the handler must not generate, replace, or drop it. No handler calls TaskRepo.Create/Assign/UpdateStatus, EventRepo.CreateChannel/PublishEvent, KBRepo.WriteArticle, GitRepo.LinkCommit, beginLocalWrite, or queue EnqueueTx.
+Delete direct legacy write authority from internal/runtime/localapi/localapi.go. Portable
+delegation is task create/update_status/route, channel create, KB write, and Git
+link_commit through WorkspaceDomain. Task definition/owner/status changes create portable
+`TaskV1` operations, while their notifications/history and generic channel post/events
+use the Slice-A-gated `ActivityV1` service. They create no `EventV1` automatically.
+Explicit promotion alone appends an attributed portable `EventV1` whose exact
+`dev.wormhole.promotion` extension has schema version 1 and only
+`source_activity_id`/`source_activity_digest`; it uses the gate-frozen service-owned
+immediate transaction and never nests ApplyBatch. This task is blocked until that gate's
+schema, repositories, atomicity, retention, and promotion interfaces are approved. No
+handler may infer an activity schema or fall back to TaskRepo/EventRepo direct writes.
+The exact seven-call mapping is: task.create = one portable operation;
+task.update_status = one portable operation plus one activity; task.route = one portable
+operation plus one activity; channel.create = one portable operation; channel.post = one
+activity; kb.write = one portable operation; and git.link_commit = one portable
+operation. Total: six portable operations and three operational activities.
 
-Exact projection reads are wormhole.task.list/get, wormhole.channel.list/events, and wormhole.kb.list/get over WorkspaceDomain.View(binding), filtered only inside that binding's composed Snapshot. channel.subscribe remains eventbus-only for new ephemeral notifications, seeded from workspace-scoped durable events; kb.search remains a binding-scoped Fabric call. Legacy task/KB/channel/event/Git tables may be populated only by an explicit projection rebuilder from the composed snapshot and are never read as authority by public handlers.
+Exact portable projection reads are task list/get, channel list, and KB list/get over
+WorkspaceDomain.View(binding), filtered inside that binding's composed Snapshot. Channel
+events/post and transition history use the gated activity service; channel.subscribe is
+eventbus-only wake-up over that service. KB search remains a binding-scoped Fabric call.
+Legacy task/KB/channel/event/Git tables may be populated only by an explicit projection
+rebuilder and are never public-handler authority.
 
 Before every scoped operation after startup—including status, diff, every pillar write, import, checkpoint, sync/Fabric routing, and graph status/query/rebuild—refreshGitBinding calls the exact Slice-A Service.RefreshWorkspace(binding), which wraps trusted ObserveGitBase with BranchSwitchReject and the zero actor, then returns the refreshed binding. Only explicit BranchSwitchDiscard is actor-attributed. ErrBranchSwitchPending, ErrGitObservationChanged, invalid committed snapshots, and conflicts fail the requested operation before OperationV1 construction or graph access. The sole exception is stash: only when that preflight returns ErrBranchSwitchPending may WorkspaceDomain.Stash run with the still-validated binding; the dispatcher then immediately calls RefreshWorkspace on that binding and Recover on the returned refreshed scope, and reports stash success only if both follow-up calls succeed.
 
@@ -411,15 +442,15 @@ func TestEveryProjectScopedToolUsesResolvedBinding(t *testing.T) {
         })
     }
 }
-func TestProjectWritesUseOperationV1NotLegacyRepos(t *testing.T) {
+func TestProjectWritesSplitPortableAndOperationalState(t *testing.T) {
     server, binding, domains, legacy := projectDomainServer(t)
     for _, tool := range []string{"wormhole.task.create","wormhole.task.update_status","wormhole.task.route","wormhole.channel.create","wormhole.channel.post","wormhole.kb.write","wormhole.git.link_commit"} {
         if _, err := callToolFromCWD(t,server,binding.Checkout.CanonicalPath,tool,minimumValidArguments(namedTool(t,server,tool))); err != nil { t.Fatalf("%s: %v",tool,err) }
     }
-    if legacy.WriteCount() != 0 || domains.OperationCount() != 8 { t.Fatalf("legacy=%d operations=%d",legacy.WriteCount(),domains.OperationCount()) }
+    if legacy.WriteCount() != 0 || domains.OperationCount() != 6 || domains.ActivityCount() != 3 { t.Fatalf("legacy=%d operations=%d activity=%d",legacy.WriteCount(),domains.OperationCount(),domains.ActivityCount()) }
     statusResult := domains.TaskStatusResult()
-    statusEvent := domains.TaskStatusEvent()
-    if statusResult.EventID == "" || statusResult.EventID != statusEvent.ID { t.Fatalf("result=%+v event=%+v",statusResult,statusEvent) }
+    statusActivity := domains.TaskStatusActivity()
+    if statusResult.ActivityID == "" || statusResult.ActivityID != statusActivity.ID { t.Fatalf("result=%+v activity=%+v",statusResult,statusActivity) }
     for _, op := range domains.Operations() { if op.Actor.Assurance != types.AssuranceLocal { t.Fatalf("%+v",op.Actor) } }
 }
 func TestDiffAndCheckpointSeeProjectDomainWrites(t *testing.T) {
@@ -444,7 +475,7 @@ func TestStashAfterBranchPendingRefreshesThenRecovers(t *testing.T) {
 }
 ~~~
 
-Run: go test ./internal/runtime/localapi ./cmd/wormhole -run 'Workspace|ResolvedBinding|ProjectWritesUseOperation|DiffAndCheckpoint|CrossWorkspaceProjection|StashAfterBranchPending|Forged|BridgeOverwrites|BridgeWorkspace|ToolSchema' -count=1
+Run: go test ./internal/runtime/localapi ./cmd/wormhole -run 'Workspace|ResolvedBinding|ProjectWritesSplitPortable|DiffAndCheckpoint|CrossWorkspaceProjection|StashAfterBranchPending|Forged|BridgeOverwrites|BridgeWorkspace|ToolSchema' -count=1
 
 Expected: PASS.
 
@@ -580,7 +611,7 @@ git commit -m "feat(gateway): wire one recovered supervisor"
 - Create: internal/runtime/codegraph/store/path_test.go
 - Create: internal/runtime/codegraph/store/migration.go
 - Create: internal/runtime/codegraph/store/migration_test.go
-- Create: internal/runtime/localstore/migrations/000003_invalidate_legacy_codegraph.sql
+- Create: internal/runtime/localstore/migrations/000006_invalidate_legacy_codegraph.sql
 - Create: internal/runtime/localstore/codegraph_invalidation.go
 - Create: internal/runtime/localstore/codegraph_invalidation_test.go
 - Modify: internal/runtime/localstore/migrations.go
@@ -589,9 +620,14 @@ git commit -m "feat(gateway): wire one recovered supervisor"
 - Modify: internal/runtime/codegraph/store/store.go
 - Modify: internal/runtime/codegraph/store/schema_test.go
 
-**Consumes:** Slice-A's single `gateway_schema_migrations` ledger after portable transitions at `GatewaySchemaVersion = 2`; stdlib strings only for graph configuration. Task 3 introduces the conversion in the manager package before Task 4 builds the full manager; config never owns it.
+**Consumes:** the single `gateway_schema_migrations` ledger after
+`000003_workspace_activity.sql`, `000004_fabric_routes.sql`, and
+`000005_sync_binding.sql` at `GatewaySchemaVersion = 5`; stdlib strings only for graph
+configuration. Task 3 introduces the conversion in the manager package before Task 4
+builds the full manager; config never owns it.
 
-**Produces:** the same `internal/runtime/localstore` migration constant advanced to `GatewaySchemaVersion = 3` after `000003_invalidate_legacy_codegraph.sql`, plus:
+**Produces:** the same `internal/runtime/localstore` migration constant advanced to
+`GatewaySchemaVersion = 6` after `000006_invalidate_legacy_codegraph.sql`, plus:
 
 ~~~go
 type Scope struct {
@@ -622,7 +658,9 @@ type FreshnessRecord struct {
 
 config/scope.go and every other config file import only stdlib. They do not import internal/types or internal/types/projectstate; AcceptedTreeDigest remains the validated sha256 string used in fingerprints and SQL.
 
-Gateway migration 000003 uses the existing gateway_schema_migrations ledger, advances the sole localstore `GatewaySchemaVersion` constant from 2 to 3, and uses exact DDL:
+Gateway migration `000006` uses the existing `gateway_schema_migrations` ledger,
+advances the sole localstore `GatewaySchemaVersion` constant from 5 to 6, and uses exact
+DDL:
 
 ~~~sql
 CREATE TABLE legacy_codegraph_invalidations (
@@ -678,13 +716,13 @@ func TestDerivativePathRejectsTraversalAndSeparatesWorkspaces(t *testing.T) {
     b, _ := DerivativePath(root, string(workspaceB))
     if a == b || filepath.Dir(a) != filepath.Join(root,"wormhole","codegraph") { t.Fatalf("a=%q b=%q",a,b) }
 }
-func TestGatewayMigration3InvalidatesLegacyGraphIdempotently(t *testing.T) {
+func TestGatewayMigration6InvalidatesLegacyGraphIdempotently(t *testing.T) {
     store := legacyGraphControlStore(t)
     first, err := store.InvalidateLegacyCodeGraph(t.Context())
     if err != nil { t.Fatal(err) }
     second, err := store.InvalidateLegacyCodeGraph(t.Context())
     if err != nil || !reflect.DeepEqual(first,second) { t.Fatalf("first=%+v second=%+v err=%v",first,second,err) }
-    assertGatewayMigrationVersion(t,store,3)
+    assertGatewayMigrationVersion(t,store,6)
     assertLegacyGraphEvidenceIntact(t,store)
 }
 func TestSchemaV3ContainsWorkspaceAndFingerprints(t *testing.T) {
@@ -695,13 +733,13 @@ func TestSchemaV3ContainsWorkspaceAndFingerprints(t *testing.T) {
 
 - [ ] **Step 2: Run RED tests.**
 
-Run: go test ./internal/runtime/localstore ./internal/runtime/codegraph/config ./internal/runtime/codegraph/store ./internal/runtime/codegraph/manager -run 'ScopeFromBinding|DerivativePath|SchemaV3|GatewayMigration3|LegacyProjectGraph' -count=1
+Run: go test ./internal/runtime/localstore ./internal/runtime/codegraph/config ./internal/runtime/codegraph/store ./internal/runtime/codegraph/manager -run 'ScopeFromBinding|DerivativePath|SchemaV3|GatewayMigration6|LegacyProjectGraph' -count=1
 
 Expected: FAIL because scope conversion and schema v3 are absent.
 
 - [ ] **Step 3: Implement scoped database and legacy invalidation (GREEN).**
 
-manager.ScopeFromBinding first calls binding.Validate, then copies its fields into the string-only config.Scope. DerivativePath requires a canonical UUID string, creates dataHome/wormhole/codegraph with 0700, and returns workspace-UUID.db beneath that exact directory. Open creates an owner-only file-backed SQLite DB and retains Scope. All SQL predicates and insert keys use scope.ProjectID, scope.WorkspaceID, and revision_id. The localstore loader still embeds the same numbered one-way files and now requires and applies the contiguous sequence `000001` through `000003`; no second ledger or graph-specific migration constant is introduced.
+manager.ScopeFromBinding first calls binding.Validate, then copies its fields into the string-only config.Scope. DerivativePath requires a canonical UUID string, creates dataHome/wormhole/codegraph with 0700, and returns workspace-UUID.db beneath that exact directory. Open creates an owner-only file-backed SQLite DB and retains Scope. All SQL predicates and insert keys use scope.ProjectID, scope.WorkspaceID, and revision_id. The localstore loader still embeds the same numbered one-way files and now requires and applies the contiguous sequence `000001` through `000006`; no second ledger or graph-specific migration constant is introduced.
 
 The supervisor translates localstore invalidation records into rebuild-required flags without mapping ambiguous legacy rows to a checkout. A new workspace graph starts disabled/rebuild-required. Restart repeats safely without deleting diagnostic evidence.
 
@@ -714,7 +752,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit.**
 
 ~~~bash
-git add internal/runtime/localstore/migrations/000003_invalidate_legacy_codegraph.sql internal/runtime/localstore/codegraph_invalidation.go internal/runtime/localstore/codegraph_invalidation_test.go internal/runtime/localstore/migrations.go internal/runtime/localstore/migrations_test.go internal/runtime/codegraph/config/scope.go internal/runtime/codegraph/config/scope_test.go internal/runtime/codegraph/config/config.go internal/runtime/codegraph/manager/scope.go internal/runtime/codegraph/manager/scope_test.go internal/runtime/codegraph/store/path.go internal/runtime/codegraph/store/path_test.go internal/runtime/codegraph/store/migration.go internal/runtime/codegraph/store/migration_test.go internal/runtime/codegraph/store/store.go internal/runtime/codegraph/store/schema_test.go
+git add internal/runtime/localstore/migrations/000006_invalidate_legacy_codegraph.sql internal/runtime/localstore/codegraph_invalidation.go internal/runtime/localstore/codegraph_invalidation_test.go internal/runtime/localstore/migrations.go internal/runtime/localstore/migrations_test.go internal/runtime/codegraph/config/scope.go internal/runtime/codegraph/config/scope_test.go internal/runtime/codegraph/config/config.go internal/runtime/codegraph/manager/scope.go internal/runtime/codegraph/manager/scope_test.go internal/runtime/codegraph/store/path.go internal/runtime/codegraph/store/path_test.go internal/runtime/codegraph/store/migration.go internal/runtime/codegraph/store/migration_test.go internal/runtime/codegraph/store/store.go internal/runtime/codegraph/store/schema_test.go
 git commit -m "feat(codegraph): scope databases by workspace"
 ~~~
 
@@ -1292,6 +1330,8 @@ type ConfirmedChange struct {
 type SetupSelection struct {
     ConnectorAdapters []string      `json:"connector_adapters"` // sorted unique codex|claude
     CodeGraphMode string             `json:"code_graph_mode"` // on|off
+    PublicationVisibility string     `json:"publication_visibility"` // local_only|public_git|private_git
+    PublicationRepositoryDigest StateDigest `json:"publication_repository_digest"`
     Identity types.ConfirmedIdentitySelection `json:"identity"`
     PlanDigest StateDigest           `json:"plan_digest"`
     Changes []ConfirmedChange        `json:"changes"` // sorted by stage, subject
@@ -1339,6 +1379,7 @@ Stages form this exact ordered prefix:
 project_validated
 gateway_ready
 workspace_registered
+publication_classified
 identity_selected
 base_imported
 connectors_applied
@@ -1347,11 +1388,19 @@ code_graph_resolved
 final_verified
 ~~~
 
-`StateDigest` is the config-owned digest boundary: callers strict-canonicalize state, `SHA256StateDigest` returns `sha256:` plus lowercase SHA-256 hex, and `ParseStateDigest` rejects every other representation. `SetupSelection` is the canonical confirmation record. `Identity` is required and must pass Task 0's exact bounded validation; because this schema has not shipped, it is part of journal schema v1 rather than a migration or optional compatibility field. Its sorted `Changes` contains safe stage/subject/action enums and prior/desired digests for the resolved service executable/action/unit/socket, workspace registration and base import, selected identity, each connector independently, Fabric/local-only resolution, and Code Graph mode/preference. `PlanDigest` hashes the strict canonical confirmation envelope: finalized connector/graph choices, the complete canonical `Identity`, and the ordered change metadata with its already-computed prior/desired digests. It never embeds the other raw state preimages. This makes the overall digest reproducible on resume from persisted identity execution intent, revalidated stable inputs, freshly derived desired digests, fixed bounded-predicate encodings, and the frozen exact-prior digests without replacing a post-effect prior with the current desired state.
+`PublicationVisibility` accepts exactly `local_only`, `public_git`, or `private_git`;
+absence/unknown remains `unclassified` in Gateway and blocks checkpoint. It is trusted
+owner-private setup intent, independent of canonical/fork routing and Fabric mode; setup
+for a public fork must explicitly select `public_git`, and checkpoint callers cannot
+override it.
+`PublicationRepositoryDigest` is the digest of the trusted canonical repository/origin
+identity observed for this workspace at confirmation. Gateway persists classification
+against that identity and invalidates it to `unclassified` on any identity/origin change.
+`StateDigest` is the config-owned digest boundary: callers strict-canonicalize state, `SHA256StateDigest` returns `sha256:` plus lowercase SHA-256 hex, and `ParseStateDigest` rejects every other representation. `SetupSelection` is the canonical confirmation record. `Identity` is required and must pass Task 0's exact bounded validation; because this schema has not shipped, it is part of journal schema v1 rather than a migration or optional compatibility field. Its sorted `Changes` contains safe stage/subject/action enums and prior/desired digests for the resolved service executable/action/unit/socket, workspace registration and base import, publication visibility, selected identity, each connector independently, Fabric/local-only resolution, and Code Graph mode/preference. `PlanDigest` hashes the strict canonical confirmation envelope: finalized connector/graph/publication choices, the repository-identity digest, the complete canonical `Identity`, and the ordered change metadata with its already-computed prior/desired digests. It never embeds the other raw state preimages. This makes the overall digest reproducible on resume from persisted identity execution intent, revalidated stable inputs, freshly derived desired digests, fixed bounded-predicate encodings, and the frozen exact-prior digests without replacing a post-effect prior with the current desired state.
 
 The confirmed display name and optional email are the single narrow PII-not-secret exception to the digest-only rule because a new process must be able to execute the already-confirmed identity action. The owner-private journal may persist exactly those two bounded final values plus `ensure-selected` and `ensure-ed25519`. It still forbids private/public key bytes, signatures, key or credential paths, raw Git config/output, connector command/argv/env/header/credential, Fabric credential/binding secret, executable/private paths, and raw graph path/status. `SetupSelection` and its identity values are never logged, emitted by status, returned through MCP, or included in a public contract response.
 
-`Begin` writes no `selection` member: `Selection` remains nil until the caller has rendered the complete plan and received confirmation. Before calling `SetSelection`, `setupPlan.ValidateConfirmation` recomputes the overall and per-change digests from the in-memory canonical plan. `SetSelection` requires and validates `Identity`, strict-validates subject/action vocabulary, exact required stage coverage, adapter correspondence, digest syntax, ordering, uniqueness, and a `PlanDigest` that covers the exact identity selection, then durably finalizes once; repeating the exact value is idempotent and a different value fails closed. `RecordConnectorBackup` rejects a missing selection or an adapter absent from its finalized changes. `MarkCompleted` rejects `connectors_applied` or any later stage unless selection is finalized, and `Complete` requires a finalized selection plus every stage, sets terminal state/time, and clears `LastError`. Completed and superseded journals are never resumable. Exactly one active canonical-root match resumes. Multiple matches return `ErrAmbiguousSetupJournal`. `Begin` holds a store-index lock and refuses a second active journal for the same root.
+`Begin` writes no `selection` member: `Selection` remains nil until the caller has rendered the complete plan and received confirmation. Before calling `SetSelection`, `setupPlan.ValidateConfirmation` recomputes the overall and per-change digests from the in-memory canonical plan. `SetSelection` requires and validates `Identity` and `PublicationRepositoryDigest`, strict-validates subject/action vocabulary, exact required stage coverage, adapter correspondence, digest syntax, ordering, uniqueness, and a `PlanDigest` that covers the exact repository digest and identity selection, then durably finalizes once; repeating the exact value is idempotent and a different value fails closed. `RecordConnectorBackup` rejects a missing selection or an adapter absent from its finalized changes. `MarkCompleted` rejects `connectors_applied` or any later stage unless selection is finalized, and `Complete` requires a finalized selection plus every stage, sets terminal state/time, and clears `LastError`. Completed and superseded journals are never resumable. Exactly one active canonical-root match resumes. Multiple matches return `ErrAmbiguousSetupJournal`. `Begin` holds a store-index lock and refuses a second active journal for the same root.
 
 `BeginConfirmedReplacement` is callable only after the caller has recomputed, rendered, and newly confirmed a drifted plan. Under the store-index lock it verifies the named old journal is still active with a finalized different selection, marks it `superseded`, and creates a new active journal for the same canonical root with only `project_validated` complete and the newly confirmed selection durable. It never copies completed effects, workspace/identity bindings, backup references, or errors from the old journal. Detection of drift itself only returns `ErrConfirmedPlanDrift` and performs no write; a replacement is a separate explicitly confirmed action.
 
@@ -1716,7 +1765,7 @@ Every public apply/remove call first requires `ConfirmedConnectorChange.Adapter 
 
 Both stores cap each record at 64 KiB; reject duplicate/unknown JSON keys, unsupported versions/enums, noncanonical UUID/reference/digest/time values, unsorted or duplicate environment names, invalid typed entries, and bytes unequal to canonical re-encoding. The reference adapter/UUID must match backup contents. Recovery additionally requires operation adapter/name == requested lock pair == `adapter.AdapterName()`/connectorName and backup adapter/name == that same operation pair; any mismatch is `ErrRecoveryConflict` before external mutation or stage advance. A backup contains only the strict prior/desired entries and metadata above; an operation contains no entry content. `Prepare` creates one durable `prepared` record only after its referenced backup is durably readable, rejects a second active adapter/name operation, and `Advance` permits only `prepared→applied|rolled_back|complete`, `applied→verified|rolled_back`, `verified→complete`, or `rolled_back→complete`; exact repeated advances are idempotent.
 
-On Unix, both stores use no-follow opens, effective-UID ownership checks, exact `0700` roots and `0600` record/lock modes, regular single-link files, OS advisory adapter/name locks, and temp-file/fsync/rename/directory-fsync writes. Startup removes only validated orphan temporary files; it never guesses about malformed records. On non-Unix, constructors return Task 8's `config.ErrPrivateStateUnsupported` before touching a path. Fault injection proves old-or-new whole records at every write boundary. V1 retains completed operation records and every referenced backup indefinitely; transaction/recovery APIs never prune or delete them, so forensic rollback evidence cannot disappear implicitly. Backup contents, environment values, record paths, and credential-bearing errors are never logged or returned.
+On Unix, both stores use no-follow opens, effective-UID ownership checks, exact `0700` roots and `0600` record/lock modes, regular single-link files, OS advisory adapter/name locks, and temp-file/fsync/rename/directory-fsync writes. Startup removes only validated orphan temporary files; it never guesses about malformed records. On non-Unix, constructors return Task 8's `config.ErrPrivateStateUnsupported` before touching a path. Fault injection proves old-or-new whole records at every write boundary. Operation records and referenced backups are excluded from pruning until terminal, then retained for exactly 30 days by default or a configured longer finite duration; policy pruning removes an eligible operation and all/only its referenced backups atomically and never deletes an active/recovery-needed pair. Backup contents, environment values, record paths, and credential-bearing errors are never logged or returned.
 
 - [ ] **Step 1: Write failing lifecycle/round-trip tests (RED).**
 
@@ -1866,7 +1915,7 @@ Use the frozen stores, coordinator, confirmed change, and stage machine above. U
 
 Recovery uses the same continuous cross-process adapter/name lock and exact digest comparisons. `prepared+prior` advances directly to complete without mutation, covering both no external mutation and a partial apply already rolled back before its journal advance. `applied+prior` advances `rolled_back→complete`. `prepared+desired` and `applied+desired` restore and verify exact prior, then advance `rolled_back→complete`. `verified+desired` advances complete. `rolled_back+prior` advances complete without mutation. At every stage, any other state/digest is a third-party mismatch: return `ErrRecoveryConflict` without mutation or stage advance. A `complete` record is terminal and not active. `RemoveTransactional` uses the same confirmed CAS, coordinator, backup, journal, crash recovery, verification, and conflict rules; tests crash both apply and remove after every durable stage and after external rollback but before the journal records it.
 
-Raw stdout, stderr, and native-config fixtures live under exact supported-version directories. Unknown version/output/config shapes fail closed. Tests cover absence, exact desired no-op, supported stdio prior, HTTP/OAuth/header rejection, spaced and empty argv, malformed/unknown version/transport, hidden-scope duplicates, immutable `AdapterName`, adapter/request/operation/backup pair mismatch, confirmed-prior/desired digest CAS, backup failure, strict backup/journal decode and canonical-size limits, no-follow/ownership/mode/platform enforcement, atomic write faults, indefinite retention, partial apply, verify mismatch, rollback failure/conflict, apply/remove crashes after every durable stage and rollback-before-advance, real two-process apply/remove serialization across the entire coordinator callback, cancellation while waiting for the lock, output bounds, secret and credential-path redaction. Fake runners record exact argv. HTTP cases assert zero backup and zero mutation; they are never rollback-success cases.
+Raw stdout, stderr, and native-config fixtures live under exact supported-version directories. Unknown version/output/config shapes fail closed. Tests cover absence, exact desired no-op, supported stdio prior, HTTP/OAuth/header rejection, spaced and empty argv, malformed/unknown version/transport, hidden-scope duplicates, immutable `AdapterName`, adapter/request/operation/backup pair mismatch, confirmed-prior/desired digest CAS, backup failure, strict backup/journal decode and canonical-size limits, no-follow/ownership/mode/platform enforcement, atomic write faults, nonterminal exclusion plus exact default-30-day/configured-finite-longer terminal retention and atomic eligible pair pruning, partial apply, verify mismatch, rollback failure/conflict, apply/remove crashes after every durable stage and rollback-before-advance, real two-process apply/remove serialization across the entire coordinator callback, cancellation while waiting for the lock, output bounds, secret and credential-path redaction. Fake runners record exact argv. HTTP cases assert zero backup and zero mutation; they are never rollback-success cases.
 
 - [ ] **Step 4: Run GREEN tests without touching real harness config.**
 
@@ -2086,32 +2135,41 @@ Execute this exact order:
 
 1. Find nearest `.wormhole`, canonicalize its root, and decode/validate canonical project state without executing repository content.
 2. Resume or begin the setup journal and mark `project_validated`; this owner-private journal write is the only pre-consent state change and `Selection` remains nil.
-3. Perform read-only discovery: resolve and validate the exact Gateway executable and service action; call direct Gateway readiness/workspace/identity reads only when already reachable; read Git identity suggestions; connector `Discover`/`Inspect`/`Plan`; derive Slice D capability from the resolved executable/version; and, only when Gateway is reachable, call the private non-starting `InspectCodeGraphPreference`. Pre-consent setup never calls worker-backed `CodeGraphStatus`. Resolve unsupported/ambiguous connector blockers before consent.
-4. Resolve every choice and construct/render one complete `setupPlan` describing the service, registration, final identity display name/optional email plus `ensure-selected`/`ensure-ed25519`, base import, every connector action, Fabric/local-only action, and graph mode. Build its canonical `SetupSelection`: persist that required bounded `ConfirmedIdentitySelection`, hash the overall strict confirmation envelope and each confirmed prior predicate/desired state, and validate it. All other raw plan values remain memory-only. Noninteractive setup exits 2 here unless `--code-graph=on|off`, an already-finalized active-journal selection, or an existing durable graph preference supplies the choice.
+3. Perform read-only discovery: resolve and validate the exact Gateway executable and service action; call direct Gateway readiness/workspace/identity reads only when already reachable; read Git identity suggestions; inspect repository visibility evidence without treating canonical/fork/Fabric mode as visibility; connector `Discover`/`Inspect`/`Plan`; derive Slice D capability from the resolved executable/version; and, only when Gateway is reachable, call the private non-starting `InspectCodeGraphPreference`. Pre-consent setup never calls worker-backed `CodeGraphStatus`. Resolve unsupported/ambiguous connector blockers before consent.
+4. Resolve every choice and construct/render one complete `setupPlan` describing the service, registration, exact publication visibility (`local_only|public_git|private_git`), final identity display name/optional email plus `ensure-selected`/`ensure-ed25519`, base import, every connector action, Fabric/local-only action, and graph mode. Unknown visibility must be explicitly resolved during setup or remains `unclassified`; `public_git` shows the confidentiality warning and applies equally to canonical repositories and public forks. Build its canonical `SetupSelection`: persist publication visibility plus the digest of the trusted repository/origin identity and the required bounded `ConfirmedIdentitySelection`, hash the overall strict confirmation envelope and each confirmed prior predicate/desired state, and validate it. All other raw plan values remain memory-only. On this branch Code Graph is fixed `off`; the `on` path is executed only on its later branch. Noninteractive setup exits 2 if publication visibility or any other required choice is unresolved, unless an already-finalized active-journal selection supplies it.
 5. Interactive setup obtains exactly one confirmation for that whole plan. A decline leaves only the active `project_validated` journal with nil selection and performs zero external mutation. Resume with an already-finalized selection never reprompts.
 6. Immediately after consent, durably call `SetSelection` with the exact safe confirmation/digests and read the journal back byte-for-byte before proceeding. This finalized record is the recovery authority. No service, Gateway, identity, connector, Fabric, graph, user-config, or repository mutation occurs before that durable readback.
 7. Inspect/install/start/verify `gatewayd`. Manager-unavailable may proceed only if direct Gateway `Readiness` already succeeds; otherwise return the exact manual diagnostic with the journal active.
 8. Register the workspace, consume only `RegisterWorkspaceResult.Binding`, and bind its workspace UUID in the journal.
-9. Call `EnsureSelectedSetupIdentity` with the setup journal UUID and its exact finalized `Selection.Identity`; the private Gateway/localidentity receipt creates or reuses and selects exactly one matching Ed25519 human idempotently. Then bind the returned human UUID in the setup journal and read it back with `SelectedLocalIdentity`. A crash before or after the RPC, selection, return, or bind repeats the same intent and cannot create a second profile/key.
-10. Refresh/import the accepted base through Gateway using the selected Gateway-owned actor. This deliberate register → identity → actor-attributed import ordering resolves the architecture outline's import-before-identity conflict with Slice A's valid-actor requirement.
-11. Apply connectors transactionally and record every nonempty opaque returned backup reference. Connector failure restores only connector state and leaves the imported workspace intact.
-12. Feature-detect Slice D's future Fabric RPC; when absent, record local-only resolution. Task 11 adds no Fabric schema, profile, command, or auth type.
-13. For code graph `on`, explicitly rebuild and require `CodeGraphStatus` ready/current; for `off`, explicitly disable and read back disabled status.
-14. Reverify Gateway, workspace, selected identity, connectors, Fabric/local-only resolution, and graph; mark `final_verified`; call journal `Complete`.
+9. Persist the finalized publication visibility and exact repository/origin-identity digest through the gate-frozen private Gateway setup RPC, read both back from the workspace, and mark `publication_classified`. The RPC accepts only the finalized owner-private setup journal intent; ordinary/public checkpoint arguments cannot set either value. A digest mismatch or changed origin leaves the workspace `unclassified`.
+10. Call `EnsureSelectedSetupIdentity` with the setup journal UUID and its exact finalized `Selection.Identity`; the private Gateway/localidentity receipt creates or reuses and selects exactly one matching Ed25519 human idempotently. Then bind the returned human UUID in the setup journal and read it back with `SelectedLocalIdentity`. A crash before or after the RPC, selection, return, or bind repeats the same intent and cannot create a second profile/key.
+11. Refresh/import the accepted base through Gateway using the selected Gateway-owned actor. This deliberate register → publication classification → identity → actor-attributed import ordering resolves the architecture outline's import-before-identity conflict with Slice A's valid-actor requirement.
+12. Apply connectors transactionally and record every nonempty opaque returned backup reference. Connector failure restores only connector state and leaves the imported workspace intact.
+13. Feature-detect Slice D's future Fabric RPC; when absent, record local-only resolution. Task 11 adds no Fabric schema, profile, command, or auth type.
+14. On this branch, explicitly persist/read back Code Graph disabled. The separate Code Graph branch owns the `on` rebuild/readiness path.
+15. Reverify Gateway, workspace, publication visibility, selected identity, connectors, Fabric/local-only resolution, and graph-disabled state; mark `final_verified`; call journal `Complete`.
 
 Planning does not depend on unknowable post-start state when Gateway is initially unavailable. The confirmation freezes these deterministic actions and bounded prior predicates:
 
 - service: exact resolved executable identity, exact unit/socket bytes, and `noop|start|install` action; both its observed pre-consent state and ready desired state are hashed;
 - workspace: `register` the exact immutable root/project/accepted commit/tree, whose prior predicate is `absent-or-exact` and whose desired predicate requires those exact semantic fields plus one canonical Gateway-owned workspace UUID, bound in the journal on first success rather than guessed before consent;
+- publication: set the exact finalized `local_only|public_git|private_git` visibility in
+  trusted workspace state; unclassified is a blocking prior, not a checkpoint-call choice;
 - identity: the exact durable `ConfirmedIdentitySelection` (`ensure-selected`, final bounded display name, optional email, `ensure-ed25519`) is both execution input and part of `PlanDigest`; any strictly valid local identity-store state is the bounded prior, while the desired predicate requires the receipt-bound human to have exactly those attributes, one valid matching Ed25519 keypair, and selected status. The first successful UUID is bound and read back rather than guessed before consent;
 - base import: exact registered workspace with `unimported-or-already-imported-exact` prior and exact accepted commit/tree desired;
 - connectors: exact inspected typed prior and exact desired entry per adapter; no bounded wildcard is permitted;
 - Fabric: a capability/action derived from the confirmed Gateway executable; C11's desired state is local-only and does not invent or attach a binding;
-- graph: `set-mode` for the confirmed `on|off`, with any strictly valid persisted preference/cache row as the bounded prior and exact desired preference/readiness predicate as desired. If Gateway was unreachable, this predicate replaces an unknown cached-status read; it never starts a worker.
+- graph: on this branch `set-mode off`, with any strictly valid persisted preference/cache
+  row as the bounded prior and exact disabled desired predicate. The later graph branch
+  owns `on` and worker readiness.
 
 These predicate descriptions have fixed canonical encodings and are what `PriorDigest`/`DesiredDigest` hash; a bounded digest is not the digest of an unavailable guessed value. After service readiness, each evaluator accepts only the exact alternatives its confirmed predicate names. Thus service start does not itself cause workspace/identity/base/graph plan drift, while malformed or out-of-bound state still fails closed. The initially-unavailable acceptance fixture has no pre-existing workspace/identity conflict and completes under one confirmation.
 
-The post-confirmation external effect order is therefore fixed as service → workspace registration → identity selection → actor-attributed base import → connectors → Fabric/local-only resolution → code graph → final verification. Journal validation and finalized-selection writes do not broaden that order into product or user-config mutation.
+The post-confirmation external effect order is therefore fixed as service → workspace
+registration → publication classification → identity selection → actor-attributed base
+import → connectors → Fabric/local-only resolution → graph-disabled readback → final
+verification. Journal validation and finalized-selection writes do not broaden that
+order into product or user-config mutation.
 
 On every resume, load the finalized selection as the action authority and revalidate only stable planning inputs: the immutable root/project state, finalized user choices, resolved executable identity, the persisted validated `ConfirmedIdentitySelection`, adapter availability/version plus desired-entry rendering, and safe Fabric/graph capability inputs. Never reread a changed Git identity suggestion to replace the confirmed identity. `ValidateResumeConfirmation` freshly hashes every derivable desired state and every fixed bounded-predicate encoding, carries forward each stored exact-prior digest, rebuilds the canonical confirmation envelope, and requires the same safe actions, identity selection, per-change digests, and `PlanDigest`. It must not run `Plan(current,current-desired)`, replace a confirmed action with `noop`, or hash post-effect service/connector state as a new prior. Current mutable readbacks are evidence for the next paragraph, not inputs that choose a new plan. Drift in any stable input, desired state, bounded predicate, or action legality returns `ErrConfirmedPlanDrift`, creates no backup/operation, performs no external mutation, and performs no journal/store write—not even `RecordLastError`; compare the old journal bytes unchanged. A different action may run only after a separately rendered confirmation calls `BeginConfirmedReplacement` to create a new journal; setup never silently replans inside the old confirmation.
 
@@ -2122,11 +2180,15 @@ Before skipping any completed stage on resume, run its exact read-only predicate
 - `project_validated`: the client's immutable canonical root equals the journal root and the current tracked project state still strict-decodes and validates without executing repository content.
 - `gateway_ready`: direct `gatewayClient.Readiness` succeeds; when systemd-user is usable, `GatewayService.Inspect` also reports `Installed`, `Running`, and `Ready`, while manual mode requires only direct readiness.
 - `workspace_registered`: `WorkspaceStatus` reports the client's canonical root and the exact journal workspace UUID.
+- `publication_classified`: the private Gateway readback reports the exact finalized
+  `Selection.PublicationVisibility` and `Selection.PublicationRepositoryDigest`; no
+  public request or Fabric hint can substitute.
 - `identity_selected`: `SelectedLocalIdentity` reports the exact journal `SelectedHumanID`; Task 0's receipt for that journal UUID names the same human/public key, and the profile exactly matches finalized `Selection.Identity` with a valid Ed25519 keypair.
 - `base_imported`: `WorkspaceStatus` reports the validated project's accepted commit/tree digest and a recovered imported base with no unresolved import conflict.
 - `connectors_applied`: each adapter in finalized `Selection.ConnectorAdapters` re-inspects as the exact desired user-scope stdio entry and has no active Task 10 operation; skipped unavailable adapters are absent from the finalized selection.
 - `fabric_resolved`: when Slice D is absent, capability detection still proves local-only; when present later, its readback must match the planned binding before this predicate can pass.
-- `code_graph_resolved`: `CodeGraphStatus` is disabled for `off`; for `on` it is enabled, `StateReady`, current, `GraphNotCurrent==false`, and not rebuild-required.
+- `code_graph_resolved`: on this branch `CodeGraphStatus` is disabled for `off`; the
+  separate Code Graph branch owns the `on` readiness predicate.
 - `final_verified`: every preceding predicate succeeds in order in the same run.
 
 A failed desired-state predicate is never silently skipped: rerun that stage's frozen idempotent effect only when the readback matches its confirmed prior; when it matches neither prior nor desired, return its typed conflict/error. `ErrConfirmedPlanDrift` is the no-write exception and must return without `RecordLastError` or any other journal/store update; other operational errors may record a redacted `LastError`. Mark each stage only after its desired predicate passes. Persisted selections make resume deterministic and prevent reprompting.
@@ -2163,8 +2225,6 @@ git commit -m "feat(cli): orchestrate journalled setup"
 - Modify: cmd/wormhole/cli_coverage_behavior_test.go
 - Modify: cmd/wormhole/cli_error_paths_test.go
 - Modify: cmd/wormhole/contract_manifest_test.go
-- Modify: cmd/wormhole/code_graph.go
-- Modify: cmd/wormhole/code_graph_test.go
 - Modify: cmd/wormhole/workspace.go
 - Modify: cmd/wormhole/workspace_test.go
 - Modify: internal/runtime/localapi/localapi.go
@@ -2172,7 +2232,6 @@ git commit -m "feat(cli): orchestrate journalled setup"
 - Modify: internal/runtime/localapi/localapi_proxy_errors_test.go
 - Modify: internal/runtime/localapi/localapi_qa_test.go
 - Modify: internal/runtime/localapi/contract_manifest_test.go
-- Modify: cmd/gatewayd/codegraph_gate_b_process_test.go
 - Modify: docs/contracts/alpha-contract.json
 - Modify: docs/contracts/README.md
 - Modify: README.md
@@ -2190,18 +2249,18 @@ The frozen 2026-07-28 result is README.md; cmd/wormhole/cli_connect_opencode_tes
 **Public command surface in this slice:**
 
 ~~~text
-wormhole setup [--code-graph=on|off] [--non-interactive]
+wormhole setup [--code-graph=off] [--non-interactive]
 wormhole status|diff|import|checkpoint|stash
 wormhole connector list
 wormhole connector install <codex|claude> [--yes]
 wormhole connector remove <codex|claude> [--yes]
-wormhole code-graph status|query|rebuild|disable
 wormhole mcp
 wormhole.workspace.status|diff|import|checkpoint|stash
-wormhole.code_graph.status|query|rebuild
 ~~~
 
-wormhole project and wormhole fabric commands remain explicitly dependent on Slice D and are not claimed shipped by this plan.
+The Code Graph commands shown elsewhere in this plan belong to its separate later branch.
+wormhole project and wormhole fabric commands remain explicitly dependent on Slice D and
+are not claimed shipped by this branch.
 
 - [ ] **Step 1: Write executable cutover and end-to-end tests (RED).**
 
@@ -2222,16 +2281,26 @@ func TestCLIAndMCPWorkspaceOperationsAreSemanticallyEqual(t *testing.T) {
         })
     }
 }
-func TestOneGatewayIsolatesTwoWorkspacesAcrossWorkerCrashAndRestart(t *testing.T) {
+func TestOneGatewayIsolatesTwoWorkspacesAcrossRestart(t *testing.T) {
     fixture := twoWorkspaceProcessFixture(t)
     fixture.WriteTask("a","task-a")
-    fixture.RebuildGraph("a")
-    fixture.RebuildGraph("b")
-    fixture.KillWorker("a")
     if got := fixture.ListTasks("b"); slices.Contains(got,"task-a") { t.Fatalf("leak=%v",got) }
-    if err := fixture.QueryGraph("b","KnownB"); err != nil { t.Fatalf("workspace b query: %v",err) }
     fixture.RestartGateway()
     if got := fixture.WorkspaceStatus("a").WorkspaceID; got != fixture.Binding("a").Scope.WorkspaceID { t.Fatalf("got=%s",got) }
+}
+func TestPortableLoopReconstructsOnlyAcceptedPortableState(t *testing.T) {
+    fixture := cleanCloneSetupFixture(t,"first")
+    fixture.InspectThenMutatePortableTaskAndOperationalActivity()
+    before := fixture.GitHead()
+    fixture.StatusDiffImport()
+    if fixture.GitHead() != before { t.Fatal("read/import advanced Git") }
+    digest := fixture.PublicationReviewDigest()
+    fixture.CheckpointAsAgent(digest)
+    fixture.AssertNoStageCommitPushOrBaseAdvance()
+    accepted := fixture.CommitAndReviewThroughGit()
+    second := cleanCloneSetupFixtureAt(t,"second",accepted)
+    second.AssertPortableTaskReconstructed()
+    second.AssertOperationalActivityAbsentUnlessExplicitlyPromoted()
 }
 func TestConnectorFailureRestoresExactSupportedPriorOrAbsence(t *testing.T) {
     for _, prior := range []connector.ConnectorEntry{{State:connector.EntryAbsent},typedStdioPrior(t),typedStdioPriorWithArgsAndEnv(t)} {
@@ -2254,19 +2323,27 @@ func TestUnsupportedConnectorPriorFailsBeforeMutation(t *testing.T) {
 
 - [ ] **Step 2: Run RED tests.**
 
-Run: go test ./cmd/wormhole ./cmd/gatewayd ./internal/runtime/localapi -run 'RemovedCommands|SemanticallyEqual|OneGatewayIsolates|ConnectorFailure|UnsupportedConnectorPrior|Contract' -count=1
+Run: go test ./cmd/wormhole ./cmd/gatewayd ./internal/runtime/localapi -run 'RemovedCommands|SemanticallyEqual|OneGatewayIsolates|PortableLoop|ConnectorFailure|UnsupportedConnectorPrior|Contract' -count=1
 
 Expected: FAIL until cutover/integration is complete.
 
 - [ ] **Step 3: Implement contract cutover and safe smoke tests (GREEN).**
 
-Remove init/join/connect from dispatcher, runInit/runJoin/runConnect callers and helpers, usage, tests, guidance, docs, and JSON contract with no aliases. Remove the join-shaped wormhole.agent.register variant, agentJoinRegisterArgs, isJoinRegisterArgs, proxyRegister, and localJoinResult while preserving the unrelated MCP initialize handshake. Modify the Slice-A cmd/wormhole/workspace.go and workspace_test.go so status/diff/import/checkpoint/stash are top-level commands only; there is no wormhole workspace subcommand. Register final workspace/code-graph tools without cwd or machine-ID schema fields. CLI workspace and graph operations call Gateway from cwd and render the same semantic result as MCP. Dispatch connector list/install/remove to the tested connector.go implementation. Update docs only for tested B/C commands; mark project/fabric administration as Slice D-dependent.
+Remove init/join/connect from dispatcher, runInit/runJoin/runConnect callers and helpers,
+usage, tests, guidance, docs, and JSON contract with no aliases. Remove the join-shaped
+wormhole.agent.register variant while preserving MCP initialize. Make status/diff/import/
+checkpoint/stash top-level only. Register workspace tools without cwd, machine IDs, or
+caller-selectable publication visibility. CLI and MCP render the same candidate and
+publication-review digests and accept the same exact public-Git acknowledgement. Dispatch
+connector lifecycle to its tested implementations. Keep Code Graph disabled and omit its
+commands/contracts on this branch; mark graph, project, and Fabric administration as
+separate-branch work.
 
 All automated adapter tests use fake runners/config roots. Real-client smoke is limited to isolated read-only version/help/get/list capability checks; no test adds or removes a real entry. There is no real mutation smoke in make check. Supported stdio priors prove transactional rollback. HTTP/OAuth/ambiguous priors prove `ErrUnsupportedPriorEntry`, zero backup, zero mutation, and preservation of the already-imported workspace; they are not rollback-success cases.
 
 - [ ] **Step 4: Run focused, scale, and full verification (GREEN).**
 
-Run: go test ./cmd/wormhole ./cmd/gatewayd ./internal/runtime/localapi ./internal/runtime/codegraph/... ./internal/runtime/config/... -count=1
+Run: go test ./cmd/wormhole ./cmd/gatewayd ./internal/runtime/localapi ./internal/runtime/config/... -count=1
 
 Expected: PASS.
 
@@ -2274,18 +2351,19 @@ Run: rg -l --glob '*.go' --glob '*.md' --glob '*.json' 'runJoin|runConnect|runIn
 
 Expected: no output; every legacy init/join/connect command, helper, variant, contract entry, and test is gone.
 
-Run: go test ./internal/runtime/codegraph/query -run TestScaleAcceptance250K -count=1 -timeout=10m
-
-Expected: p95 at most 300ms and heap growth at most 128MiB on the fixed 250k/2m fixture.
-
 Run: make check
 
 Expected: format, build, vet, integration, race, and coverage pass; merged statement coverage is at least 80 percent.
 
+Then run a fresh whole-branch review against the clone → setup → inspect → mutate →
+diff/publication-review → checkpoint → Git commit/review → second clean clone/setup/
+reconstruct evidence. This branch stops as experimental/internal and requires an explicit
+human go/no-go. Do not begin Code Graph, multi-Fabric, private identity, or OIDC here.
+
 - [ ] **Step 5: Commit exact files without broad staging.**
 
 ~~~bash
-git add cmd/wormhole/main.go cmd/wormhole/cli_main_test.go cmd/wormhole/cli_coverage_behavior_test.go cmd/wormhole/cli_error_paths_test.go cmd/wormhole/contract_manifest_test.go cmd/wormhole/code_graph.go cmd/wormhole/code_graph_test.go cmd/wormhole/workspace.go cmd/wormhole/workspace_test.go internal/runtime/localapi/localapi.go internal/runtime/localapi/mcp.go internal/runtime/localapi/localapi_proxy_errors_test.go internal/runtime/localapi/localapi_qa_test.go internal/runtime/localapi/contract_manifest_test.go cmd/gatewayd/codegraph_gate_b_process_test.go docs/contracts/alpha-contract.json docs/contracts/README.md README.md docs/claude-code-connector.md docs/compatibility.md
+git add cmd/wormhole/main.go cmd/wormhole/cli_main_test.go cmd/wormhole/cli_coverage_behavior_test.go cmd/wormhole/cli_error_paths_test.go cmd/wormhole/contract_manifest_test.go cmd/wormhole/workspace.go cmd/wormhole/workspace_test.go internal/runtime/localapi/localapi.go internal/runtime/localapi/mcp.go internal/runtime/localapi/localapi_proxy_errors_test.go internal/runtime/localapi/localapi_qa_test.go internal/runtime/localapi/contract_manifest_test.go docs/contracts/alpha-contract.json docs/contracts/README.md README.md docs/claude-code-connector.md docs/compatibility.md
 git rm cmd/wormhole/init.go cmd/wormhole/init_test.go cmd/wormhole/connect.go cmd/wormhole/connect_test.go cmd/wormhole/connect_status_coverage_test.go cmd/wormhole/cli_connect_opencode_test.go cmd/wormhole/cli_main_join_socket_test.go internal/runtime/localapi/localapi_join_test.go
 git commit -m "feat(cli): complete gateway setup cutover"
 ~~~
@@ -2294,26 +2372,29 @@ git commit -m "feat(cli): complete gateway setup cutover"
 
 - Task 1 begins after Slice A localapi workspace operations and projectstate resolver exist.
 - Task 2 follows Task 1; its FabricRouter is local-only/legacy until Slice D supplies the final multi-Fabric implementation.
-- Task 3 follows Slice A shared binding freeze. Task 4 follows Task 0's private setup-control RPC and Task 3. Task 5 follows Tasks 3-4. Task 6 follows Task 5.
+- Tasks 3–6 follow the portable-loop human go/no-go and the shared multi-Fabric schema
+  through version 5 on a separate Code Graph branch; their internal order remains
+  3 → 4 → 5 → 6 and they own only local migration `000006`.
 - Task 7 first freezes and ships the shared `CommandRunner` contract.
 - Tasks 8 and 9 may then proceed independently after Task 0 freezes `types.ConfirmedIdentitySelection`; Task 8 consumes that exact validated type in journal v1.
 - Task 10 consumes Task 7's shared runner plus Task 8's `StateDigest`, confirmed-plan error, opaque `config.BackupReference`, redaction, and private-platform contracts, but owns the cross-process operation coordinator, fully specified connector backup contents, operation journal, retention, and recovery.
-- Task 11 consumes completed Tasks 7-10 and Gateway RPCs from Tasks 1-6.
-- Task 12 consumes every prior task and retains all legacy deletion/cutover ownership. Slice D owns project/fabric CLI and authenticated attach/login; Slice E owns private human authentication.
+- On this branch Task 11 consumes Tasks 1–2 and 7–10 with a disabled CodeGraphProvider;
+  Task 12 consumes those tasks and retains legacy deletion/cutover ownership. Slice D
+  owns project/fabric CLI and authenticated attach/login; Slice E owns private identity.
 
 ## Self-review
 
 - Shared ownership: the exact Slice-A types.WorkspaceBinding flows from registration/resolution/enumeration; types.RepositoryIdentity is reused, its digest remains a validated string, and only codegraphmanager.ScopeFromBinding copies it into the stdlib-only string Scope.
 - Routing: the bridge overwrites forged private cwd before forwarding, Gateway strips it before schema validation, and every project/sync/graph/auth path records the resolved binding in forged/cross-workspace coverage.
 - Supervisor seams: FabricRouter and CodeGraphProvider have exact binding-scoped methods, non-nil fail-closed implementations, and errors.Is coverage for their typed unavailable errors.
-- Workers: separate process, DB, socket, private caches, offline/sanitized environment, read-only checkout, crash/restart/disable isolation, plus the Task 4 extension to Task 0's private setup-control RPC for cached preference inspection that never starts a worker.
-- Graph: exact schema/status fingerprints, manifest ordering/restart/failed-publish tests, explicit BM25/tokenizer constants, held-out recall/disclosure/determinism/scale gates.
+- Workers/graph: deferred to a separate branch; this branch verifies the disabled provider
+  and does not expose graph commands or claim graph acceptance.
 - Shared execution: one runner contract has exact exit/output/context semantics and is reused by service, Git identity, and connectors.
 - Lexical ownership: Task 3 owns scoped schema and cascading lifecycle; Task 6 populates lexical rows in `index/build.go` before publication, validates exact completeness in the publication transaction, and owns documentation extraction, BM25 query, and held-out/scale acceptance.
 - Service: one exact unit/socket/runtime-root contract, positive fixtures derived from configured `ResolveRuntimePaths`, fail-closed manager probing, and byte-identical active idempotence.
 - Journals: config-owned `StateDigest`, safe overall/per-change confirmed digests, required bounded `types.ConfirmedIdentitySelection` in unshipped v1 as the sole PII exception, canonical owner-only per-UUID files, OS locks, nil-before-confirmation immutable selection, explicit drift replacement, selected identity, terminal completion, ambiguous-resume rejection, credential-path redaction, Unix enforcement/non-Unix rejection, opaque backup references, and old-or-new fault recovery.
 - Git identity: exactly four read-only config keys, explicit unset behavior, canonical-root proof, and OpenPGP-only v1 signing without key-file access.
 - Setup: the Gateway client binds one immutable canonical root; one full plan/confirmation and durable digest-plus-identity execution selection precede external effects; the journal-keyed private identity RPC survives real process crash/reopen without duplicate human/profile/key; initially unavailable Gateway state is represented by confirmed bounded idempotent predicates; resume revalidates stable inputs and the frozen confirmation envelope, then compares mutable state with confirmed prior-or-desired predicates without replanning from post-effect state; `ErrConfirmedPlanDrift` leaves old journal bytes unchanged; every completed stage has an exact readiness/workspace/identity/connector/Fabric/graph readback predicate; runtime/config does not call Gateway.
-- Connectors: exact-version absent/provable-stdio support, native Claude config parsing without health checks, HTTP/OAuth rejection before mutation, immutable `AdapterName` plus exact requested connector name, one pair-scoped `WithOperationLock` critical section covering recovery/CAS/backup/journal/external mutation/verify/rollback, adapter/request/operation/backup mismatch rejection, two-process apply/remove serialization, fully specified strict private stores with indefinite retention, exact prepared/applied/verified/rolled-back recovery, and independently availability-gated isolated real-client smoke.
+- Connectors: exact-version absent/provable-stdio support, native Claude config parsing without health checks, HTTP/OAuth rejection before mutation, immutable `AdapterName` plus exact requested connector name, one pair-scoped `WithOperationLock` critical section covering recovery/CAS/backup/journal/external mutation/verify/rollback, adapter/request/operation/backup mismatch rejection, two-process apply/remove serialization, fully specified strict private stores with nonterminal pruning exclusion and exact default-30-day/configured-finite-longer terminal retention, atomic eligible pair pruning, exact prepared/applied/verified/rolled-back recovery, and independently availability-gated isolated real-client smoke.
 - C12 boundary: legacy deletion, docs/contracts cutover, and final integration remain C12-owned; earlier tasks do not edit those legacy surfaces.
 - Verification: acceptance tests have executable assertions, normal tests never mutate real user connector state, the current rg -l cutover inventory is frozen, final add/rm staging lists every path explicitly, and the 80-percent gate is explicit.

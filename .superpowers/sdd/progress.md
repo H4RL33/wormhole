@@ -619,3 +619,28 @@ race, and coverage enforcement; total statement coverage was 85.8% against the 8
 The commit was pushed and exact SHA `4492026083f2f4de95382351b2b274707dfe18de` was
 verified. This documentation checkpoint does not claim an `ObserveGitBase` service
 implementation.
+
+A4 candidate-origin provenance validation `5cb5bf6`
+(`feat(projectstate): validate observer provenance`): complete. Candidate import origin
+validation is now the exact union of a canonical UUID and
+`system:git-observation-rebase-v1` across candidate persistence, stash validation, restore
+planning, and strict retry projection. Adversarial coverage includes real RestoreStash
+use of both forms, no actor substitution, restart, malformed near-token rejection, and
+fixed canonical/digest vectors. Two independent reviews approved with no remaining
+findings. Fresh `make check`, race, vet, formatting, and diff checks passed; merged
+statement coverage was 85.9%. This prerequisite does not claim that
+`Service.ObserveGitBase` exists.
+
+A4 receipt-first transition seam `db1e060`
+(`feat(localstore): add receipt-first transitions`): complete. The binding-free
+`TransitionReceiptByKey` reads only the exact transition-receipt key with strict TEXT,
+count, canonical receipt, corruption, alias, and duplicate checks.
+`WithImmediateWorkspaceTransition` makes that receipt lookup the first SQL read after
+`BEGIN IMMEDIATE`, supplies a bound transaction only after absence, rolls back callback
+failure, and preserves `ErrCommitOutcomeUnknown`; legacy Stash/Restore seams remain
+binding-scoped. Query-recording, semantic corruption, invalid-syntax/no-SQL, isolation,
+restart, rollback, commit-failure, and subsequent-success tests cover the boundary. Two
+independent reviews approved with no remaining findings. Fresh `make check` passed at
+85.8% merged statement coverage, with race, vet, formatting, and diff checks clean. The
+next implementation tranche remains `Service.ObserveGitBase`/`RefreshWorkspace`; neither
+is claimed by this seam.

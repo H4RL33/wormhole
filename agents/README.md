@@ -2,10 +2,13 @@
 
 ## Mission and State
 
-Wormhole gives humans and agents shared, durable organisational context. Git is
-the sole code truth and accepts tracked Wormhole project state. Wormhole gives
+Wormhole gives humans and agents shared, durable project context. Git is
+the sole code truth and accepts explicitly curated portable Wormhole project state.
+Gateway/Fabric own finite-retention operational collaboration. Wormhole gives
 typed semantics to events, task state, KB records, identities, permissions, and
 links to code. The repository builds the CLI, local Gateway, and optional Fabric.
+V1 is project/repository-lineage scoped and agent-first; it defines no implicit
+organisation-wide graph, merged KB, inherited policy, or cross-project authority.
 
 ## Authority Order
 
@@ -32,7 +35,8 @@ must not leak into Core code.
 - One Gateway supports many projects, worktrees, and explicit Fabric profiles.
   Each workspace has zero or one writable Fabric stream.
 - Fabric is optional for public and private projects. It owns its Postgres plus
-  pgvector projection, membership, and remote audit; it cannot overwrite a
+  pgvector projection, membership, remote audit, and operational activity under an
+  exposed finite retention policy; it cannot overwrite a
   divergent Git base. A canonical-public hint activates only when `origin`
   matches the canonical repository identity; a fork/mismatch makes no upstream
   Fabric contact, read, or write and may bind only an independent realm.
@@ -98,8 +102,15 @@ schema as shipped until its implementation and contract checks pass.
 - Git remains sole code truth. Source integration stores commit SHA, PR URL,
   and commentary only. Typed Wormhole project records may be tracked beneath
   `.wormhole/`; source bodies may not.
-- Tracked `.wormhole/` files are repository-visible project content, visible to
-  every principal with Git access; they are never credentials or authority.
+- Tracked `.wormhole/` files are structurally eligible repository-visible project
+  content, visible to every principal with Git access; they are never credentials or
+  authority. Secret-shape validation is not confidentiality detection. Trusted
+  machine-private `public_git` classification (canonical or fork) warns, and checkpoint
+  requires an exact attributed publication-review digest
+  acknowledgement from either CLI or MCP; Wormhole makes no DLP claim.
+  Classification is explicit user policy bound to workspace/repository identity, not
+  continuous host-visibility detection; repository-identity changes invalidate it and
+  same-identity visibility changes require explicit setup reconfiguration.
   Machine-private state and secrets stay outside the repository.
 - All project-scoped Fabric data is protected by Postgres RLS. Only explicitly
   project-agnostic principal, authenticator, and agent records, plus explicitly
@@ -108,10 +119,18 @@ schema as shipped until its implementation and contract checks pass.
 - Localstore queries require explicit project namespace and workspace scope.
   Add cross-namespace and cross-workspace tests for localstore changes.
 - Local writes become durable before sync. Ephemeral presence/heartbeat events stay in
-  eventbus; durable state uses localstore and a restart-surviving sync queue.
+  eventbus. Generic task/channel/progress/runtime activity is operational and never
+  automatically becomes `EventV1`; explicit source-bound promotion alone makes selected
+  audit evidence portable. Promotion copies the source event projection exactly, keeps
+  the source actor in `EventV1`, and records the distinct promoter on `OperationV1`.
+  Ordinary activity expires when older than 30 days or outside the newest 10,000
+  unprotected workspace rows; lifecycle evidence is excluded until terminal, then uses
+  an exact 30-day default or a finite advertised longer duration.
 - Passport tokens and credentials are secrets. Do not log them. Server stores token
   hashes. Keep socket and credential file permissions restrictive.
-- Humans and agents have parity for project operations through CLI and MCP.
+- Humans and agents have equivalent authorised project operations through CLI and MCP,
+  while typed schemas, progressive disclosure, autonomous durability, attribution, and
+  handoff remain agent-first.
   Human authentication, ownership transfer, credential recovery, membership,
   and policy administration remain human control-plane operations.
 - Git/Fabric divergence uses semantic three-way rebase with explicit conflicts;

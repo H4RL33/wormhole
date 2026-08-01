@@ -175,8 +175,9 @@ checkout/worktree and materialises an uncommitted candidate through deterministi
 compare-and-swap checkpoints. Checkpoint alone never advances the base. Gateway
 may connect different workspaces to
 different Fabrics, but each workspace has at most one writable stream. Git is the
-sole code truth and accepts project-state changes. Fabric accelerates live
-collaboration without overwriting divergent Git state. The four Core pillars remain
+sole code truth and accepts explicitly curated portable project-state changes.
+Gateway/Fabric own finite-retention operational collaboration without overwriting
+divergent Git state. The four Core pillars remain
 Event Bus, Task Graph, Knowledge Base, and Identity & Permissions. Governance is
 optional and must not leak into Core.
 
@@ -248,8 +249,20 @@ the same layering pattern and isolation discipline.
 - LR1: `internal/runtime/*` packages never import `internal/core/*` or `internal/mcp`. Local storage and coordination are strictly separated.
 - LR2: `internal/runtime/localapi` may import all other `internal/runtime/*` packages (it wires them together). Other runtime packages may not import `localapi`.
 - LR3: `internal/runtime/localstore` repository methods enforce project and workspace isolation by construction: every query is scoped through mandatory parameters, never inferred from ambient state. Every change ships cross-project and cross-workspace rejection tests.
-- LR4: Ephemeral events (presence, heartbeats) are eventbus-only; durable events (task/KB changes) go through localstore. Never persist ephemeral state.
-- LR5: Sync queues are SQLite-backed, restart-surviving, and keyed by explicit Fabric instance/project/stream binding. Local writes become durable before sync; one Fabric failure never blocks local work or another binding.
+- LR4: Ephemeral presence/heartbeats are eventbus-only. Task-transition notifications,
+  progress, generic channel activity, runtime attribution, subscriptions, telemetry, and
+  uncurated discoveries use the operational activity store, never automatic `EventV1`
+  operations. Task definition/owner/portable candidate status may use `OperationV1`.
+  Explicit promotion alone strict-binds a source activity ID/digest into portable
+  audit evidence.
+- LR5: Sync queues are SQLite-backed, restart-surviving, and keyed by explicit Fabric
+  instance/project/stream binding. Local writes become durable before sync; one Fabric
+  failure never blocks local work or another binding. Nonterminal queues, conflicts,
+  recovery state, and receipts are excluded from age/rank pruning. After terminal the
+  exact default retention is 30 days; a configured longer value must remain finite.
+  Ordinary activity is eligible when it is older than 30 days **or** falls outside the
+  newest 10,000 unprotected workspace rows, and is pruned deterministically in
+  `(created_at, activity_id)` ascending order. Protected rows may exceed the cap.
 - LR6: Code Graph is Gateway-local derivative state. Dependencies are `store` →
   `config`, `index` → `config`/`golang`/`store`, and `query` →
   `config`/`source`/`store`; none imports `localapi`, `sync`, Core, or MCP.
@@ -346,9 +359,14 @@ the same layering pattern and isolation discipline.
   `timestamptz NOT NULL DEFAULT now()` timestamps, `text` not `varchar`, `jsonb` with
   `DEFAULT '[]'` for list-shaped columns, snake_case names, header comment citing the
   RFC section.
-- D5: Append-only tables (`events`, `audit_log`, future Constitution versions): no
-  UPDATE or DELETE statements against them anywhere in application code. Corrections
-  are new rows.
+- D5: Append-only means no semantic update or in-place correction. Portable accepted
+  history remains in Git. Operational activity may be deleted only by the policy-owned
+  pruning transaction after eligibility: ephemeral presence is not persisted; ordinary
+  activity becomes eligible when older than 30 days **or** outside the newest 10,000
+  unprotected workspace rows and is pruned by `(created_at, activity_id)` ascending;
+  lifecycle rows are excluded until terminal, then retained for exactly 30 days by
+  default or a configured longer finite duration. Protected rows may make the cap
+  exceed. No caller or generic CRUD path may update/delete append-only evidence.
 - D6: KB embeddings live in Fabric's Postgres pgvector datastore, in the
   project-scoped `kb_article_embeddings` generation table; an approved remote
   provider may compute vectors but is never the vector datastore. The legacy
@@ -417,11 +435,19 @@ the same layering pattern and isolation discipline.
 ## 8. Pillar-Specific Constraints
 
 ### Events / Channels
-- Typed events first: `event_type` from the RFC vocabulary
+- Operational activity is typed first: `event_type` from the RFC vocabulary
   (`task.status_changed`, `review.requested`, `build.failed`, `discovery.logged`,
   `message.posted`), typed `payload` jsonb per type, optional free-text `note`.
   `message.posted` is the escape hatch; do not add prose-first event types.
 - New event types are an escalation, not a local decision.
+- Generic channel posts/status, progress, and task transition notifications are
+  `ActivityV1`, not portable `EventV1`. Explicit promotion creates the latter with exact
+  extension key `dev.wormhole.promotion` and schema-version-1 data containing only
+  `source_activity_id` and `source_activity_digest`.
+- Promotion accepts only a complete promotable-event projection. `EventV1` channel,
+  source actor, type, payload, note, and creation time are exact deep-owned source copies;
+  `OperationV1.Actor` is the distinct promoter. Caller-selected semantics, attribution,
+  or extra extensions reject the operation.
 - Durable Fabric change discovery uses Postgres-backed polling by Gateway
   (RFC-0001 §15). Harnesses consume local SQLite/runtime state over
   MCP IPC. Ephemeral local notifications and the in-memory eventbus are
@@ -432,7 +458,8 @@ the same layering pattern and isolation discipline.
 ### Tasks
 - Hierarchy is Project → Task → Subtask via `parent_task_id`. Status enum exactly
   `todo / wip / blocked / done`. Transitions go through a validated state machine and
-  emit `task.status_changed` on the bus in the same operation — never a separate sync.
+  atomically update portable task state and append operational `task.status_changed`
+  activity through the Task-7-gated seam. They never automatically create `EventV1`.
 - Links to KB articles / commits / PRs / events go through `task_links`, not ad hoc
   columns.
 
@@ -540,6 +567,29 @@ the same layering pattern and isolation discipline.
 
 ### Portable state replay, diff, and merge
 
+- Task 7/domain projection is hard-blocked until a focused approved plan freezes
+  `000003_workspace_activity.sql`, strict `ActivityV1`, finite effective-policy storage,
+  atomic terminal/pruning rules, and the promotion receipt seam. Promotion must use one
+  ProjectState-owned immediate transaction to strict-read an exact source activity ID and
+  digest, append an attributed `EventV1` `OperationV1` with extension key
+  `dev.wormhole.promotion` and schema-version-1 data containing only
+  `source_activity_id` and `source_activity_digest`, and atomically mark/receipt that
+  source. It must not nest `ApplyBatch`.
+- Trusted machine-private setup/workspace state classifies publication as exactly
+  `unclassified`, `local_only`, `public_git`, or `private_git`, independently of
+  canonical/fork routing and Fabric mode. A public fork is `public_git`. A caller, actor
+  assurance, or copied remote hint never selects classification. Unclassified workspaces
+  permit status/diff but not checkpoint.
+  Status/diff bind project/repository/classification, candidate tree, canonical semantic
+  diff, and Git/base inputs into the publication-review digest. `public_git`
+  checkpoint accepts that exact digest (not a boolean), rechecks it before staging, and
+  persists the exact acknowledging actor/digest in the prepared journal/receipt. CLI and
+  MCP are equivalent.
+- Classification is explicit user policy, not continuous host-visibility evidence. Bind
+  it to the exact workspace/repository identity, invalidate it after an identity/origin
+  change, surface it on status/diff, and require explicit reconfiguration for a
+  same-identity visibility change; never add an implicit network visibility probe.
+
 - Persisted operation JSON is untrusted. Decode it only with the shared strict
   `projectstate.DecodeOperation`, reject non-canonical bytes, trailing JSON, unknown
   fields, malformed envelopes/payloads, invalid IDs/digests, and any row-ID/operation-ID
@@ -579,8 +629,13 @@ the same layering pattern and isolation discipline.
   All and only rows attributed by `stashed_by_stash_id` must match those arrays byte for
   byte. Portable transitions own Gateway
   migration `000002_portable_transitions.sql` and `GatewaySchemaVersion = 2`; committed
-  `000001` is immutable, Code Graph invalidation is `000003`, and multi-Fabric routing/
-  sync are `000004`/`000005`. Restore must prove `Compose(selectedStart,boundary,operations)` equals the
+  `000001`/`000002` are immutable. Mandatory portable-plan Task 6A owns append-only
+  `000003_workspace_activity.sql` after its focused operational activity/retention/
+  promotion artifact is reviewed and explicitly approved. Task 7 and migration 4 are
+  blocked until the reviewed v3 implementation commit lands. Multi-Fabric
+  routing/sync own `000004`/`000005`; the later, separately gated Code Graph branch
+  consumes that schema and owns `000006_invalidate_legacy_codegraph.sql`. Restore must
+  prove `Compose(selectedStart,boundary,operations)` equals the
   recorded composed tree, then call `ThreeWayRebase(sourceBase,current,stashComposed)`.
   Already-rebased rows at/below the boundary and later active rows move to terminal
   owner-attributed stashed state in their respective envelope arrays. Stash rejects any open

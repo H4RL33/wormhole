@@ -28,13 +28,15 @@
   explicit initial through-generation, the current rebased prefix, and the later active
   suffix in separate canonical arrays. Both arrays become terminal stashed rows owned by
   that stash ID; clean restore never reclassifies them.
-- Events and Git links are live-only immutable add-only records. Exact canonical
+- Portable `EventV1` records and Git links are live-only immutable add-only records. Exact canonical
   same-ID replay is idempotent; unequal same-ID content uses one generic immutable-
   record error/conflict/direct-delta contract. Neither kind has tombstone or
   resurrection semantics.
 - Snapshot version, project ID, and repository identity are immutable binding fields.
   Config.Handle and Remotes are Git-base-owned and never overlay-owned.
 - Focused RED precedes implementation, GREEN precedes each commit, and final merged statement coverage remains at least 80%.
+- V1 is agent-first and project/repository-lineage scoped. CLI/MCP parity means equivalent
+  authorised operations, not organisation-wide state or equal interface weighting.
 - No new dependency, ORM, singleton, init registration, panic control flow, project hook execution, repository-provided executable, or implicit network request.
 
 ---
@@ -739,7 +741,7 @@ Expected: FAIL because migration, repositories, and service are absent.
 
 - [ ] **Step 2: Implement migration, repositories, safe tree reader, and registration**
 
-Embed internal/runtime/localstore/migrations/*.sql and expose const GatewaySchemaVersion = 1 plus func applyGatewayMigrations(ctx context.Context, db *sql.DB) error. The function acquires one dedicated connection, executes BEGIN IMMEDIATE, creates and shape-checks gateway_schema_migrations, rejects a recorded version greater than GatewaySchemaVersion, applies each missing numbered file once, inserts its version row, and commits. Any DDL or ledger-write failure rolls back the entire version. This ledger name and API are the only Gateway SQLite migration mechanism. Task 4 advances it with `000002_portable_transitions.sql`; Slice B Code Graph invalidation uses `000003`, and Slice C multi-Fabric routing/sync uses `000004` and `000005`. No slice creates another ledger or reuses a number.
+Embed internal/runtime/localstore/migrations/*.sql and expose const GatewaySchemaVersion = 1 plus func applyGatewayMigrations(ctx context.Context, db *sql.DB) error. The function acquires one dedicated connection, executes BEGIN IMMEDIATE, creates and shape-checks gateway_schema_migrations, rejects a recorded version greater than GatewaySchemaVersion, applies each missing numbered file once, inserts its version row, and commits. Any DDL or ledger-write failure rolls back the entire version. This ledger name and API are the only Gateway SQLite migration mechanism. Task 4 advances it with `000002_portable_transitions.sql`. Mandatory Task 6A owns `000003_workspace_activity.sql` after its focused activity/retention/promotion artifact is reviewed and approved; Task 7 and every migration-4 consumer wait for its reviewed implementation commit. Multi-Fabric routing/sync own `000004`/`000005` on the issue-56 path, and the later Code Graph branch owns `000006`. No slice edits committed `000001` or `000002`, creates another ledger, or reuses a number.
 
 Extend the existing SQLite DSN with `_pragma=synchronous(FULL)` while retaining WAL and the busy timeout, so every pooled and dedicated connection uses the same durability setting. `TestGatewaySQLiteSynchronousFull` opens and reopens a file-backed Store, checks `PRAGMA journal_mode` is `wal` and `PRAGMA synchronous` is `2` on both the ordinary database handle and a newly acquired dedicated connection, and proves a committed migration-ledger row survives reopen. Later journal preparation transactions rely on SQLite's WAL/FULL commit guarantee; they must not manually fsync the main database file while committed bytes may reside in the WAL.
 
@@ -2567,6 +2569,33 @@ git add internal/runtime/projectstate internal/runtime/localstore/workspace_repo
 git commit -m "feat: import and observe portable workspace state"
 ~~~
 
+### Hard gate before Task 5: trusted publication classification and review CAS
+
+Task 5 is blocked until a focused approved amendment freezes the machine-private
+workspace publication-classification record/API and publication-review digest codec.
+The service—not the caller—must resolve exactly `unclassified`, `local_only`,
+`public_git`, or `private_git`; caller arguments, actor assurance, canonical/fork status,
+Fabric mode, and copied hints are never classification authority. A public fork is
+`public_git`. Classification is explicit user policy bound to the exact workspace and
+repository identity, not continuous host-visibility detection. An origin/repository
+identity change invalidates it to `unclassified`; a same-identity visibility change
+requires explicit reconfiguration and invalidates earlier review digests. Unclassified
+permits status/diff but blocks checkpoint. Status/diff must
+return an exact digest over a versioned canonical envelope
+binding project/repository/classification, accepted ref/commit/tree, candidate tree,
+canonical semantic diff, and overlay generation.
+
+`public_git` checkpoint arguments carry that exact digest, never a boolean. The
+service recomputes and compare-and-swaps it before staging, journal creation, or
+publication, then persists the exact acknowledging actor and digest in the durable
+prepared checkpoint journal/receipt. Missing/stale/mismatched acknowledgement returns a
+zero result with zero filesystem/database mutation. CLI and MCP have the same capability.
+`local_only` and `private_git` follow their respective Git boundary. Tests must cover
+public-fork `public_git`, private resolution, identity-change invalidation, explicit
+same-identity reclassification, forged mode/assurance/hint, unclassified inspect/diff versus
+checkpoint, human and agent acknowledgement parity, stale semantic diff/candidate/base/
+classification, restart receipt fidelity, and zero staging/journal/publication.
+
 ### Task 5: Checkpoint CAS, Linux exchange, durable fallback, and recovery
 
 **Files:**
@@ -2590,6 +2619,7 @@ type CheckpointRequest struct {
     Scope types.WorkspaceScope
     Root string
     ExpectedWorkingTreeDigest projectstate.Digest
+    PublicationReviewDigest *projectstate.Digest
     Actor types.ActorEnvelope
 }
 type CheckpointResult struct {
@@ -2615,7 +2645,11 @@ Checkpoint algorithm:
    `CheckpointResult{}` plus `ErrCheckpointPendingAcceptance` before filesystem staging
    or database mutation. More than one is corruption. A checkpoint never supersedes an
    unaccepted journal.
-2. Validate scope/root/actor; read allowed live tree; require digest equals ExpectedWorkingTreeDigest.
+2. Validate scope/root/actor; privately resolve the trusted publication classification;
+   reject unclassified; read the allowed live tree; require digest equals
+   ExpectedWorkingTreeDigest; compute the exact semantic diff/publication-review digest;
+   and, for `public_git`, require exact equality with PublicationReviewDigest before
+   staging or mutation. Caller data never selects classification.
 3. Strict-decode/import the valid direct tree, select the explicit Compose start and
    initial generation, DecodeOperation every later active row, compose, and reject any
    open conflict before staging by calling `tx.HasOpenConflicts(ctx)` inside the same
@@ -2633,7 +2667,9 @@ Checkpoint algorithm:
    ID, canonical operation bytes including the final LF encoded as a JSON string, and
    prepublication `active` or `rebased` state. Strict decoding reconstructs those bytes
    and requires exact equality with both `CanonicalOperation(decoded)` and the database
-   row; store the envelope in `included_operations_json`. Both `expected_live_digest` and
+   row; store the envelope in `included_operations_json`. For `public_git` the
+   same prepared record/receipt also stores the exact acknowledging actor and matching
+   publication-review digest. Both `expected_live_digest` and
    `prior_tree_digest` must equal the recomputed digest of the complete canonical prior
    tree. Commit the first transaction before filesystem publication on the
    Task-2 WAL connection whose mandatory `synchronous=FULL` policy durably syncs the
@@ -2645,7 +2681,9 @@ Checkpoint algorithm:
    canonical included-operation envelope and every exact listed row/state, absence of
    omitted or unexpected included rows or changed later generations, and
    `tx.HasOpenConflicts(ctx)`. Any mismatch rolls back with no publication; an open
-   conflict returns `CheckpointResult{}` plus `localstore.ErrWorkspaceConflicted`.
+   conflict returns `CheckpointResult{}` plus `localstore.ErrWorkspaceConflicted`. It
+   privately re-resolves classification and recomputes/rechecks the exact publication
+   review envelope and persisted acknowledgement before any publication.
 8. Hold that second immediate transaction across filesystem publication and the complete
    database finalization. Linux exchanges live `.wormhole` and stage with `renameat2`
    `RENAME_EXCHANGE`, renames the old tree to backup, and fsyncs the parent. Darwin uses
@@ -2814,7 +2852,7 @@ func (r *WorkspaceRepo) LatestLegacyIntegrationMigration(context.Context, types.
 func (r *WorkspaceRepo) TransitionLegacyIntegrationMigration(context.Context, types.WorkspaceScope, sourceDigest, fromOutcome, toOutcome, detail string) (LegacyIntegrationMigrationRow, error)
 ~~~
 
-Every method verifies the exact binding and scopes every query by project and workspace. Prepare owns one immediate transaction: safe tracked/untracked preparations require non-empty validated compatible StateJSON and atomically upsert `integration_manifest_project_state` plus the migration row; `ignored_unsafe` records no state JSON. Transition is a compare-and-swap on source digest and prior outcome. Pending lookup uses the unique partial index. Latest terminal lookup orders `updated_at DESC, source_digest DESC`, so historical rows are never selected nondeterministically.
+Every method verifies the exact binding and scopes every query by project and workspace. Prepare owns one immediate transaction: structurally eligible tracked/untracked preparations require non-empty validated compatible StateJSON and atomically upsert `integration_manifest_project_state` plus the migration row; `ignored_unsafe` records no state JSON. Transition is a compare-and-swap on source digest and prior outcome. Pending lookup uses the unique partial index. Latest terminal lookup orders `updated_at DESC, source_digest DESC`, so historical rows are never selected nondeterministically.
 
 `ErrLegacyStateRetained` is the general checkpoint blocker for any exact legacy file still present. `ErrTrackedLegacyState` wraps it for the tracked-source result, so `errors.Is` matches both. The owner-only XDG backup root is an injected trusted Service dependency; no public request supplies or overrides it.
 
@@ -2822,7 +2860,7 @@ Exact behavior:
 
 - Read exact .wormhole/integration-state.json with descriptor-relative no-follow, single-link regular-file checks; reject credential-shaped keys and project mismatch.
 - Query tracked status read-only with git ls-files --error-unmatch -- .wormhole/integration-state.json using GIT_OPTIONAL_LOCKS=0. Never run git add, rm, update-index, checkout, commit, or clean.
-- A safe tracked source atomically writes the compatible private integration state and `migrated_tracked_source_retained` row before returning ErrTrackedLegacyState. A restart test reopens the Store and proves both records committed together while source bytes and Git index remain unchanged.
+- A structurally eligible tracked source atomically writes the compatible private integration state and `migrated_tracked_source_retained` row before returning ErrTrackedLegacyState. A restart test reopens the Store and proves both records committed together while source bytes and Git index remain unchanged.
 - For an untracked safe file, first persist the compatible private integration state plus an `imported_move_pending` migration row in one WAL/FULL transaction. The row contains the source digest and deterministic owner-only XDG workspace `backup_path`; `detail` is a non-sensitive reason code. Commit before copying, renaming, or unlinking source bytes.
 - Complete the pending move by copying through an owner-only temporary backup file, fsyncing the file, no-replace renaming it to the deterministic backup path, and fsyncing the backup directory. A pre-existing exact-digest backup is reusable; another type or digest blocks recovery. Revalidate the held source identity/digest and read-only tracked status. If it became tracked, retain it and transition to `migrated_tracked_source_retained`. Otherwise descriptor-relatively unlink only that exact source, fsync its parent, then CAS-update the pending row to `migrated_and_moved` in a second transaction. Cross-filesystem rename is never assumed.
 - Reconcile an existing pending row before requiring the source to exist: source exact/backup absent creates the backup; source exact/backup exact unlinks and finalizes; source absent/backup exact only finalizes. Unexpected type, identity, bytes, digest, or both paths absent fails closed and retains the row/evidence. An ambiguous final database commit is read back on a fresh connection. Failure after the first commit returns `LegacyImportedMovePending`, its BackupPath, and the error; no premature final outcome is exposed.
@@ -2867,6 +2905,93 @@ git add internal/runtime/projectstate internal/runtime/localapi internal/runtime
 git commit -m "fix: retire tracked integration state projection"
 ~~~
 
+### Task 6A: Implement workspace activity, finite retention, and explicit promotion
+
+This is a mandatory sequential implementation task after Task 6 and before Task 7. It
+owns Gateway migration `000003_workspace_activity.sql` and the local operational seam;
+multi-Fabric migrations `000004`/`000005` may consume version 3 only after this task's
+reviewed commit lands. The optional Code Graph branch remains later at `000006`.
+
+**Required approved artifact:**
+`docs/superpowers/plans/2026-08-01-workspace-activity-retention-promotion-implementation-plan.md`.
+That focused plan must be written, independently reviewed, and explicitly approved before
+this task's RED step. It must declare the exact files and APIs, including ownership of:
+
+- Create: `internal/runtime/localstore/migrations/000003_workspace_activity.sql`
+- Modify: `internal/runtime/localstore/migrations.go`
+- Modify: `internal/runtime/localstore/migrations_test.go`
+- Create/modify: the strict stdlib-only `ActivityV1`/effective-policy types selected by
+  the approved artifact
+- Create/modify: localstore activity, retention, terminal/pruning, and promotion-receipt
+  repositories selected by the approved artifact
+- Create/modify: the ProjectState-owned promotion service and causal tests selected by
+  the approved artifact
+
+**Produces:** one reviewed commit that advances the sole
+`GatewaySchemaVersion` from 2 to 3, installs the strict workspace-scoped ActivityV1 store
+and finite policy, implements atomic terminal/pruning transactions, and implements the
+single explicit activity-to-EventV1 promotion boundary. The commit must include causal
+RED evidence, focused GREEN, restart/isolation/race/fault tests, migration rollback and
+fresh/v2→v3 upgrade proof, `git diff --check`, and `make check` at the approved coverage
+floor. The SDD ledger records the artifact approval, base/head SHAs, test evidence, and
+fresh review approval. No placeholder schema or partial v3 ledger advance may land.
+
+#### Design approval gate
+
+Before this task's RED step, the focused approved artifact must freeze
+`000003_workspace_activity.sql`, `ActivityV1`, exact repository/service interfaces, the
+effective-policy handshake, terminal/pruning transactions, and public schemas. The gate
+must prove all of the following before Task 7 becomes executable:
+
+- task definition, owner, and portable task status use the version-one Snapshot and
+  `OperationV1`; transition notifications/history, progress, generic channel activity,
+  presence, runtime attribution, subscriptions, telemetry, and uncurated discoveries do
+  not;
+- presence is restart-discardable; ordinary activity is eligible when older than 30 days
+  OR outside the newest 10,000 unprotected workspace rows and is pruned deterministically
+  by `(created_at, activity_id)` ascending; pending queues/conflicts/recovery/receipts are
+  excluded until terminal, then default to exactly 30 days with only finite configured
+  longer durations, so protected rows may make the cap exceed;
+- Gateway/Fabric expose an effective finite policy before live activity is accepted;
+- generic task/channel activity cannot construct `EventV1`; promotion accepts only a
+  complete promotable-event projection and uses one ProjectState service-owned immediate
+  transaction to strict-read the canonical source activity/digest. The stable event ID is
+  promotion-owned; channel, source actor, type, payload, note, and creation time are exact
+  deep-owned copies; `OperationV1.Actor` is the distinct promoter; caller-selected
+  semantics, attribution, or extensions reject. The event's sole extension is
+  `dev.wormhole.promotion`, with schema-version-1 data containing only
+  `source_activity_id` and `source_activity_digest`; the transaction atomically records
+  event/operation/promoter/source-digest proof without nesting `ApplyBatch`; and
+- pruning/expiry cannot mutate the accepted base, candidate, overlay, checkpoint, or any
+  portable operation.
+
+The approved artifact and implementation must include causal RED/GREEN, restart,
+isolation, cap/age, protected-row,
+promotion replay/collision, actor attribution, rollback-at-every-write, and CLI/MCP parity
+tests. Neither the current codec nor a legacy event table satisfies this gate. Task 7
+must fail closed at its dependency check unless migration version 3 and the exact approved
+ActivityV1/promotion interfaces are present.
+
+- [ ] **Step 1: Write, review, and obtain explicit approval for the required focused artifact.**
+
+Record its review and approval in the SDD ledger. Do not create migration `000003` before
+that record exists.
+
+- [ ] **Step 2: Run the artifact's causal RED suite.**
+
+The RED must fail because migration version 3 and/or one named ActivityV1, retention,
+terminal/pruning, or promotion boundary is absent—not because of an unrelated compile or
+fixture defect.
+
+- [ ] **Step 3: Implement only the approved v3 schema and seams, then run focused GREEN,
+race, rollback, restart, isolation, and fault tests.**
+
+- [ ] **Step 4: Run `make check`, obtain fresh implementation and security reviews, and
+commit exactly the artifact-declared files.**
+
+The commit message is `feat(localstore): add workspace activity`. Verify the exact commit
+SHA and update the SDD ledger before Task 7 or any migration-4 consumer begins.
+
 ### Task 7: Snapshot-backed pillar projection and bound local domain adapters
 
 **Files:**
@@ -2899,8 +3024,8 @@ func (d *WorkspaceDomain) UpdateTaskStatus(context.Context, types.WorkspaceBindi
 func (d *WorkspaceDomain) RouteTask(context.Context, types.WorkspaceBinding, types.ActorEnvelope, taskRouteArgs, string, string) (localTaskRouteResult, error)
 func (d *WorkspaceDomain) ListChannels(context.Context, types.WorkspaceBinding, channelListArgs) (localChannelListResult, error)
 func (d *WorkspaceDomain) CreateChannel(context.Context, types.WorkspaceBinding, types.ActorEnvelope, channelCreateArgs) (localChannelWriteResult, error)
-func (d *WorkspaceDomain) ListChannelEvents(context.Context, types.WorkspaceBinding, channelEventsArgs) (localEventListResult, error)
-func (d *WorkspaceDomain) PostChannelEvent(context.Context, types.WorkspaceBinding, types.ActorEnvelope, channelPostArgs) (localEventWriteResult, error)
+// Activity/promotion interfaces are supplied by the required gate amendment; they may
+// not be inferred from these portable projection interfaces.
 func (d *WorkspaceDomain) ListArticles(context.Context, types.WorkspaceBinding, kbListArgs) (localArticleListResult, error)
 func (d *WorkspaceDomain) GetArticle(context.Context, types.WorkspaceBinding, kbGetArgs) (localArticleResult, error)
 func (d *WorkspaceDomain) WriteArticle(context.Context, types.WorkspaceBinding, types.ActorEnvelope, kbWriteArgs) (localArticleWriteResult, error)
@@ -2911,17 +3036,41 @@ func (d *WorkspaceDomain) LinkCommit(context.Context, types.WorkspaceBinding, ty
 type localTaskStatusResult struct {
     TaskID string `json:"task_id"`
     Status string `json:"status"`
-    EventID string `json:"event_id"`
+    ActivityID string `json:"activity_id"`
 }
 ~~~
 
-Projection calls Compose and never reads the legacy tasks, kb_articles, channels, durable_events, git_links, or replica repository APIs. It is not separately persisted, so it is rebuildable exactly from accepted_snapshot, candidate, and operations after restart and cannot drift transactionally. Reads return sorted live records from the composed snapshot; tombstones are omitted. Every mutation validates binding and actor.ValidateLocalAction, builds only canonical projectstate.OperationV1 values, and persists through Apply/ApplyBatch. UUIDv4 IDs and UTC timestamps are generated inside the domain. UpdateTaskStatus generates one EventID, builds an updated TaskV1 operation followed by an immutable EventV1 operation whose ExpectedViewDigest is the digest after the task operation, calls Service.ApplyBatch once, and returns that same EventID in localTaskStatusResult; neither record may persist alone. Thus the seven public mutating pillar tools produce eight durable operations. Route writes the final assigned TaskV1 after scheduler selection; post publishes ephemeral notification only after the event operation is durable. Supplied agent_id fields never override the resolved actor. Existing legacy tables/repositories are migration/read-only and no handler may dual-write or fall back to them.
+Projection calls Compose and never reads the legacy tasks, kb_articles, channels,
+durable_events, git_links, or replica repository APIs. It is not separately persisted,
+so it is rebuildable exactly from accepted_snapshot, candidate, and operations after
+restart and cannot drift transactionally. Reads return sorted live portable records from
+the composed snapshot; tombstones are omitted. Every portable mutation validates binding
+and actor.ValidateLocalAction, builds only canonical projectstate.OperationV1 values, and
+persists through Apply/ApplyBatch. UUIDv4 IDs and UTC timestamps are generated inside the
+domain. UpdateTaskStatus writes the updated `TaskV1` portable task state and, through the
+gate-frozen atomic seam, appends operational transition activity; it never constructs
+`EventV1`. Generic channel post/list use the gate-frozen activity seam and create zero
+portable operations. Explicit promotion is the sole activity-to-`EventV1` path. Route
+writes the final assigned `TaskV1` after scheduler selection. Supplied agent_id fields
+never override the resolved actor. Existing legacy tables/repositories are migration/
+read-only and no handler may dual-write or fall back to them.
 
-The conversion inventory is exact: wormhole.task.list/get/create/update_status/route; wormhole.channel.list/create/events/post; wormhole.kb.list/get/write; and wormhole.git.link_commit. internal/runtime/localapi/localapi.go delegates those handler bodies to WorkspaceDomain and removes direct TaskRepo, KBRepo, EventRepo, GitRepo, and sync-queue writes. wormhole.channel.subscribe remains ephemeral delivery sourced from post-commit eventbus publication, and wormhole.kb.search remains an authenticated Fabric proxy; neither is a local durable read/write bypass.
+The portable conversion inventory is task list/get/create/update_status/route, channel
+list/create, KB list/get/write, and Git link_commit. The gate amendment owns channel
+events/post, transition activity, subscription wake-up, retention, and explicit
+promotion; those paths must use its ActivityV1 repositories/services rather than a
+portable or legacy EventV1 write. `internal/runtime/localapi/localapi.go` removes direct
+legacy TaskRepo, KBRepo, EventRepo, GitRepo, and sync-queue write authority. KB search
+remains a binding-scoped Fabric call and is not a local durable bypass.
 
 - [ ] **Step 1: Write RED projection, restart, mutation-visibility, and isolation tests**
 
-For each mutation tool above, use canonical UUID literals and assert: its typed OperationV1 is present after restart; Diff reports the mutation; Checkpoint output contains it; the same read tool returns it from Projection; another canonical project/workspace UUID cannot see it; and panic-on-use legacy repositories remain untouched. TestTaskUpdateStatusAppendsTaskAndEventAtomically asserts ApplyBatch receives exactly two chained operations, the EventV1.ID equals the returned localTaskStatusResult.EventID, and injected failure before either batch insert leaves both absent. Also add TestProjectionRebuildsAfterRestart, TestEveryLocalPillarHandlerUsesWorkspaceDomain, and TestNoLegacyReplicaWriteBypass.
+For each portable mutation tool above, use canonical UUID literals and assert its typed
+OperationV1 is present after restart; Diff reports it; Checkpoint contains it; Projection
+returns it; another scope cannot see it; and legacy repositories remain untouched. The
+gate amendment owns atomic task-status/activity and promotion tests. Also add
+TestProjectionRebuildsAfterRestart, TestEveryLocalPillarHandlerUsesWorkspaceDomain, and
+TestNoLegacyReplicaWriteBypass.
 
 Run: go test ./internal/runtime/projectstate ./internal/runtime/localapi -run 'Test(Projection|EveryLocalPillar|NoLegacyReplica|TaskUpdateStatus|Task|Channel|KB|Git).*Workspace' -count=1
 Expected: FAIL because Projection and bound adapters are absent.
@@ -2958,7 +3107,10 @@ git commit -m "feat: project local tools from portable state"
 type WorkspaceStatusArgs struct{}
 type WorkspaceDiffArgs struct{}
 type WorkspaceImportArgs struct { ExpectedWorkingTreeDigest *projectstate.Digest `json:"expected_working_tree_digest,omitempty"` }
-type WorkspaceCheckpointArgs struct { ExpectedWorkingTreeDigest projectstate.Digest `json:"expected_working_tree_digest"` }
+type WorkspaceCheckpointArgs struct {
+    ExpectedWorkingTreeDigest projectstate.Digest `json:"expected_working_tree_digest"`
+    PublicationReviewDigest *projectstate.Digest `json:"publication_review_digest,omitempty"`
+}
 type WorkspaceStashArgs struct { Label string `json:"label"` }
 func (d *WorkspaceDomain) Status(context.Context, types.WorkspaceBinding, WorkspaceStatusArgs) (runtimeprojectstate.WorkspaceStatus, error)
 func (d *WorkspaceDomain) Diff(context.Context, types.WorkspaceBinding, WorkspaceDiffArgs) (runtimeprojectstate.Diff, error)
@@ -2971,7 +3123,18 @@ func runWorkspaceCommand(context.Context, string, []string, io.Writer, io.Writer
 
 Mutations call ValidateLocalAction. Every adapter validates the binding, requires the registered checkout path/device/inode to match, and copies only binding-derived scope/root plus operation-specific args. Runtime startup calls Recover before RefreshWorkspace for every RegisteredWorkspaces result. Runtime calls RefreshWorkspace before every later scoped operation except that Stash may proceed only after ErrBranchSwitchPending and must be followed immediately by successful RefreshWorkspace plus Recover on the refreshed scope. RestoreStash stays private.
 
-Public MCP names remain wormhole.workspace.status, wormhole.workspace.diff, wormhole.workspace.import, wormhole.workspace.checkpoint, and wormhole.workspace.stash with the already frozen routing-free schemas. Approved CLI names are top-level only: wormhole status, wormhole diff, wormhole import [--expected-working-tree-digest sha256:...], wormhole checkpoint --expected-working-tree-digest sha256:..., and wormhole stash --label <non-empty-label>. There is no wormhole workspace subcommand. No public argument accepts project_id, workspace_id, cwd, root, actor, Fabric profile, or credential; cwd appears only in the private WorkspaceContext bridge.
+Public MCP names remain wormhole.workspace.status, wormhole.workspace.diff,
+wormhole.workspace.import, wormhole.workspace.checkpoint, and wormhole.workspace.stash
+with routing-free schemas. Status/diff return the exact candidate and publication-review
+digests. Approved CLI names are top-level only: wormhole status, wormhole diff, wormhole
+import [--expected-working-tree-digest sha256:...], wormhole checkpoint
+--expected-working-tree-digest sha256:... [--publication-review-digest sha256:...], and
+wormhole stash --label <non-empty-label>. `public_git` callers must supply the exact
+digest, including public forks; `local_only`/`private_git` callers do not select their
+classification through this flag.
+There is no wormhole workspace subcommand. No public argument accepts project_id,
+workspace_id, cwd, root, actor, Fabric profile, classification, or credential; cwd appears
+only in the private WorkspaceContext bridge.
 
 - [ ] **Step 1: Write RED adapter and top-level parser tests**
 
@@ -3008,8 +3171,13 @@ Slice B injects/strips types.WorkspaceContext, calls Service.ResolveWorkingDirec
 5. Task 5 materializes a candidate with crash recovery while leaving base unchanged
    and blocks publication while Task-4 conflicts remain open.
 6. Task 6 removes the tracked/private legacy leak without touching the Git index.
-7. Task 7 replaces local pillar replica reads/writes with a rebuildable composed projection and typed-operation domain adapters.
-8. Task 8 adds binding-aware workspace operations and the five top-level CLI parsers; the downstream runtime/setup seam registers routes and updates every public inventory surface atomically.
+7. Mandatory Task 6A lands the reviewed migration-v3 ActivityV1, finite-retention, and
+   explicit-promotion implementation commit after its focused artifact is independently
+   reviewed and explicitly approved.
+8. Task 7 consumes those exact reviewed v3 interfaces and replaces local pillar replica
+   reads/writes with a rebuildable composed projection plus portable-operation and
+   operational-activity domain adapters.
+9. Task 8 adds binding-aware workspace operations and the five top-level CLI parsers; the downstream runtime/setup seam registers routes and updates every public inventory surface atomically.
 
 The runtime plan consumes WorkspaceContext, WorkspaceScope, WorkspaceBinding, RegisterWorkspaceResult, ResolveWorkingDirectory, RegisteredWorkspaces, RefreshWorkspace, registration, Status, Recover, observation results, Projection, and the single workspace.go domain; its private resolver returns the exact shared WorkspaceBinding and it exclusively owns bridge transport, Gateway wiring, and MCP registration. The setup/runtime plan modifies and stages the Slice-A-owned cmd/wormhole/workspace.go parser when it makes routes live. Slice D/Fabric consumes the exact shared internal/types ActorEnvelope, WorkspaceBinding, and RepositoryIdentity plus internal/types/projectstate Digest, DecodeTree(Tree), EncodeTree(Snapshot), Validate(Snapshot), DigestTree(Tree), DecodeOperation([]byte), CanonicalOperation(OperationV1), DigestCanonicalJSON, DigestCanonicalMarkdown, OperationV1, and ApplyOperation(Snapshot, OperationV1); it does not import runtime types or redefine canonical records/reducer/digest/strict-decoding logic. Slice E validates/creates public/private ActorEnvelope values through Validate; local issuance/writes use ValidateLocalAction, historical imports use ValidateHistorical, and neither rewrites legacy/unknown assurance.
 
@@ -3025,6 +3193,15 @@ Expected: PASS. The `make check` target includes the repository's merged atomic 
 check; its reported merged statement coverage must be at least 80%. A focused package
 command, a cached earlier run, or a passing build without this coverage result does not
 satisfy the final gate.
+
+The Slice-A acceptance fixture also proves status, diff, and import do not advance Git;
+checkpoint does not stage, commit, push, or advance the accepted base; unclassified and
+`public_git`-without-matching-digest checkpoints publish nothing; generic task/
+channel operational activity is absent from the candidate; checkpoint performs no
+implicit promotion; and only an explicitly promoted, source-bound `EventV1` appears in a
+second clean reconstruction after later Git acceptance. The later programme portable-loop
+gate adds real clone/setup/native-connector/Git-review/second-clone coverage before the
+branch can stop.
 
 ## Self-review
 
@@ -3058,7 +3235,12 @@ satisfy the final gate.
   Discard never does and a nonmatch blocks same-ref rebase/discard without new state;
   trusted rebase preserves provenance or uses only the fixed system token/time; and
   unknown non-discard COMMIT never infers a result or binding.
-- Projection/routing seam: all current local pillar reads/writes use Projection/OperationV1 with no legacy-table bypass; public args expose no project/workspace/cwd/root/actor data; Slice A owns both workspace.go files, and runtime/setup later modifies and stages them with private binding resolution, startup/request refresh, live routes, and atomic alpha inventory changes. CLI names are the top-level status/diff/import/checkpoint/stash forms only.
+- Projection/routing seam: portable pillar reads/writes use Projection/OperationV1;
+  generic activity uses the gated ActivityV1 seam and only explicit promotion produces
+  EventV1. Public args expose no project/workspace/cwd/root/actor/classification data;
+  Slice A owns both workspace.go files, and runtime/setup later modifies and stages them
+  with private binding resolution, startup/request refresh, live routes, and atomic alpha
+  inventory changes. CLI names are the top-level status/diff/import/checkpoint/stash forms.
 - Existing requirements remain covered: strict schemas/remotes/references/operation
   rows, explicit Compose start/generation, CandidateDigest/OverlayGeneration status,
   idempotent registration, correct isolation, conflict checkpoint/Fabric gates, durable

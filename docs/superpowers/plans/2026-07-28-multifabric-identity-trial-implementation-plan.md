@@ -4,9 +4,21 @@
 
 **Goal:** Implement Slices D, E, and F so each registered workspace can bind immutably to one Git-aware Fabric stream, public callers have key-continuity identification only, private actions derive authenticated human and accountable-agent provenance at the server, legacy alpha state migrates without authority invention, and issue #56 closes only from reviewed real four-VM evidence.
 
-**Architecture:** Slice A owns the canonical repository, workspace, actor, tree, snapshot, digest, and reducer contracts. Gateway schema version 5 adds explicit Fabric profiles and complete bindings while quarantining every legacy row that lacks immutable scope. Fabric persists every branch transition as canonical operation bytes plus the complete canonical `.wormhole/` tree and digest, reconstructs through the shared reducer, independently observes the exact GitHub commit, and derives all actor authority at the HTTP boundary before a handler runs.
+**Architecture:** Slice A owns portable repository, workspace, actor, tree, snapshot,
+digest, and reducer contracts. Gateway schema version 5 adds explicit Fabric profiles and
+complete bindings after the activity migration. Fabric may cache canonical
+portable proposal/accepted trees for validated reconstruction, but Git observation alone
+accepts them. Separate branch/stream-scoped `ActivityV1` transport/store/queue carries
+operational collaboration under finite retention; it is never `OperationV1` or complete-
+tree authority.
 
 **Tech Stack:** Go 1.26.5; standard-library Ed25519, SHA-256, JSON, HTTP, SQLite, and Postgres access; existing `modernc.org/sqlite`, `github.com/BurntSushi/toml`, and `golang-migrate`; after the explicit human approval gate only, `github.com/coreos/go-oidc/v3/oidc` v3.20.0 and `golang.org/x/oauth2` v0.36.0.
+
+**Branch gate:** This plan runs only on a separate branch after the portable-loop
+whole-branch review and explicit human go/no-go. Do not implement any task from this plan
+on the portable-loop branch. It does not consume the optional Code Graph branch; Code
+Graph remains disabled throughout the issue-56 trial and no Code Graph delivery claim is
+made.
 
 ## Global constraints
 
@@ -17,10 +29,19 @@
   digest, operation, decoder, or canonicalization types.
 - `internal/types/projectstate` may use the repository's existing `github.com/BurntSushi/toml`; other `internal/types` files remain standard-library-only.
 - Git remains code truth and tracked-state acceptance authority. Fabric stores Git metadata and canonical `.wormhole/` tree bytes, never repository source bodies.
+- Canonical tree bytes in Fabric are validated portable replicas/proposals, not
+  operational activity and not acceptance authority. Only independently observed Git on
+  the configured repository/ref accepts portable state.
+- Fabric must expose an effective finite retention policy before accepting `ActivityV1`:
+  presence is restart-discardable; ordinary activity becomes eligible when older than
+  30 days **or** outside the newest 10,000 unprotected workspace rows and is pruned in
+  `(created_at, activity_id)` ascending order; lifecycle evidence is excluded until
+  terminal, then retained for exactly 30 days by default or a configured longer finite
+  duration. Protected rows may exceed the cap. Expiry never mutates portable Git state.
 - One workspace has zero or one writable Fabric binding. Profile, Fabric instance, remote project, stream, repository, and canonical ref identifiers never retarget silently.
 - `fabric_profiles.credential_ref` is the sole Gateway authority for a Fabric credential reference. Bindings, cursors, queues, logs, and tracked hints contain no credential reference or raw secret.
 - A copied upstream hint whose immutable `origin` repository identity differs from the canonical identity causes zero upstream Fabric network calls, including discovery, DNS, authentication, and detach.
-- Version-1 sync compatibility means the existing v1 request structs, strict decode behavior, result JSON, error strings, handler behavior, and the v1 branch of each generated descriptor remain stable. The outer descriptor may gain an explicit v2 branch; whole-descriptor byte equality is not required.
+- Version-1 sync compatibility means the existing v1 request structs, strict decode behavior, result JSON, error strings, handler behavior, and the v1 branch of each credential-authenticated compatibility descriptor remain stable. Public/identification-only registration never exposes v1 or its raw scope IDs. The private compatibility descriptor may gain an explicit v2 branch; whole-descriptor byte equality is not required.
 - Public key continuity is pseudonymous identification, not verified-human authentication. Private assurance is issued only after active human authentication, membership, ownership where applicable, Passport, and unrevoked credential checks.
 - WebAuthn/passkeys are not enabled in this release: add no route, flag, dependency, database object, or dormant code path for WebAuthn.
 - Private Git observation uses a separately configured Fabric-server GitHub credential. Gateway never reads Git credential-helper output, OAuth tokens, SSH keys, signing private keys, or Fabric Git credentials.
@@ -131,6 +152,7 @@ type FabricBinding struct {
     FabricInstanceID  string
     RemoteProjectID   string
     StreamID          string
+    AttachmentRef     string
     CanonicalRef      string
     Writable          bool
 }
@@ -152,7 +174,13 @@ func (s ActorScope) Validate() error
 func (s ActorScope) HasPermission(string) bool
 ```
 
-`FabricBinding.ValidateWithProfile` requires `Workspace.Validate`, full non-empty UUID identifiers, `FabricInstanceID == profile.FabricInstanceID`, exact repository/ref equality with the workspace binding, and no credential field. `ActorScope.Validate` calls `Actor.Validate` and checks structural scope consistency only. Task 9's `identity.Store.ResolvePrivateCredential` and `mcp.ResolvePublicIssuedScope` derive fresh scopes from server records and perform issuer-specific validation.
+`FabricBinding.ValidateWithProfile` requires `Workspace.Validate`, full non-empty UUID
+identifiers including the opaque `AttachmentRef`, `FabricInstanceID ==
+profile.FabricInstanceID`, exact repository/ref equality with the workspace binding, and
+no credential field. `ActorScope.Validate` calls `Actor.Validate` and checks structural
+scope consistency only. Task 9's `identity.Store.ResolvePrivateCredential` and
+`mcp.ResolvePublicIssuedScope` derive fresh scopes from server records and perform
+issuer-specific validation.
 
 ## File ownership map
 
@@ -251,8 +279,16 @@ git commit -m "feat: freeze Fabric routing contracts"
 - Modify: `cmd/gatewayd/gatewayd_test.go`
 
 **Interfaces:**
-- Consumes: `types.WorkspaceBinding`, Task 1 routing types, Slice-A `000001` portable schema and `000002` portable-transition schema, Slice-A's exact `localstore.WorkspaceConflictGate` and shared `localstore.ErrWorkspaceConflicted`, Slice-B `000003` runtime legacy-graph schema, and the single `gateway_schema_migrations` ledger.
-- Produces: `GatewaySchemaVersion = 4` after `000004_fabric_routes.sql`, then `GatewaySchemaVersion = 5` after `000005_sync_binding.sql`, `FabricRouteRepo`, complete-key `QueueRepo`, quarantine repositories, profile-only `CredentialSource`, and the conflict-aware atomic `MarkDelivered` boundary used by Task 6.
+- Consumes: `types.WorkspaceBinding`, Task 1 routing types, committed Slice-A
+  `000001`/`000002`, the reviewed Task-6A
+  `000003_workspace_activity.sql` implementation commit and its exact activity/policy/
+  promotion interfaces, Slice-A's conflict gate/sentinel, and the single
+  `gateway_schema_migrations` ledger. It has no Code Graph dependency; that separate
+  branch consumes the schema produced here. Task 2 must not begin from schema version 2.
+- Produces: `GatewaySchemaVersion = 4` after `000004_fabric_routes.sql`, then
+  `GatewaySchemaVersion = 5` after `000005_sync_binding.sql`, `FabricRouteRepo`,
+  complete-key `QueueRepo`, quarantine repositories, profile-only `CredentialSource`,
+  and the conflict-aware atomic `MarkDelivered` boundary used by Task 6.
 
 Repository signatures are exact:
 
@@ -336,6 +372,7 @@ CREATE TABLE workspace_fabric_bindings (
   fabric_instance_id TEXT NOT NULL,
   remote_project_id TEXT NOT NULL,
   stream_id TEXT NOT NULL,
+  attachment_ref TEXT NOT NULL,
   repository_provider TEXT NOT NULL,
   repository_immutable_id TEXT NOT NULL,
   canonical_ref TEXT NOT NULL,
@@ -345,6 +382,7 @@ CREATE TABLE workspace_fabric_bindings (
   detached_at TIMESTAMP,
   PRIMARY KEY(project_id,workspace_id),
   UNIQUE(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id),
+  UNIQUE(fabric_instance_id,attachment_ref),
   FOREIGN KEY(project_id,workspace_id)
     REFERENCES workspace_bindings(project_id,workspace_id) ON DELETE CASCADE,
   FOREIGN KEY(profile_id,fabric_instance_id)
@@ -503,7 +541,10 @@ go test ./internal/runtime/localstore ./internal/runtime/sync ./cmd/gatewayd -ru
 go test -race ./internal/runtime/localstore ./internal/runtime/sync -run 'Test(CompleteKeyQueueIsolation|CredentialRotationKeepsOneEngine)' -count=1
 ```
 
-Expected: PASS; an injected migration-4 failure leaves version 3 byte-equivalent, an injected migration-5 failure leaves version 4 and the legacy queue byte-equivalent, the loader ignores/rejects noncanonical filenames, and no quarantine row is returned by `ListPending`.
+Expected: PASS; an injected migration-4 failure leaves version 3 byte-equivalent, an
+injected migration-5 failure leaves version 4 and the legacy queue byte-equivalent, the
+loader ignores/rejects noncanonical filenames, and no quarantine row is returned by
+`ListPending`.
 
 - [ ] **Step 7: Commit**
 
@@ -511,6 +552,33 @@ Expected: PASS; an injected migration-4 failure leaves version 3 byte-equivalent
 git add internal/runtime/localstore internal/runtime/sync cmd/gatewayd
 git commit -m "feat: persist complete Fabric routes"
 ```
+
+### Hard gate before Task 3: Fabric activity transport and finite retention
+
+Task 3 is blocked until a focused approved amendment replaces its migration-21 SQL and
+interfaces with a branch/stream/workspace-scoped `ActivityV1` transport/store/queue plus
+effective-policy handshake. Keep Postgres migration number `000021`; do not renumber
+later migrations. The amendment must make operational activity separate from
+`OperationV1`, portable canonical trees, and accepted-stream authority. It must freeze:
+
+- strict attributed ActivityV1 bytes/digest and complete tenant/ref/stream/workspace keys;
+- restart-discarded presence; ordinary activity eligible when older than 30 days **or**
+  outside the newest 10,000 unprotected workspace rows, pruned deterministically by
+  `(created_at, activity_id)` ascending; lifecycle protection until terminal, followed
+  by exactly 30 days by default or a configured longer finite duration, allowing
+  protected rows to exceed the cap;
+- an effective finite-policy response that Gateway validates before sending/accepting
+  live activity, with no indefinite catch-all;
+- queue/delivery/replay/terminal/prune transactions and proof that expiry cannot change a
+  portable tree, Git acceptance, or promotion; and
+- promotion remaining Gateway-local ProjectState authority until its resulting portable
+  OperationV1 is synced as a proposal; Fabric activity never promotes itself.
+
+Required RED/GREEN covers policy absence/malformed/unbounded rejection, branch/workspace
+isolation, restart, cap/age/protected-row pruning, queue retry, replay, RLS/composite FKs,
+and portable-tree byte identity across expiry. The detailed migration-21 portable-stream
+SQL below is retained as design input for tree reconstruction only and is not executable
+until the amendment integrates the activity schema and retention transactions.
 
 ### Task 3: Add durable Git-aware Fabric streams in migration 000021
 
@@ -522,7 +590,10 @@ git commit -m "feat: persist complete Fabric routes"
 
 **Interfaces:**
 - Consumes: existing migrations 1–20 unchanged.
-- Produces: branch-isolated repository bindings, streams, per-version live/accepted canonical trees, canonical operation requests, public-key activations, nonces, composite tenant FKs, forced RLS, and immutable history.
+- Produces: branch-isolated repository bindings, non-authoritative portable proposal/
+  accepted-tree replicas, canonical portable operation requests, the gate-frozen separate
+  ActivityV1 store/policy/queue, public-key activations, nonces, composite tenant FKs,
+  forced RLS, and policy-governed evidence.
 
 - [ ] **Step 1: Write failing real-Postgres schema tests**
 
@@ -533,11 +604,11 @@ func TestMigration21StoresEveryVersionTreeAndOperationBytes(t *testing.T)
 func TestMigration21DirectSQLRejectsCrossProjectStreamFKs(t *testing.T)
 func TestMigration21DirectSQLRejectsCrossStreamWorkspaceAndRequestFKs(t *testing.T)
 func TestMigration21ForcesRLSForEveryProjectTable(t *testing.T)
-func TestMigration21RejectsVersionAndRequestMutation(t *testing.T)
+func TestMigration21RejectsVersionAndRequestUpdateOutsidePolicyPruner(t *testing.T)
 func TestMigration21DownLeavesVersion20Shape(t *testing.T)
 ```
 
-Seed two projects, two Fabric UUIDs, two streams, and two workspace UUIDs. Attempt direct inserts pairing project A with project B's repository binding, stream, workspace binding, version, public key, and nonce. Each insert must fail with SQLSTATE `23503`. Run reads and writes as the ordinary non-superuser table owner and prove cross-project rows are invisible/rejected. Update/delete version and request rows and expect SQLSTATE `55000`.
+Seed two projects, two Fabric UUIDs, two streams, and two workspace UUIDs. Attempt direct inserts pairing project A with project B's repository binding, stream, workspace binding, version, public key, and nonce. Each insert must fail with SQLSTATE `23503`. Run reads and writes as the ordinary non-superuser table owner and prove cross-project rows are invisible/rejected. Direct updates fail; deletion exists only through the gate-frozen policy-owned pruning transaction after eligibility.
 `TestMigration21StoresEveryVersionTreeAndOperationBytes` also proves an operation
 transition requires `operation_id`, canonical bytes, digest, and actor together, while
 initial/accepted-ref transitions require all four to be null.
@@ -620,6 +691,7 @@ CREATE TABLE fabric_workspace_stream_bindings (
   fabric_instance_id uuid NOT NULL,
   stream_id uuid NOT NULL,
   workspace_id uuid NOT NULL,
+  attachment_ref uuid NOT NULL,
   repository_provider text NOT NULL CHECK(repository_provider='github'),
   repository_immutable_id text NOT NULL CHECK(repository_immutable_id ~ '^[0-9]+$'),
   ref_name text NOT NULL CHECK(ref_name ~ '^refs/heads/[A-Za-z0-9._/-]+$'),
@@ -628,6 +700,7 @@ CREATE TABLE fabric_workspace_stream_bindings (
   detached_at timestamptz,
   PRIMARY KEY(project_id,fabric_instance_id,workspace_id),
   UNIQUE(project_id,fabric_instance_id,stream_id,workspace_id),
+  UNIQUE(fabric_instance_id,attachment_ref),
   FOREIGN KEY(project_id,fabric_instance_id,stream_id)
     REFERENCES fabric_streams(project_id,fabric_instance_id,stream_id) ON DELETE CASCADE,
   FOREIGN KEY(project_id,fabric_instance_id,repository_provider,repository_immutable_id)
@@ -725,10 +798,10 @@ LANGUAGE plpgsql AS $$ BEGIN
   RAISE EXCEPTION 'fabric history is immutable' USING ERRCODE='55000';
 END $$;
 CREATE TRIGGER fabric_stream_versions_immutable
-  BEFORE UPDATE OR DELETE ON fabric_stream_versions
+  BEFORE UPDATE ON fabric_stream_versions
   FOR EACH ROW EXECUTE FUNCTION reject_fabric_immutable_history();
 CREATE TRIGGER fabric_stream_requests_immutable
-  BEFORE UPDATE OR DELETE ON fabric_stream_requests
+  BEFORE UPDATE ON fabric_stream_requests
   FOR EACH ROW EXECUTE FUNCTION reject_fabric_immutable_history();
 
 DO $$
@@ -786,7 +859,7 @@ git add migrations/000021_* internal/core/git/private_schema_test.go docs/db-ent
 git commit -m "feat: add durable Git-aware streams"
 ```
 
-### Task 4: Implement exact stream reconstruction and shared-reducer transactions
+### Task 4: Implement exact portable-stream reconstruction and shared-reducer transactions
 
 **Files:**
 - Create: `internal/core/git/stream_codec.go`
@@ -798,7 +871,9 @@ git commit -m "feat: add durable Git-aware streams"
 - Consumes: migration 21 and the exact `projectstate` API, including strict
   `DecodeOperation`, `CanonicalOperation`, `DigestCanonicalJSON`, and
   `DigestCanonicalMarkdown`.
-- Produces: restart-safe `StreamStore` and transaction methods used by MCP mutation coordination.
+- Produces: restart-safe non-authoritative portable `StreamStore` and transaction methods
+  used by MCP portable-proposal coordination. ActivityV1 uses the Task-3-gated separate
+  store/transport and never enters these methods.
 
 ```go
 type StreamKey struct {
@@ -1014,7 +1089,7 @@ git commit -m "feat: observe exact canonical GitHub commits"
 - Consumes: Tasks 1–5 plus Slice-A `localstore.WorkspaceConflictGate`, the shared
   `localstore.ErrWorkspaceConflicted`, and Task 2's conflict-aware
   `QueueRepo.MarkDelivered`.
-- Produces: public key-continuity scopes, v2 attach/bootstrap/pull/push/conflict variants, and frozen v1 branch compatibility.
+- Produces: public key-continuity scopes, ID-free v2 attach/bootstrap/pull/push/conflict variants, and frozen private-credential v1 branch compatibility.
 
 ```go
 type PublicRequestProof struct {
@@ -1025,7 +1100,7 @@ type PublicRequestProof struct {
     Signature string `json:"signature"`
 }
 type AuthRequest struct {
-    ToolName, ProjectID, FabricInstanceID, Authorization string
+    ToolName, AttachmentRef, Authorization string
     PublicProof *PublicRequestProof
     Parameters any
 }
@@ -1035,22 +1110,57 @@ type AuthResolver interface {
 }
 type SyncV2Scope struct {
     Version int `json:"version"`
-    Binding types.RemoteBindingKey `json:"binding"`
+    AttachmentRef string `json:"attachment_ref"`
     Repository types.RepositoryIdentity `json:"repository"`
     CanonicalRef string `json:"canonical_ref"`
     BaseCommitSHA string `json:"base_commit_sha"`
     BaseTreeDigest projectstate.Digest `json:"base_tree_digest"`
     ExpectedStreamVersion int64 `json:"expected_stream_version"`
-    Actor *types.ActorEnvelope `json:"actor,omitempty"`
+    ExpectedLiveTreeDigest projectstate.Digest `json:"expected_live_tree_digest"`
 }
 type SyncPushV2Args struct { SyncV2Scope; Operation projectstate.OperationV1 `json:"operation"` }
+type SyncAttachV2Args struct {
+    Version int `json:"version"` // const 2
+    Repository types.RepositoryIdentity `json:"repository"`
+    CanonicalRef string `json:"canonical_ref"`
+    BaseCommitSHA string `json:"base_commit_sha"`
+    BaseTreeDigest projectstate.Digest `json:"base_tree_digest"`
+}
+type SyncAttachV2Result struct {
+    Version int `json:"version"` // const 2
+    AttachmentRef string `json:"attachment_ref"`
+    RemoteProjectID string `json:"remote_project_id"`
+    StreamID string `json:"stream_id"`
+    StreamVersion int64 `json:"stream_version"`
+    EffectiveActivityPolicy EffectiveActivityPolicyV1 `json:"effective_activity_policy"`
+}
 ```
 
-Attach carries the same scope without stream ID before server allocation; bootstrap/pull carry `after_version`; conflict carries the durable conflict ID and resolution operation. All v2 structs are closed (`additionalProperties:false`) and require `version:2`.
+`AttachmentRef` is a server-issued canonical UUID that is opaque, non-secret, and never
+grants authority by possession. Fabric resolves it to the complete project/Fabric/remote-
+project/stream binding before authorization and overwrites any private transport context;
+no v2 public argument schema contains `project_id`, `workspace_id`, `fabric_instance_id`,
+`remote_project_id`, `stream_id`, or an actor-routing field. Attach has no attachment
+reference and uses the exact closed `SyncAttachV2Args` above. Only after the server
+independently observes and validates that repository/ref may it allocate and return the
+exact closed result. `EffectiveActivityPolicyV1` is the prior Task-3-gate-frozen finite
+policy type; missing, malformed, unknown, or unbounded values reject attach before local
+binding persistence. The result's remote IDs are response data retained only in Gateway's
+private complete key and never echoed in later public arguments. Bootstrap/pull carry
+`after_version`; conflict carries the
+durable conflict ID and resolution operation. A portable operation's embedded attribution
+is content, not routing authority, and must exact-match the freshly resolved actor scope.
+All v2 structs are closed (`additionalProperties:false`) and require `version:2`.
+
+Task 3's focused amendment adds a separate ActivityV1 protocol branch. Attach/bootstrap
+must return its exact effective finite retention policy; Gateway validates that policy
+before it queues, sends, accepts, or exposes live activity. Missing, malformed, unknown,
+or unbounded policy disables remote activity without blocking portable/local work. The
+portable v2 OperationV1/tree branch does not carry generic channel/task activity.
 
 - [ ] **Step 1: Freeze v1 branches and add failing v2/proof tests**
 
-For each of `wormhole.sync.bootstrap`, `incremental_pull`, `incremental_push`, and `conflict_report`, preserve fixtures for strict v1 request decode, result JSON bytes, documented error strings, and the exact v1 descriptor branch. Add `TestSyncDescriptorV1BranchUnchangedWhenV2Added`; compare the normalized `oneOf[version=1]` branch to the frozen legacy schema, not the complete descriptor. Add public tests for padded base64, non-URL alphabet, nonce lengths 31/33, wrong key ID, stale `now-5m-1ns`, future `now+30s+1ns`, replay, body tamper, wrong Fabric/project/tool, and noncanonical timestamp.
+For each of `wormhole.sync.bootstrap`, `incremental_pull`, `incremental_push`, and `conflict_report`, preserve fixtures for strict v1 request decode, result JSON bytes, documented error strings, and the exact v1 descriptor branch on the credential-authenticated compatibility registry. Add `TestSyncDescriptorV1BranchUnchangedWhenV2Added`; compare the normalized `oneOf[version=1]` branch to the frozen legacy schema, not the complete descriptor. Public/identification-only `tools/list` exposes only ID-free v2 branches; add `TestPublicSyncV2DescriptorsRejectPrivateScopeFields` for every forbidden field above. Add public tests for padded base64, non-URL alphabet, nonce lengths 31/33, wrong key ID, stale `now-5m-1ns`, future `now+30s+1ns`, replay, body tamper, unknown/mismatched attachment or repository, wrong Fabric/tool, and noncanonical timestamp.
 
 Add `TestSyncV2PushOpenConflictStopsBeforeCredentialOrNetwork`,
 `TestSyncV2PushConflictOpenedInFlightLeavesQueueRowByteIdenticalPending`,
@@ -1067,6 +1177,12 @@ operation but before local delivery marking, then compares the complete queue ro
 after reopen. After explicit resolution, retry must send the identical canonical
 operation ID/bytes and then deliver that same row once.
 
+Add `TestSyncV2EverySignedPreconditionIsServerChecked`: independently mutate attachment,
+repository provider/immutable ID/remote, canonical ref, base commit, accepted-tree digest,
+expected stream version, and expected live-tree digest while re-signing otherwise valid
+parameters. Each case must fail before reducer dispatch, stream mutation, audit, cursor,
+or delivery and leave the stored version/tree bytes unchanged.
+
 - [ ] **Step 2: Run RED**
 
 Run: `go test ./internal/mcp ./internal/runtime/sync -run 'Test(SyncV1|SyncDescriptorV1|SyncV2|PublicProof)' -count=1`
@@ -1077,21 +1193,52 @@ Expected: v1 fixture tests PASS; new v2/proof tests FAIL.
 
 Decode public key, nonce, and signature with `base64.RawURLEncoding.Strict()` and reject `=` padding. Require 32-byte key, 32-byte nonce, and 64-byte signature. `KeyID` must equal `sha256:` plus lowercase SHA-256 hex of the raw public key. Parse `Timestamp` with `time.RFC3339Nano`, require it equals `parsed.UTC().Format(time.RFC3339Nano)`, and accept inclusive `[now-5m, now+30s]` only.
 
-Canonicalize `Parameters` with `projectstate.CanonicalJSON`; hash those bytes with SHA-256. Verify the signature over exactly:
+Canonicalize `Parameters` with `projectstate.CanonicalJSON`; hash those bytes with
+SHA-256. Fabric derives `scope-key` as `attachment:<attachment_ref>` for bound calls and
+as `repository:<sha256 canonical repository identity and ref digest>` for initial attach;
+the caller cannot supply a different discriminator. Verify the signature over exactly:
 
 ```text
-wormhole-public-v1\n<Fabric instance UUID>\n<tool name>\n<project UUID>\n<lowercase parameter SHA-256 hex>\n<canonical timestamp>\n<RawURLEncoding nonce>
+wormhole-public-v1\n<server-configured Fabric instance UUID>\n<tool name>\n<scope-key>\n<lowercase parameter SHA-256 hex>\n<canonical timestamp>\n<RawURLEncoding nonce>
 ```
 
-Require the key ID/public key to match one active `fabric_public_actor_keys` row. The initial attach activation may derive a public actor only after Task 5 observes the exact canonical tree, the signing key belongs to that tracked actor, and an agent's claimed accountable-human ID names a tracked human actor in the same tree; store that self-declared linkage and force `AssurancePublicKeyContinuity`. Later calls use `ResolvePublicIssuedScope` to construct a new envelope/scope from that row, call `Validate`, and reject private/local/legacy/unknown assurance without mutating a caller scope or labeling the principal verified. Insert the nonce hash in the same project transaction before dispatch; unique violation is replay.
+After resolving the attachment—or independently observing the initial attach repository—
+require the key ID/public key to match one active `fabric_public_actor_keys` row in that
+server-derived project. The initial attach activation may derive a public actor only after
+Task 5 observes the exact canonical tree, the signing key belongs to that tracked actor,
+and an agent's claimed accountable-human ID names a tracked human actor in the same tree;
+store that self-declared linkage and force `AssurancePublicKeyContinuity`. Later calls use
+`ResolvePublicIssuedScope` to construct a new envelope/scope from that row and the resolved
+attachment, call `Validate`, and reject private/local/legacy/unknown assurance without
+mutating caller scope or labeling the principal verified. Insert the nonce hash in the
+same server-derived project transaction before dispatch; unique violation is replay.
 
 - [ ] **Step 4: Add explicit version dispatch**
 
-Add `ArgumentVariants` and `ResultVariants` to `Tool`. Registry generation emits `oneOf` branches discriminated by required integer `version` const 1 or 2. Dispatch decodes only `version`, then strict-decodes the selected closed struct. Preserve existing v1 structs, results, handlers, and error text. `wormhole.sync.attach` is v2-only; the other four tool names expose both branches.
+Add `ArgumentVariants` and `ResultVariants` to `Tool`. The credential-authenticated
+compatibility registry emits `oneOf` branches discriminated by required integer `version`
+const 1 or 2; public/identification-only registration emits only the ID-free v2 branch.
+Dispatch decodes only `version`, then strict-decodes the selected closed struct. Preserve
+existing v1 structs, results, handlers, and error text without allowing v1 on public-key
+continuity connections. `wormhole.sync.attach` is v2-only.
 
 - [ ] **Step 5: Implement Gateway v2 transport**
 
-New complete bindings use v2. Gateway loads `types.WorkspaceBinding` immediately before each call, fills repository/ref/commit/digest from that trusted binding, loads the current stream cursor, and signs canonical params. Pull calls the server observer path and imports only a validated accepted tree. No recovery/quarantine row can construct a v2 request. V1 remains available only to a valid newly resolved credential during the explicit compatibility window; it cannot attach a new stream or bypass v2 preconditions.
+New complete bindings use v2. Gateway loads `types.WorkspaceBinding` and the local
+`FabricBinding` immediately before each call, copies only the server-issued attachment
+reference plus repository/ref/commit/digest into public params, loads the current stream
+cursor and live-tree digest, and signs canonical params. Fabric resolves that attachment
+back to its complete binding and, in one StreamStore transaction before dispatch,
+exact-matches repository/ref, current version, accepted commit, accepted-tree digest, and
+live-tree digest against the addressed stored version. A mismatch is a semantic
+precondition failure with zero reducer/audit/version mutation. Pull calls the server
+observer path and imports only a validated accepted tree. No recovery/quarantine row can
+construct a v2 request. V1 remains available only to a valid newly resolved private
+credential during the explicit compatibility window; it cannot attach a new stream,
+serve public-key continuity, or bypass v2 preconditions.
+
+ActivityV1 send/pull uses only the gate-frozen branch/stream/workspace queue and policy;
+it never calls `ApplyOperation`, reconstructs a canonical tree, or advances accepted state.
 
 Every v2 push uses this exact order for the pending row's complete `RemoteBindingKey`:
 
@@ -1134,7 +1281,9 @@ go test ./internal/mcp ./internal/runtime/sync -run 'Test(SyncV1|SyncDescriptorV
 go test -race ./internal/mcp -run 'TestPublicProofNonceReplay' -count=1
 ```
 
-Expected: PASS; exactly one concurrent nonce use succeeds; v1 request/result/error fixtures and descriptor branches are unchanged.
+Expected: PASS; exactly one concurrent nonce use succeeds; public descriptors expose only
+ID-free v2; private-credential v1 request/result/error fixtures and descriptor branches
+are unchanged.
 
 - [ ] **Step 7: Commit**
 
@@ -1182,7 +1331,16 @@ Expected: FAIL because attach validation does not precede transport construction
 
 `EvaluateAttach` is pure and compares the registered workspace repository with the independently observed local `origin` identity supplied by Slice C; shared history, URL equality, or an `upstream` remote never substitute for immutable ID equality. On mismatch, return `inactive_fork` before loading a profile credential, resolving DNS, creating a client, or observing Git.
 
-For a canonical decision, phase one contacts the chosen profile and verifies its immutable Fabric instance. Phase two calls v2 attach and receives complete remote project/stream identifiers. Only then does one SQLite transaction insert `workspace_fabric_bindings` and its cursor. Network failure leaves no binding. Detach sets the complete binding non-writable/detached and preserves queues/conflicts. Rebind is a human-only command requiring the typed confirmation string `<workspace-id>:<old-fabric-id>:<old-stream-id>`, zero pending rows, and zero open conflicts; it deletes the detached binding and creates the new complete binding in one transaction.
+For a canonical decision, phase one contacts the chosen profile and verifies its immutable
+Fabric instance. Phase two calls v2 attach and receives the opaque attachment reference
+plus complete remote project/stream identifiers as result data. Only then does one SQLite
+transaction insert `workspace_fabric_bindings` and its cursor. Later public requests send
+only the attachment reference; the other identifiers remain private complete local keys.
+Network failure leaves no binding. Detach sets the complete binding non-writable/detached
+and preserves queues/conflicts. Rebind is a human-only command requiring the typed
+confirmation string `<workspace-id>:<old-fabric-id>:<old-stream-id>`, zero pending rows,
+and zero open conflicts; it deletes the detached binding and creates the new complete
+binding in one transaction.
 
 - [ ] **Step 4: Run GREEN**
 
@@ -2191,15 +2349,16 @@ git commit -m "feat: recover legacy local Fabric state"
 
 **Interfaces:**
 - Consumes: shipped Tasks 1–14 and Slice-C setup.
-- Produces: truthful live command/schema/auth inventory plus reproducible SQLite-v4 and Postgres-21–23 migration gates.
+- Produces: truthful live command/schema/auth inventory plus reproducible SQLite-v5 and Postgres-21–23 migration gates.
 
 - [ ] **Step 1: Add failing contract assertions**
 
 Assert exact canonical type package/API names, including `DecodeOperation`,
 `CanonicalOperation`, `DigestCanonicalJSON`, and `DigestCanonicalMarkdown`; local schema
 version 5; Postgres migrations 21–23; strict stored operation ID/bytes/digest verification;
-profile-only credential authority; v1 request/result/error/descriptor-branch compatibility;
-v2 routes; token prefixes; first-owner/invitation/member/project-list/ownership/PAT/
+profile-only credential authority; private-credential v1 request/result/error/descriptor-
+branch compatibility plus public exclusion; ID-free v2 routes; token prefixes;
+first-owner/invitation/member/project-list/ownership/PAT/
 recovery commands; GitHub-only v1 observer; and absence of live `join`, `connect`,
 admin-key, WebAuthn, duplicate codec/canonicalizer, or duplicate legacy integration-state
 migration claims.
@@ -2212,11 +2371,11 @@ Expected: FAIL because live inventory/docs still describe alpha authority.
 
 - [ ] **Step 3: Update live documentation atomically**
 
-Document public continuity as pseudonymous, private assurance as server-issued, GitHub provider IDs and exact commits, separately configured Fabric-side private Git credential, complete binding identity, profile-only `credential_ref`, per-version canonical trees/operations, legacy quarantine/recovery, OIDC code+PKCE and RFC 8628 defaults, first-owner grant/invitations, refresh replay defense, and WebAuthn as unshipped. Keep dated prior alpha specs/results unchanged as historical evidence. Remove `join`/`connect` only after Slice-C setup and Tasks 11–14 pass.
+Document public continuity as pseudonymous, private assurance as server-issued, GitHub provider IDs and exact commits, separately configured Fabric-side private Git credential, complete binding identity, profile-only `credential_ref`, per-version canonical trees/operations, legacy quarantine/recovery, OIDC code+PKCE and RFC 8628 defaults, first-owner grant/invitations, refresh replay defense, and WebAuthn as unshipped. Keep dated prior alpha specs/results unchanged as historical evidence. Slice C has already removed `join`/`connect`; assert their absence here and do not reintroduce either flow.
 
 - [ ] **Step 4: Replace migration scripts with explicit version transitions**
 
-`test-alpha-upgrade.sh` creates a fresh database, runs full `up`, full `down`, then seeds fixtures at version 20 with `migrate ... goto 20`, runs `migrate ... up`, asserts version 23 and preserved IDs/audit plus revoked legacy tokens, runs 23→22 and proves old `WhoAmI` rejection, and tests 22→21 only on an empty private-identity fixture. SQLite tests construct exact schema versions 1, 2, and 3, open through one-way `000004_fabric_routes.sql` and `000005_sync_binding.sql`, verify per-file transactional rollback and quarantine copy, and reject noncanonical migration filenames; they do not claim a reverse migration. No command uses `up 1`, assumes the current version, or edits migrations 1–20.
+`test-alpha-upgrade.sh` creates a fresh database, runs full `up`, full `down`, then seeds fixtures at version 20 with `migrate ... goto 20`, runs `migrate ... up`, asserts version 23 and preserved IDs/audit plus revoked legacy tokens, runs 23→22 and proves old `WhoAmI` rejection, and tests 22→21 only on an empty private-identity fixture. SQLite tests construct exact schema versions 1, 2, and 3, open through one-way `000004_fabric_routes.sql` and `000005_sync_binding.sql`, verify per-file transactional rollback and quarantine copy, and reject noncanonical migration filenames; they do not claim a reverse migration. No command uses `up 1`, assumes the current version, edits committed SQLite migrations 1–3, or edits Postgres migrations 1–20.
 
 - [ ] **Step 5: Run GREEN contract/release gates**
 
@@ -2419,7 +2578,7 @@ make release-test
 make release-rehearsal
 ```
 
-Expected: all PASS; Postgres 20→23, safe 23→22, empty 22→21, and fresh full up/down pass; SQLite 1→2→3→4→5, migration-4/5 transactional failure rollback, canonical filename enforcement, and quarantine copy pass without a reverse-migration claim; v1 branch compatibility, v2 preconditions, exact-commit observation, restart reconstruction, composite-FK direct SQL rejection, actor forgery, atomic audit rollback, revocation, zero-contact fork, OIDC allowlist/SSRF/replay/rotation/throttling, secret redaction, and issue-56 schema tests pass; merged statement coverage is at least 80%.
+Expected: all PASS; Postgres 20→23, safe 23→22, empty 22→21, and fresh full up/down pass; SQLite 1→2→3→4→5, migration-4/5 transactional failure rollback, canonical filename enforcement, and quarantine copy pass without a reverse-migration claim; v1 branch compatibility, v2 preconditions, effective finite activity-retention handshake, exact-commit observation, restart reconstruction, composite-FK direct SQL rejection, actor forgery, atomic audit rollback, revocation, zero-contact fork, OIDC allowlist/SSRF/replay/rotation/throttling, secret redaction, and issue-56 schema tests pass; merged statement coverage is at least 80%.
 
 ## Plan self-review
 
@@ -2429,13 +2588,16 @@ Expected: all PASS; Postgres 20→23, safe 23→22, empty 22→21, and fresh ful
   `DecodeOperation`, `CanonicalOperation`, `DigestCanonicalJSON`,
   `DigestCanonicalMarkdown`, and `ApplyOperation`; it defines no second semantic codec,
   operation parser/canonicalizer, digest rule, or reducer.
-- **Durability/security:** every stream version stores complete canonical live/accepted
-  trees plus operation ID/canonical bytes/digest. Every read/restart strict-decodes the
+- **Durability/security:** portable stream versions may store complete canonical
+  live/accepted proposal replicas plus operation ID/canonical bytes/digest, but only
+  independently observed Git is acceptance authority. Every read/restart strict-decodes the
   operation, checks decoded ID against the row, checks canonical byte equality and
   `DigestCanonicalJSON`, and rejects malformed, unknown-field, trailing, noncanonical,
   ID-mismatched, or digest-mismatched corruption before serving/replay. The observer reads
   one exact commit; all tenant relationships have direct-SQL composite-FK tests; every
   handler derives scope server-side; mutation and provenance share one transaction.
+  ActivityV1 is a separate finite-retention store/queue with an effective-policy handshake
+  and cannot enter portable tree reconstruction or advance accepted state.
 - **Identity cutover:** first owner is an operator-provisioned one-use OIDC grant, later membership is invitation/admin controlled, PAT scopes are subsets, refresh/device/recovery replay defenses are fixed, and migration 23 revokes legacy authority before resolver cutover and cannot resurrect it on down.
 - **Migration ownership:** local schema v5 owns Fabric profile/binding/queue quarantine. Task 14 consumes Slice A's legacy integration-state outcome and performs no second rename, ignore, or repository-state edit.
 - **Compatibility/gates:** v1 compatibility covers request/result/error/handler and the v1 descriptor branch; WebAuthn remains absent; issue #56 uses the exact twelve prerequisite and six acceptance codes and requires real non-fabricated four-VM evidence.

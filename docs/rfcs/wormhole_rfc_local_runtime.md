@@ -4,13 +4,13 @@
 
 | | |
 |---|---|
-| Status | Draft — revised architecture, 2026-07-28 |
+| Status | Draft — revised architecture, 2026-08-01 |
 | Author | Harley |
 | Original date | 2026-07-13 |
 | Supersedes | Nothing directly; amends RFC-0001 local-runtime, transport, workspace, and optional-coordination assumptions (see §4) |
 | Related | [RFC-0001: Wormhole Core](wormhole_rfc.md), [RFC-0002: Wormhole Governance](wormhole_rfc_governance.md), [Git-Native Architecture Design](../superpowers/specs/2026-07-28-git-native-wormhole-architecture-design.md) |
 
-> **Revision note (2026-07-28).** This revision replaces the profile-per-daemon
+> **Revision note (2026-08-01).** This revision replaces the profile-per-daemon
 > and Fabric-first joining model. `gatewayd` is one passive, non-interactive
 > user-level supervisor with a stable local socket. Git carries the portable
 > project base; Gateway retains a durable machine-local overlay; Fabric is an
@@ -175,13 +175,17 @@ command is `wormhole setup`, which:
 1. discovers the repository root and tracked `.wormhole/` snapshot;
 2. validates its schema, digests, project reference, and Git context;
 3. creates or reuses an immutable local workspace binding;
-4. activates an eligible identification-only public Fabric hint, requests
+4. resolves trusted machine-private publication visibility as `unclassified`,
+   `local_only`, `public_git`, or `private_git`, independent of canonical/fork routing,
+   Fabric mode, caller arguments, actor assurance, and copied hints; public forks are
+   `public_git`, unknown visibility remains unclassified, and public-Git setup warns;
+5. activates an eligible identification-only public Fabric hint, requests
    login/profile selection for private Fabric, or remains local-only;
-5. starts or upgrades the one `gatewayd` supervisor as necessary;
-6. installs or repairs supported harness connector launchers; and
-7. asks whether to enable Code Graph and, if selected, completes its full
+6. starts or upgrades the one `gatewayd` supervisor as necessary;
+7. installs or repairs supported harness connector launchers; and
+8. asks whether to enable Code Graph and, if selected, completes its full
    initial model-free build; and
-8. verifies local readiness without requiring Fabric for a Git-only workspace.
+9. verifies local readiness without requiring Fabric for a Git-only workspace.
 
 `join` and `connect` are replaced by this one coherent flow. Connector setup
 is transactional: failed replacement restores the prior harness configuration
@@ -259,14 +263,28 @@ canonical bytes. No generated digest or index file is tracked. Unknown future
 schemas, duplicate IDs, broken references, path/record mismatches, and invalid
 canonical form fail closed.
 
-Tracked bases contain project metadata and deliberately publishable context:
-tasks, KB, channels, durable events, Git pointers, and non-secret actor
-references. They never contain bearer tokens, Passport IDs or permissions,
+Tracked bases contain structurally eligible, explicitly portable context: project
+metadata, task definitions and portable task state, curated KB, channels,
+explicitly promoted audit-significant `EventV1` records, Git pointers, and non-secret
+actor references. Secret-shape checks do not establish confidentiality or public-Git
+suitability. Tracked bases never contain bearer tokens, Passport IDs or permissions,
 credential profiles, Fabric cursors, sync queues, local audit/recovery state,
 absolute paths, socket state, connector backups, file identities, or Code
 Graph state. Those belong outside the repository in Gateway-managed local
 storage. In particular, legacy `.wormhole/integration-state.json` is migrated
 into local Gateway state and ignored; it is not snapshot authority.
+
+Task-transition notifications/history, progress, generic channel activity, presence,
+runtime attribution, subscriptions, queues, telemetry, conflicts/receipts, and
+discoveries awaiting curation are operational Gateway/Fabric state. They do not enter
+the version-one Snapshot automatically. Promotion accepts only an activity with a
+complete promotable-event projection. Channel, source actor, event type, payload, note,
+and creation time copy exactly into `EventV1`; the enclosing operation actor is the
+distinct promoter, and callers cannot replace either attribution or copied semantics.
+The event's sole extension is `dev.wormhole.promotion`, with schema-version-1 data
+containing only `source_activity_id` and `source_activity_digest`. Promotion
+marks/receipts that source atomically in one ProjectState-owned immediate transaction.
+Checkpoint only materialises already-portable operations and never performs promotion.
 
 ### 6.4 Per-checkout Code Graph workers
 
@@ -559,6 +577,32 @@ Fabric bootstrap does not replace the tracked Git base, and a tracked base
 does not grant Fabric access. Where a public project chooses not to bind
 Fabric, this section is simply absent from its setup path.
 
+### 8.5 Operational retention and publication review
+
+V1 operational retention has three classes: ephemeral presence is memory-only and may
+disappear on restart; ordinary activity is eligible when older than 30 days or outside
+the newest 10,000 unprotected workspace rows, then pruned by `(created_at, activity_id)`
+ascending; and lifecycle evidence such as pending queues, open conflicts, recovery state,
+and receipts is excluded from age/rank pruning until terminal. Post-terminal retention
+defaults to exactly 30 days and may be configured longer only to a finite duration.
+Protected rows may exceed the ordinary cap. Gateway and Fabric expose an effective finite
+policy before accepting live activity; expiry never mutates portable Git state.
+
+Status and diff remain available for an unclassified workspace and expose the exact
+candidate and publication-review digests. Checkpoint is blocked until setup has persisted
+a trusted machine-private classification. For `public_git`, including a public fork, it
+additionally requires the caller's exact publication-review digest, rechecks that digest
+before any staging/journal/publication, and persists the exact actor plus digest in its prepared
+journal/receipt. CLI and MCP provide the same capability. The acknowledgement is
+attributed publication intent and CAS, not authorization or DLP; direct Git edits remain
+possible.
+
+Classification is explicit user publication policy, not continuous Git-host visibility
+detection. It is bound to the workspace and repository identity; an origin/repository
+identity change invalidates it to `unclassified`. A same-identity host visibility change
+cannot be detected offline and requires explicit setup reconfiguration, which invalidates
+earlier review digests. Status/diff always surface the current classification.
+
 ---
 
 ## 9. Decision Register
@@ -572,8 +616,9 @@ Fabric, this section is simply absent from its setup path.
 - **Setup:** `wormhole setup` is the human-first lifecycle command and
   replaces `join` and `connect`.
 - **Portable state:** `.wormhole/state/v1/` is typed, tracked, canonical,
-  versioned project content. SQLite, credentials, queues, cursors, and
-  integration state remain private.
+  versioned curated project content. Generic activity is operational; only explicit
+  source-bound promotion creates portable `EventV1` evidence. SQLite, credentials,
+  queues, cursors, and integration state remain private.
 - **Workspace routing:** bindings are explicit and immutable; every operation
   is project-namespace and workspace scoped.
 - **Conflict resolution:** semantic three-way rebase with surfaced conflicts;
@@ -591,6 +636,11 @@ Fabric, this section is simply absent from its setup path.
   local/public ownership may be self-declared, while private ownership is
   membership-backed. Authenticators, Passport grants, and Git authorship are
   distinct and auditable.
+- **Agent-first parity:** CLI and MCP expose equivalent authorised project operations,
+  while schemas, progressive retrieval, autonomous durability, attribution, and handoff
+  remain agent-first.
+- **Scope:** V1 state and authority are project/repository-lineage scoped. Cross-repo
+  graphs, KB merge, inherited governance, and organisation authority require a new RFC.
 
 ### Contract details
 
@@ -639,8 +689,11 @@ behavior. Every negative case proves zero result where required and byte-identic
 
 - Git-tracked snapshots are content, not authorization. Treat public snapshot
   data as public and validate every imported byte before use.
-- The snapshot must never include secrets or machine-specific state. Git
-  history makes accidental disclosure durable.
+- The snapshot must never include secrets or machine-specific state. Git history makes
+  accidental disclosure durable, and secret-shape validation is not confidentiality
+  detection. `public_git` setup warns explicitly; checkpoint requires the exact
+  attributed publication-review digest from human CLI or agent MCP. Wormhole claims no
+  DLP and cannot prevent direct Git publication.
 - Fabric requires HTTPS for every non-loopback endpoint. Canonical-public
   requests prove identification-only key continuity; private requests
   authenticate with the binding's credential. HTTP is development-only on

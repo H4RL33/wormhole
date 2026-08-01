@@ -7,11 +7,11 @@
 | Status | Revised Draft |
 | Author | Harley |
 | Date | 2026-07-07 |
-| Revised | 2026-07-28 |
+| Revised | 2026-08-01 |
 | Supersedes | `slack_for_agents.md`, `slack_for_agents_revised.md`, `AIOS_V3_Proposal.md` |
 | Related | [RFC-0002: Wormhole Governance](wormhole_rfc_governance.md), [RFC-0003: Wormhole Local Runtime](wormhole_rfc_local_runtime.md), [Git-Native Architecture Design](../superpowers/specs/2026-07-28-git-native-wormhole-architecture-design.md) |
 
-> **Revision status (2026-07-28):** This draft has been reconciled around a
+> **Revision status (2026-08-01):** This draft has been reconciled around a
 > Git-native project model. Humans and agents have parity for project
 > operations; agents are durable, accountable principals; `wormhole setup`
 > replaces the legacy join/connect flow; and Fabric is an optional live
@@ -35,12 +35,12 @@ Base, and Identity & Permissions. Project state is typed, Git-native data under
 gives coding harnesses the same project operations without becoming a second
 stateful authority.
 
-Git remains the sole source of truth for code and accepts project-state changes
-through normal Git workflows. An optional Fabric can make public or private
+Git remains the sole source of truth for code and accepts explicitly curated portable
+project-state changes through normal Git workflows. An optional Fabric can make public or private
 projects feel live across participants, but it does not replace Git authority.
 
-**Code and project state are versioned by Git. Wormhole gives that project state
-typed collaboration semantics.** Governance (Constitution and Congress) remains
+**Code and curated accepted project state are versioned by Git. Wormhole gives that
+project state typed collaboration semantics.** Governance (Constitution and Congress) remains
 a separate, independently shippable layer in RFC-0002; see §10.
 
 ---
@@ -123,6 +123,8 @@ Wormhole borrows established shapes without copying their delivery assumptions:
   requiring Fabric.
 - G7: Make Fabric available as an optional live collaboration accelerator for
   both public and private projects.
+- G8: Keep the product agent-first while giving humans equivalent authorised
+  project operations and strong setup/review/control surfaces.
 
 ### 4.2 Non-goals
 
@@ -135,6 +137,8 @@ Wormhole borrows established shapes without copying their delivery assumptions:
 - NG5: Being a general-purpose chat or rich-media platform.
 - NG6: Full autonomous governance. Constitution and Congress are specified in
   RFC-0002, not as a phase of this RFC.
+- NG7: An implicit organisation-wide or cross-repository graph, KB merge,
+  inherited policy, or cross-project authority. V1 is repository-lineage scoped.
 
 ---
 
@@ -143,11 +147,14 @@ Wormhole borrows established shapes without copying their delivery assumptions:
 1. **Humans and agents have operational parity.** A permission applies to a
    project principal and operation, not to whether the caller is human or AI.
    CLI and MCP may be shaped for different clients, but neither defines a
-   lesser class of participant.
+   lesser class of participant. Parity does not change Wormhole's agent-first
+   priority: typed schemas, progressive retrieval, autonomous durability,
+   attribution, and handoff are optimised for agents.
 2. **Git is authoritative.** Git is the sole code truth and the acceptance path
    for typed `.wormhole/` project state. Wormhole stores pointers and context
    about code, not source copies.
-3. **Project state is typed and Git-native.** Events, tasks, knowledge,
+3. **Portable project state is typed and Git-native.** Curated events, task
+   definitions and portable task state, curated knowledge,
    self-declared actor attribution claims, and Git pointers have reviewable
    project-state representations under `.wormhole/`. Tracked actor claims never
    grant membership, ownership, a Passport, or an effective permission; those
@@ -158,8 +165,8 @@ Wormhole borrows established shapes without copying their delivery assumptions:
    principal is not a credential, and a valid credential does not itself grant
    an operation.
 6. **Fabric accelerates; it does not replace Git.** Projects can operate without
-   Fabric. When present, Fabric improves live discovery and coordination while
-   Git remains the acceptance and history boundary.
+   Fabric. Gateway/Fabric own operational collaboration under finite retention;
+   Git accepts only explicitly curated portable context.
 7. **Interfaces are fit for their callers.** The CLI is human-first. MCP is a
    stateless harness connector to the same Core operations.
 
@@ -178,7 +185,7 @@ Mission -> Policy -> Project State -> Principals
 |---|---|---|
 | Mission | Project metadata + KB root articles | Core |
 | Policy | Project permissions; optional governance in RFC-0002 | Core + optional layer |
-| Project state | Events, tasks, knowledge, and Git pointers in `.wormhole/` | Core |
+| Project state | Selected events, portable task state, curated knowledge, and Git pointers in `.wormhole/` | Core |
 | Principals | Durable human and agent identities with accountable ownership | Core |
 
 Organisational skills may be referenced by project state, but management of
@@ -239,17 +246,19 @@ pillars or the parity between authorised humans and agents.
 
 ### 7.2 State shape
 
-The `.wormhole/` tree is the Git-native home for publishable typed project state.
-It records events, tasks, knowledge, self-declared attribution, and references to
+The `.wormhole/` tree is the Git-native home for explicitly portable typed project
+state. It records selected audit-significant events, task definitions and portable
+task state, curated knowledge, self-declared attribution, and references to
 code, including commit SHAs and change-request URLs, but never stores a second
 copy of repository source or any membership, authenticator, credential,
 ownership grant, Passport, or effective permission. Concrete filenames, schemas,
 migrations, and merge behavior are versioned contract details.
 
-Fabric may maintain indexes, projections, or transient collaboration state to
-accelerate reads and live coordination. Those facilities are derivative of, or
-feed changes back toward, the Git acceptance path; they do not create an
-independent project truth.
+Gateway/Fabric maintain operational task-transition chatter, progress, generic
+channel activity, presence, runtime attribution, subscriptions, queues, telemetry,
+conflicts/receipts, and discoveries awaiting curation. Promotion into portable
+state is explicit, typed, attributed, and reviewable; checkpoint never promotes it.
+Operational facilities do not create an independent accepted project truth.
 
 ---
 
@@ -261,9 +270,12 @@ Channels carry typed events as their primary payload, with natural language as
 an optional note. Representative categories include task transitions, review
 requests, build failures, discoveries, and free-text messages.
 
-Events identify their acting principal, regardless of whether that principal is
-a human or an agent. Git-native event records remain available without Fabric;
-Fabric can accelerate live publication, discovery, and subscription.
+Events identify their acting principal, regardless of whether that principal is a
+human or an agent. Generic posts, progress, status chatter, presence, and runtime
+notifications are operational and do not automatically create portable records. An
+`EventV1` represents explicitly promoted audit-significant evidence whose source
+activity ID/digest and attribution are reviewable. Git-native promoted events remain
+available without Fabric; Fabric accelerates live publication and subscription.
 
 ### 8.2 Task Graph
 
@@ -271,8 +283,10 @@ Entities are **Project → Task → Subtask**, with an owner that may be a human
 agent principal, status, priority, due date, dependencies, and links to related
 events, KB articles, commits, and change requests.
 
-Task state transitions emit typed events. The task graph is a shared project
-model, not an agent-only queue or a human-only board.
+Task definitions, owner, and portable task status are reviewable project state;
+Git acceptance makes that state accepted. Transition notifications/history and
+progress chatter are operational unless explicitly promoted as audit evidence. The
+task graph is a shared project model, not an agent-only queue or a human-only board.
 
 ### 8.3 Knowledge Base
 
@@ -398,8 +412,9 @@ availability characteristics, not which project operations exist.
 
 The initial Core scope is deliberately narrow:
 
-- Typed `.wormhole/` project records for events, tasks, knowledge, attribution,
-  and code pointers; authority records remain private
+- Typed `.wormhole/` project records for curated events, task definitions/portable
+  task state, curated knowledge, attribution, and code pointers; operational and
+  authority records remain private or Fabric-side
 - Durable human and agent principals with accountable human ownership for agents
 - Separate authentication and project authorization
 - `wormhole setup` for project initialization and configuration
@@ -422,12 +437,25 @@ replacement Git hosting, and mandatory hosted infrastructure.
 - Every agent has accountable human ownership while retaining its own durable
   identity and audit attribution.
 - Public projects intentionally expose accepted `.wormhole/` state through
-  public Git. Private assurance mode keeps that state within the project's
-  private Git boundary.
+  public Git. Structural secret-shape validation does not prove confidentiality;
+  trusted machine-private `public_git` classification—whether canonical or fork—warns
+  accordingly and checkpoint requires a matching
+  attributed publication-review digest acknowledgement from either CLI or MCP.
+  This is intent/CAS, not authorization or DLP, and direct Git edits remain possible.
+  Private assurance mode keeps state within the project's private Git boundary.
+- Publication visibility is explicit user policy bound to the workspace/repository, not
+  continuous Git-host visibility detection. Repository-identity changes invalidate it;
+  same-identity host visibility changes require explicit reconfiguration and are always
+  the operator's responsibility.
 - Fabric must respect the selected public or private project boundary. Because
   Fabric is optional, loss of Fabric availability does not erase Git-accepted
   project state.
 - Wormhole never stores source code outside Git as a competing truth.
+- Operational retention is finite: presence is restart-discardable; ordinary activity
+  expires by age or by falling outside the newest 10,000 unprotected workspace rows,
+  with deterministic oldest-first pruning; pending lifecycle evidence is protected until
+  terminal, then defaults to exactly 30 days (or an advertised finite longer duration).
+  Expiry cannot mutate portable Git state.
 
 ---
 
@@ -457,17 +485,24 @@ live collaboration without changing the Git authority boundary.
 - **Core pillars:** Event Bus, Task Graph, Knowledge Base, and Identity &
   Permissions remain the four Core pillars. Git integration is cross-cutting.
 - **Operational parity:** Humans and agents can perform the same authorised
-  project operations.
+  project operations; Wormhole remains agent-first in schemas, retrieval, durability,
+  attribution, and handoff.
 - **Identity model:** Identity, authentication, and authorization are separate.
   Agents are distinct durable principals with accountable human ownership.
-- **Project authority:** Typed project state is Git-native under `.wormhole/`.
-  Git is the sole source of truth for code and accepts project-state changes.
+- **Project authority:** Explicitly curated portable project state is Git-native under
+  `.wormhole/`. Git is the sole source of truth for code and accepts those changes.
 - **Assurance modes:** Core supports local/fork, canonical-public, and private
   assurance modes.
 - **Onboarding:** `wormhole setup` replaces legacy join/connect onboarding.
 - **Interfaces:** The CLI is human-first; MCP is a stateless harness connector.
 - **Fabric:** Fabric is optional for both public and private projects and
   accelerates live collaboration without replacing Git authority.
+- **Authority boundary:** Git accepts explicitly curated portable project context;
+  Gateway/Fabric own operational activity under finite retention. `EventV1` is selected
+  audit evidence, never the automatic representation of every channel or task event.
+- **V1 scope:** Authority is project/repository-lineage scoped. Organisation-wide and
+  cross-repository graphs, merged KBs, inherited policy, and cross-project authority
+  require a separate RFC.
 - **Durable event discovery:** Each Fabric uses its Postgres change records,
   polled by bound Gateways during sync. Ephemeral Gateway notifications may
   wake local consumers but are not a second durable coordination store.
