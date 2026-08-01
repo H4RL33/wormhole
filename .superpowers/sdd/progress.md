@@ -708,3 +708,36 @@ invoke; exhaustive primitive receipt-order and rollback matrices remain owned by
 reviewed localstore seams. Portable-state Task 4 is now complete. The next portable-state
 work is the trusted publication-classification/review-CAS hard gate, followed by Task 5
 checkpoint publication and recovery toward the clone-to-second-clone loop.
+
+Publication-origin trust boundary `7e4be51`
+(`feat(projectstate): bind publication origin`): complete. Registration now persists the
+canonical repository identity and accepted Git position needed to classify later
+publication safely, while preserving exact-repeat idempotence and rejecting checkout
+collisions. The contract deliberately treats a proposed workspace UUID and accepted ref
+as observations rather than registration identity: an existing matching checkout returns
+its exact stored binding without writes, and Task 4 remains responsible for ref movement.
+Fresh focused, race, vet, formatting, diff, and repository-wide checks passed; merged
+statement coverage was 85.8%. Two independent reviews approved the checkpoint, which was
+pushed and verified at exact SHA `7e4be51877737e1e2ca0fc94134ad005cb6eaad9`.
+
+Publication-policy persistence `a62c18f`
+(`feat(localstore): persist publication policy`): complete. Schema v3 atomically
+backfills an exact current policy and immutable revision-1 bootstrap transition for every
+workspace, and new registrations create the same evidence with their binding. Strict
+current/history reads reject malformed storage classes, non-canonical repository or actor
+JSON, invalid digests and actors, non-UTC timestamps, revision gaps, impossible bootstrap
+lineage, and any binding/policy disagreement. Reconfiguration uses a complete raw CAS,
+human-only configured actors, contiguous append-only history, exact pre-existing-history
+preservation, and complete binding evidence before and after mutation; transaction and
+trigger adversaries prove rollback on drift.
+
+Review amendments independently validate the expected CAS record, compare every prior
+history row byte-for-byte, preserve the complete binding across the write, accept
+semantically identical zero-offset actor instants after canonical UTC round-trip, and
+retain the registration contract that ignores proposed workspace UUID and accepted ref.
+Fresh focused and repeated causal tests, full localstore/projectstate tests, focused race,
+vet, gofmt, and diff checks passed. A final repository-wide `make check` passed build,
+vet, integration-required tests, the complete race suite, and merged statement coverage
+at 85.8% against the accepted 80% floor. The next publication tranche is the service
+control plane that observes and reconfigures this persisted policy before checkpoint and
+recovery publication work begins.
