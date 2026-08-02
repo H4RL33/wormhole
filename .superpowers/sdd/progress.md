@@ -846,3 +846,25 @@ ProjectState and repository tests, race, vet, formatting, and diff checks passed
 fresh independent reviews found no Critical, Important, or Minor issues; controller
 reran the focused and full ProjectState suites, vet, diff checks, and `go test ./...`
 clean. Task 5C exact checkpoint-plan cross-proof is next.
+
+Task 5C exact checkpoint-plan cross-proof `2dc4eea..3e3d802`: complete. The pure
+ProjectState planner now proves one complete binding, accepted snapshot, prior candidate,
+composition, materialization disposition, operation selection, prior live tree,
+publication review, and accountable local actor before producing owned canonical
+checkpoint inputs. A review amendment strict-decodes every terminal version-1
+publication-review and prior-candidate proof, binds their historical scope, repository,
+digests, generation, candidate boundary, and canonical trees to the durable journal, and
+preserves the ratified compatibility rules for version-0 no-residual history, accepted
+nil operation envelopes, and recovered-old excluded operation evidence. Historical
+accepted refs, commits, and tree digests are proved against their journal rather than
+incorrectly compared with the current Git base.
+
+Causal focused RED/GREEN covered the missing plan API and the terminal-history provenance
+gap. The final matrix includes absent/direct/rebased candidates, rebased-prefix plus
+active-suffix selection, complete review/trust/policy drift, malformed and noncanonical
+proofs, historical field mismatches, legitimate old-base inequality, v0 compatibility,
+zero-on-error, determinism, and input/output ownership. Two fresh final reviews approved
+the amended range with no remaining Critical, Important, or Minor findings. Controller
+reran focused and full ProjectState tests, the focused race suite, vet, formatting and
+diff checks, exact two-file scope verification, and `go test ./... -count=1` clean. Task
+5D transaction-local journal preparation and transition APIs are next.
