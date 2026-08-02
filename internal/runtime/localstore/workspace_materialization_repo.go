@@ -146,7 +146,7 @@ func (tx *WorkspaceMutationTx) AcceptMaterialization(ctx context.Context, expect
 	if expected.IncludedOperationsJSON == nil {
 		return WorkspaceMaterializationRecord{}, fmt.Errorf("localstore: materialization operation proof is missing")
 	}
-	if !validWorkspaceMaterializationPublicationProof(expected) {
+	if expected.PublicationReviewProofVersion != 1 || expected.PublicationReviewJSON == nil || expected.PriorCandidateJSON == nil {
 		return WorkspaceMaterializationRecord{}, fmt.Errorf("localstore: materialization publication proof is missing or invalid")
 	}
 	current, err := tx.acceptanceEligibleMaterialization(ctx)

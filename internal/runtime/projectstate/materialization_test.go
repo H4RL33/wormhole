@@ -144,13 +144,25 @@ func TestProveMaterializationDispositionAcceptsCompleteMultipleOwnership(t *test
 		t.Fatalf("proof journals=%d, want 3 owning journals", len(proof.journals))
 	}
 
+	wantReview, wantPriorCandidate := *published.PublicationReviewJSON, *published.PriorCandidateJSON
 	wantPublished := cloneMaterializationRecord(published)
 	disposition.Journals[1].CandidateTree[0].Data[0] ^= 0xff
 	*disposition.Journals[1].IncludedOperationsJSON = "changed"
+	disposition.Journals[1].StagePath = "/mutated-stage"
+	disposition.Journals[1].BackupPath = "/mutated-backup"
+	disposition.Journals[1].PublicationReviewProofVersion = 0
+	*disposition.Journals[1].PublicationReviewJSON = "mutated review"
+	*disposition.Journals[1].PriorCandidateJSON = "mutated prior"
 	disposition.Operations[1].OperationJSON[0] ^= 0xff
 	gotPublished := proof.journals[published.JournalID]
 	if !reflect.DeepEqual(gotPublished.record, wantPublished) {
 		t.Fatal("proof retained aliases to disposition journals")
+	}
+	if gotPublished.record.PublicationReviewJSON == disposition.Journals[1].PublicationReviewJSON ||
+		gotPublished.record.PriorCandidateJSON == disposition.Journals[1].PriorCandidateJSON ||
+		gotPublished.record.PublicationReviewJSON == nil || *gotPublished.record.PublicationReviewJSON != wantReview ||
+		gotPublished.record.PriorCandidateJSON == nil || *gotPublished.record.PriorCandidateJSON != wantPriorCandidate {
+		t.Fatal("proof retained publication-proof pointer aliases")
 	}
 }
 
@@ -358,7 +370,17 @@ func TestRequireMatchingMaterializationAcceptsPublishedAndRecoveredNewWithoutAli
 
 			eligible.CandidateTree[0].Data[0] ^= 0xff
 			*eligible.IncludedOperationsJSON = "changed"
+			eligible.StagePath = "/eligible-stage"
+			eligible.BackupPath = "/eligible-backup"
+			eligible.PublicationReviewProofVersion = 0
+			*eligible.PublicationReviewJSON = "eligible review"
+			*eligible.PriorCandidateJSON = "eligible prior"
 			disposition.Journals[0].PriorTree[0].Data[0] ^= 0xff
+			disposition.Journals[0].StagePath = "/disposition-stage"
+			disposition.Journals[0].BackupPath = "/disposition-backup"
+			disposition.Journals[0].PublicationReviewProofVersion = 0
+			*disposition.Journals[0].PublicationReviewJSON = "disposition review"
+			*disposition.Journals[0].PriorCandidateJSON = "disposition prior"
 			disposition.Operations[0].OperationJSON[0] ^= 0xff
 			freshEligible := cloneMaterializationRecord(journal)
 			fresh, err := requireMatchingMaterialization(proof, &freshEligible, fixture.binding, fixture.priorTree, fixture.candidateTree, fixture.candidateDigest)
@@ -440,21 +462,33 @@ func TestRequireMatchingMaterializationRejectsRecordBindingTreeAndDigestMismatch
 		})
 	}
 
-	t.Run("separate eligible record differs from proof", func(t *testing.T) {
-		fixture := newCheckpointMaterializationFixture(t)
-		journal := fixture.journal(t, "journal-a", "published", 1, fixture.entries[:2])
-		proof, err := proveMaterializationDisposition(localstore.WorkspaceMaterializationDisposition{
-			Journals: []localstore.WorkspaceMaterializationRecord{journal}, Operations: fixture.rows("materialized", "materialized"),
+	for _, test := range []struct {
+		name   string
+		mutate func(*localstore.WorkspaceMaterializationRecord)
+	}{
+		{"included operations", func(record *localstore.WorkspaceMaterializationRecord) { *record.IncludedOperationsJSON += " " }},
+		{"stage path", func(record *localstore.WorkspaceMaterializationRecord) { record.StagePath = "/other-stage" }},
+		{"backup path", func(record *localstore.WorkspaceMaterializationRecord) { record.BackupPath = "/other-backup" }},
+		{"proof version", func(record *localstore.WorkspaceMaterializationRecord) { record.PublicationReviewProofVersion = 2 }},
+		{"publication review", func(record *localstore.WorkspaceMaterializationRecord) { *record.PublicationReviewJSON += " " }},
+		{"prior candidate", func(record *localstore.WorkspaceMaterializationRecord) { *record.PriorCandidateJSON += " " }},
+	} {
+		t.Run("separate eligible "+test.name+" differs from proof", func(t *testing.T) {
+			fixture := newCheckpointMaterializationFixture(t)
+			journal := fixture.journal(t, "journal-a", "published", 1, fixture.entries[:2])
+			proof, err := proveMaterializationDisposition(localstore.WorkspaceMaterializationDisposition{
+				Journals: []localstore.WorkspaceMaterializationRecord{journal}, Operations: fixture.rows("materialized", "materialized"),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			eligible := cloneMaterializationRecord(journal)
+			test.mutate(&eligible)
+			if _, err := requireMatchingMaterialization(proof, &eligible, fixture.binding, fixture.priorTree, fixture.candidateTree, fixture.candidateDigest); err == nil {
+				t.Fatal("eligible record differing from proof succeeded")
+			}
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		eligible := cloneMaterializationRecord(journal)
-		*eligible.IncludedOperationsJSON += " "
-		if _, err := requireMatchingMaterialization(proof, &eligible, fixture.binding, fixture.priorTree, fixture.candidateTree, fixture.candidateDigest); err == nil {
-			t.Fatal("eligible record differing from proof succeeded")
-		}
-	})
+	}
 
 	t.Run("unknown proof journal", func(t *testing.T) {
 		fixture := newCheckpointMaterializationFixture(t)

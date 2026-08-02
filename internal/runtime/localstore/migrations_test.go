@@ -729,16 +729,45 @@ func TestGatewayMigrationV4FreshSchemaProofColumnsAndConstraint(t *testing.T) {
 	if defaultVersion != 0 {
 		t.Fatalf("proof version default=%d, want 0", defaultVersion)
 	}
-	for _, query := range []string{
-		`UPDATE workspace_materializations SET publication_review_proof_version=1 WHERE journal_id='v4-default'`,
-		`UPDATE workspace_materializations SET publication_review_json='review' WHERE journal_id='v4-default'`,
-		`UPDATE workspace_materializations SET prior_candidate_json='candidate' WHERE journal_id='v4-default'`,
-		`UPDATE workspace_materializations SET publication_review_proof_version=2 WHERE journal_id='v4-default'`,
+	for _, test := range []struct {
+		name          string
+		version       int
+		review, prior any
+		legal         bool
+	}{
+		{"legal v0 null null", 0, nil, nil, true},
+		{"legal v1 both", 1, " review ", " prior ", true},
+		{"v0 review only", 0, "review", nil, false},
+		{"v0 prior only", 0, nil, "prior", false},
+		{"v0 both", 0, "review", "prior", false},
+		{"v1 neither", 1, nil, nil, false},
+		{"v1 review only", 1, "review", nil, false},
+		{"v1 prior only", 1, nil, "prior", false},
+		{"negative null", -1, nil, nil, false},
+		{"negative both", -1, "review", "prior", false},
+		{"greater than one null", 2, nil, nil, false},
+		{"greater than one both", 2, "review", "prior", false},
 	} {
-		assertSQLFails(t, db, query)
-	}
-	if _, err := db.Exec(`UPDATE workspace_materializations SET publication_review_json='review', prior_candidate_json='candidate', publication_review_proof_version=1 WHERE journal_id='v4-default'`); err != nil {
-		t.Fatalf("legal v1 proof update: %v", err)
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := db.Exec(`
+				UPDATE workspace_materializations
+				SET publication_review_json=NULL,prior_candidate_json=NULL,publication_review_proof_version=0
+				WHERE journal_id='v4-default'
+			`); err != nil {
+				t.Fatal(err)
+			}
+			_, err := db.Exec(`
+				UPDATE workspace_materializations
+				SET publication_review_json=?,prior_candidate_json=?,publication_review_proof_version=?
+				WHERE journal_id='v4-default'
+			`, test.review, test.prior, test.version)
+			if test.legal && err != nil {
+				t.Fatalf("legal proof tuple rejected: %v", err)
+			}
+			if !test.legal && err == nil {
+				t.Fatal("illegal proof tuple accepted")
+			}
+		})
 	}
 }
 
@@ -747,20 +776,28 @@ func TestGatewayMigrationV4UpgradePreservesV3RowsAndRollsBackAtomically(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
+	firstAlter := `ALTER TABLE workspace_materializations ADD COLUMN publication_review_json TEXT;`
+	secondAlter := `ALTER TABLE workspace_materializations ADD COLUMN prior_candidate_json TEXT;`
 	for _, test := range []struct {
 		name   string
 		script string
 		ledger bool
 	}{
-		{"after first alter", "ALTER TABLE workspace_materializations ADD COLUMN publication_review_json TEXT; SELECT broken;", false},
-		{"after second alter", "ALTER TABLE workspace_materializations ADD COLUMN publication_review_json TEXT; ALTER TABLE workspace_materializations ADD COLUMN prior_candidate_json TEXT; SELECT broken;", false},
-		{"ledger", string(v4Bytes), true},
+		{"after first alter", firstAlter + ` SELECT missing_after_first_alter;`, false},
+		{"after second alter", firstAlter + secondAlter + ` SELECT missing_after_second_alter;`, false},
+		{"after third alter", string(v4Bytes) + ` SELECT missing_after_third_alter;`, false},
+		{"ledger insert", string(v4Bytes), true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			db := openRawGatewayDB(t)
+			dbPath := filepath.Join(t.TempDir(), "gateway.db")
+			db, err := sql.Open("sqlite", sqliteDSN(dbPath))
+			if err != nil {
+				t.Fatal(err)
+			}
 			applyGatewayV3(t, db)
 			insertPortableTransitionBindings(t, db)
 			insertV1Materialization(t, db, "00000000-0000-4000-8000-000000000011", "v3-row", "accepted")
+			before := readV3MaterializationRaw(t, db, "v3-row")
 			if test.ledger {
 				if _, err := db.Exec(`CREATE TRIGGER reject_v4_ledger BEFORE INSERT ON gateway_schema_migrations WHEN NEW.version=4 BEGIN SELECT RAISE(ABORT,'reject v4 ledger'); END`); err != nil {
 					t.Fatal(err)
@@ -774,29 +811,41 @@ func TestGatewayMigrationV4UpgradePreservesV3RowsAndRollsBackAtomically(t *testi
 			if err := applyGatewayMigrationSet(context.Background(), db, migrations); err == nil {
 				t.Fatal("broken v4 migration succeeded")
 			}
-			assertCheckpointPublicationV4AbsentWithLedgerV3(t, db)
-		})
-	}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
 
-	db := openRawGatewayDB(t)
-	applyGatewayV3(t, db)
-	insertPortableTransitionBindings(t, db)
-	insertV1Materialization(t, db, "00000000-0000-4000-8000-000000000011", "v3-row", "accepted")
-	var priorBefore, candidateBefore []byte
-	if err := db.QueryRow(`SELECT prior_tree,candidate_tree FROM workspace_materializations WHERE journal_id='v3-row'`).Scan(&priorBefore, &candidateBefore); err != nil {
-		t.Fatal(err)
-	}
-	if err := applyGatewayMigrations(context.Background(), db); err != nil {
-		t.Fatal(err)
-	}
-	var priorAfter, candidateAfter []byte
-	var version int
-	var review, candidate any
-	if err := db.QueryRow(`SELECT prior_tree,candidate_tree,publication_review_proof_version,publication_review_json,prior_candidate_json FROM workspace_materializations WHERE journal_id='v3-row'`).Scan(&priorAfter, &candidateAfter, &version, &review, &candidate); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(priorAfter, priorBefore) || !reflect.DeepEqual(candidateAfter, candidateBefore) || version != 0 || review != nil || candidate != nil {
-		t.Fatalf("v3 row after v4=(prior=%x candidate=%x version=%d review=%v prior_candidate=%v)", priorAfter, candidateAfter, version, review, candidate)
+			db, err = sql.Open("sqlite", sqliteDSN(dbPath))
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertCheckpointPublicationV4AbsentWithLedgerV3(t, db)
+			if after := readV3MaterializationRaw(t, db, "v3-row"); !reflect.DeepEqual(after, before) {
+				t.Fatalf("failed migration changed durable v3 row: got %v want %v", after, before)
+			}
+			if test.ledger {
+				if _, err := db.Exec(`DROP TRIGGER reject_v4_ledger`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := applyGatewayMigrations(context.Background(), db); err != nil {
+				t.Fatalf("retry real v4 migration: %v", err)
+			}
+			assertCheckpointPublicationV4State(t, db, "v3-row", before)
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			db, err = sql.Open("sqlite", sqliteDSN(dbPath))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if err := applyGatewayMigrations(context.Background(), db); err != nil {
+				t.Fatalf("idempotent v4 migration: %v", err)
+			}
+			assertCheckpointPublicationV4State(t, db, "v3-row", before)
+		})
 	}
 }
 
@@ -1199,6 +1248,59 @@ func assertCheckpointPublicationV4AbsentWithLedgerV3(t *testing.T, db *sql.DB) {
 			t.Fatalf("failed v4 retained materialization column %s", column)
 		}
 	}
+}
+
+func assertCheckpointPublicationV4State(t *testing.T, db *sql.DB, journalID string, wantV3Row []string) {
+	t.Helper()
+	var maxVersion, count int
+	if err := db.QueryRow(`SELECT max(version),count(*) FROM gateway_schema_migrations`).Scan(&maxVersion, &count); err != nil {
+		t.Fatal(err)
+	}
+	if maxVersion != 4 || count != 4 {
+		t.Fatalf("ledger=(%d,%d), want durable v4", maxVersion, count)
+	}
+	if got := tableColumns(t, db, "workspace_materializations"); len(got) < 3 || !reflect.DeepEqual(got[len(got)-3:], []string{
+		"publication_review_json", "prior_candidate_json", "publication_review_proof_version",
+	}) {
+		t.Fatalf("v4 materialization columns=%v", got)
+	}
+	var proofVersion int
+	var review, prior any
+	if err := db.QueryRow(`
+		SELECT publication_review_proof_version,publication_review_json,prior_candidate_json
+		FROM workspace_materializations WHERE journal_id=?
+	`, journalID).Scan(&proofVersion, &review, &prior); err != nil {
+		t.Fatal(err)
+	}
+	if proofVersion != 0 || review != nil || prior != nil {
+		t.Fatalf("migrated proof=(%d,%v,%v), want (0,NULL,NULL)", proofVersion, review, prior)
+	}
+	if got := readV3MaterializationRaw(t, db, journalID); !reflect.DeepEqual(got, wantV3Row) {
+		t.Fatalf("v4 migration changed v3 row: got %v want %v", got, wantV3Row)
+	}
+}
+
+func readV3MaterializationRaw(t *testing.T, db *sql.DB, journalID string) []string {
+	t.Helper()
+	columns := []string{
+		"project_id", "workspace_id", "journal_id", "expected_live_digest", "accepted_base_digest",
+		"checkout_path", "checkout_device", "checkout_inode", "prior_tree_digest", "candidate_digest",
+		"through_generation", "prior_tree", "candidate_tree", "stage_path", "backup_path", "state",
+		"created_at", "updated_at", "included_operations_json",
+	}
+	selects := make([]string, 0, len(columns)*2)
+	values := make([]string, len(columns)*2)
+	targets := make([]any, len(values))
+	for index, column := range columns {
+		selects = append(selects, "quote("+column+")", "typeof("+column+")")
+		targets[index*2] = &values[index*2]
+		targets[index*2+1] = &values[index*2+1]
+	}
+	query := `SELECT ` + strings.Join(selects, ",") + ` FROM workspace_materializations WHERE journal_id=?`
+	if err := db.QueryRow(query, journalID).Scan(targets...); err != nil {
+		t.Fatal(err)
+	}
+	return values
 }
 
 func assertPublicationV3AbsentWithLedgerV2(t *testing.T, db *sql.DB) {

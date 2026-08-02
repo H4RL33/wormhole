@@ -3,6 +3,7 @@ package localstore
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"reflect"
@@ -127,6 +128,39 @@ func TestWorkspaceMutationTxAcceptMaterializationRejectsIneligibleAndStaleRows(t
 			after := readMaterializationDisposition(t, fixture.repo, fixture.binding.Scope)
 			if !reflect.DeepEqual(after, before) {
 				t.Fatalf("stale acceptance changed state: got %+v want %+v", after, before)
+			}
+		})
+	}
+}
+
+func TestWorkspaceMaterializationProofDirectAcceptanceRejectsV0(t *testing.T) {
+	for _, materializationState := range []string{"published", "recovered_new"} {
+		t.Run(materializationState, func(t *testing.T) {
+			raw := "{\"schema_version\":1,\"initial_through_generation\":3,\"operations\":[]}\n"
+			fixture := newMaterializationFixture(t, materializationState, &raw)
+			mustExecMaterialization(t, fixture.store, `
+				UPDATE workspace_materializations
+				SET publication_review_json=NULL,prior_candidate_json=NULL,publication_review_proof_version=0
+			`)
+			disposition := readMaterializationDisposition(t, fixture.repo, fixture.binding.Scope)
+			if len(disposition.Journals) != 1 || disposition.Journals[0].IncludedOperationsJSON == nil ||
+				disposition.Journals[0].PublicationReviewProofVersion != 0 {
+				t.Fatalf("v0 fixture=%+v", disposition)
+			}
+			before := readAtomicWorkspaceRawSnapshot(t, fixture.store.DB())
+			err := fixture.repo.WithImmediateWorkspace(context.Background(), fixture.binding.Scope, func(tx *WorkspaceMutationTx) error {
+				got, err := tx.AcceptMaterialization(context.Background(), disposition.Journals[0])
+				if err == nil || !reflect.DeepEqual(got, WorkspaceMaterializationRecord{}) {
+					t.Fatalf("v0 direct acceptance=(%+v,%v), want zero,error", got, err)
+				}
+				return err
+			})
+			if err == nil {
+				t.Fatal("v0 direct acceptance succeeded")
+			}
+			after := readAtomicWorkspaceRawSnapshot(t, fixture.store.DB())
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("v0 direct acceptance changed raw state: got %#v want %#v", after, before)
 			}
 		})
 	}
@@ -979,14 +1013,37 @@ func TestWorkspaceMaterializationReaderNilRawRestartAndNonAliasing(t *testing.T)
 	assertMaterializationRecord(t, first, fixture, "published", nil)
 	wantPrior := bytes.Clone(first.PriorTree[0].Data)
 	wantCandidate := bytes.Clone(first.CandidateTree[0].Data)
+	wantStage, wantBackup := first.StagePath, first.BackupPath
+	wantReview, wantPriorCandidate := *first.PublicationReviewJSON, *first.PriorCandidateJSON
+	cloned := cloneWorkspaceMaterializationRecord(*first)
+	cloned.StagePath = "/clone-stage"
+	cloned.BackupPath = "/clone-backup"
+	*cloned.PublicationReviewJSON = "clone review"
+	*cloned.PriorCandidateJSON = "clone prior candidate"
+	if first.StagePath != wantStage || first.BackupPath != wantBackup || *first.PublicationReviewJSON != wantReview ||
+		*first.PriorCandidateJSON != wantPriorCandidate {
+		t.Fatalf("mutating cloned proof aliased source record: %+v", first)
+	}
 	first.PriorTree[0].Data[0] ^= 0xff
 	first.CandidateTree[0].Data[0] ^= 0xff
+	first.StagePath = "/mutated-stage"
+	first.BackupPath = "/mutated-backup"
+	*first.PublicationReviewJSON = "mutated review"
+	*first.PriorCandidateJSON = "mutated prior candidate"
 	if first.IncludedOperationsJSON != nil {
 		t.Fatal("legacy SQL NULL became non-nil")
 	}
 	second := readEligibleMaterialization(t, repo, binding.Scope)
 	if !bytes.Equal(second.PriorTree[0].Data, wantPrior) || !bytes.Equal(second.CandidateTree[0].Data, wantCandidate) {
 		t.Fatal("mutating returned trees aliased persisted/read state")
+	}
+	if second.StagePath != wantStage || second.BackupPath != wantBackup || second.PublicationReviewProofVersion != 1 ||
+		second.PublicationReviewJSON == nil || *second.PublicationReviewJSON != wantReview ||
+		second.PriorCandidateJSON == nil || *second.PriorCandidateJSON != wantPriorCandidate {
+		t.Fatalf("mutating returned proof aliased persisted/read state: %+v", second)
+	}
+	if first.PublicationReviewJSON == second.PublicationReviewJSON || first.PriorCandidateJSON == second.PriorCandidateJSON {
+		t.Fatal("separate proof reads aliased pointers")
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -1006,7 +1063,19 @@ func TestWorkspaceMaterializationReaderExactScopeAndAbsent(t *testing.T) {
 	store, repo := openWorkspaceStore(t)
 	a := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout-a", 1, 11)
 	b := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000012", "/checkout-b", 2, 12)
+	c := createBinding(t, repo, "00000000-0000-4000-8000-000000000002", "00000000-0000-4000-8000-000000000013", "/checkout-c", 3, 13)
 	makeMaterializationFixture(t, store, repo, b, "published", nil)
+	makeMaterializationFixture(t, store, repo, c, "published", nil)
+	mustExecMaterialization(t, store, `
+		UPDATE workspace_materializations
+		SET publication_review_json=' review-b ',prior_candidate_json=' prior-b ',stage_path='/stage-b',backup_path='/backup-b'
+		WHERE project_id=? AND workspace_id=?
+	`, b.Scope.ProjectID, b.Scope.WorkspaceID)
+	mustExecMaterialization(t, store, `
+		UPDATE workspace_materializations
+		SET publication_review_json=' review-c ',prior_candidate_json=' prior-c ',stage_path='/stage-c',backup_path='/backup-c'
+		WHERE project_id=? AND workspace_id=?
+	`, c.Scope.ProjectID, c.Scope.WorkspaceID)
 	var got *WorkspaceMaterializationRecord
 	if err := repo.WithImmediateWorkspace(context.Background(), a.Scope, func(tx *WorkspaceMutationTx) error {
 		var err error
@@ -1018,8 +1087,67 @@ func TestWorkspaceMaterializationReaderExactScopeAndAbsent(t *testing.T) {
 
 	fixtureA := makeMaterializationFixture(t, store, repo, a, "recovered_new", nil)
 	assertMaterializationRecord(t, readEligibleMaterialization(t, repo, a.Scope), fixtureA, "recovered_new", nil)
-	if gotB := readEligibleMaterialization(t, repo, b.Scope); gotB == nil || gotB.Checkout != b.Checkout {
+	mustExecMaterialization(t, store, `
+		UPDATE workspace_materializations
+		SET publication_review_json=' review-a ',prior_candidate_json=' prior-a ',stage_path='/stage-a',backup_path='/backup-a'
+		WHERE project_id=? AND workspace_id=?
+	`, a.Scope.ProjectID, a.Scope.WorkspaceID)
+	gotA := readEligibleMaterialization(t, repo, a.Scope)
+	if gotA == nil || gotA.StagePath != "/stage-a" || gotA.BackupPath != "/backup-a" ||
+		*gotA.PublicationReviewJSON != " review-a " || *gotA.PriorCandidateJSON != " prior-a " {
+		t.Fatalf("workspace A proof read=%+v", gotA)
+	}
+	if gotB := readEligibleMaterialization(t, repo, b.Scope); gotB == nil || gotB.Checkout != b.Checkout ||
+		gotB.StagePath != "/stage-b" || gotB.BackupPath != "/backup-b" ||
+		*gotB.PublicationReviewJSON != " review-b " || *gotB.PriorCandidateJSON != " prior-b " {
 		t.Fatalf("workspace B read=%+v", gotB)
+	}
+	if gotC := readEligibleMaterialization(t, repo, c.Scope); gotC == nil || gotC.Checkout != c.Checkout ||
+		gotC.StagePath != "/stage-c" || gotC.BackupPath != "/backup-c" ||
+		*gotC.PublicationReviewJSON != " review-c " || *gotC.PriorCandidateJSON != " prior-c " {
+		t.Fatalf("project C read=%+v", gotC)
+	}
+}
+
+func TestWorkspaceMaterializationProofReaderRejectsEnvelopeCorruptionWithoutMutation(t *testing.T) {
+	for _, column := range []string{"publication_review_json", "prior_candidate_json"} {
+		for _, test := range []struct {
+			name  string
+			query string
+			args  []any
+		}{
+			{"empty", `UPDATE workspace_materializations SET ` + column + `=?`, []any{""}},
+			{"NUL", `UPDATE workspace_materializations SET ` + column + `=?`, []any{"proof\x00bytes"}},
+			{"invalid UTF-8 TEXT", `UPDATE workspace_materializations SET ` + column + `=CAST(X'ff' AS TEXT)`, nil},
+			{"BLOB storage", `UPDATE workspace_materializations SET ` + column + `=X'7b7d0a'`, nil},
+		} {
+			t.Run(column+" "+test.name, func(t *testing.T) {
+				raw := "{}\n"
+				fixture := newMaterializationFixture(t, "published", &raw)
+				mustExecMaterialization(t, fixture.store, test.query, test.args...)
+				assertCorruptMaterializationProofReadsWithoutMutation(t, fixture)
+			})
+		}
+	}
+}
+
+func TestWorkspaceMaterializationProofReaderRejectsVersionAndShapeCorruptionWithoutMutation(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		query string
+	}{
+		{"version BLOB storage", `UPDATE workspace_materializations SET publication_review_proof_version=CAST(X'31' AS BLOB)`},
+		{"unsupported version", `UPDATE workspace_materializations SET publication_review_proof_version=2`},
+		{"v1 missing review", `UPDATE workspace_materializations SET publication_review_json=NULL`},
+		{"v1 missing prior", `UPDATE workspace_materializations SET prior_candidate_json=NULL`},
+		{"v0 with both proofs", `UPDATE workspace_materializations SET publication_review_proof_version=0`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			raw := "{}\n"
+			fixture := newMaterializationFixture(t, "published", &raw)
+			withIgnoredMaterializationChecks(t, fixture.store.DB(), test.query)
+			assertCorruptMaterializationProofReadsWithoutMutation(t, fixture)
+		})
 	}
 }
 
@@ -1357,7 +1485,9 @@ func assertMaterializationRecord(t *testing.T, got *WorkspaceMaterializationReco
 	if got.JournalID != "legacy-journal" || got.ExpectedLiveDigest != fixture.priorDigest ||
 		got.AcceptedBaseDigest != state.Digest(fixture.binding.AcceptedTreeDigest) || got.Checkout != fixture.binding.Checkout ||
 		got.PriorTreeDigest != fixture.priorDigest || got.CandidateDigest != fixture.candidateDigest ||
-		got.ThroughGeneration != 3 || got.State != materializationState ||
+		got.ThroughGeneration != 3 || got.StagePath != "/stage" || got.BackupPath != "/backup" ||
+		got.PublicationReviewProofVersion != 1 || got.PublicationReviewJSON == nil || *got.PublicationReviewJSON != " review\n" ||
+		got.PriorCandidateJSON == nil || *got.PriorCandidateJSON != " prior-candidate\n" || got.State != materializationState ||
 		!reflect.DeepEqual(got.PriorTree, fixture.priorTree) || !reflect.DeepEqual(got.CandidateTree, fixture.candidateTree) {
 		t.Fatalf("materialization=%+v", got)
 	}
@@ -1367,6 +1497,51 @@ func assertMaterializationRecord(t *testing.T, got *WorkspaceMaterializationReco
 		}
 	} else if got.IncludedOperationsJSON == nil || *got.IncludedOperationsJSON != *included {
 		t.Fatalf("included=%v, want byte-exact %q", got.IncludedOperationsJSON, *included)
+	}
+}
+
+func assertCorruptMaterializationProofReadsWithoutMutation(t *testing.T, fixture *materializationFixture) {
+	t.Helper()
+	before := readAtomicWorkspaceRawSnapshot(t, fixture.store.DB())
+	var disposition WorkspaceMaterializationDisposition
+	err := fixture.repo.WithImmediateWorkspace(context.Background(), fixture.binding.Scope, func(tx *WorkspaceMutationTx) error {
+		var err error
+		disposition, err = tx.MaterializationDisposition(context.Background())
+		return err
+	})
+	assertEmptyMaterializationDispositionError(t, disposition, err)
+	if after := readAtomicWorkspaceRawSnapshot(t, fixture.store.DB()); !reflect.DeepEqual(after, before) {
+		t.Fatalf("corrupt disposition read changed raw state: got %#v want %#v", after, before)
+	}
+	var eligible *WorkspaceMaterializationRecord
+	err = fixture.repo.WithImmediateWorkspace(context.Background(), fixture.binding.Scope, func(tx *WorkspaceMutationTx) error {
+		var err error
+		eligible, err = tx.AcceptanceEligibleMaterialization(context.Background())
+		return err
+	})
+	if err == nil || eligible != nil {
+		t.Fatalf("corrupt eligible read=(%+v,%v), want nil,error", eligible, err)
+	}
+	if after := readAtomicWorkspaceRawSnapshot(t, fixture.store.DB()); !reflect.DeepEqual(after, before) {
+		t.Fatalf("corrupt eligible read changed raw state: got %#v want %#v", after, before)
+	}
+}
+
+func withIgnoredMaterializationChecks(t *testing.T, db *sql.DB, query string, args ...any) {
+	t.Helper()
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(context.Background(), `PRAGMA ignore_check_constraints=ON`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(context.Background(), query, args...); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(context.Background(), `PRAGMA ignore_check_constraints=OFF`); err != nil {
+		t.Fatal(err)
 	}
 }
 
