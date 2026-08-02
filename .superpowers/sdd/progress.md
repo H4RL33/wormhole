@@ -821,3 +821,16 @@ statement coverage against the accepted 80% floor. The implementation is pushed 
 remote ref was verified at exact SHA `95198f79158e6d41fc2160c63ab710b5499257ee`.
 Publication Slices 1-4 are now complete, reviewed, committed, and Task 5 checkpoint CAS,
 durable publication proof, filesystem publication, and recovery is unblocked.
+
+Task 5A schema-v4 and localstore proof persistence `9f10690..53a3436`: complete.
+Migration `000004_checkpoint_publication_review.sql` installs the exact joint
+v0/null/null-or-v1/non-null/non-null proof contract. Complete materialization reads,
+clones, equality, ProjectState acceptance proof, and acceptance CAS now preserve public
+stage/backup paths and both opaque proof envelopes; direct acceptance requires v1 while
+v0 evidence remains recoverable for later classification. Causal RED/GREEN covered the
+missing fields, direct v0 acceptance bypass, all migration failure/reopen/retry boundaries,
+opaque storage corruption, full CAS identity, scope, restart, and pointer ownership.
+The implementation passed focused and full localstore/ProjectState tests, focused race,
+vet, formatting, diff checks, and repository-wide tests. Three final read-only reviews
+approved the two-commit range with no remaining Critical, Important, or Minor findings;
+controller reran both full packages and vet clean. Task 5B proof codecs are next.
