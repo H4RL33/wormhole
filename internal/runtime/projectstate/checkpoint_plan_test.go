@@ -98,14 +98,14 @@ func TestProveCheckpointPlanHappyShapesAndSelection(t *testing.T) {
 			return input
 		}, []string{"90000000-0000-4000-8000-000000000001", "90000000-0000-4000-8000-000000000002"}},
 		{"terminal accepted history and later active", func(input checkpointPlanInput) checkpointPlanInput {
+			input = checkpointPlanHistoricalInput(t, input, "accepted")
 			operation, _ := checkpointPlanProjectOperation(t, input.Composed.status.AcceptedSnapshot, "90000000-0000-4000-8000-000000000003", "later active")
-			input.Disposition.Journals = []localstore.WorkspaceMaterializationRecord{{JournalID: "10000000-0000-4000-8000-000000000001", State: "accepted"}}
 			input.Disposition.Operations = []localstore.WorkspaceOperation{checkpointPlanOperationRow(t, 2, "active", operation)}
 			checkpointPlanRefresh(t, &input)
 			return input
 		}, []string{"90000000-0000-4000-8000-000000000003"}},
 		{"terminal recovered old history", func(input checkpointPlanInput) checkpointPlanInput {
-			input.Disposition.Journals = []localstore.WorkspaceMaterializationRecord{{JournalID: "10000000-0000-4000-8000-000000000002", State: "recovered_old"}}
+			input = checkpointPlanHistoricalInput(t, input, "recovered_old")
 			checkpointPlanRefresh(t, &input)
 			return input
 		}, nil},
@@ -207,6 +207,191 @@ func TestProveCheckpointPlanHappyShapesAndSelection(t *testing.T) {
 					t.Fatalf("selected row %d bytes differ from envelope", index)
 				}
 			}
+		})
+	}
+}
+
+func TestProveCheckpointPlanValidatesTerminalHistoryProofs(t *testing.T) {
+	for _, journalState := range []string{"accepted", "recovered_old"} {
+		t.Run(journalState+" valid historical base", func(t *testing.T) {
+			input := checkpointPlanHistoricalInput(t, checkpointPlanFixture(t), journalState)
+			journal := input.Disposition.Journals[0]
+			publication, err := decodeCheckpointPublicationReview(*journal.PublicationReviewJSON)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if publication.Review.AcceptedRef == input.Binding.AcceptedRef ||
+				publication.Review.AcceptedCommitSHA == input.Binding.AcceptedCommitSHA ||
+				publication.Review.AcceptedTreeDigest == state.Digest(input.Binding.AcceptedTreeDigest) {
+				t.Fatal("historical fixture did not differ from the current accepted Git base")
+			}
+			if journalState == "accepted" && journal.IncludedOperationsJSON != nil {
+				t.Fatal("accepted compatibility fixture unexpectedly has an operation envelope")
+			}
+			if journalState == "recovered_old" && (journal.IncludedOperationsJSON == nil || *journal.IncludedOperationsJSON != "{") {
+				t.Fatal("recovered-old fixture does not carry deliberately ignored malformed operation JSON")
+			}
+			mustProveCheckpointPlan(t, input)
+		})
+
+		t.Run(journalState+" version zero nil proof", func(t *testing.T) {
+			input := checkpointPlanHistoricalInput(t, checkpointPlanFixture(t), journalState)
+			journal := &input.Disposition.Journals[0]
+			journal.PublicationReviewProofVersion = 0
+			journal.PublicationReviewJSON = nil
+			journal.PriorCandidateJSON = nil
+			mustProveCheckpointPlan(t, input)
+		})
+
+		for _, test := range []struct {
+			name   string
+			mutate func(*localstore.WorkspaceMaterializationRecord)
+		}{
+			{"v1 nil publication", func(journal *localstore.WorkspaceMaterializationRecord) { journal.PublicationReviewJSON = nil }},
+			{"v1 nil prior candidate", func(journal *localstore.WorkspaceMaterializationRecord) { journal.PriorCandidateJSON = nil }},
+			{"malformed publication", func(journal *localstore.WorkspaceMaterializationRecord) {
+				raw := "{"
+				journal.PublicationReviewJSON = &raw
+			}},
+			{"noncanonical publication", func(journal *localstore.WorkspaceMaterializationRecord) {
+				raw := " " + *journal.PublicationReviewJSON
+				journal.PublicationReviewJSON = &raw
+			}},
+			{"malformed prior candidate", func(journal *localstore.WorkspaceMaterializationRecord) {
+				raw := "{"
+				journal.PriorCandidateJSON = &raw
+			}},
+			{"noncanonical prior candidate", func(journal *localstore.WorkspaceMaterializationRecord) {
+				raw := " " + *journal.PriorCandidateJSON
+				journal.PriorCandidateJSON = &raw
+			}},
+			{"unknown proof version", func(journal *localstore.WorkspaceMaterializationRecord) { journal.PublicationReviewProofVersion = 2 }},
+			{"v0 publication present", func(journal *localstore.WorkspaceMaterializationRecord) {
+				journal.PublicationReviewProofVersion = 0
+				journal.PriorCandidateJSON = nil
+			}},
+			{"v0 prior candidate present", func(journal *localstore.WorkspaceMaterializationRecord) {
+				journal.PublicationReviewProofVersion = 0
+				journal.PublicationReviewJSON = nil
+			}},
+		} {
+			t.Run(journalState+" "+test.name, func(t *testing.T) {
+				input := checkpointPlanHistoricalInput(t, checkpointPlanFixture(t), journalState)
+				test.mutate(&input.Disposition.Journals[0])
+				assertCheckpointPlanRejected(t, input)
+			})
+		}
+	}
+}
+
+func TestProveCheckpointPlanRejectsTerminalHistoryFieldDrift(t *testing.T) {
+	otherRepository := types.RepositoryIdentity{
+		Provider: "github", ImmutableID: "other", CanonicalRemote: "https://github.com/acme/other",
+	}
+	for _, journalState := range []string{"accepted", "recovered_old"} {
+		for _, test := range []struct {
+			name   string
+			mutate func(*localstore.WorkspaceMaterializationRecord)
+		}{
+			{"review scope", func(journal *localstore.WorkspaceMaterializationRecord) {
+				checkpointPlanRewriteHistoricalReview(t, journal, func(review *publicationReviewEnvelopeV1) {
+					review.Scope.WorkspaceID = "60000000-0000-4000-8000-000000000001"
+				})
+			}},
+			{"review repository", func(journal *localstore.WorkspaceMaterializationRecord) {
+				checkpointPlanRewriteHistoricalReview(t, journal, func(review *publicationReviewEnvelopeV1) {
+					review.Repository = otherRepository
+				})
+			}},
+			{"accepted base digest", func(journal *localstore.WorkspaceMaterializationRecord) {
+				journal.AcceptedBaseDigest = publicationRepeatedDigest('f')
+			}},
+			{"candidate digest", func(journal *localstore.WorkspaceMaterializationRecord) {
+				journal.CandidateDigest = publicationRepeatedDigest('f')
+			}},
+			{"through generation", func(journal *localstore.WorkspaceMaterializationRecord) { journal.ThroughGeneration++ }},
+			{"expected live digest", func(journal *localstore.WorkspaceMaterializationRecord) {
+				journal.ExpectedLiveDigest = publicationRepeatedDigest('f')
+			}},
+			{"prior tree digest", func(journal *localstore.WorkspaceMaterializationRecord) {
+				journal.ExpectedLiveDigest = publicationRepeatedDigest('f')
+				journal.PriorTreeDigest = journal.ExpectedLiveDigest
+			}},
+			{"candidate tree digest", func(journal *localstore.WorkspaceMaterializationRecord) {
+				journal.CandidateDigest = publicationRepeatedDigest('f')
+				checkpointPlanRewriteHistoricalReview(t, journal, func(review *publicationReviewEnvelopeV1) {
+					review.CandidateTreeDigest = journal.CandidateDigest
+				})
+			}},
+			{"prior tree identity", func(journal *localstore.WorkspaceMaterializationRecord) {
+				snapshot := checkpointPlanRetargetProject(t, mustCheckpointPlanDecodeTree(t, journal.PriorTree))
+				journal.PriorTree = mustCheckpointPlanTree(t, snapshot)
+				journal.PriorTreeDigest = snapshot.Digest
+				journal.ExpectedLiveDigest = snapshot.Digest
+			}},
+			{"candidate tree identity", func(journal *localstore.WorkspaceMaterializationRecord) {
+				snapshot := checkpointPlanRetargetRepository(t, mustCheckpointPlanDecodeTree(t, journal.CandidateTree))
+				journal.CandidateTree = mustCheckpointPlanTree(t, snapshot)
+				journal.CandidateDigest = snapshot.Digest
+				checkpointPlanRewriteHistoricalReview(t, journal, func(review *publicationReviewEnvelopeV1) {
+					review.CandidateTreeDigest = snapshot.Digest
+				})
+			}},
+			{"checkout", func(journal *localstore.WorkspaceMaterializationRecord) { journal.Checkout.Device = 0 }},
+		} {
+			t.Run(journalState+" "+test.name, func(t *testing.T) {
+				input := checkpointPlanHistoricalInput(t, checkpointPlanFixture(t), journalState)
+				test.mutate(&input.Disposition.Journals[0])
+				assertCheckpointPlanRejected(t, input)
+			})
+		}
+	}
+}
+
+func TestProveCheckpointPlanValidatesTerminalPriorCandidateAndBoundary(t *testing.T) {
+	t.Run("accepted nil operation envelope permits present candidate", func(t *testing.T) {
+		input := checkpointPlanHistoricalInput(t, checkpointPlanFixture(t), "accepted")
+		checkpointPlanSetHistoricalPriorBoundary(t, &input.Disposition.Journals[0], 7)
+		mustProveCheckpointPlan(t, input)
+	})
+
+	t.Run("accepted operation envelope matches present candidate boundary", func(t *testing.T) {
+		input := checkpointPlanHistoricalInput(t, checkpointPlanFixture(t), "accepted")
+		checkpointPlanSetHistoricalOperationBoundary(t, &input.Disposition.Journals[0], 3)
+		checkpointPlanSetHistoricalPriorBoundary(t, &input.Disposition.Journals[0], 3)
+		mustProveCheckpointPlan(t, input)
+	})
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*localstore.WorkspaceMaterializationRecord)
+	}{
+		{"accepted base", func(journal *localstore.WorkspaceMaterializationRecord) {
+			checkpointPlanSetHistoricalPriorBoundary(t, journal, 0)
+			checkpointPlanRewriteHistoricalPrior(t, journal, func(prior *checkpointPriorCandidateV1) {
+				prior.Candidate.AcceptedBaseDigest = publicationRepeatedDigest('f')
+			})
+		}},
+		{"direct tree identity", func(journal *localstore.WorkspaceMaterializationRecord) {
+			checkpointPlanSetHistoricalPriorBoundary(t, journal, 0)
+			checkpointPlanRewriteHistoricalPrior(t, journal, func(prior *checkpointPriorCandidateV1) {
+				direct := checkpointPlanRetargetProject(t, mustCheckpointPlanDecodePriorTree(t, prior.Candidate.DirectTree))
+				prior.Candidate.DirectTree = checkpointPriorTree(mustCheckpointPlanTree(t, direct), direct.Digest)
+				prior.Candidate.WorkingTreeDigest = direct.Digest
+			})
+		}},
+		{"operation boundary", func(journal *localstore.WorkspaceMaterializationRecord) {
+			checkpointPlanSetHistoricalOperationBoundary(t, journal, 3)
+			checkpointPlanSetHistoricalPriorBoundary(t, journal, 2)
+		}},
+		{"absent candidate operation boundary", func(journal *localstore.WorkspaceMaterializationRecord) {
+			checkpointPlanSetHistoricalOperationBoundary(t, journal, 3)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input := checkpointPlanHistoricalInput(t, checkpointPlanFixture(t), "accepted")
+			test.mutate(&input.Disposition.Journals[0])
+			assertCheckpointPlanRejected(t, input)
 		})
 	}
 }
@@ -349,8 +534,8 @@ func TestProveCheckpointPlanRejectsCompositionAndDispositionDrift(t *testing.T) 
 			input.Disposition.Journals = []localstore.WorkspaceMaterializationRecord{{JournalID: "journal", State: "prepared"}}
 		}},
 		{"published journal", func(input *checkpointPlanInput) {
-			raw := "proof\n"
-			input.Disposition.Journals = []localstore.WorkspaceMaterializationRecord{{JournalID: "journal", State: "published", PublicationReviewProofVersion: 1, PublicationReviewJSON: &raw, PriorCandidateJSON: &raw}}
+			history := checkpointPlanHistoricalInput(t, *input, "published")
+			input.Disposition.Journals = history.Disposition.Journals
 		}},
 		{"recovered new journal", func(input *checkpointPlanInput) {
 			input.Disposition.Journals = []localstore.WorkspaceMaterializationRecord{
@@ -359,13 +544,18 @@ func TestProveCheckpointPlanRejectsCompositionAndDispositionDrift(t *testing.T) 
 		}},
 		{"omitted selected row", func(input *checkpointPlanInput) { input.Disposition.Operations = []localstore.WorkspaceOperation{} }},
 		{"extra selected row", func(input *checkpointPlanInput) {
-			input.Disposition.Operations = append(input.Disposition.Operations, cloneImportOperation(input.Disposition.Operations[0]))
-			input.Disposition.Operations[1].Generation++
+			operation, _ := checkpointPlanProjectOperation(
+				t, input.Composed.view.Snapshot, "90000000-0000-4000-8000-000000000097", "extra selected",
+			)
+			input.Disposition.Operations = append(input.Disposition.Operations, checkpointPlanOperationRow(t, 2, "active", operation))
 		}},
 		{"selected row stashed", func(input *checkpointPlanInput) { input.Disposition.Operations[0].State = "stashed" }},
 		{"selected row discarded", func(input *checkpointPlanInput) { input.Disposition.Operations[0].State = "discarded" }},
 		{"orphan materialized", func(input *checkpointPlanInput) { input.Disposition.Operations[0].State = "materialized" }},
-		{"selected row unknown", func(input *checkpointPlanInput) { input.Disposition.Operations[0].State = "future" }},
+		{"selected row unknown", func(input *checkpointPlanInput) {
+			input.Disposition.Operations[0].State = "future"
+			checkpointPlanRefresh(t, input)
+		}},
 		{"selected row stash owned", func(input *checkpointPlanInput) {
 			owner := "80000000-0000-4000-8000-000000000001"
 			input.Disposition.Operations[0].StashedByStashID = &owner
@@ -804,6 +994,15 @@ func checkpointPlanAcceptedHistory(
 	row localstore.WorkspaceOperation,
 ) localstore.WorkspaceMaterializationRecord {
 	t.Helper()
+	accepted := input.Composed.status.AcceptedSnapshot
+	operation, err := state.DecodeOperation(row.OperationJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := state.ApplyOperation(accepted, operation)
+	if err != nil {
+		t.Fatal(err)
+	}
 	raw, err := encodeCheckpointOperations(CheckpointOperationsV1{
 		SchemaVersion: 1, InitialThroughGeneration: 0,
 		Operations: []CheckpointOperationV1{{
@@ -813,24 +1012,9 @@ func checkpointPlanAcceptedHistory(
 	if err != nil {
 		t.Fatal(err)
 	}
-	publication, err := encodeCheckpointPublicationReview(checkpointPublicationReviewV1{
-		SchemaVersion: 1, Kind: "checkpoint_publication_review", Review: input.Review.envelope,
-		ReviewDigest: input.Review.reviewDigest, CheckpointedBy: input.Actor,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	prior, err := encodeCheckpointPriorCandidate(checkpointPriorCandidateV1{
-		SchemaVersion: 1, Kind: "checkpoint_prior_candidate",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return localstore.WorkspaceMaterializationRecord{
-		JournalID: "10000000-0000-4000-8000-000000000010", ThroughGeneration: row.Generation,
-		IncludedOperationsJSON: &raw, PublicationReviewProofVersion: 1,
-		PublicationReviewJSON: &publication, PriorCandidateJSON: &prior, State: "accepted",
-	}
+	journal := checkpointPlanHistoricalJournal(t, input, "accepted", accepted, accepted, candidate, row.Generation)
+	journal.IncludedOperationsJSON = &raw
+	return journal
 }
 
 func checkpointPlanEmptyJournal(
@@ -839,30 +1023,165 @@ func checkpointPlanEmptyJournal(
 	journalID, journalState string,
 ) localstore.WorkspaceMaterializationRecord {
 	t.Helper()
-	operations, err := encodeCheckpointOperations(CheckpointOperationsV1{
-		SchemaVersion: 1, InitialThroughGeneration: 0, Operations: []CheckpointOperationV1{},
-	})
+	history := checkpointPlanHistoricalInput(t, input, journalState)
+	journal := history.Disposition.Journals[0]
+	journal.JournalID = journalID
+	return journal
+}
+
+func checkpointPlanHistoricalInput(t *testing.T, input checkpointPlanInput, journalState string) checkpointPlanInput {
+	t.Helper()
+	accepted := checkpointPlanMutatedSnapshot(t, input.Composed.status.AcceptedSnapshot, "historical accepted")
+	prior := checkpointPlanMutatedSnapshot(t, accepted, "historical prior live")
+	candidate := checkpointPlanMutatedSnapshot(t, accepted, "historical candidate")
+	journal := checkpointPlanHistoricalJournal(t, input, journalState, accepted, prior, candidate, 0)
+	switch journalState {
+	case "accepted":
+		journal.IncludedOperationsJSON = nil
+	case "recovered_old":
+		malformed := "{"
+		journal.IncludedOperationsJSON = &malformed
+	default:
+		operations, err := encodeCheckpointOperations(CheckpointOperationsV1{
+			SchemaVersion: 1, InitialThroughGeneration: 0, Operations: []CheckpointOperationV1{},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		journal.IncludedOperationsJSON = &operations
+	}
+	input.Disposition = localstore.WorkspaceMaterializationDisposition{
+		Journals:   []localstore.WorkspaceMaterializationRecord{journal},
+		Operations: []localstore.WorkspaceOperation{},
+	}
+	return input
+}
+
+func checkpointPlanHistoricalJournal(
+	t *testing.T,
+	input checkpointPlanInput,
+	journalState string,
+	accepted, prior, candidate state.Snapshot,
+	throughGeneration int64,
+) localstore.WorkspaceMaterializationRecord {
+	t.Helper()
+	review := input.Review.envelope
+	review.AcceptedRef = "refs/heads/checkpoint-history"
+	review.AcceptedCommitSHA = strings.Repeat("c", 40)
+	review.AcceptedTreeDigest = accepted.Digest
+	review.CandidateTreeDigest = candidate.Digest
+	review.OverlayGeneration = throughGeneration
+	_, reviewDigest, err := encodePublicationReviewEnvelope(review)
 	if err != nil {
 		t.Fatal(err)
 	}
 	publication, err := encodeCheckpointPublicationReview(checkpointPublicationReviewV1{
-		SchemaVersion: 1, Kind: "checkpoint_publication_review", Review: input.Review.envelope,
-		ReviewDigest: input.Review.reviewDigest, CheckpointedBy: input.Actor,
+		SchemaVersion: 1, Kind: "checkpoint_publication_review", Review: review,
+		ReviewDigest: reviewDigest, CheckpointedBy: input.Actor,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	prior, err := encodeCheckpointPriorCandidate(checkpointPriorCandidateV1{
+	priorCandidate, err := encodeCheckpointPriorCandidate(checkpointPriorCandidateV1{
 		SchemaVersion: 1, Kind: "checkpoint_prior_candidate",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return localstore.WorkspaceMaterializationRecord{
-		JournalID: journalID, IncludedOperationsJSON: &operations,
+		JournalID:          "10000000-0000-4000-8000-000000000010",
+		ExpectedLiveDigest: prior.Digest, AcceptedBaseDigest: accepted.Digest, Checkout: input.Binding.Checkout,
+		PriorTreeDigest: prior.Digest, CandidateDigest: candidate.Digest, ThroughGeneration: throughGeneration,
+		PriorTree: mustCheckpointPlanTree(t, prior), CandidateTree: mustCheckpointPlanTree(t, candidate),
 		PublicationReviewProofVersion: 1, PublicationReviewJSON: &publication,
-		PriorCandidateJSON: &prior, State: journalState,
+		PriorCandidateJSON: &priorCandidate, State: journalState,
 	}
+}
+
+func checkpointPlanRewriteHistoricalReview(
+	t *testing.T,
+	journal *localstore.WorkspaceMaterializationRecord,
+	mutate func(*publicationReviewEnvelopeV1),
+) {
+	t.Helper()
+	publication, err := decodeCheckpointPublicationReview(*journal.PublicationReviewJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutate(&publication.Review)
+	_, publication.ReviewDigest, err = encodePublicationReviewEnvelope(publication.Review)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := encodeCheckpointPublicationReview(publication)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal.PublicationReviewJSON = &raw
+}
+
+func checkpointPlanRewriteHistoricalPrior(
+	t *testing.T,
+	journal *localstore.WorkspaceMaterializationRecord,
+	mutate func(*checkpointPriorCandidateV1),
+) {
+	t.Helper()
+	prior, err := decodeCheckpointPriorCandidate(*journal.PriorCandidateJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutate(&prior)
+	raw, err := encodeCheckpointPriorCandidate(prior)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal.PriorCandidateJSON = &raw
+}
+
+func checkpointPlanSetHistoricalOperationBoundary(
+	t *testing.T,
+	journal *localstore.WorkspaceMaterializationRecord,
+	boundary int64,
+) {
+	t.Helper()
+	raw, err := encodeCheckpointOperations(CheckpointOperationsV1{
+		SchemaVersion: 1, InitialThroughGeneration: boundary, Operations: []CheckpointOperationV1{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal.IncludedOperationsJSON = &raw
+	journal.ThroughGeneration = boundary
+	checkpointPlanRewriteHistoricalReview(t, journal, func(review *publicationReviewEnvelopeV1) {
+		review.OverlayGeneration = boundary
+	})
+}
+
+func checkpointPlanSetHistoricalPriorBoundary(
+	t *testing.T,
+	journal *localstore.WorkspaceMaterializationRecord,
+	boundary int64,
+) {
+	t.Helper()
+	direct := mustCheckpointPlanDecodeTree(t, journal.CandidateTree)
+	directTree := checkpointPriorTree(mustCheckpointPlanTree(t, direct), direct.Digest)
+	candidate := &checkpointPriorCandidateStateV1{
+		AcceptedBaseDigest: journal.AcceptedBaseDigest, WorkingTreeDigest: direct.Digest,
+		DirectTree: directTree, RebasedThroughGeneration: boundary,
+		ImportedBy: "70000000-0000-4000-8000-000000000001",
+		ImportedAt: time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC),
+	}
+	if boundary != 0 {
+		rebased := directTree
+		candidate.RebasedTree = &rebased
+	}
+	raw, err := encodeCheckpointPriorCandidate(checkpointPriorCandidateV1{
+		SchemaVersion: 1, Kind: "checkpoint_prior_candidate", Candidate: candidate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal.PriorCandidateJSON = &raw
 }
 
 func checkpointPlanRefresh(t *testing.T, input *checkpointPlanInput) {
@@ -954,6 +1273,15 @@ func mustCheckpointPlanDecodeTree(t *testing.T, tree state.Tree) state.Snapshot 
 		t.Fatal(err)
 	}
 	return snapshot
+}
+
+func mustCheckpointPlanDecodePriorTree(t *testing.T, value checkpointPriorTreeV1) state.Snapshot {
+	t.Helper()
+	tree := make(state.Tree, len(value.Files))
+	for index, file := range value.Files {
+		tree[index] = state.File{Path: file.Path, Data: bytes.Clone(file.Data)}
+	}
+	return mustCheckpointPlanDecodeTree(t, tree)
 }
 
 func mustProveCheckpointPlan(t *testing.T, input checkpointPlanInput) checkpointPlan {

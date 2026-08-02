@@ -41,16 +41,8 @@ func proveCheckpointPlan(input checkpointPlanInput) (checkpointPlan, error) {
 	if err != nil {
 		return checkpointPlan{}, fmt.Errorf("projectstate: checkpoint materialization disposition: %w", err)
 	}
-	for _, journal := range input.Disposition.Journals {
-		if journal.State != "accepted" && journal.State != "recovered_old" {
-			return checkpointPlan{}, fmt.Errorf("projectstate: checkpoint has non-terminal materialization history")
-		}
-		if journal.State == "accepted" && journal.PublicationReviewProofVersion == 0 {
-			proved, ownsMaterializedRows := dispositionProof.journals[journal.JournalID]
-			if ownsMaterializedRows && len(proved.envelope.Operations) != 0 {
-				return checkpointPlan{}, fmt.Errorf("projectstate: version-zero accepted history retains materialized ownership")
-			}
-		}
+	if err := proveCheckpointTerminalHistory(input.Binding, input.Disposition, dispositionProof); err != nil {
+		return checkpointPlan{}, err
 	}
 
 	priorCandidateJSON, selectedStart, boundary, err := proveCheckpointPriorCandidate(input.Binding, input.Current, acceptedTree)
@@ -114,6 +106,98 @@ func proveCheckpointPlan(input checkpointPlanInput) (checkpointPlan, error) {
 		PublicationReviewJSON:   publicationReviewJSON,
 		PublicationReviewDigest: publicationReviewDigest,
 	}, nil
+}
+
+func proveCheckpointTerminalHistory(
+	currentBinding types.WorkspaceBinding,
+	disposition localstore.WorkspaceMaterializationDisposition,
+	dispositionProof materializationDispositionProof,
+) error {
+	for _, journal := range disposition.Journals {
+		if journal.State != "accepted" && journal.State != "recovered_old" {
+			return fmt.Errorf("projectstate: checkpoint has non-terminal materialization history")
+		}
+		switch journal.PublicationReviewProofVersion {
+		case 0:
+			if journal.PublicationReviewJSON != nil || journal.PriorCandidateJSON != nil {
+				return fmt.Errorf("projectstate: version-zero terminal history retains publication proof")
+			}
+			if journal.State == "accepted" {
+				proved, ownsMaterializedRows := dispositionProof.journals[journal.JournalID]
+				if ownsMaterializedRows && len(proved.envelope.Operations) != 0 {
+					return fmt.Errorf("projectstate: version-zero accepted history retains materialized ownership")
+				}
+			}
+			continue
+		case 1:
+			if journal.PublicationReviewJSON == nil || journal.PriorCandidateJSON == nil {
+				return fmt.Errorf("projectstate: version-one terminal history has incomplete publication proof")
+			}
+		default:
+			return fmt.Errorf("projectstate: terminal history has unknown publication proof version")
+		}
+
+		publication, err := decodeCheckpointPublicationReview(*journal.PublicationReviewJSON)
+		if err != nil {
+			return fmt.Errorf("projectstate: journal %q publication review: %w", journal.JournalID, err)
+		}
+		priorCandidate, err := decodeCheckpointPriorCandidate(*journal.PriorCandidateJSON)
+		if err != nil {
+			return fmt.Errorf("projectstate: journal %q prior candidate: %w", journal.JournalID, err)
+		}
+		review := publication.Review
+		if review.Scope != currentBinding.Scope || review.Repository != currentBinding.Repository {
+			return fmt.Errorf("projectstate: journal %q publication review workspace identity differs", journal.JournalID)
+		}
+		if review.AcceptedTreeDigest != journal.AcceptedBaseDigest || review.CandidateTreeDigest != journal.CandidateDigest ||
+			review.OverlayGeneration != journal.ThroughGeneration {
+			return fmt.Errorf("projectstate: journal %q publication review boundary differs", journal.JournalID)
+		}
+
+		historicalBinding := types.WorkspaceBinding{
+			Scope:              review.Scope,
+			Checkout:           journal.Checkout,
+			Repository:         review.Repository,
+			AcceptedRef:        review.AcceptedRef,
+			AcceptedCommitSHA:  review.AcceptedCommitSHA,
+			AcceptedTreeDigest: string(review.AcceptedTreeDigest),
+		}
+		if err := historicalBinding.Validate(); err != nil {
+			return fmt.Errorf("projectstate: journal %q historical binding: %w", journal.JournalID, err)
+		}
+		if journal.ExpectedLiveDigest != journal.PriorTreeDigest {
+			return fmt.Errorf("projectstate: journal %q prior digest differs", journal.JournalID)
+		}
+		if err := validateMatchingTree(journal.PriorTree, journal.PriorTreeDigest, historicalBinding); err != nil {
+			return fmt.Errorf("projectstate: journal %q prior tree: %w", journal.JournalID, err)
+		}
+		if err := validateMatchingTree(journal.CandidateTree, journal.CandidateDigest, historicalBinding); err != nil {
+			return fmt.Errorf("projectstate: journal %q candidate tree: %w", journal.JournalID, err)
+		}
+
+		boundary := int64(0)
+		if priorCandidate.Candidate != nil {
+			candidate := priorCandidate.Candidate
+			if candidate.AcceptedBaseDigest != journal.AcceptedBaseDigest {
+				return fmt.Errorf("projectstate: journal %q prior candidate accepted base differs", journal.JournalID)
+			}
+			direct, err := validateCheckpointPriorTree(candidate.DirectTree, checkpointPriorTreeProductionLimits())
+			if err != nil {
+				return fmt.Errorf("projectstate: journal %q direct prior candidate: %w", journal.JournalID, err)
+			}
+			if direct.Config.ProjectID != historicalBinding.Scope.ProjectID || direct.Config.Repository != historicalBinding.Repository {
+				return fmt.Errorf("projectstate: journal %q direct prior candidate identity differs", journal.JournalID)
+			}
+			boundary = candidate.RebasedThroughGeneration
+		}
+		if journal.State == "accepted" {
+			if proved, hasOperationProof := dispositionProof.journals[journal.JournalID]; hasOperationProof &&
+				boundary != proved.envelope.InitialThroughGeneration {
+				return fmt.Errorf("projectstate: journal %q prior candidate operation boundary differs", journal.JournalID)
+			}
+		}
+	}
+	return nil
 }
 
 func proveCheckpointWorkspace(input checkpointPlanInput) (state.Tree, error) {
