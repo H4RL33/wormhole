@@ -504,13 +504,53 @@ the same layering pattern and isolation discipline.
   independent realm. Worktree isolation is mandatory.
 - Checkpoint publication must compare-and-swap the expected live `.wormhole/`
   digest so direct edits cannot be overwritten. It records materialised-pending-
-  commit state privately. Only a same-symbolic-ref Reject/Refresh observation may accept
-  a matching Git commit and advance the accepted base; publication alone never does.
-  After the prepared journal commits, checkpoint must open a
-  second `BEGIN IMMEDIATE`, recheck the exact live digest, binding, candidate,
-  overlay generation/rows, and open-conflict gate, and hold that transaction through
-  filesystem publication plus the published journal/candidate/row update. Recovery
-  accepts either the recorded old or new complete live tree.
+  commit state privately. Before staging, one existing prepared/published/recovered-new
+  journal returns `ErrCheckpointPendingAcceptance`; mixed/multiple state fails closed.
+  Resolve an owner-only Git-private checkpoint directory outside the portable worktree
+  through hardened `git rev-parse --git-path wormhole/checkpoints` and require it to be on
+  the live tree's device. Allocate fresh no-replace stage/backup names but create only stage
+  before the CAS. Any pre-journal stage is unowned, never worktree-visible, ignored by
+  Recover, and never reused; cleanup is deferred.
+- Every new prepared checkpoint carries proof version 1 plus non-null strict canonical
+  publication-review and prior-candidate JSON. The latter contains complete inline direct
+  and optional rebased candidate trees; it never aliases journal `prior_tree`. Migration
+  version 4 enforces the joint version-0/null/null or version-1/non-null/non-null shape.
+  After prepared commit, checkpoint opens a second `BEGIN IMMEDIATE`, rechecks the exact
+  live digest, binding, both proofs, candidate, overlay rows, review, and conflict gate,
+  and holds it across publication, both parent fsyncs, and journal/candidate/row update.
+  After either Linux exchange or Darwin swap, old live is at stage and must be no-replace
+  renamed to the absent backup before both parents are fsynced.
+- Checkpoint and Recover never advance the accepted binding and expose no base-advanced
+  result flag. Same-symbolic-ref Reject/Refresh alone accepts a checkpoint materialization;
+  Task-4 proposal-free ref switch and applicable Discard may separately advance the base.
+  Task-5 indeterminate writes use exact transition-relative prior/next journal confirmation
+  without replay; attempted prepare treats journal absence as exact prior and retains every
+  unconfirmed unjournaled stage.
+- Recover first runs its recovery-specific disposition proof in one short
+  `BEGIN IMMEDIATE` snapshot before Git/path I/O. Empty or accepted/recovered-old-only
+  history, and separately one proved recovered-new, compose and return DB status from that
+  snapshot with no Git/path I/O. Exactly one prepared/published row drives recovery;
+  clone its complete preflight and close the transaction before outside Git. Mixed/multiple
+  pending state, no journal with materialized rows, or cross-journal/orphan/partial
+  ownership fails first. Prepared requires exact prior
+  candidate plus recorded active/rebased operations and zero owned materialized rows;
+  published/recovered-new require the exact publication postimage and every claim
+  materialized. Accepted history must pass complete historical ownership (version 0 only
+  without residual materialized rows); recovered-old owns none.
+- For a recovery driver, after the short preflight transaction closes, observe position ->
+  full tree at SHA -> origin -> final position. Under a second recovery `BEGIN IMMEDIATE`,
+  strict-reload/byte-match and re-prove the disposition, then repeat that bundle before
+  live/stage/backup I/O or any write.
+  Stored base exact or same-ref different-commit exact candidate may converge, without an
+  ancestry assumption. Any malformed/racing/drifted/other base fails with the recovery
+  precondition sentinel before origin invalidation. Recover-old restores the exact inline
+  candidate/operation preimage; recover-new retains the exact publication postimage.
+- Before stage/backup evidence I/O, re-resolve and no-follow open the owner-only same-device
+  Git-private root. Stored absolute paths must be distinct direct children named
+  `<journal_id>.stage`/`<journal_id>.backup`; inspect them descriptor-relatively without
+  following links and revalidate stable identity before mutation. Root/path containment,
+  naming, device, or rebind failure is a recovery precondition error; contained
+  symlink/type/existence/digest/identity mismatch is recovery-blocked. Mutate no path.
 - Snapshot deletion is canonical: single-file records become tombstones at their
   stable path; a KB tombstone replaces `record.json` and requires `body.md` to be
   absent. Missing targets are broken, while only schema-declared historical
@@ -637,7 +677,10 @@ the same layering pattern and isolation discipline.
   migration `000002_portable_transitions.sql` and `GatewaySchemaVersion = 2`; committed
   `000001`/`000002` are immutable. The reviewed publication amendment owns
   `000003_workspace_publication.sql`; Task 5 owns
-  `000004_checkpoint_publication_review.sql`. Mandatory portable-plan Task 6A owns
+  `000004_checkpoint_publication_review.sql`, whose three-column v4 change adds
+  `publication_review_json`, `prior_candidate_json`, and
+  `publication_review_proof_version` with the exact joint version-0/null/null versus
+  version-1/non-null/non-null CHECK. Mandatory portable-plan Task 6A owns
   append-only `000005_workspace_activity.sql` after its focused operational
   activity/retention/promotion artifact is reviewed and explicitly approved. Task 7 and
   migration 6 are blocked until the reviewed v5 implementation commit lands. Multi-Fabric
@@ -750,17 +793,22 @@ the same layering pattern and isolation discipline.
   published or recovered-new materialization match may bypass it. The matcher receives
   the complete disposition proof, eligible row, binding, canonical prior tree, captured
   candidate tree, and captured digest; no input is inferred or omitted.
-- Import, ObserveGitBase, Recover, and Discard read one complete same-transaction
-  materialization disposition before an eligible match. Accepted, published, and
-  recovered-new journals own materialized rows; prepared blocks a stable proof and drives
-  Recover; recovered-old owns none. Claims are globally generation/operation-ID unique
-  and form an exact byte/state/ownerless bijection with all materialized rows. Nil legacy
+- Import, ObserveGitBase, and Discard read one complete same-transaction materialization
+  disposition before an eligible match and use the acceptance-specific proof. Accepted,
+  published, and recovered-new journals own materialized rows; prepared is rejected by
+  that proof and drives Recover; recovered-old owns none. Claims are globally unique by
+  generation and operation ID and form an exact byte/state/ownerless bijection with all
+  materialized rows. Nil legacy
   accepted history contributes no claim and is valid only without a dependent residual
   materialized row. Each owning journal also rejects any unclaimed active/rebased row at
   or below its boundary; stashed/discarded gaps and later active rows are allowed.
   Historical prepublication state comes from the exact checkpoint transition and durable
-  envelope, not an independently reconstructable later column. This boundary requires no
-  schema or migration change. Import also uses the disposition operations as its sole
+  envelope, not an independently reconstructable later column. Recover does not reuse this
+  acceptance proof: its recovery-specific proof admits exactly one prepared only when the
+  current candidate equals the prior-candidate preimage, every listed row remains in its
+  recorded active/rebased state, and no owned materialized row exists; exactly one
+  published requires the publication postimage and all claims materialized. Import also
+  uses the disposition operations as its sole
   replay/transition inventory: active at/below the selected boundary or rebased above it
   is corruption; all valid active rows are composed and then passed as exact preloaded
   membership to `TransitionOperations`. `ActiveOperationsAfter` and generation-range
@@ -814,11 +862,12 @@ the same layering pattern and isolation discipline.
   with no receipt or state inference. RefreshWorkspace injects its validated resolved
   binding as `ExpectedBinding`, but returns `types.WorkspaceBinding{}` on that error;
   private adapters do the same, and no CLI/MCP client supplies binding or routing context.
-- At most one Git-acceptance-eligible checkpoint exists per workspace. Checkpoint checks
-  inside its first immediate transaction and returns `ErrCheckpointPendingAcceptance`
-  with zero staging or mutation while a published or recovered-new journal remains.
-  Later active generations remain overlay until that journal is accepted; checkpoints
-  are never silently superseded.
+- At most one prepared, published, or recovered-new checkpoint exists per workspace.
+  Checkpoint checks inside its first immediate transaction and returns
+  `ErrCheckpointPendingAcceptance` with zero artifact allocation or mutation while one
+  remains; a prepared row must be converged through Recover. Mixed/multiple pending rows
+  are corruption. Later active generations remain overlay until recovery/acceptance;
+  checkpoints are never silently superseded.
 - All append/rebase mutations use one caller-owned dedicated SQLite connection and one
   `BEGIN IMMEDIATE`: read exact binding/candidate/active rows, decode and compose, apply
   the shared reducer, write all rows/candidate/conflict state and the binding status,
@@ -893,6 +942,19 @@ the same layering pattern and isolation discipline.
   rollback; exact discard unknown-COMMIT confirmation; and zero-result
   non-discard/Refresh unknown-COMMIT paths. Negative cases assert zero writes and
   byte-identical retained state.
+- T7: Task-5 tests freeze v4's three columns and joint proof CHECK; strict complete-inline
+  prior-candidate goldens/cross-proofs; prepared/published/recovered-new checkpoint blocker;
+  owner-only same-device Git-private staging with backup absent pre-journal; and the split
+  pre-journal ignored-stage versus journal-backed convergence fault matrix. Recovery tests
+  freeze exact cardinality/candidate/operation ownership before I/O, no-journal orphan
+  corruption, one-short-immediate terminal status/no Git-path I/O, concurrent-writer
+  linearization at the second exact reload, and both ordered
+  position/tree-at-SHA/origin/position observations before path access. Darwin post-swap
+  faults and root/path escape, wrong-name, symlink/type/identity/rebind negatives retain
+  evidence with zero path mutation. Same-ref different-commit exact candidate has no
+  ancestry query. Task-5 unknown-COMMIT tests cover exact next, transition-relative exact
+  prior including prepared-journal absence, read failure, partial/corrupt/third state,
+  byte-identical evidence retention, and zero writer replay.
 
 Release and compatibility policy live in `docs/releasing.md` and
 `docs/compatibility.md`. Those documents describe repository workflow behavior;

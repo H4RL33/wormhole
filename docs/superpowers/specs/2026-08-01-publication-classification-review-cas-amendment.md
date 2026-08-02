@@ -678,19 +678,26 @@ ALTER TABLE workspace_materializations
   ADD COLUMN publication_review_json TEXT;
 
 ALTER TABLE workspace_materializations
+  ADD COLUMN prior_candidate_json TEXT;
+
+ALTER TABLE workspace_materializations
   ADD COLUMN publication_review_proof_version INTEGER NOT NULL DEFAULT 0
   CHECK(
-    (publication_review_proof_version=0 AND publication_review_json IS NULL) OR
-    (publication_review_proof_version=1 AND publication_review_json IS NOT NULL)
+    (publication_review_proof_version=0 AND
+      publication_review_json IS NULL AND prior_candidate_json IS NULL) OR
+    (publication_review_proof_version=1 AND
+      publication_review_json IS NOT NULL AND prior_candidate_json IS NOT NULL)
   );
 ```
 
-Version 0/null is explicit pre-v4 missing proof, not trusted as "legacy": it blocks every
+Version 0/null/null is explicit pre-v4 missing proof, not trusted as "legacy": it blocks every
 `prepared`, `published`, or `recovered_new` recovery/publication/acceptance path and retains
 all evidence. It is tolerated only on terminal `accepted` or `recovered_old` history after
-the existing complete no-residual-ownership proof succeeds. Version 1 requires the exact
-canonical JSON below. Every new prepared journal writer requires version 1 and one
-canonical envelope:
+the existing complete no-residual-ownership proof succeeds. Version 1 requires both exact
+canonical JSON envelopes below. SQL `NULL` in `prior_candidate_json` means only a blocked
+version-0 row; an actually absent pre-checkpoint candidate is represented by the non-null
+canonical `checkpointPriorCandidateV1` envelope whose `candidate` member is JSON `null`.
+Every new prepared-journal writer requires version 1 and both envelopes:
 
 ```go
 type checkpointPublicationReviewV1 struct {
@@ -700,35 +707,165 @@ type checkpointPublicationReviewV1 struct {
     ReviewDigest  projectstate.Digest         `json:"review_digest"`
     CheckpointedBy types.ActorEnvelope         `json:"checkpointed_by"`
 }
+
+type checkpointPriorCandidateV1 struct {
+    SchemaVersion int                              `json:"schema_version"`
+    Kind          string                           `json:"kind"` // checkpoint_prior_candidate
+    Candidate     *checkpointPriorCandidateStateV1 `json:"candidate"`
+}
+
+type checkpointPriorCandidateStateV1 struct {
+    AcceptedBaseDigest       projectstate.Digest    `json:"accepted_base_digest"`
+    WorkingTreeDigest        projectstate.Digest    `json:"working_tree_digest"`
+    DirectTree               checkpointPriorTreeV1  `json:"direct_tree"`
+    RebasedTree              *checkpointPriorTreeV1 `json:"rebased_tree"`
+    RebasedThroughGeneration int64                  `json:"rebased_through_generation"`
+    ImportedBy               string                 `json:"imported_by"`
+    ImportedAt               time.Time              `json:"imported_at"`
+}
+
+type checkpointPriorTreeV1 struct {
+    Digest projectstate.Digest     `json:"digest"`
+    Files  []checkpointPriorFileV1 `json:"files"`
+}
+
+type checkpointPriorFileV1 struct {
+    Path string `json:"path"`
+    Data []byte `json:"data"`
+}
 ```
 
-The field is non-null for every new checkpoint. For `public_git`, the request digest
-must equal both `ReviewDigest` and the freshly recomputed digest. For local/private, the
-same exact review and actor are durable checkpoint provenance even though no explicit
-acknowledgement is required. The decoder rejects unknown fields, trailing JSON,
+The exact absent-candidate preimage is
+`{"schema_version":1,"kind":"checkpoint_prior_candidate","candidate":null}\n`.
+All other preimages use the member order above, the shared canonical JSON encoder's final
+LF, and standard JSON base64 for `Data`. The strict decoder disallows unknown fields and
+trailing JSON, requires exactly one final canonical LF, re-encodes byte-identically, and
+validates every digest, path, tree, boundary, importer, and UTC timestamp. `Files` is a
+non-nil strictly path-sorted unique complete file list. Its decoded tree must round-trip to
+the exact bytes and digest. `ImportedBy` is exactly a canonical UUID or
+`system:git-observation-rebase-v1`; `ImportedAt` is non-zero, UTC, and zero-offset. A nil
+`RebasedTree` requires boundary zero; a present rebased tree may validly have boundary zero.
+
+Both `DirectTree` and `RebasedTree` are complete inline trees. The prior candidate's
+direct snapshot is not the materialization journal's `prior_tree`: the former is a
+database preimage while the latter is the independently captured live-tree CAS surface.
+The journal and prior-candidate proof satisfy all of these cross-proof invariants before
+prepare, publication, recovery, or acceptance:
+
+- `prior_tree_digest == expected_live_digest == DigestTree(prior_tree)`;
+- an absent prior candidate requires initial through-generation zero, but imposes no
+  equality between `prior_tree` and the accepted snapshot because the live CAS surface may
+  contain valid direct edits not yet represented by a candidate row;
+- a present prior candidate requires its accepted-base digest to equal the journal and
+  binding accepted digest, its working-tree digest to equal its complete inline direct-tree
+  digest, and both inline trees to strict-decode as complete canonical snapshots for the
+  same project and repository;
+- `RebasedThroughGeneration` equals
+  `CheckpointOperationsV1.InitialThroughGeneration`; and
+- the independently built checkpoint plan uses its exact selected start and the same
+  initial boundary, then applies all and only envelope-listed `active` rows above that
+  boundary to reproduce the journal candidate tree, digest, and through-generation;
+  listed `rebased` rows at or below the boundary remain exact ownership/prestate evidence.
+
+`publication_review_json` is non-null for every new checkpoint. For `public_git`, the
+request digest must equal both `ReviewDigest` and the freshly recomputed digest. For
+local/private, the same exact review and actor are durable checkpoint provenance even
+though no explicit acknowledgement is required. The decoder rejects unknown fields,
+trailing JSON,
 noncanonical bytes, a checkpoint actor that does not pass `ValidateLocalAction`, malformed digests/envelopes, and any
 recomputed mismatch. `WorkspaceMaterializationRecord`, every clone/scan/equality/CAS
 helper, `MaterializationDisposition`, journal insert/update, `AcceptMaterialization`, the
-complete ownership proof, and every restart-recovery branch include both fields. A writer
-API can never create version 0 or a null proof.
+complete ownership proof, and every restart-recovery branch include the proof version and
+both JSON fields. A writer API can never create version 0 or either null proof.
 
-The first checkpoint transaction requires `Actor.ValidateLocalAction`, re-observes the
+The first checkpoint transaction strict-proves the complete disposition before doing
+anything else. One existing `prepared`, `published`, or `recovered_new` journal returns
+`ErrCheckpointPendingAcceptance` before stage allocation or mutation; multiple or mixed
+pending rows fail as corruption. A prepared row is never silently superseded and must be
+converged through `Recover`. The transaction then requires `Actor.ValidateLocalAction`, captures and
+clones the exact pre-checkpoint candidate before any candidate mutation, re-observes the
 complete Git-base/origin trust bundle, byte-matches it to the stored accepted binding, and
 computes the exact review before staging or journal mutation. After the prepared journal
 commits, the second immediate transaction repeats that complete observation and recomputes
-the envelope; it requires equality with the request where supplied and with the durable
-proof before any rename/exchange.
+the review and raw prior-candidate preimage from the still-current candidate; it requires
+equality with the request where supplied and with both durable proofs before any
+rename/exchange. Publication replaces the candidate with the prior live direct tree plus
+the published candidate as its rebased tree and the exact through-generation. It preserves
+the old candidate's importer/time when one existed; otherwise it uses the checkpoint
+actor principal and occurrence time. The accepted binding remains unchanged, and every
+successful result contains only the candidate digest, materialized through-generation,
+and journal ID. `Checkpoint` and `Recover` never advance the accepted binding. A
+checkpoint materialization is accepted only by same-symbolic-ref Reject/Refresh; Task 4
+may otherwise advance the base through its proposal-free ref-switch or applicable-Discard
+transitions.
 Any accepted ref/commit/tree, candidate, semantic diff, actor attribution, overlay
 generation, policy revision/class, repository, origin, included operation membership,
 open conflict, checkout, or working-tree race prevents publication.
 
-Recovery never uses a stale policy to initiate publication. Before examining or renaming a
-path it performs the same outside/inside exact root, checkout, Git-base, and origin
-observation. A malformed/racing observation or root/checkout mismatch returns the Task-5
-recovery precondition error with policy, filesystem, journal, candidate, operations, and
-evidence untouched. Git-base case selection precedes origin invalidation; case 3 leaves
-policy untouched. In cases 1 and 2, a stable configured-origin mismatch may stickily
-invalidate policy without changing the recovery disposition.
+Before artifact creation, checkpoint resolves a Git-private checkpoint directory outside
+the portable worktree through the hardened equivalent of
+`git rev-parse --git-path wormhole/checkpoints`, proves it owner-only and on the same device
+as live `.wormhole`, or returns `ErrCheckpointUnsupported`. Cross-directory atomic exchange
+is permitted. Checkpoint generates a canonical lowercase-UUID journal ID and allocates its
+exact direct-child `<journal_id>.stage` and `<journal_id>.backup` absolute paths no-replace,
+but creates only the owner-only stage; the backup must not exist before journal-backed
+publication. An orphan stage is never an untracked worktree sibling exposed
+to a broad `git add`. Checkpoint does not create a journal before the post-stage CAS
+succeeds. On any pre-journal failure, including CAS failure, the staged tree is retained as
+unowned diagnostic evidence: no row names or owns it, `Recover` never enumerates, opens,
+validates, publishes, restores, or deletes it, and a later checkpoint uses another fresh
+no-replace pathname. Safe cleanup is explicitly deferred beyond Task 5.
+
+Linux and Darwin exchange publication have the same mandatory post-swap sequence. After
+either Linux `renameat2(RENAME_EXCHANGE)` or Darwin
+`renameatx_np(RENAME_SWAP)` succeeds, the candidate is live and the complete old live tree
+is at `stage_path`. The publisher then no-replace renames that exact stage child to the
+previously absent `backup_path` and fsyncs both the live parent and Git-private checkpoint
+parent before database finalization. A crash after swap, after stage-to-backup rename, or
+after either parent fsync retains journal-owned evidence for deterministic recovery.
+
+`Recover` first opens a short dedicated `BEGIN IMMEDIATE`. In that one writer-excluding
+snapshot it strict-loads and recovery-proves the binding, candidate, complete
+materialization disposition, exact operation ownership, and every field required to compose
+the return status before any Git or path I/O. No journal plus any materialized row is
+corruption. Empty history, or only fully proved `accepted`/`recovered_old` history, is an
+idempotent no-recovery-work disposition. Exactly one proved `recovered_new` alongside only
+such terminal history is also no-recovery-work and remains acceptance-eligible. Exactly one
+`prepared` or `published` journal alongside only terminal history drives recovery; any
+mixed or multiple prepared/published/recovered-new rows, cross-journal claim, or
+orphan/duplicate/partial ownership fails before Git or path I/O. Version 0 remains blocked.
+A prepared proof requires the candidate row to equal the exact decoded prior
+candidate preimage, every envelope-listed operation to remain in its recorded
+prepublication `active`/`rebased` state, and zero owned materialized rows. A published or
+recovered-new proof requires the candidate to equal the exact publication postimage and
+every envelope claim to be materialized. Accepted history must pass its complete historical
+ownership proof; a version-0 accepted row is tolerated only with no residual materialized
+row. Recovered-old history owns none.
+
+Every no-recovery-work disposition composes the exact `WorkspaceStatus` with both
+publication-review fields zero inside that same snapshot, closes the short transaction,
+and returns it with no Git, origin, live/stage/backup path, clock, policy, or filesystem
+I/O. It never calls `Status`, because `Status` intentionally performs a fresh publication
+review. A prepared/published driver deep-clones its complete owned preflight state and
+closes the short transaction before outside Git observation.
+
+Only the one proved `prepared` or `published` journal invokes recovery observation. The
+proved disposition is the owned preflight snapshot. Recovery then uses a separate current-HEAD
+observer, not the publication-review observer that requires the stored accepted commit.
+Each outside-SQLite observation has exact order: capture current symbolic ref and HEAD
+position; read the complete committed `.wormhole` tree/digest, project, and repository at
+that observed SHA; observe semantic origin; then capture the final symbolic-ref/HEAD
+position and require it byte-equal the initial position. After that outside observation,
+recovery opens `BEGIN IMMEDIATE`, strict-reloads and byte-matches the complete disposition
+against preflight, and repeats the recovery-specific disposition/ownership proof. It then
+repeats the exact position -> full tree at observed SHA -> origin -> final position bundle
+and byte-matches it to the outside observation before any live/stage/backup access or any
+write. A malformed bundle, observation race, disposition drift, or root/checkout mismatch
+is normalized to the Task-5 recovery precondition error with policy, filesystem, journal,
+candidate, operations, and evidence untouched. Git-base case selection precedes origin
+invalidation; case 3 leaves policy untouched. In cases 1 and 2, a stable configured-origin
+mismatch may stickily invalidate policy without changing the already selected recovery
+disposition.
 
 The observed committed Git base then selects exactly one recovery case:
 
@@ -737,15 +874,37 @@ The observed committed Git base then selects exactly one recovery case:
    recovery applies. A proven old live tree is retained/restored, every listed operation
    returns to its prepublication state, and the journal becomes `recovered_old`. A proven
    new live tree is finalised as `recovered_new` because publication already occurred.
-2. **Later Git acceptance exact.** The observed committed `.wormhole` tree is byte-exactly
-   the journal candidate and all journal, review, included-operation, checkout, project,
-   repository, and materialisation-ownership proofs succeed. Recovery finalises the
-   candidate as `recovered_new` but does not advance the accepted binding. The following
+2. **Same-ref different-commit Git acceptance exact.** The observed symbolic ref exactly
+   equals the stored accepted ref, HEAD commit differs from the stored accepted commit
+   without any ancestry requirement, and its committed `.wormhole` tree is byte-exactly
+   the journal candidate. All journal, review, prior-candidate,
+   included-operation, checkout, project, repository, and materialisation-ownership proofs
+   must succeed. Recovery finalises the candidate as `recovered_new` but does not advance
+   the accepted binding. The following
    `RefreshWorkspace`/`ObserveGitBase` call remains the sole authority that accepts the new
    Git ref/commit/tree and consumes the acceptance-eligible materialisation. Recovery never
    restores the old tree over this committed candidate.
-3. **Any other Git base.** Return `ErrCheckpointRecoveryPrecondition` with policy,
-   filesystem, journal, candidate, operations, and evidence untouched.
+3. **Any other Git base.** This includes every changed symbolic ref, even when its tree
+   happens to equal the journal candidate. Return `ErrCheckpointRecoveryPrecondition` with
+   policy, filesystem, journal, candidate, operations, and evidence untouched.
+
+After case 1 or 2 and before opening either stored stage/backup entry, recovery re-runs the
+hardened Git-private-root resolver, canonicalizes and no-follow opens that owner-only root,
+and proves it remains outside the portable worktree and on live `.wormhole`'s device. Every
+new version-1 journal ID is a canonical lowercase UUID; its stored absolute paths must be
+distinct and byte-equal to the direct root children `<journal_id>.stage` and
+`<journal_id>.backup`. Raw stored paths are never traversed or opened. Only after those
+string/containment/name checks may recovery inspect a child descriptor-relatively with
+no-follow semantics. Any present child must be a same-device directory in the exact
+state-dependent existence/digest matrix; recovery holds its descriptor, captures identity,
+and revalidates the pathname-to-descriptor identity immediately before mutation.
+
+An unsafe/rebound root, non-absolute or noncanonical stored path, escape/nested child,
+wrong journal-bound basename, equal stage/backup paths, or cross-device root returns
+`ErrCheckpointRecoveryPrecondition`. A canonical contained child that is a symlink, has an
+unexpected type/existence/digest, or changes identity returns
+`ErrCheckpointRecoveryBlocked`. Neither class follows the entry, mutates any path, or
+deletes evidence.
 
 Unknown live/stage/backup evidence always remains blocked and untouched. A sticky policy
 invalidation may commit in cases 1 or 2, but it never changes which exact tree is already
@@ -755,6 +914,38 @@ the stored version-1 durable proof is internally canonical and matches the journ
 published bytes; it does not require the current policy to equal the historical review.
 A later policy or origin change cannot authorize new publication, but also cannot prevent
 finalization of bytes proven already live or committed. Receipt fidelity survives restart.
+
+Recover-old is a complete preimage restoration, not a reconstruction. If
+`checkpointPriorCandidateV1.Candidate` is null it deletes the publication-created
+candidate. Otherwise it upserts the exact original direct snapshot, optional rebased
+snapshot, boundary, accepted/working-tree digests, importer, and timestamp. In the same
+transaction it restores every listed operation to its exact recorded prepublication
+`active`/`rebased` state, preserves every later active row, and marks the journal
+`recovered_old`. Recover-new keeps the published candidate and exact materialized rows and
+marks the journal `recovered_new`.
+
+Task-5 journal transitions have no request receipt and never retry an indeterminate write.
+Before COMMIT each path retains an owned exact prior disposition and intended next
+disposition. A fresh journal-backed confirmation transaction has only three outcomes:
+
+1. exact complete next journal, candidate, operation, policy, and ownership state: treat
+   the attempted prepare, publish, recover-old, or recover-new transition as committed;
+2. exact complete prior state, including journal absence for attempted preparation: return
+   the original error wrapping
+   `localstore.ErrCommitOutcomeUnknown` and a zero public result; or
+3. any state that is neither that transition's exact prior shape nor its exact next shape,
+   including read failure, corruption, a partial mix, or a third valid state: fail closed
+   with the original unknown-COMMIT error plus confirmation context.
+
+Confirmation performs no Git/path I/O and never replays the write. A confirmed prepared
+transition may continue to the second publication transaction; a confirmed published
+transition returns its already-constructed result; confirmed recovery returns its
+already-constructed zero-review status. For attempted preparation, exact prior absence,
+read failure, or any third state retains the unjournaled stage byte-identically. If the
+filesystem already changed but the database remains the exact prepared prior state, the
+call stays unknown and later `Recover` is the sole convergence path. Sticky invalidation
+confirmation continues to use §4's exact prior/next policy-and-history matrix and likewise
+never retries.
 
 ## 8. Required causal implementation slices
 
@@ -802,9 +993,31 @@ Implementation follows RED -> minimal GREEN -> focused review in this order:
      other domain/filesystem change;
    - branch-switch/discard/race failures preserve Task-4 zero-mutation semantics;
    - second-transaction races and conflicts publish nothing;
-   - strict durable proof and crash/restart recovery in both filesystem directions;
-   - later exact Git acceptance finalizes, unrelated Git base rejects untouched, and a
-     policy change after publication cannot strand already-published bytes.
+   - fresh/v3-to-v4 joint proof CHECKs and strict absent/direct/rebased complete inline
+     prior-candidate codec/cross-proof goldens;
+   - strict durable proof and crash/restart recovery in both filesystem directions,
+     including exact candidate absence/snapshots/boundary/import provenance restoration;
+   - Darwin swap parity with Linux: old live moves from stage to absent backup, both
+     parents fsync, and faults after swap/rename/either fsync retain recoverable evidence;
+   - exact recovery-specific prepared/published/recovered-new cardinality, candidate, and
+     operation-ownership proofs before Git/path I/O;
+   - journal-backed exact unknown-COMMIT confirmation without write replay, including
+     attempted-prepare journal absence and byte-identical unjournaled-stage retention;
+   - no-journal and proved no-recovery-work calls return zero-review status with no
+     Git/path I/O, while every pre-journal stage is ignored and later checkpoints allocate
+     fresh paths;
+   - initial short `BEGIN IMMEDIATE` same-snapshot proof/status composition, closed before
+     outside observation, plus concurrent-writer drift rejection at the second transaction;
+   - advisory-preflight disposition proof, exact reload under `BEGIN IMMEDIATE`, and
+     position/tree/origin/position observation races before any path access;
+   - hardened recovery-root re-resolution plus descriptor-relative/no-follow exact
+     journal-ID child validation, with escape/symlink/type/identity/rebind negatives and
+     zero path mutation;
+   - same-ref different-commit exact Git acceptance without an ancestry requirement,
+     changed-ref/unrelated-base rejection untouched, and Git-case precedence over origin
+     invalidation; and
+   - a policy change after publication cannot strand already-published bytes; checkpoint
+     and recovery never advance the accepted binding.
 6. **Task-8 public projections and parity**
    - CLI and MCP expose the same safe status/diff/checkpoint semantics;
    - no machine-private binding, root, checkout identity, policy actor, or snapshot leaks.

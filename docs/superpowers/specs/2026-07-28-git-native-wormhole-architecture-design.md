@@ -461,9 +461,10 @@ journal enter terminal accepted state. Publication alone never advances the acce
 base. Direct
 `.wormhole/` edits are allowed, but Gateway validates and imports their working-tree
 delta before composing it with an overlay.
-Only one published or recovered-new checkpoint may await Git acceptance per workspace.
-A second Checkpoint returns `ErrCheckpointPendingAcceptance` before staging and preserves
-all later overlay; Wormhole never silently supersedes the first journal.
+Only one prepared, published, or recovered-new checkpoint may require recovery or await Git
+acceptance per workspace. Another Checkpoint returns `ErrCheckpointPendingAcceptance`
+before artifact allocation and preserves all later overlay; Wormhole never silently
+supersedes that journal.
 
 Import performs a bounded canonical no-follow capture before its database transaction,
 honours an optional canonical expected digest, then repeats the exact read under one
@@ -586,30 +587,71 @@ frozen by the 2026-08-01 amendment.
 `wormhole checkpoint`:
 
 1. locks the workspace checkpoint operation and opens an immediate preparation
-   transaction against the expected current `.wormhole/` working-tree digest;
-2. validates the accepted base, any imported working-tree delta, overlay, and exact
-   open-conflict gate;
-3. renders, fsyncs, validates, and digests a complete canonical candidate tree in a
-   sibling staging location;
+   transaction, strict-classifies the complete materialization disposition, and returns
+   `ErrCheckpointPendingAcceptance` before artifacts or mutation for one existing
+   `prepared`, `published`, or `recovered_new` journal;
+2. validates the accepted base, current `.wormhole/` digest, any imported working-tree
+   delta, overlay, exact open-conflict gate, classification, and recomputed review; public
+   Git requires the exact supplied digest, while local/private allow nil and reject any
+   supplied mismatch;
+3. resolves an owner-only Git-private checkpoint directory outside the portable worktree
+   through hardened `git rev-parse --git-path wormhole/checkpoints`, proves it is on the
+   live tree's device, allocates fresh unique no-replace stage/backup names, creates only
+   the stage, and renders, fsyncs, validates, and digests the complete candidate there;
 4. rechecks the live working-tree digest as a compare-and-swap precondition and aborts
-   without publication if a direct edit raced with the checkpoint;
+   without publication if a direct edit raced with the checkpoint; any pre-journal stage
+   remains unowned, outside the worktree, ignored by recovery, and never reused;
 5. commits a prepared journal containing both complete trees, the accepted-base and
    candidate digests, checkout identity, included operation bytes/states, exact
-   through-generation, and the canonical version-1 publication-review envelope/digest plus
-   checkpoint actor in its durable prepared record/receipt before mutating the live tree;
-   `public_git` additionally requires that exact digest as the caller acknowledgement,
-   while every new local/private journal retains the same proof without requiring it;
+   through-generation, canonical version-1 publication-review envelope/digest plus
+   checkpoint actor, and the exact prior-candidate preimage with complete inline direct and
+   optional rebased trees before mutating the live tree;
 6. opens a second `BEGIN IMMEDIATE` after that prepared commit and, before rename or
-   exchange, reloads and rechecks the exact live digest, binding, candidate, overlay
-   generation/rows, and open-conflict gate;
+   exchange, reloads and rechecks the exact live digest, binding, both proofs, candidate,
+   overlay generation/rows, classification/review, and open-conflict gate;
 7. holds the second transaction across atomic directory exchange where supported (or
-   durable fallback publication), parent-directory fsync, and the published journal,
-   candidate, and included-operation-row updates;
+   durable fallback publication), moves old live from stage to the absent backup after
+   either Linux exchange or Darwin swap, fsyncs both parents, and updates the published
+   journal, candidate, and included-operation rows;
 8. commits those database updates only after the new complete live tree is durable,
-   while leaving the accepted Git base unchanged; and
-9. retains enough prepared-journal information for restart recovery to recognise either
-   the old or new complete live tree, restore/finalise its matching database state, or
-   recognise the later accepting Git commit.
+   while leaving the accepted Git base unchanged; indeterminate journal writes use exact
+   prior/next confirmation without replay; and
+9. retains enough journal information for restart recovery to prove one prepared/published
+   disposition, recognise either old or new complete live tree, restore the exact prior
+   candidate/operation preimage or finalise the publication postimage, and recognise an
+   exact same-ref different-commit Git acceptance without assuming ancestry.
+
+`CheckpointResult` contains only candidate digest, materialized through-generation, and
+journal ID. Checkpoint and recovery never advance the accepted binding. A checkpoint
+materialization is accepted only by same-symbolic-ref Reject/Refresh; proposal-free ref
+switches and applicable Discard remain separate Task-4 base-advancing transitions.
+
+Recovery first opens a short `BEGIN IMMEDIATE` and, in that one writer-excluding snapshot,
+strict-proves complete journal cardinality, candidate state, and operation ownership before
+Git or path I/O. Empty or accepted/recovered-old-only history, and separately the
+one-proved-recovered-new case, compose and return zero-review status from that snapshot.
+No journal with a materialized row, multiple/mixed pending rows, or any
+cross-journal/orphan/partial claim fails closed. A prepared proof requires the exact prior
+candidate and recorded active/rebased operations with zero owned materialized rows; a
+published proof requires the exact publication candidate and all claims materialized.
+
+For exactly one prepared/published driver, recovery clones the complete owned preflight and
+closes that transaction before observing Git in exact position -> complete tree at that SHA
+-> origin -> final position order. A second `BEGIN IMMEDIATE` byte-matches and re-proves the
+complete disposition, then repeats that observation before any live/stage/backup access or
+write. Stored base exact permits normal convergence. Same symbolic ref, a commit different
+from the stored accepted commit, and an exact journal-candidate tree permits recovered-new
+finalisation without an ancestry requirement. Every other Git base returns the
+recovery-precondition sentinel before origin invalidation or path I/O. Git-case selection
+precedes sticky origin invalidation.
+
+Before stage/backup evidence I/O, recovery re-resolves and no-follow opens the owner-only,
+same-device Git-private root. Stored absolute stage/backup paths must be distinct direct
+children named `<journal_id>.stage` and `<journal_id>.backup` for the canonical UUID journal
+ID. Only then may descriptor-relative/no-follow child inspection validate exact
+state-dependent existence, directory type, device, digest, and stable identity. Unsafe,
+escaping, symlinked, wrong-type, or rebound paths fail with the frozen recovery sentinel
+and zero path mutation.
 
 Checkpoint materialises only operations already classified as portable. It never scans,
 selects, summarises, or promotes operational activity as a side effect.
@@ -1259,7 +1301,7 @@ cannot close.
 | invalid tracked snapshot | reject atomically; retain prior valid base and explain exact path/schema error |
 | Fabric unavailable | local base and overlay remain fully usable; queue retry survives restart |
 | Fabric credential revoked | stop remote sync; preserve local state, conflicts, and history |
-| Gateway restart | reopen every valid workspace, overlay, queue, and checkpoint journal before serving it |
+| Gateway restart | reopen every valid workspace, overlay, queue, and checkpoint disposition; strict-prove cardinality/ownership before any recovery Git/path I/O |
 | connector apply/verify failure | restore prior connector entry; leave workspace setup intact |
 | Code Graph worker crash | keep Gateway and last published graph revision healthy; report retryable failure |
 | tracked analysis input, adapter, or toolchain changes after Code Graph publication | mark graph not current and fail query closed until explicit successful rebuild |
@@ -1267,9 +1309,15 @@ cannot close.
 | branch switch with pending state | require checkpoint/commit, stash, or discard |
 | one workspace conflicts | isolate conflict; other workspaces and Fabrics continue |
 | v2 push sees an open workspace conflict before or during delivery | make no credential/network contact when known before push; otherwise retain the byte-identical pending row after the atomic delivery recheck and retry the same operation only after resolution |
-| checkpoint interruption | recover either previous complete tree or new complete tree from durable journal |
+| checkpoint interruption before journal commit | retain the private unowned stage byte-identically; recovery performs no path I/O and a later checkpoint uses a fresh path |
+| checkpoint interruption after journal commit | recover either previous complete tree/preimage or new complete tree/postimage from the durable journal |
+| Darwin interruption after swap | treat old live at stage exactly like Linux exchange; rename it no-replace to absent backup, fsync both parents, and recover from retained evidence |
+| checkpoint database COMMIT is indeterminate | confirm exact transition prior/next state without replay; retain evidence and fail closed on read/partial/third state |
+| recovery journal path escapes, symlinks, changes type/identity, or root rebinds | never open a raw path or mutate evidence; fail with the recovery precondition/blocked sentinel after descriptor-relative validation |
+| recovery state changes between preflight and Git observation | second immediate reload rejects the drift before path I/O or writes |
 | concurrent direct `.wormhole/` edit | fail checkpoint compare-and-swap without overwriting the edit; validate/import then retry |
 | conflict opens after checkpoint prepared commit | second immediate recheck returns `localstore.ErrWorkspaceConflicted` with zero publication and retains recoverable prepared evidence |
+| another checkpoint sees prepared/published/recovered-new | return `ErrCheckpointPendingAcceptance` before artifact allocation or mutation; recover/accept the existing journal first |
 | private authentication failure | local setup succeeds; remote stage remains incomplete and retryable |
 | copied upstream hint in fork | leave hint inactive; do not contact or write upstream Fabric |
 
@@ -1358,14 +1406,35 @@ legacy or unknown until explicitly linked.
   KB bodies, preserve valid historical references, and reject live-required references
   to deleted targets.
 - Two-clone and two-worktree base/overlay/checkpoint isolation.
-- Checkpoint leaves the accepted base unchanged until a same-symbolic-ref Reject/Refresh
-  observation accepts a matching Git commit, then marks the retained materialisation
-  journal accepted without losing later overlay work. Publication alone never advances
-  the accepted base.
+- Checkpoint and recovery never advance the accepted base. Same-symbolic-ref Reject/Refresh
+  alone accepts an exact checkpoint materialisation; proposal-free ref-switch and
+  applicable-Discard base advances remain independent Task-4 transitions.
 - Direct-edit/checkpoint races fail the digest compare-and-swap and preserve both inputs.
+  The owner-only same-device stage is outside the worktree in a resolved Git-private
+  checkpoint directory, backup is absent pre-journal, recovery ignores an orphan stage,
+  and the next checkpoint allocates a fresh no-replace pathname.
 - A conflict opened after prepared-journal commit but before checkpoint rename is caught
   by the second immediate transaction and causes zero filesystem/database publication;
-  restart recovery accepts recorded old or new live-tree states at every later fault.
+  an existing prepared/published/recovered-new row blocks another checkpoint before stage.
+- Migration/codec tests freeze the joint version-0/null/null versus
+  version-1/non-null/non-null CHECK and exact absent/direct/rebased prior-candidate preimages
+  with complete inline trees. Recover-old restores candidate absence or every original
+  snapshot/boundary/provenance byte plus operation prepublication state.
+- Recovery tests strict-prove exact pending cardinality and candidate/operation ownership
+  in one short immediate snapshot; terminal no-work composes status there and performs no
+  Git/path calls. Concurrent post-preflight writers fail the second exact reload before
+  paths. Journal-backed fault points converge old/new, while pre-journal faults retain an
+  ignored stage. Darwin faults after swap, stage-to-backup rename, and each parent fsync
+  mirror Linux. Unknown COMMIT tests
+  distinguish transition-relative exact prior (including prepared-journal absence), exact
+  next, read failure, partial, and third states and prove zero write replay.
+- Recovery observer tests enforce outside observation, immediate disposition reload and
+  byte-match/re-proof, then inside observation in exact position/tree-at-SHA/origin/position
+  order before path access. Same-ref different-commit exact candidate needs no ancestry;
+  changed ref, malformed/racing bundle, or disposition drift fails before invalidation.
+- Recovery-path tests re-resolve the hardened Git-private root and reject path escape,
+  wrong journal-bound child, equal paths, cross-device root, symlink/wrong type, and
+  identity rebound before mutation, using descriptor-relative/no-follow access only.
 - Three-way merges for disjoint fields, same-field conflict, Markdown conflict,
   Event/Git-link ID collision, tombstone/record edit, tombstone/KB-body edit,
   explicit resurrection, and crash recovery. Golden merge tests cover RFC 6901

@@ -424,18 +424,36 @@ Gateway operates on three durable layers:
 
 Gateway atomically records an operation and the resulting overlay before it
 reports local success. `wormhole checkpoint` records the expected live tree
-digest, stages and validates the candidate, then rechecks that digest as a
-compare-and-swap precondition. A raced direct edit aborts publication without
-overwriting either input. Publication uses atomic directory exchange where
-available or a durable all-or-recover journal elsewhere. The accepted base does
-not move; the included overlay generation becomes materialised-pending-commit.
-Only when a same-symbolic-ref Reject/Refresh observation sees a matching Git commit does
-Gateway advance the accepted base and mark that retained journal accepted while
-preserving any later overlay. Publication alone never advances the accepted base. A
-restart recovers the previous or new complete working tree and the correct overlay state.
-Only one acceptance-eligible checkpoint may exist per workspace: another checkpoint
-returns `ErrCheckpointPendingAcceptance` before staging until the published or
-recovered-new journal is accepted. Later overlay remains available and is not superseded.
+digest and exact publication review, then renders the candidate in an owner-only,
+same-device Git-private checkpoint directory outside the portable worktree. It creates
+only a fresh no-replace stage before rechecking the live digest as a compare-and-swap
+precondition; backup does not exist until journal-backed publication. A raced direct edit
+aborts without overwriting either input. The unjournaled stage remains private, unowned,
+ignored by recovery, and never reused.
+
+Before mutating live bytes, checkpoint durably records both complete publication trees,
+exact operation states, the version-one review proof, and an exact prior-candidate
+preimage containing complete inline direct and optional rebased snapshots. Publication
+uses atomic directory exchange where available or a durable all-or-recover journal
+elsewhere. Indeterminate journal COMMITs are confirmed against exact transition-relative
+prior/next state without replay. Recover-old restores candidate absence or every original
+candidate/operation byte; recover-new retains the exact publication postimage.
+
+Recovery strict-proves complete journal cardinality, candidate state, and operation
+ownership before Git/path I/O. No-work history returns DB-composed status without Git/path
+I/O. One prepared/published driver uses an advisory current-HEAD/origin observation, then
+under `BEGIN IMMEDIATE` byte-matches and re-proves the disposition and repeats the
+position/tree-at-SHA/origin/position bundle before path access. Stored base exact or a
+same-ref different-commit exact candidate can converge; the latter has no ancestry
+requirement. Other bases fail before origin invalidation or path I/O.
+
+Checkpoint and recovery never advance the accepted base. A checkpoint materialization is
+accepted only when same-symbolic-ref Reject/Refresh observes the matching Git commit and
+marks the retained journal accepted while preserving later overlay. Task-4 proposal-free
+ref-switch and applicable-Discard transitions may otherwise advance the base independently.
+One prepared, published, or recovered-new journal blocks another checkpoint with
+`ErrCheckpointPendingAcceptance` before artifact creation. Later overlay remains available
+and is not superseded.
 
 ### 8.2 Semantic three-way rebase
 
@@ -528,8 +546,9 @@ Only same-symbolic-ref Reject/Refresh may accept an exact proved `published` or
 `ErrBranchSwitchDiscardNotApplicable`, with no receipt/base change and byte-identical
 state. A nonmatching proved acceptance-eligible row blocks same-ref Reject rebase and
 applicable discard with `ErrGitMaterializationPrecondition`, retaining journal, candidate,
-and materialized history byte-identically. `prepared` still requires recovery;
-historical `accepted` and `recovered_old` do not block. No new journal state or migration
+and materialized history byte-identically. `prepared` still requires recovery and blocks
+another checkpoint before artifact creation; historical `accepted` and `recovered_old`
+do not block. No new journal state or migration
 is introduced. Orphan or nonterminal materialized rows remain recovery blockers. The
 clean-discard receipt remains candidate-not-accepted, with nil journal, no rebase, and no
 conflicts.
