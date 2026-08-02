@@ -770,3 +770,22 @@ passed build, vet, integration-required tests, the complete race suite, and 85.8
 statement coverage. The hard gate's next and final tranche is the canonical semantic-diff
 and publication-review codec plus Status/Diff integration; checkpoint publication remains
 blocked until that tranche is reviewed and committed.
+
+Publication review codec and attribution `6a670ee`
+(`feat(projectstate): encode publication review`): Slice 4A complete. Causal RED first
+locked the missing per-field actor surface and exact empty semantic-diff and review-envelope
+codecs. The implementation preserves legacy `SemanticDiff`, replays only active operations
+above the selected boundary for greatest-effective-generation field attribution, applies
+conservative full-envelope root/change attribution, and hashes strict private canonical
+semantic-diff and review projections with the exact empty, mixed, and envelope JSON/SHA
+goldens. Four adversarial RED amendments then proved and fixed pre-root active contribution,
+non-nil empty `fields: []`, direct/rebased-prefix lifecycle veto, and shared hardened Git-ref
+validation including invalid UTF-8 and per-component dot/`.lock` cases.
+
+Two independent final reviews approved with no findings. Root-focused and full ProjectState
+tests, focused race, vet, gofmt, and diff checks passed; a fresh full `make check` passed
+build, vet, integration-required tests, the complete race suite, and 85.8% merged statement
+coverage. The pushed remote was independently verified at exact SHA
+`6a670ee71e1ab5f410ca06c68399d92dfdf80dac`. Slice 4B remains: trusted double-observed,
+single-snapshot Status/Diff publication-review integration. Checkpoint publication remains
+blocked until that integration is reviewed and committed.
