@@ -767,6 +767,14 @@ prepare, publication, recovery, or acceptance:
   boundary to reproduce the journal candidate tree, digest, and through-generation;
   listed `rebased` rows at or below the boundary remain exact ownership/prestate evidence.
 
+Each direct or rebased inline prior-candidate tree is independently limited to at most
+`10_000` files, at most `4 << 10` UTF-8 bytes per path, at most `16 << 20` bytes per file
+body, and at most `64 << 20` total bytes, counted as the sum of every path byte plus every
+file-data byte. There is no combined direct-plus-rebased aggregate limit and no raw-JSON
+byte limit in v1. Filesystem-only directory-count and depth limits do not apply to the
+serialized proof; canonical `DecodeTree` still rejects unknown or unsafe project-state
+paths.
+
 `publication_review_json` is non-null for every new checkpoint. For `public_git`, the
 request digest must equal both `ReviewDigest` and the freshly recomputed digest. For
 local/private, the same exact review and actor are durable checkpoint provenance even

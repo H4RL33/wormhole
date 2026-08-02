@@ -2735,6 +2735,15 @@ Checkpoint algorithm:
    journal absence—and returns the original unknown-COMMIT error, or fails closed on read
    failure and every third state. Every unconfirmed outcome retains the unjournaled stage
    byte-identically.
+
+   Each direct or rebased inline prior-candidate tree is independently limited to at most
+   `10_000` files, at most `4 << 10` UTF-8 bytes per path, at most `16 << 20` bytes per file
+   body, and at most `64 << 20` total bytes, counted as the sum of every path byte plus every
+   file-data byte. There is no combined direct-plus-rebased aggregate limit and no raw-JSON
+   byte limit in v1. Filesystem-only directory-count and depth limits do not apply to the
+   serialized proof; canonical `DecodeTree` still rejects unknown or unsafe project-state
+   paths.
+
 7. After that commit and before any live-tree rename/exchange, acquire a second dedicated
    connection and `BEGIN IMMEDIATE`. Reload the prepared journal and exact workspace,
    then recheck the live working-tree digest, binding accepted digest and checkout

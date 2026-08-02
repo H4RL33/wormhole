@@ -515,6 +515,13 @@ the same layering pattern and isolation discipline.
   publication-review and prior-candidate JSON. The latter contains complete inline direct
   and optional rebased candidate trees; it never aliases journal `prior_tree`. Migration
   version 4 enforces the joint version-0/null/null or version-1/non-null/non-null shape.
+  Each direct or rebased inline prior-candidate tree is independently limited to at most
+  `10_000` files, at most `4 << 10` UTF-8 bytes per path, at most `16 << 20` bytes per file
+  body, and at most `64 << 20` total bytes, counted as the sum of every path byte plus every
+  file-data byte. There is no combined direct-plus-rebased aggregate limit and no raw-JSON
+  byte limit in v1. Filesystem-only directory-count and depth limits do not apply to the
+  serialized proof; canonical `DecodeTree` still rejects unknown or unsafe project-state
+  paths.
   After prepared commit, checkpoint opens a second `BEGIN IMMEDIATE`, rechecks the exact
   live digest, binding, both proofs, candidate, overlay rows, review, and conflict gate,
   and holds it across publication, both parent fsyncs, and journal/candidate/row update.
