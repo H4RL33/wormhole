@@ -17,18 +17,23 @@ import (
 )
 
 type WorkspaceMaterializationRecord struct {
-	JournalID              string
-	ExpectedLiveDigest     projectstate.Digest
-	AcceptedBaseDigest     projectstate.Digest
-	Checkout               types.CheckoutIdentity
-	PriorTreeDigest        projectstate.Digest
-	CandidateDigest        projectstate.Digest
-	ThroughGeneration      int64
-	PriorTree              projectstate.Tree
-	CandidateTree          projectstate.Tree
-	IncludedOperationsJSON *string
-	State                  string
-	mutationMetadata       workspaceMaterializationMutationMetadata
+	JournalID                     string
+	ExpectedLiveDigest            projectstate.Digest
+	AcceptedBaseDigest            projectstate.Digest
+	Checkout                      types.CheckoutIdentity
+	PriorTreeDigest               projectstate.Digest
+	CandidateDigest               projectstate.Digest
+	ThroughGeneration             int64
+	PriorTree                     projectstate.Tree
+	CandidateTree                 projectstate.Tree
+	StagePath                     string
+	BackupPath                    string
+	IncludedOperationsJSON        *string
+	PublicationReviewProofVersion int
+	PublicationReviewJSON         *string
+	PriorCandidateJSON            *string
+	State                         string
+	mutationMetadata              workspaceMaterializationMutationMetadata
 }
 
 type WorkspaceMaterializationDisposition struct {
@@ -37,8 +42,6 @@ type WorkspaceMaterializationDisposition struct {
 }
 
 type workspaceMaterializationMutationMetadata struct {
-	StagePath    string
-	BackupPath   string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 	CreatedRaw   string
@@ -73,7 +76,9 @@ func (tx *WorkspaceMutationTx) MaterializationDisposition(ctx context.Context) (
 		       through_generation,prior_tree,candidate_tree,stage_path,backup_path,state,
 		       created_at,updated_at,CAST(created_at AS TEXT),CAST(updated_at AS TEXT),
 		       typeof(stage_path),typeof(backup_path),typeof(created_at),typeof(updated_at),
-		       included_operations_json,typeof(included_operations_json)
+		       included_operations_json,typeof(included_operations_json),
+		       publication_review_proof_version,typeof(publication_review_proof_version),publication_review_json,typeof(publication_review_json),
+		       prior_candidate_json,typeof(prior_candidate_json)
 		FROM workspace_materializations
 		WHERE project_id=? AND workspace_id=?
 		ORDER BY journal_id
@@ -141,6 +146,9 @@ func (tx *WorkspaceMutationTx) AcceptMaterialization(ctx context.Context, expect
 	if expected.IncludedOperationsJSON == nil {
 		return WorkspaceMaterializationRecord{}, fmt.Errorf("localstore: materialization operation proof is missing")
 	}
+	if !validWorkspaceMaterializationPublicationProof(expected) {
+		return WorkspaceMaterializationRecord{}, fmt.Errorf("localstore: materialization publication proof is missing or invalid")
+	}
 	current, err := tx.acceptanceEligibleMaterialization(ctx)
 	if err != nil {
 		return WorkspaceMaterializationRecord{}, err
@@ -175,13 +183,15 @@ func (tx *WorkspaceMutationTx) AcceptMaterialization(ctx context.Context, expect
 		  AND prior_tree_digest=? AND candidate_digest=? AND through_generation=?
 		  AND prior_tree=? AND candidate_tree=? AND stage_path=? AND backup_path=? AND state=?
 		  AND created_at=? AND updated_at=? AND included_operations_json=?
+		  AND publication_review_proof_version=? AND publication_review_json IS ? AND prior_candidate_json IS ?
 		RETURNING updated_at, CAST(updated_at AS TEXT), typeof(updated_at)
 	`, tx.scope.ProjectID, tx.scope.WorkspaceID, expected.JournalID,
 		expected.ExpectedLiveDigest, expected.AcceptedBaseDigest, expected.Checkout.CanonicalPath,
 		expected.Checkout.Device, expected.Checkout.Inode, expected.PriorTreeDigest,
 		expected.CandidateDigest, expected.ThroughGeneration, priorBytes, candidateBytes,
-		metadata.StagePath, metadata.BackupPath, expected.State, metadata.CreatedRaw,
-		metadata.UpdatedRaw, included).Scan(&returnedAt, &returnedRaw, &returnedClass)
+		expected.StagePath, expected.BackupPath, expected.State, metadata.CreatedRaw,
+		metadata.UpdatedRaw, included, expected.PublicationReviewProofVersion,
+		expected.PublicationReviewJSON, expected.PriorCandidateJSON).Scan(&returnedAt, &returnedRaw, &returnedClass)
 	if errors.Is(err, sql.ErrNoRows) {
 		return WorkspaceMaterializationRecord{}, fmt.Errorf("localstore: materialization acceptance precondition mismatch")
 	}
@@ -224,14 +234,14 @@ func (tx *WorkspaceMutationTx) materializationMutationMetadata(ctx context.Conte
 	var metadata workspaceMaterializationMutationMetadata
 	var matching int64
 	err := tx.conn.QueryRowContext(ctx, `
-		SELECT stage_path, backup_path, created_at, updated_at,
+		SELECT created_at, updated_at,
 		       CAST(created_at AS TEXT), CAST(updated_at AS TEXT),
 		       typeof(stage_path), typeof(backup_path), typeof(created_at), typeof(updated_at),
 		       COUNT(*) OVER ()
 		FROM workspace_materializations
 		WHERE project_id=? AND workspace_id=? AND journal_id=?
 	`, tx.scope.ProjectID, tx.scope.WorkspaceID, journalID).Scan(
-		&metadata.StagePath, &metadata.BackupPath, &metadata.CreatedAt, &metadata.UpdatedAt,
+		&metadata.CreatedAt, &metadata.UpdatedAt,
 		&metadata.CreatedRaw, &metadata.UpdatedRaw, &metadata.StageClass, &metadata.BackupClass,
 		&metadata.CreatedClass, &metadata.UpdatedClass, &matching,
 	)
@@ -266,7 +276,9 @@ func (tx *WorkspaceMutationTx) acceptanceEligibleMaterialization(ctx context.Con
 		       through_generation,prior_tree,candidate_tree,stage_path,backup_path,state,
 		       created_at,updated_at,CAST(created_at AS TEXT),CAST(updated_at AS TEXT),
 		       typeof(stage_path),typeof(backup_path),typeof(created_at),typeof(updated_at),
-		       included_operations_json,typeof(included_operations_json)
+		       included_operations_json,typeof(included_operations_json),
+		       publication_review_proof_version,typeof(publication_review_proof_version),publication_review_json,typeof(publication_review_json),
+		       prior_candidate_json,typeof(prior_candidate_json)
 		FROM workspace_materializations
 		WHERE project_id=? AND workspace_id=? AND state IN ('published','recovered_new')
 		ORDER BY journal_id
@@ -305,22 +317,23 @@ type workspaceMaterializationScanner interface {
 
 func scanWorkspaceMaterialization(scanner workspaceMaterializationScanner, scope types.WorkspaceScope, binding types.WorkspaceBinding, eligibleOnly bool) (*WorkspaceMaterializationRecord, error) {
 	var (
-		projectID, workspaceID     string
-		priorBytes, candidateBytes []byte
-		included                   sql.NullString
-		includedStorageClass       string
+		projectID, workspaceID                                                                                                     string
+		priorBytes, candidateBytes                                                                                                 []byte
+		included, publicationReview, priorCandidate                                                                                sql.NullString
+		includedStorageClass, publicationReviewProofVersionStorageClass, publicationReviewStorageClass, priorCandidateStorageClass string
 	)
 	record := &WorkspaceMaterializationRecord{}
 	if err := scanner.Scan(
 		&projectID, &workspaceID, &record.JournalID, &record.ExpectedLiveDigest, &record.AcceptedBaseDigest,
 		&record.Checkout.CanonicalPath, &record.Checkout.Device, &record.Checkout.Inode,
 		&record.PriorTreeDigest, &record.CandidateDigest, &record.ThroughGeneration,
-		&priorBytes, &candidateBytes, &record.mutationMetadata.StagePath, &record.mutationMetadata.BackupPath, &record.State,
+		&priorBytes, &candidateBytes, &record.StagePath, &record.BackupPath, &record.State,
 		&record.mutationMetadata.CreatedAt, &record.mutationMetadata.UpdatedAt,
 		&record.mutationMetadata.CreatedRaw, &record.mutationMetadata.UpdatedRaw,
 		&record.mutationMetadata.StageClass, &record.mutationMetadata.BackupClass,
 		&record.mutationMetadata.CreatedClass, &record.mutationMetadata.UpdatedClass,
-		&included, &includedStorageClass,
+		&included, &includedStorageClass, &record.PublicationReviewProofVersion, &publicationReviewProofVersionStorageClass,
+		&publicationReview, &publicationReviewStorageClass, &priorCandidate, &priorCandidateStorageClass,
 	); err != nil {
 		return nil, fmt.Errorf("scan materialization row: %w", err)
 	}
@@ -354,6 +367,9 @@ func scanWorkspaceMaterialization(scanner workspaceMaterializationScanner, scope
 	if !validWorkspaceMaterializationMutationMetadata(record.mutationMetadata) {
 		return nil, fmt.Errorf("invalid materialization mutation metadata")
 	}
+	if !validMaterializationPath(record.StagePath) || !validMaterializationPath(record.BackupPath) || record.StagePath == record.BackupPath {
+		return nil, fmt.Errorf("invalid materialization paths")
+	}
 	record.mutationMetadata.CreatedAt = record.mutationMetadata.CreatedAt.UTC()
 	record.mutationMetadata.UpdatedAt = record.mutationMetadata.UpdatedAt.UTC()
 	switch record.State {
@@ -368,18 +384,23 @@ func scanWorkspaceMaterialization(scanner workspaceMaterializationScanner, scope
 	if eligibleOnly && record.State != "published" && record.State != "recovered_new" {
 		return nil, fmt.Errorf("invalid acceptance-eligible materialization state")
 	}
-	if includedStorageClass != "null" && includedStorageClass != "text" {
-		return nil, fmt.Errorf("invalid included operations storage class")
+	var err error
+	if record.IncludedOperationsJSON, err = strictOptionalMaterializationText(included, includedStorageClass, "included operations"); err != nil {
+		return nil, err
 	}
-	if included.Valid {
-		if included.String == "" || !utf8.ValidString(included.String) || strings.ContainsRune(included.String, 0) {
-			return nil, fmt.Errorf("invalid included operations bytes")
-		}
-		value := included.String
-		record.IncludedOperationsJSON = &value
+	if record.PublicationReviewJSON, err = strictOptionalMaterializationText(publicationReview, publicationReviewStorageClass, "publication review"); err != nil {
+		return nil, err
+	}
+	if record.PriorCandidateJSON, err = strictOptionalMaterializationText(priorCandidate, priorCandidateStorageClass, "prior candidate"); err != nil {
+		return nil, err
+	}
+	if publicationReviewProofVersionStorageClass != "integer" {
+		return nil, fmt.Errorf("invalid publication review proof version storage class")
+	}
+	if !validWorkspaceMaterializationPublicationProof(*record) {
+		return nil, fmt.Errorf("invalid materialization publication proof")
 	}
 
-	var err error
 	record.PriorTree, err = strictMaterializationTree(priorBytes, record.PriorTreeDigest, binding)
 	if err != nil {
 		return nil, fmt.Errorf("prior tree: %w", err)
@@ -438,25 +459,45 @@ func equalWorkspaceMaterializationRecords(left, right WorkspaceMaterializationRe
 		left.PriorTreeDigest == right.PriorTreeDigest && left.CandidateDigest == right.CandidateDigest &&
 		left.ThroughGeneration == right.ThroughGeneration && left.State == right.State &&
 		equalWorkspaceTrees(left.PriorTree, right.PriorTree) && equalWorkspaceTrees(left.CandidateTree, right.CandidateTree) &&
+		left.StagePath == right.StagePath && left.BackupPath == right.BackupPath &&
 		equalOptionalMaterializationString(left.IncludedOperationsJSON, right.IncludedOperationsJSON) &&
+		left.PublicationReviewProofVersion == right.PublicationReviewProofVersion &&
+		equalOptionalMaterializationString(left.PublicationReviewJSON, right.PublicationReviewJSON) &&
+		equalOptionalMaterializationString(left.PriorCandidateJSON, right.PriorCandidateJSON) &&
 		equalWorkspaceMaterializationMutationMetadata(left.mutationMetadata, right.mutationMetadata)
 }
 
 func validWorkspaceMaterializationMutationMetadata(metadata workspaceMaterializationMutationMetadata) bool {
 	return metadata.StageClass == "text" && metadata.BackupClass == "text" &&
-		validMaterializationPath(metadata.StagePath) && validMaterializationPath(metadata.BackupPath) &&
-		metadata.StagePath != metadata.BackupPath &&
 		validStoredWorkspaceTimestamp(metadata.CreatedAt, metadata.CreatedRaw, metadata.CreatedClass) &&
 		validStoredWorkspaceTimestamp(metadata.UpdatedAt, metadata.UpdatedRaw, metadata.UpdatedClass) &&
 		!metadata.UpdatedAt.Before(metadata.CreatedAt)
 }
 
 func equalWorkspaceMaterializationMutationMetadata(left, right workspaceMaterializationMutationMetadata) bool {
-	return left.StagePath == right.StagePath && left.BackupPath == right.BackupPath &&
-		left.CreatedAt.Equal(right.CreatedAt) && left.UpdatedAt.Equal(right.UpdatedAt) &&
+	return left.CreatedAt.Equal(right.CreatedAt) && left.UpdatedAt.Equal(right.UpdatedAt) &&
 		left.CreatedRaw == right.CreatedRaw && left.UpdatedRaw == right.UpdatedRaw &&
 		left.StageClass == right.StageClass && left.BackupClass == right.BackupClass &&
 		left.CreatedClass == right.CreatedClass && left.UpdatedClass == right.UpdatedClass
+}
+
+func strictOptionalMaterializationText(value sql.NullString, storageClass, name string) (*string, error) {
+	if storageClass != "null" && storageClass != "text" {
+		return nil, fmt.Errorf("invalid %s storage class", name)
+	}
+	if !value.Valid {
+		return nil, nil
+	}
+	if value.String == "" || !utf8.ValidString(value.String) || strings.ContainsRune(value.String, 0) {
+		return nil, fmt.Errorf("invalid %s bytes", name)
+	}
+	cloned := value.String
+	return &cloned, nil
+}
+
+func validWorkspaceMaterializationPublicationProof(record WorkspaceMaterializationRecord) bool {
+	return (record.PublicationReviewProofVersion == 0 && record.PublicationReviewJSON == nil && record.PriorCandidateJSON == nil) ||
+		(record.PublicationReviewProofVersion == 1 && record.PublicationReviewJSON != nil && record.PriorCandidateJSON != nil)
 }
 
 func equalOptionalMaterializationString(left, right *string) bool {
@@ -473,6 +514,14 @@ func cloneWorkspaceMaterializationRecord(record WorkspaceMaterializationRecord) 
 	if record.IncludedOperationsJSON != nil {
 		value := *record.IncludedOperationsJSON
 		cloned.IncludedOperationsJSON = &value
+	}
+	if record.PublicationReviewJSON != nil {
+		value := *record.PublicationReviewJSON
+		cloned.PublicationReviewJSON = &value
+	}
+	if record.PriorCandidateJSON != nil {
+		value := *record.PriorCandidateJSON
+		cloned.PriorCandidateJSON = &value
 	}
 	return cloned
 }

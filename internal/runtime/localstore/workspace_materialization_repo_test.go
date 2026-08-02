@@ -139,6 +139,7 @@ func TestWorkspaceMutationTxAcceptMaterializationDetectsFailuresAndTriggerDrift(
 		{"write failure", `CREATE TRIGGER fail_materialization_accept BEFORE UPDATE OF state ON workspace_materializations BEGIN SELECT RAISE(ABORT,'injected materialization failure'); END`},
 		{"after trigger drift", `CREATE TRIGGER drift_materialization_accept AFTER UPDATE OF state ON workspace_materializations BEGIN UPDATE workspace_materializations SET through_generation=through_generation+1 WHERE project_id=NEW.project_id AND workspace_id=NEW.workspace_id AND journal_id=NEW.journal_id; END`},
 		{"after trigger hidden path drift", `CREATE TRIGGER drift_materialization_path AFTER UPDATE OF state ON workspace_materializations BEGIN UPDATE workspace_materializations SET stage_path='/drifted-stage' WHERE project_id=NEW.project_id AND workspace_id=NEW.workspace_id AND journal_id=NEW.journal_id; END`},
+		{"after trigger publication proof drift", `CREATE TRIGGER drift_materialization_proof AFTER UPDATE OF state ON workspace_materializations BEGIN UPDATE workspace_materializations SET publication_review_json='drifted-review',prior_candidate_json='drifted-prior' WHERE project_id=NEW.project_id AND workspace_id=NEW.workspace_id AND journal_id=NEW.journal_id; END`},
 		{"after trigger hidden timestamp drift", `CREATE TRIGGER drift_materialization_timestamp AFTER UPDATE OF state ON workspace_materializations BEGIN UPDATE workspace_materializations SET updated_at='2099-01-01 00:00:00+00:00' WHERE project_id=NEW.project_id AND workspace_id=NEW.workspace_id AND journal_id=NEW.journal_id; END`},
 		{"after trigger created timestamp drift", `CREATE TRIGGER drift_materialization_created AFTER UPDATE OF state ON workspace_materializations BEGIN UPDATE workspace_materializations SET created_at='2000-01-01 00:00:00+00:00' WHERE project_id=NEW.project_id AND workspace_id=NEW.workspace_id AND journal_id=NEW.journal_id; END`},
 	} {
@@ -228,6 +229,46 @@ func TestWorkspaceMutationTxAcceptMaterializationRejectsStaleHiddenState(t *test
 			after := readAtomicWorkspaceRawSnapshot(t, fixture.store.DB())
 			if !reflect.DeepEqual(after, before) {
 				t.Fatalf("stale hidden acceptance changed raw state: got %#v want %#v", after, before)
+			}
+		})
+	}
+}
+
+func TestWorkspaceMaterializationProofCASRejectsEveryPublicProofMutation(t *testing.T) {
+	raw := "{\"schema_version\":1,\"initial_through_generation\":3,\"operations\":[]}\n"
+	fixture := newMaterializationFixture(t, "published", &raw)
+	expected := readEligibleMaterialization(t, fixture.repo, fixture.binding.Scope)
+	if expected == nil {
+		t.Fatal("eligible materialization is nil")
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*WorkspaceMaterializationRecord)
+	}{
+		{"stage path", func(record *WorkspaceMaterializationRecord) { record.StagePath = "/other-stage" }},
+		{"backup path", func(record *WorkspaceMaterializationRecord) { record.BackupPath = "/other-backup" }},
+		{"proof version", func(record *WorkspaceMaterializationRecord) { record.PublicationReviewProofVersion++ }},
+		{"publication review", func(record *WorkspaceMaterializationRecord) {
+			value := "review mutated"
+			record.PublicationReviewJSON = &value
+		}},
+		{"prior candidate", func(record *WorkspaceMaterializationRecord) {
+			value := "prior mutated"
+			record.PriorCandidateJSON = &value
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			mutated := cloneWorkspaceMaterializationRecord(*expected)
+			test.mutate(&mutated)
+			before := readMaterializationDisposition(t, fixture.repo, fixture.binding.Scope)
+			if err := fixture.repo.WithImmediateWorkspace(context.Background(), fixture.binding.Scope, func(tx *WorkspaceMutationTx) error {
+				_, err := tx.AcceptMaterialization(context.Background(), mutated)
+				return err
+			}); err == nil {
+				t.Fatal("mutated public proof accepted")
+			}
+			if after := readMaterializationDisposition(t, fixture.repo, fixture.binding.Scope); !reflect.DeepEqual(after, before) {
+				t.Fatalf("mutated public proof changed state: got %+v want %+v", after, before)
 			}
 		})
 	}
@@ -1281,16 +1322,18 @@ func insertMaterializationRow(t *testing.T, store *Store, binding types.Workspac
 		t.Fatal(err)
 	}
 	created := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	review, priorCandidate := " review\n", " prior-candidate\n"
 	mustExecMaterialization(t, store, `
 		INSERT INTO workspace_materializations
 		(project_id,workspace_id,journal_id,expected_live_digest,accepted_base_digest,
 		 checkout_path,checkout_device,checkout_inode,prior_tree_digest,candidate_digest,
 		 through_generation,prior_tree,candidate_tree,stage_path,backup_path,state,
-		 created_at,updated_at,included_operations_json)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		 created_at,updated_at,included_operations_json,publication_review_json,prior_candidate_json,publication_review_proof_version)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 	`, binding.Scope.ProjectID, binding.Scope.WorkspaceID, journalID, priorDigest, binding.AcceptedTreeDigest,
 		binding.Checkout.CanonicalPath, binding.Checkout.Device, binding.Checkout.Inode, priorDigest, candidateDigest,
-		int64(3), priorBytes, candidateBytes, "/stage", "/backup", materializationState, created, created.Add(time.Second), included)
+		int64(3), priorBytes, candidateBytes, "/stage", "/backup", materializationState, created, created.Add(time.Second), included,
+		review, priorCandidate, 1)
 }
 
 func readEligibleMaterialization(t *testing.T, repo *WorkspaceRepo, scope types.WorkspaceScope) *WorkspaceMaterializationRecord {

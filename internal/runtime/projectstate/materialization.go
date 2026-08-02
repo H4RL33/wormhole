@@ -154,6 +154,12 @@ func proveMaterializationDisposition(disposition localstore.WorkspaceMaterializa
 		default:
 			return materializationDispositionProof{}, fmt.Errorf("projectstate: invalid materialization journal state")
 		}
+		if !validMaterializationPublicationProof(journal) {
+			return materializationDispositionProof{}, fmt.Errorf("projectstate: materialization publication proof is invalid")
+		}
+		if (journal.State == "published" || journal.State == "recovered_new") && journal.PublicationReviewProofVersion != 1 {
+			return materializationDispositionProof{}, fmt.Errorf("projectstate: acceptance-eligible materialization has no publication proof")
+		}
 		if journal.IncludedOperationsJSON == nil {
 			if journal.State == "accepted" {
 				if err := proveJournalPrepublicationMembership(journal, nil, disposition.Operations); err != nil {
@@ -244,6 +250,9 @@ func requireMatchingMaterialization(
 	if eligible.State != "published" && eligible.State != "recovered_new" {
 		return matchingMaterializationProof{}, fmt.Errorf("projectstate: materialization is not acceptance eligible")
 	}
+	if eligible.PublicationReviewProofVersion != 1 || eligible.PublicationReviewJSON == nil || eligible.PriorCandidateJSON == nil {
+		return matchingMaterializationProof{}, fmt.Errorf("projectstate: matching materialization has no publication proof")
+	}
 	if err := binding.Validate(); err != nil {
 		return matchingMaterializationProof{}, fmt.Errorf("projectstate: invalid materialization binding: %w", err)
 	}
@@ -311,7 +320,16 @@ func equalMaterializationRecord(left, right localstore.WorkspaceMaterializationR
 		left.PriorTreeDigest == right.PriorTreeDigest && left.CandidateDigest == right.CandidateDigest &&
 		left.ThroughGeneration == right.ThroughGeneration && left.State == right.State &&
 		equalCheckpointTree(left.PriorTree, right.PriorTree) && equalCheckpointTree(left.CandidateTree, right.CandidateTree) &&
-		equalOptionalString(left.IncludedOperationsJSON, right.IncludedOperationsJSON)
+		left.StagePath == right.StagePath && left.BackupPath == right.BackupPath &&
+		equalOptionalString(left.IncludedOperationsJSON, right.IncludedOperationsJSON) &&
+		left.PublicationReviewProofVersion == right.PublicationReviewProofVersion &&
+		equalOptionalString(left.PublicationReviewJSON, right.PublicationReviewJSON) &&
+		equalOptionalString(left.PriorCandidateJSON, right.PriorCandidateJSON)
+}
+
+func validMaterializationPublicationProof(record localstore.WorkspaceMaterializationRecord) bool {
+	return (record.PublicationReviewProofVersion == 0 && record.PublicationReviewJSON == nil && record.PriorCandidateJSON == nil) ||
+		(record.PublicationReviewProofVersion == 1 && record.PublicationReviewJSON != nil && record.PriorCandidateJSON != nil)
 }
 
 func equalCheckpointTree(left, right state.Tree) bool {
@@ -347,6 +365,14 @@ func cloneMaterializationRecord(record localstore.WorkspaceMaterializationRecord
 	if record.IncludedOperationsJSON != nil {
 		raw := *record.IncludedOperationsJSON
 		cloned.IncludedOperationsJSON = &raw
+	}
+	if record.PublicationReviewJSON != nil {
+		raw := *record.PublicationReviewJSON
+		cloned.PublicationReviewJSON = &raw
+	}
+	if record.PriorCandidateJSON != nil {
+		raw := *record.PriorCandidateJSON
+		cloned.PriorCandidateJSON = &raw
 	}
 	return cloned
 }

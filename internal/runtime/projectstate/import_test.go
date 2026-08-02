@@ -304,13 +304,14 @@ func TestImportMaterializationProofAloneAuthorizesResurrection(t *testing.T) {
 				INSERT INTO workspace_materializations
 				(project_id,workspace_id,journal_id,expected_live_digest,accepted_base_digest,
 				 checkout_path,checkout_device,checkout_inode,prior_tree_digest,candidate_digest,
-				 through_generation,prior_tree,candidate_tree,stage_path,backup_path,state,included_operations_json)
-				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+				 through_generation,prior_tree,candidate_tree,stage_path,backup_path,state,included_operations_json,publication_review_json,prior_candidate_json,publication_review_proof_version)
+				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 			`, registered.Binding.Scope.ProjectID, registered.Binding.Scope.WorkspaceID, "import-materialization",
 				tombstoned.Digest, state.Digest(registered.Binding.AcceptedTreeDigest), registered.Binding.Checkout.CanonicalPath,
 				registered.Binding.Checkout.Device, registered.Binding.Checkout.Inode, tombstoned.Digest, live.Digest, 0,
 				encodeServiceSnapshot(t, tombstoned), encodeServiceSnapshot(t, live),
 				filepath.Join(repository.root, ".wormhole-stage"), filepath.Join(repository.root, ".wormhole-backup"), "published", included,
+				" review\n", " prior-candidate\n", 1,
 			); err != nil {
 				t.Fatal(err)
 			}

@@ -503,6 +503,19 @@ func TestRequireMatchingMaterializationRejectsRecordBindingTreeAndDigestMismatch
 	}
 }
 
+func TestWorkspaceMaterializationProofRejectsV0PendingJournal(t *testing.T) {
+	fixture := newCheckpointMaterializationFixture(t)
+	journal := fixture.journal(t, "journal-a", "published", 1, fixture.entries[:2])
+	journal.PublicationReviewProofVersion = 0
+	journal.PublicationReviewJSON = nil
+	journal.PriorCandidateJSON = nil
+	if _, err := proveMaterializationDisposition(localstore.WorkspaceMaterializationDisposition{
+		Journals: []localstore.WorkspaceMaterializationRecord{journal}, Operations: fixture.rows("materialized", "materialized"),
+	}); err == nil {
+		t.Fatal("v0 published materialization proof succeeded")
+	}
+}
+
 func checkpointTestOperation(t *testing.T, id string) state.OperationV1 {
 	t.Helper()
 	snapshot := composeFixtureSnapshot(t)
@@ -604,9 +617,13 @@ func (fixture checkpointMaterializationFixture) journal(t *testing.T, journalID,
 		PriorTreeDigest: fixture.priorDigest, CandidateDigest: fixture.candidateDigest,
 		ThroughGeneration: through, PriorTree: checkpointCloneTree(fixture.priorTree),
 		CandidateTree: checkpointCloneTree(fixture.candidateTree), IncludedOperationsJSON: &raw,
+		StagePath: "/checkpoint-stage", BackupPath: "/checkpoint-backup",
+		PublicationReviewProofVersion: 1, PublicationReviewJSON: stringPointer(" review\n"), PriorCandidateJSON: stringPointer(" prior\n"),
 		State: journalState,
 	}
 }
+
+func stringPointer(value string) *string { return &value }
 
 func (fixture checkpointMaterializationFixture) rows(states ...string) []localstore.WorkspaceOperation {
 	rows := make([]localstore.WorkspaceOperation, len(states))

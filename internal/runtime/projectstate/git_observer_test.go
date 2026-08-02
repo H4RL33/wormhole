@@ -424,13 +424,13 @@ func TestObserveGitBaseDispositionBlockerPrecedesDiscardApplicability(t *testing
 		INSERT INTO workspace_materializations
 		(project_id,workspace_id,journal_id,expected_live_digest,accepted_base_digest,
 		 checkout_path,checkout_device,checkout_inode,prior_tree_digest,candidate_digest,
-		 through_generation,prior_tree,candidate_tree,stage_path,backup_path,state,included_operations_json)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		 through_generation,prior_tree,candidate_tree,stage_path,backup_path,state,included_operations_json,publication_review_json,prior_candidate_json,publication_review_proof_version)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 	`, registered.Binding.Scope.ProjectID, registered.Binding.Scope.WorkspaceID, "prepared-blocker",
 		workspace.Snapshot.Digest, workspace.Snapshot.Digest, registered.Binding.Checkout.CanonicalPath,
 		registered.Binding.Checkout.Device, registered.Binding.Checkout.Inode, workspace.Snapshot.Digest, workspace.Snapshot.Digest,
 		int64(0), encoded, encoded, filepath.Join(repository.root, ".wormhole-stage"),
-		filepath.Join(repository.root, ".wormhole-backup"), "prepared", envelope); err != nil {
+		filepath.Join(repository.root, ".wormhole-backup"), "prepared", envelope, " review\n", " prior-candidate\n", 1); err != nil {
 		t.Fatal(err)
 	}
 	runGit(t, repository.root, "switch", "-c", "next")
@@ -749,13 +749,13 @@ func TestObserveGitBaseExactAcceptancePreservesLaterActiveRows(t *testing.T) {
 		INSERT INTO workspace_materializations
 		(project_id,workspace_id,journal_id,expected_live_digest,accepted_base_digest,
 		 checkout_path,checkout_device,checkout_inode,prior_tree_digest,candidate_digest,
-		 through_generation,prior_tree,candidate_tree,stage_path,backup_path,state,included_operations_json)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		 through_generation,prior_tree,candidate_tree,stage_path,backup_path,state,included_operations_json,publication_review_json,prior_candidate_json,publication_review_proof_version)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 	`, registered.Binding.Scope.ProjectID, registered.Binding.Scope.WorkspaceID, "observe-with-later",
 		candidate.DirectSnapshot.Digest, state.Digest(registered.Binding.AcceptedTreeDigest), registered.Binding.Checkout.CanonicalPath,
 		registered.Binding.Checkout.Device, registered.Binding.Checkout.Inode, candidate.DirectSnapshot.Digest, materialized.Digest,
 		int64(1), encodeServiceSnapshot(t, candidate.DirectSnapshot), encodeServiceSnapshot(t, materialized),
-		filepath.Join(repository.root, ".wormhole-stage"), filepath.Join(repository.root, ".wormhole-backup"), "published", envelope); err != nil {
+		filepath.Join(repository.root, ".wormhole-stage"), filepath.Join(repository.root, ".wormhole-backup"), "published", envelope, " review\n", " prior-candidate\n", 1); err != nil {
 		t.Fatal(err)
 	}
 	writeImportSnapshot(t, repository.root, materialized)
@@ -1201,14 +1201,14 @@ func prepareObserveExactMaterialization(t *testing.T, materializationState strin
 		INSERT INTO workspace_materializations
 		(project_id,workspace_id,journal_id,expected_live_digest,accepted_base_digest,
 		 checkout_path,checkout_device,checkout_inode,prior_tree_digest,candidate_digest,
-		 through_generation,prior_tree,candidate_tree,stage_path,backup_path,state,included_operations_json)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		 through_generation,prior_tree,candidate_tree,stage_path,backup_path,state,included_operations_json,publication_review_json,prior_candidate_json,publication_review_proof_version)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 	`, registered.Binding.Scope.ProjectID, registered.Binding.Scope.WorkspaceID, "observe-journal",
 		candidate.DirectSnapshot.Digest, state.Digest(registered.Binding.AcceptedTreeDigest), registered.Binding.Checkout.CanonicalPath,
 		registered.Binding.Checkout.Device, registered.Binding.Checkout.Inode, candidate.DirectSnapshot.Digest, materialized.Digest,
 		int64(0), encodeServiceSnapshot(t, candidate.DirectSnapshot), encoded,
 		filepath.Join(repository.root, ".wormhole-stage"), filepath.Join(repository.root, ".wormhole-backup"),
-		materializationState, envelope); err != nil {
+		materializationState, envelope, " review\n", " prior-candidate\n", 1); err != nil {
 		t.Fatal(err)
 	}
 	writeImportSnapshot(t, repository.root, materialized)
