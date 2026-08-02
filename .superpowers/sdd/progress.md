@@ -789,3 +789,35 @@ coverage. The pushed remote was independently verified at exact SHA
 `6a670ee71e1ab5f410ca06c68399d92dfdf80dac`. Slice 4B remains: trusted double-observed,
 single-snapshot Status/Diff publication-review integration. Checkpoint publication remains
 blocked until that integration is reviewed and committed.
+
+Trusted publication Status/Diff `95198f7`
+(`feat(projectstate): review publication state`): Slice 4B complete. `Status` and `Diff`
+now share one transaction-local publication-review helper. It consumes a complete Git and
+semantic-origin observation outside SQLite, repeats the full observation under the exact
+workspace writer barrier, proves the accepted binding and canonical tree bytes, composes
+one SQLite snapshot, derives conservative field attribution and canonical semantic/review
+digests, and returns owned evidence reusable by both Task-5 checkpoint transactions.
+Apply and ApplyBatch retain their single mutation transaction and deliberately return zero
+publication-review fields until a trusted Status or Diff read.
+
+Git observation failures normalize to `ErrGitObservationChanged`, origin failures normalize
+to `ErrGitOriginChanged`, and the final Git-position bracket always runs after the origin
+callback so simultaneous Git drift wins. Stable repository/origin mismatch appends exactly
+one actorless unclassified policy revision only after binding, composition, candidate, and
+operation validation; Status/Diff continue from that row. Unknown COMMIT is never replayed
+and returns the already-computed review only after fresh exact transition confirmation.
+Initial observation-mode HEAD mismatch now preserves the Git-change sentinel without
+changing registration behavior.
+
+Causal and adversarial coverage includes every full-bundle field, simultaneous Git/origin
+drift, outside and in-transaction observer failures on both surfaces, exact-zero results and
+policy rollback, repository-before-origin invalidation, composition corruption, unknown
+COMMIT, writer-barrier exclusion of concurrent Apply under `-race`, owned results, restart
+stability, cross-project/workspace digest isolation, and human/accountable-agent parity.
+Two independent final reviews approved with no findings. Root-focused, focused race, full
+ProjectState, vet, gofmt, and diff checks passed; one clean repository-wide `make check`
+passed build, vet, integration-required tests, the complete race suite, and 85.8% merged
+statement coverage against the accepted 80% floor. The implementation is pushed and the
+remote ref was verified at exact SHA `95198f79158e6d41fc2160c63ab710b5499257ee`.
+Publication Slices 1-4 are now complete, reviewed, committed, and Task 5 checkpoint CAS,
+durable publication proof, filesystem publication, and recovery is unblocked.
