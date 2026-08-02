@@ -86,6 +86,9 @@ func inspectCommittedWorkspaceWithFinalReaders(
 	}
 	head := trimGitLine(headOutput)
 	if head != expectedCommit {
+		if observation {
+			return committedWorkspace{}, fmt.Errorf("%w: Git HEAD differs from expected commit", ErrGitObservationChanged)
+		}
 		return committedWorkspace{}, fmt.Errorf("projectstate: Git HEAD %q differs from expected commit %q", head, expectedCommit)
 	}
 	acceptedRef, err := symbolicHead(ctx, root)

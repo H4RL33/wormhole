@@ -21,6 +21,20 @@ import (
 	state "github.com/H4RL33/wormhole/internal/types/projectstate"
 )
 
+func TestInspectCommittedWorkspaceObservationWrapsInitialHEADMismatch(t *testing.T) {
+	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+	wrong := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	_, err := inspectCommittedWorkspaceForGitBase(context.Background(), repository.root, wrong)
+	if !errors.Is(err, ErrGitObservationChanged) {
+		t.Fatalf("observation HEAD mismatch error=%v, want ErrGitObservationChanged", err)
+	}
+	_, registrationErr := inspectCommittedWorkspace(context.Background(), repository.root, wrong)
+	if errors.Is(registrationErr, ErrGitObservationChanged) || registrationErr == nil {
+		t.Fatalf("registration HEAD mismatch error=%v, want unchanged registration error", registrationErr)
+	}
+}
+
 func TestResolveWorkingDirectoryChild(t *testing.T) {
 	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
 	child := filepath.Join(repository.root, "nested", "child")

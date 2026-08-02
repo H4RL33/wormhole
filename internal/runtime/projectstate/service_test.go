@@ -345,14 +345,14 @@ func TestServiceDiffLastWriterAttribution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.BaseDigest != base.AcceptedSnapshot.Digest || got.ViewDigest != wantView.Digest {
-		t.Fatalf("Diff digests = %q -> %q, want %q -> %q", got.BaseDigest, got.ViewDigest, base.AcceptedSnapshot.Digest, wantView.Digest)
+	if got.SemanticDiff.BaseDigest != base.AcceptedSnapshot.Digest || got.SemanticDiff.ViewDigest != wantView.Digest {
+		t.Fatalf("Diff digests = %q -> %q, want %q -> %q", got.SemanticDiff.BaseDigest, got.SemanticDiff.ViewDigest, base.AcceptedSnapshot.Digest, wantView.Digest)
 	}
-	if len(got.Changes) != 1 || got.Changes[0].Key != (state.RecordKey{Kind: "task", ID: "22222222-2222-4222-8222-222222222222"}) {
-		t.Fatalf("Diff changes = %+v", got.Changes)
+	if len(got.SemanticDiff.Changes) != 1 || got.SemanticDiff.Changes[0].Key != (state.RecordKey{Kind: "task", ID: "22222222-2222-4222-8222-222222222222"}) {
+		t.Fatalf("Diff changes = %+v", got.SemanticDiff.Changes)
 	}
-	if got.Changes[0].Actor == nil || *got.Changes[0].Actor != second.Actor {
-		t.Fatalf("Diff actor = %+v, want %+v", got.Changes[0].Actor, second.Actor)
+	if got.SemanticDiff.Changes[0].Actor != nil || got.SemanticDiff.Changes[0].Fields[0].Actor != nil {
+		t.Fatalf("mixed lifecycle writers must be conservatively unattributed: %+v", got.SemanticDiff.Changes[0])
 	}
 }
 
@@ -377,8 +377,8 @@ func TestServiceDiffAttributesDifferentKeysIndependently(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Changes) != 2 || got.Changes[0].Actor == nil || *got.Changes[0].Actor != first.Actor || got.Changes[1].Actor == nil || *got.Changes[1].Actor != second.Actor {
-		t.Fatalf("different-key attribution = %+v", got.Changes)
+	if len(got.SemanticDiff.Changes) != 2 || got.SemanticDiff.Changes[0].Actor == nil || *got.SemanticDiff.Changes[0].Actor != first.Actor || got.SemanticDiff.Changes[1].Actor == nil || *got.SemanticDiff.Changes[1].Actor != second.Actor {
+		t.Fatalf("different-key attribution = %+v", got.SemanticDiff.Changes)
 	}
 }
 
@@ -398,7 +398,7 @@ func TestServiceDiffLeavesCandidateOnlyChangesUnattributed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Changes) != 1 || got.Changes[0].Actor != nil || got.ViewDigest != direct.Digest {
+	if len(got.SemanticDiff.Changes) != 1 || got.SemanticDiff.Changes[0].Actor != nil || got.SemanticDiff.ViewDigest != direct.Digest {
 		t.Fatalf("candidate-only Diff = %+v", got)
 	}
 }
@@ -430,11 +430,11 @@ func TestServiceDiffAttributesOnlyPostRebaseActiveRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Changes) != 2 || got.Changes[0].Key.ID != "22222222-2222-4222-8222-222222222222" || got.Changes[0].Actor != nil {
-		t.Fatalf("rebased candidate attribution = %+v", got.Changes)
+	if len(got.SemanticDiff.Changes) != 2 || got.SemanticDiff.Changes[0].Key.ID != "22222222-2222-4222-8222-222222222222" || got.SemanticDiff.Changes[0].Actor != nil {
+		t.Fatalf("rebased candidate attribution = %+v", got.SemanticDiff.Changes)
 	}
-	if got.Changes[1].Key.ID != "33333333-3333-4333-8333-333333333333" || got.Changes[1].Actor == nil || *got.Changes[1].Actor != active.Actor {
-		t.Fatalf("post-boundary attribution = %+v", got.Changes)
+	if got.SemanticDiff.Changes[1].Key.ID != "33333333-3333-4333-8333-333333333333" || got.SemanticDiff.Changes[1].Actor == nil || *got.SemanticDiff.Changes[1].Actor != active.Actor {
+		t.Fatalf("post-boundary attribution = %+v", got.SemanticDiff.Changes)
 	}
 }
 
@@ -461,17 +461,17 @@ func TestServiceDiffScopeIsolationAndCorruptionIsReadOnly(t *testing.T) {
 	}
 
 	healthy, err := service.Diff(context.Background(), a.Binding.Scope)
-	if err != nil || len(healthy.Changes) != 1 {
+	if err != nil || len(healthy.SemanticDiff.Changes) != 1 {
 		t.Fatalf("healthy workspace Diff = %+v, %v", healthy, err)
 	}
 	corrupt, err := service.Diff(context.Background(), b.Binding.Scope)
-	if err == nil || !reflect.DeepEqual(corrupt, Diff{}) {
+	if err == nil || !reflect.DeepEqual(corrupt, WorkspaceDiff{}) {
 		t.Fatalf("corrupt workspace Diff = %+v, %v", corrupt, err)
 	}
 	wrong := a.Binding.Scope
 	wrong.WorkspaceID = types.WorkspaceID("ffffffff-ffff-4fff-8fff-ffffffffffff")
 	missing, err := service.Diff(context.Background(), wrong)
-	if !errors.Is(err, localstore.ErrNotFound) || !reflect.DeepEqual(missing, Diff{}) {
+	if !errors.Is(err, localstore.ErrNotFound) || !reflect.DeepEqual(missing, WorkspaceDiff{}) {
 		t.Fatalf("wrong-scope Diff = %+v, %v", missing, err)
 	}
 	if err := store.Close(); err != nil {
@@ -702,7 +702,7 @@ func TestStatusAndApplyRejectConflictStateMismatch(t *testing.T) {
 			if _, err := service.Status(context.Background(), registered.Binding.Scope); err == nil {
 				t.Fatal("Status accepted mismatched conflict state and evidence")
 			}
-			if got, err := service.Diff(context.Background(), registered.Binding.Scope); err == nil || !reflect.DeepEqual(got, Diff{}) {
+			if got, err := service.Diff(context.Background(), registered.Binding.Scope); err == nil || !reflect.DeepEqual(got, WorkspaceDiff{}) {
 				t.Fatalf("Diff accepted mismatched conflict state and evidence: got=%+v err=%v", got, err)
 			}
 			operation := servicePutTaskOperation(
@@ -1115,7 +1115,7 @@ func TestStatusAndApplyFailClosedOnCorruptPersistedState(t *testing.T) {
 			if _, err := service.Status(context.Background(), registered.Binding.Scope); err == nil {
 				t.Fatal("Status served corrupt persisted state")
 			}
-			if got, err := service.Diff(context.Background(), registered.Binding.Scope); err == nil || !reflect.DeepEqual(got, Diff{}) {
+			if got, err := service.Diff(context.Background(), registered.Binding.Scope); err == nil || !reflect.DeepEqual(got, WorkspaceDiff{}) {
 				t.Fatalf("Diff served corrupt persisted state: got=%+v err=%v", got, err)
 			}
 			operation := servicePutTaskOperation(

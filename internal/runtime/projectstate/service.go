@@ -38,11 +38,21 @@ type ServiceConfig struct {
 }
 
 type WorkspaceStatus struct {
-	Binding           types.WorkspaceBinding
-	State             string
-	AcceptedSnapshot  state.Snapshot
-	CandidateDigest   state.Digest
-	OverlayGeneration int64
+	Binding                   types.WorkspaceBinding
+	State                     string
+	AcceptedSnapshot          state.Snapshot
+	CandidateDigest           state.Digest
+	OverlayGeneration         int64
+	PublicationClassification types.PublicationClassification
+	PublicationReviewDigest   state.Digest
+}
+
+type WorkspaceDiff struct {
+	SemanticDiff              Diff
+	CandidateDigest           state.Digest
+	OverlayGeneration         int64
+	PublicationClassification types.PublicationClassification
+	PublicationReviewDigest   state.Digest
 }
 
 type withImmediateWorkspaceTransitionFunc func(
@@ -65,6 +75,7 @@ type Service struct {
 	readWorkingTree                  func(string) (state.Tree, error)
 	observeGitBase                   func(context.Context, ObserveGitBaseRequest) (gitBaseObservation, error)
 	observePublicationOrigin         func(context.Context, string) (publicationOriginObservation, error)
+	observePublicationTrust          func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error)
 	withImmediateWorkspace           withImmediateWorkspaceFunc
 	withImmediateWorkspaceTransition withImmediateWorkspaceTransitionFunc
 	now                              func() time.Time
@@ -203,46 +214,19 @@ func (s *Service) RegisteredWorkspaces(ctx context.Context) ([]types.WorkspaceBi
 }
 
 func (s *Service) Status(ctx context.Context, scope types.WorkspaceScope) (WorkspaceStatus, error) {
-	if s == nil || s.repo == nil {
-		return WorkspaceStatus{}, localstore.ErrNotFound
-	}
-	var status WorkspaceStatus
-	err := s.repo.WithImmediateWorkspace(ctx, scope, func(tx *localstore.WorkspaceMutationTx) error {
-		var err error
-		status, _, _, err = readComposedWorkspace(ctx, tx)
-		return err
-	})
+	review, err := s.readPublicationReview(ctx, scope)
 	if err != nil {
 		return WorkspaceStatus{}, err
 	}
-	return status, nil
+	return clonePublicationReviewStatus(review.status)
 }
 
-func (s *Service) Diff(ctx context.Context, scope types.WorkspaceScope) (Diff, error) {
-	if s == nil || s.repo == nil {
-		return Diff{}, localstore.ErrNotFound
-	}
-	var result Diff
-	err := s.repo.WithImmediateWorkspace(ctx, scope, func(tx *localstore.WorkspaceMutationTx) error {
-		status, view, operations, err := readComposedWorkspace(ctx, tx)
-		if err != nil {
-			return err
-		}
-		actors := make(map[state.RecordKey]types.ActorEnvelope, len(operations))
-		for _, stored := range operations {
-			key := operationTargetKey(stored.Operation)
-			if key.Kind == "" || key.ID == "" {
-				return fmt.Errorf("projectstate: active operation has no target key")
-			}
-			actors[key] = stored.Operation.Actor
-		}
-		result, err = SemanticDiff(status.AcceptedSnapshot, view.Snapshot, actors)
-		return err
-	})
+func (s *Service) Diff(ctx context.Context, scope types.WorkspaceScope) (WorkspaceDiff, error) {
+	review, err := s.readPublicationReview(ctx, scope)
 	if err != nil {
-		return Diff{}, err
+		return WorkspaceDiff{}, err
 	}
-	return result, nil
+	return clonePublicationReviewDiff(review.diff)
 }
 
 func (s *Service) Apply(ctx context.Context, scope types.WorkspaceScope, operation state.OperationV1) (WorkspaceStatus, error) {
@@ -323,6 +307,10 @@ func (s *Service) ApplyBatch(ctx context.Context, scope types.WorkspaceScope, op
 		status.State = workspaceState
 		status.CandidateDigest = current.Digest
 		status.OverlayGeneration = nextGeneration + int64(len(operations)) - 1
+		// Apply and ApplyBatch intentionally remain mutation-only operations. A
+		// caller obtains trusted publication fields through Status or Diff.
+		status.PublicationClassification = ""
+		status.PublicationReviewDigest = ""
 		result = status
 		return nil
 	})
@@ -363,41 +351,57 @@ func operationTargetKey(operation state.OperationV1) state.RecordKey {
 }
 
 func readComposedWorkspace(ctx context.Context, tx *localstore.WorkspaceMutationTx) (WorkspaceStatus, ComposedView, []StoredOperation, error) {
-	record, err := tx.Workspace(ctx)
+	loaded, err := loadComposedWorkspace(ctx, tx)
 	if err != nil {
 		return WorkspaceStatus{}, ComposedView{}, nil, err
 	}
+	return loaded.status, loaded.view, loaded.operations, nil
+}
+
+type composedWorkspace struct {
+	status        WorkspaceStatus
+	view          ComposedView
+	operations    []StoredOperation
+	selectedStart state.Snapshot
+	boundary      int64
+}
+
+func loadComposedWorkspace(ctx context.Context, tx *localstore.WorkspaceMutationTx) (composedWorkspace, error) {
+	record, err := tx.Workspace(ctx)
+	if err != nil {
+		return composedWorkspace{}, err
+	}
 	if err := verifyBindingCheckout(record.Binding); err != nil {
-		return WorkspaceStatus{}, ComposedView{}, nil, localstore.ErrNotFound
+		return composedWorkspace{}, localstore.ErrNotFound
 	}
 	openConflicts, err := tx.HasOpenConflicts(ctx)
 	if err != nil {
-		return WorkspaceStatus{}, ComposedView{}, nil, err
+		return composedWorkspace{}, err
 	}
 	if (record.State == "conflicted") != openConflicts {
-		return WorkspaceStatus{}, ComposedView{}, nil, fmt.Errorf("projectstate: workspace conflict state does not match open conflict evidence")
+		return composedWorkspace{}, fmt.Errorf("projectstate: workspace conflict state does not match open conflict evidence")
 	}
 	candidate, err := tx.Candidate(ctx)
 	if err != nil {
-		return WorkspaceStatus{}, ComposedView{}, nil, err
+		return composedWorkspace{}, err
 	}
 	start, boundary := selectCandidateStart(record.Snapshot, candidate)
 	rows, err := tx.ActiveOperationsAfter(ctx, boundary)
 	if err != nil {
-		return WorkspaceStatus{}, ComposedView{}, nil, err
+		return composedWorkspace{}, err
 	}
 	operations, err := decodeStoredOperations(rows)
 	if err != nil {
-		return WorkspaceStatus{}, ComposedView{}, nil, err
+		return composedWorkspace{}, err
 	}
 	view, err := Compose(start, boundary, operations)
 	if err != nil {
-		return WorkspaceStatus{}, ComposedView{}, nil, err
+		return composedWorkspace{}, err
 	}
-	return WorkspaceStatus{
+	return composedWorkspace{status: WorkspaceStatus{
 		Binding: record.Binding, State: record.State, AcceptedSnapshot: record.Snapshot,
 		CandidateDigest: view.Snapshot.Digest, OverlayGeneration: view.ThroughGeneration,
-	}, view, operations, nil
+	}, view: view, operations: operations, selectedStart: start, boundary: boundary}, nil
 }
 
 func selectCandidateStart(accepted state.Snapshot, candidate *localstore.WorkspaceCandidateRecord) (state.Snapshot, int64) {

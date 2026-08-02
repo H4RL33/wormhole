@@ -77,9 +77,9 @@ func TestObserveGitBaseRejectsAndDiscardsBranchSwitchProposal(t *testing.T) {
 				if !errors.Is(err, ErrBranchSwitchPending) || !reflect.DeepEqual(got, ObserveGitBaseResult{}) {
 					t.Fatalf("ObserveGitBase()=(%+v,%v)", got, err)
 				}
-				status := mustServiceStatus(t, service, registered.Binding.Scope)
-				if status.Binding != registered.Binding || status.State != "pending" {
-					t.Fatalf("rejected Status()=%+v", status)
+				status, statusErr := service.Status(context.Background(), registered.Binding.Scope)
+				if !errors.Is(statusErr, ErrGitObservationChanged) || !reflect.DeepEqual(status, WorkspaceStatus{}) {
+					t.Fatalf("rejected Status()=(%+v,%v)", status, statusErr)
 				}
 				return
 			}
