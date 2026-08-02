@@ -868,3 +868,30 @@ the amended range with no remaining Critical, Important, or Minor findings. Cont
 reran focused and full ProjectState tests, the focused race suite, vet, formatting and
 diff checks, exact two-file scope verification, and `go test ./... -count=1` clean. Task
 5D transaction-local journal preparation and transition APIs are next.
+
+Task 5D transaction-local checkpoint journals `c319e5a`: complete. Caller-owned
+exact-workspace immediate transactions can now insert one strict version-1 prepared
+journal and compare-and-swap the five legal prepared/published recovery edges without
+starting, committing, retrying, or mutating adjacent durable state. Preparation proves
+the complete terminal history, binding, canonical trees and digests, journal-bound
+paths, opaque proof bytes, optional candidate, and operation set before `INSERT ...
+RETURNING`; transition matches the entire public record plus raw timestamp and storage
+metadata before changing only state and updated time. Both seams return owned clones and
+leave acceptance exclusively to the existing published/recovered-new acceptance path.
+
+Review-driven causal REDs proved and fixed two hidden-representation boundaries. Exact
+raw operation timestamps/storage classes and candidate tree bytes/timestamps/storage
+classes are now captured and compared around each journal mutation, so semantically
+equivalent trigger drift rolls back. Complete journal discovery now CAST-matches logical
+project/workspace scope while requiring exact values and TEXT storage classes, so
+foreign-key-bypassed BLOB scope aliases cannot hide pending or duplicate history. The
+concurrent-writer test observes the second `BEGIN IMMEDIATE` admission attempt before the
+first commits and proves the second writer reloads and rejects the new pending journal.
+
+Fresh focused alias and complete Prepare/Transition tests, the full localstore package,
+focused race suite, vet, formatting, exact two-file scope and diff checks, and
+`go test ./... -count=1` all passed. Two controller reviews approved the amended commit
+with no remaining Critical, Important, or Minor findings; stress reruns covered scope
+aliases 50 times and the race path five times. Task 5E's next bounded tranche is the
+ProjectState-private, journal-agnostic durable filesystem artifact publisher; service
+checkpoint orchestration and recovery remain deferred to later Task 5 tranches.
