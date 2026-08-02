@@ -32,6 +32,7 @@ type FieldValue struct {
 type FieldChange struct {
 	Path          string
 	Before, After FieldValue
+	Actor         *types.ActorEnvelope
 }
 
 type Change struct {
