@@ -834,3 +834,15 @@ The implementation passed focused and full localstore/ProjectState tests, focuse
 vet, formatting, diff checks, and repository-wide tests. Three final read-only reviews
 approved the two-commit range with no remaining Critical, Important, or Minor findings;
 controller reran both full packages and vet clean. Task 5B proof codecs are next.
+
+Task 5B strict checkpoint proof codecs `ec79b0b`: complete. ProjectState now owns
+canonical version-1 publication-review and prior-candidate envelopes with strict nested
+validation, recomputed review digests, attributable local actors, complete inline tree
+round trips, owned decoded bytes, and zero-on-error behavior. Direct and rebased trees
+are independently bounded at 10,000 files, 4 KiB per UTF-8 path, 16 MiB per file, and
+64 MiB aggregate path plus data; the four governing context documents ratify those exact
+limits and the absence of a combined or raw-JSON cap. Causal focused RED/GREEN, full
+ProjectState and repository tests, race, vet, formatting, and diff checks passed. Three
+fresh independent reviews found no Critical, Important, or Minor issues; controller
+reran the focused and full ProjectState suites, vet, diff checks, and `go test ./...`
+clean. Task 5C exact checkpoint-plan cross-proof is next.
