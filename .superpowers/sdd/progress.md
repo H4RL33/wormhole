@@ -895,3 +895,23 @@ with no remaining Critical, Important, or Minor findings; stress reruns covered 
 aliases 50 times and the race path five times. Task 5E's next bounded tranche is the
 ProjectState-private, journal-agnostic durable filesystem artifact publisher; service
 checkpoint orchestration and recovery remain deferred to later Task 5 tranches.
+
+Task 5E durable filesystem artifact publisher `e96a45c`: complete. The ProjectState-private
+publisher validates and owns one exact checkpoint candidate, durably renders it beneath the
+Git-private checkpoint root, freezes platform capability and mount identity, and publishes
+once through Linux/Darwin exchange or a crash-recoverable no-replace fallback. Every
+preparation and mutation boundary fails closed on Git-path, descriptor, owner/mode, complete
+tree, durable metadata, mount/volume, parent-fsync, cancellation, and topology drift while
+retaining the exact stage/backup residue required by later recovery orchestration.
+
+Causal RED/GREEN covered the absent API and publisher, per-call syscall routing, same-byte
+replacement and directory-rebind attacks, private-ancestor and parent churn, held-versus-current
+mount drift at both rename boundaries, fallback durability, bounded Git output, capability
+normalization, cancellation, lifecycle concurrency, and exhaustive rename/fsync fault matrices.
+Two independent final reviews approved the stable ten-file snapshot with no Critical,
+Important, or Minor findings. The controller then passed focused ProjectState tests (3.432s),
+the full package (46.026s), focused race (5.296s), vet, formatting, Darwin arm64 and FreeBSD
+amd64 cross-compiles, staged whitespace/scope checks, and `go test ./... -count=1` (Gateway
+109.419s; ProjectState 69.465s). Native Darwin runtime fault testing remains explicitly
+deferred by the approved brief. Task 5F checkpoint service orchestration is next; Task 5G
+owns recovery.
