@@ -449,9 +449,9 @@ mechanism, topology matrix, and Stage-1A stop boundary are specified by
 
 Recovery strict-proves complete journal cardinality, candidate state, and operation
 ownership before Git/path I/O. No-work history returns DB-composed status without Git/path
-I/O. One prepared/published driver uses an advisory current-HEAD/origin observation, then
-under `BEGIN IMMEDIATE` byte-matches and re-proves the disposition and repeats the
-position/tree-at-SHA/origin/position bundle before path access. Stored base exact or a
+I/O. One prepared/published driver holds one `BEGIN IMMEDIATE` across a single stable
+position/tree-at-SHA/origin/position observation, disposition reproof, journal-bound path
+classification or mutation, database outcome reread, and commit. Stored base exact or a
 same-ref different-commit exact candidate can converge; the latter has no ancestry
 requirement. Other bases fail before origin invalidation or path I/O.
 

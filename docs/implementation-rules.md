@@ -980,14 +980,15 @@ the same layering pattern and isolation discipline.
   owner-only same-device Git-private staging with backup absent pre-journal; and the split
   pre-journal ignored-stage versus journal-backed convergence fault matrix. Recovery tests
   freeze exact cardinality/candidate/operation ownership before I/O, no-journal orphan
-  corruption, one-short-immediate terminal status/no Git-path I/O, concurrent-writer
-  linearization at the second exact reload, and both ordered
-  position/tree-at-SHA/origin/position observations before path access. Darwin post-swap
-  faults and root/path escape, wrong-name, symlink/type/identity/rebind negatives retain
-  evidence with zero path mutation. Same-ref different-commit exact candidate has no
-  ancestry query. Task-5 unknown-COMMIT tests cover exact next, transition-relative exact
-  prior including prepared-journal absence, read failure, partial/corrupt/third state,
-  byte-identical evidence retention, and zero writer replay.
+  corruption, terminal no-work status with no Git/path I/O, and one `BEGIN IMMEDIATE` held
+  across exactly one stable position/tree-at-SHA/origin/position bundle, filesystem outcome,
+  exact database convergence, and status reread. Linux no-replace rename, compensation, and
+  ordered destination/source parent-fsync faults plus root/path escape, wrong-name,
+  symlink/type/identity/rebind negatives retain evidence with zero unsafe path mutation.
+  Same-ref different-commit exact candidate has no ancestry query. Task-5 unknown-COMMIT
+  tests cover exact next, transition-relative exact prior including prepared-journal absence,
+  read failure, partial/corrupt/third state, byte-identical evidence retention, and zero
+  writer or rename replay. Exchange and Darwin runtime fault tests are deferred.
 
 Release and compatibility policy live in `docs/releasing.md` and
 `docs/compatibility.md`. Those documents describe repository workflow behavior;
