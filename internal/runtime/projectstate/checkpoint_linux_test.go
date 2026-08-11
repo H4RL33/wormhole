@@ -200,7 +200,7 @@ func TestCheckpointLinuxFinalBoundaryRejectsFreshCurrentMountMismatch(t *testing
 		renameCalls++
 		return realRename(fromFD, from, toFD, to, flags)
 	}
-	if err := publishPreparedCheckpointArtifact(context.Background(), artifact); !errors.Is(err, ErrCheckpointUnsupported) {
+	if _, err := publishPreparedCheckpointArtifact(context.Background(), artifact); !errors.Is(err, ErrCheckpointUnsupported) {
 		t.Fatalf("fresh current mount mismatch = %v, want ErrCheckpointUnsupported", err)
 	}
 	if renameCalls != 0 {
@@ -244,7 +244,7 @@ func TestCheckpointLinuxSecondBoundaryRejectsFreshCurrentMountMismatch(t *testin
 		renameCalls++
 		return publicationRename(fromFD, from, toFD, to, flags)
 	}
-	if err := publishPreparedCheckpointArtifact(context.Background(), artifact); !errors.Is(err, ErrCheckpointUnsupported) {
+	if _, err := publishPreparedCheckpointArtifact(context.Background(), artifact); !errors.Is(err, ErrCheckpointUnsupported) {
 		t.Fatalf("second-boundary fresh mount mismatch = %v, want ErrCheckpointUnsupported", err)
 	}
 	if !armed || renameCalls != 1 {

@@ -37,7 +37,7 @@ type CheckpointResult struct {
 
 type checkpointArtifactHandle struct {
 	evidence checkpointArtifactEvidence
-	publish  func(context.Context) error
+	publish  func(context.Context) (checkpointPublicationDisposition, error)
 	close    func()
 }
 
@@ -71,7 +71,7 @@ func defaultPrepareCheckpointArtifact(ctx context.Context, input checkpointArtif
 	}
 	return checkpointArtifactHandle{
 		evidence: artifact.evidence(),
-		publish: func(ctx context.Context) error {
+		publish: func(ctx context.Context) (checkpointPublicationDisposition, error) {
 			return publishPreparedCheckpointArtifact(ctx, artifact)
 		},
 		close: artifact.close,
@@ -412,8 +412,16 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 			MaterializedThroughGeneration: currentPlan.ThroughGeneration,
 			JournalID:                     prepared.JournalID,
 		}
-		if err := artifact.publish(ctx); err != nil {
+		publication, err := artifact.publish(ctx)
+		if err != nil {
 			return err
+		}
+		switch publication {
+		case checkpointPublicationPublished:
+		case checkpointPublicationPreservedConcurrentOld:
+			return ErrCheckpointCAS
+		default:
+			return fmt.Errorf("%w: invalid checkpoint publication disposition %d", ErrCheckpointRecoveryBlocked, publication)
 		}
 		secondCompleted = true
 		return nil

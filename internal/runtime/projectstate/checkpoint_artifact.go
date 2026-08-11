@@ -8,8 +8,16 @@ import (
 )
 
 var (
-	ErrCheckpointCAS         = errors.New("projectstate: checkpoint working tree changed")
-	ErrCheckpointUnsupported = errors.New("projectstate: checkpoint filesystem unsupported")
+	ErrCheckpointCAS             = errors.New("projectstate: checkpoint working tree changed")
+	ErrCheckpointUnsupported     = errors.New("projectstate: checkpoint filesystem unsupported")
+	ErrCheckpointRecoveryBlocked = errors.New("projectstate: checkpoint recovery blocked")
+)
+
+type checkpointPublicationDisposition uint8
+
+const (
+	checkpointPublicationPublished checkpointPublicationDisposition = iota + 1
+	checkpointPublicationPreservedConcurrentOld
 )
 
 type checkpointArtifactInput struct {

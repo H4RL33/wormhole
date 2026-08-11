@@ -16,7 +16,7 @@ func prepareCheckpointArtifactWithDependencies(context.Context, checkpointArtifa
 }
 
 func (*checkpointArtifact) evidence() checkpointArtifactEvidence { return checkpointArtifactEvidence{} }
-func publishPreparedCheckpointArtifact(context.Context, *checkpointArtifact) error {
-	return ErrCheckpointUnsupported
+func publishPreparedCheckpointArtifact(context.Context, *checkpointArtifact) (checkpointPublicationDisposition, error) {
+	return 0, ErrCheckpointUnsupported
 }
 func (*checkpointArtifact) close() {}

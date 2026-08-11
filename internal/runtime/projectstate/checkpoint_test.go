@@ -150,7 +150,10 @@ func TestCheckpointPublisherFailureRetainsPreparedAuthority(t *testing.T) {
 	baseFactory := fixture.service.prepareCheckpointArtifact
 	fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		handle, err := baseFactory(ctx, input)
-		handle.publish = func(context.Context) error { fixture.publishCalls++; return publishErr }
+		handle.publish = func(context.Context) (checkpointPublicationDisposition, error) {
+			fixture.publishCalls++
+			return 0, publishErr
+		}
 		return handle, err
 	}
 	got, err := fixture.service.Checkpoint(context.Background(), req)
@@ -179,6 +182,52 @@ func TestCheckpointPublisherFailureRetainsPreparedAuthority(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCheckpointRejectsTemporaryUnpublishedPublicationDispositions(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		disposition checkpointPublicationDisposition
+		want        error
+	}{
+		{name: "preserved concurrent old", disposition: checkpointPublicationPreservedConcurrentOld, want: ErrCheckpointCAS},
+		{name: "zero", want: ErrCheckpointRecoveryBlocked},
+		{name: "unknown", disposition: checkpointPublicationDisposition(99), want: ErrCheckpointRecoveryBlocked},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
+			baseFactory := fixture.service.prepareCheckpointArtifact
+			fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
+				handle, err := baseFactory(ctx, input)
+				handle.publish = func(context.Context) (checkpointPublicationDisposition, error) {
+					fixture.publishCalls++
+					return test.disposition, nil
+				}
+				return handle, err
+			}
+
+			got, err := fixture.service.Checkpoint(context.Background(), req)
+			if !errors.Is(err, test.want) || got != (CheckpointResult{}) || fixture.publishCalls != 1 || fixture.closeCalls != 1 {
+				t.Fatalf("Checkpoint = (%+v, %v), artifact publish=%d close=%d, want zero and %v", got, err, fixture.publishCalls, fixture.closeCalls, test.want)
+			}
+			disposition := readCheckpointDisposition(t, fixture.service, req.Scope)
+			if len(disposition.Journals) != 1 || disposition.Journals[0].State != "prepared" {
+				t.Fatalf("temporary disposition changed database outcome: %+v", disposition)
+			}
+			if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+				candidate, err := tx.Candidate(context.Background())
+				if err != nil {
+					return err
+				}
+				if candidate != nil {
+					return fmt.Errorf("temporary disposition retained tentative candidate: %+v", candidate)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
@@ -240,7 +289,7 @@ func TestCheckpointPendingPrecedesOwnedRequestValidationAndMutation(t *testing.T
 	baseFactory := fixture.service.prepareCheckpointArtifact
 	fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		handle, err := baseFactory(ctx, input)
-		handle.publish = func(context.Context) error { return publishErr }
+		handle.publish = func(context.Context) (checkpointPublicationDisposition, error) { return 0, publishErr }
 		return handle, err
 	}
 	if _, err := fixture.service.Checkpoint(context.Background(), req); !errors.Is(err, publishErr) {
@@ -366,8 +415,11 @@ func TestCheckpointServiceGateSerializesSameScopeBeforeOutsideObservation(t *tes
 				JournalID: journalID, StagePath: filepath.Join(privateRoot, journalID+".stage"),
 				BackupPath: filepath.Join(privateRoot, journalID+".backup"),
 			},
-			publish: func(context.Context) error { publishCalls.Add(1); return nil },
-			close:   func() { closeCalls.Add(1) },
+			publish: func(context.Context) (checkpointPublicationDisposition, error) {
+				publishCalls.Add(1)
+				return checkpointPublicationPublished, nil
+			},
+			close: func() { closeCalls.Add(1) },
 		}, nil
 	}
 	type checkpointOutcome struct {
@@ -869,8 +921,10 @@ func TestCheckpointPrepareErrorClosesReturnedArtifactOwnership(t *testing.T) {
 	fixture.service.prepareCheckpointArtifact = func(context.Context, checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		fixture.prepareCalls++
 		return checkpointArtifactHandle{
-			publish: func(context.Context) error { panic("prepare-error artifact published") },
-			close:   func() { fixture.closeCalls++ },
+			publish: func(context.Context) (checkpointPublicationDisposition, error) {
+				panic("prepare-error artifact published")
+			},
+			close: func() { fixture.closeCalls++ },
 		}, prepareErr
 	}
 
@@ -1104,8 +1158,11 @@ func TestCheckpointSecondTransactionRejectsExactTerminalDispositionDrift(t *test
 				StagePath:  filepath.Join(privateRoot, secondJournalID+".stage"),
 				BackupPath: filepath.Join(privateRoot, secondJournalID+".backup"),
 			},
-			publish: func(context.Context) error { fixture.publishCalls++; return nil },
-			close:   func() { fixture.closeCalls++ },
+			publish: func(context.Context) (checkpointPublicationDisposition, error) {
+				fixture.publishCalls++
+				return checkpointPublicationPublished, nil
+			},
+			close: func() { fixture.closeCalls++ },
 		}, nil
 	}
 	checkpointOnSecondOutsideObservation(t, fixture, func() {
@@ -1206,7 +1263,7 @@ func TestCheckpointPendingStructuralAndCardinalityValidation(t *testing.T) {
 	baseFactory := fixture.service.prepareCheckpointArtifact
 	fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		handle, err := baseFactory(ctx, input)
-		handle.publish = func(context.Context) error { return publishErr }
+		handle.publish = func(context.Context) (checkpointPublicationDisposition, error) { return 0, publishErr }
 		return handle, err
 	}
 	if _, err := fixture.service.Checkpoint(context.Background(), req); !errors.Is(err, publishErr) {
@@ -1283,7 +1340,7 @@ func TestCheckpointPendingFastPathValidatesAllTerminalProofs(t *testing.T) {
 	baseFactory := fixture.service.prepareCheckpointArtifact
 	fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		handle, err := baseFactory(ctx, input)
-		handle.publish = func(context.Context) error { return publishErr }
+		handle.publish = func(context.Context) (checkpointPublicationDisposition, error) { return 0, publishErr }
 		return handle, err
 	}
 	if _, err := fixture.service.Checkpoint(context.Background(), req); !errors.Is(err, publishErr) {
@@ -1341,7 +1398,7 @@ func TestCheckpointPendingFastPathIgnoresRecoveredOldLegacyOperationEnvelope(t *
 	baseFactory := fixture.service.prepareCheckpointArtifact
 	fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		handle, err := baseFactory(ctx, input)
-		handle.publish = func(context.Context) error { return publishErr }
+		handle.publish = func(context.Context) (checkpointPublicationDisposition, error) { return 0, publishErr }
 		return handle, err
 	}
 	if _, err := fixture.service.Checkpoint(context.Background(), req); !errors.Is(err, publishErr) {
@@ -1370,7 +1427,7 @@ func TestCheckpointPendingReviewRequiresExactAcceptedGitPosition(t *testing.T) {
 	baseFactory := fixture.service.prepareCheckpointArtifact
 	fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		handle, err := baseFactory(ctx, input)
-		handle.publish = func(context.Context) error { return publishErr }
+		handle.publish = func(context.Context) (checkpointPublicationDisposition, error) { return 0, publishErr }
 		return handle, err
 	}
 	if _, err := fixture.service.Checkpoint(context.Background(), req); !errors.Is(err, publishErr) {
@@ -1527,8 +1584,11 @@ func TestCheckpointLocalOnlyPublishesExactPlan(t *testing.T) {
 				StagePath:  filepath.Join(privateRoot, journalID+".stage"),
 				BackupPath: filepath.Join(privateRoot, journalID+".backup"),
 			},
-			publish: func(context.Context) error { publishCalls++; return nil },
-			close:   func() { closeCalls++ },
+			publish: func(context.Context) (checkpointPublicationDisposition, error) {
+				publishCalls++
+				return checkpointPublicationPublished, nil
+			},
+			close: func() { closeCalls++ },
 		}, nil
 	}
 
@@ -1691,8 +1751,11 @@ func newCheckpointCoordinatorFixture(
 				StagePath:  filepath.Join(privateRoot, journalID+".stage"),
 				BackupPath: filepath.Join(privateRoot, journalID+".backup"),
 			},
-			publish: func(context.Context) error { fixture.publishCalls++; return nil },
-			close:   func() { fixture.closeCalls++ },
+			publish: func(context.Context) (checkpointPublicationDisposition, error) {
+				fixture.publishCalls++
+				return checkpointPublicationPublished, nil
+			},
+			close: func() { fixture.closeCalls++ },
 		}, nil
 	}
 	return fixture, CheckpointRequest{

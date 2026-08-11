@@ -25,11 +25,12 @@ func TestCheckpointFallbackPublishesDurably(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer artifact.close()
-	if err := publishPreparedCheckpointArtifact(context.Background(), artifact); err != nil {
-		t.Fatalf("publish durable fallback: %v", err)
+	disposition, err := publishPreparedCheckpointArtifact(context.Background(), artifact)
+	if err != nil || disposition != checkpointPublicationPublished {
+		t.Fatalf("publish durable fallback = (%d, %v), want published and nil", disposition, err)
 	}
 	assertCheckpointPublishedTopology(t, input, artifact.evidence())
-	if err := publishPreparedCheckpointArtifact(context.Background(), artifact); !errors.Is(err, ErrCheckpointUnsupported) {
+	if _, err := publishPreparedCheckpointArtifact(context.Background(), artifact); !errors.Is(err, ErrCheckpointUnsupported) {
 		t.Fatalf("repeated publication error = %v, want closed/claimed rejection", err)
 	}
 }
@@ -42,7 +43,7 @@ func TestCheckpointArtifactPublicationLifecycleAndCancellation(t *testing.T) {
 			t.Fatal(err)
 		}
 		artifact.close()
-		if err := publishPreparedCheckpointArtifact(context.Background(), artifact); !errors.Is(err, ErrCheckpointUnsupported) {
+		if _, err := publishPreparedCheckpointArtifact(context.Background(), artifact); !errors.Is(err, ErrCheckpointUnsupported) {
 			t.Fatalf("closed publication error = %v", err)
 		}
 		assertCheckpointPreparedTopology(t, input, artifact.evidence())
@@ -57,11 +58,11 @@ func TestCheckpointArtifactPublicationLifecycleAndCancellation(t *testing.T) {
 		defer artifact.close()
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if err := publishPreparedCheckpointArtifact(ctx, artifact); !errors.Is(err, context.Canceled) {
+		if _, err := publishPreparedCheckpointArtifact(ctx, artifact); !errors.Is(err, context.Canceled) {
 			t.Fatalf("cancelled publication error = %v", err)
 		}
 		assertCheckpointPreparedTopology(t, input, artifact.evidence())
-		if err := publishPreparedCheckpointArtifact(context.Background(), artifact); !errors.Is(err, ErrCheckpointUnsupported) {
+		if _, err := publishPreparedCheckpointArtifact(context.Background(), artifact); !errors.Is(err, ErrCheckpointUnsupported) {
 			t.Fatalf("cancelled claimed artifact replay error = %v", err)
 		}
 	})
@@ -82,7 +83,8 @@ func TestCheckpointArtifactPublicationLifecycleAndCancellation(t *testing.T) {
 			go func() {
 				defer group.Done()
 				<-start
-				results <- publishPreparedCheckpointArtifact(context.Background(), artifact)
+				_, err := publishPreparedCheckpointArtifact(context.Background(), artifact)
+				results <- err
 			}()
 		}
 		close(start)
@@ -143,7 +145,7 @@ func TestCheckpointArtifactPublicationPreflightDriftIsZeroMutation(t *testing.T)
 			}
 			defer artifact.close()
 			test.mutate(t, input, artifact)
-			if err := publishPreparedCheckpointArtifact(context.Background(), artifact); err == nil {
+			if _, err := publishPreparedCheckpointArtifact(context.Background(), artifact); err == nil {
 				t.Fatal("publication accepted preflight drift")
 			}
 			if _, err := os.Lstat(artifact.evidence().StagePath); err != nil {
@@ -152,7 +154,7 @@ func TestCheckpointArtifactPublicationPreflightDriftIsZeroMutation(t *testing.T)
 			if _, err := os.Lstat(filepath.Join(input.Checkout.CanonicalPath, ".wormhole")); err != nil {
 				t.Fatalf("preflight removed live: %v", err)
 			}
-			if err := publishPreparedCheckpointArtifact(context.Background(), artifact); !errors.Is(err, ErrCheckpointUnsupported) {
+			if _, err := publishPreparedCheckpointArtifact(context.Background(), artifact); !errors.Is(err, ErrCheckpointUnsupported) {
 				t.Fatalf("failed preflight replay error = %v", err)
 			}
 		})
@@ -217,7 +219,7 @@ func TestCheckpointArtifactFinalBoundaryRejectsHookDriftBeforeFirstRename(t *tes
 				renameCalls++
 				return realRename(fromFD, from, toFD, to, flags)
 			}
-			err = publishPreparedCheckpointArtifact(ctx, artifact)
+			_, err = publishPreparedCheckpointArtifact(ctx, artifact)
 			if err == nil || !mutated {
 				t.Fatalf("hook drift publication = (%v, mutated %t)", err, mutated)
 			}
@@ -281,7 +283,7 @@ func TestCheckpointArtifactFinalBoundaryRejectsHookDriftBeforeSecondRename(t *te
 				renameCalls++
 				return realRename(fromFD, from, toFD, to, flags)
 			}
-			if err := publishPreparedCheckpointArtifact(context.Background(), artifact); err == nil {
+			if _, err := publishPreparedCheckpointArtifact(context.Background(), artifact); err == nil {
 				t.Fatal("second-boundary drift publication succeeded")
 			}
 			if !mutated || renameCalls != 1 {
@@ -317,7 +319,7 @@ func TestCheckpointArtifactPublicationExactOrdering(t *testing.T) {
 		}
 		return realFsync(fd)
 	}
-	if err := publishPreparedCheckpointArtifact(context.Background(), artifact); err != nil {
+	if _, err := publishPreparedCheckpointArtifact(context.Background(), artifact); err != nil {
 		t.Fatal(err)
 	}
 	stageName, backupName := filepath.Base(artifact.evidence().StagePath), filepath.Base(artifact.evidence().BackupPath)
@@ -367,7 +369,7 @@ func TestCheckpointFallbackFaultTopologyMatrix(t *testing.T) {
 				}
 				return nil
 			}
-			if err := publishPreparedCheckpointArtifact(context.Background(), artifact); !errors.Is(err, injected) || seen != test.occurrence {
+			if _, err := publishPreparedCheckpointArtifact(context.Background(), artifact); !errors.Is(err, injected) || seen != test.occurrence {
 				t.Fatalf("fallback fault = (%v, occurrence %d)", err, seen)
 			}
 			if test.published {
@@ -425,7 +427,7 @@ func TestCheckpointFallbackSyscallFaultTopologyMatrix(t *testing.T) {
 				}
 				return realFsync(fd)
 			}
-			if err := publishPreparedCheckpointArtifact(context.Background(), artifact); err == nil {
+			if _, err := publishPreparedCheckpointArtifact(context.Background(), artifact); err == nil {
 				t.Fatal("fallback syscall fault succeeded")
 			}
 			switch test.topology {
@@ -456,7 +458,10 @@ func TestCheckpointArtifactCloseSerializesWithPublicationAndIsIdempotent(t *test
 		return nil
 	}
 	published := make(chan error, 1)
-	go func() { published <- publishPreparedCheckpointArtifact(context.Background(), artifact) }()
+	go func() {
+		_, err := publishPreparedCheckpointArtifact(context.Background(), artifact)
+		published <- err
+	}()
 	<-entered
 	closed := make(chan struct{})
 	go func() {

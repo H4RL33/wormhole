@@ -7,7 +7,8 @@ import (
 )
 
 func TestCheckpointArtifactRejectsNilPublication(t *testing.T) {
-	if err := publishPreparedCheckpointArtifact(context.Background(), nil); !errors.Is(err, ErrCheckpointUnsupported) {
-		t.Fatalf("publish nil artifact error = %v, want ErrCheckpointUnsupported", err)
+	disposition, err := publishPreparedCheckpointArtifact(context.Background(), nil)
+	if disposition != 0 || !errors.Is(err, ErrCheckpointUnsupported) {
+		t.Fatalf("publish nil artifact = (%d, %v), want zero and ErrCheckpointUnsupported", disposition, err)
 	}
 }

@@ -1160,23 +1160,26 @@ func (artifact *checkpointArtifact) evidence() checkpointArtifactEvidence {
 	return artifact.evidenceValue
 }
 
-func publishPreparedCheckpointArtifact(ctx context.Context, artifact *checkpointArtifact) error {
+func publishPreparedCheckpointArtifact(ctx context.Context, artifact *checkpointArtifact) (checkpointPublicationDisposition, error) {
 	if artifact == nil {
-		return ErrCheckpointUnsupported
+		return 0, ErrCheckpointUnsupported
 	}
 	artifact.mu.Lock()
 	defer artifact.mu.Unlock()
 	if artifact.closed || artifact.claimed {
-		return ErrCheckpointUnsupported
+		return 0, ErrCheckpointUnsupported
 	}
 	artifact.claimed = true
 	if err := preflightCheckpointArtifactPublication(ctx, artifact); err != nil {
-		return err
+		return 0, err
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return 0, err
 	}
-	return publishCheckpointArtifactFallback(ctx, artifact)
+	if err := publishCheckpointArtifactFallback(ctx, artifact); err != nil {
+		return 0, err
+	}
+	return checkpointPublicationPublished, nil
 }
 
 func preflightCheckpointArtifactPublication(ctx context.Context, artifact *checkpointArtifact) error {
