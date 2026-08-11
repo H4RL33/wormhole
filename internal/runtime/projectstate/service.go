@@ -80,6 +80,9 @@ type Service struct {
 	withImmediateWorkspaceTransition withImmediateWorkspaceTransitionFunc
 	now                              func() time.Time
 	newStashID                       func() (string, error)
+	prepareCheckpointArtifact        prepareCheckpointArtifactFunc
+	confirmCheckpointCommit          confirmCheckpointCommitFunc
+	checkpointGates                  checkpointGateSet
 }
 
 func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service, error) {
@@ -94,6 +97,8 @@ func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service,
 		withImmediateWorkspaceTransition: repo.WithImmediateWorkspaceTransition,
 		now:                              time.Now,
 		newStashID:                       newCanonicalStashID,
+		prepareCheckpointArtifact:        defaultPrepareCheckpointArtifact,
+		confirmCheckpointCommit:          repo.ConfirmCheckpointCommit,
 	}
 	if config.LegacyIntegrationBackupRoot == "" {
 		return service, nil
