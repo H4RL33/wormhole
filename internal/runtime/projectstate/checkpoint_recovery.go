@@ -46,6 +46,16 @@ type checkpointRecoveryGitObservation struct {
 	finalPosition gitBasePosition
 }
 
+type checkpointRecoveryGitObserver func(
+	context.Context,
+	checkpointRecoveryProof,
+) (checkpointRecoveryGitObservation, error)
+
+type checkpointRecoveryPlan struct {
+	proof       checkpointRecoveryProof
+	observation checkpointRecoveryGitObservation
+}
+
 func proveCheckpointRecoveryDisposition(
 	workspace localstore.WorkspaceRecord,
 	candidate *localstore.WorkspaceCandidateRecord,
@@ -169,6 +179,28 @@ func loadCheckpointRecoveryDisposition(
 	status.PublicationReviewDigest = ""
 	proof.status = status
 	return proof, nil
+}
+
+func planCheckpointRecovery(
+	ctx context.Context,
+	tx *localstore.WorkspaceMutationTx,
+	observeGit checkpointRecoveryGitObserver,
+) (checkpointRecoveryPlan, error) {
+	proof, err := loadCheckpointRecoveryDisposition(ctx, tx)
+	if err != nil {
+		return checkpointRecoveryPlan{}, err
+	}
+	if proof.kind == checkpointRecoveryNoWork {
+		return checkpointRecoveryPlan{proof: proof}, nil
+	}
+	if observeGit == nil {
+		return checkpointRecoveryPlan{}, checkpointRecoveryPrecondition("Git observer unavailable", nil)
+	}
+	observation, err := observeGit(ctx, proof)
+	if err != nil {
+		return checkpointRecoveryPlan{}, checkpointRecoveryPrecondition("observe recovery Git bundle", err)
+	}
+	return checkpointRecoveryPlan{proof: proof, observation: observation}, nil
 }
 
 func validateCheckpointRecoveryWorkspace(workspace localstore.WorkspaceRecord) error {

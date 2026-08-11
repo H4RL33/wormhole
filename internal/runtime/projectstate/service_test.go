@@ -254,51 +254,187 @@ func TestStatusExposesCandidateDigestAndOverlayGeneration(t *testing.T) {
 }
 
 func TestRecoveryStatusCompositionUsesDatabaseOnly(t *testing.T) {
-	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
-	_, service := openProjectStateService(t, "")
-	registered := registerGitRepository(t, service, repository)
-	panicIO := func(string) { panic("recovery no-work performed checkout, Git, origin, or path I/O") }
-	service.readWorkingTree = func(string) (state.Tree, error) { panicIO("path"); return nil, nil }
-	service.observeGitBase = func(context.Context, ObserveGitBaseRequest) (gitBaseObservation, error) {
-		panicIO("git")
-		return gitBaseObservation{}, nil
+	for _, history := range []string{"empty", "accepted", "recovered_old", "recovered_new"} {
+		t.Run(history, func(t *testing.T) {
+			service, scope, root := recoveryNoWorkServiceFixture(t, history)
+			var want WorkspaceStatus
+			var wantDisposition localstore.WorkspaceMaterializationDisposition
+			var wantCandidate *localstore.WorkspaceCandidateRecord
+			if err := service.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
+				composed, err := loadComposedWorkspace(context.Background(), tx)
+				if err != nil {
+					return err
+				}
+				want = composed.status
+				wantDisposition, err = tx.MaterializationDisposition(context.Background())
+				if err != nil {
+					return err
+				}
+				wantCandidate, err = tx.Candidate(context.Background())
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if want.PublicationClassification != "" || want.PublicationReviewDigest != "" {
+				t.Fatalf("fixture status has nonzero review fields: %+v", want)
+			}
+			if err := os.Rename(root, root+"-moved"); err != nil {
+				t.Fatal(err)
+			}
+
+			observerCalls := 0
+			var got checkpointRecoveryPlan
+			err := service.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
+				var err error
+				got, err = planCheckpointRecovery(context.Background(), tx, func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
+					observerCalls++
+					panic("recovery no-work reached Git/origin observer")
+				})
+				return err
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if observerCalls != 0 || got.proof.kind != checkpointRecoveryNoWork || got.proof.driver != nil ||
+				!reflect.DeepEqual(got.observation, checkpointRecoveryGitObservation{}) || !reflect.DeepEqual(got.proof.status, want) ||
+				got.proof.status.PublicationClassification != "" || got.proof.status.PublicationReviewDigest != "" {
+				t.Fatalf("database-only %s plan=%+v observerCalls=%d, want exact zero-review no-work", history, got, observerCalls)
+			}
+
+			got.proof.workspace.Snapshot.Project.Name = "mutated proof workspace"
+			if got.proof.candidate != nil {
+				got.proof.candidate.DirectSnapshot.Project.Name = "mutated proof candidate"
+			}
+			if len(got.proof.disposition.Journals) != 0 {
+				got.proof.disposition.Journals[0].CandidateTree[0].Data[0] ^= 0xff
+			}
+			if !reflect.DeepEqual(got.proof.status, want) {
+				t.Fatal("database-only recovery status aliases proof workspace, candidate, or disposition")
+			}
+			freshDisposition := readCheckpointDisposition(t, service, scope)
+			if !reflect.DeepEqual(freshDisposition, wantDisposition) {
+				t.Fatal("mutating returned recovery proof changed durable disposition")
+			}
+			var freshCandidate *localstore.WorkspaceCandidateRecord
+			if err := service.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
+				var err error
+				freshCandidate, err = tx.Candidate(context.Background())
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if !equalCheckpointRecoveryCandidates(freshCandidate, wantCandidate) {
+				t.Fatal("mutating returned recovery proof changed durable candidate")
+			}
+		})
 	}
-	service.observePublicationOrigin = func(context.Context, string) (publicationOriginObservation, error) {
-		panicIO("origin")
-		return publicationOriginObservation{}, nil
+
+	t.Run("driver reaches observer boundary", func(t *testing.T) {
+		fixture, request, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
+		publishErr := errors.New("retain prepared recovery driver")
+		baseFactory := fixture.service.prepareCheckpointArtifact
+		fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
+			handle, err := baseFactory(ctx, input)
+			if err == nil {
+				handle.publish = func(context.Context) (checkpointPublicationDisposition, error) { return 0, publishErr }
+			}
+			return handle, err
+		}
+		if result, err := fixture.service.Checkpoint(context.Background(), request); result != (CheckpointResult{}) || !errors.Is(err, publishErr) {
+			t.Fatalf("prepare recovery driver=(%+v,%v)", result, err)
+		}
+
+		observerCalls := 0
+		var got checkpointRecoveryPlan
+		if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), request.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+			var err error
+			got, err = planCheckpointRecovery(context.Background(), tx, func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
+				observerCalls++
+				return checkpointRecoveryGitObservation{}, nil
+			})
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if observerCalls != 1 || got.proof.kind != checkpointRecoveryPrepared || got.proof.driver == nil {
+			t.Fatalf("prepared recovery plan=%+v observerCalls=%d", got, observerCalls)
+		}
+
+		injected := errors.New("injected recovery observer failure")
+		for _, test := range []struct {
+			name     string
+			observer func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error)
+			cause    error
+		}{
+			{name: "nil observer"},
+			{name: "observer error", cause: injected, observer: func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
+				return checkpointRecoveryGitObservation{}, injected
+			}},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				var rejected checkpointRecoveryPlan
+				err := fixture.service.repo.WithImmediateWorkspace(context.Background(), request.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+					var err error
+					rejected, err = planCheckpointRecovery(context.Background(), tx, test.observer)
+					return err
+				})
+				if err == nil || !errors.Is(err, ErrCheckpointRecoveryPrecondition) ||
+					(test.cause != nil && !errors.Is(err, test.cause)) || !reflect.DeepEqual(rejected, checkpointRecoveryPlan{}) {
+					t.Fatalf("rejected recovery plan=(%+v,%v), want exact zero precondition error", rejected, err)
+				}
+			})
+		}
+	})
+}
+
+func recoveryNoWorkServiceFixture(t *testing.T, history string) (*Service, types.WorkspaceScope, string) {
+	t.Helper()
+	if history == "empty" {
+		repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+		_, service := openProjectStateService(t, "")
+		registered := registerGitRepository(t, service, repository)
+		return service, registered.Binding.Scope, repository.root
 	}
-	service.observePublicationTrust = func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error) {
-		panicIO("checkout")
-		return publicationTrustObservation{}, nil
-	}
-	service.prepareCheckpointArtifact = func(context.Context, checkpointArtifactInput) (checkpointArtifactHandle, error) {
-		panicIO("artifact path")
-		return checkpointArtifactHandle{}, nil
-	}
-	movedRoot := repository.root + "-moved"
-	if err := os.Rename(repository.root, movedRoot); err != nil {
+
+	fixture, request, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
+	if history == "recovered_old" {
+		publishErr := errors.New("retain prepared recovery fixture")
+		baseFactory := fixture.service.prepareCheckpointArtifact
+		fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
+			handle, err := baseFactory(ctx, input)
+			if err == nil {
+				handle.publish = func(context.Context) (checkpointPublicationDisposition, error) { return 0, publishErr }
+			}
+			return handle, err
+		}
+		if result, err := fixture.service.Checkpoint(context.Background(), request); result != (CheckpointResult{}) || !errors.Is(err, publishErr) {
+			t.Fatalf("prepare recovered-old fixture=(%+v,%v)", result, err)
+		}
+	} else if _, err := fixture.service.Checkpoint(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}
 
-	var got checkpointRecoveryProof
-	err := service.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
-		var err error
-		got, err = loadCheckpointRecoveryDisposition(context.Background(), tx)
+	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), request.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+		disposition, err := tx.MaterializationDisposition(context.Background())
+		if err != nil {
+			return err
+		}
+		if len(disposition.Journals) != 1 {
+			return fmt.Errorf("recovery fixture journals=%d, want 1", len(disposition.Journals))
+		}
+		switch history {
+		case "accepted":
+			_, err = tx.AcceptMaterialization(context.Background(), disposition.Journals[0])
+		case "recovered_old", "recovered_new":
+			_, err = tx.TransitionMaterialization(context.Background(), disposition.Journals[0], history)
+		default:
+			return fmt.Errorf("unknown recovery fixture history %q", history)
+		}
 		return err
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if got.kind != checkpointRecoveryNoWork || got.driver != nil || got.status.Binding != registered.Binding ||
-		got.status.State != "clean" || got.status.CandidateDigest != got.status.AcceptedSnapshot.Digest ||
-		got.status.OverlayGeneration != 0 || got.status.PublicationClassification != "" || got.status.PublicationReviewDigest != "" {
-		t.Fatalf("database-only recovery status proof=%+v", got)
-	}
-	wantName := got.status.AcceptedSnapshot.Project.Name
-	got.workspace.Snapshot.Project.Name = "mutated proof workspace"
-	if got.status.AcceptedSnapshot.Project.Name != wantName {
-		t.Fatal("database-only recovery status aliases proof workspace")
-	}
+	return fixture.service, request.Scope, fixture.repository.root
 }
 
 func TestStatusSelectsRebasedCandidateAndBoundary(t *testing.T) {
