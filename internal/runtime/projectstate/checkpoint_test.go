@@ -308,7 +308,6 @@ func TestCheckpointHoldsFinalWriterAcrossPublicationAndPostimage(t *testing.T) {
 	}
 	defer writerConn.Close()
 
-	var writerDone chan error
 	baseFactory := fixture.service.prepareCheckpointArtifact
 	fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		handle, err := baseFactory(ctx, input)
@@ -351,18 +350,11 @@ func TestCheckpointHoldsFinalWriterAcrossPublicationAndPostimage(t *testing.T) {
 					journalState, operationState, workspaceState, candidateCount)
 			}
 
-			started := make(chan struct{})
-			writerDone = make(chan error, 1)
-			go func() {
-				close(started)
-				_, err := writerConn.ExecContext(context.Background(), `INSERT INTO checkpoint_writer_probe(value) VALUES ('after')`)
-				writerDone <- err
-			}()
-			<-started
-			select {
-			case err := <-writerDone:
-				t.Fatalf("concurrent writer completed during publication: %v", err)
-			case <-time.After(100 * time.Millisecond):
+			blockedCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+			_, blockedErr := writerConn.ExecContext(blockedCtx, `INSERT INTO checkpoint_writer_probe(value) VALUES ('blocked')`)
+			cancel()
+			if !errors.Is(blockedErr, context.DeadlineExceeded) {
+				t.Fatalf("writer attempt during publication error = %v, want context deadline exceeded", blockedErr)
 			}
 			return checkpointPublicationPublished, nil
 		}
@@ -370,16 +362,11 @@ func TestCheckpointHoldsFinalWriterAcrossPublicationAndPostimage(t *testing.T) {
 	}
 
 	got, err := fixture.service.Checkpoint(context.Background(), req)
-	if err != nil || got.JournalID == "" || writerDone == nil {
-		t.Fatalf("Checkpoint = (%+v, %v), writer started=%t", got, err, writerDone != nil)
+	if err != nil || got.JournalID == "" {
+		t.Fatalf("Checkpoint = (%+v, %v)", got, err)
 	}
-	select {
-	case err := <-writerDone:
-		if err != nil {
-			t.Fatalf("concurrent writer after finalization: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("concurrent writer remained blocked after finalization")
+	if _, err := writerConn.ExecContext(context.Background(), `INSERT INTO checkpoint_writer_probe(value) VALUES ('after')`); err != nil {
+		t.Fatalf("writer after finalization: %v", err)
 	}
 	var markers int
 	if err := fixture.store.DB().QueryRow(`SELECT COUNT(*) FROM checkpoint_writer_probe`).Scan(&markers); err != nil || markers != 1 {
@@ -507,6 +494,7 @@ func TestCheckpointFinalCommitUnknownClassifiesPublishedRecoveredOldPreparedAndT
 		{name: "recovered old", publication: checkpointPublicationPreservedConcurrentOld, match: localstore.WorkspaceCheckpointCommitNext, want: ErrCheckpointCAS},
 		{name: "prepared", publication: checkpointPublicationPublished, match: localstore.WorkspaceCheckpointCommitPrior, want: localstore.ErrCommitOutcomeUnknown},
 		{name: "third", publication: checkpointPublicationPublished, match: localstore.WorkspaceCheckpointCommitThird, want: ErrCheckpointRecoveryBlocked},
+		{name: "invalid", publication: checkpointPublicationPublished, match: localstore.WorkspaceCheckpointCommitMatch(99), want: ErrCheckpointRecoveryBlocked},
 		{name: "read failure", publication: checkpointPublicationPublished, confirmErr: errors.New("confirmation read failed"), want: ErrCheckpointRecoveryBlocked},
 	}
 	for _, test := range tests {
@@ -556,6 +544,12 @@ func TestCheckpointFinalCommitUnknownClassifiesPublishedRecoveredOldPreparedAndT
 				}
 			} else if !errors.Is(err, test.want) || got != (CheckpointResult{}) {
 				t.Fatalf("confirmed %s = (%+v, %v), want zero and %v", test.name, got, err, test.want)
+			}
+			if errors.Is(test.want, ErrCheckpointRecoveryBlocked) && !errors.Is(err, unknown) {
+				t.Fatalf("confirmed %s error = %v, want exact synthetic unknown wrapper in chain", test.name, err)
+			}
+			if test.confirmErr != nil && !errors.Is(err, test.confirmErr) {
+				t.Fatalf("confirmed %s error = %v, want confirmation error %v in chain", test.name, err, test.confirmErr)
 			}
 			if transactionCalls != 2 || confirmCalls != 1 || fixture.prepareCalls != 1 ||
 				fixture.publishCalls != 1 || fixture.closeCalls != 1 {

@@ -450,16 +450,16 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 		} else {
 			match, confirmErr := confirmCommit(ctx, secondPrior, secondNext)
 			if confirmErr != nil {
-				return CheckpointResult{}, fmt.Errorf("%w: checkpoint final commit confirmation failed: %v", ErrCheckpointRecoveryBlocked, confirmErr)
+				return CheckpointResult{}, fmt.Errorf("%w: checkpoint final commit confirmation failed: %w: %w", ErrCheckpointRecoveryBlocked, secondErr, confirmErr)
 			}
 			switch match {
 			case localstore.WorkspaceCheckpointCommitNext:
 			case localstore.WorkspaceCheckpointCommitPrior:
 				return CheckpointResult{}, secondErr
 			case localstore.WorkspaceCheckpointCommitThird:
-				return CheckpointResult{}, fmt.Errorf("%w: checkpoint final commit confirmation found a third state", ErrCheckpointRecoveryBlocked)
+				return CheckpointResult{}, fmt.Errorf("%w: checkpoint final commit confirmation found a third state: %w", ErrCheckpointRecoveryBlocked, secondErr)
 			default:
-				return CheckpointResult{}, fmt.Errorf("%w: checkpoint final commit confirmation returned invalid outcome %d", ErrCheckpointRecoveryBlocked, match)
+				return CheckpointResult{}, fmt.Errorf("%w: checkpoint final commit confirmation returned invalid outcome %d: %w", ErrCheckpointRecoveryBlocked, match, secondErr)
 			}
 		}
 	}
