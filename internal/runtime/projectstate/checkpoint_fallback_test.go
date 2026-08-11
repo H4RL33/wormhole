@@ -785,6 +785,66 @@ func TestCheckpointFallbackPublisherPreservesClassificationSyscallCauses(t *test
 	}
 }
 
+func TestCheckpointFallbackPublisherPreOpenFailuresCloseOnlyOwnedProofs(t *testing.T) {
+	for _, failure := range []string{"initial live", "stage after live"} {
+		t.Run(failure, func(t *testing.T) {
+			input := checkpointArtifactCandidateWithNestedFile(t)
+			artifact := prepareCheckpointFallbackArtifact(t, input)
+			defer artifact.close()
+			evidence := artifact.evidence()
+			terminalFD := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1].fd
+			privateFD := artifact.private.fd
+			stageName := filepath.Base(evidence.StagePath)
+			injected := errors.New("publication pre-open failure")
+			failed := false
+			realFstatat := artifact.dependencies.operations.fstatat
+			artifact.dependencies.operations.fstatat = func(parentFD int, name string, stat *unix.Stat_t, flags int) error {
+				failHere := failure == "initial live" && parentFD == terminalFD && name == ".wormhole" ||
+					failure == "stage after live" && parentFD == privateFD && name == stageName
+				if !failed && failHere {
+					failed = true
+					return injected
+				}
+				return realFstatat(parentFD, name, stat, flags)
+			}
+			openedLiveFD := -1
+			realOpenat := artifact.dependencies.operations.openat
+			artifact.dependencies.operations.openat = func(parentFD int, name string, flags int, mode uint32) (int, error) {
+				fd, err := realOpenat(parentFD, name, flags, mode)
+				if err == nil && parentFD == terminalFD && name == ".wormhole" {
+					openedLiveFD = fd
+				}
+				return fd, err
+			}
+			closed := []int{}
+			realClose := artifact.dependencies.operations.close
+			artifact.dependencies.operations.close = func(fd int) error {
+				closed = append(closed, fd)
+				if fd == 0 {
+					return nil
+				}
+				return realClose(fd)
+			}
+			renames := checkpointFallbackCountRenames(artifact)
+			disposition, err := publishPreparedCheckpointArtifact(context.Background(), artifact)
+			if disposition != 0 || !errors.Is(err, ErrCheckpointRecoveryBlocked) || !errors.Is(err, injected) || !failed || *renames != 0 {
+				t.Fatalf("pre-open failure = (%d, %v), failed %t renames %d", disposition, err, failed, *renames)
+			}
+			wantClosed := []int{}
+			if failure == "stage after live" {
+				if openedLiveFD <= 0 {
+					t.Fatalf("opened live proof fd = %d, want positive", openedLiveFD)
+				}
+				wantClosed = append(wantClosed, openedLiveFD)
+			}
+			if !reflect.DeepEqual(closed, wantClosed) {
+				t.Fatalf("closed proof fds = %v, want %v", closed, wantClosed)
+			}
+			assertCheckpointPreparedTopology(t, input, evidence)
+		})
+	}
+}
+
 func TestCheckpointFallbackPublisherClassifiesRenamePriorNextThird(t *testing.T) {
 	for _, role := range []struct {
 		name string

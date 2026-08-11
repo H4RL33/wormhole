@@ -257,26 +257,29 @@ func checkpointPublicationClassify(ctx context.Context, artifact *checkpointArti
 
 func checkpointPublicationOpenEntry(ctx context.Context, artifact *checkpointArtifact, parentFD int, name string, ownerOnly, stage bool) (checkpointPublicationEntryProof, error) {
 	operations := artifact.dependencies.operations
+	proof := checkpointPublicationEntryProof{fd: -1, stage: stage}
 	var linked unix.Stat_t
 	err := operations.fstatat(parentFD, name, &linked, unix.AT_SYMLINK_NOFOLLOW)
 	if errors.Is(err, unix.ENOENT) {
 		if err := checkpointPublicationProveAbsent(artifact, parentFD, name); err != nil {
-			return checkpointPublicationEntryProof{}, err
+			return proof, err
 		}
-		return checkpointPublicationEntryProof{entry: checkpointPublicationEntry{kind: checkpointPublicationAbsent}, fd: -1, stage: stage}, nil
+		proof.entry.kind = checkpointPublicationAbsent
+		return proof, nil
 	}
 	if err != nil {
-		return checkpointPublicationEntryProof{}, err
+		return proof, err
 	}
 	linkedMetadata := workingTreeStatMetadata(&linked)
 	if linkedMetadata.mode&unix.S_IFMT != unix.S_IFDIR || ownerOnly && !checkpointPublicationOwnerDirectory(linkedMetadata) {
-		return checkpointPublicationEntryProof{}, fmt.Errorf("unsafe checkpoint publication entry %q", name)
+		return proof, fmt.Errorf("unsafe checkpoint publication entry %q", name)
 	}
 	fd, err := operations.openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return checkpointPublicationEntryProof{}, err
+		return proof, err
 	}
-	proof := checkpointPublicationEntryProof{fd: fd, metadata: linkedMetadata, stage: stage}
+	proof.fd = fd
+	proof.metadata = linkedMetadata
 	fail := func(err error) (checkpointPublicationEntryProof, error) {
 		_ = operations.close(fd)
 		proof.fd = -1
