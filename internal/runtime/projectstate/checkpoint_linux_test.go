@@ -200,8 +200,8 @@ func TestCheckpointLinuxFinalBoundaryRejectsFreshCurrentMountMismatch(t *testing
 		renameCalls++
 		return realRename(fromFD, from, toFD, to, flags)
 	}
-	if _, err := publishPreparedCheckpointArtifact(context.Background(), artifact); !errors.Is(err, ErrCheckpointUnsupported) {
-		t.Fatalf("fresh current mount mismatch = %v, want ErrCheckpointUnsupported", err)
+	if disposition, err := publishPreparedCheckpointArtifact(context.Background(), artifact); disposition != 0 || !errors.Is(err, ErrCheckpointRecoveryBlocked) {
+		t.Fatalf("fresh current mount mismatch = (%d, %v), want zero and ErrCheckpointRecoveryBlocked", disposition, err)
 	}
 	if renameCalls != 0 {
 		t.Fatalf("fresh current mount mismatch rename calls = %d, want 0", renameCalls)
@@ -244,8 +244,8 @@ func TestCheckpointLinuxSecondBoundaryRejectsFreshCurrentMountMismatch(t *testin
 		renameCalls++
 		return publicationRename(fromFD, from, toFD, to, flags)
 	}
-	if _, err := publishPreparedCheckpointArtifact(context.Background(), artifact); !errors.Is(err, ErrCheckpointUnsupported) {
-		t.Fatalf("second-boundary fresh mount mismatch = %v, want ErrCheckpointUnsupported", err)
+	if disposition, err := publishPreparedCheckpointArtifact(context.Background(), artifact); disposition != 0 || !errors.Is(err, ErrCheckpointRecoveryBlocked) {
+		t.Fatalf("second-boundary fresh mount mismatch = (%d, %v), want zero and ErrCheckpointRecoveryBlocked", disposition, err)
 	}
 	if !armed || renameCalls != 1 {
 		t.Fatalf("second-boundary fresh mount mismatch = armed %t renames %d, want true/1", armed, renameCalls)

@@ -136,11 +136,6 @@ type checkpointArtifactDurableStageProof struct {
 	private     workingTreeMetadata
 }
 
-type checkpointArtifactPublicationParentsProof struct {
-	liveParent workingTreeMetadata
-	private    workingTreeMetadata
-}
-
 type checkpointGitPaths struct {
 	gitDir         string
 	checkpointRoot string
@@ -1176,10 +1171,7 @@ func publishPreparedCheckpointArtifact(ctx context.Context, artifact *checkpoint
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if err := publishCheckpointArtifactFallback(ctx, artifact); err != nil {
-		return 0, err
-	}
-	return checkpointPublicationPublished, nil
+	return publishCheckpointArtifactFallback(ctx, artifact)
 }
 
 func preflightCheckpointArtifactPublication(ctx context.Context, artifact *checkpointArtifact) error {
@@ -1193,7 +1185,7 @@ func preflightCheckpointArtifactPublication(ctx context.Context, artifact *check
 	if paths != artifact.paths {
 		return fmt.Errorf("%w: checkpoint Git paths changed", ErrCheckpointCAS)
 	}
-	if artifact.checkout == nil || artifact.git == nil || artifact.live.fd < 0 || artifact.private.fd < 0 || artifact.stage.fd < 0 {
+	if artifact.checkout == nil || artifact.git == nil || artifact.private.fd < 0 {
 		return ErrCheckpointUnsupported
 	}
 	if err := artifact.checkout.revalidate(); err != nil {
@@ -1207,194 +1199,20 @@ func preflightCheckpointArtifactPublication(ctx context.Context, artifact *check
 		return fmt.Errorf("%w: Git directory identity changed: %v", ErrCheckpointCAS, err)
 	}
 	for _, ancestor := range artifact.privateAncestors {
-		if err := revalidateWorkingTreeDirectory(ancestor); err != nil {
+		if err := revalidateWorkingTreeDirectoryIdentity(ancestor); err != nil {
 			return fmt.Errorf("%w: private-root ancestry changed: %v", ErrCheckpointCAS, err)
 		}
 	}
-	if err := revalidateWorkingTreeDirectory(artifact.private); err != nil {
+	if _, err := checkpointArtifactValidateOwnerDirectory(artifact.private, artifact.dependencies.operations); err != nil {
 		return fmt.Errorf("%w: private root changed: %v", ErrCheckpointCAS, err)
 	}
-	if err := checkpointArtifactRequireDurableDirectory(artifact.private, artifact.durableProof.private, artifact.dependencies.operations, true); err != nil {
-		return fmt.Errorf("%w: private root changed after fsync: %v", ErrCheckpointCAS, err)
+	if err := checkpointPublicationProveParentMount(artifact, terminal.fd); err != nil {
+		return fmt.Errorf("%w: checkpoint checkout mount changed: %v", ErrCheckpointCAS, err)
 	}
-	if err := revalidateWorkingTreeDirectory(artifact.stage); err != nil {
-		return fmt.Errorf("%w: stage changed: %v", ErrCheckpointCAS, err)
-	}
-	if err := revalidateWorkingTreeDirectory(artifact.live); err != nil {
-		return fmt.Errorf("%w: live tree changed: %v", ErrCheckpointCAS, err)
-	}
-	stageTree, err := readCheckpointArtifactTree(ctx, artifact.stage)
-	if err != nil || !sameCheckpointArtifactTree(stageTree, artifact.proof.candidate.tree) {
-		return fmt.Errorf("%w: staged candidate changed", ErrCheckpointCAS)
-	}
-	stageDigest, err := state.DigestTree(stageTree)
-	if err != nil || stageDigest != artifact.proof.candidate.digest {
-		return fmt.Errorf("%w: staged candidate digest changed", ErrCheckpointCAS)
-	}
-	if err := verifyCheckpointArtifactStageFiles(ctx, artifact.stage, artifact.proof.candidate.tree, artifact.durableProof, true, artifact.dependencies.operations); err != nil {
-		return fmt.Errorf("%w: staged candidate shape changed: %v", ErrCheckpointCAS, err)
-	}
-	liveTree, err := readCheckpointArtifactTree(ctx, artifact.live)
-	if err != nil || !sameCheckpointArtifactTree(liveTree, artifact.proof.prior.tree) {
-		return ErrCheckpointCAS
-	}
-	liveDigest, err := state.DigestTree(liveTree)
-	if err != nil || liveDigest != artifact.proof.prior.digest {
-		return ErrCheckpointCAS
-	}
-	if err := checkpointArtifactNameAbsent(artifact.private.fd, filepath.Base(artifact.evidenceValue.BackupPath), artifact.dependencies.operations); err != nil {
-		return fmt.Errorf("%w: checkpoint backup is no longer absent", ErrCheckpointCAS)
-	}
-	privateMetadata, err := checkpointArtifactFstatMetadata(artifact.private.fd, artifact.dependencies.operations)
-	if err != nil {
-		return err
-	}
-	liveMetadata, err := checkpointArtifactFstatMetadata(artifact.live.fd, artifact.dependencies.operations)
-	if err != nil {
-		return err
-	}
-	if terminal.metadata.device != liveMetadata.device || liveMetadata.device != privateMetadata.device {
-		return fmt.Errorf("%w: checkpoint device identity changed", ErrCheckpointUnsupported)
-	}
-	if err := revalidateCheckpointPlatformMounts(terminal.fd, artifact.live.fd, artifact.private.fd, filepath.Join(artifact.checkoutIdentity.CanonicalPath, ".wormhole"), artifact.mountProof, artifact.dependencies); err != nil {
-		return err
-	}
-	if err := artifact.dependencies.operations.fsync(terminal.fd); err != nil {
-		return fmt.Errorf("%w: live parent fsync capability changed: %v", ErrCheckpointUnsupported, err)
-	}
-	if err := artifact.dependencies.operations.fsync(artifact.private.fd); err != nil {
-		return fmt.Errorf("%w: private parent fsync capability changed: %v", ErrCheckpointUnsupported, err)
+	if err := checkpointPublicationProveParentMount(artifact, artifact.private.fd); err != nil {
+		return fmt.Errorf("%w: checkpoint private mount changed: %v", ErrCheckpointCAS, err)
 	}
 	return ctx.Err()
-}
-
-func publishCheckpointArtifactFallback(ctx context.Context, artifact *checkpointArtifact) error {
-	terminal := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1]
-	stageName := filepath.Base(artifact.evidenceValue.StagePath)
-	backupName := filepath.Base(artifact.evidenceValue.BackupPath)
-	if err := checkpointArtifactFault(artifact.dependencies, checkpointArtifactBeforeLiveMutation); err != nil {
-		return err
-	}
-	if err := checkpointArtifactRevalidatePreparedMutationBoundary(ctx, artifact, stageName, backupName); err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	renameErr := artifact.dependencies.operations.rename(terminal.fd, ".wormhole", artifact.private.fd, backupName, checkpointNoReplaceRenameFlag())
-	afterErr := checkpointArtifactFault(artifact.dependencies, checkpointArtifactAfterLiveMutation)
-	if renameErr != nil || afterErr != nil {
-		_ = checkpointArtifactRevalidateAnyFallbackTopology(artifact, stageName, backupName)
-		if renameErr != nil {
-			return fmt.Errorf("projectstate: retain checkpoint live backup: %w", renameErr)
-		}
-		return afterErr
-	}
-	if err := checkpointArtifactRequirePublishedTopology(artifact, stageName, backupName, checkpointTopologyBackedUp); err != nil {
-		return err
-	}
-	reachedParents, err := checkpointArtifactFsyncPublicationParents(artifact, true)
-	if err != nil {
-		return err
-	}
-	if err := checkpointArtifactFault(artifact.dependencies, checkpointArtifactBeforeSecondLiveMutation); err != nil {
-		return err
-	}
-	if err := checkpointArtifactRevalidateReachedMutationBoundary(artifact, stageName, backupName, checkpointTopologyBackedUp, &reachedParents); err != nil {
-		return err
-	}
-	renameErr = artifact.dependencies.operations.rename(artifact.private.fd, stageName, terminal.fd, ".wormhole", checkpointNoReplaceRenameFlag())
-	afterErr = checkpointArtifactFault(artifact.dependencies, checkpointArtifactAfterSecondLiveMutation)
-	if renameErr != nil || afterErr != nil {
-		_ = checkpointArtifactRevalidateAnyFallbackTopology(artifact, stageName, backupName)
-		if renameErr != nil {
-			return fmt.Errorf("projectstate: publish staged checkpoint tree: %w", renameErr)
-		}
-		return afterErr
-	}
-	if err := checkpointArtifactRequirePublishedTopology(artifact, stageName, backupName, checkpointTopologyPublished); err != nil {
-		return err
-	}
-	_, err = checkpointArtifactFsyncPublicationParents(artifact, false)
-	return err
-}
-
-type checkpointArtifactTopology uint8
-
-const (
-	checkpointTopologyBackedUp checkpointArtifactTopology = iota + 1
-	checkpointTopologyPublished
-	checkpointTopologyPrepared
-)
-
-func checkpointArtifactRequirePublishedTopology(artifact *checkpointArtifact, stageName, backupName string, topology checkpointArtifactTopology) error {
-	terminal := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1]
-	operations := artifact.dependencies.operations
-	var live, stage, backup *heldWorkingTreeDirectory
-	switch topology {
-	case checkpointTopologyBackedUp:
-		stage, backup = &artifact.stage, &artifact.live
-	case checkpointTopologyPublished:
-		live, backup = &artifact.stage, &artifact.live
-	default:
-		return ErrCheckpointUnsupported
-	}
-	if err := checkpointArtifactRequireHeldDirectoryPath(terminal.fd, ".wormhole", live, operations, false); err != nil {
-		return fmt.Errorf("projectstate: revalidate checkpoint live topology: %w", err)
-	}
-	if err := checkpointArtifactRequireHeldDirectoryPath(artifact.private.fd, stageName, stage, operations, stage == &artifact.stage); err != nil {
-		return fmt.Errorf("projectstate: revalidate checkpoint stage topology: %w", err)
-	}
-	if err := checkpointArtifactRequireHeldDirectoryPath(artifact.private.fd, backupName, backup, operations, false); err != nil {
-		return fmt.Errorf("projectstate: revalidate checkpoint backup topology: %w", err)
-	}
-	switch topology {
-	case checkpointTopologyBackedUp:
-		if err := checkpointArtifactRequireTreeAt(context.Background(), artifact.private.fd, backupName, artifact.live, artifact.proof.prior, operations); err != nil {
-			return fmt.Errorf("projectstate: fallback prior backup changed: %w", err)
-		}
-		if err := checkpointArtifactRequireCandidateAt(context.Background(), artifact.private.fd, stageName, artifact.stage, artifact, true, operations); err != nil {
-			return fmt.Errorf("projectstate: fallback candidate stage changed: %w", err)
-		}
-	case checkpointTopologyPublished:
-		if err := checkpointArtifactRequireCandidateAt(context.Background(), terminal.fd, ".wormhole", artifact.stage, artifact, false, operations); err != nil {
-			return fmt.Errorf("projectstate: published candidate changed: %w", err)
-		}
-		if err := checkpointArtifactRequireTreeAt(context.Background(), artifact.private.fd, backupName, artifact.live, artifact.proof.prior, operations); err != nil {
-			return fmt.Errorf("projectstate: published prior backup changed: %w", err)
-		}
-	}
-	return nil
-}
-
-func checkpointArtifactRequireTreeAt(ctx context.Context, parentFD int, name string, held heldWorkingTreeDirectory, expected checkpointArtifactTreeProof, operations checkpointArtifactPlatformOperations) error {
-	got, err := readCheckpointArtifactTreeAt(ctx, parentFD, name, held, operations)
-	if err != nil || !sameCheckpointArtifactTree(got, expected.tree) {
-		if err != nil {
-			return err
-		}
-		return fmt.Errorf("tree bytes differ")
-	}
-	digest, err := state.DigestTree(got)
-	if err != nil || digest != expected.digest {
-		if err != nil {
-			return err
-		}
-		return fmt.Errorf("tree digest differs")
-	}
-	return nil
-}
-
-func checkpointArtifactRequireCandidateAt(ctx context.Context, parentFD int, name string, held heldWorkingTreeDirectory, artifact *checkpointArtifact, strictRoot bool, operations checkpointArtifactPlatformOperations) error {
-	if err := checkpointArtifactRequireHeldDirectoryPath(parentFD, name, &held, operations, true); err != nil {
-		return err
-	}
-	metadata, err := checkpointArtifactFstatMetadata(held.fd, operations)
-	if err != nil {
-		return err
-	}
-	held.parentFD, held.name, held.path, held.metadata = parentFD, name, name, metadata
-	return verifyCheckpointArtifactStageFiles(ctx, held, artifact.proof.candidate.tree, artifact.durableProof, strictRoot, operations)
 }
 
 func checkpointArtifactRequireFullDirectoryPath(parentFD int, name string, original, durable workingTreeMetadata, operations checkpointArtifactPlatformOperations, ownerOnly bool) error {
@@ -1429,171 +1247,6 @@ func checkpointArtifactRequireDurableDirectory(directory heldWorkingTreeDirector
 		if err := checkpointArtifactRequireFullDirectoryPath(directory.parentFD, directory.name, directory.metadata, durable, operations, ownerOnly); err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-func checkpointArtifactRevalidateReachedMutationBoundary(artifact *checkpointArtifact, stageName, backupName string, topology checkpointArtifactTopology, reachedParents *checkpointArtifactPublicationParentsProof) error {
-	paths, err := resolveCheckpointGitPathsWithReader(context.Background(), artifact.checkoutIdentity.CanonicalPath, artifact.dependencies.readGit)
-	if err != nil {
-		return err
-	}
-	if paths != artifact.paths {
-		return fmt.Errorf("%w: checkpoint Git paths changed before second rename", ErrCheckpointCAS)
-	}
-	if err := artifact.checkout.revalidate(); err != nil {
-		return fmt.Errorf("%w: checkout changed before checkpoint rename", ErrCheckpointCAS)
-	}
-	terminal := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1]
-	if reachedParents != nil {
-		if err := checkpointArtifactRequireDurableDirectory(terminal, reachedParents.liveParent, artifact.dependencies.operations, false); err != nil {
-			return fmt.Errorf("%w: live parent changed after publication fsync", ErrCheckpointCAS)
-		}
-	}
-	if err := artifact.git.revalidate(); err != nil {
-		return fmt.Errorf("%w: Git directory changed before checkpoint rename", ErrCheckpointCAS)
-	}
-	for _, ancestor := range artifact.privateAncestors {
-		if err := checkpointArtifactRequireDurableDirectory(ancestor, ancestor.metadata, artifact.dependencies.operations, true); err != nil {
-			return fmt.Errorf("%w: private ancestry changed before checkpoint rename", ErrCheckpointCAS)
-		}
-	}
-	if reachedParents == nil {
-		if _, err := checkpointArtifactValidateOwnerDirectory(artifact.private, artifact.dependencies.operations); err != nil {
-			return fmt.Errorf("%w: private root changed before checkpoint rename", ErrCheckpointCAS)
-		}
-	} else if err := checkpointArtifactRequireDurableDirectory(artifact.private, reachedParents.private, artifact.dependencies.operations, true); err != nil {
-		return fmt.Errorf("%w: private root changed after publication fsync", ErrCheckpointCAS)
-	}
-	if err := checkpointArtifactRequirePublishedTopology(artifact, stageName, backupName, topology); err != nil {
-		return err
-	}
-	if err := revalidateCheckpointPlatformMounts(terminal.fd, artifact.live.fd, artifact.private.fd, filepath.Join(artifact.checkoutIdentity.CanonicalPath, ".wormhole"), artifact.mountProof, artifact.dependencies); err != nil {
-		return err
-	}
-	return checkpointArtifactRevalidateCurrentMounts(artifact, topology, reachedParents)
-}
-
-func checkpointArtifactRevalidatePreparedMutationBoundary(ctx context.Context, artifact *checkpointArtifact, stageName, backupName string) error {
-	paths, err := resolveCheckpointGitPathsWithReader(ctx, artifact.checkoutIdentity.CanonicalPath, artifact.dependencies.readGit)
-	if err != nil {
-		return err
-	}
-	if paths != artifact.paths {
-		return fmt.Errorf("%w: checkpoint Git paths changed before publication", ErrCheckpointCAS)
-	}
-	if err := artifact.checkout.revalidate(); err != nil {
-		return fmt.Errorf("%w: checkout changed before checkpoint publication", ErrCheckpointCAS)
-	}
-	if err := artifact.git.revalidate(); err != nil {
-		return fmt.Errorf("%w: Git directory changed before checkpoint publication", ErrCheckpointCAS)
-	}
-	for _, ancestor := range artifact.privateAncestors {
-		if err := checkpointArtifactRequireDurableDirectory(ancestor, ancestor.metadata, artifact.dependencies.operations, true); err != nil {
-			return fmt.Errorf("%w: private ancestry changed before checkpoint publication", ErrCheckpointCAS)
-		}
-	}
-	if _, err := checkpointArtifactValidateOwnerDirectory(artifact.private, artifact.dependencies.operations); err != nil {
-		return fmt.Errorf("%w: private root changed before checkpoint publication", ErrCheckpointCAS)
-	}
-	if err := checkpointArtifactRequireDurableDirectory(artifact.private, artifact.durableProof.private, artifact.dependencies.operations, true); err != nil {
-		return fmt.Errorf("%w: private root changed after fsync: %v", ErrCheckpointCAS, err)
-	}
-	terminal := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1]
-	operations := artifact.dependencies.operations
-	if err := checkpointArtifactRequireHeldDirectoryPath(terminal.fd, ".wormhole", &artifact.live, operations, false); err != nil {
-		return fmt.Errorf("%w: live path changed before checkpoint publication", ErrCheckpointCAS)
-	}
-	if err := checkpointArtifactRequireHeldDirectoryPath(artifact.private.fd, stageName, &artifact.stage, operations, true); err != nil {
-		return fmt.Errorf("%w: stage path changed before checkpoint publication", ErrCheckpointCAS)
-	}
-	if err := checkpointArtifactRequireHeldDirectoryPath(artifact.private.fd, backupName, nil, operations, false); err != nil {
-		return fmt.Errorf("%w: backup path changed before checkpoint publication", ErrCheckpointCAS)
-	}
-	if err := checkpointArtifactRequireCandidateAt(ctx, artifact.private.fd, stageName, artifact.stage, artifact, true, operations); err != nil {
-		return fmt.Errorf("%w: candidate stage changed before checkpoint publication", ErrCheckpointCAS)
-	}
-	if err := checkpointArtifactRequireTreeAt(ctx, terminal.fd, ".wormhole", artifact.live, artifact.proof.prior, operations); err != nil {
-		return fmt.Errorf("%w: prior live tree changed before checkpoint publication", ErrCheckpointCAS)
-	}
-	if err := revalidateCheckpointPlatformMounts(terminal.fd, artifact.live.fd, artifact.private.fd, filepath.Join(artifact.checkoutIdentity.CanonicalPath, ".wormhole"), artifact.mountProof, artifact.dependencies); err != nil {
-		return err
-	}
-	if err := checkpointArtifactRevalidateCurrentMounts(artifact, checkpointTopologyPrepared, nil); err != nil {
-		return err
-	}
-	return ctx.Err()
-}
-
-func checkpointArtifactRevalidateCurrentMounts(artifact *checkpointArtifact, topology checkpointArtifactTopology, reachedParents *checkpointArtifactPublicationParentsProof) error {
-	checkout, err := openWorkingTreeRoot(artifact.checkoutIdentity.CanonicalPath)
-	if err != nil {
-		return fmt.Errorf("%w: freshly open current checkpoint checkout: %v", ErrCheckpointCAS, err)
-	}
-	defer checkout.close()
-	sourcePath := filepath.Join(artifact.checkoutIdentity.CanonicalPath, ".wormhole")
-	expectedSource := artifact.live.metadata
-	switch topology {
-	case checkpointTopologyPrepared:
-	case checkpointTopologyBackedUp:
-		sourcePath = artifact.evidenceValue.StagePath
-		expectedSource = artifact.stage.metadata
-	default:
-		return ErrCheckpointUnsupported
-	}
-	source, err := openWorkingTreeRoot(sourcePath)
-	if err != nil {
-		return fmt.Errorf("%w: freshly open current checkpoint publication source: %v", ErrCheckpointCAS, err)
-	}
-	defer source.close()
-	private, err := openWorkingTreeRoot(artifact.paths.checkpointRoot)
-	if err != nil {
-		return fmt.Errorf("%w: freshly open current checkpoint private root: %v", ErrCheckpointCAS, err)
-	}
-	defer private.close()
-
-	heldCheckout := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1]
-	freshCheckout := checkout.ancestry[len(checkout.ancestry)-1]
-	freshSource := source.ancestry[len(source.ancestry)-1]
-	freshPrivate := private.ancestry[len(private.ancestry)-1]
-	if !sameWorkingTreeDirectoryIdentity(freshCheckout.metadata, heldCheckout.metadata) || !sameWorkingTreeDirectoryIdentity(freshSource.metadata, expectedSource) || !sameWorkingTreeDirectoryIdentity(freshPrivate.metadata, artifact.private.metadata) {
-		return fmt.Errorf("%w: freshly opened checkpoint paths differ from held objects", ErrCheckpointCAS)
-	}
-	ownerPrivate := freshPrivate.metadata.mode&unix.S_IFMT == unix.S_IFDIR && freshPrivate.metadata.uid == uint32(unix.Geteuid()) && freshPrivate.metadata.mode&0o777 == 0o700 && freshPrivate.metadata.mode&0o7000 == 0
-	if !ownerPrivate {
-		return fmt.Errorf("%w: freshly opened checkpoint private root is not owner-only", ErrCheckpointCAS)
-	}
-	switch topology {
-	case checkpointTopologyPrepared:
-		if freshCheckout.metadata != heldCheckout.metadata || freshSource.metadata != artifact.live.metadata || freshPrivate.metadata != artifact.durableProof.private {
-			return fmt.Errorf("%w: freshly opened prepared checkpoint metadata differs", ErrCheckpointCAS)
-		}
-	case checkpointTopologyBackedUp:
-		durableStage, ok := artifact.durableProof.directories["."]
-		if !ok || freshSource.metadata != durableStage || reachedParents == nil || freshCheckout.metadata != reachedParents.liveParent || freshPrivate.metadata != reachedParents.private {
-			return fmt.Errorf("%w: freshly opened fallback checkpoint metadata differs", ErrCheckpointCAS)
-		}
-	}
-	if err := revalidateCheckpointPlatformMounts(freshCheckout.fd, freshSource.fd, freshPrivate.fd, sourcePath, artifact.mountProof, artifact.dependencies); err != nil {
-		return err
-	}
-	if err := checkpointArtifactRequireDurableDirectory(freshCheckout, freshCheckout.metadata, artifact.dependencies.operations, false); err != nil {
-		return fmt.Errorf("%w: freshly opened checkpoint checkout changed during mount proof", ErrCheckpointCAS)
-	}
-	if err := checkpointArtifactRequireDurableDirectory(freshSource, freshSource.metadata, artifact.dependencies.operations, false); err != nil {
-		return fmt.Errorf("%w: freshly opened checkpoint publication source changed during mount proof", ErrCheckpointCAS)
-	}
-	if err := checkpointArtifactRequireDurableDirectory(freshPrivate, freshPrivate.metadata, artifact.dependencies.operations, true); err != nil {
-		return fmt.Errorf("%w: freshly opened checkpoint private root changed during mount proof", ErrCheckpointCAS)
-	}
-	if err := checkout.revalidate(); err != nil {
-		return fmt.Errorf("%w: freshly opened checkpoint checkout changed: %v", ErrCheckpointCAS, err)
-	}
-	if err := source.revalidate(); err != nil {
-		return fmt.Errorf("%w: freshly opened checkpoint publication source changed: %v", ErrCheckpointCAS, err)
-	}
-	if err := private.revalidate(); err != nil {
-		return fmt.Errorf("%w: freshly opened checkpoint private root changed: %v", ErrCheckpointCAS, err)
 	}
 	return nil
 }
@@ -1657,90 +1310,12 @@ func checkpointArtifactValidateOwnerDirectory(directory heldWorkingTreeDirectory
 	return metadata, nil
 }
 
-func readCheckpointArtifactTreeAt(ctx context.Context, parentFD int, name string, held heldWorkingTreeDirectory, operations checkpointArtifactPlatformOperations) (state.Tree, error) {
-	if err := checkpointArtifactRequireHeldDirectoryPath(parentFD, name, &held, operations, false); err != nil {
-		return nil, err
-	}
-	metadata, err := checkpointArtifactFstatMetadata(held.fd, operations)
-	if err != nil {
-		return nil, err
-	}
-	held.parentFD, held.name, held.path, held.metadata = parentFD, name, name, metadata
-	return readCheckpointArtifactTree(ctx, held)
-}
-
 func checkpointArtifactFstatMetadata(fd int, operations checkpointArtifactPlatformOperations) (workingTreeMetadata, error) {
 	var stat unix.Stat_t
 	if err := operations.fstat(fd, &stat); err != nil {
 		return workingTreeMetadata{}, err
 	}
 	return workingTreeStatMetadata(&stat), nil
-}
-
-func checkpointArtifactFsyncPublicationParents(artifact *checkpointArtifact, destinationPrivate bool) (checkpointArtifactPublicationParentsProof, error) {
-	terminal := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1]
-	fsyncLiveParent := func() (workingTreeMetadata, error) {
-		if err := checkpointArtifactFault(artifact.dependencies, checkpointArtifactBeforeLiveParentFsync); err != nil {
-			return workingTreeMetadata{}, err
-		}
-		if err := artifact.dependencies.operations.fsync(terminal.fd); err != nil {
-			return workingTreeMetadata{}, fmt.Errorf("projectstate: fsync checkpoint live parent: %w", err)
-		}
-		durableLiveParent, err := checkpointArtifactFstatMetadata(terminal.fd, artifact.dependencies.operations)
-		if err != nil {
-			return workingTreeMetadata{}, err
-		}
-		if err := checkpointArtifactRequireDurableDirectory(terminal, durableLiveParent, artifact.dependencies.operations, false); err != nil {
-			return workingTreeMetadata{}, fmt.Errorf("projectstate: prove durable checkpoint live parent: %w", err)
-		}
-		if err := checkpointArtifactFault(artifact.dependencies, checkpointArtifactAfterLiveParentFsync); err != nil {
-			return workingTreeMetadata{}, err
-		}
-		return durableLiveParent, nil
-	}
-	fsyncPrivateParent := func() (workingTreeMetadata, error) {
-		if err := checkpointArtifactFault(artifact.dependencies, checkpointArtifactBeforePrivateParentFsync); err != nil {
-			return workingTreeMetadata{}, err
-		}
-		if err := artifact.dependencies.operations.fsync(artifact.private.fd); err != nil {
-			return workingTreeMetadata{}, fmt.Errorf("projectstate: fsync checkpoint private parent: %w", err)
-		}
-		durablePrivate, err := checkpointArtifactFstatMetadata(artifact.private.fd, artifact.dependencies.operations)
-		if err != nil {
-			return workingTreeMetadata{}, err
-		}
-		if err := checkpointArtifactRequireDurableDirectory(artifact.private, durablePrivate, artifact.dependencies.operations, true); err != nil {
-			return workingTreeMetadata{}, fmt.Errorf("projectstate: prove durable checkpoint private parent: %w", err)
-		}
-		if err := checkpointArtifactFault(artifact.dependencies, checkpointArtifactAfterPrivateParentFsync); err != nil {
-			return workingTreeMetadata{}, err
-		}
-		return durablePrivate, nil
-	}
-	var durableLiveParent, durablePrivate workingTreeMetadata
-	var err error
-	if destinationPrivate {
-		durablePrivate, err = fsyncPrivateParent()
-		if err == nil {
-			durableLiveParent, err = fsyncLiveParent()
-		}
-	} else {
-		durableLiveParent, err = fsyncLiveParent()
-		if err == nil {
-			durablePrivate, err = fsyncPrivateParent()
-		}
-	}
-	if err != nil {
-		return checkpointArtifactPublicationParentsProof{}, err
-	}
-	return checkpointArtifactPublicationParentsProof{liveParent: durableLiveParent, private: durablePrivate}, nil
-}
-
-func checkpointArtifactRevalidateAnyFallbackTopology(artifact *checkpointArtifact, stageName, backupName string) error {
-	if err := checkpointArtifactRequirePublishedTopology(artifact, stageName, backupName, checkpointTopologyBackedUp); err == nil {
-		return nil
-	}
-	return checkpointArtifactRequirePublishedTopology(artifact, stageName, backupName, checkpointTopologyPublished)
 }
 
 func (artifact *checkpointArtifact) close() {
