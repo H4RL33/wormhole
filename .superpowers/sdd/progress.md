@@ -987,3 +987,23 @@ fsync-causality defect in the now-universal fallback; `d55012b` fixed and tested
 destination→checkout source after live→backup and checkout destination→private source after
 stage→live. Fresh re-review approved the two-commit slice with no remaining findings. Task
 502 owns the new publisher disposition/topology matrix and remains next.
+
+Task-5 Task 502 fallback publisher outcome matrix `22a0fb2..2775d8c`: complete. The private
+publisher now returns an explicit published-or-preserved disposition, classifies fresh
+descriptor-relative P/C/X/absent evidence, attempts each no-replace rename at most once,
+orders destination-before-source parent fsyncs, preserves concurrent and later live input,
+and blocks unsafe or ambiguous evidence without overwriting it. Superseded held-inode
+publication authority was removed; returned topology contains only semantic kind/tree state,
+while descriptor ownership remains transient and explicit.
+
+Two adversarial review rounds found and causally fixed exact-live-C misclassification,
+missing final owner-only stage-shape proof, discarded syscall causes, incomplete retained-byte
+assertions, stale closed descriptors in returned evidence, and a zero-value fd-0 cleanup bug.
+The final two independent re-reviews approved the complete slice with no Critical, Important,
+or Minor findings. Focused normal/race tests, the full ProjectState package, vet, Darwin arm64
+and FreeBSD amd64 cross-compiles, formatting, diff, and forbidden-symbol checks passed. A
+fresh disposable PostgreSQL 16/pgvector fixture on a private Docker network then passed the
+canonical `make check`: formatting, builds, vet, required integration, repository-wide race,
+and merged statement coverage at 85.6%, above the accepted 80% floor. Wall-clock timings are
+not treated as performance evidence because the host was under unrelated CPU-intensive load.
+Task 503 owns publisher-before-database-postimage ordering and is next.

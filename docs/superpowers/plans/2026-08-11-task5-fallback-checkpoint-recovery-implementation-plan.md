@@ -326,14 +326,15 @@ proved; nested X content remains opaque and is never decoded, imported, or execu
 
 Implement the spec matrix exactly:
 
-1. Entry P/C/absent attempts live→backup once; entry X/C/absent returns preserved-old.
+1. Entry P/C/absent attempts live→backup once; entry stable non-P live C-or-X/C/absent
+   returns preserved-old.
 2. After rename 1, absent/C/P proceeds; absent/C/X compensates; recreated-live/C/P-or-X
    preserves all and returns preserved-old.
 3. Only absent/C/P attempts stage→live once.
 4. A successful or observably-applied stage→live is the publication point. Return published
-   for stable live C, or for later stable live X only when stage is absent and backup remains
-   exact P. Backup X, or simultaneous unknown live and backup, preserves all evidence and
-   wraps `ErrCheckpointRecoveryBlocked`.
+   for any stable safe live P, C, or X only when stage is absent and backup remains exact P.
+   Backup X, or simultaneous unknown live and backup, preserves all evidence and wraps
+   `ErrCheckpointRecoveryBlocked`.
 5. Exact prior returns the original rename error. Exact next continues without replay. A
    third/unsafe topology wraps
    `ErrCheckpointRecoveryBlocked` and preserves all evidence.
