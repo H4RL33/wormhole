@@ -291,7 +291,7 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 	}
 	var success CheckpointResult
 	var secondPrior, secondNext localstore.WorkspaceCheckpointCommitState
-	secondCompleted, secondInvalidated := false, false
+	secondCompleted, secondInvalidated, preservedOld := false, false, false
 	secondErr := withWorkspace(ctx, req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		disposition, err := tx.MaterializationDisposition(ctx)
 		if err != nil {
@@ -377,51 +377,60 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 		if !equalCheckpointPlans(firstPlan, currentPlan) || !checkpointMaterializationMatchesPlan(prepared, workspace.Binding, firstPlan) {
 			return fmt.Errorf("projectstate: checkpoint plan changed before publication")
 		}
-		published, err := tx.TransitionMaterialization(ctx, prepared, "published")
-		if err != nil {
-			return err
-		}
-		wantPublished := cloneMaterializationRecord(prepared)
-		wantPublished.State = "published"
-		if !equalMaterializationRecord(published, wantPublished) {
-			return fmt.Errorf("projectstate: published checkpoint journal differs from prepared record")
-		}
-		postimage, err := checkpointPublicationPostimage(published)
-		if err != nil {
-			return err
-		}
-		if err := tx.UpsertCandidate(ctx, postimage); err != nil {
-			return err
-		}
-		if err := tx.TransitionOperations(ctx, currentPlan.IncludedOperations, "materialized", nil); err != nil {
-			return err
-		}
-		if workspace.State == "clean" {
-			if err := tx.SetStatus(ctx, "pending"); err != nil {
-				return err
-			}
-		} else if workspace.State != "pending" {
-			return fmt.Errorf("projectstate: checkpoint workspace state changed before publication")
-		}
-		secondNext, err = tx.CaptureCheckpointCommitState(ctx)
-		if err != nil {
-			return err
-		}
-		success = CheckpointResult{
-			CandidateDigest:               currentPlan.CandidateDigest,
-			MaterializedThroughGeneration: currentPlan.ThroughGeneration,
-			JournalID:                     prepared.JournalID,
-		}
 		publication, err := artifact.publish(ctx)
 		if err != nil {
 			return err
 		}
 		switch publication {
 		case checkpointPublicationPublished:
+			published, err := tx.TransitionMaterialization(ctx, prepared, "published")
+			if err != nil {
+				return err
+			}
+			wantPublished := cloneMaterializationRecord(prepared)
+			wantPublished.State = "published"
+			if !equalMaterializationRecord(published, wantPublished) {
+				return fmt.Errorf("projectstate: published checkpoint journal differs from prepared record")
+			}
+			postimage, err := checkpointPublicationPostimage(published)
+			if err != nil {
+				return err
+			}
+			if err := tx.UpsertCandidate(ctx, postimage); err != nil {
+				return err
+			}
+			if err := tx.TransitionOperations(ctx, currentPlan.IncludedOperations, "materialized", nil); err != nil {
+				return err
+			}
+			if workspace.State == "clean" {
+				if err := tx.SetStatus(ctx, "pending"); err != nil {
+					return err
+				}
+			} else if workspace.State != "pending" {
+				return fmt.Errorf("projectstate: checkpoint workspace state changed before publication")
+			}
+			success = CheckpointResult{
+				CandidateDigest:               currentPlan.CandidateDigest,
+				MaterializedThroughGeneration: currentPlan.ThroughGeneration,
+				JournalID:                     prepared.JournalID,
+			}
 		case checkpointPublicationPreservedConcurrentOld:
-			return ErrCheckpointCAS
+			recovered, err := tx.TransitionMaterialization(ctx, prepared, "recovered_old")
+			if err != nil {
+				return err
+			}
+			wantRecovered := cloneMaterializationRecord(prepared)
+			wantRecovered.State = "recovered_old"
+			if !equalMaterializationRecord(recovered, wantRecovered) {
+				return fmt.Errorf("projectstate: recovered-old checkpoint journal differs from prepared record")
+			}
+			preservedOld = true
 		default:
 			return fmt.Errorf("%w: invalid checkpoint publication disposition %d", ErrCheckpointRecoveryBlocked, publication)
+		}
+		secondNext, err = tx.CaptureCheckpointCommitState(ctx)
+		if err != nil {
+			return err
 		}
 		secondCompleted = true
 		return nil
@@ -430,16 +439,35 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 		if !errors.Is(secondErr, localstore.ErrCommitOutcomeUnknown) || !secondCompleted {
 			return CheckpointResult{}, secondErr
 		}
-		committed, confirmErr := confirmCheckpointTransition(ctx, confirmCommit, secondPrior, secondNext, secondErr)
-		if confirmErr != nil {
-			return CheckpointResult{}, confirmErr
-		}
-		if !committed {
-			return CheckpointResult{}, secondErr
+		if secondInvalidated {
+			committed, confirmErr := confirmCheckpointTransition(ctx, confirmCommit, secondPrior, secondNext, secondErr)
+			if confirmErr != nil {
+				return CheckpointResult{}, confirmErr
+			}
+			if !committed {
+				return CheckpointResult{}, secondErr
+			}
+		} else {
+			match, confirmErr := confirmCommit(ctx, secondPrior, secondNext)
+			if confirmErr != nil {
+				return CheckpointResult{}, fmt.Errorf("%w: checkpoint final commit confirmation failed: %v", ErrCheckpointRecoveryBlocked, confirmErr)
+			}
+			switch match {
+			case localstore.WorkspaceCheckpointCommitNext:
+			case localstore.WorkspaceCheckpointCommitPrior:
+				return CheckpointResult{}, secondErr
+			case localstore.WorkspaceCheckpointCommitThird:
+				return CheckpointResult{}, fmt.Errorf("%w: checkpoint final commit confirmation found a third state", ErrCheckpointRecoveryBlocked)
+			default:
+				return CheckpointResult{}, fmt.Errorf("%w: checkpoint final commit confirmation returned invalid outcome %d", ErrCheckpointRecoveryBlocked, match)
+			}
 		}
 	}
 	if secondInvalidated {
 		return CheckpointResult{}, ErrPublicationUnclassified
+	}
+	if preservedOld {
+		return CheckpointResult{}, ErrCheckpointCAS
 	}
 	return success, nil
 }

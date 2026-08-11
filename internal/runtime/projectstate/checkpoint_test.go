@@ -190,10 +190,11 @@ func TestCheckpointRejectsTemporaryUnpublishedPublicationDispositions(t *testing
 		name        string
 		disposition checkpointPublicationDisposition
 		want        error
+		journal     string
 	}{
-		{name: "preserved concurrent old", disposition: checkpointPublicationPreservedConcurrentOld, want: ErrCheckpointCAS},
-		{name: "zero", want: ErrCheckpointRecoveryBlocked},
-		{name: "unknown", disposition: checkpointPublicationDisposition(99), want: ErrCheckpointRecoveryBlocked},
+		{name: "preserved concurrent old", disposition: checkpointPublicationPreservedConcurrentOld, want: ErrCheckpointCAS, journal: "recovered_old"},
+		{name: "zero", want: ErrCheckpointRecoveryBlocked, journal: "prepared"},
+		{name: "unknown", disposition: checkpointPublicationDisposition(99), want: ErrCheckpointRecoveryBlocked, journal: "prepared"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
@@ -212,7 +213,7 @@ func TestCheckpointRejectsTemporaryUnpublishedPublicationDispositions(t *testing
 				t.Fatalf("Checkpoint = (%+v, %v), artifact publish=%d close=%d, want zero and %v", got, err, fixture.publishCalls, fixture.closeCalls, test.want)
 			}
 			disposition := readCheckpointDisposition(t, fixture.service, req.Scope)
-			if len(disposition.Journals) != 1 || disposition.Journals[0].State != "prepared" {
+			if len(disposition.Journals) != 1 || disposition.Journals[0].State != test.journal {
 				t.Fatalf("temporary disposition changed database outcome: %+v", disposition)
 			}
 			if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
@@ -255,7 +256,7 @@ func TestCheckpointFinalizationFailureRollsBackAllTentativeDatabaseWrites(t *tes
 
 	got, err := fixture.service.Checkpoint(context.Background(), req)
 	if err == nil || !strings.Contains(err.Error(), "injected checkpoint finalization failure") ||
-		got != (CheckpointResult{}) || fixture.prepareCalls != 1 || fixture.publishCalls != 0 || fixture.closeCalls != 1 {
+		got != (CheckpointResult{}) || fixture.prepareCalls != 1 || fixture.publishCalls != 1 || fixture.closeCalls != 1 {
 		t.Fatalf("finalization failure = (%+v, %v), prepare=%d publish=%d close=%d", got, err, fixture.prepareCalls, fixture.publishCalls, fixture.closeCalls)
 	}
 	disposition := readCheckpointDisposition(t, fixture.service, req.Scope)
@@ -280,6 +281,288 @@ func TestCheckpointFinalizationFailureRollsBackAllTentativeDatabaseWrites(t *tes
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCheckpointHoldsFinalWriterAcrossPublicationAndPostimage(t *testing.T) {
+	fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
+	operation := servicePutTaskOperation(
+		fixture.mustAcceptedSnapshot(t), "99999999-9999-4999-8999-999999999991",
+		"22222222-2222-4222-8222-222222222222", "writer boundary",
+	)
+	if _, err := fixture.service.Apply(context.Background(), req.Scope, operation); err != nil {
+		t.Fatal(err)
+	}
+	setServiceWorkspaceState(t, fixture.store, req.Scope, "clean")
+	if _, err := fixture.store.DB().Exec(`CREATE TABLE checkpoint_writer_probe (value TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	readConn, err := fixture.store.DB().Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readConn.Close()
+	writerConn, err := fixture.store.DB().Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writerConn.Close()
+
+	var writerDone chan error
+	baseFactory := fixture.service.prepareCheckpointArtifact
+	fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
+		handle, err := baseFactory(ctx, input)
+		if err != nil {
+			return handle, err
+		}
+		handle.publish = func(ctx context.Context) (checkpointPublicationDisposition, error) {
+			fixture.publishCalls++
+			if _, err := readConn.ExecContext(ctx, `BEGIN`); err != nil {
+				t.Fatal(err)
+			}
+			var journalState, operationState, workspaceState string
+			var candidateCount int
+			if err := readConn.QueryRowContext(ctx, `
+				SELECT state FROM workspace_materializations WHERE project_id=? AND workspace_id=?
+			`, req.Scope.ProjectID, req.Scope.WorkspaceID).Scan(&journalState); err != nil {
+				t.Fatal(err)
+			}
+			if err := readConn.QueryRowContext(ctx, `
+				SELECT state FROM workspace_overlay_operations
+				WHERE project_id=? AND workspace_id=? AND operation_id=?
+			`, req.Scope.ProjectID, req.Scope.WorkspaceID, operation.ID).Scan(&operationState); err != nil {
+				t.Fatal(err)
+			}
+			if err := readConn.QueryRowContext(ctx, `
+				SELECT status FROM workspace_bindings WHERE project_id=? AND workspace_id=?
+			`, req.Scope.ProjectID, req.Scope.WorkspaceID).Scan(&workspaceState); err != nil {
+				t.Fatal(err)
+			}
+			if err := readConn.QueryRowContext(ctx, `
+				SELECT COUNT(*) FROM workspace_candidates WHERE project_id=? AND workspace_id=?
+			`, req.Scope.ProjectID, req.Scope.WorkspaceID).Scan(&candidateCount); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readConn.ExecContext(ctx, `COMMIT`); err != nil {
+				t.Fatal(err)
+			}
+			if journalState != "prepared" || operationState != "active" || workspaceState != "clean" || candidateCount != 0 {
+				t.Fatalf("publisher database view = journal %q operation %q status %q candidates %d, want exact prepared preimage",
+					journalState, operationState, workspaceState, candidateCount)
+			}
+
+			started := make(chan struct{})
+			writerDone = make(chan error, 1)
+			go func() {
+				close(started)
+				_, err := writerConn.ExecContext(context.Background(), `INSERT INTO checkpoint_writer_probe(value) VALUES ('after')`)
+				writerDone <- err
+			}()
+			<-started
+			select {
+			case err := <-writerDone:
+				t.Fatalf("concurrent writer completed during publication: %v", err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			return checkpointPublicationPublished, nil
+		}
+		return handle, nil
+	}
+
+	got, err := fixture.service.Checkpoint(context.Background(), req)
+	if err != nil || got.JournalID == "" || writerDone == nil {
+		t.Fatalf("Checkpoint = (%+v, %v), writer started=%t", got, err, writerDone != nil)
+	}
+	select {
+	case err := <-writerDone:
+		if err != nil {
+			t.Fatalf("concurrent writer after finalization: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("concurrent writer remained blocked after finalization")
+	}
+	var markers int
+	if err := fixture.store.DB().QueryRow(`SELECT COUNT(*) FROM checkpoint_writer_probe`).Scan(&markers); err != nil || markers != 1 {
+		t.Fatalf("writer probe count = (%d, %v), want (1, nil)", markers, err)
+	}
+}
+
+func TestCheckpointPreservedConcurrentOldChangesOnlyJournalState(t *testing.T) {
+	fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
+	accepted := fixture.mustAcceptedSnapshot(t)
+	direct := checkpointPlanMutatedSnapshot(t, accepted, "preserved prior candidate")
+	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+		if err := tx.UpsertCandidate(context.Background(), *checkpointPlanCandidate(fixture.binding, direct, nil, 0)); err != nil {
+			return err
+		}
+		return tx.SetStatus(context.Background(), "pending")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	operation := servicePutTaskOperation(
+		direct, "99999999-9999-4999-8999-999999999991",
+		"22222222-2222-4222-8222-222222222222", "preserved active operation",
+	)
+	if _, err := fixture.service.Apply(context.Background(), req.Scope, operation); err != nil {
+		t.Fatal(err)
+	}
+	insertServiceConflict(t, fixture.store, req.Scope, "resolved checkpoint evidence",
+		state.RecordKey{Kind: "task", ID: "22222222-2222-4222-8222-222222222222"}, "resolved")
+
+	var before importRawState
+	baseFactory := fixture.service.prepareCheckpointArtifact
+	fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
+		handle, err := baseFactory(ctx, input)
+		if err != nil {
+			return handle, err
+		}
+		handle.publish = func(context.Context) (checkpointPublicationDisposition, error) {
+			fixture.publishCalls++
+			before = captureImportRawState(t, fixture.store)
+			var journalState string
+			if err := fixture.store.DB().QueryRow(`
+				SELECT state FROM workspace_materializations WHERE project_id=? AND workspace_id=?
+			`, req.Scope.ProjectID, req.Scope.WorkspaceID).Scan(&journalState); err != nil || journalState != "prepared" {
+				t.Fatalf("publisher journal state = (%q, %v), want prepared", journalState, err)
+			}
+			return checkpointPublicationPreservedConcurrentOld, nil
+		}
+		return handle, nil
+	}
+
+	got, err := fixture.service.Checkpoint(context.Background(), req)
+	if !errors.Is(err, ErrCheckpointCAS) || got != (CheckpointResult{}) || fixture.publishCalls != 1 {
+		t.Fatalf("preserved-old Checkpoint = (%+v, %v), publish=%d", got, err, fixture.publishCalls)
+	}
+	if after := captureImportRawState(t, fixture.store); !reflect.DeepEqual(after, before) {
+		t.Fatalf("preserved-old changed non-journal state\nbefore=%+v\nafter=%+v", before, after)
+	}
+	disposition := readCheckpointDisposition(t, fixture.service, req.Scope)
+	if len(disposition.Journals) != 1 || disposition.Journals[0].State != "recovered_old" ||
+		len(disposition.Operations) != 1 || disposition.Operations[0].OperationID != operation.ID ||
+		disposition.Operations[0].State != "active" {
+		t.Fatalf("preserved-old disposition = %+v", disposition)
+	}
+}
+
+func TestCheckpointPostPublicationDatabaseFailureRetainsPreparedRecoveryAuthority(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("real checkpoint artifacts are supported only on Linux")
+	}
+	fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
+	operation := servicePutTaskOperation(
+		fixture.mustAcceptedSnapshot(t), "99999999-9999-4999-8999-999999999991",
+		"22222222-2222-4222-8222-222222222222", "post-publication rollback",
+	)
+	if _, err := fixture.service.Apply(context.Background(), req.Scope, operation); err != nil {
+		t.Fatal(err)
+	}
+	setServiceWorkspaceState(t, fixture.store, req.Scope, "clean")
+	before := captureImportRawState(t, fixture.store)
+	if _, err := fixture.store.DB().Exec(`
+		CREATE TRIGGER fail_checkpoint_postpublication_candidate
+		BEFORE INSERT ON workspace_candidates
+		BEGIN SELECT RAISE(ABORT,'injected post-publication database failure'); END
+	`); err != nil {
+		t.Fatal(err)
+	}
+	fixture.service.prepareCheckpointArtifact = nil
+
+	got, err := fixture.service.Checkpoint(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), "injected post-publication database failure") || got != (CheckpointResult{}) {
+		t.Fatalf("post-publication database failure = (%+v, %v)", got, err)
+	}
+	if after := captureImportRawState(t, fixture.store); !reflect.DeepEqual(after, before) {
+		t.Fatalf("post-publication failure changed database preimage\nbefore=%+v\nafter=%+v", before, after)
+	}
+	disposition := readCheckpointDisposition(t, fixture.service, req.Scope)
+	if len(disposition.Journals) != 1 || disposition.Journals[0].State != "prepared" ||
+		len(disposition.Operations) != 1 || disposition.Operations[0].OperationID != operation.ID ||
+		disposition.Operations[0].State != "active" {
+		t.Fatalf("post-publication failure disposition = %+v", disposition)
+	}
+	journal := disposition.Journals[0]
+	live, err := ReadWorkingTreeNoFollow(req.Root)
+	if err != nil || !equalCheckpointTree(live, journal.CandidateTree) {
+		t.Fatalf("post-publication live tree = (%v, %v), want candidate %v", live, err, journal.CandidateTree)
+	}
+	if _, err := os.Lstat(journal.StagePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("post-publication stage remains: %v", err)
+	}
+	if backup := readCheckpointTestPathTree(t, journal.BackupPath); !equalCheckpointTree(backup, journal.PriorTree) {
+		t.Fatalf("post-publication backup differs\ngot=%v\nwant=%v", backup, journal.PriorTree)
+	}
+}
+
+func TestCheckpointFinalCommitUnknownClassifiesPublishedRecoveredOldPreparedAndThird(t *testing.T) {
+	tests := []struct {
+		name        string
+		publication checkpointPublicationDisposition
+		match       localstore.WorkspaceCheckpointCommitMatch
+		confirmErr  error
+		want        error
+		wantResult  bool
+	}{
+		{name: "published", publication: checkpointPublicationPublished, match: localstore.WorkspaceCheckpointCommitNext, wantResult: true},
+		{name: "recovered old", publication: checkpointPublicationPreservedConcurrentOld, match: localstore.WorkspaceCheckpointCommitNext, want: ErrCheckpointCAS},
+		{name: "prepared", publication: checkpointPublicationPublished, match: localstore.WorkspaceCheckpointCommitPrior, want: localstore.ErrCommitOutcomeUnknown},
+		{name: "third", publication: checkpointPublicationPublished, match: localstore.WorkspaceCheckpointCommitThird, want: ErrCheckpointRecoveryBlocked},
+		{name: "read failure", publication: checkpointPublicationPublished, confirmErr: errors.New("confirmation read failed"), want: ErrCheckpointRecoveryBlocked},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
+			baseFactory := fixture.service.prepareCheckpointArtifact
+			fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
+				handle, err := baseFactory(ctx, input)
+				if err != nil {
+					return handle, err
+				}
+				handle.publish = func(context.Context) (checkpointPublicationDisposition, error) {
+					fixture.publishCalls++
+					return test.publication, nil
+				}
+				return handle, nil
+			}
+			realWithImmediate := fixture.service.repo.WithImmediateWorkspace
+			transactionCalls := 0
+			unknown := fmt.Errorf("synthetic final commit: %w", localstore.ErrCommitOutcomeUnknown)
+			fixture.service.withImmediateWorkspace = func(
+				ctx context.Context,
+				scope types.WorkspaceScope,
+				fn func(*localstore.WorkspaceMutationTx) error,
+			) error {
+				transactionCalls++
+				err := realWithImmediate(ctx, scope, fn)
+				if err == nil && transactionCalls == 2 {
+					return unknown
+				}
+				return err
+			}
+			confirmCalls := 0
+			fixture.service.confirmCheckpointCommit = func(
+				context.Context,
+				localstore.WorkspaceCheckpointCommitState,
+				localstore.WorkspaceCheckpointCommitState,
+			) (localstore.WorkspaceCheckpointCommitMatch, error) {
+				confirmCalls++
+				return test.match, test.confirmErr
+			}
+
+			got, err := fixture.service.Checkpoint(context.Background(), req)
+			if test.wantResult {
+				if err != nil || got.JournalID == "" {
+					t.Fatalf("confirmed published = (%+v, %v)", got, err)
+				}
+			} else if !errors.Is(err, test.want) || got != (CheckpointResult{}) {
+				t.Fatalf("confirmed %s = (%+v, %v), want zero and %v", test.name, got, err, test.want)
+			}
+			if transactionCalls != 2 || confirmCalls != 1 || fixture.prepareCalls != 1 ||
+				fixture.publishCalls != 1 || fixture.closeCalls != 1 {
+				t.Fatalf("confirmed %s calls: transactions=%d confirm=%d prepare=%d publish=%d close=%d",
+					test.name, transactionCalls, confirmCalls, fixture.prepareCalls, fixture.publishCalls, fixture.closeCalls)
+			}
+		})
 	}
 }
 
@@ -705,6 +988,7 @@ func TestCheckpointUnknownCommitConfirmationMatrix(t *testing.T) {
 		match       localstore.WorkspaceCheckpointCommitMatch
 		confirmErr  error
 		wantOK      bool
+		want        error
 	}{
 		{name: "first next", transaction: 1, match: localstore.WorkspaceCheckpointCommitNext, wantOK: true},
 		{name: "first prior", transaction: 1, match: localstore.WorkspaceCheckpointCommitPrior},
@@ -713,9 +997,9 @@ func TestCheckpointUnknownCommitConfirmationMatrix(t *testing.T) {
 		{name: "first read error", transaction: 1, confirmErr: errors.New("confirmation read failed")},
 		{name: "final next", transaction: 2, match: localstore.WorkspaceCheckpointCommitNext, wantOK: true},
 		{name: "final prior", transaction: 2, match: localstore.WorkspaceCheckpointCommitPrior},
-		{name: "final third", transaction: 2, match: localstore.WorkspaceCheckpointCommitThird},
-		{name: "final invalid outcome", transaction: 2, match: localstore.WorkspaceCheckpointCommitMatch(99)},
-		{name: "final read error", transaction: 2, confirmErr: errors.New("confirmation read failed")},
+		{name: "final third", transaction: 2, match: localstore.WorkspaceCheckpointCommitThird, want: ErrCheckpointRecoveryBlocked},
+		{name: "final invalid outcome", transaction: 2, match: localstore.WorkspaceCheckpointCommitMatch(99), want: ErrCheckpointRecoveryBlocked},
+		{name: "final read error", transaction: 2, confirmErr: errors.New("confirmation read failed"), want: ErrCheckpointRecoveryBlocked},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -761,7 +1045,11 @@ func TestCheckpointUnknownCommitConfirmationMatrix(t *testing.T) {
 				}
 				return
 			}
-			if !errors.Is(err, localstore.ErrCommitOutcomeUnknown) || got != (CheckpointResult{}) || confirmCalls != 1 ||
+			want := test.want
+			if want == nil {
+				want = localstore.ErrCommitOutcomeUnknown
+			}
+			if !errors.Is(err, want) || got != (CheckpointResult{}) || confirmCalls != 1 ||
 				transactionCalls != wantTransactions || fixture.prepareCalls != 1 ||
 				fixture.publishCalls != wantPublish || fixture.closeCalls != 1 {
 				t.Fatalf("unknown outcome = (%+v, %v), transactions=%d confirm=%d prepare=%d publish=%d close=%d",
