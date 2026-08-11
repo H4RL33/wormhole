@@ -1045,3 +1045,25 @@ full ProjectState, targeted race, vet, formatting, scope, and diff gates passed 
 timings are retained only as command output and are not performance evidence. Final spec,
 discipline, and proof reviews approved the complete four-commit slice with no Critical,
 Important, or Minor findings. Task 505 Linux recovery and exact database convergence is next.
+
+Task-5 Task 505 Linux recovery and exact database convergence
+`739ca8e..4c419bc`: complete. `Service.Recover` now holds the existing workspace gate and one
+`BEGIN IMMEDIATE` across the exact database proof, one stable Git observation, strict reread,
+descriptor-relative Linux filesystem convergence, exact old/new database mutation, terminal
+status proof, and transition-relative COMMIT confirmation. Empty and terminal histories stay
+SQLite-only; non-Linux refuses only proved driver work. The Linux hook implements the approved
+P/C/X/absent matrix, backup-to-live no-replace restore, checkout-destination→private-source
+fsync ordering, byte preservation, and precondition-versus-contained-evidence taxonomy without
+advancing the accepted Git base.
+
+Three review rounds causally fixed missing durability barriers for preserved post-rename
+topologies, incomplete successful-status and cross-scope byte assertions, root/mount/rebind
+error classification, and transient root drift that a diagnostic reread could hide. The final
+phase boundary is attributed directly at exact held-parent live/stage/backup inspection and
+restores its dependency seam on every return. Focused, full ProjectState, targeted race, vet,
+Darwin arm64 compile, formatting/diff, and exact-final-tree `make check` gates passed; merged
+statement coverage is 85.5%, above the accepted 80% floor. Timings are retained only as raw
+output and are not performance evidence. Final spec, filesystem/security, and test/discipline
+reviews approved the complete three-commit slice with no Critical, Important, or Minor
+findings. Task 506 owns the deliberately deferred rename/fsync/restart/unknown-COMMIT failure
+boundaries and is next.
