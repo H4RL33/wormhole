@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
+	"github.com/H4RL33/wormhole/internal/types"
 	state "github.com/H4RL33/wormhole/internal/types/projectstate"
 )
 
@@ -819,4 +821,297 @@ func checkpointRecoveryProofFixtureForInput(
 		t.Fatal(err)
 	}
 	return workspace, candidate, journal, cloneImportDisposition(input.Disposition).Operations
+}
+
+func TestRecoverTerminalOrEmptyHistoryReturnsDatabaseComposedStatusWithoutGitOrPathIO(t *testing.T) {
+	for _, history := range []string{"empty", "accepted", "recovered_old", "recovered_new"} {
+		t.Run(history, func(t *testing.T) {
+			service, scope, root := recoveryNoWorkServiceFixture(t, history)
+			want := recoveryComposedStatus(t, service, scope)
+			before := recoveryDatabaseState(t, service, scope)
+			if err := os.Rename(root, root+"-moved-for-recovery"); err != nil {
+				t.Fatal(err)
+			}
+			service.observeCheckpointRecoveryGit = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
+				panic("no-work recovery observed Git")
+			}
+			service.recoverCheckpointFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+				panic("no-work recovery touched paths")
+			}
+
+			got, err := service.Recover(context.Background(), scope)
+			if err != nil || !reflect.DeepEqual(got, want) || got.PublicationClassification != "" || got.PublicationReviewDigest != "" {
+				t.Fatalf("Recover(%s)=(%+v,%v), want %+v", history, got, err, want)
+			}
+			got.AcceptedSnapshot.Project.Name = "mutated caller result"
+			fresh := recoveryComposedStatus(t, service, scope)
+			if fresh.AcceptedSnapshot.Project.Name == got.AcceptedSnapshot.Project.Name {
+				t.Fatal("Recover returned status aliases durable state")
+			}
+			if after := recoveryDatabaseState(t, service, scope); !reflect.DeepEqual(after, before) {
+				t.Fatal("no-work Recover changed database state")
+			}
+		})
+	}
+
+}
+
+func TestRecoverFailsScopeCheckoutRootAndGitPreconditionsBeforePathMutation(t *testing.T) {
+	t.Run("service context and scope", func(t *testing.T) {
+		var nilService *Service
+		if got, err := nilService.Recover(context.Background(), types.WorkspaceScope{}); !reflect.DeepEqual(got, WorkspaceStatus{}) || !errors.Is(err, localstore.ErrNotFound) {
+			t.Fatalf("nil-service Recover=(%+v,%v)", got, err)
+		}
+		service, scope, _ := recoveryNoWorkServiceFixture(t, "empty")
+		if got, err := service.Recover(nil, scope); !reflect.DeepEqual(got, WorkspaceStatus{}) || !errors.Is(err, localstore.ErrNotFound) {
+			t.Fatalf("nil-context Recover=(%+v,%v)", got, err)
+		}
+		scope.WorkspaceID = "invalid"
+		if got, err := service.Recover(context.Background(), scope); !reflect.DeepEqual(got, WorkspaceStatus{}) || !errors.Is(err, localstore.ErrNotFound) {
+			t.Fatalf("invalid-scope Recover=(%+v,%v)", got, err)
+		}
+	})
+
+	gitFailure := errors.New("injected recovery Git failure")
+	for _, test := range []struct {
+		name      string
+		mutate    func(*checkpointCoordinatorFixture, CheckpointRequest)
+		wantCause error
+	}{
+		{name: "Git bundle", wantCause: gitFailure, mutate: func(fixture *checkpointCoordinatorFixture, _ CheckpointRequest) {
+			fixture.service.observeCheckpointRecoveryGit = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
+				return checkpointRecoveryGitObservation{}, gitFailure
+			}
+		}},
+		{name: "checkout", mutate: func(fixture *checkpointCoordinatorFixture, _ CheckpointRequest) {
+			if err := os.Rename(fixture.repository.root, fixture.repository.root+"-moved"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture, request := recoveryDriverPlanFixture(t, "prepared")
+			before := recoveryDatabaseState(t, fixture.service, request.Scope)
+			test.mutate(fixture, request)
+			pathCalls := 0
+			fixture.service.recoverCheckpointFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+				pathCalls++
+				return checkpointRecoveryFilesystemOutcome(99), nil
+			}
+			got, err := fixture.service.Recover(context.Background(), request.Scope)
+			if !reflect.DeepEqual(got, WorkspaceStatus{}) || !errors.Is(err, ErrCheckpointRecoveryPrecondition) || pathCalls != 0 {
+				t.Fatalf("%s Recover=(%+v,%v), pathCalls=%d", test.name, got, err, pathCalls)
+			}
+			if test.wantCause != nil && !errors.Is(err, test.wantCause) {
+				t.Fatalf("%s Recover error=%v, want cause %v", test.name, err, test.wantCause)
+			}
+			if after := recoveryDatabaseState(t, fixture.service, request.Scope); !reflect.DeepEqual(after, before) {
+				t.Fatalf("%s precondition changed database state", test.name)
+			}
+		})
+	}
+
+	t.Run("journal direct-child name", func(t *testing.T) {
+		fixture, request := recoveryDriverPlanFixture(t, "prepared")
+		invalidStage := filepath.Join(filepath.Dir(readCheckpointDisposition(t, fixture.service, request.Scope).Journals[0].StagePath), "not-the-journal.stage")
+		if _, err := fixture.store.DB().Exec(`
+			UPDATE workspace_materializations SET stage_path=? WHERE project_id=? AND workspace_id=?
+		`, invalidStage, request.Scope.ProjectID, request.Scope.WorkspaceID); err != nil {
+			t.Fatal(err)
+		}
+		before := recoveryDatabaseState(t, fixture.service, request.Scope)
+		fixture.service.observeCheckpointRecoveryGit = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
+			panic("invalid journal path observed Git")
+		}
+		fixture.service.recoverCheckpointFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+			panic("invalid journal path touched filesystem")
+		}
+		got, err := fixture.service.Recover(context.Background(), request.Scope)
+		if !reflect.DeepEqual(got, WorkspaceStatus{}) || !errors.Is(err, ErrCheckpointRecoveryPrecondition) {
+			t.Fatalf("invalid journal path Recover=(%+v,%v)", got, err)
+		}
+		if after := recoveryDatabaseState(t, fixture.service, request.Scope); !reflect.DeepEqual(after, before) {
+			t.Fatal("invalid journal path recovery changed database state")
+		}
+	})
+}
+
+func TestRecoverRejectsCrossProjectDriverWithoutMutatingEitherScope(t *testing.T) {
+	fixture, request := recoveryDriverPlanFixture(t, "prepared")
+	neighborRepository := createGitRepository(t, "00000000-0000-4000-8000-000000000002")
+	neighbor := registerGitRepository(t, fixture.service, neighborRepository)
+	recoveryAssertCrossScopeRejected(t, fixture.service, request.Scope, neighbor.Binding.Scope, types.WorkspaceScope{
+		ProjectID: neighbor.Binding.Scope.ProjectID, WorkspaceID: request.Scope.WorkspaceID,
+	})
+}
+
+func TestRecoverRejectsCrossWorkspaceDriverWithoutMutatingEitherScope(t *testing.T) {
+	fixture, request := recoveryDriverPlanFixture(t, "prepared")
+	neighborRepository := createGitRepository(t, "00000000-0000-4000-8000-000000000002")
+	neighbor := registerGitRepository(t, fixture.service, neighborRepository)
+	recoveryAssertCrossScopeRejected(t, fixture.service, request.Scope, neighbor.Binding.Scope, types.WorkspaceScope{
+		ProjectID: request.Scope.ProjectID, WorkspaceID: neighbor.Binding.Scope.WorkspaceID,
+	})
+}
+
+func TestRecoverHoldsOneImmediateTransactionAcrossOneGitBundleAndConvergence(t *testing.T) {
+	fixture, request := recoveryDriverPlanFixture(t, "prepared")
+	if _, err := fixture.store.DB().Exec(`CREATE TABLE checkpoint_recovery_writer_probe(value TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	writerConn, err := fixture.store.DB().Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writerConn.Close()
+
+	realWithImmediate := fixture.service.repo.WithImmediateWorkspace
+	transactionCalls := 0
+	fixture.service.withImmediateWorkspace = func(ctx context.Context, scope types.WorkspaceScope, fn func(*localstore.WorkspaceMutationTx) error) error {
+		transactionCalls++
+		return realWithImmediate(ctx, scope, fn)
+	}
+	gitCalls := 0
+	fixture.service.observeCheckpointRecoveryGit = func(_ context.Context, proof checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
+		gitCalls++
+		return recoveryPlannerObservation(t, proof, "prepared"), nil
+	}
+	filesystemCalls := 0
+	fixture.service.recoverCheckpointFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+		filesystemCalls++
+		blockedCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+		defer cancel()
+		_, blockedErr := writerConn.ExecContext(blockedCtx, `INSERT INTO checkpoint_recovery_writer_probe(value) VALUES ('blocked')`)
+		if !errors.Is(blockedErr, context.DeadlineExceeded) {
+			t.Fatalf("writer during recovery=%v, want context deadline exceeded", blockedErr)
+		}
+		return checkpointRecoveryFilesystemRecoveredOld, nil
+	}
+
+	got, err := fixture.service.Recover(context.Background(), request.Scope)
+	if err != nil || got.Binding.Scope != request.Scope || transactionCalls != 1 || gitCalls != 1 || filesystemCalls != 1 {
+		t.Fatalf("Recover=(%+v,%v), transactions=%d Git=%d filesystem=%d", got, err, transactionCalls, gitCalls, filesystemCalls)
+	}
+	if _, err := writerConn.ExecContext(context.Background(), `INSERT INTO checkpoint_recovery_writer_probe(value) VALUES ('after')`); err != nil {
+		t.Fatalf("writer after recovery: %v", err)
+	}
+	var markers int
+	if err := fixture.store.DB().QueryRow(`SELECT COUNT(*) FROM checkpoint_recovery_writer_probe`).Scan(&markers); err != nil || markers != 1 {
+		t.Fatalf("writer markers=(%d,%v), want 1", markers, err)
+	}
+	disposition := readCheckpointDisposition(t, fixture.service, request.Scope)
+	if len(disposition.Journals) != 1 || disposition.Journals[0].State != "recovered_old" {
+		t.Fatalf("recovery disposition=%+v", disposition)
+	}
+}
+
+type checkpointRecoveryDatabaseState struct {
+	workspace   localstore.WorkspaceRecord
+	candidate   *localstore.WorkspaceCandidateRecord
+	disposition localstore.WorkspaceMaterializationDisposition
+}
+
+func recoveryDatabaseState(t *testing.T, service *Service, scope types.WorkspaceScope) checkpointRecoveryDatabaseState {
+	t.Helper()
+	var result checkpointRecoveryDatabaseState
+	if err := service.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
+		var err error
+		result.workspace, err = tx.Workspace(context.Background())
+		if err != nil {
+			return err
+		}
+		result.candidate, err = tx.Candidate(context.Background())
+		if err != nil {
+			return err
+		}
+		result.disposition, err = tx.MaterializationDisposition(context.Background())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func recoveryComposedStatus(t *testing.T, service *Service, scope types.WorkspaceScope) WorkspaceStatus {
+	t.Helper()
+	var result WorkspaceStatus
+	if err := service.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
+		workspace, err := tx.Workspace(context.Background())
+		if err != nil {
+			return err
+		}
+		composed, err := loadComposedWorkspaceRecord(context.Background(), tx, workspace)
+		if err != nil {
+			return err
+		}
+		result, err = clonePublicationReviewStatus(composed.status)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result.PublicationClassification = ""
+	result.PublicationReviewDigest = ""
+	return result
+}
+
+func recoveryAssertCrossScopeRejected(
+	t *testing.T,
+	service *Service,
+	driverScope, neighborScope, requested types.WorkspaceScope,
+) {
+	t.Helper()
+	driverBefore := recoveryDatabaseState(t, service, driverScope)
+	neighborBefore := recoveryDatabaseState(t, service, neighborScope)
+	driverPathsBefore := recoveryScopePaths(t, driverBefore)
+	neighborPathsBefore := recoveryScopePaths(t, neighborBefore)
+	service.observeCheckpointRecoveryGit = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
+		panic("cross-scope recovery observed Git")
+	}
+	service.recoverCheckpointFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+		panic("cross-scope recovery touched paths")
+	}
+	got, err := service.Recover(context.Background(), requested)
+	if !reflect.DeepEqual(got, WorkspaceStatus{}) || !errors.Is(err, localstore.ErrNotFound) {
+		t.Fatalf("cross-scope Recover=(%+v,%v)", got, err)
+	}
+	if after := recoveryDatabaseState(t, service, driverScope); !reflect.DeepEqual(after, driverBefore) {
+		t.Fatal("cross-scope recovery changed driver state")
+	}
+	if after := recoveryDatabaseState(t, service, neighborScope); !reflect.DeepEqual(after, neighborBefore) {
+		t.Fatal("cross-scope recovery changed neighbor state")
+	}
+	if after := recoveryScopePaths(t, driverBefore); !reflect.DeepEqual(after, driverPathsBefore) {
+		t.Fatal("cross-scope recovery changed driver paths")
+	}
+	if after := recoveryScopePaths(t, neighborBefore); !reflect.DeepEqual(after, neighborPathsBefore) {
+		t.Fatal("cross-scope recovery changed neighbor paths")
+	}
+}
+
+type checkpointRecoveryPathState struct {
+	live         state.Tree
+	stageExists  bool
+	backupExists bool
+}
+
+func recoveryScopePaths(t *testing.T, database checkpointRecoveryDatabaseState) checkpointRecoveryPathState {
+	t.Helper()
+	live, err := ReadWorkingTreeNoFollow(database.workspace.Binding.Checkout.CanonicalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := checkpointRecoveryPathState{live: live}
+	for _, journal := range database.disposition.Journals {
+		if _, err := os.Lstat(journal.StagePath); err == nil {
+			result.stageExists = true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(journal.BackupPath); err == nil {
+			result.backupExists = true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+	}
+	return result
 }

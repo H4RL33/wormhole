@@ -82,6 +82,8 @@ type Service struct {
 	newStashID                       func() (string, error)
 	prepareCheckpointArtifact        prepareCheckpointArtifactFunc
 	confirmCheckpointCommit          confirmCheckpointCommitFunc
+	observeCheckpointRecoveryGit     checkpointRecoveryGitObserver
+	recoverCheckpointFilesystem      checkpointRecoveryFilesystemFunc
 	checkpointGates                  checkpointGateSet
 }
 
@@ -99,6 +101,8 @@ func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service,
 		newStashID:                       newCanonicalStashID,
 		prepareCheckpointArtifact:        defaultPrepareCheckpointArtifact,
 		confirmCheckpointCommit:          repo.ConfirmCheckpointCommit,
+		observeCheckpointRecoveryGit:     observeCheckpointRecoveryGit,
+		recoverCheckpointFilesystem:      recoverCheckpointFilesystem,
 	}
 	if config.LegacyIntegrationBackupRoot == "" {
 		return service, nil

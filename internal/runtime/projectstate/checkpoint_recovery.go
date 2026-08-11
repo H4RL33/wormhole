@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
+	"github.com/H4RL33/wormhole/internal/types"
 	state "github.com/H4RL33/wormhole/internal/types/projectstate"
 )
 
@@ -54,6 +56,237 @@ type checkpointRecoveryGitObserver func(
 type checkpointRecoveryPlan struct {
 	proof       checkpointRecoveryProof
 	observation checkpointRecoveryGitObservation
+}
+
+type checkpointRecoveryFilesystemOutcome uint8
+
+const (
+	checkpointRecoveryFilesystemRecoveredOld checkpointRecoveryFilesystemOutcome = iota + 1
+	checkpointRecoveryFilesystemRecoveredNew
+)
+
+type checkpointRecoveryFilesystemFunc func(
+	context.Context,
+	checkpointRecoveryProof,
+) (checkpointRecoveryFilesystemOutcome, error)
+
+// Recover converges one proved checkpoint journal without advancing the
+// accepted Git base. Terminal history is composed entirely from SQLite.
+func (s *Service) Recover(ctx context.Context, scope types.WorkspaceScope) (WorkspaceStatus, error) {
+	if s == nil || s.repo == nil || ctx == nil || !validPublicationScope(scope) {
+		return WorkspaceStatus{}, localstore.ErrNotFound
+	}
+	release, err := s.checkpointGates.acquire(ctx, scope)
+	if err != nil {
+		return WorkspaceStatus{}, err
+	}
+	defer release()
+
+	withWorkspace := s.withImmediateWorkspace
+	if withWorkspace == nil {
+		withWorkspace = s.repo.WithImmediateWorkspace
+	}
+	observeGit := s.observeCheckpointRecoveryGit
+	if observeGit == nil {
+		observeGit = observeCheckpointRecoveryGit
+	}
+	recoverFilesystem := s.recoverCheckpointFilesystem
+	if recoverFilesystem == nil {
+		recoverFilesystem = recoverCheckpointFilesystem
+	}
+	confirmCommit := s.confirmCheckpointCommit
+	if confirmCommit == nil {
+		confirmCommit = s.repo.ConfirmCheckpointCommit
+	}
+
+	var result WorkspaceStatus
+	var prior, next localstore.WorkspaceCheckpointCommitState
+	completed := false
+	err = withWorkspace(ctx, scope, func(tx *localstore.WorkspaceMutationTx) error {
+		plan, err := planCheckpointRecovery(ctx, tx, observeGit)
+		if err != nil {
+			return err
+		}
+		if plan.proof.kind == checkpointRecoveryNoWork {
+			result = plan.proof.status
+			return nil
+		}
+		if plan.proof.workspace.Binding.Scope != scope ||
+			(plan.proof.workspace.State != "clean" && plan.proof.workspace.State != "pending") {
+			return checkpointRecoveryPrecondition("driver workspace state or scope differs", nil)
+		}
+		strict, err := strictRereadCheckpointRecoveryDisposition(ctx, tx, plan.proof)
+		if err != nil {
+			return err
+		}
+		prior, err = tx.CaptureCheckpointCommitState(ctx)
+		if err != nil {
+			return checkpointRecoveryPrecondition("capture recovery commit preimage", err)
+		}
+		outcome, err := recoverFilesystem(ctx, strict)
+		if err != nil {
+			return err
+		}
+		if err := applyCheckpointRecoveryOutcome(ctx, tx, strict, outcome); err != nil {
+			return err
+		}
+		final, err := loadCheckpointRecoveryDisposition(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if final.kind != checkpointRecoveryNoWork || final.driver != nil || final.workspace.Binding.Scope != scope {
+			return checkpointRecoveryPrecondition("recovery postimage is not terminal", nil)
+		}
+		result = final.status
+		next, err = tx.CaptureCheckpointCommitState(ctx)
+		if err != nil {
+			return checkpointRecoveryPrecondition("capture recovery commit postimage", err)
+		}
+		completed = true
+		return nil
+	})
+	if err == nil {
+		return result, nil
+	}
+	if !errors.Is(err, localstore.ErrCommitOutcomeUnknown) || !completed {
+		return WorkspaceStatus{}, err
+	}
+	match, confirmErr := confirmCommit(ctx, prior, next)
+	if confirmErr != nil {
+		return WorkspaceStatus{}, fmt.Errorf(
+			"%w: recovery final commit confirmation failed: %w: %w",
+			ErrCheckpointRecoveryBlocked, err, confirmErr,
+		)
+	}
+	switch match {
+	case localstore.WorkspaceCheckpointCommitNext:
+		return result, nil
+	case localstore.WorkspaceCheckpointCommitPrior:
+		return WorkspaceStatus{}, err
+	case localstore.WorkspaceCheckpointCommitThird:
+		return WorkspaceStatus{}, fmt.Errorf(
+			"%w: recovery final commit confirmation found a third state: %w",
+			ErrCheckpointRecoveryBlocked, err,
+		)
+	default:
+		return WorkspaceStatus{}, fmt.Errorf(
+			"%w: recovery final commit confirmation returned invalid outcome %d: %w",
+			ErrCheckpointRecoveryBlocked, match, err,
+		)
+	}
+}
+
+func strictRereadCheckpointRecoveryDisposition(
+	ctx context.Context,
+	tx *localstore.WorkspaceMutationTx,
+	expected checkpointRecoveryProof,
+) (checkpointRecoveryProof, error) {
+	workspace, err := tx.Workspace(ctx)
+	if err != nil {
+		return checkpointRecoveryProof{}, checkpointRecoveryPrecondition("strict reread workspace", err)
+	}
+	disposition, err := tx.MaterializationDisposition(ctx)
+	if err != nil {
+		return checkpointRecoveryProof{}, checkpointRecoveryPrecondition("strict reread disposition", err)
+	}
+	candidate, err := tx.Candidate(ctx)
+	if err != nil {
+		return checkpointRecoveryProof{}, checkpointRecoveryPrecondition("strict reread candidate", err)
+	}
+	strict, err := proveCheckpointRecoveryDisposition(workspace, candidate, disposition)
+	if err != nil {
+		return checkpointRecoveryProof{}, err
+	}
+	if !reflect.DeepEqual(strict, expected) {
+		return checkpointRecoveryProof{}, checkpointRecoveryPrecondition("recovery disposition changed after Git observation", nil)
+	}
+	return strict, nil
+}
+
+func applyCheckpointRecoveryOutcome(
+	ctx context.Context,
+	tx *localstore.WorkspaceMutationTx,
+	proof checkpointRecoveryProof,
+	outcome checkpointRecoveryFilesystemOutcome,
+) error {
+	if proof.driver == nil {
+		return checkpointRecoveryPrecondition("recovery driver is unavailable", nil)
+	}
+	switch outcome {
+	case checkpointRecoveryFilesystemRecoveredOld:
+		if proof.kind != checkpointRecoveryPrepared || proof.driver.State != "prepared" {
+			return checkpointRecoveryPrecondition("recovered-old requires a prepared driver", nil)
+		}
+		recovered, err := tx.TransitionMaterialization(ctx, *proof.driver, "recovered_old")
+		if err != nil {
+			return fmt.Errorf("projectstate: transition recovered-old checkpoint: %w", err)
+		}
+		want := cloneMaterializationRecord(*proof.driver)
+		want.State = "recovered_old"
+		if !equalMaterializationRecord(recovered, want) {
+			return checkpointRecoveryPrecondition("recovered-old journal postimage differs", nil)
+		}
+		return nil
+	case checkpointRecoveryFilesystemRecoveredNew:
+		if proof.kind != checkpointRecoveryPrepared && proof.kind != checkpointRecoveryPublished {
+			return checkpointRecoveryPrecondition("recovered-new requires a recovery driver", nil)
+		}
+		postimage, err := checkpointPublicationPostimage(*proof.driver)
+		if err != nil {
+			return checkpointRecoveryPrecondition("construct recovery publication postimage", err)
+		}
+		recovered, err := tx.TransitionMaterialization(ctx, *proof.driver, "recovered_new")
+		if err != nil {
+			return fmt.Errorf("projectstate: transition recovered-new checkpoint: %w", err)
+		}
+		want := cloneMaterializationRecord(*proof.driver)
+		want.State = "recovered_new"
+		if !equalMaterializationRecord(recovered, want) {
+			return checkpointRecoveryPrecondition("recovered-new journal postimage differs", nil)
+		}
+		if proof.kind == checkpointRecoveryPrepared {
+			if err := tx.UpsertCandidate(ctx, postimage); err != nil {
+				return fmt.Errorf("projectstate: apply recovered-new candidate: %w", err)
+			}
+			rows, err := checkpointRecoveryDriverOperationRows(proof)
+			if err != nil {
+				return err
+			}
+			if err := tx.TransitionOperations(ctx, rows, "materialized", nil); err != nil {
+				return fmt.Errorf("projectstate: materialize recovered-new operations: %w", err)
+			}
+		}
+		if proof.workspace.State == "clean" {
+			if err := tx.SetStatus(ctx, "pending"); err != nil {
+				return fmt.Errorf("projectstate: set recovered-new workspace pending: %w", err)
+			}
+		} else if proof.workspace.State != "pending" {
+			return checkpointRecoveryPrecondition("recovered-new workspace state differs", nil)
+		}
+		return nil
+	default:
+		return fmt.Errorf("%w: invalid recovery filesystem outcome %d", ErrCheckpointRecoveryBlocked, outcome)
+	}
+}
+
+func checkpointRecoveryDriverOperationRows(
+	proof checkpointRecoveryProof,
+) ([]localstore.WorkspaceOperation, error) {
+	rows := make(map[int64]localstore.WorkspaceOperation, len(proof.disposition.Operations))
+	for _, operation := range proof.disposition.Operations {
+		rows[operation.Generation] = operation
+	}
+	selected := make([]localstore.WorkspaceOperation, 0, len(proof.operations.Operations))
+	for _, claim := range proof.operations.Operations {
+		operation, ok := rows[claim.Generation]
+		if !ok || operation.OperationID != claim.OperationID ||
+			!bytes.Equal(operation.OperationJSON, []byte(claim.OperationJSON)) ||
+			operation.State != claim.PrepublicationState || operation.StashedByStashID != nil {
+			return nil, checkpointRecoveryPrecondition("recovery operation selection differs", nil)
+		}
+		selected = append(selected, cloneImportOperation(operation))
+	}
+	return selected, nil
 }
 
 func proveCheckpointRecoveryDisposition(
