@@ -915,3 +915,26 @@ amd64 cross-compiles, staged whitespace/scope checks, and `go test ./... -count=
 109.419s; ProjectState 69.465s). Native Darwin runtime fault testing remains explicitly
 deferred by the approved brief. Task 5F checkpoint service orchestration is next; Task 5G
 owns recovery.
+
+Task 5F1 exact checkpoint commit-state confirmation `f55a1a3`: complete. Localstore now
+captures one deep-owned opaque token for the complete checkpoint-relevant workspace
+boundary: raw binding and snapshot evidence, current publication policy and full history,
+every materialization journal and operation including private mutation metadata, and the
+optional candidate's canonical bytes and raw provenance. A dedicated read transaction
+captures current state once and classifies exact next before exact prior, otherwise third,
+without writer admission, callback replay, Git/path I/O, or exposure of private storage
+representation.
+
+Review-driven causal REDs proved and fixed nullable publication evidence which could retain
+decoded pointers after its raw SQLite value became NULL, plus reordered or duplicate
+journal/operation tokens that could not originate from the strict readers. The final tests
+also cover exact input immutability, representation-only candidate corruption, injected
+BEGIN/COMMIT failure cleanup without retry, cancellation, missing/corrupt workspaces, deep
+ownership of every snapshot record layer, coherent concurrent read snapshots, restart
+stability, and zero-on-error behavior. Final spec, security, and test-strength reviews found
+no Critical, Important, or Minor issues. Fresh controller runs passed focused tests (0.738s),
+focused race (10.323s), full localstore (13.526s), package and repository-wide vet,
+formatting/diff checks, and `go test ./... -count=1` (Gateway 103.017s; ProjectState
+49.869s). New-file statement coverage is 92.1% (268/291), above the accepted 80% floor.
+Task 5F2 now owns `Service.Checkpoint`; Task 5G remains the sole owner of recovery and
+filesystem-topology convergence.
