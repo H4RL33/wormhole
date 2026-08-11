@@ -1007,3 +1007,23 @@ canonical `make check`: formatting, builds, vet, required integration, repositor
 and merged statement coverage at 85.6%, above the accepted 80% floor. Wall-clock timings are
 not treated as performance evidence because the host was under unrelated CPU-intensive load.
 Task 503 owns publisher-before-database-postimage ordering and is next.
+
+Task-5 Task 503 publisher-before-database-postimage ordering `1278e3f..27d4006`: complete.
+The existing second `BEGIN IMMEDIATE` now remains open across final proof, filesystem
+publication, and only then the selected database terminalization. Published outcomes write
+the exact candidate/operation/status postimage; preserved concurrent-old outcomes transition
+only the prepared journal to `recovered_old` and return zero plus `ErrCheckpointCAS` after a
+known commit. Filesystem-new/database-failure retains the exact prepared database authority,
+and final unknown-COMMIT confirmation classifies exact published, recovered-old, prepared,
+third, invalid, and read-failure outcomes without replay.
+
+Causal RED proved the former database-first ordering, recovered-old rollback, and generic
+final-confirmation defects. Review then found two discipline gaps: blocked confirmation paths
+discarded machine-inspectable causes, and the initial writer-lock witness could pass before
+its goroutine entered SQLite. The bounded fix retains blocked, exact unknown-COMMIT, and read
+causes together and replaces the goroutine with a synchronous deadline-bounded contender
+followed by a successful post-finalization write. Three independent final re-reviews approved
+the corrected two-file slice with no Critical, Important, or Minor findings. The four causal
+tests, all Checkpoint tests normal/race, full ProjectState, targeted localstore confirmation,
+vet, formatting, scope, and diff checks passed. Timings are not performance evidence. Task
+504 recovery-disposition proof and no-work status composition is next.
