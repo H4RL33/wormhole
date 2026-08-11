@@ -4,6 +4,7 @@ package projectstate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -35,9 +36,9 @@ func recoverCheckpointFilesystemWithDependencies(
 	}
 	defer artifact.close()
 
-	topology, err := checkpointPublicationClassify(ctx, artifact, stageName, backupName)
+	topology, err := checkpointRecoveryClassify(ctx, artifact, stageName, backupName)
 	if err != nil {
-		return 0, checkpointPublicationClassificationError(err)
+		return 0, err
 	}
 	if proof.kind == checkpointRecoveryPublished {
 		if topology.live.kind == checkpointPublicationAbsent ||
@@ -77,9 +78,9 @@ func recoverCheckpointFilesystemWithDependencies(
 		if err := checkpointPublicationFsyncParents(artifact, false); err != nil {
 			return 0, err
 		}
-		restored, err := checkpointPublicationClassify(ctx, artifact, stageName, backupName)
+		restored, err := checkpointRecoveryClassify(ctx, artifact, stageName, backupName)
 		if err != nil {
-			return 0, checkpointPublicationClassificationError(err)
+			return 0, err
 		}
 		if restored.live.kind == checkpointPublicationAbsent ||
 			restored.stage.kind != checkpointPublicationCandidate ||
@@ -90,6 +91,9 @@ func recoverCheckpointFilesystemWithDependencies(
 		return checkpointRecoveryFilesystemRecoveredOld, nil
 
 	case liveStable && topology.stage.kind == checkpointPublicationCandidate && backupOld:
+		if err := checkpointPublicationFsyncParents(artifact, false); err != nil {
+			return 0, err
+		}
 		return checkpointRecoveryFilesystemRecoveredOld, nil
 
 	case liveStable && topology.stage.kind == checkpointPublicationAbsent && topology.backup.kind == checkpointPublicationPrior:
@@ -104,6 +108,34 @@ func recoverCheckpointFilesystemWithDependencies(
 	default:
 		return 0, checkpointPublicationBlocked("prepared recovery topology is unsafe or unlisted", nil)
 	}
+}
+
+func checkpointRecoveryClassify(
+	ctx context.Context,
+	artifact *checkpointArtifact,
+	stageName, backupName string,
+) (checkpointPublicationTopology, error) {
+	topology, err := checkpointPublicationClassify(ctx, artifact, stageName, backupName)
+	if err == nil {
+		return topology, nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return checkpointPublicationTopology{}, err
+	}
+	rootErr := checkpointPublicationRevalidateParents(ctx, artifact)
+	if rootErr != nil {
+		if errors.Is(rootErr, context.Canceled) || errors.Is(rootErr, context.DeadlineExceeded) {
+			return checkpointPublicationTopology{}, rootErr
+		}
+		return checkpointPublicationTopology{}, checkpointRecoveryPrecondition(
+			"persistent recovery root drift",
+			errors.Join(err, rootErr),
+		)
+	}
+	return checkpointPublicationTopology{}, checkpointPublicationBlocked(
+		"unsafe or unstable contained recovery evidence",
+		err,
+	)
 }
 
 func openCheckpointRecoveryArtifact(
@@ -167,7 +199,7 @@ func openCheckpointRecoveryArtifact(
 	terminal := checkout.ancestry[len(checkout.ancestry)-1]
 	mountProof, err := checkpointRecoveryMountProof(terminal.fd, private.fd, dependencies.mount)
 	if err != nil {
-		return nil, "", "", checkpointPublicationBlocked("recovery mount proof unavailable", err)
+		return nil, "", "", checkpointRecoveryPrecondition("recovery root mount proof unavailable", err)
 	}
 	trees, err := proveCheckpointArtifactTrees(checkpointArtifactInput{
 		Checkout:  driver.Checkout,

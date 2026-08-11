@@ -67,14 +67,16 @@ func TestRecoverPreparedTopologyMatrix(t *testing.T) {
 				}
 				checkpointFallbackCreateTree(t, f.livePath(), opaque)
 			},
-			wantLive: func(_ checkpointRecoveryLinuxFixture, opaque state.Tree) state.Tree { return opaque },
+			wantLive:  func(_ checkpointRecoveryLinuxFixture, opaque state.Tree) state.Tree { return opaque },
+			wantFsync: []string{"checkout", "private"},
 		},
 		{
 			name: "stable live preserves opaque backup", wantStage: true, wantBackup: true,
 			arrange: func(t *testing.T, f checkpointRecoveryLinuxFixture, opaque state.Tree) {
 				checkpointFallbackCreateTree(t, f.journal.BackupPath, opaque)
 			},
-			wantLive: func(f checkpointRecoveryLinuxFixture, _ state.Tree) state.Tree { return f.journal.PriorTree },
+			wantLive:  func(f checkpointRecoveryLinuxFixture, _ state.Tree) state.Tree { return f.journal.PriorTree },
+			wantFsync: []string{"checkout", "private"},
 		},
 	}
 	for _, test := range tests {
@@ -87,7 +89,7 @@ func TestRecoverPreparedTopologyMatrix(t *testing.T) {
 			}
 			fsyncOrder := checkpointRecoveryInstallFsyncRecorder(t, fixture)
 			got, err := fixture.service.Recover(context.Background(), fixture.request.Scope)
-			if err != nil || got.Binding.Scope != fixture.request.Scope || !reflect.DeepEqual(*fsyncOrder, test.wantFsync) {
+			if err != nil || !reflect.DeepEqual(*fsyncOrder, test.wantFsync) {
 				t.Fatalf("Recover=(%+v,%v), fsync=%v want %v", got, err, *fsyncOrder, test.wantFsync)
 			}
 			recoveryAssertTree(t, fixture.livePath(), test.wantLive(fixture, opaque))
@@ -100,6 +102,7 @@ func TestRecoverPreparedTopologyMatrix(t *testing.T) {
 			}())
 			after := recoveryDatabaseState(t, fixture.service, fixture.request.Scope)
 			recoveryAssertOldDatabase(t, before, after)
+			recoveryAssertReturnedStatus(t, fixture.service, fixture.request.Scope, got)
 		})
 	}
 }
@@ -128,7 +131,7 @@ func TestRecoverPublishedTopologyConvergesNew(t *testing.T) {
 			before := recoveryDatabaseState(t, fixture.service, fixture.request.Scope)
 			fsyncOrder := checkpointRecoveryInstallFsyncRecorder(t, fixture)
 			got, err := fixture.service.Recover(context.Background(), fixture.request.Scope)
-			if err != nil || got.Binding.Scope != fixture.request.Scope || !reflect.DeepEqual(*fsyncOrder, []string{"checkout", "private"}) {
+			if err != nil || !reflect.DeepEqual(*fsyncOrder, []string{"checkout", "private"}) {
 				t.Fatalf("Recover published=(%+v,%v), fsync=%v", got, err, *fsyncOrder)
 			}
 			after := recoveryDatabaseState(t, fixture.service, fixture.request.Scope)
@@ -136,6 +139,7 @@ func TestRecoverPublishedTopologyConvergesNew(t *testing.T) {
 			recoveryAssertTree(t, fixture.livePath(), beforeLive)
 			recoveryAssertTree(t, fixture.journal.BackupPath, beforeBackup)
 			checkpointFallbackAssertAbsent(t, fixture.journal.StagePath)
+			recoveryAssertReturnedStatus(t, fixture.service, fixture.request.Scope, got)
 		})
 	}
 }
@@ -170,7 +174,7 @@ func TestRecoverPreservesLaterLiveEditAfterPublication(t *testing.T) {
 	before := recoveryDatabaseState(t, fixture.service, fixture.request.Scope)
 	fsyncOrder := checkpointRecoveryInstallFsyncRecorder(t, fixture)
 	got, err := fixture.service.Recover(context.Background(), fixture.request.Scope)
-	if err != nil || got.Binding.Scope != fixture.request.Scope || !reflect.DeepEqual(*fsyncOrder, []string{"checkout", "private"}) {
+	if err != nil || !reflect.DeepEqual(*fsyncOrder, []string{"checkout", "private"}) {
 		t.Fatalf("Recover later-live=(%+v,%v), fsync=%v", got, err, *fsyncOrder)
 	}
 	if got.CandidateDigest != laterSnapshot.Digest || got.OverlayGeneration != 2 {
@@ -181,6 +185,7 @@ func TestRecoverPreservesLaterLiveEditAfterPublication(t *testing.T) {
 	checkpointFallbackAssertAbsent(t, fixture.journal.StagePath)
 	after := recoveryDatabaseState(t, fixture.service, fixture.request.Scope)
 	recoveryAssertNewDatabase(t, before, after, true)
+	recoveryAssertReturnedStatus(t, fixture.service, fixture.request.Scope, got)
 }
 
 func TestRecoverBlocksAmbiguousOrUnsafeTopologyWithoutMutation(t *testing.T) {
@@ -304,6 +309,77 @@ func TestRecoverBlocksAmbiguousOrUnsafeTopologyWithoutMutation(t *testing.T) {
 		}
 		recoveryAssertTree(t, filepath.Join(movedRoot, filepath.Base(fixture.journal.StagePath)), fixture.journal.CandidateTree)
 	})
+}
+
+func TestRecoverClassifiesPersistentRootsAsPreconditionsAndContainedEvidenceAsBlocked(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		dependencies func(*testing.T, checkpointRecoveryLinuxFixture, error) checkpointArtifactDependencies
+		want         error
+		unwanted     error
+	}{
+		{
+			name: "initial root mount proof",
+			dependencies: func(_ *testing.T, _ checkpointRecoveryLinuxFixture, cause error) checkpointArtifactDependencies {
+				return checkpointArtifactDependencies{mount: checkpointArtifactMountOperations{
+					statx: func(int, string, int, int, *unix.Statx_t) error { return cause },
+				}}
+			},
+			want: ErrCheckpointRecoveryPrecondition, unwanted: ErrCheckpointRecoveryBlocked,
+		},
+		{
+			name: "persistent Git path reread",
+			dependencies: func(_ *testing.T, _ checkpointRecoveryLinuxFixture, cause error) checkpointArtifactDependencies {
+				reads := 0
+				return checkpointArtifactDependencies{readGit: func(ctx context.Context, root string, limit int, args ...string) ([]byte, error) {
+					reads++
+					if reads > 3 {
+						return nil, cause
+					}
+					return readOnlyGitLimited(ctx, root, limit, args...)
+				}}
+			},
+			want: ErrCheckpointRecoveryPrecondition, unwanted: ErrCheckpointRecoveryBlocked,
+		},
+		{
+			name: "contained stage inspection",
+			dependencies: func(_ *testing.T, fixture checkpointRecoveryLinuxFixture, cause error) checkpointArtifactDependencies {
+				operations := defaultCheckpointArtifactPlatformOperations()
+				realFstatat := operations.fstatat
+				stageName := filepath.Base(fixture.journal.StagePath)
+				operations.fstatat = func(fd int, name string, stat *unix.Stat_t, flags int) error {
+					if name == stageName {
+						return cause
+					}
+					return realFstatat(fd, name, stat, flags)
+				}
+				return checkpointArtifactDependencies{readGit: readOnlyGitLimited, operations: operations}
+			},
+			want: ErrCheckpointRecoveryBlocked, unwanted: ErrCheckpointRecoveryPrecondition,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newCheckpointRecoveryLinuxFixture(t, "prepared")
+			cause := errors.New("injected " + test.name)
+			beforeDatabase := recoveryDatabaseState(t, fixture.service, fixture.request.Scope)
+			beforePaths := recoveryScopePaths(t, beforeDatabase)
+			dependencies := test.dependencies(t, fixture, cause)
+			fixture.service.recoverCheckpointFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+				return recoverCheckpointFilesystemWithDependencies(ctx, proof, dependencies)
+			}
+
+			got, err := fixture.service.Recover(context.Background(), fixture.request.Scope)
+			if !reflect.DeepEqual(got, WorkspaceStatus{}) || !errors.Is(err, test.want) || errors.Is(err, test.unwanted) || !errors.Is(err, cause) {
+				t.Fatalf("Recover taxonomy=(%+v,%v), want zero, %v, cause %v, not %v", got, err, test.want, cause, test.unwanted)
+			}
+			if after := recoveryDatabaseState(t, fixture.service, fixture.request.Scope); !reflect.DeepEqual(after, beforeDatabase) {
+				t.Fatal("taxonomy failure changed database state")
+			}
+			if after := recoveryScopePaths(t, beforeDatabase); !reflect.DeepEqual(after, beforePaths) {
+				t.Fatal("taxonomy failure changed filesystem evidence")
+			}
+		})
+	}
 }
 
 type checkpointRecoveryLinuxFixture struct {

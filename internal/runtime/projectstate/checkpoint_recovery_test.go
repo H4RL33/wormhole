@@ -938,6 +938,7 @@ func TestRecoverFailsScopeCheckoutRootAndGitPreconditionsBeforePathMutation(t *t
 
 func TestRecoverRejectsCrossProjectDriverWithoutMutatingEitherScope(t *testing.T) {
 	fixture, request := recoveryDriverPlanFixture(t, "prepared")
+	recoveryEnsureDriverArtifactEvidence(t, fixture.service, request.Scope)
 	neighborRepository := createGitRepository(t, "00000000-0000-4000-8000-000000000002")
 	neighbor := registerGitRepository(t, fixture.service, neighborRepository)
 	recoveryAssertCrossScopeRejected(t, fixture.service, request.Scope, neighbor.Binding.Scope, types.WorkspaceScope{
@@ -947,6 +948,7 @@ func TestRecoverRejectsCrossProjectDriverWithoutMutatingEitherScope(t *testing.T
 
 func TestRecoverRejectsCrossWorkspaceDriverWithoutMutatingEitherScope(t *testing.T) {
 	fixture, request := recoveryDriverPlanFixture(t, "prepared")
+	recoveryEnsureDriverArtifactEvidence(t, fixture.service, request.Scope)
 	neighborRepository := createGitRepository(t, "00000000-0000-4000-8000-000000000002")
 	neighbor := registerGitRepository(t, fixture.service, neighborRepository)
 	recoveryAssertCrossScopeRejected(t, fixture.service, request.Scope, neighbor.Binding.Scope, types.WorkspaceScope{
@@ -1003,6 +1005,7 @@ func TestRecoverHoldsOneImmediateTransactionAcrossOneGitBundleAndConvergence(t *
 	if len(disposition.Journals) != 1 || disposition.Journals[0].State != "recovered_old" {
 		t.Fatalf("recovery disposition=%+v", disposition)
 	}
+	recoveryAssertReturnedStatus(t, fixture.service, request.Scope, got)
 }
 
 type checkpointRecoveryDatabaseState struct {
@@ -1054,6 +1057,27 @@ func recoveryComposedStatus(t *testing.T, service *Service, scope types.Workspac
 	return result
 }
 
+func recoveryAssertReturnedStatus(
+	t *testing.T,
+	service *Service,
+	scope types.WorkspaceScope,
+	got WorkspaceStatus,
+) {
+	t.Helper()
+	want := recoveryComposedStatus(t, service, scope)
+	if !reflect.DeepEqual(got, want) || got.PublicationClassification != "" || got.PublicationReviewDigest != "" {
+		t.Fatalf("Recover status=%+v, want independently composed %+v with zero review fields", got, want)
+	}
+	if got.AcceptedSnapshot.Project.Extensions == nil {
+		t.Fatal("Recover accepted snapshot extensions are nil")
+	}
+	got.AcceptedSnapshot.Project.Extensions["com.wormhole.recovery-result-mutation"] = state.ExtensionV1{}
+	fresh := recoveryComposedStatus(t, service, scope)
+	if !reflect.DeepEqual(fresh, want) {
+		t.Fatalf("mutating Recover result changed durable status\nwant=%+v\nfresh=%+v", want, fresh)
+	}
+}
+
 func recoveryAssertCrossScopeRejected(
 	t *testing.T,
 	service *Service,
@@ -1088,10 +1112,48 @@ func recoveryAssertCrossScopeRejected(
 	}
 }
 
+func recoveryEnsureDriverArtifactEvidence(t *testing.T, service *Service, scope types.WorkspaceScope) {
+	t.Helper()
+	database := recoveryDatabaseState(t, service, scope)
+	if len(database.disposition.Journals) != 1 {
+		t.Fatalf("driver journal count=%d, want 1", len(database.disposition.Journals))
+	}
+	journal := database.disposition.Journals[0]
+	for _, evidence := range []struct {
+		path string
+		tree state.Tree
+	}{
+		{path: journal.StagePath, tree: journal.CandidateTree},
+		{path: journal.BackupPath, tree: journal.PriorTree},
+	} {
+		if _, err := os.Lstat(evidence.path); errors.Is(err, os.ErrNotExist) {
+			if err := os.Mkdir(evidence.path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		for _, file := range evidence.tree {
+			path := filepath.Join(evidence.path, filepath.FromSlash(file.Path))
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, file.Data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
 type checkpointRecoveryPathState struct {
-	live         state.Tree
-	stageExists  bool
-	backupExists bool
+	live    state.Tree
+	stages  map[string]checkpointRecoveryOptionalTree
+	backups map[string]checkpointRecoveryOptionalTree
+}
+
+type checkpointRecoveryOptionalTree struct {
+	exists bool
+	tree   state.Tree
 }
 
 func recoveryScopePaths(t *testing.T, database checkpointRecoveryDatabaseState) checkpointRecoveryPathState {
@@ -1100,18 +1162,50 @@ func recoveryScopePaths(t *testing.T, database checkpointRecoveryDatabaseState) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	result := checkpointRecoveryPathState{live: live}
+	result := checkpointRecoveryPathState{
+		live: live, stages: make(map[string]checkpointRecoveryOptionalTree),
+		backups: make(map[string]checkpointRecoveryOptionalTree),
+	}
+	capture := func(path string) checkpointRecoveryOptionalTree {
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			return checkpointRecoveryOptionalTree{}
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		return checkpointRecoveryOptionalTree{exists: true, tree: recoveryReadEvidenceTree(t, path)}
+	}
 	for _, journal := range database.disposition.Journals {
-		if _, err := os.Lstat(journal.StagePath); err == nil {
-			result.stageExists = true
-		} else if !errors.Is(err, os.ErrNotExist) {
-			t.Fatal(err)
+		result.stages[journal.StagePath] = capture(journal.StagePath)
+		result.backups[journal.BackupPath] = capture(journal.BackupPath)
+	}
+	return result
+}
+
+func recoveryReadEvidenceTree(t *testing.T, root string) state.Tree {
+	t.Helper()
+	result := state.Tree{}
+	if err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
-		if _, err := os.Lstat(journal.BackupPath); err == nil {
-			result.backupExists = true
-		} else if !errors.Is(err, os.ErrNotExist) {
-			t.Fatal(err)
+		if info.IsDir() {
+			return nil
 		}
+		if !info.Mode().IsRegular() {
+			return errors.New("recovery evidence contains a non-regular file")
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		result = append(result, state.File{Path: filepath.ToSlash(relative), Data: data})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 	return result
 }
