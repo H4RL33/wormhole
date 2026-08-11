@@ -283,6 +283,166 @@ func TestRecoverRestartConvergesEveryListedPublisherBoundary(t *testing.T) {
 	}
 }
 
+func TestRecoverRestartConvergesRecoveryBackupToLiveBoundaries(t *testing.T) {
+	boundaries := []struct {
+		name                      string
+		renamePrior               bool
+		interruptClassification   bool
+		fault                     checkpointArtifactFaultStage
+		wantFirstFsync            []string
+		wantRestartRenameAttempts int
+	}{
+		{name: "before applied rename", renamePrior: true, wantRestartRenameAttempts: 1},
+		{name: "after applied rename", interruptClassification: true},
+		{name: "before checkout destination fsync", fault: checkpointArtifactBeforeLiveParentFsync},
+		{name: "after checkout destination fsync", fault: checkpointArtifactAfterLiveParentFsync, wantFirstFsync: []string{"checkout"}},
+		{name: "before private source fsync", fault: checkpointArtifactBeforePrivateParentFsync, wantFirstFsync: []string{"checkout"}},
+		{name: "after private source fsync", fault: checkpointArtifactAfterPrivateParentFsync, wantFirstFsync: []string{"checkout", "private"}},
+	}
+	for _, source := range []string{"prior", "opaque"} {
+		for _, boundary := range boundaries {
+			t.Run(source+"/"+boundary.name, func(t *testing.T) {
+				fixture := newCheckpointRecoveryLinuxFixture(t, "prepared")
+				wantLive := fixture.journal.PriorTree
+				if source == "opaque" {
+					wantLive = checkpointRecoveryOpaqueTree()
+					checkpointFallbackReplaceTree(t, fixture.livePath(), wantLive, ".retained-prior")
+				}
+				if err := os.Rename(fixture.livePath(), fixture.journal.BackupPath); err != nil {
+					t.Fatal(err)
+				}
+				before := recoveryDatabaseState(t, fixture.service, fixture.request.Scope)
+				acceptedBefore := before.workspace.Binding
+				firstService := fixture.service
+				injected := errors.New("recovery restart boundary")
+
+				operations := normalizeCheckpointArtifactRenameOperations(defaultCheckpointArtifactPlatformOperations())
+				realRename, realFstatat, realFsync := operations.rename, operations.fstatat, operations.fsync
+				firstRenameAttempts := 0
+				renameApplied := false
+				operations.rename = func(fromFD int, from string, toFD int, to string, flags uint) error {
+					firstRenameAttempts++
+					if boundary.renamePrior {
+						return injected
+					}
+					if err := realRename(fromFD, from, toFD, to, flags); err != nil {
+						return err
+					}
+					renameApplied = true
+					if boundary.interruptClassification {
+						return injected
+					}
+					return nil
+				}
+				classificationInterrupted := false
+				operations.fstatat = func(fd int, name string, stat *unix.Stat_t, flags int) error {
+					if boundary.interruptClassification && renameApplied && !classificationInterrupted {
+						classificationInterrupted = true
+						return injected
+					}
+					return realFstatat(fd, name, stat, flags)
+				}
+				checkoutIdentity := checkpointRecoveryDirectoryIdentity(t, fixture.request.Root)
+				privateIdentity := checkpointRecoveryDirectoryIdentity(t, filepath.Dir(fixture.journal.StagePath))
+				var firstFsync []string
+				operations.fsync = func(fd int) error {
+					var stat unix.Stat_t
+					if err := unix.Fstat(fd, &stat); err != nil {
+						return err
+					}
+					switch [2]uint64{uint64(stat.Dev), stat.Ino} {
+					case checkoutIdentity:
+						firstFsync = append(firstFsync, "checkout")
+					case privateIdentity:
+						firstFsync = append(firstFsync, "private")
+					default:
+						t.Fatalf("first recovery fsync unexpected directory dev=%d ino=%d", stat.Dev, stat.Ino)
+					}
+					return realFsync(fd)
+				}
+				dependencies := checkpointArtifactDependencies{
+					readGit: readOnlyGitLimited,
+					fault: func(stage checkpointArtifactFaultStage) error {
+						if boundary.fault != 0 && stage == boundary.fault {
+							return injected
+						}
+						return nil
+					},
+					operations: operations,
+				}
+				fixture.service.recoverCheckpointFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+					return recoverCheckpointFilesystemWithDependencies(ctx, proof, dependencies)
+				}
+
+				got, err := fixture.service.Recover(context.Background(), fixture.request.Scope)
+				if !reflect.DeepEqual(got, WorkspaceStatus{}) || !errors.Is(err, injected) || firstRenameAttempts != 1 ||
+					!reflect.DeepEqual(firstFsync, boundary.wantFirstFsync) {
+					t.Fatalf("interrupted recovery=(%+v,%v), renames=%d fsync=%v", got, err, firstRenameAttempts, firstFsync)
+				}
+				if afterFirst := recoveryDatabaseState(t, fixture.service, fixture.request.Scope); !reflect.DeepEqual(afterFirst, before) {
+					t.Fatalf("interrupted recovery changed prepared database\nbefore=%+v\nafter=%+v", before, afterFirst)
+				}
+				if boundary.renamePrior {
+					checkpointFallbackAssertAbsent(t, fixture.livePath())
+					recoveryAssertTree(t, fixture.journal.BackupPath, wantLive)
+				} else {
+					recoveryAssertTree(t, fixture.livePath(), wantLive)
+					checkpointFallbackAssertAbsent(t, fixture.journal.BackupPath)
+				}
+				recoveryAssertTree(t, fixture.journal.StagePath, fixture.journal.CandidateTree)
+
+				checkpointRecoveryRestartService(t, fixture.checkpointCoordinatorFixture)
+				if fixture.service == firstService {
+					t.Fatal("recovery restart reused the interrupted service")
+				}
+				restartOperations := normalizeCheckpointArtifactRenameOperations(defaultCheckpointArtifactPlatformOperations())
+				restartRename, restartFsync := restartOperations.rename, restartOperations.fsync
+				restartRenameAttempts := 0
+				restartOperations.rename = func(fromFD int, from string, toFD int, to string, flags uint) error {
+					restartRenameAttempts++
+					return restartRename(fromFD, from, toFD, to, flags)
+				}
+				var restartFsyncOrder []string
+				restartOperations.fsync = func(fd int) error {
+					var stat unix.Stat_t
+					if err := unix.Fstat(fd, &stat); err != nil {
+						return err
+					}
+					switch [2]uint64{uint64(stat.Dev), stat.Ino} {
+					case checkoutIdentity:
+						restartFsyncOrder = append(restartFsyncOrder, "checkout")
+					case privateIdentity:
+						restartFsyncOrder = append(restartFsyncOrder, "private")
+					default:
+						t.Fatalf("restarted recovery fsync unexpected directory dev=%d ino=%d", stat.Dev, stat.Ino)
+					}
+					return restartFsync(fd)
+				}
+				fixture.service.recoverCheckpointFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+					return recoverCheckpointFilesystemWithDependencies(ctx, proof, checkpointArtifactDependencies{
+						readGit: readOnlyGitLimited, operations: restartOperations,
+					})
+				}
+
+				got, err = fixture.service.Recover(context.Background(), fixture.request.Scope)
+				if err != nil || restartRenameAttempts != boundary.wantRestartRenameAttempts ||
+					!reflect.DeepEqual(restartFsyncOrder, []string{"checkout", "private"}) {
+					t.Fatalf("restarted recovery=(%+v,%v), renames=%d fsync=%v", got, err, restartRenameAttempts, restartFsyncOrder)
+				}
+				after := recoveryDatabaseState(t, fixture.service, fixture.request.Scope)
+				recoveryAssertOldDatabase(t, before, after)
+				if after.workspace.Binding != acceptedBefore {
+					t.Fatalf("restarted recovery moved accepted binding\nbefore=%+v\nafter=%+v", acceptedBefore, after.workspace.Binding)
+				}
+				recoveryAssertTree(t, fixture.livePath(), wantLive)
+				recoveryAssertTree(t, fixture.journal.StagePath, fixture.journal.CandidateTree)
+				checkpointFallbackAssertAbsent(t, fixture.journal.BackupPath)
+				recoveryAssertReturnedStatus(t, fixture.service, fixture.request.Scope, got)
+			})
+		}
+	}
+}
+
 func TestRecoverFsyncFailureRetainsPreparedThenConvergesOnRetry(t *testing.T) {
 	for _, source := range []string{"prior", "opaque"} {
 		for _, failRole := range []string{"checkout", "private"} {
@@ -864,36 +1024,98 @@ func checkpointRecoveryAssertPreparedDatabase(t *testing.T, database checkpointR
 func checkpointRecoveryAssertCheckpointOutcomeDatabase(
 	t *testing.T,
 	before, after checkpointRecoveryDatabaseState,
+	expectedPrepared localstore.WorkspaceMaterializationRecord,
 	wantState string,
 ) {
 	t.Helper()
 	if len(after.disposition.Journals) != 1 {
 		t.Fatalf("checkpoint outcome journals=%d, want 1", len(after.disposition.Journals))
 	}
+	journal := after.disposition.Journals[0]
+	if journal.State != wantState || !recoveryJournalEqualExceptState(expectedPrepared, journal) {
+		t.Fatalf("checkpoint journal differs from frozen prepared input\nexpected=%+v\nafter=%+v", expectedPrepared, journal)
+	}
 	prepared := before
-	journal := cloneMaterializationRecord(after.disposition.Journals[0])
-	journal.State = "prepared"
-	prepared.disposition.Journals = []localstore.WorkspaceMaterializationRecord{journal}
+	prepared.disposition = cloneImportDisposition(before.disposition)
+	prepared.disposition.Journals = []localstore.WorkspaceMaterializationRecord{cloneMaterializationRecord(expectedPrepared)}
 	switch wantState {
 	case "prepared":
-		if after.disposition.Journals[0].State != "prepared" ||
-			!reflect.DeepEqual(after.workspace, before.workspace) ||
+		if !reflect.DeepEqual(after.workspace, before.workspace) ||
 			!reflect.DeepEqual(after.candidate, before.candidate) ||
 			!reflect.DeepEqual(after.disposition.Operations, before.disposition.Operations) {
 			t.Fatalf("prepared checkpoint database mismatch\nbefore=%+v\nafter=%+v", before, after)
 		}
 	case "published":
-		if after.disposition.Journals[0].State != "published" {
-			t.Fatalf("checkpoint journal state=%q, want published", after.disposition.Journals[0].State)
-		}
 		normalized := after
 		normalized.disposition = cloneImportDisposition(after.disposition)
 		normalized.disposition.Journals[0].State = "recovered_new"
 		recoveryAssertNewDatabase(t, prepared, normalized, true)
+		expectedOperations := make([]localstore.WorkspaceOperation, len(before.disposition.Operations))
+		for index, operation := range before.disposition.Operations {
+			expectedOperations[index] = cloneImportOperation(operation)
+			if operation.Generation <= expectedPrepared.ThroughGeneration {
+				expectedOperations[index].State = "materialized"
+			}
+		}
+		if !reflect.DeepEqual(after.disposition.Operations, expectedOperations) {
+			t.Fatalf("published checkpoint operations differ from frozen input\nexpected=%+v\nafter=%+v", expectedOperations, after.disposition.Operations)
+		}
 	case "recovered_old":
 		recoveryAssertOldDatabase(t, prepared, after)
 	default:
 		t.Fatalf("unknown checkpoint outcome state %q", wantState)
+	}
+}
+
+func checkpointRecoveryCapturePreparedJournal(
+	t *testing.T,
+	fixture *checkpointCoordinatorFixture,
+	expected *localstore.WorkspaceMaterializationRecord,
+) {
+	t.Helper()
+	realWithImmediate := fixture.service.withImmediateWorkspace
+	transactions := 0
+	fixture.service.withImmediateWorkspace = func(
+		ctx context.Context,
+		scope types.WorkspaceScope,
+		fn func(*localstore.WorkspaceMutationTx) error,
+	) error {
+		transactions++
+		transaction := transactions
+		return realWithImmediate(ctx, scope, func(tx *localstore.WorkspaceMutationTx) error {
+			if err := fn(tx); err != nil {
+				return err
+			}
+			if transaction != 1 {
+				return nil
+			}
+			disposition, err := tx.MaterializationDisposition(ctx)
+			if err != nil {
+				return err
+			}
+			if len(disposition.Journals) != 1 || disposition.Journals[0].State != "prepared" {
+				return errors.New("publisher expectation did not capture one prepared journal")
+			}
+			*expected = cloneMaterializationRecord(disposition.Journals[0])
+			return nil
+		})
+	}
+}
+
+func checkpointRecoveryAssertPreparedArtifactInput(
+	t *testing.T,
+	prepared localstore.WorkspaceMaterializationRecord,
+	input checkpointArtifactInput,
+	evidence checkpointArtifactEvidence,
+) {
+	t.Helper()
+	if prepared.State != "prepared" || prepared.JournalID != evidence.JournalID ||
+		prepared.StagePath != evidence.StagePath || prepared.BackupPath != evidence.BackupPath ||
+		prepared.Checkout != input.Checkout || prepared.ExpectedLiveDigest != input.PriorTreeDigest ||
+		prepared.PriorTreeDigest != input.PriorTreeDigest || prepared.CandidateDigest != input.CandidateDigest ||
+		!sameCheckpointArtifactTree(prepared.PriorTree, input.PriorTree) ||
+		!sameCheckpointArtifactTree(prepared.CandidateTree, input.CandidateTree) {
+		t.Fatalf("frozen prepared journal differs from pre-publication artifact input\nprepared=%+v\ninput=%+v\nevidence=%+v", prepared, input, evidence)
 	}
 }
 
@@ -990,6 +1212,10 @@ func checkpointRecoveryExercisePublisherRenameResult(t *testing.T, role, outcome
 	fixture, request := newCheckpointRecoveryPublisherFixture(t)
 	before := recoveryDatabaseState(t, fixture.service, request.Scope)
 	acceptedBefore := before.workspace.Binding
+	var expectedPrepared localstore.WorkspaceMaterializationRecord
+	checkpointRecoveryCapturePreparedJournal(t, fixture, &expectedPrepared)
+	var expectedInput checkpointArtifactInput
+	var expectedEvidence checkpointArtifactEvidence
 	opaque := checkpointRecoveryOpaqueTree()
 	thirdLive := state.Tree{{Path: "third-live.txt", Data: []byte("third publisher live topology\n")}}
 	thirdBackup := state.Tree{{Path: "third-backup.txt", Data: []byte("third publisher backup topology\n")}}
@@ -998,6 +1224,12 @@ func checkpointRecoveryExercisePublisherRenameResult(t *testing.T, role, outcome
 	checkpointRecoveryUseRealPublisher(t, fixture, func(artifact *checkpointArtifact) {
 		thirdBackup = checkpointFallbackOpaqueTree(artifact.proof.prior.tree, "third publisher backup")
 		evidence := artifact.evidence()
+		expectedEvidence = evidence
+		expectedInput = checkpointArtifactInput{
+			Checkout:  artifact.checkoutIdentity,
+			PriorTree: cloneCheckpointTree(artifact.proof.prior.tree), PriorTreeDigest: artifact.proof.prior.digest,
+			CandidateTree: cloneCheckpointTree(artifact.proof.candidate.tree), CandidateDigest: artifact.proof.candidate.digest,
+		}
 		stageName, backupName := filepath.Base(evidence.StagePath), filepath.Base(evidence.BackupPath)
 		if role == "publisher compensation" {
 			opaque = checkpointFallbackOpaqueTree(artifact.proof.prior.tree, "rename compensation")
@@ -1053,6 +1285,7 @@ func checkpointRecoveryExercisePublisherRenameResult(t *testing.T, role, outcome
 
 	got, err := fixture.service.Checkpoint(context.Background(), request)
 	after := recoveryDatabaseState(t, fixture.service, request.Scope)
+	checkpointRecoveryAssertPreparedArtifactInput(t, expectedPrepared, expectedInput, expectedEvidence)
 	if targetAttempts != 1 || after.workspace.Binding != acceptedBefore {
 		t.Fatalf("publisher target attempts=%d or accepted binding moved to %+v", targetAttempts, after.workspace.Binding)
 	}
@@ -1063,7 +1296,7 @@ func checkpointRecoveryExercisePublisherRenameResult(t *testing.T, role, outcome
 		if got != (CheckpointResult{}) || !errors.Is(err, injected) || errors.Is(err, ErrCheckpointRecoveryBlocked) {
 			t.Fatalf("publisher rename prior=(%+v,%v)", got, err)
 		}
-		checkpointRecoveryAssertCheckpointOutcomeDatabase(t, before, after, "prepared")
+		checkpointRecoveryAssertCheckpointOutcomeDatabase(t, before, after, expectedPrepared, "prepared")
 		switch role {
 		case "publisher live to backup":
 			recoveryAssertTree(t, livePath, journal.PriorTree)
@@ -1081,7 +1314,7 @@ func checkpointRecoveryExercisePublisherRenameResult(t *testing.T, role, outcome
 			if got != (CheckpointResult{}) || !errors.Is(err, ErrCheckpointCAS) {
 				t.Fatalf("publisher compensation next=(%+v,%v)", got, err)
 			}
-			checkpointRecoveryAssertCheckpointOutcomeDatabase(t, before, after, "recovered_old")
+			checkpointRecoveryAssertCheckpointOutcomeDatabase(t, before, after, expectedPrepared, "recovered_old")
 			recoveryAssertTree(t, livePath, opaque)
 			recoveryAssertTree(t, journal.StagePath, journal.CandidateTree)
 			checkpointFallbackAssertAbsent(t, journal.BackupPath)
@@ -1089,7 +1322,7 @@ func checkpointRecoveryExercisePublisherRenameResult(t *testing.T, role, outcome
 			if err != nil || got.JournalID == "" {
 				t.Fatalf("publisher rename next=(%+v,%v)", got, err)
 			}
-			checkpointRecoveryAssertCheckpointOutcomeDatabase(t, before, after, "published")
+			checkpointRecoveryAssertCheckpointOutcomeDatabase(t, before, after, expectedPrepared, "published")
 			recoveryAssertTree(t, livePath, journal.CandidateTree)
 			checkpointFallbackAssertAbsent(t, journal.StagePath)
 			recoveryAssertTree(t, journal.BackupPath, journal.PriorTree)
@@ -1098,7 +1331,7 @@ func checkpointRecoveryExercisePublisherRenameResult(t *testing.T, role, outcome
 		if got != (CheckpointResult{}) || !errors.Is(err, ErrCheckpointRecoveryBlocked) || !errors.Is(err, injected) {
 			t.Fatalf("publisher rename third=(%+v,%v)", got, err)
 		}
-		checkpointRecoveryAssertCheckpointOutcomeDatabase(t, before, after, "prepared")
+		checkpointRecoveryAssertCheckpointOutcomeDatabase(t, before, after, expectedPrepared, "prepared")
 		switch role {
 		case "publisher live to backup":
 			recoveryAssertTree(t, livePath, thirdLive)
