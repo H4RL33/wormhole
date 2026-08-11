@@ -1027,3 +1027,21 @@ the corrected two-file slice with no Critical, Important, or Minor findings. The
 tests, all Checkpoint tests normal/race, full ProjectState, targeted localstore confirmation,
 vet, formatting, scope, and diff checks passed. Timings are not performance evidence. Task
 504 recovery-disposition proof and no-work status composition is next.
+
+Task-5 Task 504 recovery proof and database-only no-work composition
+`426e04f..6c14648`: complete. Recovery now strictly owns the one prepared/published driver,
+its exact candidate pre/postimage and recorded operation envelope, terminal sibling history,
+and a single stable position→committed-tree→origin→position Git observation. Empty and
+terminal histories compose status entirely from SQLite; the existing status path retains
+checkout validation. The private planner propagates complete observations only on success
+and returns exact zero on every error, without adding `Service.Recover`, filesystem mutation,
+schema/localstore API, dependency, or platform behavior.
+
+Three adversarial test-strength rounds causally covered every candidate equality group,
+initial checkout replacement before later readers, durable no-work variants, populated
+prepared/published observations, nil candidate preimages, mixed rebased/active operation
+envelopes, and both permitted Git positions for prepared and published drivers. Focused,
+full ProjectState, targeted race, vet, formatting, scope, and diff gates passed sequentially;
+timings are retained only as command output and are not performance evidence. Final spec,
+discipline, and proof reviews approved the complete four-commit slice with no Critical,
+Important, or Minor findings. Task 505 Linux recovery and exact database convergence is next.
