@@ -1067,3 +1067,24 @@ output and are not performance evidence. Final spec, filesystem/security, and te
 reviews approved the complete three-commit slice with no Critical, Important, or Minor
 findings. Task 506 owns the deliberately deferred rename/fsync/restart/unknown-COMMIT failure
 boundaries and is next.
+
+Task-5 Task 506 failure-boundary verification `6098a80..ab4fd44`: complete. The checkpoint
+path now transition-specifically classifies the prepared-journal unknown-COMMIT result,
+and Linux recovery classifies backup-to-live no-replace rename errors as exact prior, exact
+next, or blocked third evidence without replay. Exhaustive tests freeze all four publisher
+and recovery rename roles, prepared/final/recovery COMMIT uncertainty, retained P/X bytes,
+ordered parent-fsync retry, accepted-binding immutability, and fresh-service convergence at
+every publisher and recovery compensation boundary.
+
+The first test-strength review found two Important proof gaps: a publisher journal oracle
+derived from its observed postimage and missing cross-service recovery backup-to-live
+restart rows. The test-only correction freezes the prepared record before publication,
+cross-checks it against artifact input/evidence, and adds twelve P/X restart cases spanning
+rename prior/applied and before/after both ordered fsyncs. A recorded controller waiver
+declines to fabricate RED failures for behavior already delivered by Tasks 502/503/505;
+Task 506 retains causal RED evidence for its two genuine runtime gaps. Sequential focused,
+package, targeted-race, vet, diff, and exact-final-tree `make check` gates passed; merged
+statement coverage is 85.6%, above the accepted 80% floor. Raw timings are not interpreted
+as performance evidence. Final spec/semantics, filesystem/durability/security, and
+test/discipline rereviews approved the complete range with no Critical, Important, or Minor
+findings. Task 507 combined 5F/5G verification and Stage-1A handoff is next.
