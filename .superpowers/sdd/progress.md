@@ -938,3 +938,31 @@ formatting/diff checks, and `go test ./... -count=1` (Gateway 103.017s; ProjectS
 49.869s). New-file statement coverage is 92.1% (268/291), above the accepted 80% floor.
 Task 5F2 now owns `Service.Checkpoint`; Task 5G remains the sole owner of recovery and
 filesystem-topology convergence.
+
+Task 5F2 checkpoint service orchestration `b8e3783`: complete. `Service.Checkpoint` now
+serializes per workspace, performs both trusted outside/inside Git and origin observations,
+strict-proves the complete material plan and terminal disposition before any sticky policy
+mutation, stages one durable artifact, commits one exact prepared journal, then repeats and
+byte-matches every publication precondition under a second immediate transaction held
+through filesystem publication and database finalization. Public review acknowledgement,
+local/private parity, open-conflict gates, exact zero results, owned artifact cleanup, and
+transition-relative unknown-COMMIT confirmation are enforced without advancing the accepted
+Git binding.
+
+Review-driven causal REDs fixed material-plan validation precedence, complete phase-to-phase
+terminal and ignored-operation drift, malformed terminal proof hidden beside a pending
+journal, exact accepted-ref/commit proof binding, handle-plus-error cleanup, and recovered-old
+legacy operation evidence that must remain unowned and uninterpreted. Publisher and late
+finalization failures roll back every tentative candidate, operation, and workspace write;
+real-artifact integration proves live bytes, private topology, durable journal evidence, and
+accepted-binding preservation. Two independent final reviews approved the corrected slice
+with no remaining findings. Fresh controller gates passed focused tests (33.347s), full
+ProjectState/localstore packages, vet, formatting/diff checks, and `go test ./... -count=1`
+(Gateway 93.209s; ProjectState 58.709s). `checkpoint.go` statement coverage is 82.83%
+(439/530), above the accepted 80% floor.
+
+A separate adversarial audit exposed a post-CAS/pre-rename filesystem window in the earlier
+Task 5E publisher that can displace a concurrent direct `.wormhole` edit. Task 5F therefore
+retains one bounded corrective tranche: a durable Git-private publication receipt plus
+lossless synchronous/restart compensation. That correction is required before Task 5G
+freezes recovery topology; arbitrary unproved unknown evidence remains blocked.
