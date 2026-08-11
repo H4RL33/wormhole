@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux
 
 package projectstate
 
@@ -18,24 +18,13 @@ import (
 
 func TestCheckpointFallbackPublishesDurably(t *testing.T) {
 	input := checkpointArtifactCandidateWithNestedFile(t)
-	operations := normalizeCheckpointArtifactRenameOperations(defaultCheckpointArtifactPlatformOperations())
-	realRename := operations.rename
-	operations.rename = func(fromFD int, from string, toFD int, to string, flags uint) error {
-		if flags == 2 { // RENAME_EXCHANGE on Linux and RENAME_SWAP on Darwin.
-			return unix.EOPNOTSUPP
-		}
-		return realRename(fromFD, from, toFD, to, flags)
-	}
 	artifact, err := prepareCheckpointArtifactWithDependencies(context.Background(), input, checkpointArtifactDependencies{
-		readGit: readOnlyGitLimited, operations: operations,
+		readGit: readOnlyGitLimited,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer artifact.close()
-	if artifact.strategy != checkpointPublicationFallback {
-		t.Fatalf("strategy = %v, want fallback", artifact.strategy)
-	}
 	if err := publishPreparedCheckpointArtifact(context.Background(), artifact); err != nil {
 		t.Fatalf("publish durable fallback: %v", err)
 	}
@@ -243,322 +232,104 @@ func TestCheckpointArtifactFinalBoundaryRejectsHookDriftBeforeFirstRename(t *tes
 }
 
 func TestCheckpointArtifactFinalBoundaryRejectsHookDriftBeforeSecondRename(t *testing.T) {
-	for _, strategy := range []checkpointPublicationStrategy{checkpointPublicationExchange, checkpointPublicationFallback} {
-		drifts := []string{"stage", "Git indirection", "private root mode"}
-		if strategy == checkpointPublicationFallback {
-			drifts = append(drifts, "candidate mode", "candidate root churn", "private root churn", "checkout root churn")
-		}
-		for _, drift := range drifts {
-			t.Run(fmt.Sprintf("%d/%s", strategy, drift), func(t *testing.T) {
-				input := checkpointArtifactCandidateWithNestedFile(t)
-				operations := normalizeCheckpointArtifactRenameOperations(defaultCheckpointArtifactPlatformOperations())
-				realRename := operations.rename
-				if strategy == checkpointPublicationFallback {
-					operations.rename = func(fromFD int, from string, toFD int, to string, flags uint) error {
-						if flags == checkpointExchangeRenameFlag() {
-							return unix.EOPNOTSUPP
-						}
-						return realRename(fromFD, from, toFD, to, flags)
-					}
-				}
-				artifact, err := prepareCheckpointArtifactWithDependencies(context.Background(), input, checkpointArtifactDependencies{readGit: readOnlyGitLimited, operations: operations})
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer artifact.close()
-				mutated := false
-				artifact.dependencies.fault = func(stage checkpointArtifactFaultStage) error {
-					if mutated || stage != checkpointArtifactBeforeSecondLiveMutation {
-						return nil
-					}
-					mutated = true
-					switch drift {
-					case "stage":
-						return os.WriteFile(filepath.Join(artifact.evidenceValue.StagePath, "config.toml"), []byte("changed\n"), 0o600)
-					case "Git indirection":
-						artifact.dependencies.readGit = func(context.Context, string, int, ...string) ([]byte, error) {
-							return []byte("/tmp/changed-checkpoint-git-dir\n"), nil
-						}
-					case "private root mode":
-						return os.Chmod(filepath.Dir(artifact.evidenceValue.StagePath), 0o755)
-					case "candidate mode":
-						return os.Chmod(filepath.Join(artifact.evidenceValue.StagePath, "config.toml"), 0o644)
-					case "candidate root churn":
-						marker := filepath.Join(artifact.evidenceValue.StagePath, ".checkpoint-churn")
-						if err := os.WriteFile(marker, []byte("churn"), 0o600); err != nil {
-							return err
-						}
-						return os.Remove(marker)
-					case "private root churn":
-						marker := filepath.Join(filepath.Dir(artifact.evidenceValue.StagePath), ".checkpoint-private-churn")
-						if err := os.WriteFile(marker, []byte("churn"), 0o600); err != nil {
-							return err
-						}
-						return os.Remove(marker)
-					case "checkout root churn":
-						marker := filepath.Join(input.Checkout.CanonicalPath, ".checkpoint-checkout-churn")
-						if err := os.WriteFile(marker, []byte("churn"), 0o600); err != nil {
-							return err
-						}
-						return os.Remove(marker)
-					}
+	for _, drift := range []string{"stage", "Git indirection", "private root mode", "candidate mode", "candidate root churn", "private root churn", "checkout root churn"} {
+		t.Run(drift, func(t *testing.T) {
+			input := checkpointArtifactCandidateWithNestedFile(t)
+			artifact := prepareCheckpointFallbackArtifact(t, input)
+			defer artifact.close()
+			realRename := artifact.dependencies.operations.rename
+			mutated := false
+			artifact.dependencies.fault = func(stage checkpointArtifactFaultStage) error {
+				if mutated || stage != checkpointArtifactBeforeSecondLiveMutation {
 					return nil
 				}
-				renameCalls := 0
-				artifact.dependencies.operations.rename = func(fromFD int, from string, toFD int, to string, flags uint) error {
-					renameCalls++
-					return realRename(fromFD, from, toFD, to, flags)
+				mutated = true
+				switch drift {
+				case "stage":
+					return os.WriteFile(filepath.Join(artifact.evidenceValue.StagePath, "config.toml"), []byte("changed\n"), 0o600)
+				case "Git indirection":
+					artifact.dependencies.readGit = func(context.Context, string, int, ...string) ([]byte, error) {
+						return []byte("/tmp/changed-checkpoint-git-dir\n"), nil
+					}
+				case "private root mode":
+					return os.Chmod(filepath.Dir(artifact.evidenceValue.StagePath), 0o755)
+				case "candidate mode":
+					return os.Chmod(filepath.Join(artifact.evidenceValue.StagePath, "config.toml"), 0o644)
+				case "candidate root churn":
+					marker := filepath.Join(artifact.evidenceValue.StagePath, ".checkpoint-churn")
+					if err := os.WriteFile(marker, []byte("churn"), 0o600); err != nil {
+						return err
+					}
+					return os.Remove(marker)
+				case "private root churn":
+					marker := filepath.Join(filepath.Dir(artifact.evidenceValue.StagePath), ".checkpoint-private-churn")
+					if err := os.WriteFile(marker, []byte("churn"), 0o600); err != nil {
+						return err
+					}
+					return os.Remove(marker)
+				case "checkout root churn":
+					marker := filepath.Join(input.Checkout.CanonicalPath, ".checkpoint-checkout-churn")
+					if err := os.WriteFile(marker, []byte("churn"), 0o600); err != nil {
+						return err
+					}
+					return os.Remove(marker)
 				}
-				if err := publishPreparedCheckpointArtifact(context.Background(), artifact); err == nil {
-					t.Fatal("second-boundary drift publication succeeded")
-				}
-				if !mutated || renameCalls != 1 {
-					t.Fatalf("second-boundary drift = mutated %t rename calls %d, want true/1", mutated, renameCalls)
-				}
-			})
-		}
+				return nil
+			}
+			renameCalls := 0
+			artifact.dependencies.operations.rename = func(fromFD int, from string, toFD int, to string, flags uint) error {
+				renameCalls++
+				return realRename(fromFD, from, toFD, to, flags)
+			}
+			if err := publishPreparedCheckpointArtifact(context.Background(), artifact); err == nil {
+				t.Fatal("second-boundary drift publication succeeded")
+			}
+			if !mutated || renameCalls != 1 {
+				t.Fatalf("second-boundary drift = mutated %t renames %d, want true/1", mutated, renameCalls)
+			}
+		})
 	}
 }
 
 func TestCheckpointArtifactPublicationExactOrdering(t *testing.T) {
-	for _, strategy := range []checkpointPublicationStrategy{checkpointPublicationExchange, checkpointPublicationFallback} {
-		t.Run(fmt.Sprint(strategy), func(t *testing.T) {
-			input := checkpointArtifactCandidateWithNestedFile(t)
-			operations := normalizeCheckpointArtifactRenameOperations(defaultCheckpointArtifactPlatformOperations())
-			realRename, realFsync := operations.rename, operations.fsync
-			if strategy == checkpointPublicationFallback {
-				operations.rename = func(fromFD int, from string, toFD int, to string, flags uint) error {
-					if flags == checkpointExchangeRenameFlag() {
-						return unix.EOPNOTSUPP
-					}
-					return realRename(fromFD, from, toFD, to, flags)
-				}
-			}
-			artifact, err := prepareCheckpointArtifactWithDependencies(context.Background(), input, checkpointArtifactDependencies{readGit: readOnlyGitLimited, operations: operations})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer artifact.close()
-			terminalFD, privateFD := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1].fd, artifact.private.fd
-			var calls []string
-			artifact.dependencies.operations.rename = func(fromFD int, from string, toFD int, to string, flags uint) error {
-				calls = append(calls, fmt.Sprintf("rename:%s:%s:%d", from, to, flags))
-				return realRename(fromFD, from, toFD, to, flags)
-			}
-			artifact.dependencies.operations.fsync = func(fd int) error {
-				switch fd {
-				case terminalFD:
-					calls = append(calls, "fsync:live-parent")
-				case privateFD:
-					calls = append(calls, "fsync:private-parent")
-				default:
-					calls = append(calls, fmt.Sprintf("fsync:%d", fd))
-				}
-				return realFsync(fd)
-			}
-			if err := publishPreparedCheckpointArtifact(context.Background(), artifact); err != nil {
-				t.Fatal(err)
-			}
-			stageName, backupName := filepath.Base(artifact.evidence().StagePath), filepath.Base(artifact.evidence().BackupPath)
-			want := []string{"fsync:live-parent", "fsync:private-parent"}
-			if strategy == checkpointPublicationExchange {
-				want = append(want,
-					fmt.Sprintf("rename:.wormhole:%s:%d", stageName, checkpointExchangeRenameFlag()),
-					fmt.Sprintf("rename:%s:%s:%d", stageName, backupName, checkpointNoReplaceRenameFlag()),
-					"fsync:live-parent", "fsync:private-parent")
-			} else {
-				want = append(want,
-					fmt.Sprintf("rename:.wormhole:%s:%d", backupName, checkpointNoReplaceRenameFlag()),
-					"fsync:live-parent", "fsync:private-parent",
-					fmt.Sprintf("rename:%s:.wormhole:%d", stageName, checkpointNoReplaceRenameFlag()),
-					"fsync:live-parent", "fsync:private-parent")
-			}
-			if !reflect.DeepEqual(calls, want) {
-				t.Fatalf("publication calls = %v, want %v", calls, want)
-			}
-		})
-	}
-}
-
-func TestCheckpointExchangeNeverFallsBackAfterLiveCall(t *testing.T) {
-	for _, afterMutation := range []bool{false, true} {
-		t.Run(fmt.Sprintf("after-mutation-%t", afterMutation), func(t *testing.T) {
-			input := checkpointArtifactCandidateWithNestedFile(t)
-			artifact, err := prepareCheckpointArtifact(context.Background(), input)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer artifact.close()
-			if artifact.strategy != checkpointPublicationExchange {
-				t.Skip("host filesystem selected durable fallback")
-			}
-			realRename := artifact.dependencies.operations.rename
-			var calls []uint
-			artifact.dependencies.operations.rename = func(fromFD int, from string, toFD int, to string, flags uint) error {
-				calls = append(calls, flags)
-				if afterMutation {
-					if err := realRename(fromFD, from, toFD, to, flags); err != nil {
-						return err
-					}
-				}
-				return unix.EIO
-			}
-			if err := publishPreparedCheckpointArtifact(context.Background(), artifact); err == nil {
-				t.Fatal("ambiguous live exchange error succeeded")
-			}
-			if !reflect.DeepEqual(calls, []uint{checkpointExchangeRenameFlag()}) {
-				t.Fatalf("live exchange error calls = %v, want exchange only", calls)
-			}
-			if afterMutation {
-				assertCheckpointExchangedTopology(t, input, artifact.evidence())
-			} else {
-				assertCheckpointPreparedTopology(t, input, artifact.evidence())
-			}
-		})
-	}
-}
-
-func TestCheckpointExchangePostSwapProofRejectsCandidateShapeMutation(t *testing.T) {
 	input := checkpointArtifactCandidateWithNestedFile(t)
-	artifact, err := prepareCheckpointArtifact(context.Background(), input)
+	operations := normalizeCheckpointArtifactRenameOperations(defaultCheckpointArtifactPlatformOperations())
+	realRename, realFsync := operations.rename, operations.fsync
+	artifact, err := prepareCheckpointArtifactWithDependencies(context.Background(), input, checkpointArtifactDependencies{readGit: readOnlyGitLimited, operations: operations})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer artifact.close()
-	if artifact.strategy != checkpointPublicationExchange {
-		t.Skip("host filesystem selected durable fallback")
-	}
-	realRename := artifact.dependencies.operations.rename
-	renameCalls := 0
+	terminalFD, privateFD := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1].fd, artifact.private.fd
+	var calls []string
 	artifact.dependencies.operations.rename = func(fromFD int, from string, toFD int, to string, flags uint) error {
-		renameCalls++
-		if err := realRename(fromFD, from, toFD, to, flags); err != nil {
-			return err
+		calls = append(calls, fmt.Sprintf("rename:%s:%s:%d", from, to, flags))
+		return realRename(fromFD, from, toFD, to, flags)
+	}
+	artifact.dependencies.operations.fsync = func(fd int) error {
+		switch fd {
+		case terminalFD:
+			calls = append(calls, "fsync:live-parent")
+		case privateFD:
+			calls = append(calls, "fsync:private-parent")
+		default:
+			calls = append(calls, fmt.Sprintf("fsync:%d", fd))
 		}
-		if renameCalls == 1 {
-			live := filepath.Join(input.Checkout.CanonicalPath, ".wormhole", "unexpected-empty")
-			return os.Mkdir(live, 0o700)
-		}
-		return nil
+		return realFsync(fd)
 	}
-	if err := publishPreparedCheckpointArtifact(context.Background(), artifact); err == nil {
-		t.Fatal("post-swap candidate shape mutation published")
+	if err := publishPreparedCheckpointArtifact(context.Background(), artifact); err != nil {
+		t.Fatal(err)
 	}
-	if renameCalls != 1 {
-		t.Fatalf("post-swap candidate shape rename calls = %d, want 1", renameCalls)
+	stageName, backupName := filepath.Base(artifact.evidence().StagePath), filepath.Base(artifact.evidence().BackupPath)
+	want := []string{
+		"fsync:live-parent", "fsync:private-parent",
+		fmt.Sprintf("rename:.wormhole:%s:%d", backupName, checkpointNoReplaceRenameFlag()),
+		"fsync:live-parent", "fsync:private-parent",
+		fmt.Sprintf("rename:%s:.wormhole:%d", stageName, checkpointNoReplaceRenameFlag()),
+		"fsync:live-parent", "fsync:private-parent",
 	}
-	if _, err := os.Lstat(filepath.Join(input.Checkout.CanonicalPath, ".wormhole", "unexpected-empty")); err != nil {
-		t.Fatalf("post-swap candidate residue missing: %v", err)
-	}
-	assertCheckpointPathTree(t, artifact.evidence().StagePath, input.PriorTree)
-	if _, err := os.Lstat(artifact.evidence().BackupPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("post-swap shape fault created backup: %v", err)
-	}
-}
-
-func TestCheckpointExchangeFaultTopologyMatrix(t *testing.T) {
-	for _, stage := range []checkpointArtifactFaultStage{
-		checkpointArtifactAfterLiveMutation,
-		checkpointArtifactBeforeSecondLiveMutation,
-		checkpointArtifactAfterSecondLiveMutation,
-		checkpointArtifactBeforeLiveParentFsync,
-		checkpointArtifactAfterLiveParentFsync,
-		checkpointArtifactBeforePrivateParentFsync,
-		checkpointArtifactAfterPrivateParentFsync,
-	} {
-		t.Run(fmt.Sprint(stage), func(t *testing.T) {
-			input := checkpointArtifactCandidateWithNestedFile(t)
-			artifact, err := prepareCheckpointArtifact(context.Background(), input)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer artifact.close()
-			if artifact.strategy != checkpointPublicationExchange {
-				t.Skip("host filesystem selected durable fallback")
-			}
-			injected := errors.New("exchange publication fault")
-			triggered := false
-			artifact.dependencies.fault = func(got checkpointArtifactFaultStage) error {
-				if !triggered && got == stage {
-					triggered = true
-					return injected
-				}
-				return nil
-			}
-			if err := publishPreparedCheckpointArtifact(context.Background(), artifact); !errors.Is(err, injected) || !triggered {
-				t.Fatalf("exchange fault = (%v, triggered %t)", err, triggered)
-			}
-			switch stage {
-			case checkpointArtifactAfterLiveMutation, checkpointArtifactBeforeSecondLiveMutation:
-				assertCheckpointExchangedTopology(t, input, artifact.evidence())
-			default:
-				assertCheckpointPublishedTopology(t, input, artifact.evidence())
-			}
-		})
-	}
-}
-
-func TestCheckpointExchangeSyscallFaultTopologyMatrix(t *testing.T) {
-	tests := []struct {
-		name       string
-		renameCall int
-		fsyncRole  string
-		mutate     bool
-		topology   checkpointArtifactTopology
-	}{
-		{name: "exchange unchanged error", renameCall: 1},
-		{name: "exchange mutated error", renameCall: 1, mutate: true, topology: checkpointTopologyExchanged},
-		{name: "backup rename unchanged error", renameCall: 2, topology: checkpointTopologyExchanged},
-		{name: "backup rename mutated error", renameCall: 2, mutate: true, topology: checkpointTopologyPublished},
-		{name: "live parent fsync error", fsyncRole: "live", topology: checkpointTopologyPublished},
-		{name: "private parent fsync error", fsyncRole: "private", topology: checkpointTopologyPublished},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			input := checkpointArtifactCandidateWithNestedFile(t)
-			artifact, err := prepareCheckpointArtifact(context.Background(), input)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer artifact.close()
-			if artifact.strategy != checkpointPublicationExchange {
-				t.Skip("host filesystem selected durable fallback")
-			}
-			terminalFD, privateFD := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1].fd, artifact.private.fd
-			realRename, realFsync := artifact.dependencies.operations.rename, artifact.dependencies.operations.fsync
-			renameCalls := 0
-			artifact.dependencies.operations.rename = func(fromFD int, from string, toFD int, to string, flags uint) error {
-				renameCalls++
-				if renameCalls == test.renameCall {
-					if test.mutate {
-						if err := realRename(fromFD, from, toFD, to, flags); err != nil {
-							return err
-						}
-					}
-					return unix.EIO
-				}
-				return realRename(fromFD, from, toFD, to, flags)
-			}
-			fsyncCounts := map[int]int{}
-			artifact.dependencies.operations.fsync = func(fd int) error {
-				fsyncCounts[fd]++
-				if fsyncCounts[fd] == 2 && ((test.fsyncRole == "live" && fd == terminalFD) || (test.fsyncRole == "private" && fd == privateFD)) {
-					return unix.EIO
-				}
-				return realFsync(fd)
-			}
-			if err := publishPreparedCheckpointArtifact(context.Background(), artifact); err == nil {
-				t.Fatal("exchange syscall fault succeeded")
-			}
-			switch test.topology {
-			case 0:
-				assertCheckpointPreparedTopology(t, input, artifact.evidence())
-			case checkpointTopologyExchanged:
-				assertCheckpointExchangedTopology(t, input, artifact.evidence())
-			case checkpointTopologyPublished:
-				assertCheckpointPublishedTopology(t, input, artifact.evidence())
-			}
-		})
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("publication calls = %v, want %v", calls, want)
 	}
 }
 
@@ -713,32 +484,11 @@ func TestCheckpointArtifactCloseSerializesWithPublicationAndIsIdempotent(t *test
 
 func prepareCheckpointFallbackArtifact(t *testing.T, input checkpointArtifactInput) *checkpointArtifact {
 	t.Helper()
-	operations := normalizeCheckpointArtifactRenameOperations(defaultCheckpointArtifactPlatformOperations())
-	realRename := operations.rename
-	operations.rename = func(fromFD int, from string, toFD int, to string, flags uint) error {
-		if flags == checkpointExchangeRenameFlag() {
-			return unix.EOPNOTSUPP
-		}
-		return realRename(fromFD, from, toFD, to, flags)
-	}
-	artifact, err := prepareCheckpointArtifactWithDependencies(context.Background(), input, checkpointArtifactDependencies{readGit: readOnlyGitLimited, operations: operations})
+	artifact, err := prepareCheckpointArtifactWithDependencies(context.Background(), input, checkpointArtifactDependencies{readGit: readOnlyGitLimited})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if artifact.strategy != checkpointPublicationFallback {
-		artifact.close()
-		t.Fatalf("strategy = %d, want fallback", artifact.strategy)
-	}
 	return artifact
-}
-
-func assertCheckpointExchangedTopology(t *testing.T, input checkpointArtifactInput, evidence checkpointArtifactEvidence) {
-	t.Helper()
-	assertCheckpointPathTree(t, filepath.Join(input.Checkout.CanonicalPath, ".wormhole"), input.CandidateTree)
-	assertCheckpointPathTree(t, evidence.StagePath, input.PriorTree)
-	if _, err := os.Lstat(evidence.BackupPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("exchanged backup exists: %v", err)
-	}
 }
 
 func assertCheckpointBackedUpTopology(t *testing.T, input checkpointArtifactInput, evidence checkpointArtifactEvidence) {

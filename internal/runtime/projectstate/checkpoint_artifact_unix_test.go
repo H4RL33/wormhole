@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux
 
 package projectstate
 
@@ -325,7 +325,7 @@ func TestCheckpointArtifactCapabilityProbeNeverRetriesCloseAfterError(t *testing
 				}
 				return realClose(closingFD)
 			}
-			_, err = checkpointArtifactCapabilityProbe(private, checkpointArtifactDependencies{operations: operations}, checkpointNoReplaceRenameFlag(), checkpointExchangeRenameFlag(), func(error) bool { return false })
+			err = checkpointArtifactCapabilityProbe(private, checkpointArtifactDependencies{operations: operations}, checkpointNoReplaceRenameFlag())
 			if !errors.Is(err, ErrCheckpointUnsupported) {
 				t.Fatalf("close failure = %v, want ErrCheckpointUnsupported", err)
 			}

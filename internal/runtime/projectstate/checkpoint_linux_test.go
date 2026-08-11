@@ -5,7 +5,6 @@ package projectstate
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -13,147 +12,39 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func TestCheckpointLinuxExchangeProbeFallbackWhitelistAndResidue(t *testing.T) {
-	for _, test := range []struct {
-		name    string
-		err     error
-		want    checkpointPublicationStrategy
-		residue bool
-		mutate  bool
-	}{
-		{name: "enosys", err: unix.ENOSYS, want: checkpointPublicationFallback},
-		{name: "einval", err: unix.EINVAL, want: checkpointPublicationFallback},
-		{name: "eopnotsupp", err: unix.EOPNOTSUPP, want: checkpointPublicationFallback},
-		{name: "eio", err: unix.EIO, residue: true},
-		{name: "eperm", err: unix.EPERM, residue: true},
-		{name: "eacces", err: unix.EACCES, residue: true},
-		{name: "exdev", err: unix.EXDEV, residue: true},
-		{name: "unknown errno", err: unix.Errno(0x7fff), residue: true},
-		{name: "whitelisted errno with changed topology", err: unix.ENOSYS, residue: true, mutate: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			directory := t.TempDir()
-			fd, err := unix.Open(directory, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer unix.Close(fd)
-			operations := defaultCheckpointArtifactPlatformOperations()
-			operations.rename = func(fromFD int, from string, toFD int, target string, flags uint) error {
-				if flags == unix.RENAME_NOREPLACE {
-					return unix.Renameat2(fromFD, from, toFD, target, flags)
-				}
-				if test.mutate {
-					if err := unix.Renameat2(fromFD, from, toFD, target, flags); err != nil {
-						return err
-					}
-				}
-				return test.err
-			}
-			got, err := checkpointLinuxExchangeProbe(fd, checkpointArtifactDependencies{operations: operations})
-			if test.want == 0 {
-				if err == nil {
-					t.Fatal("ambiguous exchange error selected a strategy")
-				}
-			} else if err != nil || got != test.want {
-				t.Fatalf("probe = (%v, %v), want (%v, nil)", got, err, test.want)
-			}
-			for _, name := range []string{".checkpoint-probe-a", ".checkpoint-probe-b"} {
-				_, statErr := os.Lstat(directory + "/" + name)
-				if test.residue && statErr != nil {
-					t.Fatalf("missing retained ambiguous residue %q: %v", name, statErr)
-				}
-				if !test.residue && !errors.Is(statErr, os.ErrNotExist) {
-					t.Fatalf("probe residue %q: %v", name, statErr)
-				}
-			}
-		})
-	}
-}
-
-func TestCheckpointExchangePublishesRealLinux(t *testing.T) {
-	input := checkpointArtifactCandidateWithNestedFile(t)
-	artifact, err := prepareCheckpointArtifact(context.Background(), input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer artifact.close()
-	if artifact.strategy != checkpointPublicationExchange {
-		t.Skip("host filesystem selected durable fallback")
-	}
-	if err := publishPreparedCheckpointArtifact(context.Background(), artifact); err != nil {
-		t.Fatalf("publish real Linux exchange: %v", err)
-	}
-	assertCheckpointPublishedTopology(t, input, artifact.evidence())
-}
-
-func TestCheckpointExchangeAllowsOrdinaryLiveDirectoryMode(t *testing.T) {
-	input := checkpointArtifactCandidateWithNestedFile(t)
-	livePath := filepath.Join(input.Checkout.CanonicalPath, ".wormhole")
-	if err := os.Chmod(livePath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	artifact, err := prepareCheckpointArtifact(context.Background(), input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer artifact.close()
-	if artifact.strategy != checkpointPublicationExchange {
-		t.Skip("host filesystem selected durable fallback")
-	}
-	if err := publishPreparedCheckpointArtifact(context.Background(), artifact); err != nil {
-		t.Fatalf("publish with ordinary live mode: %v", err)
-	}
-	assertCheckpointPublishedTopology(t, input, artifact.evidence())
-}
-
-func TestCheckpointLinuxExchangeProbeProvesNoReplaceAndClosesOnce(t *testing.T) {
-	directory := t.TempDir()
-	fd, err := unix.Open(directory, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer unix.Close(fd)
-	operations := defaultCheckpointArtifactPlatformOperations()
-	operations = normalizeCheckpointArtifactRenameOperations(operations)
+func TestCheckpointLinuxPublicationRequiresNoReplaceWithoutExchange(t *testing.T) {
+	input := checkpointArtifactTestInput(t)
+	operations := normalizeCheckpointArtifactRenameOperations(defaultCheckpointArtifactPlatformOperations())
 	realRename := operations.rename
-	var flags []uint
-	operations.rename = func(fromFD int, from string, toFD int, target string, flag uint) error {
-		flags = append(flags, flag)
-		return realRename(fromFD, from, toFD, target, flag)
-	}
-	realOpenat := operations.openat
-	liveDescriptor := make(map[int]bool)
-	doubleClose := false
-	operations.openat = func(parentFD int, name string, flags int, mode uint32) (int, error) {
-		opened, openErr := realOpenat(parentFD, name, flags, mode)
-		if openErr == nil {
-			if liveDescriptor[opened] {
-				t.Fatalf("open reused still-live descriptor %d", opened)
-			}
-			liveDescriptor[opened] = true
+	var renameFlags []uint
+	operations.rename = func(fromFD int, from string, toFD int, to string, flags uint) error {
+		renameFlags = append(renameFlags, flags)
+		if flags != unix.RENAME_NOREPLACE {
+			t.Errorf("capability probe requested rename flag %d, want RENAME_NOREPLACE only", flags)
+			return unix.EOPNOTSUPP
 		}
-		return opened, openErr
+		return realRename(fromFD, from, toFD, to, flags)
 	}
-	realClose := operations.close
-	operations.close = func(fd int) error {
-		if !liveDescriptor[fd] {
-			doubleClose = true
-		} else {
-			delete(liveDescriptor, fd)
+	artifact, err := prepareCheckpointArtifactWithDependencies(context.Background(), input, checkpointArtifactDependencies{
+		readGit: readOnlyGitLimited, operations: operations,
+		newJournalID: func() (string, error) { return "88888888-8888-4888-8888-888888888888", nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer artifact.close()
+	if len(renameFlags) == 0 {
+		t.Fatal("capability probe did not request RENAME_NOREPLACE")
+	}
+	for _, flags := range renameFlags {
+		if flags != unix.RENAME_NOREPLACE {
+			t.Fatalf("capability probe flags = %v, want RENAME_NOREPLACE only", renameFlags)
 		}
-		return realClose(fd)
 	}
-	strategy, err := checkpointLinuxExchangeProbe(fd, checkpointArtifactDependencies{operations: operations})
-	if err != nil || strategy != checkpointPublicationExchange {
-		t.Fatalf("real capability probe = (%v, %v)", strategy, err)
-	}
-	wantFlags := []uint{unix.RENAME_NOREPLACE, unix.RENAME_NOREPLACE, unix.RENAME_NOREPLACE, unix.RENAME_EXCHANGE, unix.RENAME_EXCHANGE}
-	if !reflect.DeepEqual(flags, wantFlags) {
-		t.Fatalf("rename flags = %v, want %v", flags, wantFlags)
-	}
-	if doubleClose || len(liveDescriptor) != 0 {
-		t.Fatalf("probe descriptor ownership = double-close %t live %v", doubleClose, liveDescriptor)
+	evidence := artifact.evidence()
+	if filepath.Base(evidence.StagePath) != "88888888-8888-4888-8888-888888888888.stage" ||
+		filepath.Base(evidence.BackupPath) != "88888888-8888-4888-8888-888888888888.backup" {
+		t.Fatalf("artifact evidence = %+v, want existing stage and backup names", evidence)
 	}
 }
 
@@ -271,7 +162,7 @@ func TestCheckpointLinuxMountOperationErrorsAreUnsupported(t *testing.T) {
 	dependencies := checkpointArtifactDependencies{mount: checkpointArtifactMountOperations{statx: func(int, string, int, int, *unix.Statx_t) error {
 		return unix.EIO
 	}}}
-	_, _, err := freezeCheckpointPlatformCapabilities(10, 11, heldWorkingTreeDirectory{fd: 12}, "", dependencies)
+	_, err := freezeCheckpointPlatformCapabilities(10, 11, heldWorkingTreeDirectory{fd: 12}, "", dependencies)
 	if !errors.Is(err, ErrCheckpointUnsupported) {
 		t.Fatalf("freeze mount operation error = %v, want ErrCheckpointUnsupported", err)
 	}
@@ -318,59 +209,45 @@ func TestCheckpointLinuxFinalBoundaryRejectsFreshCurrentMountMismatch(t *testing
 }
 
 func TestCheckpointLinuxSecondBoundaryRejectsFreshCurrentMountMismatch(t *testing.T) {
-	for _, strategy := range []checkpointPublicationStrategy{checkpointPublicationExchange, checkpointPublicationFallback} {
-		t.Run([]string{"", "exchange", "fallback"}[strategy], func(t *testing.T) {
-			input := checkpointArtifactCandidateWithNestedFile(t)
-			operations := normalizeCheckpointArtifactRenameOperations(defaultCheckpointArtifactPlatformOperations())
-			if strategy == checkpointPublicationFallback {
-				realRename := operations.rename
-				operations.rename = func(fromFD int, from string, toFD int, to string, flags uint) error {
-					if flags == checkpointExchangeRenameFlag() {
-						return unix.EOPNOTSUPP
-					}
-					return realRename(fromFD, from, toFD, to, flags)
-				}
-			}
-			artifact, err := prepareCheckpointArtifactWithDependencies(context.Background(), input, checkpointArtifactDependencies{readGit: readOnlyGitLimited, operations: operations})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer artifact.close()
-			held := map[int]bool{
-				artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1].fd: true,
-				artifact.live.fd:    true,
-				artifact.private.fd: true,
-				artifact.stage.fd:   true,
-			}
-			armed := false
-			artifact.dependencies.fault = func(stage checkpointArtifactFaultStage) error {
-				if stage == checkpointArtifactBeforeSecondLiveMutation {
-					armed = true
-				}
-				return nil
-			}
-			realStatx := unix.Statx
-			artifact.dependencies.mount.statx = func(fd int, path string, flags, mask int, stat *unix.Statx_t) error {
-				if err := realStatx(fd, path, flags, mask, stat); err != nil {
-					return err
-				}
-				if armed && !held[fd] && mask&(unix.STATX_MNT_ID|unix.STATX_MNT_ID_UNIQUE) != 0 {
-					stat.Mnt_id++
-				}
-				return nil
-			}
-			renameCalls := 0
-			publicationRename := artifact.dependencies.operations.rename
-			artifact.dependencies.operations.rename = func(fromFD int, from string, toFD int, to string, flags uint) error {
-				renameCalls++
-				return publicationRename(fromFD, from, toFD, to, flags)
-			}
-			if err := publishPreparedCheckpointArtifact(context.Background(), artifact); !errors.Is(err, ErrCheckpointUnsupported) {
-				t.Fatalf("second-boundary fresh mount mismatch = %v, want ErrCheckpointUnsupported", err)
-			}
-			if !armed || renameCalls != 1 {
-				t.Fatalf("second-boundary fresh mount mismatch = armed %t renames %d, want true/1", armed, renameCalls)
-			}
-		})
+	input := checkpointArtifactCandidateWithNestedFile(t)
+	artifact, err := prepareCheckpointArtifact(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer artifact.close()
+	held := map[int]bool{
+		artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1].fd: true,
+		artifact.live.fd:    true,
+		artifact.private.fd: true,
+		artifact.stage.fd:   true,
+	}
+	armed := false
+	artifact.dependencies.fault = func(stage checkpointArtifactFaultStage) error {
+		if stage == checkpointArtifactBeforeSecondLiveMutation {
+			armed = true
+		}
+		return nil
+	}
+	realStatx := unix.Statx
+	artifact.dependencies.mount.statx = func(fd int, path string, flags, mask int, stat *unix.Statx_t) error {
+		if err := realStatx(fd, path, flags, mask, stat); err != nil {
+			return err
+		}
+		if armed && !held[fd] && mask&(unix.STATX_MNT_ID|unix.STATX_MNT_ID_UNIQUE) != 0 {
+			stat.Mnt_id++
+		}
+		return nil
+	}
+	renameCalls := 0
+	publicationRename := artifact.dependencies.operations.rename
+	artifact.dependencies.operations.rename = func(fromFD int, from string, toFD int, to string, flags uint) error {
+		renameCalls++
+		return publicationRename(fromFD, from, toFD, to, flags)
+	}
+	if err := publishPreparedCheckpointArtifact(context.Background(), artifact); !errors.Is(err, ErrCheckpointUnsupported) {
+		t.Fatalf("second-boundary fresh mount mismatch = %v, want ErrCheckpointUnsupported", err)
+	}
+	if !armed || renameCalls != 1 {
+		t.Fatalf("second-boundary fresh mount mismatch = armed %t renames %d, want true/1", armed, renameCalls)
 	}
 }

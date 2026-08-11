@@ -720,8 +720,8 @@ func TestCheckpointUnknownCommitConfirmationMatrix(t *testing.T) {
 }
 
 func TestDefaultCheckpointArtifactFactoryIntegration(t *testing.T) {
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		t.Skip("real checkpoint artifacts are supported only on Unix")
+	if runtime.GOOS != "linux" {
+		t.Skip("real checkpoint artifacts are supported only on Linux")
 	}
 	fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
 	accepted := fixture.mustAcceptedSnapshot(t)

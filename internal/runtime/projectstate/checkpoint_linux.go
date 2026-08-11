@@ -36,28 +36,29 @@ func normalizeCheckpointArtifactRenameOperations(operations checkpointArtifactPl
 	return operations
 }
 
-func checkpointExchangeRenameFlag() uint  { return unix.RENAME_EXCHANGE }
 func checkpointNoReplaceRenameFlag() uint { return unix.RENAME_NOREPLACE }
 
-func freezeCheckpointPlatformCapabilities(checkoutFD, liveFD int, private heldWorkingTreeDirectory, _ string, dependencies checkpointArtifactDependencies) (checkpointPublicationStrategy, checkpointMountProof, error) {
+func freezeCheckpointPlatformCapabilities(checkoutFD, liveFD int, private heldWorkingTreeDirectory, _ string, dependencies checkpointArtifactDependencies) (checkpointMountProof, error) {
 	proof, err := checkpointLinuxMountProof(checkoutFD, liveFD, private.fd, dependencies.mount)
 	if err != nil {
-		return 0, checkpointMountProof{}, fmt.Errorf("%w: checkpoint mount proof unavailable: %v", ErrCheckpointUnsupported, err)
+		return checkpointMountProof{}, fmt.Errorf("%w: checkpoint mount proof unavailable: %v", ErrCheckpointUnsupported, err)
 	}
 	if err := checkpointLinuxValidateMountProof(proof); err != nil {
-		return 0, checkpointMountProof{}, err
+		return checkpointMountProof{}, err
 	}
 	if err := checkpointLinuxValidateLiveMountRoot(liveFD, dependencies.mount); err != nil {
-		return 0, checkpointMountProof{}, fmt.Errorf("%w: live mount-root proof unavailable: %v", ErrCheckpointUnsupported, err)
+		return checkpointMountProof{}, fmt.Errorf("%w: live mount-root proof unavailable: %v", ErrCheckpointUnsupported, err)
 	}
 	if err := dependencies.operations.fsync(checkoutFD); err != nil {
-		return 0, checkpointMountProof{}, fmt.Errorf("%w: checkout directory fsync unsupported: %v", ErrCheckpointUnsupported, err)
+		return checkpointMountProof{}, fmt.Errorf("%w: checkout directory fsync unsupported: %v", ErrCheckpointUnsupported, err)
 	}
 	if err := dependencies.operations.fsync(private.fd); err != nil {
-		return 0, checkpointMountProof{}, fmt.Errorf("%w: private directory fsync unsupported: %v", ErrCheckpointUnsupported, err)
+		return checkpointMountProof{}, fmt.Errorf("%w: private directory fsync unsupported: %v", ErrCheckpointUnsupported, err)
 	}
-	strategy, err := checkpointLinuxExchangeProbe(private.fd, dependencies)
-	return strategy, proof, err
+	if err := checkpointArtifactCapabilityProbe(private, dependencies, checkpointNoReplaceRenameFlag()); err != nil {
+		return checkpointMountProof{}, err
+	}
+	return proof, nil
 }
 
 func checkpointLinuxMount(fd int, operations checkpointArtifactMountOperations) (uint64, error) {
@@ -180,15 +181,4 @@ func checkpointLinuxValidateLiveMountRoot(liveFD int, operations checkpointArtif
 		return fmt.Errorf("%w: live .wormhole is a mount root", ErrCheckpointUnsupported)
 	}
 	return nil
-}
-
-func checkpointLinuxExchangeProbe(privateFD int, dependencies checkpointArtifactDependencies) (checkpointPublicationStrategy, error) {
-	privateMetadata, err := workingTreeFstat(privateFD)
-	if err != nil {
-		return 0, err
-	}
-	private := heldWorkingTreeDirectory{fd: privateFD, parentFD: -1, path: ".", metadata: privateMetadata}
-	return checkpointArtifactCapabilityProbe(private, dependencies, unix.RENAME_NOREPLACE, unix.RENAME_EXCHANGE, func(err error) bool {
-		return errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EINVAL) || errors.Is(err, unix.EOPNOTSUPP)
-	})
 }

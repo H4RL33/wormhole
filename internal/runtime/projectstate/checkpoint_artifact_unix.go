@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux
 
 package projectstate
 
@@ -158,7 +158,6 @@ type checkpointArtifact struct {
 	privateAncestors []heldWorkingTreeDirectory
 	stage            heldWorkingTreeDirectory
 	proof            checkpointArtifactTreesProof
-	strategy         checkpointPublicationStrategy
 	checkoutIdentity types.CheckoutIdentity
 	paths            checkpointGitPaths
 	mountProof       checkpointMountProof
@@ -493,7 +492,7 @@ func prepareCheckpointArtifactFilesystem(ctx context.Context, input checkpointAr
 	if err := checkpointArtifactFault(dependencies, checkpointArtifactBeforeCapabilityFreeze); err != nil {
 		return nil, err
 	}
-	strategy, mountProof, err := freezeCheckpointPlatformCapabilities(terminal.fd, live.fd, private, filepath.Join(input.Checkout.CanonicalPath, ".wormhole"), dependencies)
+	mountProof, err := freezeCheckpointPlatformCapabilities(terminal.fd, live.fd, private, filepath.Join(input.Checkout.CanonicalPath, ".wormhole"), dependencies)
 	if err != nil {
 		return nil, err
 	}
@@ -646,7 +645,7 @@ func prepareCheckpointArtifactFilesystem(ctx context.Context, input checkpointAr
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	artifact := &checkpointArtifact{checkout: checkout, live: live, git: git, private: private, privateAncestors: privateAncestors, stage: stage, proof: proof, strategy: strategy,
+	artifact := &checkpointArtifact{checkout: checkout, live: live, git: git, private: private, privateAncestors: privateAncestors, stage: stage, proof: proof,
 		checkoutIdentity: input.Checkout, paths: paths, mountProof: mountProof, durableProof: durableProof, dependencies: dependencies,
 		evidenceValue: checkpointArtifactEvidence{JournalID: journalID, StagePath: filepath.Join(paths.checkpointRoot, stageName), BackupPath: filepath.Join(paths.checkpointRoot, backupName)}}
 	checkout, git = nil, nil
@@ -748,12 +747,12 @@ func checkpointArtifactNameAbsent(parentFD int, name string, operations checkpoi
 	return err
 }
 
-func checkpointArtifactCapabilityProbe(private heldWorkingTreeDirectory, dependencies checkpointArtifactDependencies, noReplaceFlag, exchangeFlag uint, exchangeUnsupported func(error) bool) (checkpointPublicationStrategy, error) {
+func checkpointArtifactCapabilityProbe(private heldWorkingTreeDirectory, dependencies checkpointArtifactDependencies, noReplaceFlag uint) error {
 	operations := dependencies.operations
 	const fileName = ".checkpoint-probe-file"
 	fileFD, err := operations.openat(private.fd, fileName, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
 	if err != nil {
-		return 0, fmt.Errorf("%w: create regular-file fsync probe: %v", ErrCheckpointUnsupported, err)
+		return fmt.Errorf("%w: create regular-file fsync probe: %v", ErrCheckpointUnsupported, err)
 	}
 	fileClosed := false
 	defer func() {
@@ -763,34 +762,34 @@ func checkpointArtifactCapabilityProbe(private heldWorkingTreeDirectory, depende
 	}()
 	var fileStat unix.Stat_t
 	if err := operations.fstat(fileFD, &fileStat); err != nil {
-		return 0, fmt.Errorf("%w: stat regular-file fsync probe: %v", ErrCheckpointUnsupported, err)
+		return fmt.Errorf("%w: stat regular-file fsync probe: %v", ErrCheckpointUnsupported, err)
 	}
 	fileMetadata := workingTreeStatMetadata(&fileStat)
 	if fileMetadata.mode&unix.S_IFMT != unix.S_IFREG || fileMetadata.uid != uint32(unix.Geteuid()) || fileMetadata.links != 1 || fileMetadata.mode&0o777 != 0o600 || fileMetadata.mode&0o7000 != 0 {
-		return 0, fmt.Errorf("%w: unsafe regular-file fsync probe", ErrCheckpointUnsupported)
+		return fmt.Errorf("%w: unsafe regular-file fsync probe", ErrCheckpointUnsupported)
 	}
 	if err := operations.fsync(fileFD); err != nil {
-		return 0, fmt.Errorf("%w: regular-file fsync unsupported: %v", ErrCheckpointUnsupported, err)
+		return fmt.Errorf("%w: regular-file fsync unsupported: %v", ErrCheckpointUnsupported, err)
 	}
 	closingFileFD := fileFD
 	fileClosed = true
 	fileFD = -1
 	if err := operations.close(closingFileFD); err != nil {
-		return 0, fmt.Errorf("%w: close regular-file fsync probe: %v", ErrCheckpointUnsupported, err)
+		return fmt.Errorf("%w: close regular-file fsync probe: %v", ErrCheckpointUnsupported, err)
 	}
 	if err := operations.unlinkat(private.fd, fileName, 0); err != nil {
-		return 0, fmt.Errorf("%w: remove regular-file fsync probe: %v", ErrCheckpointUnsupported, err)
+		return fmt.Errorf("%w: remove regular-file fsync probe: %v", ErrCheckpointUnsupported, err)
 	}
 
 	const nameA, nameB, nameC = ".checkpoint-probe-a", ".checkpoint-probe-b", ".checkpoint-probe-c"
 	for _, name := range []string{nameA, nameB} {
 		if err := operations.mkdirat(private.fd, name, 0o700); err != nil {
-			return 0, fmt.Errorf("%w: create directory rename probe %q: %v", ErrCheckpointUnsupported, name, err)
+			return fmt.Errorf("%w: create directory rename probe %q: %v", ErrCheckpointUnsupported, name, err)
 		}
 	}
 	a, err := openCheckpointArtifactChildDirectoryWithOperations(private, nameA, operations)
 	if err != nil {
-		return 0, fmt.Errorf("%w: hold first directory rename probe: %v", ErrCheckpointUnsupported, err)
+		return fmt.Errorf("%w: hold first directory rename probe: %v", ErrCheckpointUnsupported, err)
 	}
 	defer func() {
 		if a.fd >= 0 {
@@ -799,7 +798,7 @@ func checkpointArtifactCapabilityProbe(private heldWorkingTreeDirectory, depende
 	}()
 	b, err := openCheckpointArtifactChildDirectoryWithOperations(private, nameB, operations)
 	if err != nil {
-		return 0, fmt.Errorf("%w: hold second directory rename probe: %v", ErrCheckpointUnsupported, err)
+		return fmt.Errorf("%w: hold second directory rename probe: %v", ErrCheckpointUnsupported, err)
 	}
 	defer func() {
 		if b.fd >= 0 {
@@ -808,69 +807,46 @@ func checkpointArtifactCapabilityProbe(private heldWorkingTreeDirectory, depende
 	}()
 
 	if err := operations.rename(private.fd, nameA, private.fd, nameB, noReplaceFlag); !errors.Is(err, unix.EEXIST) {
-		return 0, fmt.Errorf("%w: occupied-target no-replace directory rename unsupported: %v", ErrCheckpointUnsupported, err)
+		return fmt.Errorf("%w: occupied-target no-replace directory rename unsupported: %v", ErrCheckpointUnsupported, err)
 	}
 	if err := checkpointArtifactRequireTopology(private.fd, operations, map[string]*heldWorkingTreeDirectory{nameA: &a, nameB: &b, nameC: nil}); err != nil {
-		return 0, fmt.Errorf("%w: occupied-target no-replace probe: %v", ErrCheckpointUnsupported, err)
+		return fmt.Errorf("%w: occupied-target no-replace probe: %v", ErrCheckpointUnsupported, err)
 	}
 	if err := operations.rename(private.fd, nameA, private.fd, nameC, noReplaceFlag); err != nil {
-		return 0, fmt.Errorf("%w: absent-target no-replace directory rename unsupported: %v", ErrCheckpointUnsupported, err)
+		return fmt.Errorf("%w: absent-target no-replace directory rename unsupported: %v", ErrCheckpointUnsupported, err)
 	}
 	if err := checkpointArtifactRequireTopology(private.fd, operations, map[string]*heldWorkingTreeDirectory{nameA: nil, nameB: &b, nameC: &a}); err != nil {
-		return 0, fmt.Errorf("%w: absent-target no-replace probe: %v", ErrCheckpointUnsupported, err)
+		return fmt.Errorf("%w: absent-target no-replace probe: %v", ErrCheckpointUnsupported, err)
 	}
 	if err := operations.rename(private.fd, nameC, private.fd, nameA, noReplaceFlag); err != nil {
-		return 0, fmt.Errorf("%w: reverse no-replace directory rename unsupported: %v", ErrCheckpointUnsupported, err)
+		return fmt.Errorf("%w: reverse no-replace directory rename unsupported: %v", ErrCheckpointUnsupported, err)
 	}
 	if err := checkpointArtifactRequireTopology(private.fd, operations, map[string]*heldWorkingTreeDirectory{nameA: &a, nameB: &b, nameC: nil}); err != nil {
-		return 0, fmt.Errorf("%w: reverse no-replace probe: %v", ErrCheckpointUnsupported, err)
-	}
-
-	exchangeErr := operations.rename(private.fd, nameA, private.fd, nameB, exchangeFlag)
-	if exchangeErr == nil {
-		if err := checkpointArtifactRequireTopology(private.fd, operations, map[string]*heldWorkingTreeDirectory{nameA: &b, nameB: &a, nameC: nil}); err != nil {
-			return 0, fmt.Errorf("%w: successful exchange probe topology: %v", ErrCheckpointUnsupported, err)
-		}
-		if err := operations.rename(private.fd, nameA, private.fd, nameB, exchangeFlag); err != nil {
-			return 0, fmt.Errorf("%w: reverse exchange probe: %v", ErrCheckpointUnsupported, err)
-		}
-		if err := checkpointArtifactRequireTopology(private.fd, operations, map[string]*heldWorkingTreeDirectory{nameA: &a, nameB: &b, nameC: nil}); err != nil {
-			return 0, fmt.Errorf("%w: reverse exchange probe topology: %v", ErrCheckpointUnsupported, err)
-		}
-	} else {
-		if err := checkpointArtifactRequireTopology(private.fd, operations, map[string]*heldWorkingTreeDirectory{nameA: &a, nameB: &b, nameC: nil}); err != nil {
-			return 0, fmt.Errorf("%w: exchange probe topology uncertain after %v: %v", ErrCheckpointUnsupported, exchangeErr, err)
-		}
-		if !exchangeUnsupported(exchangeErr) {
-			return 0, fmt.Errorf("%w: exchange probe: %v", ErrCheckpointUnsupported, exchangeErr)
-		}
+		return fmt.Errorf("%w: reverse no-replace probe: %v", ErrCheckpointUnsupported, err)
 	}
 
 	closingAFD := a.fd
 	a.fd = -1
 	if err := operations.close(closingAFD); err != nil {
-		return 0, fmt.Errorf("%w: close first directory rename probe: %v", ErrCheckpointUnsupported, err)
+		return fmt.Errorf("%w: close first directory rename probe: %v", ErrCheckpointUnsupported, err)
 	}
 	closingBFD := b.fd
 	b.fd = -1
 	if err := operations.close(closingBFD); err != nil {
-		return 0, fmt.Errorf("%w: close second directory rename probe: %v", ErrCheckpointUnsupported, err)
+		return fmt.Errorf("%w: close second directory rename probe: %v", ErrCheckpointUnsupported, err)
 	}
 	for _, name := range []string{nameA, nameB} {
 		if err := operations.unlinkat(private.fd, name, unix.AT_REMOVEDIR); err != nil {
-			return 0, fmt.Errorf("%w: remove directory rename probe %q: %v", ErrCheckpointUnsupported, name, err)
+			return fmt.Errorf("%w: remove directory rename probe %q: %v", ErrCheckpointUnsupported, name, err)
 		}
 	}
 	if err := checkpointArtifactRequireTopology(private.fd, operations, map[string]*heldWorkingTreeDirectory{nameA: nil, nameB: nil, nameC: nil}); err != nil {
-		return 0, fmt.Errorf("%w: cleaned directory rename probe topology: %v", ErrCheckpointUnsupported, err)
+		return fmt.Errorf("%w: cleaned directory rename probe topology: %v", ErrCheckpointUnsupported, err)
 	}
 	if err := operations.fsync(private.fd); err != nil {
-		return 0, fmt.Errorf("%w: durably clean directory rename probe: %v", ErrCheckpointUnsupported, err)
+		return fmt.Errorf("%w: durably clean directory rename probe: %v", ErrCheckpointUnsupported, err)
 	}
-	if exchangeErr != nil {
-		return checkpointPublicationFallback, nil
-	}
-	return checkpointPublicationExchange, nil
+	return nil
 }
 
 func checkpointArtifactRequireTopology(parentFD int, operations checkpointArtifactPlatformOperations, topology map[string]*heldWorkingTreeDirectory) error {
@@ -1200,14 +1176,7 @@ func publishPreparedCheckpointArtifact(ctx context.Context, artifact *checkpoint
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	switch artifact.strategy {
-	case checkpointPublicationExchange:
-		return publishCheckpointArtifactExchange(ctx, artifact)
-	case checkpointPublicationFallback:
-		return publishCheckpointArtifactFallback(ctx, artifact)
-	default:
-		return ErrCheckpointUnsupported
-	}
+	return publishCheckpointArtifactFallback(ctx, artifact)
 }
 
 func preflightCheckpointArtifactPublication(ctx context.Context, artifact *checkpointArtifact) error {
@@ -1296,53 +1265,6 @@ func preflightCheckpointArtifactPublication(ctx context.Context, artifact *check
 	return ctx.Err()
 }
 
-func publishCheckpointArtifactExchange(ctx context.Context, artifact *checkpointArtifact) error {
-	terminal := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1]
-	stageName := filepath.Base(artifact.evidenceValue.StagePath)
-	backupName := filepath.Base(artifact.evidenceValue.BackupPath)
-	if err := checkpointArtifactFault(artifact.dependencies, checkpointArtifactBeforeLiveMutation); err != nil {
-		return err
-	}
-	if err := checkpointArtifactRevalidatePreparedMutationBoundary(ctx, artifact, stageName, backupName); err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	renameErr := artifact.dependencies.operations.rename(terminal.fd, ".wormhole", artifact.private.fd, stageName, checkpointExchangeRenameFlag())
-	afterErr := checkpointArtifactFault(artifact.dependencies, checkpointArtifactAfterLiveMutation)
-	if renameErr != nil || afterErr != nil {
-		_ = checkpointArtifactRevalidateAnyExchangeTopology(artifact, stageName, backupName)
-		if renameErr != nil {
-			return fmt.Errorf("projectstate: exchange checkpoint live tree: %w", renameErr)
-		}
-		return afterErr
-	}
-	if err := checkpointArtifactRequirePublishedTopology(artifact, stageName, backupName, checkpointTopologyExchanged); err != nil {
-		return err
-	}
-	if err := checkpointArtifactFault(artifact.dependencies, checkpointArtifactBeforeSecondLiveMutation); err != nil {
-		return err
-	}
-	if err := checkpointArtifactRevalidateReachedMutationBoundary(artifact, stageName, backupName, checkpointTopologyExchanged, nil); err != nil {
-		return err
-	}
-	renameErr = artifact.dependencies.operations.rename(artifact.private.fd, stageName, artifact.private.fd, backupName, checkpointNoReplaceRenameFlag())
-	afterErr = checkpointArtifactFault(artifact.dependencies, checkpointArtifactAfterSecondLiveMutation)
-	if renameErr != nil || afterErr != nil {
-		_ = checkpointArtifactRevalidateAnyExchangeTopology(artifact, stageName, backupName)
-		if renameErr != nil {
-			return fmt.Errorf("projectstate: retain exchanged checkpoint backup: %w", renameErr)
-		}
-		return afterErr
-	}
-	if err := checkpointArtifactRequirePublishedTopology(artifact, stageName, backupName, checkpointTopologyPublished); err != nil {
-		return err
-	}
-	_, err := checkpointArtifactFsyncPublicationParents(artifact)
-	return err
-}
-
 func publishCheckpointArtifactFallback(ctx context.Context, artifact *checkpointArtifact) error {
 	terminal := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1]
 	stageName := filepath.Base(artifact.evidenceValue.StagePath)
@@ -1397,8 +1319,7 @@ func publishCheckpointArtifactFallback(ctx context.Context, artifact *checkpoint
 type checkpointArtifactTopology uint8
 
 const (
-	checkpointTopologyExchanged checkpointArtifactTopology = iota + 1
-	checkpointTopologyBackedUp
+	checkpointTopologyBackedUp checkpointArtifactTopology = iota + 1
 	checkpointTopologyPublished
 	checkpointTopologyPrepared
 )
@@ -1408,8 +1329,6 @@ func checkpointArtifactRequirePublishedTopology(artifact *checkpointArtifact, st
 	operations := artifact.dependencies.operations
 	var live, stage, backup *heldWorkingTreeDirectory
 	switch topology {
-	case checkpointTopologyExchanged:
-		live, stage = &artifact.stage, &artifact.live
 	case checkpointTopologyBackedUp:
 		stage, backup = &artifact.stage, &artifact.live
 	case checkpointTopologyPublished:
@@ -1427,13 +1346,6 @@ func checkpointArtifactRequirePublishedTopology(artifact *checkpointArtifact, st
 		return fmt.Errorf("projectstate: revalidate checkpoint backup topology: %w", err)
 	}
 	switch topology {
-	case checkpointTopologyExchanged:
-		if err := checkpointArtifactRequireCandidateAt(context.Background(), terminal.fd, ".wormhole", artifact.stage, artifact, false, operations); err != nil {
-			return fmt.Errorf("projectstate: exchanged candidate changed: %w", err)
-		}
-		if err := checkpointArtifactRequireTreeAt(context.Background(), artifact.private.fd, stageName, artifact.live, artifact.proof.prior, operations); err != nil {
-			return fmt.Errorf("projectstate: exchanged prior stage changed: %w", err)
-		}
 	case checkpointTopologyBackedUp:
 		if err := checkpointArtifactRequireTreeAt(context.Background(), artifact.private.fd, backupName, artifact.live, artifact.proof.prior, operations); err != nil {
 			return fmt.Errorf("projectstate: fallback prior backup changed: %w", err)
@@ -1620,8 +1532,6 @@ func checkpointArtifactRevalidateCurrentMounts(artifact *checkpointArtifact, top
 	expectedSource := artifact.live.metadata
 	switch topology {
 	case checkpointTopologyPrepared:
-	case checkpointTopologyExchanged:
-		expectedSource = artifact.stage.metadata
 	case checkpointTopologyBackedUp:
 		sourcePath = artifact.evidenceValue.StagePath
 		expectedSource = artifact.stage.metadata
@@ -1799,13 +1709,6 @@ func checkpointArtifactFsyncPublicationParents(artifact *checkpointArtifact) (ch
 		return checkpointArtifactPublicationParentsProof{}, err
 	}
 	return checkpointArtifactPublicationParentsProof{liveParent: durableLiveParent, private: durablePrivate}, nil
-}
-
-func checkpointArtifactRevalidateAnyExchangeTopology(artifact *checkpointArtifact, stageName, backupName string) error {
-	if err := checkpointArtifactRequirePublishedTopology(artifact, stageName, backupName, checkpointTopologyExchanged); err == nil {
-		return nil
-	}
-	return checkpointArtifactRequirePublishedTopology(artifact, stageName, backupName, checkpointTopologyPublished)
 }
 
 func checkpointArtifactRevalidateAnyFallbackTopology(artifact *checkpointArtifact, stageName, backupName string) error {
