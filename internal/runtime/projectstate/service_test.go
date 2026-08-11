@@ -330,7 +330,82 @@ func TestRecoveryStatusCompositionUsesDatabaseOnly(t *testing.T) {
 	}
 
 	t.Run("driver reaches observer boundary", func(t *testing.T) {
-		fixture, request, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
+		for _, test := range []struct {
+			name string
+			kind checkpointRecoveryKind
+		}{
+			{name: "prepared", kind: checkpointRecoveryPrepared},
+			{name: "published", kind: checkpointRecoveryPublished},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				fixture, request := recoveryDriverPlanFixture(t, test.name)
+				observerCalls := 0
+				var wantObservation checkpointRecoveryGitObservation
+				var got checkpointRecoveryPlan
+				if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), request.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+					var err error
+					got, err = planCheckpointRecovery(context.Background(), tx, func(_ context.Context, proof checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
+						observerCalls++
+						if proof.kind != test.kind || proof.driver == nil || proof.driver.State != test.name {
+							t.Fatalf("%s observer proof=%+v", test.name, proof)
+						}
+						wantObservation = recoveryPlannerObservation(t, proof, test.name)
+						return wantObservation, nil
+					})
+					return err
+				}); err != nil {
+					t.Fatal(err)
+				}
+				gotDriverState := ""
+				if got.proof.driver != nil {
+					gotDriverState = got.proof.driver.State
+				}
+				if observerCalls != 1 || got.proof.kind != test.kind || got.proof.driver == nil || got.proof.driver.State != test.name ||
+					reflect.DeepEqual(wantObservation, checkpointRecoveryGitObservation{}) || !reflect.DeepEqual(got.observation, wantObservation) {
+					t.Fatalf("%s recovery plan=(kind=%d, driver=%q, observationEqual=%t) observerCalls=%d, want exact nonzero propagation",
+						test.name, got.proof.kind, gotDriverState, reflect.DeepEqual(got.observation, wantObservation), observerCalls)
+				}
+
+				injected := errors.New("injected " + test.name + " recovery observer failure")
+				errorCalls := 0
+				var rejected checkpointRecoveryPlan
+				err := fixture.service.repo.WithImmediateWorkspace(context.Background(), request.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+					var err error
+					rejected, err = planCheckpointRecovery(context.Background(), tx, func(_ context.Context, proof checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
+						errorCalls++
+						if proof.kind != test.kind || proof.driver == nil || proof.driver.State != test.name {
+							t.Fatalf("%s error observer proof=%+v", test.name, proof)
+						}
+						return wantObservation, injected
+					})
+					return err
+				})
+				if errorCalls != 1 || err == nil || !errors.Is(err, ErrCheckpointRecoveryPrecondition) ||
+					!errors.Is(err, injected) || !reflect.DeepEqual(rejected, checkpointRecoveryPlan{}) {
+					t.Fatalf("rejected %s recovery plan=(zero=%t, err=%v) calls=%d, want exact zero sentinel and cause",
+						test.name, reflect.DeepEqual(rejected, checkpointRecoveryPlan{}), err, errorCalls)
+				}
+
+				if test.kind == checkpointRecoveryPrepared {
+					var missing checkpointRecoveryPlan
+					err := fixture.service.repo.WithImmediateWorkspace(context.Background(), request.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+						var err error
+						missing, err = planCheckpointRecovery(context.Background(), tx, nil)
+						return err
+					})
+					if err == nil || !errors.Is(err, ErrCheckpointRecoveryPrecondition) || !reflect.DeepEqual(missing, checkpointRecoveryPlan{}) {
+						t.Fatalf("nil-observer recovery plan=(%+v,%v), want exact zero precondition error", missing, err)
+					}
+				}
+			})
+		}
+	})
+}
+
+func recoveryDriverPlanFixture(t *testing.T, driverState string) (*checkpointCoordinatorFixture, CheckpointRequest) {
+	t.Helper()
+	fixture, request, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
+	if driverState == "prepared" {
 		publishErr := errors.New("retain prepared recovery driver")
 		baseFactory := fixture.service.prepareCheckpointArtifact
 		fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
@@ -343,48 +418,48 @@ func TestRecoveryStatusCompositionUsesDatabaseOnly(t *testing.T) {
 		if result, err := fixture.service.Checkpoint(context.Background(), request); result != (CheckpointResult{}) || !errors.Is(err, publishErr) {
 			t.Fatalf("prepare recovery driver=(%+v,%v)", result, err)
 		}
+		return fixture, request
+	}
+	if driverState != "published" {
+		t.Fatalf("unknown recovery driver state %q", driverState)
+	}
+	if result, err := fixture.service.Checkpoint(context.Background(), request); err != nil || result.JournalID == "" {
+		t.Fatalf("publish recovery driver=(%+v,%v)", result, err)
+	}
+	return fixture, request
+}
 
-		observerCalls := 0
-		var got checkpointRecoveryPlan
-		if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), request.Scope, func(tx *localstore.WorkspaceMutationTx) error {
-			var err error
-			got, err = planCheckpointRecovery(context.Background(), tx, func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
-				observerCalls++
-				return checkpointRecoveryGitObservation{}, nil
-			})
-			return err
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if observerCalls != 1 || got.proof.kind != checkpointRecoveryPrepared || got.proof.driver == nil {
-			t.Fatalf("prepared recovery plan=%+v observerCalls=%d", got, observerCalls)
-		}
-
-		injected := errors.New("injected recovery observer failure")
-		for _, test := range []struct {
-			name     string
-			observer func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error)
-			cause    error
-		}{
-			{name: "nil observer"},
-			{name: "observer error", cause: injected, observer: func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
-				return checkpointRecoveryGitObservation{}, injected
-			}},
-		} {
-			t.Run(test.name, func(t *testing.T) {
-				var rejected checkpointRecoveryPlan
-				err := fixture.service.repo.WithImmediateWorkspace(context.Background(), request.Scope, func(tx *localstore.WorkspaceMutationTx) error {
-					var err error
-					rejected, err = planCheckpointRecovery(context.Background(), tx, test.observer)
-					return err
-				})
-				if err == nil || !errors.Is(err, ErrCheckpointRecoveryPrecondition) ||
-					(test.cause != nil && !errors.Is(err, test.cause)) || !reflect.DeepEqual(rejected, checkpointRecoveryPlan{}) {
-					t.Fatalf("rejected recovery plan=(%+v,%v), want exact zero precondition error", rejected, err)
-				}
-			})
-		}
-	})
+func recoveryPlannerObservation(t *testing.T, proof checkpointRecoveryProof, driverState string) checkpointRecoveryGitObservation {
+	t.Helper()
+	tree, err := state.EncodeTree(proof.workspace.Snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := state.DecodeTree(cloneCheckpointTree(tree))
+	if err != nil {
+		t.Fatal(err)
+	}
+	originValue := observedOriginV1{SchemaVersion: 1, Kind: "network", Host: "github.com", Path: "acme/recovery-" + driverState}
+	originDigest, err := digestObservedOrigin(originValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := proof.workspace.Binding
+	position := gitBasePosition{
+		root: binding.Checkout.CanonicalPath, checkout: binding.Checkout,
+		acceptedRef: binding.AcceptedRef, commit: binding.AcceptedCommitSHA,
+	}
+	return checkpointRecoveryGitObservation{
+		position: position,
+		committed: committedWorkspace{
+			root: position.root, checkout: position.checkout, acceptedRef: position.acceptedRef,
+			commit: position.commit, tree: tree, snapshot: snapshot,
+		},
+		origin: publicationOriginObservation{
+			root: position.root, checkout: position.checkout, origin: originValue, digest: originDigest,
+		},
+		finalPosition: position,
+	}
 }
 
 func recoveryNoWorkServiceFixture(t *testing.T, history string) (*Service, types.WorkspaceScope, string) {

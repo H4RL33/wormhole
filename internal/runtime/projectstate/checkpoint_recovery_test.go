@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	state "github.com/H4RL33/wormhole/internal/types/projectstate"
@@ -301,6 +302,97 @@ func TestProveCheckpointRecoveryDispositionRejectsMixedOrOrphanState(t *testing.
 			}
 		})
 	}
+
+	t.Run("candidate exactness", func(t *testing.T) {
+		input := checkpointPlanRebasedInput(t, checkpointPlanFixture(t), 0)
+		candidateWorkspace, prior, candidatePrepared, candidateOperations := checkpointRecoveryProofFixtureForInput(t, input)
+		candidatePublished := cloneMaterializationRecord(candidatePrepared)
+		candidatePublished.State = "published"
+		postimage, err := checkpointPublicationPostimage(candidatePublished)
+		if err != nil {
+			t.Fatal(err)
+		}
+		materialized := cloneImportDisposition(localstore.WorkspaceMaterializationDisposition{Operations: candidateOperations}).Operations
+		for index := range materialized {
+			materialized[index].State = "materialized"
+		}
+
+		mutations := []struct {
+			name   string
+			mutate func(*localstore.WorkspaceCandidateRecord)
+		}{
+			{name: "accepted base digest", mutate: func(candidate *localstore.WorkspaceCandidateRecord) {
+				candidate.AcceptedBaseDigest = publicationRepeatedDigest('f')
+			}},
+			{name: "working tree digest", mutate: func(candidate *localstore.WorkspaceCandidateRecord) {
+				candidate.WorkingTreeDigest = publicationRepeatedDigest('e')
+			}},
+			{name: "direct canonical tree", mutate: func(candidate *localstore.WorkspaceCandidateRecord) {
+				candidate.DirectSnapshot = checkpointPlanMutatedSnapshot(t, candidate.DirectSnapshot, "recovery direct candidate drift")
+			}},
+			{name: "rebased tree nilness", mutate: func(candidate *localstore.WorkspaceCandidateRecord) {
+				candidate.RebasedSnapshot = nil
+			}},
+			{name: "rebased tree content", mutate: func(candidate *localstore.WorkspaceCandidateRecord) {
+				if candidate.RebasedSnapshot == nil {
+					t.Fatal("candidate exactness fixture lacks rebased snapshot")
+				}
+				changed := checkpointPlanMutatedSnapshot(t, *candidate.RebasedSnapshot, "recovery rebased candidate drift")
+				candidate.RebasedSnapshot = &changed
+			}},
+			{name: "rebased boundary", mutate: func(candidate *localstore.WorkspaceCandidateRecord) {
+				candidate.RebasedThroughGeneration++
+			}},
+			{name: "import origin", mutate: func(candidate *localstore.WorkspaceCandidateRecord) {
+				candidate.ImportedBy = "70000000-0000-4000-8000-000000000099"
+			}},
+			{name: "import timestamp", mutate: func(candidate *localstore.WorkspaceCandidateRecord) {
+				candidate.ImportedAt = candidate.ImportedAt.Add(time.Second)
+			}},
+		}
+		drivers := []struct {
+			name        string
+			kind        checkpointRecoveryKind
+			candidate   *localstore.WorkspaceCandidateRecord
+			disposition localstore.WorkspaceMaterializationDisposition
+		}{
+			{
+				name: "prepared", kind: checkpointRecoveryPrepared, candidate: prior,
+				disposition: localstore.WorkspaceMaterializationDisposition{
+					Journals: []localstore.WorkspaceMaterializationRecord{candidatePrepared}, Operations: candidateOperations,
+				},
+			},
+			{
+				name: "published", kind: checkpointRecoveryPublished, candidate: &postimage,
+				disposition: localstore.WorkspaceMaterializationDisposition{
+					Journals: []localstore.WorkspaceMaterializationRecord{candidatePublished}, Operations: materialized,
+				},
+			},
+		}
+		for _, driver := range drivers {
+			t.Run(driver.name, func(t *testing.T) {
+				baseline, err := proveCheckpointRecoveryDisposition(candidateWorkspace, driver.candidate, driver.disposition)
+				if err != nil || baseline.kind != driver.kind || baseline.driver == nil {
+					t.Fatalf("valid %s candidate baseline=(%+v,%v)", driver.name, baseline, err)
+				}
+				for _, mutation := range mutations {
+					t.Run(mutation.name, func(t *testing.T) {
+						candidate, err := cloneImportCandidate(driver.candidate)
+						if err != nil {
+							t.Fatal(err)
+						}
+						mutation.mutate(candidate)
+						proof, err := proveCheckpointRecoveryDisposition(candidateWorkspace, candidate, driver.disposition)
+						if err == nil || !errors.Is(err, ErrCheckpointRecoveryPrecondition) ||
+							!reflect.DeepEqual(proof, checkpointRecoveryProof{}) {
+							t.Fatalf("%s candidate drift=(kind=%d, zero=%t, err=%v), want exact zero precondition error",
+								mutation.name, proof.kind, reflect.DeepEqual(proof, checkpointRecoveryProof{}), err)
+						}
+					})
+				}
+			})
+		}
+	})
 }
 
 func TestObserveCheckpointRecoveryGitAllowsOnlyStoredOrSameRefCandidate(t *testing.T) {
@@ -337,6 +429,7 @@ func TestObserveCheckpointRecoveryGitAllowsOnlyStoredOrSameRefCandidate(t *testi
 	}
 
 	type observationEdits struct {
+		initial   func(*gitBasePosition)
 		committed func(*committedWorkspace)
 		final     func(*gitBasePosition)
 		origin    func(*publicationOriginObservation)
@@ -348,6 +441,9 @@ func TestObserveCheckpointRecoveryGitAllowsOnlyStoredOrSameRefCandidate(t *testi
 			root: workspace.Binding.Checkout.CanonicalPath, checkout: workspace.Binding.Checkout,
 			acceptedRef: workspace.Binding.AcceptedRef, commit: commit,
 		}
+		if edits.initial != nil {
+			edits.initial(&position)
+		}
 		snapshot, decodeErr := state.DecodeTree(cloneCheckpointTree(tree))
 		if decodeErr != nil {
 			t.Fatal(decodeErr)
@@ -356,6 +452,9 @@ func TestObserveCheckpointRecoveryGitAllowsOnlyStoredOrSameRefCandidate(t *testi
 			root: position.root, checkout: position.checkout, acceptedRef: position.acceptedRef,
 			commit: position.commit, tree: cloneCheckpointTree(tree), snapshot: snapshot,
 		}
+		originForPosition := origin
+		originForPosition.root = position.root
+		originForPosition.checkout = position.checkout
 		var calls []string
 		positionCalls := 0
 		readers := checkpointRecoveryGitReaders{
@@ -387,7 +486,7 @@ func TestObserveCheckpointRecoveryGitAllowsOnlyStoredOrSameRefCandidate(t *testi
 				if root != position.root {
 					t.Fatalf("origin root=%q, want %q", root, position.root)
 				}
-				got := origin
+				got := originForPosition
 				if edits.origin != nil {
 					edits.origin(&got)
 				}
@@ -417,11 +516,16 @@ func TestObserveCheckpointRecoveryGitAllowsOnlyStoredOrSameRefCandidate(t *testi
 		commit             string
 		tree               state.Tree
 		edits              observationEdits
+		wantInitialOnly    bool
 		wantCompleteBundle bool
 		wantRacePrecedence bool
 	}{
 		{name: "different commit wrong tree", commit: candidateCommit, tree: acceptedTree},
 		{name: "stored commit candidate tree", commit: workspace.Binding.AcceptedCommitSHA, tree: journal.CandidateTree},
+		{name: "replaced initial checkout", commit: candidateCommit, tree: journal.CandidateTree,
+			edits: observationEdits{initial: func(value *gitBasePosition) {
+				value.checkout.Inode++
+			}}, wantInitialOnly: true},
 		{name: "changed checkout", commit: candidateCommit, tree: journal.CandidateTree, edits: observationEdits{
 			committed: func(value *committedWorkspace) { value.checkout.Inode++ },
 		}},
@@ -462,6 +566,9 @@ func TestObserveCheckpointRecoveryGitAllowsOnlyStoredOrSameRefCandidate(t *testi
 			if err == nil || !errors.Is(err, ErrCheckpointRecoveryPrecondition) ||
 				!reflect.DeepEqual(observed, checkpointRecoveryGitObservation{}) {
 				t.Fatalf("rejected observation=(%+v,%v), calls=%v", observed, err, calls)
+			}
+			if test.wantInitialOnly && !reflect.DeepEqual(calls, []string{"position"}) {
+				t.Fatalf("initial-checkout calls=%v, want rejection before committed/origin reads", calls)
 			}
 			if test.wantCompleteBundle && !reflect.DeepEqual(calls, []string{"position", "committed", "origin", "position"}) {
 				t.Fatalf("race/origin calls=%v, want complete ordered bundle", calls)
@@ -519,6 +626,20 @@ func checkpointRecoveryProofFixtureWithInput(t *testing.T) (
 ) {
 	t.Helper()
 	input := checkpointPlanActiveInput(t, checkpointPlanDirectInput(t, checkpointPlanFixture(t)))
+	workspace, candidate, journal, operations := checkpointRecoveryProofFixtureForInput(t, input)
+	return input, workspace, candidate, journal, operations
+}
+
+func checkpointRecoveryProofFixtureForInput(
+	t *testing.T,
+	input checkpointPlanInput,
+) (
+	localstore.WorkspaceRecord,
+	*localstore.WorkspaceCandidateRecord,
+	localstore.WorkspaceMaterializationRecord,
+	[]localstore.WorkspaceOperation,
+) {
+	t.Helper()
 	journal := checkpointJournalFromPlan(t, input)
 	privateRoot := t.TempDir()
 	journal.StagePath = filepath.Join(privateRoot, journal.JournalID+".stage")
@@ -533,5 +654,5 @@ func checkpointRecoveryProofFixtureWithInput(t *testing.T) (
 	if err != nil {
 		t.Fatal(err)
 	}
-	return input, workspace, candidate, journal, cloneImportDisposition(input.Disposition).Operations
+	return workspace, candidate, journal, cloneImportDisposition(input.Disposition).Operations
 }
