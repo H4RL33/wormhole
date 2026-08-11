@@ -324,7 +324,7 @@ func TestCheckpointArtifactPublicationExactOrdering(t *testing.T) {
 	want := []string{
 		"fsync:live-parent", "fsync:private-parent",
 		fmt.Sprintf("rename:.wormhole:%s:%d", backupName, checkpointNoReplaceRenameFlag()),
-		"fsync:live-parent", "fsync:private-parent",
+		"fsync:private-parent", "fsync:live-parent",
 		fmt.Sprintf("rename:%s:.wormhole:%d", stageName, checkpointNoReplaceRenameFlag()),
 		"fsync:live-parent", "fsync:private-parent",
 	}

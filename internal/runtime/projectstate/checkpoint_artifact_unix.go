@@ -1290,7 +1290,7 @@ func publishCheckpointArtifactFallback(ctx context.Context, artifact *checkpoint
 	if err := checkpointArtifactRequirePublishedTopology(artifact, stageName, backupName, checkpointTopologyBackedUp); err != nil {
 		return err
 	}
-	reachedParents, err := checkpointArtifactFsyncPublicationParents(artifact)
+	reachedParents, err := checkpointArtifactFsyncPublicationParents(artifact, true)
 	if err != nil {
 		return err
 	}
@@ -1312,7 +1312,7 @@ func publishCheckpointArtifactFallback(ctx context.Context, artifact *checkpoint
 	if err := checkpointArtifactRequirePublishedTopology(artifact, stageName, backupName, checkpointTopologyPublished); err != nil {
 		return err
 	}
-	_, err = checkpointArtifactFsyncPublicationParents(artifact)
+	_, err = checkpointArtifactFsyncPublicationParents(artifact, false)
 	return err
 }
 
@@ -1674,38 +1674,60 @@ func checkpointArtifactFstatMetadata(fd int, operations checkpointArtifactPlatfo
 	return workingTreeStatMetadata(&stat), nil
 }
 
-func checkpointArtifactFsyncPublicationParents(artifact *checkpointArtifact) (checkpointArtifactPublicationParentsProof, error) {
+func checkpointArtifactFsyncPublicationParents(artifact *checkpointArtifact, destinationPrivate bool) (checkpointArtifactPublicationParentsProof, error) {
 	terminal := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1]
-	if err := checkpointArtifactFault(artifact.dependencies, checkpointArtifactBeforeLiveParentFsync); err != nil {
-		return checkpointArtifactPublicationParentsProof{}, err
+	fsyncLiveParent := func() (workingTreeMetadata, error) {
+		if err := checkpointArtifactFault(artifact.dependencies, checkpointArtifactBeforeLiveParentFsync); err != nil {
+			return workingTreeMetadata{}, err
+		}
+		if err := artifact.dependencies.operations.fsync(terminal.fd); err != nil {
+			return workingTreeMetadata{}, fmt.Errorf("projectstate: fsync checkpoint live parent: %w", err)
+		}
+		durableLiveParent, err := checkpointArtifactFstatMetadata(terminal.fd, artifact.dependencies.operations)
+		if err != nil {
+			return workingTreeMetadata{}, err
+		}
+		if err := checkpointArtifactRequireDurableDirectory(terminal, durableLiveParent, artifact.dependencies.operations, false); err != nil {
+			return workingTreeMetadata{}, fmt.Errorf("projectstate: prove durable checkpoint live parent: %w", err)
+		}
+		if err := checkpointArtifactFault(artifact.dependencies, checkpointArtifactAfterLiveParentFsync); err != nil {
+			return workingTreeMetadata{}, err
+		}
+		return durableLiveParent, nil
 	}
-	if err := artifact.dependencies.operations.fsync(terminal.fd); err != nil {
-		return checkpointArtifactPublicationParentsProof{}, fmt.Errorf("projectstate: fsync checkpoint live parent: %w", err)
+	fsyncPrivateParent := func() (workingTreeMetadata, error) {
+		if err := checkpointArtifactFault(artifact.dependencies, checkpointArtifactBeforePrivateParentFsync); err != nil {
+			return workingTreeMetadata{}, err
+		}
+		if err := artifact.dependencies.operations.fsync(artifact.private.fd); err != nil {
+			return workingTreeMetadata{}, fmt.Errorf("projectstate: fsync checkpoint private parent: %w", err)
+		}
+		durablePrivate, err := checkpointArtifactFstatMetadata(artifact.private.fd, artifact.dependencies.operations)
+		if err != nil {
+			return workingTreeMetadata{}, err
+		}
+		if err := checkpointArtifactRequireDurableDirectory(artifact.private, durablePrivate, artifact.dependencies.operations, true); err != nil {
+			return workingTreeMetadata{}, fmt.Errorf("projectstate: prove durable checkpoint private parent: %w", err)
+		}
+		if err := checkpointArtifactFault(artifact.dependencies, checkpointArtifactAfterPrivateParentFsync); err != nil {
+			return workingTreeMetadata{}, err
+		}
+		return durablePrivate, nil
 	}
-	durableLiveParent, err := checkpointArtifactFstatMetadata(terminal.fd, artifact.dependencies.operations)
+	var durableLiveParent, durablePrivate workingTreeMetadata
+	var err error
+	if destinationPrivate {
+		durablePrivate, err = fsyncPrivateParent()
+		if err == nil {
+			durableLiveParent, err = fsyncLiveParent()
+		}
+	} else {
+		durableLiveParent, err = fsyncLiveParent()
+		if err == nil {
+			durablePrivate, err = fsyncPrivateParent()
+		}
+	}
 	if err != nil {
-		return checkpointArtifactPublicationParentsProof{}, err
-	}
-	if err := checkpointArtifactRequireDurableDirectory(terminal, durableLiveParent, artifact.dependencies.operations, false); err != nil {
-		return checkpointArtifactPublicationParentsProof{}, fmt.Errorf("projectstate: prove durable checkpoint live parent: %w", err)
-	}
-	if err := checkpointArtifactFault(artifact.dependencies, checkpointArtifactAfterLiveParentFsync); err != nil {
-		return checkpointArtifactPublicationParentsProof{}, err
-	}
-	if err := checkpointArtifactFault(artifact.dependencies, checkpointArtifactBeforePrivateParentFsync); err != nil {
-		return checkpointArtifactPublicationParentsProof{}, err
-	}
-	if err := artifact.dependencies.operations.fsync(artifact.private.fd); err != nil {
-		return checkpointArtifactPublicationParentsProof{}, fmt.Errorf("projectstate: fsync checkpoint private parent: %w", err)
-	}
-	durablePrivate, err := checkpointArtifactFstatMetadata(artifact.private.fd, artifact.dependencies.operations)
-	if err != nil {
-		return checkpointArtifactPublicationParentsProof{}, err
-	}
-	if err := checkpointArtifactRequireDurableDirectory(artifact.private, durablePrivate, artifact.dependencies.operations, true); err != nil {
-		return checkpointArtifactPublicationParentsProof{}, fmt.Errorf("projectstate: prove durable checkpoint private parent: %w", err)
-	}
-	if err := checkpointArtifactFault(artifact.dependencies, checkpointArtifactAfterPrivateParentFsync); err != nil {
 		return checkpointArtifactPublicationParentsProof{}, err
 	}
 	return checkpointArtifactPublicationParentsProof{liveParent: durableLiveParent, private: durablePrivate}, nil
