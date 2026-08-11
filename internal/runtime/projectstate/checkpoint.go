@@ -273,7 +273,11 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 		if !errors.Is(firstErr, localstore.ErrCommitOutcomeUnknown) || !firstCompleted {
 			return CheckpointResult{}, firstErr
 		}
-		committed, confirmErr := confirmCheckpointTransition(ctx, confirmCommit, firstPrior, firstNext, firstErr)
+		confirm := confirmPreparedCheckpointTransition
+		if firstInvalidated {
+			confirm = confirmCheckpointTransition
+		}
+		committed, confirmErr := confirm(ctx, confirmCommit, firstPrior, firstNext, firstErr)
 		if confirmErr != nil {
 			return CheckpointResult{}, confirmErr
 		}
@@ -738,6 +742,38 @@ func confirmCheckpointTransition(
 		return false, fmt.Errorf("%w: checkpoint commit confirmation found a third state", commitErr)
 	default:
 		return false, fmt.Errorf("%w: checkpoint commit confirmation returned invalid outcome %d", commitErr, match)
+	}
+}
+
+func confirmPreparedCheckpointTransition(
+	ctx context.Context,
+	confirm confirmCheckpointCommitFunc,
+	prior localstore.WorkspaceCheckpointCommitState,
+	next localstore.WorkspaceCheckpointCommitState,
+	commitErr error,
+) (bool, error) {
+	match, err := confirm(ctx, prior, next)
+	if err != nil {
+		return false, fmt.Errorf(
+			"%w: checkpoint prepared commit confirmation failed: %w: %w",
+			ErrCheckpointRecoveryBlocked, commitErr, err,
+		)
+	}
+	switch match {
+	case localstore.WorkspaceCheckpointCommitNext:
+		return true, nil
+	case localstore.WorkspaceCheckpointCommitPrior:
+		return false, commitErr
+	case localstore.WorkspaceCheckpointCommitThird:
+		return false, fmt.Errorf(
+			"%w: checkpoint prepared commit confirmation found a third state: %w",
+			ErrCheckpointRecoveryBlocked, commitErr,
+		)
+	default:
+		return false, fmt.Errorf(
+			"%w: checkpoint prepared commit confirmation returned invalid outcome %d: %w",
+			ErrCheckpointRecoveryBlocked, match, commitErr,
+		)
 	}
 }
 

@@ -70,12 +70,33 @@ func recoverCheckpointFilesystemWithDependencies(
 			return 0, err
 		}
 		terminal := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1]
-		if err := artifact.dependencies.operations.rename(
+		backup := checkpointPublicationEntry{
+			kind: topology.backup.kind,
+			tree: cloneCheckpointTree(topology.backup.tree),
+		}
+		renameErr := artifact.dependencies.operations.rename(
 			artifact.private.fd, backupName,
 			terminal.fd, ".wormhole",
 			checkpointNoReplaceRenameFlag(),
-		); err != nil {
-			return 0, fmt.Errorf("projectstate: restore checkpoint backup: %w", err)
+		)
+		if renameErr != nil {
+			observed, classifyErr := checkpointRecoveryClassify(ctx, artifact, stageName, backupName)
+			if classifyErr != nil {
+				return 0, checkpointPublicationBlocked(
+					"classify recovery backup-to-live rename error",
+					fmt.Errorf("%w: %w", renameErr, classifyErr),
+				)
+			}
+			switch {
+			case checkpointRecoveryRestorePrior(observed, backup):
+				return 0, fmt.Errorf("projectstate: restore checkpoint backup: %w", renameErr)
+			case checkpointRecoveryRestoreNext(observed, backup):
+			default:
+				return 0, checkpointPublicationBlocked(
+					"recovery backup-to-live rename reached third topology",
+					renameErr,
+				)
+			}
 		}
 		if err := checkpointPublicationFsyncParents(artifact, false); err != nil {
 			return 0, err
@@ -84,10 +105,7 @@ func recoverCheckpointFilesystemWithDependencies(
 		if err != nil {
 			return 0, err
 		}
-		if restored.live.kind == checkpointPublicationAbsent ||
-			restored.stage.kind != checkpointPublicationCandidate ||
-			restored.backup.kind != checkpointPublicationAbsent ||
-			!sameCheckpointArtifactTree(restored.live.tree, topology.backup.tree) {
+		if !checkpointRecoveryRestoreNext(restored, backup) {
 			return 0, checkpointPublicationBlocked("restored checkpoint topology differs", nil)
 		}
 		return checkpointRecoveryFilesystemRecoveredOld, nil
@@ -110,6 +128,20 @@ func recoverCheckpointFilesystemWithDependencies(
 	default:
 		return 0, checkpointPublicationBlocked("prepared recovery topology is unsafe or unlisted", nil)
 	}
+}
+
+func checkpointRecoveryRestorePrior(topology checkpointPublicationTopology, backup checkpointPublicationEntry) bool {
+	return topology.live.kind == checkpointPublicationAbsent &&
+		topology.stage.kind == checkpointPublicationCandidate &&
+		topology.backup.kind == backup.kind &&
+		sameCheckpointArtifactTree(topology.backup.tree, backup.tree)
+}
+
+func checkpointRecoveryRestoreNext(topology checkpointPublicationTopology, backup checkpointPublicationEntry) bool {
+	return topology.live.kind != checkpointPublicationAbsent &&
+		topology.stage.kind == checkpointPublicationCandidate &&
+		topology.backup.kind == checkpointPublicationAbsent &&
+		sameCheckpointArtifactTree(topology.live.tree, backup.tree)
 }
 
 func checkpointRecoveryClassify(

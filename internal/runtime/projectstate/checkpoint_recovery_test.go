@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1006,6 +1007,88 @@ func TestRecoverHoldsOneImmediateTransactionAcrossOneGitBundleAndConvergence(t *
 		t.Fatalf("recovery disposition=%+v", disposition)
 	}
 	recoveryAssertReturnedStatus(t, fixture.service, request.Scope, got)
+}
+
+func TestRecoverUnknownCommitConfirmationMatrix(t *testing.T) {
+	tests := []struct {
+		name       string
+		driver     string
+		filesystem checkpointRecoveryFilesystemOutcome
+		match      localstore.WorkspaceCheckpointCommitMatch
+		confirmErr error
+		wantOK     bool
+		want       error
+	}{
+		{name: "prepared recovered old next", driver: "prepared", filesystem: checkpointRecoveryFilesystemRecoveredOld, match: localstore.WorkspaceCheckpointCommitNext, wantOK: true},
+		{name: "prepared recovered new next", driver: "prepared", filesystem: checkpointRecoveryFilesystemRecoveredNew, match: localstore.WorkspaceCheckpointCommitNext, wantOK: true},
+		{name: "published recovered new next", driver: "published", filesystem: checkpointRecoveryFilesystemRecoveredNew, match: localstore.WorkspaceCheckpointCommitNext, wantOK: true},
+		{name: "prepared prior", driver: "prepared", filesystem: checkpointRecoveryFilesystemRecoveredOld, match: localstore.WorkspaceCheckpointCommitPrior, want: localstore.ErrCommitOutcomeUnknown},
+		{name: "published prior", driver: "published", filesystem: checkpointRecoveryFilesystemRecoveredNew, match: localstore.WorkspaceCheckpointCommitPrior, want: localstore.ErrCommitOutcomeUnknown},
+		{name: "third", driver: "prepared", filesystem: checkpointRecoveryFilesystemRecoveredOld, match: localstore.WorkspaceCheckpointCommitThird, want: ErrCheckpointRecoveryBlocked},
+		{name: "invalid", driver: "prepared", filesystem: checkpointRecoveryFilesystemRecoveredOld, match: localstore.WorkspaceCheckpointCommitMatch(99), want: ErrCheckpointRecoveryBlocked},
+		{name: "read failure", driver: "prepared", filesystem: checkpointRecoveryFilesystemRecoveredOld, confirmErr: errors.New("recovery confirmation read failed"), want: ErrCheckpointRecoveryBlocked},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture, request := recoveryDriverPlanFixture(t, test.driver)
+			before := recoveryDatabaseState(t, fixture.service, request.Scope)
+			acceptedBefore := before.workspace.Binding
+			fixture.service.observeCheckpointRecoveryGit = func(_ context.Context, proof checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
+				return recoveryPlannerObservation(t, proof, test.driver), nil
+			}
+			filesystemCalls := 0
+			fixture.service.recoverCheckpointFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+				filesystemCalls++
+				return test.filesystem, nil
+			}
+			realWithImmediate := fixture.service.repo.WithImmediateWorkspace
+			transactionCalls := 0
+			unknown := fmt.Errorf("synthetic recovery final commit: %w", localstore.ErrCommitOutcomeUnknown)
+			fixture.service.withImmediateWorkspace = func(
+				ctx context.Context,
+				scope types.WorkspaceScope,
+				fn func(*localstore.WorkspaceMutationTx) error,
+			) error {
+				transactionCalls++
+				err := realWithImmediate(ctx, scope, fn)
+				if err == nil {
+					return unknown
+				}
+				return err
+			}
+			confirmCalls := 0
+			fixture.service.confirmCheckpointCommit = func(
+				context.Context,
+				localstore.WorkspaceCheckpointCommitState,
+				localstore.WorkspaceCheckpointCommitState,
+			) (localstore.WorkspaceCheckpointCommitMatch, error) {
+				confirmCalls++
+				return test.match, test.confirmErr
+			}
+
+			got, err := fixture.service.Recover(context.Background(), request.Scope)
+			if test.wantOK {
+				if err != nil || got.Binding.Scope != request.Scope {
+					t.Fatalf("confirmed recovery next = (%+v,%v)", got, err)
+				}
+			} else if !reflect.DeepEqual(got, WorkspaceStatus{}) || !errors.Is(err, test.want) || !errors.Is(err, unknown) {
+				t.Fatalf("confirmed recovery uncertainty = (%+v,%v), want zero, %v, and unknown cause", got, err, test.want)
+			}
+			if test.confirmErr != nil && !errors.Is(err, test.confirmErr) {
+				t.Fatalf("confirmed recovery error = %v, want read cause %v", err, test.confirmErr)
+			}
+			if transactionCalls != 1 || filesystemCalls != 1 || confirmCalls != 1 {
+				t.Fatalf("recovery uncertainty calls: transactions=%d filesystem=%d confirm=%d", transactionCalls, filesystemCalls, confirmCalls)
+			}
+			after := recoveryDatabaseState(t, fixture.service, request.Scope)
+			if after.workspace.Binding != acceptedBefore {
+				t.Fatalf("recovery uncertainty moved accepted binding\nbefore=%+v\nafter=%+v", acceptedBefore, after.workspace.Binding)
+			}
+			if test.wantOK {
+				recoveryAssertReturnedStatus(t, fixture.service, request.Scope, got)
+			}
+		})
+	}
 }
 
 type checkpointRecoveryDatabaseState struct {

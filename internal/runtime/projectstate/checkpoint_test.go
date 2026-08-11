@@ -986,9 +986,9 @@ func TestCheckpointUnknownCommitConfirmationMatrix(t *testing.T) {
 	}{
 		{name: "first next", transaction: 1, match: localstore.WorkspaceCheckpointCommitNext, wantOK: true},
 		{name: "first prior", transaction: 1, match: localstore.WorkspaceCheckpointCommitPrior},
-		{name: "first third", transaction: 1, match: localstore.WorkspaceCheckpointCommitThird},
-		{name: "first invalid outcome", transaction: 1, match: localstore.WorkspaceCheckpointCommitMatch(99)},
-		{name: "first read error", transaction: 1, confirmErr: errors.New("confirmation read failed")},
+		{name: "first third", transaction: 1, match: localstore.WorkspaceCheckpointCommitThird, want: ErrCheckpointRecoveryBlocked},
+		{name: "first invalid outcome", transaction: 1, match: localstore.WorkspaceCheckpointCommitMatch(99), want: ErrCheckpointRecoveryBlocked},
+		{name: "first read error", transaction: 1, confirmErr: errors.New("confirmation read failed"), want: ErrCheckpointRecoveryBlocked},
 		{name: "final next", transaction: 2, match: localstore.WorkspaceCheckpointCommitNext, wantOK: true},
 		{name: "final prior", transaction: 2, match: localstore.WorkspaceCheckpointCommitPrior},
 		{name: "final third", transaction: 2, match: localstore.WorkspaceCheckpointCommitThird, want: ErrCheckpointRecoveryBlocked},
@@ -1048,6 +1048,12 @@ func TestCheckpointUnknownCommitConfirmationMatrix(t *testing.T) {
 				fixture.publishCalls != wantPublish || fixture.closeCalls != 1 {
 				t.Fatalf("unknown outcome = (%+v, %v), transactions=%d confirm=%d prepare=%d publish=%d close=%d",
 					got, err, transactionCalls, confirmCalls, fixture.prepareCalls, fixture.publishCalls, fixture.closeCalls)
+			}
+			if !errors.Is(err, unknown) {
+				t.Fatalf("unknown outcome error = %v, want original unknown cause", err)
+			}
+			if test.confirmErr != nil && !errors.Is(err, test.confirmErr) {
+				t.Fatalf("unknown outcome error = %v, want confirmation cause %v", err, test.confirmErr)
 			}
 		})
 	}
