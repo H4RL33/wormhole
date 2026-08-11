@@ -10,6 +10,21 @@
 
 ## Global Constraints
 
+### Current execution amendment — 2026-08-11
+
+This plan is historical executable detail except for the simplified, coherent Task-5 `5F`/
+`5G` checkpoint-and-recovery boundary now in progress. The approved fallback-only V1 design
+in `docs/superpowers/specs/2026-08-11-task5-fallback-checkpoint-recovery-simplification-design.md`
+controls that boundary. Complete it against the retained product, security, crash-consistency,
+concurrent-process, untrusted-repository, and cross-workspace isolation requirements.
+Private implementation prescriptions in earlier Task-5 text are not authority to strengthen
+an invariant without the proportionality review rule in `docs/implementation-rules.md`.
+
+After `5F`/`5G`, the programme requires its mandatory Stage 1A simplification gate and a
+hard pause. Tasks 6, 6A, 7, and 8 are deferred and require an explicit human go/no-go after
+that gate; do not prepare migrations, interfaces, tests, or supporting refactors for them
+in advance.
+
 - Authority order is RFC-0001, RFC-0003 amendments, the approved 2026-07-28 architecture, implementation rules, then non-conflicting code.
 - internal/types remains stdlib-only. internal/types/projectstate may import internal/types, stdlib, and existing BurntSushi/toml. It never imports runtime, Core, MCP, or commands.
 - internal/runtime/projectstate may import internal/types, internal/types/projectstate, internal/runtime/localstore, stdlib, and existing x/sys. It never imports Core or MCP.
@@ -19,7 +34,9 @@
 - V1 rejects unknown fields except the explicit typed extensions envelope. Unknown versions and kinds fail closed.
 - New local writes require assurance=local through ValidateLocalAction. Legacy/unknown envelopes are accepted only through ValidateHistorical while decoding or migrating existing history; public-key-continuity and private-authenticated remain valid structurally but are issued and authorized by later Fabric/identity work.
 - Provider repository-ID discovery is deferred. A supplied immutable ID is validated against config; no provider network call occurs.
-- Linux uses atomic directory exchange. Every supported non-exchange filesystem uses the durable fallback journal. ErrCheckpointUnsupported is returned before mutation only when required durability primitives are proven unavailable.
+- V1 uses one Linux/WSL no-replace fallback publication path. It is available only when the
+  required same-device rename and directory-fsync primitives are proven before mutation;
+  otherwise it returns ErrCheckpointUnsupported. Darwin support is deferred.
 - Existing replica tables are read models only. A strict-decoded snapshot start, its
   explicit initial through-generation, and strict-decoded active overlay operations
   are the only Compose inputs.
@@ -2605,7 +2622,32 @@ preimage on recover-old, and never advances the accepted base itself. Pre-journa
 are unowned retained evidence in a Git-private checkpoint directory;
 no-journal/no-recovery-work Recover calls ignore them and perform no Git/path I/O.
 
-### Task 5: Checkpoint CAS, Linux exchange, durable fallback, and recovery
+### Task 5: Checkpoint publication and recovery
+
+> **Executable Task-5 mapping (2026-08-11):** Only 5F and 5G below remain executable.
+> The older file list, algorithm, step text, exchange/Darwin branches, and test prescriptions
+> in the remainder of this Task-5 section are historical reference, not implementation
+> authority. Already-landed migration `000004`, publication-review/prior-candidate proof,
+> accepted-base, actor, conflict, isolation, and direct-edit contracts remain prerequisites;
+> this task adds no migration, receipt schema, public API, or Darwin path.
+
+#### 5F — Fallback publication and checkpoint ordering
+
+Remove only the superseded `checkpointArtifactReceipt*`/inode-topology experiment and the
+exchange/Darwin Task-5 publisher paths. Implement the Linux/WSL ordered no-replace fallback
+publisher and hold the second writer transaction across final reproof, durable filesystem
+publication, and the database postimage. Follow the exact fsync, race, and unknown-outcome
+rules in the approved 2026-08-11 fallback design.
+
+#### 5G — Recovery and unknown outcomes
+
+Implement the approved prepared/published topology matrix, one-transaction recovery Git
+observation, exact recovered-old/recovered-new database outcome, and prior/next/third
+classification without replay. Known states converge; ambiguous/unsafe states preserve all
+evidence and block. The focused 5F/5G implementation plan owns exact current file/symbol and
+TDD steps.
+
+> **Historical Task-5 detail begins below. Do not execute it.**
 
 **Files:**
 - Create: internal/runtime/localstore/migrations/000004_checkpoint_publication_review.sql
@@ -3034,6 +3076,11 @@ Expected: PASS.
 git add internal/runtime/projectstate internal/runtime/localstore
 git commit -m "feat: checkpoint portable state durably"
 ~~~
+
+> **HARD PAUSE AFTER TASK 5:** Everything from Task 6 onward is historical,
+> non-executable planning material until Stage 1A is complete and the human architect
+> records an explicit go/no-go naming the next authorised work. Do not prepare its
+> migrations, interfaces, tests, or supporting refactors.
 
 ### Task 6: Legacy private-state migration without Git-index mutation
 

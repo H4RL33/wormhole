@@ -966,3 +966,13 @@ Task 5E publisher that can displace a concurrent direct `.wormhole` edit. Task 5
 retains one bounded corrective tranche: a durable Git-private publication receipt plus
 lossless synchronous/restart compensation. That correction is required before Task 5G
 freezes recovery topology; arbitrary unproved unknown evidence remains blocked.
+
+**2026-08-11 Task-5 simplification directive:** the approved fallback-only V1 design is
+`docs/superpowers/specs/2026-08-11-task5-fallback-checkpoint-recovery-simplification-design.md`.
+It supersedes the preceding proposed corrective mechanism as an implementation requirement.
+The remaining scope is only coherent Task-5 `5F`/`5G` checkpoint/recovery: one Linux/WSL
+no-replace fallback path, journal-led recovery of known crash topologies, preservation and
+blocking of direct-edit/unknown topologies, and publisher-before-DB-postimage ordering.
+Delete all in-flight work for the superseded mechanism before implementing this design. On
+completion, run the mandatory Stage 1A simplification gate and hard-pause; Tasks 6, 6A, 7,
+8, and Stage 2 require an explicit human go/no-go.

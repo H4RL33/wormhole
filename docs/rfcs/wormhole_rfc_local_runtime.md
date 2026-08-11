@@ -433,11 +433,19 @@ ignored by recovery, and never reused.
 
 Before mutating live bytes, checkpoint durably records both complete publication trees,
 exact operation states, the version-one review proof, and an exact prior-candidate
-preimage containing complete inline direct and optional rebased snapshots. Publication
-uses atomic directory exchange where available or a durable all-or-recover journal
-elsewhere. Indeterminate journal COMMITs are confirmed against exact transition-relative
-prior/next state without replay. Recover-old restores candidate absence or every original
-candidate/operation byte; recover-new retains the exact publication postimage.
+preimage containing complete inline direct and optional rebased snapshots. For Task-5 V1,
+publication uses one ordered Linux/WSL no-replace rename path backed by that journal;
+exchange publication and Darwin runtime support are deferred. Missing same-mount no-replace
+rename or directory-fsync primitives return `ErrCheckpointUnsupported` before artifact
+creation. Known interruption states
+converge to an exact old preimage or new postimage. Ambiguous compound states retain every
+path and database byte and block for operator inspection rather than adding a second
+receipt or guessing provenance. Indeterminate journal COMMITs are confirmed against exact
+transition-relative prior/next state without replay. Recover-old restores candidate absence
+or every original candidate/operation byte; recover-new retains the exact publication
+postimage. This paragraph is the RFC-level 2026-08-11 Task-5 amendment; its exact
+mechanism, topology matrix, and Stage-1A stop boundary are specified by
+`docs/superpowers/specs/2026-08-11-task5-fallback-checkpoint-recovery-simplification-design.md`.
 
 Recovery strict-proves complete journal cardinality, candidate state, and operation
 ownership before Git/path I/O. No-work history returns DB-composed status without Git/path

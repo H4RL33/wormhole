@@ -19,7 +19,10 @@ assumptions; RFC-0002 governs optional Governance; the approved
 defines their version-one contract details, with
 `docs/superpowers/specs/2026-08-01-publication-classification-review-cas-amendment.md`
 governing the trusted publication-policy/origin/review-CAS boundary and successor
-migration numbering; `docs/implementation-rules.md`;
+migration numbering, and
+`docs/superpowers/specs/2026-08-11-task5-fallback-checkpoint-recovery-simplification-design.md`
+narrowly amending the Task-5 V1 publication/recovery mechanism and platform boundary;
+`docs/implementation-rules.md`;
 existing code.
 
 RFC tool shapes are indicative unless code freezes them. Governance is optional and
@@ -52,6 +55,9 @@ Permissions. Wormhole stores no competing copy of repository source.
 ## Transition State
 
 The 2026-07-28 architecture is authoritative but not yet fully implemented.
+Current execution is limited to the fallback-only Task-5 `5F`/`5G` boundary,
+then the mandatory Stage 1A simplification gate and a human go/no-go. Tasks 6,
+6A, 7, 8, Stage 2, and later work are not executable before that decision.
 Current code still contains legacy `join`/`connect`, single-profile bootstrap,
 Passport-only attribution, and pre-snapshot assumptions. Implementation plans
 must migrate those paths in tested slices. Do not document a target command or

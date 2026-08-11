@@ -16,10 +16,27 @@ repository-lineage scoped.
 
 **Tech Stack:** Go 1.26.5; SQLite and Postgres; Git; MCP JSON-RPC; systemd-user where available; deterministic `go/packages` Code Graph analysis; Codex and Claude CLIs; existing dependencies plus only the separately approved OIDC modules named below.
 
+## Current execution amendment — 2026-08-11
+
+This amendment controls the current branch's scope. Finish only the simplified, coherent
+Task-5 `5F`/`5G` checkpoint-and-recovery boundary, using the approved fallback-only V1
+design in `docs/superpowers/specs/2026-08-11-task5-fallback-checkpoint-recovery-simplification-design.md`.
+It preserves the surviving product, security, crash-consistency, concurrent-process,
+untrusted-repository, and cross-workspace isolation requirements, but must not add
+defensive machinery merely because an earlier plan section describes a possible private
+implementation.
+
+Immediately after that boundary, run mandatory **Stage 1A: simplification gate** and pause.
+Tasks 6, 6A, 7, and 8, Stage 2, and every later stage are non-executable until a human
+records an explicit go/no-go after reviewing Stage 1A. No worker may treat their existing
+descriptions as standing authority to start or prepare those tasks.
+
 ## Authority and frozen constraints
 
 - Follow RFC-0001, the reconciled RFC-0003 amendments, `docs/superpowers/specs/2026-07-28-git-native-wormhole-architecture-design.md`, and `docs/implementation-rules.md`.
-- The three slice plans below own executable detail. If prose here conflicts, the slice plan and its frozen cross-slice contracts win.
+- Except for the current execution amendment, the three slice plans below own executable
+  detail. The approved fallback-only Task-5 design controls `5F`/`5G` where earlier slice
+  prose prescribes a different private implementation.
 - Keep one implementation writer in the shared feature worktree at a time. Scale dynamically with independent investigators and fresh spec/quality reviewers; never let concurrent writers overlap shared packages or migrations.
 - Every behavior change follows RED, minimal GREEN, focused verification, and an intentionally scoped commit. The merged statement-coverage floor is 80 percent.
 - Public MCP schemas never accept a project ID, workspace ID, checkout root, working directory, actor, Fabric credential, or routing authority. Gateway resolves and overwrites all private transport context.
@@ -39,21 +56,45 @@ repository-lineage scoped.
 
 ### Stage 1: Portable Git-native project state
 
-Execute Tasks 1–6, mandatory Task 6A, then Tasks 7–8 in
-`2026-07-28-git-native-portable-state-implementation-plan.md` in order. This stage freezes
-shared identity/workspace types and the canonical codec/reducer before any consumer is
-implemented, then adds scoped persistence, composition, import/stash, checkpoint recovery,
-legacy migration, the version-5 operational activity boundary, snapshot-backed pillar
-projections, and top-level project commands.
+Complete only the already-started portable-state work through the simplified Task-5 `5F`/`5G`
+checkpoint-and-recovery boundary. Then run Stage 1A and pause. Tasks 6, mandatory Task 6A,
+7, and 8 remain planned work, not authorised work, until the human Stage-1A go/no-go.
 
 Gate: all Slice-A focused tests, migration tests, crash/recovery tests, `go test -race`
 targets, and `make check` pass at or above 80 percent merged coverage. Status/diff/import
 do not advance Git; checkpoint does not stage, commit, push, advance the base, or promote
-operational activity. Task 6A cannot start until its focused activity/retention/promotion
-artifact is reviewed and explicitly approved; Task 7 cannot start until Task 6A's reviewed
-SQLite migration `000005` implementation commit lands.
+operational activity.
+
+### Stage 1A: Simplification gate and mandatory pause
+
+Stage 1A is a review/refactoring-decision gate, not permission to begin Tasks 6–8. It changes
+no production or test code and must produce four reviewable deliverables scoped to mechanisms
+implemented through Task 5:
+
+1. A complexity inventory whose every row names the mechanism, category (product
+   requirement, security boundary, crash consistency, compatibility, or speculative
+   hardening), owning requirement, concrete threat/failure, V1 likelihood or explicit
+   assumption, cheaper alternative, and retain/remove decision.
+2. Deletion and guarantee-reduction candidates for the first Git-native alpha, with the
+   user-visible and recovery trade-off for each candidate.
+3. A lifecycle-boundary refactor proposal covering registration/resolution, overlay
+   composition and mutation, Git observation, publication policy/review,
+   checkpoint/recovery, and legacy migration. Every proposal states the before-to-after
+   dependency boundary and reduces coupled reasoning rather than only splitting files by
+   length.
+4. An executable architecture-test retention plan mapping each retained observable
+   invariant to an existing or proposed end-to-end test and naming private-helper,
+   SQL-shape, or incidental tests that may be removed because they only fossilise an
+   implementation. Proposed test changes remain non-executable until the go/no-go.
+
+The gate passes only when all four artifacts exist and the human decision record names the
+retained V1 guarantee set, accepted recovery posture, and exact next authorised work.
+Absent that decision, the branch remains paused.
 
 ### Stage 2: Minimal Gateway, setup, and native connectors
+
+Stage 2 is explicitly deferred. It may begin only after the Stage-1A deliverables and an
+explicit human go/no-go; its existing task description is not implementation authority.
 
 Execute only the minimum non-Code-Graph portions of the Gateway/setup plan needed for one
 supervisor, trusted workspace dispatch, journalled setup, and transactional Codex/Claude

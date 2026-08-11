@@ -5,7 +5,12 @@ Authority order: RFC-0001, with RFC-0003 overriding it only where RFC-0003
 explicitly amends local-runtime, transport, workspace, or optional-coordination
 assumptions; RFC-0002 governs optional Governance; the approved
 `docs/superpowers/specs/2026-07-28-git-native-wormhole-architecture-design.md`
-defines their version-one contract details; `docs/implementation-rules.md`;
+defines their version-one contract details, with
+`docs/superpowers/specs/2026-08-01-publication-classification-review-cas-amendment.md`
+governing publication policy, origin, review CAS, and its durable proof, and
+`docs/superpowers/specs/2026-08-11-task5-fallback-checkpoint-recovery-simplification-design.md`
+narrowly governing the Task-5 V1 publisher/recovery mechanism and platform boundary;
+`docs/implementation-rules.md`;
 existing code.
 This document derives from the RFCs and current code; if it conflicts with an RFC, the RFC
 wins and this file has a bug — flag it, don't silently pick one.
@@ -13,6 +18,14 @@ wins and this file has a bug — flag it, don't silently pick one.
 This is a *constraint document*, not a tutorial. Every section states rules. If a task
 requires breaking a rule here, stop and escalate to the orchestrating agent or human;
 do not improvise.
+
+Approved programme and slice-plan execution amendments control task scope and sequencing.
+They cannot weaken an RFC requirement, but they can defer an otherwise described task or
+private implementation choice. The current amendment permits only the fallback-only Task-5
+`5F`/`5G` checkpoint-and-recovery boundary defined in
+`docs/superpowers/specs/2026-08-11-task5-fallback-checkpoint-recovery-simplification-design.md`,
+followed by the mandatory Stage 1A simplification gate and hard pause; Tasks 6, 6A, 7, 8,
+and Stage 2 require a later explicit human go/no-go.
 
 ---
 
@@ -149,7 +162,20 @@ commands in T4, you read the output, and the output says pass. Paste the decisiv
 verification (missing DB, sandbox limits), the status is **not** "done" — it is "written,
 unverified, because ___", stated exactly that way.
 
-### 2.8 Rationalisations to catch yourself making
+### 2.8 Invariant proportionality review gate
+
+Every new or strengthened invariant must name, in its task brief and review evidence:
+
+1. its owning requirement;
+2. the concrete failure or threat it prevents;
+3. V1 likelihood evidence, or an explicit assumption when evidence is unavailable; and
+4. why fail-closed handling, manual repair, recovery to the last known complete state, or
+   another simpler recovery path is insufficient.
+
+Absent all four, review blocks the change. A plausible hypothetical is not enough to add
+durable state, a compatibility commitment, a new mutation boundary, or redundant proof.
+
+### 2.9 Rationalisations to catch yourself making
 
 | The thought | The reality |
 |---|---|
@@ -524,30 +550,30 @@ the same layering pattern and isolation discipline.
   paths.
   After prepared commit, checkpoint opens a second `BEGIN IMMEDIATE`, rechecks the exact
   live digest, binding, both proofs, candidate, overlay rows, review, and conflict gate,
-  and holds it across publication, both parent fsyncs, and journal/candidate/row update.
-  After either Linux exchange or Darwin swap, old live is at stage and must be no-replace
-  renamed to the absent backup before both parents are fsynced.
+  and holds it across publication, ordered parent fsyncs, and journal/candidate/row update.
+  Task-5 V1 no-replace renames live to absent backup, fsyncs the private destination before
+  the checkout source, reclassifies, then renames stage to absent live and fsyncs the
+  checkout destination before the private source. It writes no database postimage before
+  durable publication. Exchange and Darwin Task-5 support are deferred.
 - Checkpoint and Recover never advance the accepted binding and expose no base-advanced
   result flag. Same-symbolic-ref Reject/Refresh alone accepts a checkpoint materialization;
   Task-4 proposal-free ref switch and applicable Discard may separately advance the base.
   Task-5 indeterminate writes use exact transition-relative prior/next journal confirmation
   without replay; attempted prepare treats journal absence as exact prior and retains every
   unconfirmed unjournaled stage.
-- Recover first runs its recovery-specific disposition proof in one short
+- Recover runs its recovery-specific disposition proof in one
   `BEGIN IMMEDIATE` snapshot before Git/path I/O. Empty or accepted/recovered-old-only
   history, and separately one proved recovered-new, compose and return DB status from that
   snapshot with no Git/path I/O. Exactly one prepared/published row drives recovery;
-  clone its complete preflight and close the transaction before outside Git. Mixed/multiple
-  pending state, no journal with materialized rows, or cross-journal/orphan/partial
-  ownership fails first. Prepared requires exact prior
+  mixed/multiple pending state, no journal with materialized rows, or cross-journal/orphan/
+  partial ownership fails first. Prepared requires exact prior
   candidate plus recorded active/rebased operations and zero owned materialized rows;
   published/recovered-new require the exact publication postimage and every claim
   materialized. Accepted history must pass complete historical ownership (version 0 only
   without residual materialized rows); recovered-old owns none.
-- For a recovery driver, after the short preflight transaction closes, observe position ->
-  full tree at SHA -> origin -> final position. Under a second recovery `BEGIN IMMEDIATE`,
-  strict-reload/byte-match and re-prove the disposition, then repeat that bundle before
-  live/stage/backup I/O or any write.
+- For a recovery driver, retain that writer transaction while observing position -> full
+  tree at SHA -> origin -> final position once, re-prove the disposition, classify or
+  mutate journal-bound paths, write and reread the selected database outcome, and commit.
   Stored base exact or same-ref different-commit exact candidate may converge, without an
   ancestry assumption. Any malformed/racing/drifted/other base fails with the recovery
   precondition sentinel before origin invalidation. Recover-old restores the exact inline

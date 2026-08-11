@@ -584,6 +584,16 @@ host changing from private to public; the operator must reclassify before publis
 through Git. Exact storage, canonical codecs, race behavior, and migration ownership are
 frozen by the 2026-08-01 amendment.
 
+> **Task-5 V1 execution amendment (2026-08-11):**
+> `2026-08-11-task5-fallback-checkpoint-recovery-simplification-design.md` governs the
+> private publication/recovery mechanism and platform boundary for Tasks `5F`/`5G`.
+> It replaces exchange and Darwin paths with one Linux/WSL no-replace fallback path,
+> removes the proposed private receipt, and uses one recovery `BEGIN IMMEDIATE` across one
+> local Git observation, filesystem classification/mutation, and database outcome. Any
+> conflicting exchange/Darwin, two-transaction recovery, or receipt detail in this older
+> design is historical and non-executable. The accepted-base, review-CAS, isolation,
+> byte-preservation, crash-consistency, and no-blind-replay guarantees remain binding.
+
 `wormhole checkpoint`:
 
 1. locks the workspace checkpoint operation and opens an immediate preparation
@@ -615,13 +625,13 @@ frozen by the 2026-08-01 amendment.
    serialized proof; canonical `DecodeTree` still rejects unknown or unsafe project-state
    paths.
 
-6. opens a second `BEGIN IMMEDIATE` after that prepared commit and, before rename or
-   exchange, reloads and rechecks the exact live digest, binding, both proofs, candidate,
+6. opens a second `BEGIN IMMEDIATE` after that prepared commit and, before any rename,
+   reloads and rechecks the exact live digest, binding, both proofs, candidate,
    overlay generation/rows, classification/review, and open-conflict gate;
-7. holds the second transaction across atomic directory exchange where supported (or
-   durable fallback publication), moves old live from stage to the absent backup after
-   either Linux exchange or Darwin swap, fsyncs both parents, and updates the published
-   journal, candidate, and included-operation rows;
+7. holds the second transaction across ordered fallback publication: no-replace rename old
+   live to the absent backup, fsync the private destination before the checkout source,
+   reclassify, then no-replace rename stage to absent live and fsync the checkout destination
+   before the private source. It mutates no database postimage until publication is durable;
 8. commits those database updates only after the new complete live tree is durable,
    while leaving the accepted Git base unchanged; indeterminate journal writes use exact
    prior/next confirmation without replay; and
@@ -635,7 +645,7 @@ journal ID. Checkpoint and recovery never advance the accepted binding. A checkp
 materialization is accepted only by same-symbolic-ref Reject/Refresh; proposal-free ref
 switches and applicable Discard remain separate Task-4 base-advancing transitions.
 
-Recovery first opens a short `BEGIN IMMEDIATE` and, in that one writer-excluding snapshot,
+For Task-5 V1, recovery opens one `BEGIN IMMEDIATE` and, in that one writer-excluding snapshot,
 strict-proves complete journal cardinality, candidate state, and operation ownership before
 Git or path I/O. Empty or accepted/recovered-old-only history, and separately the
 one-proved-recovered-new case, compose and return zero-review status from that snapshot.
@@ -644,11 +654,11 @@ cross-journal/orphan/partial claim fails closed. A prepared proof requires the e
 candidate and recorded active/rebased operations with zero owned materialized rows; a
 published proof requires the exact publication candidate and all claims materialized.
 
-For exactly one prepared/published driver, recovery clones the complete owned preflight and
-closes that transaction before observing Git in exact position -> complete tree at that SHA
--> origin -> final position order. A second `BEGIN IMMEDIATE` byte-matches and re-proves the
-complete disposition, then repeats that observation before any live/stage/backup access or
-write. Stored base exact permits normal convergence. Same symbolic ref, a commit different
+For exactly one prepared/published driver, recovery keeps that transaction open while it
+makes one stable local Git observation in exact position -> complete tree at that SHA ->
+origin -> final position order, re-proves the complete disposition, classifies or mutates
+the journal-bound filesystem paths, writes the selected database outcome, rereads it, and
+commits. Stored base exact permits normal convergence. Same symbolic ref, a commit different
 from the stored accepted commit, and an exact journal-candidate tree permits recovered-new
 finalisation without an ancestry requirement. Every other Git base returns the
 recovery-precondition sentinel before origin invalidation or path I/O. Git-case selection
@@ -1320,10 +1330,10 @@ cannot close.
 | v2 push sees an open workspace conflict before or during delivery | make no credential/network contact when known before push; otherwise retain the byte-identical pending row after the atomic delivery recheck and retry the same operation only after resolution |
 | checkpoint interruption before journal commit | retain the private unowned stage byte-identically; recovery performs no path I/O and a later checkpoint uses a fresh path |
 | checkpoint interruption after journal commit | recover either previous complete tree/preimage or new complete tree/postimage from the durable journal |
-| Darwin interruption after swap | treat old live at stage exactly like Linux exchange; rename it no-replace to absent backup, fsync both parents, and recover from retained evidence |
+| unsupported platform or missing fallback durability primitive | return `ErrCheckpointUnsupported` before artifact creation or publication; Task-5 V1 runtime is Linux/WSL only |
 | checkpoint database COMMIT is indeterminate | confirm exact transition prior/next state without replay; retain evidence and fail closed on read/partial/third state |
 | recovery journal path escapes, symlinks, changes type/identity, or root rebinds | never open a raw path or mutate evidence; fail with the recovery precondition/blocked sentinel after descriptor-relative validation |
-| recovery state changes between preflight and Git observation | second immediate reload rejects the drift before path I/O or writes |
+| recovery state changes while the writer transaction is held | in-transaction reproof rejects the drift before path I/O or writes |
 | concurrent direct `.wormhole/` edit | fail checkpoint compare-and-swap without overwriting the edit; validate/import then retry |
 | conflict opens after checkpoint prepared commit | second immediate recheck returns `localstore.ErrWorkspaceConflicted` with zero publication and retains recoverable prepared evidence |
 | another checkpoint sees prepared/published/recovered-new | return `ErrCheckpointPendingAcceptance` before artifact allocation or mutation; recover/accept the existing journal first |
@@ -1430,16 +1440,15 @@ legacy or unknown until explicitly linked.
   with complete inline trees. Recover-old restores candidate absence or every original
   snapshot/boundary/provenance byte plus operation prepublication state.
 - Recovery tests strict-prove exact pending cardinality and candidate/operation ownership
-  in one short immediate snapshot; terminal no-work composes status there and performs no
-  Git/path calls. Concurrent post-preflight writers fail the second exact reload before
-  paths. Journal-backed fault points converge old/new, while pre-journal faults retain an
-  ignored stage. Darwin faults after swap, stage-to-backup rename, and each parent fsync
-  mirror Linux. Unknown COMMIT tests
+  in one immediate transaction; terminal no-work composes status there and performs no
+  Git/path calls. Journal-backed fallback fault points converge old/new where the topology
+  is provable and retain/block on ambiguous compound evidence, while pre-journal faults
+  retain an ignored stage. Unknown COMMIT tests
   distinguish transition-relative exact prior (including prepared-journal absence), exact
   next, read failure, partial, and third states and prove zero write replay.
-- Recovery observer tests enforce outside observation, immediate disposition reload and
-  byte-match/re-proof, then inside observation in exact position/tree-at-SHA/origin/position
-  order before path access. Same-ref different-commit exact candidate needs no ancestry;
+- Recovery observer tests enforce one stable observation under the recovery writer
+  transaction in exact position/tree-at-SHA/origin/position order, followed by disposition
+  byte-match/re-proof before path access. Same-ref different-commit exact candidate needs no ancestry;
   changed ref, malformed/racing bundle, or disposition drift fails before invalidation.
 - Recovery-path tests re-resolve the hardened Git-private root and reject path escape,
   wrong journal-bound child, equal paths, cross-device root, symlink/wrong type, and
