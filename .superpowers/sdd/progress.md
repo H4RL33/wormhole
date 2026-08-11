@@ -976,3 +976,14 @@ blocking of direct-edit/unknown topologies, and publisher-before-DB-postimage or
 Delete all in-flight work for the superseded mechanism before implementing this design. On
 completion, run the mandatory Stage 1A simplification gate and hard-pause; Tasks 6, 6A, 7,
 8, and Stage 2 require an explicit human go/no-go.
+
+Task-5 Task 501 fallback removal gate `eadbbe1..d55012b`: complete. The uncommitted receipt
+experiment was removed before execution; tracked exchange, strategy, and Darwin publisher
+paths were then deleted, leaving one Linux/WSL no-replace fallback and a non-Linux
+unsupported build path. Causal RED proved the exchange probe was still requested. Focused
+capability/artifact/fallback tests, full ProjectState tests, Darwin arm64 and FreeBSD amd64
+cross-compiles, formatting, and diff checks passed. Controller review found one Important
+fsync-causality defect in the now-universal fallback; `d55012b` fixed and tested private
+destination→checkout source after live→backup and checkout destination→private source after
+stage→live. Fresh re-review approved the two-commit slice with no remaining findings. Task
+502 owns the new publisher disposition/topology matrix and remains next.
