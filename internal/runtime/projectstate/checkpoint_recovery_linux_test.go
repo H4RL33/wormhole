@@ -342,6 +342,37 @@ func TestRecoverClassifiesPersistentRootsAsPreconditionsAndContainedEvidenceAsBl
 			want: ErrCheckpointRecoveryPrecondition, unwanted: ErrCheckpointRecoveryBlocked,
 		},
 		{
+			name: "transient Git path parent validation",
+			dependencies: func(t *testing.T, fixture checkpointRecoveryLinuxFixture, cause error) checkpointArtifactDependencies {
+				privateParentIdentity := checkpointRecoveryDirectoryIdentity(t, filepath.Dir(filepath.Dir(fixture.journal.StagePath)))
+				privateRootName := filepath.Base(filepath.Dir(fixture.journal.StagePath))
+				operations := defaultCheckpointArtifactPlatformOperations()
+				realFstatat := operations.fstatat
+				privateRootOpened := false
+				operations.fstatat = func(fd int, name string, stat *unix.Stat_t, flags int) error {
+					err := realFstatat(fd, name, stat, flags)
+					if err != nil || privateRootOpened || name != privateRootName {
+						return err
+					}
+					var parent unix.Stat_t
+					if err := unix.Fstat(fd, &parent); err != nil {
+						t.Fatal(err)
+					}
+					privateRootOpened = [2]uint64{uint64(parent.Dev), parent.Ino} == privateParentIdentity
+					return nil
+				}
+				failed := false
+				return checkpointArtifactDependencies{readGit: func(ctx context.Context, root string, limit int, args ...string) ([]byte, error) {
+					if privateRootOpened && !failed {
+						failed = true
+						return nil, cause
+					}
+					return readOnlyGitLimited(ctx, root, limit, args...)
+				}, operations: operations}
+			},
+			want: ErrCheckpointRecoveryPrecondition, unwanted: ErrCheckpointRecoveryBlocked,
+		},
+		{
 			name: "contained stage inspection",
 			dependencies: func(_ *testing.T, fixture checkpointRecoveryLinuxFixture, cause error) checkpointArtifactDependencies {
 				operations := defaultCheckpointArtifactPlatformOperations()

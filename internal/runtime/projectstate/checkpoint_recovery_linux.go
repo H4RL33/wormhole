@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 func recoverCheckpointFilesystem(
@@ -115,6 +117,21 @@ func checkpointRecoveryClassify(
 	artifact *checkpointArtifact,
 	stageName, backupName string,
 ) (checkpointPublicationTopology, error) {
+	terminalFD := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1].fd
+	privateFD := artifact.private.fd
+	containedEntryInspectionStarted := false
+	originalFstatat := artifact.dependencies.operations.fstatat
+	artifact.dependencies.operations.fstatat = func(parentFD int, name string, stat *unix.Stat_t, flags int) error {
+		if (parentFD == terminalFD && name == ".wormhole") ||
+			(parentFD == privateFD && (name == stageName || name == backupName)) {
+			containedEntryInspectionStarted = true
+		}
+		return originalFstatat(parentFD, name, stat, flags)
+	}
+	defer func() {
+		artifact.dependencies.operations.fstatat = originalFstatat
+	}()
+
 	topology, err := checkpointPublicationClassify(ctx, artifact, stageName, backupName)
 	if err == nil {
 		return topology, nil
@@ -122,14 +139,10 @@ func checkpointRecoveryClassify(
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return checkpointPublicationTopology{}, err
 	}
-	rootErr := checkpointPublicationRevalidateParents(ctx, artifact)
-	if rootErr != nil {
-		if errors.Is(rootErr, context.Canceled) || errors.Is(rootErr, context.DeadlineExceeded) {
-			return checkpointPublicationTopology{}, rootErr
-		}
+	if !containedEntryInspectionStarted {
 		return checkpointPublicationTopology{}, checkpointRecoveryPrecondition(
-			"persistent recovery root drift",
-			errors.Join(err, rootErr),
+			"recovery root validation failed",
+			err,
 		)
 	}
 	return checkpointPublicationTopology{}, checkpointPublicationBlocked(
