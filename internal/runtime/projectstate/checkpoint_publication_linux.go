@@ -23,10 +23,15 @@ const (
 )
 
 type checkpointPublicationEntry struct {
-	kind     checkpointPublicationEntryKind
-	tree     state.Tree
+	kind checkpointPublicationEntryKind
+	tree state.Tree
+}
+
+type checkpointPublicationEntryProof struct {
+	entry    checkpointPublicationEntry
 	metadata workingTreeMetadata
 	fd       int
+	stage    bool
 }
 
 type checkpointPublicationTopology struct {
@@ -47,7 +52,8 @@ func publishCheckpointArtifactFallback(ctx context.Context, artifact *checkpoint
 	if err != nil {
 		return 0, checkpointPublicationClassificationError(err)
 	}
-	if checkpointPublicationIs(entry, checkpointPublicationOpaque, checkpointPublicationCandidate, checkpointPublicationAbsent) {
+	if (entry.live.kind == checkpointPublicationCandidate || entry.live.kind == checkpointPublicationOpaque) &&
+		entry.stage.kind == checkpointPublicationCandidate && entry.backup.kind == checkpointPublicationAbsent {
 		return checkpointPublicationPreservedConcurrentOld, nil
 	}
 	if !checkpointPublicationIs(entry, checkpointPublicationPrior, checkpointPublicationCandidate, checkpointPublicationAbsent) {
@@ -204,7 +210,7 @@ func checkpointPublicationClassify(ctx context.Context, artifact *checkpointArti
 		return checkpointPublicationTopology{}, err
 	}
 	terminal := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1]
-	entries := []*checkpointPublicationEntry{}
+	entries := []*checkpointPublicationEntryProof{}
 	defer func() {
 		for _, entry := range entries {
 			if entry.fd >= 0 {
@@ -213,7 +219,7 @@ func checkpointPublicationClassify(ctx context.Context, artifact *checkpointArti
 			}
 		}
 	}()
-	open := func(parentFD int, name string, ownerOnly, stage bool) (checkpointPublicationEntry, error) {
+	open := func(parentFD int, name string, ownerOnly, stage bool) (checkpointPublicationEntryProof, error) {
 		entry, err := checkpointPublicationOpenEntry(ctx, artifact, parentFD, name, ownerOnly, stage)
 		if entry.fd >= 0 {
 			entries = append(entries, &entry)
@@ -232,15 +238,15 @@ func checkpointPublicationClassify(ctx context.Context, artifact *checkpointArti
 	if err != nil {
 		return checkpointPublicationTopology{}, err
 	}
-	topology := checkpointPublicationTopology{live: live, stage: stage, backup: backup}
+	topology := checkpointPublicationTopology{live: live.entry, stage: stage.entry, backup: backup.entry}
 	for _, proof := range []struct {
 		parentFD int
 		name     string
-		entry    *checkpointPublicationEntry
+		entry    *checkpointPublicationEntryProof
 	}{
-		{terminal.fd, ".wormhole", &topology.live},
-		{artifact.private.fd, stageName, &topology.stage},
-		{artifact.private.fd, backupName, &topology.backup},
+		{terminal.fd, ".wormhole", &live},
+		{artifact.private.fd, stageName, &stage},
+		{artifact.private.fd, backupName, &backup},
 	} {
 		if err := checkpointPublicationRevalidateEntry(ctx, artifact, proof.parentFD, proof.name, proof.entry); err != nil {
 			return checkpointPublicationTopology{}, err
@@ -249,32 +255,32 @@ func checkpointPublicationClassify(ctx context.Context, artifact *checkpointArti
 	return topology, nil
 }
 
-func checkpointPublicationOpenEntry(ctx context.Context, artifact *checkpointArtifact, parentFD int, name string, ownerOnly, stage bool) (checkpointPublicationEntry, error) {
+func checkpointPublicationOpenEntry(ctx context.Context, artifact *checkpointArtifact, parentFD int, name string, ownerOnly, stage bool) (checkpointPublicationEntryProof, error) {
 	operations := artifact.dependencies.operations
 	var linked unix.Stat_t
 	err := operations.fstatat(parentFD, name, &linked, unix.AT_SYMLINK_NOFOLLOW)
 	if errors.Is(err, unix.ENOENT) {
 		if err := checkpointPublicationProveAbsent(artifact, parentFD, name); err != nil {
-			return checkpointPublicationEntry{}, err
+			return checkpointPublicationEntryProof{}, err
 		}
-		return checkpointPublicationEntry{kind: checkpointPublicationAbsent, fd: -1}, nil
+		return checkpointPublicationEntryProof{entry: checkpointPublicationEntry{kind: checkpointPublicationAbsent}, fd: -1, stage: stage}, nil
 	}
 	if err != nil {
-		return checkpointPublicationEntry{}, err
+		return checkpointPublicationEntryProof{}, err
 	}
 	linkedMetadata := workingTreeStatMetadata(&linked)
 	if linkedMetadata.mode&unix.S_IFMT != unix.S_IFDIR || ownerOnly && !checkpointPublicationOwnerDirectory(linkedMetadata) {
-		return checkpointPublicationEntry{}, fmt.Errorf("unsafe checkpoint publication entry %q", name)
+		return checkpointPublicationEntryProof{}, fmt.Errorf("unsafe checkpoint publication entry %q", name)
 	}
 	fd, err := operations.openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return checkpointPublicationEntry{}, err
+		return checkpointPublicationEntryProof{}, err
 	}
-	entry := checkpointPublicationEntry{fd: fd, metadata: linkedMetadata}
-	fail := func(err error) (checkpointPublicationEntry, error) {
+	proof := checkpointPublicationEntryProof{fd: fd, metadata: linkedMetadata, stage: stage}
+	fail := func(err error) (checkpointPublicationEntryProof, error) {
 		_ = operations.close(fd)
-		entry.fd = -1
-		return entry, err
+		proof.fd = -1
+		return proof, err
 	}
 	opened, err := checkpointArtifactFstatMetadata(fd, operations)
 	if err != nil || opened != linkedMetadata {
@@ -295,20 +301,20 @@ func checkpointPublicationOpenEntry(ctx context.Context, artifact *checkpointArt
 			return fail(err)
 		}
 	}
-	entry.tree = tree
+	proof.entry.tree = tree
 	switch {
 	case stage && sameCheckpointArtifactTree(tree, artifact.proof.candidate.tree):
-		entry.kind = checkpointPublicationCandidate
+		proof.entry.kind = checkpointPublicationCandidate
 	case stage:
 		return fail(fmt.Errorf("checkpoint stage is not the exact candidate tree"))
 	case sameCheckpointArtifactTree(tree, artifact.proof.prior.tree):
-		entry.kind = checkpointPublicationPrior
+		proof.entry.kind = checkpointPublicationPrior
 	case sameCheckpointArtifactTree(tree, artifact.proof.candidate.tree):
-		entry.kind = checkpointPublicationCandidate
+		proof.entry.kind = checkpointPublicationCandidate
 	default:
-		entry.kind = checkpointPublicationOpaque
+		proof.entry.kind = checkpointPublicationOpaque
 	}
-	return entry, nil
+	return proof, nil
 }
 
 func checkpointPublicationValidateStageShape(ctx context.Context, root heldWorkingTreeDirectory, tree state.Tree) error {
@@ -342,25 +348,40 @@ func checkpointPublicationValidateStageShape(ctx context.Context, root heldWorki
 	return verifyCheckpointArtifactCapture(ctx, root, defaultWorkingTreeLimits(), walker)
 }
 
-func checkpointPublicationRevalidateEntry(ctx context.Context, artifact *checkpointArtifact, parentFD int, name string, entry *checkpointPublicationEntry) error {
-	if entry.kind == checkpointPublicationAbsent {
+func checkpointPublicationRevalidateEntry(ctx context.Context, artifact *checkpointArtifact, parentFD int, name string, proof *checkpointPublicationEntryProof) error {
+	if proof.entry.kind == checkpointPublicationAbsent {
 		return checkpointPublicationProveAbsent(artifact, parentFD, name)
 	}
 	operations := artifact.dependencies.operations
-	opened, err := checkpointArtifactFstatMetadata(entry.fd, operations)
-	if err != nil || opened != entry.metadata {
+	opened, err := checkpointArtifactFstatMetadata(proof.fd, operations)
+	if err != nil {
+		return fmt.Errorf("checkpoint publication entry %q final descriptor stat: %w", name, err)
+	}
+	if opened != proof.metadata {
 		return fmt.Errorf("checkpoint publication entry %q changed after capture", name)
 	}
 	var linked unix.Stat_t
-	if err := operations.fstatat(parentFD, name, &linked, unix.AT_SYMLINK_NOFOLLOW); err != nil || workingTreeStatMetadata(&linked) != entry.metadata {
+	if err := operations.fstatat(parentFD, name, &linked, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return fmt.Errorf("checkpoint publication path %q final stat: %w", name, err)
+	}
+	if workingTreeStatMetadata(&linked) != proof.metadata {
 		return fmt.Errorf("checkpoint publication path %q changed after capture", name)
 	}
-	if err := checkpointPublicationProveMount(artifact, entry.fd); err != nil {
+	if err := checkpointPublicationProveMount(artifact, proof.fd); err != nil {
 		return err
 	}
-	tree, err := readCheckpointArtifactTree(ctx, heldWorkingTreeDirectory{fd: entry.fd, parentFD: parentFD, name: name, path: name, metadata: entry.metadata})
-	if err != nil || !sameCheckpointArtifactTree(tree, entry.tree) {
+	root := heldWorkingTreeDirectory{fd: proof.fd, parentFD: parentFD, name: name, path: name, metadata: proof.metadata}
+	tree, err := readCheckpointArtifactTree(ctx, root)
+	if err != nil {
+		return fmt.Errorf("checkpoint publication bytes at %q final read: %w", name, err)
+	}
+	if !sameCheckpointArtifactTree(tree, proof.entry.tree) {
 		return fmt.Errorf("checkpoint publication bytes at %q changed after capture", name)
+	}
+	if proof.stage {
+		if err := checkpointPublicationValidateStageShape(ctx, root, tree); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -375,7 +396,10 @@ func checkpointPublicationProveAbsent(artifact *checkpointArtifact, parentFD int
 		return err
 	}
 	after, err := checkpointArtifactFstatMetadata(parentFD, operations)
-	if err != nil || before != after {
+	if err != nil {
+		return fmt.Errorf("checkpoint publication parent final stat while proving %q absent: %w", name, err)
+	}
+	if before != after {
 		return fmt.Errorf("checkpoint publication parent changed while proving %q absent", name)
 	}
 	var linked unix.Stat_t
@@ -425,7 +449,10 @@ func checkpointPublicationRevalidateParents(ctx context.Context, artifact *check
 		return err
 	}
 	paths, err := resolveCheckpointGitPathsWithReader(ctx, artifact.checkoutIdentity.CanonicalPath, artifact.dependencies.readGit)
-	if err != nil || paths != artifact.paths {
+	if err != nil {
+		return fmt.Errorf("checkpoint publication resolve Git paths: %w", err)
+	}
+	if paths != artifact.paths {
 		return fmt.Errorf("checkpoint publication Git paths changed")
 	}
 	if err := artifact.checkout.revalidate(); err != nil {
@@ -503,5 +530,5 @@ func checkpointPublicationBlocked(message string, cause error) error {
 	if cause == nil {
 		return fmt.Errorf("%w: %s", ErrCheckpointRecoveryBlocked, message)
 	}
-	return fmt.Errorf("%w: %s: %v", ErrCheckpointRecoveryBlocked, message, cause)
+	return fmt.Errorf("%w: %s: %w", ErrCheckpointRecoveryBlocked, message, cause)
 }
