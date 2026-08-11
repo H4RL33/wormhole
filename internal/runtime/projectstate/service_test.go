@@ -253,6 +253,54 @@ func TestStatusExposesCandidateDigestAndOverlayGeneration(t *testing.T) {
 	}
 }
 
+func TestRecoveryStatusCompositionUsesDatabaseOnly(t *testing.T) {
+	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+	_, service := openProjectStateService(t, "")
+	registered := registerGitRepository(t, service, repository)
+	panicIO := func(string) { panic("recovery no-work performed checkout, Git, origin, or path I/O") }
+	service.readWorkingTree = func(string) (state.Tree, error) { panicIO("path"); return nil, nil }
+	service.observeGitBase = func(context.Context, ObserveGitBaseRequest) (gitBaseObservation, error) {
+		panicIO("git")
+		return gitBaseObservation{}, nil
+	}
+	service.observePublicationOrigin = func(context.Context, string) (publicationOriginObservation, error) {
+		panicIO("origin")
+		return publicationOriginObservation{}, nil
+	}
+	service.observePublicationTrust = func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error) {
+		panicIO("checkout")
+		return publicationTrustObservation{}, nil
+	}
+	service.prepareCheckpointArtifact = func(context.Context, checkpointArtifactInput) (checkpointArtifactHandle, error) {
+		panicIO("artifact path")
+		return checkpointArtifactHandle{}, nil
+	}
+	movedRoot := repository.root + "-moved"
+	if err := os.Rename(repository.root, movedRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	var got checkpointRecoveryProof
+	err := service.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+		var err error
+		got, err = loadCheckpointRecoveryDisposition(context.Background(), tx)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.kind != checkpointRecoveryNoWork || got.driver != nil || got.status.Binding != registered.Binding ||
+		got.status.State != "clean" || got.status.CandidateDigest != got.status.AcceptedSnapshot.Digest ||
+		got.status.OverlayGeneration != 0 || got.status.PublicationClassification != "" || got.status.PublicationReviewDigest != "" {
+		t.Fatalf("database-only recovery status proof=%+v", got)
+	}
+	wantName := got.status.AcceptedSnapshot.Project.Name
+	got.workspace.Snapshot.Project.Name = "mutated proof workspace"
+	if got.status.AcceptedSnapshot.Project.Name != wantName {
+		t.Fatal("database-only recovery status aliases proof workspace")
+	}
+}
+
 func TestStatusSelectsRebasedCandidateAndBoundary(t *testing.T) {
 	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
 	store, service := openProjectStateService(t, "")

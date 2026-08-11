@@ -379,6 +379,14 @@ func loadComposedWorkspace(ctx context.Context, tx *localstore.WorkspaceMutation
 	if err := verifyBindingCheckout(record.Binding); err != nil {
 		return composedWorkspace{}, localstore.ErrNotFound
 	}
+	return loadComposedWorkspaceRecord(ctx, tx, record)
+}
+
+func loadComposedWorkspaceRecord(
+	ctx context.Context,
+	tx *localstore.WorkspaceMutationTx,
+	record localstore.WorkspaceRecord,
+) (composedWorkspace, error) {
 	openConflicts, err := tx.HasOpenConflicts(ctx)
 	if err != nil {
 		return composedWorkspace{}, err
