@@ -342,6 +342,431 @@ func TestCheckpointArtifactCapabilityProbeNeverRetriesCloseAfterError(t *testing
 	}
 }
 
+type checkpointFDOwnershipRecorder struct {
+	generation map[int]checkpointFDGeneration
+	opened     map[int]int
+	closed     map[int]int
+	unowned    []int
+}
+
+type checkpointFDGeneration struct {
+	live    bool
+	tracked bool
+}
+
+func checkpointArtifactTrackedOperations(trackName func(string) bool) (checkpointArtifactPlatformOperations, *checkpointFDOwnershipRecorder) {
+	operations := normalizeCheckpointArtifactRenameOperations(defaultCheckpointArtifactPlatformOperations())
+	recorder := &checkpointFDOwnershipRecorder{
+		generation: make(map[int]checkpointFDGeneration),
+		opened:     make(map[int]int),
+		closed:     make(map[int]int),
+	}
+	// Track only child descriptors acquired through the injected operations seam.
+	// Checkout, Git, and live-root handles use their own direct Unix ownership.
+	realOpenat, realClose := operations.openat, operations.close
+	operations.openat = func(parentFD int, name string, flags int, mode uint32) (int, error) {
+		fd, err := realOpenat(parentFD, name, flags, mode)
+		if err == nil {
+			tracked := trackName(name)
+			recorder.generation[fd] = checkpointFDGeneration{live: true, tracked: tracked}
+			if tracked {
+				recorder.opened[fd]++
+			}
+		}
+		return fd, err
+	}
+	operations.close = func(fd int) error {
+		if generation, known := recorder.generation[fd]; known {
+			if !generation.live {
+				recorder.unowned = append(recorder.unowned, fd)
+				return unix.EBADF
+			}
+			generation.live = false
+			recorder.generation[fd] = generation
+			if generation.tracked {
+				recorder.closed[fd]++
+			}
+			return realClose(fd)
+		}
+		if fd == 0 {
+			recorder.unowned = append(recorder.unowned, fd)
+			return unix.EBADF
+		}
+		return realClose(fd)
+	}
+	return operations, recorder
+}
+
+func (recorder *checkpointFDOwnershipRecorder) assertBalanced(t *testing.T) {
+	t.Helper()
+	if len(recorder.unowned) != 0 {
+		t.Fatalf("closed unowned descriptors: %v", recorder.unowned)
+	}
+	for fd, generation := range recorder.generation {
+		if generation.live {
+			t.Fatalf("descriptor %d has a live seam-open generation (tracked=%t)", fd, generation.tracked)
+		}
+	}
+	for fd, opened := range recorder.opened {
+		if recorder.closed[fd] != opened {
+			t.Fatalf("descriptor %d opened %d times, closed %d times", fd, opened, recorder.closed[fd])
+		}
+	}
+}
+
+func TestCheckpointArtifactPreparationPrivateRootFailureOwnsOnlyAcquiredFDs(t *testing.T) {
+	for _, boundary := range []string{"early stat", "post-open stat", "created parent fsync", "final path", "final stability"} {
+		t.Run(boundary, func(t *testing.T) {
+			input := checkpointArtifactTestInput(t)
+			operations, recorder := checkpointArtifactTrackedOperations(func(name string) bool {
+				return name == "wormhole" || name == "checkpoints"
+			})
+			cause := errors.New("private root " + boundary)
+			privateRoot := filepath.Join(input.Checkout.CanonicalPath, ".git", "wormhole", "checkpoints")
+			journalAllocated := false
+			wormholeFD := -1
+			switch boundary {
+			case "early stat":
+				realFstatat := operations.fstatat
+				operations.fstatat = func(fd int, name string, stat *unix.Stat_t, flags int) error {
+					if name == "wormhole" {
+						return cause
+					}
+					return realFstatat(fd, name, stat, flags)
+				}
+			case "post-open stat":
+				realOpenat, realFstat := operations.openat, operations.fstat
+				operations.openat = func(fd int, name string, flags int, mode uint32) (int, error) {
+					opened, err := realOpenat(fd, name, flags, mode)
+					if err == nil && name == "wormhole" {
+						wormholeFD = opened
+					}
+					return opened, err
+				}
+				operations.fstat = func(fd int, stat *unix.Stat_t) error {
+					if fd == wormholeFD {
+						return cause
+					}
+					return realFstat(fd, stat)
+				}
+			case "created parent fsync":
+				realMkdirat, realFsync := operations.mkdirat, operations.fsync
+				createdParentFD := -1
+				operations.mkdirat = func(fd int, name string, mode uint32) error {
+					err := realMkdirat(fd, name, mode)
+					if err == nil && name == "wormhole" {
+						createdParentFD = fd
+					}
+					return err
+				}
+				operations.fsync = func(fd int) error {
+					if fd == createdParentFD {
+						return cause
+					}
+					return realFsync(fd)
+				}
+			case "final path":
+				git, openErr := openWorkingTreeRoot(filepath.Join(input.Checkout.CanonicalPath, ".git"))
+				if openErr != nil {
+					t.Fatal(openErr)
+				}
+				gitTerminal := git.ancestry[len(git.ancestry)-1]
+				private, ancestors, openErr := openCheckpointPrivateRoot(gitTerminal, privateRoot+"-wrong", checkpointArtifactDependencies{operations: operations})
+				if private.fd >= 0 {
+					_ = operations.close(private.fd)
+				}
+				for index := len(ancestors) - 1; index >= 0; index-- {
+					_ = operations.close(ancestors[index].fd)
+				}
+				git.close()
+				if openErr == nil {
+					t.Fatal("private root accepted wrong final path")
+				}
+				recorder.assertBalanced(t)
+				return
+			case "final stability":
+				realOpenat, realFstat := operations.openat, operations.fstat
+				checkpointsFD := -1
+				operations.openat = func(fd int, name string, flags int, mode uint32) (int, error) {
+					opened, err := realOpenat(fd, name, flags, mode)
+					if err == nil && name == "checkpoints" {
+						checkpointsFD = opened
+					}
+					return opened, err
+				}
+				operations.fstat = func(fd int, stat *unix.Stat_t) error {
+					if err := realFstat(fd, stat); err != nil {
+						return err
+					}
+					if fd == checkpointsFD {
+						checkpointsFD = -1
+						if err := os.Rename(privateRoot, privateRoot+"-retained"); err != nil {
+							return err
+						}
+						if err := os.Mkdir(privateRoot, 0o700); err != nil {
+							return err
+						}
+					}
+					return nil
+				}
+			}
+			artifact, err := prepareCheckpointArtifactWithDependencies(context.Background(), input, checkpointArtifactDependencies{
+				readGit: readOnlyGitLimited, operations: operations,
+				newJournalID: func() (string, error) { journalAllocated = true; return "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", nil },
+			})
+			if artifact != nil || err == nil || journalAllocated {
+				t.Fatalf("private-root %s = (%v, %v), journal allocated=%t", boundary, artifact, err, journalAllocated)
+			}
+			if boundary != "final stability" && !errors.Is(err, cause) {
+				t.Fatalf("private-root %s lost cause: %v", boundary, err)
+			}
+			recorder.assertBalanced(t)
+			if boundary == "created parent fsync" {
+				wormholePath := filepath.Join(input.Checkout.CanonicalPath, ".git", "wormhole")
+				if info, statErr := os.Lstat(wormholePath); statErr != nil || !info.IsDir() {
+					t.Fatalf("retained applied-create %q = (%v, %v)", wormholePath, info, statErr)
+				}
+			}
+			if boundary == "final stability" {
+				for _, path := range []string{privateRoot, privateRoot + "-retained"} {
+					if info, statErr := os.Lstat(path); statErr != nil || !info.IsDir() {
+						t.Fatalf("retained stability path %q = (%v, %v)", path, info, statErr)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestCheckpointArtifactPreparationSecondPrivateChildFailureClosesCurrentParent(t *testing.T) {
+	for _, boundary := range []string{"initial stat", "unsafe shape", "mkdir", "post-create stat", "open", "post-open stat", "metadata mismatch", "created parent fsync"} {
+		t.Run(boundary, func(t *testing.T) {
+			input := checkpointArtifactTestInput(t)
+			if boundary == "unsafe shape" {
+				wormholePath := filepath.Join(input.Checkout.CanonicalPath, ".git", "wormhole")
+				if err := os.Mkdir(wormholePath, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(filepath.Join(wormholePath, "checkpoints"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			operations, recorder := checkpointArtifactTrackedOperations(func(name string) bool {
+				return name == "wormhole" || name == "checkpoints"
+			})
+			cause := errors.New("second private child " + boundary)
+			checkpointsFD, checkpointsStats := -1, 0
+			realFstatat, realOpenat, realFstat := operations.fstatat, operations.openat, operations.fstat
+			operations.fstatat = func(fd int, name string, stat *unix.Stat_t, flags int) error {
+				err := realFstatat(fd, name, stat, flags)
+				if name == "checkpoints" {
+					checkpointsStats++
+					switch boundary {
+					case "initial stat":
+						return cause
+					case "post-create stat":
+						if checkpointsStats == 2 {
+							return cause
+						}
+					case "metadata mismatch":
+						if err == nil {
+							stat.Ino++
+						}
+					}
+				}
+				return err
+			}
+			if boundary == "mkdir" {
+				realMkdirat := operations.mkdirat
+				operations.mkdirat = func(fd int, name string, mode uint32) error {
+					if name == "checkpoints" {
+						return cause
+					}
+					return realMkdirat(fd, name, mode)
+				}
+			}
+			operations.openat = func(fd int, name string, flags int, mode uint32) (int, error) {
+				if name == "checkpoints" && boundary == "open" {
+					return -1, cause
+				}
+				opened, err := realOpenat(fd, name, flags, mode)
+				if err == nil && name == "checkpoints" {
+					checkpointsFD = opened
+				}
+				return opened, err
+			}
+			operations.fstat = func(fd int, stat *unix.Stat_t) error {
+				if fd == checkpointsFD && boundary == "post-open stat" {
+					return cause
+				}
+				return realFstat(fd, stat)
+			}
+			if boundary == "created parent fsync" {
+				realFsync := operations.fsync
+				operations.fsync = func(fd int) error {
+					var stat unix.Stat_t
+					if err := unix.Fstat(fd, &stat); err != nil {
+						return err
+					}
+					wormholePath := filepath.Join(input.Checkout.CanonicalPath, ".git", "wormhole")
+					var wormhole unix.Stat_t
+					if err := unix.Stat(wormholePath, &wormhole); err == nil && stat.Dev == wormhole.Dev && stat.Ino == wormhole.Ino {
+						return cause
+					}
+					return realFsync(fd)
+				}
+			}
+
+			journalAllocated := false
+			artifact, err := prepareCheckpointArtifactWithDependencies(context.Background(), input, checkpointArtifactDependencies{
+				readGit: readOnlyGitLimited, operations: operations,
+				newJournalID: func() (string, error) { journalAllocated = true; return "abababab-abab-4bab-8bab-abababababab", nil },
+			})
+			if artifact != nil || err == nil || journalAllocated {
+				t.Fatalf("second-child %s = (%v, %v), journal allocated=%t", boundary, artifact, err, journalAllocated)
+			}
+			if boundary != "unsafe shape" && boundary != "metadata mismatch" && !errors.Is(err, cause) {
+				t.Fatalf("second-child %s lost cause: %v", boundary, err)
+			}
+			recorder.assertBalanced(t)
+			if boundary == "created parent fsync" || boundary == "post-create stat" {
+				checkpointsPath := filepath.Join(input.Checkout.CanonicalPath, ".git", "wormhole", "checkpoints")
+				if info, statErr := os.Lstat(checkpointsPath); statErr != nil || !info.IsDir() {
+					t.Fatalf("retained applied-create %q = (%v, %v)", checkpointsPath, info, statErr)
+				}
+			}
+		})
+	}
+}
+
+func TestCheckpointFDOwnershipRecorderRejectsDoubleCloseAndTracksReuse(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"child", "untracked"} {
+		if err := os.Mkdir(filepath.Join(root, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	parentFD, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(parentFD)
+	operations, recorder := checkpointArtifactTrackedOperations(func(name string) bool { return name == "child" })
+	openChild := func(name string) int {
+		fd, openErr := operations.openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		return fd
+	}
+	firstFD := openChild("child")
+	if err := operations.close(firstFD); err != nil {
+		t.Fatal(err)
+	}
+	if err := operations.close(firstFD); !errors.Is(err, unix.EBADF) {
+		t.Fatalf("double close = %v, want EBADF", err)
+	}
+	secondFD := openChild("untracked")
+	if secondFD != firstFD {
+		t.Fatalf("descriptor was not reused: first=%d second=%d", firstFD, secondFD)
+	}
+	if err := operations.close(secondFD); err != nil {
+		t.Fatalf("close untracked reused generation: %v", err)
+	}
+	thirdFD := openChild("child")
+	if thirdFD != firstFD {
+		t.Fatalf("descriptor was not reused again: first=%d third=%d", firstFD, thirdFD)
+	}
+	if err := operations.close(thirdFD); err != nil {
+		t.Fatalf("close tracked reused generation: %v", err)
+	}
+	if len(recorder.unowned) != 1 || recorder.unowned[0] != firstFD {
+		t.Fatalf("unsafe closes = %v, want [%d]", recorder.unowned, firstFD)
+	}
+	recorder.unowned = nil
+	recorder.assertBalanced(t)
+}
+
+func TestCheckpointArtifactPreparationStageOpenFailureOwnsOnlyAcquiredFDs(t *testing.T) {
+	for _, boundary := range []string{"initial stat", "unsafe shape", "open", "post-open stat", "metadata mismatch"} {
+		t.Run(boundary, func(t *testing.T) {
+			input := checkpointArtifactTestInput(t)
+			operations, recorder := checkpointArtifactTrackedOperations(func(name string) bool {
+				return strings.HasSuffix(name, ".stage")
+			})
+			cause := errors.New("stage " + boundary)
+			stageFD, stageStats := -1, 0
+			realFstatat, realOpenat, realFstat := operations.fstatat, operations.openat, operations.fstat
+			operations.fstatat = func(fd int, name string, stat *unix.Stat_t, flags int) error {
+				err := realFstatat(fd, name, stat, flags)
+				if strings.HasSuffix(name, ".stage") {
+					stageStats++
+					if stageStats == 2 {
+						switch boundary {
+						case "initial stat":
+							return cause
+						case "unsafe shape":
+							stat.Mode = unix.S_IFDIR | 0o755
+						}
+					}
+				}
+				return err
+			}
+			operations.openat = func(fd int, name string, flags int, mode uint32) (int, error) {
+				if strings.HasSuffix(name, ".stage") && boundary == "open" {
+					return -1, cause
+				}
+				opened, err := realOpenat(fd, name, flags, mode)
+				if err == nil && strings.HasSuffix(name, ".stage") {
+					stageFD = opened
+				}
+				return opened, err
+			}
+			operations.fstat = func(fd int, stat *unix.Stat_t) error {
+				if fd == stageFD {
+					if boundary == "post-open stat" {
+						return cause
+					}
+					if err := realFstat(fd, stat); err != nil {
+						return err
+					}
+					if boundary == "metadata mismatch" {
+						stat.Ino++
+					}
+					return nil
+				}
+				return realFstat(fd, stat)
+			}
+			if boundary == "post-open stat" {
+				realClose := operations.close
+				operations.close = func(fd int) error {
+					err := realClose(fd)
+					if err == nil && fd == stageFD {
+						return unix.EIO
+					}
+					return err
+				}
+			}
+			journalID := "ffffffff-ffff-4fff-8fff-ffffffffffff"
+			artifact, err := prepareCheckpointArtifactWithDependencies(context.Background(), input, checkpointArtifactDependencies{
+				readGit: readOnlyGitLimited, operations: operations,
+				newJournalID: func() (string, error) { return journalID, nil },
+			})
+			if artifact != nil || err == nil {
+				t.Fatalf("stage %s = (%v, %v)", boundary, artifact, err)
+			}
+			if (boundary == "initial stat" || boundary == "open" || boundary == "post-open stat") && !errors.Is(err, cause) {
+				t.Fatalf("stage %s lost cause: %v", boundary, err)
+			}
+			recorder.assertBalanced(t)
+			stagePath := filepath.Join(input.Checkout.CanonicalPath, ".git", "wormhole", "checkpoints", journalID+".stage")
+			if info, statErr := os.Lstat(stagePath); statErr != nil || !info.IsDir() {
+				t.Fatalf("retained stage = (%v, %v)", info, statErr)
+			}
+		})
+	}
+}
+
 func TestCheckpointArtifactCapabilityProbeResidueDoesNotPoisonNextPreparation(t *testing.T) {
 	firstProbeID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	secondProbeID := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"

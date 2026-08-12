@@ -655,25 +655,31 @@ func prepareCheckpointArtifactFilesystem(ctx context.Context, input checkpointAr
 
 func openCheckpointPrivateRoot(git heldWorkingTreeDirectory, expected string, dependencies checkpointArtifactDependencies) (heldWorkingTreeDirectory, []heldWorkingTreeDirectory, error) {
 	if !filepath.IsAbs(expected) || filepath.Clean(expected) != expected {
-		return heldWorkingTreeDirectory{}, nil, fmt.Errorf("projectstate: checkpoint private root changed")
+		return heldWorkingTreeDirectory{fd: -1}, nil, fmt.Errorf("projectstate: checkpoint private root changed")
 	}
 	parent := git
 	ancestors := make([]heldWorkingTreeDirectory, 0, 1)
+	closeParentAndAncestors := func() {
+		if parent.fd != git.fd {
+			_ = dependencies.operations.close(parent.fd)
+		}
+		for index := len(ancestors) - 1; index >= 0; index-- {
+			if ancestors[index].fd != parent.fd {
+				_ = dependencies.operations.close(ancestors[index].fd)
+			}
+		}
+	}
 	for _, name := range []string{"wormhole", "checkpoints"} {
 		child, created, err := openOrCreateCheckpointPrivateDirectory(parent, name, dependencies.operations)
 		if err != nil {
-			for index := len(ancestors) - 1; index >= 0; index-- {
-				_ = dependencies.operations.close(ancestors[index].fd)
-			}
-			return heldWorkingTreeDirectory{}, nil, err
+			closeParentAndAncestors()
+			return heldWorkingTreeDirectory{fd: -1}, nil, err
 		}
 		if created {
 			if err := dependencies.operations.fsync(parent.fd); err != nil {
 				_ = dependencies.operations.close(child.fd)
-				for index := len(ancestors) - 1; index >= 0; index-- {
-					_ = dependencies.operations.close(ancestors[index].fd)
-				}
-				return heldWorkingTreeDirectory{}, nil, err
+				closeParentAndAncestors()
+				return heldWorkingTreeDirectory{fd: -1}, nil, err
 			}
 		}
 		if parent.fd != git.fd {
@@ -682,18 +688,12 @@ func openCheckpointPrivateRoot(git heldWorkingTreeDirectory, expected string, de
 		parent = child
 	}
 	if filepath.Base(expected) != parent.name || filepath.Base(filepath.Dir(expected)) != "wormhole" {
-		_ = dependencies.operations.close(parent.fd)
-		for index := len(ancestors) - 1; index >= 0; index-- {
-			_ = dependencies.operations.close(ancestors[index].fd)
-		}
-		return heldWorkingTreeDirectory{}, nil, fmt.Errorf("projectstate: checkpoint private root path changed")
+		closeParentAndAncestors()
+		return heldWorkingTreeDirectory{fd: -1}, nil, fmt.Errorf("projectstate: checkpoint private root path changed")
 	}
 	if err := revalidateWorkingTreeDirectory(parent); err != nil {
-		_ = dependencies.operations.close(parent.fd)
-		for index := len(ancestors) - 1; index >= 0; index-- {
-			_ = dependencies.operations.close(ancestors[index].fd)
-		}
-		return heldWorkingTreeDirectory{}, nil, err
+		closeParentAndAncestors()
+		return heldWorkingTreeDirectory{fd: -1}, nil, err
 	}
 	return parent, ancestors, nil
 }
@@ -904,15 +904,15 @@ func openCheckpointArtifactChildDirectory(parent heldWorkingTreeDirectory, name 
 func openCheckpointArtifactChildDirectoryWithOperations(parent heldWorkingTreeDirectory, name string, operations checkpointArtifactPlatformOperations) (heldWorkingTreeDirectory, error) {
 	var stat unix.Stat_t
 	if err := operations.fstatat(parent.fd, name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		return heldWorkingTreeDirectory{}, err
+		return heldWorkingTreeDirectory{fd: -1}, err
 	}
 	metadata := workingTreeStatMetadata(&stat)
 	if metadata.mode&unix.S_IFMT != unix.S_IFDIR || metadata.uid != uint32(unix.Geteuid()) || metadata.mode&0o777 != 0o700 || metadata.mode&0o7000 != 0 {
-		return heldWorkingTreeDirectory{}, fmt.Errorf("%w: unsafe checkpoint stage", ErrCheckpointUnsupported)
+		return heldWorkingTreeDirectory{fd: -1}, fmt.Errorf("%w: unsafe checkpoint stage", ErrCheckpointUnsupported)
 	}
 	fd, err := operations.openat(parent.fd, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return heldWorkingTreeDirectory{}, err
+		return heldWorkingTreeDirectory{fd: -1}, err
 	}
 	var openedStat unix.Stat_t
 	err = operations.fstat(fd, &openedStat)
@@ -922,7 +922,7 @@ func openCheckpointArtifactChildDirectoryWithOperations(parent heldWorkingTreeDi
 		if err == nil {
 			err = fmt.Errorf("projectstate: checkpoint stage directory changed while opening")
 		}
-		return heldWorkingTreeDirectory{}, err
+		return heldWorkingTreeDirectory{fd: -1}, err
 	}
 	return heldWorkingTreeDirectory{fd: fd, parentFD: parent.fd, name: name, path: filepath.Join(parent.path, name), metadata: opened}, nil
 }

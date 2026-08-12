@@ -192,6 +192,84 @@ func TestRecoverPreparedStageAbsentCandidateBackupIsBlocked(t *testing.T) {
 	}
 }
 
+func TestRecoverPrivateRootOpenFailureOwnsOnlyAcquiredFDs(t *testing.T) {
+	for _, boundary := range []string{"initial stat", "unsafe shape", "open", "post-open stat", "metadata mismatch"} {
+		t.Run(boundary, func(t *testing.T) {
+			fixture := newCheckpointRecoveryLinuxFixture(t, "prepared")
+			beforeDatabase := recoveryDatabaseState(t, fixture.service, fixture.request.Scope)
+			beforePaths := recoveryScopePaths(t, beforeDatabase)
+			operations, recorder := checkpointArtifactTrackedOperations(func(name string) bool {
+				return name == "wormhole" || name == "checkpoints"
+			})
+			cause := errors.New("recovery private root " + boundary)
+			checkpointsFD := -1
+			realFstatat, realOpenat, realFstat := operations.fstatat, operations.openat, operations.fstat
+			operations.fstatat = func(fd int, name string, stat *unix.Stat_t, flags int) error {
+				err := realFstatat(fd, name, stat, flags)
+				if name == "checkpoints" {
+					switch boundary {
+					case "initial stat":
+						return cause
+					case "unsafe shape":
+						if err == nil {
+							stat.Mode = unix.S_IFDIR | 0o755
+						}
+					}
+				}
+				return err
+			}
+			operations.openat = func(fd int, name string, flags int, mode uint32) (int, error) {
+				if name == "checkpoints" && boundary == "open" {
+					return -1, cause
+				}
+				opened, err := realOpenat(fd, name, flags, mode)
+				if err == nil && name == "checkpoints" {
+					checkpointsFD = opened
+				}
+				return opened, err
+			}
+			operations.fstat = func(fd int, stat *unix.Stat_t) error {
+				if fd != checkpointsFD {
+					return realFstat(fd, stat)
+				}
+				if boundary == "post-open stat" {
+					return cause
+				}
+				if err := realFstat(fd, stat); err != nil {
+					return err
+				}
+				if boundary == "metadata mismatch" {
+					stat.Ino++
+				}
+				return nil
+			}
+			renames, fsyncs := 0, 0
+			operations.rename = func(int, string, int, string, uint) error { renames++; return errors.New("unexpected rename") }
+			operations.fsync = func(int) error { fsyncs++; return errors.New("unexpected fsync") }
+			fixture.service.recoverCheckpointFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+				return recoverCheckpointFilesystemWithDependencies(ctx, proof, checkpointArtifactDependencies{
+					readGit: readOnlyGitLimited, operations: operations,
+				})
+			}
+
+			got, err := fixture.service.Recover(context.Background(), fixture.request.Scope)
+			if !reflect.DeepEqual(got, WorkspaceStatus{}) || !errors.Is(err, ErrCheckpointRecoveryPrecondition) || renames != 0 || fsyncs != 0 {
+				t.Fatalf("recovery %s = (%+v, %v), renames=%d fsyncs=%d", boundary, got, err, renames, fsyncs)
+			}
+			if (boundary == "initial stat" || boundary == "open" || boundary == "post-open stat") && !errors.Is(err, cause) {
+				t.Fatalf("recovery %s lost cause: %v", boundary, err)
+			}
+			recorder.assertBalanced(t)
+			if after := recoveryDatabaseState(t, fixture.service, fixture.request.Scope); !reflect.DeepEqual(after, beforeDatabase) {
+				t.Fatalf("recovery %s changed database", boundary)
+			}
+			if after := recoveryScopePaths(t, beforeDatabase); !reflect.DeepEqual(after, beforePaths) {
+				t.Fatalf("recovery %s changed filesystem evidence", boundary)
+			}
+		})
+	}
+}
+
 func TestRecoverRejectsPublishedAndRecoveredNewPartialWorkspaceStateBeforeIO(t *testing.T) {
 	for _, driverState := range []string{"published", "recovered_new"} {
 		for _, workspaceState := range []string{"clean", "conflicted"} {
