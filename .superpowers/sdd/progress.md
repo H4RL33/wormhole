@@ -1088,3 +1088,30 @@ statement coverage is 85.6%, above the accepted 80% floor. Raw timings are not i
 as performance evidence. Final spec/semantics, filesystem/durability/security, and
 test/discipline rereviews approved the complete range with no Critical, Important, or Minor
 findings. Task 507 combined 5F/5G verification and Stage-1A handoff is next.
+
+Task-5 Task 507 combined 5F/5G verification and handoff
+`27cb34f..56cca80` (27 commits): complete. The complete fallback-only checkpoint/recovery
+range now preserves known concurrent repository input, performs publisher-before-database
+postimage ordering, converges only proved prepared/published Linux topologies in one writer
+transaction, retains exact evidence for blocked or unknown outcomes without replay, and
+leaves non-Linux runtime publication/recovery unsupported. Review-driven correction commits
+`2e9758b`, `b97e7d8`, and `56cca80` close every whole-range state-machine, syscall-cause,
+filesystem-proof, and file-descriptor-ownership finding, including descriptor zero and
+tracked-to-untracked descriptor-number reuse. No finding was waived.
+
+The exact committed tree at `56cca80` passed the ProjectState/localstore package tests,
+targeted checkpoint/recovery race tests, targeted vet, Darwin arm64 and FreeBSD amd64
+cross-compiles, the empty forbidden receipt/exchange/swap symbol scan, formatting and diff
+checks, canonical `make check`, standalone `make race`, and standalone `make coverage`.
+Merged statement coverage is 85.8 percent, above the accepted 80 percent floor. Raw command
+durations are retained only as output and are not performance evidence because the host was
+under unrelated CPU-intensive load. Definitive filesystem/FD-safety, specification, and
+codebase-discipline whole-range reviews each approved the immutable range with zero Critical,
+Important, or Minor findings.
+
+Stage 1A is now the only authorised next step: a review-only complexity inventory,
+guarantee-reduction candidate set, lifecycle-boundary refactor proposal, and architecture-test
+retention plan. Tasks 6, 6A, 7, 8, Stage 2, and all supporting implementation preparation
+remain non-executable until those four artifacts are reviewed and the human architect records
+an explicit go/no-go naming the retained V1 guarantees, accepted recovery posture, and exact
+next authorised work.
