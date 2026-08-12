@@ -1115,3 +1115,47 @@ retention plan. Tasks 6, 6A, 7, 8, Stage 2, and all supporting implementation pr
 remain non-executable until those four artifacts are reviewed and the human architect records
 an explicit go/no-go naming the retained V1 guarantees, accepted recovery posture, and exact
 next authorised work.
+
+Stage 1A simplification gate: complete. The review-only checkpoint comprises:
+
+- `docs/superpowers/reviews/2026-08-11-stage1a-complexity-inventory.md`: 70 mechanisms,
+  classified as 37 observable guarantees and 33 private mechanisms, with four named high-cost
+  concentrations (HC1–HC4) and an explicit retain/replace/remove judgment for each row;
+- `docs/superpowers/reviews/2026-08-11-stage1a-guarantee-reduction-candidates.md`: the
+  non-negotiable V1 floor plus 14 independently selectable reduction decisions (R01–R14),
+  each recording workflow, recovery, compatibility/security, complexity, dependency, and
+  reversibility consequences;
+- `docs/superpowers/reviews/2026-08-11-stage1a-lifecycle-refactor-proposal.md`: six bounded
+  lifecycle owners—registration/resolution, overlay view/mutation, Git observation,
+  publication policy/review, checkpoint/recovery, and legacy migration—using existing-package
+  coordinators rather than a generic framework; and
+- `docs/superpowers/reviews/2026-08-11-stage1a-architecture-test-retention-plan.md`: A01–A25
+  scoped architecture oracles, an exact 37/37 observable-inventory crosswalk, 81 verified
+  existing test symbols, and 20 explicitly proposed tests. Evidence is selected per oracle;
+  the plan does not authorize a universal mega-harness or freeze private mechanisms.
+
+The final immutable artifacts were independently reviewed for guarantee/filesystem safety,
+architecture-test retention/specification coverage, and holistic codebase discipline. Each
+review returned zero Critical, zero Important, and zero Minor findings against the exact same
+four SHA-256 hashes. Earlier review findings were corrected rather than waived: the V1 floor
+now names durable attributable overlay mutation, atomic batch behavior, no-silent-loss merge,
+and the current host/power durability promise; database and filesystem authority decisions
+are separate; reduction IDs no longer collide with inventory checkpoint IDs; R06 cannot
+silently authorize deletion of the dormant Task-6/W11 seam; R14 defaults to deferral unless
+it proves net deletion without a new table or subsystem; and test evidence remains scoped.
+
+This stage changed documentation only. It added no production code, tests, schema, build
+configuration, dependencies, generated output, or implementation preparation for a later
+task. Static verification passed: artifact hashes stayed frozen across all reviews,
+`git diff --check` was clean, all 70 inventory rows were well formed, all R01–R14 matrix rows
+and headings were unique, the observable crosswalk matched exactly, and all referenced test
+names were classified as existing or explicitly proposed. No timing or profiling conclusion
+was drawn from the CPU-loaded host.
+
+The next human go/no-go must explicitly accept, reject, or defer every R01–R14 choice and
+record: the private-database adversary model; the separate Git-private-path/filesystem
+authority model; any released compatibility floor; supported platform/filesystem scope;
+host/power durability; the exact automatic-recovery versus manual-repair matrix; publication
+modes and review envelope; private evidence retention/idempotency policy; and the exact next
+authorized task. Until that decision is recorded, Tasks 6, 6A, 7, 8, Stage 2, and supporting
+implementation/refactor preparation remain hard-paused.
