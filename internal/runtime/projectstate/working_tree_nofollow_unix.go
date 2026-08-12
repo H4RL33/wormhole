@@ -41,15 +41,18 @@ type workingTreeRootHandle struct {
 	ancestry []heldWorkingTreeDirectory
 }
 
+type workingTreeDescriptorValidator func(fd int, relativePath string) error
+
 type workingTreeWalker struct {
-	limits            workingTreeLimits
-	hook              workingTreeReadHook
-	files             state.Tree
-	fileMetadata      map[string]workingTreeMetadata
-	directoryMetadata map[string]workingTreeMetadata
-	fileCount         int
-	directoryCount    int
-	totalBytes        int64
+	limits             workingTreeLimits
+	hook               workingTreeReadHook
+	validateDescriptor workingTreeDescriptorValidator
+	files              state.Tree
+	fileMetadata       map[string]workingTreeMetadata
+	directoryMetadata  map[string]workingTreeMetadata
+	fileCount          int
+	directoryCount     int
+	totalBytes         int64
 }
 
 func readWorkingTreeNoFollowPlatform(root string, limits workingTreeLimits, hook workingTreeReadHook) (state.Tree, error) {
@@ -280,6 +283,11 @@ func openWormholeDirectory(checkoutFD int) (heldWorkingTreeDirectory, bool, erro
 }
 
 func (walker *workingTreeWalker) walkDirectory(directory heldWorkingTreeDirectory, relativePath string) error {
+	if walker.validateDescriptor != nil {
+		if err := walker.validateDescriptor(directory.fd, relativePath); err != nil {
+			return fmt.Errorf("projectstate: validate working-tree directory %q: %w", relativePath, err)
+		}
+	}
 	names, overflow, err := workingTreeDirectoryNames(directory.fd, walker.remainingEntryCapacity())
 	if err != nil {
 		return fmt.Errorf("projectstate: enumerate working-tree directory %q: %w", relativePath, err)
@@ -410,6 +418,11 @@ func (walker *workingTreeWalker) readFile(parentFD int, name, relativePath strin
 	}
 	if opened != linked {
 		return fmt.Errorf("%w: file %q changed while opening", ErrWorkingTreeChanged, relativePath)
+	}
+	if walker.validateDescriptor != nil {
+		if err := walker.validateDescriptor(fd, relativePath); err != nil {
+			return fmt.Errorf("projectstate: validate working-tree file %q: %w", relativePath, err)
+		}
 	}
 	infoBefore, err := file.Stat()
 	if err != nil {

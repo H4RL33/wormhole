@@ -988,7 +988,15 @@ the same layering pattern and isolation discipline.
   Same-ref different-commit exact candidate has no ancestry query. Task-5 unknown-COMMIT
   tests cover exact next, transition-relative exact prior including prepared-journal absence,
   read failure, partial/corrupt/third state, byte-identical evidence retention, and zero
-  writer or rename replay. Exchange and Darwin runtime fault tests are deferred.
+  writer or rename replay. Exact Candidate is preservable old-side live/backup evidence
+  only while the exact Candidate stage remains; a prepared, stage-absent Candidate backup
+  stays blocked. Checkpoint-only recursive capture proves the frozen mount and non-mount-root
+  property for root/directories/files in both passes. One complete persistent-root proof
+  runs at classifier entry/tail and immediately before every rename; recovery maps typed
+  root drift to precondition and contained evidence to blocked. Pure recovery proof admits
+  prepared `clean|pending` and published/recovered-new exact `pending` only, before I/O.
+  Post-journal CAS wrappers retain syscall causes. Exchange and Darwin runtime fault tests
+  are deferred.
 
 Release and compatibility policy live in `docs/releasing.md` and
 `docs/compatibility.md`. Those documents describe repository workflow behavior;

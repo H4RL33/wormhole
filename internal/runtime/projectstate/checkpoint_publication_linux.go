@@ -40,6 +40,28 @@ type checkpointPublicationTopology struct {
 	backup checkpointPublicationEntry
 }
 
+type checkpointPublicationEvidenceClass uint8
+
+const (
+	checkpointPublicationPersistentRoot checkpointPublicationEvidenceClass = iota + 1
+	checkpointPublicationContainedEntry
+)
+
+type checkpointPublicationEvidenceError struct {
+	class checkpointPublicationEvidenceClass
+	cause error
+}
+
+func (err *checkpointPublicationEvidenceError) Error() string { return err.cause.Error() }
+func (err *checkpointPublicationEvidenceError) Unwrap() error { return err.cause }
+
+func checkpointPublicationEvidenceFailure(class checkpointPublicationEvidenceClass, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &checkpointPublicationEvidenceError{class: class, cause: err}
+}
+
 func publishCheckpointArtifactFallback(ctx context.Context, artifact *checkpointArtifact) (checkpointPublicationDisposition, error) {
 	terminal := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1]
 	stageName := filepath.Base(artifact.evidenceValue.StagePath)
@@ -56,11 +78,27 @@ func publishCheckpointArtifactFallback(ctx context.Context, artifact *checkpoint
 		entry.stage.kind == checkpointPublicationCandidate && entry.backup.kind == checkpointPublicationAbsent {
 		return checkpointPublicationPreservedConcurrentOld, nil
 	}
+	if entry.live.kind != checkpointPublicationAbsent && entry.stage.kind == checkpointPublicationCandidate &&
+		entry.backup.kind == checkpointPublicationCandidate {
+		if err := checkpointPublicationFsyncParents(artifact, true); err != nil {
+			return 0, err
+		}
+		return checkpointPublicationPreservedConcurrentOld, nil
+	}
+	if checkpointPublicationIs(entry, checkpointPublicationAbsent, checkpointPublicationCandidate, checkpointPublicationCandidate) {
+		return checkpointPublicationCompensate(ctx, artifact, stageName, backupName, entry.backup)
+	}
 	if !checkpointPublicationIs(entry, checkpointPublicationPrior, checkpointPublicationCandidate, checkpointPublicationAbsent) {
 		return 0, checkpointPublicationBlocked("invalid entry topology", nil)
 	}
 	if err := ctx.Err(); err != nil {
 		return 0, err
+	}
+	if err := checkpointPublicationRevalidateParents(ctx, artifact); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return 0, err
+		}
+		return 0, checkpointPublicationBlocked("persistent roots changed before live-to-backup rename", err)
 	}
 
 	renameErr := artifact.dependencies.operations.rename(terminal.fd, ".wormhole", artifact.private.fd, backupName, checkpointNoReplaceRenameFlag())
@@ -73,7 +111,8 @@ func publishCheckpointArtifactFallback(ctx context.Context, artifact *checkpoint
 		switch {
 		case checkpointPublicationIs(observed, checkpointPublicationPrior, checkpointPublicationCandidate, checkpointPublicationAbsent):
 			return 0, fmt.Errorf("projectstate: retain checkpoint live backup: %w", renameErr)
-		case checkpointPublicationIs(observed, checkpointPublicationAbsent, checkpointPublicationCandidate, checkpointPublicationPrior):
+		case checkpointPublicationIs(observed, checkpointPublicationAbsent, checkpointPublicationCandidate, checkpointPublicationPrior),
+			checkpointPublicationIs(observed, checkpointPublicationAbsent, checkpointPublicationCandidate, checkpointPublicationCandidate):
 		default:
 			return 0, checkpointPublicationBlocked("live-to-backup rename reached third topology", renameErr)
 		}
@@ -92,13 +131,17 @@ func publishCheckpointArtifactFallback(ctx context.Context, artifact *checkpoint
 		return 0, checkpointPublicationBlocked("candidate stage is unavailable after backup rename", nil)
 	}
 	if observed.live.kind != checkpointPublicationAbsent {
-		if observed.backup.kind == checkpointPublicationPrior || observed.backup.kind == checkpointPublicationOpaque {
+		if observed.backup.kind == checkpointPublicationPrior || observed.backup.kind == checkpointPublicationCandidate ||
+			observed.backup.kind == checkpointPublicationOpaque {
 			return checkpointPublicationPreservedConcurrentOld, nil
 		}
 		return 0, checkpointPublicationBlocked("recreated live has ambiguous backup", nil)
 	}
 	if observed.backup.kind == checkpointPublicationOpaque {
-		return checkpointPublicationCompensate(ctx, artifact, stageName, backupName, observed.backup.tree)
+		return checkpointPublicationCompensate(ctx, artifact, stageName, backupName, observed.backup)
+	}
+	if observed.backup.kind == checkpointPublicationCandidate {
+		return checkpointPublicationCompensate(ctx, artifact, stageName, backupName, observed.backup)
 	}
 	if observed.backup.kind != checkpointPublicationPrior {
 		return 0, checkpointPublicationBlocked("backup is not the exact prior tree", nil)
@@ -112,16 +155,26 @@ func publishCheckpointArtifactFallback(ctx context.Context, artifact *checkpoint
 		return 0, checkpointPublicationClassificationError(err)
 	}
 	if observed.live.kind != checkpointPublicationAbsent {
-		if observed.stage.kind == checkpointPublicationCandidate && (observed.backup.kind == checkpointPublicationPrior || observed.backup.kind == checkpointPublicationOpaque) {
+		if observed.stage.kind == checkpointPublicationCandidate && (observed.backup.kind == checkpointPublicationPrior ||
+			observed.backup.kind == checkpointPublicationCandidate || observed.backup.kind == checkpointPublicationOpaque) {
 			return checkpointPublicationPreservedConcurrentOld, nil
 		}
 		return 0, checkpointPublicationBlocked("publication boundary changed before stage rename", nil)
+	}
+	if checkpointPublicationIs(observed, checkpointPublicationAbsent, checkpointPublicationCandidate, checkpointPublicationCandidate) {
+		return checkpointPublicationCompensate(ctx, artifact, stageName, backupName, observed.backup)
 	}
 	if !checkpointPublicationIs(observed, checkpointPublicationAbsent, checkpointPublicationCandidate, checkpointPublicationPrior) {
 		return 0, checkpointPublicationBlocked("publication preimage changed before stage rename", nil)
 	}
 	if err := ctx.Err(); err != nil {
 		return 0, err
+	}
+	if err := checkpointPublicationRevalidateParents(ctx, artifact); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return 0, err
+		}
+		return 0, checkpointPublicationBlocked("persistent roots changed before stage-to-live rename", err)
 	}
 	renameErr = artifact.dependencies.operations.rename(artifact.private.fd, stageName, terminal.fd, ".wormhole", checkpointNoReplaceRenameFlag())
 	afterErr = checkpointArtifactFault(artifact.dependencies, checkpointArtifactAfterSecondLiveMutation)
@@ -153,8 +206,11 @@ func publishCheckpointArtifactFallback(ctx context.Context, artifact *checkpoint
 	return checkpointPublicationPublished, nil
 }
 
-func checkpointPublicationCompensate(ctx context.Context, artifact *checkpointArtifact, stageName, backupName string, opaque state.Tree) (checkpointPublicationDisposition, error) {
+func checkpointPublicationCompensate(ctx context.Context, artifact *checkpointArtifact, stageName, backupName string, preserved checkpointPublicationEntry) (checkpointPublicationDisposition, error) {
 	terminal := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1]
+	if preserved.kind != checkpointPublicationCandidate && preserved.kind != checkpointPublicationOpaque {
+		return 0, checkpointPublicationBlocked("compensation source is not preservable old-side evidence", nil)
+	}
 	if err := checkpointArtifactFault(artifact.dependencies, checkpointArtifactBeforeSecondLiveMutation); err != nil {
 		return 0, err
 	}
@@ -163,16 +219,22 @@ func checkpointPublicationCompensate(ctx context.Context, artifact *checkpointAr
 		return 0, checkpointPublicationClassificationError(err)
 	}
 	if observed.live.kind != checkpointPublicationAbsent {
-		if observed.stage.kind == checkpointPublicationCandidate && observed.backup.kind == checkpointPublicationOpaque {
+		if checkpointPublicationCompensationPreserved(observed, preserved) {
 			return checkpointPublicationPreservedConcurrentOld, nil
 		}
 		return 0, checkpointPublicationBlocked("compensation boundary changed before rename", nil)
 	}
-	if !checkpointPublicationCompensationPrior(observed, opaque) {
+	if !checkpointPublicationCompensationPrior(observed, preserved) {
 		return 0, checkpointPublicationBlocked("compensation preimage changed before rename", nil)
 	}
 	if err := ctx.Err(); err != nil {
 		return 0, err
+	}
+	if err := checkpointPublicationRevalidateParents(ctx, artifact); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return 0, err
+		}
+		return 0, checkpointPublicationBlocked("persistent roots changed before compensation rename", err)
 	}
 	renameErr := artifact.dependencies.operations.rename(artifact.private.fd, backupName, terminal.fd, ".wormhole", checkpointNoReplaceRenameFlag())
 	afterErr := checkpointArtifactFault(artifact.dependencies, checkpointArtifactAfterSecondLiveMutation)
@@ -182,9 +244,9 @@ func checkpointPublicationCompensate(ctx context.Context, artifact *checkpointAr
 			return 0, checkpointPublicationBlocked("classify compensation rename error", classifyErr)
 		}
 		switch {
-		case checkpointPublicationCompensationPrior(observed, opaque):
+		case checkpointPublicationCompensationPrior(observed, preserved):
 			return 0, fmt.Errorf("projectstate: restore concurrent checkpoint live tree: %w", renameErr)
-		case checkpointPublicationCompensationNext(observed, opaque):
+		case checkpointPublicationCompensationNext(observed, preserved):
 		default:
 			return 0, checkpointPublicationBlocked("compensation rename reached third topology", renameErr)
 		}
@@ -195,7 +257,7 @@ func checkpointPublicationCompensate(ctx context.Context, artifact *checkpointAr
 		if classifyErr != nil {
 			return 0, checkpointPublicationClassificationError(classifyErr)
 		}
-		if !checkpointPublicationCompensationNext(observed, opaque) {
+		if !checkpointPublicationCompensationNext(observed, preserved) {
 			return 0, checkpointPublicationBlocked("compensation postimage is ambiguous", nil)
 		}
 	}
@@ -207,7 +269,7 @@ func checkpointPublicationCompensate(ctx context.Context, artifact *checkpointAr
 
 func checkpointPublicationClassify(ctx context.Context, artifact *checkpointArtifact, stageName, backupName string) (_ checkpointPublicationTopology, resultErr error) {
 	if err := checkpointPublicationRevalidateParents(ctx, artifact); err != nil {
-		return checkpointPublicationTopology{}, err
+		return checkpointPublicationTopology{}, checkpointPublicationEvidenceFailure(checkpointPublicationPersistentRoot, err)
 	}
 	terminal := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1]
 	entries := []*checkpointPublicationEntryProof{}
@@ -228,15 +290,15 @@ func checkpointPublicationClassify(ctx context.Context, artifact *checkpointArti
 	}
 	live, err := open(terminal.fd, ".wormhole", false, false)
 	if err != nil {
-		return checkpointPublicationTopology{}, err
+		return checkpointPublicationTopology{}, checkpointPublicationEvidenceFailure(checkpointPublicationContainedEntry, err)
 	}
 	stage, err := open(artifact.private.fd, stageName, true, true)
 	if err != nil {
-		return checkpointPublicationTopology{}, err
+		return checkpointPublicationTopology{}, checkpointPublicationEvidenceFailure(checkpointPublicationContainedEntry, err)
 	}
 	backup, err := open(artifact.private.fd, backupName, false, false)
 	if err != nil {
-		return checkpointPublicationTopology{}, err
+		return checkpointPublicationTopology{}, checkpointPublicationEvidenceFailure(checkpointPublicationContainedEntry, err)
 	}
 	topology := checkpointPublicationTopology{live: live.entry, stage: stage.entry, backup: backup.entry}
 	for _, proof := range []struct {
@@ -249,8 +311,11 @@ func checkpointPublicationClassify(ctx context.Context, artifact *checkpointArti
 		{artifact.private.fd, backupName, &backup},
 	} {
 		if err := checkpointPublicationRevalidateEntry(ctx, artifact, proof.parentFD, proof.name, proof.entry); err != nil {
-			return checkpointPublicationTopology{}, err
+			return checkpointPublicationTopology{}, checkpointPublicationEvidenceFailure(checkpointPublicationContainedEntry, err)
 		}
+	}
+	if err := checkpointPublicationRevalidateParents(ctx, artifact); err != nil {
+		return checkpointPublicationTopology{}, checkpointPublicationEvidenceFailure(checkpointPublicationPersistentRoot, err)
 	}
 	return topology, nil
 }
@@ -295,12 +360,12 @@ func checkpointPublicationOpenEntry(ctx context.Context, artifact *checkpointArt
 	if err := checkpointPublicationProveMount(artifact, fd); err != nil {
 		return fail(err)
 	}
-	tree, err := readCheckpointArtifactTree(ctx, heldWorkingTreeDirectory{fd: fd, parentFD: parentFD, name: name, path: name, metadata: opened})
+	tree, err := readCheckpointArtifactTree(ctx, heldWorkingTreeDirectory{fd: fd, parentFD: parentFD, name: name, path: name, metadata: opened}, artifact.mountProof, artifact.dependencies.mount)
 	if err != nil {
 		return fail(err)
 	}
 	if stage {
-		if err := checkpointPublicationValidateStageShape(ctx, heldWorkingTreeDirectory{fd: fd, parentFD: parentFD, name: name, path: name, metadata: opened}, tree); err != nil {
+		if err := checkpointPublicationValidateStageShape(ctx, artifact, heldWorkingTreeDirectory{fd: fd, parentFD: parentFD, name: name, path: name, metadata: opened}, tree); err != nil {
 			return fail(err)
 		}
 	}
@@ -320,8 +385,9 @@ func checkpointPublicationOpenEntry(ctx context.Context, artifact *checkpointArt
 	return proof, nil
 }
 
-func checkpointPublicationValidateStageShape(ctx context.Context, root heldWorkingTreeDirectory, tree state.Tree) error {
+func checkpointPublicationValidateStageShape(ctx context.Context, artifact *checkpointArtifact, root heldWorkingTreeDirectory, tree state.Tree) error {
 	walker := newWorkingTreeWalker(defaultWorkingTreeLimits(), func(workingTreeReadStage, string) error { return ctx.Err() })
+	walker.validateDescriptor = checkpointArtifactDescriptorValidator(artifact.mountProof, artifact.dependencies.mount)
 	if err := walker.walkDirectory(root, "."); err != nil {
 		return err
 	}
@@ -374,7 +440,7 @@ func checkpointPublicationRevalidateEntry(ctx context.Context, artifact *checkpo
 		return err
 	}
 	root := heldWorkingTreeDirectory{fd: proof.fd, parentFD: parentFD, name: name, path: name, metadata: proof.metadata}
-	tree, err := readCheckpointArtifactTree(ctx, root)
+	tree, err := readCheckpointArtifactTree(ctx, root, artifact.mountProof, artifact.dependencies.mount)
 	if err != nil {
 		return fmt.Errorf("checkpoint publication bytes at %q final read: %w", name, err)
 	}
@@ -382,7 +448,7 @@ func checkpointPublicationRevalidateEntry(ctx context.Context, artifact *checkpo
 		return fmt.Errorf("checkpoint publication bytes at %q changed after capture", name)
 	}
 	if proof.stage {
-		if err := checkpointPublicationValidateStageShape(ctx, root, tree); err != nil {
+		if err := checkpointPublicationValidateStageShape(ctx, artifact, root, tree); err != nil {
 			return err
 		}
 	}
@@ -417,32 +483,46 @@ func checkpointPublicationProveAbsent(artifact *checkpointArtifact, parentFD int
 }
 
 func checkpointPublicationProveMount(artifact *checkpointArtifact, fd int) error {
-	if err := checkpointPublicationProveParentMount(artifact, fd); err != nil {
+	return checkpointArtifactProveEntryMount(artifact.mountProof, artifact.dependencies.mount, fd)
+}
+
+func checkpointArtifactDescriptorValidator(proof checkpointMountProof, operations checkpointArtifactMountOperations) workingTreeDescriptorValidator {
+	return func(fd int, _ string) error {
+		return checkpointArtifactProveEntryMount(proof, operations, fd)
+	}
+}
+
+func checkpointArtifactProveEntryMount(proof checkpointMountProof, operations checkpointArtifactMountOperations, fd int) error {
+	if err := checkpointArtifactProveParentMount(proof, operations, fd); err != nil {
 		return err
 	}
-	if err := checkpointLinuxValidateLiveMountRoot(fd, artifact.dependencies.mount); err != nil {
+	if err := checkpointLinuxValidateLiveMountRoot(fd, operations); err != nil {
 		return err
 	}
 	return nil
 }
 
 func checkpointPublicationProveParentMount(artifact *checkpointArtifact, fd int) error {
+	return checkpointArtifactProveParentMount(artifact.mountProof, artifact.dependencies.mount, fd)
+}
+
+func checkpointArtifactProveParentMount(proof checkpointMountProof, operations checkpointArtifactMountOperations, fd int) error {
 	var id uint64
 	var err error
-	if artifact.mountProof.unique {
+	if proof.unique {
 		var unique bool
-		id, unique, err = checkpointLinuxTryUniqueMount(fd, artifact.dependencies.mount)
+		id, unique, err = checkpointLinuxTryUniqueMount(fd, operations)
 		if err == nil && !unique {
 			err = fmt.Errorf("unique mount identity unavailable")
 		}
 	} else {
-		id, err = checkpointLinuxLegacyMount(fd, artifact.dependencies.mount)
+		id, err = checkpointLinuxLegacyMount(fd, operations)
 	}
 	if err != nil {
 		return err
 	}
-	if id == 0 || id != artifact.mountProof.checkout {
-		return fmt.Errorf("checkpoint publication entry changed mount")
+	if id == 0 || id != proof.checkout {
+		return fmt.Errorf("%w: checkpoint publication entry changed mount", ErrCheckpointUnsupported)
 	}
 	return nil
 }
@@ -461,6 +541,10 @@ func checkpointPublicationRevalidateParents(ctx context.Context, artifact *check
 	if err := artifact.checkout.revalidate(); err != nil {
 		return err
 	}
+	terminal := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1]
+	if terminal.metadata.device != artifact.checkoutIdentity.Device || terminal.metadata.inode != artifact.checkoutIdentity.Inode {
+		return fmt.Errorf("checkpoint publication checkout identity changed")
+	}
 	if err := artifact.git.revalidate(); err != nil {
 		return err
 	}
@@ -472,11 +556,13 @@ func checkpointPublicationRevalidateParents(ctx context.Context, artifact *check
 	if _, err := checkpointArtifactValidateOwnerDirectory(artifact.private, artifact.dependencies.operations); err != nil {
 		return err
 	}
-	terminal := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1]
 	if err := checkpointPublicationProveParentMount(artifact, terminal.fd); err != nil {
 		return err
 	}
-	return checkpointPublicationProveParentMount(artifact, artifact.private.fd)
+	if err := checkpointPublicationProveParentMount(artifact, artifact.private.fd); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 func checkpointPublicationFsyncParents(artifact *checkpointArtifact, destinationPrivate bool) error {
@@ -510,12 +596,19 @@ func checkpointPublicationReachedPoint(topology checkpointPublicationTopology) b
 	return topology.live.kind != checkpointPublicationAbsent && topology.stage.kind == checkpointPublicationAbsent && topology.backup.kind == checkpointPublicationPrior
 }
 
-func checkpointPublicationCompensationPrior(topology checkpointPublicationTopology, opaque state.Tree) bool {
-	return checkpointPublicationIs(topology, checkpointPublicationAbsent, checkpointPublicationCandidate, checkpointPublicationOpaque) && sameCheckpointArtifactTree(topology.backup.tree, opaque)
+func checkpointPublicationCompensationPreserved(topology checkpointPublicationTopology, preserved checkpointPublicationEntry) bool {
+	return topology.live.kind != checkpointPublicationAbsent && topology.stage.kind == checkpointPublicationCandidate &&
+		topology.backup.kind == preserved.kind && sameCheckpointArtifactTree(topology.backup.tree, preserved.tree)
 }
 
-func checkpointPublicationCompensationNext(topology checkpointPublicationTopology, opaque state.Tree) bool {
-	return topology.live.kind == checkpointPublicationOpaque && topology.stage.kind == checkpointPublicationCandidate && topology.backup.kind == checkpointPublicationAbsent && sameCheckpointArtifactTree(topology.live.tree, opaque)
+func checkpointPublicationCompensationPrior(topology checkpointPublicationTopology, preserved checkpointPublicationEntry) bool {
+	return checkpointPublicationIs(topology, checkpointPublicationAbsent, checkpointPublicationCandidate, preserved.kind) &&
+		sameCheckpointArtifactTree(topology.backup.tree, preserved.tree)
+}
+
+func checkpointPublicationCompensationNext(topology checkpointPublicationTopology, preserved checkpointPublicationEntry) bool {
+	return topology.live.kind == preserved.kind && topology.stage.kind == checkpointPublicationCandidate &&
+		topology.backup.kind == checkpointPublicationAbsent && sameCheckpointArtifactTree(topology.live.tree, preserved.tree)
 }
 
 func checkpointPublicationOwnerDirectory(metadata workingTreeMetadata) bool {

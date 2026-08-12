@@ -588,17 +588,17 @@ func prepareCheckpointArtifactFilesystem(ctx context.Context, input checkpointAr
 	if err := checkpointArtifactRequireDurableDirectory(private, durableProof.private, dependencies.operations, true); err != nil {
 		return nil, fmt.Errorf("projectstate: checkpoint private root changed after fsync: %w", err)
 	}
-	readback, err := readCheckpointArtifactTree(ctx, stage)
+	readback, err := readCheckpointArtifactTree(ctx, stage, mountProof, dependencies.mount)
 	if err != nil || !sameCheckpointArtifactTree(readback, proof.candidate.tree) {
 		if err == nil {
 			err = fmt.Errorf("checkpoint stage bytes differ")
 		}
 		return nil, fmt.Errorf("projectstate: verify checkpoint stage: %w", err)
 	}
-	if err := verifyCheckpointArtifactStageFiles(ctx, stage, proof.candidate.tree, durableProof, true, dependencies.operations); err != nil {
+	if err := verifyCheckpointArtifactStageFiles(ctx, stage, proof.candidate.tree, durableProof, true, mountProof, dependencies.mount); err != nil {
 		return nil, err
 	}
-	liveTree, err := readCheckpointArtifactTree(ctx, live)
+	liveTree, err := readCheckpointArtifactTree(ctx, live, mountProof, dependencies.mount)
 	if err != nil || !sameCheckpointArtifactTree(liveTree, proof.prior.tree) {
 		return nil, ErrCheckpointCAS
 	}
@@ -1046,8 +1046,9 @@ func writeCheckpointArtifactFile(fd int, data []byte, dependencies checkpointArt
 	return nil
 }
 
-func readCheckpointArtifactTree(ctx context.Context, root heldWorkingTreeDirectory) (state.Tree, error) {
+func readCheckpointArtifactTree(ctx context.Context, root heldWorkingTreeDirectory, mountProof checkpointMountProof, mount checkpointArtifactMountOperations) (state.Tree, error) {
 	walker := newWorkingTreeWalker(defaultWorkingTreeLimits(), func(workingTreeReadStage, string) error { return ctx.Err() })
+	walker.validateDescriptor = checkpointArtifactDescriptorValidator(mountProof, mount)
 	if err := walker.walkDirectory(root, "."); err != nil {
 		return nil, err
 	}
@@ -1061,7 +1062,7 @@ func readCheckpointArtifactTree(ctx context.Context, root heldWorkingTreeDirecto
 	return walker.files, nil
 }
 
-func verifyCheckpointArtifactStageFiles(ctx context.Context, root heldWorkingTreeDirectory, tree state.Tree, durable checkpointArtifactDurableStageProof, strictRoot bool, _ checkpointArtifactPlatformOperations) error {
+func verifyCheckpointArtifactStageFiles(ctx context.Context, root heldWorkingTreeDirectory, tree state.Tree, durable checkpointArtifactDurableStageProof, strictRoot bool, mountProof checkpointMountProof, mount checkpointArtifactMountOperations) error {
 	expectedDirectories := map[string]struct{}{".": {}}
 	for _, file := range tree {
 		for directory := filepath.ToSlash(filepath.Dir(file.Path)); directory != "."; directory = filepath.ToSlash(filepath.Dir(directory)) {
@@ -1069,6 +1070,7 @@ func verifyCheckpointArtifactStageFiles(ctx context.Context, root heldWorkingTre
 		}
 	}
 	walker := newWorkingTreeWalker(defaultWorkingTreeLimits(), func(workingTreeReadStage, string) error { return ctx.Err() })
+	walker.validateDescriptor = checkpointArtifactDescriptorValidator(mountProof, mount)
 	if err := walker.walkDirectory(root, "."); err != nil {
 		return err
 	}
@@ -1131,6 +1133,7 @@ func verifyCheckpointArtifactCapture(ctx context.Context, root heldWorkingTreeDi
 		return err
 	}
 	verification := newWorkingTreeWalker(limits, func(workingTreeReadStage, string) error { return ctx.Err() })
+	verification.validateDescriptor = expected.validateDescriptor
 	if err := verification.walkDirectory(root, "."); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
@@ -1178,39 +1181,14 @@ func preflightCheckpointArtifactPublication(ctx context.Context, artifact *check
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	paths, err := resolveCheckpointGitPathsWithReader(ctx, artifact.checkoutIdentity.CanonicalPath, artifact.dependencies.readGit)
-	if err != nil {
-		return err
-	}
-	if paths != artifact.paths {
-		return fmt.Errorf("%w: checkpoint Git paths changed", ErrCheckpointCAS)
-	}
 	if artifact.checkout == nil || artifact.git == nil || artifact.private.fd < 0 {
 		return ErrCheckpointUnsupported
 	}
-	if err := artifact.checkout.revalidate(); err != nil {
-		return fmt.Errorf("%w: checkout identity changed: %v", ErrCheckpointCAS, err)
-	}
-	terminal := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1]
-	if terminal.metadata.device != artifact.checkoutIdentity.Device || terminal.metadata.inode != artifact.checkoutIdentity.Inode {
-		return fmt.Errorf("%w: checkout identity changed", ErrCheckpointCAS)
-	}
-	if err := artifact.git.revalidate(); err != nil {
-		return fmt.Errorf("%w: Git directory identity changed: %v", ErrCheckpointCAS, err)
-	}
-	for _, ancestor := range artifact.privateAncestors {
-		if err := revalidateWorkingTreeDirectoryIdentity(ancestor); err != nil {
-			return fmt.Errorf("%w: private-root ancestry changed: %v", ErrCheckpointCAS, err)
+	if err := checkpointPublicationRevalidateParents(ctx, artifact); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
 		}
-	}
-	if _, err := checkpointArtifactValidateOwnerDirectory(artifact.private, artifact.dependencies.operations); err != nil {
-		return fmt.Errorf("%w: private root changed: %v", ErrCheckpointCAS, err)
-	}
-	if err := checkpointPublicationProveParentMount(artifact, terminal.fd); err != nil {
-		return fmt.Errorf("%w: checkpoint checkout mount changed: %v", ErrCheckpointCAS, err)
-	}
-	if err := checkpointPublicationProveParentMount(artifact, artifact.private.fd); err != nil {
-		return fmt.Errorf("%w: checkpoint private mount changed: %v", ErrCheckpointCAS, err)
+		return fmt.Errorf("%w: checkpoint persistent roots changed: %w", ErrCheckpointCAS, err)
 	}
 	return ctx.Err()
 }
@@ -1279,15 +1257,18 @@ func checkpointArtifactRequireHeldDirectoryPath(parentFD int, name string, expec
 			return metadata.mode&unix.S_IFMT == unix.S_IFDIR && metadata.uid == uint32(unix.Geteuid()) && metadata.mode&0o777 == 0o700 && metadata.mode&0o7000 == 0
 		}
 		if !ownerShape(linkedMetadata) || !ownerShape(openedMetadata) {
-			return fmt.Errorf("path %q is not owner-only", name)
+			return fmt.Errorf("%w: path %q is not owner-only", ErrCheckpointUnsupported, name)
 		}
 		var linkedAgain unix.Stat_t
 		if err := operations.fstatat(parentFD, name, &linkedAgain, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 			return err
 		}
 		againMetadata := workingTreeStatMetadata(&linkedAgain)
-		if !sameWorkingTreeDirectoryIdentity(againMetadata, expected.metadata) || !ownerShape(againMetadata) {
-			return fmt.Errorf("path %q owner-only shape changed during proof", name)
+		if !sameWorkingTreeDirectoryIdentity(againMetadata, expected.metadata) {
+			return fmt.Errorf("path %q identity changed during owner-only proof", name)
+		}
+		if !ownerShape(againMetadata) {
+			return fmt.Errorf("%w: path %q owner-only shape changed during proof", ErrCheckpointUnsupported, name)
 		}
 	}
 	return nil

@@ -363,7 +363,7 @@ func TestCheckpointArtifactValidPreparationStagesCandidate(t *testing.T) {
 	if _, statErr := os.Stat(evidence.StagePath); statErr != nil {
 		t.Fatalf("stage missing: %v", statErr)
 	}
-	staged, readErr := readCheckpointArtifactTree(context.Background(), artifact.stage)
+	staged, readErr := readCheckpointArtifactTree(context.Background(), artifact.stage, artifact.mountProof, artifact.dependencies.mount)
 	if readErr != nil || !sameCheckpointArtifactTree(staged, input.CandidateTree) || sameCheckpointArtifactTree(staged, input.PriorTree) {
 		t.Fatalf("staged candidate bytes = (%v, %v)", staged, readErr)
 	}
@@ -977,7 +977,19 @@ func readCheckpointArtifactPathTree(ctx context.Context, path string) (state.Tre
 		return nil, err
 	}
 	defer handle.close()
-	return readCheckpointArtifactTree(ctx, handle.ancestry[len(handle.ancestry)-1])
+	root := handle.ancestry[len(handle.ancestry)-1]
+	mount := normalizeCheckpointArtifactMountOperations(checkpointArtifactMountOperations{})
+	mountID, unique, err := checkpointLinuxTryUniqueMount(root.fd, mount)
+	if err != nil {
+		return nil, err
+	}
+	if mountID == 0 {
+		mountID, err = checkpointLinuxLegacyMount(root.fd, mount)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return readCheckpointArtifactTree(ctx, root, checkpointMountProof{checkout: mountID, unique: unique}, mount)
 }
 
 func assertCheckpointPublishedTopology(t *testing.T, input checkpointArtifactInput, evidence checkpointArtifactEvidence) {

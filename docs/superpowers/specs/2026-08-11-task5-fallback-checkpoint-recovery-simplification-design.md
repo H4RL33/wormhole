@@ -46,6 +46,13 @@ then proves pathname-to-descriptor stability, type, ownership, mount, and requir
 that attempt. A byte-identical replacement is acceptable; an unsafe or unstable object is
 not.
 
+Checkpoint-only recursive capture applies the frozen checkout-mount and non-mount-root
+proof to the outer root, every opened nested directory, and every opened regular file in
+both the initial and verification pass. Generic working-tree capture keeps its existing
+portable semantics. The publisher/recovery classifier repeats one complete persistent-root
+proof after all contained-entry capture, and the same proof runs immediately before each
+actual rename with no intervening hook or filesystem work.
+
 V1 guarantees:
 
 - checkpoint never advances, commits, stages, or pushes the accepted Git base;
@@ -111,7 +118,7 @@ The flow is:
    mutation.
 4. Rename live to backup no-replace. Fsync the private destination parent before the
    checkout source parent. Reinspect all three paths.
-5. If backup is stable opaque `X` rather than `P`, restore it to the still-absent live path
+5. If backup is exact `C` or stable opaque `X` rather than `P`, restore it to the still-absent live path
    no-replace, fsync checkout destination before private source, and return the preserved
    concurrent-old disposition. If another live directory has appeared, preserve it plus
    stage/backup and return concurrent-old without overwriting anything.
@@ -145,13 +152,18 @@ exact `C`.
 
 After strict journal/scope/checkout/root/name proof, prepared recovery uses this matrix:
 
+While stage remains exact `C`, it proves the stage-to-live publication rename has not
+linearized. Exact `C` in live or backup is therefore preservable old-side evidence just
+like another stable live directory. Once stage is absent, backup=`C` no longer has that
+pre-linearization proof and remains ambiguous for a prepared journal.
+
 | Live | Stage | Backup | Outcome |
 | --- | --- | --- | --- |
-| `P` or `X` | `C` | `Ø` | Publication did not begin. Preserve live/stage and transition to `recovered_old`. |
-| `Ø` | `C` | `P` or `X` | Rename backup to live no-replace, fsync destination then source, verify stability, and transition to `recovered_old`. |
-| any stable directory | `C` | `P` or `X` | A writer recreated live between renames. Preserve every path and transition to `recovered_old`. |
+| `P`, `C`, or `X` | `C` | `Ø` | Publication did not begin. Preserve live/stage and transition to `recovered_old`. |
+| `Ø` | `C` | `P`, `C`, or `X` | Rename backup to live no-replace, fsync destination then source, verify stability, and transition to `recovered_old`. |
+| any stable directory | `C` | `P`, `C`, or `X` | A writer recreated live between renames. Preserve every path and transition to `recovered_old`. |
 | any stable directory | `Ø` | `P` | Publication crossed its linearization point. Preserve later live bytes, fsync the checkout destination then private source, build the exact postimage, and transition to `recovered_new`. |
-| any stable directory | `Ø` | `X` | Old-side and publication timing are ambiguous. Retain all evidence and return `ErrCheckpointRecoveryBlocked`. |
+| any stable directory | `Ø` | `C` or `X` | Old-side and publication timing are ambiguous. Retain all evidence and return `ErrCheckpointRecoveryBlocked`. |
 
 Every unlisted or unsafe topology is blocked and byte-preserving. Recovery never resumes a
 prepared publisher and never reuses its journal names. A later checkpoint may begin only
@@ -171,6 +183,11 @@ Git base proceeds; the already-approved same-symbolic-ref different-commit case 
 only when its committed Wormhole tree is exact `C`. Other Git bases fail before path
 mutation.
 
+The pure recovery disposition proof accepts `prepared` only with workspace state `clean` or
+`pending`, and accepts `published`/`recovered_new` only with exact `pending`. It checks this
+after candidate/operation ownership so partial ownership remains the first corruption
+failure, and before Git or path I/O.
+
 ## Errors and uncertain outcomes
 
 - A safely preserved pre-publication edit returns zero result plus `ErrCheckpointCAS`.
@@ -181,6 +198,8 @@ mutation.
 - Unsafe or ambiguous contained evidence returns `ErrCheckpointRecoveryBlocked` with all
   bytes retained.
 - Ordinary syscall or `fsync` failures retain prepared authority and wrap their cause.
+  Post-journal root preflight retains both the checkpoint CAS sentinel and the underlying
+  cause for `errors.Is` inspection.
   Pathname reread never claims that a failed `fsync` reached durable storage. Recovery
   classifies the retained topology and repeats the idempotent destination-then-source
   directory fsync before committing an outcome that depends on those namespace changes.

@@ -111,9 +111,8 @@ func (s *Service) Recover(ctx context.Context, scope types.WorkspaceScope) (Work
 			result = plan.proof.status
 			return nil
 		}
-		if plan.proof.workspace.Binding.Scope != scope ||
-			(plan.proof.workspace.State != "clean" && plan.proof.workspace.State != "pending") {
-			return checkpointRecoveryPrecondition("driver workspace state or scope differs", nil)
+		if plan.proof.workspace.Binding.Scope != scope {
+			return checkpointRecoveryPrecondition("driver workspace scope differs", nil)
 		}
 		strict, err := strictRereadCheckpointRecoveryDisposition(ctx, tx, plan.proof)
 		if err != nil {
@@ -324,7 +323,6 @@ func proveCheckpointRecoveryDisposition(
 			candidate: ownedCandidate, disposition: ownedDisposition,
 		}, nil
 	}
-
 	operations, err := decodeCheckpointOperations(*pending.IncludedOperationsJSON)
 	if err != nil {
 		return checkpointRecoveryProof{}, checkpointRecoveryPrecondition("driver operation envelope", err)
@@ -349,6 +347,9 @@ func proveCheckpointRecoveryDisposition(
 		if !equalCheckpointRecoveryCandidates(prior, candidate) {
 			return checkpointRecoveryProof{}, checkpointRecoveryPrecondition("prepared candidate preimage differs", nil)
 		}
+		if workspace.State != "clean" && workspace.State != "pending" {
+			return checkpointRecoveryProof{}, checkpointRecoveryPrecondition("prepared workspace state differs", nil)
+		}
 	case "published", "recovered_new":
 		postimage, err := checkpointPublicationPostimage(*pending)
 		if err != nil {
@@ -356,6 +357,9 @@ func proveCheckpointRecoveryDisposition(
 		}
 		if !equalCheckpointRecoveryCandidates(&postimage, candidate) {
 			return checkpointRecoveryProof{}, checkpointRecoveryPrecondition("publication candidate postimage differs", nil)
+		}
+		if workspace.State != "pending" {
+			return checkpointRecoveryProof{}, checkpointRecoveryPrecondition("publication workspace state differs", nil)
 		}
 		if pending.State == "recovered_new" {
 			kind = checkpointRecoveryNoWork

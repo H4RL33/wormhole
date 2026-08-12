@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
-
-	"golang.org/x/sys/unix"
 )
 
 func recoverCheckpointFilesystem(
@@ -55,9 +53,12 @@ func recoverCheckpointFilesystemWithDependencies(
 	}
 
 	liveStable := topology.live.kind != checkpointPublicationAbsent
-	backupOld := topology.backup.kind == checkpointPublicationPrior || topology.backup.kind == checkpointPublicationOpaque
+	liveOld := topology.live.kind == checkpointPublicationPrior || topology.live.kind == checkpointPublicationCandidate ||
+		topology.live.kind == checkpointPublicationOpaque
+	backupOld := topology.backup.kind == checkpointPublicationPrior || topology.backup.kind == checkpointPublicationCandidate ||
+		topology.backup.kind == checkpointPublicationOpaque
 	switch {
-	case (topology.live.kind == checkpointPublicationPrior || topology.live.kind == checkpointPublicationOpaque) &&
+	case liveOld &&
 		topology.stage.kind == checkpointPublicationCandidate && topology.backup.kind == checkpointPublicationAbsent:
 		if err := checkpointPublicationFsyncParents(artifact, false); err != nil {
 			return 0, err
@@ -66,13 +67,19 @@ func recoverCheckpointFilesystemWithDependencies(
 
 	case topology.live.kind == checkpointPublicationAbsent &&
 		topology.stage.kind == checkpointPublicationCandidate && backupOld:
-		if err := ctx.Err(); err != nil {
-			return 0, err
-		}
 		terminal := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1]
 		backup := checkpointPublicationEntry{
 			kind: topology.backup.kind,
 			tree: cloneCheckpointTree(topology.backup.tree),
+		}
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		if err := checkpointPublicationRevalidateParents(ctx, artifact); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return 0, err
+			}
+			return 0, checkpointRecoveryPrecondition("persistent roots changed before recovery restore rename", err)
 		}
 		renameErr := artifact.dependencies.operations.rename(
 			artifact.private.fd, backupName,
@@ -149,21 +156,6 @@ func checkpointRecoveryClassify(
 	artifact *checkpointArtifact,
 	stageName, backupName string,
 ) (checkpointPublicationTopology, error) {
-	terminalFD := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1].fd
-	privateFD := artifact.private.fd
-	containedEntryInspectionStarted := false
-	originalFstatat := artifact.dependencies.operations.fstatat
-	artifact.dependencies.operations.fstatat = func(parentFD int, name string, stat *unix.Stat_t, flags int) error {
-		if (parentFD == terminalFD && name == ".wormhole") ||
-			(parentFD == privateFD && (name == stageName || name == backupName)) {
-			containedEntryInspectionStarted = true
-		}
-		return originalFstatat(parentFD, name, stat, flags)
-	}
-	defer func() {
-		artifact.dependencies.operations.fstatat = originalFstatat
-	}()
-
 	topology, err := checkpointPublicationClassify(ctx, artifact, stageName, backupName)
 	if err == nil {
 		return topology, nil
@@ -171,7 +163,8 @@ func checkpointRecoveryClassify(
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return checkpointPublicationTopology{}, err
 	}
-	if !containedEntryInspectionStarted {
+	var evidenceErr *checkpointPublicationEvidenceError
+	if errors.As(err, &evidenceErr) && evidenceErr.class == checkpointPublicationPersistentRoot {
 		return checkpointPublicationTopology{}, checkpointRecoveryPrecondition(
 			"recovery root validation failed",
 			err,

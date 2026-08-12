@@ -328,12 +328,12 @@ Implement the spec matrix exactly:
 
 1. Entry P/C/absent attempts live→backup once; entry stable non-P live C-or-X/C/absent
    returns preserved-old.
-2. After rename 1, absent/C/P proceeds; absent/C/X compensates; recreated-live/C/P-or-X
+2. After rename 1, absent/C/P proceeds; absent/C/C-or-X compensates; recreated-live/C/P-or-C-or-X
    preserves all and returns preserved-old.
 3. Only absent/C/P attempts stage→live once.
 4. A successful or observably-applied stage→live is the publication point. Return published
    for any stable safe live P, C, or X only when stage is absent and backup remains exact P.
-   Backup X, or simultaneous unknown live and backup, preserves all evidence and wraps
+   Backup C or X, or simultaneous unknown live and backup, preserves all evidence and wraps
    `ErrCheckpointRecoveryBlocked`.
 5. Exact prior returns the original rename error. Exact next continues without replay. A
    third/unsafe topology wraps
@@ -619,21 +619,31 @@ and prove the complete disposition/status; capture exact commit next state; comm
 separate writer must remain blocked from the initial proof through Git observation,
 filesystem work, postimage, and final reread.
 
+The pure disposition proof permits `prepared` only in `clean|pending` and permits
+`published`/`recovered_new` only in exact `pending`, after candidate/operation ownership and
+before any Git/path seam.
+
 - [ ] **Step 4: Implement the Linux topology matrix**
 
 Use descriptor-relative no-follow opens and fresh stability/mount proof. Whenever stage is
 present it must be exact C. Implement:
 
-- live P-or-X / stage C / backup absent → preserve, unconditionally fsync checkout
+- validate the frozen checkout mount and non-mount-root attribute on the outer root, every
+  nested directory, and every file in both recursive capture passes; generic working-tree
+  capture remains unchanged;
+- run one complete persistent-root proof at classifier entry and tail, attribute root versus
+  contained-entry failures explicitly, and repeat the full root proof immediately before
+  each publisher/recovery rename with no intervening hook or filesystem work;
+- live P-or-C-or-X / stage C / backup absent → preserve, unconditionally fsync checkout
   destination then private source, recovered-old. This same topology can mean publication
   never began or compensation applied before an fsync failure, so pathname state never
   permits skipping the repeated idempotent fsync;
-- live absent / stage C / backup P-or-X → one backup→live no-replace rename, checkout
+- live absent / stage C / backup P-or-C-or-X → one backup→live no-replace rename, checkout
   destination fsync then private source fsync, recovered-old;
-- live stable / stage C / backup P-or-X → preserve all, recovered-old;
+- live stable / stage C / backup P-or-C-or-X → preserve all, recovered-old;
 - live stable / stage absent / backup P → fsync checkout destination then private source,
   preserve later live, recovered-new;
-- live stable / stage absent / backup X → preserve and block;
+- live stable / stage absent / backup C-or-X → preserve and block;
 - published with safe live/stage-absent/backup-present → fsync and recovered-new;
 - every unlisted/unsafe/unstable layout → preserve and block.
 
@@ -719,6 +729,7 @@ and confirmation are complete.
 On any publisher fsync error, return the wrapped error with prepared authority. Recovery
 classifies the retained topology, repeats destination-then-source directory fsync, and only
 then commits recovered-old/new. Do not classify failed fsync as durable from path state.
+Post-journal preflight wraps both checkpoint CAS and its underlying root/syscall cause.
 
 - [ ] **Step 4: Complete transition-specific unknown COMMIT behavior**
 

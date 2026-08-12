@@ -510,6 +510,46 @@ func TestCheckpointFallbackPublisherPreservesConcurrentOldAndNeverOverwritesRecr
 		checkpointFallbackAssertAbsent(t, artifact.evidence().BackupPath)
 	})
 
+	t.Run("candidate backup compensation after live-to-backup race", func(t *testing.T) {
+		input := checkpointArtifactCandidateWithNestedFile(t)
+		artifact := prepareCheckpointFallbackArtifact(t, input)
+		defer artifact.close()
+		evidence := artifact.evidence()
+		terminalFD := artifact.checkout.ancestry[len(artifact.checkout.ancestry)-1].fd
+		privateFD := artifact.private.fd
+		realRename := artifact.dependencies.operations.rename
+		realFsync := artifact.dependencies.operations.fsync
+		renames := 0
+		var fsyncOrder []string
+		artifact.dependencies.operations.rename = func(fromFD int, from string, toFD int, to string, flags uint) error {
+			renames++
+			if renames == 1 {
+				checkpointFallbackWriteTree(t, filepath.Join(input.Checkout.CanonicalPath, ".wormhole"), input.CandidateTree)
+			}
+			return realRename(fromFD, from, toFD, to, flags)
+		}
+		artifact.dependencies.operations.fsync = func(fd int) error {
+			switch fd {
+			case terminalFD:
+				fsyncOrder = append(fsyncOrder, "checkout")
+			case privateFD:
+				fsyncOrder = append(fsyncOrder, "private")
+			}
+			return realFsync(fd)
+		}
+
+		disposition, err := publishPreparedCheckpointArtifact(context.Background(), artifact)
+		if disposition != checkpointPublicationPreservedConcurrentOld || err != nil || renames != 2 {
+			t.Fatalf("candidate-backup compensation = (%d, %v), renames %d", disposition, err, renames)
+		}
+		if !reflect.DeepEqual(fsyncOrder, []string{"private", "checkout", "checkout", "private"}) {
+			t.Fatalf("candidate-backup compensation fsync order = %v", fsyncOrder)
+		}
+		assertCheckpointPathTree(t, filepath.Join(input.Checkout.CanonicalPath, ".wormhole"), input.CandidateTree)
+		assertCheckpointPathTree(t, evidence.StagePath, input.CandidateTree)
+		checkpointFallbackAssertAbsent(t, evidence.BackupPath)
+	})
+
 	t.Run("recreated live", func(t *testing.T) {
 		input := checkpointArtifactCandidateWithNestedFile(t)
 		artifact := prepareCheckpointFallbackArtifact(t, input)

@@ -69,7 +69,12 @@ func TestProveCheckpointRecoveryDispositionOwnsPreparedAndPublishedState(t *test
 			for index := range materialized {
 				materialized[index].State = "materialized"
 			}
-			proof, err := proveCheckpointRecoveryDisposition(workspace, &publishedCandidate, localstore.WorkspaceMaterializationDisposition{
+			publishedWorkspace, err := cloneImportWorkspace(workspace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			publishedWorkspace.State = "pending"
+			proof, err := proveCheckpointRecoveryDisposition(publishedWorkspace, &publishedCandidate, localstore.WorkspaceMaterializationDisposition{
 				Journals: []localstore.WorkspaceMaterializationRecord{journal}, Operations: materialized,
 			})
 			if err != nil {
@@ -150,7 +155,14 @@ func TestProveCheckpointRecoveryDispositionOwnsPreparedAndPublishedState(t *test
 						disposition := localstore.WorkspaceMaterializationDisposition{
 							Journals: []localstore.WorkspaceMaterializationRecord{journal}, Operations: rows,
 						}
-						proof, err := proveCheckpointRecoveryDisposition(fixtureWorkspace, candidate, disposition)
+						proofWorkspace, err := cloneImportWorkspace(fixtureWorkspace)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if journalState != "prepared" {
+							proofWorkspace.State = "pending"
+						}
+						proof, err := proveCheckpointRecoveryDisposition(proofWorkspace, candidate, disposition)
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -503,7 +515,14 @@ func TestProveCheckpointRecoveryDispositionRejectsMixedOrOrphanState(t *testing.
 		}
 		for _, driver := range drivers {
 			t.Run(driver.name, func(t *testing.T) {
-				baseline, err := proveCheckpointRecoveryDisposition(candidateWorkspace, driver.candidate, driver.disposition)
+				driverWorkspace, err := cloneImportWorkspace(candidateWorkspace)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if driver.kind == checkpointRecoveryPublished {
+					driverWorkspace.State = "pending"
+				}
+				baseline, err := proveCheckpointRecoveryDisposition(driverWorkspace, driver.candidate, driver.disposition)
 				if err != nil || baseline.kind != driver.kind || baseline.driver == nil {
 					t.Fatalf("valid %s candidate baseline=(%+v,%v)", driver.name, baseline, err)
 				}
@@ -514,7 +533,7 @@ func TestProveCheckpointRecoveryDispositionRejectsMixedOrOrphanState(t *testing.
 							t.Fatal(err)
 						}
 						mutation.mutate(candidate)
-						proof, err := proveCheckpointRecoveryDisposition(candidateWorkspace, candidate, driver.disposition)
+						proof, err := proveCheckpointRecoveryDisposition(driverWorkspace, candidate, driver.disposition)
 						if err == nil || !errors.Is(err, ErrCheckpointRecoveryPrecondition) ||
 							!reflect.DeepEqual(proof, checkpointRecoveryProof{}) {
 							t.Fatalf("%s candidate drift=(kind=%d, zero=%t, err=%v), want exact zero precondition error",
@@ -523,6 +542,82 @@ func TestProveCheckpointRecoveryDispositionRejectsMixedOrOrphanState(t *testing.
 					})
 				}
 			})
+		}
+	})
+}
+
+func TestProveCheckpointRecoveryDispositionRequiresDriverWorkspaceState(t *testing.T) {
+	_, workspace, priorCandidate, prepared, operations := checkpointRecoveryProofFixtureWithInput(t)
+	publicationCandidate := func(journal localstore.WorkspaceMaterializationRecord) *localstore.WorkspaceCandidateRecord {
+		candidate, err := checkpointPublicationPostimage(journal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &candidate
+	}
+	publicationRows := func() []localstore.WorkspaceOperation {
+		rows := cloneImportDisposition(localstore.WorkspaceMaterializationDisposition{Operations: operations}).Operations
+		for index := range rows {
+			rows[index].State = "materialized"
+		}
+		return rows
+	}
+	tests := []struct {
+		name         string
+		journalState string
+		workspace    string
+		wantKind     checkpointRecoveryKind
+		wantError    bool
+	}{
+		{name: "prepared clean", journalState: "prepared", workspace: "clean", wantKind: checkpointRecoveryPrepared},
+		{name: "prepared pending", journalState: "prepared", workspace: "pending", wantKind: checkpointRecoveryPrepared},
+		{name: "prepared conflicted", journalState: "prepared", workspace: "conflicted", wantError: true},
+		{name: "published pending", journalState: "published", workspace: "pending", wantKind: checkpointRecoveryPublished},
+		{name: "published clean", journalState: "published", workspace: "clean", wantError: true},
+		{name: "published conflicted", journalState: "published", workspace: "conflicted", wantError: true},
+		{name: "recovered-new pending", journalState: "recovered_new", workspace: "pending", wantKind: checkpointRecoveryNoWork},
+		{name: "recovered-new clean", journalState: "recovered_new", workspace: "clean", wantError: true},
+		{name: "recovered-new conflicted", journalState: "recovered_new", workspace: "conflicted", wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			currentWorkspace := workspace
+			currentWorkspace.State = test.workspace
+			journal := cloneMaterializationRecord(prepared)
+			journal.State = test.journalState
+			candidate := priorCandidate
+			rows := operations
+			if test.journalState != "prepared" {
+				candidate = publicationCandidate(journal)
+				rows = publicationRows()
+			}
+			proof, err := proveCheckpointRecoveryDisposition(currentWorkspace, candidate, localstore.WorkspaceMaterializationDisposition{
+				Journals: []localstore.WorkspaceMaterializationRecord{journal}, Operations: rows,
+			})
+			if test.wantError {
+				if err == nil || !errors.Is(err, ErrCheckpointRecoveryPrecondition) || !reflect.DeepEqual(proof, checkpointRecoveryProof{}) {
+					t.Fatalf("driver state proof = (%+v, %v), want exact zero precondition", proof, err)
+				}
+				return
+			}
+			if err != nil || proof.kind != test.wantKind {
+				t.Fatalf("valid driver state proof = (%+v, %v), want kind %d", proof, err, test.wantKind)
+			}
+		})
+	}
+
+	t.Run("partial ownership fails before workspace state", func(t *testing.T) {
+		currentWorkspace := workspace
+		currentWorkspace.State = "conflicted"
+		rows := cloneImportDisposition(localstore.WorkspaceMaterializationDisposition{Operations: operations}).Operations
+		rows[0].State = "materialized"
+		proof, err := proveCheckpointRecoveryDisposition(currentWorkspace, priorCandidate, localstore.WorkspaceMaterializationDisposition{
+			Journals: []localstore.WorkspaceMaterializationRecord{prepared}, Operations: rows,
+		})
+		if err == nil || !errors.Is(err, ErrCheckpointRecoveryPrecondition) ||
+			!strings.Contains(err.Error(), "driver operation ownership") ||
+			strings.Contains(err.Error(), "workspace state differs") || !reflect.DeepEqual(proof, checkpointRecoveryProof{}) {
+			t.Fatalf("partial ownership precedence = (%+v, %v)", proof, err)
 		}
 	})
 }
@@ -545,7 +640,12 @@ func TestObserveCheckpointRecoveryGitAllowsOnlyStoredOrSameRefCandidate(t *testi
 	for index := range materialized {
 		materialized[index].State = "materialized"
 	}
-	publishedProof, err := proveCheckpointRecoveryDisposition(workspace, &publishedCandidate, localstore.WorkspaceMaterializationDisposition{
+	publishedWorkspace, err := cloneImportWorkspace(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishedWorkspace.State = "pending"
+	publishedProof, err := proveCheckpointRecoveryDisposition(publishedWorkspace, &publishedCandidate, localstore.WorkspaceMaterializationDisposition{
 		Journals: []localstore.WorkspaceMaterializationRecord{journal}, Operations: materialized,
 	})
 	if err != nil || publishedProof.kind != checkpointRecoveryPublished {
