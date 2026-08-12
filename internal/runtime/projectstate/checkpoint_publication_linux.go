@@ -106,7 +106,10 @@ func publishCheckpointArtifactFallback(ctx context.Context, artifact *checkpoint
 	if renameErr != nil {
 		observed, classifyErr := checkpointPublicationClassify(ctx, artifact, stageName, backupName)
 		if classifyErr != nil {
-			return 0, checkpointPublicationBlocked("classify live-to-backup rename error", classifyErr)
+			return 0, checkpointPublicationBlocked(
+				"classify live-to-backup rename error",
+				fmt.Errorf("%w: %w", renameErr, classifyErr),
+			)
 		}
 		switch {
 		case checkpointPublicationIs(observed, checkpointPublicationPrior, checkpointPublicationCandidate, checkpointPublicationAbsent):
@@ -181,7 +184,10 @@ func publishCheckpointArtifactFallback(ctx context.Context, artifact *checkpoint
 	if renameErr != nil {
 		observed, classifyErr := checkpointPublicationClassify(ctx, artifact, stageName, backupName)
 		if classifyErr != nil {
-			return 0, checkpointPublicationBlocked("classify stage-to-live rename error", classifyErr)
+			return 0, checkpointPublicationBlocked(
+				"classify stage-to-live rename error",
+				fmt.Errorf("%w: %w", renameErr, classifyErr),
+			)
 		}
 		switch {
 		case checkpointPublicationIs(observed, checkpointPublicationAbsent, checkpointPublicationCandidate, checkpointPublicationPrior):
@@ -241,7 +247,10 @@ func checkpointPublicationCompensate(ctx context.Context, artifact *checkpointAr
 	if renameErr != nil {
 		observed, classifyErr := checkpointPublicationClassify(ctx, artifact, stageName, backupName)
 		if classifyErr != nil {
-			return 0, checkpointPublicationBlocked("classify compensation rename error", classifyErr)
+			return 0, checkpointPublicationBlocked(
+				"classify compensation rename error",
+				fmt.Errorf("%w: %w", renameErr, classifyErr),
+			)
 		}
 		switch {
 		case checkpointPublicationCompensationPrior(observed, preserved):

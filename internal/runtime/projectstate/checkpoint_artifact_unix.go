@@ -27,6 +27,7 @@ const (
 
 type checkpointArtifactDependencies struct {
 	readGit      func(context.Context, string, int, ...string) ([]byte, error)
+	newProbeID   func() (string, error)
 	newJournalID func() (string, error)
 	fault        func(checkpointArtifactFaultStage) error
 	operations   checkpointArtifactPlatformOperations
@@ -190,6 +191,9 @@ func prepareCheckpointArtifactWithDependencies(ctx context.Context, input checkp
 	dependencies.mount = normalizeCheckpointArtifactMountOperations(dependencies.mount)
 	if dependencies.newJournalID == nil {
 		dependencies.newJournalID = newCheckpointArtifactJournalID
+	}
+	if dependencies.newProbeID == nil {
+		dependencies.newProbeID = newCheckpointArtifactProbeID
 	}
 	paths, err := resolveCheckpointGitPathsWithReader(ctx, input.Checkout.CanonicalPath, readGit)
 	if err != nil {
@@ -744,7 +748,19 @@ func checkpointArtifactNameAbsent(parentFD int, name string, operations checkpoi
 
 func checkpointArtifactCapabilityProbe(private heldWorkingTreeDirectory, dependencies checkpointArtifactDependencies, noReplaceFlag uint) error {
 	operations := dependencies.operations
-	const fileName = ".checkpoint-probe-file"
+	newProbeID := dependencies.newProbeID
+	if newProbeID == nil {
+		newProbeID = newCheckpointArtifactProbeID
+	}
+	probeID, err := newProbeID()
+	if err != nil {
+		return fmt.Errorf("%w: allocate checkpoint capability probe ID: %v", ErrCheckpointUnsupported, err)
+	}
+	if !types.CanonicalUUID(probeID) {
+		return fmt.Errorf("%w: generated invalid checkpoint capability probe ID", ErrCheckpointUnsupported)
+	}
+	probeNames := checkpointArtifactProbeNames(probeID)
+	fileName := probeNames.file
 	fileFD, err := operations.openat(private.fd, fileName, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
 	if err != nil {
 		return fmt.Errorf("%w: create regular-file fsync probe: %v", ErrCheckpointUnsupported, err)
@@ -776,7 +792,7 @@ func checkpointArtifactCapabilityProbe(private heldWorkingTreeDirectory, depende
 		return fmt.Errorf("%w: remove regular-file fsync probe: %v", ErrCheckpointUnsupported, err)
 	}
 
-	const nameA, nameB, nameC = ".checkpoint-probe-a", ".checkpoint-probe-b", ".checkpoint-probe-c"
+	nameA, nameB, nameC := probeNames.a, probeNames.b, probeNames.c
 	for _, name := range []string{nameA, nameB} {
 		if err := operations.mkdirat(private.fd, name, 0o700); err != nil {
 			return fmt.Errorf("%w: create directory rename probe %q: %v", ErrCheckpointUnsupported, name, err)
@@ -844,6 +860,23 @@ func checkpointArtifactCapabilityProbe(private heldWorkingTreeDirectory, depende
 	return nil
 }
 
+type checkpointArtifactCapabilityProbeNames struct {
+	file string
+	a    string
+	b    string
+	c    string
+}
+
+func checkpointArtifactProbeNames(probeID string) checkpointArtifactCapabilityProbeNames {
+	prefix := ".checkpoint-probe-" + probeID + "-"
+	return checkpointArtifactCapabilityProbeNames{
+		file: prefix + "file",
+		a:    prefix + "a",
+		b:    prefix + "b",
+		c:    prefix + "c",
+	}
+}
+
 func checkpointArtifactRequireTopology(parentFD int, operations checkpointArtifactPlatformOperations, topology map[string]*heldWorkingTreeDirectory) error {
 	for name, expected := range topology {
 		if expected == nil {
@@ -894,7 +927,15 @@ func openCheckpointArtifactChildDirectoryWithOperations(parent heldWorkingTreeDi
 	return heldWorkingTreeDirectory{fd: fd, parentFD: parent.fd, name: name, path: filepath.Join(parent.path, name), metadata: opened}, nil
 }
 
+func newCheckpointArtifactProbeID() (string, error) {
+	return newCheckpointArtifactRandomID()
+}
+
 func newCheckpointArtifactJournalID() (string, error) {
+	return newCheckpointArtifactRandomID()
+}
+
+func newCheckpointArtifactRandomID() (string, error) {
 	var raw [16]byte
 	if _, err := io.ReadFull(rand.Reader, raw[:]); err != nil {
 		return "", err

@@ -19,12 +19,13 @@ import (
 
 func TestRecoverPreparedTopologyMatrix(t *testing.T) {
 	tests := []struct {
-		name       string
-		arrange    func(*testing.T, checkpointRecoveryLinuxFixture, state.Tree)
-		wantLive   func(checkpointRecoveryLinuxFixture, state.Tree) state.Tree
-		wantStage  bool
-		wantBackup bool
-		wantFsync  []string
+		name           string
+		arrange        func(*testing.T, checkpointRecoveryLinuxFixture, state.Tree)
+		wantLive       func(checkpointRecoveryLinuxFixture, state.Tree) state.Tree
+		wantBackupTree func(checkpointRecoveryLinuxFixture, state.Tree) state.Tree
+		wantStage      bool
+		wantBackup     bool
+		wantFsync      []string
 	}{
 		{
 			name: "live prior stage candidate backup absent", wantStage: true,
@@ -87,24 +88,27 @@ func TestRecoverPreparedTopologyMatrix(t *testing.T) {
 				}
 				checkpointFallbackCreateTree(t, f.livePath(), opaque)
 			},
-			wantLive:  func(_ checkpointRecoveryLinuxFixture, opaque state.Tree) state.Tree { return opaque },
-			wantFsync: []string{"checkout", "private"},
+			wantLive:       func(_ checkpointRecoveryLinuxFixture, opaque state.Tree) state.Tree { return opaque },
+			wantBackupTree: func(f checkpointRecoveryLinuxFixture, _ state.Tree) state.Tree { return f.journal.PriorTree },
+			wantFsync:      []string{"checkout", "private"},
 		},
 		{
 			name: "stable live preserves opaque backup", wantStage: true, wantBackup: true,
 			arrange: func(t *testing.T, f checkpointRecoveryLinuxFixture, opaque state.Tree) {
 				checkpointFallbackCreateTree(t, f.journal.BackupPath, opaque)
 			},
-			wantLive:  func(f checkpointRecoveryLinuxFixture, _ state.Tree) state.Tree { return f.journal.PriorTree },
-			wantFsync: []string{"checkout", "private"},
+			wantLive:       func(f checkpointRecoveryLinuxFixture, _ state.Tree) state.Tree { return f.journal.PriorTree },
+			wantBackupTree: func(_ checkpointRecoveryLinuxFixture, opaque state.Tree) state.Tree { return opaque },
+			wantFsync:      []string{"checkout", "private"},
 		},
 		{
 			name: "stable prior live preserves candidate backup", wantStage: true, wantBackup: true,
 			arrange: func(t *testing.T, f checkpointRecoveryLinuxFixture, _ state.Tree) {
 				checkpointFallbackCreateTree(t, f.journal.BackupPath, f.journal.CandidateTree)
 			},
-			wantLive:  func(f checkpointRecoveryLinuxFixture, _ state.Tree) state.Tree { return f.journal.PriorTree },
-			wantFsync: []string{"checkout", "private"},
+			wantLive:       func(f checkpointRecoveryLinuxFixture, _ state.Tree) state.Tree { return f.journal.PriorTree },
+			wantBackupTree: func(f checkpointRecoveryLinuxFixture, _ state.Tree) state.Tree { return f.journal.CandidateTree },
+			wantFsync:      []string{"checkout", "private"},
 		},
 		{
 			name: "stable candidate live preserves candidate backup", wantStage: true, wantBackup: true,
@@ -112,8 +116,9 @@ func TestRecoverPreparedTopologyMatrix(t *testing.T) {
 				checkpointFallbackWriteTree(t, f.livePath(), f.journal.CandidateTree)
 				checkpointFallbackCreateTree(t, f.journal.BackupPath, f.journal.CandidateTree)
 			},
-			wantLive:  func(f checkpointRecoveryLinuxFixture, _ state.Tree) state.Tree { return f.journal.CandidateTree },
-			wantFsync: []string{"checkout", "private"},
+			wantLive:       func(f checkpointRecoveryLinuxFixture, _ state.Tree) state.Tree { return f.journal.CandidateTree },
+			wantBackupTree: func(f checkpointRecoveryLinuxFixture, _ state.Tree) state.Tree { return f.journal.CandidateTree },
+			wantFsync:      []string{"checkout", "private"},
 		},
 		{
 			name: "stable opaque live preserves candidate backup", wantStage: true, wantBackup: true,
@@ -121,8 +126,9 @@ func TestRecoverPreparedTopologyMatrix(t *testing.T) {
 				checkpointFallbackReplaceTree(t, f.livePath(), opaque, ".retained-prior")
 				checkpointFallbackCreateTree(t, f.journal.BackupPath, f.journal.CandidateTree)
 			},
-			wantLive:  func(_ checkpointRecoveryLinuxFixture, opaque state.Tree) state.Tree { return opaque },
-			wantFsync: []string{"checkout", "private"},
+			wantLive:       func(_ checkpointRecoveryLinuxFixture, opaque state.Tree) state.Tree { return opaque },
+			wantBackupTree: func(f checkpointRecoveryLinuxFixture, _ state.Tree) state.Tree { return f.journal.CandidateTree },
+			wantFsync:      []string{"checkout", "private"},
 		},
 	}
 	for _, test := range tests {
@@ -140,17 +146,11 @@ func TestRecoverPreparedTopologyMatrix(t *testing.T) {
 			}
 			recoveryAssertTree(t, fixture.livePath(), test.wantLive(fixture, opaque))
 			recoveryAssertPath(t, fixture.journal.StagePath, test.wantStage, fixture.journal.CandidateTree)
-			recoveryAssertPath(t, fixture.journal.BackupPath, test.wantBackup, func() state.Tree {
-				if test.name == "stable live preserves opaque backup" {
-					return opaque
-				}
-				if test.name == "stable prior live preserves candidate backup" ||
-					test.name == "stable candidate live preserves candidate backup" ||
-					test.name == "stable opaque live preserves candidate backup" {
-					return fixture.journal.CandidateTree
-				}
-				return fixture.journal.PriorTree
-			}())
+			var wantBackupTree state.Tree
+			if test.wantBackupTree != nil {
+				wantBackupTree = test.wantBackupTree(fixture, opaque)
+			}
+			recoveryAssertPath(t, fixture.journal.BackupPath, test.wantBackup, wantBackupTree)
 			after := recoveryDatabaseState(t, fixture.service, fixture.request.Scope)
 			recoveryAssertOldDatabase(t, before, after)
 			recoveryAssertReturnedStatus(t, fixture.service, fixture.request.Scope, got)
@@ -434,6 +434,86 @@ func TestCheckpointPostJournalContextFailureRemainsRaw(t *testing.T) {
 	recoveryAssertTree(t, filepath.Join(request.Root, ".wormhole"), prepared.PriorTree)
 	recoveryAssertTree(t, prepared.StagePath, prepared.CandidateTree)
 	checkpointFallbackAssertAbsent(t, prepared.BackupPath)
+}
+
+func TestCheckpointPublisherRenameClassificationFailurePreservesBothCauses(t *testing.T) {
+	for _, role := range []string{"live-to-backup", "stage-to-live", "compensation"} {
+		t.Run(role, func(t *testing.T) {
+			fixture, request := newCheckpointRecoveryPublisherFixture(t)
+			before := recoveryDatabaseState(t, fixture.service, request.Scope)
+			acceptedBefore := before.workspace.Binding
+			var prepared localstore.WorkspaceMaterializationRecord
+			checkpointRecoveryCapturePreparedJournal(t, fixture, &prepared)
+			renameCause := errors.New(role + " rename uncertainty")
+			classificationCause := errors.New(role + " classifier failure")
+			targetRenames, fsyncAfterTarget := 0, 0
+			checkpointRecoveryUseRealPublisher(t, fixture, func(artifact *checkpointArtifact) {
+				realReadGit := artifact.dependencies.readGit
+				targetReturned := false
+				artifact.dependencies.readGit = func(ctx context.Context, root string, limit int, args ...string) ([]byte, error) {
+					if targetReturned {
+						return nil, classificationCause
+					}
+					return realReadGit(ctx, root, limit, args...)
+				}
+				stageName := filepath.Base(artifact.evidenceValue.StagePath)
+				backupName := filepath.Base(artifact.evidenceValue.BackupPath)
+				realRename := artifact.dependencies.operations.rename
+				artifact.dependencies.operations.rename = func(fromFD int, from string, toFD int, to string, flags uint) error {
+					target := role == "live-to-backup" && from == ".wormhole" && to == backupName ||
+						role == "stage-to-live" && from == stageName && to == ".wormhole" ||
+						role == "compensation" && from == backupName && to == ".wormhole"
+					if target {
+						targetRenames++
+						targetReturned = true
+						return renameCause
+					}
+					return realRename(fromFD, from, toFD, to, flags)
+				}
+				realFsync := artifact.dependencies.operations.fsync
+				artifact.dependencies.operations.fsync = func(fd int) error {
+					if targetReturned {
+						fsyncAfterTarget++
+					}
+					return realFsync(fd)
+				}
+				if role == "compensation" {
+					artifact.dependencies.fault = func(stage checkpointArtifactFaultStage) error {
+						if stage == checkpointArtifactAfterLiveMutation {
+							checkpointFallbackWriteTree(t, artifact.evidenceValue.BackupPath, artifact.proof.candidate.tree)
+						}
+						return nil
+					}
+				}
+			})
+
+			got, err := fixture.service.Checkpoint(context.Background(), request)
+			if got != (CheckpointResult{}) || !errors.Is(err, ErrCheckpointRecoveryBlocked) ||
+				!errors.Is(err, renameCause) || !errors.Is(err, classificationCause) ||
+				targetRenames != 1 || fsyncAfterTarget != 0 {
+				t.Fatalf("%s classifier failure = (%+v, %v), target renames=%d fsync-after=%d", role, got, err, targetRenames, fsyncAfterTarget)
+			}
+			after := recoveryDatabaseState(t, fixture.service, request.Scope)
+			checkpointRecoveryAssertCheckpointOutcomeDatabase(t, before, after, prepared, "prepared")
+			if after.workspace.Binding != acceptedBefore {
+				t.Fatalf("%s classifier failure moved accepted binding", role)
+			}
+			switch role {
+			case "live-to-backup":
+				recoveryAssertTree(t, filepath.Join(request.Root, ".wormhole"), prepared.PriorTree)
+				recoveryAssertTree(t, prepared.StagePath, prepared.CandidateTree)
+				checkpointFallbackAssertAbsent(t, prepared.BackupPath)
+			case "stage-to-live":
+				checkpointFallbackAssertAbsent(t, filepath.Join(request.Root, ".wormhole"))
+				recoveryAssertTree(t, prepared.StagePath, prepared.CandidateTree)
+				recoveryAssertTree(t, prepared.BackupPath, prepared.PriorTree)
+			case "compensation":
+				checkpointFallbackAssertAbsent(t, filepath.Join(request.Root, ".wormhole"))
+				recoveryAssertTree(t, prepared.StagePath, prepared.CandidateTree)
+				recoveryAssertTree(t, prepared.BackupPath, prepared.CandidateTree)
+			}
+		})
+	}
 }
 
 func TestCheckpointAndRecoverRejectNestedMountSubstitutionBeforeRename(t *testing.T) {

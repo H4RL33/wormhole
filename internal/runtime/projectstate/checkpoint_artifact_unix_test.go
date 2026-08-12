@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -292,7 +293,9 @@ func TestCheckpointArtifactCapabilityFailuresPrecedeStageCreation(t *testing.T) 
 }
 
 func TestCheckpointArtifactCapabilityProbeNeverRetriesCloseAfterError(t *testing.T) {
-	for _, targetName := range []string{".checkpoint-probe-file", ".checkpoint-probe-a", ".checkpoint-probe-b"} {
+	probeID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	probeNames := checkpointArtifactProbeNames(probeID)
+	for _, targetName := range []string{probeNames.file, probeNames.a, probeNames.b} {
 		t.Run(targetName, func(t *testing.T) {
 			path := t.TempDir()
 			fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
@@ -325,7 +328,10 @@ func TestCheckpointArtifactCapabilityProbeNeverRetriesCloseAfterError(t *testing
 				}
 				return realClose(closingFD)
 			}
-			err = checkpointArtifactCapabilityProbe(private, checkpointArtifactDependencies{operations: operations}, checkpointNoReplaceRenameFlag())
+			err = checkpointArtifactCapabilityProbe(private, checkpointArtifactDependencies{
+				operations: operations,
+				newProbeID: func() (string, error) { return probeID, nil },
+			}, checkpointNoReplaceRenameFlag())
 			if !errors.Is(err, ErrCheckpointUnsupported) {
 				t.Fatalf("close failure = %v, want ErrCheckpointUnsupported", err)
 			}
@@ -334,6 +340,285 @@ func TestCheckpointArtifactCapabilityProbeNeverRetriesCloseAfterError(t *testing
 			}
 		})
 	}
+}
+
+func TestCheckpointArtifactCapabilityProbeResidueDoesNotPoisonNextPreparation(t *testing.T) {
+	firstProbeID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	secondProbeID := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	journalID := "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+	firstNames := checkpointArtifactProbeNames(firstProbeID)
+	tests := []struct {
+		name   string
+		inject func(*checkpointArtifactPlatformOperations, *bool)
+	}{
+		{name: "file fstat", inject: func(operations *checkpointArtifactPlatformOperations, injected *bool) {
+			realOpenat, realFstat := operations.openat, operations.fstat
+			fileFD := -1
+			operations.openat = func(parentFD int, name string, flags int, mode uint32) (int, error) {
+				fd, err := realOpenat(parentFD, name, flags, mode)
+				if err == nil && name == firstNames.file {
+					fileFD = fd
+				}
+				return fd, err
+			}
+			operations.fstat = func(fd int, stat *unix.Stat_t) error {
+				if err := realFstat(fd, stat); err != nil {
+					return err
+				}
+				if !*injected && fd == fileFD {
+					*injected = true
+					return unix.EIO
+				}
+				return nil
+			}
+		}},
+		{name: "file fsync", inject: checkpointArtifactProbeFsyncFailure(firstNames.file)},
+		{name: "file close", inject: checkpointArtifactProbeCloseFailure(firstNames.file)},
+		{name: "first mkdir", inject: checkpointArtifactProbeMkdirFailure(firstNames.a)},
+		{name: "second mkdir", inject: checkpointArtifactProbeMkdirFailure(firstNames.b)},
+		{name: "occupied rename", inject: checkpointArtifactProbeRenameFailure(firstNames.a, firstNames.b)},
+		{name: "forward rename", inject: checkpointArtifactProbeRenameFailure(firstNames.a, firstNames.c)},
+		{name: "reverse rename", inject: checkpointArtifactProbeRenameFailure(firstNames.c, firstNames.a)},
+		{name: "first directory close", inject: checkpointArtifactProbeCloseFailure(firstNames.a)},
+		{name: "second directory close", inject: checkpointArtifactProbeCloseFailure(firstNames.b)},
+		{name: "file unlink", inject: checkpointArtifactProbeUnlinkFailure(firstNames.file)},
+		{name: "first directory unlink", inject: checkpointArtifactProbeUnlinkFailure(firstNames.a)},
+		{name: "second directory unlink", inject: checkpointArtifactProbeUnlinkFailure(firstNames.b)},
+		{name: "private fsync", inject: checkpointArtifactProbeFsyncFailure("")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := checkpointArtifactCandidateWithNestedFile(t)
+			operations := normalizeCheckpointArtifactRenameOperations(defaultCheckpointArtifactPlatformOperations())
+			injected := false
+			test.inject(&operations, &injected)
+			probeIDs := []string{firstProbeID, secondProbeID}
+			probeAllocations, journalAllocations := 0, 0
+			dependencies := checkpointArtifactDependencies{
+				readGit:    readOnlyGitLimited,
+				operations: operations,
+				newProbeID: func() (string, error) {
+					id := probeIDs[probeAllocations]
+					probeAllocations++
+					return id, nil
+				},
+				newJournalID: func() (string, error) {
+					journalAllocations++
+					return journalID, nil
+				},
+			}
+			first, err := prepareCheckpointArtifactWithDependencies(context.Background(), input, dependencies)
+			if first != nil || !errors.Is(err, ErrCheckpointUnsupported) || !injected ||
+				probeAllocations != 1 || journalAllocations != 0 {
+				t.Fatalf("first preparation = (%v, %v), injected=%t probes=%d journals=%d", first, err, injected, probeAllocations, journalAllocations)
+			}
+			privateRoot := filepath.Join(input.Checkout.CanonicalPath, ".git", "wormhole", "checkpoints")
+			before := checkpointArtifactProbeNamespaceSnapshot(t, privateRoot, firstProbeID)
+
+			second, err := prepareCheckpointArtifactWithDependencies(context.Background(), input, dependencies)
+			if err != nil || second == nil || probeAllocations != 2 || journalAllocations != 1 {
+				t.Fatalf("second preparation = (%v, %v), probes=%d journals=%d", second, err, probeAllocations, journalAllocations)
+			}
+			defer second.close()
+			after := checkpointArtifactProbeNamespaceSnapshot(t, privateRoot, firstProbeID)
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("second probe changed first residue\nbefore=%+v\nafter=%+v", before, after)
+			}
+			if got := checkpointArtifactProbeNamespaceSnapshot(t, privateRoot, secondProbeID); len(got) != 0 {
+				t.Fatalf("second probe residue = %+v", got)
+			}
+			evidence := second.evidence()
+			if evidence.JournalID != journalID {
+				t.Fatalf("journal ID = %q, want %q", evidence.JournalID, journalID)
+			}
+			assertCheckpointPathTree(t, evidence.StagePath, input.CandidateTree)
+		})
+	}
+}
+
+func TestCheckpointArtifactProbeIdentityFailurePrecedesProbeAndJournalMutation(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		allocate func() (string, error)
+	}{
+		{name: "allocation error", allocate: func() (string, error) { return "", errors.New("probe allocation failed") }},
+		{name: "invalid ID", allocate: func() (string, error) { return "not-a-canonical-uuid", nil }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input := checkpointArtifactTestInput(t)
+			journalAllocated := false
+			artifact, err := prepareCheckpointArtifactWithDependencies(context.Background(), input, checkpointArtifactDependencies{
+				readGit:    readOnlyGitLimited,
+				newProbeID: test.allocate,
+				newJournalID: func() (string, error) {
+					journalAllocated = true
+					return "dddddddd-dddd-4ddd-8ddd-dddddddddddd", nil
+				},
+			})
+			if artifact != nil || !errors.Is(err, ErrCheckpointUnsupported) || journalAllocated {
+				t.Fatalf("probe identity failure = (%v, %v), journal allocated=%t", artifact, err, journalAllocated)
+			}
+			privateRoot := filepath.Join(input.Checkout.CanonicalPath, ".git", "wormhole", "checkpoints")
+			entries, readErr := os.ReadDir(privateRoot)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("probe identity failure created private entries: %v", entries)
+			}
+		})
+	}
+}
+
+func checkpointArtifactProbeFsyncFailure(targetName string) func(*checkpointArtifactPlatformOperations, *bool) {
+	return func(operations *checkpointArtifactPlatformOperations, injected *bool) {
+		realOpenat, realFsync := operations.openat, operations.fsync
+		targetFD, privateFD := -1, -1
+		operations.openat = func(parentFD int, name string, flags int, mode uint32) (int, error) {
+			fd, err := realOpenat(parentFD, name, flags, mode)
+			if name == targetName && err == nil {
+				targetFD = fd
+			}
+			if strings.HasPrefix(name, ".checkpoint-probe-") {
+				privateFD = parentFD
+			}
+			return fd, err
+		}
+		operations.fsync = func(fd int) error {
+			if err := realFsync(fd); err != nil {
+				return err
+			}
+			wantFD := targetFD
+			if targetName == "" {
+				wantFD = privateFD
+			}
+			if !*injected && wantFD >= 0 && fd == wantFD {
+				*injected = true
+				return unix.EIO
+			}
+			return nil
+		}
+	}
+}
+
+func checkpointArtifactProbeCloseFailure(targetName string) func(*checkpointArtifactPlatformOperations, *bool) {
+	return func(operations *checkpointArtifactPlatformOperations, injected *bool) {
+		realOpenat, realClose := operations.openat, operations.close
+		targetFD := -1
+		operations.openat = func(parentFD int, name string, flags int, mode uint32) (int, error) {
+			fd, err := realOpenat(parentFD, name, flags, mode)
+			if err == nil && name == targetName {
+				targetFD = fd
+			}
+			return fd, err
+		}
+		operations.close = func(fd int) error {
+			if err := realClose(fd); err != nil {
+				return err
+			}
+			if !*injected && fd == targetFD {
+				*injected = true
+				return unix.EIO
+			}
+			return nil
+		}
+	}
+}
+
+func checkpointArtifactProbeMkdirFailure(targetName string) func(*checkpointArtifactPlatformOperations, *bool) {
+	return func(operations *checkpointArtifactPlatformOperations, injected *bool) {
+		realMkdirat := operations.mkdirat
+		operations.mkdirat = func(parentFD int, name string, mode uint32) error {
+			if err := realMkdirat(parentFD, name, mode); err != nil {
+				return err
+			}
+			if !*injected && name == targetName {
+				*injected = true
+				return unix.EIO
+			}
+			return nil
+		}
+	}
+}
+
+func checkpointArtifactProbeRenameFailure(fromName, toName string) func(*checkpointArtifactPlatformOperations, *bool) {
+	return func(operations *checkpointArtifactPlatformOperations, injected *bool) {
+		realRename := operations.rename
+		operations.rename = func(fromFD int, from string, toFD int, to string, flags uint) error {
+			err := realRename(fromFD, from, toFD, to, flags)
+			if !*injected && from == fromName && to == toName {
+				*injected = true
+				return unix.EIO
+			}
+			return err
+		}
+	}
+}
+
+func checkpointArtifactProbeUnlinkFailure(targetName string) func(*checkpointArtifactPlatformOperations, *bool) {
+	return func(operations *checkpointArtifactPlatformOperations, injected *bool) {
+		realUnlinkat := operations.unlinkat
+		operations.unlinkat = func(parentFD int, name string, flags int) error {
+			if err := realUnlinkat(parentFD, name, flags); err != nil {
+				return err
+			}
+			if !*injected && name == targetName {
+				*injected = true
+				return unix.EIO
+			}
+			return nil
+		}
+	}
+}
+
+type checkpointArtifactProbeSnapshotEntry struct {
+	name       string
+	mode       os.FileMode
+	device     uint64
+	inode      uint64
+	links      uint64
+	fileBytes  []byte
+	childNames []string
+}
+
+func checkpointArtifactProbeNamespaceSnapshot(t *testing.T, root, probeID string) []checkpointArtifactProbeSnapshotEntry {
+	t.Helper()
+	prefix := ".checkpoint-probe-" + probeID + "-"
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make([]checkpointArtifactProbeSnapshotEntry, 0, 4)
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), prefix) {
+			continue
+		}
+		path := filepath.Join(root, entry.Name())
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			t.Fatalf("probe entry %q has stat type %T", path, info.Sys())
+		}
+		snapshot := checkpointArtifactProbeSnapshotEntry{
+			name: entry.Name(), mode: info.Mode(), device: uint64(stat.Dev), inode: stat.Ino, links: uint64(stat.Nlink),
+		}
+		if info.Mode().IsRegular() {
+			snapshot.fileBytes, err = os.ReadFile(path)
+		} else if info.IsDir() {
+			children, readErr := os.ReadDir(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			for _, child := range children {
+				snapshot.childNames = append(snapshot.childNames, child.Name())
+			}
+		}
+		result = append(result, snapshot)
+	}
+	return result
 }
 
 func TestCheckpointArtifactValidPreparationStagesCandidate(t *testing.T) {
