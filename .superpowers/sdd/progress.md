@@ -1216,3 +1216,16 @@ derived inside the daemon before graph recovery or mutation, and a stopped daemo
 touch DB/WAL/SHM state. PostgreSQL-dependent repository integration gates remain unavailable
 because no service is listening on `[::1]:5432`; no Task 5 or later implementation is included
 in `R01_END`.
+
+Stage 1A R01-R05 execution: Task 5 complete (commit
+`84846628dc1d642881e72291b75ff4bad6414c47`, independent specification/quality reviews
+clean). Gateway schema v5 gives every fresh and v1-v4 workspace a private positive
+revision-1 baseline and replaces the acceptance-only index with exact
+`prepared|published|recovered_new` current-materialisation uniqueness. The canonical and
+restore-retry readers enforce integer storage and positivity; private equality and
+accepted-base post-state retain the revision without public or portable exposure.
+Post-review exact v5, full localstore, full projectstate, vet, formatting, and diff gates
+passed. Incompatible v4 data rolls the migration back atomically, verified after reopen
+with the ledger, schema, indexes, and every raw v4 cell unchanged. Task 6 remains the next
+authorized implementation dependency; no revision tracker or later-task writer migration
+entered Task 5.
