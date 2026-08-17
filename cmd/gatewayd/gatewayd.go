@@ -301,17 +301,18 @@ func runWithSyncEngineFactory(ctx context.Context, profileName string, factory s
 	if err != nil {
 		return fmt.Errorf("load runtime paths: %w", err)
 	}
+	ownerLock, err := acquireDatabaseOwnerLock(paths.DBPath)
+	if err != nil {
+		return fmt.Errorf("acquire database owner lock: %w", err)
+	}
+	defer ownerLock.Close()
 	cfg, credentialErr := config.Load(profileName)
 	preCredential := errors.Is(credentialErr, config.ErrCredentialsNotFound)
 	if credentialErr != nil && !preCredential {
 		return fmt.Errorf("load config: %w", credentialErr)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(paths.DBPath), 0o700); err != nil {
-		return fmt.Errorf("create data directory: %w", err)
-	}
-
-	store, err := localstore.Open(paths.DBPath)
+	store, err := localstore.Open(ownerLock.DatabasePath())
 	if err != nil {
 		return fmt.Errorf("open local store: %w", err)
 	}
