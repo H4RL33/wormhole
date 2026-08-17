@@ -86,7 +86,11 @@ func (r *WorkspaceRepo) WithImmediateWorkspaceTransition(
 	if err != nil {
 		return fmt.Errorf("localstore: read workspace transition receipt by key: %w", err)
 	}
-	if err := fn(&WorkspaceMutationTx{conn: conn, scope: scope}, receipt); err != nil {
+	tx := &WorkspaceMutationTx{conn: conn, scope: scope, revision: workspaceRevisionTracker{}}
+	if err := fn(tx, receipt); err != nil {
+		return err
+	}
+	if err := tx.finalizeWorkspaceRevision(ctx); err != nil {
 		return err
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {

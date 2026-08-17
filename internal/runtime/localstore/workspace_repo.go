@@ -91,8 +91,9 @@ type WorkspaceOperationInsert struct {
 // WorkspaceMutationTx is one repository-owned immediate transaction restricted
 // to the immutable scope supplied to WithImmediateWorkspace.
 type WorkspaceMutationTx struct {
-	conn  *sql.Conn
-	scope types.WorkspaceScope
+	conn     *sql.Conn
+	scope    types.WorkspaceScope
+	revision workspaceRevisionTracker
 }
 
 func NewWorkspaceRepo(db *sql.DB) *WorkspaceRepo {
@@ -124,7 +125,11 @@ func (r *WorkspaceRepo) WithImmediateWorkspace(ctx context.Context, scope types.
 	} else if err != nil {
 		return fmt.Errorf("localstore: verify workspace mutation scope: %w", err)
 	}
-	if err := fn(&WorkspaceMutationTx{conn: conn, scope: scope}); err != nil {
+	tx := &WorkspaceMutationTx{conn: conn, scope: scope, revision: workspaceRevisionTracker{}}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := tx.finalizeWorkspaceRevision(ctx); err != nil {
 		return err
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
