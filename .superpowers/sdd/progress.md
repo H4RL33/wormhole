@@ -1152,10 +1152,37 @@ and headings were unique, the observable crosswalk matched exactly, and all refe
 names were classified as existing or explicitly proposed. No timing or profiling conclusion
 was drawn from the CPU-loaded host.
 
-The next human go/no-go must explicitly accept, reject, or defer every R01–R14 choice and
+The next human go/no-go must explicitly accept, reject, or defer every R01-R14 choice and
 record: the private-database adversary model; the separate Git-private-path/filesystem
 authority model; any released compatibility floor; supported platform/filesystem scope;
 host/power durability; the exact automatic-recovery versus manual-repair matrix; publication
 modes and review envelope; private evidence retention/idempotency policy; and the exact next
 authorized task. Until that decision is recorded, Tasks 6, 6A, 7, 8, Stage 2, and supporting
 implementation/refactor preparation remain hard-paused.
+
+Stage 1A human decision and R01-R05 design: approved 2026-08-17. The tracked record is
+`docs/superpowers/specs/2026-08-17-stage1a-r01-r05-foundation-reduction-design.md`.
+It accepts R01-R10 and R12 at programme level, rejects R11, defers R13/R14, freezes the exact
+four-row R10 automatic-recovery matrix, and selects only R01-R05 for the next implementation
+tranche after the written-spec review gate.
+R03 consumes Gateway migration `000005_workspace_revision.sql`; the old Task 6A and later
+migration-number reservations are stale pending replanning after this tranche.
+
+The selected work must replace rather than layer: one daemon owner, one monotonic
+workspace revision, one compact checkpoint-COMMIT authority, and current-workset hot paths,
+with terminal history retained behind an explicit internal audit. Architecture replacement
+evidence lands before each mechanism deletion, final coverage remains at least 80%, and the
+comparison review must show net production/test/total deletion. R06+, lifecycle extraction,
+Tasks 6/6A/7/8, Stage 2, publication/filesystem/recovery simplification, terminal pruning,
+and unrelated cleanup remain hard-paused. The written-spec review gate precedes planning or
+production implementation.
+
+The written design also freezes the implementation implications found during independent
+review: configured and sticky publication transitions share R04's compact
+scope/revision/target confirmation; both immediate-workspace wrappers share R03's lazy
+dirty/CAS tracker; Code Graph private lifecycle calls and public rebuild share one
+daemon-owned per-project executor; and daemon lock release follows definitive handler/job
+quiescence. All A01-A25 invariants remain retained, with an exact per-R01-R05 prerequisite
+table and G01-G05 causal oracles. The scorecard recipe is baseline-SHA/path/pattern anchored,
+requires a separate R01 commit boundary, and cannot lose renamed successor code from its
+manifests.

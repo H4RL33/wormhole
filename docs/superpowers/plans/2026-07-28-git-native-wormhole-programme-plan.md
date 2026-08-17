@@ -4,8 +4,8 @@
 
 **Goal:** Deliver and validate the Git-native portable project loop first, then pursue
 multi-Fabric/accountable identity and the real issue-56 four-VM trial through separately
-approved branches. Optional Code Graph follows shared schema version 7 on its own branch
-and is not a trial prerequisite.
+approved branches. Optional Code Graph follows the shared schema assigned by a later,
+separately approved plan on its own branch and is not a trial prerequisite.
 
 **Architecture:** Git accepts explicitly curated portable project context. A repository
 carries a canonical typed `.wormhole` base; each checkout composes it with a private
@@ -16,20 +16,19 @@ repository-lineage scoped.
 
 **Tech Stack:** Go 1.26.5; SQLite and Postgres; Git; MCP JSON-RPC; systemd-user where available; deterministic `go/packages` Code Graph analysis; Codex and Claude CLIs; existing dependencies plus only the separately approved OIDC modules named below.
 
-## Current execution amendment — 2026-08-11
+## Current execution amendment — 2026-08-17
 
-This amendment controls the current branch's scope. Finish only the simplified, coherent
-Task-5 `5F`/`5G` checkpoint-and-recovery boundary, using the approved fallback-only V1
-design in `docs/superpowers/specs/2026-08-11-task5-fallback-checkpoint-recovery-simplification-design.md`.
-It preserves the surviving product, security, crash-consistency, concurrent-process,
-untrusted-repository, and cross-workspace isolation requirements, but must not add
-defensive machinery merely because an earlier plan section describes a possible private
-implementation.
+Task-5 `5F`/`5G` and the review-only Stage 1A gate are complete. The human decision in
+`docs/superpowers/specs/2026-08-17-stage1a-r01-r05-foundation-reduction-design.md`
+selects exactly the R01-R05 private-persistence foundation reduction and its mandatory
+comparison review. Its written-spec review remains pending: no implementation plan or
+production change is executable until that verdict is recorded. That design controls every
+conflict with earlier private-proof or migration-reservation prose.
 
-Immediately after that boundary, run mandatory **Stage 1A: simplification gate** and pause.
-Tasks 6, 6A, 7, and 8, Stage 2, and every later stage are non-executable until a human
-records an explicit go/no-go after reviewing Stage 1A. No worker may treat their existing
-descriptions as standing authority to start or prepare those tasks.
+No R06-R14 implementation, lifecycle coordinator extraction, package restructuring,
+Tasks 6, 6A, 7, or 8 preparation, Stage 2 work, publication-class migration, filesystem
+recovery simplification, terminal pruning, or unrelated cleanup is executable in this
+tranche. Completion triggers another hard pause and explicit human decision.
 
 ## Authority and frozen constraints
 
@@ -56,9 +55,10 @@ descriptions as standing authority to start or prepare those tasks.
 
 ### Stage 1: Portable Git-native project state
 
-Complete only the already-started portable-state work through the simplified Task-5 `5F`/`5G`
-checkpoint-and-recovery boundary. Then run Stage 1A and pause. Tasks 6, mandatory Task 6A,
-7, and 8 remain planned work, not authorised work, until the human Stage-1A go/no-go.
+Task-5 and the review-only Stage 1A gate are complete. After the written-spec review gate is
+recorded, execute only the approved R01-R05 foundation-reduction design, produce its
+objective scorecard, and pause. Tasks 6, mandatory Task 6A, 7, and 8 remain planned work,
+not authorised work.
 
 Gate: all Slice-A focused tests, migration tests, crash/recovery tests, `go test -race`
 targets, and `make check` pass at or above 80 percent merged coverage. Status/diff/import
@@ -87,9 +87,10 @@ implemented through Task 5:
    SQL-shape, or incidental tests that may be removed because they only fossilise an
    implementation. Proposed test changes remain non-executable until the go/no-go.
 
-The gate passes only when all four artifacts exist and the human decision record names the
-retained V1 guarantee set, accepted recovery posture, and exact next authorised work.
-Absent that decision, the branch remains paused.
+All four artifacts exist and the 2026-08-17 human decision record names the retained V1
+guarantee set, exact R10 recovery posture, and R01-R05 as the sole next selected tranche.
+The written-spec review remains its execution gate, and the tranche remains subject to its
+own measured-simplification pause.
 
 ### Stage 2: Minimal Gateway, setup, and native connectors
 
@@ -114,12 +115,13 @@ After the Stage-2 go/no-go, first create the multi-Fabric/private-identity branc
 must freeze its separate
 branch/stream-scoped `ActivityV1` transport/store/queue and effective finite-retention
 handshake; operational activity is not `OperationV1` or complete-tree authority. That
-branch owns shared Gateway migrations `000006_fabric_routes.sql` and
-`000007_sync_binding.sql` and has no Code Graph dependency.
+branch owns the shared Gateway migrations assigned by its future approved plan and has no
+Code Graph dependency.
 
 The optional model-free Code Graph proceeds only on another separately approved branch
-based after shared schema version 7. It owns `000008_invalidate_legacy_codegraph.sql`,
-remains disabled by default, and is not a prerequisite for Stage 4 or issue #56.
+based after those shared migrations. Its migration number is assigned only after the
+R01-R05 pause; it remains disabled by default and is not a prerequisite for Stage 4 or
+issue #56.
 
 Task 10 is a hard human approval gate. Do not modify `go.mod`, `go.sum`, or implement OIDC until approval explicitly names:
 

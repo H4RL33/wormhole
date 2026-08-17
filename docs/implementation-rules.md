@@ -7,9 +7,13 @@ assumptions; RFC-0002 governs optional Governance; the approved
 `docs/superpowers/specs/2026-07-28-git-native-wormhole-architecture-design.md`
 defines their version-one contract details, with
 `docs/superpowers/specs/2026-08-01-publication-classification-review-cas-amendment.md`
-governing publication policy, origin, review CAS, and its durable proof, and
+governing publication policy, origin, review CAS, its durable proof, and its then-current
+successor migration numbering, and
 `docs/superpowers/specs/2026-08-11-task5-fallback-checkpoint-recovery-simplification-design.md`
-narrowly governing the Task-5 V1 publisher/recovery mechanism and platform boundary;
+narrowly governing the Task-5 V1 publisher/recovery mechanism and platform boundary, and
+`docs/superpowers/specs/2026-08-17-stage1a-r01-r05-foundation-reduction-design.md`
+recording the Stage 1A human decision and narrowly governing the selected R01-R05
+private-persistence reduction after its written-spec review gate;
 `docs/implementation-rules.md`;
 existing code.
 This document derives from the RFCs and current code; if it conflicts with an RFC, the RFC
@@ -21,11 +25,12 @@ do not improvise.
 
 Approved programme and slice-plan execution amendments control task scope and sequencing.
 They cannot weaken an RFC requirement, but they can defer an otherwise described task or
-private implementation choice. The current amendment permits only the fallback-only Task-5
-`5F`/`5G` checkpoint-and-recovery boundary defined in
-`docs/superpowers/specs/2026-08-11-task5-fallback-checkpoint-recovery-simplification-design.md`,
-followed by the mandatory Stage 1A simplification gate and hard pause; Tasks 6, 6A, 7, 8,
-and Stage 2 require a later explicit human go/no-go.
+private implementation choice. Task-5 and the review-only Stage 1A gate are complete. The
+current amendment selects only R01-R05 and their objective comparison review as defined in
+the 2026-08-17 design. Its written-spec review remains pending: no implementation plan or
+production change is executable until that verdict is recorded. R06-R14 implementation,
+lifecycle extraction, Tasks 6, 6A, 7, 8, Stage 2, and supporting preparation require a later
+explicit human go/no-go.
 
 ---
 
@@ -549,8 +554,9 @@ the same layering pattern and isolation discipline.
   serialized proof; canonical `DecodeTree` still rejects unknown or unsafe project-state
   paths.
   After prepared commit, checkpoint opens a second `BEGIN IMMEDIATE`, rechecks the exact
-  live digest, binding, both proofs, candidate, overlay rows, review, and conflict gate,
-  and holds it across publication, ordered parent fsyncs, and journal/candidate/row update.
+  live digest, expected workspace revision, journal-bound publication/prior-candidate
+  proofs, current candidate and owned operation workset, review, and conflict gate, and
+  holds it across publication, ordered parent fsyncs, and journal/candidate/row update.
   Task-5 V1 no-replace renames live to absent backup, fsyncs the private destination before
   the checkout source, reclassifies, then renames stage to absent live and fsyncs the
   checkout destination before the private source. It writes no database postimage before
@@ -558,19 +564,18 @@ the same layering pattern and isolation discipline.
 - Checkpoint and Recover never advance the accepted binding and expose no base-advanced
   result flag. Same-symbolic-ref Reject/Refresh alone accepts a checkpoint materialization;
   Task-4 proposal-free ref switch and applicable Discard may separately advance the base.
-  Task-5 indeterminate writes use exact transition-relative prior/next journal confirmation
-  without replay; attempted prepare treats journal absence as exact prior and retains every
-  unconfirmed unjournaled stage.
-- Recover runs its recovery-specific disposition proof in one
-  `BEGIN IMMEDIATE` snapshot before Git/path I/O. Empty or accepted/recovered-old-only
-  history, and separately one proved recovered-new, compose and return DB status from that
-  snapshot with no Git/path I/O. Exactly one prepared/published row drives recovery;
-  mixed/multiple pending state, no journal with materialized rows, or cross-journal/orphan/
-  partial ownership fails first. Prepared requires exact prior
-  candidate plus recorded active/rebased operations and zero owned materialized rows;
-  published/recovered-new require the exact publication postimage and every claim
-  materialized. Accepted history must pass complete historical ownership (version 0 only
-  without residual materialized rows); recovered-old owns none.
+  Task-5 indeterminate database writes use the R04 compact scope/revision/target
+  prior-next-third confirmation without replay; attempted prepare treats exact target
+  absence plus no current owner as prior and retains every unconfirmed unjournaled stage.
+- Recover reads one strict current-workset projection in one `BEGIN IMMEDIATE` snapshot
+  before Git/path I/O. No current journal, or one current `recovered_new` journal, composes
+  and returns DB status from that snapshot with no Git/path I/O. Exactly one current
+  `prepared` or `published` journal may drive recovery; malformed current authority or
+  partial ownership fails first. Prepared requires the exact prior candidate plus its
+  recorded active/rebased operations and zero owned materialized rows; published and
+  recovered-new require the exact publication postimage and every current claim
+  materialized. Accepted and recovered-old history is not loaded on this path; the explicit
+  history-audit entrypoint owns strict validation of retained terminal evidence.
 - For a recovery driver, retain that writer transaction while observing position -> full
   tree at SHA -> origin -> final position once, re-prove the disposition, classify or
   mutate journal-bound paths, write and reread the selected database outcome, and commit.
@@ -640,9 +645,9 @@ the same layering pattern and isolation discipline.
 
 ### Portable state replay, diff, and merge
 
-- Task 7/domain projection is hard-blocked until a focused approved plan freezes
-  `000005_workspace_activity.sql`, strict `ActivityV1`, finite effective-policy storage,
-  atomic terminal/pruning rules, and the promotion receipt seam. Promotion must use one
+- Task 7/domain projection is hard-blocked until a focused approved plan assigns its
+  replacement migration number and freezes strict `ActivityV1`, finite effective-policy
+  storage, atomic terminal/pruning rules, and the promotion receipt seam. Promotion must use one
   ProjectState-owned immediate transaction to strict-read an exact source activity ID and
   digest, append an attributed `EventV1` `OperationV1` with extension key
   `dev.wormhole.promotion` and schema-version-1 data containing only
@@ -668,6 +673,11 @@ the same layering pattern and isolation discipline.
   change; never add an implicit network visibility probe. The exact schema, origin codec,
   diff/review goldens, checkpoint/recovery CAS, and zero-domain-mutation rules are frozen in
   `docs/superpowers/specs/2026-08-01-publication-classification-review-cas-amendment.md`.
+  Unknown COMMIT confirmation for both configured and sticky policy transitions uses the
+  R04 compact target containing exact workspace revision, transition kind, policy revision,
+  and canonical logical policy digest. Exact prior returns the original unknown result,
+  exact next returns the transition result, and any other state blocks. Ordinary policy
+  operations never load append-only policy history; the explicit history audit owns it.
 
 - Persisted operation JSON is untrusted. Decode it only with the shared strict
   `projectstate.DecodeOperation`, reject non-canonical bytes, trailing JSON, unknown
@@ -689,22 +699,16 @@ the same layering pattern and isolation discipline.
   rebase base. The existing `operations_json` column is a strict canonical
   `StashReplayV1` containing schema version, selected-start tree/digest, initial boundary,
   a non-nil absorbed-rebased prefix array, and a separate non-nil active suffix array.
-  Inside the same immediate transaction, Stash reads one non-nil complete
-  `OperationAudit` of `WorkspaceOperationAuditRecord` values containing every
-  exact-workspace operation in stable increasing-generation order across active, rebased,
-  materialized, stashed, and discarded states. Each record embeds its exact
-  `WorkspaceOperation` and retains `CreatedAt` for `RestoreRetryState`. The reader strictly
-  validates every row's positive generation, globally unique canonical operation ID,
-  canonical operation bytes, state, stash-owner metadata, and timestamp. Stash maps every
-  embedded operation in returned order into a non-nil `[]WorkspaceOperation`, preserving
-  count and performing no filtering or omission, then passes only that operation inventory
-  to `buildStashPlan`; `CreatedAt` is not a planner input. The planner
-  derives all ownerless rebased rows at/below the selected boundary and all ownerless
-  active rows above it, rejects active rows at/below the boundary and rebased rows above
-  it, and validates but ignores terminal materialized/stashed/discarded rows. Only the
-  two exact cloned memberships returned by the planner may be passed to
-  `TransitionOperations`; filtered stash readers and generation-range updates are
-  forbidden.
+  Inside the same immediate transaction, Stash reads one non-nil strict current-workset
+  projection containing the exact ownerless rebased rows at/below the selected boundary and
+  ownerless active rows above it in stable increasing-generation order. Each record embeds
+  its exact `WorkspaceOperation` and retains `CreatedAt` only where `RestoreRetryState`
+  needs it. The reader validates positive generation, unique canonical operation ID and
+  bytes, current state, owner metadata, and semantic timestamp. Active rows at/below the
+  boundary and rebased rows above it are corruption. Materialized, stashed, and discarded
+  terminal rows are not loaded by Stash; the explicit history audit owns them. Only the two
+  exact cloned current memberships returned by the planner may be passed to
+  `TransitionOperations`; generation-range updates remain forbidden.
   All and only rows attributed by `stashed_by_stash_id` must match those arrays byte for
   byte. Portable transitions own Gateway
   migration `000002_portable_transitions.sql` and `GatewaySchemaVersion = 2`; committed
@@ -713,12 +717,12 @@ the same layering pattern and isolation discipline.
   `000004_checkpoint_publication_review.sql`, whose three-column v4 change adds
   `publication_review_json`, `prior_candidate_json`, and
   `publication_review_proof_version` with the exact joint version-0/null/null versus
-  version-1/non-null/non-null CHECK. Mandatory portable-plan Task 6A owns
-  append-only `000005_workspace_activity.sql` after its focused operational
-  activity/retention/promotion artifact is reviewed and explicitly approved. Task 7 and
-  migration 6 are blocked until the reviewed v5 implementation commit lands. Multi-Fabric
-  routing/sync own `000006`/`000007`; the later, separately gated Code Graph branch
-  consumes that schema and owns `000008_invalidate_legacy_codegraph.sql`. Restore must
+  version-1/non-null/non-null CHECK. The approved Stage 1A R03 reduction now owns
+  `000005_workspace_revision.sql`, including the positive workspace revision and one-current-
+  materialisation constraint. This explicitly supersedes the earlier Task 6A/multi-Fabric/
+  Code Graph reservations for `000005`-`000008`; later tasks receive new numbers only after
+  the mandatory R01-R05 pause and a new human decision. No later migration is prepared in
+  this tranche. Restore must
   prove `Compose(selectedStart,boundary,operations)` equals the
   recorded composed tree, then call `ThreeWayRebase(sourceBase,current,stashComposed)`.
   Already-rebased rows at/below the boundary and later active rows move to terminal
@@ -730,32 +734,19 @@ the same layering pattern and isolation discipline.
   terminal stashed. A conflicted restore leaves
   the candidate, every operation row, and full stash byte-identical; it persists only
   deterministic conflict evidence and status `conflicted`. Before writing those allowed
-  fields it captures the protected state, including every non-status binding field,
-  binding `created_at`/`updated_at`, and the accepted snapshot. Afterward it rereads the
-  complete state. The accepted snapshot, all non-status binding fields, binding
-  `created_at`, every candidate field/blob, every operation logical field plus
-  `created_at`, and every stash field/blob/envelope/actor plus `created_at` must be
-  unchanged; only the exact
-  status/`updated_at` mutation produced by `SetStatus("conflicted")` and deterministic
-  open-conflict replacement may differ. The post-state must contain that exact status,
-  timestamp, and evidence. It rejects every other change and
-  stores a canonical retry digest over explicit restore/conflicted action/outcome, scope,
-  request ID/digest, stash ID, and that post-state, including both binding timestamps, in
-  the same transaction. Exact
-  repeat strict-composes current and replay rows, recomputes semantic evidence and that
-  digest, and returns the same public result with zero writes only when both binding
-  timestamps and every other committed field still match; a same-status rewrite of
-  `updated_at` therefore fails closed. Localstore supplies explicit exact-byte digests for
-  the raw accepted-snapshot, candidate direct/rebased, and stash source/composed canonical
-  file-list BLOBs while those bytes are available. Each digest is `"sha256:" +
-  lowerhex(SHA256(raw))` over the complete raw BLOB with no canonicalization, framing,
-  prefix, or separator in the hash input, after strict decode and byte-equal canonical
-  re-encoding. Runtime copies these fields and never re-encodes decoded trees to recreate
-  them. Literal-byte golden vectors freeze every BLOB digest;
-  corruption or drift fails closed. The digest cryptographically commits to equality at
-  the retry transaction's linearization point, not to absence of an intermediate
-  mutation-and-reversal. The retained stash is resolution/audit evidence, not a blind
-  replay instruction.
+  fields it captures the expected workspace revision and the exact semantic preimage needed
+  by this restore: accepted snapshot, current candidate, selected operation memberships,
+  named stash, workspace status, and open conflicts. The transaction applies one revision
+  CAS and then rereads only the targeted semantic postimage. That postimage must preserve
+  the accepted snapshot, candidate, operations, and stash while containing exactly the
+  conflicted status and deterministic evidence. The receipt stores the committed workspace
+  revision and a canonical retry digest over the explicit restore/conflicted action,
+  outcome, scope, request ID/digest, stash ID, and that semantic postimage. Exact repeat
+  strict-composes the named current/stash rows, recomputes the evidence and digest, and
+  returns the same public result with zero writes only when the recorded revision and digest
+  still match. Raw SQLite timestamps, storage classes, and byte-preserving BLOB echoes are
+  not retry or concurrency authority. The retained stash remains resolution/audit evidence,
+  not a blind replay instruction.
 - Stash, restore, and discard require canonical UUID request IDs and immutable canonical
   transition receipts. Each request digest is canonical JSON of a dedicated tagged v1
   projection binding schema/action/scope, the complete strict canonical actor envelope,
@@ -768,13 +759,11 @@ the same layering pattern and isolation discipline.
   outcome, and result; restore alone additionally carries a
   retry digest that is nil exactly for clean and non-nil exactly for conflicted.
   Action/outcome must equal the receipt row. A transition receipt's logical key is the
-  exact textual project/workspace/request triple. For detection only, readers CAST-match
-  all three persisted key columns so a BLOB alias cannot hide: a present key requires
-  exactly one match, exact raw key values, and TEXT storage for every selected column;
-  zero matches must satisfy the strict all-null absence shape, and multiple matches are
-  corruption. `InsertTransitionReceipt` strict-preflights that same logical key inside
-  its caller-owned `BEGIN IMMEDIATE`, so it cannot insert beside a hidden alias. This
-  hardening uses the existing table and requires no schema change. Localstore treats
+  exact textual project/workspace/request triple. Readers use that exact indexed key and
+  require zero or one semantically valid record; another returned scope/key or impossible
+  multiplicity is corruption. `InsertTransitionReceipt` relies on the schema's exact unique
+  key inside its caller-owned `BEGIN IMMEDIATE`. BLOB/TEXT aliases and raw storage classes
+  are outside the supported private-DB threat model. Localstore treats
   `result_json` as
   action-opaque: it requires exactly one valid compact JSON value followed by exactly one
   LF, preserves those bytes and object-member order, and never schema-decodes or
@@ -791,23 +780,14 @@ the same layering pattern and isolation discipline.
   commit may be proved by an exact receipt; an unknown conflicted commit must pass the same
   retry-state verification or remain `ErrCommitOutcomeUnknown`. Retry uses the same
   request or operation ID and reads back the receipt before attempting an insert.
-  BranchSwitchDiscard is stricter. Its outside preflight uses exactly
-  `WorkspaceRepo.TransitionReceiptByKey(ctx, scope, requestID)`. That method syntactically
-  validates scope/request ID and queries only `workspace_transition_receipts`; it never
-  queries `workspace_bindings`. It CAST-matches the textual triple, requires exact raw
-  TEXT keys/storage, and selects `COUNT(rowid) OVER()` plus exact columns/types.
-  `sql.ErrNoRows` returns nil, count one returns one fully strict record, and every other
-  returned count is corruption/ambiguity. This read follows pure validation/digest computation
-  and precedes every filesystem, Git, and current-binding check. An exact receipt returns
-  read-only with zero Git calls/writes; another action/digest is
-  `ErrIdempotencyConflict`; corruption or ambiguity fails closed.
-  Discard then uses exactly `WorkspaceRepo.WithImmediateWorkspaceTransition` with
-  `(ctx, scope, requestID, fn)`. It syntactically validates inputs, begins
-  `BEGIN IMMEDIATE`, and makes the same table-only receipt lookup its first SQL read. It
-  passes the receipt and bound-scope transaction to `fn`; a concurrent exact receipt wins
-  read-only, and only nil permits `fn` to call `tx.Workspace` or another state method. Existing
-  `WithImmediateWorkspace` and `TransitionReceipt` semantics remain unchanged for Stash
-  and RestoreStash.
+  BranchSwitchDiscard performs a receipt preflight after pure validation/digest computation
+  and before filesystem, Git, or mutable workspace work. An exact receipt returns read-only
+  with zero Git calls/writes; another action/digest is `ErrIdempotencyConflict`; malformed
+  evidence fails closed. Its immediate transaction rechecks that receipt before mutation,
+  then reads the expected workspace revision and targeted current workset. A concurrent
+  exact receipt wins read-only, and only absence permits the semantic transition. Exact SQL
+  read order, table-only lookup shape, raw keys, and storage classes are not architecture
+  authority. Stash and RestoreStash retain the same semantic idempotency contract.
 - Persisted conflicts have UUIDv4 occurrence IDs separate from recomputed deterministic
   semantic conflict IDs. One open semantic ID per exact workspace is enforced; repeated
   evidence reuses its occurrence, absent evidence resolves it, and reopening allocates a
@@ -824,28 +804,25 @@ the same layering pattern and isolation discipline.
   Raw path deletion is classified in canonical kind/UUID order before next-tree decode.
   `ValidateDirectDelta(prior,next)` accepts no proof; only a repository-owned exact
   published or recovered-new materialization match may bypass it. The matcher receives
-  the complete disposition proof, eligible row, binding, canonical prior tree, captured
-  candidate tree, and captured digest; no input is inferred or omitted.
-- Import, ObserveGitBase, and Discard read one complete same-transaction materialization
-  disposition before an eligible match and use the acceptance-specific proof. Accepted,
-  published, and recovered-new journals own materialized rows; prepared is rejected by
-  that proof and drives Recover; recovered-old owns none. Claims are globally unique by
-  generation and operation ID and form an exact byte/state/ownerless bijection with all
-  materialized rows. Nil legacy
-  accepted history contributes no claim and is valid only without a dependent residual
-  materialized row. Each owning journal also rejects any unclaimed active/rebased row at
-  or below its boundary; stashed/discarded gaps and later active rows are allowed.
-  Historical prepublication state comes from the exact checkpoint transition and durable
-  envelope, not an independently reconstructable later column. Recover does not reuse this
-  acceptance proof: its recovery-specific proof admits exactly one prepared only when the
-  current candidate equals the prior-candidate preimage, every listed row remains in its
-  recorded active/rebased state, and no owned materialized row exists; exactly one
-  published requires the publication postimage and all claims materialized. Import also
-  uses the disposition operations as its sole
-  replay/transition inventory: active at/below the selected boundary or rebased above it
-  is corruption; all valid active rows are composed and then passed as exact preloaded
-  membership to `TransitionOperations`. `ActiveOperationsAfter` and generation-range
-  updates are forbidden for this mutation.
+  current-owner proof, eligible journal, binding, canonical prior tree, captured candidate
+  tree, and captured digest; no semantic input is inferred or omitted.
+- Import, ObserveGitBase, and Discard read one same-transaction current-workset projection
+  before an eligible match. One published or recovered-new journal may own current
+  materialized rows; prepared is rejected by acceptance and drives Recover. Current claims
+  are unique by generation and operation ID and form an exact byte/state/owner bijection
+  with that journal's rows. The current journal also rejects an unclaimed active/rebased row
+  at or below its boundary; stashed/discarded gaps and later active rows are allowed.
+  Accepted/recovered-old journals, unrelated terminal operation rows, resolved conflicts,
+  policy history, and unrelated receipts are not loaded; the explicit history audit owns
+  their validation. Historical prepublication state still comes from the current
+  checkpoint transition and durable envelope. Recovery-specific proof admits one prepared
+  only when the current candidate equals the prior-candidate preimage, every listed row
+  remains in its recorded active/rebased state, and no owned materialized row exists; one
+  published requires the publication postimage and all current claims materialized. Import
+  uses the current active/rebased operation projection as its replay/transition inventory:
+  active at/below the selected boundary or rebased above it is corruption; every valid
+  current row is composed and then passed as exact preloaded membership to
+  `TransitionOperations`. Generation-range updates remain forbidden for this mutation.
   Import has no request ID or receipt: indeterminate COMMIT always returns
   `ImportResult{}` plus `ErrCommitOutcomeUnknown`, and retry recomputes from fresh capture
   and transaction state rather than inferring an original result from database readback.
@@ -854,15 +831,15 @@ the same layering pattern and isolation discipline.
   results, and materialization-exception status never alter that direct semantic count.
 - ObserveGitBase supports Reject and Discard only. Reject and the Discard no-receipt path
   perform a full outside observation. Inside one immediate transaction, continued
-  Discard absence or Reject requires the complete current binding to equal the valid
-  private adapter-supplied `ExpectedBinding`, with equal scope and matching root; preloads
-  complete candidate, operation, conflict, accepted, and materialization state; and
-  reobserves checkout identity, symbolic ref, and HEAD before the first write. This is the
-  linearization boundary; a same-SHA symbolic-ref change counts. Before applicability,
-  strict-prove and classify the complete disposition. Prepared, orphan/unclaimed or
-  nonterminal materialized, corrupt/ambiguous terminal ownership, and every incomplete
-  proof fail first as recovery/corruption blockers. Historical accepted/recovered-old
-  rows are nonblocking only after their proof passes.
+  Discard absence or Reject requires the exact current binding to equal the valid private
+  adapter-supplied `ExpectedBinding`, with equal scope and matching root; preloads the
+  current candidate, active/rebased operations, open conflicts, accepted snapshot, current
+  journal and its owned rows; and reobserves checkout identity, symbolic ref, and HEAD
+  before the first write. This is the linearization boundary; a same-SHA symbolic-ref change
+  counts. Before applicability, strict-prove and classify only that current workset.
+  Prepared, malformed current ownership, and incomplete current proof fail first as
+  recovery/corruption blockers. Accepted/recovered-old and other terminal history is
+  nonblocking and is not loaded.
 - Discard is applicable only to an actual symbolic-ref change plus at least one candidate,
   exact active/rebased proposal row, or open conflict occurrence. Otherwise it returns
   `ObserveGitBaseResult{}` plus `ErrBranchSwitchDiscardNotApplicable`, with no mutation or
@@ -902,11 +879,13 @@ the same layering pattern and isolation discipline.
   are corruption. Later active generations remain overlay until recovery/acceptance;
   checkpoints are never silently superseded.
 - All append/rebase mutations use one caller-owned dedicated SQLite connection and one
-  `BEGIN IMMEDIATE`: read exact binding/candidate/active rows, decode and compose, apply
-  the shared reducer, write all rows/candidate/conflict state and the binding status,
-  then commit or roll back together. Helpers must not open nested transactions. A
-  standalone append API that bypasses composition, status, generation, or candidate
-  validation is forbidden.
+  `BEGIN IMMEDIATE`: read exact binding revision/candidate/current rows, decode and compose,
+  apply the shared reducer, write all rows/candidate/conflict state and the binding status,
+  advance the revision once, then commit or roll back together. Both
+  `WithImmediateWorkspace` and `WithImmediateWorkspaceTransition` instantiate and finalize
+  the same lazy dirty/revision-CAS tracker; registration alone creates revision `1` directly.
+  Helpers must not open nested transactions. A standalone append API that bypasses
+  composition, status, generation, revision, or candidate validation is forbidden.
 - `localstore.WorkspaceConflictGate` has exactly
   `HasOpenConflicts(context.Context, types.WorkspaceScope) (bool, error)`;
   `WorkspaceRepo.HasOpenConflicts` uses that signature and
@@ -964,36 +943,34 @@ the same layering pattern and isolation discipline.
   `make check` passing and its output observed. Before a milestone handoff or
   release claim, also run the repository's release test and rehearsal gates.
 - T5: Merged statement coverage must remain at or above 80%.
-- T6: Observer changes freeze binding-free table-only receipt lookup and enforced
-  first-read traces through a rejecting/query-recording `database/sql` driver proxy,
-  never triggers; real-SQLite zero/one/multiple/hidden-alias cases; receipt-before-Git and
-  concurrent-recheck ordering; strict materialization proof before applicability; the
-  terminal-only not-applicable matrix and blocker-only negative matrix; same-ref-only
-  Reject acceptance; Discard-not-applicable exact materialization; negative
-  materialization; fixed/preserved importer provenance through stash/retry, including a
-  hard-coded system-token retry preimage/digest beside the UUID golden; restart/per-write
-  rollback; exact discard unknown-COMMIT confirmation; and zero-result
-  non-discard/Refresh unknown-COMMIT paths. Negative cases assert zero writes and
-  byte-identical retained state.
-- T7: Task-5 tests freeze v4's three columns and joint proof CHECK; strict complete-inline
-  prior-candidate goldens/cross-proofs; prepared/published/recovered-new checkpoint blocker;
-  owner-only same-device Git-private staging with backup absent pre-journal; and the split
-  pre-journal ignored-stage versus journal-backed convergence fault matrix. Recovery tests
-  freeze exact cardinality/candidate/operation ownership before I/O, no-journal orphan
-  corruption, terminal no-work status with no Git/path I/O, and one `BEGIN IMMEDIATE` held
-  across exactly one stable position/tree-at-SHA/origin/position bundle, filesystem outcome,
-  exact database convergence, and status reread. Linux no-replace rename, compensation, and
-  ordered destination/source parent-fsync faults plus root/path escape, wrong-name,
+- T6: Observer changes freeze semantic receipt-first idempotency before Git or mutation,
+  concurrent receipt/revision recheck, current-workset proof before applicability, the
+  terminal-only not-applicable matrix, same-ref-only Reject acceptance,
+  Discard-not-applicable exact materialization, negative materialization, and preserved
+  importer provenance through stash/retry, including the hard-coded system-token and UUID
+  goldens. Retain restart/per-write rollback, exact discard unknown-COMMIT confirmation, and
+  zero-result non-discard/Refresh unknown-COMMIT paths. Negative cases assert zero writes and
+  semantically unchanged retained state. Tests do not freeze first SQL read, table-only
+  query shape, raw storage class, or a complete-history projection.
+- T7: Task-5 tests retain v4's three columns and joint proof CHECK; strict inline
+  prior-candidate goldens/cross-proofs; the prepared/published/recovered-new checkpoint
+  blocker; owner-only same-device Git-private staging with backup absent pre-journal; and
+  the split pre-journal ignored-stage versus journal-backed convergence fault matrix.
+  Recovery tests prove exact current-owner cardinality/candidate/operation ownership before
+  I/O, no-current-journal status with no Git/path I/O, and one `BEGIN IMMEDIATE` held across
+  one stable position/tree-at-SHA/origin/position bundle, filesystem outcome, exact database
+  convergence, and status reread. Linux no-replace rename, compensation, ordered
+  destination/source parent-fsync faults, and root/path escape, wrong-name,
   symlink/type/identity/rebind negatives retain evidence with zero unsafe path mutation.
-  Same-ref different-commit exact candidate has no ancestry query. Task-5 unknown-COMMIT
-  tests cover exact next, transition-relative exact prior including prepared-journal absence,
-  read failure, partial/corrupt/third state, byte-identical evidence retention, and zero
-  writer or rename replay. Exact Candidate is preservable old-side live/backup evidence
-  only while the exact Candidate stage remains; a prepared, stage-absent Candidate backup
-  stays blocked. Checkpoint-only recursive capture proves the frozen mount and non-mount-root
-  property for root/directories/files in both passes. One complete persistent-root proof
-  runs at classifier entry/tail and immediately before every rename; recovery maps typed
-  root drift to precondition and contained evidence to blocked. Pure recovery proof admits
+  Same-ref different-commit exact candidate has no ancestry query. Unknown-COMMIT tests use
+  the compact scope/revision/target prior-next-third matrix, including prepared-journal
+  absence, read failure, partial/corrupt/third state, semantic evidence retention, and zero
+  writer or rename replay. Exact Candidate is preservable old-side live/backup evidence only
+  while the exact Candidate stage remains; a prepared, stage-absent Candidate backup stays
+  blocked. Checkpoint-only recursive capture proves the frozen mount and non-mount-root
+  property for root/directories/files in both passes. One persistent-root proof runs at
+  classifier entry/tail and immediately before every rename; recovery maps typed root drift
+  to precondition and contained evidence to blocked. Pure recovery proof admits current
   prepared `clean|pending` and published/recovered-new exact `pending` only, before I/O.
   Post-journal CAS wrappers retain syscall causes. Exchange and Darwin runtime fault tests
   are deferred.

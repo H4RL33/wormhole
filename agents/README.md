@@ -18,10 +18,13 @@ assumptions; RFC-0002 governs optional Governance; the approved
 `docs/superpowers/specs/2026-07-28-git-native-wormhole-architecture-design.md`
 defines their version-one contract details, with
 `docs/superpowers/specs/2026-08-01-publication-classification-review-cas-amendment.md`
-governing the trusted publication-policy/origin/review-CAS boundary and successor
-migration numbering, and
+governing the trusted publication-policy/origin/review-CAS boundary and its then-current
+successor migration numbering, and
 `docs/superpowers/specs/2026-08-11-task5-fallback-checkpoint-recovery-simplification-design.md`
-narrowly amending the Task-5 V1 publication/recovery mechanism and platform boundary;
+narrowly amending the Task-5 V1 publication/recovery mechanism and platform boundary, and
+`docs/superpowers/specs/2026-08-17-stage1a-r01-r05-foundation-reduction-design.md`
+recording the Stage 1A human decisions and narrowly governing the selected R01-R05
+private-persistence reduction after its written-spec review gate;
 `docs/implementation-rules.md`;
 existing code.
 
@@ -55,9 +58,13 @@ Permissions. Wormhole stores no competing copy of repository source.
 ## Transition State
 
 The 2026-07-28 architecture is authoritative but not yet fully implemented.
-Current execution is limited to the fallback-only Task-5 `5F`/`5G` boundary,
-then the mandatory Stage 1A simplification gate and a human go/no-go. Tasks 6,
-6A, 7, 8, Stage 2, and later work are not executable before that decision.
+Task-5 `5F`/`5G` and the mandatory Stage 1A review are complete. The human
+go/no-go selected R01-R05 as the sole next tranche through the mandatory
+measured-simplification pause defined by the 2026-08-17 design. Its written-spec
+review remains pending: no implementation plan or production change is executable
+until that verdict is recorded. R06-R14 implementation, lifecycle coordinator
+extraction, Tasks 6, 6A, 7, 8, Stage 2, and later work remain non-executable before
+the next explicit decision.
 Current code still contains legacy `join`/`connect`, single-profile bootstrap,
 Passport-only attribution, and pre-snapshot assumptions. Implementation plans
 must migrate those paths in tested slices. Do not document a target command or
