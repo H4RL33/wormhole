@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/H4RL33/wormhole/internal/types"
 )
 
 func TestGatewayMigrationLedger(t *testing.T) {
@@ -49,8 +51,8 @@ func TestWorkspacePublicationMigrationFreshSchema(t *testing.T) {
 	if err := store.DB().QueryRow(`SELECT max(version), count(*) FROM gateway_schema_migrations`).Scan(&version, &count); err != nil {
 		t.Fatal(err)
 	}
-	if version != 4 || count != 4 {
-		t.Fatalf("migration ledger=(%d,%d), want (4,4)", version, count)
+	if version != 5 || count != 5 {
+		t.Fatalf("migration ledger=(%d,%d), want (5,5)", version, count)
 	}
 	for _, table := range []string{"workspace_publication_policies", "workspace_publication_policy_history"} {
 		var got string
@@ -427,7 +429,7 @@ func TestGatewayMigrationRejectsFutureVersion(t *testing.T) {
 		  version INTEGER PRIMARY KEY,
 		  applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
-		INSERT INTO gateway_schema_migrations(version) VALUES (5);
+		INSERT INTO gateway_schema_migrations(version) VALUES (6);
 	`); err != nil {
 		t.Fatal(err)
 	}
@@ -488,8 +490,8 @@ func TestPortableTransitionsMigrationPreservesV1Rows(t *testing.T) {
 	if err := db.QueryRow(`SELECT count(*) FROM gateway_schema_migrations`).Scan(&ledgerRows); err != nil {
 		t.Fatal(err)
 	}
-	if ledgerRows != 4 {
-		t.Fatalf("migration ledger rows=%d, want 4", ledgerRows)
+	if ledgerRows != 5 {
+		t.Fatalf("migration ledger rows=%d, want 5", ledgerRows)
 	}
 	var firstApplied time.Time
 	if err := db.QueryRow(`SELECT applied_at FROM gateway_schema_migrations WHERE version=1`).Scan(&firstApplied); err != nil {
@@ -596,7 +598,7 @@ func TestPortableTransitionsFreshSchemaConstraintsAndIndexes(t *testing.T) {
 	}
 
 	assertIndexPredicate(t, db, "workspace_one_open_semantic_conflict", "WHERE state='open'")
-	assertIndexPredicate(t, db, "workspace_one_acceptance_eligible_candidate", "WHERE state IN ('published','recovered_new')")
+	assertIndexPredicate(t, db, "workspace_one_current_materialization", "WHERE state IN ('prepared', 'published', 'recovered_new')")
 
 	const projectID = "00000000-0000-4000-8000-000000000001"
 	const workspaceID = "00000000-0000-4000-8000-000000000011"
@@ -702,7 +704,7 @@ func TestGatewayMigrationV4FreshSchemaProofColumnsAndConstraint(t *testing.T) {
 	}
 	defer store.Close()
 	db := store.DB()
-	if got, want := GatewaySchemaVersion, 4; got != want {
+	if got, want := GatewaySchemaVersion, 5; got != want {
 		t.Fatalf("GatewaySchemaVersion=%d, want %d", got, want)
 	}
 	if got, want := tableColumns(t, db, "workspace_materializations"), []string{
@@ -718,8 +720,8 @@ func TestGatewayMigrationV4FreshSchemaProofColumnsAndConstraint(t *testing.T) {
 	if err := db.QueryRow(`SELECT max(version),count(*) FROM gateway_schema_migrations`).Scan(&version, &count); err != nil {
 		t.Fatal(err)
 	}
-	if version != 4 || count != 4 {
-		t.Fatalf("migration ledger=(%d,%d), want (4,4)", version, count)
+	if version != 5 || count != 5 {
+		t.Fatalf("migration ledger=(%d,%d), want (5,5)", version, count)
 	}
 	insertPortableTransitionBindings(t, db)
 	insertV1Materialization(t, db, "00000000-0000-4000-8000-000000000011", "v4-default", "accepted")
@@ -828,7 +830,11 @@ func TestGatewayMigrationV4UpgradePreservesV3RowsAndRollsBackAtomically(t *testi
 					t.Fatal(err)
 				}
 			}
-			if err := applyGatewayMigrations(context.Background(), db); err != nil {
+			realMigrations, err := loadGatewayMigrations()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := applyGatewayMigrationSet(context.Background(), db, realMigrations[:4]); err != nil {
 				t.Fatalf("retry real v4 migration: %v", err)
 			}
 			assertCheckpointPublicationV4State(t, db, "v3-row", before)
@@ -841,11 +847,579 @@ func TestGatewayMigrationV4UpgradePreservesV3RowsAndRollsBackAtomically(t *testi
 				t.Fatal(err)
 			}
 			defer db.Close()
-			if err := applyGatewayMigrations(context.Background(), db); err != nil {
+			if err := applyGatewayMigrationSet(context.Background(), db, realMigrations[:4]); err != nil {
 				t.Fatalf("idempotent v4 migration: %v", err)
 			}
 			assertCheckpointPublicationV4State(t, db, "v3-row", before)
 		})
+	}
+}
+
+func TestGatewayMigrationV5FreshSchemaAndCurrentMaterializationUniqueness(t *testing.T) {
+	t.Run("declared version", func(t *testing.T) {
+		if got, want := GatewaySchemaVersion, 5; got != want {
+			t.Fatalf("GatewaySchemaVersion=%d, want %d", got, want)
+		}
+	})
+	t.Run("exact migration file", func(t *testing.T) {
+		contents, err := gatewayMigrationFiles.ReadFile("migrations/000005_workspace_revision.sql")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := strings.TrimSpace(string(contents)), strings.TrimSpace(gatewayV5MigrationSQL); got != want {
+			t.Fatalf("v5 migration SQL=\n%s\nwant=\n%s", got, want)
+		}
+	})
+
+	store, err := Open(filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	db := store.DB()
+	assertGatewayV5Schema(t, db)
+	assertGatewayMigrationLedger(t, db, 5)
+
+	insertPortableTransitionBindings(t, db)
+	insertGatewayV5Binding(t, db,
+		"00000000-0000-4000-8000-000000000002",
+		"00000000-0000-4000-8000-000000000011", "/checkout-project-two", 2, 21)
+	for _, scope := range []types.WorkspaceScope{
+		{ProjectID: "00000000-0000-4000-8000-000000000001", WorkspaceID: "00000000-0000-4000-8000-000000000011"},
+		{ProjectID: "00000000-0000-4000-8000-000000000001", WorkspaceID: "00000000-0000-4000-8000-000000000012"},
+		{ProjectID: "00000000-0000-4000-8000-000000000002", WorkspaceID: "00000000-0000-4000-8000-000000000011"},
+	} {
+		assertGatewayV5RevisionCell(t, db, scope, "1", "integer")
+	}
+
+	first := types.WorkspaceScope{
+		ProjectID: "00000000-0000-4000-8000-000000000001", WorkspaceID: "00000000-0000-4000-8000-000000000011",
+	}
+	second := types.WorkspaceScope{
+		ProjectID: "00000000-0000-4000-8000-000000000001", WorkspaceID: "00000000-0000-4000-8000-000000000012",
+	}
+	otherProject := types.WorkspaceScope{
+		ProjectID: "00000000-0000-4000-8000-000000000002", WorkspaceID: "00000000-0000-4000-8000-000000000011",
+	}
+	insertGatewayV5Materialization(t, db, first, "first-accepted", "accepted")
+	insertGatewayV5Materialization(t, db, first, "first-recovered-old", "recovered_old")
+	insertGatewayV5Materialization(t, db, first, "first-prepared", "prepared")
+	assertGatewayV5MaterializationInsertFails(t, db, first, "first-published", "published")
+
+	insertGatewayV5Materialization(t, db, second, "second-published", "published")
+	assertGatewayV5MaterializationInsertFails(t, db, second, "second-recovered-new", "recovered_new")
+	insertGatewayV5Materialization(t, db, otherProject, "other-recovered-new", "recovered_new")
+	assertNoForeignKeyViolations(t, db)
+}
+
+func TestGatewayMigrationV5UpgradesEverySupportedDatabase(t *testing.T) {
+	fresh, err := Open(filepath.Join(t.TempDir(), "fresh.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshContract := readGatewayV5SchemaContract(t, fresh.DB())
+	if err := fresh.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	for priorVersion := 1; priorVersion <= 4; priorVersion++ {
+		t.Run(fmt.Sprintf("v%d", priorVersion), func(t *testing.T) {
+			db, err := sql.Open("sqlite", sqliteDSN(filepath.Join(t.TempDir(), "gateway.db")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			migrations, err := loadGatewayMigrations()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := applyGatewayMigrationSet(context.Background(), db, migrations[:priorVersion]); err != nil {
+				t.Fatalf("apply v%d fixture: %v", priorVersion, err)
+			}
+			insertPortableTransitionBindings(t, db)
+			insertV1Materialization(t, db, "00000000-0000-4000-8000-000000000011", "upgrade-terminal", "accepted")
+			for version := 1; version <= priorVersion; version++ {
+				stamp := fmt.Sprintf("2026-08-%02d 0%d:00:00", version, version)
+				if _, err := db.Exec(`UPDATE gateway_schema_migrations SET applied_at=? WHERE version=?`, stamp, version); err != nil {
+					t.Fatal(err)
+				}
+			}
+			beforeLedger := readGatewayMigrationLedgerRaw(t, db, priorVersion)
+			bindingColumns := tableColumns(t, db, "workspace_bindings")
+			materializationColumns := tableColumns(t, db, "workspace_materializations")
+			beforeBinding := readGatewayRawRow(t, db, "workspace_bindings", bindingColumns,
+				"project_id=? AND workspace_id=?",
+				"00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011")
+			beforeMaterialization := readGatewayRawRow(t, db, "workspace_materializations", materializationColumns,
+				"journal_id=?", "upgrade-terminal")
+
+			if err := applyGatewayMigrationSet(context.Background(), db, migrations); err != nil {
+				t.Fatalf("upgrade v%d to v5: %v", priorVersion, err)
+			}
+			assertGatewayMigrationLedger(t, db, 5)
+			if got := readGatewayMigrationLedgerRaw(t, db, priorVersion); !reflect.DeepEqual(got, beforeLedger) {
+				t.Fatalf("upgrade changed prior ledger timestamps: got %v want %v", got, beforeLedger)
+			}
+			if got := readGatewayRawRow(t, db, "workspace_bindings", bindingColumns,
+				"project_id=? AND workspace_id=?",
+				"00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011"); !reflect.DeepEqual(got, beforeBinding) {
+				t.Fatalf("upgrade changed prior binding cells: got %v want %v", got, beforeBinding)
+			}
+			if got := readGatewayRawRow(t, db, "workspace_materializations", materializationColumns,
+				"journal_id=?", "upgrade-terminal"); !reflect.DeepEqual(got, beforeMaterialization) {
+				t.Fatalf("upgrade changed prior materialization cells: got %v want %v", got, beforeMaterialization)
+			}
+			for _, workspaceID := range []types.WorkspaceID{
+				"00000000-0000-4000-8000-000000000011", "00000000-0000-4000-8000-000000000012",
+			} {
+				assertGatewayV5RevisionCell(t, db, types.WorkspaceScope{
+					ProjectID: "00000000-0000-4000-8000-000000000001", WorkspaceID: workspaceID,
+				}, "1", "integer")
+			}
+			if got := readGatewayV5SchemaContract(t, db); !reflect.DeepEqual(got, freshContract) {
+				t.Fatalf("upgraded v%d schema contract differs from fresh v5:\ngot  %+v\nwant %+v", priorVersion, got, freshContract)
+			}
+		})
+	}
+}
+
+func TestGatewayMigrationV5RejectsIncompatibleV4Atomically(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "gateway.db")
+	db, err := sql.Open("sqlite", sqliteDSN(databasePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrations, err := loadGatewayMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyGatewayMigrationSet(context.Background(), db, migrations[:4]); err != nil {
+		t.Fatal(err)
+	}
+	insertPortableTransitionBindings(t, db)
+	scope := types.WorkspaceScope{
+		ProjectID: "00000000-0000-4000-8000-000000000001", WorkspaceID: "00000000-0000-4000-8000-000000000011",
+	}
+	insertGatewayV5Materialization(t, db, scope, "v4-prepared", "prepared")
+	insertGatewayV5Materialization(t, db, scope, "v4-published", "published")
+	if _, err := db.Exec(`
+		UPDATE workspace_materializations
+		SET publication_review_json='{"review":"v4"}',
+		    prior_candidate_json='{"candidate":"v4"}',
+		    publication_review_proof_version=1
+		WHERE journal_id='v4-published'
+	`); err != nil {
+		t.Fatal(err)
+	}
+	bindingColumns := tableColumns(t, db, "workspace_bindings")
+	materializationColumns := tableColumns(t, db, "workspace_materializations")
+	beforeBinding := readGatewayRawRow(t, db, "workspace_bindings", bindingColumns,
+		"project_id=? AND workspace_id=?", scope.ProjectID, scope.WorkspaceID)
+	beforePrepared := readGatewayRawRow(t, db, "workspace_materializations", materializationColumns,
+		"journal_id=?", "v4-prepared")
+	beforePublished := readGatewayRawRow(t, db, "workspace_materializations", materializationColumns,
+		"journal_id=?", "v4-published")
+
+	if err := applyGatewayMigrationSet(context.Background(), db, migrations); err == nil {
+		t.Fatal("incompatible v4 current materializations migrated successfully")
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = sql.Open("sqlite", sqliteDSN(databasePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	assertGatewayMigrationLedger(t, db, 4)
+	if containsString(tableColumns(t, db, "workspace_bindings"), "workspace_revision") {
+		t.Fatal("failed v5 migration retained workspace_revision")
+	}
+	assertGatewayIndexSQL(t, db, "workspace_one_acceptance_eligible_candidate",
+		`CREATE UNIQUE INDEX workspace_one_acceptance_eligible_candidate ON workspace_materializations(project_id,workspace_id) WHERE state IN ('published','recovered_new')`)
+	assertGatewayIndexAbsent(t, db, "workspace_one_current_materialization")
+	if got := readGatewayRawRow(t, db, "workspace_bindings", bindingColumns,
+		"project_id=? AND workspace_id=?", scope.ProjectID, scope.WorkspaceID); !reflect.DeepEqual(got, beforeBinding) {
+		t.Fatalf("failed v5 migration changed binding cells: got %v want %v", got, beforeBinding)
+	}
+	if got := readGatewayRawRow(t, db, "workspace_materializations", materializationColumns,
+		"journal_id=?", "v4-prepared"); !reflect.DeepEqual(got, beforePrepared) {
+		t.Fatalf("failed v5 migration changed prepared row: got %v want %v", got, beforePrepared)
+	}
+	if got := readGatewayRawRow(t, db, "workspace_materializations", materializationColumns,
+		"journal_id=?", "v4-published"); !reflect.DeepEqual(got, beforePublished) {
+		t.Fatalf("failed v5 migration changed published row: got %v want %v", got, beforePublished)
+	}
+}
+
+func TestGatewayMigrationV5PrivateRevisionRecordAndAcceptedBaseCarry(t *testing.T) {
+	store, repo := openWorkspaceStore(t)
+	binding := createBinding(t, repo,
+		"00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+	if _, ok := reflect.TypeOf(types.WorkspaceBinding{}).FieldByName("WorkspaceRevision"); ok {
+		t.Fatal("portable WorkspaceBinding exposes private workspace revision")
+	}
+	if _, err := store.DB().Exec(`
+		UPDATE workspace_bindings SET workspace_revision=7
+		WHERE project_id=? AND workspace_id=?
+	`, binding.Scope.ProjectID, binding.Scope.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	before, err := repo.Workspace(context.Background(), binding.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gatewayV5WorkspaceRevision(t, before); got != 7 {
+		t.Fatalf("workspace revision=%d, want 7", got)
+	}
+	different := before
+	setGatewayV5WorkspaceRevision(t, &different, 8)
+	if equalWorkspaceRecords(before, different) {
+		t.Fatal("workspace record equality ignored revision")
+	}
+
+	var advanced WorkspaceRecord
+	if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+		var err error
+		advanced, err = tx.AdvanceAcceptedBase(context.Background(), WorkspaceAcceptedBaseTransition{
+			Expected: before, ObservedRef: "refs/heads/next", ObservedCommitSHA: strings.Repeat("c", 40),
+			ObservedTree: changedWorkspaceTree(t, binding, "Revision Carry"), NextState: "pending",
+		})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := gatewayV5WorkspaceRevision(t, advanced); got != 7 {
+		t.Fatalf("advanced workspace revision=%d, want existing 7", got)
+	}
+}
+
+func TestGatewayMigrationV5ReadersRejectCorruptRevision(t *testing.T) {
+	for _, test := range []struct {
+		name, expression, storageClass string
+	}{
+		{name: "hostile text", expression: `CAST('not-an-integer' AS TEXT)`, storageClass: "text"},
+		{name: "hostile blob coercible by Scan", expression: `X'31'`, storageClass: "blob"},
+		{name: "hostile real", expression: `1.5`, storageClass: "real"},
+		{name: "zero", expression: `0`, storageClass: "integer"},
+		{name: "negative", expression: `-1`, storageClass: "integer"},
+		{name: "overflow representation", expression: `1e100`, storageClass: "real"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, repo, binding, stash := restoreRetryCorruptionFixture(t)
+			if _, err := store.DB().Exec(`PRAGMA ignore_check_constraints=ON`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.DB().Exec(`
+				UPDATE workspace_bindings SET workspace_revision=`+test.expression+`
+				WHERE project_id=? AND workspace_id=?
+			`, binding.Scope.ProjectID, binding.Scope.WorkspaceID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.DB().Exec(`PRAGMA ignore_check_constraints=OFF`); err != nil {
+				t.Fatal(err)
+			}
+			var quoted, storageClass string
+			if err := store.DB().QueryRow(`
+				SELECT quote(workspace_revision),typeof(workspace_revision)
+				FROM workspace_bindings WHERE project_id=? AND workspace_id=?
+			`, binding.Scope.ProjectID, binding.Scope.WorkspaceID).Scan(&quoted, &storageClass); err != nil {
+				t.Fatal(err)
+			}
+			if storageClass != test.storageClass {
+				t.Fatalf("corrupt revision=%s class=%q, want %q", quoted, storageClass, test.storageClass)
+			}
+			assertGatewayV5RevisionReadersReject(t, store, repo, binding, stash.StashID)
+		})
+	}
+}
+
+const gatewayV5MigrationSQL = `
+ALTER TABLE workspace_bindings
+ADD COLUMN workspace_revision INTEGER NOT NULL DEFAULT 1
+CHECK(typeof(workspace_revision) = 'integer' AND workspace_revision >= 1);
+
+DROP INDEX workspace_one_acceptance_eligible_candidate;
+
+CREATE UNIQUE INDEX workspace_one_current_materialization
+ON workspace_materializations(project_id, workspace_id)
+WHERE state IN ('prepared', 'published', 'recovered_new');
+`
+
+type gatewayV5SchemaColumn struct {
+	Name, Type, Default string
+	NotNull, PrimaryKey int
+}
+
+type gatewayV5SchemaContract struct {
+	BindingSQL, CurrentIndexSQL string
+	BindingColumns              []gatewayV5SchemaColumn
+}
+
+func assertGatewayV5Schema(t *testing.T, db *sql.DB) {
+	t.Helper()
+	contract := readGatewayV5SchemaContract(t, db)
+	if len(contract.BindingColumns) == 0 {
+		t.Fatal("workspace_bindings has no columns")
+	}
+	wantRevision := gatewayV5SchemaColumn{
+		Name: "workspace_revision", Type: "INTEGER", Default: "1", NotNull: 1, PrimaryKey: 0,
+	}
+	if got := contract.BindingColumns[len(contract.BindingColumns)-1]; got != wantRevision {
+		t.Fatalf("workspace_revision column=%+v, want %+v", got, wantRevision)
+	}
+	wantCheck := normalizeGatewayV5SQL(`workspace_revision INTEGER NOT NULL DEFAULT 1 CHECK(typeof(workspace_revision) = 'integer' AND workspace_revision >= 1)`)
+	if !strings.Contains(contract.BindingSQL, wantCheck) {
+		t.Fatalf("workspace_bindings SQL=%q, want exact revision clause %q", contract.BindingSQL, wantCheck)
+	}
+	wantIndex := normalizeGatewayV5SQL(`CREATE UNIQUE INDEX workspace_one_current_materialization ON workspace_materializations(project_id, workspace_id) WHERE state IN ('prepared', 'published', 'recovered_new')`)
+	if contract.CurrentIndexSQL != wantIndex {
+		t.Fatalf("current-materialization index SQL=%q, want %q", contract.CurrentIndexSQL, wantIndex)
+	}
+	assertGatewayIndexAbsent(t, db, "workspace_one_acceptance_eligible_candidate")
+}
+
+func readGatewayV5SchemaContract(t *testing.T, db *sql.DB) gatewayV5SchemaContract {
+	t.Helper()
+	var contract gatewayV5SchemaContract
+	var bindingSQL, currentIndexSQL string
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='workspace_bindings'`).Scan(&bindingSQL); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='index' AND name='workspace_one_current_materialization'`).Scan(&currentIndexSQL); err != nil {
+		t.Fatal(err)
+	}
+	contract.BindingSQL = normalizeGatewayV5SQL(bindingSQL)
+	contract.CurrentIndexSQL = normalizeGatewayV5SQL(currentIndexSQL)
+	rows, err := db.Query(`PRAGMA table_info(workspace_bindings)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var column gatewayV5SchemaColumn
+		var defaultValue any
+		if err := rows.Scan(&cid, &column.Name, &column.Type, &column.NotNull, &defaultValue, &column.PrimaryKey); err != nil {
+			t.Fatal(err)
+		}
+		if defaultValue != nil {
+			column.Default = fmt.Sprint(defaultValue)
+		}
+		contract.BindingColumns = append(contract.BindingColumns, column)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return contract
+}
+
+func normalizeGatewayV5SQL(value string) string {
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func assertGatewayMigrationLedger(t *testing.T, db *sql.DB, wantVersion int) {
+	t.Helper()
+	var maxVersion, count int
+	if err := db.QueryRow(`SELECT max(version),count(*) FROM gateway_schema_migrations`).Scan(&maxVersion, &count); err != nil {
+		t.Fatal(err)
+	}
+	if maxVersion != wantVersion || count != wantVersion {
+		t.Fatalf("migration ledger=(%d,%d), want (%d,%d)", maxVersion, count, wantVersion, wantVersion)
+	}
+	rows, err := db.Query(`SELECT version FROM gateway_schema_migrations ORDER BY version`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	version := 0
+	for rows.Next() {
+		version++
+		var got int
+		if err := rows.Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != version {
+			t.Fatalf("migration ledger version %d=%d", version, got)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readGatewayMigrationLedgerRaw(t *testing.T, db *sql.DB, through int) []string {
+	t.Helper()
+	rows, err := db.Query(`
+		SELECT printf('%d|%s|%s',version,quote(applied_at),typeof(applied_at))
+		FROM gateway_schema_migrations WHERE version<=? ORDER BY version
+	`, through)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var values []string
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			t.Fatal(err)
+		}
+		values = append(values, value)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return values
+}
+
+func insertGatewayV5Binding(t *testing.T, db *sql.DB, projectID, workspaceID, path string, device, inode int) {
+	t.Helper()
+	if _, err := db.Exec(`
+		INSERT INTO workspace_bindings
+		(project_id,workspace_id,checkout_path,checkout_device,checkout_inode,
+		 repository_identity_json,accepted_ref,accepted_commit,accepted_digest,
+		 accepted_snapshot,status)
+		VALUES (?,?,?,?,?,'{}','refs/heads/main',?,?,X'00','clean')
+	`, projectID, workspaceID, path, device, inode, strings.Repeat("a", 40), "sha256:"+strings.Repeat("a", 64)); err != nil {
+		t.Fatalf("insert v5 binding: %v", err)
+	}
+}
+
+func insertGatewayV5Materialization(t *testing.T, db *sql.DB, scope types.WorkspaceScope, journalID, state string) {
+	t.Helper()
+	if err := execGatewayV5Materialization(db, scope, journalID, state); err != nil {
+		t.Fatalf("insert materialization %s/%s: %v", journalID, state, err)
+	}
+}
+
+func assertGatewayV5MaterializationInsertFails(t *testing.T, db *sql.DB, scope types.WorkspaceScope, journalID, state string) {
+	t.Helper()
+	if err := execGatewayV5Materialization(db, scope, journalID, state); err == nil {
+		t.Fatalf("inserted second current materialization %s/%s", journalID, state)
+	}
+}
+
+func execGatewayV5Materialization(db *sql.DB, scope types.WorkspaceScope, journalID, state string) error {
+	_, err := db.Exec(`
+		INSERT INTO workspace_materializations
+		(project_id,workspace_id,journal_id,expected_live_digest,accepted_base_digest,
+		 checkout_path,checkout_device,checkout_inode,prior_tree_digest,candidate_digest,
+		 through_generation,prior_tree,candidate_tree,stage_path,backup_path,state)
+		SELECT project_id,workspace_id,?,'sha256:' || printf('%064d',2),accepted_digest,
+		       checkout_path,checkout_device,checkout_inode,'sha256:' || printf('%064d',3),
+		       'sha256:' || printf('%064d',4),1,X'00',X'01','/stage','/backup',?
+		FROM workspace_bindings WHERE project_id=? AND workspace_id=?
+	`, journalID, state, scope.ProjectID, scope.WorkspaceID)
+	return err
+}
+
+func assertGatewayV5RevisionCell(t *testing.T, db *sql.DB, scope types.WorkspaceScope, wantQuoted, wantClass string) {
+	t.Helper()
+	var quoted, storageClass string
+	if err := db.QueryRow(`
+		SELECT quote(workspace_revision),typeof(workspace_revision)
+		FROM workspace_bindings WHERE project_id=? AND workspace_id=?
+	`, scope.ProjectID, scope.WorkspaceID).Scan(&quoted, &storageClass); err != nil {
+		t.Fatal(err)
+	}
+	if quoted != wantQuoted || storageClass != wantClass {
+		t.Fatalf("revision cell=(%s,%s), want (%s,%s)", quoted, storageClass, wantQuoted, wantClass)
+	}
+}
+
+func assertGatewayIndexSQL(t *testing.T, db *sql.DB, name, want string) {
+	t.Helper()
+	var sqlText string
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='index' AND name=?`, name).Scan(&sqlText); err != nil {
+		t.Fatalf("read index %s: %v", name, err)
+	}
+	if got, want := normalizeGatewayV5SQL(sqlText), normalizeGatewayV5SQL(want); got != want {
+		t.Fatalf("index %s SQL=%q, want %q", name, got, want)
+	}
+}
+
+func assertGatewayIndexAbsent(t *testing.T, db *sql.DB, name string) {
+	t.Helper()
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?`, name).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("index %s exists", name)
+	}
+}
+
+func readGatewayRawRow(t *testing.T, db *sql.DB, table string, columns []string, predicate string, arguments ...any) []string {
+	t.Helper()
+	selects := make([]string, 0, len(columns)*2)
+	values := make([]string, len(columns)*2)
+	targets := make([]any, len(values))
+	for index, column := range columns {
+		selects = append(selects, "quote("+column+")", "typeof("+column+")")
+		targets[index*2] = &values[index*2]
+		targets[index*2+1] = &values[index*2+1]
+	}
+	query := `SELECT ` + strings.Join(selects, ",") + ` FROM ` + table + ` WHERE ` + predicate
+	if err := db.QueryRow(query, arguments...).Scan(targets...); err != nil {
+		t.Fatal(err)
+	}
+	return values
+}
+
+func gatewayV5WorkspaceRevision(t *testing.T, record WorkspaceRecord) int64 {
+	t.Helper()
+	field := reflect.ValueOf(record).FieldByName("WorkspaceRevision")
+	if !field.IsValid() || field.Kind() != reflect.Int64 {
+		t.Fatal("WorkspaceRecord lacks int64 WorkspaceRevision")
+	}
+	return field.Int()
+}
+
+func setGatewayV5WorkspaceRevision(t *testing.T, record *WorkspaceRecord, revision int64) {
+	t.Helper()
+	field := reflect.ValueOf(record).Elem().FieldByName("WorkspaceRevision")
+	if !field.IsValid() || !field.CanSet() || field.Kind() != reflect.Int64 {
+		t.Fatal("WorkspaceRecord lacks settable int64 WorkspaceRevision")
+	}
+	field.SetInt(revision)
+}
+
+func assertGatewayV5RevisionReadersReject(t *testing.T, store *Store, repo *WorkspaceRepo, binding types.WorkspaceBinding, stashID string) {
+	t.Helper()
+	if got, err := repo.Workspace(context.Background(), binding.Scope); err == nil || !reflect.DeepEqual(got, WorkspaceRecord{}) {
+		t.Fatalf("Workspace corrupt revision=(%+v,%v), want zero,error", got, err)
+	}
+	called := false
+	if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(*WorkspaceMutationTx) error {
+		called = true
+		return nil
+	}); err == nil || called {
+		t.Fatalf("WithImmediateWorkspace corrupt revision=(called=%v,err=%v), want false,error", called, err)
+	}
+	if got, err := repo.RegisteredWorkspaces(context.Background()); err == nil || got != nil {
+		t.Fatalf("RegisteredWorkspaces corrupt revision=(%+v,%v), want nil,error", got, err)
+	}
+	if got, err := repo.ResolveWorkingDirectory(context.Background(), types.WorkspaceContext{
+		WorkingDirectory: binding.Checkout.CanonicalPath,
+	}); err == nil || !reflect.DeepEqual(got, types.WorkspaceBinding{}) {
+		t.Fatalf("ResolveWorkingDirectory corrupt revision=(%+v,%v), want zero,error", got, err)
+	}
+
+	conn, err := store.DB().Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(context.Background(), `BEGIN`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = conn.ExecContext(context.Background(), `ROLLBACK`) }()
+	tx := &WorkspaceMutationTx{conn: conn, scope: binding.Scope}
+	if got, err := tx.Workspace(context.Background()); err == nil || !reflect.DeepEqual(got, WorkspaceRecord{}) {
+		t.Fatalf("transaction Workspace corrupt revision=(%+v,%v), want zero,error", got, err)
+	}
+	if got, err := tx.RestoreRetryState(context.Background(), stashID); err == nil || !reflect.DeepEqual(got, WorkspaceRestoreRetryState{}) {
+		t.Fatalf("RestoreRetryState corrupt revision=(%+v,%v), want zero,error", got, err)
 	}
 }
 

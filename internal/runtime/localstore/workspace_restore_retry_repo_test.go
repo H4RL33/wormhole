@@ -365,10 +365,13 @@ func TestWorkspaceMutationTxRestoreRetryStateRejectsCASTEquivalentScopeAliases(t
 		{"binding", func(t *testing.T, store *Store, binding types.WorkspaceBinding, _ WorkspaceStashInsert) {
 			execRestoreCorruption(t, store, `
 				INSERT INTO workspace_bindings
+				(project_id,workspace_id,checkout_path,checkout_device,checkout_inode,
+				 repository_identity_json,accepted_ref,accepted_commit,accepted_digest,
+				 accepted_snapshot,status,created_at,updated_at,workspace_revision)
 				SELECT CAST(project_id AS BLOB), workspace_id, checkout_path || '-alias',
 				       checkout_device + 100, checkout_inode + 100, repository_identity_json,
 				       accepted_ref, accepted_commit, accepted_digest, accepted_snapshot,
-				       status, created_at, updated_at
+				       status, created_at, updated_at, workspace_revision
 				FROM workspace_bindings WHERE project_id=? AND workspace_id=?
 			`, binding.Scope.ProjectID, binding.Scope.WorkspaceID)
 		}},

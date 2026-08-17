@@ -97,17 +97,18 @@ func (tx *WorkspaceMutationTx) restoreRetryWorkspace(ctx context.Context) (Works
 		inodeClass, repositoryClass  string
 		refClass, commitClass        string
 		digestClass, snapshotClass   string
-		statusClass, createdClass    string
-		updatedClass                 string
+		statusClass, revisionClass   string
+		createdClass, updatedClass   string
 	)
 	err := tx.conn.QueryRowContext(ctx, `
 		SELECT project_id, workspace_id, checkout_path, checkout_device, checkout_inode,
 		       repository_identity_json, accepted_ref, accepted_commit, accepted_digest,
-		       accepted_snapshot, status, created_at, updated_at,
+		       accepted_snapshot, status, workspace_revision, created_at, updated_at,
 		       typeof(project_id), typeof(workspace_id), typeof(checkout_path),
 		       typeof(checkout_device), typeof(checkout_inode), typeof(repository_identity_json),
 		       typeof(accepted_ref), typeof(accepted_commit), typeof(accepted_digest),
-		       typeof(accepted_snapshot), typeof(status), typeof(created_at), typeof(updated_at),
+		       typeof(accepted_snapshot), typeof(status), typeof(workspace_revision),
+		       typeof(created_at), typeof(updated_at),
 		       COUNT(*) OVER ()
 		FROM workspace_bindings
 		WHERE CAST(project_id AS TEXT)=? AND CAST(workspace_id AS TEXT)=?
@@ -116,10 +117,10 @@ func (tx *WorkspaceMutationTx) restoreRetryWorkspace(ctx context.Context) (Works
 		&record.Binding.Checkout.CanonicalPath, &record.Binding.Checkout.Device,
 		&record.Binding.Checkout.Inode, &repositoryJSON, &record.Binding.AcceptedRef,
 		&record.Binding.AcceptedCommitSHA, &record.Binding.AcceptedTreeDigest,
-		&acceptedRaw, &record.State, &createdAt, &updatedAt,
+		&acceptedRaw, &record.State, &record.WorkspaceRevision, &createdAt, &updatedAt,
 		&projectClass, &workspaceClass, &pathClass, &deviceClass, &inodeClass,
 		&repositoryClass, &refClass, &commitClass, &digestClass, &snapshotClass,
-		&statusClass, &createdClass, &updatedClass, &matching,
+		&statusClass, &revisionClass, &createdClass, &updatedClass, &matching,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return WorkspaceRecord{}, nil, time.Time{}, time.Time{}, ErrNotFound
@@ -129,10 +130,11 @@ func (tx *WorkspaceMutationTx) restoreRetryWorkspace(ctx context.Context) (Works
 	}
 	classes := []string{projectClass, workspaceClass, pathClass, deviceClass, inodeClass,
 		repositoryClass, refClass, commitClass, digestClass, snapshotClass, statusClass,
-		createdClass, updatedClass}
+		revisionClass, createdClass, updatedClass}
 	wantClasses := []string{"text", "text", "text", "integer", "integer", "text", "text",
-		"text", "text", "blob", "text", "text", "text"}
-	if matching != 1 || !equalRestoreStorageClasses(classes, wantClasses) || record.Binding.Scope != tx.scope {
+		"text", "text", "blob", "text", "integer", "text", "text"}
+	if matching != 1 || !equalRestoreStorageClasses(classes, wantClasses) ||
+		record.Binding.Scope != tx.scope || record.WorkspaceRevision < 1 {
 		return WorkspaceRecord{}, nil, time.Time{}, time.Time{}, fmt.Errorf("localstore: malformed or ambiguous restore retry workspace")
 	}
 	if err := json.Unmarshal([]byte(repositoryJSON), &record.Binding.Repository); err != nil {

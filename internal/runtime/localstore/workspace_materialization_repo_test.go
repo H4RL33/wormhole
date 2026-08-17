@@ -388,7 +388,7 @@ func TestWorkspaceMutationTxPrepareMaterializationRejectsInvalidTransactionAndHi
 		name := strings.Join(states, "+")
 		t.Run(name, func(t *testing.T) {
 			fixture := newMaterializationFixture(t, states[0], stringPointerForTest("proof\n"))
-			if _, err := fixture.store.DB().Exec(`DROP INDEX workspace_one_acceptance_eligible_candidate`); err != nil {
+			if _, err := fixture.store.DB().Exec(`DROP INDEX workspace_one_current_materialization`); err != nil {
 				t.Fatal(err)
 			}
 			insertMaterializationRow(t, fixture.store, fixture.binding, "second-pending", states[1], fixture.priorTree, fixture.candidateTree, fixture.priorDigest, fixture.candidateDigest, stringPointerForTest("proof\n"))
@@ -871,6 +871,9 @@ func TestWorkspaceMutationTxTransitionMaterializationRejectsInvalidTransactionMi
 	})
 	t.Run("other pending", func(t *testing.T) {
 		fixture := newMaterializationFixture(t, "prepared", &proof)
+		if _, err := fixture.store.DB().Exec(`DROP INDEX workspace_one_current_materialization`); err != nil {
+			t.Fatal(err)
+		}
 		insertMaterializationRow(t, fixture.store, fixture.binding, "other-pending", "published", fixture.priorTree, fixture.candidateTree, fixture.priorDigest, fixture.candidateDigest, &proof)
 		expected := readMaterializationDisposition(t, fixture.repo, fixture.binding.Scope).Journals[1]
 		before := readAtomicWorkspaceRawSnapshot(t, fixture.store.DB())
@@ -961,6 +964,9 @@ func TestWorkspaceMutationTxTransitionMaterializationRejectsBlobScopedJournalAli
 			proof := "operation proof\n"
 			fixture := newMaterializationFixture(t, "prepared", &proof)
 			expected := readMaterializationDisposition(t, fixture.repo, fixture.binding.Scope).Journals[0]
+			if _, err := fixture.store.DB().Exec(`DROP INDEX workspace_one_current_materialization`); err != nil {
+				t.Fatal(err)
+			}
 			insertMaterializationRow(t, fixture.store, fixture.binding, "hidden-pending", "prepared",
 				fixture.priorTree, fixture.candidateTree, fixture.priorDigest, fixture.candidateDigest, &proof)
 			corruptMaterializationScopeKeyToBlob(t, fixture.store, "hidden-pending", column)
@@ -1733,7 +1739,7 @@ func TestWorkspaceMaterializationDispositionReturnsOrderedCompleteIsolatedState(
 	fixtureA := makeMaterializationFixture(t, store, repo, a, "prepared", nil)
 	makeMaterializationFixture(t, store, repo, b, "accepted", nil)
 	makeMaterializationFixture(t, store, repo, c, "accepted", nil)
-	if _, err := store.DB().Exec(`DROP INDEX workspace_one_acceptance_eligible_candidate`); err != nil {
+	if _, err := store.DB().Exec(`DROP INDEX workspace_one_current_materialization`); err != nil {
 		t.Fatal(err)
 	}
 	raw := " {\"operations\": [1]}\n"
@@ -2266,7 +2272,7 @@ func TestWorkspaceMaterializationProofReaderRejectsVersionAndShapeCorruptionWith
 
 func TestWorkspaceMaterializationReaderValidatesFullSetBeforeDigestFiltering(t *testing.T) {
 	fixture := newMaterializationFixture(t, "published", nil)
-	if _, err := fixture.store.DB().Exec(`DROP INDEX workspace_one_acceptance_eligible_candidate`); err != nil {
+	if _, err := fixture.store.DB().Exec(`DROP INDEX workspace_one_current_materialization`); err != nil {
 		t.Fatal(err)
 	}
 	secondSnapshot, err := state.DecodeTree(fixture.candidateTree)

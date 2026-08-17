@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-const GatewaySchemaVersion = 4
+const GatewaySchemaVersion = 5
 
 const gatewayMigrationLedgerDDL = `CREATE TABLE gateway_schema_migrations (
   version INTEGER PRIMARY KEY,

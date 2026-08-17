@@ -36,9 +36,10 @@ type WorkspaceRepo struct {
 }
 
 type WorkspaceRecord struct {
-	Binding  types.WorkspaceBinding
-	Snapshot projectstate.Snapshot
-	State    string
+	Binding           types.WorkspaceBinding
+	Snapshot          projectstate.Snapshot
+	State             string
+	WorkspaceRevision int64
 }
 
 // WorkspaceAcceptedBaseTransition describes one exact accepted-base compare-and-swap.
@@ -274,7 +275,10 @@ func (tx *WorkspaceMutationTx) AdvanceAcceptedBase(ctx context.Context, transiti
 	if err != nil {
 		return WorkspaceRecord{}, fmt.Errorf("localstore: reread accepted-base advance: %w", err)
 	}
-	want := WorkspaceRecord{Binding: nextBinding, Snapshot: observedSnapshot, State: transition.NextState}
+	want := WorkspaceRecord{
+		Binding: nextBinding, Snapshot: observedSnapshot, State: transition.NextState,
+		WorkspaceRevision: transition.Expected.WorkspaceRevision,
+	}
 	if !equalWorkspaceRecords(post, want) {
 		return WorkspaceRecord{}, fmt.Errorf("localstore: accepted-base transition post-state mismatch")
 	}
@@ -1158,7 +1162,7 @@ func canonicalObservedWorkspaceTree(tree projectstate.Tree) (projectstate.Snapsh
 }
 
 func equalWorkspaceRecords(left, right WorkspaceRecord) bool {
-	if left.Binding != right.Binding || left.State != right.State {
+	if left.Binding != right.Binding || left.State != right.State || left.WorkspaceRevision != right.WorkspaceRevision {
 		return false
 	}
 	leftTree, leftErr := projectstate.EncodeTree(left.Snapshot)
@@ -1343,7 +1347,7 @@ func (r *WorkspaceRepo) RegisteredWorkspaces(ctx context.Context) ([]types.Works
 const workspaceSelect = `
 	SELECT project_id, workspace_id, checkout_path, checkout_device, checkout_inode,
 	       repository_identity_json, accepted_ref, accepted_commit, accepted_digest,
-	       accepted_snapshot, status
+	       accepted_snapshot, status, workspace_revision, typeof(workspace_revision)
 	FROM workspace_bindings`
 
 type workspaceScanner interface {
@@ -1366,13 +1370,18 @@ func scanWorkspace(scanner workspaceScanner) (WorkspaceRecord, []byte, error) {
 	var record WorkspaceRecord
 	var repositoryJSON string
 	var snapshotBytes []byte
+	var revisionClass string
 	if err := scanner.Scan(
 		&record.Binding.Scope.ProjectID, &record.Binding.Scope.WorkspaceID,
 		&record.Binding.Checkout.CanonicalPath, &record.Binding.Checkout.Device, &record.Binding.Checkout.Inode,
 		&repositoryJSON, &record.Binding.AcceptedRef, &record.Binding.AcceptedCommitSHA,
 		&record.Binding.AcceptedTreeDigest, &snapshotBytes, &record.State,
+		&record.WorkspaceRevision, &revisionClass,
 	); err != nil {
 		return WorkspaceRecord{}, nil, err
+	}
+	if revisionClass != "integer" || record.WorkspaceRevision < 1 {
+		return WorkspaceRecord{}, nil, fmt.Errorf("invalid workspace revision")
 	}
 	if err := json.Unmarshal([]byte(repositoryJSON), &record.Binding.Repository); err != nil {
 		return WorkspaceRecord{}, nil, fmt.Errorf("decode repository identity: %w", err)
