@@ -15,12 +15,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/runtime/config"
 	"github.com/H4RL33/wormhole/internal/runtime/eventbus"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
+	syncpkg "github.com/H4RL33/wormhole/internal/runtime/sync"
 )
 
 const (
@@ -426,6 +428,187 @@ func TestServer_CloseCancelsActiveRequestWithoutContextCancel(t *testing.T) {
 		t.Fatal("Serve did not return after direct Close")
 	}
 	waitForTrackedConnectionCount(t, srv, 0)
+}
+
+func TestServerCloseWaitsForNonCooperativeTrackedHandler(t *testing.T) {
+	requestStarted := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseHandler) }) }
+
+	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
+	if err != nil {
+		t.Fatalf("localstore.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	er := localstore.NewEventRepo(store.DB())
+	socketPath := filepath.Join(t.TempDir(), "wormholed.sock")
+	srv, err := New(socketPath, "", "test-token", "project-1", store, localstore.NewTaskRepo(store.DB(), er), er, localstore.NewKBRepo(store.DB()), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	const blockingTool = "wormhole.test.non-cooperative"
+	srv.registry.tools[blockingTool] = localTool{
+		Name: blockingTool,
+		Handler: func(context.Context, json.RawMessage) (any, error) {
+			close(requestStarted)
+			<-releaseHandler
+			return map[string]bool{"released": true}, nil
+		},
+	}
+
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- srv.Serve(context.Background()) }()
+	serveReturned := false
+	t.Cleanup(func() {
+		release()
+		_ = srv.Close()
+		if !serveReturned {
+			select {
+			case <-serveDone:
+			case <-time.After(time.Second):
+			}
+		}
+	})
+	conn := dialLocalSocket(t, socketPath)
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	mcpInitialize(t, conn, reader)
+	params, _ := json.Marshal(toolsCallParams{Name: blockingTool, Arguments: json.RawMessage(`{}`)})
+	call, _ := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("2"), Method: "tools/call", Params: params})
+	if _, err := conn.Write(append(call, '\n')); err != nil {
+		t.Fatalf("write blocking request: %v", err)
+	}
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("non-cooperative handler did not start")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- srv.Close() }()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close returned before non-cooperative handler exited: %v", err)
+	case <-time.After(1250 * time.Millisecond):
+	}
+
+	release()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close after handler release: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return after non-cooperative handler exited")
+	}
+	select {
+	case err := <-serveDone:
+		serveReturned = true
+		if err != nil {
+			t.Fatalf("Serve after handler release: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not return after non-cooperative handler exited")
+	}
+	if got := trackedConnectionCount(srv); got != 0 {
+		t.Fatalf("tracked connection count after Close = %d, want 0", got)
+	}
+}
+
+func TestServerCloseStopsWorkerPublishedByAdmittedHandler(t *testing.T) {
+	requestStarted := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseHandler) }) }
+	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
+	if err != nil {
+		t.Fatalf("localstore.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	er := localstore.NewEventRepo(store.DB())
+	socketPath := filepath.Join(t.TempDir(), "wormholed.sock")
+	srv, err := New(socketPath, "", "test-token", "project-1", store, localstore.NewTaskRepo(store.DB(), er), er, localstore.NewKBRepo(store.DB()), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv.enrolmentSyncEngines = make(map[string]*syncpkg.Engine)
+	const blockingTool = "wormhole.test.publish-worker"
+	srv.registry.tools[blockingTool] = localTool{
+		Name: blockingTool,
+		Handler: func(context.Context, json.RawMessage) (any, error) {
+			close(requestStarted)
+			<-releaseHandler
+			srv.enrolmentBootstrapMu.Lock()
+			srv.enrolmentSyncEngines["late"] = &syncpkg.Engine{}
+			srv.enrolmentBootstrapMu.Unlock()
+			return map[string]bool{"published": true}, nil
+		},
+	}
+
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- srv.Serve(context.Background()) }()
+	serveReturned := false
+	t.Cleanup(func() {
+		release()
+		_ = srv.Close()
+		if !serveReturned {
+			select {
+			case <-serveDone:
+			case <-time.After(time.Second):
+			}
+		}
+	})
+	conn := dialLocalSocket(t, socketPath)
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	mcpInitialize(t, conn, reader)
+	params, _ := json.Marshal(toolsCallParams{Name: blockingTool, Arguments: json.RawMessage(`{}`)})
+	call, _ := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("2"), Method: "tools/call", Params: params})
+	if _, err := conn.Write(append(call, '\n')); err != nil {
+		t.Fatalf("write worker-publishing request: %v", err)
+	}
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("worker-publishing handler did not start")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- srv.Close() }()
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	if _, err := conn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("tracked connection remained open during shutdown")
+	} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		t.Fatal("shutdown did not close the tracked connection")
+	}
+	release()
+
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close after worker publication: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return after worker-publishing handler exited")
+	}
+	srv.enrolmentBootstrapMu.Lock()
+	remainingWorkers := len(srv.enrolmentSyncEngines)
+	srv.enrolmentBootstrapMu.Unlock()
+	if remainingWorkers != 0 {
+		t.Fatalf("enrolment sync workers after Close = %d, want 0", remainingWorkers)
+	}
+	select {
+	case err := <-serveDone:
+		serveReturned = true
+		if err != nil {
+			t.Fatalf("Serve after worker publication: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not return after worker-publishing handler exited")
+	}
 }
 
 func TestServer_ShutdownAfterAdmissionBeforeHandlerStart(t *testing.T) {

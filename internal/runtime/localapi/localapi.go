@@ -55,9 +55,6 @@ const (
 	// local daemon, and eight persistent harness sessions cover normal local
 	// concurrency while bounding handler and frame-buffer resources.
 	maxActiveConnections = 8
-	// handlerShutdownTimeout bounds graceful shutdown if a handler does not
-	// observe cancellation after its connection is closed.
-	handlerShutdownTimeout = time.Second
 )
 
 type rpcRequest struct {
@@ -472,7 +469,6 @@ func (s *Server) Close() error {
 		s.admissionMu.Lock()
 		s.shutdown.Store(true)
 		s.closeErr = s.listener.Close()
-		s.stopEnrolmentSyncEngines()
 
 		// Force-close all tracked open connections to prevent handle goroutines
 		// from leaking on shutdown. Iterate conns and close each one (issue #20).
@@ -485,16 +481,8 @@ func (s *Server) Close() error {
 		})
 		s.admissionMu.Unlock()
 
-		handlersDone := make(chan struct{})
-		go func() {
-			s.handlerWG.Wait()
-			close(handlersDone)
-		}()
-		select {
-		case <-handlersDone:
-		case <-time.After(handlerShutdownTimeout):
-			s.closeErr = errors.Join(s.closeErr, fmt.Errorf("localapi: timed out waiting for handlers to stop"))
-		}
+		s.handlerWG.Wait()
+		s.stopEnrolmentSyncEngines()
 	})
 	return s.closeErr
 }

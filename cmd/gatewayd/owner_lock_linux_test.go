@@ -3,17 +3,254 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/H4RL33/wormhole/internal/runtime/localapi"
+	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"golang.org/x/sys/unix"
 )
+
+const (
+	gatewayOwnerHelperModeEnv    = "GATEWAYD_OWNER_HELPER_MODE"
+	gatewayOwnerHelperDBEnv      = "GATEWAYD_OWNER_HELPER_DB"
+	gatewayOwnerHelperSocketEnv  = "GATEWAYD_OWNER_HELPER_SOCKET"
+	gatewayOwnerHelperStartedEnv = "GATEWAYD_OWNER_HELPER_STARTED"
+	gatewayOwnerHelperReleaseEnv = "GATEWAYD_OWNER_HELPER_RELEASE"
+)
+
+type gatewayOwnerBlockingPolicy struct {
+	startedPath string
+	releasePath string
+}
+
+func (policy gatewayOwnerBlockingPolicy) EnrolmentPermissionEnvelope(context.Context, string) (localapi.EnrolmentPermissionEnvelope, error) {
+	if err := os.WriteFile(policy.startedPath, []byte("started"), 0o600); err != nil {
+		return localapi.EnrolmentPermissionEnvelope{}, err
+	}
+	for {
+		if _, err := os.Stat(policy.releasePath); err == nil {
+			return localapi.EnrolmentPermissionEnvelope{}, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return localapi.EnrolmentPermissionEnvelope{}, err
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestProcessGatewayOwnerShutdownHelper(t *testing.T) {
+	if os.Getenv(gatewayOwnerHelperModeEnv) != "blocked-handler" {
+		return
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM)
+	defer cancel()
+	ownerLock, err := acquireDatabaseOwnerLock(os.Getenv(gatewayOwnerHelperDBEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ownerLock.Close()
+	store, err := localstore.Open(ownerLock.DatabasePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	er := localstore.NewEventRepo(store.DB())
+	srv, err := localapi.New(
+		os.Getenv(gatewayOwnerHelperSocketEnv), "", "", "project-1", store,
+		localstore.NewTaskRepo(store.DB(), er), er, localstore.NewKBRepo(store.DB()), nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	srv.SetEnrolmentPolicySource(gatewayOwnerBlockingPolicy{
+		startedPath: os.Getenv(gatewayOwnerHelperStartedEnv),
+		releasePath: os.Getenv(gatewayOwnerHelperReleaseEnv),
+	})
+
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- srv.Serve(ctx) }()
+	<-srv.Serving()
+	conn, err := net.Dial("unix", os.Getenv(gatewayOwnerHelperSocketEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	if _, err := fmt.Fprintln(conn, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.ReadBytes('\n'); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintln(conn, `{"jsonrpc":"2.0","method":"notifications/initialized"}`); err != nil {
+		t.Fatal(err)
+	}
+	arguments, err := json.Marshal(localapi.EnrolmentRequest{
+		Version:           localapi.EnrolmentProtocolVersion,
+		ProjectID:         "project-1",
+		FabricAddress:     "http://127.0.0.1:1",
+		IdempotencyKey:    "123e4567-e89b-12d3-a456-426614174000",
+		CredentialProfile: "default",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	params, err := json.Marshal(map[string]any{"name": localapi.EnrolmentToolName, "arguments": json.RawMessage(arguments)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": json.RawMessage(params)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write(append(request, '\n')); err != nil {
+		t.Fatal(err)
+	}
+
+	<-ctx.Done()
+	if err := srv.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serveDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGatewayOwnerLockHeldUntilTrackedHandlerQuiesces(t *testing.T) {
+	process, databasePath, lockPath, releasePath, output := startGatewayOwnerHelper(t)
+	before := databaseOwnerLockFileInfo(t, lockPath)
+	if err := process.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("signal Gateway owner helper: %v", err)
+	}
+
+	time.Sleep(1250 * time.Millisecond)
+	contender, contentionErr := acquireDatabaseOwnerLock(databasePath)
+	if contender != nil {
+		_ = contender.Close()
+	}
+	if err := os.WriteFile(releasePath, []byte("release"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitErr := waitGatewayOwnerHelper(process)
+	if contender != nil || !errors.Is(contentionErr, errGatewayAlreadyRunning) {
+		t.Fatalf("owner lock during blocked-handler shutdown = lock:%v error:%v, want %v; helper: %v\n%s", contender, contentionErr, errGatewayAlreadyRunning, waitErr, output.String())
+	}
+	if waitErr != nil {
+		t.Fatalf("Gateway owner helper after release: %v\n%s", waitErr, output.String())
+	}
+
+	reacquired, err := acquireDatabaseOwnerLock(databasePath)
+	if err != nil {
+		t.Fatalf("reacquire owner lock after handler release: %v", err)
+	}
+	defer reacquired.Close()
+	after := databaseOwnerLockFileInfo(t, lockPath)
+	if !os.SameFile(before, after) {
+		t.Fatal("handler quiescence takeover replaced the persistent owner entry")
+	}
+}
+
+func TestGatewayKilledOwnerAllowsTakeover(t *testing.T) {
+	process, databasePath, lockPath, _, output := startGatewayOwnerHelper(t)
+	before := databaseOwnerLockFileInfo(t, lockPath)
+	if err := process.Process.Signal(syscall.SIGKILL); err != nil {
+		t.Fatalf("kill Gateway owner helper: %v", err)
+	}
+	if err := waitGatewayOwnerHelper(process); err == nil {
+		t.Fatalf("killed Gateway owner helper exited successfully\n%s", output.String())
+	}
+
+	started := time.Now()
+	contender, err := acquireDatabaseOwnerLock(databasePath)
+	if err != nil {
+		t.Fatalf("take over owner lock after SIGKILL: %v", err)
+	}
+	defer contender.Close()
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("owner lock takeover after SIGKILL took %v, want immediate", elapsed)
+	}
+	after := databaseOwnerLockFileInfo(t, lockPath)
+	if !os.SameFile(before, after) {
+		t.Fatal("SIGKILL takeover replaced the persistent owner entry")
+	}
+}
+
+func startGatewayOwnerHelper(t *testing.T) (*exec.Cmd, string, string, string, *bytes.Buffer) {
+	t.Helper()
+	directory := t.TempDir()
+	dataDirectory := filepath.Join(directory, "data")
+	if err := os.Mkdir(dataDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	databasePath := filepath.Join(dataDirectory, "wormholed.db")
+	lockPath := databasePath + ".lock"
+	socketPath := filepath.Join(directory, "wormholed.sock")
+	startedPath := filepath.Join(directory, "handler-started")
+	releasePath := filepath.Join(directory, "handler-release")
+	command := exec.Command(os.Args[0], "-test.run=^TestProcessGatewayOwnerShutdownHelper$")
+	command.Env = append(os.Environ(),
+		gatewayOwnerHelperModeEnv+"=blocked-handler",
+		gatewayOwnerHelperDBEnv+"="+databasePath,
+		gatewayOwnerHelperSocketEnv+"="+socketPath,
+		gatewayOwnerHelperStartedEnv+"="+startedPath,
+		gatewayOwnerHelperReleaseEnv+"="+releasePath,
+	)
+	output := &bytes.Buffer{}
+	command.Stdout = output
+	command.Stderr = output
+	if err := command.Start(); err != nil {
+		t.Fatalf("start Gateway owner helper: %v", err)
+	}
+	t.Cleanup(func() {
+		if command.ProcessState == nil {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+		}
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(startedPath); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+			t.Fatalf("Gateway owner helper did not admit blocked handler\n%s", output.String())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return command, databasePath, lockPath, releasePath, output
+}
+
+func waitGatewayOwnerHelper(command *exec.Cmd) error {
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(5 * time.Second):
+		_ = command.Process.Kill()
+		return <-done
+	}
+}
 
 func TestDatabaseOwnerLockCanonicalAliases(t *testing.T) {
 	workingDirectory, err := os.Getwd()
