@@ -1229,3 +1229,15 @@ passed. Incompatible v4 data rolls the migration back atomically, verified after
 with the ledger, schema, indexes, and every raw v4 cell unchanged. Task 6 remains the next
 authorized implementation dependency; no revision tracker or later-task writer migration
 entered Task 5.
+
+Stage 1A R01-R05 execution: Task 6 complete (commit `8f94c8d`, independent
+specification/quality reviews clean). One lazy transaction-scoped tracker now owns revision
+projection and exact parameter-bound CAS finalization in both immediate workspace wrappers.
+Clean work performs no revision SQL; one or many marks advance exactly once; callback,
+statement, stale-CAS, malformed, and overflow failures roll back before COMMIT; only actual
+COMMIT failure retains `ErrCommitOutcomeUnknown`; and the transition receipt lookup remains
+the first SQL read. Fresh focused, race, full localstore, vet, formatting, and diff gates
+passed. The ordinary repository suite also passed during implementation; the
+integration-required gate remains environment-blocked by unavailable PostgreSQL on
+`[::1]:5432`. Task 7 remains the next authorized dependency, and no production writer helper
+acquired a dirty mark in Task 6.
