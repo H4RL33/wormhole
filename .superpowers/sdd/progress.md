@@ -1204,3 +1204,15 @@ specification/quality review clean). Post-review exact Code Graph race and focus
 Gateway/localapi gates passed. One recovered runtime, lifecycle, and pointer-stable mutex now
 own each daemon project; lazy publication is atomic and cross-project builds remain
 independent. End-to-end CLI routing remains the explicit Task 4 dependency.
+
+Stage 1A R01-R05 execution: Task 4 and R01 complete. The immutable reviewed implementation
+boundary is `R01_END = 01da36d69ac11cd6e2c56a896e3d8961853822ff` (`refactor(cli): route
+code graph lifecycle via gateway`); this separate progress-record commit is outside that
+implementation range. Independent specification and quality reviews reported no Critical,
+Important, or Minor findings. Fresh post-review G01 and A18 witnesses, sole-owner/authority
+searches, normal package tests, and the full three-package race gate passed. The CLI now sends
+all six lifecycle operations over the hidden private Gateway RPC, mutation authority is
+derived inside the daemon before graph recovery or mutation, and a stopped daemon cannot
+touch DB/WAL/SHM state. PostgreSQL-dependent repository integration gates remain unavailable
+because no service is listening on `[::1]:5432`; no Task 5 or later implementation is included
+in `R01_END`.

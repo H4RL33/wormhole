@@ -3,8 +3,8 @@
 This ledger is the executable evidence boundary required by the approved
 Stage 1A R01-R05 design and implementation plan. The measurement baseline is
 `4d84903eba1efb36a4348f5f1c81db9e6eb5c624`. The reviewed R01 implementation
-SHA is recorded later by the controller; this implementation commit does not
-claim or write `R01_END`.
+SHA is recorded below by the controller in a later documentation commit; the
+implementation commit itself does not claim or write `R01_END`.
 
 The Task-4 RED run established the R01 causal witness before production edits:
 the local API command returned `-32601 method not found` for the private method,
@@ -43,10 +43,12 @@ existing WAL sidecar. The corresponding restored commands are recorded below.
 
 ## R01 measurement record
 
-The controller records the immutable reviewed implementation SHA separately.
-No post-review boundary commit is part of the implementation commit.
+The immutable reviewed implementation boundary is
+`R01_END = 01da36d69ac11cd6e2c56a896e3d8961853822ff`. The separate
+post-review documentation commit that records this value is outside the R01
+implementation range and must never be amended or fixed up across `R01_END`.
 
-Working-tree measurement against the immutable R01 baseline
+Endpoint measurement against the immutable R01 baseline
 `4d84903eba1efb36a4348f5f1c81db9e6eb5c624` after Task 4:
 
 - production Go: `P+=519 P-=166 net=+353`;
