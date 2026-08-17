@@ -1186,3 +1186,9 @@ quiescence. All A01-A25 invariants remain retained, with an exact per-R01-R05 pr
 table and G01-G05 causal oracles. The scorecard recipe is baseline-SHA/path/pattern anchored,
 requires a separate R01 commit boundary, and cannot lose renamed successor code from its
 manifests.
+
+Stage 1A R01-R05 execution: Task 1 complete (commits `6b6a49b..ebaf135`, independent
+specification/quality review clean). The post-review
+`go test ./cmd/gatewayd -run '^TestDatabaseOwnerLock' -count=1` gate passed. Definitive
+non-cooperative handler quiescence remains the explicit Task 2 dependency; no later-task
+implementation entered Task 1.
