@@ -1192,3 +1192,9 @@ specification/quality review clean). The post-review
 `go test ./cmd/gatewayd -run '^TestDatabaseOwnerLock' -count=1` gate passed. Definitive
 non-cooperative handler quiescence remains the explicit Task 2 dependency; no later-task
 implementation entered Task 1.
+
+Stage 1A R01-R05 execution: Task 2 complete (commit `373d53c`, independent
+specification/quality review clean). Post-review localapi/owner-lock focused tests and the
+required combined race command passed. Shutdown now closes admission/connections, waits
+definitively for handlers, then stops late enrolment workers; normal sync-worker stop ordering
+remains unchanged. The direct CLI Code Graph path remains the explicit Tasks 3-4 dependency.
