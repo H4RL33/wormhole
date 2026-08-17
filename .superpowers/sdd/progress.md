@@ -1198,3 +1198,9 @@ specification/quality review clean). Post-review localapi/owner-lock focused tes
 required combined race command passed. Shutdown now closes admission/connections, waits
 definitively for handlers, then stops late enrolment workers; normal sync-worker stop ordering
 remains unchanged. The direct CLI Code Graph path remains the explicit Tasks 3-4 dependency.
+
+Stage 1A R01-R05 execution: Task 3 complete (commit `c6fe955`, independent
+specification/quality review clean). Post-review exact Code Graph race and focused
+Gateway/localapi gates passed. One recovered runtime, lifecycle, and pointer-stable mutex now
+own each daemon project; lazy publication is atomic and cross-project builds remain
+independent. End-to-end CLI routing remains the explicit Task 4 dependency.
