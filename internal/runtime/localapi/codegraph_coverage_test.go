@@ -17,13 +17,15 @@ func TestCodeGraphLifecycleExecuteRejectsInvalidScopeBindingAndOperation(t *test
 	lifecycle, _ := newLifecycleTestState(t, "project-a", []string{"https://example.invalid/approved.git"})
 	tests := []CodeGraphLifecycleRequest{
 		{Operation: CodeGraphStatus, ProjectID: "project-b"},
-		{Operation: CodeGraphRebuild, ProjectID: "project-a", CredentialProfile: "profile"},
 		{Operation: "unsupported", ProjectID: "project-a"},
 	}
 	for _, request := range tests {
 		if _, err := lifecycle.Execute(ctx, request); err == nil {
 			t.Fatalf("Execute(%+v) succeeded", request)
 		}
+	}
+	if _, err := lifecycle.executeWithBinding(ctx, CodeGraphLifecycleRequest{Operation: CodeGraphRebuild, ProjectID: "project-a"}, codeGraphRepositoryBinding{profile: "profile"}); err == nil {
+		t.Fatal("executeWithBinding accepted incomplete repository binding")
 	}
 }
 

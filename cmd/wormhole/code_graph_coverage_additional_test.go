@@ -7,11 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	runtimeconfig "github.com/H4RL33/wormhole/internal/runtime/config"
 	"github.com/H4RL33/wormhole/internal/runtime/localapi"
-	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 )
 
 func TestCodeGraphCLIRejectsRemainingCommandAndInteractionFailures(t *testing.T) {
@@ -69,18 +70,13 @@ func TestResolveCodeGraphProjectRequiresExplicitOrNearestConfiguration(t *testin
 	}
 }
 
-func TestExecuteCodeGraphLifecycleRejectsAmbiguousAndUnreadyCredentials(t *testing.T) {
-	tests := []struct {
-		name     string
-		profiles int
-		want     string
-	}{
-		{"no credentials", 0, "no credential"},
-		{"ambiguous credentials", 2, "multiple credential profiles"},
-		{"checkpoint not ready", 1, "not a ready bootstrapped checkpoint"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+func TestExecuteCodeGraphLifecycleStoppedDaemonDoesNotMutateDatabase(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		name := "absent"
+		if existing {
+			name = "existing"
+		}
+		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
 			t.Setenv("HOME", filepath.Join(root, "home"))
 			t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
@@ -89,31 +85,86 @@ func TestExecuteCodeGraphLifecycleRejectsAmbiguousAndUnreadyCredentials(t *testi
 			if err != nil {
 				t.Fatal(err)
 			}
-			for i := 0; i < tt.profiles; i++ {
-				profile := "profile-" + string(rune('a'+i))
-				if _, err := runtimeconfig.WriteCredentialProfile(paths.CredentialsDir, profile, runtimeconfig.Credentials{
-					Server: "https://fabric.example", ProjectID: "project-a", AgentID: "agent-" + profile,
-					PassportID: "passport-" + profile, Token: "secret",
-				}); err != nil {
+			files := []string{paths.DBPath, paths.DBPath + "-wal", paths.DBPath + "-shm"}
+			before := map[string]databaseFileSnapshot{}
+			if existing {
+				if err := os.MkdirAll(filepath.Dir(paths.DBPath), 0o700); err != nil {
 					t.Fatal(err)
 				}
+				for index, path := range files {
+					if err := os.WriteFile(path, []byte("opaque-owner-state-"+string(rune('a'+index))), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					stamp := time.Unix(1_700_000_000+int64(index), 123).UTC()
+					if err := os.Chtimes(path, stamp, stamp); err != nil {
+						t.Fatal(err)
+					}
+					before[path] = snapshotDatabaseFile(t, path)
+				}
 			}
-			if err := os.MkdirAll(filepath.Dir(paths.DBPath), 0o700); err != nil {
-				t.Fatal(err)
+
+			requests := []localapi.CodeGraphLifecycleRequest{
+				{Operation: localapi.CodeGraphEnable, ProjectID: "project-a", Checkout: "/enable"},
+				{Operation: localapi.CodeGraphDisable, ProjectID: "project-a"},
+				{Operation: localapi.CodeGraphStatus, ProjectID: "project-a"},
+				{Operation: localapi.CodeGraphRebuild, ProjectID: "project-a"},
+				{Operation: localapi.CodeGraphCheckoutSet, ProjectID: "project-a", Checkout: "/set"},
+				{Operation: localapi.CodeGraphCheckoutShow, ProjectID: "project-a"},
 			}
-			store, err := localstore.Open(paths.DBPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := store.Close(); err != nil {
-				t.Fatal(err)
-			}
-			_, err = executeCodeGraphLifecycle(context.Background(), localapi.CodeGraphLifecycleRequest{
-				Operation: localapi.CodeGraphRebuild, ProjectID: "project-a",
-			})
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("executeCodeGraphLifecycle error = %v, want containing %q", err, tt.want)
+			for _, request := range requests {
+				_, err = executeCodeGraphLifecycle(context.Background(), request)
+				if err == nil || !strings.Contains(err.Error(), "gatewayd not running") {
+					t.Errorf("stopped Gateway %s error = %v, want gatewayd not running", request.Operation, err)
+				}
+				for _, path := range files {
+					if !existing {
+						if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+							t.Fatalf("stopped Gateway %s created %s: %v", request.Operation, path, statErr)
+						}
+						continue
+					}
+					after := snapshotDatabaseFile(t, path)
+					if !before[path].equal(after) {
+						t.Fatalf("stopped Gateway %s changed %s\nbefore=%+v\nafter=%+v", request.Operation, path, before[path], after)
+					}
+				}
 			}
 		})
 	}
+}
+
+type databaseFileSnapshot struct {
+	Bytes         string
+	Mode          os.FileMode
+	Size          int64
+	ModTime       time.Time
+	Device, Inode uint64
+	Links         uint64
+	UID, GID      uint32
+}
+
+func snapshotDatabaseFile(t *testing.T, path string) databaseFileSnapshot {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("%s metadata has type %T", path, info.Sys())
+	}
+	return databaseFileSnapshot{
+		Bytes: string(raw), Mode: info.Mode(), Size: info.Size(), ModTime: info.ModTime(),
+		Device: uint64(stat.Dev), Inode: stat.Ino, Links: uint64(stat.Nlink), UID: stat.Uid, GID: stat.Gid,
+	}
+}
+
+func (snapshot databaseFileSnapshot) equal(other databaseFileSnapshot) bool {
+	return snapshot.Bytes == other.Bytes && snapshot.Mode == other.Mode && snapshot.Size == other.Size &&
+		snapshot.ModTime.Equal(other.ModTime) && snapshot.Device == other.Device && snapshot.Inode == other.Inode &&
+		snapshot.Links == other.Links && snapshot.UID == other.UID && snapshot.GID == other.GID
 }

@@ -1,20 +1,19 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	codegraphconfig "github.com/H4RL33/wormhole/internal/runtime/codegraph/config"
-	codegraphstore "github.com/H4RL33/wormhole/internal/runtime/codegraph/store"
-	runtimeconfig "github.com/H4RL33/wormhole/internal/runtime/config"
 	"github.com/H4RL33/wormhole/internal/runtime/localapi"
-	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 )
 
 func TestCodeGraphCommandsAreRegistered(t *testing.T) {
@@ -181,66 +180,131 @@ func TestCodeGraphStatusAndCheckoutShowDoNotRequireConfirmation(t *testing.T) {
 	}
 }
 
-func TestExecuteCodeGraphLocalStatusShowAndDisableRequireNoCredentials(t *testing.T) {
+func TestExecuteCodeGraphLifecycleUsesPrivateRPCWithClosedClaims(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", filepath.Join(root, "home"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
-	paths, err := runtimeconfig.ResolveRuntimePaths()
+	socketPath := gatewaySocketPath()
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Dir(paths.DBPath), 0o700); err != nil {
-		t.Fatal(err)
+	t.Cleanup(func() { _ = listener.Close() })
+
+	type capturedCall struct {
+		method string
+		params map[string]json.RawMessage
 	}
-	local, err := localstore.Open(paths.DBPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	graph, err := codegraphstore.Open(context.Background(), local.DB(), "project-a")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := graph.PutProjectConfig(context.Background(), codegraphconfig.Project{
-		ProjectID: "project-a", Enabled: true, CanonicalRemote: "https://example.invalid/repo.git",
-		ActiveCheckout: "/checkout", ProjectSourceByteCeiling: codegraphconfig.DefaultProjectSourceByteCeiling,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := graph.CreateCandidate(context.Background(), codegraphstore.Revision{
-		ProjectID: "project-a", ID: "candidate", IndexedCommit: strings.Repeat("a", 40), CreatedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := local.Close(); err != nil {
-		t.Fatal(err)
-	}
-	for _, operation := range []localapi.CodeGraphLifecycleOperation{localapi.CodeGraphStatus, localapi.CodeGraphCheckoutShow} {
-		status, err := executeCodeGraphLifecycle(context.Background(), localapi.CodeGraphLifecycleRequest{Operation: operation, ProjectID: "project-a"})
-		if err != nil {
-			t.Fatalf("%s without credentials = %v", operation, err)
+	calls := make(chan capturedCall, 6)
+	serverErr := make(chan error, 1)
+	go func() {
+		for range 6 {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				serverErr <- acceptErr
+				return
+			}
+			reader := bufio.NewReader(conn)
+			readRequest := func() (rpcRequest, error) {
+				line, readErr := reader.ReadBytes('\n')
+				if readErr != nil {
+					return rpcRequest{}, readErr
+				}
+				var request rpcRequest
+				readErr = json.Unmarshal(bytes.TrimSpace(line), &request)
+				return request, readErr
+			}
+			initialize, readErr := readRequest()
+			if readErr != nil || initialize.Method != "initialize" {
+				_ = conn.Close()
+				serverErr <- errors.New("missing Gateway initialize request")
+				return
+			}
+			response, _ := json.Marshal(rpcResponse{JSONRPC: "2.0", ID: initialize.ID, Result: json.RawMessage(`{}`)})
+			if _, writeErr := conn.Write(append(response, '\n')); writeErr != nil {
+				_ = conn.Close()
+				serverErr <- writeErr
+				return
+			}
+			initialized, readErr := readRequest()
+			if readErr != nil || initialized.Method != "notifications/initialized" {
+				_ = conn.Close()
+				serverErr <- errors.New("missing Gateway initialized notification")
+				return
+			}
+			request, readErr := readRequest()
+			if readErr != nil {
+				_ = conn.Close()
+				serverErr <- readErr
+				return
+			}
+			var params map[string]json.RawMessage
+			if readErr = json.Unmarshal(request.Params, &params); readErr != nil {
+				_ = conn.Close()
+				serverErr <- readErr
+				return
+			}
+			calls <- capturedCall{method: request.Method, params: params}
+			result, _ := json.Marshal(localapi.CodeGraphLifecycleStatus{ProjectID: "project-a", ActiveCheckout: "/checkout"})
+			response, _ = json.Marshal(rpcResponse{JSONRPC: "2.0", ID: request.ID, Result: result})
+			_, writeErr := conn.Write(append(response, '\n'))
+			_ = conn.Close()
+			if writeErr != nil {
+				serverErr <- writeErr
+				return
+			}
 		}
-		if !status.Enabled || status.ActiveCheckout != "/checkout" {
-			t.Fatalf("%s status = %+v", operation, status)
+		serverErr <- nil
+	}()
+
+	requests := []localapi.CodeGraphLifecycleRequest{
+		{Operation: localapi.CodeGraphEnable, ProjectID: "project-a", Checkout: "/enable"},
+		{Operation: localapi.CodeGraphDisable, ProjectID: "project-a"},
+		{Operation: localapi.CodeGraphStatus, ProjectID: "project-a"},
+		{Operation: localapi.CodeGraphRebuild, ProjectID: "project-a"},
+		{Operation: localapi.CodeGraphCheckoutSet, ProjectID: "project-a", Checkout: "/set"},
+		{Operation: localapi.CodeGraphCheckoutShow, ProjectID: "project-a"},
+	}
+	for _, request := range requests {
+		if _, callErr := executeCodeGraphLifecycle(context.Background(), request); callErr != nil {
+			t.Errorf("execute %s: %v", request.Operation, callErr)
 		}
 	}
-	if _, err := executeCodeGraphLifecycle(context.Background(), localapi.CodeGraphLifecycleRequest{Operation: localapi.CodeGraphDisable, ProjectID: "project-a"}); err != nil {
-		t.Fatalf("disable without credentials = %v", err)
+
+	for _, request := range requests {
+		select {
+		case captured := <-calls:
+			if captured.method != "wormhole/code-graph/lifecycle" {
+				t.Errorf("%s method = %q", request.Operation, captured.method)
+			}
+			wantKeys := map[string]bool{"operation": true, "project_id": true}
+			if request.Checkout != "" {
+				wantKeys["checkout"] = true
+			}
+			if len(captured.params) != len(wantKeys) {
+				t.Errorf("%s params = %s, want only operation/project_id/optional checkout", request.Operation, requestJSON(captured.params))
+			}
+			for key := range captured.params {
+				if !wantKeys[key] {
+					t.Errorf("%s sent forbidden wire claim %q", request.Operation, key)
+				}
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("%s did not call the private Gateway RPC", request.Operation)
+		}
 	}
-	local, err = localstore.Open(paths.DBPath)
-	if err != nil {
+	if err := <-serverErr; err != nil {
 		t.Fatal(err)
 	}
-	defer local.Close()
-	for _, table := range []string{"codegraph_config", "codegraph_revisions"} {
-		var rows int
-		if err := local.DB().QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE project_id = 'project-a'`).Scan(&rows); err != nil {
-			t.Fatal(err)
-		}
-		if rows != 0 {
-			t.Fatalf("%s rows after credential-free disable = %d", table, rows)
-		}
-	}
+}
+
+func requestJSON(value any) string {
+	raw, _ := json.Marshal(value)
+	return string(raw)
 }
 
 func TestCodeGraphRejectsForbiddenKnobs(t *testing.T) {

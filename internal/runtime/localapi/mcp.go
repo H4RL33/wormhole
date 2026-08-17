@@ -27,8 +27,9 @@ import (
 )
 
 const (
-	integrationPlanRPCMethod   = "wormhole/integration/plan"
-	integrationCommitRPCMethod = "wormhole/integration/commit"
+	integrationPlanRPCMethod    = "wormhole/integration/plan"
+	integrationCommitRPCMethod  = "wormhole/integration/commit"
+	codeGraphLifecycleRPCMethod = "wormhole/code-graph/lifecycle"
 )
 
 // Local JSON-RPC 2.0 error codes (docs/mcp-protocol.md §3.1's table,
@@ -572,8 +573,9 @@ type localJoinResult struct {
 // given connection — the subscription delivery goroutine (see
 // handleChannelSubscribeMCP) never touches it, so no extra lock guards it.
 type mcpSession struct {
-	initialized bool
-	writeMu     sync.Mutex
+	initializeReceived bool
+	initialized        bool
+	writeMu            sync.Mutex
 }
 
 // initializeResult is the "initialize" response result shape (design doc
@@ -1057,11 +1059,14 @@ func (s *Server) dispatchMCPMessage(ctx context.Context, sess *mcpSession, conn 
 
 	switch req.Method {
 	case "initialize":
+		sess.initializeReceived = true
 		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: marshalResult(handleInitialize(s.version))})
 
 	case "notifications/initialized":
 		// No response is ever produced for a notification.
-		sess.initialized = true
+		if sess.initializeReceived {
+			sess.initialized = true
+		}
 
 	case "tools/list":
 		if isNotification {
@@ -1084,6 +1089,28 @@ func (s *Server) dispatchMCPMessage(ctx context.Context, sess *mcpSession, conn 
 		result, rpcErr := s.handleToolsCall(ctx, sess, conn, reg, req.Params)
 		if rpcErr != nil {
 			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: rpcErr})
+			return
+		}
+		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: marshalResult(result)})
+
+	case codeGraphLifecycleRPCMethod:
+		// Private same-user human CLI method. It is deliberately not a tool,
+		// so models cannot discover or invoke lifecycle mutation through MCP.
+		if isNotification {
+			return
+		}
+		if !sess.initialized {
+			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcServerNotInitialized, Message: "server not initialized: send initialize and notifications/initialized before Code Graph lifecycle"}})
+			return
+		}
+		var command CodeGraphLifecycleRequest
+		if err := decodeClosedJSON(req.Params, &command); err != nil {
+			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: "invalid Code Graph lifecycle request"}})
+			return
+		}
+		result, err := s.executePrivateCodeGraphLifecycle(ctx, command)
+		if err != nil {
+			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: err.Error()}})
 			return
 		}
 		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: marshalResult(result)})

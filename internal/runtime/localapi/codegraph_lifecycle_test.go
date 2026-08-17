@@ -191,10 +191,9 @@ func TestCodeGraphLifecycleRejectsPassportRepositoryRotationBeforePublication(t 
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, err := state.Execute(ctx, CodeGraphLifecycleRequest{
+		_, err := state.executeWithBinding(ctx, CodeGraphLifecycleRequest{
 			Operation: CodeGraphEnable, ProjectID: "project-a", Checkout: checkout,
-			CredentialProfile: "profile", AgentID: "agent", PassportID: "passport",
-		})
+		}, codeGraphRepositoryBinding{profile: "profile", agent: "agent", passport: "passport"})
 		done <- err
 	}()
 	<-entered
@@ -311,22 +310,23 @@ func TestCodeGraphLifecycleUsesOnlyExplicitActivePassportNotStaleReadyPassport(t
 		}
 	}
 	oldCheckout := lifecycleGitRepository(t, "https://example.invalid/old.git", "package old\n")
-	request := CodeGraphLifecycleRequest{Operation: CodeGraphEnable, ProjectID: "project-a", Checkout: oldCheckout, CredentialProfile: "profile", AgentID: "agent", PassportID: "passport"}
-	if _, err := state.Execute(context.Background(), request); !errors.Is(err, ErrCodeGraphRepositoryMismatch) {
+	request := CodeGraphLifecycleRequest{Operation: CodeGraphEnable, ProjectID: "project-a", Checkout: oldCheckout}
+	binding := codeGraphRepositoryBinding{profile: "profile", agent: "agent", passport: "passport"}
+	if _, err := state.executeWithBinding(context.Background(), request, binding); !errors.Is(err, ErrCodeGraphRepositoryMismatch) {
 		t.Fatalf("stale Passport checkout error = %v, want ErrCodeGraphRepositoryMismatch", err)
 	}
 	currentCheckout := lifecycleGitRepository(t, "https://example.invalid/current.git", "package current\n")
 	request.Checkout = currentCheckout
-	if _, err := state.Execute(context.Background(), request); err != nil {
+	if _, err := state.executeWithBinding(context.Background(), request, binding); err != nil {
 		t.Fatalf("active Passport checkout error = %v", err)
 	}
 	request.Operation = CodeGraphRebuild
 	request.Checkout = ""
-	if _, err := state.Execute(context.Background(), request); err != nil {
+	if _, err := state.executeWithBinding(context.Background(), request, binding); err != nil {
 		t.Fatalf("active Passport rebuild error = %v", err)
 	}
-	request.CredentialProfile, request.AgentID, request.PassportID = "old-profile", "old-agent", "old-passport"
-	if _, err := state.Execute(context.Background(), request); !errors.Is(err, ErrCodeGraphRepositoryMismatch) {
+	binding = codeGraphRepositoryBinding{profile: "old-profile", agent: "old-agent", passport: "old-passport"}
+	if _, err := state.executeWithBinding(context.Background(), request, binding); !errors.Is(err, ErrCodeGraphRepositoryMismatch) {
 		t.Fatalf("stale Passport rebuild error = %v, want ErrCodeGraphRepositoryMismatch", err)
 	}
 }

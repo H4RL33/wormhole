@@ -11,9 +11,7 @@ import (
 	"strings"
 
 	projectconfig "github.com/H4RL33/wormhole/internal/config"
-	runtimeconfig "github.com/H4RL33/wormhole/internal/runtime/config"
 	"github.com/H4RL33/wormhole/internal/runtime/localapi"
-	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"golang.org/x/term"
 )
 
@@ -163,42 +161,9 @@ func resolveCodeGraphProject(explicit string) (string, error) {
 }
 
 func executeCodeGraphLifecycle(ctx context.Context, request localapi.CodeGraphLifecycleRequest) (localapi.CodeGraphLifecycleStatus, error) {
-	paths, err := runtimeconfig.ResolveRuntimePaths()
-	if err != nil {
+	var response localapi.CodeGraphLifecycleStatus
+	if err := callGatewayPrivateMethod(ctx, gatewaySocketPath(), codeGraphLifecycleRPCMethod, request, &response); err != nil {
 		return localapi.CodeGraphLifecycleStatus{}, err
 	}
-	gatewayStore, err := localstore.Open(paths.DBPath)
-	if err != nil {
-		return localapi.CodeGraphLifecycleStatus{}, err
-	}
-	defer gatewayStore.Close()
-	if request.Operation == localapi.CodeGraphEnable || request.Operation == localapi.CodeGraphCheckoutSet || request.Operation == localapi.CodeGraphRebuild {
-		multi, err := runtimeconfig.LoadMultiOrg()
-		if err != nil {
-			return localapi.CodeGraphLifecycleStatus{}, err
-		}
-		matchedProfile := ""
-		var matched runtimeconfig.Credentials
-		for profile, org := range multi.Orgs {
-			if org.Credentials.ProjectID != request.ProjectID {
-				continue
-			}
-			if matchedProfile != "" {
-				return localapi.CodeGraphLifecycleStatus{}, errors.New("code graph lifecycle: multiple credential profiles bind this project")
-			}
-			matchedProfile, matched = profile, org.Credentials
-		}
-		if matchedProfile == "" {
-			return localapi.CodeGraphLifecycleStatus{}, errors.New("code graph lifecycle: no credential profile binds this project")
-		}
-		if err := gatewayStore.ValidateReadyCheckpoint(ctx, request.ProjectID, matched.AgentID, matched.PassportID, matchedProfile); err != nil {
-			return localapi.CodeGraphLifecycleStatus{}, fmt.Errorf("code graph lifecycle: active credential is not a ready bootstrapped checkpoint: %w", err)
-		}
-		request.CredentialProfile, request.AgentID, request.PassportID = matchedProfile, matched.AgentID, matched.PassportID
-	}
-	lifecycle, err := localapi.NewCodeGraphLifecycle(ctx, gatewayStore.DB(), request.ProjectID)
-	if err != nil {
-		return localapi.CodeGraphLifecycleStatus{}, err
-	}
-	return lifecycle.Execute(ctx, request)
+	return response, nil
 }
