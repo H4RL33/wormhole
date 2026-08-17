@@ -1164,7 +1164,7 @@ Stage 1A human decision and R01-R05 design: approved 2026-08-17. The tracked rec
 `docs/superpowers/specs/2026-08-17-stage1a-r01-r05-foundation-reduction-design.md`.
 It accepts R01-R10 and R12 at programme level, rejects R11, defers R13/R14, freezes the exact
 four-row R10 automatic-recovery matrix, and selects only R01-R05 for the next implementation
-tranche after the written-spec review gate.
+tranche. The written-spec review was approved on 2026-08-17.
 R03 consumes Gateway migration `000005_workspace_revision.sql`; the old Task 6A and later
 migration-number reservations are stale pending replanning after this tranche.
 
@@ -1174,8 +1174,8 @@ with terminal history retained behind an explicit internal audit. Architecture r
 evidence lands before each mechanism deletion, final coverage remains at least 80%, and the
 comparison review must show net production/test/total deletion. R06+, lifecycle extraction,
 Tasks 6/6A/7/8, Stage 2, publication/filesystem/recovery simplification, terminal pruning,
-and unrelated cleanup remain hard-paused. The written-spec review gate precedes planning or
-production implementation.
+and unrelated cleanup remain hard-paused. The approved written spec now authorises the exact
+implementation plan; production work follows that plan only.
 
 The written design also freezes the implementation implications found during independent
 review: configured and sticky publication transitions share R04's compact

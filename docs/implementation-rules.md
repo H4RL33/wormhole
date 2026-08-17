@@ -13,7 +13,7 @@ successor migration numbering, and
 narrowly governing the Task-5 V1 publisher/recovery mechanism and platform boundary, and
 `docs/superpowers/specs/2026-08-17-stage1a-r01-r05-foundation-reduction-design.md`
 recording the Stage 1A human decision and narrowly governing the selected R01-R05
-private-persistence reduction after its written-spec review gate;
+private-persistence reduction after its approved written-spec review gate;
 `docs/implementation-rules.md`;
 existing code.
 This document derives from the RFCs and current code; if it conflicts with an RFC, the RFC
@@ -27,10 +27,10 @@ Approved programme and slice-plan execution amendments control task scope and se
 They cannot weaken an RFC requirement, but they can defer an otherwise described task or
 private implementation choice. Task-5 and the review-only Stage 1A gate are complete. The
 current amendment selects only R01-R05 and their objective comparison review as defined in
-the 2026-08-17 design. Its written-spec review remains pending: no implementation plan or
-production change is executable until that verdict is recorded. R06-R14 implementation,
-lifecycle extraction, Tasks 6, 6A, 7, 8, Stage 2, and supporting preparation require a later
-explicit human go/no-go.
+the 2026-08-17 design. Its written-spec review is approved; write the exact implementation
+plan before production changes, then execute only that plan through the comparison pause.
+R06-R14 implementation, lifecycle extraction, Tasks 6, 6A, 7, 8, Stage 2, and supporting
+preparation require a later explicit human go/no-go.
 
 ---
 

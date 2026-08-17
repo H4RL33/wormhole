@@ -21,9 +21,9 @@ repository-lineage scoped.
 Task-5 `5F`/`5G` and the review-only Stage 1A gate are complete. The human decision in
 `docs/superpowers/specs/2026-08-17-stage1a-r01-r05-foundation-reduction-design.md`
 selects exactly the R01-R05 private-persistence foundation reduction and its mandatory
-comparison review. Its written-spec review remains pending: no implementation plan or
-production change is executable until that verdict is recorded. That design controls every
-conflict with earlier private-proof or migration-reservation prose.
+comparison review. Its written-spec review was approved on 2026-08-17; write the exact
+implementation plan before production changes, then execute only that plan. The design
+controls every conflict with earlier private-proof or migration-reservation prose.
 
 No R06-R14 implementation, lifecycle coordinator extraction, package restructuring,
 Tasks 6, 6A, 7, or 8 preparation, Stage 2 work, publication-class migration, filesystem
@@ -55,10 +55,10 @@ tranche. Completion triggers another hard pause and explicit human decision.
 
 ### Stage 1: Portable Git-native project state
 
-Task-5 and the review-only Stage 1A gate are complete. After the written-spec review gate is
-recorded, execute only the approved R01-R05 foundation-reduction design, produce its
-objective scorecard, and pause. Tasks 6, mandatory Task 6A, 7, and 8 remain planned work,
-not authorised work.
+Task-5, the review-only Stage 1A gate, and the R01-R05 written-spec review are complete.
+Write the exact implementation plan, execute only the approved R01-R05
+foundation-reduction design, produce its objective scorecard, and pause. Tasks 6, mandatory
+Task 6A, 7, and 8 remain planned work, not authorised work.
 
 Gate: all Slice-A focused tests, migration tests, crash/recovery tests, `go test -race`
 targets, and `make check` pass at or above 80 percent merged coverage. Status/diff/import
@@ -89,8 +89,8 @@ implemented through Task 5:
 
 All four artifacts exist and the 2026-08-17 human decision record names the retained V1
 guarantee set, exact R10 recovery posture, and R01-R05 as the sole next selected tranche.
-The written-spec review remains its execution gate, and the tranche remains subject to its
-own measured-simplification pause.
+The written-spec review was approved on 2026-08-17, and the tranche remains subject to its
+own implementation plan and measured-simplification pause.
 
 ### Stage 2: Minimal Gateway, setup, and native connectors
 

@@ -1,7 +1,7 @@
 # Stage 1A R01-R05 Foundation-Reduction Design
 
-**Status:** Approved design; implementation not yet authorised until the written-spec
-review gate is passed.
+**Status:** Written-spec review approved 2026-08-17; R01-R05 implementation planning
+authorised.
 
 **Date:** 2026-08-17
 
@@ -88,9 +88,9 @@ power-loss durability contract continues to apply to the four automatic cases.
 
 ## 3. Authorised scope and stop boundary
 
-Once this written-spec review is approved, the first authorised implementation tranche is
-exactly R01-R05. It includes the schema, production, test, private CLI transport,
-documentation, and deletion work necessary to make those five decisions true.
+The approved first implementation tranche is exactly R01-R05. It includes the schema,
+production, test, private CLI transport, documentation, and deletion work necessary to make
+those five decisions true.
 
 It excludes:
 
