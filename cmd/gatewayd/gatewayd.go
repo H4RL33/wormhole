@@ -6,7 +6,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"net"
@@ -427,7 +426,7 @@ func runWithSyncEngineFactory(ctx context.Context, profileName string, factory s
 	for projectID := range syncEngines.notReady {
 		recoveryProjects = append(recoveryProjects, projectID)
 	}
-	_ = wireCodeGraphRuntimes(ctx, srv, store.DB(), codeGraphProjects, syncEngines.notReady)
+	_ = wireCodeGraphRuntimes(ctx, srv, codeGraphProjects, syncEngines.notReady)
 	srv.SetRecoveryOnlyProjects(recoveryProjects, len(recoveryProjects) == len(syncEngines.projects))
 	srv.SetEnrolmentRuntime(loadEnrolmentPolicy(), paths.CredentialsDir)
 	srv.EnableEnrolmentBootstrap(syncCfg)
@@ -454,7 +453,7 @@ var errCodeGraphRecoveryOnly = errors.New("Code Graph unavailable while project 
 // graph store must not prevent Gateway's enrolment/recovery surface from
 // serving. The returned per-project outcomes exist for deterministic tests and
 // future local health logging; callers deliberately continue on errors.
-func wireCodeGraphRuntimes(ctx context.Context, srv *localapi.Server, db *sql.DB, projectIDs []string, recoveryOnly map[string]bool) map[string]error {
+func wireCodeGraphRuntimes(ctx context.Context, srv *localapi.Server, projectIDs []string, recoveryOnly map[string]bool) map[string]error {
 	outcomes := make(map[string]error, len(projectIDs))
 	seen := make(map[string]struct{}, len(projectIDs))
 	for _, projectID := range projectIDs {
@@ -466,11 +465,8 @@ func wireCodeGraphRuntimes(ctx context.Context, srv *localapi.Server, db *sql.DB
 			outcomes[projectID] = errCodeGraphRecoveryOnly
 			continue
 		}
-		runtime, err := localapi.NewCodeGraphRuntime(ctx, db, projectID)
+		err := srv.EnsureCodeGraphRuntime(ctx, projectID)
 		outcomes[projectID] = err
-		if err == nil {
-			srv.SetCodeGraphRuntime(projectID, runtime)
-		}
 	}
 	return outcomes
 }

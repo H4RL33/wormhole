@@ -61,7 +61,7 @@ type CodeGraphLifecycle struct {
 	store   *codegraphstore.Store
 	index   *codegraphindex.Index
 	project string
-	mu      sync.Mutex
+	mu      *sync.Mutex
 	// beforeBuild is a same-package test seam after initial authorization and
 	// before the long candidate build.
 	beforeBuild func()
@@ -72,11 +72,11 @@ func NewCodeGraphLifecycle(ctx context.Context, db *sql.DB, projectID string) (*
 	if err != nil {
 		return nil, err
 	}
-	return &CodeGraphLifecycle{db: db, store: graphStore, index: codegraphindex.New(graphStore), project: projectID}, nil
+	return &CodeGraphLifecycle{db: db, store: graphStore, index: codegraphindex.New(graphStore), project: projectID, mu: &sync.Mutex{}}, nil
 }
 
 func (lifecycle *CodeGraphLifecycle) Execute(ctx context.Context, request CodeGraphLifecycleRequest) (CodeGraphLifecycleStatus, error) {
-	if lifecycle == nil || request.ProjectID != lifecycle.project {
+	if lifecycle == nil || lifecycle.mu == nil || request.ProjectID != lifecycle.project {
 		return CodeGraphLifecycleStatus{}, errors.New("code graph lifecycle: invalid project scope")
 	}
 	binding := codeGraphRepositoryBinding{}
@@ -85,6 +85,16 @@ func (lifecycle *CodeGraphLifecycle) Execute(ctx context.Context, request CodeGr
 			return CodeGraphLifecycleStatus{}, ErrCodeGraphRepositoryBinding
 		}
 		binding = codeGraphRepositoryBinding{profile: request.CredentialProfile, agent: request.AgentID, passport: request.PassportID}
+	}
+	return lifecycle.executeWithBinding(ctx, request, binding)
+}
+
+func (lifecycle *CodeGraphLifecycle) executeWithBinding(ctx context.Context, request CodeGraphLifecycleRequest, binding codeGraphRepositoryBinding) (CodeGraphLifecycleStatus, error) {
+	if lifecycle == nil || lifecycle.mu == nil || request.ProjectID != lifecycle.project {
+		return CodeGraphLifecycleStatus{}, errors.New("code graph lifecycle: invalid project scope")
+	}
+	if (binding.profile == "") != (binding.agent == "") || (binding.profile == "") != (binding.passport == "") {
+		return CodeGraphLifecycleStatus{}, ErrCodeGraphRepositoryBinding
 	}
 	switch request.Operation {
 	case CodeGraphEnable:
@@ -452,7 +462,7 @@ func (s *Server) resolveCodeGraphRuntime(projectID string) (CodeGraphRuntime, er
 		return CodeGraphRuntime{}, errors.New("code graph: project runtime unavailable")
 	}
 	runtime, ok := raw.(CodeGraphRuntime)
-	if !ok || runtime.projectID != projectID || runtime.Store == nil || runtime.Query == nil || runtime.Index == nil || runtime.rebuildMu == nil {
+	if !ok || !validCodeGraphRuntime(projectID, runtime) {
 		return CodeGraphRuntime{}, errors.New("code graph: project runtime unavailable")
 	}
 	return runtime, nil
@@ -561,9 +571,9 @@ func (s *Server) handleCodeGraphStatus(ctx context.Context, raw json.RawMessage)
 	if out.DatabaseSize, err = runtime.Store.DatabaseSize(ctx); err != nil {
 		return nil, err
 	}
-	building := !runtime.rebuildMu.TryLock()
+	building := !runtime.lifecycleMu.TryLock()
 	if !building {
-		runtime.rebuildMu.Unlock()
+		runtime.lifecycleMu.Unlock()
 	}
 	var revision codegraphstore.Revision
 	var counts codegraphstore.PayloadCounts
@@ -661,10 +671,10 @@ func (s *Server) handleCodeGraphRebuild(ctx context.Context, raw json.RawMessage
 	if err != nil {
 		return nil, err
 	}
-	if !runtime.rebuildMu.TryLock() {
+	if !runtime.lifecycleMu.TryLock() {
 		return nil, errors.New("code graph: rebuild already in progress")
 	}
-	defer runtime.rebuildMu.Unlock()
+	defer runtime.lifecycleMu.Unlock()
 	if err := runtime.Index.Build(ctx, codegraphindex.BuildRequest{ProjectID: args.ProjectID, RevisionID: fmt.Sprintf("mcp-rebuild-%d", time.Now().UTC().UnixNano())}); err != nil {
 		return nil, err
 	}

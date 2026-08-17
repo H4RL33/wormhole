@@ -90,11 +90,11 @@ func TestCodeGraphRebuildRejectsConcurrentDisabledForeignAndDangerousRequestsWit
 		}
 	}
 	wantCount := count()
-	runtime.rebuildMu.Lock()
+	runtime.lifecycleMu.Lock()
 	if _, err := srv.handleCodeGraphRebuild(context.Background(), json.RawMessage(`{"project_id":"project-1"}`)); err == nil || !strings.Contains(err.Error(), "already in progress") {
 		t.Fatalf("concurrent rebuild error = %v", err)
 	}
-	runtime.rebuildMu.Unlock()
+	runtime.lifecycleMu.Unlock()
 	assertActive(wantCount)
 
 	if _, err := srv.handleCodeGraphRebuild(context.Background(), json.RawMessage(`{"project_id":"project-2"}`)); err == nil {

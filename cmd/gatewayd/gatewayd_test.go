@@ -31,19 +31,24 @@ func TestWireCodeGraphRuntimesIsolatesReadyRecoveryAndUnavailableProjects(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &localapi.Server{}
-	ready := wireCodeGraphRuntimes(context.Background(), srv, store.DB(), []string{"project-a", "project-b", "project-a"}, nil)
+	er := localstore.NewEventRepo(store.DB())
+	srv, err := localapi.New(filepath.Join(t.TempDir(), "gateway.sock"), "", "", "project-a", store, localstore.NewTaskRepo(store.DB(), er), er, localstore.NewKBRepo(store.DB()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	ready := wireCodeGraphRuntimes(context.Background(), srv, []string{"project-a", "project-b", "project-a"}, nil)
 	if len(ready) != 2 || ready["project-a"] != nil || ready["project-b"] != nil {
 		t.Fatalf("ready wiring outcomes = %+v, want one successful runtime per unique project", ready)
 	}
-	recovery := wireCodeGraphRuntimes(context.Background(), srv, store.DB(), []string{"project-ready", "project-recovery"}, map[string]bool{"project-recovery": true})
+	recovery := wireCodeGraphRuntimes(context.Background(), srv, []string{"project-ready", "project-recovery"}, map[string]bool{"project-recovery": true})
 	if recovery["project-ready"] != nil || !errors.Is(recovery["project-recovery"], errCodeGraphRecoveryOnly) {
 		t.Fatalf("recovery wiring outcomes = %+v", recovery)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	unavailable := wireCodeGraphRuntimes(context.Background(), srv, store.DB(), []string{"project-unavailable"}, nil)
+	unavailable := wireCodeGraphRuntimes(context.Background(), srv, []string{"project-unavailable"}, nil)
 	if unavailable["project-unavailable"] == nil {
 		t.Fatalf("closed derivative store unexpectedly wired: %+v", unavailable)
 	}

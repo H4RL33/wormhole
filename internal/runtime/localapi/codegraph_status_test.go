@@ -82,8 +82,8 @@ func TestCodeGraphStatusSixStatesAndRequiredFields(t *testing.T) {
 func TestCodeGraphStatusPreservesActiveFieldsWhileRebuildInProgress(t *testing.T) {
 	srv, runtime, _ := newCodeGraphStatusFixture(t)
 	buildCodeGraphFixture(t, runtime, "active-before-rebuild")
-	runtime.rebuildMu.Lock()
-	defer runtime.rebuildMu.Unlock()
+	runtime.lifecycleMu.Lock()
+	defer runtime.lifecycleMu.Unlock()
 	result := codeGraphStatus(t, srv)
 	if result.State != "initializing" || result.ActiveRevision != "active-before-rebuild" || result.SymbolCount < 1 || result.EdgeCount < 1 || result.LastSuccessfulBuild == nil {
 		t.Fatalf("in-progress status lost active graph fields: %+v", result)

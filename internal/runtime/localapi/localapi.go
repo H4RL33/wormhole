@@ -171,6 +171,7 @@ type Server struct {
 	// authorizationAgents binds each project to the agent id in the active
 	// credential profile, preventing stale cache rows from authorizing it.
 	authorizationAgents sync.Map // map[projectID]agentID
+	codeGraphSetupMu    sync.Mutex
 	codeGraphs          sync.Map // map[projectID]CodeGraphRuntime
 
 	// testBeforeHandlerStart is a deterministic test barrier between admission
@@ -203,11 +204,12 @@ type Server struct {
 // CodeGraphRuntime is one explicitly project-bound local Code Graph. Gateway
 // construction owns it; callers cannot select a checkout, limits, or store.
 type CodeGraphRuntime struct {
-	projectID string
-	Store     *codegraphstore.Store
-	Query     *codegraphquery.Service
-	Index     *codegraphindex.Index
-	rebuildMu *sync.Mutex
+	projectID   string
+	Store       *codegraphstore.Store
+	Query       *codegraphquery.Service
+	Index       *codegraphindex.Index
+	Lifecycle   *CodeGraphLifecycle
+	lifecycleMu *sync.Mutex
 }
 
 // NewCodeGraphRuntime opens one project-bound store over Gateway's SQLite
@@ -218,21 +220,67 @@ func NewCodeGraphRuntime(ctx context.Context, db *sql.DB, projectID string) (Cod
 	if err != nil {
 		return CodeGraphRuntime{}, err
 	}
+	index := codegraphindex.New(graphStore)
+	lifecycleMu := &sync.Mutex{}
 	return CodeGraphRuntime{
 		projectID: projectID,
 		Store:     graphStore,
 		Query:     codegraphquery.New(graphStore, codegraphconfig.DefaultProjectSourceByteCeiling),
-		Index:     codegraphindex.New(graphStore),
-		rebuildMu: &sync.Mutex{},
+		Index:     index,
+		Lifecycle: &CodeGraphLifecycle{
+			db: db, store: graphStore, index: index, project: projectID, mu: lifecycleMu,
+		},
+		lifecycleMu: lifecycleMu,
 	}, nil
 }
 
 // SetCodeGraphRuntime binds a runtime to precisely one project. A nil or
 // incomplete runtime is ignored so unavailable graph state fails closed.
 func (s *Server) SetCodeGraphRuntime(projectID string, runtime CodeGraphRuntime) {
-	if projectID != "" && runtime.projectID == projectID && runtime.Store != nil && runtime.Query != nil && runtime.Index != nil && runtime.rebuildMu != nil {
+	s.codeGraphSetupMu.Lock()
+	defer s.codeGraphSetupMu.Unlock()
+	if validCodeGraphRuntime(projectID, runtime) {
+		if _, exists := s.codeGraphs.Load(projectID); exists {
+			return
+		}
 		s.codeGraphs.Store(projectID, runtime)
 	}
+}
+
+// EnsureCodeGraphRuntime opens and atomically publishes one complete
+// project-bound runtime. It is safe for eager Gateway wiring and concurrent
+// pre-credential lifecycle access.
+func (s *Server) EnsureCodeGraphRuntime(ctx context.Context, projectID string) error {
+	_, err := s.ensureCodeGraphRuntime(ctx, projectID)
+	return err
+}
+
+func (s *Server) ensureCodeGraphRuntime(ctx context.Context, projectID string) (CodeGraphRuntime, error) {
+	if projectID == "" || s.store == nil {
+		return CodeGraphRuntime{}, errors.New("code graph: project runtime unavailable")
+	}
+	s.codeGraphSetupMu.Lock()
+	defer s.codeGraphSetupMu.Unlock()
+	if raw, ok := s.codeGraphs.Load(projectID); ok {
+		runtime, ok := raw.(CodeGraphRuntime)
+		if !ok || !validCodeGraphRuntime(projectID, runtime) {
+			return CodeGraphRuntime{}, errors.New("code graph: project runtime unavailable")
+		}
+		return runtime, nil
+	}
+	runtime, err := NewCodeGraphRuntime(ctx, s.store.DB(), projectID)
+	if err != nil {
+		return CodeGraphRuntime{}, err
+	}
+	s.codeGraphs.Store(projectID, runtime)
+	return runtime, nil
+}
+
+func validCodeGraphRuntime(projectID string, runtime CodeGraphRuntime) bool {
+	return projectID != "" && runtime.projectID == projectID && runtime.Store != nil && runtime.Query != nil && runtime.Index != nil &&
+		runtime.Lifecycle != nil && runtime.lifecycleMu != nil && runtime.Lifecycle.db != nil &&
+		runtime.Lifecycle.store == runtime.Store && runtime.Lifecycle.index == runtime.Index &&
+		runtime.Lifecycle.project == projectID && runtime.Lifecycle.mu == runtime.lifecycleMu
 }
 
 // SetVersion sets the linker-injected Gateway version reported by MCP
