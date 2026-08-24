@@ -1324,3 +1324,17 @@ All G03/G05/A10/A12-A17/A23 prerequisites passed before deletion. Fresh focused,
 localstore/projectstate, vet, formatting, authority, and diff gates passed; PostgreSQL remains
 the external integration limitation. Tracked Task-12 change is `+1097/-1723`, net `-626`.
 Task 13 is next; no Task 13 publication-authority migration entered Task 12.
+
+Stage 1A R01-R05 execution: Task 13 complete (commit `2941341`, independent
+specification and quality re-reviews clean). Configured and sticky publication transitions
+now use the shared compact confirmation envelope with exact workspace scope, projected
+revision, transition class, and canonical current-policy authority in one coherent read
+snapshot. Attempts bind their capture scope and reject cross-scope confirmation before
+repository access. Registration, reconfiguration, review, and checkpoint hot paths are
+current-only; ordered policy history is reachable solely through `AuditWorkspaceHistory`.
+Synthetic revision-sized test history and tautological length assertions were removed in
+favour of actual current/public behavior and explicit audit tests. Every mandated R04
+prerequisite plus directly affected A02/A11 coverage passed before legacy authority deletion.
+Focused, race, full localstore/projectstate, vet, authority, formatting, and diff gates passed.
+Tracked Task-13 change is `+555/-227` with production net `-2`. Task 14 is next; no Task 14
+complete-workset or proof-forest deletion entered Task 13.
