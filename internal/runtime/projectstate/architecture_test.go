@@ -17,6 +17,50 @@ import (
 	state "github.com/H4RL33/wormhole/internal/types/projectstate"
 )
 
+func TestStage1ASoleWorkspaceAuthorities(t *testing.T) {
+	root := filepath.Join("..", "..", "..")
+	sources := architectureProductionGoSources(t, root)
+
+	t.Run("superseded authorities stay absent", func(t *testing.T) {
+		for _, forbidden := range []string{
+			"Workspace" + "CheckpointCommitState",
+			"Capture" + "CheckpointCommitState",
+			"Confirm" + "CheckpointCommit",
+			"Workspace" + "Materialization" + "Disposition",
+			"Materialization" + "Disposition",
+			"Workspace" + "Restore" + "RetryState",
+			"Restore" + "RetryState",
+			"." + "Operation" + "Audit(",
+			"." + "PublicationPolicy" + "History(",
+		} {
+			assertArchitectureSourceAbsent(t, sources, forbidden)
+		}
+	})
+
+	t.Run("one owner remains for each authority family", func(t *testing.T) {
+		assertArchitectureSourceMatchesExactly(t, sources, "localstore."+"Open(", "cmd/gatewayd/gatewayd.go", 1)
+		for _, authority := range []string{
+			"type workspace" + "RevisionTracker struct",
+			"func (tx *WorkspaceMutationTx) mark" + "WorkspaceDirty",
+			"func (tx *WorkspaceMutationTx) finalize" + "WorkspaceRevision",
+		} {
+			assertArchitectureSourceMatchesExactly(t, sources, authority, "internal/runtime/localstore/workspace_revision_repo.go", 1)
+		}
+		assertArchitectureSourceMatchesExactly(t, sources,
+			"func (tx *WorkspaceMutationTx) Current"+"Materialization",
+			"internal/runtime/localstore/workspace_current_mutation_repo.go", 1)
+		assertArchitectureSourceMatchesExactly(t, sources,
+			"func (tx *WorkspaceMutationTx) Restore"+"CurrentState",
+			"internal/runtime/localstore/workspace_restore_retry_repo.go", 1)
+		assertArchitectureSourceMatchesExactly(t, sources,
+			"func (r *WorkspaceRepo) Audit"+"WorkspaceHistory",
+			"internal/runtime/localstore/workspace_history_audit.go", 1)
+		assertArchitectureSourceMatchesExactly(t, sources,
+			"func (r *WorkspaceRepo) Confirm"+"WorkspaceCommit",
+			"internal/runtime/localstore/workspace_commit_confirmation.go", 1)
+	})
+}
+
 func TestCompactTargetedCommitConfirmationNeverReplays(t *testing.T) {
 	t.Run("journal", func(t *testing.T) {
 		fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
@@ -83,6 +127,64 @@ func TestCompactTargetedCommitConfirmationNeverReplays(t *testing.T) {
 			t.Fatalf("transactions=%d, want 1 without replay", transactionCalls)
 		}
 	})
+}
+
+func architectureProductionGoSources(t *testing.T, root string) map[string]string {
+	t.Helper()
+	sources := make(map[string]string)
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if entry.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		sources[filepath.ToSlash(relative)] = string(data)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return sources
+}
+
+func assertArchitectureSourceAbsent(t *testing.T, sources map[string]string, forbidden string) {
+	t.Helper()
+	for path, source := range sources {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("superseded authority %q remains in %s", forbidden, path)
+		}
+	}
+}
+
+func assertArchitectureSourceMatchesExactly(t *testing.T, sources map[string]string, authority, want string, wantCount int) {
+	t.Helper()
+	matches := make([]string, 0, 1)
+	count := 0
+	for path, source := range sources {
+		occurrences := strings.Count(source, authority)
+		if occurrences != 0 {
+			matches = append(matches, path)
+			count += occurrences
+		}
+	}
+	sort.Strings(matches)
+	if !reflect.DeepEqual(matches, []string{want}) || count != wantCount {
+		t.Fatalf("authority %q owners=%v occurrences=%d, want [%s] and %d", authority, matches, count, want, wantCount)
+	}
 }
 
 func TestCoarsePrivateCorruptionFailsClosedWithoutCrossScopeMutation(t *testing.T) {
