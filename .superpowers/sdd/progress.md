@@ -1351,3 +1351,14 @@ and the revision-1 V1 receipt adapter remain; complete history is reachable only
 `AuditWorkspaceHistory`. Post-deletion exact, race, full-package, vet, formatting, and
 zero-authority gates passed. Complete Task-14 delivery is `+719/-9409` including the ledger,
 net `-8690`. Task 15 is next; no Task-15 representation sweep entered Task 14.
+
+Stage 1A R01-R05 execution: Task 15 complete (commit `6adfa29`, independent
+specification and quality re-reviews clean). A durable architecture gate now proves zero
+superseded Go authorities and exact counts/paths for the sole database opener, revision
+tracker/finalizer, compact confirmer, current-workset composition, and explicit history audit.
+A same-file duplicate `localstore.Open` causal mutation failed with occurrence count 2 and was
+restored. The ledger command audit found four grouped selectors using escaped alternation that
+could pass while running zero tests; authoritative cells were corrected in place, all stored
+commands and nine canonical verbose reruns passed, and no escaped command alternation remains.
+Five-package normal and race suites, formatting, and diff gates passed; all 38 ledger rows are
+green. Task 16 is next; no production Go or Task-16 representation sweep entered Task 15.
