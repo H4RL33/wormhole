@@ -1338,3 +1338,16 @@ prerequisite plus directly affected A02/A11 coverage passed before legacy author
 Focused, race, full localstore/projectstate, vet, authority, formatting, and diff gates passed.
 Tracked Task-13 change is `+555/-227` with production net `-2`. Task 14 is next; no Task 14
 complete-workset or proof-forest deletion entered Task 13.
+
+Stage 1A R01-R05 execution: Task 14 complete (commit `5dca137`, independent
+specification and quality re-reviews clean). Checkpoint, recovery, materialisation, import,
+Git observation, publication, and restore now operate on exact current/named worksets; no-owner
+and recovered-new recovery return from one database snapshot before Git/path I/O, while
+prepared/published recovery retains the existing writer transaction, Git bundle, filesystem
+classifier, durability, and R10 behavior. Complete materialisation, restore-retry, operation
+audit, adjacent/raw metadata, and terminal-plan proof forests plus 107 mechanism tests were
+deleted only after G04 and all 41 A08-A17/A22/A23 prerequisites passed. V2 restore authority
+and the revision-1 V1 receipt adapter remain; complete history is reachable only through
+`AuditWorkspaceHistory`. Post-deletion exact, race, full-package, vet, formatting, and
+zero-authority gates passed. Complete Task-14 delivery is `+719/-9409` including the ledger,
+net `-8690`. Task 15 is next; no Task-15 representation sweep entered Task 14.
