@@ -1311,3 +1311,16 @@ PostgreSQL remains the only external `make check` blocker. The family is locally
 simplification pause removed 61 net production lines of duplicate proof logic and confirmed
 that further Task-11 deletion would prematurely erase Task-14 evidence. Task 12 may begin only
 from this recorded pause; no Task 12/R04 work entered Task 11.
+
+Stage 1A R01-R05 execution: Task 12 complete (commit `47778be`, independent
+specification and quality re-reviews clean). Journal prepare/finalise/recovery unknown-COMMIT
+confirmation now uses exact scope, projected workspace revision, targeted journal authority,
+current owner, and canonical journal-owned logical postimage in one coherent read snapshot.
+Recovered-old remains target-present/current-owner-absent; legitimate alternate ownership
+classifies third, while expected tokens retain strict topology validation. Checkpoint sticky
+invalidation temporarily uses the existing publication-specific seam pending Task 13. The
+universal checkpoint token and its mechanism-test file were deleted; zero old symbols remain.
+All G03/G05/A10/A12-A17/A23 prerequisites passed before deletion. Fresh focused, race, full
+localstore/projectstate, vet, formatting, authority, and diff gates passed; PostgreSQL remains
+the external integration limitation. Tracked Task-12 change is `+1097/-1723`, net `-626`.
+Task 13 is next; no Task 13 publication-authority migration entered Task 12.
