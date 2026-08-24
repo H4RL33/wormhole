@@ -1254,3 +1254,17 @@ restore status transitions. Fresh post-review inventory, focused service, race, 
 localstore/projectstate, vet, formatting, authority, and diff gates passed. Task 8 is the
 next authorized dependency; publication, materialisation, and checkpoint writers remain
 unmarked.
+
+Stage 1A R01-R05 execution: Task 8 complete (commit `9385380`, independent
+specification and quality reviews clean). Publication configuration/sticky invalidation and
+materialisation prepare/transition/accept now mark the sole tracker after their complete
+semantic postconditions. Checkpoint prepare and finalisation remain separate `+1`
+transactions; recovery finalisation and Git acceptance advance once despite composed
+multiwriter work. In-callback checkpoint evidence carries the projected revision, while one
+token-local comparator keeps only the legacy Task-12 checkpoint token revision-blind without
+weakening general publication equality. Exact RED/GREEN/restoration evidence was recorded
+for omitted marking, double finalisation, and unchecked overflow; retained raw and Linux
+recovery tests separately require the exact revision delta while preserving all other
+whole-state assertions. Fresh focused, race, full localstore/projectstate, vet, formatting,
+authority, and diff gates passed. Task 9 is the next authorized dependency; no R02
+private-corruption proof deletion or R04/R05 work entered Task 8.
