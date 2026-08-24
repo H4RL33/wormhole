@@ -492,7 +492,9 @@ func TestServiceStashRollsBackEveryWriteStage(t *testing.T) {
 		}, trigger: `
 			CREATE TRIGGER stash_fault BEFORE UPDATE OF state ON workspace_overlay_operations
 			WHEN OLD.generation=7 AND NEW.state='stashed' BEGIN SELECT RAISE(ABORT,'later transition'); END`},
-		{name: "status", trigger: `
+		{name: "status", prepare: func(t *testing.T, fixture stashServiceFixture) {
+			setServiceWorkspaceState(t, fixture.store, fixture.req.Scope, "pending")
+		}, trigger: `
 			CREATE TRIGGER stash_fault BEFORE UPDATE OF status ON workspace_bindings BEGIN SELECT RAISE(ABORT,'status'); END`},
 		{name: "receipt", trigger: `
 			CREATE TRIGGER stash_fault BEFORE INSERT ON workspace_transition_receipts BEGIN SELECT RAISE(ABORT,'receipt'); END`},

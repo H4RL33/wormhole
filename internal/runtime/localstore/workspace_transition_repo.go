@@ -142,7 +142,7 @@ func (tx *WorkspaceMutationTx) InsertTransitionReceipt(ctx context.Context, rece
 	if inserted != 1 {
 		return fmt.Errorf("localstore: workspace transition receipt insert affected %d rows", inserted)
 	}
-	return nil
+	return tx.markWorkspaceDirty(ctx)
 }
 
 type workspaceTransitionReceiptQueryer interface {

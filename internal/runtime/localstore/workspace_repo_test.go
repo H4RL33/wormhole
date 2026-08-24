@@ -341,6 +341,10 @@ func TestWorkspaceMutationTxAdvanceAcceptedBaseSameStatementTimestampRawAtomicDe
 		t.Fatal(err)
 	}
 	before := readAtomicWorkspaceRawSnapshot(t, store.DB())
+	beforeWorkspace, err := repo.Workspace(context.Background(), binding.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
 	observedTree := changedWorkspaceTree(t, binding, "Observed")
 	observedSnapshot, err := state.DecodeTree(observedTree)
 	if err != nil {
@@ -370,13 +374,14 @@ func TestWorkspaceMutationTxAdvanceAcceptedBaseSameStatementTimestampRawAtomicDe
 		"workspace_id": quoteSQLiteTextLiteral(string(binding.Scope.WorkspaceID)),
 	}
 	assertAtomicWorkspaceRawDelta(t, before, after, "workspace_bindings", targetKeys, "accepted_ref", "accepted_commit",
-		"accepted_digest", "accepted_snapshot", "status", "updated_at")
+		"accepted_digest", "accepted_snapshot", "status", "updated_at", "workspace_revision")
 	target := findAtomicWorkspaceRawRow(t, after, "workspace_bindings", targetKeys)
 	assertRawAtomicCell(t, target, "accepted_ref", quoteSQLiteTextLiteral("refs/heads/next"), "text")
 	assertRawAtomicCell(t, target, "accepted_commit", quoteSQLiteTextLiteral(strings.Repeat("c", 40)), "text")
 	assertRawAtomicCell(t, target, "accepted_digest", quoteSQLiteTextLiteral(string(observedSnapshot.Digest)), "text")
 	assertRawAtomicCell(t, target, "accepted_snapshot", fmt.Sprintf("X'%X'", observedBytes), "blob")
 	assertRawAtomicCell(t, target, "status", quoteSQLiteTextLiteral("pending"), "text")
+	assertRawAtomicCell(t, target, "workspace_revision", fmt.Sprint(beforeWorkspace.WorkspaceRevision+1), "integer")
 	var probe, persisted string
 	if err := store.DB().QueryRow(`SELECT value FROM accepted_base_timestamp_probe`).Scan(&probe); err != nil {
 		t.Fatal(err)

@@ -256,8 +256,8 @@ func TestServiceRestoreStashCleanRollsBackEveryWriteStage(t *testing.T) {
 	}{
 		{name: "candidate insert aborted", newFixture: newRestoreCleanInsertWriteFixture,
 			trigger: `CREATE TRIGGER restore_fault BEFORE INSERT ON workspace_candidates BEGIN SELECT RAISE(ABORT,'candidate insert'); END`},
-		{name: "candidate update ignored", trigger: `CREATE TRIGGER restore_fault BEFORE UPDATE ON workspace_candidates
-			BEGIN SELECT RAISE(IGNORE); END`},
+		{name: "candidate update aborted", trigger: `CREATE TRIGGER restore_fault BEFORE UPDATE ON workspace_candidates
+			BEGIN SELECT RAISE(ABORT,'candidate update'); END`},
 		{name: "second active transition aborted", trigger: `CREATE TRIGGER restore_fault BEFORE UPDATE OF state,stashed_by_stash_id ON workspace_overlay_operations
 			WHEN OLD.generation=3 AND OLD.state='active' AND NEW.state='rebased' AND NEW.stashed_by_stash_id IS NULL
 			BEGIN SELECT RAISE(ABORT,'second active transition'); END`},
@@ -334,7 +334,7 @@ func TestServiceRestoreStashConflictedWriteOrderIsExact(t *testing.T) {
 	for _, conflict := range got.Conflicts {
 		want = append(want, "conflict_insert:"+conflict.ID)
 	}
-	want = append(want, "status:conflicted", "receipt:conflicted")
+	want = append(want, "receipt:conflicted")
 	if order := restoreWriteOrder(t, fixture.store); !reflect.DeepEqual(order, want) {
 		t.Fatalf("conflicted write order=%v, want %v", order, want)
 	}
@@ -343,19 +343,35 @@ func TestServiceRestoreStashConflictedWriteOrderIsExact(t *testing.T) {
 func TestServiceRestoreStashConflictedRollsBackEveryWriteStage(t *testing.T) {
 	for _, test := range []struct {
 		name    string
+		prepare func(*testing.T, restoreServiceFixture)
 		trigger string
 	}{
 		{name: "stale conflict resolution", trigger: `CREATE TRIGGER restore_fault BEFORE UPDATE OF state,resolved_at ON workspace_conflicts
 			WHEN OLD.state='open' AND NEW.state='resolved' BEGIN SELECT RAISE(ABORT,'conflict resolve'); END`},
 		{name: "desired conflict insertion", trigger: `CREATE TRIGGER restore_fault BEFORE INSERT ON workspace_conflicts
 			WHEN NEW.state='open' BEGIN SELECT RAISE(ABORT,'conflict insert'); END`},
-		{name: "conflicted status", trigger: `CREATE TRIGGER restore_fault BEFORE UPDATE OF status ON workspace_bindings
+		{name: "conflicted status", prepare: func(t *testing.T, fixture restoreServiceFixture) {
+			result, err := fixture.store.DB().Exec(`
+				DELETE FROM workspace_conflicts WHERE project_id=? AND workspace_id=?
+			`, fixture.req.Scope.ProjectID, fixture.req.Scope.WorkspaceID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			deleted, err := result.RowsAffected()
+			if err != nil || deleted != 1 {
+				t.Fatalf("delete seeded restore conflict=(%d,%v), want (1,nil)", deleted, err)
+			}
+			setServiceWorkspaceState(t, fixture.store, fixture.req.Scope, "pending")
+		}, trigger: `CREATE TRIGGER restore_fault BEFORE UPDATE OF status ON workspace_bindings
 			WHEN NEW.status='conflicted' BEGIN SELECT RAISE(ABORT,'conflicted status'); END`},
 		{name: "conflicted receipt", trigger: `CREATE TRIGGER restore_fault BEFORE INSERT ON workspace_transition_receipts
 			WHEN NEW.action='restore' AND NEW.outcome='conflicted' BEGIN SELECT RAISE(ABORT,'conflicted receipt'); END`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newRestoreConflictedWriteFixture(t)
+			if test.prepare != nil {
+				test.prepare(t, fixture)
+			}
 			if _, err := fixture.store.DB().Exec(test.trigger); err != nil {
 				t.Fatal(err)
 			}
@@ -1258,7 +1274,7 @@ func installRestoreWriteOrderLog(t *testing.T, store *localstore.Store) {
 		CREATE TRIGGER restore_order_conflict_insert AFTER INSERT ON workspace_conflicts BEGIN INSERT INTO restore_write_order(stage) VALUES ('conflict_insert:'||NEW.conflict_id); END;
 		CREATE TRIGGER restore_order_conflict_update AFTER UPDATE ON workspace_conflicts BEGIN INSERT INTO restore_write_order(stage) VALUES ('conflict_resolve'); END;
 		CREATE TRIGGER restore_order_conflict_delete AFTER DELETE ON workspace_conflicts BEGIN INSERT INTO restore_write_order(stage) VALUES ('conflict_unexpected_delete'); END;
-		CREATE TRIGGER restore_order_status AFTER UPDATE ON workspace_bindings BEGIN INSERT INTO restore_write_order(stage) VALUES ('status:'||NEW.status); END;
+		CREATE TRIGGER restore_order_status AFTER UPDATE OF status ON workspace_bindings BEGIN INSERT INTO restore_write_order(stage) VALUES ('status:'||NEW.status); END;
 		CREATE TRIGGER restore_order_stash_insert AFTER INSERT ON workspace_stashes BEGIN INSERT INTO restore_write_order(stage) VALUES ('stash_unexpected_insert'); END;
 		CREATE TRIGGER restore_order_stash_update AFTER UPDATE ON workspace_stashes BEGIN INSERT INTO restore_write_order(stage) VALUES ('stash_unexpected_update'); END;
 		CREATE TRIGGER restore_order_stash_delete AFTER DELETE ON workspace_stashes BEGIN INSERT INTO restore_write_order(stage) VALUES ('stash_delete'); END;

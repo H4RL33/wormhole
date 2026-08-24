@@ -221,10 +221,6 @@ func (tx *WorkspaceMutationTx) AdvanceAcceptedBase(ctx context.Context, transiti
 	if !equalWorkspaceRecords(current, transition.Expected) {
 		return WorkspaceRecord{}, fmt.Errorf("localstore: accepted-base transition precondition mismatch")
 	}
-	metadata, err := tx.workspaceBindingMutationMetadata(ctx)
-	if err != nil {
-		return WorkspaceRecord{}, err
-	}
 
 	observedSnapshot, observedBytes, err := canonicalObservedWorkspaceTree(transition.ObservedTree)
 	if err != nil {
@@ -241,9 +237,20 @@ func (tx *WorkspaceMutationTx) AdvanceAcceptedBase(ctx context.Context, transiti
 	if err := nextBinding.Validate(); err != nil {
 		return WorkspaceRecord{}, fmt.Errorf("localstore: invalid observed accepted-base binding: %w", err)
 	}
+	want := WorkspaceRecord{
+		Binding: nextBinding, Snapshot: observedSnapshot, State: transition.NextState,
+		WorkspaceRevision: transition.Expected.WorkspaceRevision,
+	}
+	if equalWorkspaceRecords(current, want) {
+		return current, nil
+	}
 	repositoryJSON, err := json.Marshal(transition.Expected.Binding.Repository)
 	if err != nil {
 		return WorkspaceRecord{}, fmt.Errorf("localstore: encode expected accepted-base repository: %w", err)
+	}
+	metadata, err := tx.workspaceBindingMutationMetadata(ctx)
+	if err != nil {
+		return WorkspaceRecord{}, err
 	}
 
 	var returnedAt time.Time
@@ -280,10 +287,6 @@ func (tx *WorkspaceMutationTx) AdvanceAcceptedBase(ctx context.Context, transiti
 	if err != nil {
 		return WorkspaceRecord{}, fmt.Errorf("localstore: reread accepted-base advance: %w", err)
 	}
-	want := WorkspaceRecord{
-		Binding: nextBinding, Snapshot: observedSnapshot, State: transition.NextState,
-		WorkspaceRevision: transition.Expected.WorkspaceRevision,
-	}
 	if !equalWorkspaceRecords(post, want) {
 		return WorkspaceRecord{}, fmt.Errorf("localstore: accepted-base transition post-state mismatch")
 	}
@@ -294,6 +297,9 @@ func (tx *WorkspaceMutationTx) AdvanceAcceptedBase(ctx context.Context, transiti
 	if postMetadata.CreatedRaw != metadata.CreatedRaw || !postMetadata.CreatedAt.Equal(metadata.CreatedAt) ||
 		postMetadata.UpdatedRaw != returnedRaw || !postMetadata.UpdatedAt.Equal(returnedAt) {
 		return WorkspaceRecord{}, fmt.Errorf("localstore: accepted-base transition metadata drift")
+	}
+	if err := tx.markWorkspaceDirty(ctx); err != nil {
+		return WorkspaceRecord{}, err
 	}
 	return post, nil
 }
@@ -590,7 +596,7 @@ func (tx *WorkspaceMutationTx) TransitionOperations(ctx context.Context, operati
 			return fmt.Errorf("localstore: workspace operation transition affected %d rows", affected)
 		}
 	}
-	return nil
+	return tx.markWorkspaceDirty(ctx)
 }
 
 // NextGeneration allocates after the greatest generation in every persisted
@@ -674,7 +680,7 @@ func (tx *WorkspaceMutationTx) InsertActiveOperations(ctx context.Context, opera
 			return fmt.Errorf("localstore: active workspace operation insert affected %d rows", inserted)
 		}
 	}
-	return nil
+	return tx.markWorkspaceDirty(ctx)
 }
 
 // SetStatus changes only the binding owned by this immediate transaction.
@@ -694,9 +700,20 @@ func (tx *WorkspaceMutationTx) SetStatusReturningUpdatedAt(ctx context.Context, 
 	default:
 		return time.Time{}, fmt.Errorf("localstore: invalid workspace state %q", state)
 	}
+	workspace, err := tx.Workspace(ctx)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if workspace.State == state {
+		metadata, err := tx.workspaceBindingMutationMetadata(ctx)
+		if err != nil {
+			return time.Time{}, err
+		}
+		return metadata.UpdatedAt, nil
+	}
 	var updatedAt time.Time
 	var updatedAtClass string
-	err := tx.conn.QueryRowContext(ctx, `
+	err = tx.conn.QueryRowContext(ctx, `
 		UPDATE workspace_bindings
 		SET status=?, updated_at=CURRENT_TIMESTAMP
 		WHERE project_id=? AND workspace_id=?
@@ -710,6 +727,9 @@ func (tx *WorkspaceMutationTx) SetStatusReturningUpdatedAt(ctx context.Context, 
 	}
 	if updatedAtClass != "text" || !validUTCTimestamp(updatedAt) {
 		return time.Time{}, fmt.Errorf("localstore: invalid workspace status update timestamp")
+	}
+	if err := tx.markWorkspaceDirty(ctx); err != nil {
+		return time.Time{}, err
 	}
 	return updatedAt.UTC(), nil
 }
@@ -845,6 +865,13 @@ func (tx *WorkspaceMutationTx) UpsertCandidate(ctx context.Context, candidate Wo
 		 rebased_through_generation=excluded.rebased_through_generation,
 		 imported_by=excluded.imported_by,
 		 imported_at=excluded.imported_at
+		WHERE workspace_candidates.accepted_base_digest IS NOT excluded.accepted_base_digest
+		   OR workspace_candidates.working_tree_digest IS NOT excluded.working_tree_digest
+		   OR workspace_candidates.direct_tree IS NOT excluded.direct_tree
+		   OR workspace_candidates.rebased_tree IS NOT excluded.rebased_tree
+		   OR workspace_candidates.rebased_through_generation IS NOT excluded.rebased_through_generation
+		   OR workspace_candidates.imported_by IS NOT excluded.imported_by
+		   OR workspace_candidates.imported_at IS NOT excluded.imported_at
 	`, tx.scope.ProjectID, tx.scope.WorkspaceID, candidate.AcceptedBaseDigest,
 		candidate.WorkingTreeDigest, directBytes, rebasedBytes, candidate.RebasedThroughGeneration,
 		candidate.ImportedBy, candidate.ImportedAt.UTC())
@@ -855,10 +882,13 @@ func (tx *WorkspaceMutationTx) UpsertCandidate(ctx context.Context, candidate Wo
 	if err != nil {
 		return fmt.Errorf("localstore: inspect workspace candidate upsert: %w", err)
 	}
-	if affected != 1 {
+	if affected < 0 || affected > 1 {
 		return fmt.Errorf("localstore: workspace candidate upsert affected %d rows", affected)
 	}
-	return nil
+	if affected == 0 {
+		return nil
+	}
+	return tx.markWorkspaceDirty(ctx)
 }
 
 // DeleteCandidate removes the candidate from this transaction's exact
@@ -884,7 +914,10 @@ func (tx *WorkspaceMutationTx) DeleteCandidate(ctx context.Context, expectedPres
 	if affected != want {
 		return fmt.Errorf("localstore: workspace candidate delete affected %d rows, want %d", affected, want)
 	}
-	return nil
+	if affected == 0 {
+		return nil
+	}
+	return tx.markWorkspaceDirty(ctx)
 }
 
 // HasOpenConflictForKeys reports whether unresolved evidence targets any key.

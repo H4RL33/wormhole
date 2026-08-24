@@ -78,7 +78,7 @@ func (tx *WorkspaceMutationTx) InsertStash(ctx context.Context, stash WorkspaceS
 	if inserted != 1 {
 		return fmt.Errorf("localstore: workspace stash insert affected %d rows", inserted)
 	}
-	return nil
+	return tx.markWorkspaceDirty(ctx)
 }
 
 // Stash returns one strictly decoded stash from this transaction's exact
@@ -146,7 +146,7 @@ func (tx *WorkspaceMutationTx) DeleteStash(ctx context.Context, stashID string) 
 	if deleted != 1 {
 		return fmt.Errorf("localstore: workspace stash delete affected %d rows, want 1", deleted)
 	}
-	return nil
+	return tx.markWorkspaceDirty(ctx)
 }
 
 func validateWorkspaceStashInsert(stash WorkspaceStashInsert, binding types.WorkspaceBinding) ([]byte, []byte, []byte, error) {

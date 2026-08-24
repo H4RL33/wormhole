@@ -48,6 +48,86 @@ func TestRegisterWorkspaceIdempotent(t *testing.T) {
 	}
 }
 
+func TestRegisterWorkspaceIdempotentRevisionBaselineSurvivesExactReregistrationAfterReopen(t *testing.T) {
+	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+	databasePath := filepath.Join(t.TempDir(), "gateway.db")
+	store, service := openProjectStateServiceAt(t, databasePath)
+	request := RegisterWorkspaceRequest{
+		Root: repository.root, ExpectedProjectID: repository.projectID, ExpectedRepository: repository.identity, ExpectedCommit: repository.commit,
+	}
+	first, err := service.RegisterWorkspace(context.Background(), request)
+	if err != nil || !first.Created {
+		t.Fatalf("first registration=(%+v,%v)", first, err)
+	}
+	assertRegistrationRevisionBaseline(t, store, first.Binding.Scope)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, service = openProjectStateServiceAt(t, databasePath)
+	second, err := service.RegisterWorkspace(context.Background(), request)
+	if err != nil || second.Created || second.Binding != first.Binding {
+		t.Fatalf("exact registration after reopen=(%+v,%v), want read-only %+v", second, err, first.Binding)
+	}
+	assertRegistrationRevisionBaseline(t, store, second.Binding.Scope)
+}
+
+func assertRegistrationRevisionBaseline(t *testing.T, store *localstore.Store, scope types.WorkspaceScope) {
+	t.Helper()
+	var revision int64
+	if err := store.DB().QueryRow(`
+		SELECT workspace_revision FROM workspace_bindings
+		WHERE project_id=? AND workspace_id=?
+	`, scope.ProjectID, scope.WorkspaceID).Scan(&revision); err != nil {
+		t.Fatal(err)
+	}
+	if revision != 1 {
+		t.Fatalf("registration workspace revision=%d, want baseline 1", revision)
+	}
+}
+
+func TestWorkspaceStashExactRetryPreservesReceiptAndRevision(t *testing.T) {
+	fixture := newStashServiceFixture(t)
+	first, err := fixture.service.Stash(context.Background(), fixture.req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeRevision := workspaceRevisionForServiceTest(t, fixture.store, fixture.req.Scope)
+	beforeRaw := captureStashRawState(t, fixture.store)
+	beforeReceipt, err := fixture.service.repo.TransitionReceipt(context.Background(), fixture.req.Scope, fixture.req.RequestID)
+	if err != nil || beforeReceipt == nil {
+		t.Fatalf("first stash receipt=(%+v,%v)", beforeReceipt, err)
+	}
+	fixture.service.newStashID = func() (string, error) { return "20000000-0000-4000-8000-000000000002", nil }
+
+	retry, err := fixture.service.Stash(context.Background(), fixture.req)
+	if err != nil || retry != first {
+		t.Fatalf("exact retry Stash()=(%+v,%v), want %+v", retry, err, first)
+	}
+	if afterRevision := workspaceRevisionForServiceTest(t, fixture.store, fixture.req.Scope); afterRevision != beforeRevision {
+		t.Fatalf("exact retry workspace revision=%d, want %d", afterRevision, beforeRevision)
+	}
+	if afterRaw := captureStashRawState(t, fixture.store); !reflect.DeepEqual(afterRaw, beforeRaw) {
+		t.Fatal("exact retry changed durable stash evidence")
+	}
+	afterReceipt, err := fixture.service.repo.TransitionReceipt(context.Background(), fixture.req.Scope, fixture.req.RequestID)
+	if err != nil || !reflect.DeepEqual(afterReceipt, beforeReceipt) {
+		t.Fatalf("exact retry receipt=(%+v,%v), want %+v", afterReceipt, err, beforeReceipt)
+	}
+}
+
+func workspaceRevisionForServiceTest(t *testing.T, store *localstore.Store, scope types.WorkspaceScope) int64 {
+	t.Helper()
+	var revision int64
+	if err := store.DB().QueryRow(`
+		SELECT workspace_revision FROM workspace_bindings
+		WHERE project_id=? AND workspace_id=?
+	`, scope.ProjectID, scope.WorkspaceID).Scan(&revision); err != nil {
+		t.Fatal(err)
+	}
+	return revision
+}
+
 func TestRegisterWorkspaceCheckoutCollision(t *testing.T) {
 	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
 	_, service := openProjectStateService(t, "")

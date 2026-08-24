@@ -124,6 +124,7 @@ func (tx *WorkspaceMutationTx) ReplaceOpenConflictOccurrences(ctx context.Contex
 			return nil, fmt.Errorf("localstore: open semantic conflict evidence changed")
 		}
 	}
+	changed := false
 
 	for _, occurrence := range open {
 		if _, retained := desiredByID[occurrence.ConflictID]; retained {
@@ -158,6 +159,7 @@ func (tx *WorkspaceMutationTx) ReplaceOpenConflictOccurrences(ctx context.Contex
 			!validUTCTimestamp(persistedResolvedAt.Time) || !persistedResolvedAt.Time.Equal(resolvedAt) {
 			return nil, fmt.Errorf("localstore: resolved conflict occurrence changed unexpectedly")
 		}
+		changed = true
 	}
 
 	for _, evidence := range desired {
@@ -183,6 +185,7 @@ func (tx *WorkspaceMutationTx) ReplaceOpenConflictOccurrences(ctx context.Contex
 		if err := requireConflictRowsAffected(result, "insert", 1); err != nil {
 			return nil, err
 		}
+		changed = true
 	}
 
 	replaced, err := tx.OpenConflictOccurrences(ctx)
@@ -196,6 +199,11 @@ func (tx *WorkspaceMutationTx) ReplaceOpenConflictOccurrences(ctx context.Contex
 		evidence, ok := desiredByID[occurrence.ConflictID]
 		if !ok || occurrence.WorkspaceConflictEvidence != evidence {
 			return nil, fmt.Errorf("localstore: open conflict replacement evidence mismatch")
+		}
+	}
+	if changed {
+		if err := tx.markWorkspaceDirty(ctx); err != nil {
+			return nil, err
 		}
 	}
 	return replaced, nil
