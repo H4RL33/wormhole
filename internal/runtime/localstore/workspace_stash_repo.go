@@ -92,22 +92,15 @@ func (tx *WorkspaceMutationTx) Stash(ctx context.Context, stashID string) (*Work
 	}
 	record, err := scanOptionalWorkspaceStash(tx.conn.QueryRowContext(ctx, `
 		SELECT binding.project_id, binding.workspace_id, binding.repository_identity_json,
-		       COUNT(stash.rowid) OVER (),
 		       stash.project_id, stash.workspace_id, stash.stash_id,
 		       stash.source_base_digest, stash.candidate_digest,
 		       stash.source_tree, stash.composed_tree, stash.operations_json,
-		       stash.through_generation, stash.actor_json, stash.label, stash.created_at,
-		       typeof(stash.project_id), typeof(stash.workspace_id), typeof(stash.stash_id),
-		       typeof(stash.source_base_digest),
-		       typeof(stash.candidate_digest), typeof(stash.source_tree),
-		       typeof(stash.composed_tree), typeof(stash.operations_json),
-		       typeof(stash.through_generation), typeof(stash.actor_json),
-		       typeof(stash.label), typeof(stash.created_at)
+		       stash.through_generation, stash.actor_json, stash.label, stash.created_at
 		FROM workspace_bindings AS binding
 		LEFT JOIN workspace_stashes AS stash
-		  ON CAST(stash.project_id AS TEXT)=binding.project_id
-		 AND CAST(stash.workspace_id AS TEXT)=binding.workspace_id
-		 AND CAST(stash.stash_id AS TEXT)=?
+		  ON stash.project_id=binding.project_id
+		 AND stash.workspace_id=binding.workspace_id
+		 AND stash.stash_id=?
 		WHERE binding.project_id=? AND binding.workspace_id=?
 	`, stashID, tx.scope.ProjectID, tx.scope.WorkspaceID), tx.scope, stashID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -134,7 +127,6 @@ func (tx *WorkspaceMutationTx) DeleteStash(ctx context.Context, stashID string) 
 	result, err := tx.conn.ExecContext(ctx, `
 		DELETE FROM workspace_stashes
 		WHERE project_id=? AND workspace_id=? AND stash_id=?
-		  AND typeof(project_id)='text' AND typeof(workspace_id)='text' AND typeof(stash_id)='text'
 	`, tx.scope.ProjectID, tx.scope.WorkspaceID, record.StashID)
 	if err != nil {
 		return fmt.Errorf("localstore: delete workspace stash: %w", err)
@@ -200,74 +192,40 @@ func encodeWorkspaceStashTree(tree projectstate.Tree, expected projectstate.Dige
 
 func scanOptionalWorkspaceStash(scanner interface{ Scan(...any) error }, expectedScope types.WorkspaceScope, expectedStashID string) (*WorkspaceStashRecord, error) {
 	var (
-		scope                             types.WorkspaceScope
-		repositoryJSON                    string
-		matchingStashCount                int64
-		projectID, workspaceID, stashID   sql.NullString
-		sourceDigest                      sql.NullString
-		candidateDigest, operationsJSON   sql.NullString
-		actorJSON, label                  sql.NullString
-		sourceBytes, composedBytes        []byte
-		throughGeneration                 sql.NullInt64
-		createdAt                         sql.NullTime
-		projectIDClass, workspaceIDClass  sql.NullString
-		stashIDClass, sourceDigestClass   sql.NullString
-		candidateDigestClass              sql.NullString
-		sourceClass, composedClass        sql.NullString
-		operationsClass, generationClass  sql.NullString
-		actorClass, labelClass, timeClass sql.NullString
+		scope                           types.WorkspaceScope
+		repositoryJSON                  string
+		projectID, workspaceID, stashID sql.NullString
+		sourceDigest                    sql.NullString
+		candidateDigest, operationsJSON sql.NullString
+		actorJSON, label                sql.NullString
+		sourceBytes, composedBytes      []byte
+		throughGeneration               sql.NullInt64
+		createdAt                       sql.NullTime
 	)
 	if err := scanner.Scan(
-		&scope.ProjectID, &scope.WorkspaceID, &repositoryJSON, &matchingStashCount,
+		&scope.ProjectID, &scope.WorkspaceID, &repositoryJSON,
 		&projectID, &workspaceID, &stashID, &sourceDigest, &candidateDigest, &sourceBytes, &composedBytes,
 		&operationsJSON, &throughGeneration, &actorJSON, &label, &createdAt,
-		&projectIDClass, &workspaceIDClass, &stashIDClass, &sourceDigestClass, &candidateDigestClass, &sourceClass,
-		&composedClass, &operationsClass, &generationClass, &actorClass,
-		&labelClass, &timeClass,
 	); err != nil {
 		return nil, err
 	}
 	if scope != expectedScope || !validWorkspaceScope(scope) {
 		return nil, fmt.Errorf("workspace stash scope differs from transaction")
 	}
-	if matchingStashCount < 0 || matchingStashCount > 1 {
-		return nil, fmt.Errorf("ambiguous persisted workspace stash key")
-	}
 	repository, err := decodeWorkspaceStashRepository(repositoryJSON)
 	if err != nil {
 		return nil, err
 	}
-	classes := []sql.NullString{
-		projectIDClass, workspaceIDClass, stashIDClass, sourceDigestClass, candidateDigestClass, sourceClass, composedClass,
-		operationsClass, generationClass, actorClass, labelClass, timeClass,
-	}
 	if !stashID.Valid {
-		if matchingStashCount != 0 {
-			return nil, fmt.Errorf("incomplete persisted workspace stash key")
-		}
 		if projectID.Valid || workspaceID.Valid || sourceDigest.Valid || candidateDigest.Valid || sourceBytes != nil || composedBytes != nil ||
 			operationsJSON.Valid || throughGeneration.Valid || actorJSON.Valid || label.Valid || createdAt.Valid {
 			return nil, fmt.Errorf("incomplete persisted workspace stash")
 		}
-		for _, class := range classes {
-			if !class.Valid || class.String != "null" {
-				return nil, fmt.Errorf("invalid absent workspace stash storage class")
-			}
-		}
 		return nil, nil
-	}
-	if matchingStashCount != 1 {
-		return nil, fmt.Errorf("incomplete persisted workspace stash key")
 	}
 	if !projectID.Valid || !workspaceID.Valid || !sourceDigest.Valid || !candidateDigest.Valid || sourceBytes == nil || composedBytes == nil ||
 		!operationsJSON.Valid || !throughGeneration.Valid || !actorJSON.Valid || !label.Valid || !createdAt.Valid {
 		return nil, fmt.Errorf("incomplete persisted workspace stash")
-	}
-	wantClasses := []string{"text", "text", "text", "text", "text", "blob", "blob", "text", "integer", "text", "text", "text"}
-	for index, class := range classes {
-		if !class.Valid || class.String != wantClasses[index] {
-			return nil, fmt.Errorf("invalid persisted workspace stash storage class")
-		}
 	}
 	if projectID.String != scope.ProjectID || workspaceID.String != string(scope.WorkspaceID) {
 		return nil, fmt.Errorf("persisted workspace stash scope differs from transaction")

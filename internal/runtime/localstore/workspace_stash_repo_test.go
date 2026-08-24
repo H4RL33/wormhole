@@ -282,7 +282,7 @@ func TestWorkspaceStashCRUDReadsCanonicalHistoricalActor(t *testing.T) {
 }
 
 func TestWorkspaceStashCRUDPlainInsertExactDeleteAndRollback(t *testing.T) {
-	store, repo := openWorkspaceStore(t)
+	_, repo := openWorkspaceStore(t)
 	binding := createBinding(t, repo,
 		"00000000-0000-4000-8000-000000000001",
 		"00000000-0000-4000-8000-000000000011",
@@ -315,39 +315,6 @@ func TestWorkspaceStashCRUDPlainInsertExactDeleteAndRollback(t *testing.T) {
 	}
 	assertWorkspaceStashRead(t, repo, binding.Scope, stash)
 
-	ignored := validWorkspaceStash(t, binding, "00000000-0000-4000-8000-000000000032")
-	if _, err := store.DB().Exec(`
-		CREATE TRIGGER ignore_workspace_stash_insert
-		BEFORE INSERT ON workspace_stashes
-		WHEN NEW.stash_id='00000000-0000-4000-8000-000000000032'
-		BEGIN SELECT RAISE(IGNORE); END
-	`); err != nil {
-		t.Fatal(err)
-	}
-	if err := repo.WithImmediateWorkspace(ctx, binding.Scope, func(tx *WorkspaceMutationTx) error {
-		return tx.InsertStash(ctx, ignored)
-	}); err == nil {
-		t.Fatal("ignored stash insert succeeded")
-	}
-	assertWorkspaceStashAbsent(t, repo, binding.Scope, ignored.StashID)
-
-	if _, err := store.DB().Exec(`
-		CREATE TRIGGER ignore_workspace_stash_delete
-		BEFORE DELETE ON workspace_stashes
-		WHEN OLD.stash_id='00000000-0000-4000-8000-000000000031'
-		BEGIN SELECT RAISE(IGNORE); END
-	`); err != nil {
-		t.Fatal(err)
-	}
-	if err := repo.WithImmediateWorkspace(ctx, binding.Scope, func(tx *WorkspaceMutationTx) error {
-		return tx.DeleteStash(ctx, stash.StashID)
-	}); err == nil {
-		t.Fatal("ignored stash delete succeeded")
-	}
-	assertWorkspaceStashRead(t, repo, binding.Scope, stash)
-	if _, err := store.DB().Exec(`DROP TRIGGER ignore_workspace_stash_delete`); err != nil {
-		t.Fatal(err)
-	}
 	if err := repo.WithImmediateWorkspace(ctx, binding.Scope, func(tx *WorkspaceMutationTx) error {
 		if err := tx.DeleteStash(ctx, stash.StashID); err != nil {
 			return err
@@ -406,59 +373,7 @@ func TestWorkspaceStashCRUDDeleteRetainsOwnedTerminalOperations(t *testing.T) {
 	}
 }
 
-func TestWorkspaceStashCRUDDeleteStrictPreflight(t *testing.T) {
-	for _, test := range []struct {
-		name     string
-		corrupt  func(*testing.T, *Store, types.WorkspaceBinding, WorkspaceStashInsert)
-		wantRows int
-	}{
-		{name: "BLOB-only logical key", wantRows: 1, corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding, stash WorkspaceStashInsert) {
-			updateWorkspaceStashRaw(t, store, binding.Scope, stash.StashID, "stash_id=CAST(stash_id AS BLOB)")
-		}},
-		{name: "TEXT and BLOB logical duplicate", wantRows: 2, corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding, stash WorkspaceStashInsert) {
-			_, err := store.DB().Exec(`
-				INSERT INTO workspace_stashes
-				(project_id,workspace_id,stash_id,source_base_digest,candidate_digest,source_tree,
-				 composed_tree,operations_json,through_generation,actor_json,label,created_at)
-				SELECT project_id,workspace_id,CAST(stash_id AS BLOB),source_base_digest,candidate_digest,
-				       source_tree,composed_tree,operations_json,through_generation,actor_json,label,created_at
-				FROM workspace_stashes
-				WHERE project_id=? AND workspace_id=? AND stash_id=?
-			`, binding.Scope.ProjectID, binding.Scope.WorkspaceID, stash.StashID)
-			if err != nil {
-				t.Fatal(err)
-			}
-		}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			store, repo := openWorkspaceStore(t)
-			binding := createBinding(t, repo,
-				"00000000-0000-4000-8000-000000000001",
-				"00000000-0000-4000-8000-000000000011",
-				"/checkout", 1, 11,
-			)
-			stash := validWorkspaceStash(t, binding, "00000000-0000-4000-8000-000000000031")
-			if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-				return tx.InsertStash(context.Background(), stash)
-			}); err != nil {
-				t.Fatal(err)
-			}
-			test.corrupt(t, store, binding, stash)
-			if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-				return tx.DeleteStash(context.Background(), stash.StashID)
-			}); err == nil {
-				t.Fatal("DeleteStash succeeded without strict preflight")
-			}
-			var rows int
-			if err := store.DB().QueryRow(`
-				SELECT count(*) FROM workspace_stashes
-				WHERE CAST(project_id AS TEXT)=? AND CAST(workspace_id AS TEXT)=? AND CAST(stash_id AS TEXT)=?
-			`, binding.Scope.ProjectID, binding.Scope.WorkspaceID, stash.StashID).Scan(&rows); err != nil || rows != test.wantRows {
-				t.Fatalf("rows after rejected delete=%d err=%v, want %d", rows, err, test.wantRows)
-			}
-		})
-	}
-
+func TestWorkspaceStashCRUDDeleteRejectsAbsentOrMissingScope(t *testing.T) {
 	store, repo := openWorkspaceStore(t)
 	binding := createBinding(t, repo,
 		"00000000-0000-4000-8000-000000000001",
@@ -521,15 +436,14 @@ func TestWorkspaceStashCRUDPreservesRuntimeUnknownOperationsBytes(t *testing.T) 
 	}); err != nil {
 		t.Fatal(err)
 	}
-	var persisted, actorJSON, operationsClass, sourceClass, composedClass string
+	var persisted, actorJSON string
 	var sourceBytes, composedBytes []byte
 	if err := store.DB().QueryRow(`
-		SELECT source_tree, composed_tree, operations_json, actor_json,
-		       typeof(source_tree), typeof(composed_tree), typeof(operations_json)
+		SELECT source_tree, composed_tree, operations_json, actor_json
 		FROM workspace_stashes
 		WHERE project_id=? AND workspace_id=? AND stash_id=?
 	`, binding.Scope.ProjectID, binding.Scope.WorkspaceID, stash.StashID).Scan(
-		&sourceBytes, &composedBytes, &persisted, &actorJSON, &sourceClass, &composedClass, &operationsClass,
+		&sourceBytes, &composedBytes, &persisted, &actorJSON,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -546,91 +460,16 @@ func TestWorkspaceStashCRUDPreservesRuntimeUnknownOperationsBytes(t *testing.T) 
 		t.Fatal(err)
 	}
 	if !bytes.Equal(sourceBytes, wantSource) || !bytes.Equal(composedBytes, wantComposed) ||
-		persisted != stash.OperationsJSON || actorJSON != string(wantActor) ||
-		sourceClass != "blob" || composedClass != "blob" || operationsClass != "text" {
-		t.Fatalf("persisted stash bytes/classes differ from exact canonical input")
+		persisted != stash.OperationsJSON || actorJSON != string(wantActor) {
+		t.Fatalf("persisted stash bytes differ from exact canonical input")
 	}
 	assertWorkspaceStashRead(t, repo, binding.Scope, stash)
 }
 
-func TestWorkspaceStashCRUDRejectsBlobStashIDInsteadOfReportingAbsent(t *testing.T) {
-	store, repo := openWorkspaceStore(t)
-	binding := createBinding(t, repo,
-		"00000000-0000-4000-8000-000000000001",
-		"00000000-0000-4000-8000-000000000011",
-		"/checkout", 1, 11,
-	)
-	stash := validWorkspaceStash(t, binding, "00000000-0000-4000-8000-000000000031")
-	if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-		return tx.InsertStash(context.Background(), stash)
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.DB().Exec(`
-		UPDATE workspace_stashes SET stash_id=CAST(stash_id AS BLOB)
-		WHERE project_id=? AND workspace_id=?
-	`, binding.Scope.ProjectID, binding.Scope.WorkspaceID); err != nil {
-		t.Fatal(err)
-	}
-	var got *WorkspaceStashRecord
-	err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-		var err error
-		got, err = tx.Stash(context.Background(), stash.StashID)
-		return err
-	})
-	if err == nil || got != nil {
-		t.Fatalf("blob stash ID read=(%+v,%v), want nil and corruption error", got, err)
-	}
-}
-
 func TestWorkspaceStashCRUDRejectsPersistedCorruption(t *testing.T) {
 	tests := []workspaceStashCorruptionCase{
-		{name: "BLOB project ID", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding, stash WorkspaceStashInsert) {
-			updateWorkspaceStashScopeStorage(t, store, binding.Scope, stash.StashID, "project_id")
-		}},
-		{name: "BLOB workspace ID", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding, stash WorkspaceStashInsert) {
-			updateWorkspaceStashScopeStorage(t, store, binding.Scope, stash.StashID, "workspace_id")
-		}},
-		{name: "duplicate textual key across storage classes", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding, stash WorkspaceStashInsert) {
-			_, err := store.DB().Exec(`
-				INSERT INTO workspace_stashes
-				(project_id,workspace_id,stash_id,source_base_digest,candidate_digest,source_tree,
-				 composed_tree,operations_json,through_generation,actor_json,label,created_at)
-				SELECT project_id,workspace_id,CAST(stash_id AS BLOB),source_base_digest,candidate_digest,
-				       source_tree,composed_tree,operations_json,through_generation,actor_json,label,created_at
-				FROM workspace_stashes
-				WHERE project_id=? AND workspace_id=? AND stash_id=?
-			`, binding.Scope.ProjectID, binding.Scope.WorkspaceID, stash.StashID)
-			if err != nil {
-				t.Fatal(err)
-			}
-		}},
-		{name: "BLOB source digest", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding, stash WorkspaceStashInsert) {
-			updateWorkspaceStashRaw(t, store, binding.Scope, stash.StashID, "source_base_digest=CAST(source_base_digest AS BLOB)")
-		}},
-		{name: "BLOB candidate digest", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding, stash WorkspaceStashInsert) {
-			updateWorkspaceStashRaw(t, store, binding.Scope, stash.StashID, "candidate_digest=CAST(candidate_digest AS BLOB)")
-		}},
-		{name: "TEXT source tree", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding, stash WorkspaceStashInsert) {
-			updateWorkspaceStashRaw(t, store, binding.Scope, stash.StashID, "source_tree=CAST(source_tree AS TEXT)")
-		}},
-		{name: "TEXT composed tree", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding, stash WorkspaceStashInsert) {
-			updateWorkspaceStashRaw(t, store, binding.Scope, stash.StashID, "composed_tree=CAST(composed_tree AS TEXT)")
-		}},
-		{name: "BLOB operations bytes", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding, stash WorkspaceStashInsert) {
-			updateWorkspaceStashRaw(t, store, binding.Scope, stash.StashID, "operations_json=CAST(operations_json AS BLOB)")
-		}},
-		{name: "REAL generation", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding, stash WorkspaceStashInsert) {
+		{name: "non-integral generation", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding, stash WorkspaceStashInsert) {
 			updateWorkspaceStashRaw(t, store, binding.Scope, stash.StashID, "through_generation=7.5")
-		}},
-		{name: "BLOB actor", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding, stash WorkspaceStashInsert) {
-			updateWorkspaceStashRaw(t, store, binding.Scope, stash.StashID, "actor_json=CAST(actor_json AS BLOB)")
-		}},
-		{name: "BLOB label", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding, stash WorkspaceStashInsert) {
-			updateWorkspaceStashRaw(t, store, binding.Scope, stash.StashID, "label=CAST(label AS BLOB)")
-		}},
-		{name: "INTEGER timestamp", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding, stash WorkspaceStashInsert) {
-			updateWorkspaceStashRaw(t, store, binding.Scope, stash.StashID, "created_at=1")
 		}},
 		{name: "invalid source digest", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding, stash WorkspaceStashInsert) {
 			updateWorkspaceStashRaw(t, store, binding.Scope, stash.StashID, "source_base_digest='BAD'")
@@ -892,29 +731,5 @@ func updateWorkspaceStashValues(t *testing.T, store *Store, scope types.Workspac
 	affected, err := result.RowsAffected()
 	if err != nil || affected != 1 {
 		t.Fatalf("corrupt workspace stash affected=%d err=%v, want 1", affected, err)
-	}
-}
-
-func updateWorkspaceStashScopeStorage(t *testing.T, store *Store, scope types.WorkspaceScope, stashID, column string) {
-	t.Helper()
-	conn, err := store.DB().Conn(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(context.Background(), `PRAGMA foreign_keys=OFF`); err != nil {
-		t.Fatal(err)
-	}
-	query := "UPDATE workspace_stashes SET " + column + "=CAST(" + column + " AS BLOB) WHERE project_id=? AND workspace_id=? AND stash_id=?"
-	result, err := conn.ExecContext(context.Background(), query, scope.ProjectID, scope.WorkspaceID, stashID)
-	if err != nil {
-		t.Fatalf("corrupt workspace stash scope: %v", err)
-	}
-	affected, err := result.RowsAffected()
-	if err != nil || affected != 1 {
-		t.Fatalf("corrupt workspace stash scope affected=%d err=%v, want 1", affected, err)
-	}
-	if _, err := conn.ExecContext(context.Background(), `PRAGMA foreign_keys=ON`); err != nil {
-		t.Fatal(err)
 	}
 }

@@ -253,15 +253,22 @@ func (tx *WorkspaceMutationTx) restoreRetryStash(ctx context.Context, stashID st
 	}
 	var sourceRaw, composedRaw []byte
 	var sourceClass, composedClass string
+	var matching int64
 	err = tx.conn.QueryRowContext(ctx, `
-		SELECT source_tree, composed_tree, typeof(source_tree), typeof(composed_tree)
+		SELECT source_tree, composed_tree, typeof(source_tree), typeof(composed_tree),
+		       (SELECT COUNT(*) FROM workspace_stashes AS aliases
+		        WHERE CAST(aliases.project_id AS TEXT)=?
+		          AND CAST(aliases.workspace_id AS TEXT)=?
+		          AND CAST(aliases.stash_id AS TEXT)=?)
 		FROM workspace_stashes
 		WHERE project_id=? AND workspace_id=? AND stash_id=?
-	`, tx.scope.ProjectID, tx.scope.WorkspaceID, stashID).Scan(&sourceRaw, &composedRaw, &sourceClass, &composedClass)
+	`, tx.scope.ProjectID, tx.scope.WorkspaceID, stashID,
+		tx.scope.ProjectID, tx.scope.WorkspaceID, stashID,
+	).Scan(&sourceRaw, &composedRaw, &sourceClass, &composedClass, &matching)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("localstore: read restore retry stash blobs: %w", err)
 	}
-	if sourceClass != "blob" || composedClass != "blob" {
+	if matching != 1 || sourceClass != "blob" || composedClass != "blob" {
 		return nil, nil, nil, fmt.Errorf("localstore: invalid restore retry stash blob storage class")
 	}
 	sourceCanonical, err := encodeFileList(stash.SourceTree)

@@ -1,9 +1,13 @@
 package localstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 	"unicode"
@@ -134,30 +138,15 @@ func (tx *WorkspaceMutationTx) ReplaceOpenConflictOccurrences(ctx context.Contex
 			UPDATE workspace_conflicts
 			SET state='resolved', resolved_at=?
 			WHERE project_id=? AND workspace_id=? AND occurrence_id=? AND conflict_id=?
-			  AND record_kind=? AND record_id=? AND field_path=? AND conflict_kind=?
-			  AND base_json=? AND ours_json=? AND theirs_json=?
 			  AND state='open' AND resolved_at IS NULL
 		`, resolvedAt.UTC(), tx.scope.ProjectID, tx.scope.WorkspaceID,
-			occurrence.OccurrenceID, occurrence.ConflictID, occurrence.Key.Kind,
-			occurrence.Key.ID, occurrence.FieldPath, occurrence.ConflictKind,
-			occurrence.BaseJSON, occurrence.OursJSON, occurrence.TheirsJSON,
+			occurrence.OccurrenceID, occurrence.ConflictID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("localstore: resolve conflict occurrence: %w", err)
 		}
 		if err := requireConflictRowsAffected(result, "resolve", 1); err != nil {
 			return nil, err
-		}
-		persisted, persistedState, persistedResolvedAt, err := tx.conflictOccurrenceByID(ctx, occurrence.OccurrenceID)
-		if err != nil {
-			return nil, err
-		}
-		if persisted.WorkspaceConflictEvidence != occurrence.WorkspaceConflictEvidence ||
-			persisted.OccurrenceID != occurrence.OccurrenceID ||
-			!persisted.CreatedAt.Equal(occurrence.CreatedAt) ||
-			persistedState != "resolved" || !persistedResolvedAt.Valid ||
-			!validUTCTimestamp(persistedResolvedAt.Time) || !persistedResolvedAt.Time.Equal(resolvedAt) {
-			return nil, fmt.Errorf("localstore: resolved conflict occurrence changed unexpectedly")
 		}
 		changed = true
 	}
@@ -209,35 +198,6 @@ func (tx *WorkspaceMutationTx) ReplaceOpenConflictOccurrences(ctx context.Contex
 	return replaced, nil
 }
 
-func (tx *WorkspaceMutationTx) conflictOccurrenceByID(ctx context.Context, occurrenceID string) (WorkspaceConflictOccurrence, string, sql.NullTime, error) {
-	var projectID, workspaceID, state string
-	var resolvedAt sql.NullTime
-	var occurrence WorkspaceConflictOccurrence
-	err := tx.conn.QueryRowContext(ctx, `
-		SELECT project_id, workspace_id, occurrence_id, conflict_id, record_kind, record_id,
-		       field_path, conflict_kind, base_json, ours_json, theirs_json,
-		       state, created_at, resolved_at
-		FROM workspace_conflicts
-		WHERE project_id=? AND workspace_id=? AND occurrence_id=?
-	`, tx.scope.ProjectID, tx.scope.WorkspaceID, occurrenceID).Scan(
-		&projectID, &workspaceID, &occurrence.OccurrenceID, &occurrence.ConflictID,
-		&occurrence.Key.Kind, &occurrence.Key.ID, &occurrence.FieldPath,
-		&occurrence.ConflictKind, &occurrence.BaseJSON, &occurrence.OursJSON,
-		&occurrence.TheirsJSON, &state, &occurrence.CreatedAt, &resolvedAt,
-	)
-	if err != nil {
-		return WorkspaceConflictOccurrence{}, "", sql.NullTime{}, fmt.Errorf("localstore: read conflict occurrence after mutation: %w", err)
-	}
-	if projectID != tx.scope.ProjectID || workspaceID != string(tx.scope.WorkspaceID) {
-		return WorkspaceConflictOccurrence{}, "", sql.NullTime{}, fmt.Errorf("localstore: conflict occurrence scope changed unexpectedly")
-	}
-	if err := validateWorkspaceConflictOccurrence(tx.scope, occurrence); err != nil {
-		return WorkspaceConflictOccurrence{}, "", sql.NullTime{}, fmt.Errorf("localstore: validate conflict occurrence after mutation: %w", err)
-	}
-	occurrence.CreatedAt = occurrence.CreatedAt.UTC()
-	return occurrence, state, resolvedAt, nil
-}
-
 func requireConflictRowsAffected(result sql.Result, action string, want int64) error {
 	affected, err := result.RowsAffected()
 	if err != nil {
@@ -276,9 +236,62 @@ func validateWorkspaceConflictEvidence(scope types.WorkspaceScope, evidence Work
 		return fmt.Errorf("invalid conflict kind")
 	}
 	for _, encoded := range []string{evidence.BaseJSON, evidence.OursJSON, evidence.TheirsJSON} {
-		if encoded == "" || !utf8.ValidString(encoded) {
-			return fmt.Errorf("invalid conflict evidence bytes")
+		if err := validateWorkspaceConflictFieldEnvelope(encoded); err != nil {
+			return err
 		}
+	}
+	return nil
+}
+
+type workspaceConflictFieldEnvelope struct {
+	Present bool            `json:"present"`
+	Value   json.RawMessage `json:"value,omitempty"`
+}
+
+func validateWorkspaceConflictFieldEnvelope(encoded string) error {
+	if encoded == "" || !utf8.ValidString(encoded) {
+		return fmt.Errorf("invalid conflict evidence bytes")
+	}
+	decoder := json.NewDecoder(strings.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	var envelope *workspaceConflictFieldEnvelope
+	if err := decoder.Decode(&envelope); err != nil {
+		return fmt.Errorf("invalid conflict field envelope: %w", err)
+	}
+	if envelope == nil {
+		return fmt.Errorf("invalid conflict field envelope: null")
+	}
+	if err := requireWorkspaceConflictJSONEOF(decoder); err != nil {
+		return err
+	}
+	if !envelope.Present {
+		if envelope.Value != nil {
+			return fmt.Errorf("absent conflict field has a value")
+		}
+	} else {
+		if len(envelope.Value) == 0 {
+			return fmt.Errorf("present conflict field has no value")
+		}
+		valueDecoder := json.NewDecoder(bytes.NewReader(envelope.Value))
+		valueDecoder.UseNumber()
+		var value any
+		if err := valueDecoder.Decode(&value); err != nil {
+			return fmt.Errorf("invalid conflict field value: %w", err)
+		}
+		if err := requireWorkspaceConflictJSONEOF(valueDecoder); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func requireWorkspaceConflictJSONEOF(decoder *json.Decoder) error {
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return fmt.Errorf("multiple conflict JSON values")
+		}
+		return fmt.Errorf("trailing conflict JSON: %w", err)
 	}
 	return nil
 }

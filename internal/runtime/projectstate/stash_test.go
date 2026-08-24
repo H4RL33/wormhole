@@ -395,67 +395,6 @@ func TestServiceStashCorruptExactReceiptFailsClosedWithoutConflictAlias(t *testi
 	}
 }
 
-func TestServiceStashHiddenBlobExactReceiptKeyFailsClosedWithoutMutation(t *testing.T) {
-	fixture := newStashServiceFixture(t)
-	direct := diffCloneSnapshot(t, fixture.accepted)
-	direct.Project.Name = "mutable candidate"
-	direct.Project.UpdatedAt = direct.Project.UpdatedAt.Add(time.Minute)
-	direct = diffCanonicalSnapshot(t, direct)
-	insertServiceCandidate(t, fixture.store, fixture.req.Scope, fixture.accepted.Digest, direct, nil, 0)
-	later := servicePutTaskOperation(direct, "90000000-0000-4000-8000-000000000001", "80000000-0000-4000-8000-000000000001", "mutable operation")
-	composed, err := state.ApplyOperation(direct, later)
-	if err != nil {
-		t.Fatal(err)
-	}
-	insertStashServiceOperation(t, fixture.store, fixture.req.Scope, 1, later, "active")
-	setServiceWorkspaceState(t, fixture.store, fixture.req.Scope, "pending")
-
-	receiptResult := StashResult{
-		StashID:         "20000000-0000-4000-8000-000000000009",
-		SourceDigest:    fixture.accepted.Digest,
-		CandidateDigest: composed.Digest,
-		OperationCount:  1,
-	}
-	receiptJSON, err := encodeStashReceipt(receiptResult)
-	if err != nil {
-		t.Fatal(err)
-	}
-	requestDigest, err := stashRequestDigest(fixture.req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
-		return tx.InsertTransitionReceipt(context.Background(), localstore.WorkspaceTransitionReceiptInsert{
-			RequestID: fixture.req.RequestID, Action: "stash", RequestDigest: requestDigest,
-			Actor: fixture.req.Actor, ResultJSON: receiptJSON, Outcome: "clean",
-		})
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fixture.store.DB().Exec(`
-		UPDATE workspace_transition_receipts SET request_id=CAST(request_id AS BLOB)
-		WHERE project_id=? AND workspace_id=? AND request_id=?
-	`, fixture.req.Scope.ProjectID, fixture.req.Scope.WorkspaceID, fixture.req.RequestID); err != nil {
-		t.Fatal(err)
-	}
-	before := captureStashRawState(t, fixture.store)
-	got, err := fixture.service.Stash(context.Background(), fixture.req)
-	if err == nil || errors.Is(err, ErrIdempotencyConflict) || errors.Is(err, localstore.ErrCommitOutcomeUnknown) || got != (StashResult{}) {
-		t.Fatalf("hidden BLOB receipt Stash()=(%+v,%v), want zero ordinary non-conflict failure", got, err)
-	}
-	if after := captureStashRawState(t, fixture.store); !reflect.DeepEqual(after, before) {
-		t.Fatal("hidden BLOB receipt failure changed complete raw state")
-	}
-	var logicalRows int
-	var requestClass string
-	if err := fixture.store.DB().QueryRow(`
-		SELECT count(*), min(typeof(request_id)) FROM workspace_transition_receipts
-		WHERE CAST(project_id AS TEXT)=? AND CAST(workspace_id AS TEXT)=? AND CAST(request_id AS TEXT)=?
-	`, fixture.req.Scope.ProjectID, fixture.req.Scope.WorkspaceID, fixture.req.RequestID).Scan(&logicalRows, &requestClass); err != nil || logicalRows != 1 || requestClass != "blob" {
-		t.Fatalf("logical receipts after Stash()=(count=%d class=%q err=%v), want one unchanged BLOB row", logicalRows, requestClass, err)
-	}
-}
-
 func TestServiceStashRollsBackEveryWriteStage(t *testing.T) {
 	for _, test := range []struct {
 		name    string

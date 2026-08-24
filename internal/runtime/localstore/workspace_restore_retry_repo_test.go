@@ -237,8 +237,13 @@ func TestWorkspaceMutationTxRestoreRetryStateSameAndCrossProjectIsolation(t *tes
 				"00000000-0000-4000-8000-000000000023",
 			}[index]},
 			FieldPath: "/title", ConflictKind: "same_field",
-			BaseJSON: []string{`{"scope":"a"}`, `{"scope":"b"}`, `{"scope":"c"}`}[index],
-			OursJSON: `{"side":"ours"}`, TheirsJSON: `{"side":"theirs"}`,
+			BaseJSON: []string{
+				"{\"present\":true,\"value\":\"a\"}\n",
+				"{\"present\":true,\"value\":\"b\"}\n",
+				"{\"present\":true,\"value\":\"c\"}\n",
+			}[index],
+			OursJSON:   "{\"present\":true,\"value\":\"ours\"}\n",
+			TheirsJSON: "{\"present\":true,\"value\":\"theirs\"}\n",
 		}
 		wantConflicts[index] = conflict
 		if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
@@ -444,20 +449,20 @@ func TestWorkspaceMutationTxRestoreRetryStateSortsAndRejectsDuplicateOpenConflic
 			{
 				ConflictID: "sha256:" + strings.Repeat("c", 64),
 				Key:        state.RecordKey{Kind: "task", ID: "00000000-0000-4000-8000-000000000023"},
-				FieldPath:  "/title", ConflictKind: "same_field", BaseJSON: `{"v":"task"}`,
-				OursJSON: `{"v":"ours"}`, TheirsJSON: `{"v":"theirs"}`,
+				FieldPath:  "/title", ConflictKind: "same_field", BaseJSON: "{\"present\":true,\"value\":\"task\"}\n",
+				OursJSON: "{\"present\":true,\"value\":\"ours\"}\n", TheirsJSON: "{\"present\":true,\"value\":\"theirs\"}\n",
 			},
 			{
 				ConflictID: "sha256:" + strings.Repeat("a", 64),
 				Key:        state.RecordKey{Kind: "project", ID: binding.Scope.ProjectID},
-				FieldPath:  "/name", ConflictKind: "same_field", BaseJSON: `{"v":"project"}`,
-				OursJSON: `{"v":"ours"}`, TheirsJSON: `{"v":"theirs"}`,
+				FieldPath:  "/name", ConflictKind: "same_field", BaseJSON: "{\"present\":true,\"value\":\"project\"}\n",
+				OursJSON: "{\"present\":true,\"value\":\"ours\"}\n", TheirsJSON: "{\"present\":true,\"value\":\"theirs\"}\n",
 			},
 			{
 				ConflictID: "sha256:" + strings.Repeat("b", 64),
 				Key:        state.RecordKey{Kind: "actor", ID: "00000000-0000-4000-8000-000000000022"},
-				FieldPath:  "/display_name", ConflictKind: "same_field", BaseJSON: `{"v":"actor"}`,
-				OursJSON: `{"v":"ours"}`, TheirsJSON: `{"v":"theirs"}`,
+				FieldPath:  "/display_name", ConflictKind: "same_field", BaseJSON: "{\"present\":true,\"value\":\"actor\"}\n",
+				OursJSON: "{\"present\":true,\"value\":\"ours\"}\n", TheirsJSON: "{\"present\":true,\"value\":\"theirs\"}\n",
 			},
 		}
 		if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
@@ -517,8 +522,8 @@ func restoreRetryCorruptionFixture(t *testing.T) (*Store, *WorkspaceRepo, types.
 		_, err := tx.ReplaceOpenConflictOccurrences(context.Background(), []WorkspaceConflictEvidence{{
 			ConflictID: "sha256:" + strings.Repeat("a", 64),
 			Key:        state.RecordKey{Kind: "task", ID: "00000000-0000-4000-8000-000000000021"},
-			FieldPath:  "/title", ConflictKind: "same_field", BaseJSON: `{"v":"base"}`,
-			OursJSON: `{"v":"ours"}`, TheirsJSON: `{"v":"theirs"}`,
+			FieldPath:  "/title", ConflictKind: "same_field", BaseJSON: "{\"present\":true,\"value\":\"base\"}\n",
+			OursJSON: "{\"present\":true,\"value\":\"ours\"}\n", TheirsJSON: "{\"present\":true,\"value\":\"theirs\"}\n",
 		}}, time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC))
 		return err
 	}); err != nil {

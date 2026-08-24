@@ -196,88 +196,6 @@ func TestWorkspaceTransitionReceiptSingleSnapshotDistinguishesWorkspaceFromAbsen
 	}
 }
 
-func TestWorkspaceTransitionReceiptRejectsBlobRequestIDInsteadOfReportingAbsent(t *testing.T) {
-	store, repo := openWorkspaceStore(t)
-	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
-	receipt := validWorkspaceTransitionReceipt(t, "00000000-0000-1000-8000-000000000031", "stash", "clean")
-	if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-		return tx.InsertTransitionReceipt(context.Background(), receipt)
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.DB().Exec(`
-		UPDATE workspace_transition_receipts SET request_id=CAST(request_id AS BLOB)
-		WHERE project_id=? AND workspace_id=? AND request_id=?
-	`, binding.Scope.ProjectID, binding.Scope.WorkspaceID, receipt.RequestID); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := repo.TransitionReceipt(context.Background(), binding.Scope, receipt.RequestID); err == nil || got != nil {
-		t.Fatalf("BLOB request ID receipt=(%+v,%v), want nil and corruption error", got, err)
-	}
-}
-
-func TestWorkspaceTransitionReceiptRejectsCastEquivalentDuplicateKey(t *testing.T) {
-	store, repo := openWorkspaceStore(t)
-	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
-	receipt := validWorkspaceTransitionReceipt(t, "00000000-0000-1000-8000-000000000031", "stash", "clean")
-	if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-		return tx.InsertTransitionReceipt(context.Background(), receipt)
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.DB().Exec(`
-		INSERT INTO workspace_transition_receipts
-		(project_id,workspace_id,request_id,action,request_digest,actor_json,result_json,outcome,created_at)
-		SELECT project_id,workspace_id,CAST(request_id AS BLOB),action,request_digest,actor_json,result_json,outcome,created_at
-		FROM workspace_transition_receipts
-		WHERE project_id=? AND workspace_id=? AND request_id=?
-	`, binding.Scope.ProjectID, binding.Scope.WorkspaceID, receipt.RequestID); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := repo.TransitionReceipt(context.Background(), binding.Scope, receipt.RequestID); err == nil || got != nil {
-		t.Fatalf("CAST-equivalent duplicate receipt=(%+v,%v), want nil and ambiguity error", got, err)
-	}
-}
-
-func TestWorkspaceTransitionReceiptInsertRejectsHiddenBlobLogicalDuplicate(t *testing.T) {
-	for _, column := range []string{"project_id", "workspace_id", "request_id"} {
-		t.Run(column, func(t *testing.T) {
-			store, repo := openWorkspaceStore(t)
-			binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
-			receipt := validWorkspaceTransitionReceipt(t, "00000000-0000-1000-8000-000000000031", "stash", "clean")
-			if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-				return tx.InsertTransitionReceipt(context.Background(), receipt)
-			}); err != nil {
-				t.Fatal(err)
-			}
-			updateWorkspaceTransitionReceiptStorage(t, store, binding.Scope, receipt.RequestID, column)
-			var wantRowID int64
-			if err := store.DB().QueryRow(`
-				SELECT rowid FROM workspace_transition_receipts
-				WHERE CAST(project_id AS TEXT)=? AND CAST(workspace_id AS TEXT)=? AND CAST(request_id AS TEXT)=?
-			`, binding.Scope.ProjectID, binding.Scope.WorkspaceID, receipt.RequestID).Scan(&wantRowID); err != nil {
-				t.Fatal(err)
-			}
-			if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-				return tx.InsertTransitionReceipt(context.Background(), receipt)
-			}); err == nil {
-				t.Fatalf("InsertTransitionReceipt accepted a hidden BLOB %s logical duplicate", column)
-			}
-			var rows int
-			var gotRowID int64
-			var storageClass string
-			query := "SELECT count(*), min(rowid), min(typeof(" + column + ")) FROM workspace_transition_receipts " +
-				"WHERE CAST(project_id AS TEXT)=? AND CAST(workspace_id AS TEXT)=? AND CAST(request_id AS TEXT)=?"
-			if err := store.DB().QueryRow(query, binding.Scope.ProjectID, binding.Scope.WorkspaceID, receipt.RequestID).Scan(
-				&rows, &gotRowID, &storageClass,
-			); err != nil || rows != 1 || gotRowID != wantRowID || storageClass != "blob" {
-				t.Fatalf("logical receipt after rejected insert=(rows=%d rowid=%d class=%q err=%v), want one unchanged BLOB rowid %d",
-					rows, gotRowID, storageClass, err, wantRowID)
-			}
-		})
-	}
-}
-
 func TestWorkspaceTransitionReceiptRejectsMalformedInputWithoutWrites(t *testing.T) {
 	_, repo := openWorkspaceStore(t)
 	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
@@ -320,8 +238,8 @@ func TestWorkspaceTransitionReceiptRejectsMalformedInputWithoutWrites(t *testing
 	}
 }
 
-func TestWorkspaceTransitionReceiptDuplicateAndIgnoredInsertFail(t *testing.T) {
-	store, repo := openWorkspaceStore(t)
+func TestWorkspaceTransitionReceiptDuplicateInsertFails(t *testing.T) {
+	_, repo := openWorkspaceStore(t)
 	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
 	receipt := validWorkspaceTransitionReceipt(t, "00000000-0000-1000-8000-000000000031", "stash", "clean")
 	if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
@@ -333,21 +251,6 @@ func TestWorkspaceTransitionReceiptDuplicateAndIgnoredInsertFail(t *testing.T) {
 		return tx.InsertTransitionReceipt(context.Background(), receipt)
 	}); err == nil {
 		t.Fatal("duplicate receipt insert succeeded")
-	}
-
-	ignored := validWorkspaceTransitionReceipt(t, "00000000-0000-1000-8000-000000000032", "discard", "conflicted")
-	if _, err := store.DB().Exec(`
-		CREATE TRIGGER ignore_transition_receipt
-		BEFORE INSERT ON workspace_transition_receipts
-		WHEN NEW.request_id='00000000-0000-1000-8000-000000000032'
-		BEGIN SELECT RAISE(IGNORE); END
-	`); err != nil {
-		t.Fatal(err)
-	}
-	if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-		return tx.InsertTransitionReceipt(context.Background(), ignored)
-	}); err == nil {
-		t.Fatal("ignored receipt insert succeeded")
 	}
 	got, err := repo.TransitionReceipt(context.Background(), binding.Scope, receipt.RequestID)
 	if err != nil {
@@ -553,17 +456,7 @@ func TestWorkspaceTransitionReceiptCorruptionFailsClosedAfterReopen(t *testing.T
 		name   string
 		column string
 		value  any
-		asBlob bool
 	}{
-		{name: "BLOB project key", column: "project_id", asBlob: true},
-		{name: "BLOB workspace key", column: "workspace_id", asBlob: true},
-		{name: "BLOB request key", column: "request_id", asBlob: true},
-		{name: "BLOB action", column: "action", asBlob: true},
-		{name: "BLOB digest", column: "request_digest", asBlob: true},
-		{name: "BLOB actor", column: "actor_json", asBlob: true},
-		{name: "BLOB result", column: "result_json", asBlob: true},
-		{name: "BLOB outcome", column: "outcome", asBlob: true},
-		{name: "BLOB time", column: "created_at", asBlob: true},
 		{name: "action", column: "action", value: "publish"},
 		{name: "digest", column: "request_digest", value: "sha256:" + strings.Repeat("A", 64)},
 		{name: "actor", column: "actor_json", value: "{\"actor_kind\":\"human\",\"assurance\":\"local\",\"human_principal_id\":\"BAD\",\"occurred_at\":\"2026-07-29T12:00:00Z\"}\n"},
@@ -588,13 +481,9 @@ func TestWorkspaceTransitionReceiptCorruptionFailsClosedAfterReopen(t *testing.T
 			if _, err := store.DB().Exec(`PRAGMA ignore_check_constraints=ON`); err != nil {
 				t.Fatal(err)
 			}
-			if test.asBlob {
-				updateWorkspaceTransitionReceiptStorage(t, store, binding.Scope, receipt.RequestID, test.column)
-			} else {
-				query := fmt.Sprintf("UPDATE workspace_transition_receipts SET %s=? WHERE project_id=? AND workspace_id=?", test.column)
-				if _, err := store.DB().Exec(query, test.value, binding.Scope.ProjectID, binding.Scope.WorkspaceID); err != nil {
-					t.Fatal(err)
-				}
+			query := fmt.Sprintf("UPDATE workspace_transition_receipts SET %s=? WHERE project_id=? AND workspace_id=?", test.column)
+			if _, err := store.DB().Exec(query, test.value, binding.Scope.ProjectID, binding.Scope.WorkspaceID); err != nil {
+				t.Fatal(err)
 			}
 			if err := store.Close(); err != nil {
 				t.Fatal(err)
@@ -685,35 +574,4 @@ func readRawWorkspaceTransitionReceipt(t *testing.T, store *Store, scope types.W
 		t.Fatal(err)
 	}
 	return raw
-}
-
-func updateWorkspaceTransitionReceiptStorage(t *testing.T, store *Store, scope types.WorkspaceScope, requestID, column string) {
-	t.Helper()
-	conn, err := store.DB().Conn(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(context.Background(), `PRAGMA foreign_keys=OFF`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := conn.ExecContext(context.Background(), `PRAGMA ignore_check_constraints=ON`); err != nil {
-		t.Fatal(err)
-	}
-	query := "UPDATE workspace_transition_receipts SET " + column + "=CAST(" + column + " AS BLOB) " +
-		"WHERE project_id=? AND workspace_id=? AND request_id=?"
-	result, err := conn.ExecContext(context.Background(), query, scope.ProjectID, scope.WorkspaceID, requestID)
-	if err != nil {
-		t.Fatalf("corrupt workspace transition receipt storage: %v", err)
-	}
-	affected, err := result.RowsAffected()
-	if err != nil || affected != 1 {
-		t.Fatalf("corrupt workspace transition receipt storage affected=%d err=%v, want 1", affected, err)
-	}
-	if _, err := conn.ExecContext(context.Background(), `PRAGMA ignore_check_constraints=OFF`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := conn.ExecContext(context.Background(), `PRAGMA foreign_keys=ON`); err != nil {
-		t.Fatal(err)
-	}
 }

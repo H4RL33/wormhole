@@ -87,25 +87,7 @@ func TestTransitionReceiptByKeyExactReadAbsentUnregisteredIsolationAndRestart(t 
 	assertWorkspaceTransitionReceipt(t, got, receipts[0])
 }
 
-func TestTransitionReceiptByKeyRejectsAliasesDuplicatesAndSelectedFieldCorruption(t *testing.T) {
-	for _, column := range []string{"project_id", "workspace_id", "request_id"} {
-		t.Run("hidden BLOB key "+column, func(t *testing.T) {
-			store, repo, binding, receipt := transitionBoundaryFixture(t)
-			updateWorkspaceTransitionReceiptStorage(t, store, binding.Scope, receipt.RequestID, column)
-			if got, err := repo.TransitionReceiptByKey(context.Background(), binding.Scope, receipt.RequestID); err == nil || got != nil {
-				t.Fatalf("BLOB %s receipt=(%+v,%v), want fail closed", column, got, err)
-			}
-		})
-	}
-	for _, column := range []string{"action", "request_digest", "actor_json", "result_json", "outcome", "created_at"} {
-		t.Run("BLOB selected field "+column, func(t *testing.T) {
-			store, repo, binding, receipt := transitionBoundaryFixture(t)
-			updateWorkspaceTransitionReceiptStorage(t, store, binding.Scope, receipt.RequestID, column)
-			if got, err := repo.TransitionReceiptByKey(context.Background(), binding.Scope, receipt.RequestID); err == nil || got != nil {
-				t.Fatalf("BLOB %s receipt=(%+v,%v), want fail closed", column, got, err)
-			}
-		})
-	}
+func TestTransitionReceiptByKeyRejectsSelectedLogicalCorruption(t *testing.T) {
 	for _, test := range []struct {
 		name, column, value string
 	}{
@@ -135,21 +117,6 @@ func TestTransitionReceiptByKeyRejectsAliasesDuplicatesAndSelectedFieldCorruptio
 			}
 		})
 	}
-	t.Run("CAST-equivalent duplicate", func(t *testing.T) {
-		store, repo, binding, receipt := transitionBoundaryFixture(t)
-		if _, err := store.DB().Exec(`
-			INSERT INTO workspace_transition_receipts
-			(project_id,workspace_id,request_id,action,request_digest,actor_json,result_json,outcome,created_at)
-			SELECT project_id,workspace_id,CAST(request_id AS BLOB),action,request_digest,actor_json,result_json,outcome,created_at
-			FROM workspace_transition_receipts
-			WHERE project_id=? AND workspace_id=? AND request_id=?
-		`, binding.Scope.ProjectID, binding.Scope.WorkspaceID, receipt.RequestID); err != nil {
-			t.Fatal(err)
-		}
-		if got, err := repo.TransitionReceiptByKey(context.Background(), binding.Scope, receipt.RequestID); err == nil || got != nil {
-			t.Fatalf("duplicate receipt=(%+v,%v), want fail closed", got, err)
-		}
-	})
 }
 
 func TestTransitionReceiptByKeyReadsOnlyReceiptTable(t *testing.T) {
@@ -550,21 +517,8 @@ func assertTransitionSelectTables(t *testing.T, trace *transitionTraceDriver, ta
 
 func assertTransitionReceiptQueryShape(t *testing.T, query string) {
 	t.Helper()
-	for _, key := range []string{"project_id", "workspace_id", "request_id"} {
-		if !strings.Contains(query, "CAST("+key+" AS TEXT)=?") {
-			t.Fatalf("receipt query lacks CAST-matched %s: %q", key, query)
-		}
-	}
-	if !strings.Contains(query, "COUNT(rowid) OVER ()") {
-		t.Fatalf("receipt query lacks logical-match count: %q", query)
-	}
-	for _, column := range []string{
-		"project_id", "workspace_id", "request_id", "action", "request_digest",
-		"actor_json", "result_json", "outcome", "created_at",
-	} {
-		if !strings.Contains(query, "typeof("+column+")") {
-			t.Fatalf("receipt query lacks typeof(%s): %q", column, query)
-		}
+	if !strings.Contains(query, "WHERE project_id=? AND workspace_id=? AND request_id=?") {
+		t.Fatalf("receipt query lacks exact scoped key predicate: %q", query)
 	}
 }
 

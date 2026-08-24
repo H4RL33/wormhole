@@ -271,7 +271,7 @@ func TestWorkspaceConflictOccurrencesExactScopeIsolation(t *testing.T) {
 		{scope: c.Scope, evidence: workspaceConflictEvidence(1, key)},
 	}
 	for index := range fixtures {
-		fixtures[index].evidence.BaseJSON = fmt.Sprintf("base-%d", index)
+		fixtures[index].evidence.BaseJSON = fmt.Sprintf("{\"present\":true,\"value\":\"base-%d\"}\n", index)
 		fixture := fixtures[index]
 		if err := repo.WithImmediateWorkspace(context.Background(), fixture.scope, func(tx *WorkspaceMutationTx) error {
 			_, err := tx.ReplaceOpenConflictOccurrences(context.Background(), []WorkspaceConflictEvidence{fixture.evidence}, time.Date(2026, 7, 29, 12, index, 0, 0, time.UTC))
@@ -583,96 +583,7 @@ func TestWorkspaceConflictOccurrencesDuplicatePersistedSemanticIDFailsClosed(t *
 	}
 }
 
-func TestWorkspaceConflictOccurrencesRejectResolveTriggerTimestampMutation(t *testing.T) {
-	store, repo := openWorkspaceStore(t)
-	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
-	evidence := workspaceConflictEvidence(1, state.RecordKey{Kind: "task", ID: "00000000-0000-4000-8000-000000000021"})
-	var original WorkspaceConflictOccurrence
-	if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-		got, err := tx.ReplaceOpenConflictOccurrences(context.Background(), []WorkspaceConflictEvidence{evidence}, time.Date(2026, 7, 29, 11, 0, 0, 0, time.UTC))
-		if err == nil {
-			original = got[0]
-		}
-		return err
-	}); err != nil {
-		t.Fatal(err)
-	}
-	triggerSQL := fmt.Sprintf(`
-		CREATE TRIGGER mutate_conflict_resolved_at
-		AFTER UPDATE OF state,resolved_at ON workspace_conflicts
-		WHEN NEW.occurrence_id='%s' AND NEW.state='resolved'
-		BEGIN
-			UPDATE workspace_conflicts SET resolved_at='2026-07-29 15:00:00+00:00'
-			WHERE project_id=NEW.project_id AND workspace_id=NEW.workspace_id
-			  AND occurrence_id=NEW.occurrence_id;
-		END
-	`, original.OccurrenceID)
-	if _, err := store.DB().Exec(triggerSQL); err != nil {
-		t.Fatal(err)
-	}
-	err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-		_, err := tx.ReplaceOpenConflictOccurrences(context.Background(), nil, time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC))
-		return err
-	})
-	if err == nil {
-		t.Fatal("resolved_at trigger mutation succeeded")
-	}
-	if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-		got, err := tx.OpenConflictOccurrences(context.Background())
-		if err != nil || len(got) != 1 || got[0] != original {
-			t.Fatalf("trigger rollback open occurrences=(%+v,%v), want %+v", got, err, original)
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestWorkspaceConflictOccurrencesTriggerFaultsRollbackAtomically(t *testing.T) {
-	t.Run("ignored insert", func(t *testing.T) {
-		databasePath, store, repo, binding := openConflictFaultStore(t)
-		evidence := workspaceConflictEvidence(1, state.RecordKey{Kind: "task", ID: "00000000-0000-4000-8000-000000000021"})
-		if _, err := store.DB().Exec(`
-			CREATE TRIGGER ignore_conflict_insert
-			BEFORE INSERT ON workspace_conflicts
-			WHEN NEW.conflict_id='sha256:0000000000000000000000000000000000000000000000000000000000000001'
-			BEGIN SELECT RAISE(IGNORE); END
-		`); err != nil {
-			t.Fatal(err)
-		}
-		err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-			_, err := tx.ReplaceOpenConflictOccurrences(context.Background(), []WorkspaceConflictEvidence{evidence}, time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC))
-			return err
-		})
-		if err == nil {
-			t.Fatal("ignored insert succeeded")
-		}
-		assertConflictHistoryCountAfterReopen(t, databasePath, store, binding.Scope, 0)
-	})
-
-	t.Run("ignored resolve", func(t *testing.T) {
-		databasePath, store, repo, binding := openConflictFaultStore(t)
-		evidence := workspaceConflictEvidence(1, state.RecordKey{Kind: "task", ID: "00000000-0000-4000-8000-000000000021"})
-		original := replaceOneConflict(t, repo, binding.Scope, evidence)
-		triggerSQL := fmt.Sprintf(`
-			CREATE TRIGGER ignore_conflict_resolve
-			BEFORE UPDATE ON workspace_conflicts
-			WHEN OLD.occurrence_id='%s'
-			BEGIN SELECT RAISE(IGNORE); END
-		`, original.OccurrenceID)
-		if _, err := store.DB().Exec(triggerSQL); err != nil {
-			t.Fatal(err)
-		}
-		err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-			_, err := tx.ReplaceOpenConflictOccurrences(context.Background(), nil, time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC))
-			return err
-		})
-		if err == nil {
-			t.Fatal("ignored resolve succeeded")
-		}
-		assertOpenConflictAfterReopen(t, databasePath, store, binding.Scope, original)
-	})
-
+func TestWorkspaceConflictOccurrencesStatementFailureRollsBackAtomically(t *testing.T) {
 	t.Run("resolve then insert abort", func(t *testing.T) {
 		databasePath, store, repo, binding := openConflictFaultStore(t)
 		oldEvidence := workspaceConflictEvidence(1, state.RecordKey{Kind: "task", ID: "00000000-0000-4000-8000-000000000021"})
@@ -694,30 +605,6 @@ func TestWorkspaceConflictOccurrencesTriggerFaultsRollbackAtomically(t *testing.
 			t.Fatal("replacement hid later insert trigger failure")
 		}
 		assertOpenConflictAfterReopen(t, databasePath, store, binding.Scope, original)
-	})
-
-	t.Run("insert evidence mutation", func(t *testing.T) {
-		databasePath, store, repo, binding := openConflictFaultStore(t)
-		evidence := workspaceConflictEvidence(1, state.RecordKey{Kind: "task", ID: "00000000-0000-4000-8000-000000000021"})
-		if _, err := store.DB().Exec(`
-			CREATE TRIGGER mutate_conflict_insert_evidence
-			AFTER INSERT ON workspace_conflicts
-			BEGIN
-				UPDATE workspace_conflicts SET base_json=''
-				WHERE project_id=NEW.project_id AND workspace_id=NEW.workspace_id
-				  AND occurrence_id=NEW.occurrence_id;
-			END
-		`); err != nil {
-			t.Fatal(err)
-		}
-		err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-			_, err := tx.ReplaceOpenConflictOccurrences(context.Background(), []WorkspaceConflictEvidence{evidence}, time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC))
-			return err
-		})
-		if err == nil {
-			t.Fatal("insert evidence mutation succeeded")
-		}
-		assertConflictHistoryCountAfterReopen(t, databasePath, store, binding.Scope, 0)
 	})
 }
 

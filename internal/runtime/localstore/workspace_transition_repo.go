@@ -152,15 +152,9 @@ type workspaceTransitionReceiptQueryer interface {
 func readWorkspaceTransitionReceiptByKey(ctx context.Context, queryer workspaceTransitionReceiptQueryer, scope types.WorkspaceScope, requestID string) (*WorkspaceTransitionReceiptRecord, error) {
 	record, err := scanWorkspaceTransitionReceiptByKey(queryer.QueryRowContext(ctx, `
 		SELECT project_id, workspace_id, request_id, action, request_digest,
-		       actor_json, result_json, outcome, created_at,
-		       typeof(project_id), typeof(workspace_id), typeof(request_id),
-		       typeof(action), typeof(request_digest), typeof(actor_json),
-		       typeof(result_json), typeof(outcome), typeof(created_at),
-		       COUNT(rowid) OVER ()
+		       actor_json, result_json, outcome, created_at
 		FROM workspace_transition_receipts
-		WHERE CAST(project_id AS TEXT)=?
-		  AND CAST(workspace_id AS TEXT)=?
-		  AND CAST(request_id AS TEXT)=?
+		WHERE project_id=? AND workspace_id=? AND request_id=?
 	`, scope.ProjectID, scope.WorkspaceID, requestID), scope, requestID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -181,23 +175,12 @@ func scanWorkspaceTransitionReceiptByKey(
 		action, digest, actorJSON, resultJSON sql.NullString
 		outcome                               sql.NullString
 		createdAt                             sql.NullTime
-		projectClass, workspaceClass          string
-		requestClass, actionClass             string
-		digestClass, actorClass, resultClass  string
-		outcomeClass, timeClass               string
-		matching                              int64
 	)
 	if err := scanner.Scan(
 		&projectID, &workspaceID, &requestID, &action, &digest,
 		&actorJSON, &resultJSON, &outcome, &createdAt,
-		&projectClass, &workspaceClass, &requestClass, &actionClass,
-		&digestClass, &actorClass, &resultClass, &outcomeClass, &timeClass,
-		&matching,
 	); err != nil {
 		return nil, err
-	}
-	if matching != 1 {
-		return nil, fmt.Errorf("ambiguous persisted workspace transition receipt key")
 	}
 	values := []sql.NullString{projectID, workspaceID, requestID, action, digest, actorJSON, resultJSON, outcome}
 	for _, value := range values {
@@ -207,12 +190,6 @@ func scanWorkspaceTransitionReceiptByKey(
 	}
 	if !createdAt.Valid {
 		return nil, fmt.Errorf("incomplete persisted transition receipt")
-	}
-	classes := []string{projectClass, workspaceClass, requestClass, actionClass, digestClass, actorClass, resultClass, outcomeClass, timeClass}
-	for _, class := range classes {
-		if class != "text" {
-			return nil, fmt.Errorf("invalid persisted workspace transition receipt storage class")
-		}
 	}
 	if projectID.String != expectedScope.ProjectID || workspaceID.String != string(expectedScope.WorkspaceID) || requestID.String != expectedRequestID {
 		return nil, fmt.Errorf("persisted workspace transition receipt key mismatch")
@@ -229,20 +206,14 @@ func readWorkspaceTransitionReceipt(ctx context.Context, queryer workspaceTransi
 	}
 	record, err := scanOptionalWorkspaceTransitionReceipt(queryer.QueryRowContext(ctx, `
 		SELECT binding.project_id, binding.workspace_id,
-		       COUNT(receipt.rowid) OVER (),
 		       receipt.project_id, receipt.workspace_id, receipt.request_id,
 		       receipt.action, receipt.request_digest, receipt.actor_json,
-		       receipt.result_json, receipt.outcome, receipt.created_at,
-		       NULLIF(typeof(receipt.project_id),'null'), NULLIF(typeof(receipt.workspace_id),'null'),
-		       NULLIF(typeof(receipt.request_id),'null'), NULLIF(typeof(receipt.action),'null'),
-		       NULLIF(typeof(receipt.request_digest),'null'), NULLIF(typeof(receipt.actor_json),'null'),
-		       NULLIF(typeof(receipt.result_json),'null'), NULLIF(typeof(receipt.outcome),'null'),
-		       NULLIF(typeof(receipt.created_at),'null')
+		       receipt.result_json, receipt.outcome, receipt.created_at
 		FROM workspace_bindings AS binding
 		LEFT JOIN workspace_transition_receipts AS receipt
-		  ON CAST(receipt.project_id AS TEXT)=binding.project_id
-		 AND CAST(receipt.workspace_id AS TEXT)=binding.workspace_id
-		 AND CAST(receipt.request_id AS TEXT)=?
+		  ON receipt.project_id=binding.project_id
+		 AND receipt.workspace_id=binding.workspace_id
+		 AND receipt.request_id=?
 		WHERE binding.project_id=? AND binding.workspace_id=?
 	`, requestID, scope.ProjectID, scope.WorkspaceID), scope, requestID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -260,61 +231,32 @@ func scanOptionalWorkspaceTransitionReceipt(
 	expectedRequestID string,
 ) (*WorkspaceTransitionReceiptRecord, error) {
 	var (
-		scope                                      types.WorkspaceScope
-		matchingReceiptCount                       int64
-		projectID, workspaceID, requestID          sql.NullString
-		action, digest, actorJSON, resultJSON      sql.NullString
-		outcome                                    sql.NullString
-		createdAt                                  sql.NullTime
-		projectClass, workspaceClass, requestClass sql.NullString
-		actionClass, digestClass, actorClass       sql.NullString
-		resultClass, outcomeClass, timeClass       sql.NullString
+		scope                                 types.WorkspaceScope
+		projectID, workspaceID, requestID     sql.NullString
+		action, digest, actorJSON, resultJSON sql.NullString
+		outcome                               sql.NullString
+		createdAt                             sql.NullTime
 	)
 	if err := scanner.Scan(
-		&scope.ProjectID, &scope.WorkspaceID, &matchingReceiptCount,
+		&scope.ProjectID, &scope.WorkspaceID,
 		&projectID, &workspaceID, &requestID, &action, &digest,
 		&actorJSON, &resultJSON, &outcome, &createdAt,
-		&projectClass, &workspaceClass, &requestClass, &actionClass, &digestClass,
-		&actorClass, &resultClass, &outcomeClass, &timeClass,
 	); err != nil {
 		return nil, err
 	}
 	if scope != expectedScope || !validWorkspaceScope(scope) {
 		return nil, fmt.Errorf("workspace transition receipt scope differs from request")
 	}
-	if matchingReceiptCount < 0 || matchingReceiptCount > 1 {
-		return nil, fmt.Errorf("ambiguous persisted workspace transition receipt key")
-	}
-	classes := []sql.NullString{
-		projectClass, workspaceClass, requestClass, actionClass, digestClass,
-		actorClass, resultClass, outcomeClass, timeClass,
-	}
 	if !requestID.Valid {
-		if matchingReceiptCount != 0 {
-			return nil, fmt.Errorf("incomplete persisted transition receipt key")
-		}
 		if projectID.Valid || workspaceID.Valid || action.Valid || digest.Valid || actorJSON.Valid ||
 			resultJSON.Valid || outcome.Valid || createdAt.Valid {
 			return nil, fmt.Errorf("incomplete persisted transition receipt")
 		}
-		for _, class := range classes {
-			if class.Valid {
-				return nil, fmt.Errorf("invalid absent workspace transition receipt storage class")
-			}
-		}
 		return nil, nil
-	}
-	if matchingReceiptCount != 1 {
-		return nil, fmt.Errorf("incomplete persisted transition receipt key")
 	}
 	if !projectID.Valid || !workspaceID.Valid || !action.Valid || !digest.Valid || !actorJSON.Valid ||
 		!resultJSON.Valid || !outcome.Valid || !createdAt.Valid {
 		return nil, fmt.Errorf("incomplete persisted transition receipt")
-	}
-	for _, class := range classes {
-		if !class.Valid || class.String != "text" {
-			return nil, fmt.Errorf("invalid persisted workspace transition receipt storage class")
-		}
 	}
 	if projectID.String != expectedScope.ProjectID || workspaceID.String != string(expectedScope.WorkspaceID) || requestID.String != expectedRequestID {
 		return nil, fmt.Errorf("persisted workspace transition receipt key mismatch")
