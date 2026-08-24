@@ -94,13 +94,13 @@ func (s *Service) Recover(ctx context.Context, scope types.WorkspaceScope) (Work
 	if recoverFilesystem == nil {
 		recoverFilesystem = recoverCheckpointFilesystem
 	}
-	confirmCommit := s.confirmCheckpointCommit
+	confirmCommit := s.confirmWorkspaceCommit
 	if confirmCommit == nil {
-		confirmCommit = s.repo.ConfirmCheckpointCommit
+		confirmCommit = s.repo.ConfirmWorkspaceCommit
 	}
 
 	var result WorkspaceStatus
-	var prior, next localstore.WorkspaceCheckpointCommitState
+	var prior, next localstore.WorkspaceCommitConfirmation
 	completed := false
 	err = withWorkspace(ctx, scope, func(tx *localstore.WorkspaceMutationTx) error {
 		plan, err := planCheckpointRecovery(ctx, tx, observeGit)
@@ -118,7 +118,7 @@ func (s *Service) Recover(ctx context.Context, scope types.WorkspaceScope) (Work
 		if err != nil {
 			return err
 		}
-		prior, err = tx.CaptureCheckpointCommitState(ctx)
+		prior, err = tx.CaptureMaterializationCommitConfirmation(ctx, strict.driver.JournalID)
 		if err != nil {
 			return checkpointRecoveryPrecondition("capture recovery commit preimage", err)
 		}
@@ -137,7 +137,7 @@ func (s *Service) Recover(ctx context.Context, scope types.WorkspaceScope) (Work
 			return checkpointRecoveryPrecondition("recovery postimage is not terminal", nil)
 		}
 		result = final.status
-		next, err = tx.CaptureCheckpointCommitState(ctx)
+		next, err = tx.CaptureMaterializationCommitConfirmation(ctx, strict.driver.JournalID)
 		if err != nil {
 			return checkpointRecoveryPrecondition("capture recovery commit postimage", err)
 		}
@@ -158,11 +158,11 @@ func (s *Service) Recover(ctx context.Context, scope types.WorkspaceScope) (Work
 		)
 	}
 	switch match {
-	case localstore.WorkspaceCheckpointCommitNext:
+	case localstore.WorkspaceCommitNext:
 		return result, nil
-	case localstore.WorkspaceCheckpointCommitPrior:
+	case localstore.WorkspaceCommitPrior:
 		return WorkspaceStatus{}, err
-	case localstore.WorkspaceCheckpointCommitThird:
+	case localstore.WorkspaceCommitThird:
 		return WorkspaceStatus{}, fmt.Errorf(
 			"%w: recovery final commit confirmation found a third state: %w",
 			ErrCheckpointRecoveryBlocked, err,

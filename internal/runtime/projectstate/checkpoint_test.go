@@ -517,16 +517,16 @@ func TestCheckpointFinalCommitUnknownClassifiesPublishedRecoveredOldPreparedAndT
 	tests := []struct {
 		name        string
 		publication checkpointPublicationDisposition
-		match       localstore.WorkspaceCheckpointCommitMatch
+		match       localstore.WorkspaceCommitMatch
 		confirmErr  error
 		want        error
 		wantResult  bool
 	}{
-		{name: "published", publication: checkpointPublicationPublished, match: localstore.WorkspaceCheckpointCommitNext, wantResult: true},
-		{name: "recovered old", publication: checkpointPublicationPreservedConcurrentOld, match: localstore.WorkspaceCheckpointCommitNext, want: ErrCheckpointCAS},
-		{name: "prepared", publication: checkpointPublicationPublished, match: localstore.WorkspaceCheckpointCommitPrior, want: localstore.ErrCommitOutcomeUnknown},
-		{name: "third", publication: checkpointPublicationPublished, match: localstore.WorkspaceCheckpointCommitThird, want: ErrCheckpointRecoveryBlocked},
-		{name: "invalid", publication: checkpointPublicationPublished, match: localstore.WorkspaceCheckpointCommitMatch(99), want: ErrCheckpointRecoveryBlocked},
+		{name: "published", publication: checkpointPublicationPublished, match: localstore.WorkspaceCommitNext, wantResult: true},
+		{name: "recovered old", publication: checkpointPublicationPreservedConcurrentOld, match: localstore.WorkspaceCommitNext, want: ErrCheckpointCAS},
+		{name: "prepared", publication: checkpointPublicationPublished, match: localstore.WorkspaceCommitPrior, want: localstore.ErrCommitOutcomeUnknown},
+		{name: "third", publication: checkpointPublicationPublished, match: localstore.WorkspaceCommitThird, want: ErrCheckpointRecoveryBlocked},
+		{name: "invalid", publication: checkpointPublicationPublished, match: localstore.WorkspaceCommitMatch(99), want: ErrCheckpointRecoveryBlocked},
 		{name: "read failure", publication: checkpointPublicationPublished, confirmErr: errors.New("confirmation read failed"), want: ErrCheckpointRecoveryBlocked},
 	}
 	for _, test := range tests {
@@ -560,11 +560,11 @@ func TestCheckpointFinalCommitUnknownClassifiesPublishedRecoveredOldPreparedAndT
 				return err
 			}
 			confirmCalls := 0
-			fixture.service.confirmCheckpointCommit = func(
+			fixture.service.confirmWorkspaceCommit = func(
 				context.Context,
-				localstore.WorkspaceCheckpointCommitState,
-				localstore.WorkspaceCheckpointCommitState,
-			) (localstore.WorkspaceCheckpointCommitMatch, error) {
+				localstore.WorkspaceCommitConfirmation,
+				localstore.WorkspaceCommitConfirmation,
+			) (localstore.WorkspaceCommitMatch, error) {
 				confirmCalls++
 				return test.match, test.confirmErr
 			}
@@ -925,19 +925,19 @@ func TestCheckpointStickyInvalidationUnknownCommitConfirmation(t *testing.T) {
 	tests := []struct {
 		name        string
 		transaction int
-		match       localstore.WorkspaceCheckpointCommitMatch
+		match       localstore.WorkspaceCommitMatch
 		confirmErr  error
 		want        error
 	}{
-		{name: "first next", transaction: 1, match: localstore.WorkspaceCheckpointCommitNext, want: ErrPublicationUnclassified},
-		{name: "first prior", transaction: 1, match: localstore.WorkspaceCheckpointCommitPrior, want: localstore.ErrCommitOutcomeUnknown},
-		{name: "first third", transaction: 1, match: localstore.WorkspaceCheckpointCommitThird, want: localstore.ErrCommitOutcomeUnknown},
-		{name: "first invalid", transaction: 1, match: localstore.WorkspaceCheckpointCommitMatch(99), want: localstore.ErrCommitOutcomeUnknown},
+		{name: "first next", transaction: 1, match: localstore.WorkspaceCommitNext, want: ErrPublicationUnclassified},
+		{name: "first prior", transaction: 1, match: localstore.WorkspaceCommitPrior, want: localstore.ErrCommitOutcomeUnknown},
+		{name: "first third", transaction: 1, match: localstore.WorkspaceCommitThird, want: localstore.ErrCommitOutcomeUnknown},
+		{name: "first invalid", transaction: 1, match: localstore.WorkspaceCommitMatch(99), want: localstore.ErrCommitOutcomeUnknown},
 		{name: "first read error", transaction: 1, confirmErr: errors.New("invalidation confirmation failed"), want: localstore.ErrCommitOutcomeUnknown},
-		{name: "second next", transaction: 2, match: localstore.WorkspaceCheckpointCommitNext, want: ErrPublicationUnclassified},
-		{name: "second prior", transaction: 2, match: localstore.WorkspaceCheckpointCommitPrior, want: localstore.ErrCommitOutcomeUnknown},
-		{name: "second third", transaction: 2, match: localstore.WorkspaceCheckpointCommitThird, want: localstore.ErrCommitOutcomeUnknown},
-		{name: "second invalid", transaction: 2, match: localstore.WorkspaceCheckpointCommitMatch(99), want: localstore.ErrCommitOutcomeUnknown},
+		{name: "second next", transaction: 2, match: localstore.WorkspaceCommitNext, want: ErrPublicationUnclassified},
+		{name: "second prior", transaction: 2, match: localstore.WorkspaceCommitPrior, want: localstore.ErrCommitOutcomeUnknown},
+		{name: "second third", transaction: 2, match: localstore.WorkspaceCommitThird, want: localstore.ErrCommitOutcomeUnknown},
+		{name: "second invalid", transaction: 2, match: localstore.WorkspaceCommitMatch(99), want: localstore.ErrCommitOutcomeUnknown},
 		{name: "second read error", transaction: 2, confirmErr: errors.New("invalidation confirmation failed"), want: localstore.ErrCommitOutcomeUnknown},
 	}
 	for _, test := range tests {
@@ -972,13 +972,25 @@ func TestCheckpointStickyInvalidationUnknownCommitConfirmation(t *testing.T) {
 				return err
 			}
 			confirmCalls := 0
-			fixture.service.confirmCheckpointCommit = func(
-				context.Context,
-				localstore.WorkspaceCheckpointCommitState,
-				localstore.WorkspaceCheckpointCommitState,
-			) (localstore.WorkspaceCheckpointCommitMatch, error) {
+			fixture.service.confirmPublicationTransitionCommit = func(
+				_ context.Context,
+				_ *localstore.WorkspaceRepo,
+				_ types.WorkspaceScope,
+				attempt publicationTransitionAttempt,
+				commitErr error,
+			) (PublicationConfiguration, error) {
 				confirmCalls++
-				return test.match, test.confirmErr
+				if test.confirmErr != nil {
+					return PublicationConfiguration{}, fmt.Errorf("%w: %v", commitErr, test.confirmErr)
+				}
+				switch test.match {
+				case localstore.WorkspaceCommitNext:
+					return attempt.configuration, nil
+				case localstore.WorkspaceCommitPrior:
+					return PublicationConfiguration{}, commitErr
+				default:
+					return PublicationConfiguration{}, fmt.Errorf("%w: unexpected publication state", commitErr)
+				}
 			}
 
 			got, err := fixture.service.Checkpoint(context.Background(), req)
@@ -1030,20 +1042,20 @@ func TestCheckpointUnknownCommitConfirmationMatrix(t *testing.T) {
 	tests := []struct {
 		name        string
 		transaction int
-		match       localstore.WorkspaceCheckpointCommitMatch
+		match       localstore.WorkspaceCommitMatch
 		confirmErr  error
 		wantOK      bool
 		want        error
 	}{
-		{name: "first next", transaction: 1, match: localstore.WorkspaceCheckpointCommitNext, wantOK: true},
-		{name: "first prior", transaction: 1, match: localstore.WorkspaceCheckpointCommitPrior},
-		{name: "first third", transaction: 1, match: localstore.WorkspaceCheckpointCommitThird, want: ErrCheckpointRecoveryBlocked},
-		{name: "first invalid outcome", transaction: 1, match: localstore.WorkspaceCheckpointCommitMatch(99), want: ErrCheckpointRecoveryBlocked},
+		{name: "first next", transaction: 1, match: localstore.WorkspaceCommitNext, wantOK: true},
+		{name: "first prior", transaction: 1, match: localstore.WorkspaceCommitPrior},
+		{name: "first third", transaction: 1, match: localstore.WorkspaceCommitThird, want: ErrCheckpointRecoveryBlocked},
+		{name: "first invalid outcome", transaction: 1, match: localstore.WorkspaceCommitMatch(99), want: ErrCheckpointRecoveryBlocked},
 		{name: "first read error", transaction: 1, confirmErr: errors.New("confirmation read failed"), want: ErrCheckpointRecoveryBlocked},
-		{name: "final next", transaction: 2, match: localstore.WorkspaceCheckpointCommitNext, wantOK: true},
-		{name: "final prior", transaction: 2, match: localstore.WorkspaceCheckpointCommitPrior},
-		{name: "final third", transaction: 2, match: localstore.WorkspaceCheckpointCommitThird, want: ErrCheckpointRecoveryBlocked},
-		{name: "final invalid outcome", transaction: 2, match: localstore.WorkspaceCheckpointCommitMatch(99), want: ErrCheckpointRecoveryBlocked},
+		{name: "final next", transaction: 2, match: localstore.WorkspaceCommitNext, wantOK: true},
+		{name: "final prior", transaction: 2, match: localstore.WorkspaceCommitPrior},
+		{name: "final third", transaction: 2, match: localstore.WorkspaceCommitThird, want: ErrCheckpointRecoveryBlocked},
+		{name: "final invalid outcome", transaction: 2, match: localstore.WorkspaceCommitMatch(99), want: ErrCheckpointRecoveryBlocked},
 		{name: "final read error", transaction: 2, confirmErr: errors.New("confirmation read failed"), want: ErrCheckpointRecoveryBlocked},
 	}
 	for _, test := range tests {
@@ -1065,11 +1077,11 @@ func TestCheckpointUnknownCommitConfirmationMatrix(t *testing.T) {
 				return err
 			}
 			confirmCalls := 0
-			fixture.service.confirmCheckpointCommit = func(
+			fixture.service.confirmWorkspaceCommit = func(
 				context.Context,
-				localstore.WorkspaceCheckpointCommitState,
-				localstore.WorkspaceCheckpointCommitState,
-			) (localstore.WorkspaceCheckpointCommitMatch, error) {
+				localstore.WorkspaceCommitConfirmation,
+				localstore.WorkspaceCommitConfirmation,
+			) (localstore.WorkspaceCommitMatch, error) {
 				confirmCalls++
 				return test.match, test.confirmErr
 			}
@@ -1078,7 +1090,7 @@ func TestCheckpointUnknownCommitConfirmationMatrix(t *testing.T) {
 			wantPublish := 0
 			if test.transaction == 2 {
 				wantPublish = 1
-			} else if test.match == localstore.WorkspaceCheckpointCommitNext && test.confirmErr == nil {
+			} else if test.match == localstore.WorkspaceCommitNext && test.confirmErr == nil {
 				wantTransactions = 2
 				wantPublish = 1
 			}

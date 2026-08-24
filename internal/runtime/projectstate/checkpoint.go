@@ -42,11 +42,19 @@ type checkpointArtifactHandle struct {
 }
 
 type prepareCheckpointArtifactFunc func(context.Context, checkpointArtifactInput) (checkpointArtifactHandle, error)
-type confirmCheckpointCommitFunc func(
+type confirmWorkspaceCommitFunc func(
 	context.Context,
-	localstore.WorkspaceCheckpointCommitState,
-	localstore.WorkspaceCheckpointCommitState,
-) (localstore.WorkspaceCheckpointCommitMatch, error)
+	localstore.WorkspaceCommitConfirmation,
+	localstore.WorkspaceCommitConfirmation,
+) (localstore.WorkspaceCommitMatch, error)
+
+type confirmPublicationTransitionCommitFunc func(
+	context.Context,
+	*localstore.WorkspaceRepo,
+	types.WorkspaceScope,
+	publicationTransitionAttempt,
+	error,
+) (PublicationConfiguration, error)
 
 type checkpointGateSet struct {
 	mu      sync.Mutex
@@ -115,9 +123,13 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 	if prepareArtifact == nil {
 		prepareArtifact = defaultPrepareCheckpointArtifact
 	}
-	confirmCommit := s.confirmCheckpointCommit
+	confirmCommit := s.confirmWorkspaceCommit
 	if confirmCommit == nil {
-		confirmCommit = s.repo.ConfirmCheckpointCommit
+		confirmCommit = s.repo.ConfirmWorkspaceCommit
+	}
+	confirmPublication := s.confirmPublicationTransitionCommit
+	if confirmPublication == nil {
+		confirmPublication = confirmPublicationCommit
 	}
 
 	var artifact checkpointArtifactHandle
@@ -132,7 +144,8 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 	var firstReview publicationReviewTransactionEvidence
 	var firstDisposition localstore.WorkspaceMaterializationDisposition
 	var prepared localstore.WorkspaceMaterializationRecord
-	var firstPrior, firstNext localstore.WorkspaceCheckpointCommitState
+	var firstPrior, firstNext localstore.WorkspaceCommitConfirmation
+	var firstPublicationAttempt publicationTransitionAttempt
 	firstCompleted, firstInvalidated := false, false
 	firstErr := withWorkspace(ctx, req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		disposition, err := tx.MaterializationDisposition(ctx)
@@ -155,10 +168,6 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 		}
 		firstDisposition = cloneImportDisposition(disposition)
 
-		firstPrior, err = tx.CaptureCheckpointCommitState(ctx)
-		if err != nil {
-			return err
-		}
 		workspace, err := checkpointValidateTransactionRequest(ctx, tx, req)
 		if err != nil {
 			return err
@@ -204,10 +213,7 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 				return ErrPublicationUnclassified
 			}
 			firstInvalidated = true
-			firstNext, err = tx.CaptureCheckpointCommitState(ctx)
-			if err != nil {
-				return err
-			}
+			firstPublicationAttempt = reviewAttempt
 			firstCompleted = true
 			return nil
 		}
@@ -236,6 +242,10 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 		if _, err := s.checkpointReadLive(req.Root, workspace.Binding, req.ExpectedWorkingTreeDigest, firstPlan.PriorTree); err != nil {
 			return err
 		}
+		firstPrior, err = tx.CaptureMaterializationCommitConfirmation(ctx, artifact.evidence.JournalID)
+		if err != nil {
+			return err
+		}
 		included, publication, priorCandidate := firstPlan.IncludedOperationsJSON, firstPlan.PublicationReviewJSON, firstPlan.PriorCandidateJSON
 		proposed := localstore.WorkspaceMaterializationRecord{
 			JournalID:                     artifact.evidence.JournalID,
@@ -262,7 +272,7 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 		if !equalMaterializationRecord(prepared, proposed) {
 			return fmt.Errorf("projectstate: prepared checkpoint journal differs from proposed record")
 		}
-		firstNext, err = tx.CaptureCheckpointCommitState(ctx)
+		firstNext, err = tx.CaptureMaterializationCommitConfirmation(ctx, prepared.JournalID)
 		if err != nil {
 			return err
 		}
@@ -273,16 +283,18 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 		if !errors.Is(firstErr, localstore.ErrCommitOutcomeUnknown) || !firstCompleted {
 			return CheckpointResult{}, firstErr
 		}
-		confirm := confirmPreparedCheckpointTransition
 		if firstInvalidated {
-			confirm = confirmCheckpointTransition
-		}
-		committed, confirmErr := confirm(ctx, confirmCommit, firstPrior, firstNext, firstErr)
-		if confirmErr != nil {
-			return CheckpointResult{}, confirmErr
-		}
-		if !committed {
-			return CheckpointResult{}, firstErr
+			if _, confirmErr := confirmPublication(ctx, s.repo, req.Scope, firstPublicationAttempt, firstErr); confirmErr != nil {
+				return CheckpointResult{}, confirmErr
+			}
+		} else {
+			committed, confirmErr := confirmPreparedCheckpointTransition(ctx, confirmCommit, firstPrior, firstNext, firstErr)
+			if confirmErr != nil {
+				return CheckpointResult{}, confirmErr
+			}
+			if !committed {
+				return CheckpointResult{}, firstErr
+			}
 		}
 	}
 	if firstInvalidated {
@@ -294,7 +306,8 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 		return CheckpointResult{}, err
 	}
 	var success CheckpointResult
-	var secondPrior, secondNext localstore.WorkspaceCheckpointCommitState
+	var secondPrior, secondNext localstore.WorkspaceCommitConfirmation
+	var secondPublicationAttempt publicationTransitionAttempt
 	secondCompleted, secondInvalidated, preservedOld := false, false, false
 	secondErr := withWorkspace(ctx, req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		disposition, err := tx.MaterializationDisposition(ctx)
@@ -308,7 +321,7 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 		if !reflect.DeepEqual(firstDisposition, terminal) {
 			return fmt.Errorf("projectstate: checkpoint materialization disposition changed before publication")
 		}
-		secondPrior, err = tx.CaptureCheckpointCommitState(ctx)
+		secondPrior, err = tx.CaptureMaterializationCommitConfirmation(ctx, prepared.JournalID)
 		if err != nil {
 			return err
 		}
@@ -361,10 +374,7 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 				return ErrPublicationUnclassified
 			}
 			secondInvalidated = true
-			secondNext, err = tx.CaptureCheckpointCommitState(ctx)
-			if err != nil {
-				return err
-			}
+			secondPublicationAttempt = reviewAttempt
 			secondCompleted = true
 			return nil
 		}
@@ -432,7 +442,7 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 		default:
 			return fmt.Errorf("%w: invalid checkpoint publication disposition %d", ErrCheckpointRecoveryBlocked, publication)
 		}
-		secondNext, err = tx.CaptureCheckpointCommitState(ctx)
+		secondNext, err = tx.CaptureMaterializationCommitConfirmation(ctx, prepared.JournalID)
 		if err != nil {
 			return err
 		}
@@ -444,12 +454,8 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 			return CheckpointResult{}, secondErr
 		}
 		if secondInvalidated {
-			committed, confirmErr := confirmCheckpointTransition(ctx, confirmCommit, secondPrior, secondNext, secondErr)
-			if confirmErr != nil {
+			if _, confirmErr := confirmPublication(ctx, s.repo, req.Scope, secondPublicationAttempt, secondErr); confirmErr != nil {
 				return CheckpointResult{}, confirmErr
-			}
-			if !committed {
-				return CheckpointResult{}, secondErr
 			}
 		} else {
 			match, confirmErr := confirmCommit(ctx, secondPrior, secondNext)
@@ -457,10 +463,10 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 				return CheckpointResult{}, fmt.Errorf("%w: checkpoint final commit confirmation failed: %w: %w", ErrCheckpointRecoveryBlocked, secondErr, confirmErr)
 			}
 			switch match {
-			case localstore.WorkspaceCheckpointCommitNext:
-			case localstore.WorkspaceCheckpointCommitPrior:
+			case localstore.WorkspaceCommitNext:
+			case localstore.WorkspaceCommitPrior:
 				return CheckpointResult{}, secondErr
-			case localstore.WorkspaceCheckpointCommitThird:
+			case localstore.WorkspaceCommitThird:
 				return CheckpointResult{}, fmt.Errorf("%w: checkpoint final commit confirmation found a third state: %w", ErrCheckpointRecoveryBlocked, secondErr)
 			default:
 				return CheckpointResult{}, fmt.Errorf("%w: checkpoint final commit confirmation returned invalid outcome %d: %w", ErrCheckpointRecoveryBlocked, match, secondErr)
@@ -724,9 +730,9 @@ func validCheckpointArtifactPath(value string) bool {
 
 func confirmCheckpointTransition(
 	ctx context.Context,
-	confirm confirmCheckpointCommitFunc,
-	prior localstore.WorkspaceCheckpointCommitState,
-	next localstore.WorkspaceCheckpointCommitState,
+	confirm confirmWorkspaceCommitFunc,
+	prior localstore.WorkspaceCommitConfirmation,
+	next localstore.WorkspaceCommitConfirmation,
 	commitErr error,
 ) (bool, error) {
 	match, err := confirm(ctx, prior, next)
@@ -734,11 +740,11 @@ func confirmCheckpointTransition(
 		return false, fmt.Errorf("%w: checkpoint commit confirmation failed: %v", commitErr, err)
 	}
 	switch match {
-	case localstore.WorkspaceCheckpointCommitNext:
+	case localstore.WorkspaceCommitNext:
 		return true, nil
-	case localstore.WorkspaceCheckpointCommitPrior:
+	case localstore.WorkspaceCommitPrior:
 		return false, commitErr
-	case localstore.WorkspaceCheckpointCommitThird:
+	case localstore.WorkspaceCommitThird:
 		return false, fmt.Errorf("%w: checkpoint commit confirmation found a third state", commitErr)
 	default:
 		return false, fmt.Errorf("%w: checkpoint commit confirmation returned invalid outcome %d", commitErr, match)
@@ -747,9 +753,9 @@ func confirmCheckpointTransition(
 
 func confirmPreparedCheckpointTransition(
 	ctx context.Context,
-	confirm confirmCheckpointCommitFunc,
-	prior localstore.WorkspaceCheckpointCommitState,
-	next localstore.WorkspaceCheckpointCommitState,
+	confirm confirmWorkspaceCommitFunc,
+	prior localstore.WorkspaceCommitConfirmation,
+	next localstore.WorkspaceCommitConfirmation,
 	commitErr error,
 ) (bool, error) {
 	match, err := confirm(ctx, prior, next)
@@ -760,11 +766,11 @@ func confirmPreparedCheckpointTransition(
 		)
 	}
 	switch match {
-	case localstore.WorkspaceCheckpointCommitNext:
+	case localstore.WorkspaceCommitNext:
 		return true, nil
-	case localstore.WorkspaceCheckpointCommitPrior:
+	case localstore.WorkspaceCommitPrior:
 		return false, commitErr
-	case localstore.WorkspaceCheckpointCommitThird:
+	case localstore.WorkspaceCommitThird:
 		return false, fmt.Errorf(
 			"%w: checkpoint prepared commit confirmation found a third state: %w",
 			ErrCheckpointRecoveryBlocked, commitErr,

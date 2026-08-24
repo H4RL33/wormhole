@@ -1151,18 +1151,18 @@ func TestRecoverUnknownCommitConfirmationMatrix(t *testing.T) {
 		name       string
 		driver     string
 		filesystem checkpointRecoveryFilesystemOutcome
-		match      localstore.WorkspaceCheckpointCommitMatch
+		match      localstore.WorkspaceCommitMatch
 		confirmErr error
 		wantOK     bool
 		want       error
 	}{
-		{name: "prepared recovered old next", driver: "prepared", filesystem: checkpointRecoveryFilesystemRecoveredOld, match: localstore.WorkspaceCheckpointCommitNext, wantOK: true},
-		{name: "prepared recovered new next", driver: "prepared", filesystem: checkpointRecoveryFilesystemRecoveredNew, match: localstore.WorkspaceCheckpointCommitNext, wantOK: true},
-		{name: "published recovered new next", driver: "published", filesystem: checkpointRecoveryFilesystemRecoveredNew, match: localstore.WorkspaceCheckpointCommitNext, wantOK: true},
-		{name: "prepared prior", driver: "prepared", filesystem: checkpointRecoveryFilesystemRecoveredOld, match: localstore.WorkspaceCheckpointCommitPrior, want: localstore.ErrCommitOutcomeUnknown},
-		{name: "published prior", driver: "published", filesystem: checkpointRecoveryFilesystemRecoveredNew, match: localstore.WorkspaceCheckpointCommitPrior, want: localstore.ErrCommitOutcomeUnknown},
-		{name: "third", driver: "prepared", filesystem: checkpointRecoveryFilesystemRecoveredOld, match: localstore.WorkspaceCheckpointCommitThird, want: ErrCheckpointRecoveryBlocked},
-		{name: "invalid", driver: "prepared", filesystem: checkpointRecoveryFilesystemRecoveredOld, match: localstore.WorkspaceCheckpointCommitMatch(99), want: ErrCheckpointRecoveryBlocked},
+		{name: "prepared recovered old next", driver: "prepared", filesystem: checkpointRecoveryFilesystemRecoveredOld, match: localstore.WorkspaceCommitNext, wantOK: true},
+		{name: "prepared recovered new next", driver: "prepared", filesystem: checkpointRecoveryFilesystemRecoveredNew, match: localstore.WorkspaceCommitNext, wantOK: true},
+		{name: "published recovered new next", driver: "published", filesystem: checkpointRecoveryFilesystemRecoveredNew, match: localstore.WorkspaceCommitNext, wantOK: true},
+		{name: "prepared prior", driver: "prepared", filesystem: checkpointRecoveryFilesystemRecoveredOld, match: localstore.WorkspaceCommitPrior, want: localstore.ErrCommitOutcomeUnknown},
+		{name: "published prior", driver: "published", filesystem: checkpointRecoveryFilesystemRecoveredNew, match: localstore.WorkspaceCommitPrior, want: localstore.ErrCommitOutcomeUnknown},
+		{name: "third", driver: "prepared", filesystem: checkpointRecoveryFilesystemRecoveredOld, match: localstore.WorkspaceCommitThird, want: ErrCheckpointRecoveryBlocked},
+		{name: "invalid", driver: "prepared", filesystem: checkpointRecoveryFilesystemRecoveredOld, match: localstore.WorkspaceCommitMatch(99), want: ErrCheckpointRecoveryBlocked},
 		{name: "read failure", driver: "prepared", filesystem: checkpointRecoveryFilesystemRecoveredOld, confirmErr: errors.New("recovery confirmation read failed"), want: ErrCheckpointRecoveryBlocked},
 	}
 	for _, test := range tests {
@@ -1194,11 +1194,11 @@ func TestRecoverUnknownCommitConfirmationMatrix(t *testing.T) {
 				return err
 			}
 			confirmCalls := 0
-			fixture.service.confirmCheckpointCommit = func(
+			fixture.service.confirmWorkspaceCommit = func(
 				context.Context,
-				localstore.WorkspaceCheckpointCommitState,
-				localstore.WorkspaceCheckpointCommitState,
-			) (localstore.WorkspaceCheckpointCommitMatch, error) {
+				localstore.WorkspaceCommitConfirmation,
+				localstore.WorkspaceCommitConfirmation,
+			) (localstore.WorkspaceCommitMatch, error) {
 				confirmCalls++
 				return test.match, test.confirmErr
 			}

@@ -69,22 +69,23 @@ type withImmediateWorkspaceFunc func(
 ) error
 
 type Service struct {
-	repo                             *localstore.WorkspaceRepo
-	legacyBackupRoot                 string
-	registrationTimeout              time.Duration
-	readWorkingTree                  func(string) (state.Tree, error)
-	observeGitBase                   func(context.Context, ObserveGitBaseRequest) (gitBaseObservation, error)
-	observePublicationOrigin         func(context.Context, string) (publicationOriginObservation, error)
-	observePublicationTrust          func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error)
-	withImmediateWorkspace           withImmediateWorkspaceFunc
-	withImmediateWorkspaceTransition withImmediateWorkspaceTransitionFunc
-	now                              func() time.Time
-	newStashID                       func() (string, error)
-	prepareCheckpointArtifact        prepareCheckpointArtifactFunc
-	confirmCheckpointCommit          confirmCheckpointCommitFunc
-	observeCheckpointRecoveryGit     checkpointRecoveryGitObserver
-	recoverCheckpointFilesystem      checkpointRecoveryFilesystemFunc
-	checkpointGates                  checkpointGateSet
+	repo                               *localstore.WorkspaceRepo
+	legacyBackupRoot                   string
+	registrationTimeout                time.Duration
+	readWorkingTree                    func(string) (state.Tree, error)
+	observeGitBase                     func(context.Context, ObserveGitBaseRequest) (gitBaseObservation, error)
+	observePublicationOrigin           func(context.Context, string) (publicationOriginObservation, error)
+	observePublicationTrust            func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error)
+	withImmediateWorkspace             withImmediateWorkspaceFunc
+	withImmediateWorkspaceTransition   withImmediateWorkspaceTransitionFunc
+	now                                func() time.Time
+	newStashID                         func() (string, error)
+	prepareCheckpointArtifact          prepareCheckpointArtifactFunc
+	confirmWorkspaceCommit             confirmWorkspaceCommitFunc
+	confirmPublicationTransitionCommit confirmPublicationTransitionCommitFunc
+	observeCheckpointRecoveryGit       checkpointRecoveryGitObserver
+	recoverCheckpointFilesystem        checkpointRecoveryFilesystemFunc
+	checkpointGates                    checkpointGateSet
 }
 
 func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service, error) {
@@ -94,15 +95,16 @@ func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service,
 	service := &Service{
 		repo: repo, registrationTimeout: workspaceRegistrationTimeout,
 		readWorkingTree: ReadWorkingTreeNoFollow, observeGitBase: observeGitBaseOutside,
-		observePublicationOrigin:         observePublicationOrigin,
-		withImmediateWorkspace:           repo.WithImmediateWorkspace,
-		withImmediateWorkspaceTransition: repo.WithImmediateWorkspaceTransition,
-		now:                              time.Now,
-		newStashID:                       newCanonicalStashID,
-		prepareCheckpointArtifact:        defaultPrepareCheckpointArtifact,
-		confirmCheckpointCommit:          repo.ConfirmCheckpointCommit,
-		observeCheckpointRecoveryGit:     observeCheckpointRecoveryGit,
-		recoverCheckpointFilesystem:      recoverCheckpointFilesystem,
+		observePublicationOrigin:           observePublicationOrigin,
+		withImmediateWorkspace:             repo.WithImmediateWorkspace,
+		withImmediateWorkspaceTransition:   repo.WithImmediateWorkspaceTransition,
+		now:                                time.Now,
+		newStashID:                         newCanonicalStashID,
+		prepareCheckpointArtifact:          defaultPrepareCheckpointArtifact,
+		confirmWorkspaceCommit:             repo.ConfirmWorkspaceCommit,
+		confirmPublicationTransitionCommit: confirmPublicationCommit,
+		observeCheckpointRecoveryGit:       observeCheckpointRecoveryGit,
+		recoverCheckpointFilesystem:        recoverCheckpointFilesystem,
 	}
 	if config.LegacyIntegrationBackupRoot == "" {
 		return service, nil

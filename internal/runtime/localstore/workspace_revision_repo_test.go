@@ -1180,37 +1180,35 @@ func TestWorkspaceRevisionMaterializationWriterInventory(t *testing.T) {
 	})
 }
 
-func TestWorkspaceRevisionMaterializationCheckpointCommitProjectionAndTokenComparator(t *testing.T) {
+func TestWorkspaceRevisionMaterializationCommitProjectionAndTokenComparator(t *testing.T) {
 	ctx := context.Background()
+	journalID := "00000000-0000-4000-8000-000000000051"
 
 	t.Run("dirty in-callback capture uses projected revision", func(t *testing.T) {
 		_, repo, binding := coreWriterInventoryFixture(t)
 		before := coreWriterRevision(t, repo, binding.Scope)
-		captured := rolledBackCheckpointCommitState(t, repo, binding.Scope, func(tx *WorkspaceMutationTx) error {
+		captured := rolledBackMaterializationConfirmation(t, repo, binding.Scope, journalID, func(tx *WorkspaceMutationTx) error {
 			return tx.SetStatus(ctx, "pending")
 		})
-		if got := captured.binding.Record.WorkspaceRevision; got != before+1 {
+		if got := captured.revision; got != before+1 {
 			t.Fatalf("dirty checkpoint capture workspace revision=%d, want projected %d", got, before+1)
 		}
 		assertWorkspaceRevisionTestState(t, repo.db, binding.Scope, before, "clean")
 	})
 
-	t.Run("old token ignores only revision while general binding equality remains sensitive", func(t *testing.T) {
+	t.Run("compact token equality binds revision and authority", func(t *testing.T) {
 		_, repo, binding := coreWriterInventoryFixture(t)
-		prior := captureCheckpointCommitState(t, repo, binding.Scope)
-		nextRevision := cloneWorkspaceCheckpointCommitState(prior)
-		nextRevision.binding.Record.WorkspaceRevision++
-		if equalWorkspacePublicationBindingEvidence(prior.binding, nextRevision.binding) {
-			t.Fatal("general publication binding equality ignored workspace revision")
-		}
-		if !equalWorkspaceCheckpointCommitStates(prior, nextRevision) {
-			t.Fatal("legacy checkpoint token equality did not ignore workspace revision")
+		prior := captureMaterializationConfirmation(t, repo, binding.Scope, journalID)
+		nextRevision := prior
+		nextRevision.revision++
+		if equalWorkspaceCommitConfirmations(prior, nextRevision) {
+			t.Fatal("compact confirmation equality ignored workspace revision")
 		}
 
-		otherBindingChange := cloneWorkspaceCheckpointCommitState(nextRevision)
-		otherBindingChange.binding.Record.State = "pending"
-		if equalWorkspaceCheckpointCommitStates(prior, otherBindingChange) {
-			t.Fatal("legacy checkpoint token equality ignored a non-revision binding change")
+		otherAuthority := prior
+		otherAuthority.authorityDigest = state.Digest("sha256:" + strings.Repeat("f", 64))
+		if equalWorkspaceCommitConfirmations(prior, otherAuthority) {
+			t.Fatal("compact confirmation equality ignored authority digest")
 		}
 	})
 }

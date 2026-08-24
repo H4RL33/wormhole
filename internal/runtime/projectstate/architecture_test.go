@@ -17,6 +17,46 @@ import (
 	state "github.com/H4RL33/wormhole/internal/types/projectstate"
 )
 
+func TestCompactTargetedCommitConfirmationNeverReplays(t *testing.T) {
+	t.Run("journal", func(t *testing.T) {
+		fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
+		realWithImmediate := fixture.service.repo.WithImmediateWorkspace
+		transactionCalls := 0
+		unknown := fmt.Errorf("synthetic compact confirmation: %w", localstore.ErrCommitOutcomeUnknown)
+		fixture.service.withImmediateWorkspace = func(
+			ctx context.Context,
+			scope types.WorkspaceScope,
+			fn func(*localstore.WorkspaceMutationTx) error,
+		) error {
+			transactionCalls++
+			err := realWithImmediate(ctx, scope, fn)
+			if err == nil && transactionCalls == 2 {
+				return unknown
+			}
+			return err
+		}
+		confirmationCalls := 0
+		fixture.service.confirmWorkspaceCommit = func(
+			context.Context,
+			localstore.WorkspaceCommitConfirmation,
+			localstore.WorkspaceCommitConfirmation,
+		) (localstore.WorkspaceCommitMatch, error) {
+			confirmationCalls++
+			return localstore.WorkspaceCommitNext, nil
+		}
+
+		result, err := fixture.service.Checkpoint(context.Background(), req)
+		if err != nil || result.JournalID == "" {
+			t.Fatalf("compact journal confirmation=(%+v,%v), want successful result", result, err)
+		}
+		if confirmationCalls != 1 || transactionCalls != 2 || fixture.prepareCalls != 1 ||
+			fixture.publishCalls != 1 || fixture.closeCalls != 1 {
+			t.Fatalf("confirmation=%d transactions=%d prepare=%d publish=%d close=%d, want 1/2/1/1/1 without replay",
+				confirmationCalls, transactionCalls, fixture.prepareCalls, fixture.publishCalls, fixture.closeCalls)
+		}
+	})
+}
+
 func TestCoarsePrivateCorruptionFailsClosedWithoutCrossScopeMutation(t *testing.T) {
 	for _, test := range []struct {
 		name    string
