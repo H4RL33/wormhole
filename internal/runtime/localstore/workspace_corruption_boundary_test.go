@@ -98,10 +98,10 @@ func TestWorkspaceTransactionWrappersRollBackInjectedWriteFailure(t *testing.T) 
 	}
 }
 
-// TestWorkspaceReducedRepresentationBoundary rejects only the concrete raw
-// representation proof fragments retired by Task 9. It deliberately leaves
-// workspace-revision typing, publication/materialization, checkpoint, history,
-// and restore-retry paths to their owning later tasks.
+// TestWorkspaceReducedRepresentationBoundary rejects the concrete private raw
+// representation proof fragments retired through the final Task 16 sweep.
+// Schema, semantic, current-state, audit, revision, and durability authorities
+// remain owned by their focused tests.
 func TestWorkspaceReducedRepresentationBoundary(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -141,6 +141,32 @@ func TestWorkspaceReducedRepresentationBoundary(t *testing.T) {
 				"ON CAST(receipt.project_id AS TEXT)=binding.project_id",
 			},
 			retirement: "Task 9 keeps immutable receipt semantics and exact scope/key while removing raw alias/count/storage-class proof",
+		},
+		{
+			name: "workspace-repository-json-byte-echo",
+			file: "workspace_repo.go",
+			fragments: []string{
+				"canonicalRepository, err := json.Marshal(record.Binding.Repository)",
+				"string(canonicalRepository) != repositoryJSON",
+			},
+			retirement: "Task 16 keeps strict logical repository decoding and validation while accepting equivalent private JSON representation",
+		},
+		{
+			name: "publication-repository-json-byte-echo",
+			file: "workspace_publication_repo.go",
+			fragments: []string{
+				"string(canonicalRepository) != stored.RepositoryJSON",
+			},
+			retirement: "Task 16 keeps strict logical publication repository decoding and validation while removing private JSON byte equality",
+		},
+		{
+			name: "stash-repository-json-byte-echo",
+			file: "workspace_stash_repo.go",
+			fragments: []string{
+				"func decodeWorkspaceStashRepository(",
+				"string(canonical) != raw",
+			},
+			retirement: "Task 16 reuses strict logical repository decoding and preserves semantic scope/repository membership",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -212,9 +211,9 @@ func scanOptionalWorkspaceStash(scanner interface{ Scan(...any) error }, expecte
 	if scope != expectedScope || !validWorkspaceScope(scope) {
 		return nil, fmt.Errorf("workspace stash scope differs from transaction")
 	}
-	repository, err := decodeWorkspaceStashRepository(repositoryJSON)
+	repository, err := decodeWorkspaceRepositoryIdentity(repositoryJSON)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode workspace stash repository identity: %w", err)
 	}
 	if !stashID.Valid {
 		if projectID.Valid || workspaceID.Valid || sourceDigest.Valid || candidateDigest.Valid || sourceBytes != nil || composedBytes != nil ||
@@ -273,21 +272,6 @@ func scanOptionalWorkspaceStash(scanner interface{ Scan(...any) error }, expecte
 		return nil, fmt.Errorf("decode persisted workspace stash composed tree: %w", err)
 	}
 	return record, nil
-}
-
-func decodeWorkspaceStashRepository(raw string) (types.RepositoryIdentity, error) {
-	var repository types.RepositoryIdentity
-	if err := json.Unmarshal([]byte(raw), &repository); err != nil {
-		return types.RepositoryIdentity{}, fmt.Errorf("decode workspace stash repository identity: %w", err)
-	}
-	canonical, err := json.Marshal(repository)
-	if err != nil || string(canonical) != raw {
-		return types.RepositoryIdentity{}, fmt.Errorf("workspace stash repository identity is not canonical")
-	}
-	if err := repository.Validate(); err != nil {
-		return types.RepositoryIdentity{}, fmt.Errorf("invalid workspace stash repository identity: %w", err)
-	}
-	return repository, nil
 }
 
 func equalWorkspaceStashTree(left, right projectstate.Tree) bool {

@@ -20,11 +20,12 @@ existing WAL sidecar. The corresponding restored commands are recorded below.
 | G01 | Private lifecycle and public rebuild share one per-project serialization authority while projects remain independent. | `TestPrivateCodeGraphLifecycleSerializesWithPublicRebuild`; `TestCodeGraphProjectExecutorsAreIndependent` | `go test -race ./internal/runtime/localapi -run 'Test(PrivateCodeGraphLifecycleSerializesWithPublicRebuild|CodeGraphProjectExecutorsAreIndependent)' -count=1` | Task-3 RED observed same-project overlap when private/public paths owned different mutexes. | Per-request or independent lifecycle mutex | green |
 | G01 | Every CLI lifecycle operation dials the private method with only operation/project/checkout claims. | `TestExecuteCodeGraphLifecycleUsesPrivateRPCWithClosedClaims` | `go test ./cmd/wormhole -run '^TestExecuteCodeGraphLifecycleUsesPrivateRPCWithClosedClaims$' -count=1` | Task-4 RED made no socket call and instead attempted the direct database path. | `executeCodeGraphLifecycle` direct store/lifecycle construction | green |
 | G01 | With Gateway stopped, all six CLI lifecycle operations leave absent DB/WAL/SHM absent and existing sidecars byte-and-metadata identical. | `TestExecuteCodeGraphLifecycleStoppedDaemonDoesNotMutateDatabase` | `go test ./cmd/wormhole -run '^TestExecuteCodeGraphLifecycleStoppedDaemonDoesNotMutateDatabase$' -count=1` | Task-4 RED attempted schema access and removed an existing WAL sidecar. | CLI `localstore.Open` ownership bypass | green |
-| G02 | Malformed current logical binding/snapshot, candidate, operation, open conflict, named stash/receipt, publication policy, or materialisation journal returns zero/error and preserves target+sibling DB, revision, Git, worktree, and applicable checkpoint artifacts. | `TestCoarsePrivateCorruptionFailsClosedWithoutCrossScopeMutation` | `go test ./internal/runtime/projectstate -run '^TestCoarsePrivateCorruptionFailsClosedWithoutCrossScopeMutation$' -count=1` | The pre-production open-conflict row reached the restore mutation clock before decoding malformed field evidence; the other eight retained strict semantic boundaries were already green. Shared Evidence then temporarily removed the negative stash-operation-count validator (`stash_codec.go` hash `4ea47ce1...` to `5f6b72b5...`); the exact command failed only the named-receipt row with nonzero `OperationCount:-1`. Exact restoration returned the file hash and empty-diff hash and the command to green. | Representation-specific corruption tables are retired only row-by-row after this owner is green; checkpoint/history rows remain pending Tasks 10-14. | green |
+| G02 | Malformed current logical binding/snapshot, candidate, operation, open conflict, named stash/receipt, publication policy, or materialisation journal returns zero/error and preserves target+sibling DB, revision, Git, worktree, and applicable checkpoint artifacts. | `TestCoarsePrivateCorruptionFailsClosedWithoutCrossScopeMutation` | `go test ./internal/runtime/projectstate -run '^TestCoarsePrivateCorruptionFailsClosedWithoutCrossScopeMutation$' -count=1` | The pre-production open-conflict row reached the restore mutation clock before decoding malformed field evidence; the other eight retained strict semantic boundaries were already green. Shared Evidence then temporarily removed the negative stash-operation-count validator (`stash_codec.go` hash `4ea47ce1...` to `5f6b72b5...`); the exact command failed only the named-receipt row with nonzero `OperationCount:-1`. Exact restoration returned the file and intended-worktree diff hashes and the command to green. | Representation-specific rows were retired only after this semantic owner and the checkpoint/history owners from Tasks 10-14 were green. | green |
 | G02 | Both immediate workspace wrappers roll back a prior semantic write and keep revision/siblings unchanged when a real statement fails. | `TestWorkspaceTransactionWrappersRollBackInjectedWriteFailure` | `go test ./internal/runtime/localstore -run '^TestWorkspaceTransactionWrappersRollBackInjectedWriteFailure$' -count=1` | A target-scoped `BEFORE UPDATE OF status` `RAISE(ABORT)` fires after an operation insert; both wrappers preserve the exact pre-transaction raw snapshot and then succeed after the trigger is removed. | Successful `RAISE(IGNORE)` and successful rewriting-trigger oracles; retained real-ABORT rollback replaces them. | green |
 | R02 | Accepted-base/status current mutations and conflict resolution trust private representation while retaining typed semantic transition, exact scope/state, affected-row proof, strict logical conflict decoding, real-statement rollback, and the R03 revision CAS. | `TestCoarsePrivateCorruptionFailsClosedWithoutCrossScopeMutation`; `TestWorkspaceTransactionWrappersRollBackInjectedWriteFailure`; `TestWorkspaceReducedRepresentationBoundary`; `TestWorkspaceMutationTxAdvanceAcceptedBaseWriteFailureRollsBack`; `TestWorkspaceConflictOccurrencesStatementFailureRollsBackAtomically` | `go test ./internal/runtime/localstore ./internal/runtime/projectstate -run 'CoarsePrivateCorruption|WorkspaceReducedRepresentationBoundary|WorkspaceTransactionWrappers|AdvanceAcceptedBase|SetStatus|Conflict' -count=1` | Task-9 RED found malformed conflict evidence reached the restore mutation clock; the reduced-boundary gate named the raw accepted-base timestamp/full-row fragments before their removal. The exact G02/rollback commands and retained accepted-base/status/conflict family command are green. | `workspaceBindingMutationMetadata`; `TestWorkspaceMutationTxAdvanceAcceptedBaseMetadataHelperErrors`; `TestWorkspaceMutationTxAdvanceAcceptedBaseRejectsTimestampRegression`; `TestWorkspaceMutationTxAdvanceAcceptedBaseIgnoredUpdateRollsBackRawStateAndReleasesWriter`; `TestWorkspaceMutationTxAdvanceAcceptedBaseSameStatementTimestampRawAtomicDelta`; the three successful drift rows removed from `TestWorkspaceMutationTxAdvanceAcceptedBaseDetectsTriggerDriftAndRollsBack` (the real-ABORT row remains under the renamed owner); `TestWorkspaceMutationTxSetStatusReturningUpdatedAtIgnoredUpdateIsNotFound`; `TestWorkspaceMutationTxSetStatusReturningUpdatedAtPrecedesAfterTriggerAndRollsBack`; `TestWorkspaceConflictOccurrencesRejectResolveTriggerTimestampMutation`; the ignored-insert, ignored-resolve, and successful evidence-rewrite rows removed from `TestWorkspaceConflictOccurrencesTriggerFaultsRollbackAtomically` (the real-ABORT row remains under the renamed owner). | green |
 | R02 | Named stash reads/deletes trust SQLite key representation while retaining canonical tree/digest/actor validation, exact logical scope/key, immutable collision behavior, restart/isolation, absence handling, and ordinary rollback. | `TestCoarsePrivateCorruptionFailsClosedWithoutCrossScopeMutation`; `TestWorkspaceTransactionWrappersRollBackInjectedWriteFailure`; `TestWorkspaceStashCRUDRestartOwnershipAbsenceAndIsolation`; `TestWorkspaceStashCRUDRejectsPersistedCorruption`; `TestWorkspaceStashCRUDRejectsTreeActorTextAndTimestampCorruption`; `TestWorkspaceStashCRUDPlainInsertExactDeleteAndRollback`; `TestWorkspaceStashCRUDDeleteRollsBackWithCallerTransaction` | `go test ./internal/runtime/localstore -run '^(TestWorkspaceStashCRUD|TestWorkspaceTransactionWrappersRollBackInjectedWriteFailure)' -count=1`<br>`go test ./internal/runtime/projectstate -run '^(TestCoarsePrivateCorruptionFailsClosedWithoutCrossScopeMutation|TestServiceStashDirectCandidateWithActiveSuffix|TestServiceStashCommitUnknownReturnsZeroAndSameRequestRetrySucceeds|TestServiceRestoreStashCleanConsumesStashAndReceiptRetryIsReadOnly|TestServiceRestoreStashConflictRetainsStateAndExactRetryIsReadOnly)$' -count=1` | The coarse service boundary and both immediate-wrapper ABORT owner are green; retained stash/service lifecycle owners are green after the named-stash scanner reduction. | Successful stash insert/delete `RAISE(IGNORE)` cases removed from `TestWorkspaceStashCRUDPlainInsertExactDeleteAndRollback`; BLOB-only key and TEXT/BLOB duplicate rows removed from `TestWorkspaceStashCRUDDeleteStrictPreflight` (absence/missing-scope remains as `TestWorkspaceStashCRUDDeleteRejectsAbsentOrMissingScope`); `TestWorkspaceStashCRUDRejectsBlobStashIDInsteadOfReportingAbsent`; BLOB project/workspace/digest/operations/actor/label, TEXT tree, storage-class duplicate, and integer-timestamp rows removed from `TestWorkspaceStashCRUDRejectsPersistedCorruption`; `typeof` class assertions removed from `TestWorkspaceStashCRUDPreservesRuntimeUnknownOperationsBytes`; `updateWorkspaceStashScopeStorage`. | green |
 | R02 | Named transition receipts use an exact scoped receipt-first key lookup while retaining strict logical decoding, immutable collision behavior, exact scope, restart safety, callback/commit rollback, and the R03 revision authority. | `TestCoarsePrivateCorruptionFailsClosedWithoutCrossScopeMutation`; `TestWorkspaceTransactionWrappersRollBackInjectedWriteFailure`; `TestTransitionReceiptByKeyExactReadAbsentUnregisteredIsolationAndRestart`; `TestTransitionReceiptByKeyRejectsSelectedLogicalCorruption`; `TestTransitionReceiptByKeyReadsOnlyReceiptTable`; `TestWithImmediateWorkspaceTransitionReceiptIsFirstRead`; `TestWorkspaceTransitionReceiptDuplicateCannotMutateImmutableFields`; `TestWorkspaceTransitionReceiptCorruptionFailsClosedAfterReopen` | `go test ./internal/runtime/localstore -run '^(TestWorkspaceTransitionReceipt|TestTransitionReceiptByKey|TestWithImmediateWorkspaceTransitionReceiptIsFirstRead|TestWorkspaceRevisionTrackerLazyLoadFinalizerSQLAndTransitionReceiptOrdering|TestWorkspaceTransactionWrappersRollBackInjectedWriteFailure)' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestCoarsePrivateCorruptionFailsClosedWithoutCrossScopeMutation$' -count=1` | The receipt-first trace now requires the exact `project_id/workspace_id/request_id` predicate without prescribing `CAST`, `COUNT`, or `typeof`; the retained semantic/restart/scope/collision/rollback owners and G02 command are green. | `TestWorkspaceTransitionReceiptRejectsBlobRequestIDInsteadOfReportingAbsent`; `TestWorkspaceTransitionReceiptRejectsCastEquivalentDuplicateKey`; `TestWorkspaceTransitionReceiptInsertRejectsHiddenBlobLogicalDuplicate`; `TestServiceStashHiddenBlobExactReceiptKeyFailsClosedWithoutMutation`; BLOB key/field and CAST-equivalent duplicate rows removed from `TestTransitionReceiptByKeyRejectsAliasesDuplicatesAndSelectedFieldCorruption` (logical rows remain under the renamed owner); the successful ignored-insert half removed from `TestWorkspaceTransitionReceiptDuplicateAndIgnoredInsertFail` (duplicate collision remains under the renamed owner); BLOB rows removed from `TestWorkspaceTransitionReceiptCorruptionFailsClosedAfterReopen`; `assertTransitionReceiptQueryShape` representation clauses; `updateWorkspaceTransitionReceiptStorage`. | green |
+| R02 | Publication policy, materialisation, complete operation audit, and repository identity readers trust private SQLite/JSON representation while retaining strict logical policy/repository/actor/tree/journal/operation decoding, semantic digests, exact scope/current ownership, ordered history audit, affected-row/history writes, real statement rollback, and the sole R03 revision CAS. | `TestWorkspaceReducedRepresentationBoundary`; `TestWorkspacePublicationPolicyStrictReadersRejectCorruption`; `TestWorkspacePublicationPolicyFailsClosedOnMissingOrDisagreeingHistory`; `TestAuditWorkspaceHistoryStrictOrderedFamiliesAndExactScope`; `TestCurrentWorkspaceMaterializationStrictCorruptionAndSiblingIsolation`; `TestWorkspaceRevisionPublicationWriterInventory`; `TestWorkspaceTransactionWrappersRollBackInjectedWriteFailure`; `TestCoarsePrivateCorruptionFailsClosedWithoutCrossScopeMutation`; `TestStage1ASoleWorkspaceAuthorities/workspace_representation_sweep_stays_frozen` | `go test ./internal/runtime/localstore -run 'Test(WorkspaceReducedRepresentationBoundary|WorkspacePublicationPolicy|AuditWorkspaceHistory|CurrentWorkspaceMaterialization|WorkspaceRevisionPublication|WorkspaceTransactionWrappers)' -count=1`<br>`go test ./internal/runtime/projectstate -run 'Test(CoarsePrivateCorruptionFailsClosedWithoutCrossScopeMutation|Stage1ASoleWorkspaceAuthorities)' -count=1` | The G02 semantic-decoder bypass fails the coarse boundary and returns green after restoration. The architecture gate freezes the completed workspace production lexical sweep at `CAST=0`, `typeof=1`, `StorageClasses=0`, and identifiers ending `Raw=0`. | `validStoredWorkspaceTimestamp`; `validMonotonicWorkspaceMutationTimestamp`; `workspacePublicationRawRecord`; publication/materialisation/operation-audit storage-class projections and raw timestamp equality; `publicationBindingEvidence`; `equalWorkspacePublicationBindingEvidence`; bootstrap/publication/binding adjacent rereads; `TestWorkspaceMutationTxAdvanceAcceptedBaseTimestampPredicate`; representation rows in `TestWorkspacePublicationPolicyStrictReadersRejectCorruption` (fractional revision remains semantic); `TestWorkspaceRegistrationRereadsBootstrapPolicyBeforeCommit`; `TestWorkspacePublicationPolicyCASRejectsTriggerDriftAtomically`; `TestWorkspacePublicationPolicyCASProtectsCompleteBindingEvidence`; zero-caller raw-delta helpers; stash terminal storage-class subcase; private repository JSON byte-remarshal equality in workspace/publication/stash readers | green |
 | G03 | Every real core, publication, and materialisation writer advances the scoped workspace revision exactly once; exact reads, no-ops, duplicates, stale/illegal transitions, and ineligible operations advance zero. | `TestWorkspaceRevisionCoreWriterInventory`; `TestWorkspaceRevisionPublicationWriterInventory`; `TestWorkspaceRevisionMaterializationWriterInventory` | `go test ./internal/runtime/localstore -run '^TestWorkspaceRevision(CoreWriterInventory|Publication|Materialization)' -count=1` | With the real `ReconfigurePublication` dirty mark temporarily omitted, `TestWorkspaceRevisionCausalWitness/omitted_publication_writer_mark_is_observable` failed at committed revision `1`, wanted `2`; restoring the exact marker returned the command to green. | Per-writer ad hoc revision authority or an untracked lifecycle writer | green |
 | G03 | Checkpoint prepare and finalisation are separate `+1` transactions; recovery finalisation and Git acceptance each advance once despite composing several writers; dirty in-callback commit evidence carries projected `R+1`, and compact confirmation equality binds that revision. | `TestWorkspaceRevisionMaterializationCommitProjectionAndTokenComparator`; `TestCheckpointPublisherFailureRetainsPreparedAuthority`; `TestCheckpointFinalizationFailureRollsBackAllTentativeDatabaseWrites`; `TestCheckpointPreservedConcurrentOldChangesOnlyJournalState`; `TestCheckpointPendingStatusPreservesTimestampAndMaterializesExactOperations`; `TestWorkspaceRevisionRecoveryFinalizationAdvancesOnce`; `TestObserveGitBaseSameRefAcceptsExactMaterialization`; `TestPublicationConfigurationStableMismatchCommitsStickyInvalidation`; `TestReconfigurePublicationCurrentExactSameHumanIsNoOpWithoutClockOrWrite`; `TestReconfigurePublicationSameClassDifferentHumanAdvancesAttribution` | `go test ./internal/runtime/localstore ./internal/runtime/projectstate -run 'Revision|Publication|Materialization|Checkpoint' -count=1` | Pre-production Task-8 RED observed durable prepare at `+0`, successful publication with only the Task-7 finalisation advance, and recovery finalisation at `+0`; exact boundary assertions turned green after the lifecycle writers joined the sole tracker. Task 12 replaced the revision-blind complete token with an exact projected-revision compact proof. | Statement-count revision increments, shadow counters, or revision-blind commit equality | green |
 | G03 | A dirty transaction has exactly one finalisation authority, and any second finalisation stale-CAS aborts and rolls back every logical and revision write. | `TestWorkspaceRevisionCausalWitness/double_finalization_rejects_and_rolls_back_multiwrite_transaction` | `go test ./internal/runtime/localstore -run '^TestWorkspaceRevisionCausalWitness$' -count=1` | Shared Evidence temporarily rebased `tx.revision.expected=next` after each successful finalisation, changing `workspace_revision_repo.go` hash `a41b7353...` to `613816ae...`; the exact command failed only this witness with `double finalization error=<nil>`. Removing the faulty rebase restored hash `a41b7353...`, an empty production diff, and GREEN. | Multiple finalisers or partial multiwrite commit | green |
@@ -35,6 +36,7 @@ existing WAL sidecar. The corresponding restored commands are recorded below.
 Task-13 review correction retired the synthetic `readPublicationPolicyState` test helper, which manufactured `PolicyRevision` empty rows and made checkpoint/publication-review `len(history)` assertions tautological. Those callers now assert current policy or public behavior; complete retained-history integrity remains owned only by the explicit `AuditWorkspaceHistory` tests.
 Task-9 prerequisite verification (2026-08-24): every exact command stored on rows A02-A17, A20, A22, and A23 was rerun individually against the final Task-9 tree and exited zero; each command's `go test` output reported `ok`. The `green` status on those rows records that prerequisite result before Task-9 approval.
 
+| A01 | Git remains sole code truth; private overlay mutation does not imply publication, while checkpoint publishes only the exact selected plan. | `TestImportPersistsCleanDirectCandidate`; `TestApplyBatchDoesNotObservePublicationReview`; `TestCheckpointLocalOnlyPublishesExactPlan` | `go test ./internal/runtime/projectstate -run '^TestImportPersistsCleanDirectCandidate$' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestApplyBatchDoesNotObservePublicationReview$' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestCheckpointLocalOnlyPublishesExactPlan$' -count=1` | Retained architecture tests preserve the separation between private mutation and explicit Git publication. | none | green |
 | A02 | Trusted workspace registration/resolution is idempotent and rejects replacement, ambiguity, and collisions. | `TestRegisterWorkspaceIdempotent`; `TestResolveWorkingDirectoryChild`; `TestResolveWorkingDirectoryLongestAncestor`; `TestResolveWorkingDirectoryRejectsReplacedCheckout`; `TestWorkspaceRegistrationCheckoutCollision` | `go test ./internal/runtime/projectstate -run '^TestRegisterWorkspaceIdempotent$' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestResolveWorkingDirectoryChild$' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestResolveWorkingDirectoryLongestAncestor$' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestResolveWorkingDirectoryRejectsReplacedCheckout$' -count=1`<br>`go test ./internal/runtime/localstore -run '^TestWorkspaceRegistrationCheckoutCollision$' -count=1` | Retained architecture tests; no R01 deletion. Task-9 prerequisite commands exited zero with `ok`. | none | green |
 | A03 | Project/workspace scopes cannot read or mutate sibling scopes. | `TestRegisterWorkspaceStatusIsScoped`; `TestServiceDiffScopeIsolationAndCorruptionIsReadOnly`; `TestServiceStashKeepsSiblingWorkspaceAndReceiptScopeIsolated`; `TestRecoverRejectsCrossProjectDriverWithoutMutatingEitherScope`; `TestRecoverRejectsCrossWorkspaceDriverWithoutMutatingEitherScope` | `go test ./internal/runtime/projectstate -run '^TestRegisterWorkspaceStatusIsScoped$' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestServiceDiffScopeIsolationAndCorruptionIsReadOnly$' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestServiceStashKeepsSiblingWorkspaceAndReceiptScopeIsolated$' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestRecoverRejectsCrossProjectDriverWithoutMutatingEitherScope$' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestRecoverRejectsCrossWorkspaceDriverWithoutMutatingEitherScope$' -count=1` | Retained architecture tests; no R01 deletion. | none | green |
 | A04 | Untrusted repository reads cannot escape, follow hostile links, fetch, or exceed bounds. | `TestReadWorkingTreeNoFollowRejectsRootAncestorAndEntrySymlinks`; `TestReadWorkingTreeNoFollowRejectsNonRegularAndHardLinkedFiles`; `TestPromisorMissingObjectFailsClosedWithoutNetwork`; `TestBoundedCommittedTreeListing` | `go test ./internal/runtime/projectstate -run '^TestReadWorkingTreeNoFollowRejectsRootAncestorAndEntrySymlinks$' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestReadWorkingTreeNoFollowRejectsNonRegularAndHardLinkedFiles$' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestPromisorMissingObjectFailsClosedWithoutNetwork$' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestBoundedCommittedTreeListing$' -count=1` | Retained architecture tests; no R01 deletion. | none | green |
@@ -52,9 +54,13 @@ Task-9 prerequisite verification (2026-08-24): every exact command stored on row
 | A16 | Cancellation before mutation is clean; later failure retains recoverable evidence and causes. | `TestCheckpointArtifactPublicationLifecycleAndCancellation`; `TestCheckpointPostJournalContextFailureRemainsRaw`; `TestCheckpointPostJournalMountFailurePreservesCASAndSyscallCause`; `TestRecoverFsyncFailureRetainsPreparedThenConvergesOnRetry` | `go test ./internal/runtime/projectstate -run '^TestCheckpointArtifactPublicationLifecycleAndCancellation$' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestCheckpointPostJournalContextFailureRemainsRaw$' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestCheckpointPostJournalMountFailurePreservesCASAndSyscallCause$' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestRecoverFsyncFailureRetainsPreparedThenConvergesOnRetry$' -count=1` | Retained architecture tests; no R01 deletion. | none | green |
 | A17 | No-pending recovery is database-only, stable, and idempotent. | `TestRecoverTerminalOrEmptyHistoryReturnsDatabaseComposedStatusWithoutGitOrPathIO`; `TestRecoveryStatusCompositionUsesDatabaseOnly` | `go test ./internal/runtime/projectstate -run '^TestRecoverTerminalOrEmptyHistoryReturnsDatabaseComposedStatusWithoutGitOrPathIO$' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestRecoveryStatusCompositionUsesDatabaseOnly$' -count=1` | Retained architecture tests; no R01 deletion. | none | green |
 | A18 | Same-scope writers serialize, cancellation releases waiters, scopes remain independent, and descriptor ownership does not leak. | `TestCheckpointGateSerializesCancelsSeparatesAndPrunes`; `TestCheckpointServiceGateSerializesSameScopeBeforeOutsideObservation`; `TestCheckpointFDOwnershipRecorderRejectsDoubleCloseAndTracksReuse` | `go test ./internal/runtime/projectstate -run '^TestCheckpointGateSerializesCancelsSeparatesAndPrunes$' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestCheckpointServiceGateSerializesSameScopeBeforeOutsideObservation$' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestCheckpointFDOwnershipRecorderRejectsDoubleCloseAndTracksReuse$' -count=1` | Retained public concurrency/descriptor tests; R01 removes only independent process ownership. | Independent direct database client cooperation | green |
+| A19 | Linux is the only supported Gateway runtime; checkpoint publication requires the Linux no-replace primitive, unsupported builds retain guidance, and Darwin/FreeBSD binaries plus tests compile. | `TestCheckpointLinuxPublicationRequiresNoReplaceWithoutExchange`; `TestUnsupportedPlatformFailsWithGuidance`; Darwin arm64 and FreeBSD amd64 compile gates | `go test ./internal/runtime/projectstate -run '^TestCheckpointLinuxPublicationRequiresNoReplaceWithoutExchange$' -count=1`<br>`GOOS=darwin GOARCH=arm64 go build -o /tmp/gatewayd-darwin ./cmd/gatewayd`<br>`GOOS=darwin GOARCH=arm64 go test -c -o /tmp/gatewayd-darwin.test ./cmd/gatewayd`<br>`GOOS=freebsd GOARCH=amd64 go build -o /tmp/gatewayd-freebsd ./cmd/gatewayd`<br>`GOOS=freebsd GOARCH=amd64 go test -c -o /tmp/gatewayd-freebsd.test ./cmd/gatewayd` | The Linux test exercises the supported syscall requirement; the two unsupported-platform test binaries compile `TestUnsupportedPlatformFailsWithGuidance` and its platform implementation without claiming cross-host execution. | none | green |
 | A20 | Released schema data migrates atomically, rejects future ledgers, and preserves composed state. | `TestGatewayMigrationLedger`; `TestGatewayMigrationRollback`; `TestGatewayMigrationRejectsFutureVersion`; `TestPortableTransitionsMigrationPreservesV1Rows`; `TestWorkspacePublicationMigrationBackfillsV2Bindings`; `TestGatewayMigrationV4UpgradePreservesV3RowsAndRollsBackAtomically` | `go test ./internal/runtime/localstore -run '^TestGatewayMigrationLedger$' -count=1`<br>`go test ./internal/runtime/localstore -run '^TestGatewayMigrationRollback$' -count=1`<br>`go test ./internal/runtime/localstore -run '^TestGatewayMigrationRejectsFutureVersion$' -count=1`<br>`go test ./internal/runtime/localstore -run '^TestPortableTransitionsMigrationPreservesV1Rows$' -count=1`<br>`go test ./internal/runtime/localstore -run '^TestWorkspacePublicationMigrationBackfillsV2Bindings$' -count=1`<br>`go test ./internal/runtime/localstore -run '^TestGatewayMigrationV4UpgradePreservesV3RowsAndRollsBackAtomically$' -count=1` | Retained architecture tests; no R01 deletion. | none | green |
+| A21 | Portable state and remotes remain canonical, secret-shaped remote keys are rejected, and checkpoint postimages use only durable proof provenance. | `TestCanonicalV1RoundTrip`; `TestRemotesRejectsCredentialShapedKey`; `TestCheckpointLocalOnlyPublishesExactPlan`; `TestCheckpointPublicationPostimageUsesOnlyDurableProofProvenance` | `go test ./internal/types/projectstate -run '^TestCanonicalV1RoundTrip$' -count=1`<br>`go test ./internal/types/projectstate -run '^TestRemotesRejectsCredentialShapedKey$' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestCheckpointLocalOnlyPublishesExactPlan$' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestCheckpointPublicationPostimageUsesOnlyDurableProofProvenance$' -count=1` | The four retained current-tree tests are green. Task 17 clean-clone commands are an additional pause-packet gate and remain explicitly for Task 17 to run and record; this row does not claim that future evidence. | none | green |
 | A22 | Accepted base advances only through trusted Git observation with safe rebase/discard retry behavior. | `TestObserveGitBaseSameRefAcceptsExactMaterialization`; `TestObserveGitBaseExactAcceptancePreservesLaterActiveRows`; `TestObserveGitBaseCommitOnlyChangeRebasesProposal`; `TestBranchSwitchDiscardUnknownCommitConfirmsExactReceiptWithoutGit` | `go test ./internal/runtime/projectstate -run '^TestObserveGitBaseSameRefAcceptsExactMaterialization$' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestObserveGitBaseExactAcceptancePreservesLaterActiveRows$' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestObserveGitBaseCommitOnlyChangeRebasesProposal$' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestBranchSwitchDiscardUnknownCommitConfirmsExactReceiptWithoutGit$' -count=1` | Retained architecture tests; no R01 deletion. | none | green |
 | A23 | A workspace has at most one outstanding checkpoint, blocked before artifact allocation. | `TestCheckpointPendingPrecedesOwnedRequestValidationAndMutation` | `go test ./internal/runtime/projectstate -run '^TestCheckpointPendingPrecedesOwnedRequestValidationAndMutation$' -count=1` | Retained architecture test; no R01 deletion. | none | green |
+| A24 | Canonical portable inputs reject invalid shapes and remotes reject credential-shaped keys. | `TestRejectsInvalidCanonicalInputs`; `TestRemotesRejectsCredentialShapedKey` | `go test ./internal/types/projectstate -run '^TestRejectsInvalidCanonicalInputs$' -count=1`<br>`go test ./internal/types/projectstate -run '^TestRemotesRejectsCredentialShapedKey$' -count=1` | Retained portable-state and secret-shape validation tests. | none | green |
+| A25 | Checkpoint and recovery reject nested-mount substitution and revalidate persistent roots immediately before every rename. | `TestCheckpointAndRecoverRejectNestedMountSubstitutionBeforeRename`; `TestCheckpointAndRecoverRevalidatePersistentRootsImmediatelyBeforeEveryRename` | `go test ./internal/runtime/projectstate -run '^TestCheckpointAndRecoverRejectNestedMountSubstitutionBeforeRename$' -count=1`<br>`go test ./internal/runtime/projectstate -run '^TestCheckpointAndRecoverRevalidatePersistentRootsImmediatelyBeforeEveryRename$' -count=1` | Retained Linux filesystem-containment tests. | none | green |
 
 ## R01 measurement record
 
@@ -114,3 +120,164 @@ The Task-8 authority searches prove:
 
 Lifecycle `markWorkspaceDirty` calls are clients of that authority, not
 independent counters or finalisers.
+
+## Task 16 final R02 sweep and frozen measurement record
+
+Task 16 completed the private-representation sweep without entering R06 or the
+Task-17 scorecard/pause packet. The only remaining lexical occurrence in the
+workspace production manifest is
+`workspace_repo.go:1242: typeof(workspace_revision)`. It is retained because
+the current binding reader must reject a fractional, non-integer, or
+non-positive R03 revision semantically. The migration SQL's
+`CHECK(typeof(workspace_revision)='integer')` and its migration tests are
+separate schema evidence outside the workspace-production lexical manifest.
+The final exact counts are `CAST(` 0, `typeof(` 1, `StorageClasses` 0, and
+identifier tokens ending in `Raw` 0. The corresponding architecture test
+freezes both the total `typeof(` count and its sole location.
+
+The immutable baseline manifests generated from
+`4d84903eba1efb36a4348f5f1c81db9e6eb5c624` are:
+
+```text
+production (8 files, 5,524 physical lines)
+internal/runtime/localstore/workspace_checkpoint_commit_repo.go
+internal/runtime/localstore/workspace_conflict_repo.go
+internal/runtime/localstore/workspace_materialization_repo.go
+internal/runtime/localstore/workspace_publication_repo.go
+internal/runtime/localstore/workspace_repo.go
+internal/runtime/localstore/workspace_restore_retry_repo.go
+internal/runtime/localstore/workspace_stash_repo.go
+internal/runtime/localstore/workspace_transition_repo.go
+
+tests (9 files, 12,010 physical lines)
+internal/runtime/localstore/workspace_checkpoint_commit_repo_test.go
+internal/runtime/localstore/workspace_conflict_repo_test.go
+internal/runtime/localstore/workspace_materialization_repo_test.go
+internal/runtime/localstore/workspace_publication_repo_test.go
+internal/runtime/localstore/workspace_repo_test.go
+internal/runtime/localstore/workspace_restore_retry_repo_test.go
+internal/runtime/localstore/workspace_stash_repo_test.go
+internal/runtime/localstore/workspace_transition_boundary_test.go
+internal/runtime/localstore/workspace_transition_repo_test.go
+```
+
+The Task-16 worktree manifests, including every successor revision,
+current-workset, audit, and compact-confirmation file, are:
+
+```text
+production (11 files, 4,587 physical lines)
+internal/runtime/localstore/workspace_commit_confirmation.go
+internal/runtime/localstore/workspace_conflict_repo.go
+internal/runtime/localstore/workspace_current_mutation_repo.go
+internal/runtime/localstore/workspace_history_audit.go
+internal/runtime/localstore/workspace_materialization_repo.go
+internal/runtime/localstore/workspace_publication_repo.go
+internal/runtime/localstore/workspace_repo.go
+internal/runtime/localstore/workspace_restore_retry_repo.go
+internal/runtime/localstore/workspace_revision_repo.go
+internal/runtime/localstore/workspace_stash_repo.go
+internal/runtime/localstore/workspace_transition_repo.go
+
+tests (13 files, 9,439 physical lines)
+internal/runtime/localstore/workspace_commit_confirmation_test.go
+internal/runtime/localstore/workspace_conflict_repo_test.go
+internal/runtime/localstore/workspace_corruption_boundary_test.go
+internal/runtime/localstore/workspace_current_repo_test.go
+internal/runtime/localstore/workspace_history_audit_test.go
+internal/runtime/localstore/workspace_materialization_repo_test.go
+internal/runtime/localstore/workspace_publication_repo_test.go
+internal/runtime/localstore/workspace_repo_test.go
+internal/runtime/localstore/workspace_restore_retry_repo_test.go
+internal/runtime/localstore/workspace_revision_repo_test.go
+internal/runtime/localstore/workspace_stash_repo_test.go
+internal/runtime/localstore/workspace_transition_boundary_test.go
+internal/runtime/localstore/workspace_transition_repo_test.go
+```
+
+Task-16-only numstat is production `P+=125 P-=383 net=-258`, tests
+`T+=73 T-=270 net=-197`, and total implementation
+`additions=198 deletions=653 net=-455`; there is no Task-16 migration SQL.
+The test-retirement accounting is publication reader/CAS mechanism proofs
+`+9/-153`, workspace registration/raw-delta mechanism proofs `+0/-99`, the
+terminal-history storage-class subcase `+0/-14`, and the reduced-boundary plus
+architecture freeze `+64/-4`. Thus every Task-16 family is non-additive in the
+aggregate, and retired mechanism-test lines (270) exceed replacement/freeze
+lines (73).
+
+The cumulative `R01_END..Task-16-worktree` numstat is production Go/support
+`+2292/-3504 net=-1212`, migration SQL `+9/-0 net=+9`, tests
+`+5669/-9371 net=-3702`, and total implementation
+`+7970/-12875 net=-4905`. Architecture tests account for a labelled
+`+989/-0` subset of tests. Production including migration is
+`+2301/-3504 net=-1203`; both production and total implementation are
+objectively subtractive.
+
+The fresh Shared Evidence witnesses were:
+
+- G01: `gatewayd.go` pre/restored SHA-256
+  `fe05a11f7a0271f5919b852939834bf939764e17c6d5f71b266fc7a78d7f85a5`.
+  Temporarily bypassing the lifetime owner lock changed it to
+  `aeb2bc2288c38434e23b9287a280668c67490f54a35329d04657a071d871d3d1`
+  (temporary worktree diff
+  `6695b852182222ac2c494f4dc584d23c42986f6cb07607d1495a72626b15c20f`).
+  The exact G01 command failed the losing-owner no-mutation and unsafe-owner
+  WAL checks; exact restoration made it green.
+- G02: `stash_codec.go` pre/restored SHA-256
+  `4ea47ce1a13acfe81762ad253b9b7aba24628d136f24422199996d6783226bac`.
+  Bypassing negative operation-count validation changed it to
+  `5f6b72b532f085fcc840d9f6af06146eabfeb493f7df85dfdc661a3a9b83bd72`
+  (temporary diff
+  `1f28243bb42e6bdc7783c6ce75e4877cb14e1588591e99e1c33707411e8ef9ee`).
+  The exact command failed the named malformed receipt with
+  `OperationCount:-1`; exact restoration made it green.
+- G03: final `workspace_publication_repo.go` pre/restored SHA-256
+  `f05e7722bb6465e2550e544cc3dceeeb4e7d07cdd94b6e4b2877252fe2f5e1ca`.
+  Removing its writer mark changed it to
+  `a1b48fabed9df7ca7789f1e42406ba797a9eef932c7ff4b83a4a943666050008`
+  (temporary diff
+  `fc14cce436f7d7364438b3220da2dbb18e448a6374de56fbe4eb1df04357b6ff`).
+  `TestWorkspaceRevisionCausalWitness` failed at committed revision 1 versus
+  required 2; exact restoration returned the intended-worktree diff
+  `7ca3529f33de77034690bc3c70d387f8243bc5abc31c0416b1c716daaa6003c9`
+  and the command to green. The same test directly constructs double
+  finalisation and unchecked SQL overflow.
+- G04: `import.go` pre/restored SHA-256
+  `34ee80200c8967c2ac780d2e37ce4a79352c59caae3e4a76f2181477c9ddc795`.
+  Coupling import to `AuditWorkspaceHistory` changed it to
+  `c962a63bb18a15c6e9fda106eb2dca79770d81d5bde57da266836057c46734ca`
+  (temporary diff
+  `f390b337d2d96ac9adbfadbe4b884d1db5387fe839f1c4bef5c03866748e5362`).
+  The exact command failed import on unrelated terminal
+  `schema_version=0`; exact restoration made it green.
+- G05 uses direct test-only table constructions. The journal and publication
+  tables construct missing targets, revision mismatches, alternate targets,
+  and a different current owner, all of which classify Third. All four exact
+  localstore/projectstate G05 commands are green without a production fault.
+
+Every temporary production mutation was reversed with `apply_patch`; restored
+file hashes matched, `git diff --check` passed, and final status contains only
+the intended Task-16 files. The post-review aggregate G suite's five exact
+commands are green. All 91 concrete A-row commands, including A19's Linux gate
+and four Darwin/FreeBSD build/test-compile gates, exited zero. After the final
+review corrections, the affected focused commands and the required five-package
+gate were rerun green. A Task-16 five-package coverage profile reports 83.1%
+merged statement coverage. The attempted repository-wide atomic profile is
+77.6%, below the approved 80% threshold, and its PostgreSQL integration tests
+also failed because the unavailable local service refused `[::1]:5432`.
+Task 16's exact brief does not contain the full-repository/80% gate; Task 17's
+task-complete sentence and `make check` step own it. This record therefore
+flags 77.6% explicitly as unresolved Task-17 work and does not claim that gate.
+
+The final authority searches find exactly one production `localstore.Open`, at
+`cmd/gatewayd/gatewayd.go:314`, using `ownerLock.DatabasePath()`. The sole
+revision type and four revision methods are in
+`workspace_revision_repo.go`; there is one production
+`SET workspace_revision=?` with exact scope and expected-revision CAS, and no
+SQL `workspace_revision + 1`. The exact current/confirmation/audit definitions
+are `RestoreCurrentState` in `workspace_restore_retry_repo.go`,
+`CurrentMaterialization` in `workspace_current_mutation_repo.go`,
+`ConfirmWorkspaceCommit` in `workspace_commit_confirmation.go`, and
+`AuditWorkspaceHistory` in `workspace_history_audit.go`. The compact
+confirmation successor is 536 production lines, 15 functions, and 708 test
+lines. Production ProjectState callers of `OperationAudit`,
+`MaterializationDisposition`, and `PublicationPolicyHistory` are all zero.

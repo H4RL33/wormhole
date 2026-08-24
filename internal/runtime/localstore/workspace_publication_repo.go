@@ -1,7 +1,6 @@
 package localstore
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -31,30 +30,12 @@ type WorkspacePublicationPolicyTransition struct {
 	Next     WorkspacePublicationPolicyRecord
 }
 
-type workspacePublicationRawRecord struct {
+type workspacePublicationStoredRecord struct {
 	Record         WorkspacePublicationPolicyRecord
 	RepositoryJSON string
 	OriginValue    sql.NullString
 	ActorJSON      sql.NullString
-	ChangedAtRaw   sql.NullString
-	CreatedAt      time.Time
-	CreatedAtRaw   string
-	UpdatedAt      time.Time
-	UpdatedAtRaw   string
 	RecordedAt     time.Time
-	RecordedAtRaw  string
-	StorageClasses [11]string
-}
-
-type workspacePublicationBindingEvidence struct {
-	Record         WorkspaceRecord
-	SnapshotBytes  []byte
-	RepositoryJSON string
-	CreatedAt      time.Time
-	CreatedAtRaw   string
-	UpdatedAt      time.Time
-	UpdatedAtRaw   string
-	StorageClasses [13]string
 }
 
 func (tx *WorkspaceMutationTx) PublicationPolicy(ctx context.Context) (WorkspacePublicationPolicyRecord, error) {
@@ -95,14 +76,14 @@ func (tx *WorkspaceMutationTx) ReconfigurePublication(ctx context.Context, trans
 	if current.Record.PolicyRevision == math.MaxInt64 || transition.Next.PolicyRevision != current.Record.PolicyRevision+1 {
 		return WorkspacePublicationPolicyRecord{}, fmt.Errorf("localstore: invalid publication policy revision transition")
 	}
-	bindingEvidence, err := tx.publicationBindingEvidence(ctx)
+	binding, _, err := queryWorkspaceByScope(ctx, tx.conn, tx.scope)
 	if err != nil {
 		return WorkspacePublicationPolicyRecord{}, fmt.Errorf("localstore: read publication policy binding: %w", err)
 	}
-	if transition.Next.Repository != bindingEvidence.Record.Binding.Repository {
+	if transition.Next.Repository != binding.Binding.Repository {
 		return WorkspacePublicationPolicyRecord{}, fmt.Errorf("localstore: publication policy repository differs from binding")
 	}
-	if current.Record.Repository != bindingEvidence.Record.Binding.Repository && transition.Next.TransitionKind != "repository_invalidated" {
+	if current.Record.Repository != binding.Binding.Repository && transition.Next.TransitionKind != "repository_invalidated" {
 		return WorkspacePublicationPolicyRecord{}, fmt.Errorf("localstore: publication repository drift requires invalidation")
 	}
 	nextRepositoryJSON, nextOrigin, nextActor, nextChangedAt, err := encodeWorkspacePublicationPolicyRecord(transition.Next, false)
@@ -110,310 +91,163 @@ func (tx *WorkspaceMutationTx) ReconfigurePublication(ctx context.Context, trans
 		return WorkspacePublicationPolicyRecord{}, err
 	}
 
-	var returnedAt time.Time
-	var returnedRaw, returnedClass string
-	err = tx.conn.QueryRowContext(ctx, `
+	result, err := tx.conn.ExecContext(ctx, `
 		UPDATE workspace_publication_policies
 		SET repository_identity_json=?, origin_digest=?, classification=?, policy_revision=?,
 		    transition_kind=?, changed_actor_json=?, changed_at=?, updated_at=CURRENT_TIMESTAMP
-		WHERE CAST(project_id AS TEXT)=? AND CAST(workspace_id AS TEXT)=?
-		  AND project_id=? AND workspace_id=?
+		WHERE project_id=? AND workspace_id=?
 		  AND repository_identity_json=? AND origin_digest IS ? AND classification=?
-		  AND policy_revision=? AND transition_kind=? AND changed_actor_json IS ? AND changed_at IS ?
-		  AND CAST(changed_at AS TEXT) IS ? AND created_at=? AND updated_at=?
-		  AND typeof(project_id)=? AND typeof(workspace_id)=?
-		  AND typeof(repository_identity_json)=? AND typeof(origin_digest)=?
-		  AND typeof(classification)=? AND typeof(policy_revision)=?
-		  AND typeof(transition_kind)=? AND typeof(changed_actor_json)=?
-		  AND typeof(changed_at)=? AND typeof(created_at)=? AND typeof(updated_at)=?
-		RETURNING updated_at,CAST(updated_at AS TEXT),typeof(updated_at)
+		  AND policy_revision=? AND transition_kind=? AND changed_actor_json IS ?
 	`, nextRepositoryJSON, nullableStringValue(nextOrigin), string(transition.Next.Classification),
 		transition.Next.PolicyRevision, transition.Next.TransitionKind, nullableStringValue(nextActor),
-		nullableStringValue(nextChangedAt), tx.scope.ProjectID, tx.scope.WorkspaceID,
-		tx.scope.ProjectID, tx.scope.WorkspaceID, current.RepositoryJSON,
+		nullableStringValue(nextChangedAt), tx.scope.ProjectID, tx.scope.WorkspaceID, current.RepositoryJSON,
 		nullableStringValue(current.OriginValue), string(current.Record.Classification),
 		current.Record.PolicyRevision, current.Record.TransitionKind, nullableStringValue(current.ActorJSON),
-		nullableStringValue(current.ChangedAtRaw), nullableStringValue(current.ChangedAtRaw),
-		current.CreatedAtRaw, current.UpdatedAtRaw,
-		current.StorageClasses[0], current.StorageClasses[1], current.StorageClasses[2],
-		current.StorageClasses[3], current.StorageClasses[4], current.StorageClasses[5],
-		current.StorageClasses[6], current.StorageClasses[7], current.StorageClasses[8],
-		current.StorageClasses[9], current.StorageClasses[10]).Scan(&returnedAt, &returnedRaw, &returnedClass)
-	if errors.Is(err, sql.ErrNoRows) {
-		return WorkspacePublicationPolicyRecord{}, ErrPublicationConfigurationCAS
-	}
+	)
 	if err != nil {
 		return WorkspacePublicationPolicyRecord{}, fmt.Errorf("localstore: update publication policy: %w", err)
 	}
-	if !validMonotonicWorkspaceMutationTimestamp(returnedAt, returnedRaw, returnedClass, current.UpdatedAt) {
-		return WorkspacePublicationPolicyRecord{}, fmt.Errorf("localstore: invalid publication policy update timestamp")
+	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		return WorkspacePublicationPolicyRecord{}, ErrPublicationConfigurationCAS
 	}
-	var recordedAt time.Time
-	var recordedRaw, recordedClass string
-	if err := tx.conn.QueryRowContext(ctx, `
+	if _, err := tx.conn.ExecContext(ctx, `
 		INSERT INTO workspace_publication_policy_history
 		(project_id,workspace_id,policy_revision,repository_identity_json,origin_digest,
 		 classification,transition_kind,changed_actor_json,changed_at)
 		VALUES (?,?,?,?,?,?,?,?,?)
-		RETURNING recorded_at,CAST(recorded_at AS TEXT),typeof(recorded_at)
 	`, tx.scope.ProjectID, tx.scope.WorkspaceID, transition.Next.PolicyRevision, nextRepositoryJSON,
 		nullableStringValue(nextOrigin), string(transition.Next.Classification), transition.Next.TransitionKind,
-		nullableStringValue(nextActor), nullableStringValue(nextChangedAt)).Scan(&recordedAt, &recordedRaw, &recordedClass); err != nil {
+		nullableStringValue(nextActor), nullableStringValue(nextChangedAt)); err != nil {
 		return WorkspacePublicationPolicyRecord{}, fmt.Errorf("localstore: append publication policy history: %w", err)
 	}
-	if !validStoredWorkspaceTimestamp(recordedAt, recordedRaw, recordedClass) {
-		return WorkspacePublicationPolicyRecord{}, fmt.Errorf("localstore: invalid publication policy history timestamp")
-	}
 
-	post, err := queryWorkspacePublicationPolicy(ctx, tx.conn, tx.scope)
-	if err != nil {
-		return WorkspacePublicationPolicyRecord{}, fmt.Errorf("localstore: reread publication policy transition: %w", err)
-	}
-	postBindingEvidence, err := tx.publicationBindingEvidence(ctx)
-	if err != nil {
-		return WorkspacePublicationPolicyRecord{}, fmt.Errorf("localstore: reread publication policy binding: %w", err)
-	}
-	if !equalWorkspacePublicationBindingEvidence(bindingEvidence, postBindingEvidence) {
-		return WorkspacePublicationPolicyRecord{}, fmt.Errorf("localstore: publication policy binding drift")
-	}
-	if !equalWorkspacePublicationPolicyRecords(post.Record, transition.Next) ||
-		post.RepositoryJSON != nextRepositoryJSON ||
-		!equalNullableStrings(post.OriginValue, nextOrigin) ||
-		!equalNullableStrings(post.ActorJSON, nextActor) ||
-		!equalNullableStrings(post.ChangedAtRaw, nextChangedAt) ||
-		post.CreatedAtRaw != current.CreatedAtRaw || !post.CreatedAt.Equal(current.CreatedAt) ||
-		post.UpdatedAtRaw != returnedRaw || !post.UpdatedAt.Equal(returnedAt) {
-		return WorkspacePublicationPolicyRecord{}, fmt.Errorf("localstore: publication policy transition post-state mismatch")
-	}
 	if err := tx.markWorkspaceDirty(ctx); err != nil {
 		return WorkspacePublicationPolicyRecord{}, err
 	}
-	return cloneWorkspacePublicationPolicyRecord(post.Record), nil
+	return cloneWorkspacePublicationPolicyRecord(transition.Next), nil
 }
 
-func (tx *WorkspaceMutationTx) publicationBindingEvidence(ctx context.Context) (workspacePublicationBindingEvidence, error) {
-	record, snapshotBytes, err := queryWorkspaceByScope(ctx, tx.conn, tx.scope)
-	if errors.Is(err, sql.ErrNoRows) {
-		return workspacePublicationBindingEvidence{}, ErrNotFound
-	}
-	if err != nil {
-		return workspacePublicationBindingEvidence{}, err
-	}
-	var evidence workspacePublicationBindingEvidence
-	evidence.Record = record
-	evidence.SnapshotBytes = bytes.Clone(snapshotBytes)
-	var (
-		projectID, workspaceID, checkoutPath, repositoryJSON string
-		acceptedRef, acceptedCommit, acceptedDigest, status  string
-		device, inode                                        uint64
-		storedSnapshot                                       []byte
-		matching                                             int64
-	)
-	err = tx.conn.QueryRowContext(ctx, `
-		SELECT project_id,workspace_id,checkout_path,checkout_device,checkout_inode,
-		       repository_identity_json,accepted_ref,accepted_commit,accepted_digest,
-		       accepted_snapshot,status,created_at,updated_at,
-		       CAST(created_at AS TEXT),CAST(updated_at AS TEXT),
-		       typeof(project_id),typeof(workspace_id),typeof(checkout_path),
-		       typeof(checkout_device),typeof(checkout_inode),typeof(repository_identity_json),
-		       typeof(accepted_ref),typeof(accepted_commit),typeof(accepted_digest),
-		       typeof(accepted_snapshot),typeof(status),typeof(created_at),typeof(updated_at),
-		       COUNT(rowid) OVER ()
-		FROM workspace_bindings
-		WHERE CAST(project_id AS TEXT)=? AND CAST(workspace_id AS TEXT)=?
-	`, tx.scope.ProjectID, tx.scope.WorkspaceID).Scan(
-		&projectID, &workspaceID, &checkoutPath, &device, &inode,
-		&repositoryJSON, &acceptedRef, &acceptedCommit, &acceptedDigest,
-		&storedSnapshot, &status, &evidence.CreatedAt, &evidence.UpdatedAt,
-		&evidence.CreatedAtRaw, &evidence.UpdatedAtRaw,
-		&evidence.StorageClasses[0], &evidence.StorageClasses[1], &evidence.StorageClasses[2],
-		&evidence.StorageClasses[3], &evidence.StorageClasses[4], &evidence.StorageClasses[5],
-		&evidence.StorageClasses[6], &evidence.StorageClasses[7], &evidence.StorageClasses[8],
-		&evidence.StorageClasses[9], &evidence.StorageClasses[10], &evidence.StorageClasses[11],
-		&evidence.StorageClasses[12], &matching,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return workspacePublicationBindingEvidence{}, ErrNotFound
-	}
-	if err != nil {
-		return workspacePublicationBindingEvidence{}, fmt.Errorf("scan publication binding evidence: %w", err)
-	}
-	wantClasses := [13]string{
-		"text", "text", "text", "integer", "integer", "text", "text",
-		"text", "text", "blob", "text", "text", "text",
-	}
-	if matching != 1 || evidence.StorageClasses != wantClasses ||
-		projectID != tx.scope.ProjectID || workspaceID != string(tx.scope.WorkspaceID) ||
-		checkoutPath != record.Binding.Checkout.CanonicalPath || device != record.Binding.Checkout.Device ||
-		inode != record.Binding.Checkout.Inode || acceptedRef != record.Binding.AcceptedRef ||
-		acceptedCommit != record.Binding.AcceptedCommitSHA || acceptedDigest != record.Binding.AcceptedTreeDigest ||
-		status != record.State || !bytes.Equal(storedSnapshot, snapshotBytes) ||
-		!validStoredWorkspaceTimestamp(evidence.CreatedAt, evidence.CreatedAtRaw, evidence.StorageClasses[11]) ||
-		!validStoredWorkspaceTimestamp(evidence.UpdatedAt, evidence.UpdatedAtRaw, evidence.StorageClasses[12]) ||
-		evidence.UpdatedAt.Before(evidence.CreatedAt) {
-		return workspacePublicationBindingEvidence{}, fmt.Errorf("invalid publication binding evidence")
-	}
-	canonicalRepository, err := json.Marshal(record.Binding.Repository)
-	if err != nil || repositoryJSON != string(canonicalRepository) {
-		return workspacePublicationBindingEvidence{}, fmt.Errorf("noncanonical publication binding repository evidence")
-	}
-	evidence.RepositoryJSON = repositoryJSON
-	evidence.CreatedAt = evidence.CreatedAt.UTC()
-	evidence.UpdatedAt = evidence.UpdatedAt.UTC()
-	return evidence, nil
-}
-
-func (tx *WorkspaceMutationTx) auditPublicationPolicyState(ctx context.Context) (workspacePublicationRawRecord, []workspacePublicationRawRecord, error) {
+func (tx *WorkspaceMutationTx) auditPublicationPolicyState(ctx context.Context) (workspacePublicationStoredRecord, []workspacePublicationStoredRecord, error) {
 	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
-		return workspacePublicationRawRecord{}, nil, ErrNotFound
+		return workspacePublicationStoredRecord{}, nil, ErrNotFound
 	}
 	if _, _, err := queryWorkspaceByScope(ctx, tx.conn, tx.scope); errors.Is(err, sql.ErrNoRows) {
-		return workspacePublicationRawRecord{}, nil, ErrNotFound
+		return workspacePublicationStoredRecord{}, nil, ErrNotFound
 	} else if err != nil {
-		return workspacePublicationRawRecord{}, nil, fmt.Errorf("localstore: validate publication policy workspace: %w", err)
+		return workspacePublicationStoredRecord{}, nil, fmt.Errorf("localstore: validate publication policy workspace: %w", err)
 	}
 	current, err := queryWorkspacePublicationPolicy(ctx, tx.conn, tx.scope)
 	if err != nil {
-		return workspacePublicationRawRecord{}, nil, err
+		return workspacePublicationStoredRecord{}, nil, err
 	}
 	history, err := queryWorkspacePublicationPolicyHistory(ctx, tx.conn, tx.scope)
 	if err != nil {
-		return workspacePublicationRawRecord{}, nil, err
+		return workspacePublicationStoredRecord{}, nil, err
 	}
 	if int64(len(history)) != current.Record.PolicyRevision {
-		return workspacePublicationRawRecord{}, nil, fmt.Errorf("localstore: publication policy history is not contiguous through current revision")
+		return workspacePublicationStoredRecord{}, nil, fmt.Errorf("localstore: publication policy history is not contiguous through current revision")
 	}
 	for index := range history {
 		if history[index].Record.PolicyRevision != int64(index+1) {
-			return workspacePublicationRawRecord{}, nil, fmt.Errorf("localstore: publication policy history revision gap")
+			return workspacePublicationStoredRecord{}, nil, fmt.Errorf("localstore: publication policy history revision gap")
 		}
 		if index == 0 {
 			if history[index].Record.TransitionKind != "bootstrap" {
-				return workspacePublicationRawRecord{}, nil, fmt.Errorf("localstore: publication policy history does not begin with bootstrap")
+				return workspacePublicationStoredRecord{}, nil, fmt.Errorf("localstore: publication policy history does not begin with bootstrap")
 			}
 			continue
 		}
 		if history[index].RecordedAt.Before(history[index-1].RecordedAt) {
-			return workspacePublicationRawRecord{}, nil, fmt.Errorf("localstore: publication policy history timestamps are not monotonic")
+			return workspacePublicationStoredRecord{}, nil, fmt.Errorf("localstore: publication policy history timestamps are not monotonic")
 		}
 		if err := validateWorkspacePublicationPolicyProgression(history[index-1].Record, history[index].Record); err != nil {
-			return workspacePublicationRawRecord{}, nil, err
+			return workspacePublicationStoredRecord{}, nil, err
 		}
 	}
-	if len(history) == 0 || !equalWorkspacePublicationPolicyRecords(current.Record, history[len(history)-1].Record) ||
-		current.RepositoryJSON != history[len(history)-1].RepositoryJSON ||
-		!equalNullableStrings(current.OriginValue, history[len(history)-1].OriginValue) ||
-		!equalNullableStrings(current.ActorJSON, history[len(history)-1].ActorJSON) ||
-		!equalNullableStrings(current.ChangedAtRaw, history[len(history)-1].ChangedAtRaw) {
-		return workspacePublicationRawRecord{}, nil, fmt.Errorf("localstore: current publication policy differs from final history")
+	if len(history) == 0 || !equalWorkspacePublicationPolicyRecords(current.Record, history[len(history)-1].Record) {
+		return workspacePublicationStoredRecord{}, nil, fmt.Errorf("localstore: current publication policy differs from final history")
 	}
 	return current, history, nil
 }
 
-func queryWorkspacePublicationPolicy(ctx context.Context, queryer workspaceQueryer, scope types.WorkspaceScope) (workspacePublicationRawRecord, error) {
+func queryWorkspacePublicationPolicy(ctx context.Context, queryer workspaceQueryer, scope types.WorkspaceScope) (workspacePublicationStoredRecord, error) {
 	row := queryer.QueryRowContext(ctx, `
 		SELECT project_id,workspace_id,repository_identity_json,origin_digest,classification,
-		       policy_revision,transition_kind,changed_actor_json,changed_at,created_at,updated_at,
-		       CAST(changed_at AS TEXT),CAST(created_at AS TEXT),CAST(updated_at AS TEXT),
-		       typeof(project_id),typeof(workspace_id),typeof(repository_identity_json),
-		       typeof(origin_digest),typeof(classification),typeof(policy_revision),
-		       typeof(transition_kind),typeof(changed_actor_json),typeof(changed_at),
-		       typeof(created_at),typeof(updated_at),COUNT(rowid) OVER ()
+		       policy_revision,transition_kind,changed_actor_json,changed_at
 		FROM workspace_publication_policies
-		WHERE CAST(project_id AS TEXT)=? AND CAST(workspace_id AS TEXT)=?
+		WHERE project_id=? AND workspace_id=?
 	`, scope.ProjectID, scope.WorkspaceID)
-	var raw workspacePublicationRawRecord
-	var projectID, workspaceID, repositoryJSON, classification, transitionKind sql.NullString
-	var revision sql.NullInt64
+	var stored workspacePublicationStoredRecord
+	var projectID, workspaceID, repositoryJSON, classification, transitionKind string
+	var revision int64
 	var changedAt sql.NullTime
-	var matching int64
 	if err := row.Scan(
-		&projectID, &workspaceID, &repositoryJSON, &raw.OriginValue, &classification,
-		&revision, &transitionKind, &raw.ActorJSON, &changedAt, &raw.CreatedAt, &raw.UpdatedAt,
-		&raw.ChangedAtRaw, &raw.CreatedAtRaw, &raw.UpdatedAtRaw,
-		&raw.StorageClasses[0], &raw.StorageClasses[1], &raw.StorageClasses[2],
-		&raw.StorageClasses[3], &raw.StorageClasses[4], &raw.StorageClasses[5],
-		&raw.StorageClasses[6], &raw.StorageClasses[7], &raw.StorageClasses[8],
-		&raw.StorageClasses[9], &raw.StorageClasses[10], &matching,
+		&projectID, &workspaceID, &repositoryJSON, &stored.OriginValue, &classification,
+		&revision, &transitionKind, &stored.ActorJSON, &changedAt,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return workspacePublicationRawRecord{}, fmt.Errorf("localstore: missing publication policy")
+			return workspacePublicationStoredRecord{}, fmt.Errorf("localstore: missing publication policy")
 		}
-		return workspacePublicationRawRecord{}, fmt.Errorf("localstore: scan publication policy: %w", err)
+		return workspacePublicationStoredRecord{}, fmt.Errorf("localstore: scan publication policy: %w", err)
 	}
-	if matching != 1 || !projectID.Valid || !workspaceID.Valid || !repositoryJSON.Valid ||
-		!classification.Valid || !revision.Valid || !transitionKind.Valid {
-		return workspacePublicationRawRecord{}, fmt.Errorf("localstore: incomplete or ambiguous publication policy")
+	if projectID != scope.ProjectID || workspaceID != string(scope.WorkspaceID) {
+		return workspacePublicationStoredRecord{}, fmt.Errorf("localstore: publication policy scope differs from transaction")
 	}
-	if projectID.String != scope.ProjectID || workspaceID.String != string(scope.WorkspaceID) {
-		return workspacePublicationRawRecord{}, fmt.Errorf("localstore: publication policy scope differs from transaction")
-	}
-	raw.RepositoryJSON = repositoryJSON.String
-	raw.Record.PolicyRevision = revision.Int64
-	raw.Record.Classification = types.PublicationClassification(classification.String)
-	raw.Record.TransitionKind = transitionKind.String
+	stored.RepositoryJSON = repositoryJSON
+	stored.Record.PolicyRevision = revision
+	stored.Record.Classification = types.PublicationClassification(classification)
+	stored.Record.TransitionKind = transitionKind
 	if changedAt.Valid {
 		value := changedAt.Time
-		raw.Record.ChangedAt = &value
+		stored.Record.ChangedAt = &value
 	}
-	if err := decodeWorkspacePublicationPolicyRaw(&raw, false); err != nil {
-		return workspacePublicationRawRecord{}, err
+	if err := decodeWorkspacePublicationPolicyStored(&stored, false); err != nil {
+		return workspacePublicationStoredRecord{}, err
 	}
-	return raw, nil
+	return stored, nil
 }
 
 func queryWorkspacePublicationPolicyHistory(ctx context.Context, queryer interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
-}, scope types.WorkspaceScope) ([]workspacePublicationRawRecord, error) {
+}, scope types.WorkspaceScope) ([]workspacePublicationStoredRecord, error) {
 	rows, err := queryer.QueryContext(ctx, `
 		SELECT project_id,workspace_id,repository_identity_json,origin_digest,classification,
-		       policy_revision,transition_kind,changed_actor_json,changed_at,recorded_at,
-		       CAST(changed_at AS TEXT),CAST(recorded_at AS TEXT),
-		       typeof(project_id),typeof(workspace_id),typeof(repository_identity_json),
-		       typeof(origin_digest),typeof(classification),typeof(policy_revision),
-		       typeof(transition_kind),typeof(changed_actor_json),typeof(changed_at),typeof(recorded_at)
+		       policy_revision,transition_kind,changed_actor_json,changed_at,recorded_at
 		FROM workspace_publication_policy_history
-		WHERE CAST(project_id AS TEXT)=? AND CAST(workspace_id AS TEXT)=?
+		WHERE project_id=? AND workspace_id=?
 		ORDER BY policy_revision,rowid
 	`, scope.ProjectID, scope.WorkspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("localstore: query publication policy history: %w", err)
 	}
 	defer rows.Close()
-	history := make([]workspacePublicationRawRecord, 0)
+	history := make([]workspacePublicationStoredRecord, 0)
 	for rows.Next() {
-		var raw workspacePublicationRawRecord
-		var projectID, workspaceID, repositoryJSON, classification, transitionKind sql.NullString
-		var revision sql.NullInt64
+		var stored workspacePublicationStoredRecord
+		var projectID, workspaceID, repositoryJSON, classification, transitionKind string
+		var revision int64
 		var changedAt sql.NullTime
 		if err := rows.Scan(
-			&projectID, &workspaceID, &repositoryJSON, &raw.OriginValue, &classification,
-			&revision, &transitionKind, &raw.ActorJSON, &changedAt, &raw.RecordedAt,
-			&raw.ChangedAtRaw, &raw.RecordedAtRaw,
-			&raw.StorageClasses[0], &raw.StorageClasses[1], &raw.StorageClasses[2],
-			&raw.StorageClasses[3], &raw.StorageClasses[4], &raw.StorageClasses[5],
-			&raw.StorageClasses[6], &raw.StorageClasses[7], &raw.StorageClasses[8],
-			&raw.StorageClasses[9],
+			&projectID, &workspaceID, &repositoryJSON, &stored.OriginValue, &classification,
+			&revision, &transitionKind, &stored.ActorJSON, &changedAt, &stored.RecordedAt,
 		); err != nil {
 			return nil, fmt.Errorf("localstore: scan publication policy history: %w", err)
 		}
-		if !projectID.Valid || !workspaceID.Valid || !repositoryJSON.Valid || !classification.Valid ||
-			!revision.Valid || !transitionKind.Valid || projectID.String != scope.ProjectID ||
-			workspaceID.String != string(scope.WorkspaceID) {
-			return nil, fmt.Errorf("localstore: incomplete publication policy history row")
+		if projectID != scope.ProjectID || workspaceID != string(scope.WorkspaceID) {
+			return nil, fmt.Errorf("localstore: invalid publication policy history scope")
 		}
-		raw.RepositoryJSON = repositoryJSON.String
-		raw.Record.PolicyRevision = revision.Int64
-		raw.Record.Classification = types.PublicationClassification(classification.String)
-		raw.Record.TransitionKind = transitionKind.String
+		stored.RepositoryJSON = repositoryJSON
+		stored.Record.PolicyRevision = revision
+		stored.Record.Classification = types.PublicationClassification(classification)
+		stored.Record.TransitionKind = transitionKind
 		if changedAt.Valid {
 			value := changedAt.Time
-			raw.Record.ChangedAt = &value
+			stored.Record.ChangedAt = &value
 		}
-		if err := decodeWorkspacePublicationPolicyRaw(&raw, true); err != nil {
+		if err := decodeWorkspacePublicationPolicyStored(&stored, true); err != nil {
 			return nil, err
 		}
-		history = append(history, raw)
+		history = append(history, stored)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("localstore: iterate publication policy history: %w", err)
@@ -421,78 +255,43 @@ func queryWorkspacePublicationPolicyHistory(ctx context.Context, queryer interfa
 	return history, nil
 }
 
-func decodeWorkspacePublicationPolicyRaw(raw *workspacePublicationRawRecord, history bool) error {
-	requiredClasses := 11
-	if history {
-		requiredClasses = 10
-	}
-	for index := 0; index < requiredClasses; index++ {
-		want := "text"
-		if index == 5 {
-			want = "integer"
-		}
-		if index == 3 || index == 7 || index == 8 {
-			if (index == 3 && raw.OriginValue.Valid) || (index == 7 && raw.ActorJSON.Valid) || (index == 8 && raw.ChangedAtRaw.Valid) {
-				want = "text"
-			} else {
-				want = "null"
-			}
-		}
-		if raw.StorageClasses[index] != want {
-			return fmt.Errorf("localstore: invalid publication policy storage class")
-		}
-	}
-	if raw.Record.PolicyRevision <= 0 || raw.Record.Classification.Validate() != nil {
+func decodeWorkspacePublicationPolicyStored(stored *workspacePublicationStoredRecord, history bool) error {
+	if stored.Record.PolicyRevision <= 0 || stored.Record.Classification.Validate() != nil {
 		return fmt.Errorf("localstore: invalid publication policy value")
 	}
-	var repository types.RepositoryIdentity
-	if err := json.Unmarshal([]byte(raw.RepositoryJSON), &repository); err != nil {
+	repository, err := decodeWorkspaceRepositoryIdentity(stored.RepositoryJSON)
+	if err != nil {
 		return fmt.Errorf("localstore: decode publication repository identity: %w", err)
 	}
-	canonicalRepository, err := json.Marshal(repository)
-	if err != nil || string(canonicalRepository) != raw.RepositoryJSON || repository.Validate() != nil {
-		return fmt.Errorf("localstore: publication repository identity is not canonical")
-	}
-	raw.Record.Repository = repository
-	if raw.OriginValue.Valid {
-		digest := projectstate.Digest(raw.OriginValue.String)
+	stored.Record.Repository = repository
+	if stored.OriginValue.Valid {
+		digest := projectstate.Digest(stored.OriginValue.String)
 		if !validPublicationPolicyDigest(digest) {
 			return fmt.Errorf("localstore: invalid publication origin digest")
 		}
-		raw.Record.OriginDigest = &digest
+		stored.Record.OriginDigest = &digest
 	}
-	if raw.ActorJSON.Valid {
-		actor, err := decodeCanonicalTransitionActor([]byte(raw.ActorJSON.String))
+	if stored.ActorJSON.Valid {
+		actor, err := decodeCanonicalTransitionActor([]byte(stored.ActorJSON.String))
 		if err != nil || actor.ActorKind != types.ActorHuman || actor.ValidateLocalAction() != nil {
 			return fmt.Errorf("localstore: invalid publication policy actor")
 		}
-		raw.Record.ChangedBy = &actor
+		stored.Record.ChangedBy = &actor
 	}
-	if raw.Record.ChangedAt != nil && (!raw.ChangedAtRaw.Valid || !validUTCTimestamp(*raw.Record.ChangedAt)) {
+	if stored.Record.ChangedAt != nil && !validUTCTimestamp(*stored.Record.ChangedAt) {
 		return fmt.Errorf("localstore: invalid publication policy changed timestamp")
 	}
-	if raw.Record.ChangedAt != nil {
-		if raw.ChangedAtRaw.String != raw.Record.ChangedAt.Format("2006-01-02 15:04:05.999999999 -0700 MST") {
-			return fmt.Errorf("localstore: noncanonical publication policy changed timestamp")
-		}
-		value := raw.Record.ChangedAt.UTC()
-		raw.Record.ChangedAt = &value
+	if stored.Record.ChangedAt != nil {
+		value := stored.Record.ChangedAt.UTC()
+		stored.Record.ChangedAt = &value
 	}
 	if history {
-		if !validStoredWorkspaceTimestamp(raw.RecordedAt, raw.RecordedAtRaw, raw.StorageClasses[9]) {
+		if !validUTCTimestamp(stored.RecordedAt) {
 			return fmt.Errorf("localstore: invalid publication policy recorded timestamp")
 		}
-		raw.RecordedAt = raw.RecordedAt.UTC()
-	} else {
-		if !validStoredWorkspaceTimestamp(raw.CreatedAt, raw.CreatedAtRaw, raw.StorageClasses[9]) ||
-			!validStoredWorkspaceTimestamp(raw.UpdatedAt, raw.UpdatedAtRaw, raw.StorageClasses[10]) ||
-			raw.UpdatedAt.Before(raw.CreatedAt) {
-			return fmt.Errorf("localstore: invalid publication policy metadata timestamp")
-		}
-		raw.CreatedAt = raw.CreatedAt.UTC()
-		raw.UpdatedAt = raw.UpdatedAt.UTC()
+		stored.RecordedAt = stored.RecordedAt.UTC()
 	}
-	if err := validateWorkspacePublicationPolicyRecord(raw.Record, true); err != nil {
+	if err := validateWorkspacePublicationPolicyRecord(stored.Record, true); err != nil {
 		return err
 	}
 	return nil
@@ -647,15 +446,6 @@ func equalWorkspacePublicationActors(left, right types.ActorEnvelope) bool {
 	left.OccurredAt = time.Time{}
 	right.OccurredAt = time.Time{}
 	return left == right && leftOccurredAt.Equal(rightOccurredAt)
-}
-
-func equalWorkspacePublicationBindingEvidence(left, right workspacePublicationBindingEvidence) bool {
-	return equalWorkspaceRecords(left.Record, right.Record) &&
-		bytes.Equal(left.SnapshotBytes, right.SnapshotBytes) &&
-		left.RepositoryJSON == right.RepositoryJSON &&
-		left.CreatedAt.Equal(right.CreatedAt) && left.CreatedAtRaw == right.CreatedAtRaw &&
-		left.UpdatedAt.Equal(right.UpdatedAt) && left.UpdatedAtRaw == right.UpdatedAtRaw &&
-		left.StorageClasses == right.StorageClasses
 }
 
 func cloneWorkspacePublicationPolicyRecord(record WorkspacePublicationPolicyRecord) WorkspacePublicationPolicyRecord {

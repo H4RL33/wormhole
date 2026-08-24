@@ -140,7 +140,9 @@ func TestWorkspacePublicationPolicyFailsClosedOnMissingOrDisagreeingHistory(t *t
 		{
 			name: "disagreeing final history",
 			mutate: func(t *testing.T, store *Store, scope types.WorkspaceScope) {
-				if _, err := store.DB().Exec(`UPDATE workspace_publication_policy_history SET repository_identity_json='{}' WHERE project_id=? AND workspace_id=?`, scope.ProjectID, scope.WorkspaceID); err != nil {
+				if _, err := store.DB().Exec(`UPDATE workspace_publication_policy_history SET repository_identity_json=? WHERE project_id=? AND workspace_id=?`,
+					`{"provider":"github","immutable_id":"other","canonical_remote":"https://github.com/acme/other"}`,
+					scope.ProjectID, scope.WorkspaceID); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -200,37 +202,6 @@ func TestWorkspaceRegistrationPublicationRowsAreAtomic(t *testing.T) {
 	}
 }
 
-func TestWorkspaceRegistrationRereadsBootstrapPolicyBeforeCommit(t *testing.T) {
-	store, repo := openWorkspaceStore(t)
-	if _, err := store.DB().Exec(`
-		CREATE TRIGGER drift_bootstrap_publication_history
-		AFTER INSERT ON workspace_publication_policy_history
-		BEGIN
-		  UPDATE workspace_publication_policies SET repository_identity_json='{}'
-		    WHERE project_id=NEW.project_id AND workspace_id=NEW.workspace_id;
-		  UPDATE workspace_publication_policy_history SET repository_identity_json='{}'
-		    WHERE project_id=NEW.project_id AND workspace_id=NEW.workspace_id;
-		END;
-	`); err != nil {
-		t.Fatal(err)
-	}
-	binding := workspaceBinding("00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
-	tree := workspaceTree(t, binding.Scope.ProjectID, binding.Repository)
-	binding = bindingWithTreeDigest(t, binding, tree)
-	if _, _, err := repo.RegisterWorkspace(context.Background(), binding, tree); err == nil {
-		t.Fatal("registration committed trigger-drifted bootstrap policy")
-	}
-	for _, table := range []string{"workspace_bindings", "workspace_publication_policies", "workspace_publication_policy_history"} {
-		var count int
-		if err := store.DB().QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil {
-			t.Fatal(err)
-		}
-		if count != 0 {
-			t.Fatalf("drifted registration retained %d %s rows", count, table)
-		}
-	}
-}
-
 func TestRepeatedWorkspaceRegistrationIgnoresProposedWorkspaceIDAndAcceptedRef(t *testing.T) {
 	store, repo := openWorkspaceStore(t)
 	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
@@ -254,29 +225,21 @@ func TestWorkspacePublicationPolicyStrictReadersRejectCorruption(t *testing.T) {
 		mutate func(t *testing.T, db *sql.DB, scope types.WorkspaceScope)
 	}{
 		{
-			name: "noncanonical repository JSON",
+			name: "unknown repository field",
 			mutate: func(t *testing.T, db *sql.DB, scope types.WorkspaceScope) {
-				updatePublicationPair(t, db, scope, `repository_identity_json='{"provider":"","immutable_id":"","canonical_remote":"","extra":true}'`)
+				updatePublicationPair(t, db, scope, `repository_identity_json='{"provider":"github","immutable_id":"repo","canonical_remote":"https://github.com/acme/repo","extra":true}'`)
 			},
 		},
 		{
-			name: "repository JSON storage class",
+			name: "trailing repository JSON",
 			mutate: func(t *testing.T, db *sql.DB, scope types.WorkspaceScope) {
-				updatePublicationPair(t, db, scope, `repository_identity_json=CAST('{}' AS BLOB)`)
+				updatePublicationPair(t, db, scope, `repository_identity_json='{"provider":"github","immutable_id":"repo","canonical_remote":"https://github.com/acme/repo"} {}'`)
 			},
 		},
 		{
-			name: "revision storage class",
+			name: "fractional policy revision",
 			mutate: func(t *testing.T, db *sql.DB, scope types.WorkspaceScope) {
 				withIgnoredSQLiteChecks(t, db, func() { updatePublicationPair(t, db, scope, `policy_revision=1.5`) })
-			},
-		},
-		{
-			name: "classification storage class",
-			mutate: func(t *testing.T, db *sql.DB, scope types.WorkspaceScope) {
-				withIgnoredSQLiteChecks(t, db, func() {
-					updatePublicationPair(t, db, scope, `classification=CAST('unclassified' AS BLOB)`)
-				})
 			},
 		},
 		{
@@ -328,22 +291,6 @@ func TestWorkspacePublicationPolicyStrictReadersRejectCorruption(t *testing.T) {
 				setConfiguredPublicationPair(t, db, scope, string(actorJSON), "sha256:"+strings.Repeat("a", 64), "2026-08-01 13:00:00 +0100 CET")
 			},
 		},
-		{
-			name: "current metadata storage class",
-			mutate: func(t *testing.T, db *sql.DB, scope types.WorkspaceScope) {
-				if _, err := db.Exec(`UPDATE workspace_publication_policies SET created_at=1 WHERE project_id=? AND workspace_id=?`, scope.ProjectID, scope.WorkspaceID); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-		{
-			name: "history metadata storage class",
-			mutate: func(t *testing.T, db *sql.DB, scope types.WorkspaceScope) {
-				if _, err := db.Exec(`UPDATE workspace_publication_policy_history SET recorded_at=1 WHERE project_id=? AND workspace_id=?`, scope.ProjectID, scope.WorkspaceID); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store, repo := openWorkspaceStore(t)
@@ -354,11 +301,7 @@ func TestWorkspacePublicationPolicyStrictReadersRejectCorruption(t *testing.T) {
 			test.mutate(t, store.DB(), binding.Scope)
 			err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
 				_, currentErr := tx.PublicationPolicy(context.Background())
-				if test.name == "history metadata storage class" {
-					if currentErr != nil {
-						t.Fatalf("current-only PublicationPolicy was poisoned by history: %v", currentErr)
-					}
-				} else if currentErr == nil {
+				if currentErr == nil {
 					t.Fatal("PublicationPolicy accepted corrupt current row")
 				}
 				_, err := publicationPolicyHistoryForTest(tx, context.Background())
@@ -575,56 +518,6 @@ func TestWorkspacePublicationPolicyRejectsOverflowedPersistedLineageWithoutMutat
 	}
 }
 
-func TestWorkspacePublicationPolicyCASRejectsTriggerDriftAtomically(t *testing.T) {
-	store, repo := openWorkspaceStore(t)
-	binding := createBinding(t, repo,
-		"00000000-0000-4000-8000-000000000001",
-		"00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
-	var bootstrap WorkspacePublicationPolicyRecord
-	err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-		var err error
-		bootstrap, err = tx.PublicationPolicy(context.Background())
-		return err
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.DB().Exec(`
-		CREATE TRIGGER drift_publication_after_update
-		AFTER UPDATE ON workspace_publication_policies
-		BEGIN UPDATE workspace_publication_policies SET classification='private_git'
-		WHERE project_id=NEW.project_id AND workspace_id=NEW.workspace_id; END;
-	`); err != nil {
-		t.Fatal(err)
-	}
-	origin := publicationTestDigest('a')
-	actor := publicationTestHuman("00000000-0000-4000-8000-000000000021")
-	changedAt := time.Date(2026, 8, 1, 12, 34, 56, 0, time.UTC)
-	next := WorkspacePublicationPolicyRecord{
-		Repository: binding.Repository, OriginDigest: &origin,
-		Classification: types.PublicationPublicGit, PolicyRevision: 2,
-		TransitionKind: "configured", ChangedBy: &actor, ChangedAt: &changedAt,
-	}
-	err = repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-		_, err := tx.ReconfigurePublication(context.Background(), WorkspacePublicationPolicyTransition{Expected: bootstrap, Next: next})
-		return err
-	})
-	if err == nil {
-		t.Fatal("trigger-drifted publication transition succeeded")
-	}
-	var revision, historyCount int
-	var classification string
-	if err := store.DB().QueryRow(`SELECT policy_revision,classification FROM workspace_publication_policies WHERE project_id=? AND workspace_id=?`, binding.Scope.ProjectID, binding.Scope.WorkspaceID).Scan(&revision, &classification); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.DB().QueryRow(`SELECT count(*) FROM workspace_publication_policy_history WHERE project_id=? AND workspace_id=?`, binding.Scope.ProjectID, binding.Scope.WorkspaceID).Scan(&historyCount); err != nil {
-		t.Fatal(err)
-	}
-	if revision != 1 || classification != "unclassified" || historyCount != 1 {
-		t.Fatalf("trigger drift rollback current=(%d,%s) history=%d", revision, classification, historyCount)
-	}
-}
-
 func TestWorkspacePublicationPolicyRejectsInvalidSemanticallyEqualExpected(t *testing.T) {
 	store, repo := openWorkspaceStore(t)
 	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
@@ -689,43 +582,6 @@ func TestWorkspacePublicationPolicyTreatsZeroOffsetActorTimesSemantically(t *tes
 	})
 	if err != nil {
 		t.Fatalf("semantically equal zero-offset Expected actor: %v", err)
-	}
-}
-
-func TestWorkspacePublicationPolicyCASProtectsCompleteBindingEvidence(t *testing.T) {
-	for _, test := range []struct {
-		name       string
-		assignment string
-	}{
-		{"semantic field", `accepted_ref='refs/heads/drift'`},
-		{"raw timestamp", `updated_at='2026-08-01 00:00:00'`},
-		{"storage class", `accepted_ref=CAST(accepted_ref AS BLOB)`},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			store, repo := openWorkspaceStore(t)
-			binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
-			_, configured := configurePublicationPolicy(t, repo, binding, types.PublicationPublicGit)
-			if _, err := store.DB().Exec(`
-				CREATE TRIGGER drift_binding_during_publication_update
-				AFTER UPDATE ON workspace_publication_policies
-				BEGIN UPDATE workspace_bindings SET ` + test.assignment + `
-				WHERE project_id=NEW.project_id AND workspace_id=NEW.workspace_id; END;
-			`); err != nil {
-				t.Fatal(err)
-			}
-			before := readAtomicWorkspaceRawSnapshot(t, store.DB())
-			next := publicationOriginInvalidation(binding.Repository, configured.PolicyRevision+1, 'b')
-			err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-				_, err := tx.ReconfigurePublication(context.Background(), WorkspacePublicationPolicyTransition{Expected: configured, Next: next})
-				return err
-			})
-			if err == nil {
-				t.Fatal("publication transition accepted binding drift")
-			}
-			if after := readAtomicWorkspaceRawSnapshot(t, store.DB()); !reflect.DeepEqual(after, before) {
-				t.Fatalf("binding drift was not rolled back: before=%v after=%v", before, after)
-			}
-		})
 	}
 }
 

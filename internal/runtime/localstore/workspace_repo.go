@@ -265,14 +265,6 @@ func (tx *WorkspaceMutationTx) AdvanceAcceptedBase(ctx context.Context, transiti
 	return want, nil
 }
 
-func validStoredWorkspaceTimestamp(value time.Time, raw, storageClass string) bool {
-	return storageClass == "text" && raw != "" && validUTCTimestamp(value)
-}
-
-func validMonotonicWorkspaceMutationTimestamp(returned time.Time, raw, storageClass string, previous time.Time) bool {
-	return validStoredWorkspaceTimestamp(returned, raw, storageClass) && !returned.Before(previous)
-}
-
 func (tx *WorkspaceMutationTx) workspaceOperationHistory(ctx context.Context) ([]WorkspaceOperation, error) {
 	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
 		return nil, ErrNotFound
@@ -282,12 +274,9 @@ func (tx *WorkspaceMutationTx) workspaceOperationHistory(ctx context.Context) ([
 	}
 	rows, err := tx.conn.QueryContext(ctx, `
 		SELECT project_id, workspace_id, generation, operation_id, operation_json,
-		       state, stashed_by_stash_id, created_at,
-		       typeof(project_id), typeof(workspace_id), typeof(generation),
-		       typeof(operation_id), typeof(operation_json), typeof(state),
-		       typeof(stashed_by_stash_id), typeof(created_at)
+		       state, stashed_by_stash_id, created_at
 		FROM workspace_overlay_operations
-		WHERE CAST(project_id AS TEXT)=? AND CAST(workspace_id AS TEXT)=?
+		WHERE project_id=? AND workspace_id=?
 		ORDER BY generation
 	`, tx.scope.ProjectID, tx.scope.WorkspaceID)
 	if err != nil {
@@ -302,22 +291,12 @@ func (tx *WorkspaceMutationTx) workspaceOperationHistory(ctx context.Context) ([
 			stashID                                                            sql.NullString
 			generation                                                         sql.NullInt64
 			createdAt                                                          sql.NullTime
-			projectType, workspaceType, generationType                         string
-			operationIDType, operationJSONType, stateType                      string
-			stashIDType, createdAtType                                         string
 		)
 		if err := rows.Scan(
 			&projectID, &workspaceID, &generation, &operationID, &operationJSON,
 			&operationState, &stashID, &createdAt,
-			&projectType, &workspaceType, &generationType, &operationIDType,
-			&operationJSONType, &stateType, &stashIDType, &createdAtType,
 		); err != nil {
 			return nil, fmt.Errorf("localstore: scan workspace operation audit: %w", err)
-		}
-		if projectType != "text" || workspaceType != "text" || generationType != "integer" ||
-			operationIDType != "text" || operationJSONType != "text" || stateType != "text" ||
-			(stashIDType != "null" && stashIDType != "text") || createdAtType != "text" {
-			return nil, fmt.Errorf("localstore: invalid workspace operation audit storage class")
 		}
 		if !projectID.Valid || !workspaceID.Valid || !generation.Valid || !operationID.Valid ||
 			!operationJSON.Valid || !operationState.Valid || !createdAt.Valid ||
@@ -1180,18 +1159,6 @@ func (r *WorkspaceRepo) RegisterWorkspace(ctx context.Context, candidate types.W
 	if err := insertBootstrapPublicationPolicy(ctx, conn, candidate.Scope, string(repositoryJSON)); err != nil {
 		return types.WorkspaceBinding{}, false, err
 	}
-	publication, err := queryWorkspacePublicationPolicy(ctx, conn, candidate.Scope)
-	wantPublication := WorkspacePublicationPolicyRecord{
-		Repository: candidate.Repository, Classification: types.PublicationUnclassified,
-		PolicyRevision: 1, TransitionKind: "bootstrap",
-	}
-	if err != nil || publication.RepositoryJSON != string(repositoryJSON) ||
-		!equalWorkspacePublicationPolicyRecords(publication.Record, wantPublication) {
-		if err == nil {
-			err = fmt.Errorf("bootstrap publication policy differs from registration")
-		}
-		return types.WorkspaceBinding{}, false, fmt.Errorf("localstore: validate registered workspace publication policy: %w", err)
-	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return types.WorkspaceBinding{}, false, fmt.Errorf("localstore: commit workspace registration: %w", err)
 	}
@@ -1308,12 +1275,10 @@ func scanWorkspace(scanner workspaceScanner) (WorkspaceRecord, []byte, error) {
 	if revisionClass != "integer" || record.WorkspaceRevision < 1 {
 		return WorkspaceRecord{}, nil, fmt.Errorf("invalid workspace revision")
 	}
-	if err := json.Unmarshal([]byte(repositoryJSON), &record.Binding.Repository); err != nil {
+	var err error
+	record.Binding.Repository, err = decodeWorkspaceRepositoryIdentity(repositoryJSON)
+	if err != nil {
 		return WorkspaceRecord{}, nil, fmt.Errorf("decode repository identity: %w", err)
-	}
-	canonicalRepository, err := json.Marshal(record.Binding.Repository)
-	if err != nil || string(canonicalRepository) != repositoryJSON {
-		return WorkspaceRecord{}, nil, fmt.Errorf("repository identity is not canonical")
 	}
 	if err := record.Binding.Validate(); err != nil {
 		return WorkspaceRecord{}, nil, err
@@ -1337,6 +1302,22 @@ func scanWorkspace(scanner workspaceScanner) (WorkspaceRecord, []byte, error) {
 		return WorkspaceRecord{}, nil, fmt.Errorf("invalid workspace state %q", record.State)
 	}
 	return record, snapshotBytes, nil
+}
+
+func decodeWorkspaceRepositoryIdentity(encoded string) (types.RepositoryIdentity, error) {
+	var repository types.RepositoryIdentity
+	decoder := json.NewDecoder(strings.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&repository); err != nil {
+		return types.RepositoryIdentity{}, err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return types.RepositoryIdentity{}, fmt.Errorf("trailing repository identity data")
+	}
+	if err := repository.Validate(); err != nil {
+		return types.RepositoryIdentity{}, err
+	}
+	return repository, nil
 }
 
 func canonicalStoredTree(tree projectstate.Tree) (projectstate.Snapshot, []byte, error) {

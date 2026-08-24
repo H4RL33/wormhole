@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -58,6 +59,31 @@ func TestStage1ASoleWorkspaceAuthorities(t *testing.T) {
 		assertArchitectureSourceMatchesExactly(t, sources,
 			"func (r *WorkspaceRepo) Confirm"+"WorkspaceCommit",
 			"internal/runtime/localstore/workspace_commit_confirmation.go", 1)
+	})
+
+	t.Run("workspace representation sweep stays frozen", func(t *testing.T) {
+		workspaceSources := make(map[string]string)
+		for path, source := range sources {
+			if strings.HasPrefix(path, "internal/runtime/localstore/workspace") {
+				workspaceSources[path] = source
+			}
+		}
+		for _, forbidden := range []string{"CAST(", "StorageClasses"} {
+			assertArchitectureSourceAbsent(t, workspaceSources, forbidden)
+		}
+		typeofCount := 0
+		for _, source := range workspaceSources {
+			typeofCount += strings.Count(source, "typeof(")
+		}
+		if typeofCount != 1 {
+			t.Fatalf("workspace production typeof occurrences=%d, want exactly 1", typeofCount)
+		}
+		assertArchitectureSourceMatchesExactly(t, workspaceSources, "typeof(workspace_revision)",
+			"internal/runtime/localstore/workspace_repo.go", 1)
+		if count := architectureRegexpCount(workspaceSources,
+			regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*Raw\b`)); count != 0 {
+			t.Fatalf("workspace production identifiers ending Raw=%d, want 0", count)
+		}
 	})
 }
 
@@ -185,6 +211,14 @@ func assertArchitectureSourceMatchesExactly(t *testing.T, sources map[string]str
 	if !reflect.DeepEqual(matches, []string{want}) || count != wantCount {
 		t.Fatalf("authority %q owners=%v occurrences=%d, want [%s] and %d", authority, matches, count, want, wantCount)
 	}
+}
+
+func architectureRegexpCount(sources map[string]string, pattern *regexp.Regexp) int {
+	count := 0
+	for _, source := range sources {
+		count += len(pattern.FindAllStringIndex(source, -1))
+	}
+	return count
 }
 
 func TestCoarsePrivateCorruptionFailsClosedWithoutCrossScopeMutation(t *testing.T) {

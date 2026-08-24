@@ -264,20 +264,6 @@ func TestServiceStashCurrentWorksetRejectsWrongSideAndIgnoresCorruptTerminalRows
 				t.Fatal(err)
 			}
 		}, wantSuccess: true},
-		{name: "corrupt terminal storage class", setup: func(t *testing.T, fixture stashServiceFixture) {
-			operation := servicePutTaskOperation(fixture.accepted, "90000000-0000-4000-8000-000000000001", "80000000-0000-4000-8000-000000000001", "terminal")
-			raw, err := state.CanonicalOperation(operation)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := fixture.store.DB().Exec(`
-				INSERT INTO workspace_overlay_operations
-				(project_id,workspace_id,generation,operation_id,operation_json,state)
-				VALUES (?,?,?,?,?,'materialized')
-			`, fixture.req.Scope.ProjectID, fixture.req.Scope.WorkspaceID, 1, operation.ID, raw); err != nil {
-				t.Fatal(err)
-			}
-		}, wantSuccess: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newStashServiceFixture(t)

@@ -42,9 +42,8 @@ func (tx *WorkspaceMutationTx) currentMaterializationByJournalID(ctx context.Con
 		SELECT project_id,workspace_id,journal_id,expected_live_digest,accepted_base_digest,
 		       checkout_path,checkout_device,checkout_inode,prior_tree_digest,candidate_digest,
 		       through_generation,prior_tree,candidate_tree,stage_path,backup_path,state,
-		       included_operations_json,typeof(included_operations_json),
-		       publication_review_proof_version,typeof(publication_review_proof_version),publication_review_json,typeof(publication_review_json),
-		       prior_candidate_json,typeof(prior_candidate_json)
+		       included_operations_json,publication_review_proof_version,publication_review_json,
+		       prior_candidate_json
 		FROM workspace_materializations
 		WHERE project_id=? AND workspace_id=? AND journal_id=?
 	`, tx.scope.ProjectID, tx.scope.WorkspaceID, journalID)
@@ -271,9 +270,8 @@ func (tx *WorkspaceMutationTx) acceptanceEligibleCurrentMaterialization(ctx cont
 		SELECT project_id,workspace_id,journal_id,expected_live_digest,accepted_base_digest,
 		       checkout_path,checkout_device,checkout_inode,prior_tree_digest,candidate_digest,
 		       through_generation,prior_tree,candidate_tree,stage_path,backup_path,state,
-		       included_operations_json,typeof(included_operations_json),
-		       publication_review_proof_version,typeof(publication_review_proof_version),publication_review_json,typeof(publication_review_json),
-		       prior_candidate_json,typeof(prior_candidate_json)
+		       included_operations_json,publication_review_proof_version,publication_review_json,
+		       prior_candidate_json
 		FROM workspace_materializations
 		WHERE project_id=? AND workspace_id=? AND state IN ('published','recovered_new')
 		ORDER BY journal_id
@@ -321,9 +319,8 @@ func (tx *WorkspaceMutationTx) CurrentMaterialization(ctx context.Context) (*Wor
 		SELECT project_id,workspace_id,journal_id,expected_live_digest,accepted_base_digest,
 		       checkout_path,checkout_device,checkout_inode,prior_tree_digest,candidate_digest,
 		       through_generation,prior_tree,candidate_tree,stage_path,backup_path,state,
-		       included_operations_json,typeof(included_operations_json),
-		       publication_review_proof_version,typeof(publication_review_proof_version),publication_review_json,typeof(publication_review_json),
-		       prior_candidate_json,typeof(prior_candidate_json)
+		       included_operations_json,publication_review_proof_version,publication_review_json,
+		       prior_candidate_json
 		FROM workspace_materializations
 		WHERE project_id=? AND workspace_id=?
 		  AND state IN ('prepared','published','recovered_new')

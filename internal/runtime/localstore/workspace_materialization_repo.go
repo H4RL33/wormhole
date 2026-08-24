@@ -50,11 +50,10 @@ func (tx *WorkspaceMutationTx) workspaceMaterializationHistory(ctx context.Conte
 		SELECT project_id,workspace_id,journal_id,expected_live_digest,accepted_base_digest,
 		       checkout_path,checkout_device,checkout_inode,prior_tree_digest,candidate_digest,
 		       through_generation,prior_tree,candidate_tree,stage_path,backup_path,state,
-		       included_operations_json,typeof(included_operations_json),
-		       publication_review_proof_version,typeof(publication_review_proof_version),publication_review_json,typeof(publication_review_json),
-		       prior_candidate_json,typeof(prior_candidate_json)
+		       included_operations_json,publication_review_proof_version,publication_review_json,
+		       prior_candidate_json
 		FROM workspace_materializations
-		WHERE CAST(project_id AS TEXT)=? AND CAST(workspace_id AS TEXT)=?
+		WHERE project_id=? AND workspace_id=?
 		ORDER BY journal_id
 	`, tx.scope.ProjectID, tx.scope.WorkspaceID)
 	if err != nil {
@@ -169,10 +168,9 @@ type workspaceMaterializationScanner interface {
 
 func scanWorkspaceMaterialization(scanner workspaceMaterializationScanner, scope types.WorkspaceScope, binding types.WorkspaceBinding, eligibleOnly bool) (*WorkspaceMaterializationRecord, error) {
 	var (
-		projectID, workspaceID                                                                                                     string
-		priorBytes, candidateBytes                                                                                                 []byte
-		included, publicationReview, priorCandidate                                                                                sql.NullString
-		includedStorageClass, publicationReviewProofVersionStorageClass, publicationReviewStorageClass, priorCandidateStorageClass string
+		projectID, workspaceID                      string
+		priorBytes, candidateBytes                  []byte
+		included, publicationReview, priorCandidate sql.NullString
 	)
 	record := &WorkspaceMaterializationRecord{}
 	destinations := []any{
@@ -182,8 +180,7 @@ func scanWorkspaceMaterialization(scanner workspaceMaterializationScanner, scope
 		&priorBytes, &candidateBytes, &record.StagePath, &record.BackupPath, &record.State,
 	}
 	destinations = append(destinations,
-		&included, &includedStorageClass, &record.PublicationReviewProofVersion, &publicationReviewProofVersionStorageClass,
-		&publicationReview, &publicationReviewStorageClass, &priorCandidate, &priorCandidateStorageClass,
+		&included, &record.PublicationReviewProofVersion, &publicationReview, &priorCandidate,
 	)
 	if err := scanner.Scan(destinations...); err != nil {
 		return nil, fmt.Errorf("scan materialization row: %w", err)
@@ -231,17 +228,14 @@ func scanWorkspaceMaterialization(scanner workspaceMaterializationScanner, scope
 		return nil, fmt.Errorf("invalid acceptance-eligible materialization state")
 	}
 	var err error
-	if record.IncludedOperationsJSON, err = strictOptionalMaterializationText(included, includedStorageClass, "included operations"); err != nil {
+	if record.IncludedOperationsJSON, err = strictOptionalMaterializationText(included, "included operations"); err != nil {
 		return nil, err
 	}
-	if record.PublicationReviewJSON, err = strictOptionalMaterializationText(publicationReview, publicationReviewStorageClass, "publication review"); err != nil {
+	if record.PublicationReviewJSON, err = strictOptionalMaterializationText(publicationReview, "publication review"); err != nil {
 		return nil, err
 	}
-	if record.PriorCandidateJSON, err = strictOptionalMaterializationText(priorCandidate, priorCandidateStorageClass, "prior candidate"); err != nil {
+	if record.PriorCandidateJSON, err = strictOptionalMaterializationText(priorCandidate, "prior candidate"); err != nil {
 		return nil, err
-	}
-	if publicationReviewProofVersionStorageClass != "integer" {
-		return nil, fmt.Errorf("invalid publication review proof version storage class")
 	}
 	if !validWorkspaceMaterializationPublicationProof(*record) {
 		return nil, fmt.Errorf("invalid materialization publication proof")
@@ -312,10 +306,7 @@ func equalWorkspaceMaterializationRecords(left, right WorkspaceMaterializationRe
 		equalOptionalMaterializationString(left.PriorCandidateJSON, right.PriorCandidateJSON)
 }
 
-func strictOptionalMaterializationText(value sql.NullString, storageClass, name string) (*string, error) {
-	if storageClass != "null" && storageClass != "text" {
-		return nil, fmt.Errorf("invalid %s storage class", name)
-	}
+func strictOptionalMaterializationText(value sql.NullString, name string) (*string, error) {
 	if !value.Valid {
 		return nil, nil
 	}

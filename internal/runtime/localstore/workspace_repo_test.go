@@ -209,30 +209,6 @@ func TestWorkspaceMutationTxAdvanceAcceptedBaseWriteFailureRollsBack(t *testing.
 	}
 }
 
-func TestWorkspaceMutationTxAdvanceAcceptedBaseTimestampPredicate(t *testing.T) {
-	previous := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
-	for _, test := range []struct {
-		name     string
-		returned time.Time
-		raw      string
-		class    string
-		want     bool
-	}{
-		{"equal is monotonic", previous, "2026-07-29 12:00:00+00:00", "text", true},
-		{"later is monotonic", previous.Add(time.Second), "2026-07-29 12:00:01+00:00", "text", true},
-		{"regression", previous.Add(-time.Nanosecond), "2026-07-29 11:59:59.999999999+00:00", "text", false},
-		{"invalid storage class", previous, "2026-07-29 12:00:00+00:00", "integer", false},
-		{"empty raw timestamp", previous, "", "text", false},
-		{"zero timestamp", time.Time{}, "0001-01-01 00:00:00+00:00", "text", false},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if got := validMonotonicWorkspaceMutationTimestamp(test.returned, test.raw, test.class, previous); got != test.want {
-				t.Fatalf("validMonotonicWorkspaceMutationTimestamp()=%v, want %v", got, test.want)
-			}
-		})
-	}
-}
-
 func TestWorkspaceMutationTxAdvanceAcceptedBaseInvalidAPIHasNoMutation(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -2524,81 +2500,6 @@ func quoteSQLiteTestIdentifier(value string) string {
 
 func quoteSQLiteTextLiteral(value string) string {
 	return `'` + strings.ReplaceAll(value, `'`, `''`) + `'`
-}
-
-func assertAtomicWorkspaceRawDelta(t *testing.T, before, after rawAtomicWorkspaceSnapshot, targetTable string, targetKeys map[string]string, allowedColumns ...string) {
-	t.Helper()
-	allowed := make(map[string]struct{}, len(allowedColumns))
-	for _, column := range allowedColumns {
-		allowed[column] = struct{}{}
-	}
-	targetFound := false
-	if len(before) != len(after) {
-		t.Fatalf("raw table count changed: got %d want %d", len(after), len(before))
-	}
-	for table, beforeRows := range before {
-		afterRows, ok := after[table]
-		if !ok || len(afterRows) != len(beforeRows) {
-			t.Fatalf("raw %s row count changed: got %d want %d", table, len(afterRows), len(beforeRows))
-		}
-		for rowIndex, beforeRow := range beforeRows {
-			afterRow := afterRows[rowIndex]
-			isTarget := table == targetTable && atomicWorkspaceRawRowMatches(beforeRow, targetKeys)
-			if isTarget {
-				targetFound = true
-			}
-			if len(afterRow) != len(beforeRow) {
-				t.Fatalf("raw %s row %d column count changed", table, rowIndex)
-			}
-			for column, beforeCell := range beforeRow {
-				afterCell, ok := afterRow[column]
-				if !ok {
-					t.Fatalf("raw %s row %d lost column %s", table, rowIndex, column)
-				}
-				if isTarget {
-					if _, permitted := allowed[column]; permitted {
-						if afterCell.StorageClass != beforeCell.StorageClass {
-							t.Fatalf("raw %s.%s storage class changed: got %s want %s", table, column, afterCell.StorageClass, beforeCell.StorageClass)
-						}
-						continue
-					}
-				}
-				if afterCell != beforeCell {
-					t.Fatalf("unpermitted raw delta %s row %d column %s: got %+v want %+v", table, rowIndex, column, afterCell, beforeCell)
-				}
-			}
-		}
-	}
-	if !targetFound {
-		t.Fatalf("raw target %s keys=%v not found", targetTable, targetKeys)
-	}
-}
-
-func findAtomicWorkspaceRawRow(t *testing.T, snapshot rawAtomicWorkspaceSnapshot, table string, targetKeys map[string]string) rawAtomicWorkspaceRow {
-	t.Helper()
-	for _, row := range snapshot[table] {
-		if atomicWorkspaceRawRowMatches(row, targetKeys) {
-			return row
-		}
-	}
-	t.Fatalf("raw target %s keys=%v not found", table, targetKeys)
-	return nil
-}
-
-func atomicWorkspaceRawRowMatches(row rawAtomicWorkspaceRow, targetKeys map[string]string) bool {
-	for column, quoted := range targetKeys {
-		if row[column].Quoted != quoted {
-			return false
-		}
-	}
-	return true
-}
-
-func assertRawAtomicCell(t *testing.T, row rawAtomicWorkspaceRow, column, quoted, storageClass string) {
-	t.Helper()
-	if got := row[column]; got.Quoted != quoted || got.StorageClass != storageClass {
-		t.Fatalf("raw %s=%+v, want quoted=%s class=%s", column, got, quoted, storageClass)
-	}
 }
 
 func createBinding(t *testing.T, repo *WorkspaceRepo, projectID, workspaceID, path string, device, inode uint64) types.WorkspaceBinding {
