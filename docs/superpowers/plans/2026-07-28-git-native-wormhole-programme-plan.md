@@ -21,14 +21,21 @@ repository-lineage scoped.
 Task-5 `5F`/`5G` and the review-only Stage 1A gate are complete. The human decision in
 `docs/superpowers/specs/2026-08-17-stage1a-r01-r05-foundation-reduction-design.md`
 selects exactly the R01-R05 private-persistence foundation reduction and its mandatory
-comparison review. Its written-spec review was approved on 2026-08-17; write the exact
-implementation plan before production changes, then execute only that plan. The design
-controls every conflict with earlier private-proof or migration-reservation prose.
+comparison review. Its written-spec review was approved on 2026-08-17, and the exact plan
+has now run through its measured-simplification pause. The immutable production/test
+boundary is `R05_END = 41683b94a06c7b5faa07ad97010cec2462af47f3`. Independent final
+reviews and every required G/A, focused, migration/architecture, race, repository, release,
+rehearsal, diff, and clean-clone gate passed; `make check` reported 85.0% merged statement
+coverage against the unchanged 80% floor. The objective comparison is subtractive in
+production, tests, and total implementation, with no dual owner, revision, current-workset,
+confirmation, or audit authority. The design continues to control every conflict with
+earlier private-proof or migration-reservation prose.
 
 No R06-R14 implementation, lifecycle coordinator extraction, package restructuring,
 Tasks 6, 6A, 7, or 8 preparation, Stage 2 work, publication-class migration, filesystem
-recovery simplification, terminal pruning, or unrelated cleanup is executable in this
-tranche. Completion triggers another hard pause and explicit human decision.
+recovery simplification, terminal pruning, or unrelated cleanup is executable after this
+pause. The programme is stopped pending a new explicit human go/no-go that records the
+exact next authorised scope.
 
 ## Authority and frozen constraints
 
@@ -55,10 +62,11 @@ tranche. Completion triggers another hard pause and explicit human decision.
 
 ### Stage 1: Portable Git-native project state
 
-Task-5, the review-only Stage 1A gate, and the R01-R05 written-spec review are complete.
-Write the exact implementation plan, execute only the approved R01-R05
-foundation-reduction design, produce its objective scorecard, and pause. Tasks 6, mandatory
-Task 6A, 7, and 8 remain planned work, not authorised work.
+Task-5, the review-only Stage 1A gate, the R01-R05 written-spec review, and the approved
+R01-R05 implementation are complete. Its immutable production/test boundary is
+`41683b94a06c7b5faa07ad97010cec2462af47f3`; its objective scorecard and full Task-17 gate
+record establish the measured pause. Tasks 6, mandatory Task 6A, 7, and 8 remain planned
+work, not authorised work.
 
 Gate: all Slice-A focused tests, migration tests, crash/recovery tests, `go test -race`
 targets, and `make check` pass at or above 80 percent merged coverage. Status/diff/import
@@ -89,8 +97,10 @@ implemented through Task 5:
 
 All four artifacts exist and the 2026-08-17 human decision record names the retained V1
 guarantee set, exact R10 recovery posture, and R01-R05 as the sole next selected tranche.
-The written-spec review was approved on 2026-08-17, and the tranche remains subject to its
-own implementation plan and measured-simplification pause.
+The written-spec review was approved on 2026-08-17. That tranche is now complete at
+`R05_END = 41683b94a06c7b5faa07ad97010cec2462af47f3`, all required verification gates are
+green including 85.0% merged statement coverage, and the measured-simplification pause is
+in force. No later stage or reduction is authorised until the next explicit human go/no-go.
 
 ### Stage 2: Minimal Gateway, setup, and native connectors
 

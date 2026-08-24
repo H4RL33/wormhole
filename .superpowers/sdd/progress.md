@@ -1362,3 +1362,22 @@ could pass while running zero tests; authoritative cells were corrected in place
 commands and nine canonical verbose reruns passed, and no escaped command alternation remains.
 Five-package normal and race suites, formatting, and diff gates passed; all 38 ledger rows are
 green. Task 16 is next; no production Go or Task-16 representation sweep entered Task 15.
+
+Stage 1A R01-R05 execution: Tasks 16-17 complete and the measured pause is reached. Task 16
+froze the final private-representation sweep and sole-authority evidence in commit
+`41683b94a06c7b5faa07ad97010cec2462af47f3` (`test(stage1a): consolidate reduction
+evidence`). After independent final specification and quality approval, Task 17 reran the
+complete G/A, focused, migration/architecture, race, repository, release, rehearsal, diff,
+and clean-clone gates. All passed; `make check` reported 85.0% merged statement coverage,
+above the unchanged 80% floor, and the supported PostgreSQL integration environment was
+included. The clean detached clone reproduced the affected migration, architecture,
+portable-state, and checkpoint-provenance results without source-worktree dependencies.
+
+The immutable production/test boundary is
+`R05_END = 41683b94a06c7b5faa07ad97010cec2462af47f3`; the pause packet is documentation-only
+and remains separate from that boundary. The objective comparison is subtractive in
+production, tests, and total implementation across both required ranges, with no dual
+database owner, workspace-revision finalizer, current-workset authority, compact confirmer,
+or history-audit path. Stage 1A now stops for the explicit human go/no-go. R06-R14,
+lifecycle extraction, Tasks 6/6A/7/8, Stage 2, and all later implementation or refactor work
+remain unauthorised until a new human decision records the exact next scope.
