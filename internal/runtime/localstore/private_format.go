@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+
+	codeschema "github.com/H4RL33/wormhole/internal/runtime/codegraph/schema"
 )
 
 // ErrUnsupportedPrivateFormat reports a private Gateway database that this
@@ -36,9 +38,12 @@ var (
 	//go:embed private_schema_v6.sql
 	privateSchemaV6 string
 
-	privateSchemaFingerprintOnce  sync.Once
-	privateSchemaFingerprintValue string
-	privateSchemaFingerprintErr   error
+	privateSchemaFingerprintOnce         sync.Once
+	privateSchemaFingerprintValue        string
+	privateSchemaFingerprintErr          error
+	privateWithCodeGraphFingerprintOnce  sync.Once
+	privateWithCodeGraphFingerprintValue string
+	privateWithCodeGraphFingerprintErr   error
 
 	// privateSchemaV6ValidationHook is a failure-injection seam for proving
 	// fresh initialization rollback. It is nil in normal Gateway operation.
@@ -153,8 +158,21 @@ func validateCurrentPrivateSchema(db privateSchemaQueryer) error {
 		return fmt.Errorf("private schema fingerprint is unreadable")
 	}
 	expectedFingerprint, err := canonicalPrivateSchemaFingerprint()
-	if err != nil || actualFingerprint != expectedFingerprint {
+	if err != nil {
 		return fmt.Errorf("private schema object definitions are not exact v6")
+	}
+	graphCatalogPresent := false
+	if actualFingerprint != expectedFingerprint {
+		withCodeGraph, graphErr := canonicalPrivateSchemaWithCodeGraphFingerprint()
+		if graphErr != nil || actualFingerprint != withCodeGraph {
+			return fmt.Errorf("private schema object definitions are not exact v6")
+		}
+		graphCatalogPresent = true
+	}
+	if graphCatalogPresent {
+		if err := validateCurrentCodeGraphLedger(db); err != nil {
+			return err
+		}
 	}
 	var tableCount int
 	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='gateway_schema_migrations'`).Scan(&tableCount); err != nil {
@@ -175,7 +193,7 @@ func validateCurrentPrivateSchema(db privateSchemaQueryer) error {
 		return fmt.Errorf("private schema ledger is not exact v6")
 	}
 
-	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`)
+	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'codegraph_%'`)
 	if err != nil {
 		return fmt.Errorf("private schema object inventory is unreadable")
 	}
@@ -220,6 +238,26 @@ func validateCurrentPrivateSchema(db privateSchemaQueryer) error {
 	}
 	if unsupportedProofs != 0 {
 		return fmt.Errorf("private database contains unsupported materialization proof evidence")
+	}
+	return nil
+}
+
+func validateCurrentCodeGraphLedger(db privateSchemaQueryer) error {
+	rows, err := db.Query(`SELECT version FROM codegraph_schema_migrations ORDER BY version`)
+	if err != nil {
+		return fmt.Errorf("Code Graph schema ledger is unreadable")
+	}
+	defer rows.Close()
+	want := 1
+	for rows.Next() {
+		var version int
+		if err := rows.Scan(&version); err != nil || version != want {
+			return fmt.Errorf("Code Graph schema ledger is not exact v2")
+		}
+		want++
+	}
+	if err := rows.Err(); err != nil || want != 3 {
+		return fmt.Errorf("Code Graph schema ledger is not exact v2")
 	}
 	return nil
 }
@@ -301,6 +339,31 @@ func canonicalPrivateSchemaFingerprint() (string, error) {
 		privateSchemaFingerprintValue, privateSchemaFingerprintErr = privateSchemaFingerprint(db)
 	})
 	return privateSchemaFingerprintValue, privateSchemaFingerprintErr
+}
+
+func canonicalPrivateSchemaWithCodeGraphFingerprint() (string, error) {
+	privateWithCodeGraphFingerprintOnce.Do(func() {
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			privateWithCodeGraphFingerprintErr = err
+			return
+		}
+		defer db.Close()
+		if _, err := db.Exec(schema); err != nil {
+			privateWithCodeGraphFingerprintErr = err
+			return
+		}
+		if _, err := db.Exec(privateSchemaV6); err != nil {
+			privateWithCodeGraphFingerprintErr = err
+			return
+		}
+		if _, err := db.Exec(codeschema.CurrentSQL()); err != nil {
+			privateWithCodeGraphFingerprintErr = err
+			return
+		}
+		privateWithCodeGraphFingerprintValue, privateWithCodeGraphFingerprintErr = privateSchemaFingerprint(db)
+	})
+	return privateWithCodeGraphFingerprintValue, privateWithCodeGraphFingerprintErr
 }
 
 func privateSidecarsPresent(path string) (bool, error) {

@@ -2,12 +2,87 @@ package localstore
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	codegraphconfig "github.com/H4RL33/wormhole/internal/runtime/codegraph/config"
+	codegraphstore "github.com/H4RL33/wormhole/internal/runtime/codegraph/store"
 )
+
+func TestGatewayReopensExactV6WithCurrentCodeGraphCatalogAndRows(t *testing.T) {
+	databasePath := freshDatabasePathWithClosedStore(t)
+	db, err := sql.Open("sqlite", sqliteDSN(databasePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph, err := codegraphstore.Open(context.Background(), db, "project-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := graph.PutProjectConfig(context.Background(), codegraphstoreProjectConfig("project-a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(databasePath)
+	if err != nil {
+		t.Fatalf("Open rejected current private + Code Graph catalog: %v", err)
+	}
+	defer store.Close()
+	var graphRows int
+	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM codegraph_config WHERE project_id = ?`, "project-a").Scan(&graphRows); err != nil {
+		t.Fatal(err)
+	}
+	if graphRows != 1 {
+		t.Fatalf("Code Graph rows after private reopen = %d, want 1", graphRows)
+	}
+}
+
+func TestGatewayRejectsCurrentPrivateWithCodeGraphCatalogDrift(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup string
+	}{
+		{name: "missing required index", setup: `DROP INDEX codegraph_edges_source_traversal`},
+		{name: "extra graph table", setup: `CREATE TABLE codegraph_future (value TEXT)`},
+		{name: "malformed ledger", setup: `DROP TABLE codegraph_schema_migrations; CREATE TABLE codegraph_schema_migrations (version TEXT); INSERT INTO codegraph_schema_migrations VALUES ('2')`},
+		{name: "future ledger", setup: `INSERT INTO codegraph_schema_migrations(version, applied_at) VALUES (3, CURRENT_TIMESTAMP)`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			databasePath := freshDatabasePathWithClosedStore(t)
+			db, err := sql.Open("sqlite", sqliteDSN(databasePath))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := codegraphstore.Open(context.Background(), db, "project-a"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(test.setup); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Open(databasePath); err == nil {
+				t.Fatal("Open accepted drifted Code Graph catalog")
+			}
+		})
+	}
+}
+
+func codegraphstoreProjectConfig(projectID string) codegraphconfig.Project {
+	return codegraphconfig.Project{
+		ProjectID: projectID, Enabled: true, CanonicalRemote: "https://example.com/project.git",
+		ActiveCheckout: "/work/project", ProjectSourceByteCeiling: codegraphconfig.DefaultProjectSourceByteCeiling,
+	}
+}
 
 func TestGatewayPreflightRejectsPreR06DatabaseWithoutMutation(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "gateway.db")
