@@ -2,9 +2,9 @@
 
 **Date:** 2026-08-24
 **Scope:** R06 only
-**Implementation candidate:** `27f5b8524e216d18e6e57d9d390823e83e6ae1da`
-**Status:** Implementation and focused evidence present; independent review and
-full repository gates remain pending. This report is not a final release claim.
+**Implementation commits:** `27f5b85`, `a18b6f4`, `e1d2df5`
+**Status:** Complete. The implementation received independent approval and all
+required R06 gates passed.
 
 ## Decision implemented
 
@@ -29,6 +29,14 @@ review, the R01-R05 authorities, or the approved R10 recovery matrix. The dorman
 W11 `legacy_integration_state_migrations` table and
 `LegacyIntegrationBackupRoot` seam remain present and are not implemented by R06.
 
+An exact v6 private database may optionally contain the current Code Graph catalog.
+The accepted optional catalog is the complete canonical catalog at Code Graph
+schema version 2, with ledger rows 1 and 2. A v6 database with no Code Graph
+catalog is also valid. A Code Graph v1-only, partial, malformed, future, or extra
+catalog is not a compatibility case and is refused before mutation. Existing
+current Code Graph rows survive Gateway close and reopen; they are not rebuilt or
+discarded by private-format preflight.
+
 ## Code and test evidence
 
 The implementation is discoverable in:
@@ -38,6 +46,8 @@ The implementation is discoverable in:
   current proof-floor checks;
 - `internal/runtime/localstore/private_schema_v6.sql`, the consolidated schema
   snapshot used by the one-transaction fresh initializer;
+- `internal/runtime/codegraph/schema/schema.go`, the pure canonical Code Graph
+  catalog authority used by both localstore preflight and the Code Graph store;
 - `internal/runtime/localstore/localstore.go`, whose `Open` path classifies before
   writable open and initializes only the fresh class; and
 - `internal/runtime/localstore/r06_authority_test.go`, which prevents reintroduction
@@ -51,7 +61,9 @@ The causal tests are named and retained in
 - `TestGatewayFreshInitializationProducesExactV6`;
 - `TestGatewayExactV6ReopensWithoutSchemaMutation`;
 - `TestGatewayFreshInitializationIsAtomic`; and
-- `TestGatewayPreflightRejectsUnsupportedCurrentProofWithoutMutation`.
+- `TestGatewayPreflightRejectsUnsupportedCurrentProofWithoutMutation`;
+- `TestGatewayReopensExactV6WithCurrentCodeGraphCatalogAndRows`; and
+- `TestGatewayRejectsCurrentPrivateWithCodeGraphCatalogDrift`.
 
 The focused command completed successfully:
 
@@ -61,20 +73,43 @@ ok   github.com/H4RL33/wormhole/internal/runtime/localstore  7.012s
 ok   github.com/H4RL33/wormhole/internal/runtime/projectstate  120.162s
 ```
 
-The pre-implementation-to-candidate range was measured with
-`git diff --numstat 84c463d..27f5b85`:
+The complete R06 range was measured with
+`git diff --numstat 84c463d..e1d2df5`:
 
 | Area | Added | Deleted | Net |
 |---|---:|---:|---:|
-| Production Go | 219 | 366 | -147 |
-| Test Go | 322 | 2,179 | -1,857 |
+| Production Go | 716 | 468 | +248 |
+| Test Go | 595 | 2,179 | -1,584 |
 | Private SQL snapshot and retired SQL migrations | 71 | 201 | -130 |
-| **Total** | **612** | **2,746** | **-2,134** |
+| Documentation | 271 | 43 | +228 |
+| **Total** | **1,653** | **2,891** | **-1,238** |
 
-The range also passes `git diff --check`. The test deletion is intentional: it
-removes v1-v5 upgrade/backfill matrices and obsolete proof-compatibility coverage,
-while retaining current v6, refusal, atomicity, scope, restart, and recovery
-evidence.
+The implementation-only portion is `+1,382/-2,848` (net `-1,466`); the
+documentation portion is reported separately above. The range passes
+`git diff --check`. The test deletion is intentional: it removes v1-v5
+upgrade/backfill matrices and obsolete proof-compatibility coverage, while adding
+exact catalog, sidecar, atomicity, scope, restart, optional Code Graph, and
+recovery evidence.
+
+## Independent review and gates
+
+Independent specification and quality review approved the implementation commits
+`a18b6f4` and `e1d2df5`. The final verification record is:
+
+| Gate | Result |
+|---|---|
+| Focused localstore/projectstate and affected Code Graph tests | green |
+| Full repository test/review suite | green |
+| `make check` | green, 84.8% merged statement coverage |
+| `make release-test` | green |
+| `make release-rehearsal` | green |
+| Clean detached clone | affected packages plus five Gateway tests green |
+
+One earlier overlapping full run had a transient Alpha token failure. No code
+change was made for it: the affected run was isolated and passed three times, then
+the isolated `make check` completed green. The transient failure is retained as
+verification context, not treated as a product failure or hidden by relaxing a
+test.
 
 ## Operator contract
 
@@ -87,19 +122,9 @@ and CLI guide.
 
 ## Boundary and next work
 
-R06 is the last authorized reduction item in this tranche. R07-R14 and all other
-reduction work are paused after the R06 review boundary. The next authorized work is
-a separately planned decomposition of `projectstate.Service` behind its existing
-facade; that decomposition is not part of R06. After that tranche, work returns to
-feature delivery toward the Git-native branch goal. No Stage 2, lifecycle
-extraction, Tasks 6/6A/7/8 preparation, or unrelated cleanup is authorized by this
-record.
-
-## Remaining verification
-
-Before R06 can be called complete, the parent orchestration must obtain independent
-specification/quality review and run the full approved repository gates: focused and
-complete tests, architecture/G/A evidence, race, formatting and diff checks,
-`make check` at or above the 80% coverage floor, release tests, release rehearsal,
-and clean-clone verification. Until those results are recorded, `27f5b85` remains
-an implementation candidate rather than a released format contract.
+R06 is complete and is the last authorized reduction item in this tranche. R07-R14
+and all other reduction work are paused. The next authorized work is a separately
+planned decomposition of `projectstate.Service` behind its existing facade; that
+decomposition is not part of R06. After that tranche, work returns to feature
+delivery toward the Git-native branch goal. No Stage 2, lifecycle extraction,
+Tasks 6/6A/7/8 preparation, or unrelated cleanup is authorized by this record.

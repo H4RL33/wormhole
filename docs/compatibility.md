@@ -23,6 +23,12 @@ mutation. Every other existing private database—including an older/future,
 malformed, partial, unexpected, or proof-incompatible database—is classified
 read-only and refused before mutation.
 
+An exact v6 database may omit Code Graph or contain the complete optional current
+Code Graph catalog at schema version 2 with ledger rows 1 and 2. A Code Graph
+v1-only, partial, malformed, future, or extra catalog is not a compatibility case
+and is refused before mutation. Existing current Code Graph rows remain intact
+across Gateway close and reopen; preflight does not rebuild or discard them.
+
 Wormhole does not migrate, normalize, export, reset, quarantine, rename, or delete
 an unsupported private database. The refusal leaves the database and its evidence
 under operator control. Before any deliberate manual removal, stop Gateway, inspect

@@ -29,14 +29,14 @@ do not improvise.
 Approved programme and slice-plan execution amendments control task scope and sequencing.
 They cannot weaken an RFC requirement, but they can defer an otherwise described task or
 private implementation choice. Task-5, the review-only Stage 1A gate, and R01-R05 are
-complete. The current amendment authorizes R06 only: a closed-pre-alpha private Gateway
-format hard cut to schema v6. Its implementation candidate is `27f5b85` and remains
-pending independent review and final gates; until those pass, treat the R06 behavior as
-an implementation candidate rather than a released contract. R07-R14 and all other
-reduction work pause after R06. The next authorized tranche is a separately planned
-decomposition of `projectstate.Service` behind its existing facade, followed by feature
-delivery toward the Git-native branch goal. Lifecycle extraction, Tasks 6, 6A, 7, 8,
-Stage 2, and unrelated preparation require a later explicit go/no-go.
+complete. The current amendment authorized R06 only: a closed-pre-alpha private Gateway
+format hard cut to schema v6. R06 is complete in approved implementation commits
+`27f5b85`, `a18b6f4`, and `e1d2df5`; independent review, `make check` (84.8%),
+release-test, release-rehearsal, and clean detached-clone gates passed. R07-R14 and
+all other reduction work are now paused. The next authorized tranche is a separately
+planned decomposition of `projectstate.Service` behind its existing facade, followed
+by feature delivery toward the Git-native branch goal. Lifecycle extraction, Tasks 6,
+6A, 7, 8, Stage 2, and unrelated preparation require a later explicit go/no-go.
 
 ---
 
@@ -269,13 +269,14 @@ the same layering pattern and isolation discipline.
 |---|---|---|
 | `cmd/gatewayd` | Process wiring: config load, localstore, localapi, sync engine, graceful shutdown | `internal/runtime/*`, `internal/types` |
 | `internal/runtime/config` | XDG-compliant paths, immutable workspace bindings, identity refs, and multiple Fabric profiles | `internal/types`, stdlib |
-| `internal/runtime/localstore` | SQLite-backed bases, overlays, domain records, queues, conflicts, and checkpoints scoped by project and workspace | `internal/types`, stdlib, modernc SQLite driver |
+| `internal/runtime/localstore` | SQLite-backed bases, overlays, domain records, queues, conflicts, checkpoints, and private-format preflight scoped by project and workspace | `internal/types`, `internal/runtime/codegraph/schema` (pure catalog authority only), stdlib, modernc SQLite driver |
 | `internal/runtime/localapi` | Stable local IPC, project-operation registry, cwd/workspace routing, and actor-envelope resolution | All sibling `internal/runtime/*` packages, `internal/types`, stdlib |
 | `internal/runtime/eventbus` | In-memory pub/sub for ephemeral events (presence, heartbeats); never persists | `internal/types`, stdlib |
 | `internal/runtime/scheduler` | Agent registration, presence tracking, capability matching, local task routing | `internal/types`, stdlib |
 | `internal/runtime/sync` | Explicit per-binding Fabric clients, durable queues, bootstrap/incremental streams, Git-base preconditions, and conflict audit | `internal/runtime/localstore`, `internal/types`, stdlib |
 | `internal/runtime/codegraph/config` | Disabled-by-default, workspace-scoped local Code Graph configuration | stdlib |
 | `internal/runtime/codegraph/golang` | Read-only Go compiler analysis into the language-neutral graph model | `golang.org/x/tools/go/packages`, stdlib |
+| `internal/runtime/codegraph/schema` | Pure canonical Code Graph SQLite catalog SQL, version, fingerprint, and read-only validation authority | stdlib |
 | `internal/runtime/codegraph/store` | Component-local SQLite schema, revision payloads, snapshot reads, and atomic publication | `internal/runtime/codegraph/config`, stdlib |
 | `internal/runtime/codegraph/index` | Canonical source inventory, compiler-backed candidate construction, invariant validation, and publication | `internal/runtime/codegraph/config`, `internal/runtime/codegraph/golang`, `internal/runtime/codegraph/store`, stdlib |
 | `internal/runtime/codegraph/query` | Deterministic lexical and structural retrieval with freshness-gated source access | `internal/runtime/codegraph/config`, `internal/runtime/codegraph/source`, `internal/runtime/codegraph/store`, stdlib |
@@ -285,6 +286,11 @@ the same layering pattern and isolation discipline.
 
 - LR1: `internal/runtime/*` packages never import `internal/core/*` or `internal/mcp`. Local storage and coordination are strictly separated.
 - LR2: `internal/runtime/localapi` may import all other `internal/runtime/*` packages (it wires them together). Other runtime packages may not import `localapi`.
+- LR2a: `internal/runtime/localstore` may import only the pure
+  `internal/runtime/codegraph/schema` catalog authority for private-format
+  fingerprinting and validation. It must never import Code Graph `store`, `index`,
+  `query`, or other runtime behavior; schema owns no Gateway or Code Graph runtime
+  state and performs no writes during validation.
 - LR3: `internal/runtime/localstore` repository methods enforce project and workspace isolation by construction: every query is scoped through mandatory parameters, never inferred from ambient state. Every change ships cross-project and cross-workspace rejection tests.
 - LR4: Ephemeral presence/heartbeats are eventbus-only. Task-transition notifications,
   progress, generic channel activity, runtime attribution, subscriptions, telemetry, and
@@ -415,10 +421,11 @@ the same layering pattern and isolation discipline.
   provider may compute vectors but is never the vector datastore. The legacy
   nullable `kb_articles.embedding` column is compatibility-only and must not be
   used for production ranking or new writes.
-- D7: D1 governs Fabric's Postgres schema. The currently implemented legacy
-  Code Graph schema is migration input, not the final per-workspace worker
-  schema. Its tables use their
-  own `codegraph_schema_migrations` SQLite ledger, fail closed on a schema newer
+- D7: D1 governs Fabric's Postgres schema. The canonical Code Graph component
+  catalog is owned by `internal/runtime/codegraph/schema`, not by the Code Graph
+  store runtime. Its optional objects live in the Gateway private SQLite database,
+  use their own
+  `codegraph_schema_migrations` SQLite ledger, fail closed on a schema newer
   than the binary, and never enter the Fabric migration sequence. They may store
   paths, indexed hashes, signatures, ranges, edges, and diagnostics, but never
   complete source files, function bodies, or returned context packages. Schema

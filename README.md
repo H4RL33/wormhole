@@ -124,6 +124,10 @@ then remove the private database only as an explicit manual action before rerunn
 setup. The current binary provides no reset or export command. This rule concerns
 machine-private Gateway state only; the tracked portable project state in
 `.wormhole/state/v1/` remains the supported Git interchange and clean-clone format.
+An exact v6 database may also contain the optional current Code Graph catalog
+(schema v2, ledger rows 1 and 2); its rows are preserved across Gateway restart.
+Graph v1-only or drifted catalogs are refused with the private database rather
+than upgraded in place.
 
 ## Get started
 

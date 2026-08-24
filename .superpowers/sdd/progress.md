@@ -1384,22 +1384,28 @@ implementation or refactor work remained unauthorised; the subsequent R06 approv
 recorded below.
 
 R06 private-format hard-cut: the human approved the closed-pre-alpha design on
-2026-08-24. Implementation candidate `27f5b8524e216d18e6e57d9d390823e83e6ae1da`
-(`refactor(localstore): hard cut private schema v6`) replaces the private v1-v5
-upgrade runner with a consolidated schema-v6 snapshot and read-only preflight.
-Only absent/empty databases initialize, and only exact v6 databases reopen without
-schema mutation; every other existing private database is preserved and refused.
-The dormant W11 seam and portable tracked Git v1 state remain unchanged. Focused
-`go test ./internal/runtime/localstore ./internal/runtime/projectstate -count=1`
-passed. The implementation range `84c463d..27f5b85` is `+612/-2746` lines (net
-`-2134`), including removal of obsolete migration/proof compatibility coverage.
+2026-08-24. Approved implementation commits `27f5b85`, `a18b6f4`, and `e1d2df5`
+replace the private v1-v5 upgrade runner with a consolidated schema-v6 snapshot
+and read-only preflight. Only absent/empty databases initialize, and only exact v6
+databases reopen without schema mutation; every other existing private database is
+preserved and refused. The exact current optional Code Graph catalog is schema v2
+(ledger rows 1 and 2); v1-only or drifted catalogs are refused, while current graph
+rows survive Gateway restart. The dormant W11 seam and portable tracked Git v1
+state remain unchanged. Focused localstore/projectstate, affected Code Graph, and
+full repository verification passed. The complete range `84c463d..e1d2df5` is
+`+1653/-2891` lines (net `-1238`), including removal of obsolete migration/proof
+compatibility coverage.
 
 R06 documentation tranche: README, agent bootstrap, implementation rules,
 compatibility policy, CLI guide, Git-native programme plan, this ledger, and the
 R06 report (`docs/superpowers/reviews/2026-08-24-r06-private-format-hard-cut-report.md`)
 now describe the private v6 boundary, operator preservation/manual-removal flow,
 portable Git v1 distinction, retained W11/R10 guarantees, and the next authorized
-`projectstate.Service` decomposition. R06 remains pending independent review and
-full repository gates; no R07-R14 reduction or Service decomposition was included.
-After the R06 review boundary, reduction work pauses and feature delivery resumes
+`projectstate.Service` decomposition. Independent review approved R06; `make check`
+passed at 84.8% merged statement coverage, `make release-test` and
+`make release-rehearsal` passed, and a clean detached clone passed the affected
+packages plus five Gateway tests. One transient Alpha token failure in an earlier
+overlapping full run was followed by three isolated passes and a clean isolated
+`make check`, with no code change. R06 is complete; no R07-R14 reduction or Service
+decomposition was included. Reduction work pauses and feature delivery resumes
 under a new explicit scope.

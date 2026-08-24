@@ -60,14 +60,13 @@ Permissions. Wormhole stores no competing copy of repository source.
 ## Transition State
 
 The 2026-07-28 architecture is authoritative but not yet fully implemented.
-Task-5 `5F`/`5G`, the mandatory Stage 1A review, and the approved R01-R05
-measured-simplification tranche are complete. The approved R06 design authorizes
-one closed-pre-alpha private-format hard cut: fresh Gateway state is initialized
-directly as schema v6, exact v6 state reopens without schema mutation, and every
-other existing private database is preserved and refused before mutation. The
-implementation candidate is `27f5b85`; it remains pending the independent review
-and final repository gates, so do not describe R06 as released until those gates
-pass.
+Task-5 `5F`/`5G`, the mandatory Stage 1A review, the approved R01-R05
+measured-simplification tranche, and R06 are complete. R06's closed-pre-alpha
+private-format hard cut initializes fresh Gateway state directly as schema v6,
+reopens exact v6 state without schema mutation, and preserves/refuses every other
+existing private database before mutation. Approved implementation commits are
+`27f5b85`, `a18b6f4`, and `e1d2df5`; independent review, `make check` (84.8%),
+release, rehearsal, and clean-clone gates passed.
 
 After R06's review boundary, all remaining reduction work (R07-R14) is paused.
 The next authorized tranche is decomposition of `projectstate.Service` behind its
@@ -100,7 +99,7 @@ schema as shipped until its implementation and contract checks pass.
 - `internal/runtime/localapi`, `localstore`, `eventbus`, `scheduler`, `sync`, `config`:
   local runtime, including explicit project/workspace routing, Git bases,
   private overlays, checkpoints, and multiple Fabric profiles.
-- `internal/runtime/codegraph/{config,golang,store,index,query,source}`: Gateway-local
+- `internal/runtime/codegraph/{config,golang,schema,store,index,query,source}`: Gateway-local
   Code Graph configuration, compiler analysis, derivative SQLite state, revision
   publication, bounded query, and transient hash-validated source assembly only;
   never Fabric state or persisted source bodies.

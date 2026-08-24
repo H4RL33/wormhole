@@ -35,9 +35,10 @@ The human then approved R06 only under the closed-pre-alpha hard-cut design in
 `docs/superpowers/specs/2026-08-24-r06-private-format-hard-cut-design.md`. R06 is a
 private Gateway format epoch break: fresh state initializes directly as schema v6,
 exact v6 state reopens without schema mutation, and every other private database is
-preserved and refused before mutation. The implementation candidate is `27f5b85`;
-independent review and final repository gates are still pending, so this programme
-record does not claim R06 is released.
+preserved and refused before mutation. R06 is complete in approved implementation
+commits `27f5b85`, `a18b6f4`, and `e1d2df5`; independent review, `make check` at
+84.8% merged statement coverage, release-test, release-rehearsal, and clean
+detached-clone gates passed.
 
 After the R06 review boundary, all reduction work R07-R14 is paused. The next
 authorized tranche is a separately planned decomposition of `projectstate.Service`
@@ -114,11 +115,11 @@ guarantee set, exact R10 recovery posture, and R01-R05 as the sole selected redu
 tranche. The written-spec review was approved on 2026-08-17. That tranche is complete at
 `R05_END = 41683b94a06c7b5faa07ad97010cec2462af47f3`, all required verification gates are
 green including 85.0% merged statement coverage, and its measured-simplification pause was
-reached. The later R06 hard-cut design was separately approved on 2026-08-24 and its
-implementation candidate is `27f5b85`, pending independent review and final gates. After
-that review boundary, R07-R14 remain paused; the next authorized work is the separately
-planned `projectstate.Service` decomposition, followed by feature delivery. No Stage 2,
-lifecycle extraction, or unrelated reduction work is authorized by this record.
+reached. The later R06 hard-cut design was separately approved on 2026-08-24 and is
+complete in `27f5b85`, `a18b6f4`, and `e1d2df5`. After that review boundary, R07-R14
+remain paused; the next authorized work is the separately planned `projectstate.Service`
+decomposition, followed by feature delivery. No Stage 2, lifecycle extraction, or
+unrelated reduction work is authorized by this record.
 
 ### Stage 2: Minimal Gateway, setup, and native connectors
 
