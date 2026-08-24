@@ -109,6 +109,22 @@ The current compatibility mode is `alpha-inventory`: reviewed interface changes
 update the checked-in inventory, but this alpha state makes no beta compatibility
 promise. See [Compatibility policy](docs/compatibility.md).
 
+### Private Gateway data is intentionally disposable in pre-alpha
+
+The private SQLite database used by `gatewayd` has no backward-compatibility
+promise. The current R06 format is schema-v6: a missing or genuinely empty
+database is initialized atomically, and an exact v6 database reopens without
+schema mutation. Older, future, malformed, partial, unexpected, or
+proof-incompatible databases are preserved and refused before mutation; they are
+not migrated, exported, normalized, reset, quarantined, renamed, or deleted.
+
+If Gateway reports an unsupported private database, stop it first. Inspect for
+unpublished overlays, stashes, and pending checkpoints, make an operator backup,
+then remove the private database only as an explicit manual action before rerunning
+setup. The current binary provides no reset or export command. This rule concerns
+machine-private Gateway state only; the tracked portable project state in
+`.wormhole/state/v1/` remains the supported Git interchange and clean-clone format.
+
 ## Get started
 
 Choose the path that matches how you want to use Wormhole.

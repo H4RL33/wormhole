@@ -10,7 +10,31 @@ release artifacts.
 
 Reviewed alpha interface changes update that manifest in the same change. The
 inventory makes drift visible; it does not make alpha interfaces backwards
-compatible. This repository state makes **no beta compatibility promise**.
+compatible. This repository state makes **no beta compatibility promise**. It is
+closed pre-alpha software: private Gateway SQLite state has no
+backward-compatibility promise between format epochs.
+
+## Private Gateway database format
+
+The current private Gateway format is schema-v6. This is a complete format epoch,
+not an upgrade path from v1-v5. A missing or genuinely empty private database is
+initialized atomically as v6. An exact current v6 database reopens without schema
+mutation. Every other existing private database—including an older/future,
+malformed, partial, unexpected, or proof-incompatible database—is classified
+read-only and refused before mutation.
+
+Wormhole does not migrate, normalize, export, reset, quarantine, rename, or delete
+an unsupported private database. The refusal leaves the database and its evidence
+under operator control. Before any deliberate manual removal, stop Gateway, inspect
+for unpublished overlays, stashes, and pending checkpoints, and make a backup. The
+current binary has no reset or export command; removal is an explicit operator
+action followed by a fresh setup.
+
+This private-format rule does not apply to the portable tracked project state under
+`.wormhole/state/v1/`. That Git format remains the supported interchange and
+clean-clone reconstruction format. The dormant W11
+`legacy_integration_state_migrations`/`LegacyIntegrationBackupRoot` seam is retained
+but is not a private-format compatibility mechanism and is not implemented by R06.
 
 ## Future beta activation
 

@@ -25,6 +25,8 @@ narrowly amending the Task-5 V1 publication/recovery mechanism and platform boun
 `docs/superpowers/specs/2026-08-17-stage1a-r01-r05-foundation-reduction-design.md`
 recording the Stage 1A human decisions and narrowly governing the selected R01-R05
 private-persistence reduction after its approved written-spec review gate;
+and `docs/superpowers/specs/2026-08-24-r06-private-format-hard-cut-design.md`
+governing the approved closed-pre-alpha private Gateway format hard cut;
 `docs/implementation-rules.md`;
 existing code.
 
@@ -58,13 +60,21 @@ Permissions. Wormhole stores no competing copy of repository source.
 ## Transition State
 
 The 2026-07-28 architecture is authoritative but not yet fully implemented.
-Task-5 `5F`/`5G` and the mandatory Stage 1A review are complete. The human
-go/no-go selected R01-R05 as the sole next tranche through the mandatory
-measured-simplification pause defined by the 2026-08-17 design. Its written-spec
-review is approved. Write the exact R01-R05 implementation plan before production
-changes, then execute only that plan through the comparison pause. R06-R14
-implementation, lifecycle coordinator extraction, Tasks 6, 6A, 7, 8, Stage 2, and
-later work remain non-executable before the next explicit decision.
+Task-5 `5F`/`5G`, the mandatory Stage 1A review, and the approved R01-R05
+measured-simplification tranche are complete. The approved R06 design authorizes
+one closed-pre-alpha private-format hard cut: fresh Gateway state is initialized
+directly as schema v6, exact v6 state reopens without schema mutation, and every
+other existing private database is preserved and refused before mutation. The
+implementation candidate is `27f5b85`; it remains pending the independent review
+and final repository gates, so do not describe R06 as released until those gates
+pass.
+
+After R06's review boundary, all remaining reduction work (R07-R14) is paused.
+The next authorized tranche is decomposition of `projectstate.Service` behind its
+existing facade; it must be separately planned and reviewed, and it must not be
+silently folded into R06. Subsequent work returns to feature delivery toward the
+Git-native branch goal. Tasks 6, 6A, 7, 8, Stage 2, and unrelated preparation remain
+non-executable unless the next explicit decision expands scope.
 Current code still contains legacy `join`/`connect`, single-profile bootstrap,
 Passport-only attribution, and pre-snapshot assumptions. Implementation plans
 must migrate those paths in tested slices. Do not document a target command or
@@ -214,6 +224,14 @@ Workspace IDs, overlays, stashes, recovery journals, Fabric credentials,
 connector backups, and Code Graph databases are machine-private and remain
 outside the repository. Legacy `.wormhole/integration-state.json` must be
 migrated/ignored, never committed.
+
+The private Gateway SQLite database is a closed-pre-alpha format. The current
+binary supports only a fresh initialization or an exact schema-v6 database. It
+does not migrate, export, reset, normalize, or delete an older, future, malformed,
+partial, or proof-incompatible database. An unsupported database is left in place;
+inspect unpublished overlays/checkpoints, make an operator backup, stop Gateway,
+and remove it only as an explicit manual action before rerunning setup. This rule
+does not change the portable, Git-tracked `.wormhole/state/v1/` format.
 
 `wormholed.sock` and `wormholed.db` are retained local-state filenames, not
 legacy executable aliases. Invoke `gatewayd`, never a former daemon name.

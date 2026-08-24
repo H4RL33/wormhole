@@ -14,6 +14,9 @@ narrowly governing the Task-5 V1 publisher/recovery mechanism and platform bound
 `docs/superpowers/specs/2026-08-17-stage1a-r01-r05-foundation-reduction-design.md`
 recording the Stage 1A human decision and narrowly governing the selected R01-R05
 private-persistence reduction after its approved written-spec review gate;
+and the approved
+`docs/superpowers/specs/2026-08-24-r06-private-format-hard-cut-design.md`
+governing the closed-pre-alpha private Gateway schema-v6 hard cut;
 `docs/implementation-rules.md`;
 existing code.
 This document derives from the RFCs and current code; if it conflicts with an RFC, the RFC
@@ -25,12 +28,15 @@ do not improvise.
 
 Approved programme and slice-plan execution amendments control task scope and sequencing.
 They cannot weaken an RFC requirement, but they can defer an otherwise described task or
-private implementation choice. Task-5 and the review-only Stage 1A gate are complete. The
-current amendment selects only R01-R05 and their objective comparison review as defined in
-the 2026-08-17 design. Its written-spec review is approved; write the exact implementation
-plan before production changes, then execute only that plan through the comparison pause.
-R06-R14 implementation, lifecycle extraction, Tasks 6, 6A, 7, 8, Stage 2, and supporting
-preparation require a later explicit human go/no-go.
+private implementation choice. Task-5, the review-only Stage 1A gate, and R01-R05 are
+complete. The current amendment authorizes R06 only: a closed-pre-alpha private Gateway
+format hard cut to schema v6. Its implementation candidate is `27f5b85` and remains
+pending independent review and final gates; until those pass, treat the R06 behavior as
+an implementation candidate rather than a released contract. R07-R14 and all other
+reduction work pause after R06. The next authorized tranche is a separately planned
+decomposition of `projectstate.Service` behind its existing facade, followed by feature
+delivery toward the Git-native branch goal. Lifecycle extraction, Tasks 6, 6A, 7, 8,
+Stage 2, and unrelated preparation require a later explicit go/no-go.
 
 ---
 
@@ -370,9 +376,15 @@ the same layering pattern and isolation discipline.
 
 ## 6. Database Rules
 
-- D1: Schema changes only via golang-migrate pairs in `migrations/`
+- D1: Fabric/Postgres schema changes only via golang-migrate pairs in `migrations/`
   (`NNNNNN_name.up.sql` + `.down.sql`, zero-padded sequential). Down migration must
-  actually revert. Never edit an already-committed migration; add a new one.
+  actually revert. Never edit an already-committed migration; add a new one. The
+  private Gateway SQLite database is separate: its closed-pre-alpha format is one
+  consolidated schema-v6 epoch initialized atomically from
+  `internal/runtime/localstore/private_schema_v6.sql`. It has no v1-v5 upgrade
+  runner, exporter, reset command, or compatibility reader. Only a missing/empty
+  database may initialize, and only an exact current v6 database may reopen;
+  every other existing database is classified read-only and refused before mutation.
 - D2: Entity shapes come from `docs/db-entities.md`. Deviating from it means updating
   that file in the same change, with the reason.
 - D3: Every project-scoped table gets RLS. Global application tables are limited
@@ -710,19 +722,18 @@ the same layering pattern and isolation discipline.
   exact cloned current memberships returned by the planner may be passed to
   `TransitionOperations`; generation-range updates remain forbidden.
   All and only rows attributed by `stashed_by_stash_id` must match those arrays byte for
-  byte. Portable transitions own Gateway
-  migration `000002_portable_transitions.sql` and `GatewaySchemaVersion = 2`; committed
-  `000001`/`000002` are immutable. The reviewed publication amendment owns
-  `000003_workspace_publication.sql`; Task 5 owns
-  `000004_checkpoint_publication_review.sql`, whose three-column v4 change adds
-  `publication_review_json`, `prior_candidate_json`, and
-  `publication_review_proof_version` with the exact joint version-0/null/null versus
-  version-1/non-null/non-null CHECK. The approved Stage 1A R03 reduction now owns
-  `000005_workspace_revision.sql`, including the positive workspace revision and one-current-
-  materialisation constraint. This explicitly supersedes the earlier Task 6A/multi-Fabric/
-  Code Graph reservations for `000005`-`000008`; later tasks receive new numbers only after
-  the mandatory R01-R05 pause and a new human decision. No later migration is prepared in
-  this tranche. Restore must
+  byte. Portable transitions remain represented by the tracked Git v1 state. The private
+  Gateway database is now one consolidated schema-v6 epoch, initialized from
+  `internal/runtime/localstore/private_schema_v6.sql` in one transaction and recorded by
+  the exact singleton ledger identity `{6}`. The old private v1-v5 migration files,
+  upgrade runner, cache/channel backfills, and legacy proof readers are not part of the
+  supported runtime. Existing databases are classified through a read-only SQLite
+  preflight: only an absent/empty path is fresh and only the exact current v6 object,
+  column, ledger, and current-proof floor is reopenable. Future, malformed, partial,
+  unexpected, or proof-incompatible evidence is preserved and refused before mutation.
+  The dormant `legacy_integration_state_migrations` table and
+  `LegacyIntegrationBackupRoot` seam remain present for the separately authorized W11
+  work; R06 does not implement W11. Restore must
   prove `Compose(selectedStart,boundary,operations)` equals the
   recorded composed tree, then call `ThreeWayRebase(sourceBase,current,stashComposed)`.
   Already-rebased rows at/below the boundary and later active rows move to terminal

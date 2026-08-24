@@ -179,6 +179,20 @@ Paths:
 The retained `wormholed.db` and `wormholed.sock` filenames are paths for local
 Gateway state. They are not executable aliases; use `gatewayd` for the daemon.
 
+### Private Gateway database format
+
+This closed-pre-alpha build supports only a fresh private database or an exact
+schema-v6 database. Fresh initialization is atomic; exact v6 reopen performs no
+schema mutation. An older, future, malformed, partial, unexpected, or
+proof-incompatible database is preserved and refused during read-only preflight.
+
+There is no private-database migration, exporter, reset command, normalization,
+quarantine, or automatic deletion. When refusal occurs, stop `gatewayd`, inspect
+for unpublished overlays, stashes, and pending checkpoints, and back up the
+database before any deliberate manual removal. Remove it only outside Wormhole,
+then rerun setup. This does not change the supported tracked Git format under
+`.wormhole/state/v1/`.
+
 ## Connection patterns
 
 Single machine:

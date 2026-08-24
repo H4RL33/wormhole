@@ -16,7 +16,7 @@ repository-lineage scoped.
 
 **Tech Stack:** Go 1.26.5; SQLite and Postgres; Git; MCP JSON-RPC; systemd-user where available; deterministic `go/packages` Code Graph analysis; Codex and Claude CLIs; existing dependencies plus only the separately approved OIDC modules named below.
 
-## Current execution amendment — 2026-08-17
+## Current execution amendment — 2026-08-24
 
 Task-5 `5F`/`5G` and the review-only Stage 1A gate are complete. The human decision in
 `docs/superpowers/specs/2026-08-17-stage1a-r01-r05-foundation-reduction-design.md`
@@ -31,11 +31,21 @@ production, tests, and total implementation, with no dual owner, revision, curre
 confirmation, or audit authority. The design continues to control every conflict with
 earlier private-proof or migration-reservation prose.
 
-No R06-R14 implementation, lifecycle coordinator extraction, package restructuring,
-Tasks 6, 6A, 7, or 8 preparation, Stage 2 work, publication-class migration, filesystem
-recovery simplification, terminal pruning, or unrelated cleanup is executable after this
-pause. The programme is stopped pending a new explicit human go/no-go that records the
-exact next authorised scope.
+The human then approved R06 only under the closed-pre-alpha hard-cut design in
+`docs/superpowers/specs/2026-08-24-r06-private-format-hard-cut-design.md`. R06 is a
+private Gateway format epoch break: fresh state initializes directly as schema v6,
+exact v6 state reopens without schema mutation, and every other private database is
+preserved and refused before mutation. The implementation candidate is `27f5b85`;
+independent review and final repository gates are still pending, so this programme
+record does not claim R06 is released.
+
+After the R06 review boundary, all reduction work R07-R14 is paused. The next
+authorized tranche is a separately planned decomposition of `projectstate.Service`
+behind its existing facade, followed by feature building toward the Git-native
+branch goal. No lifecycle coordinator extraction, package restructuring, Tasks 6,
+6A, 7, or 8 preparation, Stage 2 work, publication-class migration, filesystem
+recovery simplification, terminal pruning, or unrelated cleanup is executable unless
+the human later expands scope.
 
 ## Authority and frozen constraints
 
@@ -48,7 +58,11 @@ exact next authorised scope.
 - Public MCP schemas never accept a project ID, workspace ID, checkout root, working directory, actor, Fabric credential, or routing authority. Gateway resolves and overwrites all private transport context.
 - Git credentials may inform provider-native Git operations but are never read, copied, logged, or used as Wormhole/Fabric identity credentials.
 - Code Graph remains local, deterministic, model-free, vector-free, source-body-free, and freshness-gated. Compute profiles, warnings, embedding downloads, and Warpspeed remain dormant future concepts.
-- Local Gateway migrations are one-way numbered SQL files in the single migration ledger. Postgres migrations retain explicit up/down files and must not resurrect revoked authority.
+- Fabric/Postgres migrations retain explicit up/down files. Private Gateway state is
+  instead a consolidated schema-v6 SQLite epoch initialized atomically; no private
+  v1-v5 upgrade, export, reset, or compatibility reader exists. The dormant W11
+  `legacy_integration_state_migrations` seam remains retained, but is not implemented
+  by R06. Portable tracked `.wormhole/state/v1/` remains the supported Git format.
 - Generic task/channel/progress/runtime activity is operational. Only explicit typed,
   attributed, source-digest-bound promotion creates portable `EventV1` evidence;
   checkpoint never promotes.
@@ -96,11 +110,15 @@ implemented through Task 5:
    implementation. Proposed test changes remain non-executable until the go/no-go.
 
 All four artifacts exist and the 2026-08-17 human decision record names the retained V1
-guarantee set, exact R10 recovery posture, and R01-R05 as the sole next selected tranche.
-The written-spec review was approved on 2026-08-17. That tranche is now complete at
+guarantee set, exact R10 recovery posture, and R01-R05 as the sole selected reduction
+tranche. The written-spec review was approved on 2026-08-17. That tranche is complete at
 `R05_END = 41683b94a06c7b5faa07ad97010cec2462af47f3`, all required verification gates are
-green including 85.0% merged statement coverage, and the measured-simplification pause is
-in force. No later stage or reduction is authorised until the next explicit human go/no-go.
+green including 85.0% merged statement coverage, and its measured-simplification pause was
+reached. The later R06 hard-cut design was separately approved on 2026-08-24 and its
+implementation candidate is `27f5b85`, pending independent review and final gates. After
+that review boundary, R07-R14 remain paused; the next authorized work is the separately
+planned `projectstate.Service` decomposition, followed by feature delivery. No Stage 2,
+lifecycle extraction, or unrelated reduction work is authorized by this record.
 
 ### Stage 2: Minimal Gateway, setup, and native connectors
 

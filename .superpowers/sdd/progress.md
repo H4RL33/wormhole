@@ -1378,6 +1378,28 @@ The immutable production/test boundary is
 and remains separate from that boundary. The objective comparison is subtractive in
 production, tests, and total implementation across both required ranges, with no dual
 database owner, workspace-revision finalizer, current-workset authority, compact confirmer,
-or history-audit path. Stage 1A now stops for the explicit human go/no-go. R06-R14,
-lifecycle extraction, Tasks 6/6A/7/8, Stage 2, and all later implementation or refactor work
-remain unauthorised until a new human decision records the exact next scope.
+or history-audit path. Stage 1A then stopped for the explicit human go/no-go. At that
+boundary R06-R14, lifecycle extraction, Tasks 6/6A/7/8, Stage 2, and all later
+implementation or refactor work remained unauthorised; the subsequent R06 approval is
+recorded below.
+
+R06 private-format hard-cut: the human approved the closed-pre-alpha design on
+2026-08-24. Implementation candidate `27f5b8524e216d18e6e57d9d390823e83e6ae1da`
+(`refactor(localstore): hard cut private schema v6`) replaces the private v1-v5
+upgrade runner with a consolidated schema-v6 snapshot and read-only preflight.
+Only absent/empty databases initialize, and only exact v6 databases reopen without
+schema mutation; every other existing private database is preserved and refused.
+The dormant W11 seam and portable tracked Git v1 state remain unchanged. Focused
+`go test ./internal/runtime/localstore ./internal/runtime/projectstate -count=1`
+passed. The implementation range `84c463d..27f5b85` is `+612/-2746` lines (net
+`-2134`), including removal of obsolete migration/proof compatibility coverage.
+
+R06 documentation tranche: README, agent bootstrap, implementation rules,
+compatibility policy, CLI guide, Git-native programme plan, this ledger, and the
+R06 report (`docs/superpowers/reviews/2026-08-24-r06-private-format-hard-cut-report.md`)
+now describe the private v6 boundary, operator preservation/manual-removal flow,
+portable Git v1 distinction, retained W11/R10 guarantees, and the next authorized
+`projectstate.Service` decomposition. R06 remains pending independent review and
+full repository gates; no R07-R14 reduction or Service decomposition was included.
+After the R06 review boundary, reduction work pauses and feature delivery resumes
+under a new explicit scope.
