@@ -1241,3 +1241,16 @@ passed. The ordinary repository suite also passed during implementation; the
 integration-required gate remains environment-blocked by unavailable PostgreSQL on
 `[::1]:5432`. Task 7 remains the next authorized dependency, and no production writer helper
 acquired a dirty mark in Task 6.
+
+Stage 1A R01-R05 execution: Task 7 complete (commit `6a35bfd`, independent
+specification/quality re-reviews clean). Accepted-base, operation, status, candidate,
+conflict, stash, and receipt writers now mark the sole Task-6 tracker only after a proven
+logical change; multi-helper transactions advance once, while empty and exact semantic
+no-ops remain revision-stable. Registration remains the durable revision-1 baseline, and
+receipt-first service retry is read-only. The approved R02 boundary intentionally treats a
+hostile `RAISE(IGNORE)` successful-write transform as unsupported; real `RAISE(ABORT)`
+failure seams retain complete rollback coverage, including genuine stash and conflicted
+restore status transitions. Fresh post-review inventory, focused service, race, full
+localstore/projectstate, vet, formatting, authority, and diff gates passed. Task 8 is the
+next authorized dependency; publication, materialisation, and checkpoint writers remain
+unmarked.
