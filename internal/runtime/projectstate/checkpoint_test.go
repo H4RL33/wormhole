@@ -147,11 +147,13 @@ func TestCheckpointPublisherFailureRetainsPreparedAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	publishErr := errors.New("publisher failed")
+	revisionAtPublish := int64(0)
 	baseFactory := fixture.service.prepareCheckpointArtifact
 	fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		handle, err := baseFactory(ctx, input)
 		handle.publish = func(context.Context) (checkpointPublicationDisposition, error) {
 			fixture.publishCalls++
+			revisionAtPublish = workspaceRevisionForProjectStateTest(t, fixture.service, req.Scope)
 			return 0, publishErr
 		}
 		return handle, err
@@ -159,6 +161,9 @@ func TestCheckpointPublisherFailureRetainsPreparedAuthority(t *testing.T) {
 	got, err := fixture.service.Checkpoint(context.Background(), req)
 	if !errors.Is(err, publishErr) || got != (CheckpointResult{}) || fixture.publishCalls != 1 || fixture.closeCalls != 1 {
 		t.Fatalf("Checkpoint = (%+v, %v), artifact publish=%d close=%d", got, err, fixture.publishCalls, fixture.closeCalls)
+	}
+	if revisionAtPublish != before.WorkspaceRevision+1 {
+		t.Fatalf("checkpoint prepared revision at publisher=%d, want %d", revisionAtPublish, before.WorkspaceRevision+1)
 	}
 	disposition := readCheckpointDisposition(t, fixture.service, req.Scope)
 	if len(disposition.Journals) != 1 || disposition.Journals[0].State != "prepared" ||
@@ -170,6 +175,9 @@ func TestCheckpointPublisherFailureRetainsPreparedAuthority(t *testing.T) {
 	if err != nil || workspace.State != "clean" || workspace.Binding != before.Binding ||
 		!checkpointSnapshotsEqual(workspace.Snapshot, before.Snapshot) {
 		t.Fatalf("publisher failure workspace = (%+v, %v)", workspace, err)
+	}
+	if workspace.WorkspaceRevision != revisionAtPublish {
+		t.Fatalf("publisher failure workspace revision=%d, want durable prepare %d", workspace.WorkspaceRevision, revisionAtPublish)
 	}
 	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		candidate, err := tx.Candidate(context.Background())
@@ -253,6 +261,20 @@ func TestCheckpointFinalizationFailureRollsBackAllTentativeDatabaseWrites(t *tes
 	`); err != nil {
 		t.Fatal(err)
 	}
+	revisionAtPublish := int64(0)
+	baseFactory := fixture.service.prepareCheckpointArtifact
+	fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
+		handle, err := baseFactory(ctx, input)
+		if err != nil {
+			return handle, err
+		}
+		publish := handle.publish
+		handle.publish = func(ctx context.Context) (checkpointPublicationDisposition, error) {
+			revisionAtPublish = workspaceRevisionForProjectStateTest(t, fixture.service, req.Scope)
+			return publish(ctx)
+		}
+		return handle, nil
+	}
 
 	got, err := fixture.service.Checkpoint(context.Background(), req)
 	if err == nil || !strings.Contains(err.Error(), "injected checkpoint finalization failure") ||
@@ -269,6 +291,9 @@ func TestCheckpointFinalizationFailureRollsBackAllTentativeDatabaseWrites(t *tes
 	if err != nil || after.State != "clean" || after.Binding != before.Binding ||
 		!checkpointSnapshotsEqual(after.Snapshot, before.Snapshot) {
 		t.Fatalf("finalization rollback workspace = (%+v, %v), before=%+v", after, err, before)
+	}
+	if revisionAtPublish != before.WorkspaceRevision+1 || after.WorkspaceRevision != revisionAtPublish {
+		t.Fatalf("finalization rollback revisions=(publisher=%d,after=%d), want durable prepare=%d and rolled-back finalization", revisionAtPublish, after.WorkspaceRevision, before.WorkspaceRevision+1)
 	}
 	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		candidate, err := tx.Candidate(context.Background())
@@ -395,8 +420,10 @@ func TestCheckpointPreservedConcurrentOldChangesOnlyJournalState(t *testing.T) {
 	}
 	insertServiceConflict(t, fixture.store, req.Scope, "resolved checkpoint evidence",
 		state.RecordKey{Kind: "task", ID: "22222222-2222-4222-8222-222222222222"}, "resolved")
+	revisionBeforeCheckpoint := workspaceRevisionForProjectStateTest(t, fixture.service, req.Scope)
 
 	var before importRawState
+	revisionAtPublish := int64(0)
 	baseFactory := fixture.service.prepareCheckpointArtifact
 	fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		handle, err := baseFactory(ctx, input)
@@ -405,6 +432,7 @@ func TestCheckpointPreservedConcurrentOldChangesOnlyJournalState(t *testing.T) {
 		}
 		handle.publish = func(context.Context) (checkpointPublicationDisposition, error) {
 			fixture.publishCalls++
+			revisionAtPublish = workspaceRevisionForProjectStateTest(t, fixture.service, req.Scope)
 			before = captureImportRawState(t, fixture.store)
 			var journalState string
 			if err := fixture.store.DB().QueryRow(`
@@ -420,6 +448,10 @@ func TestCheckpointPreservedConcurrentOldChangesOnlyJournalState(t *testing.T) {
 	got, err := fixture.service.Checkpoint(context.Background(), req)
 	if !errors.Is(err, ErrCheckpointCAS) || got != (CheckpointResult{}) || fixture.publishCalls != 1 {
 		t.Fatalf("preserved-old Checkpoint = (%+v, %v), publish=%d", got, err, fixture.publishCalls)
+	}
+	afterRevision := workspaceRevisionForProjectStateTest(t, fixture.service, req.Scope)
+	if revisionAtPublish != revisionBeforeCheckpoint+1 || afterRevision != revisionAtPublish+1 {
+		t.Fatalf("preserved-old revisions=(before=%d,publisher=%d,after=%d), want separate +1 prepare and +1 finalization", revisionBeforeCheckpoint, revisionAtPublish, afterRevision)
 	}
 	if after := captureImportRawState(t, fixture.store); !reflect.DeepEqual(after, before) {
 		t.Fatalf("preserved-old changed non-journal state\nbefore=%+v\nafter=%+v", before, after)
@@ -777,12 +809,31 @@ func TestCheckpointPendingStatusPreservesTimestampAndMaterializesExactOperations
 	`, req.Scope.ProjectID, req.Scope.WorkspaceID).Scan(&beforeTimestamp); err != nil {
 		t.Fatal(err)
 	}
+	revisionBeforeCheckpoint := workspaceRevisionForProjectStateTest(t, fixture.service, req.Scope)
+	revisionAtPublish := int64(0)
+	baseFactory := fixture.service.prepareCheckpointArtifact
+	fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
+		handle, err := baseFactory(ctx, input)
+		if err != nil {
+			return handle, err
+		}
+		publish := handle.publish
+		handle.publish = func(ctx context.Context) (checkpointPublicationDisposition, error) {
+			revisionAtPublish = workspaceRevisionForProjectStateTest(t, fixture.service, req.Scope)
+			return publish(ctx)
+		}
+		return handle, nil
+	}
 	got, err := fixture.service.Checkpoint(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.CandidateDigest != applied.CandidateDigest || got.MaterializedThroughGeneration != 1 {
 		t.Fatalf("active-operation Checkpoint = %+v, applied = %+v", got, applied)
+	}
+	afterRevision := workspaceRevisionForProjectStateTest(t, fixture.service, req.Scope)
+	if revisionAtPublish != revisionBeforeCheckpoint+1 || afterRevision != revisionAtPublish+1 {
+		t.Fatalf("published checkpoint revisions=(before=%d,publisher=%d,after=%d), want separate +1 prepare and +1 finalization", revisionBeforeCheckpoint, revisionAtPublish, afterRevision)
 	}
 	var afterTimestamp string
 	if err := fixture.store.DB().QueryRow(`

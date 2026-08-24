@@ -469,6 +469,7 @@ func TestObserveGitBaseSameRefAcceptsExactMaterialization(t *testing.T) {
 				}
 				fixture.store, fixture.service = openProjectStateServiceAt(t, fixture.databasePath)
 			}
+			beforeRevision := workspaceRevisionForProjectStateTest(t, fixture.service, fixture.registered.Binding.Scope)
 
 			got, err := fixture.service.ObserveGitBase(context.Background(), ObserveGitBaseRequest{
 				Scope: fixture.registered.Binding.Scope, ExpectedBinding: fixture.registered.Binding,
@@ -498,6 +499,9 @@ func TestObserveGitBaseSameRefAcceptsExactMaterialization(t *testing.T) {
 			}
 			if candidate != nil || eligible != nil {
 				t.Fatalf("candidate=%+v eligible=%+v, want consumed candidate and accepted journal", candidate, eligible)
+			}
+			if afterRevision := workspaceRevisionForProjectStateTest(t, fixture.service, fixture.registered.Binding.Scope); afterRevision != beforeRevision+1 {
+				t.Fatalf("Git materialization acceptance workspace revision=%d, want %d", afterRevision, beforeRevision+1)
 			}
 		})
 	}

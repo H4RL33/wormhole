@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -681,7 +682,7 @@ func TestWorkspaceMutationTxTransitionMaterializationSupportsOnlyFiveEdges(t *te
 				&got.PriorTree[0].Data[0] == &expected.PriorTree[0].Data[0] || &got.CandidateTree[0].Data[0] == &expected.CandidateTree[0].Data[0] {
 				t.Fatal("transition result aliases input")
 			}
-			assertAtomicWorkspaceRawDelta(t, before, readAtomicWorkspaceRawSnapshot(t, fixture.store.DB()), "workspace_materializations",
+			assertAtomicWorkspaceMaterializationRawDelta(t, before, readAtomicWorkspaceRawSnapshot(t, fixture.store.DB()), fixture.binding.Scope,
 				map[string]string{"project_id": quoteSQLiteTextLiteral(fixture.binding.Scope.ProjectID), "workspace_id": quoteSQLiteTextLiteral(string(fixture.binding.Scope.WorkspaceID)), "journal_id": quoteSQLiteTextLiteral(expected.JournalID)}, "state", "updated_at")
 		})
 	}
@@ -1538,7 +1539,7 @@ func TestWorkspaceMutationTxAcceptMaterializationSameStatementTimestampRawAtomic
 		"workspace_id": quoteSQLiteTextLiteral(string(binding.Scope.WorkspaceID)),
 		"journal_id":   quoteSQLiteTextLiteral("legacy-journal"),
 	}
-	assertAtomicWorkspaceRawDelta(t, before, after, "workspace_materializations", targetKeys, "state", "updated_at")
+	assertAtomicWorkspaceMaterializationRawDelta(t, before, after, binding.Scope, targetKeys, "state", "updated_at")
 	target := findAtomicWorkspaceRawRow(t, after, "workspace_materializations", targetKeys)
 	assertRawAtomicCell(t, target, "state", quoteSQLiteTextLiteral("accepted"), "text")
 	var probe, persisted string
@@ -1562,6 +1563,48 @@ func TestWorkspaceMutationTxAcceptMaterializationSameStatementTimestampRawAtomic
 	if reopened := readAtomicWorkspaceRawSnapshot(t, restarted.DB()); !reflect.DeepEqual(reopened, after) {
 		t.Fatalf("materialization raw state changed after reopen: got %#v want %#v", reopened, after)
 	}
+}
+
+func assertAtomicWorkspaceMaterializationRawDelta(
+	t *testing.T,
+	before, after rawAtomicWorkspaceSnapshot,
+	scope types.WorkspaceScope,
+	materializationKeys map[string]string,
+	allowedMaterializationColumns ...string,
+) {
+	t.Helper()
+	bindingKeys := map[string]string{
+		"project_id":   quoteSQLiteTextLiteral(scope.ProjectID),
+		"workspace_id": quoteSQLiteTextLiteral(string(scope.WorkspaceID)),
+	}
+	beforeBinding := findAtomicWorkspaceRawRow(t, before, "workspace_bindings", bindingKeys)
+	afterBinding := findAtomicWorkspaceRawRow(t, after, "workspace_bindings", bindingKeys)
+	beforeRevision := beforeBinding["workspace_revision"]
+	afterRevision := afterBinding["workspace_revision"]
+	parsedBefore, err := strconv.ParseInt(beforeRevision.Quoted, 10, 64)
+	if err != nil {
+		t.Fatalf("parse prior workspace revision %q: %v", beforeRevision.Quoted, err)
+	}
+	if afterRevision.StorageClass != "integer" || afterRevision.Quoted != strconv.FormatInt(parsedBefore+1, 10) {
+		t.Fatalf("workspace revision delta=%+v -> %+v, want exact +1 integer", beforeRevision, afterRevision)
+	}
+
+	normalizedAfter := make(rawAtomicWorkspaceSnapshot, len(after))
+	for table, rows := range after {
+		normalizedAfter[table] = make([]rawAtomicWorkspaceRow, len(rows))
+		for index, row := range rows {
+			normalizedAfter[table][index] = make(rawAtomicWorkspaceRow, len(row))
+			for column, cell := range row {
+				normalizedAfter[table][index][column] = cell
+			}
+		}
+	}
+	for _, row := range normalizedAfter["workspace_bindings"] {
+		if atomicWorkspaceRawRowMatches(row, bindingKeys) {
+			row["workspace_revision"] = beforeRevision
+		}
+	}
+	assertAtomicWorkspaceRawDelta(t, before, normalizedAfter, "workspace_materializations", materializationKeys, allowedMaterializationColumns...)
 }
 
 func TestWorkspaceMutationTxAcceptMaterializationInvalidAPIHasNoMutation(t *testing.T) {

@@ -1907,7 +1907,9 @@ func recoveryAssertPath(t *testing.T, path string, exists bool, want state.Tree)
 
 func recoveryAssertOldDatabase(t *testing.T, before, after checkpointRecoveryDatabaseState) {
 	t.Helper()
-	if !reflect.DeepEqual(after.workspace, before.workspace) || !reflect.DeepEqual(after.candidate, before.candidate) ||
+	if !recoveryWorkspaceEqualExceptRevision(after.workspace, before.workspace) ||
+		after.workspace.WorkspaceRevision != before.workspace.WorkspaceRevision+1 ||
+		!reflect.DeepEqual(after.candidate, before.candidate) ||
 		!reflect.DeepEqual(after.disposition.Operations, before.disposition.Operations) ||
 		len(before.disposition.Journals) != 1 || len(after.disposition.Journals) != 1 ||
 		after.disposition.Journals[0].State != "recovered_old" ||
@@ -1919,7 +1921,8 @@ func recoveryAssertOldDatabase(t *testing.T, before, after checkpointRecoveryDat
 func recoveryAssertNewDatabase(t *testing.T, before, after checkpointRecoveryDatabaseState, prepared bool) {
 	t.Helper()
 	if before.workspace.Binding != after.workspace.Binding || !checkpointSnapshotsEqual(before.workspace.Snapshot, after.workspace.Snapshot) ||
-		after.workspace.State != "pending" || len(before.disposition.Journals) != 1 || len(after.disposition.Journals) != 1 ||
+		after.workspace.State != "pending" || after.workspace.WorkspaceRevision != before.workspace.WorkspaceRevision+1 ||
+		len(before.disposition.Journals) != 1 || len(after.disposition.Journals) != 1 ||
 		after.disposition.Journals[0].State != "recovered_new" ||
 		!recoveryJournalEqualExceptState(before.disposition.Journals[0], after.disposition.Journals[0]) {
 		t.Fatalf("new database journal/workspace mismatch\nbefore=%+v\nafter=%+v", before, after)
@@ -1942,6 +1945,12 @@ func recoveryAssertNewDatabase(t *testing.T, before, after checkpointRecoveryDat
 	if prepared && before.candidate != nil {
 		t.Fatalf("prepared fixture unexpectedly had candidate %+v", before.candidate)
 	}
+}
+
+func recoveryWorkspaceEqualExceptRevision(left, right localstore.WorkspaceRecord) bool {
+	left.WorkspaceRevision = 0
+	right.WorkspaceRevision = 0
+	return reflect.DeepEqual(left, right)
 }
 
 func recoveryJournalEqualExceptState(left, right localstore.WorkspaceMaterializationRecord) bool {
@@ -2050,11 +2059,13 @@ func checkpointRecoveryAssertCheckpointOutcomeDatabase(
 		t.Fatalf("checkpoint journal differs from frozen prepared input\nexpected=%+v\nafter=%+v", expectedPrepared, journal)
 	}
 	prepared := before
+	prepared.workspace.WorkspaceRevision++
 	prepared.disposition = cloneImportDisposition(before.disposition)
 	prepared.disposition.Journals = []localstore.WorkspaceMaterializationRecord{cloneMaterializationRecord(expectedPrepared)}
 	switch wantState {
 	case "prepared":
-		if !reflect.DeepEqual(after.workspace, before.workspace) ||
+		if !recoveryWorkspaceEqualExceptRevision(after.workspace, before.workspace) ||
+			after.workspace.WorkspaceRevision != before.workspace.WorkspaceRevision+1 ||
 			!reflect.DeepEqual(after.candidate, before.candidate) ||
 			!reflect.DeepEqual(after.disposition.Operations, before.disposition.Operations) {
 			t.Fatalf("prepared checkpoint database mismatch\nbefore=%+v\nafter=%+v", before, after)

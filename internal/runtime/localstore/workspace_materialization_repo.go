@@ -276,6 +276,9 @@ func (tx *WorkspaceMutationTx) PrepareMaterialization(ctx context.Context, prepa
 	if matchedPrepared != 1 || matchedExisting != len(preflight.Journals) {
 		return WorkspaceMaterializationRecord{}, fmt.Errorf("localstore: prepared materialization cardinality changed")
 	}
+	if err := tx.markWorkspaceDirty(ctx); err != nil {
+		return WorkspaceMaterializationRecord{}, err
+	}
 	return cloneWorkspaceMaterializationRecord(result), nil
 }
 
@@ -422,6 +425,9 @@ func (tx *WorkspaceMutationTx) TransitionMaterialization(ctx context.Context, ex
 	}
 	if matchedTarget != 1 || matchedOthers != len(preflight.Journals)-1 {
 		return WorkspaceMaterializationRecord{}, fmt.Errorf("localstore: materialization transition cardinality changed")
+	}
+	if err := tx.markWorkspaceDirty(ctx); err != nil {
+		return WorkspaceMaterializationRecord{}, err
 	}
 	return cloneWorkspaceMaterializationRecord(result), nil
 }
@@ -863,6 +869,9 @@ func (tx *WorkspaceMutationTx) AcceptMaterialization(ctx context.Context, expect
 		}
 		if !equalWorkspaceMaterializationMutationMetadata(postMetadata, want.mutationMetadata) {
 			return WorkspaceMaterializationRecord{}, fmt.Errorf("localstore: materialization acceptance metadata drift")
+		}
+		if err := tx.markWorkspaceDirty(ctx); err != nil {
+			return WorkspaceMaterializationRecord{}, err
 		}
 		return cloneWorkspaceMaterializationRecord(record), nil
 	}

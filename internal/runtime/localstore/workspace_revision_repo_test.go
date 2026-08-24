@@ -924,6 +924,382 @@ func TestWorkspaceRevisionCoreWriterInventory(t *testing.T) {
 	})
 }
 
+func TestWorkspaceRevisionPublicationWriterInventory(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("configured transition advances once", func(t *testing.T) {
+		_, repo, binding := coreWriterInventoryFixture(t)
+		var bootstrap WorkspacePublicationPolicyRecord
+		if err := repo.WithImmediateWorkspace(ctx, binding.Scope, func(tx *WorkspaceMutationTx) error {
+			var err error
+			bootstrap, err = tx.PublicationPolicy(ctx)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		origin := publicationTestDigest('a')
+		actor := publicationTestHuman("00000000-0000-4000-8000-000000000021")
+		changedAt := time.Date(2026, 8, 17, 13, 0, 0, 0, time.UTC)
+		next := WorkspacePublicationPolicyRecord{
+			Repository: binding.Repository, OriginDigest: &origin,
+			Classification: types.PublicationPublicGit, PolicyRevision: 2,
+			TransitionKind: "configured", ChangedBy: &actor, ChangedAt: &changedAt,
+		}
+		before := coreWriterRevision(t, repo, binding.Scope)
+		if err := repo.WithImmediateWorkspace(ctx, binding.Scope, func(tx *WorkspaceMutationTx) error {
+			got, err := tx.ReconfigurePublication(ctx, WorkspacePublicationPolicyTransition{Expected: bootstrap, Next: next})
+			if err == nil && !equalWorkspacePublicationPolicyRecords(got, next) {
+				return fmt.Errorf("configured publication=%+v, want %+v", got, next)
+			}
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got := coreWriterRevision(t, repo, binding.Scope); got != before+1 {
+			t.Fatalf("configured publication revision=%d, want %d", got, before+1)
+		}
+	})
+
+	t.Run("sticky invalidation advances once", func(t *testing.T) {
+		_, repo, binding := coreWriterInventoryFixture(t)
+		_, configured := configurePublicationPolicy(t, repo, binding, types.PublicationPublicGit)
+		next := publicationOriginInvalidation(binding.Repository, configured.PolicyRevision+1, 'b')
+		before := coreWriterRevision(t, repo, binding.Scope)
+		if err := repo.WithImmediateWorkspace(ctx, binding.Scope, func(tx *WorkspaceMutationTx) error {
+			got, err := tx.ReconfigurePublication(ctx, WorkspacePublicationPolicyTransition{Expected: configured, Next: next})
+			if err == nil && !equalWorkspacePublicationPolicyRecords(got, next) {
+				return fmt.Errorf("invalidated publication=%+v, want %+v", got, next)
+			}
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got := coreWriterRevision(t, repo, binding.Scope); got != before+1 {
+			t.Fatalf("sticky invalidation revision=%d, want %d", got, before+1)
+		}
+	})
+
+	t.Run("policy reads and rejected stale transition remain stable", func(t *testing.T) {
+		_, repo, binding := coreWriterInventoryFixture(t)
+		bootstrap, configured := configurePublicationPolicy(t, repo, binding, types.PublicationLocalOnly)
+		assertCoreWriterRevisionStable(t, repo, binding.Scope, func(tx *WorkspaceMutationTx) error {
+			if _, err := tx.PublicationPolicy(ctx); err != nil {
+				return err
+			}
+			_, err := tx.PublicationPolicyHistory(ctx)
+			return err
+		})
+		before := coreWriterRevision(t, repo, binding.Scope)
+		err := repo.WithImmediateWorkspace(ctx, binding.Scope, func(tx *WorkspaceMutationTx) error {
+			_, err := tx.ReconfigurePublication(ctx, WorkspacePublicationPolicyTransition{Expected: bootstrap, Next: configured})
+			return err
+		})
+		if !errors.Is(err, ErrPublicationConfigurationCAS) {
+			t.Fatalf("stale publication transition error=%v, want ErrPublicationConfigurationCAS", err)
+		}
+		if got := coreWriterRevision(t, repo, binding.Scope); got != before {
+			t.Fatalf("rejected publication revision=%d, want %d", got, before)
+		}
+	})
+
+	t.Run("target scope advances without sibling scopes", func(t *testing.T) {
+		_, repo := openWorkspaceStore(t)
+		target := createBinding(t, repo,
+			"00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/publication-a", 1, 11)
+		siblingWorkspace := createBinding(t, repo, target.Scope.ProjectID,
+			"00000000-0000-4000-8000-000000000012", "/publication-b", 1, 12)
+		siblingProject := createBinding(t, repo,
+			"00000000-0000-4000-8000-000000000002", string(target.Scope.WorkspaceID), "/publication-c", 2, 11)
+		configurePublicationPolicy(t, repo, target, types.PublicationPrivateGit)
+		if got := coreWriterRevision(t, repo, target.Scope); got != 2 {
+			t.Fatalf("target publication revision=%d, want 2", got)
+		}
+		if got := coreWriterRevision(t, repo, siblingWorkspace.Scope); got != 1 {
+			t.Fatalf("sibling-workspace publication revision=%d, want 1", got)
+		}
+		if got := coreWriterRevision(t, repo, siblingProject.Scope); got != 1 {
+			t.Fatalf("sibling-project publication revision=%d, want 1", got)
+		}
+	})
+}
+
+func TestWorkspaceRevisionMaterializationWriterInventory(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("prepare advances once", func(t *testing.T) {
+		fixture := newMaterializationFixtureWithoutJournal(t)
+		prepared := validPreparedMaterialization(t, fixture.binding, "00000000-0000-1000-8000-000000000061")
+		before := coreWriterRevision(t, fixture.repo, fixture.binding.Scope)
+		if err := fixture.repo.WithImmediateWorkspace(ctx, fixture.binding.Scope, func(tx *WorkspaceMutationTx) error {
+			got, err := tx.PrepareMaterialization(ctx, prepared)
+			if err == nil && !equalWorkspaceMaterializationPublicForTest(got, prepared) {
+				return fmt.Errorf("prepared materialization=%+v, want %+v", got, prepared)
+			}
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got := coreWriterRevision(t, fixture.repo, fixture.binding.Scope); got != before+1 {
+			t.Fatalf("prepared materialization revision=%d, want %d", got, before+1)
+		}
+	})
+
+	for _, edge := range []struct{ source, target string }{
+		{"prepared", "published"}, {"prepared", "recovered_old"}, {"prepared", "recovered_new"},
+		{"published", "recovered_old"}, {"published", "recovered_new"},
+	} {
+		t.Run("transition "+edge.source+" to "+edge.target+" advances once", func(t *testing.T) {
+			proof := "operation proof\n"
+			fixture := newMaterializationFixture(t, edge.source, &proof)
+			expected := readMaterializationDisposition(t, fixture.repo, fixture.binding.Scope).Journals[0]
+			before := coreWriterRevision(t, fixture.repo, fixture.binding.Scope)
+			if err := fixture.repo.WithImmediateWorkspace(ctx, fixture.binding.Scope, func(tx *WorkspaceMutationTx) error {
+				got, err := tx.TransitionMaterialization(ctx, expected, edge.target)
+				if err == nil && got.State != edge.target {
+					return fmt.Errorf("materialization state=%q, want %q", got.State, edge.target)
+				}
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if got := coreWriterRevision(t, fixture.repo, fixture.binding.Scope); got != before+1 {
+				t.Fatalf("materialization transition revision=%d, want %d", got, before+1)
+			}
+		})
+	}
+
+	for _, source := range []string{"published", "recovered_new"} {
+		t.Run("accept "+source+" advances once", func(t *testing.T) {
+			proof := "{\"schema_version\":1,\"initial_through_generation\":3,\"operations\":[]}\n"
+			fixture := newMaterializationFixture(t, source, &proof)
+			expected := readEligibleMaterialization(t, fixture.repo, fixture.binding.Scope)
+			if expected == nil {
+				t.Fatal("eligible materialization is nil")
+			}
+			before := coreWriterRevision(t, fixture.repo, fixture.binding.Scope)
+			if err := fixture.repo.WithImmediateWorkspace(ctx, fixture.binding.Scope, func(tx *WorkspaceMutationTx) error {
+				got, err := tx.AcceptMaterialization(ctx, *expected)
+				if err == nil && got.State != "accepted" {
+					return fmt.Errorf("accepted materialization state=%q, want accepted", got.State)
+				}
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if got := coreWriterRevision(t, fixture.repo, fixture.binding.Scope); got != before+1 {
+				t.Fatalf("accepted materialization revision=%d, want %d", got, before+1)
+			}
+		})
+	}
+
+	t.Run("duplicate stale same-state illegal and ineligible operations remain stable", func(t *testing.T) {
+		proof := "operation proof\n"
+		fixture := newMaterializationFixture(t, "prepared", &proof)
+		exactJournalID := validPreparedMaterialization(t, fixture.binding, "legacy-journal")
+		differentJournalID := validPreparedMaterialization(t, fixture.binding, "00000000-0000-1000-8000-000000000062")
+		expected := readMaterializationDisposition(t, fixture.repo, fixture.binding.Scope).Journals[0]
+		before := coreWriterRevision(t, fixture.repo, fixture.binding.Scope)
+		for name, mutate := range map[string]func(*WorkspaceMutationTx) error{
+			"exact duplicate journal ID prepare": func(tx *WorkspaceMutationTx) error {
+				_, err := tx.PrepareMaterialization(ctx, exactJournalID)
+				return err
+			},
+			"different journal ID beside current owner": func(tx *WorkspaceMutationTx) error {
+				_, err := tx.PrepareMaterialization(ctx, differentJournalID)
+				return err
+			},
+			"stale transition": func(tx *WorkspaceMutationTx) error {
+				stale := cloneWorkspaceMaterializationRecord(expected)
+				stale.CandidateDigest = state.Digest("sha256:" + strings.Repeat("f", 64))
+				_, err := tx.TransitionMaterialization(ctx, stale, "published")
+				return err
+			},
+			"same-state transition": func(tx *WorkspaceMutationTx) error {
+				_, err := tx.TransitionMaterialization(ctx, expected, "prepared")
+				return err
+			},
+			"illegal transition": func(tx *WorkspaceMutationTx) error {
+				_, err := tx.TransitionMaterialization(ctx, expected, "accepted")
+				return err
+			},
+			"ineligible acceptance": func(tx *WorkspaceMutationTx) error {
+				_, err := tx.AcceptMaterialization(ctx, expected)
+				return err
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				err := fixture.repo.WithImmediateWorkspace(ctx, fixture.binding.Scope, mutate)
+				if err == nil {
+					t.Fatalf("%s succeeded", name)
+				}
+				if got := coreWriterRevision(t, fixture.repo, fixture.binding.Scope); got != before {
+					t.Fatalf("%s revision=%d, want %d", name, got, before)
+				}
+			})
+		}
+	})
+
+	t.Run("prepare revision persists without changing sibling scopes", func(t *testing.T) {
+		databasePath := filepath.Join(t.TempDir(), "gateway.db")
+		store, err := Open(databasePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		repo := NewWorkspaceRepo(store.DB())
+		target := createBinding(t, repo,
+			"00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/materialization-a", 1, 11)
+		siblingWorkspace := createBinding(t, repo, target.Scope.ProjectID,
+			"00000000-0000-4000-8000-000000000012", "/materialization-b", 1, 12)
+		siblingProject := createBinding(t, repo,
+			"00000000-0000-4000-8000-000000000002", string(target.Scope.WorkspaceID), "/materialization-c", 2, 11)
+		prepared := validPreparedMaterialization(t, target, "00000000-0000-1000-8000-000000000063")
+		if err := repo.WithImmediateWorkspace(ctx, target.Scope, func(tx *WorkspaceMutationTx) error {
+			_, err := tx.PrepareMaterialization(ctx, prepared)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		store, err = Open(databasePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = store.Close() })
+		repo = NewWorkspaceRepo(store.DB())
+		if got := coreWriterRevision(t, repo, target.Scope); got != 2 {
+			t.Fatalf("restarted target revision=%d, want 2", got)
+		}
+		if got := coreWriterRevision(t, repo, siblingWorkspace.Scope); got != 1 {
+			t.Fatalf("restarted sibling-workspace revision=%d, want 1", got)
+		}
+		if got := coreWriterRevision(t, repo, siblingProject.Scope); got != 1 {
+			t.Fatalf("restarted sibling-project revision=%d, want 1", got)
+		}
+	})
+}
+
+func TestWorkspaceRevisionMaterializationCheckpointCommitProjectionAndTokenComparator(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("dirty in-callback capture uses projected revision", func(t *testing.T) {
+		_, repo, binding := coreWriterInventoryFixture(t)
+		before := coreWriterRevision(t, repo, binding.Scope)
+		captured := rolledBackCheckpointCommitState(t, repo, binding.Scope, func(tx *WorkspaceMutationTx) error {
+			return tx.SetStatus(ctx, "pending")
+		})
+		if got := captured.binding.Record.WorkspaceRevision; got != before+1 {
+			t.Fatalf("dirty checkpoint capture workspace revision=%d, want projected %d", got, before+1)
+		}
+		assertWorkspaceRevisionTestState(t, repo.db, binding.Scope, before, "clean")
+	})
+
+	t.Run("old token ignores only revision while general binding equality remains sensitive", func(t *testing.T) {
+		_, repo, binding := coreWriterInventoryFixture(t)
+		prior := captureCheckpointCommitState(t, repo, binding.Scope)
+		nextRevision := cloneWorkspaceCheckpointCommitState(prior)
+		nextRevision.binding.Record.WorkspaceRevision++
+		if equalWorkspacePublicationBindingEvidence(prior.binding, nextRevision.binding) {
+			t.Fatal("general publication binding equality ignored workspace revision")
+		}
+		if !equalWorkspaceCheckpointCommitStates(prior, nextRevision) {
+			t.Fatal("legacy checkpoint token equality did not ignore workspace revision")
+		}
+
+		otherBindingChange := cloneWorkspaceCheckpointCommitState(nextRevision)
+		otherBindingChange.binding.Record.State = "pending"
+		if equalWorkspaceCheckpointCommitStates(prior, otherBindingChange) {
+			t.Fatal("legacy checkpoint token equality ignored a non-revision binding change")
+		}
+	})
+}
+
+func TestWorkspaceRevisionCausalWitness(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("omitted publication writer mark is observable", func(t *testing.T) {
+		_, repo, binding := coreWriterInventoryFixture(t)
+		var bootstrap WorkspacePublicationPolicyRecord
+		if err := repo.WithImmediateWorkspace(ctx, binding.Scope, func(tx *WorkspaceMutationTx) error {
+			var err error
+			bootstrap, err = tx.PublicationPolicy(ctx)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		origin := publicationTestDigest('c')
+		actor := publicationTestHuman("00000000-0000-4000-8000-000000000023")
+		changedAt := time.Date(2026, 8, 17, 14, 0, 0, 0, time.UTC)
+		next := WorkspacePublicationPolicyRecord{
+			Repository: binding.Repository, OriginDigest: &origin,
+			Classification: types.PublicationPrivateGit, PolicyRevision: 2,
+			TransitionKind: "configured", ChangedBy: &actor, ChangedAt: &changedAt,
+		}
+		before := coreWriterRevision(t, repo, binding.Scope)
+		if err := repo.WithImmediateWorkspace(ctx, binding.Scope, func(tx *WorkspaceMutationTx) error {
+			_, err := tx.ReconfigurePublication(ctx, WorkspacePublicationPolicyTransition{Expected: bootstrap, Next: next})
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got := coreWriterRevision(t, repo, binding.Scope); got != before+1 {
+			t.Fatalf("publication writer committed revision=%d, want %d; dirty mark is missing", got, before+1)
+		}
+	})
+
+	t.Run("double finalization rejects and rolls back multiwrite transaction", func(t *testing.T) {
+		_, repo, binding := coreWriterInventoryFixture(t)
+		operation := validWorkspaceOperation("00000000-0000-4000-8000-000000000123")
+		canonical, err := state.CanonicalOperation(operation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = repo.WithImmediateWorkspace(ctx, binding.Scope, func(tx *WorkspaceMutationTx) error {
+			if err := tx.InsertActiveOperations(ctx, []WorkspaceOperationInsert{{Generation: 1, OperationID: operation.ID, OperationJSON: canonical}}); err != nil {
+				return err
+			}
+			if err := tx.SetStatus(ctx, "pending"); err != nil {
+				return err
+			}
+			if err := tx.finalizeWorkspaceRevision(ctx); err != nil {
+				return err
+			}
+			return tx.finalizeWorkspaceRevision(ctx)
+		})
+		if err == nil || errors.Is(err, ErrCommitOutcomeUnknown) {
+			t.Fatalf("double finalization error=%v, want stale-CAS pre-COMMIT failure", err)
+		}
+		assertWorkspaceRevisionTestState(t, repo.db, binding.Scope, 1, "clean")
+		requireCoreWriterOperationStates(t, repo, binding.Scope, nil)
+	})
+
+	t.Run("unchecked overflow rejects and rolls back logical rows", func(t *testing.T) {
+		store, repo, binding := coreWriterInventoryFixture(t)
+		if _, err := store.DB().Exec(`
+			UPDATE workspace_bindings SET workspace_revision=?
+			WHERE project_id=? AND workspace_id=?
+		`, int64(math.MaxInt64), binding.Scope.ProjectID, binding.Scope.WorkspaceID); err != nil {
+			t.Fatal(err)
+		}
+		var uncheckedErr error
+		err := repo.WithImmediateWorkspace(ctx, binding.Scope, func(tx *WorkspaceMutationTx) error {
+			if err := tx.SetStatus(ctx, "pending"); err != nil {
+				return err
+			}
+			_, uncheckedErr = tx.conn.ExecContext(ctx, `
+				UPDATE workspace_bindings SET workspace_revision=workspace_revision+1
+				WHERE project_id=? AND workspace_id=?
+			`, binding.Scope.ProjectID, binding.Scope.WorkspaceID)
+			return uncheckedErr
+		})
+		if uncheckedErr == nil || err == nil || errors.Is(err, ErrCommitOutcomeUnknown) {
+			t.Fatalf("unchecked overflow errors=(statement=%v,transaction=%v), want pre-COMMIT failure", uncheckedErr, err)
+		}
+		assertWorkspaceRevisionTestState(t, store.DB(), binding.Scope, math.MaxInt64, "clean")
+	})
+}
+
 func coreWriterInventoryFixture(t *testing.T) (*Store, *WorkspaceRepo, types.WorkspaceBinding) {
 	t.Helper()
 	store, repo := openWorkspaceStore(t)

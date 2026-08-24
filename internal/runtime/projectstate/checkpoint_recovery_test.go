@@ -1109,6 +1109,43 @@ func TestRecoverHoldsOneImmediateTransactionAcrossOneGitBundleAndConvergence(t *
 	recoveryAssertReturnedStatus(t, fixture.service, request.Scope, got)
 }
 
+func TestWorkspaceRevisionRecoveryFinalizationAdvancesOnce(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		driver           string
+		filesystem       checkpointRecoveryFilesystemOutcome
+		wantJournalState string
+	}{
+		{name: "recovered old", driver: "prepared", filesystem: checkpointRecoveryFilesystemRecoveredOld, wantJournalState: "recovered_old"},
+		{name: "recovered new", driver: "published", filesystem: checkpointRecoveryFilesystemRecoveredNew, wantJournalState: "recovered_new"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture, request := recoveryDriverPlanFixture(t, test.driver)
+			beforeRevision := workspaceRevisionForProjectStateTest(t, fixture.service, request.Scope)
+			fixture.service.observeCheckpointRecoveryGit = func(_ context.Context, proof checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
+				return recoveryPlannerObservation(t, proof, test.driver), nil
+			}
+			fixture.service.recoverCheckpointFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+				return test.filesystem, nil
+			}
+
+			got, err := fixture.service.Recover(context.Background(), request.Scope)
+			if err != nil || got.Binding.Scope != request.Scope {
+				t.Fatalf("Recover()=(%+v,%v)", got, err)
+			}
+			afterRevision := workspaceRevisionForProjectStateTest(t, fixture.service, request.Scope)
+			if afterRevision != beforeRevision+1 {
+				t.Fatalf("%s recovery workspace revision=%d, want %d", test.name, afterRevision, beforeRevision+1)
+			}
+			disposition := readCheckpointDisposition(t, fixture.service, request.Scope)
+			if len(disposition.Journals) != 1 || disposition.Journals[0].State != test.wantJournalState {
+				t.Fatalf("%s recovery disposition=%+v", test.name, disposition)
+			}
+			recoveryAssertReturnedStatus(t, fixture.service, request.Scope, got)
+		})
+	}
+}
+
 func TestRecoverUnknownCommitConfirmationMatrix(t *testing.T) {
 	tests := []struct {
 		name       string

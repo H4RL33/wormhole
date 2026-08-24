@@ -87,6 +87,7 @@ func TestPublicationConfigurationStableMismatchCommitsStickyInvalidation(t *test
 		changedAt := time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC)
 		clockCalls := 0
 		fixture.service.now = func() time.Time { clockCalls++; return changedAt }
+		beforeRevision := workspaceRevisionForProjectStateTest(t, fixture.service, fixture.binding.Scope)
 
 		got, err := fixture.service.PublicationConfiguration(context.Background(), fixture.binding.Scope)
 		if err != nil || got.Classification != types.PublicationUnclassified ||
@@ -99,10 +100,17 @@ func TestPublicationConfigurationStableMismatchCommitsStickyInvalidation(t *test
 		if rows := capturePublicationRawState(t, fixture.store).history; len(rows) != 3 {
 			t.Fatalf("origin invalidation history rows=%d, want 3", len(rows))
 		}
+		afterInvalidationRevision := workspaceRevisionForProjectStateTest(t, fixture.service, fixture.binding.Scope)
+		if afterInvalidationRevision != beforeRevision+1 {
+			t.Fatalf("sticky invalidation workspace revision=%d, want %d", afterInvalidationRevision, beforeRevision+1)
+		}
 		fixture.service.now = func() time.Time { panic("current invalidation read consulted clock") }
 		again, err := fixture.service.PublicationConfiguration(context.Background(), fixture.binding.Scope)
 		if err != nil || !reflect.DeepEqual(again, got) {
 			t.Fatalf("current invalidation read=(%+v,%v), want %+v", again, err, got)
+		}
+		if repeatRevision := workspaceRevisionForProjectStateTest(t, fixture.service, fixture.binding.Scope); repeatRevision != afterInvalidationRevision {
+			t.Fatalf("repeated sticky invalidation read workspace revision=%d, want %d", repeatRevision, afterInvalidationRevision)
 		}
 	})
 
@@ -863,6 +871,7 @@ func TestReconfigurePublicationCurrentExactSameHumanIsNoOpWithoutClockOrWrite(t 
 	request := publicationRequest(t, fixture.binding, configured, configured.Classification, retryActor)
 	fixture.service.now = func() time.Time { panic("same-human no-op consulted clock") }
 	before := capturePublicationRawState(t, fixture.store)
+	beforeRevision := workspaceRevisionForProjectStateTest(t, fixture.service, fixture.binding.Scope)
 
 	got, err := fixture.service.ReconfigurePublication(context.Background(), request)
 	if err != nil || !reflect.DeepEqual(got, configured) {
@@ -870,6 +879,9 @@ func TestReconfigurePublicationCurrentExactSameHumanIsNoOpWithoutClockOrWrite(t 
 	}
 	if after := capturePublicationRawState(t, fixture.store); !reflect.DeepEqual(after, before) {
 		t.Fatalf("same-human no-op changed publication state\nbefore=%v\nafter=%v", before, after)
+	}
+	if afterRevision := workspaceRevisionForProjectStateTest(t, fixture.service, fixture.binding.Scope); afterRevision != beforeRevision {
+		t.Fatalf("same-human no-op workspace revision=%d, want %d", afterRevision, beforeRevision)
 	}
 }
 
@@ -883,6 +895,7 @@ func TestReconfigurePublicationSameClassDifferentHumanAdvancesAttribution(t *tes
 	changedAt := time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC)
 	clockCalls := 0
 	fixture.service.now = func() time.Time { clockCalls++; return changedAt }
+	beforeRevision := workspaceRevisionForProjectStateTest(t, fixture.service, fixture.binding.Scope)
 
 	got, err := fixture.service.ReconfigurePublication(context.Background(), publicationRequest(
 		t, fixture.binding, configured, configured.Classification, secondActor,
@@ -893,6 +906,9 @@ func TestReconfigurePublicationSameClassDifferentHumanAdvancesAttribution(t *tes
 	}
 	if rows := capturePublicationRawState(t, fixture.store).history; len(rows) != 3 {
 		t.Fatalf("different-human history rows=%d, want 3", len(rows))
+	}
+	if afterRevision := workspaceRevisionForProjectStateTest(t, fixture.service, fixture.binding.Scope); afterRevision != beforeRevision+1 {
+		t.Fatalf("different-human publication workspace revision=%d, want %d", afterRevision, beforeRevision+1)
 	}
 }
 
@@ -1026,6 +1042,15 @@ func mustPublicationConfiguration(t *testing.T, service *Service, scope types.Wo
 		t.Fatal(err)
 	}
 	return configuration
+}
+
+func workspaceRevisionForProjectStateTest(t *testing.T, service *Service, scope types.WorkspaceScope) int64 {
+	t.Helper()
+	workspace, err := service.repo.Workspace(context.Background(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return workspace.WorkspaceRevision
 }
 
 func publicationRequest(

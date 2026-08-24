@@ -56,6 +56,11 @@ func (tx *WorkspaceMutationTx) CaptureCheckpointCommitState(ctx context.Context)
 	if err != nil {
 		return WorkspaceCheckpointCommitState{}, fmt.Errorf("localstore: capture checkpoint adjacent evidence: %w", err)
 	}
+	projectedRevision, err := tx.projectedWorkspaceRevision(ctx)
+	if err != nil {
+		return WorkspaceCheckpointCommitState{}, fmt.Errorf("localstore: project checkpoint binding revision: %w", err)
+	}
+	binding.Record.WorkspaceRevision = projectedRevision
 	state := cloneWorkspaceCheckpointCommitState(WorkspaceCheckpointCommitState{
 		version:         workspaceCheckpointCommitStateVersion,
 		scope:           tx.scope,
@@ -149,7 +154,7 @@ func cloneWorkspaceCheckpointCommitState(value WorkspaceCheckpointCommitState) W
 
 func equalWorkspaceCheckpointCommitStates(left, right WorkspaceCheckpointCommitState) bool {
 	if left.version != right.version || left.scope != right.scope ||
-		!equalWorkspacePublicationBindingEvidence(left.binding, right.binding) ||
+		!equalWorkspaceCheckpointPublicationBindingEvidence(left.binding, right.binding) ||
 		!equalWorkspaceCheckpointPublicationRawRecords(left.policy, right.policy) ||
 		(left.policyHistory == nil) != (right.policyHistory == nil) ||
 		len(left.policyHistory) != len(right.policyHistory) ||
@@ -163,6 +168,17 @@ func equalWorkspaceCheckpointCommitStates(left, right WorkspaceCheckpointCommitS
 		}
 	}
 	return true
+}
+
+func equalWorkspaceCheckpointPublicationBindingEvidence(
+	left workspacePublicationBindingEvidence,
+	right workspacePublicationBindingEvidence,
+) bool {
+	leftCopy := left
+	rightCopy := right
+	leftCopy.Record.WorkspaceRevision = 0
+	rightCopy.Record.WorkspaceRevision = 0
+	return equalWorkspacePublicationBindingEvidence(leftCopy, rightCopy)
 }
 
 func validWorkspaceCheckpointCommitState(value WorkspaceCheckpointCommitState) bool {

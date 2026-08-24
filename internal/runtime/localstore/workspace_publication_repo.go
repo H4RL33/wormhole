@@ -189,6 +189,9 @@ func (tx *WorkspaceMutationTx) ReconfigurePublication(ctx context.Context, trans
 		final.RecordedAtRaw != recordedRaw || !final.RecordedAt.Equal(recordedAt) {
 		return WorkspacePublicationPolicyRecord{}, fmt.Errorf("localstore: publication policy transition post-state mismatch")
 	}
+	if err := tx.markWorkspaceDirty(ctx); err != nil {
+		return WorkspacePublicationPolicyRecord{}, err
+	}
 	return cloneWorkspacePublicationPolicyRecord(post.Record), nil
 }
 
