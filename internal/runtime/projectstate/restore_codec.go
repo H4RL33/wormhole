@@ -30,6 +30,8 @@ type decodedRestoreReceipt struct {
 	Result              RestoreStashResult
 	Outcome             string
 	ConflictRetryDigest *state.Digest
+	SchemaVersion       int
+	WorkspaceRevision   int64
 }
 
 type restoreRequestDigestV1 struct {
@@ -66,6 +68,15 @@ type restoreStashReceiptV1 struct {
 	SchemaVersion       int                  `json:"schema_version"`
 	Action              string               `json:"action"`
 	Outcome             string               `json:"outcome"`
+	Result              restoreStashResultV1 `json:"result"`
+	ConflictRetryDigest *state.Digest        `json:"conflict_retry_digest"`
+}
+
+type restoreStashReceiptV2 struct {
+	SchemaVersion       int                  `json:"schema_version"`
+	Action              string               `json:"action"`
+	Outcome             string               `json:"outcome"`
+	WorkspaceRevision   int64                `json:"workspace_revision"`
 	Result              restoreStashResultV1 `json:"result"`
 	ConflictRetryDigest *state.Digest        `json:"conflict_retry_digest"`
 }
@@ -119,6 +130,48 @@ func encodeConflictedRestoreReceipt(result RestoreStashResult, retryDigest state
 	})
 }
 
+func encodeCleanRestoreReceiptV2(result RestoreStashResult, workspaceRevision int64) (json.RawMessage, error) {
+	private, err := privateRestoreResult(result)
+	if err != nil {
+		return nil, err
+	}
+	if workspaceRevision < 1 {
+		return nil, fmt.Errorf("projectstate: invalid restore receipt workspace revision")
+	}
+	if err := validateRestoreReceiptOutcome(private, "clean", nil); err != nil {
+		return nil, err
+	}
+	return encodeRestoreReceiptV2(restoreStashReceiptV2{
+		SchemaVersion: 2, Action: "restore", Outcome: "clean",
+		WorkspaceRevision: workspaceRevision, Result: private,
+	})
+}
+
+func encodeConflictedRestoreReceiptV2(result RestoreStashResult, workspaceRevision int64, retryDigest state.Digest) (json.RawMessage, error) {
+	private, err := privateRestoreResult(result)
+	if err != nil {
+		return nil, err
+	}
+	if workspaceRevision < 1 {
+		return nil, fmt.Errorf("projectstate: invalid restore receipt workspace revision")
+	}
+	if err := validateRestoreReceiptOutcome(private, "conflicted", &retryDigest); err != nil {
+		return nil, err
+	}
+	return encodeRestoreReceiptV2(restoreStashReceiptV2{
+		SchemaVersion: 2, Action: "restore", Outcome: "conflicted",
+		WorkspaceRevision: workspaceRevision, Result: private, ConflictRetryDigest: &retryDigest,
+	})
+}
+
+func encodeRestoreReceiptV2(receipt restoreStashReceiptV2) (json.RawMessage, error) {
+	encoded, err := state.CanonicalJSON(receipt)
+	if err != nil {
+		return nil, fmt.Errorf("projectstate: encode restore receipt v2: %w", err)
+	}
+	return json.RawMessage(encoded), nil
+}
+
 func encodeRestoreReceipt(receipt restoreStashReceiptV1) (json.RawMessage, error) {
 	encoded, err := state.CanonicalJSON(receipt)
 	if err != nil {
@@ -165,11 +218,11 @@ func decodeRestoreReceipt(receipt *localstore.WorkspaceTransitionReceiptRecord, 
 		return decodedRestoreReceipt{}, fmt.Errorf("projectstate: invalid restore receipt timestamp")
 	}
 
-	private, err := decodeRestoreReceiptJSON(receipt.ResultJSON)
+	private, schemaVersion, workspaceRevision, err := decodeRestoreReceiptJSONAny(receipt.ResultJSON)
 	if err != nil {
 		return decodedRestoreReceipt{}, err
 	}
-	if private.SchemaVersion != 1 || private.Action != "restore" || private.Outcome != receipt.Outcome {
+	if private.Action != "restore" || private.Outcome != receipt.Outcome {
 		return decodedRestoreReceipt{}, fmt.Errorf("projectstate: invalid restore receipt envelope")
 	}
 	result, err := publicRestoreResult(private.Result)
@@ -187,7 +240,67 @@ func decodeRestoreReceipt(receipt *localstore.WorkspaceTransitionReceiptRecord, 
 	}
 	return decodedRestoreReceipt{
 		Result: result, Outcome: private.Outcome, ConflictRetryDigest: retryDigest,
+		SchemaVersion: schemaVersion, WorkspaceRevision: workspaceRevision,
 	}, nil
+}
+
+func decodeRestoreReceiptJSONAny(raw json.RawMessage) (restoreStashReceiptV1, int, int64, error) {
+	var header struct {
+		SchemaVersion int `json:"schema_version"`
+	}
+	if err := json.Unmarshal(raw, &header); err != nil {
+		return restoreStashReceiptV1{}, 0, 0, fmt.Errorf("projectstate: decode restore receipt header: %w", err)
+	}
+	switch header.SchemaVersion {
+	case 1:
+		private, err := decodeRestoreReceiptJSON(raw)
+		if err != nil {
+			return restoreStashReceiptV1{}, 0, 0, err
+		}
+		revision := int64(0)
+		if private.Outcome == "conflicted" {
+			revision = 1
+		}
+		return private, 1, revision, nil
+	case 2:
+		private, err := decodeRestoreReceiptJSONV2(raw)
+		if err != nil {
+			return restoreStashReceiptV1{}, 0, 0, err
+		}
+		if private.WorkspaceRevision < 1 {
+			return restoreStashReceiptV1{}, 0, 0, fmt.Errorf("projectstate: invalid restore receipt workspace revision")
+		}
+		return restoreStashReceiptV1{
+			SchemaVersion: 2, Action: private.Action, Outcome: private.Outcome,
+			Result: private.Result, ConflictRetryDigest: private.ConflictRetryDigest,
+		}, 2, private.WorkspaceRevision, nil
+	default:
+		return restoreStashReceiptV1{}, 0, 0, fmt.Errorf("projectstate: unsupported restore receipt schema version")
+	}
+}
+
+func decodeRestoreReceiptJSONV2(raw json.RawMessage) (restoreStashReceiptV2, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var receipt restoreStashReceiptV2
+	if err := decoder.Decode(&receipt); err != nil {
+		return restoreStashReceiptV2{}, fmt.Errorf("projectstate: decode restore receipt v2: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return restoreStashReceiptV2{}, fmt.Errorf("projectstate: decode restore receipt v2: trailing JSON")
+		}
+		return restoreStashReceiptV2{}, fmt.Errorf("projectstate: decode restore receipt v2: %w", err)
+	}
+	canonical, err := state.CanonicalJSON(receipt)
+	if err != nil {
+		return restoreStashReceiptV2{}, fmt.Errorf("projectstate: canonicalize restore receipt v2: %w", err)
+	}
+	if !bytes.Equal(canonical, raw) {
+		return restoreStashReceiptV2{}, fmt.Errorf("projectstate: restore receipt v2 is not canonical JSON")
+	}
+	return receipt, nil
 }
 
 func decodeRestoreReceiptJSON(raw json.RawMessage) (restoreStashReceiptV1, error) {

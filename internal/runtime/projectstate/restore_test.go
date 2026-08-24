@@ -2,6 +2,7 @@ package projectstate
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -19,6 +20,202 @@ func TestServiceRestoreStashAPI(t *testing.T) {
 	var service *Service
 	if got, err := service.RestoreStash(context.Background(), RestoreStashRequest{}); err == nil || !reflect.DeepEqual(got, RestoreStashResult{}) {
 		t.Fatalf("RestoreStash()=(%+v,%v), want zero result and error", got, err)
+	}
+}
+
+func TestServiceRestoreStashV2ReceiptsStoreCommittedRevisionAndRetryRequiresIt(t *testing.T) {
+	for _, conflicted := range []bool{false, true} {
+		name := "clean"
+		if conflicted {
+			name = "conflicted"
+		}
+		t.Run(name, func(t *testing.T) {
+			fixture := newRestoreServiceFixture(t)
+			if conflicted {
+				current := restoreProjectName(t, fixture.accepted, "current project", 2*time.Minute)
+				insertServiceCandidate(t, fixture.store, fixture.req.Scope, fixture.accepted.Digest, current, nil, 0)
+				setServiceWorkspaceState(t, fixture.store, fixture.req.Scope, "pending")
+			}
+			want, err := fixture.service.RestoreStash(context.Background(), fixture.req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var raw []byte
+			var committedRevision int64
+			if err := fixture.store.DB().QueryRow(`SELECT receipt.result_json,binding.workspace_revision
+				FROM workspace_transition_receipts receipt JOIN workspace_bindings binding USING(project_id,workspace_id)
+				WHERE receipt.project_id=? AND receipt.workspace_id=? AND receipt.request_id=?`,
+				fixture.req.Scope.ProjectID, fixture.req.Scope.WorkspaceID, fixture.req.RequestID).Scan(&raw, &committedRevision); err != nil {
+				t.Fatal(err)
+			}
+			var receipt restoreStashReceiptV2
+			if err := json.Unmarshal(raw, &receipt); err != nil {
+				t.Fatal(err)
+			}
+			if receipt.SchemaVersion != 2 || receipt.WorkspaceRevision != committedRevision {
+				t.Fatalf("receipt=%+v committed revision=%d", receipt, committedRevision)
+			}
+			if !conflicted {
+				return
+			}
+
+			if _, err := fixture.store.DB().Exec(`UPDATE workspace_bindings SET workspace_revision=workspace_revision+1
+				WHERE project_id=? AND workspace_id=?`, fixture.req.Scope.ProjectID, fixture.req.Scope.WorkspaceID); err != nil {
+				t.Fatal(err)
+			}
+			before := captureStashRawState(t, fixture.store)
+			got, err := fixture.service.RestoreStash(context.Background(), fixture.req)
+			if err == nil || !reflect.DeepEqual(got, RestoreStashResult{}) || !strings.Contains(err.Error(), "revision mismatch") {
+				t.Fatalf("revision-mismatched retry=(%+v,%v)", got, err)
+			}
+			if after := captureStashRawState(t, fixture.store); !reflect.DeepEqual(after, before) {
+				t.Fatal("revision-mismatched retry wrote state")
+			}
+			_ = want
+		})
+	}
+}
+
+func TestServiceRestoreStashAlreadyConflictedIdenticalEvidenceProjectsReceiptRevision(t *testing.T) {
+	fixture := newRestoreServiceFixture(t)
+	current := restoreProjectName(t, fixture.accepted, "current project", 2*time.Minute)
+	insertServiceCandidate(t, fixture.store, fixture.req.Scope, fixture.accepted.Digest, current, nil, 0)
+	setServiceWorkspaceState(t, fixture.store, fixture.req.Scope, "pending")
+
+	var evidence []localstore.WorkspaceConflictEvidence
+	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+		persisted, err := tx.RestoreCurrentState(context.Background(), fixture.req.StashID)
+		if err != nil {
+			return err
+		}
+		plan, err := buildRestoreCurrentPlan(persisted)
+		if err != nil {
+			return err
+		}
+		if len(plan.Result.Conflicts) == 0 || len(plan.ConflictEvidence) == 0 {
+			return fmt.Errorf("restore fixture did not conflict")
+		}
+		evidence = append([]localstore.WorkspaceConflictEvidence{}, plan.ConflictEvidence...)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+		if _, err := tx.ReplaceOpenConflictOccurrences(context.Background(), evidence, time.Date(2026, 8, 24, 15, 0, 0, 0, time.UTC)); err != nil {
+			return err
+		}
+		return tx.SetStatus(context.Background(), "conflicted")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := fixture.service.repo.Workspace(context.Background(), fixture.req.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want, err := fixture.service.RestoreStash(context.Background(), fixture.req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw []byte
+	var committedRevision int64
+	if err := fixture.store.DB().QueryRow(`SELECT receipt.result_json,binding.workspace_revision
+		FROM workspace_transition_receipts receipt JOIN workspace_bindings binding USING(project_id,workspace_id)
+		WHERE receipt.project_id=? AND receipt.workspace_id=? AND receipt.request_id=?`,
+		fixture.req.Scope.ProjectID, fixture.req.Scope.WorkspaceID, fixture.req.RequestID).Scan(&raw, &committedRevision); err != nil {
+		t.Fatal(err)
+	}
+	var receipt restoreStashReceiptV2
+	if err := json.Unmarshal(raw, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if committedRevision != before.WorkspaceRevision+1 || receipt.WorkspaceRevision != committedRevision {
+		t.Fatalf("already-conflicted receipt revision=%d committed revision=%d before=%d",
+			receipt.WorkspaceRevision, committedRevision, before.WorkspaceRevision)
+	}
+
+	beforeRetry := captureStashRawState(t, fixture.store)
+	got, err := fixture.service.RestoreStash(context.Background(), fixture.req)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("already-conflicted immediate retry=(%+v,%v), want (%+v,nil)", got, err, want)
+	}
+	if afterRetry := captureStashRawState(t, fixture.store); !reflect.DeepEqual(afterRetry, beforeRetry) {
+		t.Fatal("already-conflicted immediate retry wrote state")
+	}
+}
+
+func TestServiceRestoreStashConflictedV1AdapterRequiresMigrationBaselineRevision(t *testing.T) {
+	fixture := newRestoreServiceFixture(t)
+	current := restoreProjectName(t, fixture.accepted, "current project", 2*time.Minute)
+	insertServiceCandidate(t, fixture.store, fixture.req.Scope, fixture.accepted.Digest, current, nil, 0)
+	setServiceWorkspaceState(t, fixture.store, fixture.req.Scope, "pending")
+	want, err := fixture.service.RestoreStash(context.Background(), fixture.req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw []byte
+	if err := fixture.store.DB().QueryRow(`SELECT result_json FROM workspace_transition_receipts
+		WHERE project_id=? AND workspace_id=? AND request_id=?`, fixture.req.Scope.ProjectID,
+		fixture.req.Scope.WorkspaceID, fixture.req.RequestID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var v2 restoreStashReceiptV2
+	if err := json.Unmarshal(raw, &v2); err != nil {
+		t.Fatal(err)
+	}
+	v1, err := encodeRestoreReceipt(restoreStashReceiptV1{
+		SchemaVersion: 1, Action: "restore", Outcome: "conflicted",
+		Result: v2.Result, ConflictRetryDigest: v2.ConflictRetryDigest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.DB().Exec(`UPDATE workspace_transition_receipts SET result_json=?
+		WHERE project_id=? AND workspace_id=? AND request_id=?`, v1, fixture.req.Scope.ProjectID,
+		fixture.req.Scope.WorkspaceID, fixture.req.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.DB().Exec(`UPDATE workspace_bindings SET workspace_revision=1
+		WHERE project_id=? AND workspace_id=?`, fixture.req.Scope.ProjectID, fixture.req.Scope.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := fixture.service.RestoreStash(context.Background(), fixture.req)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("baseline v1 retry=(%+v,%v), want (%+v,nil)", got, err, want)
+	}
+	if _, err := fixture.store.DB().Exec(`UPDATE workspace_bindings SET workspace_revision=2
+		WHERE project_id=? AND workspace_id=?`, fixture.req.Scope.ProjectID, fixture.req.Scope.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	before := captureStashRawState(t, fixture.store)
+	got, err = fixture.service.RestoreStash(context.Background(), fixture.req)
+	if err == nil || !reflect.DeepEqual(got, RestoreStashResult{}) || !strings.Contains(err.Error(), "legacy") {
+		t.Fatalf("nonbaseline v1 retry=(%+v,%v)", got, err)
+	}
+	if after := captureStashRawState(t, fixture.store); !reflect.DeepEqual(after, before) {
+		t.Fatal("nonbaseline v1 retry wrote state")
+	}
+}
+
+func TestServiceRestoreStashConflictedRereadsSemanticPostimageBeforeReceipt(t *testing.T) {
+	fixture := newRestoreServiceFixture(t)
+	current := restoreProjectName(t, fixture.accepted, "current project", 2*time.Minute)
+	insertServiceCandidate(t, fixture.store, fixture.req.Scope, fixture.accepted.Digest, current, nil, 0)
+	setServiceWorkspaceState(t, fixture.store, fixture.req.Scope, "pending")
+	if _, err := fixture.store.DB().Exec(`CREATE TRIGGER restore_mutate_named_postimage
+		AFTER UPDATE OF status ON workspace_bindings WHEN NEW.status='conflicted' BEGIN
+		  UPDATE workspace_stashes SET label='trigger changed semantic postimage'
+		  WHERE project_id=NEW.project_id AND workspace_id=NEW.workspace_id;
+		END`); err != nil {
+		t.Fatal(err)
+	}
+	before := captureStashRawState(t, fixture.store)
+	got, err := fixture.service.RestoreStash(context.Background(), fixture.req)
+	if err == nil || !reflect.DeepEqual(got, RestoreStashResult{}) || !strings.Contains(err.Error(), "protected current state") {
+		t.Fatalf("postimage-mutated RestoreStash()=(%+v,%v)", got, err)
+	}
+	if after := captureStashRawState(t, fixture.store); !reflect.DeepEqual(after, before) {
+		t.Fatal("failed semantic postimage reread did not roll back")
 	}
 }
 
@@ -550,13 +747,14 @@ func TestServiceRestoreStashConflictRetainsStateAndExactRetryIsReadOnly(t *testi
 	}
 }
 
-func TestServiceRestoreStashConflictedRetryRejectsStateDrift(t *testing.T) {
+func TestServiceRestoreStashConflictedRetryIgnoresRawBindingTimestampDrift(t *testing.T) {
 	fixture := newRestoreServiceFixture(t)
 	current := restoreProjectName(t, fixture.accepted, "current project", 2*time.Minute)
 	insertServiceCandidate(t, fixture.store, fixture.req.Scope, fixture.accepted.Digest, current, nil, 0)
 	setServiceWorkspaceState(t, fixture.store, fixture.req.Scope, "pending")
 	fixture.service.now = func() time.Time { return time.Date(2026, 7, 29, 13, 30, 0, 0, time.UTC) }
-	if _, err := fixture.service.RestoreStash(context.Background(), fixture.req); err != nil {
+	want, err := fixture.service.RestoreStash(context.Background(), fixture.req)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fixture.store.DB().Exec(`
@@ -568,8 +766,8 @@ func TestServiceRestoreStashConflictedRetryRejectsStateDrift(t *testing.T) {
 	before := captureStashRawState(t, fixture.store)
 	fixture.service.now = func() time.Time { panic("drifted retry consulted clock") }
 	got, err := fixture.service.RestoreStash(context.Background(), fixture.req)
-	if err == nil || errors.Is(err, ErrIdempotencyConflict) || !reflect.DeepEqual(got, RestoreStashResult{}) {
-		t.Fatalf("drifted retry RestoreStash()=(%+v,%v), want ordinary zero failure", got, err)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("timestamp-only retry RestoreStash()=(%+v,%v), want (%+v,nil)", got, err, want)
 	}
 	if after := captureStashRawState(t, fixture.store); !reflect.DeepEqual(after, before) {
 		t.Fatal("failed drifted retry changed persisted state")
@@ -612,6 +810,7 @@ func TestServiceRestoreStashConflictedRetryDriftMatrixAfterRestart(t *testing.T)
 		mutate       func(*testing.T, restoreServiceFixture)
 		wantContains string
 		wantSentinel error
+		wantSuccess  bool
 	}{
 		{name: "binding ref digest", wantContains: "retry state mismatch", mutate: func(t *testing.T, fixture restoreServiceFixture) {
 			if _, err := fixture.store.DB().Exec(`UPDATE workspace_bindings SET accepted_ref='refs/heads/retry-drift'
@@ -619,7 +818,7 @@ func TestServiceRestoreStashConflictedRetryDriftMatrixAfterRestart(t *testing.T)
 				t.Fatal(err)
 			}
 		}},
-		{name: "binding created at digest", wantContains: "retry state mismatch", mutate: func(t *testing.T, fixture restoreServiceFixture) {
+		{name: "binding created at excluded", wantSuccess: true, mutate: func(t *testing.T, fixture restoreServiceFixture) {
 			if _, err := fixture.store.DB().Exec(`UPDATE workspace_bindings SET created_at='2025-01-02 03:04:05+00:00'
 				WHERE project_id=? AND workspace_id=?`, fixture.req.Scope.ProjectID, fixture.req.Scope.WorkspaceID); err != nil {
 				t.Fatal(err)
@@ -631,7 +830,7 @@ func TestServiceRestoreStashConflictedRetryDriftMatrixAfterRestart(t *testing.T)
 				t.Fatal(err)
 			}
 		}},
-		{name: "candidate attribution digest", wantContains: "retry state mismatch", mutate: func(t *testing.T, fixture restoreServiceFixture) {
+		{name: "candidate attribution timestamp excluded", wantSuccess: true, mutate: func(t *testing.T, fixture restoreServiceFixture) {
 			if _, err := fixture.store.DB().Exec(`UPDATE workspace_candidates SET imported_at='2032-01-02 03:04:05+00:00'
 				WHERE project_id=? AND workspace_id=?`, fixture.req.Scope.ProjectID, fixture.req.Scope.WorkspaceID); err != nil {
 				t.Fatal(err)
@@ -661,7 +860,7 @@ func TestServiceRestoreStashConflictedRetryDriftMatrixAfterRestart(t *testing.T)
 				t.Fatal(err)
 			}
 		}},
-		{name: "retained stash timestamp digest", wantContains: "retry state mismatch", mutate: func(t *testing.T, fixture restoreServiceFixture) {
+		{name: "retained stash timestamp excluded", wantSuccess: true, mutate: func(t *testing.T, fixture restoreServiceFixture) {
 			if _, err := fixture.store.DB().Exec(`UPDATE workspace_stashes SET created_at='2032-01-02 03:04:05+00:00'
 				WHERE project_id=? AND workspace_id=? AND stash_id=?`, fixture.req.Scope.ProjectID, fixture.req.Scope.WorkspaceID, fixture.req.StashID); err != nil {
 				t.Fatal(err)
@@ -685,7 +884,7 @@ func TestServiceRestoreStashConflictedRetryDriftMatrixAfterRestart(t *testing.T)
 				t.Fatal(err)
 			}
 		}},
-		{name: "conflict created at digest", wantContains: "retry state mismatch", mutate: func(t *testing.T, fixture restoreServiceFixture) {
+		{name: "conflict created at excluded", wantSuccess: true, mutate: func(t *testing.T, fixture restoreServiceFixture) {
 			if _, err := fixture.store.DB().Exec(`UPDATE workspace_conflicts SET created_at='2032-01-02 03:04:05+00:00'
 				WHERE project_id=? AND workspace_id=? AND state='open'`, fixture.req.Scope.ProjectID, fixture.req.Scope.WorkspaceID); err != nil {
 				t.Fatal(err)
@@ -699,7 +898,7 @@ func TestServiceRestoreStashConflictedRetryDriftMatrixAfterRestart(t *testing.T)
 				t.Fatal(err)
 			}
 		}},
-		{name: "semantic conflict evidence", wantContains: "semantic conflict evidence mismatch", mutate: func(t *testing.T, fixture restoreServiceFixture) {
+		{name: "semantic conflict evidence", wantContains: "conflict evidence mismatch", mutate: func(t *testing.T, fixture restoreServiceFixture) {
 			var occurrences []localstore.WorkspaceConflictOccurrence
 			if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 				var err error
@@ -735,13 +934,13 @@ func TestServiceRestoreStashConflictedRetryDriftMatrixAfterRestart(t *testing.T)
 				t.Fatal(err)
 			}
 		}},
-		{name: "current active created at digest", wantContains: "retry state mismatch", mutate: func(t *testing.T, fixture restoreServiceFixture) {
+		{name: "current active created at excluded", wantSuccess: true, mutate: func(t *testing.T, fixture restoreServiceFixture) {
 			if _, err := fixture.store.DB().Exec(`UPDATE workspace_overlay_operations SET created_at='2032-01-02 03:04:05+00:00'
 				WHERE project_id=? AND workspace_id=? AND generation=8`, fixture.req.Scope.ProjectID, fixture.req.Scope.WorkspaceID); err != nil {
 				t.Fatal(err)
 			}
 		}},
-		{name: "unrelated operation created at digest", wantContains: "retry state mismatch", mutate: func(t *testing.T, fixture restoreServiceFixture) {
+		{name: "unrelated operation created at excluded", wantSuccess: true, mutate: func(t *testing.T, fixture restoreServiceFixture) {
 			if _, err := fixture.store.DB().Exec(`UPDATE workspace_overlay_operations SET created_at='2032-01-02 03:04:05+00:00'
 				WHERE project_id=? AND workspace_id=? AND generation=9`, fixture.req.Scope.ProjectID, fixture.req.Scope.WorkspaceID); err != nil {
 				t.Fatal(err)
@@ -765,8 +964,9 @@ func TestServiceRestoreStashConflictedRetryDriftMatrixAfterRestart(t *testing.T)
 			insertStashServiceOperation(t, fixture.store, fixture.req.Scope, 8, active, "active")
 			insertStashServiceOperation(t, fixture.store, fixture.req.Scope, 9, terminal, "materialized")
 			setServiceWorkspaceState(t, fixture.store, fixture.req.Scope, "pending")
-			if got, err := fixture.service.RestoreStash(context.Background(), fixture.req); err != nil || len(got.Conflicts) == 0 {
-				t.Fatalf("first conflicted RestoreStash()=(%+v,%v)", got, err)
+			want, err := fixture.service.RestoreStash(context.Background(), fixture.req)
+			if err != nil || len(want.Conflicts) == 0 {
+				t.Fatalf("first conflicted RestoreStash()=(%+v,%v)", want, err)
 			}
 			if err := fixture.store.Close(); err != nil {
 				t.Fatal(err)
@@ -777,6 +977,15 @@ func TestServiceRestoreStashConflictedRetryDriftMatrixAfterRestart(t *testing.T)
 			before := captureStashRawState(t, fixture.store)
 			fixture.service.now = func() time.Time { panic("drift retry consulted clock") }
 			got, err := fixture.service.RestoreStash(context.Background(), fixture.req)
+			if test.wantSuccess {
+				if err != nil || !reflect.DeepEqual(got, want) {
+					t.Fatalf("excluded raw drift RestoreStash()=(%+v,%v), want (%+v,nil)", got, err, want)
+				}
+				if after := captureStashRawState(t, fixture.store); !reflect.DeepEqual(after, before) {
+					t.Fatal("read-only raw-drift retry changed persisted state")
+				}
+				return
+			}
 			if err == nil || errors.Is(err, ErrIdempotencyConflict) || !reflect.DeepEqual(got, RestoreStashResult{}) {
 				t.Fatalf("drifted RestoreStash()=(%+v,%v), want ordinary zero failure", got, err)
 			}
@@ -822,14 +1031,15 @@ func TestServiceRestoreStashConflictedRetryRejectsStashOwnedRowDriftAfterRestart
 		mutate       func(*testing.T, restoreSparseConflictFixture)
 		wantContains string
 		wantSentinel error
+		wantSuccess  bool
 	}{
-		{name: "absorbed created at digest", wantContains: "retry state mismatch", mutate: func(t *testing.T, fixture restoreSparseConflictFixture) {
+		{name: "absorbed created at excluded", wantSuccess: true, mutate: func(t *testing.T, fixture restoreSparseConflictFixture) {
 			if _, err := fixture.store.DB().Exec(`UPDATE workspace_overlay_operations SET created_at='2033-01-02 03:04:05+00:00'
 				WHERE project_id=? AND workspace_id=? AND generation=4`, fixture.req.Scope.ProjectID, fixture.req.Scope.WorkspaceID); err != nil {
 				t.Fatal(err)
 			}
 		}},
-		{name: "later created at digest", wantContains: "retry state mismatch", mutate: func(t *testing.T, fixture restoreSparseConflictFixture) {
+		{name: "later created at excluded", wantSuccess: true, mutate: func(t *testing.T, fixture restoreSparseConflictFixture) {
 			if _, err := fixture.store.DB().Exec(`UPDATE workspace_overlay_operations SET created_at='2033-01-02 03:04:05+00:00'
 				WHERE project_id=? AND workspace_id=? AND generation=10`, fixture.req.Scope.ProjectID, fixture.req.Scope.WorkspaceID); err != nil {
 				t.Fatal(err)
@@ -845,8 +1055,9 @@ func TestServiceRestoreStashConflictedRetryRejectsStashOwnedRowDriftAfterRestart
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newRestoreSparseConflictFixture(t)
-			if got, err := fixture.service.RestoreStash(context.Background(), fixture.req); err != nil || len(got.Conflicts) == 0 {
-				t.Fatalf("first conflicted RestoreStash()=(%+v,%v)", got, err)
+			want, err := fixture.service.RestoreStash(context.Background(), fixture.req)
+			if err != nil || len(want.Conflicts) == 0 {
+				t.Fatalf("first conflicted RestoreStash()=(%+v,%v)", want, err)
 			}
 			if err := fixture.store.Close(); err != nil {
 				t.Fatal(err)
@@ -857,6 +1068,15 @@ func TestServiceRestoreStashConflictedRetryRejectsStashOwnedRowDriftAfterRestart
 			before := captureStashRawState(t, fixture.store)
 			fixture.service.now = func() time.Time { panic("stash-owned drift retry consulted clock") }
 			got, err := fixture.service.RestoreStash(context.Background(), fixture.req)
+			if test.wantSuccess {
+				if err != nil || !reflect.DeepEqual(got, want) {
+					t.Fatalf("excluded stash-row timestamp RestoreStash()=(%+v,%v), want (%+v,nil)", got, err, want)
+				}
+				if after := captureStashRawState(t, fixture.store); !reflect.DeepEqual(after, before) {
+					t.Fatal("read-only stash timestamp retry changed state")
+				}
+				return
+			}
 			if err == nil || errors.Is(err, ErrIdempotencyConflict) || !reflect.DeepEqual(got, RestoreStashResult{}) {
 				t.Fatalf("stash-owned drift RestoreStash()=(%+v,%v)", got, err)
 			}
@@ -873,7 +1093,7 @@ func TestServiceRestoreStashConflictedRetryRejectsStashOwnedRowDriftAfterRestart
 	}
 }
 
-func TestServiceRestoreStashConflictedTimestampMismatchRollsBack(t *testing.T) {
+func TestServiceRestoreStashConflictedIgnoresRawStatusTimestampRewrite(t *testing.T) {
 	fixture := newRestoreServiceFixture(t)
 	current := restoreProjectName(t, fixture.accepted, "current project", 2*time.Minute)
 	insertServiceCandidate(t, fixture.store, fixture.req.Scope, fixture.accepted.Digest, current, nil, 0)
@@ -887,13 +1107,9 @@ func TestServiceRestoreStashConflictedTimestampMismatchRollsBack(t *testing.T) {
 	`); err != nil {
 		t.Fatal(err)
 	}
-	before := captureStashRawState(t, fixture.store)
 	got, err := fixture.service.RestoreStash(context.Background(), fixture.req)
-	if err == nil || errors.Is(err, ErrIdempotencyConflict) || !reflect.DeepEqual(got, RestoreStashResult{}) {
-		t.Fatalf("timestamp-tampered RestoreStash()=(%+v,%v), want ordinary zero failure", got, err)
-	}
-	if after := captureStashRawState(t, fixture.store); !reflect.DeepEqual(after, before) {
-		t.Fatal("timestamp mismatch did not roll back complete restore")
+	if err != nil || len(got.Conflicts) == 0 {
+		t.Fatalf("timestamp-rewritten RestoreStash()=(%+v,%v), want conflicted success", got, err)
 	}
 }
 
@@ -1073,7 +1289,7 @@ func TestConfirmRestoreStashCommitFailureMatrixPreservesUnknownOutcome(t *testin
 	}
 }
 
-func TestConfirmRestoreStashConflictedCommitRejectsPostStateDrift(t *testing.T) {
+func TestConfirmRestoreStashConflictedCommitIgnoresRawTimestampDrift(t *testing.T) {
 	fixture := newRestoreServiceFixture(t)
 	current := restoreProjectName(t, fixture.accepted, "current project", 2*time.Minute)
 	insertServiceCandidate(t, fixture.store, fixture.req.Scope, fixture.accepted.Digest, current, nil, 0)
@@ -1092,9 +1308,8 @@ func TestConfirmRestoreStashConflictedCommitRejectsPostStateDrift(t *testing.T) 
 	}
 	commitErr := fmt.Errorf("%w: fixture", localstore.ErrCommitOutcomeUnknown)
 	got, err := confirmRestoreStashCommit(context.Background(), fixture.service.repo, fixture.req, digest, want, commitErr)
-	if !errors.Is(err, localstore.ErrCommitOutcomeUnknown) || errors.Is(err, ErrIdempotencyConflict) ||
-		!reflect.DeepEqual(got, RestoreStashResult{}) {
-		t.Fatalf("drifted confirmRestoreStashCommit()=(%+v,%v)", got, err)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("timestamp-only confirmRestoreStashCommit()=(%+v,%v), want (%+v,nil)", got, err, want)
 	}
 }
 

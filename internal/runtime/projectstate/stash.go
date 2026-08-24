@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/google/uuid"
 
@@ -50,11 +51,11 @@ func (s *Service) Stash(ctx context.Context, req StashRequest) (StashResult, err
 		if err != nil {
 			return err
 		}
-		openConflicts, err := tx.HasOpenConflicts(ctx)
+		openConflicts, err := tx.OpenConflictOccurrences(ctx)
 		if err != nil {
 			return err
 		}
-		if openConflicts {
+		if len(openConflicts) != 0 {
 			return localstore.ErrWorkspaceConflicted
 		}
 		candidate, err := tx.Candidate(ctx)
@@ -65,17 +66,18 @@ func (s *Service) Stash(ctx context.Context, req StashRequest) (StashResult, err
 		if err != nil {
 			return fmt.Errorf("projectstate: encode stash accepted source: %w", err)
 		}
-		auditRecords, err := tx.OperationAudit(ctx)
+		activeRows, err := tx.ActiveOperationsAfter(ctx, 0)
 		if err != nil {
 			return err
 		}
-		operationInventory := make([]localstore.WorkspaceOperation, 0, len(auditRecords))
-		for _, record := range auditRecords {
-			operationInventory = append(operationInventory, cloneStashOperation(record.WorkspaceOperation))
+		rebasedRows, err := tx.RebasedOperationsAtOrBefore(ctx, int64(^uint64(0)>>1))
+		if err != nil {
+			return err
 		}
-		if len(operationInventory) != len(auditRecords) {
-			return fmt.Errorf("projectstate: incomplete stash operation audit projection")
-		}
+		operationInventory := append(rebasedRows, activeRows...)
+		sort.Slice(operationInventory, func(i, j int) bool {
+			return operationInventory[i].Generation < operationInventory[j].Generation
+		})
 		plan, err := buildStashPlan(workspace.Binding, workspace.Snapshot, candidate, operationInventory)
 		if err != nil {
 			return err

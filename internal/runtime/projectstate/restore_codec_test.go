@@ -19,6 +19,8 @@ const (
 	restoreCleanReceiptGolden      = "{\"schema_version\":1,\"action\":\"restore\",\"outcome\":\"clean\",\"result\":{\"restored_digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"rebased_through_generation\":4,\"conflicts\":[],\"stash_retained\":false},\"conflict_retry_digest\":null}\n"
 	restoreConflictedResultGolden  = "{\"restored_digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"rebased_through_generation\":4,\"conflicts\":[{\"id\":\"sha256:1c7adaf28e9f811f3039b88a685ed8f88510c5d3445d66c213d96bbc1ef3ca92\",\"key\":{\"kind\":\"task\",\"id\":\"22222222-2222-4222-8222-222222222222\"},\"field_path\":\"/title\",\"kind\":\"same_field\",\"base\":{\"present\":true,\"value\":\"base\"},\"ours\":{\"present\":true,\"value\":\"ours\"},\"theirs\":{\"present\":true,\"value\":\"theirs\"}}],\"stash_retained\":true}\n"
 	restoreConflictedReceiptGolden = "{\"schema_version\":1,\"action\":\"restore\",\"outcome\":\"conflicted\",\"result\":{\"restored_digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"rebased_through_generation\":4,\"conflicts\":[{\"id\":\"sha256:1c7adaf28e9f811f3039b88a685ed8f88510c5d3445d66c213d96bbc1ef3ca92\",\"key\":{\"kind\":\"task\",\"id\":\"22222222-2222-4222-8222-222222222222\"},\"field_path\":\"/title\",\"kind\":\"same_field\",\"base\":{\"present\":true,\"value\":\"base\"},\"ours\":{\"present\":true,\"value\":\"ours\"},\"theirs\":{\"present\":true,\"value\":\"theirs\"}}],\"stash_retained\":true},\"conflict_retry_digest\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}\n"
+	restoreCleanReceiptV2Golden    = "{\"schema_version\":2,\"action\":\"restore\",\"outcome\":\"clean\",\"workspace_revision\":7,\"result\":{\"restored_digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"rebased_through_generation\":4,\"conflicts\":[],\"stash_retained\":false},\"conflict_retry_digest\":null}\n"
+	restoreConflictReceiptV2Golden = "{\"schema_version\":2,\"action\":\"restore\",\"outcome\":\"conflicted\",\"workspace_revision\":7,\"result\":{\"restored_digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"rebased_through_generation\":4,\"conflicts\":[{\"id\":\"sha256:1c7adaf28e9f811f3039b88a685ed8f88510c5d3445d66c213d96bbc1ef3ca92\",\"key\":{\"kind\":\"task\",\"id\":\"22222222-2222-4222-8222-222222222222\"},\"field_path\":\"/title\",\"kind\":\"same_field\",\"base\":{\"present\":true,\"value\":\"base\"},\"ours\":{\"present\":true,\"value\":\"ours\"},\"theirs\":{\"present\":true,\"value\":\"theirs\"}}],\"stash_retained\":true},\"conflict_retry_digest\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}\n"
 )
 
 func TestRestoreRequestDigestGolden(t *testing.T) {
@@ -118,6 +120,47 @@ func TestRestoreConflictedReceiptGolden(t *testing.T) {
 	}
 	assertRestoreCodecGolden(t, envelope, restoreConflictedReceiptGolden,
 		"sha256:76cbbe824c0a4640ae8feaf2f541573ab4c7df7e0f88130bfab3ef2b6cacc672")
+}
+
+func TestRestoreReceiptV2GoldenStoresProjectedCommittedRevision(t *testing.T) {
+	const revision int64 = 7
+	clean, err := encodeCleanRestoreReceiptV2(restoreCodecCleanResult(), revision)
+	if err != nil || string(clean) != restoreCleanReceiptV2Golden {
+		t.Fatalf("encodeCleanRestoreReceiptV2()=(%q,%v), want golden", clean, err)
+	}
+	retry := restoreCodecRetryDigest()
+	conflicted, err := encodeConflictedRestoreReceiptV2(restoreCodecConflictedResult(t), revision, retry)
+	if err != nil || string(conflicted) != restoreConflictReceiptV2Golden {
+		t.Fatalf("encodeConflictedRestoreReceiptV2()=(%q,%v), want golden", conflicted, err)
+	}
+
+	req := restoreCodecRequest()
+	requestDigest, err := restoreRequestDigest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, outcome string
+		raw           json.RawMessage
+		wantRetry     bool
+	}{
+		{name: "clean", outcome: "clean", raw: clean},
+		{name: "conflicted", outcome: "conflicted", raw: conflicted, wantRetry: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			row := restoreCodecReceipt(t, req, test.outcome)
+			row.ResultJSON = bytes.Clone(test.raw)
+			decoded, err := decodeRestoreReceipt(row, req, requestDigest)
+			if err != nil || decoded.SchemaVersion != 2 || decoded.WorkspaceRevision != revision ||
+				(decoded.ConflictRetryDigest != nil) != test.wantRetry {
+				t.Fatalf("decode v2 receipt=(%+v,%v)", decoded, err)
+			}
+		})
+	}
+
+	if got, err := encodeCleanRestoreReceiptV2(restoreCodecCleanResult(), 0); err == nil || got != nil {
+		t.Fatalf("zero revision v2 receipt=(%q,%v), want nil,error", got, err)
+	}
 }
 
 func TestEncodeRestoreReceiptInvariantMatrix(t *testing.T) {

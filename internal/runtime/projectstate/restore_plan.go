@@ -38,6 +38,9 @@ type restorePlan struct {
 	Result           RestoreStashResult
 }
 
+// buildRestorePlan is retained for Task-14 deletion with the superseded
+// complete-history retry authority. Production restore paths use the bounded
+// current-state entrypoint below.
 func buildRestorePlan(retry localstore.WorkspaceRestoreRetryState) (restorePlan, error) {
 	stash, err := proveRestoreStash(retry)
 	if err != nil {
@@ -47,6 +50,22 @@ func buildRestorePlan(retry localstore.WorkspaceRestoreRetryState) (restorePlan,
 	if err != nil {
 		return restorePlan{}, err
 	}
+	return buildRestorePlanFromProofs(stash, current)
+}
+
+func buildRestoreCurrentPlan(current localstore.WorkspaceRestoreCurrentState) (restorePlan, error) {
+	stash, err := proveRestoreCurrentStash(current)
+	if err != nil {
+		return restorePlan{}, err
+	}
+	composed, err := composeRestoreCurrentState(current)
+	if err != nil {
+		return restorePlan{}, err
+	}
+	return buildRestorePlanFromProofs(stash, composed)
+}
+
+func buildRestorePlanFromProofs(stash restoreStashProof, current currentProof) (restorePlan, error) {
 	merged, err := ThreeWayRebase(stash.SourceBase, current.Snapshot, stash.Composed)
 	if err != nil {
 		return restorePlan{}, fmt.Errorf("projectstate: restore stash semantic rebase: %w", err)
@@ -76,15 +95,25 @@ func buildRestorePlan(retry localstore.WorkspaceRestoreRetryState) (restorePlan,
 	return plan, nil
 }
 
-func proveRestoreStash(retry localstore.WorkspaceRestoreRetryState) (restoreStashProof, error) {
-	if retry.Operations == nil {
-		return restoreStashProof{}, fmt.Errorf("%w: complete operation audit is nil", ErrStashOperationMismatch)
+func proveRestoreCurrentStash(current localstore.WorkspaceRestoreCurrentState) (restoreStashProof, error) {
+	if current.StashOperations == nil {
+		return restoreStashProof{}, fmt.Errorf("%w: named stash operations are nil", ErrStashOperationMismatch)
 	}
-	binding := retry.Workspace.Binding
+	owned, err := validateRestoreOperationRows(current.StashOperations)
+	if err != nil {
+		return restoreStashProof{}, err
+	}
+	return proveRestoreStashFromOwned(current.Workspace.Binding, current.Stash, owned)
+}
+
+func proveRestoreStashFromOwned(
+	binding types.WorkspaceBinding,
+	stash localstore.WorkspaceStashRecord,
+	owned []restoreAuditOperation,
+) (restoreStashProof, error) {
 	if err := binding.Validate(); err != nil {
 		return restoreStashProof{}, fmt.Errorf("projectstate: invalid restore binding: %w", err)
 	}
-	stash := retry.Stash
 	if !canonicalUUIDv4(stash.StashID) {
 		return restoreStashProof{}, fmt.Errorf("%w: invalid stash ID", ErrStashCorrupt)
 	}
@@ -120,19 +149,9 @@ func proveRestoreStash(retry localstore.WorkspaceRestoreRetryState) (restoreStas
 		return restoreStashProof{}, fmt.Errorf("%w: replay does not reproduce composed stash", ErrStashCorrupt)
 	}
 
-	audit, err := validateRestoreAudit(retry.Operations)
-	if err != nil {
-		return restoreStashProof{}, err
-	}
 	expected := make([]StoredOperation, 0, len(replay.AbsorbedOperations)+len(replay.Operations))
 	expected = append(expected, replay.AbsorbedOperations...)
 	expected = append(expected, replay.Operations...)
-	owned := make([]restoreAuditOperation, 0, len(expected))
-	for _, row := range audit {
-		if row.row.StashedByStashID != nil && *row.row.StashedByStashID == stash.StashID {
-			owned = append(owned, row)
-		}
-	}
 	if len(owned) != len(expected) {
 		return restoreStashProof{}, fmt.Errorf("%w: owned row count is %d, want %d", ErrStashOperationMismatch, len(owned), len(expected))
 	}
@@ -140,6 +159,7 @@ func proveRestoreStash(retry localstore.WorkspaceRestoreRetryState) (restoreStas
 	for index := range expected {
 		wantJSON, canonicalErr := state.CanonicalOperation(expected[index].Operation)
 		if canonicalErr != nil || owned[index].row.State != "stashed" ||
+			owned[index].row.StashedByStashID == nil || *owned[index].row.StashedByStashID != stash.StashID ||
 			owned[index].row.Generation != expected[index].Generation ||
 			owned[index].row.OperationID != expected[index].Operation.ID ||
 			!bytes.Equal(owned[index].row.OperationJSON, wantJSON) {
@@ -148,16 +168,93 @@ func proveRestoreStash(retry localstore.WorkspaceRestoreRetryState) (restoreStas
 		rows[index] = cloneImportOperation(owned[index].row)
 	}
 	absorbedCount := len(replay.AbsorbedOperations)
-	absorbed := append([]localstore.WorkspaceOperation{}, rows[:absorbedCount]...)
-	later := append([]localstore.WorkspaceOperation{}, rows[absorbedCount:]...)
 	ownedReplay, err := cloneRestoreReplay(replay)
 	if err != nil {
 		return restoreStashProof{}, fmt.Errorf("%w: clone replay: %v", ErrStashCorrupt, err)
 	}
 	return restoreStashProof{
 		SourceBase: source, Composed: composed, Replay: ownedReplay,
-		AbsorbedRows: absorbed, LaterRows: later,
+		AbsorbedRows: append([]localstore.WorkspaceOperation{}, rows[:absorbedCount]...),
+		LaterRows:    append([]localstore.WorkspaceOperation{}, rows[absorbedCount:]...),
 	}, nil
+}
+
+func composeRestoreCurrentState(current localstore.WorkspaceRestoreCurrentState) (currentProof, error) {
+	if current.CurrentOperations == nil {
+		return currentProof{}, fmt.Errorf("%w: current operations are nil", ErrStashOperationMismatch)
+	}
+	binding := current.Workspace.Binding
+	if err := binding.Validate(); err != nil {
+		return currentProof{}, fmt.Errorf("projectstate: invalid restore current binding: %w", err)
+	}
+	acceptedTree, err := state.EncodeTree(current.Workspace.Snapshot)
+	if err != nil || validateMatchingTree(acceptedTree, state.Digest(binding.AcceptedTreeDigest), binding) != nil {
+		return currentProof{}, fmt.Errorf("projectstate: invalid restore current accepted snapshot")
+	}
+	accepted, err := state.DecodeTree(acceptedTree)
+	if err != nil {
+		return currentProof{}, fmt.Errorf("projectstate: clone restore current accepted snapshot: %w", err)
+	}
+	if err := validateStashCandidate(current.Candidate, accepted.Digest, binding); err != nil {
+		return currentProof{}, fmt.Errorf("projectstate: invalid restore current candidate: %w", err)
+	}
+	if current.Candidate != nil && (!types.ValidCandidateImportOrigin(current.Candidate.ImportedBy) || current.Candidate.ImportedAt.IsZero() || !zeroOffsetTime(current.Candidate.ImportedAt)) {
+		return currentProof{}, fmt.Errorf("projectstate: invalid restore current candidate attribution")
+	}
+	start, boundary := selectCandidateStart(accepted, current.Candidate)
+	direct := accepted
+	if current.Candidate != nil {
+		direct = current.Candidate.DirectSnapshot
+	}
+	direct, err = cloneImportSnapshot(direct)
+	if err != nil {
+		return currentProof{}, fmt.Errorf("projectstate: clone restore direct snapshot: %w", err)
+	}
+	decoded, err := validateRestoreOperationRows(current.CurrentOperations)
+	if err != nil {
+		return currentProof{}, err
+	}
+	activeRows := make([]localstore.WorkspaceOperation, 0)
+	operations := make([]StoredOperation, 0)
+	for _, operation := range decoded {
+		row := operation.row
+		switch row.State {
+		case "active":
+			if row.Generation <= boundary {
+				return currentProof{}, fmt.Errorf("%w: active row at or below current boundary", ErrStashOperationMismatch)
+			}
+			activeRows = append(activeRows, cloneImportOperation(row))
+			operations = append(operations, StoredOperation{Generation: row.Generation, Operation: operation.operation})
+		case "rebased":
+			if row.Generation > boundary {
+				return currentProof{}, fmt.Errorf("%w: rebased row above current boundary", ErrStashOperationMismatch)
+			}
+		default:
+			return currentProof{}, fmt.Errorf("%w: non-current operation in current workset", ErrStashOperationMismatch)
+		}
+	}
+	composed, err := Compose(start, boundary, operations)
+	if err != nil {
+		return currentProof{}, fmt.Errorf("projectstate: compose restore current state: %w", err)
+	}
+	return currentProof{DirectSnapshot: direct, Snapshot: composed.Snapshot, ThroughGeneration: composed.ThroughGeneration, ActiveRows: activeRows}, nil
+}
+
+func proveRestoreStash(retry localstore.WorkspaceRestoreRetryState) (restoreStashProof, error) {
+	if retry.Operations == nil {
+		return restoreStashProof{}, fmt.Errorf("%w: complete operation audit is nil", ErrStashOperationMismatch)
+	}
+	audit, err := validateRestoreAudit(retry.Operations)
+	if err != nil {
+		return restoreStashProof{}, err
+	}
+	owned := make([]restoreAuditOperation, 0)
+	for _, row := range audit {
+		if row.row.StashedByStashID != nil && *row.row.StashedByStashID == retry.Stash.StashID {
+			owned = append(owned, row)
+		}
+	}
+	return proveRestoreStashFromOwned(retry.Workspace.Binding, retry.Stash, owned)
 }
 
 func composeRestoreCurrent(retry localstore.WorkspaceRestoreRetryState) (currentProof, error) {
@@ -231,7 +328,7 @@ func validateRestoreAudit(records []localstore.WorkspaceOperationAuditRecord) ([
 	if records == nil {
 		return nil, fmt.Errorf("%w: complete operation audit is nil", ErrStashOperationMismatch)
 	}
-	decoded := make([]restoreAuditOperation, 0, len(records))
+	rows := make([]localstore.WorkspaceOperation, len(records))
 	seenIDs := make(map[string]struct{}, len(records))
 	var previousGeneration int64
 	for index, record := range records {
@@ -243,6 +340,27 @@ func validateRestoreAudit(records []localstore.WorkspaceOperationAuditRecord) ([
 		previousGeneration = row.Generation
 		if _, duplicate := seenIDs[row.OperationID]; duplicate {
 			return nil, fmt.Errorf("%w: duplicate operation audit identity", ErrStashOperationMismatch)
+		}
+		seenIDs[row.OperationID] = struct{}{}
+		rows[index] = row
+	}
+	return validateRestoreOperationRows(rows)
+}
+
+func validateRestoreOperationRows(records []localstore.WorkspaceOperation) ([]restoreAuditOperation, error) {
+	if records == nil {
+		return nil, fmt.Errorf("%w: operation rows are nil", ErrStashOperationMismatch)
+	}
+	decoded := make([]restoreAuditOperation, 0, len(records))
+	seenIDs := make(map[string]struct{}, len(records))
+	var previousGeneration int64
+	for index, row := range records {
+		if row.Generation <= 0 || (index > 0 && row.Generation <= previousGeneration) || !types.CanonicalUUID(row.OperationID) {
+			return nil, fmt.Errorf("%w: invalid operation metadata at row %d", ErrStashOperationMismatch, index)
+		}
+		previousGeneration = row.Generation
+		if _, duplicate := seenIDs[row.OperationID]; duplicate {
+			return nil, fmt.Errorf("%w: duplicate operation identity", ErrStashOperationMismatch)
 		}
 		seenIDs[row.OperationID] = struct{}{}
 		switch row.State {
@@ -259,11 +377,11 @@ func validateRestoreAudit(records []localstore.WorkspaceOperationAuditRecord) ([
 		}
 		operation, err := state.DecodeOperation(row.OperationJSON)
 		if err != nil {
-			return nil, fmt.Errorf("%w: decode operation audit row %d: %v", ErrStashOperationMismatch, index, err)
+			return nil, fmt.Errorf("%w: decode operation row %d: %v", ErrStashOperationMismatch, index, err)
 		}
 		canonical, err := state.CanonicalOperation(operation)
 		if err != nil || operation.ID != row.OperationID || !bytes.Equal(canonical, row.OperationJSON) {
-			return nil, fmt.Errorf("%w: operation audit row %d differs from canonical operation", ErrStashOperationMismatch, index)
+			return nil, fmt.Errorf("%w: operation row %d differs from canonical operation", ErrStashOperationMismatch, index)
 		}
 		decoded = append(decoded, restoreAuditOperation{row: cloneImportOperation(row), operation: operation})
 	}

@@ -1225,6 +1225,97 @@ func TestRestoreRetryTwoConflictMembershipAndSemanticEvidence(t *testing.T) {
 	}
 }
 
+func TestRestoreStashRetryDigestV2TargetsSemanticCurrentWorkset(t *testing.T) {
+	req, requestDigest, legacy := restoreRetryFixtureWithTerminal(t)
+	current := restoreCurrentStateFixture(legacy)
+	const projectedRevision int64 = 9
+	base, err := restoreStashRetryDigestV2(req, requestDigest, projectedRevision, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rawOnly := cloneRestoreCurrentState(t, current)
+	rawOnly.Candidate.ImportedAt = rawOnly.Candidate.ImportedAt.Add(time.Hour)
+	rawOnly.Stash.CreatedAt = rawOnly.Stash.CreatedAt.Add(time.Hour)
+	rawOnly.Stash.ActorJSON = "raw storage echo excluded from v2"
+	if got, err := restoreStashRetryDigestV2(req, requestDigest, projectedRevision, rawOnly); err != nil || got != base {
+		t.Fatalf("raw-only metadata changed v2 digest=(%q,%v), want %q", got, err, base)
+	}
+
+	for _, test := range []struct {
+		name     string
+		revision int64
+		edit     func(*localstore.WorkspaceRestoreCurrentState)
+	}{
+		{name: "recorded revision", revision: projectedRevision + 1},
+		{name: "candidate provenance", revision: projectedRevision, edit: func(value *localstore.WorkspaceRestoreCurrentState) {
+			value.Candidate.ImportedBy = "00000000-0000-4000-8000-000000000062"
+		}},
+		{name: "named stash label", revision: projectedRevision, edit: func(value *localstore.WorkspaceRestoreCurrentState) {
+			value.Stash.Label = "changed semantic label"
+		}},
+		{name: "open conflict evidence", revision: projectedRevision, edit: func(value *localstore.WorkspaceRestoreCurrentState) {
+			value.OpenConflicts[0].OursJSON = `"changed"`
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := cloneRestoreCurrentState(t, current)
+			if test.edit != nil {
+				test.edit(&changed)
+			}
+			got, err := restoreStashRetryDigestV2(req, requestDigest, test.revision, changed)
+			if err == nil && got == base {
+				t.Fatalf("semantic mutation retained v2 digest %q", got)
+			}
+		})
+	}
+}
+
+func restoreCurrentStateFixture(legacy localstore.WorkspaceRestoreRetryState) localstore.WorkspaceRestoreCurrentState {
+	current := localstore.WorkspaceRestoreCurrentState{
+		Workspace: legacy.Workspace, Candidate: legacy.Candidate, Stash: legacy.Stash,
+		OpenConflicts:     append([]localstore.WorkspaceConflictOccurrence{}, legacy.OpenConflicts...),
+		CurrentOperations: []localstore.WorkspaceOperation{}, StashOperations: []localstore.WorkspaceOperation{},
+	}
+	for _, record := range legacy.Operations {
+		row := cloneImportOperation(record.WorkspaceOperation)
+		if row.State == "active" || row.State == "rebased" {
+			current.CurrentOperations = append(current.CurrentOperations, row)
+		}
+		if row.StashedByStashID != nil && *row.StashedByStashID == legacy.Stash.StashID {
+			current.StashOperations = append(current.StashOperations, row)
+		}
+	}
+	return current
+}
+
+func cloneRestoreCurrentState(t *testing.T, value localstore.WorkspaceRestoreCurrentState) localstore.WorkspaceRestoreCurrentState {
+	t.Helper()
+	cloned := value
+	cloned.Workspace.Snapshot = composeCloneSnapshot(t, value.Workspace.Snapshot)
+	if value.Candidate != nil {
+		candidate, err := cloneImportCandidate(value.Candidate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cloned.Candidate = candidate
+	}
+	cloned.Stash.SourceTree = cloneCheckpointTree(value.Stash.SourceTree)
+	cloned.Stash.ComposedTree = cloneCheckpointTree(value.Stash.ComposedTree)
+	cloned.CurrentOperations = cloneRestoreOperationRows(value.CurrentOperations)
+	cloned.StashOperations = cloneRestoreOperationRows(value.StashOperations)
+	cloned.OpenConflicts = append([]localstore.WorkspaceConflictOccurrence{}, value.OpenConflicts...)
+	return cloned
+}
+
+func cloneRestoreOperationRows(rows []localstore.WorkspaceOperation) []localstore.WorkspaceOperation {
+	cloned := make([]localstore.WorkspaceOperation, len(rows))
+	for index := range rows {
+		cloned[index] = cloneImportOperation(rows[index])
+	}
+	return cloned
+}
+
 func semanticallyDifferentRestoreConflict(t *testing.T, row localstore.WorkspaceConflictOccurrence) localstore.WorkspaceConflictOccurrence {
 	t.Helper()
 	conflicts, err := decodeWorkspaceConflictOccurrences([]localstore.WorkspaceConflictOccurrence{row})

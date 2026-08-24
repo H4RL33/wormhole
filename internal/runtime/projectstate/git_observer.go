@@ -74,7 +74,6 @@ type observeGitBaseState struct {
 	candidate                *localstore.WorkspaceCandidateRecord
 	audit                    []restoreAuditOperation
 	openConflicts            []localstore.WorkspaceConflictOccurrence
-	disposition              localstore.WorkspaceMaterializationDisposition
 	dispositionProof         materializationDispositionProof
 	eligible                 *localstore.WorkspaceMaterializationRecord
 	materializationPriorTree state.Tree
@@ -409,15 +408,6 @@ func loadObserveGitBaseState(
 		return observeGitBaseState{}, err
 	}
 
-	auditRecords, err := tx.OperationAudit(ctx)
-	if err != nil {
-		return observeGitBaseState{}, err
-	}
-	audit, err := validateRestoreAudit(auditRecords)
-	if err != nil {
-		return observeGitBaseState{}, fmt.Errorf("projectstate: invalid complete Git observation operation audit: %w", err)
-	}
-
 	openConflicts, err := tx.OpenConflictOccurrences(ctx)
 	if err != nil {
 		return observeGitBaseState{}, err
@@ -430,25 +420,19 @@ func loadObserveGitBaseState(
 		return observeGitBaseState{}, fmt.Errorf("projectstate: workspace conflict state does not match open conflict evidence")
 	}
 
-	eligible, err := tx.AcceptanceEligibleMaterialization(ctx)
+	disposition, proof, eligible, err := loadCurrentMaterializationDisposition(ctx, tx)
 	if err != nil {
 		return observeGitBaseState{}, err
 	}
-	if eligible != nil {
-		cloned := cloneMaterializationRecord(*eligible)
-		eligible = &cloned
+	currentRows := make([]localstore.WorkspaceOperation, 0, len(disposition.Operations))
+	for _, row := range disposition.Operations {
+		if row.State == "active" || row.State == "rebased" {
+			currentRows = append(currentRows, cloneImportOperation(row))
+		}
 	}
-	disposition, err := tx.MaterializationDisposition(ctx)
+	audit, err := validateRestoreOperationRows(currentRows)
 	if err != nil {
-		return observeGitBaseState{}, err
-	}
-	disposition = cloneImportDisposition(disposition)
-	proof, err := proveMaterializationDisposition(disposition)
-	if err != nil {
-		return observeGitBaseState{}, err
-	}
-	if err := crossCheckObserveGitBaseAudit(audit, disposition.Operations); err != nil {
-		return observeGitBaseState{}, err
+		return observeGitBaseState{}, fmt.Errorf("projectstate: invalid current Git observation operations: %w", err)
 	}
 	if eligible != nil && candidate == nil {
 		return observeGitBaseState{}, fmt.Errorf("projectstate: acceptance-eligible materialization has no candidate")
@@ -498,7 +482,7 @@ func loadObserveGitBaseState(
 
 	return observeGitBaseState{
 		workspace: workspace, candidate: candidate, audit: audit,
-		openConflicts: openConflicts, disposition: disposition, dispositionProof: proof,
+		openConflicts: openConflicts, dispositionProof: proof,
 		eligible: eligible, materializationPriorTree: materializationPriorTree, activeRows: activeRows,
 		discardRows: discardRows, proposal: proposal,
 	}, nil
@@ -527,18 +511,6 @@ func composeObserveGitBaseProposal(loaded observeGitBaseState) (ComposedView, er
 		return ComposedView{}, fmt.Errorf("projectstate: compose current Git observation proposal: %w", err)
 	}
 	return current, nil
-}
-
-func crossCheckObserveGitBaseAudit(audit []restoreAuditOperation, disposition []localstore.WorkspaceOperation) error {
-	if audit == nil || disposition == nil || len(audit) != len(disposition) {
-		return fmt.Errorf("projectstate: materialization disposition differs from complete operation audit")
-	}
-	for index := range audit {
-		if !equalObserveGitBaseOperation(audit[index].row, disposition[index]) {
-			return fmt.Errorf("projectstate: materialization disposition operation %d differs from complete audit", index)
-		}
-	}
-	return nil
 }
 
 func equalObserveGitBaseOperation(left, right localstore.WorkspaceOperation) bool {

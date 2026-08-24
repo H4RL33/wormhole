@@ -261,10 +261,12 @@ func TestImportMaterializationProofAloneAuthorizesResurrection(t *testing.T) {
 	for _, test := range []struct {
 		name           string
 		removeEnvelope bool
+		journalState   string
 		wantErr        bool
 	}{
-		{name: "proved match"},
-		{name: "missing proof envelope", removeEnvelope: true, wantErr: true},
+		{name: "proved match", journalState: "published"},
+		{name: "missing proof envelope", journalState: "published", removeEnvelope: true, wantErr: true},
+		{name: "prepared current authority blocks import", journalState: "prepared", wantErr: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
@@ -310,7 +312,7 @@ func TestImportMaterializationProofAloneAuthorizesResurrection(t *testing.T) {
 				tombstoned.Digest, state.Digest(registered.Binding.AcceptedTreeDigest), registered.Binding.Checkout.CanonicalPath,
 				registered.Binding.Checkout.Device, registered.Binding.Checkout.Inode, tombstoned.Digest, live.Digest, 0,
 				encodeServiceSnapshot(t, tombstoned), encodeServiceSnapshot(t, live),
-				filepath.Join(repository.root, ".wormhole-stage"), filepath.Join(repository.root, ".wormhole-backup"), "published", included,
+				filepath.Join(repository.root, ".wormhole-stage"), filepath.Join(repository.root, ".wormhole-backup"), test.journalState, included,
 				" review\n", " prior-candidate\n", 1,
 			); err != nil {
 				t.Fatal(err)
@@ -325,7 +327,8 @@ func TestImportMaterializationProofAloneAuthorizesResurrection(t *testing.T) {
 			}
 			got, err := service.Import(context.Background(), request)
 			if test.wantErr {
-				if err == nil || !reflect.DeepEqual(got, ImportResult{}) {
+				if err == nil || !reflect.DeepEqual(got, ImportResult{}) ||
+					(test.journalState == "prepared" && !strings.Contains(err.Error(), "prepared")) {
 					t.Fatalf("Import()=(%+v,%v), want proof failure", got, err)
 				}
 				return

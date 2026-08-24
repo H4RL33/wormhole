@@ -89,6 +89,12 @@ type WorkspaceMutationTx struct {
 	revision workspaceRevisionTracker
 }
 
+// ProjectedWorkspaceRevision returns the revision this transaction will commit
+// if its currently recorded writes succeed.
+func (tx *WorkspaceMutationTx) ProjectedWorkspaceRevision(ctx context.Context) (int64, error) {
+	return tx.projectedWorkspaceRevision(ctx)
+}
+
 func NewWorkspaceRepo(db *sql.DB) *WorkspaceRepo {
 	return &WorkspaceRepo{db: db}
 }

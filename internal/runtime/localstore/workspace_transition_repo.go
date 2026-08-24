@@ -112,6 +112,40 @@ func (tx *WorkspaceMutationTx) TransitionReceipt(ctx context.Context, requestID 
 // InsertTransitionReceipt appends exactly one canonical immutable receipt to
 // this transaction's exact workspace.
 func (tx *WorkspaceMutationTx) InsertTransitionReceipt(ctx context.Context, receipt WorkspaceTransitionReceiptInsert) error {
+	if err := tx.insertTransitionReceipt(ctx, receipt); err != nil {
+		return err
+	}
+	return tx.markWorkspaceDirty(ctx)
+}
+
+// InsertTransitionReceiptAtProjectedRevision marks the guaranteed receipt
+// write before projecting the transaction revision, then builds and inserts
+// the revision-bound receipt without marking the tracker a second time.
+func (tx *WorkspaceMutationTx) InsertTransitionReceiptAtProjectedRevision(
+	ctx context.Context,
+	build func(int64) (WorkspaceTransitionReceiptInsert, error),
+) error {
+	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
+		return ErrNotFound
+	}
+	if build == nil {
+		return fmt.Errorf("localstore: nil projected transition receipt builder")
+	}
+	if err := tx.markWorkspaceDirty(ctx); err != nil {
+		return err
+	}
+	projectedRevision, err := tx.projectedWorkspaceRevision(ctx)
+	if err != nil {
+		return err
+	}
+	receipt, err := build(projectedRevision)
+	if err != nil {
+		return err
+	}
+	return tx.insertTransitionReceipt(ctx, receipt)
+}
+
+func (tx *WorkspaceMutationTx) insertTransitionReceipt(ctx context.Context, receipt WorkspaceTransitionReceiptInsert) error {
 	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
 		return ErrNotFound
 	}
@@ -142,7 +176,7 @@ func (tx *WorkspaceMutationTx) InsertTransitionReceipt(ctx context.Context, rece
 	if inserted != 1 {
 		return fmt.Errorf("localstore: workspace transition receipt insert affected %d rows", inserted)
 	}
-	return tx.markWorkspaceDirty(ctx)
+	return nil
 }
 
 type workspaceTransitionReceiptQueryer interface {

@@ -226,10 +226,11 @@ func TestServiceStashAbsorbedSparseSuffixLeavesTerminalHistoryUnchanged(t *testi
 	assertStashFinished(t, fixture.service, fixture.req.Scope)
 }
 
-func TestServiceStashCompleteAuditRejectsWrongSideAndCorruptTerminalRows(t *testing.T) {
+func TestServiceStashCurrentWorksetRejectsWrongSideAndIgnoresCorruptTerminalRows(t *testing.T) {
 	for _, test := range []struct {
-		name  string
-		setup func(*testing.T, stashServiceFixture)
+		name        string
+		setup       func(*testing.T, stashServiceFixture)
+		wantSuccess bool
 	}{
 		{name: "active at rebased boundary", setup: func(t *testing.T, fixture stashServiceFixture) {
 			operation := servicePutTaskOperation(fixture.accepted, "90000000-0000-4000-8000-000000000004", "80000000-0000-4000-8000-000000000004", "wrong active")
@@ -262,7 +263,7 @@ func TestServiceStashCompleteAuditRejectsWrongSideAndCorruptTerminalRows(t *test
 				"90000000-0000-4000-8000-000000000001", "{"); err != nil {
 				t.Fatal(err)
 			}
-		}},
+		}, wantSuccess: true},
 		{name: "corrupt terminal storage class", setup: func(t *testing.T, fixture stashServiceFixture) {
 			operation := servicePutTaskOperation(fixture.accepted, "90000000-0000-4000-8000-000000000001", "80000000-0000-4000-8000-000000000001", "terminal")
 			raw, err := state.CanonicalOperation(operation)
@@ -276,13 +277,22 @@ func TestServiceStashCompleteAuditRejectsWrongSideAndCorruptTerminalRows(t *test
 			`, fixture.req.Scope.ProjectID, fixture.req.Scope.WorkspaceID, 1, operation.ID, raw); err != nil {
 				t.Fatal(err)
 			}
-		}},
+		}, wantSuccess: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newStashServiceFixture(t)
 			test.setup(t, fixture)
 			before := captureStashRawState(t, fixture.store)
 			got, err := fixture.service.Stash(context.Background(), fixture.req)
+			if test.wantSuccess {
+				if err != nil || got.StashID != fixture.stashID {
+					t.Fatalf("Stash()=(%+v,%v), want current-workset success", got, err)
+				}
+				if err := fixture.service.repo.AuditWorkspaceHistory(context.Background(), fixture.req.Scope); err == nil {
+					t.Fatal("AuditWorkspaceHistory accepted corrupt terminal operation")
+				}
+				return
+			}
 			if err == nil || got != (StashResult{}) {
 				t.Fatalf("Stash()=(%+v,%v), want zero failure", got, err)
 			}

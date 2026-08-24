@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/types"
@@ -30,6 +31,66 @@ type WorkspaceRestoreRetryState struct {
 	StashSourceTreeBlobDigest      projectstate.Digest
 	StashComposedTreeBlobDigest    projectstate.Digest
 	OpenConflicts                  []WorkspaceConflictOccurrence
+}
+
+// WorkspaceRestoreCurrentState is the bounded semantic authority for one
+// restore attempt or conflicted retry. Retained terminal rows outside the
+// named stash are deliberately not loaded.
+type WorkspaceRestoreCurrentState struct {
+	Workspace         WorkspaceRecord
+	Candidate         *WorkspaceCandidateRecord
+	CurrentOperations []WorkspaceOperation
+	Stash             WorkspaceStashRecord
+	StashOperations   []WorkspaceOperation
+	OpenConflicts     []WorkspaceConflictOccurrence
+}
+
+// RestoreCurrentState reads only the exact named stash and current proposal
+// workset from this caller-owned exact-workspace transaction.
+func (tx *WorkspaceMutationTx) RestoreCurrentState(ctx context.Context, stashID string) (WorkspaceRestoreCurrentState, error) {
+	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
+		return WorkspaceRestoreCurrentState{}, ErrNotFound
+	}
+	if !validCanonicalUUIDv4(stashID) {
+		return WorkspaceRestoreCurrentState{}, fmt.Errorf("localstore: invalid restore current stash ID")
+	}
+	workspace, err := tx.Workspace(ctx)
+	if err != nil {
+		return WorkspaceRestoreCurrentState{}, err
+	}
+	candidate, err := tx.Candidate(ctx)
+	if err != nil {
+		return WorkspaceRestoreCurrentState{}, err
+	}
+	stash, err := tx.Stash(ctx, stashID)
+	if err != nil {
+		return WorkspaceRestoreCurrentState{}, err
+	}
+	if stash == nil {
+		return WorkspaceRestoreCurrentState{}, ErrNotFound
+	}
+	active, err := tx.ActiveOperationsAfter(ctx, 0)
+	if err != nil {
+		return WorkspaceRestoreCurrentState{}, err
+	}
+	rebased, err := tx.RebasedOperationsAtOrBefore(ctx, int64(^uint64(0)>>1))
+	if err != nil {
+		return WorkspaceRestoreCurrentState{}, err
+	}
+	current := append(rebased, active...)
+	sort.Slice(current, func(i, j int) bool { return current[i].Generation < current[j].Generation })
+	owned, err := tx.StashedOperationsByStashID(ctx, stashID)
+	if err != nil {
+		return WorkspaceRestoreCurrentState{}, err
+	}
+	conflicts, err := tx.OpenConflictOccurrences(ctx)
+	if err != nil {
+		return WorkspaceRestoreCurrentState{}, err
+	}
+	return WorkspaceRestoreCurrentState{
+		Workspace: workspace, Candidate: candidate, CurrentOperations: current,
+		Stash: *stash, StashOperations: owned, OpenConflicts: conflicts,
+	}, nil
 }
 
 // RestoreRetryState reads the complete state needed to prove a conflicted

@@ -49,14 +49,14 @@ func (s *Service) RestoreStash(ctx context.Context, req RestoreStashRequest) (Re
 			return nil
 		}
 
-		before, err := tx.RestoreRetryState(ctx, req.StashID)
+		before, err := tx.RestoreCurrentState(ctx, req.StashID)
 		if err != nil {
 			return err
 		}
-		if err := validateRestoreStatusConflictCoherence(before); err != nil {
+		if err := validateRestoreCurrentStatusConflictCoherence(before); err != nil {
 			return err
 		}
-		plan, err := buildRestorePlan(before)
+		plan, err := buildRestoreCurrentPlan(before)
 		if err != nil {
 			return err
 		}
@@ -90,7 +90,7 @@ func applyCleanRestore(
 	tx *localstore.WorkspaceMutationTx,
 	req RestoreStashRequest,
 	requestDigest state.Digest,
-	before localstore.WorkspaceRestoreRetryState,
+	before localstore.WorkspaceRestoreCurrentState,
 	plan restorePlan,
 	mutationTime time.Time,
 ) error {
@@ -134,7 +134,11 @@ func applyCleanRestore(
 	if err := tx.DeleteStash(ctx, req.StashID); err != nil {
 		return err
 	}
-	receiptJSON, err := encodeCleanRestoreReceipt(plan.Result)
+	projectedRevision, err := tx.ProjectedWorkspaceRevision(ctx)
+	if err != nil {
+		return err
+	}
+	receiptJSON, err := encodeCleanRestoreReceiptV2(plan.Result, projectedRevision)
 	if err != nil {
 		return err
 	}
@@ -149,7 +153,7 @@ func applyConflictedRestore(
 	tx *localstore.WorkspaceMutationTx,
 	req RestoreStashRequest,
 	requestDigest state.Digest,
-	before localstore.WorkspaceRestoreRetryState,
+	before localstore.WorkspaceRestoreCurrentState,
 	plan restorePlan,
 	mutationTime time.Time,
 ) error {
@@ -157,31 +161,29 @@ func applyConflictedRestore(
 	if err != nil {
 		return err
 	}
-	updatedAt, err := tx.SetStatusReturningUpdatedAt(ctx, "conflicted")
+	if _, err := tx.SetStatusReturningUpdatedAt(ctx, "conflicted"); err != nil {
+		return err
+	}
+	after, err := tx.RestoreCurrentState(ctx, req.StashID)
 	if err != nil {
 		return err
 	}
-	after, err := tx.RestoreRetryState(ctx, req.StashID)
-	if err != nil {
+	if err := validateConflictedRestoreCurrentTransition(before, after, persistedConflicts); err != nil {
 		return err
 	}
-	if !updatedAt.Equal(after.BindingUpdatedAt) {
-		return fmt.Errorf("projectstate: conflicted restore status timestamp differs from reread state")
-	}
-	if err := validateConflictedRestoreTransition(before, after, persistedConflicts); err != nil {
-		return err
-	}
-	retryDigest, err := restoreStashRetryDigest(req, requestDigest, after)
-	if err != nil {
-		return err
-	}
-	receiptJSON, err := encodeConflictedRestoreReceipt(plan.Result, retryDigest)
-	if err != nil {
-		return err
-	}
-	return tx.InsertTransitionReceipt(ctx, localstore.WorkspaceTransitionReceiptInsert{
-		RequestID: req.RequestID, Action: "restore", RequestDigest: requestDigest,
-		Actor: req.Actor, ResultJSON: receiptJSON, Outcome: "conflicted",
+	return tx.InsertTransitionReceiptAtProjectedRevision(ctx, func(projectedRevision int64) (localstore.WorkspaceTransitionReceiptInsert, error) {
+		retryDigest, err := restoreStashRetryDigestV2(req, requestDigest, projectedRevision, after)
+		if err != nil {
+			return localstore.WorkspaceTransitionReceiptInsert{}, err
+		}
+		receiptJSON, err := encodeConflictedRestoreReceiptV2(plan.Result, projectedRevision, retryDigest)
+		if err != nil {
+			return localstore.WorkspaceTransitionReceiptInsert{}, err
+		}
+		return localstore.WorkspaceTransitionReceiptInsert{
+			RequestID: req.RequestID, Action: "restore", RequestDigest: requestDigest,
+			Actor: req.Actor, ResultJSON: receiptJSON, Outcome: "conflicted",
+		}, nil
 	})
 }
 
@@ -195,26 +197,38 @@ func verifyConflictedRestoreReceipt(
 	if decoded.Outcome != "conflicted" || decoded.ConflictRetryDigest == nil {
 		return RestoreStashResult{}, fmt.Errorf("projectstate: invalid conflicted restore receipt")
 	}
-	persisted, err := tx.RestoreRetryState(ctx, req.StashID)
+	persisted, err := tx.RestoreCurrentState(ctx, req.StashID)
 	if err != nil {
 		return RestoreStashResult{}, err
 	}
-	if err := validateRestoreStatusConflictCoherence(persisted); err != nil {
+	if err := validateRestoreCurrentStatusConflictCoherence(persisted); err != nil {
 		return RestoreStashResult{}, err
 	}
-	plan, err := buildRestorePlan(persisted)
+	plan, err := buildRestoreCurrentPlan(persisted)
 	if err != nil {
 		return RestoreStashResult{}, err
 	}
 	if !reflect.DeepEqual(plan.Result, decoded.Result) {
 		return RestoreStashResult{}, fmt.Errorf("projectstate: conflicted restore retry result mismatch")
 	}
-	retryDigest, err := restoreStashRetryDigest(req, requestDigest, persisted)
-	if err != nil {
-		return RestoreStashResult{}, err
-	}
-	if retryDigest != *decoded.ConflictRetryDigest {
-		return RestoreStashResult{}, fmt.Errorf("projectstate: conflicted restore retry state mismatch")
+	switch decoded.SchemaVersion {
+	case 1:
+		if persisted.Workspace.WorkspaceRevision != 1 {
+			return RestoreStashResult{}, fmt.Errorf("projectstate: legacy conflicted restore retry revision mismatch")
+		}
+	case 2:
+		if persisted.Workspace.WorkspaceRevision != decoded.WorkspaceRevision {
+			return RestoreStashResult{}, fmt.Errorf("projectstate: conflicted restore retry revision mismatch")
+		}
+		retryDigest, err := restoreStashRetryDigestV2(req, requestDigest, decoded.WorkspaceRevision, persisted)
+		if err != nil {
+			return RestoreStashResult{}, err
+		}
+		if retryDigest != *decoded.ConflictRetryDigest {
+			return RestoreStashResult{}, fmt.Errorf("projectstate: conflicted restore retry state mismatch")
+		}
+	default:
+		return RestoreStashResult{}, fmt.Errorf("projectstate: unsupported restore receipt schema")
 	}
 	return cloneRestoreStashResult(decoded.Result), nil
 }

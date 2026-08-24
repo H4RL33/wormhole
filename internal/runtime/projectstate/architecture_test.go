@@ -157,11 +157,174 @@ func TestCoarsePrivateCorruptionFailsClosedWithoutCrossScopeMutation(t *testing.
 	}
 }
 
+func TestCurrentWorksetIgnoresTerminalCorruptionAndAuditReportsIt(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		prepare        func(*testing.T, *architectureFixture)
+		corruptCurrent func(*testing.T, *architectureFixture)
+		attempt        func(*testing.T, *architectureFixture) error
+	}{
+		{
+			name: "import",
+			prepare: func(t *testing.T, fixture *architectureFixture) {
+				direct := restoreProjectName(t, fixture.base.AcceptedSnapshot, "imported project", time.Minute)
+				writeImportSnapshot(t, fixture.targetRepository.root, direct)
+			},
+			corruptCurrent: func(t *testing.T, fixture *architectureFixture) {
+				insertServiceCandidate(t, fixture.store, fixture.target.Scope, fixture.base.AcceptedSnapshot.Digest,
+					fixture.base.AcceptedSnapshot, nil, 0)
+				corruptArchitectureCandidate(t, fixture)
+			},
+			attempt: func(t *testing.T, fixture *architectureFixture) error {
+				_, err := fixture.service.Import(context.Background(), ImportRequest{
+					Scope: fixture.target.Scope, Root: fixture.targetRepository.root, Actor: diffActorEnvelope(),
+				})
+				return err
+			},
+		},
+		{
+			name: "stash",
+			prepare: func(t *testing.T, fixture *architectureFixture) {
+				fixture.service.newStashID = func() (string, error) { return "20000000-0000-4000-8000-000000000011", nil }
+				direct := restoreProjectName(t, fixture.base.AcceptedSnapshot, "stashed project", time.Minute)
+				insertServiceCandidate(t, fixture.store, fixture.target.Scope, fixture.base.AcceptedSnapshot.Digest, direct, nil, 0)
+				setServiceWorkspaceState(t, fixture.store, fixture.target.Scope, "pending")
+				fixture.stashRequest = StashRequest{
+					Scope: fixture.target.Scope, RequestID: "40000000-0000-4000-8000-000000000011",
+					Actor: diffActorEnvelope(), Label: "current-workset stash",
+				}
+			},
+			corruptCurrent: corruptArchitectureCandidate,
+			attempt: func(t *testing.T, fixture *architectureFixture) error {
+				_, err := fixture.service.Stash(context.Background(), fixture.stashRequest)
+				return err
+			},
+		},
+		{
+			name: "restore",
+			prepare: func(t *testing.T, fixture *architectureFixture) {
+				prepareArchitectureRestoreStash(t, fixture)
+			},
+			corruptCurrent: func(t *testing.T, fixture *architectureFixture) {
+				if _, err := fixture.store.DB().Exec(`UPDATE workspace_stashes SET composed_tree=X'7B'
+					WHERE project_id=? AND workspace_id=? AND stash_id=?`, fixture.target.Scope.ProjectID,
+					fixture.target.Scope.WorkspaceID, fixture.restoreRequest.StashID); err != nil {
+					t.Fatal(err)
+				}
+			},
+			attempt: func(t *testing.T, fixture *architectureFixture) error {
+				_, err := fixture.service.RestoreStash(context.Background(), fixture.restoreRequest)
+				return err
+			},
+		},
+		{
+			name: "git_observation",
+			prepare: func(t *testing.T, fixture *architectureFixture) {
+				runGit(t, fixture.targetRepository.root, "switch", "-c", "current-workset")
+			},
+			corruptCurrent: func(t *testing.T, fixture *architectureFixture) {
+				operation := servicePutTaskOperation(fixture.base.AcceptedSnapshot,
+					"90000000-0000-4000-8000-000000000098",
+					"80000000-0000-4000-8000-000000000098", "corrupt current")
+				insertServiceOperation(t, fixture.store, fixture.target.Scope, 1, operation, "active")
+				if _, err := fixture.store.DB().Exec(`UPDATE workspace_overlay_operations SET operation_json='{}'
+					WHERE project_id=? AND workspace_id=? AND generation=1`, fixture.target.Scope.ProjectID,
+					fixture.target.Scope.WorkspaceID); err != nil {
+					t.Fatal(err)
+				}
+				setServiceWorkspaceState(t, fixture.store, fixture.target.Scope, "pending")
+			},
+			attempt: func(t *testing.T, fixture *architectureFixture) error {
+				_, err := fixture.service.ObserveGitBase(context.Background(), ObserveGitBaseRequest{
+					Scope: fixture.target.Scope, ExpectedBinding: fixture.target,
+					Root: fixture.targetRepository.root, ExpectedCommit: fixture.targetRepository.commit,
+				})
+				return err
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newArchitectureFixture(t)
+			defer fixture.store.Close()
+			test.prepare(t, &fixture)
+			corruptArchitectureUnrelatedTerminalOperation(t, fixture.store, fixture.target.Scope)
+
+			beforeAudit := captureArchitectureRawDB(t, fixture.store)
+			if err := fixture.service.repo.AuditWorkspaceHistory(context.Background(), fixture.target.Scope); err == nil {
+				t.Fatal("AuditWorkspaceHistory accepted corrupt terminal operation")
+			}
+			if err := fixture.service.repo.AuditWorkspaceHistory(context.Background(), fixture.sibling.Scope); err != nil {
+				t.Fatalf("sibling AuditWorkspaceHistory: %v", err)
+			}
+			if afterAudit := captureArchitectureRawDB(t, fixture.store); !reflect.DeepEqual(afterAudit, beforeAudit) {
+				t.Fatal("AuditWorkspaceHistory mutated retained evidence")
+			}
+
+			siblingBefore := captureArchitectureGit(t, fixture.siblingRepository.root)
+			siblingStatus := mustServiceStatus(t, fixture.service, fixture.sibling.Scope)
+			if err := test.attempt(t, &fixture); err != nil {
+				t.Fatalf("current-workset lifecycle remained coupled to corrupt terminal history: %v", err)
+			}
+			if siblingAfter := captureArchitectureGit(t, fixture.siblingRepository.root); !reflect.DeepEqual(siblingAfter, siblingBefore) {
+				t.Fatal("current-workset lifecycle changed sibling Git state")
+			}
+			if after := mustServiceStatus(t, fixture.service, siblingStatus.Binding.Scope); !reflect.DeepEqual(after, siblingStatus) {
+				t.Fatal("current-workset lifecycle changed sibling workspace state")
+			}
+
+			blocked := newArchitectureFixture(t)
+			defer blocked.store.Close()
+			test.prepare(t, &blocked)
+			test.corruptCurrent(t, &blocked)
+			beforeBlocked := captureArchitectureRawDB(t, blocked.store)
+			beforeBlockedRevisions := captureArchitectureRevisions(t, blocked.store)
+			beforeBlockedGit := captureArchitectureGit(t, blocked.targetRepository.root)
+			beforeBlockedSiblingGit := captureArchitectureGit(t, blocked.siblingRepository.root)
+			if err := test.attempt(t, &blocked); err == nil {
+				t.Fatal("corrupt current or named authority did not block lifecycle")
+			}
+			assertArchitecturePreserved(t, blocked.store, beforeBlocked,
+				beforeBlockedRevisions, blocked.targetRepository.root, beforeBlockedGit,
+				blocked.siblingRepository.root, beforeBlockedSiblingGit, map[string]architecturePathState{})
+		})
+	}
+}
+
+func corruptArchitectureCandidate(t *testing.T, fixture *architectureFixture) {
+	t.Helper()
+	if _, err := fixture.store.DB().Exec(`UPDATE workspace_candidates SET direct_tree=X'7B'
+		WHERE project_id=? AND workspace_id=?`, fixture.target.Scope.ProjectID, fixture.target.Scope.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func corruptArchitectureUnrelatedTerminalOperation(t *testing.T, store *localstore.Store, scope types.WorkspaceScope) {
+	t.Helper()
+	operation := servicePutTaskOperation(state.Snapshot{},
+		"90000000-0000-4000-8000-000000000099",
+		"80000000-0000-4000-8000-000000000099", "retained terminal")
+	operation.ExpectedViewDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	raw, err := state.CanonicalOperation(operation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`INSERT INTO workspace_overlay_operations
+		(project_id,workspace_id,generation,operation_id,operation_json,state)
+		VALUES (?,?,?,?,?,'discarded')`, scope.ProjectID, scope.WorkspaceID, 99, operation.ID, raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`UPDATE workspace_overlay_operations SET operation_json='{}'
+		WHERE project_id=? AND workspace_id=? AND generation=99`, scope.ProjectID, scope.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+}
+
 type architectureFixture struct {
 	targetRepository, siblingRepository gitRepository
 	store                               *localstore.Store
 	service                             *Service
 	target                              types.WorkspaceBinding
+	sibling                             types.WorkspaceBinding
 	base                                WorkspaceStatus
 	stashRequest                        StashRequest
 	restoreRequest                      RestoreStashRequest
@@ -176,10 +339,10 @@ func newArchitectureFixture(t *testing.T) architectureFixture {
 	siblingRepository := createGitRepository(t, projectID)
 	store, service := openProjectStateService(t, "")
 	target := registerGitRepository(t, service, targetRepository)
-	_ = registerGitRepository(t, service, siblingRepository)
+	sibling := registerGitRepository(t, service, siblingRepository)
 	return architectureFixture{
 		targetRepository: targetRepository, siblingRepository: siblingRepository,
-		store: store, service: service, target: target.Binding,
+		store: store, service: service, target: target.Binding, sibling: sibling.Binding,
 		base: mustServiceStatus(t, service, target.Binding.Scope),
 	}
 }
