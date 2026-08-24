@@ -61,7 +61,7 @@ func (r *WorkspaceRepo) AuditWorkspaceHistory(ctx context.Context, scope types.W
 
 func (tx *WorkspaceMutationTx) auditWorkspaceStashHistory(
 	ctx context.Context,
-	operations []WorkspaceOperationAuditRecord,
+	operations []WorkspaceOperation,
 ) error {
 	rows, err := tx.conn.QueryContext(ctx, `
 		SELECT project_id, workspace_id, stash_id

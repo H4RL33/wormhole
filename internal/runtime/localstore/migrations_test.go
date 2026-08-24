@@ -1125,7 +1125,16 @@ func TestGatewayMigrationV5ReadersRejectCorruptRevision(t *testing.T) {
 		{name: "overflow representation", expression: `1e100`, storageClass: "real"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			store, repo, binding, stash := restoreRetryCorruptionFixture(t)
+			store, repo := openWorkspaceStore(t)
+			binding := createBinding(t, repo,
+				"00000000-0000-4000-8000-000000000001",
+				"00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
+			stash := validWorkspaceStash(t, binding, "00000000-0000-4000-8000-000000000031")
+			if err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
+				return tx.InsertStash(context.Background(), stash)
+			}); err != nil {
+				t.Fatal(err)
+			}
 			if _, err := store.DB().Exec(`PRAGMA ignore_check_constraints=ON`); err != nil {
 				t.Fatal(err)
 			}
@@ -1437,8 +1446,8 @@ func assertGatewayV5RevisionReadersReject(t *testing.T, store *Store, repo *Work
 	if got, err := tx.Workspace(context.Background()); err == nil || !reflect.DeepEqual(got, WorkspaceRecord{}) {
 		t.Fatalf("transaction Workspace corrupt revision=(%+v,%v), want zero,error", got, err)
 	}
-	if got, err := tx.RestoreRetryState(context.Background(), stashID); err == nil || !reflect.DeepEqual(got, WorkspaceRestoreRetryState{}) {
-		t.Fatalf("RestoreRetryState corrupt revision=(%+v,%v), want zero,error", got, err)
+	if got, err := tx.RestoreCurrentState(context.Background(), stashID); err == nil || !reflect.DeepEqual(got, WorkspaceRestoreCurrentState{}) {
+		t.Fatalf("RestoreCurrentState corrupt revision=(%+v,%v), want zero,error", got, err)
 	}
 }
 

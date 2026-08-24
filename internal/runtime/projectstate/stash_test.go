@@ -799,7 +799,7 @@ func assertStashOperationState(
 	}
 	found := false
 	if err := service.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
-		records, err := tx.OperationAudit(context.Background())
+		records, err := tx.OperationsByGenerations(context.Background(), []int64{generation})
 		if err != nil {
 			return err
 		}

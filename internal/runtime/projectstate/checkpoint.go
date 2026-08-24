@@ -142,31 +142,20 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 
 	var firstPlan checkpointPlan
 	var firstReview publicationReviewTransactionEvidence
-	var firstDisposition localstore.WorkspaceMaterializationDisposition
+	var firstDisposition localstore.WorkspaceCurrentMaterialization
 	var prepared localstore.WorkspaceMaterializationRecord
 	var firstPrior, firstNext localstore.WorkspaceCommitConfirmation
 	var firstPublicationAttempt publicationTransitionAttempt
 	firstCompleted, firstInvalidated := false, false
 	firstErr := withWorkspace(ctx, req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
-		disposition, err := tx.MaterializationDisposition(ctx)
+		disposition, _, _, err := loadCurrentMaterializationWorkset(ctx, tx)
 		if err != nil {
 			return err
 		}
-		pending, err := checkpointPendingJournal(firstOutside.workspace.Binding, disposition)
-		if err != nil {
-			return err
-		}
-		if pending != nil {
+		if len(disposition.Journals) != 0 {
 			return ErrCheckpointPendingAcceptance
 		}
-		proof, err := proveMaterializationDisposition(disposition)
-		if err != nil {
-			return fmt.Errorf("projectstate: checkpoint materialization disposition: %w", err)
-		}
-		if err := proveCheckpointTerminalHistory(firstOutside.workspace.Binding, disposition, proof); err != nil {
-			return err
-		}
-		firstDisposition = cloneImportDisposition(disposition)
+		firstDisposition = cloneImportCurrentMaterialization(disposition)
 
 		workspace, err := checkpointValidateTransactionRequest(ctx, tx, req)
 		if err != nil {
@@ -195,7 +184,7 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 		if err != nil {
 			return err
 		}
-		disposition = cloneImportDisposition(disposition)
+		disposition = cloneImportCurrentMaterialization(disposition)
 		if err := proveCheckpointMaterialPreflight(
 			workspace, current, composed, disposition, live, req.Actor,
 		); err != nil {
@@ -310,7 +299,7 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 	var secondPublicationAttempt publicationTransitionAttempt
 	secondCompleted, secondInvalidated, preservedOld := false, false, false
 	secondErr := withWorkspace(ctx, req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
-		disposition, err := tx.MaterializationDisposition(ctx)
+		disposition, _, _, err := loadCurrentMaterializationWorkset(ctx, tx)
 		if err != nil {
 			return err
 		}
@@ -486,7 +475,7 @@ func proveCheckpointMaterialPreflight(
 	workspace localstore.WorkspaceRecord,
 	current *localstore.WorkspaceCandidateRecord,
 	composed composedWorkspace,
-	disposition localstore.WorkspaceMaterializationDisposition,
+	disposition localstore.WorkspaceCurrentMaterialization,
 	priorLiveTree state.Tree,
 	actor types.ActorEnvelope,
 ) error {
@@ -503,11 +492,7 @@ func proveCheckpointMaterialPreflight(
 	if err != nil {
 		return err
 	}
-	dispositionProof, err := proveMaterializationDisposition(disposition)
-	if err != nil {
-		return fmt.Errorf("projectstate: checkpoint materialization disposition: %w", err)
-	}
-	if err := proveCheckpointTerminalHistory(workspace.Binding, disposition, dispositionProof); err != nil {
+	if _, err := proveCurrentMaterializationWorkset(disposition); err != nil {
 		return err
 	}
 	_, selectedStart, boundary, err := proveCheckpointPriorCandidate(workspace.Binding, current, acceptedTree)
@@ -785,7 +770,7 @@ func confirmPreparedCheckpointTransition(
 
 func checkpointPendingJournal(
 	binding types.WorkspaceBinding,
-	disposition localstore.WorkspaceMaterializationDisposition,
+	disposition localstore.WorkspaceCurrentMaterialization,
 ) (*localstore.WorkspaceMaterializationRecord, error) {
 	if disposition.Journals == nil || disposition.Operations == nil {
 		return nil, fmt.Errorf("projectstate: incomplete checkpoint materialization disposition")
@@ -824,55 +809,7 @@ func checkpointPendingJournal(
 			return nil, fmt.Errorf("projectstate: invalid checkpoint journal state")
 		}
 	}
-	if pending != nil {
-		if err := validateCheckpointTerminalDispositionWithPending(binding, disposition); err != nil {
-			return nil, err
-		}
-	}
 	return pending, nil
-}
-
-func validateCheckpointTerminalDispositionWithPending(
-	binding types.WorkspaceBinding,
-	disposition localstore.WorkspaceMaterializationDisposition,
-) error {
-	terminal := localstore.WorkspaceMaterializationDisposition{
-		Journals:   make([]localstore.WorkspaceMaterializationRecord, 0, len(disposition.Journals)),
-		Operations: make([]localstore.WorkspaceOperation, 0, len(disposition.Operations)),
-	}
-	claimedMaterialized := make(map[int64]struct{})
-	for _, journal := range disposition.Journals {
-		if journal.State != "accepted" && journal.State != "recovered_old" {
-			continue
-		}
-		terminal.Journals = append(terminal.Journals, cloneMaterializationRecord(journal))
-		if journal.State != "accepted" || journal.IncludedOperationsJSON == nil {
-			continue
-		}
-		envelope, err := decodeCheckpointOperations(*journal.IncludedOperationsJSON)
-		if err != nil {
-			return fmt.Errorf("projectstate: terminal checkpoint journal %q operation proof: %w", journal.JournalID, err)
-		}
-		for _, operation := range envelope.Operations {
-			claimedMaterialized[operation.Generation] = struct{}{}
-		}
-	}
-	for _, operation := range disposition.Operations {
-		if operation.State == "materialized" {
-			if _, claimed := claimedMaterialized[operation.Generation]; !claimed {
-				continue
-			}
-		}
-		terminal.Operations = append(terminal.Operations, cloneImportOperation(operation))
-	}
-	proof, err := proveMaterializationDisposition(terminal)
-	if err != nil {
-		return fmt.Errorf("projectstate: terminal checkpoint history beside pending journal: %w", err)
-	}
-	if err := proveCheckpointTerminalHistory(binding, terminal, proof); err != nil {
-		return err
-	}
-	return nil
 }
 
 func validateCheckpointPendingRecord(binding types.WorkspaceBinding, journal localstore.WorkspaceMaterializationRecord) error {
@@ -944,17 +881,17 @@ func validateCheckpointPendingRecord(binding types.WorkspaceBinding, journal loc
 
 func checkpointRequirePreparedDisposition(
 	binding types.WorkspaceBinding,
-	disposition localstore.WorkspaceMaterializationDisposition,
+	disposition localstore.WorkspaceCurrentMaterialization,
 	expected localstore.WorkspaceMaterializationRecord,
-) (localstore.WorkspaceMaterializationDisposition, error) {
+) (localstore.WorkspaceCurrentMaterialization, error) {
 	pending, err := checkpointPendingJournal(binding, disposition)
 	if err != nil {
-		return localstore.WorkspaceMaterializationDisposition{}, err
+		return localstore.WorkspaceCurrentMaterialization{}, err
 	}
 	if pending == nil || pending.State != "prepared" || !equalMaterializationRecord(*pending, expected) {
-		return localstore.WorkspaceMaterializationDisposition{}, fmt.Errorf("projectstate: prepared checkpoint journal changed before publication")
+		return localstore.WorkspaceCurrentMaterialization{}, fmt.Errorf("projectstate: prepared checkpoint journal changed before publication")
 	}
-	terminal := cloneImportDisposition(disposition)
+	terminal := cloneImportCurrentMaterialization(disposition)
 	kept := make([]localstore.WorkspaceMaterializationRecord, 0, len(terminal.Journals)-1)
 	removed := 0
 	for _, journal := range terminal.Journals {
@@ -965,15 +902,11 @@ func checkpointRequirePreparedDisposition(
 		kept = append(kept, journal)
 	}
 	if removed != 1 {
-		return localstore.WorkspaceMaterializationDisposition{}, fmt.Errorf("projectstate: prepared checkpoint journal cardinality changed")
+		return localstore.WorkspaceCurrentMaterialization{}, fmt.Errorf("projectstate: prepared checkpoint journal cardinality changed")
 	}
 	terminal.Journals = kept
-	proof, err := proveMaterializationDisposition(terminal)
-	if err != nil {
-		return localstore.WorkspaceMaterializationDisposition{}, err
-	}
-	if err := proveCheckpointTerminalHistory(binding, terminal, proof); err != nil {
-		return localstore.WorkspaceMaterializationDisposition{}, err
+	if _, err := proveCurrentMaterializationWorkset(terminal); err != nil {
+		return localstore.WorkspaceCurrentMaterialization{}, err
 	}
 	return terminal, nil
 }

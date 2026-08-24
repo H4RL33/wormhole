@@ -74,7 +74,7 @@ type observeGitBaseState struct {
 	candidate                *localstore.WorkspaceCandidateRecord
 	audit                    []restoreAuditOperation
 	openConflicts            []localstore.WorkspaceConflictOccurrence
-	dispositionProof         materializationDispositionProof
+	dispositionProof         currentMaterializationProof
 	eligible                 *localstore.WorkspaceMaterializationRecord
 	materializationPriorTree state.Tree
 	activeRows               []localstore.WorkspaceOperation
@@ -420,7 +420,7 @@ func loadObserveGitBaseState(
 		return observeGitBaseState{}, fmt.Errorf("projectstate: workspace conflict state does not match open conflict evidence")
 	}
 
-	disposition, proof, eligible, err := loadCurrentMaterializationDisposition(ctx, tx)
+	disposition, proof, eligible, err := loadCurrentMaterializationWorkset(ctx, tx)
 	if err != nil {
 		return observeGitBaseState{}, err
 	}

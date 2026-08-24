@@ -38,21 +38,6 @@ type restorePlan struct {
 	Result           RestoreStashResult
 }
 
-// buildRestorePlan is retained for Task-14 deletion with the superseded
-// complete-history retry authority. Production restore paths use the bounded
-// current-state entrypoint below.
-func buildRestorePlan(retry localstore.WorkspaceRestoreRetryState) (restorePlan, error) {
-	stash, err := proveRestoreStash(retry)
-	if err != nil {
-		return restorePlan{}, err
-	}
-	current, err := composeRestoreCurrent(retry)
-	if err != nil {
-		return restorePlan{}, err
-	}
-	return buildRestorePlanFromProofs(stash, current)
-}
-
 func buildRestoreCurrentPlan(current localstore.WorkspaceRestoreCurrentState) (restorePlan, error) {
 	stash, err := proveRestoreCurrentStash(current)
 	if err != nil {
@@ -240,111 +225,9 @@ func composeRestoreCurrentState(current localstore.WorkspaceRestoreCurrentState)
 	return currentProof{DirectSnapshot: direct, Snapshot: composed.Snapshot, ThroughGeneration: composed.ThroughGeneration, ActiveRows: activeRows}, nil
 }
 
-func proveRestoreStash(retry localstore.WorkspaceRestoreRetryState) (restoreStashProof, error) {
-	if retry.Operations == nil {
-		return restoreStashProof{}, fmt.Errorf("%w: complete operation audit is nil", ErrStashOperationMismatch)
-	}
-	audit, err := validateRestoreAudit(retry.Operations)
-	if err != nil {
-		return restoreStashProof{}, err
-	}
-	owned := make([]restoreAuditOperation, 0)
-	for _, row := range audit {
-		if row.row.StashedByStashID != nil && *row.row.StashedByStashID == retry.Stash.StashID {
-			owned = append(owned, row)
-		}
-	}
-	return proveRestoreStashFromOwned(retry.Workspace.Binding, retry.Stash, owned)
-}
-
-func composeRestoreCurrent(retry localstore.WorkspaceRestoreRetryState) (currentProof, error) {
-	if retry.Operations == nil {
-		return currentProof{}, fmt.Errorf("%w: complete operation audit is nil", ErrStashOperationMismatch)
-	}
-	binding := retry.Workspace.Binding
-	if err := binding.Validate(); err != nil {
-		return currentProof{}, fmt.Errorf("projectstate: invalid restore current binding: %w", err)
-	}
-	acceptedTree, err := state.EncodeTree(retry.Workspace.Snapshot)
-	if err != nil || validateMatchingTree(acceptedTree, state.Digest(binding.AcceptedTreeDigest), binding) != nil {
-		return currentProof{}, fmt.Errorf("projectstate: invalid restore current accepted snapshot")
-	}
-	accepted, err := state.DecodeTree(acceptedTree)
-	if err != nil {
-		return currentProof{}, fmt.Errorf("projectstate: clone restore current accepted snapshot: %w", err)
-	}
-	if err := validateStashCandidate(retry.Candidate, accepted.Digest, binding); err != nil {
-		return currentProof{}, fmt.Errorf("projectstate: invalid restore current candidate: %w", err)
-	}
-	if retry.Candidate != nil && (!types.ValidCandidateImportOrigin(retry.Candidate.ImportedBy) || retry.Candidate.ImportedAt.IsZero() || !zeroOffsetTime(retry.Candidate.ImportedAt)) {
-		return currentProof{}, fmt.Errorf("projectstate: invalid restore current candidate attribution")
-	}
-	start, boundary := selectCandidateStart(accepted, retry.Candidate)
-	direct := accepted
-	if retry.Candidate != nil {
-		direct = retry.Candidate.DirectSnapshot
-	}
-	direct, err = cloneImportSnapshot(direct)
-	if err != nil {
-		return currentProof{}, fmt.Errorf("projectstate: clone restore direct snapshot: %w", err)
-	}
-	audit, err := validateRestoreAudit(retry.Operations)
-	if err != nil {
-		return currentProof{}, err
-	}
-	activeRows := make([]localstore.WorkspaceOperation, 0)
-	operations := make([]StoredOperation, 0)
-	for _, audited := range audit {
-		row := audited.row
-		switch row.State {
-		case "active":
-			if row.Generation <= boundary {
-				return currentProof{}, fmt.Errorf("%w: active row at or below current boundary", ErrStashOperationMismatch)
-			}
-			activeRows = append(activeRows, cloneImportOperation(row))
-			operations = append(operations, StoredOperation{Generation: row.Generation, Operation: audited.operation})
-		case "rebased":
-			if row.Generation > boundary {
-				return currentProof{}, fmt.Errorf("%w: rebased row above current boundary", ErrStashOperationMismatch)
-			}
-		}
-	}
-	composed, err := Compose(start, boundary, operations)
-	if err != nil {
-		return currentProof{}, fmt.Errorf("projectstate: compose restore current state: %w", err)
-	}
-	return currentProof{
-		DirectSnapshot: direct, Snapshot: composed.Snapshot,
-		ThroughGeneration: composed.ThroughGeneration, ActiveRows: activeRows,
-	}, nil
-}
-
 type restoreAuditOperation struct {
 	row       localstore.WorkspaceOperation
 	operation state.OperationV1
-}
-
-func validateRestoreAudit(records []localstore.WorkspaceOperationAuditRecord) ([]restoreAuditOperation, error) {
-	if records == nil {
-		return nil, fmt.Errorf("%w: complete operation audit is nil", ErrStashOperationMismatch)
-	}
-	rows := make([]localstore.WorkspaceOperation, len(records))
-	seenIDs := make(map[string]struct{}, len(records))
-	var previousGeneration int64
-	for index, record := range records {
-		row := record.WorkspaceOperation
-		if row.Generation <= 0 || (index > 0 && row.Generation <= previousGeneration) ||
-			!types.CanonicalUUID(row.OperationID) || record.CreatedAt.IsZero() || !zeroOffsetTime(record.CreatedAt) {
-			return nil, fmt.Errorf("%w: invalid operation audit metadata at row %d", ErrStashOperationMismatch, index)
-		}
-		previousGeneration = row.Generation
-		if _, duplicate := seenIDs[row.OperationID]; duplicate {
-			return nil, fmt.Errorf("%w: duplicate operation audit identity", ErrStashOperationMismatch)
-		}
-		seenIDs[row.OperationID] = struct{}{}
-		rows[index] = row
-	}
-	return validateRestoreOperationRows(rows)
 }
 
 func validateRestoreOperationRows(records []localstore.WorkspaceOperation) ([]restoreAuditOperation, error) {

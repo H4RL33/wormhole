@@ -97,31 +97,6 @@ func TestProveCheckpointPlanHappyShapesAndSelection(t *testing.T) {
 			checkpointPlanRefresh(t, &input)
 			return input
 		}, []string{"90000000-0000-4000-8000-000000000001", "90000000-0000-4000-8000-000000000002"}},
-		{"terminal accepted history and later active", func(input checkpointPlanInput) checkpointPlanInput {
-			input = checkpointPlanHistoricalInput(t, input, "accepted")
-			operation, _ := checkpointPlanProjectOperation(t, input.Composed.status.AcceptedSnapshot, "90000000-0000-4000-8000-000000000003", "later active")
-			input.Disposition.Operations = []localstore.WorkspaceOperation{checkpointPlanOperationRow(t, 2, "active", operation)}
-			checkpointPlanRefresh(t, &input)
-			return input
-		}, []string{"90000000-0000-4000-8000-000000000003"}},
-		{"terminal recovered old history", func(input checkpointPlanInput) checkpointPlanInput {
-			input = checkpointPlanHistoricalInput(t, input, "recovered_old")
-			checkpointPlanRefresh(t, &input)
-			return input
-		}, nil},
-		{"historically owned materialized row and later active", func(input checkpointPlanInput) checkpointPlanInput {
-			historical, _ := checkpointPlanProjectOperation(t, input.Composed.status.AcceptedSnapshot, "90000000-0000-4000-8000-000000000007", "historical")
-			active, _ := checkpointPlanProjectOperation(t, input.Composed.status.AcceptedSnapshot, "90000000-0000-4000-8000-000000000008", "later active")
-			input.Disposition.Operations = []localstore.WorkspaceOperation{
-				checkpointPlanOperationRow(t, 1, "materialized", historical),
-				checkpointPlanOperationRow(t, 2, "active", active),
-			}
-			input.Disposition.Journals = []localstore.WorkspaceMaterializationRecord{
-				checkpointPlanAcceptedHistory(t, input, input.Disposition.Operations[0]),
-			}
-			checkpointPlanRefresh(t, &input)
-			return input
-		}, []string{"90000000-0000-4000-8000-000000000008"}},
 		{"ignored stashed and discarded rows", func(input checkpointPlanInput) checkpointPlanInput {
 			first, _ := checkpointPlanProjectOperation(t, input.Composed.status.AcceptedSnapshot, "90000000-0000-4000-8000-000000000004", "ignored stash")
 			second, _ := checkpointPlanProjectOperation(t, input.Composed.status.AcceptedSnapshot, "90000000-0000-4000-8000-000000000005", "ignored discard")
@@ -207,191 +182,6 @@ func TestProveCheckpointPlanHappyShapesAndSelection(t *testing.T) {
 					t.Fatalf("selected row %d bytes differ from envelope", index)
 				}
 			}
-		})
-	}
-}
-
-func TestProveCheckpointPlanValidatesTerminalHistoryProofs(t *testing.T) {
-	for _, journalState := range []string{"accepted", "recovered_old"} {
-		t.Run(journalState+" valid historical base", func(t *testing.T) {
-			input := checkpointPlanHistoricalInput(t, checkpointPlanFixture(t), journalState)
-			journal := input.Disposition.Journals[0]
-			publication, err := decodeCheckpointPublicationReview(*journal.PublicationReviewJSON)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if publication.Review.AcceptedRef == input.Binding.AcceptedRef ||
-				publication.Review.AcceptedCommitSHA == input.Binding.AcceptedCommitSHA ||
-				publication.Review.AcceptedTreeDigest == state.Digest(input.Binding.AcceptedTreeDigest) {
-				t.Fatal("historical fixture did not differ from the current accepted Git base")
-			}
-			if journalState == "accepted" && journal.IncludedOperationsJSON != nil {
-				t.Fatal("accepted compatibility fixture unexpectedly has an operation envelope")
-			}
-			if journalState == "recovered_old" && (journal.IncludedOperationsJSON == nil || *journal.IncludedOperationsJSON != "{") {
-				t.Fatal("recovered-old fixture does not carry deliberately ignored malformed operation JSON")
-			}
-			mustProveCheckpointPlan(t, input)
-		})
-
-		t.Run(journalState+" version zero nil proof", func(t *testing.T) {
-			input := checkpointPlanHistoricalInput(t, checkpointPlanFixture(t), journalState)
-			journal := &input.Disposition.Journals[0]
-			journal.PublicationReviewProofVersion = 0
-			journal.PublicationReviewJSON = nil
-			journal.PriorCandidateJSON = nil
-			mustProveCheckpointPlan(t, input)
-		})
-
-		for _, test := range []struct {
-			name   string
-			mutate func(*localstore.WorkspaceMaterializationRecord)
-		}{
-			{"v1 nil publication", func(journal *localstore.WorkspaceMaterializationRecord) { journal.PublicationReviewJSON = nil }},
-			{"v1 nil prior candidate", func(journal *localstore.WorkspaceMaterializationRecord) { journal.PriorCandidateJSON = nil }},
-			{"malformed publication", func(journal *localstore.WorkspaceMaterializationRecord) {
-				raw := "{"
-				journal.PublicationReviewJSON = &raw
-			}},
-			{"noncanonical publication", func(journal *localstore.WorkspaceMaterializationRecord) {
-				raw := " " + *journal.PublicationReviewJSON
-				journal.PublicationReviewJSON = &raw
-			}},
-			{"malformed prior candidate", func(journal *localstore.WorkspaceMaterializationRecord) {
-				raw := "{"
-				journal.PriorCandidateJSON = &raw
-			}},
-			{"noncanonical prior candidate", func(journal *localstore.WorkspaceMaterializationRecord) {
-				raw := " " + *journal.PriorCandidateJSON
-				journal.PriorCandidateJSON = &raw
-			}},
-			{"unknown proof version", func(journal *localstore.WorkspaceMaterializationRecord) { journal.PublicationReviewProofVersion = 2 }},
-			{"v0 publication present", func(journal *localstore.WorkspaceMaterializationRecord) {
-				journal.PublicationReviewProofVersion = 0
-				journal.PriorCandidateJSON = nil
-			}},
-			{"v0 prior candidate present", func(journal *localstore.WorkspaceMaterializationRecord) {
-				journal.PublicationReviewProofVersion = 0
-				journal.PublicationReviewJSON = nil
-			}},
-		} {
-			t.Run(journalState+" "+test.name, func(t *testing.T) {
-				input := checkpointPlanHistoricalInput(t, checkpointPlanFixture(t), journalState)
-				test.mutate(&input.Disposition.Journals[0])
-				assertCheckpointPlanRejected(t, input)
-			})
-		}
-	}
-}
-
-func TestProveCheckpointPlanRejectsTerminalHistoryFieldDrift(t *testing.T) {
-	otherRepository := types.RepositoryIdentity{
-		Provider: "github", ImmutableID: "other", CanonicalRemote: "https://github.com/acme/other",
-	}
-	for _, journalState := range []string{"accepted", "recovered_old"} {
-		for _, test := range []struct {
-			name   string
-			mutate func(*localstore.WorkspaceMaterializationRecord)
-		}{
-			{"review scope", func(journal *localstore.WorkspaceMaterializationRecord) {
-				checkpointPlanRewriteHistoricalReview(t, journal, func(review *publicationReviewEnvelopeV1) {
-					review.Scope.WorkspaceID = "60000000-0000-4000-8000-000000000001"
-				})
-			}},
-			{"review repository", func(journal *localstore.WorkspaceMaterializationRecord) {
-				checkpointPlanRewriteHistoricalReview(t, journal, func(review *publicationReviewEnvelopeV1) {
-					review.Repository = otherRepository
-				})
-			}},
-			{"accepted base digest", func(journal *localstore.WorkspaceMaterializationRecord) {
-				journal.AcceptedBaseDigest = publicationRepeatedDigest('f')
-			}},
-			{"candidate digest", func(journal *localstore.WorkspaceMaterializationRecord) {
-				journal.CandidateDigest = publicationRepeatedDigest('f')
-			}},
-			{"through generation", func(journal *localstore.WorkspaceMaterializationRecord) { journal.ThroughGeneration++ }},
-			{"expected live digest", func(journal *localstore.WorkspaceMaterializationRecord) {
-				journal.ExpectedLiveDigest = publicationRepeatedDigest('f')
-			}},
-			{"prior tree digest", func(journal *localstore.WorkspaceMaterializationRecord) {
-				journal.ExpectedLiveDigest = publicationRepeatedDigest('f')
-				journal.PriorTreeDigest = journal.ExpectedLiveDigest
-			}},
-			{"candidate tree digest", func(journal *localstore.WorkspaceMaterializationRecord) {
-				journal.CandidateDigest = publicationRepeatedDigest('f')
-				checkpointPlanRewriteHistoricalReview(t, journal, func(review *publicationReviewEnvelopeV1) {
-					review.CandidateTreeDigest = journal.CandidateDigest
-				})
-			}},
-			{"prior tree identity", func(journal *localstore.WorkspaceMaterializationRecord) {
-				snapshot := checkpointPlanRetargetProject(t, mustCheckpointPlanDecodeTree(t, journal.PriorTree))
-				journal.PriorTree = mustCheckpointPlanTree(t, snapshot)
-				journal.PriorTreeDigest = snapshot.Digest
-				journal.ExpectedLiveDigest = snapshot.Digest
-			}},
-			{"candidate tree identity", func(journal *localstore.WorkspaceMaterializationRecord) {
-				snapshot := checkpointPlanRetargetRepository(t, mustCheckpointPlanDecodeTree(t, journal.CandidateTree))
-				journal.CandidateTree = mustCheckpointPlanTree(t, snapshot)
-				journal.CandidateDigest = snapshot.Digest
-				checkpointPlanRewriteHistoricalReview(t, journal, func(review *publicationReviewEnvelopeV1) {
-					review.CandidateTreeDigest = snapshot.Digest
-				})
-			}},
-			{"checkout", func(journal *localstore.WorkspaceMaterializationRecord) { journal.Checkout.Device = 0 }},
-		} {
-			t.Run(journalState+" "+test.name, func(t *testing.T) {
-				input := checkpointPlanHistoricalInput(t, checkpointPlanFixture(t), journalState)
-				test.mutate(&input.Disposition.Journals[0])
-				assertCheckpointPlanRejected(t, input)
-			})
-		}
-	}
-}
-
-func TestProveCheckpointPlanValidatesTerminalPriorCandidateAndBoundary(t *testing.T) {
-	t.Run("accepted nil operation envelope permits present candidate", func(t *testing.T) {
-		input := checkpointPlanHistoricalInput(t, checkpointPlanFixture(t), "accepted")
-		checkpointPlanSetHistoricalPriorBoundary(t, &input.Disposition.Journals[0], 7)
-		mustProveCheckpointPlan(t, input)
-	})
-
-	t.Run("accepted operation envelope matches present candidate boundary", func(t *testing.T) {
-		input := checkpointPlanHistoricalInput(t, checkpointPlanFixture(t), "accepted")
-		checkpointPlanSetHistoricalOperationBoundary(t, &input.Disposition.Journals[0], 3)
-		checkpointPlanSetHistoricalPriorBoundary(t, &input.Disposition.Journals[0], 3)
-		mustProveCheckpointPlan(t, input)
-	})
-
-	for _, test := range []struct {
-		name   string
-		mutate func(*localstore.WorkspaceMaterializationRecord)
-	}{
-		{"accepted base", func(journal *localstore.WorkspaceMaterializationRecord) {
-			checkpointPlanSetHistoricalPriorBoundary(t, journal, 0)
-			checkpointPlanRewriteHistoricalPrior(t, journal, func(prior *checkpointPriorCandidateV1) {
-				prior.Candidate.AcceptedBaseDigest = publicationRepeatedDigest('f')
-			})
-		}},
-		{"direct tree identity", func(journal *localstore.WorkspaceMaterializationRecord) {
-			checkpointPlanSetHistoricalPriorBoundary(t, journal, 0)
-			checkpointPlanRewriteHistoricalPrior(t, journal, func(prior *checkpointPriorCandidateV1) {
-				direct := checkpointPlanRetargetProject(t, mustCheckpointPlanDecodePriorTree(t, prior.Candidate.DirectTree))
-				prior.Candidate.DirectTree = checkpointPriorTree(mustCheckpointPlanTree(t, direct), direct.Digest)
-				prior.Candidate.WorkingTreeDigest = direct.Digest
-			})
-		}},
-		{"operation boundary", func(journal *localstore.WorkspaceMaterializationRecord) {
-			checkpointPlanSetHistoricalOperationBoundary(t, journal, 3)
-			checkpointPlanSetHistoricalPriorBoundary(t, journal, 2)
-		}},
-		{"absent candidate operation boundary", func(journal *localstore.WorkspaceMaterializationRecord) {
-			checkpointPlanSetHistoricalOperationBoundary(t, journal, 3)
-		}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			input := checkpointPlanHistoricalInput(t, checkpointPlanFixture(t), "accepted")
-			test.mutate(&input.Disposition.Journals[0])
-			assertCheckpointPlanRejected(t, input)
 		})
 	}
 }
@@ -533,15 +323,6 @@ func TestProveCheckpointPlanRejectsCompositionAndDispositionDrift(t *testing.T) 
 		{"pending journal", func(input *checkpointPlanInput) {
 			input.Disposition.Journals = []localstore.WorkspaceMaterializationRecord{{JournalID: "journal", State: "prepared"}}
 		}},
-		{"published journal", func(input *checkpointPlanInput) {
-			history := checkpointPlanHistoricalInput(t, *input, "published")
-			input.Disposition.Journals = history.Disposition.Journals
-		}},
-		{"recovered new journal", func(input *checkpointPlanInput) {
-			input.Disposition.Journals = []localstore.WorkspaceMaterializationRecord{
-				checkpointPlanEmptyJournal(t, *input, "10000000-0000-4000-8000-000000000020", "recovered_new"),
-			}
-		}},
 		{"omitted selected row", func(input *checkpointPlanInput) { input.Disposition.Operations = []localstore.WorkspaceOperation{} }},
 		{"extra selected row", func(input *checkpointPlanInput) {
 			operation, _ := checkpointPlanProjectOperation(
@@ -602,55 +383,6 @@ func TestProveCheckpointPlanRejectsCompositionAndDispositionDrift(t *testing.T) 
 		input := checkpointPlanRebasedInput(t, cloneCheckpointPlanInput(t, checkpointPlanFixture(t)), 1)
 		operation, _ := checkpointPlanProjectOperation(t, *input.Current.RebasedSnapshot, "90000000-0000-4000-8000-000000000031", "invalid later rebased")
 		input.Disposition.Operations = []localstore.WorkspaceOperation{checkpointPlanOperationRow(t, 2, "rebased", operation)}
-		checkpointPlanRefresh(t, &input)
-		assertCheckpointPlanRejected(t, input)
-	})
-	t.Run("historical ownership corruption", func(t *testing.T) {
-		input := checkpointPlanFixture(t)
-		operation, _ := checkpointPlanProjectOperation(t, input.Composed.status.AcceptedSnapshot, "90000000-0000-4000-8000-000000000032", "historical")
-		row := checkpointPlanOperationRow(t, 1, "materialized", operation)
-		input.Disposition.Operations = []localstore.WorkspaceOperation{row}
-		input.Disposition.Journals = []localstore.WorkspaceMaterializationRecord{checkpointPlanAcceptedHistory(t, input, row)}
-		other, _ := checkpointPlanProjectOperation(t, input.Composed.status.AcceptedSnapshot, "90000000-0000-4000-8000-000000000034", "other historical")
-		otherRow := checkpointPlanOperationRow(t, 1, "materialized", other)
-		otherHistory := checkpointPlanAcceptedHistory(t, input, otherRow)
-		input.Disposition.Journals[0].IncludedOperationsJSON = otherHistory.IncludedOperationsJSON
-		checkpointPlanRefresh(t, &input)
-		assertCheckpointPlanRejected(t, input)
-	})
-	t.Run("historical through generation mismatch", func(t *testing.T) {
-		input := checkpointPlanFixture(t)
-		operation, _ := checkpointPlanProjectOperation(t, input.Composed.status.AcceptedSnapshot, "90000000-0000-4000-8000-000000000033", "historical")
-		row := checkpointPlanOperationRow(t, 1, "materialized", operation)
-		input.Disposition.Operations = []localstore.WorkspaceOperation{row}
-		input.Disposition.Journals = []localstore.WorkspaceMaterializationRecord{checkpointPlanAcceptedHistory(t, input, row)}
-		input.Disposition.Journals[0].ThroughGeneration = 2
-		checkpointPlanRefresh(t, &input)
-		assertCheckpointPlanRejected(t, input)
-	})
-	t.Run("version zero accepted residual ownership", func(t *testing.T) {
-		input := checkpointPlanFixture(t)
-		operation, _ := checkpointPlanProjectOperation(t, input.Composed.status.AcceptedSnapshot, "90000000-0000-4000-8000-000000000035", "legacy historical")
-		row := checkpointPlanOperationRow(t, 1, "materialized", operation)
-		input.Disposition.Operations = []localstore.WorkspaceOperation{row}
-		journal := checkpointPlanAcceptedHistory(t, input, row)
-		journal.PublicationReviewProofVersion = 0
-		journal.PublicationReviewJSON = nil
-		journal.PriorCandidateJSON = nil
-		input.Disposition.Journals = []localstore.WorkspaceMaterializationRecord{journal}
-		checkpointPlanRefresh(t, &input)
-		assertCheckpointPlanRejected(t, input)
-	})
-	t.Run("cross journal ownership claim", func(t *testing.T) {
-		input := checkpointPlanFixture(t)
-		operation, _ := checkpointPlanProjectOperation(t, input.Composed.status.AcceptedSnapshot, "90000000-0000-4000-8000-000000000036", "claimed twice")
-		row := checkpointPlanOperationRow(t, 1, "materialized", operation)
-		first := checkpointPlanAcceptedHistory(t, input, row)
-		second := cloneMaterializationRecord(first)
-		first.JournalID = "10000000-0000-4000-8000-000000000021"
-		second.JournalID = "10000000-0000-4000-8000-000000000022"
-		input.Disposition.Journals = []localstore.WorkspaceMaterializationRecord{first, second}
-		input.Disposition.Operations = []localstore.WorkspaceOperation{row}
 		checkpointPlanRefresh(t, &input)
 		assertCheckpointPlanRejected(t, input)
 	})
@@ -828,7 +560,7 @@ func checkpointPlanFixture(t *testing.T) checkpointPlanInput {
 	}
 	var evidence publicationReviewTransactionEvidence
 	var current *localstore.WorkspaceCandidateRecord
-	var disposition localstore.WorkspaceMaterializationDisposition
+	var disposition localstore.WorkspaceCurrentMaterialization
 	var attempt publicationTransitionAttempt
 	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		var transactionErr error
@@ -842,7 +574,7 @@ func checkpointPlanFixture(t *testing.T) checkpointPlanInput {
 		if transactionErr != nil {
 			return transactionErr
 		}
-		disposition, transactionErr = tx.MaterializationDisposition(context.Background())
+		disposition, transactionErr = readCurrentMaterializationWorkset(context.Background(), tx)
 		return transactionErr
 	}); err != nil {
 		t.Fatal(err)
@@ -873,7 +605,7 @@ func cloneCheckpointPlanInput(t *testing.T, input checkpointPlanInput) checkpoin
 	}
 	return checkpointPlanInput{
 		Binding: input.Binding, Current: current, Composed: composed,
-		Disposition: cloneImportDisposition(input.Disposition), Review: review,
+		Disposition: cloneImportCurrentMaterialization(input.Disposition), Review: review,
 		PriorLiveTree: cloneCheckpointTree(input.PriorLiveTree), Actor: input.Actor,
 	}
 }
@@ -1050,7 +782,7 @@ func checkpointPlanHistoricalInput(t *testing.T, input checkpointPlanInput, jour
 		}
 		journal.IncludedOperationsJSON = &operations
 	}
-	input.Disposition = localstore.WorkspaceMaterializationDisposition{
+	input.Disposition = localstore.WorkspaceCurrentMaterialization{
 		Journals:   []localstore.WorkspaceMaterializationRecord{journal},
 		Operations: []localstore.WorkspaceOperation{},
 	}

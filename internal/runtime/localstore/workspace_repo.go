@@ -60,11 +60,6 @@ type WorkspaceOperation struct {
 	StashedByStashID *string
 }
 
-type WorkspaceOperationAuditRecord struct {
-	WorkspaceOperation
-	CreatedAt time.Time
-}
-
 type WorkspaceCandidateRecord struct {
 	AcceptedBaseDigest       projectstate.Digest
 	WorkingTreeDigest        projectstate.Digest
@@ -278,14 +273,7 @@ func validMonotonicWorkspaceMutationTimestamp(returned time.Time, raw, storageCl
 	return validStoredWorkspaceTimestamp(returned, raw, storageClass) && !returned.Before(previous)
 }
 
-// OperationAudit is the legacy-only complete operation reader retained for
-// lifecycle migrations in Tasks 11-14. New ordinary paths must compose the
-// bounded readers below; explicit history validation uses AuditWorkspaceHistory.
-func (tx *WorkspaceMutationTx) OperationAudit(ctx context.Context) ([]WorkspaceOperationAuditRecord, error) {
-	return tx.workspaceOperationHistory(ctx)
-}
-
-func (tx *WorkspaceMutationTx) workspaceOperationHistory(ctx context.Context) ([]WorkspaceOperationAuditRecord, error) {
+func (tx *WorkspaceMutationTx) workspaceOperationHistory(ctx context.Context) ([]WorkspaceOperation, error) {
 	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
 		return nil, ErrNotFound
 	}
@@ -306,7 +294,7 @@ func (tx *WorkspaceMutationTx) workspaceOperationHistory(ctx context.Context) ([
 		return nil, fmt.Errorf("localstore: query workspace operation audit: %w", err)
 	}
 	defer rows.Close()
-	records := make([]WorkspaceOperationAuditRecord, 0)
+	records := make([]WorkspaceOperation, 0)
 	seenIDs := make(map[string]struct{})
 	for rows.Next() {
 		var (
@@ -359,10 +347,7 @@ func (tx *WorkspaceMutationTx) workspaceOperationHistory(ctx context.Context) ([
 		if !validUTCTimestamp(createdAt.Time) {
 			return nil, fmt.Errorf("localstore: invalid workspace operation audit timestamp")
 		}
-		records = append(records, WorkspaceOperationAuditRecord{
-			WorkspaceOperation: operation,
-			CreatedAt:          createdAt.Time.UTC(),
-		})
+		records = append(records, operation)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("localstore: iterate workspace operation audit: %w", err)

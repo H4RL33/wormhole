@@ -228,6 +228,8 @@ func TestCoarsePrivateCorruptionFailsClosedWithoutCrossScopeMutation(t *testing.
 func TestCurrentWorksetIgnoresTerminalCorruptionAndAuditReportsIt(t *testing.T) {
 	for _, test := range []struct {
 		name           string
+		fixture        func(*testing.T) architectureFixture
+		blockedFixture func(*testing.T) architectureFixture
 		prepare        func(*testing.T, *architectureFixture)
 		corruptCurrent func(*testing.T, *architectureFixture)
 		attempt        func(*testing.T, *architectureFixture) error
@@ -310,11 +312,82 @@ func TestCurrentWorksetIgnoresTerminalCorruptionAndAuditReportsIt(t *testing.T) 
 				return err
 			},
 		},
+		{
+			name:    "checkpoint",
+			fixture: newArchitectureCheckpointFixture,
+			corruptCurrent: func(t *testing.T, fixture *architectureFixture) {
+				if _, err := fixture.store.DB().Exec(`INSERT INTO workspace_overlay_operations
+					(project_id,workspace_id,generation,operation_id,operation_json,state)
+					VALUES (?,?,1,'99999999-9999-4999-8999-999999999991','{','active')`,
+					fixture.target.Scope.ProjectID, fixture.target.Scope.WorkspaceID); err != nil {
+					t.Fatal(err)
+				}
+				fixture.service.prepareCheckpointArtifact = func(context.Context, checkpointArtifactInput) (checkpointArtifactHandle, error) {
+					panic("corrupt current checkpoint workset allocated an artifact")
+				}
+			},
+			attempt: func(t *testing.T, fixture *architectureFixture) error {
+				_, err := fixture.service.Checkpoint(context.Background(), fixture.checkpointRequest)
+				return err
+			},
+		},
+		{
+			name:           "recovery",
+			blockedFixture: newArchitectureRecoveryFixture,
+			prepare: func(t *testing.T, fixture *architectureFixture) {
+				fixture.recoverScope = fixture.target.Scope
+			},
+			corruptCurrent: func(t *testing.T, fixture *architectureFixture) {
+				if _, err := fixture.store.DB().Exec(`UPDATE workspace_materializations SET candidate_tree=X'7B'
+					WHERE project_id=? AND workspace_id=? AND state='prepared'`,
+					fixture.target.Scope.ProjectID, fixture.target.Scope.WorkspaceID); err != nil {
+					t.Fatal(err)
+				}
+			},
+			attempt: func(t *testing.T, fixture *architectureFixture) error {
+				if err := attemptArchitectureCurrentRecovery(t, fixture); err != nil {
+					return err
+				}
+				recoveredNew := newArchitectureRecoveredNewFixture(t)
+				defer recoveredNew.store.Close()
+				return attemptArchitectureCurrentRecovery(t, &recoveredNew)
+			},
+		},
+		{
+			name: "publication",
+			prepare: func(t *testing.T, fixture *architectureFixture) {
+				prepareArchitecturePublication(t, fixture)
+			},
+			corruptCurrent: func(t *testing.T, fixture *architectureFixture) {
+				if _, err := fixture.store.DB().Exec(`UPDATE workspace_publication_policies SET origin_digest='bad'
+					WHERE project_id=? AND workspace_id=?`, fixture.target.Scope.ProjectID,
+					fixture.target.Scope.WorkspaceID); err != nil {
+					t.Fatal(err)
+				}
+			},
+			attempt: func(t *testing.T, fixture *architectureFixture) error {
+				current, err := fixture.service.PublicationConfiguration(context.Background(), fixture.target.Scope)
+				if err != nil {
+					return err
+				}
+				fixture.service.now = func() time.Time { return time.Date(2026, 8, 24, 13, 0, 0, 0, time.UTC) }
+				_, err = fixture.service.ReconfigurePublication(context.Background(), publicationRequest(
+					t, fixture.target, current, types.PublicationPublicGit, diffActorEnvelope(),
+				))
+				return err
+			},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			fixture := newArchitectureFixture(t)
+			factory := test.fixture
+			if factory == nil {
+				factory = newArchitectureFixture
+			}
+			fixture := factory(t)
 			defer fixture.store.Close()
-			test.prepare(t, &fixture)
+			if test.prepare != nil {
+				test.prepare(t, &fixture)
+			}
 			corruptArchitectureUnrelatedTerminalOperation(t, fixture.store, fixture.target.Scope)
 
 			beforeAudit := captureArchitectureRawDB(t, fixture.store)
@@ -340,9 +413,15 @@ func TestCurrentWorksetIgnoresTerminalCorruptionAndAuditReportsIt(t *testing.T) 
 				t.Fatal("current-workset lifecycle changed sibling workspace state")
 			}
 
-			blocked := newArchitectureFixture(t)
+			blockedFactory := test.blockedFixture
+			if blockedFactory == nil {
+				blockedFactory = factory
+			}
+			blocked := blockedFactory(t)
 			defer blocked.store.Close()
-			test.prepare(t, &blocked)
+			if test.prepare != nil {
+				test.prepare(t, &blocked)
+			}
 			test.corruptCurrent(t, &blocked)
 			beforeBlocked := captureArchitectureRawDB(t, blocked.store)
 			beforeBlockedRevisions := captureArchitectureRevisions(t, blocked.store)
@@ -396,6 +475,7 @@ type architectureFixture struct {
 	base                                WorkspaceStatus
 	stashRequest                        StashRequest
 	restoreRequest                      RestoreStashRequest
+	checkpointRequest                   CheckpointRequest
 	recoverScope                        types.WorkspaceScope
 	artifactRoots                       []string
 }
@@ -501,6 +581,35 @@ func newArchitectureRecoveryFixture(t *testing.T) architectureFixture {
 	}
 }
 
+func newArchitectureCheckpointFixture(t *testing.T) architectureFixture {
+	t.Helper()
+	checkpoint, request, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
+	siblingRepository := createGitRepository(t, request.Scope.ProjectID)
+	sibling := registerGitRepository(t, checkpoint.service, siblingRepository)
+	return architectureFixture{
+		targetRepository: checkpoint.repository, siblingRepository: siblingRepository,
+		store: checkpoint.store, service: checkpoint.service, target: checkpoint.binding,
+		sibling: sibling.Binding, base: mustServiceStatus(t, checkpoint.service, checkpoint.binding.Scope),
+		checkpointRequest: request,
+	}
+}
+
+func newArchitectureRecoveredNewFixture(t *testing.T) architectureFixture {
+	t.Helper()
+	fixture := newArchitectureRecoveryFixture(t)
+	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.recoverScope, func(tx *localstore.WorkspaceMutationTx) error {
+		proof, err := loadCheckpointRecoveryDisposition(context.Background(), tx)
+		if err != nil {
+			return err
+		}
+		return applyCheckpointRecoveryOutcome(context.Background(), tx, proof, checkpointRecoveryFilesystemRecoveredNew)
+	}); err != nil {
+		fixture.store.Close()
+		t.Fatal(err)
+	}
+	return fixture
+}
+
 func attemptArchitectureApply(t *testing.T, fixture *architectureFixture) error {
 	t.Helper()
 	operation := servicePutTaskOperation(fixture.base.AcceptedSnapshot,
@@ -554,6 +663,18 @@ func attemptArchitectureRecover(t *testing.T, fixture *architectureFixture) erro
 	if !reflect.DeepEqual(got, WorkspaceStatus{}) {
 		t.Fatalf("Recover() result=%+v, want zero", got)
 	}
+	return err
+}
+
+func attemptArchitectureCurrentRecovery(t *testing.T, fixture *architectureFixture) error {
+	t.Helper()
+	fixture.service.observeCheckpointRecoveryGit = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
+		panic("current-workset no-op recovery observed Git")
+	}
+	fixture.service.recoverCheckpointFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+		panic("current-workset no-op recovery touched filesystem")
+	}
+	_, err := fixture.service.Recover(context.Background(), fixture.recoverScope)
 	return err
 }
 

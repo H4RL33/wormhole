@@ -147,8 +147,6 @@ func (tx *WorkspaceMutationTx) MaterializationByJournalID(ctx context.Context, j
 		SELECT project_id,workspace_id,journal_id,expected_live_digest,accepted_base_digest,
 		       checkout_path,checkout_device,checkout_inode,prior_tree_digest,candidate_digest,
 		       through_generation,prior_tree,candidate_tree,stage_path,backup_path,state,
-		       created_at,updated_at,CAST(created_at AS TEXT),CAST(updated_at AS TEXT),
-		       typeof(stage_path),typeof(backup_path),typeof(created_at),typeof(updated_at),
 		       included_operations_json,typeof(included_operations_json),
 		       publication_review_proof_version,typeof(publication_review_proof_version),publication_review_json,typeof(publication_review_json),
 		       prior_candidate_json,typeof(prior_candidate_json)

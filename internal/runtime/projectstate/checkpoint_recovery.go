@@ -29,7 +29,7 @@ type checkpointRecoveryProof struct {
 	kind        checkpointRecoveryKind
 	workspace   localstore.WorkspaceRecord
 	candidate   *localstore.WorkspaceCandidateRecord
-	disposition localstore.WorkspaceMaterializationDisposition
+	disposition localstore.WorkspaceCurrentMaterialization
 	driver      *localstore.WorkspaceMaterializationRecord
 	operations  CheckpointOperationsV1
 	status      WorkspaceStatus
@@ -184,7 +184,7 @@ func strictRereadCheckpointRecoveryDisposition(
 	if err != nil {
 		return checkpointRecoveryProof{}, checkpointRecoveryPrecondition("strict reread workspace", err)
 	}
-	disposition, err := tx.MaterializationDisposition(ctx)
+	disposition, _, _, err := loadCurrentMaterializationWorkset(ctx, tx)
 	if err != nil {
 		return checkpointRecoveryProof{}, checkpointRecoveryPrecondition("strict reread disposition", err)
 	}
@@ -291,7 +291,7 @@ func checkpointRecoveryDriverOperationRows(
 func proveCheckpointRecoveryDisposition(
 	workspace localstore.WorkspaceRecord,
 	candidate *localstore.WorkspaceCandidateRecord,
-	disposition localstore.WorkspaceMaterializationDisposition,
+	disposition localstore.WorkspaceCurrentMaterialization,
 ) (checkpointRecoveryProof, error) {
 	if err := validateCheckpointRecoveryWorkspace(workspace); err != nil {
 		return checkpointRecoveryProof{}, checkpointRecoveryPrecondition("workspace proof", err)
@@ -308,15 +308,11 @@ func proveCheckpointRecoveryDisposition(
 	if err != nil {
 		return checkpointRecoveryProof{}, checkpointRecoveryPrecondition("clone candidate proof", err)
 	}
-	ownedDisposition := cloneImportDisposition(disposition)
+	ownedDisposition := cloneImportCurrentMaterialization(disposition)
 
 	if pending == nil {
-		dispositionProof, err := proveMaterializationDisposition(disposition)
-		if err != nil {
-			return checkpointRecoveryProof{}, checkpointRecoveryPrecondition("terminal ownership", err)
-		}
-		if err := proveCheckpointTerminalHistory(workspace.Binding, disposition, dispositionProof); err != nil {
-			return checkpointRecoveryProof{}, checkpointRecoveryPrecondition("terminal history", err)
+		if _, err := proveCurrentMaterializationWorkset(disposition); err != nil {
+			return checkpointRecoveryProof{}, checkpointRecoveryPrecondition("current ownership", err)
 		}
 		return checkpointRecoveryProof{
 			kind: checkpointRecoveryNoWork, workspace: ownedWorkspace,
@@ -327,13 +323,7 @@ func proveCheckpointRecoveryDisposition(
 	if err != nil {
 		return checkpointRecoveryProof{}, checkpointRecoveryPrecondition("driver operation envelope", err)
 	}
-	terminalGenerations, terminalIDs, err := checkpointRecoveryTerminalClaims(disposition)
-	if err != nil {
-		return checkpointRecoveryProof{}, checkpointRecoveryPrecondition("terminal operation ownership", err)
-	}
-	if err := proveCheckpointRecoveryOperationOwnership(
-		disposition, *pending, operations, terminalGenerations, terminalIDs,
-	); err != nil {
+	if err := proveCheckpointRecoveryOperationOwnership(disposition, *pending, operations); err != nil {
 		return checkpointRecoveryProof{}, checkpointRecoveryPrecondition("driver operation ownership", err)
 	}
 
@@ -389,7 +379,7 @@ func loadCheckpointRecoveryDisposition(
 	if err != nil {
 		return checkpointRecoveryProof{}, checkpointRecoveryPrecondition("read workspace", err)
 	}
-	disposition, err := tx.MaterializationDisposition(ctx)
+	disposition, _, _, err := loadCurrentMaterializationWorkset(ctx, tx)
 	if err != nil {
 		return checkpointRecoveryProof{}, checkpointRecoveryPrecondition("read journal disposition", err)
 	}
@@ -451,39 +441,10 @@ func validateCheckpointRecoveryWorkspace(workspace localstore.WorkspaceRecord) e
 	return validateMatchingTree(tree, state.Digest(workspace.Binding.AcceptedTreeDigest), workspace.Binding)
 }
 
-func checkpointRecoveryTerminalClaims(
-	disposition localstore.WorkspaceMaterializationDisposition,
-) (map[int64]CheckpointOperationV1, map[string]struct{}, error) {
-	generations := make(map[int64]CheckpointOperationV1)
-	operationIDs := make(map[string]struct{})
-	for _, journal := range disposition.Journals {
-		if journal.State != "accepted" || journal.IncludedOperationsJSON == nil {
-			continue
-		}
-		envelope, err := decodeCheckpointOperations(*journal.IncludedOperationsJSON)
-		if err != nil {
-			return nil, nil, err
-		}
-		for _, operation := range envelope.Operations {
-			if _, duplicate := generations[operation.Generation]; duplicate {
-				return nil, nil, fmt.Errorf("duplicate terminal operation generation")
-			}
-			if _, duplicate := operationIDs[operation.OperationID]; duplicate {
-				return nil, nil, fmt.Errorf("duplicate terminal operation ID")
-			}
-			generations[operation.Generation] = operation
-			operationIDs[operation.OperationID] = struct{}{}
-		}
-	}
-	return generations, operationIDs, nil
-}
-
 func proveCheckpointRecoveryOperationOwnership(
-	disposition localstore.WorkspaceMaterializationDisposition,
+	disposition localstore.WorkspaceCurrentMaterialization,
 	driver localstore.WorkspaceMaterializationRecord,
 	envelope CheckpointOperationsV1,
-	terminalGenerations map[int64]CheckpointOperationV1,
-	terminalIDs map[string]struct{},
 ) error {
 	rowsByGeneration := make(map[int64]localstore.WorkspaceOperation, len(disposition.Operations))
 	rowIDs := make(map[string]struct{}, len(disposition.Operations))
@@ -499,12 +460,6 @@ func proveCheckpointRecoveryOperationOwnership(
 	}
 	driverGenerations := make(map[int64]struct{}, len(envelope.Operations))
 	for _, claim := range envelope.Operations {
-		if _, duplicate := terminalGenerations[claim.Generation]; duplicate {
-			return fmt.Errorf("driver and terminal history share an operation generation")
-		}
-		if _, duplicate := terminalIDs[claim.OperationID]; duplicate {
-			return fmt.Errorf("driver and terminal history share an operation ID")
-		}
 		row, ok := rowsByGeneration[claim.Generation]
 		if !ok || row.OperationID != claim.OperationID || !bytes.Equal(row.OperationJSON, []byte(claim.OperationJSON)) ||
 			row.StashedByStashID != nil {
@@ -524,9 +479,6 @@ func proveCheckpointRecoveryOperationOwnership(
 	}
 	for _, operation := range disposition.Operations {
 		if operation.State != "materialized" {
-			continue
-		}
-		if _, terminal := terminalGenerations[operation.Generation]; terminal {
 			continue
 		}
 		if driver.State != "prepared" {

@@ -232,14 +232,6 @@ func verifyConflictedRestoreReceipt(
 	}
 	return cloneRestoreStashResult(decoded.Result), nil
 }
-
-func validateRestoreStatusConflictCoherence(persisted localstore.WorkspaceRestoreRetryState) error {
-	if (persisted.Workspace.State == "conflicted") != (len(persisted.OpenConflicts) != 0) {
-		return fmt.Errorf("projectstate: restore workspace status and open conflicts are incoherent")
-	}
-	return nil
-}
-
 func confirmRestoreStashCommit(
 	ctx context.Context,
 	repo *localstore.WorkspaceRepo,

@@ -145,14 +145,14 @@ func TestBranchSwitchDiscardApplicabilityAndDetachedSameSHA(t *testing.T) {
 				}
 				if test.rebasedOnly {
 					if err := service.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
-						audit, err := tx.OperationAudit(context.Background())
+						audit, err := readAllOperationRows(context.Background(), tx)
 						if err != nil {
 							return err
 						}
 						if len(audit) != 1 {
 							return fmt.Errorf("operation audit has %d rows", len(audit))
 						}
-						return tx.TransitionOperations(context.Background(), []localstore.WorkspaceOperation{audit[0].WorkspaceOperation}, "rebased", nil)
+						return tx.TransitionOperations(context.Background(), []localstore.WorkspaceOperation{audit[0]}, "rebased", nil)
 					}); err != nil {
 						t.Fatal(err)
 					}
@@ -405,53 +405,6 @@ func TestObserveGitBaseRequiresCompleteExpectedBindingCAS(t *testing.T) {
 	}
 }
 
-func TestObserveGitBaseDispositionBlockerPrecedesDiscardApplicability(t *testing.T) {
-	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
-	store, service := openProjectStateService(t, "")
-	registered := registerGitRepository(t, service, repository)
-	workspace, err := service.repo.Workspace(context.Background(), registered.Binding.Scope)
-	if err != nil {
-		t.Fatal(err)
-	}
-	envelope, err := encodeCheckpointOperations(CheckpointOperationsV1{
-		SchemaVersion: 1, InitialThroughGeneration: 0, Operations: []CheckpointOperationV1{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	encoded := encodeServiceSnapshot(t, workspace.Snapshot)
-	if _, err := store.DB().Exec(`
-		INSERT INTO workspace_materializations
-		(project_id,workspace_id,journal_id,expected_live_digest,accepted_base_digest,
-		 checkout_path,checkout_device,checkout_inode,prior_tree_digest,candidate_digest,
-		 through_generation,prior_tree,candidate_tree,stage_path,backup_path,state,included_operations_json,publication_review_json,prior_candidate_json,publication_review_proof_version)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-	`, registered.Binding.Scope.ProjectID, registered.Binding.Scope.WorkspaceID, "prepared-blocker",
-		workspace.Snapshot.Digest, workspace.Snapshot.Digest, registered.Binding.Checkout.CanonicalPath,
-		registered.Binding.Checkout.Device, registered.Binding.Checkout.Inode, workspace.Snapshot.Digest, workspace.Snapshot.Digest,
-		int64(0), encoded, encoded, filepath.Join(repository.root, ".wormhole-stage"),
-		filepath.Join(repository.root, ".wormhole-backup"), "prepared", envelope, " review\n", " prior-candidate\n", 1); err != nil {
-		t.Fatal(err)
-	}
-	runGit(t, repository.root, "switch", "-c", "next")
-	req := ObserveGitBaseRequest{
-		Scope: registered.Binding.Scope, ExpectedBinding: registered.Binding,
-		Root: repository.root, ExpectedCommit: repository.commit,
-		BranchAction: BranchSwitchDiscard, RequestID: "10000000-0000-4000-8000-a00000000004", Actor: diffActorEnvelope(),
-	}
-	got, err := service.ObserveGitBase(context.Background(), req)
-	if err == nil || errors.Is(err, ErrBranchSwitchDiscardNotApplicable) || !strings.Contains(err.Error(), "prepared") ||
-		!reflect.DeepEqual(got, ObserveGitBaseResult{}) {
-		t.Fatalf("ObserveGitBase()=(%+v,%v), want disposition blocker precedence", got, err)
-	}
-	if after, readErr := service.repo.Workspace(context.Background(), registered.Binding.Scope); readErr != nil || after.Binding != registered.Binding {
-		t.Fatalf("workspace after blocker=(%+v,%v)", after, readErr)
-	}
-	if receipt, readErr := service.repo.TransitionReceiptByKey(context.Background(), req.Scope, req.RequestID); readErr != nil || receipt != nil {
-		t.Fatalf("receipt after blocker=(%+v,%v)", receipt, readErr)
-	}
-}
-
 func TestObserveGitBaseSameRefAcceptsExactMaterialization(t *testing.T) {
 	for _, test := range []struct {
 		name                 string
@@ -492,7 +445,7 @@ func TestObserveGitBaseSameRefAcceptsExactMaterialization(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				eligible, err = tx.AcceptanceEligibleMaterialization(context.Background())
+				eligible, err = tx.CurrentMaterialization(context.Background())
 				return err
 			}); err != nil {
 				t.Fatal(err)
@@ -532,7 +485,7 @@ func TestObserveGitBaseMaterializationCandidateMismatchIsPrecondition(t *testing
 		if err != nil {
 			return err
 		}
-		eligible, err := tx.AcceptanceEligibleMaterialization(context.Background())
+		eligible, err := tx.CurrentMaterialization(context.Background())
 		if err != nil {
 			return err
 		}
@@ -557,14 +510,14 @@ func TestObserveGitBaseExactAcceptanceRejectsRebasedRowAboveBoundary(t *testing.
 		t.Fatal(err)
 	}
 	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
-		audit, err := tx.OperationAudit(context.Background())
+		audit, err := readAllOperationRows(context.Background(), tx)
 		if err != nil {
 			return err
 		}
 		if len(audit) != 1 || audit[0].State != "active" || audit[0].Generation != 1 {
 			return fmt.Errorf("active audit fixture=%+v", audit)
 		}
-		return tx.TransitionOperations(context.Background(), []localstore.WorkspaceOperation{audit[0].WorkspaceOperation}, "rebased", nil)
+		return tx.TransitionOperations(context.Background(), []localstore.WorkspaceOperation{audit[0]}, "rebased", nil)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -625,7 +578,7 @@ func TestBranchSwitchDiscardNonmatchingEligibleIsPreconditionAndRetained(t *test
 		if err != nil {
 			return err
 		}
-		eligible, err := tx.AcceptanceEligibleMaterialization(context.Background())
+		eligible, err := tx.CurrentMaterialization(context.Background())
 		if err != nil {
 			return err
 		}
@@ -663,11 +616,11 @@ func TestBranchSwitchDiscardExactEligibleIsNotApplicableAndRetained(t *testing.T
 		if err != nil {
 			return err
 		}
-		eligible, err := tx.AcceptanceEligibleMaterialization(context.Background())
+		eligible, err := tx.CurrentMaterialization(context.Background())
 		if err != nil {
 			return err
 		}
-		audit, err := tx.OperationAudit(context.Background())
+		audit, err := readAllOperationRows(context.Background(), tx)
 		if err != nil {
 			return err
 		}
@@ -715,14 +668,14 @@ func TestObserveGitBaseExactAcceptancePreservesLaterActiveRows(t *testing.T) {
 	}
 	var firstRow, secondRow localstore.WorkspaceOperation
 	if err := service.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
-		audit, err := tx.OperationAudit(context.Background())
+		audit, err := readAllOperationRows(context.Background(), tx)
 		if err != nil {
 			return err
 		}
 		if len(audit) != 2 {
 			return fmt.Errorf("operation audit has %d rows", len(audit))
 		}
-		firstRow, secondRow = audit[0].WorkspaceOperation, audit[1].WorkspaceOperation
+		firstRow, secondRow = audit[0], audit[1]
 		rebased := materialized
 		if err := tx.UpsertCandidate(context.Background(), localstore.WorkspaceCandidateRecord{
 			AcceptedBaseDigest: state.Digest(registered.Binding.AcceptedTreeDigest),
@@ -780,12 +733,12 @@ func TestObserveGitBaseExactAcceptancePreservesLaterActiveRows(t *testing.T) {
 		t.Fatalf("Status()=%+v, want accepted=%s composed=%s", status, materialized.Digest, composed.Digest)
 	}
 	if err := service.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
-		audit, err := tx.OperationAudit(context.Background())
+		audit, err := readAllOperationRows(context.Background(), tx)
 		if err != nil {
 			return err
 		}
 		if len(audit) != 2 || audit[0].State != "materialized" ||
-			audit[1].State != "active" || !reflect.DeepEqual(audit[1].WorkspaceOperation, secondRow) {
+			audit[1].State != "active" || !reflect.DeepEqual(audit[1], secondRow) {
 			return fmt.Errorf("post-acceptance audit=%+v", audit)
 		}
 		candidate, err := tx.Candidate(context.Background())
@@ -871,7 +824,7 @@ func TestObserveGitBaseRebaseWithoutCandidateUsesSystemProvenance(t *testing.T) 
 		if err != nil {
 			return err
 		}
-		audit, err := tx.OperationAudit(context.Background())
+		audit, err := readAllOperationRows(context.Background(), tx)
 		if err != nil {
 			return err
 		}
@@ -1135,9 +1088,24 @@ func TestRefreshWorkspaceReadsHEADAndReturnsUpdatedBinding(t *testing.T) {
 
 type observeGitBaseAdjacentState struct {
 	candidate   *localstore.WorkspaceCandidateRecord
-	audit       []localstore.WorkspaceOperationAuditRecord
+	audit       []localstore.WorkspaceOperation
 	conflicts   []localstore.WorkspaceConflictOccurrence
-	disposition localstore.WorkspaceMaterializationDisposition
+	disposition localstore.WorkspaceCurrentMaterialization
+}
+
+func readAllOperationRows(ctx context.Context, tx *localstore.WorkspaceMutationTx) ([]localstore.WorkspaceOperation, error) {
+	next, err := tx.NextGeneration(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if next == 1 {
+		return []localstore.WorkspaceOperation{}, nil
+	}
+	generations := make([]int64, next-1)
+	for index := range generations {
+		generations[index] = int64(index + 1)
+	}
+	return tx.OperationsByGenerations(ctx, generations)
 }
 
 func readObserveGitBaseAdjacentState(
@@ -1151,7 +1119,7 @@ func readObserveGitBaseAdjacentState(
 		if err != nil {
 			return err
 		}
-		got.audit, err = tx.OperationAudit(context.Background())
+		got.audit, err = readAllOperationRows(context.Background(), tx)
 		if err != nil {
 			return err
 		}
@@ -1159,7 +1127,7 @@ func readObserveGitBaseAdjacentState(
 		if err != nil {
 			return err
 		}
-		got.disposition, err = tx.MaterializationDisposition(context.Background())
+		got.disposition, err = readCurrentMaterializationWorkset(context.Background(), tx)
 		return err
 	})
 	return got, err

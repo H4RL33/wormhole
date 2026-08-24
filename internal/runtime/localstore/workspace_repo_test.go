@@ -1397,304 +1397,6 @@ func TestWorkspaceMutationTxWorkspaceAndActiveOperationsAfter(t *testing.T) {
 	}
 }
 
-func TestWorkspaceMutationTxOperationAuditReturnsNonNilEmpty(t *testing.T) {
-	_, repo := openWorkspaceStore(t)
-	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
-
-	err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-		operations, err := tx.OperationAudit(context.Background())
-		if err != nil {
-			return err
-		}
-		if operations == nil || len(operations) != 0 {
-			t.Fatalf("OperationAudit()=%+v, want non-nil empty slice", operations)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestWorkspaceMutationTxOperationAuditReturnsAllStatesInStableOrder(t *testing.T) {
-	store, repo := openWorkspaceStore(t)
-	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
-	stashID := "10000000-0000-4000-8000-000000000001"
-	states := []string{"active", "rebased", "materialized", "stashed", "discarded", "stashed"}
-	wantTimes := make([]time.Time, len(states))
-	wantJSON := make([][]byte, len(states))
-	for index, operationState := range states {
-		operationID := fmt.Sprintf("00000000-0000-4000-8000-%012d", 91+index)
-		var owner *string
-		if index == 3 {
-			owner = &stashID
-		}
-		wantJSON[index] = insertWorkspaceOperationOwned(t, store, binding.Scope, int64(index+1), validWorkspaceOperation(operationID), operationState, owner)
-		wantTimes[index] = time.Date(2026, 7, 29, 10, index, 0, 0, time.UTC)
-		if _, err := store.DB().Exec(`
-			UPDATE workspace_overlay_operations SET created_at=?
-			WHERE project_id=? AND workspace_id=? AND generation=?
-		`, wantTimes[index], binding.Scope.ProjectID, binding.Scope.WorkspaceID, index+1); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-		records, err := tx.OperationAudit(context.Background())
-		if err != nil {
-			return err
-		}
-		if len(records) != len(states) {
-			t.Fatalf("OperationAudit len=%d, want %d", len(records), len(states))
-		}
-		for index, record := range records {
-			if record.Generation != int64(index+1) || record.State != states[index] ||
-				!bytes.Equal(record.OperationJSON, wantJSON[index]) || !record.CreatedAt.Equal(wantTimes[index]) ||
-				record.CreatedAt.Location() != time.UTC {
-				t.Fatalf("OperationAudit[%d]=%+v", index, record)
-			}
-			if index == 3 {
-				if record.StashedByStashID == nil || *record.StashedByStashID != stashID {
-					t.Fatalf("owned stash=%+v", record)
-				}
-			} else if record.StashedByStashID != nil {
-				t.Fatalf("unexpected stash owner at %d: %+v", index, record)
-			}
-		}
-		records[0].OperationJSON[0] ^= 0xff
-		*records[3].StashedByStashID = "20000000-0000-4000-8000-000000000002"
-		again, err := tx.OperationAudit(context.Background())
-		if err != nil {
-			return err
-		}
-		if !bytes.Equal(again[0].OperationJSON, wantJSON[0]) || again[3].StashedByStashID == nil || *again[3].StashedByStashID != stashID {
-			t.Fatal("OperationAudit aliased operation bytes or stash owner")
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestWorkspaceMutationTxOperationAuditIsExactScopedAcrossRestart(t *testing.T) {
-	databasePath := filepath.Join(t.TempDir(), "gateway.db")
-	store, err := Open(databasePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repo := NewWorkspaceRepo(store.DB())
-	a := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout-a", 1, 11)
-	b := createBinding(t, repo, a.Scope.ProjectID, "00000000-0000-4000-8000-000000000012", "/checkout-b", 2, 12)
-	c := createBinding(t, repo, "00000000-0000-4000-8000-000000000002", string(a.Scope.WorkspaceID), "/checkout-c", 3, 13)
-	want := insertWorkspaceOperation(t, store, a.Scope, 1, validWorkspaceOperation("00000000-0000-4000-8000-000000000091"), "active")
-	insertWorkspaceOperation(t, store, b.Scope, 1, validWorkspaceOperation("00000000-0000-4000-8000-000000000092"), "rebased")
-	insertWorkspaceOperation(t, store, c.Scope, 1, validWorkspaceOperation("00000000-0000-4000-8000-000000000093"), "discarded")
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	store, err = Open(databasePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	repo = NewWorkspaceRepo(store.DB())
-
-	err = repo.WithImmediateWorkspace(context.Background(), a.Scope, func(tx *WorkspaceMutationTx) error {
-		records, err := tx.OperationAudit(context.Background())
-		if err != nil {
-			return err
-		}
-		if len(records) != 1 || records[0].Generation != 1 || !bytes.Equal(records[0].OperationJSON, want) {
-			t.Fatalf("OperationAudit()=%+v, want only workspace A", records)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestWorkspaceMutationTxOperationAuditRejectsUnavailableOrMissingScope(t *testing.T) {
-	store, repo := openWorkspaceStore(t)
-	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
-	ctx := context.Background()
-
-	var nilTx *WorkspaceMutationTx
-	if _, err := nilTx.OperationAudit(ctx); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("nil OperationAudit error=%v, want ErrNotFound", err)
-	}
-	if _, err := (&WorkspaceMutationTx{}).OperationAudit(ctx); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("invalid OperationAudit error=%v, want ErrNotFound", err)
-	}
-	conn, err := store.DB().Conn(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	missing := types.WorkspaceScope{ProjectID: binding.Scope.ProjectID, WorkspaceID: "00000000-0000-4000-8000-000000000099"}
-	if _, err := (&WorkspaceMutationTx{conn: conn, scope: missing}).OperationAudit(ctx); !errors.Is(err, ErrNotFound) {
-		conn.Close()
-		t.Fatalf("missing OperationAudit error=%v, want ErrNotFound", err)
-	}
-	if err := conn.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := (&WorkspaceMutationTx{conn: conn, scope: binding.Scope}).OperationAudit(ctx); err == nil || errors.Is(err, ErrNotFound) {
-		t.Fatalf("closed-connection OperationAudit error=%v, want query error", err)
-	}
-}
-
-func TestWorkspaceMutationTxOperationAuditRejectsLogicalCorruption(t *testing.T) {
-	canonical := validWorkspaceOperation("00000000-0000-4000-8000-000000000091")
-	canonicalJSON, err := state.CanonicalOperation(canonical)
-	if err != nil {
-		t.Fatal(err)
-	}
-	owner := "10000000-0000-4000-8000-000000000001"
-	for _, test := range []struct {
-		name      string
-		wantError string
-		corrupt   func(*testing.T, *Store, types.WorkspaceBinding)
-	}{
-		{name: "nonpositive generation", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding) {
-			insertWorkspaceOperationRaw(t, store, binding.Scope, 0, canonical.ID, canonicalJSON, "active")
-		}},
-		{name: "malformed operation", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding) {
-			insertWorkspaceOperationRaw(t, store, binding.Scope, 1, canonical.ID, []byte("{"), "active")
-		}},
-		{name: "row ID mismatch", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding) {
-			insertWorkspaceOperationRaw(t, store, binding.Scope, 1, "00000000-0000-4000-8000-000000000092", canonicalJSON, "active")
-		}},
-		{name: "noncanonical operation", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding) {
-			insertWorkspaceOperationRaw(t, store, binding.Scope, 1, canonical.ID, bytes.TrimSuffix(bytes.Clone(canonicalJSON), []byte("\n")), "active")
-		}},
-		{name: "invalid state", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding) {
-			insertWorkspaceOperationRaw(t, store, binding.Scope, 1, canonical.ID, canonicalJSON, "poison")
-		}},
-		{name: "owner on active", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding) {
-			insertWorkspaceOperationRawOwned(t, store, binding.Scope, 1, canonical.ID, canonicalJSON, "active", &owner)
-		}},
-		{name: "invalid stash owner", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding) {
-			invalidOwner := "10000000-0000-1000-8000-000000000001"
-			insertWorkspaceOperationRawOwned(t, store, binding.Scope, 1, canonical.ID, canonicalJSON, "stashed", &invalidOwner)
-		}},
-		{name: "zero timestamp", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding) {
-			insertWorkspaceOperationRaw(t, store, binding.Scope, 1, canonical.ID, canonicalJSON, "active")
-			if _, err := store.DB().Exec(`UPDATE workspace_overlay_operations SET created_at=?`, time.Time{}); err != nil {
-				t.Fatal(err)
-			}
-		}},
-		{name: "offset timestamp", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding) {
-			insertWorkspaceOperationRaw(t, store, binding.Scope, 1, canonical.ID, canonicalJSON, "active")
-			if _, err := store.DB().Exec(`UPDATE workspace_overlay_operations SET created_at=?`, time.Date(2026, 7, 29, 12, 0, 0, 0, time.FixedZone("offset", 3600))); err != nil {
-				t.Fatal(err)
-			}
-		}},
-		{name: "duplicate generation", wantError: "generations are not strictly increasing", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding) {
-			recreateWorkspaceOperationsWithoutKeys(t, store)
-			insertWorkspaceOperationRaw(t, store, binding.Scope, 1, canonical.ID, canonicalJSON, "active")
-			second := validWorkspaceOperation("00000000-0000-4000-8000-000000000092")
-			secondJSON, err := state.CanonicalOperation(second)
-			if err != nil {
-				t.Fatal(err)
-			}
-			insertWorkspaceOperationRaw(t, store, binding.Scope, 1, second.ID, secondJSON, "rebased")
-			if _, err := store.DB().Exec(`UPDATE workspace_overlay_operations SET created_at=?`, time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)); err != nil {
-				t.Fatal(err)
-			}
-		}},
-		{name: "duplicate operation ID", wantError: "duplicate operation ID", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding) {
-			recreateWorkspaceOperationsWithoutKeys(t, store)
-			insertWorkspaceOperationRaw(t, store, binding.Scope, 1, canonical.ID, canonicalJSON, "active")
-			insertWorkspaceOperationRaw(t, store, binding.Scope, 2, canonical.ID, canonicalJSON, "rebased")
-			if _, err := store.DB().Exec(`UPDATE workspace_overlay_operations SET created_at=?`, time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)); err != nil {
-				t.Fatal(err)
-			}
-		}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			store, repo := openWorkspaceStore(t)
-			store.DB().SetMaxOpenConns(1)
-			binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
-			if _, err := store.DB().Exec(`PRAGMA foreign_keys=OFF`); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := store.DB().Exec(`PRAGMA ignore_check_constraints=ON`); err != nil {
-				t.Fatal(err)
-			}
-			test.corrupt(t, store, binding)
-			err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-				_, err := tx.OperationAudit(context.Background())
-				return err
-			})
-			if err == nil {
-				t.Fatal("OperationAudit served logically corrupt operation history")
-			}
-			if test.wantError != "" && !strings.Contains(err.Error(), test.wantError) {
-				t.Fatalf("OperationAudit error=%v, want %q", err, test.wantError)
-			}
-		})
-	}
-}
-
-func TestWorkspaceMutationTxOperationAuditRejectsSelectedStorageClassCorruption(t *testing.T) {
-	for _, test := range []struct {
-		name    string
-		owned   bool
-		corrupt func(*testing.T, *Store, types.WorkspaceBinding)
-	}{
-		{name: "project BLOB", corrupt: updateOperationAuditColumn("project_id", "CAST(project_id AS BLOB)")},
-		{name: "workspace BLOB", corrupt: updateOperationAuditColumn("workspace_id", "CAST(workspace_id AS BLOB)")},
-		{name: "generation BLOB", corrupt: updateOperationAuditColumn("generation", "CAST(generation AS BLOB)")},
-		{name: "operation ID BLOB", corrupt: updateOperationAuditColumn("operation_id", "CAST(operation_id AS BLOB)")},
-		{name: "operation JSON BLOB", corrupt: updateOperationAuditColumn("operation_json", "CAST(operation_json AS BLOB)")},
-		{name: "state BLOB", corrupt: updateOperationAuditColumn("state", "CAST(state AS BLOB)")},
-		{name: "stash owner BLOB", owned: true, corrupt: updateOperationAuditColumn("stashed_by_stash_id", "CAST(stashed_by_stash_id AS BLOB)")},
-		{name: "created at BLOB", corrupt: updateOperationAuditColumn("created_at", "CAST(created_at AS BLOB)")},
-		{name: "ambiguous textual cast scope", corrupt: func(t *testing.T, store *Store, binding types.WorkspaceBinding) {
-			operation := validWorkspaceOperation("00000000-0000-4000-8000-000000000092")
-			operationJSON, err := state.CanonicalOperation(operation)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := store.DB().Exec(`
-				INSERT INTO workspace_overlay_operations
-				(project_id,workspace_id,generation,operation_id,operation_json,state,stashed_by_stash_id,created_at)
-				VALUES (CAST(? AS BLOB),?,2,?,?,'rebased',NULL,?)
-			`, binding.Scope.ProjectID, binding.Scope.WorkspaceID, operation.ID, string(operationJSON), time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)); err != nil {
-				t.Fatal(err)
-			}
-		}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			store, repo := openWorkspaceStore(t)
-			store.DB().SetMaxOpenConns(1)
-			binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
-			if _, err := store.DB().Exec(`PRAGMA foreign_keys=OFF`); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := store.DB().Exec(`PRAGMA ignore_check_constraints=ON`); err != nil {
-				t.Fatal(err)
-			}
-			var owner *string
-			operationState := "active"
-			if test.owned {
-				operationState = "stashed"
-				owner = stringPointer("10000000-0000-4000-8000-000000000001")
-			}
-			insertWorkspaceOperationOwned(t, store, binding.Scope, 1, validWorkspaceOperation("00000000-0000-4000-8000-000000000091"), operationState, owner)
-			test.corrupt(t, store, binding)
-			err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-				_, err := tx.OperationAudit(context.Background())
-				return err
-			})
-			if err == nil {
-				t.Fatal("OperationAudit served selected storage-class corruption")
-			}
-		})
-	}
-}
-
 func TestWorkspaceMutationTxActiveOperationsAfterToleratesDiscardedHistory(t *testing.T) {
 	store, repo := openWorkspaceStore(t)
 	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
@@ -2484,12 +2186,12 @@ func TestWorkspaceMutationTxSetStatusReturningUpdatedAtMatchesStrictStateAndScop
 		if err != nil {
 			return err
 		}
-		strict, err := tx.RestoreRetryState(context.Background(), stashID)
+		strict, err := tx.Workspace(context.Background())
 		if err != nil {
 			return err
 		}
-		if strict.Workspace.State != "pending" || !strict.BindingUpdatedAt.Equal(first) || first.Location() != time.UTC {
-			t.Fatalf("strict state=%q updated_at=%v, returned %v in %v", strict.Workspace.State, strict.BindingUpdatedAt, first, first.Location())
+		if strict.State != "pending" || first.Location() != time.UTC {
+			t.Fatalf("strict state=%q, returned timestamp %v in %v", strict.State, first, first.Location())
 		}
 		second, err = tx.SetStatusReturningUpdatedAt(context.Background(), "conflicted")
 		if err != nil {
@@ -2502,9 +2204,9 @@ func TestWorkspaceMutationTxSetStatusReturningUpdatedAtMatchesStrictStateAndScop
 	}); err != nil {
 		t.Fatal(err)
 	}
-	strict := mustRestoreRetryState(t, repo, a.Scope, stashID)
-	if strict.Workspace.State != "blocked" || strict.BindingUpdatedAt.Before(second) {
-		t.Fatalf("wrapper strict state=%q updated_at=%v, prior returned=%v", strict.Workspace.State, strict.BindingUpdatedAt, second)
+	strict, err := repo.Workspace(context.Background(), a.Scope)
+	if err != nil || strict.State != "blocked" {
+		t.Fatalf("wrapper strict state=%q error=%v, prior returned=%v", strict.State, err, second)
 	}
 	for _, neighbor := range []types.WorkspaceBinding{b, c} {
 		workspace, err := repo.Workspace(context.Background(), neighbor.Scope)
@@ -2570,28 +2272,27 @@ func TestWorkspaceMutationTxSetStatusReturningUpdatedAtCallbackRollback(t *testi
 	}); err != nil {
 		t.Fatal(err)
 	}
-	before := mustRestoreRetryState(t, repo, binding.Scope, stashID)
 	callbackErr := errors.New("status timestamp rollback fixture")
 	err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
 		updatedAt, err := tx.SetStatusReturningUpdatedAt(context.Background(), "pending")
 		if err != nil {
 			return err
 		}
-		strict, err := tx.RestoreRetryState(context.Background(), stashID)
+		strict, err := tx.Workspace(context.Background())
 		if err != nil {
 			return err
 		}
-		if strict.Workspace.State != "pending" || !strict.BindingUpdatedAt.Equal(updatedAt) {
-			t.Fatalf("transaction-local state=%q updated_at=%v, returned=%v", strict.Workspace.State, strict.BindingUpdatedAt, updatedAt)
+		if strict.State != "pending" || !validUTCTimestamp(updatedAt) {
+			t.Fatalf("transaction-local state=%q returned timestamp=%v", strict.State, updatedAt)
 		}
 		return callbackErr
 	})
 	if !errors.Is(err, callbackErr) || errors.Is(err, ErrCommitOutcomeUnknown) {
 		t.Fatalf("callback error=%v, want rollback fixture without unknown-commit sentinel", err)
 	}
-	after := mustRestoreRetryState(t, repo, binding.Scope, stashID)
-	if after.Workspace.State != "clean" || !after.BindingUpdatedAt.Equal(before.BindingUpdatedAt) {
-		t.Fatalf("rolled-back state=%q updated_at=%v, want clean/%v", after.Workspace.State, after.BindingUpdatedAt, before.BindingUpdatedAt)
+	after, readErr := repo.Workspace(context.Background(), binding.Scope)
+	if readErr != nil || after.State != "clean" {
+		t.Fatalf("rolled-back state=%q error=%v, want clean", after.State, readErr)
 	}
 }
 
@@ -3016,15 +2717,6 @@ func recreateWorkspaceOperationsWithoutKeys(t *testing.T, store *Store) {
 	} {
 		if _, err := store.DB().Exec(statement); err != nil {
 			t.Fatalf("replace operation table for corrupt-row test: %v", err)
-		}
-	}
-}
-
-func updateOperationAuditColumn(column, expression string) func(*testing.T, *Store, types.WorkspaceBinding) {
-	return func(t *testing.T, store *Store, _ types.WorkspaceBinding) {
-		t.Helper()
-		if _, err := store.DB().Exec(fmt.Sprintf(`UPDATE workspace_overlay_operations SET %s=%s`, column, expression)); err != nil {
-			t.Fatalf("corrupt operation audit %s: %v", column, err)
 		}
 	}
 }

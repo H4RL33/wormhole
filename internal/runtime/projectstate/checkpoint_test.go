@@ -221,7 +221,11 @@ func TestCheckpointRejectsTemporaryUnpublishedPublicationDispositions(t *testing
 				t.Fatalf("Checkpoint = (%+v, %v), artifact publish=%d close=%d, want zero and %v", got, err, fixture.publishCalls, fixture.closeCalls, test.want)
 			}
 			disposition := readCheckpointDisposition(t, fixture.service, req.Scope)
-			if len(disposition.Journals) != 1 || disposition.Journals[0].State != test.journal {
+			if test.journal == "recovered_old" {
+				if len(disposition.Journals) != 0 {
+					t.Fatalf("terminal checkpoint remained in current workset: %+v", disposition)
+				}
+			} else if len(disposition.Journals) != 1 || disposition.Journals[0].State != test.journal {
 				t.Fatalf("temporary disposition changed database outcome: %+v", disposition)
 			}
 			if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
@@ -396,71 +400,6 @@ func TestCheckpointHoldsFinalWriterAcrossPublicationAndPostimage(t *testing.T) {
 	var markers int
 	if err := fixture.store.DB().QueryRow(`SELECT COUNT(*) FROM checkpoint_writer_probe`).Scan(&markers); err != nil || markers != 1 {
 		t.Fatalf("writer probe count = (%d, %v), want (1, nil)", markers, err)
-	}
-}
-
-func TestCheckpointPreservedConcurrentOldChangesOnlyJournalState(t *testing.T) {
-	fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
-	accepted := fixture.mustAcceptedSnapshot(t)
-	direct := checkpointPlanMutatedSnapshot(t, accepted, "preserved prior candidate")
-	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
-		if err := tx.UpsertCandidate(context.Background(), *checkpointPlanCandidate(fixture.binding, direct, nil, 0)); err != nil {
-			return err
-		}
-		return tx.SetStatus(context.Background(), "pending")
-	}); err != nil {
-		t.Fatal(err)
-	}
-	operation := servicePutTaskOperation(
-		direct, "99999999-9999-4999-8999-999999999991",
-		"22222222-2222-4222-8222-222222222222", "preserved active operation",
-	)
-	if _, err := fixture.service.Apply(context.Background(), req.Scope, operation); err != nil {
-		t.Fatal(err)
-	}
-	insertServiceConflict(t, fixture.store, req.Scope, "resolved checkpoint evidence",
-		state.RecordKey{Kind: "task", ID: "22222222-2222-4222-8222-222222222222"}, "resolved")
-	revisionBeforeCheckpoint := workspaceRevisionForProjectStateTest(t, fixture.service, req.Scope)
-
-	var before importRawState
-	revisionAtPublish := int64(0)
-	baseFactory := fixture.service.prepareCheckpointArtifact
-	fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
-		handle, err := baseFactory(ctx, input)
-		if err != nil {
-			return handle, err
-		}
-		handle.publish = func(context.Context) (checkpointPublicationDisposition, error) {
-			fixture.publishCalls++
-			revisionAtPublish = workspaceRevisionForProjectStateTest(t, fixture.service, req.Scope)
-			before = captureImportRawState(t, fixture.store)
-			var journalState string
-			if err := fixture.store.DB().QueryRow(`
-				SELECT state FROM workspace_materializations WHERE project_id=? AND workspace_id=?
-			`, req.Scope.ProjectID, req.Scope.WorkspaceID).Scan(&journalState); err != nil || journalState != "prepared" {
-				t.Fatalf("publisher journal state = (%q, %v), want prepared", journalState, err)
-			}
-			return checkpointPublicationPreservedConcurrentOld, nil
-		}
-		return handle, nil
-	}
-
-	got, err := fixture.service.Checkpoint(context.Background(), req)
-	if !errors.Is(err, ErrCheckpointCAS) || got != (CheckpointResult{}) || fixture.publishCalls != 1 {
-		t.Fatalf("preserved-old Checkpoint = (%+v, %v), publish=%d", got, err, fixture.publishCalls)
-	}
-	afterRevision := workspaceRevisionForProjectStateTest(t, fixture.service, req.Scope)
-	if revisionAtPublish != revisionBeforeCheckpoint+1 || afterRevision != revisionAtPublish+1 {
-		t.Fatalf("preserved-old revisions=(before=%d,publisher=%d,after=%d), want separate +1 prepare and +1 finalization", revisionBeforeCheckpoint, revisionAtPublish, afterRevision)
-	}
-	if after := captureImportRawState(t, fixture.store); !reflect.DeepEqual(after, before) {
-		t.Fatalf("preserved-old changed non-journal state\nbefore=%+v\nafter=%+v", before, after)
-	}
-	disposition := readCheckpointDisposition(t, fixture.service, req.Scope)
-	if len(disposition.Journals) != 1 || disposition.Journals[0].State != "recovered_old" ||
-		len(disposition.Operations) != 1 || disposition.Operations[0].OperationID != operation.ID ||
-		disposition.Operations[0].State != "active" {
-		t.Fatalf("preserved-old disposition = %+v", disposition)
 	}
 }
 
@@ -1479,14 +1418,14 @@ func TestCheckpointSecondTransactionPlanAndProofDriftPublishNothing(t *testing.T
 	}
 }
 
-func TestCheckpointSecondTransactionRejectsExactTerminalDispositionDrift(t *testing.T) {
+func TestCheckpointSecondTransactionIgnoresTerminalDispositionDrift(t *testing.T) {
 	fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
 	first, err := fixture.service.Checkpoint(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
-		disposition, err := tx.MaterializationDisposition(context.Background())
+		disposition, err := readCurrentMaterializationWorkset(context.Background(), tx)
 		if err != nil {
 			return err
 		}
@@ -1526,18 +1465,18 @@ func TestCheckpointSecondTransactionRejectsExactTerminalDispositionDrift(t *test
 	})
 
 	got, err := fixture.service.Checkpoint(context.Background(), req)
-	if err == nil || got != (CheckpointResult{}) || fixture.prepareCalls != 1 ||
-		fixture.publishCalls != 0 || fixture.closeCalls != 1 {
+	if err != nil || got.JournalID != secondJournalID || fixture.prepareCalls != 1 ||
+		fixture.publishCalls != 1 || fixture.closeCalls != 1 {
 		t.Fatalf("terminal-drift Checkpoint = (%+v, %v), prepare=%d publish=%d close=%d", got, err, fixture.prepareCalls, fixture.publishCalls, fixture.closeCalls)
 	}
 	disposition := readCheckpointDisposition(t, fixture.service, req.Scope)
-	if len(disposition.Journals) != 2 || disposition.Journals[0].State != "accepted" ||
-		disposition.Journals[1].JournalID != secondJournalID || disposition.Journals[1].State != "prepared" {
+	if len(disposition.Journals) != 1 || disposition.Journals[0].JournalID != secondJournalID ||
+		disposition.Journals[0].State != "published" {
 		t.Fatalf("terminal-drift disposition = %+v", disposition)
 	}
 }
 
-func TestCheckpointSecondTransactionRejectsExactOperationDispositionDrift(t *testing.T) {
+func TestCheckpointSecondTransactionIgnoresTerminalOperationDrift(t *testing.T) {
 	tests := []struct {
 		name       string
 		before     func(*checkpointCoordinatorFixture, CheckpointRequest, state.OperationV1)
@@ -1594,14 +1533,14 @@ func TestCheckpointSecondTransactionRejectsExactOperationDispositionDrift(t *tes
 			checkpointOnSecondOutsideObservation(t, fixture, func() { test.secondStep(fixture, req, operation) })
 
 			got, err := fixture.service.Checkpoint(context.Background(), req)
-			if err == nil || got != (CheckpointResult{}) || fixture.prepareCalls != 1 ||
-				fixture.publishCalls != 0 || fixture.closeCalls != 1 {
+			if err != nil || got.JournalID == "" || fixture.prepareCalls != 1 ||
+				fixture.publishCalls != 1 || fixture.closeCalls != 1 {
 				t.Fatalf("operation-disposition drift = (%+v, %v), prepare=%d publish=%d close=%d",
 					got, err, fixture.prepareCalls, fixture.publishCalls, fixture.closeCalls)
 			}
 			disposition := readCheckpointDisposition(t, fixture.service, req.Scope)
-			if len(disposition.Journals) != 1 || disposition.Journals[0].State != "prepared" ||
-				len(disposition.Operations) != 1 || disposition.Operations[0].State != "discarded" {
+			if len(disposition.Journals) != 1 || disposition.Journals[0].State != "published" ||
+				len(disposition.Operations) != 0 {
 				t.Fatalf("operation-disposition drift durable state = %+v", disposition)
 			}
 		})
@@ -1622,13 +1561,13 @@ func TestCheckpointPendingStructuralAndCardinalityValidation(t *testing.T) {
 	}
 	base := readCheckpointDisposition(t, fixture.service, req.Scope)
 	binding := fixture.binding
-	terminalOnly := cloneImportDisposition(base)
+	terminalOnly := cloneImportCurrentMaterialization(base)
 	terminalOnly.Journals[0].State = "accepted"
 	if got, err := checkpointRequirePreparedDisposition(binding, terminalOnly, base.Journals[0]); err == nil || got.Journals != nil || got.Operations != nil {
 		t.Fatalf("terminal-only prepared disposition = (%+v, %v)", got, err)
 	}
 	for _, journalState := range []string{"prepared", "published", "recovered_new"} {
-		value := cloneImportDisposition(base)
+		value := cloneImportCurrentMaterialization(base)
 		value.Journals[0].State = journalState
 		pending, err := checkpointPendingJournal(binding, value)
 		if err != nil || pending == nil || pending.State != journalState {
@@ -1637,107 +1576,49 @@ func TestCheckpointPendingStructuralAndCardinalityValidation(t *testing.T) {
 	}
 	tests := []struct {
 		name   string
-		mutate func(*localstore.WorkspaceMaterializationDisposition)
+		mutate func(*localstore.WorkspaceCurrentMaterialization)
 	}{
-		{name: "nil journals", mutate: func(value *localstore.WorkspaceMaterializationDisposition) { value.Journals = nil }},
-		{name: "nil operations", mutate: func(value *localstore.WorkspaceMaterializationDisposition) { value.Operations = nil }},
-		{name: "duplicate pending", mutate: func(value *localstore.WorkspaceMaterializationDisposition) {
+		{name: "nil journals", mutate: func(value *localstore.WorkspaceCurrentMaterialization) { value.Journals = nil }},
+		{name: "nil operations", mutate: func(value *localstore.WorkspaceCurrentMaterialization) { value.Operations = nil }},
+		{name: "duplicate pending", mutate: func(value *localstore.WorkspaceCurrentMaterialization) {
 			second := cloneMaterializationRecord(value.Journals[0])
 			second.JournalID = "40000000-0000-4000-8000-000000000001"
 			second.StagePath = filepath.Join(filepath.Dir(second.StagePath), second.JournalID+".stage")
 			second.BackupPath = filepath.Join(filepath.Dir(second.BackupPath), second.JournalID+".backup")
 			value.Journals = append(value.Journals, second)
 		}},
-		{name: "unknown state", mutate: func(value *localstore.WorkspaceMaterializationDisposition) { value.Journals[0].State = "future" }},
-		{name: "bad journal ID", mutate: func(value *localstore.WorkspaceMaterializationDisposition) { value.Journals[0].JournalID = "bad" }},
-		{name: "missing proof", mutate: func(value *localstore.WorkspaceMaterializationDisposition) {
+		{name: "unknown state", mutate: func(value *localstore.WorkspaceCurrentMaterialization) { value.Journals[0].State = "future" }},
+		{name: "bad journal ID", mutate: func(value *localstore.WorkspaceCurrentMaterialization) { value.Journals[0].JournalID = "bad" }},
+		{name: "missing proof", mutate: func(value *localstore.WorkspaceCurrentMaterialization) {
 			value.Journals[0].PublicationReviewJSON = nil
 		}},
-		{name: "wrong path", mutate: func(value *localstore.WorkspaceMaterializationDisposition) { value.Journals[0].StagePath += ".wrong" }},
-		{name: "prior tree", mutate: func(value *localstore.WorkspaceMaterializationDisposition) {
+		{name: "wrong path", mutate: func(value *localstore.WorkspaceCurrentMaterialization) { value.Journals[0].StagePath += ".wrong" }},
+		{name: "prior tree", mutate: func(value *localstore.WorkspaceCurrentMaterialization) {
 			value.Journals[0].PriorTree[0].Data[0] ^= 1
 		}},
-		{name: "candidate tree", mutate: func(value *localstore.WorkspaceMaterializationDisposition) {
+		{name: "candidate tree", mutate: func(value *localstore.WorkspaceCurrentMaterialization) {
 			value.Journals[0].CandidateTree[0].Data[0] ^= 1
 		}},
-		{name: "operation proof", mutate: func(value *localstore.WorkspaceMaterializationDisposition) {
+		{name: "operation proof", mutate: func(value *localstore.WorkspaceCurrentMaterialization) {
 			bad := "{}\n"
 			value.Journals[0].IncludedOperationsJSON = &bad
 		}},
-		{name: "boundary", mutate: func(value *localstore.WorkspaceMaterializationDisposition) { value.Journals[0].ThroughGeneration++ }},
-		{name: "publication proof", mutate: func(value *localstore.WorkspaceMaterializationDisposition) {
+		{name: "boundary", mutate: func(value *localstore.WorkspaceCurrentMaterialization) { value.Journals[0].ThroughGeneration++ }},
+		{name: "publication proof", mutate: func(value *localstore.WorkspaceCurrentMaterialization) {
 			bad := "{}\n"
 			value.Journals[0].PublicationReviewJSON = &bad
 		}},
-		{name: "prior candidate proof", mutate: func(value *localstore.WorkspaceMaterializationDisposition) {
+		{name: "prior candidate proof", mutate: func(value *localstore.WorkspaceCurrentMaterialization) {
 			bad := "{}\n"
 			value.Journals[0].PriorCandidateJSON = &bad
 		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			value := cloneImportDisposition(base)
+			value := cloneImportCurrentMaterialization(base)
 			test.mutate(&value)
 			if pending, err := checkpointPendingJournal(binding, value); err == nil || pending != nil {
 				t.Fatalf("malformed pending = (%+v, %v)", pending, err)
-			}
-		})
-	}
-}
-
-func TestCheckpointPendingFastPathValidatesAllTerminalProofs(t *testing.T) {
-	fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
-	publishErr := errors.New("retain prepared")
-	baseFactory := fixture.service.prepareCheckpointArtifact
-	fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
-		handle, err := baseFactory(ctx, input)
-		handle.publish = func(context.Context) (checkpointPublicationDisposition, error) { return 0, publishErr }
-		return handle, err
-	}
-	if _, err := fixture.service.Checkpoint(context.Background(), req); !errors.Is(err, publishErr) {
-		t.Fatal(err)
-	}
-	base := readCheckpointDisposition(t, fixture.service, req.Scope)
-	terminal := cloneMaterializationRecord(base.Journals[0])
-	terminal.JournalID = "20000000-0000-4000-8000-000000000001"
-	terminal.StagePath = filepath.Join(filepath.Dir(terminal.StagePath), terminal.JournalID+".stage")
-	terminal.BackupPath = filepath.Join(filepath.Dir(terminal.BackupPath), terminal.JournalID+".backup")
-	terminal.State = "accepted"
-	mixed := cloneImportDisposition(base)
-	mixed.Journals = append([]localstore.WorkspaceMaterializationRecord{terminal}, mixed.Journals...)
-	if pending, err := checkpointPendingJournal(fixture.binding, mixed); err != nil || pending == nil || pending.State != "prepared" {
-		t.Fatalf("valid mixed pending disposition = (%+v, %v)", pending, err)
-	}
-
-	tests := []struct {
-		name   string
-		mutate func(*localstore.WorkspaceMaterializationRecord)
-	}{
-		{name: "operation proof", mutate: func(journal *localstore.WorkspaceMaterializationRecord) {
-			bad := "{}\n"
-			journal.IncludedOperationsJSON = &bad
-		}},
-		{name: "publication proof", mutate: func(journal *localstore.WorkspaceMaterializationRecord) {
-			bad := "{}\n"
-			journal.PublicationReviewJSON = &bad
-		}},
-		{name: "prior candidate proof", mutate: func(journal *localstore.WorkspaceMaterializationRecord) {
-			bad := "{}\n"
-			journal.PriorCandidateJSON = &bad
-		}},
-		{name: "candidate tree", mutate: func(journal *localstore.WorkspaceMaterializationRecord) {
-			journal.CandidateTree[0].Data[0] ^= 1
-		}},
-		{name: "proof version", mutate: func(journal *localstore.WorkspaceMaterializationRecord) {
-			journal.PublicationReviewProofVersion = 2
-		}},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			value := cloneImportDisposition(mixed)
-			test.mutate(&value.Journals[0])
-			if pending, err := checkpointPendingJournal(fixture.binding, value); err == nil || pending != nil {
-				t.Fatalf("malformed mixed pending disposition = (%+v, %v)", pending, err)
 			}
 		})
 	}
@@ -1763,7 +1644,7 @@ func TestCheckpointPendingFastPathIgnoresRecoveredOldLegacyOperationEnvelope(t *
 	legacy.State = "recovered_old"
 	malformedLegacyEnvelope := "legacy operation evidence is intentionally noncanonical"
 	legacy.IncludedOperationsJSON = &malformedLegacyEnvelope
-	mixed := cloneImportDisposition(base)
+	mixed := cloneImportCurrentMaterialization(base)
 	mixed.Journals = append([]localstore.WorkspaceMaterializationRecord{legacy}, mixed.Journals...)
 
 	pending, err := checkpointPendingJournal(fixture.binding, mixed)
@@ -1798,7 +1679,7 @@ func TestCheckpointPendingReviewRequiresExactAcceptedGitPosition(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			value := cloneImportDisposition(base)
+			value := cloneImportCurrentMaterialization(base)
 			journal := &value.Journals[0]
 			publication, err := decodeCheckpointPublicationReview(*journal.PublicationReviewJSON)
 			if err != nil {
@@ -1969,7 +1850,7 @@ func TestCheckpointLocalOnlyPublishesExactPlan(t *testing.T) {
 		t.Fatalf("workspace after checkpoint = %+v, before = %+v", after, before)
 	}
 	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
-		disposition, err := tx.MaterializationDisposition(context.Background())
+		disposition, err := readCurrentMaterializationWorkset(context.Background(), tx)
 		if err != nil {
 			return err
 		}
@@ -2119,12 +2000,12 @@ func readCheckpointDisposition(
 	t *testing.T,
 	service *Service,
 	scope types.WorkspaceScope,
-) localstore.WorkspaceMaterializationDisposition {
+) localstore.WorkspaceCurrentMaterialization {
 	t.Helper()
-	var disposition localstore.WorkspaceMaterializationDisposition
+	var disposition localstore.WorkspaceCurrentMaterialization
 	if err := service.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
 		var err error
-		disposition, err = tx.MaterializationDisposition(context.Background())
+		disposition, err = readCurrentMaterializationWorkset(context.Background(), tx)
 		return err
 	}); err != nil {
 		t.Fatal(err)

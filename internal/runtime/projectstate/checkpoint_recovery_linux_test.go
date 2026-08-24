@@ -1911,9 +1911,7 @@ func recoveryAssertOldDatabase(t *testing.T, before, after checkpointRecoveryDat
 		after.workspace.WorkspaceRevision != before.workspace.WorkspaceRevision+1 ||
 		!reflect.DeepEqual(after.candidate, before.candidate) ||
 		!reflect.DeepEqual(after.disposition.Operations, before.disposition.Operations) ||
-		len(before.disposition.Journals) != 1 || len(after.disposition.Journals) != 1 ||
-		after.disposition.Journals[0].State != "recovered_old" ||
-		!recoveryJournalEqualExceptState(before.disposition.Journals[0], after.disposition.Journals[0]) {
+		len(before.disposition.Journals) != 1 || len(after.disposition.Journals) != 0 {
 		t.Fatalf("old database mismatch\nbefore=%+v\nafter=%+v", before, after)
 	}
 }
@@ -2051,6 +2049,14 @@ func checkpointRecoveryAssertCheckpointOutcomeDatabase(
 	wantState string,
 ) {
 	t.Helper()
+	if wantState == "recovered_old" {
+		prepared := before
+		prepared.workspace.WorkspaceRevision++
+		prepared.disposition = cloneImportCurrentMaterialization(before.disposition)
+		prepared.disposition.Journals = []localstore.WorkspaceMaterializationRecord{cloneMaterializationRecord(expectedPrepared)}
+		recoveryAssertOldDatabase(t, prepared, after)
+		return
+	}
 	if len(after.disposition.Journals) != 1 {
 		t.Fatalf("checkpoint outcome journals=%d, want 1", len(after.disposition.Journals))
 	}
@@ -2060,7 +2066,7 @@ func checkpointRecoveryAssertCheckpointOutcomeDatabase(
 	}
 	prepared := before
 	prepared.workspace.WorkspaceRevision++
-	prepared.disposition = cloneImportDisposition(before.disposition)
+	prepared.disposition = cloneImportCurrentMaterialization(before.disposition)
 	prepared.disposition.Journals = []localstore.WorkspaceMaterializationRecord{cloneMaterializationRecord(expectedPrepared)}
 	switch wantState {
 	case "prepared":
@@ -2072,7 +2078,7 @@ func checkpointRecoveryAssertCheckpointOutcomeDatabase(
 		}
 	case "published":
 		normalized := after
-		normalized.disposition = cloneImportDisposition(after.disposition)
+		normalized.disposition = cloneImportCurrentMaterialization(after.disposition)
 		normalized.disposition.Journals[0].State = "recovered_new"
 		recoveryAssertNewDatabase(t, prepared, normalized, true)
 		expectedOperations := make([]localstore.WorkspaceOperation, len(before.disposition.Operations))
@@ -2085,8 +2091,6 @@ func checkpointRecoveryAssertCheckpointOutcomeDatabase(
 		if !reflect.DeepEqual(after.disposition.Operations, expectedOperations) {
 			t.Fatalf("published checkpoint operations differ from frozen input\nexpected=%+v\nafter=%+v", expectedOperations, after.disposition.Operations)
 		}
-	case "recovered_old":
-		recoveryAssertOldDatabase(t, prepared, after)
 	default:
 		t.Fatalf("unknown checkpoint outcome state %q", wantState)
 	}
@@ -2114,7 +2118,7 @@ func checkpointRecoveryCapturePreparedJournal(
 			if transaction != 1 {
 				return nil
 			}
-			disposition, err := tx.MaterializationDisposition(ctx)
+			disposition, err := readCurrentMaterializationWorkset(ctx, tx)
 			if err != nil {
 				return err
 			}
@@ -2314,7 +2318,7 @@ func checkpointRecoveryExercisePublisherRenameResult(t *testing.T, role, outcome
 	if targetAttempts != 1 || after.workspace.Binding != acceptedBefore {
 		t.Fatalf("publisher target attempts=%d or accepted binding moved to %+v", targetAttempts, after.workspace.Binding)
 	}
-	journal := after.disposition.Journals[0]
+	journal := expectedPrepared
 	livePath := filepath.Join(request.Root, ".wormhole")
 	switch outcome {
 	case "prior":

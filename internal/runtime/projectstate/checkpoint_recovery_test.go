@@ -1,7 +1,6 @@
 package projectstate
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -16,216 +15,6 @@ import (
 	"github.com/H4RL33/wormhole/internal/types"
 	state "github.com/H4RL33/wormhole/internal/types/projectstate"
 )
-
-func TestProveCheckpointRecoveryDispositionOwnsPreparedAndPublishedState(t *testing.T) {
-	workspace, priorCandidate, prepared, operations := checkpointRecoveryProofFixture(t)
-
-	t.Run("prepared", func(t *testing.T) {
-		workspaceInput, err := cloneImportWorkspace(workspace)
-		if err != nil {
-			t.Fatal(err)
-		}
-		disposition := localstore.WorkspaceMaterializationDisposition{
-			Journals:   []localstore.WorkspaceMaterializationRecord{cloneMaterializationRecord(prepared)},
-			Operations: cloneImportDisposition(localstore.WorkspaceMaterializationDisposition{Operations: operations}).Operations,
-		}
-		candidate, err := cloneImportCandidate(priorCandidate)
-		if err != nil {
-			t.Fatal(err)
-		}
-		proof, err := proveCheckpointRecoveryDisposition(workspaceInput, candidate, disposition)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if proof.kind != checkpointRecoveryPrepared || proof.driver == nil || proof.driver.State != "prepared" ||
-			len(proof.operations.Operations) != len(operations) || !reflect.DeepEqual(proof.status, WorkspaceStatus{}) {
-			t.Fatalf("prepared proof=%+v", proof)
-		}
-
-		wantDriverByte := proof.driver.CandidateTree[0].Data[0]
-		wantCandidateName := proof.candidate.DirectSnapshot.Project.Name
-		workspaceInput.Snapshot.Project.Name = "mutated workspace"
-		candidate.DirectSnapshot.Project.Name = "mutated candidate"
-		disposition.Journals[0].CandidateTree[0].Data[0] ^= 0xff
-		disposition.Operations[0].OperationJSON[0] ^= 0xff
-		proof.disposition.Journals[0].CandidateTree[0].Data[0] ^= 0xff
-		if proof.workspace.Snapshot.Project.Name == workspaceInput.Snapshot.Project.Name ||
-			proof.candidate.DirectSnapshot.Project.Name != wantCandidateName ||
-			proof.driver.CandidateTree[0].Data[0] != wantDriverByte ||
-			bytes.Equal(proof.disposition.Operations[0].OperationJSON, disposition.Operations[0].OperationJSON) {
-			t.Fatal("prepared proof retained mutable input or internal aliases")
-		}
-	})
-
-	for _, journalState := range []string{"published", "recovered_new"} {
-		t.Run(journalState, func(t *testing.T) {
-			journal := cloneMaterializationRecord(prepared)
-			journal.State = journalState
-			publishedCandidate, err := checkpointPublicationPostimage(journal)
-			if err != nil {
-				t.Fatal(err)
-			}
-			materialized := cloneImportDisposition(localstore.WorkspaceMaterializationDisposition{Operations: operations}).Operations
-			for index := range materialized {
-				materialized[index].State = "materialized"
-			}
-			publishedWorkspace, err := cloneImportWorkspace(workspace)
-			if err != nil {
-				t.Fatal(err)
-			}
-			publishedWorkspace.State = "pending"
-			proof, err := proveCheckpointRecoveryDisposition(publishedWorkspace, &publishedCandidate, localstore.WorkspaceMaterializationDisposition{
-				Journals: []localstore.WorkspaceMaterializationRecord{journal}, Operations: materialized,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			wantKind := checkpointRecoveryPublished
-			if journalState == "recovered_new" {
-				wantKind = checkpointRecoveryNoWork
-			}
-			if proof.kind != wantKind || (journalState == "published") != (proof.driver != nil) ||
-				len(proof.operations.Operations) != len(operations) {
-				t.Fatalf("%s proof=%+v", journalState, proof)
-			}
-			if journalState == "recovered_new" && !reflect.DeepEqual(proof.status, WorkspaceStatus{}) {
-				t.Fatalf("pure recovered-new proof unexpectedly composed status: %+v", proof.status)
-			}
-		})
-	}
-
-	t.Run("valid preimage and operation envelopes", func(t *testing.T) {
-		fixtures := []struct {
-			name          string
-			input         checkpointPlanInput
-			wantPriorNil  bool
-			wantRowStates []string
-		}{
-			{
-				name: "nil prior candidate", input: checkpointPlanActiveInput(t, checkpointPlanFixture(t)),
-				wantPriorNil: true, wantRowStates: []string{"active"},
-			},
-			{
-				name: "mixed rebased and active", input: checkpointRecoveryMixedOperationInput(t),
-				wantRowStates: []string{"rebased", "active"},
-			},
-		}
-		for _, fixture := range fixtures {
-			t.Run(fixture.name, func(t *testing.T) {
-				fixtureWorkspace, fixtureCandidate, fixturePrepared, fixtureRows := checkpointRecoveryProofFixtureForInput(t, fixture.input)
-				prior, err := decodeCheckpointPriorCandidate(*fixturePrepared.PriorCandidateJSON)
-				if err != nil || (prior.Candidate == nil) != fixture.wantPriorNil {
-					t.Fatalf("%s prior preimage=(%+v,%v), want nil=%t", fixture.name, prior, err, fixture.wantPriorNil)
-				}
-				envelope, err := decodeCheckpointOperations(*fixturePrepared.IncludedOperationsJSON)
-				if err != nil || len(envelope.Operations) != len(fixture.wantRowStates) {
-					t.Fatalf("%s operation envelope=(%+v,%v)", fixture.name, envelope, err)
-				}
-				for index, wantState := range fixture.wantRowStates {
-					if envelope.Operations[index].PrepublicationState != wantState || fixtureRows[index].State != wantState {
-						t.Fatalf("%s row %d states=(%q,%q), want %q", fixture.name, index,
-							envelope.Operations[index].PrepublicationState, fixtureRows[index].State, wantState)
-					}
-				}
-
-				for _, journalState := range []string{"prepared", "published", "recovered_new"} {
-					t.Run(journalState, func(t *testing.T) {
-						journal := cloneMaterializationRecord(fixturePrepared)
-						journal.State = journalState
-						rows := cloneImportDisposition(localstore.WorkspaceMaterializationDisposition{Operations: fixtureRows}).Operations
-						candidate, err := cloneImportCandidate(fixtureCandidate)
-						if err != nil {
-							t.Fatal(err)
-						}
-						wantKind := checkpointRecoveryPrepared
-						if journalState != "prepared" {
-							postimage, err := checkpointPublicationPostimage(journal)
-							if err != nil {
-								t.Fatal(err)
-							}
-							candidate = &postimage
-							for index := range rows {
-								rows[index].State = "materialized"
-							}
-							wantKind = checkpointRecoveryPublished
-							if journalState == "recovered_new" {
-								wantKind = checkpointRecoveryNoWork
-							}
-						}
-						disposition := localstore.WorkspaceMaterializationDisposition{
-							Journals: []localstore.WorkspaceMaterializationRecord{journal}, Operations: rows,
-						}
-						proofWorkspace, err := cloneImportWorkspace(fixtureWorkspace)
-						if err != nil {
-							t.Fatal(err)
-						}
-						if journalState != "prepared" {
-							proofWorkspace.State = "pending"
-						}
-						proof, err := proveCheckpointRecoveryDisposition(proofWorkspace, candidate, disposition)
-						if err != nil {
-							t.Fatal(err)
-						}
-						wantDriver := journalState != "recovered_new"
-						if proof.kind != wantKind || (proof.driver != nil) != wantDriver ||
-							!equalCheckpointRecoveryCandidates(proof.candidate, candidate) || len(proof.operations.Operations) != len(envelope.Operations) {
-							t.Fatalf("%s/%s proof semantics=(kind=%d, driver=%t, candidateEqual=%t, operations=%d)",
-								fixture.name, journalState, proof.kind, proof.driver != nil,
-								equalCheckpointRecoveryCandidates(proof.candidate, candidate), len(proof.operations.Operations))
-						}
-						for index, wantOperation := range envelope.Operations {
-							gotOperation := proof.operations.Operations[index]
-							wantPersistedState := fixture.wantRowStates[index]
-							if journalState != "prepared" {
-								wantPersistedState = "materialized"
-							}
-							if gotOperation.Generation != wantOperation.Generation || gotOperation.OperationID != wantOperation.OperationID ||
-								gotOperation.OperationJSON != wantOperation.OperationJSON || gotOperation.PrepublicationState != wantOperation.PrepublicationState ||
-								proof.disposition.Operations[index].State != wantPersistedState {
-								t.Fatalf("%s/%s operation %d differs from recorded envelope/materialization", fixture.name, journalState, index)
-							}
-						}
-
-						wantDriverByte := byte(0)
-						if proof.driver != nil {
-							wantDriverByte = proof.driver.CandidateTree[0].Data[0]
-						}
-						wantCandidateName := ""
-						if proof.candidate != nil {
-							wantCandidateName = proof.candidate.DirectSnapshot.Project.Name
-						}
-						wantOperationBytes := append([]byte(nil), proof.disposition.Operations[0].OperationJSON...)
-						disposition.Journals[0].CandidateTree[0].Data[0] ^= 0xff
-						disposition.Operations[0].OperationJSON[0] ^= 0xff
-						if candidate != nil {
-							candidate.DirectSnapshot.Project.Name = "mutated recovery candidate"
-						}
-						if (proof.driver != nil && proof.driver.CandidateTree[0].Data[0] != wantDriverByte) ||
-							(proof.candidate != nil && proof.candidate.DirectSnapshot.Project.Name != wantCandidateName) ||
-							!bytes.Equal(proof.disposition.Operations[0].OperationJSON, wantOperationBytes) {
-							t.Fatalf("%s/%s proof retained mutable driver, candidate, or operation input", fixture.name, journalState)
-						}
-					})
-				}
-			})
-		}
-	})
-
-	t.Run("terminal accepted", func(t *testing.T) {
-		accepted := cloneMaterializationRecord(prepared)
-		accepted.State = "accepted"
-		materialized := cloneImportDisposition(localstore.WorkspaceMaterializationDisposition{Operations: operations}).Operations
-		for index := range materialized {
-			materialized[index].State = "materialized"
-		}
-		proof, err := proveCheckpointRecoveryDisposition(workspace, nil, localstore.WorkspaceMaterializationDisposition{
-			Journals: []localstore.WorkspaceMaterializationRecord{accepted}, Operations: materialized,
-		})
-		if err != nil || proof.kind != checkpointRecoveryNoWork || proof.driver != nil {
-			t.Fatalf("terminal accepted proof=(%+v,%v)", proof, err)
-		}
-	})
-}
 
 func checkpointRecoveryMixedOperationInput(t *testing.T) checkpointPlanInput {
 	t.Helper()
@@ -246,306 +35,6 @@ func checkpointRecoveryMixedOperationInput(t *testing.T) checkpointPlanInput {
 	return input
 }
 
-func TestProveCheckpointRecoveryDispositionRejectsMixedOrOrphanState(t *testing.T) {
-	input, workspace, priorCandidate, prepared, operations := checkpointRecoveryProofFixtureWithInput(t)
-	acceptedOperation := func(generation int64, operationID string) (localstore.WorkspaceMaterializationRecord, localstore.WorkspaceOperation) {
-		operation, _ := checkpointPlanProjectOperation(t, workspace.Snapshot, operationID, "accepted recovery history")
-		row := checkpointPlanOperationRow(t, generation, "materialized", operation)
-		journal := checkpointPlanAcceptedHistory(t, input, row)
-		journal.JournalID = "10000000-0000-4000-8000-000000000001"
-		return journal, row
-	}
-	tests := []struct {
-		name      string
-		candidate func() *localstore.WorkspaceCandidateRecord
-		dispose   func() localstore.WorkspaceMaterializationDisposition
-	}{
-		{
-			name: "mixed drivers", candidate: func() *localstore.WorkspaceCandidateRecord { return priorCandidate },
-			dispose: func() localstore.WorkspaceMaterializationDisposition {
-				first := cloneMaterializationRecord(prepared)
-				second := cloneMaterializationRecord(prepared)
-				second.JournalID = "40000000-0000-4000-8000-000000000001"
-				second.StagePath = filepath.Join(filepath.Dir(second.StagePath), second.JournalID+".stage")
-				second.BackupPath = filepath.Join(filepath.Dir(second.BackupPath), second.JournalID+".backup")
-				return localstore.WorkspaceMaterializationDisposition{Journals: []localstore.WorkspaceMaterializationRecord{first, second}, Operations: operations}
-			},
-		},
-		{
-			name: "prepared candidate absent", candidate: func() *localstore.WorkspaceCandidateRecord { return nil },
-			dispose: func() localstore.WorkspaceMaterializationDisposition {
-				return localstore.WorkspaceMaterializationDisposition{Journals: []localstore.WorkspaceMaterializationRecord{prepared}, Operations: operations}
-			},
-		},
-		{
-			name: "prepared operation materialized", candidate: func() *localstore.WorkspaceCandidateRecord { return priorCandidate },
-			dispose: func() localstore.WorkspaceMaterializationDisposition {
-				rows := cloneImportDisposition(localstore.WorkspaceMaterializationDisposition{Operations: operations}).Operations
-				rows[0].State = "materialized"
-				return localstore.WorkspaceMaterializationDisposition{Journals: []localstore.WorkspaceMaterializationRecord{prepared}, Operations: rows}
-			},
-		},
-		{
-			name: "orphan materialized row", candidate: func() *localstore.WorkspaceCandidateRecord { return nil },
-			dispose: func() localstore.WorkspaceMaterializationDisposition {
-				rows := cloneImportDisposition(localstore.WorkspaceMaterializationDisposition{Operations: operations}).Operations
-				rows[0].State = "materialized"
-				return localstore.WorkspaceMaterializationDisposition{Journals: []localstore.WorkspaceMaterializationRecord{}, Operations: rows}
-			},
-		},
-		{
-			name: "published operation not materialized",
-			candidate: func() *localstore.WorkspaceCandidateRecord {
-				journal := cloneMaterializationRecord(prepared)
-				journal.State = "published"
-				candidate, err := checkpointPublicationPostimage(journal)
-				if err != nil {
-					t.Fatal(err)
-				}
-				return &candidate
-			},
-			dispose: func() localstore.WorkspaceMaterializationDisposition {
-				journal := cloneMaterializationRecord(prepared)
-				journal.State = "published"
-				return localstore.WorkspaceMaterializationDisposition{Journals: []localstore.WorkspaceMaterializationRecord{journal}, Operations: operations}
-			},
-		},
-		{
-			name: "malformed terminal sibling", candidate: func() *localstore.WorkspaceCandidateRecord { return priorCandidate },
-			dispose: func() localstore.WorkspaceMaterializationDisposition {
-				terminal := checkpointPlanHistoricalInput(t, input, "accepted").Disposition.Journals[0]
-				terminal.JournalID = "10000000-0000-4000-8000-000000000001"
-				bad := "{}\n"
-				terminal.PublicationReviewJSON = &bad
-				return localstore.WorkspaceMaterializationDisposition{
-					Journals: []localstore.WorkspaceMaterializationRecord{terminal, prepared}, Operations: operations,
-				}
-			},
-		},
-		{
-			name: "driver terminal generation overlap",
-			candidate: func() *localstore.WorkspaceCandidateRecord {
-				journal := cloneMaterializationRecord(prepared)
-				journal.State = "published"
-				candidate, err := checkpointPublicationPostimage(journal)
-				if err != nil {
-					t.Fatal(err)
-				}
-				return &candidate
-			},
-			dispose: func() localstore.WorkspaceMaterializationDisposition {
-				driver := cloneMaterializationRecord(prepared)
-				driver.State = "published"
-				terminal := cloneMaterializationRecord(driver)
-				terminal.JournalID = "10000000-0000-4000-8000-000000000001"
-				terminal.StagePath = filepath.Join(filepath.Dir(terminal.StagePath), terminal.JournalID+".stage")
-				terminal.BackupPath = filepath.Join(filepath.Dir(terminal.BackupPath), terminal.JournalID+".backup")
-				terminal.State = "accepted"
-				row := cloneImportOperation(operations[0])
-				row.State = "materialized"
-				return localstore.WorkspaceMaterializationDisposition{
-					Journals: []localstore.WorkspaceMaterializationRecord{terminal, driver}, Operations: []localstore.WorkspaceOperation{row},
-				}
-			},
-		},
-		{
-			name: "driver terminal ID overlap", candidate: func() *localstore.WorkspaceCandidateRecord { return priorCandidate },
-			dispose: func() localstore.WorkspaceMaterializationDisposition {
-				terminal, terminalRow := acceptedOperation(operations[0].Generation+1, operations[0].OperationID)
-				return localstore.WorkspaceMaterializationDisposition{
-					Journals:   []localstore.WorkspaceMaterializationRecord{terminal, prepared},
-					Operations: []localstore.WorkspaceOperation{cloneImportOperation(operations[0]), terminalRow},
-				}
-			},
-		},
-		{
-			name: "operation JSON mismatch", candidate: func() *localstore.WorkspaceCandidateRecord { return priorCandidate },
-			dispose: func() localstore.WorkspaceMaterializationDisposition {
-				row := cloneImportOperation(operations[0])
-				changed, _ := checkpointPlanProjectOperation(t, priorCandidate.DirectSnapshot, row.OperationID, "different row operation")
-				row.OperationJSON = checkpointPlanOperationRow(t, row.Generation, row.State, changed).OperationJSON
-				return localstore.WorkspaceMaterializationDisposition{
-					Journals: []localstore.WorkspaceMaterializationRecord{prepared}, Operations: []localstore.WorkspaceOperation{row},
-				}
-			},
-		},
-		{
-			name: "operation ID mismatch", candidate: func() *localstore.WorkspaceCandidateRecord { return priorCandidate },
-			dispose: func() localstore.WorkspaceMaterializationDisposition {
-				changed, _ := checkpointPlanProjectOperation(t, priorCandidate.DirectSnapshot, "90000000-0000-4000-8000-000000000021", "different row ID")
-				row := checkpointPlanOperationRow(t, operations[0].Generation, operations[0].State, changed)
-				return localstore.WorkspaceMaterializationDisposition{
-					Journals: []localstore.WorkspaceMaterializationRecord{prepared}, Operations: []localstore.WorkspaceOperation{row},
-				}
-			},
-		},
-		{
-			name: "operation stash owner", candidate: func() *localstore.WorkspaceCandidateRecord { return priorCandidate },
-			dispose: func() localstore.WorkspaceMaterializationDisposition {
-				row := cloneImportOperation(operations[0])
-				stashID := "80000000-0000-4000-8000-000000000001"
-				row.StashedByStashID = &stashID
-				return localstore.WorkspaceMaterializationDisposition{
-					Journals: []localstore.WorkspaceMaterializationRecord{prepared}, Operations: []localstore.WorkspaceOperation{row},
-				}
-			},
-		},
-		{
-			name: "prepared active versus rebased state mismatch", candidate: func() *localstore.WorkspaceCandidateRecord { return priorCandidate },
-			dispose: func() localstore.WorkspaceMaterializationDisposition {
-				row := cloneImportOperation(operations[0])
-				row.State = "rebased"
-				return localstore.WorkspaceMaterializationDisposition{
-					Journals: []localstore.WorkspaceMaterializationRecord{prepared}, Operations: []localstore.WorkspaceOperation{row},
-				}
-			},
-		},
-		{
-			name: "non-nil prior candidate drift",
-			candidate: func() *localstore.WorkspaceCandidateRecord {
-				candidate, err := cloneImportCandidate(priorCandidate)
-				if err != nil {
-					t.Fatal(err)
-				}
-				candidate.ImportedBy = "70000000-0000-4000-8000-000000000099"
-				return candidate
-			},
-			dispose: func() localstore.WorkspaceMaterializationDisposition {
-				return localstore.WorkspaceMaterializationDisposition{Journals: []localstore.WorkspaceMaterializationRecord{prepared}, Operations: operations}
-			},
-		},
-		{
-			name: "publication postimage candidate drift",
-			candidate: func() *localstore.WorkspaceCandidateRecord {
-				journal := cloneMaterializationRecord(prepared)
-				journal.State = "published"
-				candidate, err := checkpointPublicationPostimage(journal)
-				if err != nil {
-					t.Fatal(err)
-				}
-				candidate.ImportedBy = "70000000-0000-4000-8000-000000000099"
-				return &candidate
-			},
-			dispose: func() localstore.WorkspaceMaterializationDisposition {
-				journal := cloneMaterializationRecord(prepared)
-				journal.State = "published"
-				rows := cloneImportDisposition(localstore.WorkspaceMaterializationDisposition{Operations: operations}).Operations
-				for index := range rows {
-					rows[index].State = "materialized"
-				}
-				return localstore.WorkspaceMaterializationDisposition{Journals: []localstore.WorkspaceMaterializationRecord{journal}, Operations: rows}
-			},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			proof, err := proveCheckpointRecoveryDisposition(workspace, test.candidate(), test.dispose())
-			if err == nil || !errors.Is(err, ErrCheckpointRecoveryPrecondition) ||
-				!reflect.DeepEqual(proof, checkpointRecoveryProof{}) {
-				t.Fatalf("invalid recovery disposition=(%+v,%v), want zero precondition error", proof, err)
-			}
-		})
-	}
-
-	t.Run("candidate exactness", func(t *testing.T) {
-		input := checkpointPlanRebasedInput(t, checkpointPlanFixture(t), 0)
-		candidateWorkspace, prior, candidatePrepared, candidateOperations := checkpointRecoveryProofFixtureForInput(t, input)
-		candidatePublished := cloneMaterializationRecord(candidatePrepared)
-		candidatePublished.State = "published"
-		postimage, err := checkpointPublicationPostimage(candidatePublished)
-		if err != nil {
-			t.Fatal(err)
-		}
-		materialized := cloneImportDisposition(localstore.WorkspaceMaterializationDisposition{Operations: candidateOperations}).Operations
-		for index := range materialized {
-			materialized[index].State = "materialized"
-		}
-
-		mutations := []struct {
-			name   string
-			mutate func(*localstore.WorkspaceCandidateRecord)
-		}{
-			{name: "accepted base digest", mutate: func(candidate *localstore.WorkspaceCandidateRecord) {
-				candidate.AcceptedBaseDigest = publicationRepeatedDigest('f')
-			}},
-			{name: "working tree digest", mutate: func(candidate *localstore.WorkspaceCandidateRecord) {
-				candidate.WorkingTreeDigest = publicationRepeatedDigest('e')
-			}},
-			{name: "direct canonical tree", mutate: func(candidate *localstore.WorkspaceCandidateRecord) {
-				candidate.DirectSnapshot = checkpointPlanMutatedSnapshot(t, candidate.DirectSnapshot, "recovery direct candidate drift")
-			}},
-			{name: "rebased tree nilness", mutate: func(candidate *localstore.WorkspaceCandidateRecord) {
-				candidate.RebasedSnapshot = nil
-			}},
-			{name: "rebased tree content", mutate: func(candidate *localstore.WorkspaceCandidateRecord) {
-				if candidate.RebasedSnapshot == nil {
-					t.Fatal("candidate exactness fixture lacks rebased snapshot")
-				}
-				changed := checkpointPlanMutatedSnapshot(t, *candidate.RebasedSnapshot, "recovery rebased candidate drift")
-				candidate.RebasedSnapshot = &changed
-			}},
-			{name: "rebased boundary", mutate: func(candidate *localstore.WorkspaceCandidateRecord) {
-				candidate.RebasedThroughGeneration++
-			}},
-			{name: "import origin", mutate: func(candidate *localstore.WorkspaceCandidateRecord) {
-				candidate.ImportedBy = "70000000-0000-4000-8000-000000000099"
-			}},
-			{name: "import timestamp", mutate: func(candidate *localstore.WorkspaceCandidateRecord) {
-				candidate.ImportedAt = candidate.ImportedAt.Add(time.Second)
-			}},
-		}
-		drivers := []struct {
-			name        string
-			kind        checkpointRecoveryKind
-			candidate   *localstore.WorkspaceCandidateRecord
-			disposition localstore.WorkspaceMaterializationDisposition
-		}{
-			{
-				name: "prepared", kind: checkpointRecoveryPrepared, candidate: prior,
-				disposition: localstore.WorkspaceMaterializationDisposition{
-					Journals: []localstore.WorkspaceMaterializationRecord{candidatePrepared}, Operations: candidateOperations,
-				},
-			},
-			{
-				name: "published", kind: checkpointRecoveryPublished, candidate: &postimage,
-				disposition: localstore.WorkspaceMaterializationDisposition{
-					Journals: []localstore.WorkspaceMaterializationRecord{candidatePublished}, Operations: materialized,
-				},
-			},
-		}
-		for _, driver := range drivers {
-			t.Run(driver.name, func(t *testing.T) {
-				driverWorkspace, err := cloneImportWorkspace(candidateWorkspace)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if driver.kind == checkpointRecoveryPublished {
-					driverWorkspace.State = "pending"
-				}
-				baseline, err := proveCheckpointRecoveryDisposition(driverWorkspace, driver.candidate, driver.disposition)
-				if err != nil || baseline.kind != driver.kind || baseline.driver == nil {
-					t.Fatalf("valid %s candidate baseline=(%+v,%v)", driver.name, baseline, err)
-				}
-				for _, mutation := range mutations {
-					t.Run(mutation.name, func(t *testing.T) {
-						candidate, err := cloneImportCandidate(driver.candidate)
-						if err != nil {
-							t.Fatal(err)
-						}
-						mutation.mutate(candidate)
-						proof, err := proveCheckpointRecoveryDisposition(driverWorkspace, candidate, driver.disposition)
-						if err == nil || !errors.Is(err, ErrCheckpointRecoveryPrecondition) ||
-							!reflect.DeepEqual(proof, checkpointRecoveryProof{}) {
-							t.Fatalf("%s candidate drift=(kind=%d, zero=%t, err=%v), want exact zero precondition error",
-								mutation.name, proof.kind, reflect.DeepEqual(proof, checkpointRecoveryProof{}), err)
-						}
-					})
-				}
-			})
-		}
-	})
-}
-
 func TestProveCheckpointRecoveryDispositionRequiresDriverWorkspaceState(t *testing.T) {
 	_, workspace, priorCandidate, prepared, operations := checkpointRecoveryProofFixtureWithInput(t)
 	publicationCandidate := func(journal localstore.WorkspaceMaterializationRecord) *localstore.WorkspaceCandidateRecord {
@@ -556,7 +45,7 @@ func TestProveCheckpointRecoveryDispositionRequiresDriverWorkspaceState(t *testi
 		return &candidate
 	}
 	publicationRows := func() []localstore.WorkspaceOperation {
-		rows := cloneImportDisposition(localstore.WorkspaceMaterializationDisposition{Operations: operations}).Operations
+		rows := cloneImportCurrentMaterialization(localstore.WorkspaceCurrentMaterialization{Operations: operations}).Operations
 		for index := range rows {
 			rows[index].State = "materialized"
 		}
@@ -591,7 +80,7 @@ func TestProveCheckpointRecoveryDispositionRequiresDriverWorkspaceState(t *testi
 				candidate = publicationCandidate(journal)
 				rows = publicationRows()
 			}
-			proof, err := proveCheckpointRecoveryDisposition(currentWorkspace, candidate, localstore.WorkspaceMaterializationDisposition{
+			proof, err := proveCheckpointRecoveryDisposition(currentWorkspace, candidate, localstore.WorkspaceCurrentMaterialization{
 				Journals: []localstore.WorkspaceMaterializationRecord{journal}, Operations: rows,
 			})
 			if test.wantError {
@@ -609,9 +98,9 @@ func TestProveCheckpointRecoveryDispositionRequiresDriverWorkspaceState(t *testi
 	t.Run("partial ownership fails before workspace state", func(t *testing.T) {
 		currentWorkspace := workspace
 		currentWorkspace.State = "conflicted"
-		rows := cloneImportDisposition(localstore.WorkspaceMaterializationDisposition{Operations: operations}).Operations
+		rows := cloneImportCurrentMaterialization(localstore.WorkspaceCurrentMaterialization{Operations: operations}).Operations
 		rows[0].State = "materialized"
-		proof, err := proveCheckpointRecoveryDisposition(currentWorkspace, priorCandidate, localstore.WorkspaceMaterializationDisposition{
+		proof, err := proveCheckpointRecoveryDisposition(currentWorkspace, priorCandidate, localstore.WorkspaceCurrentMaterialization{
 			Journals: []localstore.WorkspaceMaterializationRecord{prepared}, Operations: rows,
 		})
 		if err == nil || !errors.Is(err, ErrCheckpointRecoveryPrecondition) ||
@@ -624,7 +113,7 @@ func TestProveCheckpointRecoveryDispositionRequiresDriverWorkspaceState(t *testi
 
 func TestObserveCheckpointRecoveryGitAllowsOnlyStoredOrSameRefCandidate(t *testing.T) {
 	workspace, priorCandidate, prepared, operations := checkpointRecoveryProofFixture(t)
-	preparedProof, err := proveCheckpointRecoveryDisposition(workspace, priorCandidate, localstore.WorkspaceMaterializationDisposition{
+	preparedProof, err := proveCheckpointRecoveryDisposition(workspace, priorCandidate, localstore.WorkspaceCurrentMaterialization{
 		Journals: []localstore.WorkspaceMaterializationRecord{prepared}, Operations: operations,
 	})
 	if err != nil || preparedProof.kind != checkpointRecoveryPrepared {
@@ -636,7 +125,7 @@ func TestObserveCheckpointRecoveryGitAllowsOnlyStoredOrSameRefCandidate(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	materialized := cloneImportDisposition(localstore.WorkspaceMaterializationDisposition{Operations: operations}).Operations
+	materialized := cloneImportCurrentMaterialization(localstore.WorkspaceCurrentMaterialization{Operations: operations}).Operations
 	for index := range materialized {
 		materialized[index].State = "materialized"
 	}
@@ -645,7 +134,7 @@ func TestObserveCheckpointRecoveryGitAllowsOnlyStoredOrSameRefCandidate(t *testi
 		t.Fatal(err)
 	}
 	publishedWorkspace.State = "pending"
-	publishedProof, err := proveCheckpointRecoveryDisposition(publishedWorkspace, &publishedCandidate, localstore.WorkspaceMaterializationDisposition{
+	publishedProof, err := proveCheckpointRecoveryDisposition(publishedWorkspace, &publishedCandidate, localstore.WorkspaceCurrentMaterialization{
 		Journals: []localstore.WorkspaceMaterializationRecord{journal}, Operations: materialized,
 	})
 	if err != nil || publishedProof.kind != checkpointRecoveryPublished {
@@ -921,7 +410,7 @@ func checkpointRecoveryProofFixtureForInput(
 	if err != nil {
 		t.Fatal(err)
 	}
-	return workspace, candidate, journal, cloneImportDisposition(input.Disposition).Operations
+	return workspace, candidate, journal, cloneImportCurrentMaterialization(input.Disposition).Operations
 }
 
 func TestRecoverTerminalOrEmptyHistoryReturnsDatabaseComposedStatusWithoutGitOrPathIO(t *testing.T) {
@@ -1103,7 +592,7 @@ func TestRecoverHoldsOneImmediateTransactionAcrossOneGitBundleAndConvergence(t *
 		t.Fatalf("writer markers=(%d,%v), want 1", markers, err)
 	}
 	disposition := readCheckpointDisposition(t, fixture.service, request.Scope)
-	if len(disposition.Journals) != 1 || disposition.Journals[0].State != "recovered_old" {
+	if len(disposition.Journals) != 0 {
 		t.Fatalf("recovery disposition=%+v", disposition)
 	}
 	recoveryAssertReturnedStatus(t, fixture.service, request.Scope, got)
@@ -1138,7 +627,11 @@ func TestWorkspaceRevisionRecoveryFinalizationAdvancesOnce(t *testing.T) {
 				t.Fatalf("%s recovery workspace revision=%d, want %d", test.name, afterRevision, beforeRevision+1)
 			}
 			disposition := readCheckpointDisposition(t, fixture.service, request.Scope)
-			if len(disposition.Journals) != 1 || disposition.Journals[0].State != test.wantJournalState {
+			if test.wantJournalState == "recovered_old" && len(disposition.Journals) != 0 {
+				t.Fatalf("%s recovery disposition=%+v", test.name, disposition)
+			}
+			if test.wantJournalState != "recovered_old" &&
+				(len(disposition.Journals) != 1 || disposition.Journals[0].State != test.wantJournalState) {
 				t.Fatalf("%s recovery disposition=%+v", test.name, disposition)
 			}
 			recoveryAssertReturnedStatus(t, fixture.service, request.Scope, got)
@@ -1231,7 +724,7 @@ func TestRecoverUnknownCommitConfirmationMatrix(t *testing.T) {
 type checkpointRecoveryDatabaseState struct {
 	workspace   localstore.WorkspaceRecord
 	candidate   *localstore.WorkspaceCandidateRecord
-	disposition localstore.WorkspaceMaterializationDisposition
+	disposition localstore.WorkspaceCurrentMaterialization
 }
 
 func recoveryDatabaseState(t *testing.T, service *Service, scope types.WorkspaceScope) checkpointRecoveryDatabaseState {
@@ -1247,7 +740,7 @@ func recoveryDatabaseState(t *testing.T, service *Service, scope types.Workspace
 		if err != nil {
 			return err
 		}
-		result.disposition, err = tx.MaterializationDisposition(context.Background())
+		result.disposition, err = readCurrentMaterializationWorkset(context.Background(), tx)
 		return err
 	}); err != nil {
 		t.Fatal(err)

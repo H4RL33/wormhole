@@ -126,235 +126,16 @@ func TestEncodeCheckpointOperationsRejectsInvalidEnvelopeThroughDecoder(t *testi
 	}
 }
 
-func TestProveMaterializationDispositionAcceptsCompleteMultipleOwnership(t *testing.T) {
-	fixture := newCheckpointMaterializationFixture(t)
-	accepted := fixture.journal(t, "journal-a", "accepted", 1, fixture.entries[:1])
-	published := fixture.journal(t, "journal-b", "published", 1, fixture.entries[1:2])
-	recovered := fixture.journal(t, "journal-c", "recovered_new", 2, fixture.entries[2:])
-	recoveredOld := fixture.journal(t, "journal-d", "recovered_old", 1, fixture.entries[1:2])
-	disposition := localstore.WorkspaceMaterializationDisposition{
-		Journals:   []localstore.WorkspaceMaterializationRecord{accepted, published, recovered, recoveredOld},
-		Operations: fixture.rows("materialized", "materialized", "materialized"),
-	}
-	proof, err := proveMaterializationDisposition(disposition)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(proof.journals) != 3 {
-		t.Fatalf("proof journals=%d, want 3 owning journals", len(proof.journals))
-	}
-
-	wantReview, wantPriorCandidate := *published.PublicationReviewJSON, *published.PriorCandidateJSON
-	wantPublished := cloneMaterializationRecord(published)
-	disposition.Journals[1].CandidateTree[0].Data[0] ^= 0xff
-	*disposition.Journals[1].IncludedOperationsJSON = "changed"
-	disposition.Journals[1].StagePath = "/mutated-stage"
-	disposition.Journals[1].BackupPath = "/mutated-backup"
-	disposition.Journals[1].PublicationReviewProofVersion = 0
-	*disposition.Journals[1].PublicationReviewJSON = "mutated review"
-	*disposition.Journals[1].PriorCandidateJSON = "mutated prior"
-	disposition.Operations[1].OperationJSON[0] ^= 0xff
-	gotPublished := proof.journals[published.JournalID]
-	if !reflect.DeepEqual(gotPublished.record, wantPublished) {
-		t.Fatal("proof retained aliases to disposition journals")
-	}
-	if gotPublished.record.PublicationReviewJSON == disposition.Journals[1].PublicationReviewJSON ||
-		gotPublished.record.PriorCandidateJSON == disposition.Journals[1].PriorCandidateJSON ||
-		gotPublished.record.PublicationReviewJSON == nil || *gotPublished.record.PublicationReviewJSON != wantReview ||
-		gotPublished.record.PriorCandidateJSON == nil || *gotPublished.record.PriorCandidateJSON != wantPriorCandidate {
-		t.Fatal("proof retained publication-proof pointer aliases")
-	}
-}
-
-func TestProveMaterializationDispositionNilAndRecoveryStateRules(t *testing.T) {
-	fixture := newCheckpointMaterializationFixture(t)
-	t.Run("accepted nil without materialized residual", func(t *testing.T) {
-		journal := fixture.journal(t, "journal-a", "accepted", 0, nil)
-		journal.IncludedOperationsJSON = nil
-		disposition := localstore.WorkspaceMaterializationDisposition{
-			Journals: []localstore.WorkspaceMaterializationRecord{journal},
-			Operations: []localstore.WorkspaceOperation{{
-				Generation: 1, OperationID: fixture.entries[0].OperationID,
-				OperationJSON: []byte(fixture.entries[0].OperationJSON), State: "active",
-			}},
-		}
-		if _, err := proveMaterializationDisposition(disposition); err != nil {
-			t.Fatal(err)
-		}
-	})
-
-	for _, journalState := range []string{"published", "recovered_new"} {
-		t.Run(journalState+" nil envelope", func(t *testing.T) {
-			journal := fixture.journal(t, "journal-a", journalState, 0, nil)
-			journal.IncludedOperationsJSON = nil
-			if _, err := proveMaterializationDisposition(localstore.WorkspaceMaterializationDisposition{
-				Journals: []localstore.WorkspaceMaterializationRecord{journal}, Operations: []localstore.WorkspaceOperation{},
-			}); err == nil {
-				t.Fatal("nil acceptance-eligible envelope succeeded")
-			}
-		})
-	}
-
-	t.Run("accepted nil with materialized residual", func(t *testing.T) {
-		journal := fixture.journal(t, "journal-a", "accepted", 0, nil)
-		journal.IncludedOperationsJSON = nil
-		if _, err := proveMaterializationDisposition(localstore.WorkspaceMaterializationDisposition{
-			Journals: []localstore.WorkspaceMaterializationRecord{journal}, Operations: fixture.rows("materialized"),
-		}); err == nil {
-			t.Fatal("unclaimed materialized row succeeded")
-		}
-	})
-
-	t.Run("prepared blocks stable proof", func(t *testing.T) {
-		journal := fixture.journal(t, "journal-a", "prepared", 1, fixture.entries[:1])
-		if _, err := proveMaterializationDisposition(localstore.WorkspaceMaterializationDisposition{
-			Journals: []localstore.WorkspaceMaterializationRecord{journal}, Operations: fixture.rows("materialized"),
-		}); err == nil {
-			t.Fatal("prepared journal succeeded")
-		}
-	})
-
-	t.Run("recovered old envelope excluded and reusable", func(t *testing.T) {
-		recoveredOld := fixture.journal(t, "journal-a", "recovered_old", 1, fixture.entries[:1])
-		*recoveredOld.IncludedOperationsJSON = "not JSON"
-		if _, err := proveMaterializationDisposition(localstore.WorkspaceMaterializationDisposition{
-			Journals: []localstore.WorkspaceMaterializationRecord{recoveredOld}, Operations: []localstore.WorkspaceOperation{},
-		}); err != nil {
-			t.Fatalf("excluded recovered-old envelope was decoded: %v", err)
-		}
-		recoveredOld = fixture.journal(t, "journal-a", "recovered_old", 1, fixture.entries[:1])
-		published := fixture.journal(t, "journal-b", "published", 1, fixture.entries[:1])
-		if _, err := proveMaterializationDisposition(localstore.WorkspaceMaterializationDisposition{
-			Journals: []localstore.WorkspaceMaterializationRecord{recoveredOld, published}, Operations: fixture.rows("materialized"),
-		}); err != nil {
-			t.Fatalf("reused recovered operation failed: %v", err)
-		}
-	})
-}
-
-func TestProveMaterializationDispositionAllowsLaterActiveAndTerminalGaps(t *testing.T) {
-	for _, terminalState := range []string{"stashed", "discarded"} {
-		t.Run(terminalState, func(t *testing.T) {
-			fixture := newCheckpointMaterializationFixture(t)
-			journal := fixture.journal(t, "journal-a", "published", 1, fixture.entries[:1])
-			operations := fixture.rows("materialized", "active", terminalState)
-			if terminalState == "stashed" {
-				owner := "88888888-8888-4888-8888-888888888888"
-				operations[2].StashedByStashID = &owner
-			}
-			if _, err := proveMaterializationDisposition(localstore.WorkspaceMaterializationDisposition{
-				Journals: []localstore.WorkspaceMaterializationRecord{journal}, Operations: operations,
-			}); err != nil {
-				t.Fatalf("later active and %s gap failed: %v", terminalState, err)
-			}
-		})
-	}
-}
-
-func TestProveMaterializationDispositionRejectsIncompleteOrAmbiguousOwnership(t *testing.T) {
-	fixture := newCheckpointMaterializationFixture(t)
-	valid := func() localstore.WorkspaceMaterializationDisposition {
-		return localstore.WorkspaceMaterializationDisposition{
-			Journals: []localstore.WorkspaceMaterializationRecord{
-				fixture.journal(t, "journal-a", "published", 1, fixture.entries[:2]),
-			},
-			Operations: fixture.rows("materialized", "materialized"),
-		}
-	}
-	tests := []struct {
-		name string
-		edit func(*localstore.WorkspaceMaterializationDisposition)
-	}{
-		{"final boundary mismatch", func(value *localstore.WorkspaceMaterializationDisposition) { value.Journals[0].ThroughGeneration++ }},
-		{"missing claimed row", func(value *localstore.WorkspaceMaterializationDisposition) { value.Operations = value.Operations[:1] }},
-		{"altered claimed row ID", func(value *localstore.WorkspaceMaterializationDisposition) {
-			value.Operations[1].OperationID = fixture.entries[0].OperationID
-		}},
-		{"altered claimed row bytes", func(value *localstore.WorkspaceMaterializationDisposition) {
-			value.Operations[1].OperationJSON = append(bytes.Clone(value.Operations[1].OperationJSON), ' ')
-		}},
-		{"wrong claimed row state", func(value *localstore.WorkspaceMaterializationDisposition) { value.Operations[1].State = "active" }},
-		{"claimed row stash owner", func(value *localstore.WorkspaceMaterializationDisposition) {
-			owner := "88888888-8888-4888-8888-888888888888"
-			value.Operations[1].StashedByStashID = &owner
-		}},
-		{"extra unclaimed materialized row", func(value *localstore.WorkspaceMaterializationDisposition) {
-			value.Operations = fixture.rows("materialized", "materialized", "materialized")
-		}},
-		{"unordered journals", func(value *localstore.WorkspaceMaterializationDisposition) {
-			second := fixture.journal(t, "journal-0", "accepted", 0, []CheckpointOperationV1{})
-			value.Journals = append(value.Journals, second)
-		}},
-		{"duplicate journal ID", func(value *localstore.WorkspaceMaterializationDisposition) {
-			value.Journals = append(value.Journals, cloneMaterializationRecord(value.Journals[0]))
-		}},
-		{"unordered operation rows", func(value *localstore.WorkspaceMaterializationDisposition) {
-			value.Operations[0], value.Operations[1] = value.Operations[1], value.Operations[0]
-		}},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			disposition := valid()
-			test.edit(&disposition)
-			if proof, err := proveMaterializationDisposition(disposition); err == nil || proof.journals != nil {
-				t.Fatalf("corrupt ownership proof=(%+v,%v), want zero error result", proof, err)
-			}
-		})
-	}
-
-	t.Run("duplicate generation across owning journals", func(t *testing.T) {
-		first := fixture.journal(t, "journal-a", "accepted", 1, fixture.entries[:1])
-		duplicate := fixture.entries[1]
-		duplicate.Generation = fixture.entries[0].Generation
-		duplicate.PrepublicationState = "rebased"
-		second := fixture.journal(t, "journal-b", "published", 1, []CheckpointOperationV1{duplicate})
-		if _, err := proveMaterializationDisposition(localstore.WorkspaceMaterializationDisposition{
-			Journals: []localstore.WorkspaceMaterializationRecord{first, second}, Operations: fixture.rows("materialized", "materialized"),
-		}); err == nil {
-			t.Fatal("duplicate claimed generation succeeded")
-		}
-	})
-	t.Run("duplicate operation ID across owning journals", func(t *testing.T) {
-		first := fixture.journal(t, "journal-a", "accepted", 1, fixture.entries[:1])
-		duplicate := fixture.entries[0]
-		duplicate.Generation = 2
-		duplicate.PrepublicationState = "active"
-		second := fixture.journal(t, "journal-b", "published", 1, []CheckpointOperationV1{duplicate})
-		if _, err := proveMaterializationDisposition(localstore.WorkspaceMaterializationDisposition{
-			Journals: []localstore.WorkspaceMaterializationRecord{first, second}, Operations: fixture.rows("materialized", "materialized"),
-		}); err == nil {
-			t.Fatal("duplicate claimed operation ID succeeded")
-		}
-	})
-	t.Run("omitted active row inside journal window", func(t *testing.T) {
-		claim := fixture.entries[1]
-		journal := fixture.journal(t, "journal-a", "published", 0, []CheckpointOperationV1{claim})
-		if _, err := proveMaterializationDisposition(localstore.WorkspaceMaterializationDisposition{
-			Journals: []localstore.WorkspaceMaterializationRecord{journal}, Operations: fixture.rows("active", "materialized"),
-		}); err == nil {
-			t.Fatal("omitted active row inside checkpoint window succeeded")
-		}
-	})
-	t.Run("omitted rebased row inside journal boundary", func(t *testing.T) {
-		journal := fixture.journal(t, "journal-a", "published", 1, fixture.entries[1:2])
-		if _, err := proveMaterializationDisposition(localstore.WorkspaceMaterializationDisposition{
-			Journals: []localstore.WorkspaceMaterializationRecord{journal}, Operations: fixture.rows("rebased", "materialized"),
-		}); err == nil {
-			t.Fatal("omitted rebased row inside checkpoint boundary succeeded")
-		}
-	})
-}
-
 func TestRequireMatchingMaterializationAcceptsPublishedAndRecoveredNewWithoutAliasing(t *testing.T) {
 	for _, journalState := range []string{"published", "recovered_new"} {
 		t.Run(journalState, func(t *testing.T) {
 			fixture := newCheckpointMaterializationFixture(t)
 			journal := fixture.journal(t, "journal-a", journalState, 1, fixture.entries[:2])
-			disposition := localstore.WorkspaceMaterializationDisposition{
+			disposition := localstore.WorkspaceCurrentMaterialization{
 				Journals:   []localstore.WorkspaceMaterializationRecord{cloneMaterializationRecord(journal)},
 				Operations: fixture.rows("materialized", "materialized"),
 			}
-			proof, err := proveMaterializationDisposition(disposition)
+			proof, err := proveCurrentMaterializationWorkset(disposition)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -396,9 +177,6 @@ func TestRequireMatchingMaterializationRejectsRecordBindingTreeAndDigestMismatch
 		name   string
 		mutate func(*checkpointMaterializationFixture, *localstore.WorkspaceMaterializationRecord, *types.WorkspaceBinding, *state.Tree, *state.Digest)
 	}{
-		{"accepted state", func(_ *checkpointMaterializationFixture, journal *localstore.WorkspaceMaterializationRecord, _ *types.WorkspaceBinding, _ *state.Tree, _ *state.Digest) {
-			journal.State = "accepted"
-		}},
 		{"checkout binding", func(_ *checkpointMaterializationFixture, _ *localstore.WorkspaceMaterializationRecord, binding *types.WorkspaceBinding, _ *state.Tree, _ *state.Digest) {
 			binding.Checkout.Inode++
 		}},
@@ -448,7 +226,7 @@ func TestRequireMatchingMaterializationRejectsRecordBindingTreeAndDigestMismatch
 			candidate := checkpointCloneTree(fixture.candidateTree)
 			candidateDigest := fixture.candidateDigest
 			test.mutate(&fixture, &journal, &binding, &candidate, &candidateDigest)
-			proof, err := proveMaterializationDisposition(localstore.WorkspaceMaterializationDisposition{
+			proof, err := proveCurrentMaterializationWorkset(localstore.WorkspaceCurrentMaterialization{
 				Journals:   []localstore.WorkspaceMaterializationRecord{cloneMaterializationRecord(journal)},
 				Operations: fixture.rows("materialized", "materialized"),
 			})
@@ -476,7 +254,7 @@ func TestRequireMatchingMaterializationRejectsRecordBindingTreeAndDigestMismatch
 		t.Run("separate eligible "+test.name+" differs from proof", func(t *testing.T) {
 			fixture := newCheckpointMaterializationFixture(t)
 			journal := fixture.journal(t, "journal-a", "published", 1, fixture.entries[:2])
-			proof, err := proveMaterializationDisposition(localstore.WorkspaceMaterializationDisposition{
+			proof, err := proveCurrentMaterializationWorkset(localstore.WorkspaceCurrentMaterialization{
 				Journals: []localstore.WorkspaceMaterializationRecord{journal}, Operations: fixture.rows("materialized", "materialized"),
 			})
 			if err != nil {
@@ -493,7 +271,7 @@ func TestRequireMatchingMaterializationRejectsRecordBindingTreeAndDigestMismatch
 	t.Run("unknown proof journal", func(t *testing.T) {
 		fixture := newCheckpointMaterializationFixture(t)
 		journal := fixture.journal(t, "journal-a", "published", 1, fixture.entries[:2])
-		proof, err := proveMaterializationDisposition(localstore.WorkspaceMaterializationDisposition{
+		proof, err := proveCurrentMaterializationWorkset(localstore.WorkspaceCurrentMaterialization{
 			Journals: []localstore.WorkspaceMaterializationRecord{journal}, Operations: fixture.rows("materialized", "materialized"),
 		})
 		if err != nil {
@@ -508,7 +286,7 @@ func TestRequireMatchingMaterializationRejectsRecordBindingTreeAndDigestMismatch
 
 	t.Run("nil eligible and zero proof", func(t *testing.T) {
 		fixture := newCheckpointMaterializationFixture(t)
-		if match, err := requireMatchingMaterialization(materializationDispositionProof{}, nil, fixture.binding, fixture.priorTree, fixture.candidateTree, fixture.candidateDigest); err == nil || match != (matchingMaterializationProof{}) {
+		if match, err := requireMatchingMaterialization(currentMaterializationProof{}, nil, fixture.binding, fixture.priorTree, fixture.candidateTree, fixture.candidateDigest); err == nil || match != (matchingMaterializationProof{}) {
 			t.Fatalf("unavailable matching proof=(%+v,%v)", match, err)
 		}
 	})
@@ -517,7 +295,7 @@ func TestRequireMatchingMaterializationRejectsRecordBindingTreeAndDigestMismatch
 		t.Run(testName, func(t *testing.T) {
 			fixture := newCheckpointMaterializationFixture(t)
 			journal := fixture.journal(t, "journal-a", "published", 1, fixture.entries[:2])
-			proof, err := proveMaterializationDisposition(localstore.WorkspaceMaterializationDisposition{
+			proof, err := proveCurrentMaterializationWorkset(localstore.WorkspaceCurrentMaterialization{
 				Journals: []localstore.WorkspaceMaterializationRecord{journal}, Operations: fixture.rows("materialized", "materialized"),
 			})
 			if err != nil {
@@ -543,7 +321,7 @@ func TestWorkspaceMaterializationProofRejectsV0PendingJournal(t *testing.T) {
 	journal.PublicationReviewProofVersion = 0
 	journal.PublicationReviewJSON = nil
 	journal.PriorCandidateJSON = nil
-	if _, err := proveMaterializationDisposition(localstore.WorkspaceMaterializationDisposition{
+	if _, err := proveCurrentMaterializationWorkset(localstore.WorkspaceCurrentMaterialization{
 		Journals: []localstore.WorkspaceMaterializationRecord{journal}, Operations: fixture.rows("materialized", "materialized"),
 	}); err == nil {
 		t.Fatal("v0 published materialization proof succeeded")

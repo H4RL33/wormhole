@@ -338,7 +338,7 @@ func TestRecoveryStatusCompositionUsesDatabaseOnly(t *testing.T) {
 		t.Run(history, func(t *testing.T) {
 			service, scope, root := recoveryNoWorkServiceFixture(t, history)
 			var want WorkspaceStatus
-			var wantDisposition localstore.WorkspaceMaterializationDisposition
+			var wantDisposition localstore.WorkspaceCurrentMaterialization
 			var wantCandidate *localstore.WorkspaceCandidateRecord
 			if err := service.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
 				composed, err := loadComposedWorkspace(context.Background(), tx)
@@ -346,7 +346,7 @@ func TestRecoveryStatusCompositionUsesDatabaseOnly(t *testing.T) {
 					return err
 				}
 				want = composed.status
-				wantDisposition, err = tx.MaterializationDisposition(context.Background())
+				wantDisposition, err = readCurrentMaterializationWorkset(context.Background(), tx)
 				if err != nil {
 					return err
 				}
@@ -570,7 +570,7 @@ func recoveryNoWorkServiceFixture(t *testing.T, history string) (*Service, types
 	}
 
 	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), request.Scope, func(tx *localstore.WorkspaceMutationTx) error {
-		disposition, err := tx.MaterializationDisposition(context.Background())
+		disposition, err := readCurrentMaterializationWorkset(context.Background(), tx)
 		if err != nil {
 			return err
 		}

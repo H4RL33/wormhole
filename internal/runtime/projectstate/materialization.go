@@ -24,7 +24,7 @@ type CheckpointOperationsV1 struct {
 	Operations               []CheckpointOperationV1 `json:"operations"`
 }
 
-type materializationDispositionProof struct {
+type currentMaterializationProof struct {
 	journals map[string]materializationJournalProof
 }
 
@@ -119,103 +119,6 @@ func decodeCheckpointOperations(raw string) (CheckpointOperationsV1, error) {
 	return envelope, nil
 }
 
-func proveMaterializationDisposition(disposition localstore.WorkspaceMaterializationDisposition) (materializationDispositionProof, error) {
-	if disposition.Journals == nil || disposition.Operations == nil {
-		return materializationDispositionProof{}, fmt.Errorf("projectstate: incomplete materialization disposition")
-	}
-	for index, journal := range disposition.Journals {
-		if journal.JournalID == "" || (index > 0 && journal.JournalID <= disposition.Journals[index-1].JournalID) {
-			return materializationDispositionProof{}, fmt.Errorf("projectstate: materialization journals are not strictly ordered and unique")
-		}
-	}
-	rowsByGeneration := make(map[int64]localstore.WorkspaceOperation, len(disposition.Operations))
-	rowIDs := make(map[string]struct{}, len(disposition.Operations))
-	for index, operation := range disposition.Operations {
-		if operation.Generation <= 0 || (index > 0 && operation.Generation <= disposition.Operations[index-1].Generation) || !types.CanonicalUUID(operation.OperationID) {
-			return materializationDispositionProof{}, fmt.Errorf("projectstate: materialization operations are not strictly ordered and valid")
-		}
-		if _, duplicate := rowIDs[operation.OperationID]; duplicate {
-			return materializationDispositionProof{}, fmt.Errorf("projectstate: duplicate materialization operation ID")
-		}
-		rowIDs[operation.OperationID] = struct{}{}
-		rowsByGeneration[operation.Generation] = operation
-	}
-
-	proof := materializationDispositionProof{journals: make(map[string]materializationJournalProof)}
-	claimsByGeneration := make(map[int64]CheckpointOperationV1)
-	claimedIDs := make(map[string]struct{})
-	for _, journal := range disposition.Journals {
-		switch journal.State {
-		case "prepared":
-			return materializationDispositionProof{}, fmt.Errorf("projectstate: prepared materialization requires recovery")
-		case "recovered_old":
-			continue
-		case "accepted", "published", "recovered_new":
-		default:
-			return materializationDispositionProof{}, fmt.Errorf("projectstate: invalid materialization journal state")
-		}
-		if !validMaterializationPublicationProof(journal) {
-			return materializationDispositionProof{}, fmt.Errorf("projectstate: materialization publication proof is invalid")
-		}
-		if (journal.State == "published" || journal.State == "recovered_new") && journal.PublicationReviewProofVersion != 1 {
-			return materializationDispositionProof{}, fmt.Errorf("projectstate: acceptance-eligible materialization has no publication proof")
-		}
-		if journal.IncludedOperationsJSON == nil {
-			if journal.State == "accepted" {
-				if err := proveJournalPrepublicationMembership(journal, nil, disposition.Operations); err != nil {
-					return materializationDispositionProof{}, err
-				}
-				continue
-			}
-			return materializationDispositionProof{}, fmt.Errorf("projectstate: acceptance-eligible materialization has no operation envelope")
-		}
-		envelope, err := decodeCheckpointOperations(*journal.IncludedOperationsJSON)
-		if err != nil {
-			return materializationDispositionProof{}, fmt.Errorf("projectstate: journal %q operation envelope: %w", journal.JournalID, err)
-		}
-		through := envelope.InitialThroughGeneration
-		if len(envelope.Operations) != 0 && envelope.Operations[len(envelope.Operations)-1].Generation > through {
-			through = envelope.Operations[len(envelope.Operations)-1].Generation
-		}
-		if through != journal.ThroughGeneration {
-			return materializationDispositionProof{}, fmt.Errorf("projectstate: journal %q operation boundary mismatch", journal.JournalID)
-		}
-		journalClaims := make(map[int64]struct{}, len(envelope.Operations))
-		for _, claim := range envelope.Operations {
-			if _, duplicate := claimsByGeneration[claim.Generation]; duplicate {
-				return materializationDispositionProof{}, fmt.Errorf("projectstate: duplicate claimed operation generation")
-			}
-			if _, duplicate := claimedIDs[claim.OperationID]; duplicate {
-				return materializationDispositionProof{}, fmt.Errorf("projectstate: duplicate claimed operation ID")
-			}
-			claimsByGeneration[claim.Generation] = claim
-			claimedIDs[claim.OperationID] = struct{}{}
-			journalClaims[claim.Generation] = struct{}{}
-		}
-		if err := proveJournalPrepublicationMembership(journal, journalClaims, disposition.Operations); err != nil {
-			return materializationDispositionProof{}, err
-		}
-		proof.journals[journal.JournalID] = materializationJournalProof{
-			record: cloneMaterializationRecord(journal), envelope: cloneCheckpointOperations(envelope),
-		}
-	}
-	for generation, claim := range claimsByGeneration {
-		operation, ok := rowsByGeneration[generation]
-		if !ok || operation.OperationID != claim.OperationID || !bytes.Equal(operation.OperationJSON, []byte(claim.OperationJSON)) ||
-			operation.State != "materialized" || operation.StashedByStashID != nil {
-			return materializationDispositionProof{}, fmt.Errorf("projectstate: claimed materialization operation does not match persisted row")
-		}
-	}
-	for _, operation := range disposition.Operations {
-		if operation.State == "materialized" {
-			if _, claimed := claimsByGeneration[operation.Generation]; !claimed {
-				return materializationDispositionProof{}, fmt.Errorf("projectstate: unclaimed materialized operation")
-			}
-		}
-	}
-	return proof, nil
-}
-
 func proveJournalPrepublicationMembership(
 	journal localstore.WorkspaceMaterializationRecord,
 	claims map[int64]struct{},
@@ -233,7 +136,7 @@ func proveJournalPrepublicationMembership(
 }
 
 func requireMatchingMaterialization(
-	proof materializationDispositionProof,
+	proof currentMaterializationProof,
 	eligible *localstore.WorkspaceMaterializationRecord,
 	binding types.WorkspaceBinding,
 	capturedPrior state.Tree,

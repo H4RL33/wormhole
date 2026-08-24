@@ -114,7 +114,7 @@ func (s *Service) Import(ctx context.Context, req ImportRequest) (ImportResult, 
 			return err
 		}
 
-		disposition, proof, eligible, err := loadCurrentMaterializationDisposition(ctx, tx)
+		disposition, proof, eligible, err := loadCurrentMaterializationWorkset(ctx, tx)
 		if err != nil {
 			return err
 		}
@@ -243,31 +243,31 @@ func (s *Service) Import(ctx context.Context, req ImportRequest) (ImportResult, 
 	return result, nil
 }
 
-func loadCurrentMaterializationDisposition(
+func loadCurrentMaterializationWorkset(
 	ctx context.Context,
 	tx *localstore.WorkspaceMutationTx,
-) (localstore.WorkspaceMaterializationDisposition, materializationDispositionProof, *localstore.WorkspaceMaterializationRecord, error) {
+) (localstore.WorkspaceCurrentMaterialization, currentMaterializationProof, *localstore.WorkspaceMaterializationRecord, error) {
 	current, err := tx.CurrentMaterialization(ctx)
 	if err != nil {
-		return localstore.WorkspaceMaterializationDisposition{}, materializationDispositionProof{}, nil, err
+		return localstore.WorkspaceCurrentMaterialization{}, currentMaterializationProof{}, nil, err
 	}
 	active, err := tx.ActiveOperationsAfter(ctx, 0)
 	if err != nil {
-		return localstore.WorkspaceMaterializationDisposition{}, materializationDispositionProof{}, nil, err
+		return localstore.WorkspaceCurrentMaterialization{}, currentMaterializationProof{}, nil, err
 	}
 	rebased, err := tx.RebasedOperationsAtOrBefore(ctx, int64(^uint64(0)>>1))
 	if err != nil {
-		return localstore.WorkspaceMaterializationDisposition{}, materializationDispositionProof{}, nil, err
+		return localstore.WorkspaceCurrentMaterialization{}, currentMaterializationProof{}, nil, err
 	}
 	operations := append(rebased, active...)
 	if current != nil {
 		if current.IncludedOperationsJSON == nil {
-			return localstore.WorkspaceMaterializationDisposition{}, materializationDispositionProof{}, nil,
+			return localstore.WorkspaceCurrentMaterialization{}, currentMaterializationProof{}, nil,
 				fmt.Errorf("projectstate: current materialization has no operation envelope")
 		}
 		envelope, err := decodeCheckpointOperations(*current.IncludedOperationsJSON)
 		if err != nil {
-			return localstore.WorkspaceMaterializationDisposition{}, materializationDispositionProof{}, nil, err
+			return localstore.WorkspaceCurrentMaterialization{}, currentMaterializationProof{}, nil, err
 		}
 		generations := make([]int64, len(envelope.Operations))
 		for index := range envelope.Operations {
@@ -275,7 +275,7 @@ func loadCurrentMaterializationDisposition(
 		}
 		owned, err := tx.OperationsByGenerations(ctx, generations)
 		if err != nil {
-			return localstore.WorkspaceMaterializationDisposition{}, materializationDispositionProof{}, nil, err
+			return localstore.WorkspaceCurrentMaterialization{}, currentMaterializationProof{}, nil, err
 		}
 		byGeneration := make(map[int64]localstore.WorkspaceOperation, len(operations)+len(owned))
 		for _, operation := range operations {
@@ -283,7 +283,7 @@ func loadCurrentMaterializationDisposition(
 		}
 		for _, operation := range owned {
 			if prior, ok := byGeneration[operation.Generation]; ok && !equalObserveGitBaseOperation(prior, operation) {
-				return localstore.WorkspaceMaterializationDisposition{}, materializationDispositionProof{}, nil,
+				return localstore.WorkspaceCurrentMaterialization{}, currentMaterializationProof{}, nil,
 					fmt.Errorf("projectstate: current materialization operation differs from current workset")
 			}
 			byGeneration[operation.Generation] = operation
@@ -294,7 +294,7 @@ func loadCurrentMaterializationDisposition(
 		}
 	}
 	sort.Slice(operations, func(i, j int) bool { return operations[i].Generation < operations[j].Generation })
-	disposition := localstore.WorkspaceMaterializationDisposition{
+	disposition := localstore.WorkspaceCurrentMaterialization{
 		Journals: []localstore.WorkspaceMaterializationRecord{}, Operations: operations,
 	}
 	var eligible *localstore.WorkspaceMaterializationRecord
@@ -306,48 +306,50 @@ func loadCurrentMaterializationDisposition(
 			eligible = &owned
 		}
 	}
-	proof, err := proveCurrentMaterializationDisposition(disposition)
+	proof, err := proveCurrentMaterializationWorkset(disposition)
 	if err != nil {
-		return localstore.WorkspaceMaterializationDisposition{}, materializationDispositionProof{}, nil, err
+		return localstore.WorkspaceCurrentMaterialization{}, currentMaterializationProof{}, nil, err
 	}
 	return disposition, proof, eligible, nil
 }
 
-func proveCurrentMaterializationDisposition(
-	disposition localstore.WorkspaceMaterializationDisposition,
-) (materializationDispositionProof, error) {
+func readCurrentMaterializationWorkset(ctx context.Context, tx *localstore.WorkspaceMutationTx) (localstore.WorkspaceCurrentMaterialization, error) {
+	workset, _, _, err := loadCurrentMaterializationWorkset(ctx, tx)
+	return workset, err
+}
+
+func proveCurrentMaterializationWorkset(
+	disposition localstore.WorkspaceCurrentMaterialization,
+) (currentMaterializationProof, error) {
 	if disposition.Journals == nil || disposition.Operations == nil || len(disposition.Journals) > 1 {
-		return materializationDispositionProof{}, fmt.Errorf("projectstate: invalid current materialization cardinality")
+		return currentMaterializationProof{}, fmt.Errorf("projectstate: invalid current materialization cardinality")
 	}
 	rows, err := validateRestoreOperationRows(disposition.Operations)
 	if err != nil {
-		return materializationDispositionProof{}, err
+		return currentMaterializationProof{}, err
 	}
-	proof := materializationDispositionProof{journals: make(map[string]materializationJournalProof)}
+	proof := currentMaterializationProof{journals: make(map[string]materializationJournalProof)}
 	if len(disposition.Journals) == 0 {
 		return proof, nil
 	}
 	journal := disposition.Journals[0]
-	if journal.State == "prepared" {
-		return materializationDispositionProof{}, fmt.Errorf("projectstate: prepared materialization requires recovery")
-	}
-	if journal.State != "published" && journal.State != "recovered_new" {
-		return materializationDispositionProof{}, fmt.Errorf("projectstate: invalid current materialization state")
+	if journal.State != "prepared" && journal.State != "published" && journal.State != "recovered_new" {
+		return currentMaterializationProof{}, fmt.Errorf("projectstate: invalid current materialization state")
 	}
 	if !validMaterializationPublicationProof(journal) || journal.PublicationReviewProofVersion != 1 ||
 		journal.IncludedOperationsJSON == nil {
-		return materializationDispositionProof{}, fmt.Errorf("projectstate: current materialization publication authority is incomplete")
+		return currentMaterializationProof{}, fmt.Errorf("projectstate: current materialization publication authority is incomplete")
 	}
 	envelope, err := decodeCheckpointOperations(*journal.IncludedOperationsJSON)
 	if err != nil {
-		return materializationDispositionProof{}, err
+		return currentMaterializationProof{}, err
 	}
 	through := envelope.InitialThroughGeneration
 	if len(envelope.Operations) != 0 && envelope.Operations[len(envelope.Operations)-1].Generation > through {
 		through = envelope.Operations[len(envelope.Operations)-1].Generation
 	}
 	if through != journal.ThroughGeneration {
-		return materializationDispositionProof{}, fmt.Errorf("projectstate: current materialization operation boundary mismatch")
+		return currentMaterializationProof{}, fmt.Errorf("projectstate: current materialization operation boundary mismatch")
 	}
 	byGeneration := make(map[int64]localstore.WorkspaceOperation, len(rows))
 	for _, decoded := range rows {
@@ -356,9 +358,13 @@ func proveCurrentMaterializationDisposition(
 	claims := make(map[int64]struct{}, len(envelope.Operations))
 	for _, claim := range envelope.Operations {
 		row, ok := byGeneration[claim.Generation]
+		wantState := "materialized"
+		if journal.State == "prepared" {
+			wantState = claim.PrepublicationState
+		}
 		if !ok || row.OperationID != claim.OperationID || !bytes.Equal(row.OperationJSON, []byte(claim.OperationJSON)) ||
-			row.State != "materialized" || row.StashedByStashID != nil {
-			return materializationDispositionProof{}, fmt.Errorf("projectstate: current materialization claimed operation mismatch")
+			row.State != wantState || row.StashedByStashID != nil {
+			return currentMaterializationProof{}, fmt.Errorf("projectstate: current materialization claimed operation mismatch")
 		}
 		claims[claim.Generation] = struct{}{}
 	}
@@ -366,7 +372,7 @@ func proveCurrentMaterializationDisposition(
 		row := decoded.row
 		if (row.State == "active" || row.State == "rebased") && row.Generation <= journal.ThroughGeneration {
 			if _, claimed := claims[row.Generation]; !claimed {
-				return materializationDispositionProof{}, fmt.Errorf("projectstate: current materialization omits a prepublication operation")
+				return currentMaterializationProof{}, fmt.Errorf("projectstate: current materialization omits a prepublication operation")
 			}
 		}
 	}
@@ -495,8 +501,8 @@ func cloneImportSnapshot(snapshot state.Snapshot) (state.Snapshot, error) {
 	return state.DecodeTree(cloneCheckpointTree(tree))
 }
 
-func cloneImportDisposition(value localstore.WorkspaceMaterializationDisposition) localstore.WorkspaceMaterializationDisposition {
-	cloned := localstore.WorkspaceMaterializationDisposition{}
+func cloneImportCurrentMaterialization(value localstore.WorkspaceCurrentMaterialization) localstore.WorkspaceCurrentMaterialization {
+	cloned := localstore.WorkspaceCurrentMaterialization{}
 	if value.Journals != nil {
 		cloned.Journals = make([]localstore.WorkspaceMaterializationRecord, len(value.Journals))
 		for index, journal := range value.Journals {

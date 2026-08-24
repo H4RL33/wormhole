@@ -506,14 +506,14 @@ func TestWorkspaceRevisionCoreWriterInventory(t *testing.T) {
 			},
 			mutate: func(t *testing.T, repo *WorkspaceRepo, binding types.WorkspaceBinding) error {
 				return repo.WithImmediateWorkspace(ctx, binding.Scope, func(tx *WorkspaceMutationTx) error {
-					audit, err := tx.OperationAudit(ctx)
+					audit, err := tx.OperationsByGenerations(ctx, []int64{1, 2})
 					if err != nil || len(audit) != 2 {
 						if err == nil {
 							err = fmt.Errorf("operation audit length=%d, want 2", len(audit))
 						}
 						return err
 					}
-					return tx.TransitionOperations(ctx, []WorkspaceOperation{audit[0].WorkspaceOperation, audit[1].WorkspaceOperation}, "materialized", nil)
+					return tx.TransitionOperations(ctx, audit, "materialized", nil)
 				})
 			},
 			verify: func(t *testing.T, repo *WorkspaceRepo, binding types.WorkspaceBinding) {
@@ -1050,7 +1050,7 @@ func TestWorkspaceRevisionMaterializationWriterInventory(t *testing.T) {
 		t.Run("transition "+edge.source+" to "+edge.target+" advances once", func(t *testing.T) {
 			proof := "operation proof\n"
 			fixture := newMaterializationFixture(t, edge.source, &proof)
-			expected := readMaterializationDisposition(t, fixture.repo, fixture.binding.Scope).Journals[0]
+			expected := *readCurrentWorkspaceMaterialization(t, fixture.repo, fixture.binding.Scope)
 			before := coreWriterRevision(t, fixture.repo, fixture.binding.Scope)
 			if err := fixture.repo.WithImmediateWorkspace(ctx, fixture.binding.Scope, func(tx *WorkspaceMutationTx) error {
 				got, err := tx.TransitionMaterialization(ctx, expected, edge.target)
@@ -1071,7 +1071,7 @@ func TestWorkspaceRevisionMaterializationWriterInventory(t *testing.T) {
 		t.Run("accept "+source+" advances once", func(t *testing.T) {
 			proof := "{\"schema_version\":1,\"initial_through_generation\":3,\"operations\":[]}\n"
 			fixture := newMaterializationFixture(t, source, &proof)
-			expected := readEligibleMaterialization(t, fixture.repo, fixture.binding.Scope)
+			expected := readCurrentWorkspaceMaterialization(t, fixture.repo, fixture.binding.Scope)
 			if expected == nil {
 				t.Fatal("eligible materialization is nil")
 			}
@@ -1096,7 +1096,7 @@ func TestWorkspaceRevisionMaterializationWriterInventory(t *testing.T) {
 		fixture := newMaterializationFixture(t, "prepared", &proof)
 		exactJournalID := validPreparedMaterialization(t, fixture.binding, "legacy-journal")
 		differentJournalID := validPreparedMaterialization(t, fixture.binding, "00000000-0000-1000-8000-000000000062")
-		expected := readMaterializationDisposition(t, fixture.repo, fixture.binding.Scope).Journals[0]
+		expected := *readCurrentWorkspaceMaterialization(t, fixture.repo, fixture.binding.Scope)
 		before := coreWriterRevision(t, fixture.repo, fixture.binding.Scope)
 		for name, mutate := range map[string]func(*WorkspaceMutationTx) error{
 			"exact duplicate journal ID prepare": func(tx *WorkspaceMutationTx) error {
@@ -1382,7 +1382,11 @@ func requireCoreWriterOperationState(t *testing.T, repo *WorkspaceRepo, scope ty
 func requireCoreWriterOperationStates(t *testing.T, repo *WorkspaceRepo, scope types.WorkspaceScope, want []string) {
 	t.Helper()
 	if err := repo.WithImmediateWorkspace(context.Background(), scope, func(tx *WorkspaceMutationTx) error {
-		audit, err := tx.OperationAudit(context.Background())
+		generations := make([]int64, len(want))
+		for index := range generations {
+			generations[index] = int64(index + 1)
+		}
+		audit, err := tx.OperationsByGenerations(context.Background(), generations)
 		if err != nil || len(audit) != len(want) {
 			t.Fatalf("operation committed state=(%+v,%v), want %d operations", audit, err, len(want))
 		}
