@@ -2,7 +2,6 @@ package localstore
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -259,37 +258,6 @@ func TestWhoAmICache_SameAgentKeepsIndependentProjectScopes(t *testing.T) {
 	b, err := store.GetCachedWhoAmIForProject(ctx, "project-b")
 	if err != nil || len(b.Permissions) != 1 || b.Permissions[0] != "kb.write" {
 		t.Fatalf("project B cache = %+v err=%v", b, err)
-	}
-}
-
-func TestOpen_MigratesLegacyAgentOnlyWhoAmICacheKey(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "legacy.db")
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatalf("open legacy db: %v", err)
-	}
-	if _, err := db.Exec(`CREATE TABLE whoami_cache (agent_id TEXT PRIMARY KEY, owner TEXT NOT NULL, model TEXT NOT NULL, capabilities TEXT NOT NULL DEFAULT '[]', project_id TEXT NOT NULL, permissions TEXT NOT NULL DEFAULT '[]', cached_at TIMESTAMP NOT NULL)`); err != nil {
-		t.Fatalf("create legacy cache: %v", err)
-	}
-	if _, err := db.Exec(`INSERT INTO whoami_cache VALUES ('shared-agent','','','[]','project-a','["task.create"]',CURRENT_TIMESTAMP)`); err != nil {
-		t.Fatalf("seed legacy cache: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close legacy db: %v", err)
-	}
-
-	store, err := Open(path)
-	if err != nil {
-		t.Fatalf("Open migrated db: %v", err)
-	}
-	defer store.Close()
-	if err := store.CacheWhoAmI(context.Background(), WhoAmICache{AgentID: "shared-agent", ProjectID: "project-b", Permissions: []string{"kb.write"}, CachedAt: time.Now().UTC()}); err != nil {
-		t.Fatalf("cache second project: %v", err)
-	}
-	for _, projectID := range []string{"project-a", "project-b"} {
-		if _, err := store.GetCachedWhoAmIForProject(context.Background(), projectID); err != nil {
-			t.Fatalf("project %s missing after migration: %v", projectID, err)
-		}
 	}
 }
 

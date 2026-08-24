@@ -529,15 +529,15 @@ func TestImportWriteFailureAndCommitUnknownReturnZero(t *testing.T) {
 			if test.want == nil {
 				return
 			}
+			if _, err := store.DB().Exec(`DROP TRIGGER import_fail_commit; DROP TABLE import_deferred_failure`); err != nil {
+				t.Fatal(err)
+			}
 			if err := store.Close(); err != nil {
 				t.Fatal(err)
 			}
 			reopenedStore, reopenedService := openProjectStateServiceAt(t, databasePath)
 			if after := captureImportRawState(t, reopenedStore); !reflect.DeepEqual(after, before) {
 				t.Fatalf("failed Import changed state after reopen\nbefore=%+v\nafter=%+v", before, after)
-			}
-			if _, err := reopenedStore.DB().Exec(`DROP TRIGGER import_fail_commit; DROP TABLE import_deferred_failure`); err != nil {
-				t.Fatal(err)
 			}
 			accepted := mustServiceStatus(t, reopenedService, registered.Binding.Scope).AcceptedSnapshot
 			operation := servicePutTaskOperation(accepted, "99999999-9999-4999-8999-999999999991", "22222222-2222-4222-8222-222222222222", "fresh retry")

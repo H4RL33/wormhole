@@ -318,8 +318,7 @@ func strictOptionalMaterializationText(value sql.NullString, name string) (*stri
 }
 
 func validWorkspaceMaterializationPublicationProof(record WorkspaceMaterializationRecord) bool {
-	return (record.PublicationReviewProofVersion == 0 && record.PublicationReviewJSON == nil && record.PriorCandidateJSON == nil) ||
-		(record.PublicationReviewProofVersion == 1 && record.PublicationReviewJSON != nil && record.PriorCandidateJSON != nil)
+	return record.PublicationReviewProofVersion == 1 && record.PublicationReviewJSON != nil && record.PriorCandidateJSON != nil
 }
 
 func equalOptionalMaterializationString(left, right *string) bool {

@@ -231,8 +231,7 @@ func equalMaterializationRecord(left, right localstore.WorkspaceMaterializationR
 }
 
 func validMaterializationPublicationProof(record localstore.WorkspaceMaterializationRecord) bool {
-	return (record.PublicationReviewProofVersion == 0 && record.PublicationReviewJSON == nil && record.PriorCandidateJSON == nil) ||
-		(record.PublicationReviewProofVersion == 1 && record.PublicationReviewJSON != nil && record.PriorCandidateJSON != nil)
+	return record.PublicationReviewProofVersion == 1 && record.PublicationReviewJSON != nil && record.PriorCandidateJSON != nil
 }
 
 func equalCheckpointTree(left, right state.Tree) bool {

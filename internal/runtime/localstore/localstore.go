@@ -1,8 +1,8 @@
 // Package localstore is Gateway's durable local state (RFC-0003 §6.3,
 // §7.2). It follows the Store-struct/sentinel-error/wrapped-error shape
 // established by internal/core/identity (docs/implementation-rules.md §5),
-// adapted for SQLite. Legacy schema remains applied on Open and Gateway-owned
-// portable state follows through its dedicated numbered migration ledger.
+// adapted for SQLite. Private Gateway state is a strict v6 format epoch;
+// tracked portable state remains governed by its own Git format.
 package localstore
 
 import (
@@ -275,58 +275,21 @@ type Store struct {
 // Open creates (if needed) and opens the SQLite file at path, applying the
 // schema. Callers must Close the returned Store.
 func Open(path string) (*Store, error) {
+	format, err := classifyPrivateDatabase(path)
+	if err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("localstore: open %s: %w", path, err)
 	}
-	if _, err := db.Exec(schema); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("localstore: apply schema: %w", err)
-	}
-	if err := migrateWhoAmICacheProjectKey(db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("localstore: migrate whoami cache: %w", err)
-	}
-	if err := migrateChannelCreatedAt(db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("localstore: migrate channel timestamp: %w", err)
-	}
-	if err := applyGatewayMigrations(context.Background(), db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("localstore: migrate gateway schema: %w", err)
+	if format == privateFormatFresh {
+		if err := initializePrivateSchemaV6(context.Background(), db); err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	return &Store{db: db}, nil
-}
-
-func migrateChannelCreatedAt(db *sql.DB) error {
-	rows, err := db.Query(`PRAGMA table_info(channels)`)
-	if err != nil {
-		return err
-	}
-	hasCreatedAt := false
-	for rows.Next() {
-		var cid, notNull, pk int
-		var name, columnType string
-		var defaultValue any
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
-			rows.Close()
-			return err
-		}
-		if name == "created_at" {
-			hasCreatedAt = true
-		}
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if hasCreatedAt {
-		return nil
-	}
-	if _, err := db.Exec(`ALTER TABLE channels ADD COLUMN created_at TIMESTAMP`); err != nil {
-		return err
-	}
-	_, err = db.Exec(`UPDATE channels SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL`)
-	return err
 }
 
 func sqliteDSN(path string) string {
@@ -338,48 +301,6 @@ func sqliteDSN(path string) string {
 	query.Add("_pragma", "foreign_keys(1)")
 	u.RawQuery = query.Encode()
 	return u.String()
-}
-
-func migrateWhoAmICacheProjectKey(db *sql.DB) error {
-	rows, err := db.Query(`PRAGMA table_info(whoami_cache)`)
-	if err != nil {
-		return err
-	}
-	primaryColumns := 0
-	for rows.Next() {
-		var cid, notNull, pk int
-		var name, columnType string
-		var defaultValue any
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
-			rows.Close()
-			return err
-		}
-		if pk > 0 {
-			primaryColumns++
-		}
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if primaryColumns != 1 {
-		return nil
-	}
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, statement := range []string{
-		`ALTER TABLE whoami_cache RENAME TO whoami_cache_legacy`,
-		`CREATE TABLE whoami_cache (agent_id TEXT NOT NULL, owner TEXT NOT NULL, model TEXT NOT NULL, capabilities TEXT NOT NULL DEFAULT '[]', project_id TEXT NOT NULL, permissions TEXT NOT NULL DEFAULT '[]', cached_at TIMESTAMP NOT NULL, PRIMARY KEY (agent_id, project_id))`,
-		`INSERT INTO whoami_cache SELECT agent_id, owner, model, capabilities, project_id, permissions, cached_at FROM whoami_cache_legacy`,
-		`DROP TABLE whoami_cache_legacy`,
-	} {
-		if _, err := tx.Exec(statement); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
 }
 
 // Close releases the underlying database handle.

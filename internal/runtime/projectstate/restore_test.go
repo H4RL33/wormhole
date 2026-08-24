@@ -1188,6 +1188,9 @@ func TestServiceRestoreStashConflictedCommitUnknownReopensByteIdenticalAndRetryS
 	if after := captureStashRawState(t, fixture.store); !reflect.DeepEqual(after, before) {
 		t.Fatal("failed conflicted commit changed immediate raw state")
 	}
+	if _, err := fixture.store.DB().Exec(`DROP TRIGGER restore_conflicted_fail_commit; DROP TABLE restore_conflicted_deferred_failure`); err != nil {
+		t.Fatal(err)
+	}
 	if err := fixture.store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -1195,9 +1198,6 @@ func TestServiceRestoreStashConflictedCommitUnknownReopensByteIdenticalAndRetryS
 	fixture.store, fixture.service = reopenedStore, reopenedService
 	if after := captureStashRawState(t, fixture.store); !reflect.DeepEqual(after, before) {
 		t.Fatal("failed conflicted commit changed reopened raw state")
-	}
-	if _, err := fixture.store.DB().Exec(`DROP TRIGGER restore_conflicted_fail_commit; DROP TABLE restore_conflicted_deferred_failure`); err != nil {
-		t.Fatal(err)
 	}
 	retried, err := fixture.service.RestoreStash(context.Background(), fixture.req)
 	if err != nil || len(retried.Conflicts) == 0 || !retried.StashRetained {
