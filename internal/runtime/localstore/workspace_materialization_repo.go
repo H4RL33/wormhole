@@ -80,8 +80,9 @@ type workspaceMaterializationCandidateEvidence struct {
 	StorageClasses           [9]string
 }
 
-// MaterializationDisposition returns the complete strictly validated journal
-// and operation history for this transaction's exact workspace.
+// MaterializationDisposition is the legacy-only complete journal and operation
+// reader retained for lifecycle migrations in Tasks 11-14. New ordinary paths
+// use CurrentMaterialization and the narrow operation readers.
 func (tx *WorkspaceMutationTx) MaterializationDisposition(ctx context.Context) (WorkspaceMaterializationDisposition, error) {
 	empty := WorkspaceMaterializationDisposition{
 		Journals:   make([]WorkspaceMaterializationRecord, 0),
@@ -91,12 +92,34 @@ func (tx *WorkspaceMutationTx) MaterializationDisposition(ctx context.Context) (
 	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
 		return empty, ErrNotFound
 	}
+	journals, err := tx.workspaceMaterializationHistory(ctx)
+	if err != nil {
+		return empty, err
+	}
+	disposition.Journals = journals
+	disposition.Operations, err = tx.queryWorkspaceOperations(ctx, `
+		SELECT generation, operation_id, operation_json, state, stashed_by_stash_id
+		FROM workspace_overlay_operations
+		WHERE project_id=? AND workspace_id=?
+		ORDER BY generation
+	`, tx.scope.ProjectID, tx.scope.WorkspaceID)
+	if err != nil {
+		return empty, fmt.Errorf("localstore: read materialization disposition operations: %w", err)
+	}
+	return disposition, nil
+}
+
+func (tx *WorkspaceMutationTx) workspaceMaterializationHistory(ctx context.Context) ([]WorkspaceMaterializationRecord, error) {
+	history := make([]WorkspaceMaterializationRecord, 0)
+	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
+		return history, ErrNotFound
+	}
 	workspace, _, err := queryWorkspaceByScope(ctx, tx.conn, tx.scope)
 	if errors.Is(err, sql.ErrNoRows) {
-		return empty, ErrNotFound
+		return history, ErrNotFound
 	}
 	if err != nil {
-		return empty, fmt.Errorf("localstore: validate materialization disposition workspace: %w", err)
+		return history, fmt.Errorf("localstore: validate materialization history workspace: %w", err)
 	}
 	rows, err := tx.conn.QueryContext(ctx, `
 		SELECT project_id,workspace_id,typeof(project_id),typeof(workspace_id),
@@ -113,33 +136,24 @@ func (tx *WorkspaceMutationTx) MaterializationDisposition(ctx context.Context) (
 		ORDER BY journal_id
 	`, tx.scope.ProjectID, tx.scope.WorkspaceID)
 	if err != nil {
-		return empty, fmt.Errorf("localstore: query materialization disposition journals: %w", err)
+		return history, fmt.Errorf("localstore: query materialization history: %w", err)
 	}
 	for rows.Next() {
 		record, err := scanWorkspaceMaterialization(workspaceMaterializationDispositionScanner{rows: rows}, tx.scope, workspace.Binding, false)
 		if err != nil {
 			_ = rows.Close()
-			return empty, fmt.Errorf("localstore: validate materialization disposition journal: %w", err)
+			return history, fmt.Errorf("localstore: validate materialization history journal: %w", err)
 		}
-		disposition.Journals = append(disposition.Journals, *record)
+		history = append(history, *record)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return empty, fmt.Errorf("localstore: iterate materialization disposition journals: %w", err)
+		return history, fmt.Errorf("localstore: iterate materialization history: %w", err)
 	}
 	if err := rows.Close(); err != nil {
-		return empty, fmt.Errorf("localstore: close materialization disposition journals: %w", err)
+		return history, fmt.Errorf("localstore: close materialization history: %w", err)
 	}
-	disposition.Operations, err = tx.queryWorkspaceOperations(ctx, `
-		SELECT generation, operation_id, operation_json, state, stashed_by_stash_id
-		FROM workspace_overlay_operations
-		WHERE project_id=? AND workspace_id=?
-		ORDER BY generation
-	`, tx.scope.ProjectID, tx.scope.WorkspaceID)
-	if err != nil {
-		return empty, fmt.Errorf("localstore: read materialization disposition operations: %w", err)
-	}
-	return disposition, nil
+	return history, nil
 }
 
 func (tx *WorkspaceMutationTx) AcceptanceEligibleMaterialization(ctx context.Context) (*WorkspaceMaterializationRecord, error) {

@@ -104,11 +104,13 @@ func TestWorkspacePublicationPolicyBootstrapAndConfiguredCAS(t *testing.T) {
 
 func TestWorkspacePublicationPolicyFailsClosedOnMissingOrDisagreeingHistory(t *testing.T) {
 	for _, test := range []struct {
-		name   string
-		mutate func(t *testing.T, store *Store, scope types.WorkspaceScope)
+		name              string
+		currentShouldFail bool
+		mutate            func(t *testing.T, store *Store, scope types.WorkspaceScope)
 	}{
 		{
-			name: "missing current",
+			name:              "missing current",
+			currentShouldFail: true,
 			mutate: func(t *testing.T, store *Store, scope types.WorkspaceScope) {
 				if _, err := store.DB().Exec(`DELETE FROM workspace_publication_policies WHERE project_id=? AND workspace_id=?`, scope.ProjectID, scope.WorkspaceID); err != nil {
 					t.Fatal(err)
@@ -139,12 +141,19 @@ func TestWorkspacePublicationPolicyFailsClosedOnMissingOrDisagreeingHistory(t *t
 				"00000000-0000-4000-8000-000000000011",
 				"/checkout", 1, 11)
 			test.mutate(t, store, binding.Scope)
+			var currentErr error
 			err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-				_, err := tx.PublicationPolicy(context.Background())
-				return err
+				_, currentErr = tx.PublicationPolicy(context.Background())
+				return nil
 			})
-			if err == nil {
-				t.Fatal("corrupt publication policy read succeeded")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.currentShouldFail != (currentErr != nil) {
+				t.Fatalf("PublicationPolicy error=%v, currentShouldFail=%t", currentErr, test.currentShouldFail)
+			}
+			if err := repo.AuditWorkspaceHistory(context.Background(), binding.Scope); err == nil {
+				t.Fatal("AuditWorkspaceHistory accepted missing or disagreeing policy history")
 			}
 		})
 	}
@@ -347,8 +356,13 @@ func TestWorkspacePublicationPolicyStrictReadersRejectCorruption(t *testing.T) {
 				"/checkout", 1, 11)
 			test.mutate(t, store.DB(), binding.Scope)
 			err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-				if _, err := tx.PublicationPolicy(context.Background()); err == nil {
-					t.Fatal("PublicationPolicy accepted corrupt row")
+				_, currentErr := tx.PublicationPolicy(context.Background())
+				if test.name == "history metadata storage class" {
+					if currentErr != nil {
+						t.Fatalf("current-only PublicationPolicy was poisoned by history: %v", currentErr)
+					}
+				} else if currentErr == nil {
+					t.Fatal("PublicationPolicy accepted corrupt current row")
 				}
 				_, err := tx.PublicationPolicyHistory(context.Background())
 				return err
@@ -384,11 +398,17 @@ func TestWorkspacePublicationPolicyRejectsHistoryGap(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-		_, err := tx.PublicationPolicy(context.Background())
+		current, err := tx.PublicationPolicy(context.Background())
+		if err == nil && !equalWorkspacePublicationPolicyRecords(current, invalidated) {
+			t.Fatalf("current policy=%+v, want %+v", current, invalidated)
+		}
 		return err
 	})
-	if err == nil {
-		t.Fatalf("history gap after %+v -> %+v was accepted", bootstrap, invalidated)
+	if err != nil {
+		t.Fatalf("current-only policy was poisoned by history gap after %+v -> %+v: %v", bootstrap, invalidated, err)
+	}
+	if err := repo.AuditWorkspaceHistory(context.Background(), binding.Scope); err == nil {
+		t.Fatal("AuditWorkspaceHistory accepted publication history gap")
 	}
 }
 
@@ -439,8 +459,11 @@ func TestWorkspacePublicationPolicyRejectsImpossibleHistoryProgression(t *testin
 				_, err := tx.PublicationPolicy(context.Background())
 				return err
 			})
-			if err == nil {
-				t.Fatal("impossible publication history progression was accepted")
+			if err != nil {
+				t.Fatalf("current-only PublicationPolicy was poisoned by impossible history: %v", err)
+			}
+			if err := repo.AuditWorkspaceHistory(context.Background(), binding.Scope); err == nil {
+				t.Fatal("AuditWorkspaceHistory accepted impossible publication history progression")
 			}
 		})
 	}

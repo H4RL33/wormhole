@@ -1737,7 +1737,7 @@ func TestWorkspaceMutationTxActiveOperationsAfterIgnoresCorruptTerminalPayload(t
 	}
 }
 
-func TestWorkspaceMutationTxActiveOperationsAfterRejectsInvalidHistoricalOwnerMetadata(t *testing.T) {
+func TestWorkspaceMutationTxActiveOperationsAfterIgnoresInvalidHistoricalOwnerMetadataAndAuditRejects(t *testing.T) {
 	for _, test := range []struct {
 		name, state, owner string
 	}{
@@ -1754,11 +1754,17 @@ func TestWorkspaceMutationTxActiveOperationsAfterRejectsInvalidHistoricalOwnerMe
 			insertWorkspaceOperationRawOwned(t, store, binding.Scope, 1, "00000000-0000-4000-8000-000000000091", []byte("{"), test.state, &test.owner)
 			insertWorkspaceOperation(t, store, binding.Scope, 2, validWorkspaceOperation("00000000-0000-4000-8000-000000000092"), "active")
 			err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-				_, err := tx.ActiveOperationsAfter(context.Background(), 0)
+				operations, err := tx.ActiveOperationsAfter(context.Background(), 0)
+				if err == nil && (len(operations) != 1 || operations[0].Generation != 2) {
+					t.Fatalf("active operations=%+v, want only generation 2", operations)
+				}
 				return err
 			})
-			if err == nil {
-				t.Fatal("ActiveOperationsAfter ignored invalid historical owner metadata")
+			if err != nil {
+				t.Fatalf("ActiveOperationsAfter was poisoned by historical owner metadata: %v", err)
+			}
+			if err := repo.AuditWorkspaceHistory(context.Background(), binding.Scope); err == nil {
+				t.Fatal("AuditWorkspaceHistory accepted invalid historical owner metadata")
 			}
 		})
 	}
@@ -2118,15 +2124,16 @@ func TestWorkspaceMutationTxActiveOperationsAfterRejectsCorruption(t *testing.T)
 		operationID string
 		operation   []byte
 		rowState    string
+		selected    bool
 	}{
-		{name: "malformed JSON", generation: 1, operationID: canonicalOperation.ID, operation: []byte("{"), rowState: "active"},
-		{name: "unknown field", generation: 1, operationID: canonicalOperation.ID, operation: append(bytes.TrimSuffix(bytes.Clone(canonicalBytes), []byte("}\n")), []byte(",\"unknown\":true}\n")...), rowState: "active"},
-		{name: "trailing JSON", generation: 1, operationID: canonicalOperation.ID, operation: append(bytes.Clone(canonicalBytes), []byte("{}")...), rowState: "active"},
-		{name: "non-canonical bytes", generation: 1, operationID: canonicalOperation.ID, operation: bytes.TrimSuffix(bytes.Clone(canonicalBytes), []byte("\n")), rowState: "active"},
-		{name: "row ID mismatch", generation: 1, operationID: "00000000-0000-4000-8000-000000000092", operation: canonicalBytes, rowState: "active"},
-		{name: "invalid row ID", generation: 1, operationID: "BAD", operation: canonicalBytes, rowState: "active"},
-		{name: "invalid generation", generation: 0, operationID: canonicalOperation.ID, operation: canonicalBytes, rowState: "active"},
-		{name: "invalid state", generation: 1, operationID: canonicalOperation.ID, operation: canonicalBytes, rowState: "poison"},
+		{name: "malformed JSON", generation: 1, operationID: canonicalOperation.ID, operation: []byte("{"), rowState: "active", selected: true},
+		{name: "unknown field", generation: 1, operationID: canonicalOperation.ID, operation: append(bytes.TrimSuffix(bytes.Clone(canonicalBytes), []byte("}\n")), []byte(",\"unknown\":true}\n")...), rowState: "active", selected: true},
+		{name: "trailing JSON", generation: 1, operationID: canonicalOperation.ID, operation: append(bytes.Clone(canonicalBytes), []byte("{}")...), rowState: "active", selected: true},
+		{name: "non-canonical bytes", generation: 1, operationID: canonicalOperation.ID, operation: bytes.TrimSuffix(bytes.Clone(canonicalBytes), []byte("\n")), rowState: "active", selected: true},
+		{name: "row ID mismatch", generation: 1, operationID: "00000000-0000-4000-8000-000000000092", operation: canonicalBytes, rowState: "active", selected: true},
+		{name: "invalid row ID", generation: 1, operationID: "BAD", operation: canonicalBytes, rowState: "active", selected: true},
+		{name: "invalid generation outside bound", generation: 0, operationID: canonicalOperation.ID, operation: canonicalBytes, rowState: "active"},
+		{name: "invalid terminal state", generation: 1, operationID: canonicalOperation.ID, operation: canonicalBytes, rowState: "poison"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store, repo := openWorkspaceStore(t)
@@ -2142,8 +2149,14 @@ func TestWorkspaceMutationTxActiveOperationsAfterRejectsCorruption(t *testing.T)
 				_, err := tx.ActiveOperationsAfter(context.Background(), 0)
 				return err
 			})
-			if err == nil {
-				t.Fatal("ActiveOperationsAfter served corrupt persisted state")
+			if test.selected && err == nil {
+				t.Fatal("ActiveOperationsAfter served corrupt selected state")
+			}
+			if !test.selected && err != nil {
+				t.Fatalf("ActiveOperationsAfter was poisoned by unselected history: %v", err)
+			}
+			if err := repo.AuditWorkspaceHistory(context.Background(), binding.Scope); err == nil {
+				t.Fatal("AuditWorkspaceHistory accepted corrupt operation history")
 			}
 		})
 	}

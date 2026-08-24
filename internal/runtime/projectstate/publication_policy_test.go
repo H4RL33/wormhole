@@ -703,38 +703,19 @@ func TestReconfigurePublicationConcurrentSameExpectedAllowsOneTransition(t *test
 	}
 }
 
-func TestPublicationServiceRejectsCorruptPolicyWithoutMutation(t *testing.T) {
+func TestPublicationServiceCurrentPolicyIgnoresHistoricalMismatch(t *testing.T) {
 	tests := []struct {
-		name        string
-		reconfigure bool
-		mutate      func(*testing.T, publicationServiceFixture)
+		name           string
+		classification types.PublicationClassification
+		mutate         func(*testing.T, publicationServiceFixture)
 	}{
-		{name: "current differs from history", mutate: func(t *testing.T, fixture publicationServiceFixture) {
+		{name: "current differs from history", classification: types.PublicationLocalOnly, mutate: func(t *testing.T, fixture publicationServiceFixture) {
 			if _, err := fixture.store.DB().Exec(`UPDATE workspace_publication_policies SET classification='local_only'
 				WHERE project_id=? AND workspace_id=?`, fixture.binding.Scope.ProjectID, fixture.binding.Scope.WorkspaceID); err != nil {
 				t.Fatal(err)
 			}
 		}},
-		{name: "configured agent actor", reconfigure: true, mutate: func(t *testing.T, fixture publicationServiceFixture) {
-			agent := types.ActorEnvelope{
-				ActorKind: types.ActorAgent, AgentID: "00000000-0000-4000-8000-000000000031",
-				AccountableHumanID: "00000000-0000-4000-8000-000000000021", SessionID: "session",
-				HarnessName: "codex", HarnessVersion: "1", Assurance: types.AssuranceLocal,
-				OccurredAt: time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC),
-			}
-			encoded, err := state.CanonicalJSON(agent)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, table := range []string{"workspace_publication_policies", "workspace_publication_policy_history"} {
-				if _, err := fixture.store.DB().Exec(`UPDATE `+table+` SET changed_actor_json=?
-					WHERE project_id=? AND workspace_id=? AND policy_revision=2`, string(encoded),
-					fixture.binding.Scope.ProjectID, fixture.binding.Scope.WorkspaceID); err != nil {
-					t.Fatal(err)
-				}
-			}
-		}},
-		{name: "history gap", mutate: func(t *testing.T, fixture publicationServiceFixture) {
+		{name: "history gap", classification: types.PublicationPublicGit, mutate: func(t *testing.T, fixture publicationServiceFixture) {
 			if _, err := fixture.store.DB().Exec(`DELETE FROM workspace_publication_policy_history
 				WHERE project_id=? AND workspace_id=? AND policy_revision=1`, fixture.binding.Scope.ProjectID, fixture.binding.Scope.WorkspaceID); err != nil {
 				t.Fatal(err)
@@ -744,25 +725,53 @@ func TestPublicationServiceRejectsCorruptPolicyWithoutMutation(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newPublicationServiceFixture(t, "00000000-0000-4000-8000-000000000001", "https://github.com/acme/wormhole.git")
-			configured := configurePublicationForTest(t, fixture, types.PublicationPublicGit, diffActorEnvelope(), time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC))
-			request := publicationRequest(t, fixture.binding, configured, types.PublicationPrivateGit, diffActorEnvelope())
+			configurePublicationForTest(t, fixture, types.PublicationPublicGit, diffActorEnvelope(), time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC))
 			test.mutate(t, fixture)
-			fixture.service.now = func() time.Time { panic("corrupt policy consulted clock") }
+			fixture.service.now = func() time.Time { panic("current policy read consulted clock") }
 			before := capturePublicationRawState(t, fixture.store)
-			var got PublicationConfiguration
-			var err error
-			if test.reconfigure {
-				got, err = fixture.service.ReconfigurePublication(context.Background(), request)
-			} else {
-				got, err = fixture.service.PublicationConfiguration(context.Background(), fixture.binding.Scope)
-			}
-			if err == nil || errors.Is(err, ErrPublicationConfigurationCAS) || got != (PublicationConfiguration{}) {
-				t.Fatalf("corrupt policy service call=(%+v,%v)", got, err)
+			got, err := fixture.service.PublicationConfiguration(context.Background(), fixture.binding.Scope)
+			if err != nil || got.Classification != test.classification || got.PolicyRevision != 2 {
+				t.Fatalf("PublicationConfiguration()=(%+v,%v)", got, err)
 			}
 			if after := capturePublicationRawState(t, fixture.store); !reflect.DeepEqual(after, before) {
-				t.Fatalf("corruption failure changed state\nbefore=%v\nafter=%v", before, after)
+				t.Fatalf("current policy read changed state\nbefore=%v\nafter=%v", before, after)
+			}
+			if err := fixture.service.repo.AuditWorkspaceHistory(context.Background(), fixture.binding.Scope); err == nil {
+				t.Fatal("AuditWorkspaceHistory()=nil for publication history mismatch")
 			}
 		})
+	}
+}
+
+func TestReconfigurePublicationRejectsInvalidCurrentActorWithoutMutation(t *testing.T) {
+	fixture := newPublicationServiceFixture(t, "00000000-0000-4000-8000-000000000001", "https://github.com/acme/wormhole.git")
+	configured := configurePublicationForTest(t, fixture, types.PublicationPublicGit, diffActorEnvelope(), time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC))
+	request := publicationRequest(t, fixture.binding, configured, types.PublicationPrivateGit, diffActorEnvelope())
+	agent := types.ActorEnvelope{
+		ActorKind: types.ActorAgent, AgentID: "00000000-0000-4000-8000-000000000031",
+		AccountableHumanID: "00000000-0000-4000-8000-000000000021", SessionID: "session",
+		HarnessName: "codex", HarnessVersion: "1", Assurance: types.AssuranceLocal,
+		OccurredAt: time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC),
+	}
+	encoded, err := state.CanonicalJSON(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"workspace_publication_policies", "workspace_publication_policy_history"} {
+		if _, err := fixture.store.DB().Exec(`UPDATE `+table+` SET changed_actor_json=?
+			WHERE project_id=? AND workspace_id=? AND policy_revision=2`, string(encoded),
+			fixture.binding.Scope.ProjectID, fixture.binding.Scope.WorkspaceID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fixture.service.now = func() time.Time { panic("invalid policy consulted clock") }
+	before := capturePublicationRawState(t, fixture.store)
+	got, err := fixture.service.ReconfigurePublication(context.Background(), request)
+	if err == nil || errors.Is(err, ErrPublicationConfigurationCAS) || got != (PublicationConfiguration{}) {
+		t.Fatalf("ReconfigurePublication()=(%+v,%v)", got, err)
+	}
+	if after := capturePublicationRawState(t, fixture.store); !reflect.DeepEqual(after, before) {
+		t.Fatalf("corruption failure changed state\nbefore=%v\nafter=%v", before, after)
 	}
 }
 

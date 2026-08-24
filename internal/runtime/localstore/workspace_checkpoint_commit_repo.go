@@ -12,8 +12,8 @@ import (
 
 const workspaceCheckpointCommitStateVersion uint8 = 1
 
-// WorkspaceCheckpointCommitState is an opaque exact local-store checkpoint
-// boundary captured inside a caller-owned workspace mutation transaction.
+// WorkspaceCheckpointCommitState is the legacy-only complete checkpoint token
+// retained until Task 12 replaces checkpoint and recovery confirmation.
 type WorkspaceCheckpointCommitState struct {
 	version         uint8
 	scope           types.WorkspaceScope
@@ -32,6 +32,8 @@ const (
 	WorkspaceCheckpointCommitNext
 )
 
+// CaptureCheckpointCommitState is legacy-only; new current readers must not
+// route through this complete-state scanner.
 func (tx *WorkspaceMutationTx) CaptureCheckpointCommitState(ctx context.Context) (WorkspaceCheckpointCommitState, error) {
 	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
 		return WorkspaceCheckpointCommitState{}, ErrNotFound
@@ -76,6 +78,8 @@ func (tx *WorkspaceMutationTx) CaptureCheckpointCommitState(ctx context.Context)
 	return state, nil
 }
 
+// ConfirmCheckpointCommit is legacy-only until Task 12 installs targeted
+// revision and journal confirmation.
 func (r *WorkspaceRepo) ConfirmCheckpointCommit(
 	ctx context.Context,
 	prior WorkspaceCheckpointCommitState,

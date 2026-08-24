@@ -272,9 +272,14 @@ func validMonotonicWorkspaceMutationTimestamp(returned time.Time, raw, storageCl
 	return validStoredWorkspaceTimestamp(returned, raw, storageClass) && !returned.Before(previous)
 }
 
-// OperationAudit returns every operation for this transaction's exact
-// workspace in persisted generation order.
+// OperationAudit is the legacy-only complete operation reader retained for
+// lifecycle migrations in Tasks 11-14. New ordinary paths must compose the
+// bounded readers below; explicit history validation uses AuditWorkspaceHistory.
 func (tx *WorkspaceMutationTx) OperationAudit(ctx context.Context) ([]WorkspaceOperationAuditRecord, error) {
+	return tx.workspaceOperationHistory(ctx)
+}
+
+func (tx *WorkspaceMutationTx) workspaceOperationHistory(ctx context.Context) ([]WorkspaceOperationAuditRecord, error) {
 	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
 		return nil, ErrNotFound
 	}
@@ -368,9 +373,6 @@ func (tx *WorkspaceMutationTx) ActiveOperationsAfter(ctx context.Context, genera
 	if generation < 0 {
 		return nil, fmt.Errorf("localstore: active workspace operations: invalid generation")
 	}
-	if err := tx.validateWorkspaceOperationMetadata(ctx); err != nil {
-		return nil, err
-	}
 	operations, err := tx.queryWorkspaceOperations(ctx, `
 		SELECT generation, operation_id, operation_json, state, stashed_by_stash_id
 		FROM workspace_overlay_operations
@@ -392,9 +394,6 @@ func (tx *WorkspaceMutationTx) RebasedOperationsAtOrBefore(ctx context.Context, 
 	if generation < 0 {
 		return nil, fmt.Errorf("localstore: rebased workspace operations: invalid generation")
 	}
-	if err := tx.validateWorkspaceOperationMetadata(ctx); err != nil {
-		return nil, err
-	}
 	operations, err := tx.queryWorkspaceOperations(ctx, `
 		SELECT generation, operation_id, operation_json, state, stashed_by_stash_id
 		FROM workspace_overlay_operations
@@ -415,9 +414,6 @@ func (tx *WorkspaceMutationTx) StashedOperationsByStashID(ctx context.Context, s
 	}
 	if !validCanonicalUUIDv4(stashID) {
 		return nil, fmt.Errorf("localstore: invalid workspace stash ID")
-	}
-	if err := tx.validateWorkspaceOperationMetadata(ctx); err != nil {
-		return nil, err
 	}
 	operations, err := tx.queryWorkspaceOperations(ctx, `
 		SELECT generation, operation_id, operation_json, state, stashed_by_stash_id
@@ -445,9 +441,6 @@ func (tx *WorkspaceMutationTx) OperationsByGenerations(ctx context.Context, gene
 	operations := make([]WorkspaceOperation, 0, len(generations))
 	if len(generations) == 0 {
 		return operations, nil
-	}
-	if err := tx.validateWorkspaceOperationMetadata(ctx); err != nil {
-		return nil, err
 	}
 	for _, generation := range generations {
 		operation, err := scanWorkspaceOperation(tx.conn.QueryRowContext(ctx, `
@@ -888,46 +881,6 @@ func (tx *WorkspaceMutationTx) HasOpenConflictForKeys(ctx context.Context, keys 
 		}
 	}
 	return false, nil
-}
-
-func (tx *WorkspaceMutationTx) validateWorkspaceOperationMetadata(ctx context.Context) error {
-	rows, err := tx.conn.QueryContext(ctx, `
-		SELECT generation, state, stashed_by_stash_id
-		FROM workspace_overlay_operations
-		WHERE project_id=? AND workspace_id=?
-		ORDER BY generation
-	`, tx.scope.ProjectID, tx.scope.WorkspaceID)
-	if err != nil {
-		return fmt.Errorf("localstore: query workspace operation metadata: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var generation int64
-		var state string
-		var stashID sql.NullString
-		if err := rows.Scan(&generation, &state, &stashID); err != nil {
-			return fmt.Errorf("localstore: scan workspace operation metadata: %w", err)
-		}
-		if generation <= 0 {
-			return fmt.Errorf("localstore: invalid workspace operation generation")
-		}
-		switch state {
-		case "active", "rebased", "materialized", "discarded":
-			if stashID.Valid {
-				return fmt.Errorf("localstore: non-stashed workspace operation has a stash owner")
-			}
-		case "stashed":
-			if stashID.Valid && !validCanonicalUUIDv4(stashID.String) {
-				return fmt.Errorf("localstore: stashed workspace operation has an invalid stash owner")
-			}
-		default:
-			return fmt.Errorf("localstore: invalid workspace operation state %q", state)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("localstore: iterate workspace operation metadata: %w", err)
-	}
-	return nil
 }
 
 func (tx *WorkspaceMutationTx) queryWorkspaceOperations(ctx context.Context, query string, args ...any) ([]WorkspaceOperation, error) {

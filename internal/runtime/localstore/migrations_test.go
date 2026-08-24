@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/types"
+	state "github.com/H4RL33/wormhole/internal/types/projectstate"
 )
 
 func TestGatewayMigrationLedger(t *testing.T) {
@@ -924,11 +926,11 @@ func TestGatewayMigrationV5UpgradesEverySupportedDatabase(t *testing.T) {
 
 	for priorVersion := 1; priorVersion <= 4; priorVersion++ {
 		t.Run(fmt.Sprintf("v%d", priorVersion), func(t *testing.T) {
-			db, err := sql.Open("sqlite", sqliteDSN(filepath.Join(t.TempDir(), "gateway.db")))
+			databasePath := filepath.Join(t.TempDir(), "gateway.db")
+			db, err := sql.Open("sqlite", sqliteDSN(databasePath))
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer db.Close()
 			migrations, err := loadGatewayMigrations()
 			if err != nil {
 				t.Fatal(err)
@@ -937,7 +939,9 @@ func TestGatewayMigrationV5UpgradesEverySupportedDatabase(t *testing.T) {
 				t.Fatalf("apply v%d fixture: %v", priorVersion, err)
 			}
 			insertPortableTransitionBindings(t, db)
-			insertV1Materialization(t, db, "00000000-0000-4000-8000-000000000011", "upgrade-terminal", "accepted")
+			bindings := canonicalizeGatewayMigrationBindings(t, db)
+			seedGatewayMigrationPublicationPolicies(t, db, bindings)
+			insertCanonicalV1Materialization(t, db, bindings[0], "upgrade-terminal", "accepted")
 			for version := 1; version <= priorVersion; version++ {
 				stamp := fmt.Sprintf("2026-08-%02d 0%d:00:00", version, version)
 				if _, err := db.Exec(`UPDATE gateway_schema_migrations SET applied_at=? WHERE version=?`, stamp, version); err != nil {
@@ -955,6 +959,21 @@ func TestGatewayMigrationV5UpgradesEverySupportedDatabase(t *testing.T) {
 
 			if err := applyGatewayMigrationSet(context.Background(), db, migrations); err != nil {
 				t.Fatalf("upgrade v%d to v5: %v", priorVersion, err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatalf("close upgraded v%d fixture: %v", priorVersion, err)
+			}
+			reopened, err := Open(databasePath)
+			if err != nil {
+				t.Fatalf("reopen upgraded v%d fixture: %v", priorVersion, err)
+			}
+			defer reopened.Close()
+			db = reopened.DB()
+			repo := NewWorkspaceRepo(db)
+			for _, binding := range bindings {
+				if err := repo.AuditWorkspaceHistory(context.Background(), binding.Scope); err != nil {
+					t.Fatalf("audit upgraded v%d workspace %s: %v", priorVersion, binding.Scope.WorkspaceID, err)
+				}
 			}
 			assertGatewayMigrationLedger(t, db, 5)
 			if got := readGatewayMigrationLedgerRaw(t, db, priorVersion); !reflect.DeepEqual(got, beforeLedger) {
@@ -1918,6 +1937,108 @@ func insertPortableTransitionBindings(t *testing.T, db *sql.DB) {
 			binding.path, binding.device, binding.inode, `{}`, "refs/heads/main", "deadbeef",
 			"sha256:"+strings.Repeat("a", 64), []byte("snapshot"), "clean"); err != nil {
 			t.Fatalf("insert binding %s: %v", binding.workspaceID, err)
+		}
+	}
+}
+
+func canonicalizeGatewayMigrationBindings(t *testing.T, db *sql.DB) []types.WorkspaceBinding {
+	t.Helper()
+	bindings := make([]types.WorkspaceBinding, 0, 2)
+	for _, input := range []struct {
+		workspaceID string
+		path        string
+		device      uint64
+		inode       uint64
+	}{
+		{"00000000-0000-4000-8000-000000000011", "/checkout-one", 1, 11},
+		{"00000000-0000-4000-8000-000000000012", "/checkout-two", 1, 12},
+	} {
+		binding := workspaceBinding("00000000-0000-4000-8000-000000000001", input.workspaceID,
+			input.path, input.device, input.inode)
+		tree := workspaceTree(t, binding.Scope.ProjectID, binding.Repository)
+		binding = bindingWithTreeDigest(t, binding, tree)
+		encoded, err := encodeFileList(tree)
+		if err != nil {
+			t.Fatal(err)
+		}
+		repositoryJSON, err := json.Marshal(binding.Repository)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`
+			UPDATE workspace_bindings
+			SET repository_identity_json=?, accepted_ref=?, accepted_commit=?, accepted_digest=?, accepted_snapshot=?
+			WHERE project_id=? AND workspace_id=?
+		`, string(repositoryJSON), binding.AcceptedRef, binding.AcceptedCommitSHA,
+			binding.AcceptedTreeDigest, encoded, binding.Scope.ProjectID, binding.Scope.WorkspaceID); err != nil {
+			t.Fatalf("canonicalize migration binding %s: %v", binding.Scope.WorkspaceID, err)
+		}
+		bindings = append(bindings, binding)
+	}
+	return bindings
+}
+
+func insertCanonicalV1Materialization(t *testing.T, db *sql.DB, binding types.WorkspaceBinding, journalID, journalState string) {
+	t.Helper()
+	priorTree := workspaceTree(t, binding.Scope.ProjectID, binding.Repository)
+	candidateTree := changedWorkspaceTree(t, binding, "Migration Candidate")
+	priorSnapshot, err := state.DecodeTree(priorTree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateSnapshot, err := state.DecodeTree(candidateTree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priorBytes, err := encodeFileList(priorTree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateBytes, err := encodeFileList(candidateTree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO workspace_materializations
+		(project_id,workspace_id,journal_id,expected_live_digest,accepted_base_digest,
+		 checkout_path,checkout_device,checkout_inode,prior_tree_digest,candidate_digest,
+		 through_generation,prior_tree,candidate_tree,stage_path,backup_path,state)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	`, binding.Scope.ProjectID, binding.Scope.WorkspaceID, journalID, priorSnapshot.Digest,
+		binding.AcceptedTreeDigest, binding.Checkout.CanonicalPath, binding.Checkout.Device,
+		binding.Checkout.Inode, priorSnapshot.Digest, candidateSnapshot.Digest, 0,
+		priorBytes, candidateBytes, "/stage", "/backup", journalState); err != nil {
+		t.Fatalf("insert canonical v1 materialization %s: %v", journalID, err)
+	}
+}
+
+func seedGatewayMigrationPublicationPolicies(t *testing.T, db *sql.DB, bindings []types.WorkspaceBinding) {
+	t.Helper()
+	var policiesExist int
+	if err := db.QueryRow(`
+		SELECT count(*) FROM sqlite_master
+		WHERE type='table' AND name='workspace_publication_policies'
+	`).Scan(&policiesExist); err != nil {
+		t.Fatal(err)
+	}
+	if policiesExist == 0 {
+		return
+	}
+	for _, binding := range bindings {
+		repositoryJSON, err := json.Marshal(binding.Repository)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`
+			INSERT INTO workspace_publication_policies
+			(project_id,workspace_id,repository_identity_json,classification,policy_revision,transition_kind)
+			VALUES (?,?,?,'unclassified',1,'bootstrap');
+			INSERT INTO workspace_publication_policy_history
+			(project_id,workspace_id,policy_revision,repository_identity_json,classification,transition_kind)
+			VALUES (?,?,1,?,'unclassified','bootstrap')
+		`, binding.Scope.ProjectID, binding.Scope.WorkspaceID, string(repositoryJSON),
+			binding.Scope.ProjectID, binding.Scope.WorkspaceID, string(repositoryJSON)); err != nil {
+			t.Fatalf("seed migration publication policy %s: %v", binding.Scope.WorkspaceID, err)
 		}
 	}
 }

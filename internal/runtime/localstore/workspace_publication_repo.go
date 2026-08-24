@@ -58,13 +58,24 @@ type workspacePublicationBindingEvidence struct {
 }
 
 func (tx *WorkspaceMutationTx) PublicationPolicy(ctx context.Context) (WorkspacePublicationPolicyRecord, error) {
-	current, _, err := tx.publicationPolicyState(ctx)
+	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
+		return WorkspacePublicationPolicyRecord{}, ErrNotFound
+	}
+	if _, _, err := queryWorkspaceByScope(ctx, tx.conn, tx.scope); errors.Is(err, sql.ErrNoRows) {
+		return WorkspacePublicationPolicyRecord{}, ErrNotFound
+	} else if err != nil {
+		return WorkspacePublicationPolicyRecord{}, fmt.Errorf("localstore: validate current publication policy workspace: %w", err)
+	}
+	current, err := queryWorkspacePublicationPolicy(ctx, tx.conn, tx.scope)
 	if err != nil {
 		return WorkspacePublicationPolicyRecord{}, err
 	}
 	return cloneWorkspacePublicationPolicyRecord(current.Record), nil
 }
 
+// PublicationPolicyHistory is a legacy-only complete reader retained for the
+// publication migrations in Tasks 13-14. New historical validation enters
+// through AuditWorkspaceHistory.
 func (tx *WorkspaceMutationTx) PublicationPolicyHistory(ctx context.Context) ([]WorkspacePublicationPolicyRecord, error) {
 	_, history, err := tx.publicationPolicyState(ctx)
 	if err != nil {
