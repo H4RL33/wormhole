@@ -1296,3 +1296,18 @@ legacy-only for Tasks 11-14. Exact RED/GREEN, focused race, full localstore/proj
 vet, formatting, and diff gates passed; repository `make check` remains environment-blocked
 only by unavailable PostgreSQL at `[::1]:5432`. Task 11 is next; no lifecycle migration or
 R04 work entered Task 10.
+
+Stage 1A R01-R05 execution: Task 11 complete (commit `3b87dd6`, independent
+specification and quality re-reviews clean). Import, stash, restore, and Git observation now
+use bounded current/named worksets and ignore unrelated terminal corruption while the
+explicit history audit remains fail-closed. Prepared materialisations are recovery-only;
+wrong-side operation guards remain strict. New restore receipts are v2, bind the tracker-owned
+committed revision, and protect a reread semantic postimage; exact retry requires revision and
+digest, while the v1 adapter is limited to the migration baseline. A causal review fix covered
+the receipt-only already-conflicted case (`R` projection versus `R+1` commit). Fresh G04/V2,
+focused race, full localstore/projectstate, vet, authority, formatting, and diff gates passed;
+PostgreSQL remains the only external `make check` blocker. The family is locally additive
+(`+1369/-155`) because Task 14 owns deletion of displaced legacy mechanisms. The required
+simplification pause removed 61 net production lines of duplicate proof logic and confirmed
+that further Task-11 deletion would prematurely erase Task-14 evidence. Task 12 may begin only
+from this recorded pause; no Task 12/R04 work entered Task 11.
