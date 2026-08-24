@@ -1282,3 +1282,17 @@ materialisation, checkpoint/history, OperationAudit, and restore-retry evidence 
 Tasks 10-14. Fresh full localstore/projectstate, focused race, vet, formatting, authority,
 and diff gates passed. Task 10 is the next authorized dependency; no R04/R05 implementation
 or R06+ work entered Task 9.
+
+Stage 1A R01-R05 execution: Task 10 complete (commit `dd82172`, independent
+specification and quality re-reviews clean). Localstore now separates bounded current
+authority from one explicit, exact-scope, read-only history audit. Current materialisation
+is limited to prepared/published/recovered-new with explicit cardinality proof; current
+operation and policy readers no longer load unrelated terminal history. The audit strictly
+validates ordered terminal journals, complete operations, exact-scope stash ownership,
+resolved conflicts, policy history, and receipts in one coherent snapshot; migrated
+ownerless stashed rows remain supported. Successful v1-v4 to v5 reopen fixtures invoke the
+audit with canonical evidence. Existing complete-history/checkpoint readers are explicitly
+legacy-only for Tasks 11-14. Exact RED/GREEN, focused race, full localstore/projectstate,
+vet, formatting, and diff gates passed; repository `make check` remains environment-blocked
+only by unavailable PostgreSQL at `[::1]:5432`. Task 11 is next; no lifecycle migration or
+R04 work entered Task 10.
