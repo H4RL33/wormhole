@@ -2,12 +2,16 @@ package localstore
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	_ "embed"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
+	"sort"
+	"sync"
 )
 
 // ErrUnsupportedPrivateFormat reports a private Gateway database that this
@@ -31,7 +35,20 @@ const (
 var (
 	//go:embed private_schema_v6.sql
 	privateSchemaV6 string
+
+	privateSchemaFingerprintOnce  sync.Once
+	privateSchemaFingerprintValue string
+	privateSchemaFingerprintErr   error
+
+	// privateSchemaV6ValidationHook is a failure-injection seam for proving
+	// fresh initialization rollback. It is nil in normal Gateway operation.
+	privateSchemaV6ValidationHook func(*sql.Tx) error
 )
+
+type privateSchemaQueryer interface {
+	Query(string, ...any) (*sql.Rows, error)
+	QueryRow(string, ...any) *sql.Row
+}
 
 var requiredPrivateTables = map[string]struct{}{
 	"whoami_cache": {}, "projects": {}, "agents": {}, "passports": {}, "auth_scopes": {},
@@ -59,6 +76,11 @@ var requiredPrivateColumns = map[string][]string{
 func classifyPrivateDatabase(path string) (privateFormatClass, error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
+		if present, sidecarErr := privateSidecarsPresent(path); sidecarErr != nil {
+			return 0, ErrUnsupportedPrivateFormat{Path: path, Reason: sidecarErr.Error()}
+		} else if present {
+			return 0, ErrUnsupportedPrivateFormat{Path: path, Reason: "database sidecar evidence exists without a main database"}
+		}
 		return privateFormatFresh, nil
 	}
 	if err != nil {
@@ -68,10 +90,20 @@ func classifyPrivateDatabase(path string) (privateFormatClass, error) {
 		return 0, ErrUnsupportedPrivateFormat{Path: path, Reason: "private database is not a regular file"}
 	}
 	if info.Size() == 0 {
+		if present, sidecarErr := privateSidecarsPresent(path); sidecarErr != nil {
+			return 0, ErrUnsupportedPrivateFormat{Path: path, Reason: sidecarErr.Error()}
+		} else if present {
+			return 0, ErrUnsupportedPrivateFormat{Path: path, Reason: "zero-byte database has sidecar evidence"}
+		}
 		return privateFormatFresh, nil
 	}
 
-	db, err := sql.Open("sqlite", sqliteReadOnlyDSN(path))
+	classificationPath, cleanup, err := copyPrivateEvidenceForClassification(path)
+	if err != nil {
+		return 0, ErrUnsupportedPrivateFormat{Path: path, Reason: "private database evidence could not be copied safely"}
+	}
+	defer cleanup()
+	db, err := sql.Open("sqlite", sqliteReadOnlyDSN(classificationPath))
 	if err != nil {
 		return 0, ErrUnsupportedPrivateFormat{Path: path, Reason: "read-only preflight could not open database"}
 	}
@@ -85,7 +117,45 @@ func classifyPrivateDatabase(path string) (privateFormatClass, error) {
 	return privateFormatCurrent, nil
 }
 
-func validateCurrentPrivateSchema(db *sql.DB) error {
+func copyPrivateEvidenceForClassification(path string) (string, func(), error) {
+	directory, err := os.MkdirTemp("", "wormhole-private-preflight-")
+	if err != nil {
+		return "", func() {}, err
+	}
+	cleanup := func() { _ = os.RemoveAll(directory) }
+	target := filepath.Join(directory, filepath.Base(path))
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+		source := path + suffix
+		info, statErr := os.Lstat(source)
+		if errors.Is(statErr, os.ErrNotExist) {
+			continue
+		}
+		if statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			cleanup()
+			return "", func() {}, fmt.Errorf("unsafe private evidence %s", source)
+		}
+		data, readErr := os.ReadFile(source)
+		if readErr != nil {
+			cleanup()
+			return "", func() {}, readErr
+		}
+		if writeErr := os.WriteFile(target+suffix, data, info.Mode().Perm()); writeErr != nil {
+			cleanup()
+			return "", func() {}, writeErr
+		}
+	}
+	return target, cleanup, nil
+}
+
+func validateCurrentPrivateSchema(db privateSchemaQueryer) error {
+	actualFingerprint, err := privateSchemaFingerprint(db)
+	if err != nil {
+		return fmt.Errorf("private schema fingerprint is unreadable")
+	}
+	expectedFingerprint, err := canonicalPrivateSchemaFingerprint()
+	if err != nil || actualFingerprint != expectedFingerprint {
+		return fmt.Errorf("private schema object definitions are not exact v6")
+	}
 	var tableCount int
 	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='gateway_schema_migrations'`).Scan(&tableCount); err != nil {
 		return fmt.Errorf("private schema ledger is unreadable")
@@ -154,7 +224,7 @@ func validateCurrentPrivateSchema(db *sql.DB) error {
 	return nil
 }
 
-func privateTableColumns(db *sql.DB, table string) (map[string]struct{}, error) {
+func privateTableColumns(db privateSchemaQueryer, table string) (map[string]struct{}, error) {
 	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
 	if err != nil {
 		return nil, fmt.Errorf("private schema table %q is unreadable", table)
@@ -174,6 +244,81 @@ func privateTableColumns(db *sql.DB, table string) (map[string]struct{}, error) 
 		return nil, fmt.Errorf("private schema table %q is unreadable", table)
 	}
 	return columns, nil
+}
+
+func privateSchemaFingerprint(db privateSchemaQueryer) (string, error) {
+	rows, err := db.Query(`SELECT type,name,tbl_name,coalesce(sql,'') FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name,tbl_name`)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	type object struct{ kind, name, table, sql string }
+	objects := make([]object, 0)
+	for rows.Next() {
+		var value object
+		if err := rows.Scan(&value.kind, &value.name, &value.table, &value.sql); err != nil {
+			return "", err
+		}
+		objects = append(objects, value)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	// Keep the digest independent of driver row order even if SQLite changes
+	// its ordering for an equivalent catalog query.
+	sort.Slice(objects, func(i, j int) bool {
+		if objects[i].kind != objects[j].kind {
+			return objects[i].kind < objects[j].kind
+		}
+		if objects[i].name != objects[j].name {
+			return objects[i].name < objects[j].name
+		}
+		return objects[i].table < objects[j].table
+	})
+	hash := sha256.New()
+	for _, value := range objects {
+		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%s\x00%s\x00", value.kind, value.name, value.table, value.sql)
+	}
+	return fmt.Sprintf("sha256:%x", hash.Sum(nil)), nil
+}
+
+func canonicalPrivateSchemaFingerprint() (string, error) {
+	privateSchemaFingerprintOnce.Do(func() {
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			privateSchemaFingerprintErr = err
+			return
+		}
+		defer db.Close()
+		if _, err := db.Exec(schema); err != nil {
+			privateSchemaFingerprintErr = err
+			return
+		}
+		if _, err := db.Exec(privateSchemaV6); err != nil {
+			privateSchemaFingerprintErr = err
+			return
+		}
+		privateSchemaFingerprintValue, privateSchemaFingerprintErr = privateSchemaFingerprint(db)
+	})
+	return privateSchemaFingerprintValue, privateSchemaFingerprintErr
+}
+
+func privateSidecarsPresent(path string) (bool, error) {
+	present := false
+	for _, sidecar := range []string{path + "-wal", path + "-shm", path + "-journal"} {
+		info, err := os.Lstat(sidecar)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return false, fmt.Errorf("private database sidecar %s cannot be classified safely", sidecar)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return false, fmt.Errorf("private database sidecar %s is not a regular file", sidecar)
+		}
+		present = true
+	}
+	return present, nil
 }
 
 func sqliteReadOnlyDSN(path string) string {
@@ -197,6 +342,14 @@ func initializePrivateSchemaV6(ctx context.Context, db *sql.DB) error {
 	}
 	if _, err := tx.ExecContext(ctx, privateSchemaV6); err != nil {
 		return fmt.Errorf("localstore: initialize private schema v6: %w", err)
+	}
+	if privateSchemaV6ValidationHook != nil {
+		if err := privateSchemaV6ValidationHook(tx); err != nil {
+			return err
+		}
+	}
+	if err := validateCurrentPrivateSchema(tx); err != nil {
+		return fmt.Errorf("localstore: validate private schema v6: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("localstore: commit private schema v6: %w", err)

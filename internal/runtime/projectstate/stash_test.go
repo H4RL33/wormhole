@@ -450,6 +450,9 @@ func TestServiceStashRollsBackEveryWriteStage(t *testing.T) {
 			if after := captureStashRawState(t, fixture.store); !reflect.DeepEqual(after, before) {
 				t.Fatal("write-stage failure changed state")
 			}
+			if _, err := fixture.store.DB().Exec(`DROP TRIGGER stash_fault`); err != nil {
+				t.Fatal(err)
+			}
 			if err := fixture.store.Close(); err != nil {
 				t.Fatal(err)
 			}

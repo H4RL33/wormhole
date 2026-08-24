@@ -604,6 +604,9 @@ func TestWorkspaceConflictOccurrencesStatementFailureRollsBackAtomically(t *test
 		if err == nil {
 			t.Fatal("replacement hid later insert trigger failure")
 		}
+		if _, err := store.DB().Exec(`DROP TRIGGER abort_second_conflict_insert`); err != nil {
+			t.Fatal(err)
+		}
 		assertOpenConflictAfterReopen(t, databasePath, store, binding.Scope, original)
 	})
 }

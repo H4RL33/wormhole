@@ -2065,6 +2065,9 @@ func TestWorkspaceMutationTxInsertActiveOperationsRejectsIgnoredInsert(t *testin
 		}
 		return tx.SetStatus(context.Background(), "pending")
 	})
+	if _, err := store.DB().Exec(`DROP TRIGGER ignore_second_workspace_operation`); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -2355,6 +2358,9 @@ func TestWorkspaceMutationTxSetStatusFailureRollsBackPriorWrites(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("SetStatus hid an update failure")
+	}
+	if _, err := store.DB().Exec(`DROP TRIGGER reject_workspace_pending`); err != nil {
+		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)

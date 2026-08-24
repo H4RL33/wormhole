@@ -485,6 +485,9 @@ func TestServiceRestoreStashCleanRollsBackEveryWriteStage(t *testing.T) {
 			if after := captureStashRawState(t, fixture.store); !reflect.DeepEqual(after, before) {
 				t.Fatal("write-stage failure changed complete raw state")
 			}
+			if _, err := fixture.store.DB().Exec(`DROP TRIGGER restore_fault`); err != nil {
+				t.Fatal(err)
+			}
 			if err := fixture.store.Close(); err != nil {
 				t.Fatal(err)
 			}
@@ -580,6 +583,9 @@ func TestServiceRestoreStashConflictedRollsBackEveryWriteStage(t *testing.T) {
 			}
 			if after := captureStashRawState(t, fixture.store); !reflect.DeepEqual(after, before) {
 				t.Fatal("conflicted write-stage failure changed complete raw state")
+			}
+			if _, err := fixture.store.DB().Exec(`DROP TRIGGER restore_fault`); err != nil {
+				t.Fatal(err)
 			}
 			if err := fixture.store.Close(); err != nil {
 				t.Fatal(err)

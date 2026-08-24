@@ -586,6 +586,9 @@ func TestImportRollsBackEveryWriteStage(t *testing.T) {
 			if err == nil || !reflect.DeepEqual(got, ImportResult{}) {
 				t.Fatalf("Import()=(%+v,%v), want zero rollback", got, err)
 			}
+			if _, err := fixture.store.DB().Exec(`DROP TRIGGER import_fault`); err != nil {
+				t.Fatal(err)
+			}
 			if err := fixture.store.Close(); err != nil {
 				t.Fatal(err)
 			}

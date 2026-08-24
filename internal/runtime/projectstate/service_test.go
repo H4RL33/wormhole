@@ -1224,6 +1224,9 @@ func TestApplyBatchInsertOrStatusFailureRollsBackEverything(t *testing.T) {
 			if _, err := service.ApplyBatch(context.Background(), registered.Binding.Scope, []state.OperationV1{first, second}); err == nil {
 				t.Fatal("ApplyBatch hid an injected persistence failure")
 			}
+			if _, err := store.DB().Exec(`DROP TRIGGER IF EXISTS reject_service_second_insert; DROP TRIGGER IF EXISTS reject_service_status`); err != nil {
+				t.Fatal(err)
+			}
 			if err := store.Close(); err != nil {
 				t.Fatal(err)
 			}

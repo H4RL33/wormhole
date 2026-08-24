@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -279,17 +280,63 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	preimage, err := captureFreshPrivatePreimage(path, format == privateFormatFresh)
+	if err != nil {
+		return nil, ErrUnsupportedPrivateFormat{Path: path, Reason: "fresh private database preimage cannot be captured"}
+	}
 	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("localstore: open %s: %w", path, err)
 	}
 	if format == privateFormatFresh {
 		if err := initializePrivateSchemaV6(context.Background(), db); err != nil {
-			db.Close()
+			_ = db.Close()
+			if restoreErr := restoreFreshPrivatePreimage(path, preimage); restoreErr != nil {
+				return nil, fmt.Errorf("%w; restore fresh private preimage: %v", err, restoreErr)
+			}
 			return nil, err
 		}
 	}
 	return &Store{db: db}, nil
+}
+
+type freshPrivatePreimage struct {
+	absent bool
+	data   []byte
+	mode   os.FileMode
+}
+
+func captureFreshPrivatePreimage(path string, fresh bool) (freshPrivatePreimage, error) {
+	preimage := freshPrivatePreimage{}
+	if !fresh {
+		return preimage, nil
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		preimage.absent = true
+		return preimage, nil
+	}
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() != 0 {
+		return freshPrivatePreimage{}, fmt.Errorf("invalid fresh preimage")
+	}
+	preimage.mode = info.Mode().Perm()
+	return preimage, nil
+}
+
+func restoreFreshPrivatePreimage(path string, preimage freshPrivatePreimage) error {
+	if preimage.absent {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	} else if err := os.WriteFile(path, preimage.data, preimage.mode); err != nil {
+		return err
+	}
+	for _, sidecar := range []string{path + "-wal", path + "-shm", path + "-journal"} {
+		if err := os.Remove(sidecar); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 func sqliteDSN(path string) string {

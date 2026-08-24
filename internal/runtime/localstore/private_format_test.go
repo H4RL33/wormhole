@@ -92,6 +92,180 @@ func TestGatewayPreflightRejectsFutureMalformedPartialLedgerWithoutMutation(t *t
 	}
 }
 
+func TestGatewayPreflightRejectsSingletonV6WithMalformedLedgerDDL(t *testing.T) {
+	databasePath := freshDatabasePathWithClosedStore(t)
+	db, err := sql.Open("sqlite", sqliteDSN(databasePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP TABLE gateway_schema_migrations; CREATE TABLE gateway_schema_migrations (version TEXT); INSERT INTO gateway_schema_migrations(version) VALUES ('6')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotPrivateEvidence(t, databasePath)
+	if _, err := Open(databasePath); err == nil {
+		t.Fatal("Open accepted singleton v6 with malformed ledger DDL")
+	}
+	assertPrivateEvidenceUnchanged(t, databasePath, before)
+}
+
+func TestGatewayPreflightRejectsSchemaObjectDriftAndUnexpectedObjects(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup string
+	}{
+		{name: "dropped required index", setup: `DROP INDEX workspace_overlay_generation`},
+		{name: "dropped required trigger", setup: `DROP TRIGGER integration_manifest_bodies_no_update`},
+		{name: "dropped required constraint", setup: `PRAGMA writable_schema=ON; UPDATE sqlite_master SET sql=replace(sql, 'CHECK(typeof(workspace_revision) = ''integer'' AND workspace_revision >= 1)', '') WHERE type='table' AND name='workspace_bindings'; PRAGMA writable_schema=OFF`},
+		{name: "extra view", setup: `CREATE VIEW unexpected_private_view AS SELECT 1`},
+		{name: "extra index", setup: `CREATE INDEX unexpected_private_index ON projects(namespace_id)`},
+		{name: "extra trigger", setup: `CREATE TRIGGER unexpected_private_trigger AFTER INSERT ON projects BEGIN SELECT 1; END`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			databasePath := freshDatabasePathWithClosedStore(t)
+			db, err := sql.Open("sqlite", sqliteDSN(databasePath))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(test.setup); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotPrivateEvidence(t, databasePath)
+			if _, err := Open(databasePath); err == nil {
+				t.Fatal("Open accepted private schema object drift")
+			}
+			assertPrivateEvidenceUnchanged(t, databasePath, before)
+		})
+	}
+}
+
+func TestGatewayPreflightRejectsSidecarEvidenceWithoutMainDatabase(t *testing.T) {
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		t.Run(suffix, func(t *testing.T) {
+			databasePath := filepath.Join(t.TempDir(), "gateway.db")
+			if err := os.WriteFile(databasePath+suffix, []byte("uncommitted evidence"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotPrivateEvidence(t, databasePath)
+			if _, err := Open(databasePath); err == nil {
+				t.Fatal("Open treated sidecar evidence as fresh")
+			}
+			assertPrivateEvidenceUnchanged(t, databasePath, before)
+		})
+	}
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		t.Run("zero-main"+suffix, func(t *testing.T) {
+			databasePath := filepath.Join(t.TempDir(), "gateway.db")
+			if err := os.WriteFile(databasePath, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(databasePath+suffix, []byte("uncommitted evidence"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotPrivateEvidence(t, databasePath)
+			if _, err := Open(databasePath); err == nil {
+				t.Fatal("Open treated zero-byte database with sidecar as fresh")
+			}
+			assertPrivateEvidenceUnchanged(t, databasePath, before)
+		})
+	}
+}
+
+func TestGatewayFreshInitializationFailurePreservesPreimageAndSidecars(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "gateway.db")
+	validationErr := errors.New("injected v6 validation failure")
+	previous := privateSchemaV6ValidationHook
+	privateSchemaV6ValidationHook = func(*sql.Tx) error { return validationErr }
+	t.Cleanup(func() { privateSchemaV6ValidationHook = previous })
+	if _, err := Open(databasePath); !errors.Is(err, validationErr) {
+		t.Fatalf("Open injected initialization error=%v, want %v", err, validationErr)
+	}
+	for _, path := range []string{databasePath, databasePath + "-wal", databasePath + "-shm", databasePath + "-journal"} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("failed fresh initialization left %s: %v", path, err)
+		}
+	}
+
+	zeroPath := filepath.Join(t.TempDir(), "zero.db")
+	if err := os.WriteFile(zeroPath, nil, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(zeroPath); !errors.Is(err, validationErr) {
+		t.Fatalf("Open zero-byte injected initialization error=%v, want %v", err, validationErr)
+	}
+	info, err := os.Stat(zeroPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != 0 || info.Mode().Perm() != 0o640 {
+		t.Fatalf("zero-byte fresh preimage changed: size=%d mode=%o", info.Size(), info.Mode().Perm())
+	}
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		if _, err := os.Lstat(zeroPath + suffix); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("zero-byte failed initialization left %s: %v", suffix, err)
+		}
+	}
+}
+
+func freshDatabasePathWithClosedStore(t *testing.T) string {
+	t.Helper()
+	databasePath := filepath.Join(t.TempDir(), "gateway.db")
+	store, err := Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return databasePath
+}
+
+type privateEvidence struct {
+	path string
+	data []byte
+	mode os.FileMode
+}
+
+func snapshotPrivateEvidence(t *testing.T, databasePath string) []privateEvidence {
+	t.Helper()
+	evidence := make([]privateEvidence, 0, 4)
+	for _, path := range []string{databasePath, databasePath + "-wal", databasePath + "-shm", databasePath + "-journal"} {
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			evidence = append(evidence, privateEvidence{path: path})
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		evidence = append(evidence, privateEvidence{path: path, data: data, mode: info.Mode()})
+	}
+	return evidence
+}
+
+func assertPrivateEvidenceUnchanged(t *testing.T, databasePath string, before []privateEvidence) {
+	t.Helper()
+	after := snapshotPrivateEvidence(t, databasePath)
+	if len(after) != len(before) {
+		t.Fatalf("private evidence count changed: before=%d after=%d", len(before), len(after))
+	}
+	for index := range before {
+		if before[index].path != after[index].path || before[index].mode != after[index].mode || !bytes.Equal(before[index].data, after[index].data) {
+			t.Fatalf("private evidence changed at %s", before[index].path)
+		}
+	}
+}
+
 func TestGatewayFreshInitializationProducesExactV6(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "gateway.db")
 	store, err := Open(databasePath)
