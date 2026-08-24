@@ -1268,3 +1268,17 @@ recovery tests separately require the exact revision delta while preserving all 
 whole-state assertions. Fresh focused, race, full localstore/projectstate, vet, formatting,
 authority, and diff gates passed. Task 9 is the next authorized dependency; no R02
 private-corruption proof deletion or R04/R05 work entered Task 8.
+
+Stage 1A R01-R05 execution: Task 9 complete (commit `170130c`, independent
+specification and quality re-reviews clean). Ordinary accepted-base/status/conflict,
+named-stash, and named-receipt paths now trust private SQLite representation while retaining
+strict logical decoding, canonical semantic evidence, exact scope/state/cardinality,
+real-statement rollback, and the sole R03 revision CAS. Coarse service corruption coverage
+preserves target and sibling database state, Git/worktree state, and checkpoint artifacts;
+both immediate wrappers have real `RAISE(ABORT)` rollback owners. Every stored R02
+prerequisite command was rerun green before obsolete representation tests were retired.
+Task 9 removed 1,171 lines while adding 851 (net -320); deferred publication,
+materialisation, checkpoint/history, OperationAudit, and restore-retry evidence remains for
+Tasks 10-14. Fresh full localstore/projectstate, focused race, vet, formatting, authority,
+and diff gates passed. Task 10 is the next authorized dependency; no R04/R05 implementation
+or R06+ work entered Task 9.
