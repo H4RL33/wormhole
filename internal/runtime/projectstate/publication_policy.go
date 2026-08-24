@@ -85,7 +85,7 @@ func (s *Service) PublicationConfiguration(ctx context.Context, scope types.Work
 			if err != nil {
 				return err
 			}
-			resolved, err := applyPublicationTransition(ctx, tx, policy, next, observed.digest, true, &attempt)
+			resolved, err := applyPublicationTransition(ctx, tx, currentWorkspace.Binding.Scope, policy, next, observed.digest, true, &attempt)
 			if err != nil {
 				return err
 			}
@@ -156,7 +156,7 @@ func (s *Service) ReconfigurePublication(ctx context.Context, req ReconfigurePub
 			if err != nil {
 				return err
 			}
-			resolved, err := applyPublicationTransition(ctx, tx, policy, next, observed.digest, true, &attempt)
+			resolved, err := applyPublicationTransition(ctx, tx, currentWorkspace.Binding.Scope, policy, next, observed.digest, true, &attempt)
 			if err != nil {
 				return err
 			}
@@ -193,7 +193,7 @@ func (s *Service) ReconfigurePublication(ctx context.Context, req ReconfigurePub
 			Classification: req.Classification, PolicyRevision: policy.PolicyRevision + 1,
 			TransitionKind: "configured", ChangedBy: &actor, ChangedAt: &changedAt,
 		}
-		configured, err := applyPublicationTransition(ctx, tx, policy, next, observed.digest, false, &attempt)
+		configured, err := applyPublicationTransition(ctx, tx, currentWorkspace.Binding.Scope, policy, next, observed.digest, false, &attempt)
 		if err != nil {
 			return err
 		}
@@ -220,23 +220,31 @@ func (s *Service) ReconfigurePublication(ctx context.Context, req ReconfigurePub
 }
 
 type publicationTransitionAttempt struct {
-	prior         localstore.WorkspacePublicationPolicyRecord
-	next          localstore.WorkspacePublicationPolicyRecord
-	priorHistory  []localstore.WorkspacePublicationPolicyRecord
-	configuration PublicationConfiguration
-	invalidated   bool
-	completed     bool
+	scope             types.WorkspaceScope
+	priorConfirmation localstore.WorkspaceCommitConfirmation
+	nextConfirmation  localstore.WorkspaceCommitConfirmation
+	configuration     PublicationConfiguration
+	invalidated       bool
+	completed         bool
 }
 
 func applyPublicationTransition(
 	ctx context.Context,
 	tx *localstore.WorkspaceMutationTx,
+	scope types.WorkspaceScope,
 	prior, next localstore.WorkspacePublicationPolicyRecord,
 	observed state.Digest,
 	invalidated bool,
 	attempt *publicationTransitionAttempt,
 ) (localstore.WorkspacePublicationPolicyRecord, error) {
-	history, err := tx.PublicationPolicyHistory(ctx)
+	if !validPublicationScope(scope) {
+		return localstore.WorkspacePublicationPolicyRecord{}, localstore.ErrNotFound
+	}
+	class := localstore.WorkspacePublicationConfigured
+	if invalidated {
+		class = localstore.WorkspacePublicationStickyInvalidation
+	}
+	priorConfirmation, err := tx.CapturePublicationCommitConfirmation(ctx, class)
 	if err != nil {
 		return localstore.WorkspacePublicationPolicyRecord{}, err
 	}
@@ -246,9 +254,13 @@ func applyPublicationTransition(
 	if err != nil {
 		return localstore.WorkspacePublicationPolicyRecord{}, err
 	}
+	nextConfirmation, err := tx.CapturePublicationCommitConfirmation(ctx, class)
+	if err != nil {
+		return localstore.WorkspacePublicationPolicyRecord{}, err
+	}
 	*attempt = publicationTransitionAttempt{
-		prior: cloneServicePublicationPolicyRecord(prior), next: cloneServicePublicationPolicyRecord(configured),
-		priorHistory:  cloneServicePublicationPolicyHistory(history),
+		scope:             scope,
+		priorConfirmation: priorConfirmation, nextConfirmation: nextConfirmation,
 		configuration: publicationConfigurationFromRecord(observed, configured),
 		invalidated:   invalidated, completed: true,
 	}
@@ -262,43 +274,21 @@ func confirmPublicationCommit(
 	attempt publicationTransitionAttempt,
 	commitErr error,
 ) (PublicationConfiguration, error) {
-	var current localstore.WorkspacePublicationPolicyRecord
-	var history []localstore.WorkspacePublicationPolicyRecord
-	err := repo.WithImmediateWorkspace(ctx, scope, func(tx *localstore.WorkspaceMutationTx) error {
-		var err error
-		current, err = tx.PublicationPolicy(ctx)
-		if err != nil {
-			return err
-		}
-		history, err = tx.PublicationPolicyHistory(ctx)
-		return err
-	})
+	if repo == nil || !validPublicationScope(scope) || attempt.scope != scope || !attempt.completed {
+		return PublicationConfiguration{}, fmt.Errorf("%w: invalid publication commit confirmation", commitErr)
+	}
+	match, err := repo.ConfirmWorkspaceCommit(ctx, attempt.priorConfirmation, attempt.nextConfirmation)
 	if err != nil {
 		return PublicationConfiguration{}, fmt.Errorf("%w: publication commit confirmation failed: %v", commitErr, err)
 	}
-	if equalServicePublicationPolicyRecords(current, attempt.next) &&
-		equalConfirmedPublicationHistory(history, attempt.priorHistory, attempt.next) {
-		confirmed := publicationConfigurationFromRecord(attempt.configuration.ObservedOriginDigest, current)
-		if !equalPublicationConfigurations(confirmed, attempt.configuration) {
-			return PublicationConfiguration{}, fmt.Errorf("%w: publication commit confirmation projection mismatch", commitErr)
-		}
-		return clonePublicationConfiguration(confirmed), nil
-	}
-	if equalServicePublicationPolicyRecords(current, attempt.prior) &&
-		equalServicePublicationPolicyHistories(history, attempt.priorHistory) {
+	switch match {
+	case localstore.WorkspaceCommitNext:
+		return clonePublicationConfiguration(attempt.configuration), nil
+	case localstore.WorkspaceCommitPrior:
 		return PublicationConfiguration{}, commitErr
+	default:
+		return PublicationConfiguration{}, fmt.Errorf("%w: publication commit confirmation found unexpected current state", commitErr)
 	}
-	return PublicationConfiguration{}, fmt.Errorf("%w: publication commit confirmation found unexpected current or history state", commitErr)
-}
-
-func equalConfirmedPublicationHistory(
-	actual, prior []localstore.WorkspacePublicationPolicyRecord,
-	next localstore.WorkspacePublicationPolicyRecord,
-) bool {
-	if len(actual) != len(prior)+1 || !equalServicePublicationPolicyHistories(actual[:len(prior)], prior) {
-		return false
-	}
-	return equalServicePublicationPolicyRecords(actual[len(actual)-1], next)
 }
 
 func publicationInvalidationKind(
@@ -393,14 +383,6 @@ func cloneServicePublicationPolicyRecord(record localstore.WorkspacePublicationP
 	return clone
 }
 
-func cloneServicePublicationPolicyHistory(history []localstore.WorkspacePublicationPolicyRecord) []localstore.WorkspacePublicationPolicyRecord {
-	clone := make([]localstore.WorkspacePublicationPolicyRecord, len(history))
-	for index := range history {
-		clone[index] = cloneServicePublicationPolicyRecord(history[index])
-	}
-	return clone
-}
-
 func equalServicePublicationPolicyRecords(left, right localstore.WorkspacePublicationPolicyRecord) bool {
 	if left.Repository != right.Repository || left.Classification != right.Classification ||
 		left.PolicyRevision != right.PolicyRevision || left.TransitionKind != right.TransitionKind ||
@@ -415,18 +397,6 @@ func equalServicePublicationPolicyRecords(left, right localstore.WorkspacePublic
 		return false
 	}
 	return left.ChangedAt == nil || left.ChangedAt.Equal(*right.ChangedAt)
-}
-
-func equalServicePublicationPolicyHistories(left, right []localstore.WorkspacePublicationPolicyRecord) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if !equalServicePublicationPolicyRecords(left[index], right[index]) {
-			return false
-		}
-	}
-	return true
 }
 
 func validPublicationScope(scope types.WorkspaceScope) bool {

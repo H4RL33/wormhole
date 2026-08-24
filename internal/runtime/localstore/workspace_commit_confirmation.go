@@ -26,8 +26,7 @@ const (
 )
 
 // WorkspaceCommitConfirmation is an opaque, compact proof for one projected
-// workspace commit. Task 12 produces materialization proofs; Task 13 adds the
-// publication projection carried by the same envelope.
+// workspace commit.
 type WorkspaceCommitConfirmation struct {
 	formatVersion   int
 	scope           types.WorkspaceScope
@@ -65,6 +64,19 @@ type materializationCommitAuthorityV1 struct {
 	IncludedOperationsDigest *projectstate.Digest   `json:"included_operations_digest"`
 	PublicationReviewDigest  *projectstate.Digest   `json:"publication_review_digest"`
 	PriorCandidateDigest     *projectstate.Digest   `json:"prior_candidate_digest"`
+}
+
+type publicationCommitAuthorityV1 struct {
+	SchemaVersion   int                                 `json:"schema_version"`
+	Scope           types.WorkspaceScope                `json:"scope"`
+	TransitionClass WorkspacePublicationTransitionClass `json:"transition_class"`
+	Repository      types.RepositoryIdentity            `json:"repository"`
+	OriginDigest    *projectstate.Digest                `json:"origin_digest"`
+	Classification  types.PublicationClassification     `json:"classification"`
+	PolicyRevision  int64                               `json:"policy_revision"`
+	TransitionKind  string                              `json:"transition_kind"`
+	ChangedBy       *types.ActorEnvelope                `json:"changed_by"`
+	ChangedAt       *time.Time                          `json:"changed_at"`
 }
 
 type materializationCandidatePostimageV1 struct {
@@ -242,6 +254,44 @@ func (tx *WorkspaceMutationTx) CaptureMaterializationCommitConfirmation(ctx cont
 	return confirmation, nil
 }
 
+// CapturePublicationCommitConfirmation captures the complete logical current
+// policy, requested transition class, and projected workspace revision without
+// reading publication history.
+func (tx *WorkspaceMutationTx) CapturePublicationCommitConfirmation(
+	ctx context.Context,
+	class WorkspacePublicationTransitionClass,
+) (WorkspaceCommitConfirmation, error) {
+	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) || !validWorkspacePublicationTransitionClass(class) {
+		return WorkspaceCommitConfirmation{}, ErrNotFound
+	}
+	record, err := tx.PublicationPolicy(ctx)
+	if err != nil {
+		return WorkspaceCommitConfirmation{}, err
+	}
+	revision, err := tx.projectedWorkspaceRevision(ctx)
+	if err != nil {
+		return WorkspaceCommitConfirmation{}, fmt.Errorf("localstore: project publication commit revision: %w", err)
+	}
+	authorityDigest, err := projectstate.DigestCanonicalJSON(publicationCommitAuthorityV1{
+		SchemaVersion: 1, Scope: tx.scope, TransitionClass: class,
+		Repository: record.Repository, OriginDigest: record.OriginDigest,
+		Classification: record.Classification, PolicyRevision: record.PolicyRevision,
+		TransitionKind: record.TransitionKind, ChangedBy: record.ChangedBy, ChangedAt: record.ChangedAt,
+	})
+	if err != nil {
+		return WorkspaceCommitConfirmation{}, fmt.Errorf("localstore: digest publication commit authority: %w", err)
+	}
+	confirmation := WorkspaceCommitConfirmation{
+		formatVersion: workspaceCommitConfirmationVersion,
+		scope:         tx.scope, revision: revision, targetKind: workspaceCommitPublication,
+		transitionClass: class, authorityDigest: authorityDigest,
+	}
+	if !validObservedWorkspaceCommitConfirmation(confirmation) {
+		return WorkspaceCommitConfirmation{}, fmt.Errorf("localstore: captured malformed publication confirmation")
+	}
+	return confirmation, nil
+}
+
 func materializationCommitAuthority(scope types.WorkspaceScope, record WorkspaceMaterializationRecord) (materializationCommitAuthorityV1, []int64, error) {
 	includedDigest, err := optionalCanonicalJSONDigest(record.IncludedOperationsJSON)
 	if err != nil {
@@ -368,9 +418,6 @@ func (r *WorkspaceRepo) ConfirmWorkspaceCommit(ctx context.Context, prior, next 
 		equalWorkspaceCommitConfirmations(prior, next) {
 		return WorkspaceCommitThird, fmt.Errorf("localstore: incompatible workspace commit confirmations")
 	}
-	if prior.targetKind != workspaceCommitMaterialization {
-		return WorkspaceCommitThird, fmt.Errorf("localstore: publication commit confirmation is not installed")
-	}
 	conn, err := r.db.Conn(ctx)
 	if err != nil {
 		return WorkspaceCommitThird, fmt.Errorf("localstore: acquire workspace commit confirmation connection: %w", err)
@@ -385,7 +432,16 @@ func (r *WorkspaceRepo) ConfirmWorkspaceCommit(ctx context.Context, prior, next 
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
-	current, err := (&WorkspaceMutationTx{conn: conn, scope: prior.scope}).CaptureMaterializationCommitConfirmation(ctx, prior.targetID)
+	tx := &WorkspaceMutationTx{conn: conn, scope: prior.scope}
+	var current WorkspaceCommitConfirmation
+	switch prior.targetKind {
+	case workspaceCommitMaterialization:
+		current, err = tx.CaptureMaterializationCommitConfirmation(ctx, prior.targetID)
+	case workspaceCommitPublication:
+		current, err = tx.CapturePublicationCommitConfirmation(ctx, prior.transitionClass)
+	default:
+		err = fmt.Errorf("localstore: unsupported workspace commit confirmation target")
+	}
 	if err != nil {
 		return WorkspaceCommitThird, fmt.Errorf("localstore: read workspace commit confirmation: %w", err)
 	}
@@ -420,6 +476,9 @@ func validWorkspaceCommitConfirmation(value WorkspaceCommitConfirmation) bool {
 	if !validWorkspaceCommitConfirmationStructure(value) {
 		return false
 	}
+	if value.targetKind == workspaceCommitPublication {
+		return true
+	}
 	switch value.targetState {
 	case "":
 		return value.currentOwnerID == ""
@@ -436,6 +495,9 @@ func validObservedWorkspaceCommitConfirmation(value WorkspaceCommitConfirmation)
 	if !validWorkspaceCommitConfirmationStructure(value) {
 		return false
 	}
+	if value.targetKind == workspaceCommitPublication {
+		return true
+	}
 	switch value.targetState {
 	case "":
 		return value.currentOwnerID != value.targetID
@@ -450,9 +512,15 @@ func validObservedWorkspaceCommitConfirmation(value WorkspaceCommitConfirmation)
 
 func validWorkspaceCommitConfirmationStructure(value WorkspaceCommitConfirmation) bool {
 	if value.formatVersion != workspaceCommitConfirmationVersion || !validWorkspaceScope(value.scope) || value.revision <= 0 ||
-		value.targetKind != workspaceCommitMaterialization || !validLegacyMaterializationJournalID(value.targetID) ||
-		value.transitionClass != "" || !validMaterializationDigest(value.authorityDigest) || value.postimageDigest == nil ||
-		!validMaterializationDigest(*value.postimageDigest) {
+		!validMaterializationDigest(value.authorityDigest) {
+		return false
+	}
+	if value.targetKind == workspaceCommitPublication {
+		return value.targetID == "" && value.targetState == "" && value.currentOwnerID == "" &&
+			validWorkspacePublicationTransitionClass(value.transitionClass) && value.postimageDigest == nil
+	}
+	if value.targetKind != workspaceCommitMaterialization || !validLegacyMaterializationJournalID(value.targetID) ||
+		value.transitionClass != "" || value.postimageDigest == nil || !validMaterializationDigest(*value.postimageDigest) {
 		return false
 	}
 	if value.currentOwnerID != "" && !validLegacyMaterializationJournalID(value.currentOwnerID) {
@@ -464,4 +532,8 @@ func validWorkspaceCommitConfirmationStructure(value WorkspaceCommitConfirmation
 	default:
 		return false
 	}
+}
+
+func validWorkspacePublicationTransitionClass(class WorkspacePublicationTransitionClass) bool {
+	return class == WorkspacePublicationConfigured || class == WorkspacePublicationStickyInvalidation
 }

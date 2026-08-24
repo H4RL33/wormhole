@@ -55,6 +55,34 @@ func TestCompactTargetedCommitConfirmationNeverReplays(t *testing.T) {
 				confirmationCalls, transactionCalls, fixture.prepareCalls, fixture.publishCalls, fixture.closeCalls)
 		}
 	})
+	t.Run("publication", func(t *testing.T) {
+		fixture := newPublicationServiceFixture(t, "00000000-0000-4000-8000-000000000001", "https://github.com/acme/wormhole.git")
+		current := mustPublicationConfiguration(t, fixture.service, fixture.binding.Scope)
+		req := publicationRequest(t, fixture.binding, current, types.PublicationPublicGit, diffActorEnvelope())
+		fixture.service.now = func() time.Time { return time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC) }
+		realWithImmediate := fixture.service.repo.WithImmediateWorkspace
+		transactionCalls := 0
+		unknown := fmt.Errorf("synthetic compact publication confirmation: %w", localstore.ErrCommitOutcomeUnknown)
+		fixture.service.withImmediateWorkspace = func(
+			ctx context.Context,
+			scope types.WorkspaceScope,
+			fn func(*localstore.WorkspaceMutationTx) error,
+		) error {
+			transactionCalls++
+			err := realWithImmediate(ctx, scope, fn)
+			if err == nil {
+				return unknown
+			}
+			return err
+		}
+		got, err := fixture.service.ReconfigurePublication(context.Background(), req)
+		if err != nil || got.PolicyRevision != current.PolicyRevision+1 {
+			t.Fatalf("compact publication confirmation=(%+v,%v), want successful transition", got, err)
+		}
+		if transactionCalls != 1 {
+			t.Fatalf("transactions=%d, want 1 without replay", transactionCalls)
+		}
+	})
 }
 
 func TestCoarsePrivateCorruptionFailsClosedWithoutCrossScopeMutation(t *testing.T) {

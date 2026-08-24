@@ -860,9 +860,9 @@ func TestCheckpointStableOriginMismatchInvalidatesInEachTransaction(t *testing.T
 			fixture.publishCalls != 0 || fixture.closeCalls != 0 {
 			t.Fatalf("first invalidation Checkpoint = (%+v, %v), artifact publish=%d close=%d", got, err, fixture.publishCalls, fixture.closeCalls)
 		}
-		policy, history := readPublicationPolicyState(t, fixture.service, req.Scope)
-		if policy.Classification != types.PublicationUnclassified || policy.TransitionKind != "origin_invalidated" || len(history) != 3 {
-			t.Fatalf("first invalidation policy=%+v history=%+v", policy, history)
+		policy := readPublicationPolicy(t, fixture.service, req.Scope)
+		if policy.Classification != types.PublicationUnclassified || policy.TransitionKind != "origin_invalidated" || policy.PolicyRevision != 3 {
+			t.Fatalf("first invalidation policy=%+v", policy)
 		}
 	})
 	t.Run("second transaction", func(t *testing.T) {
@@ -904,7 +904,7 @@ func TestCheckpointFirstMaterialPreflightPrecedesOriginInvalidation(t *testing.T
 		t.Fatal(err)
 	}
 	beforeDisposition := readCheckpointDisposition(t, fixture.service, req.Scope)
-	beforePolicy, beforeHistory := readPublicationPolicyState(t, fixture.service, req.Scope)
+	beforePolicy := readPublicationPolicy(t, fixture.service, req.Scope)
 	runGit(t, fixture.repository.root, "remote", "set-url", "origin", "https://github.com/acme/changed.git")
 
 	got, err := fixture.service.Checkpoint(context.Background(), req)
@@ -912,9 +912,9 @@ func TestCheckpointFirstMaterialPreflightPrecedesOriginInvalidation(t *testing.T
 		fixture.prepareCalls != 0 || fixture.publishCalls != 0 || fixture.closeCalls != 0 {
 		t.Fatalf("invalid-material Checkpoint = (%+v, %v), prepare=%d publish=%d close=%d", got, err, fixture.prepareCalls, fixture.publishCalls, fixture.closeCalls)
 	}
-	afterPolicy, afterHistory := readPublicationPolicyState(t, fixture.service, req.Scope)
-	if !reflect.DeepEqual(afterPolicy, beforePolicy) || !reflect.DeepEqual(afterHistory, beforeHistory) {
-		t.Fatalf("invalid material committed invalidation\nbefore=(%+v, %+v)\nafter=(%+v, %+v)", beforePolicy, beforeHistory, afterPolicy, afterHistory)
+	afterPolicy := readPublicationPolicy(t, fixture.service, req.Scope)
+	if !reflect.DeepEqual(afterPolicy, beforePolicy) {
+		t.Fatalf("invalid material committed invalidation\nbefore=%+v\nafter=%+v", beforePolicy, afterPolicy)
 	}
 	if afterDisposition := readCheckpointDisposition(t, fixture.service, req.Scope); !reflect.DeepEqual(afterDisposition, beforeDisposition) {
 		t.Fatalf("invalid-material disposition changed\nbefore=%+v\nafter=%+v", beforeDisposition, afterDisposition)
@@ -1027,9 +1027,9 @@ func TestCheckpointSecondPlanDriftPrecedesOriginInvalidation(t *testing.T) {
 		fixture.publishCalls != 0 || fixture.closeCalls != 1 {
 		t.Fatalf("combined drift Checkpoint = (%+v, %v), publish=%d close=%d", got, err, fixture.publishCalls, fixture.closeCalls)
 	}
-	policy, history := readPublicationPolicyState(t, fixture.service, req.Scope)
-	if policy.Classification != types.PublicationLocalOnly || policy.PolicyRevision != 2 || len(history) != 2 {
-		t.Fatalf("combined drift changed policy=%+v history=%+v", policy, history)
+	policy := readPublicationPolicy(t, fixture.service, req.Scope)
+	if policy.Classification != types.PublicationLocalOnly || policy.PolicyRevision != 2 {
+		t.Fatalf("combined drift changed policy=%+v", policy)
 	}
 	disposition := readCheckpointDisposition(t, fixture.service, req.Scope)
 	if len(disposition.Journals) != 1 || disposition.Journals[0].State != "prepared" ||

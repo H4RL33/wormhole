@@ -209,7 +209,9 @@ func (s *Service) publicationReviewInTransaction(
 		if err != nil {
 			return publicationReviewTransactionEvidence{}, err
 		}
-		resolvedPolicy, err = applyPublicationTransition(ctx, tx, policy, next, inside.origin.digest, true, attempt)
+		resolvedPolicy, err = applyPublicationTransition(
+			ctx, tx, workspace.Binding.Scope, policy, next, inside.origin.digest, true, attempt,
+		)
 		if err != nil {
 			return publicationReviewTransactionEvidence{}, err
 		}

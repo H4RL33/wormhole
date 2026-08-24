@@ -29,7 +29,7 @@ func TestWorkspacePublicationPolicyBootstrapAndConfiguredCAS(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		history, err := tx.PublicationPolicyHistory(context.Background())
+		history, err := publicationPolicyHistoryForTest(tx, context.Background())
 		if err != nil {
 			return err
 		}
@@ -87,7 +87,7 @@ func TestWorkspacePublicationPolicyBootstrapAndConfiguredCAS(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		history, err := tx.PublicationPolicyHistory(context.Background())
+		history, err := publicationPolicyHistoryForTest(tx, context.Background())
 		if err != nil {
 			return err
 		}
@@ -100,6 +100,18 @@ func TestWorkspacePublicationPolicyBootstrapAndConfiguredCAS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+func publicationPolicyHistoryForTest(tx *WorkspaceMutationTx, ctx context.Context) ([]WorkspacePublicationPolicyRecord, error) {
+	_, history, err := tx.auditPublicationPolicyState(ctx)
+	if err != nil {
+		return nil, err
+	}
+	records := make([]WorkspacePublicationPolicyRecord, len(history))
+	for index := range history {
+		records[index] = cloneWorkspacePublicationPolicyRecord(history[index].Record)
+	}
+	return records, nil
 }
 
 func TestWorkspacePublicationPolicyFailsClosedOnMissingOrDisagreeingHistory(t *testing.T) {
@@ -156,21 +168,6 @@ func TestWorkspacePublicationPolicyFailsClosedOnMissingOrDisagreeingHistory(t *t
 				t.Fatal("AuditWorkspaceHistory accepted missing or disagreeing policy history")
 			}
 		})
-	}
-}
-
-func TestRepeatedWorkspaceRegistrationStrictlyValidatesPublicationPolicy(t *testing.T) {
-	store, repo := openWorkspaceStore(t)
-	binding := createBinding(t, repo,
-		"00000000-0000-4000-8000-000000000001",
-		"00000000-0000-4000-8000-000000000011",
-		"/checkout", 1, 11)
-	tree := workspaceTree(t, binding.Scope.ProjectID, binding.Repository)
-	if _, err := store.DB().Exec(`DELETE FROM workspace_publication_policy_history WHERE project_id=? AND workspace_id=?`, binding.Scope.ProjectID, binding.Scope.WorkspaceID); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := repo.RegisterWorkspace(context.Background(), binding, tree); err == nil {
-		t.Fatal("repeated registration accepted missing publication history")
 	}
 }
 
@@ -364,11 +361,11 @@ func TestWorkspacePublicationPolicyStrictReadersRejectCorruption(t *testing.T) {
 				} else if currentErr == nil {
 					t.Fatal("PublicationPolicy accepted corrupt current row")
 				}
-				_, err := tx.PublicationPolicyHistory(context.Background())
+				_, err := publicationPolicyHistoryForTest(tx, context.Background())
 				return err
 			})
 			if err == nil {
-				t.Fatal("PublicationPolicyHistory accepted corrupt row")
+				t.Fatal("publication history audit accepted corrupt row")
 			}
 		})
 	}
@@ -692,34 +689,6 @@ func TestWorkspacePublicationPolicyTreatsZeroOffsetActorTimesSemantically(t *tes
 	})
 	if err != nil {
 		t.Fatalf("semantically equal zero-offset Expected actor: %v", err)
-	}
-}
-
-func TestWorkspacePublicationPolicyCASProtectsImmutableHistoryPrefix(t *testing.T) {
-	store, repo := openWorkspaceStore(t)
-	binding := createBinding(t, repo, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "/checkout", 1, 11)
-	_, configured := configurePublicationPolicy(t, repo, binding, types.PublicationPublicGit)
-	if _, err := store.DB().Exec(`
-		CREATE TRIGGER rewrite_publication_history_prefix
-		AFTER UPDATE ON workspace_publication_policies
-		BEGIN
-		  UPDATE workspace_publication_policy_history SET classification='private_git'
-		  WHERE project_id=NEW.project_id AND workspace_id=NEW.workspace_id AND policy_revision=2;
-		END;
-	`); err != nil {
-		t.Fatal(err)
-	}
-	before := readAtomicWorkspaceRawSnapshot(t, store.DB())
-	next := publicationOriginInvalidation(binding.Repository, configured.PolicyRevision+1, 'b')
-	err := repo.WithImmediateWorkspace(context.Background(), binding.Scope, func(tx *WorkspaceMutationTx) error {
-		_, err := tx.ReconfigurePublication(context.Background(), WorkspacePublicationPolicyTransition{Expected: configured, Next: next})
-		return err
-	})
-	if err == nil {
-		t.Fatal("publication transition accepted rewritten immutable history prefix")
-	}
-	if after := readAtomicWorkspaceRawSnapshot(t, store.DB()); !reflect.DeepEqual(after, before) {
-		t.Fatalf("history-prefix drift was not rolled back: before=%v after=%v", before, after)
 	}
 }
 

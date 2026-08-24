@@ -354,9 +354,9 @@ func TestPublicationReviewStableMismatchInvalidatesOnceAndContinues(t *testing.T
 	if err != nil || first.PublicationClassification != types.PublicationUnclassified || !validPublicationDigest(first.PublicationReviewDigest) {
 		t.Fatalf("first invalidated Status=(%+v,%v)", first, err)
 	}
-	policy, history := readPublicationPolicyState(t, fixture.service, fixture.binding.Scope)
-	if policy.PolicyRevision != configured.PolicyRevision+1 || policy.TransitionKind != "origin_invalidated" || len(history) != int(policy.PolicyRevision) {
-		t.Fatalf("invalidated policy=%+v history=%d", policy, len(history))
+	policy := readPublicationPolicy(t, fixture.service, fixture.binding.Scope)
+	if policy.PolicyRevision != configured.PolicyRevision+1 || policy.TransitionKind != "origin_invalidated" {
+		t.Fatalf("invalidated policy=%+v", policy)
 	}
 	fixture.service.now = func() time.Time { panic("sticky invalidation consulted clock twice") }
 	second, err := fixture.service.Status(context.Background(), fixture.binding.Scope)
@@ -412,7 +412,7 @@ func TestPublicationReviewRepositoryMismatchPrecedesOriginMismatch(t *testing.T)
 	if err != nil || got.PublicationClassification != types.PublicationUnclassified {
 		t.Fatalf("repository mismatch Status=(%+v,%v)", got, err)
 	}
-	policy, _ := readPublicationPolicyState(t, fixture.service, fixture.binding.Scope)
+	policy := readPublicationPolicy(t, fixture.service, fixture.binding.Scope)
 	if policy.PolicyRevision != configured.PolicyRevision+1 || policy.TransitionKind != "repository_invalidated" {
 		t.Fatalf("repository precedence policy=%+v", policy)
 	}
@@ -437,7 +437,7 @@ func TestPublicationReviewUnknownCommitConfirmationDoesNotRetry(t *testing.T) {
 	if err != nil || got.PublicationClassification != types.PublicationUnclassified || !validPublicationDigest(got.PublicationReviewDigest) || calls != 1 {
 		t.Fatalf("unknown-commit Status=(%+v,%v) calls=%d", got, err, calls)
 	}
-	policy, _ := readPublicationPolicyState(t, fixture.service, fixture.binding.Scope)
+	policy := readPublicationPolicy(t, fixture.service, fixture.binding.Scope)
 	if policy.PolicyRevision != configured.PolicyRevision+1 {
 		t.Fatalf("confirmed policy revision=%d", policy.PolicyRevision)
 	}
@@ -710,10 +710,10 @@ func TestPublicationReviewClassificationSurvivesHumanAndAgentChanges(t *testing.
 		t.Fatal(err)
 	}
 	status := mustServiceStatus(t, fixture.service, fixture.binding.Scope)
-	policy, history := readPublicationPolicyState(t, fixture.service, fixture.binding.Scope)
+	policy := readPublicationPolicy(t, fixture.service, fixture.binding.Scope)
 	if status.PublicationClassification != types.PublicationPublicGit ||
-		policy.PolicyRevision != configured.PolicyRevision || len(history) != int(configured.PolicyRevision) {
-		t.Fatalf("data actors changed classification: status=%+v policy=%+v history=%d", status, policy, len(history))
+		policy.PolicyRevision != configured.PolicyRevision {
+		t.Fatalf("data actors changed classification: status=%+v policy=%+v", status, policy)
 	}
 }
 
@@ -736,10 +736,10 @@ func TestPublicationReviewStickyInvalidationSurvivesRestart(t *testing.T) {
 	}
 	_, reopened := openProjectStateServiceAt(t, databasePath)
 	got := mustServiceStatus(t, reopened, registered.Binding.Scope)
-	policy, history := readPublicationPolicyState(t, reopened, registered.Binding.Scope)
+	policy := readPublicationPolicy(t, reopened, registered.Binding.Scope)
 	if !reflect.DeepEqual(got, want) || policy.PolicyRevision != configured.PolicyRevision+1 ||
-		policy.TransitionKind != "origin_invalidated" || len(history) != int(policy.PolicyRevision) {
-		t.Fatalf("restarted invalidation status=%+v policy=%+v history=%d, want=%+v", got, policy, len(history), want)
+		policy.TransitionKind != "origin_invalidated" {
+		t.Fatalf("restarted invalidation status=%+v policy=%+v, want=%+v", got, policy, want)
 	}
 }
 

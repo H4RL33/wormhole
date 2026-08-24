@@ -1169,7 +1169,7 @@ func (r *WorkspaceRepo) RegisterWorkspace(ctx context.Context, candidate types.W
 		if !exact {
 			return types.WorkspaceBinding{}, false, ErrCheckoutCollision
 		}
-		if _, _, err := (&WorkspaceMutationTx{conn: conn, scope: existing.Binding.Scope}).publicationPolicyState(ctx); err != nil {
+		if _, err := queryWorkspacePublicationPolicy(ctx, conn, existing.Binding.Scope); err != nil {
 			return types.WorkspaceBinding{}, false, fmt.Errorf("localstore: validate repeated workspace publication policy: %w", err)
 		}
 		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
@@ -1195,15 +1195,13 @@ func (r *WorkspaceRepo) RegisterWorkspace(ctx context.Context, candidate types.W
 	if err := insertBootstrapPublicationPolicy(ctx, conn, candidate.Scope, string(repositoryJSON)); err != nil {
 		return types.WorkspaceBinding{}, false, err
 	}
-	publication, history, err := (&WorkspaceMutationTx{conn: conn, scope: candidate.Scope}).publicationPolicyState(ctx)
+	publication, err := queryWorkspacePublicationPolicy(ctx, conn, candidate.Scope)
 	wantPublication := WorkspacePublicationPolicyRecord{
 		Repository: candidate.Repository, Classification: types.PublicationUnclassified,
 		PolicyRevision: 1, TransitionKind: "bootstrap",
 	}
 	if err != nil || publication.RepositoryJSON != string(repositoryJSON) ||
-		!equalWorkspacePublicationPolicyRecords(publication.Record, wantPublication) || len(history) != 1 ||
-		history[0].RepositoryJSON != string(repositoryJSON) ||
-		!equalWorkspacePublicationPolicyRecords(history[0].Record, wantPublication) {
+		!equalWorkspacePublicationPolicyRecords(publication.Record, wantPublication) {
 		if err == nil {
 			err = fmt.Errorf("bootstrap publication policy differs from registration")
 		}

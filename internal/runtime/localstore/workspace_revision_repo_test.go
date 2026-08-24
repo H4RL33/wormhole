@@ -986,8 +986,7 @@ func TestWorkspaceRevisionPublicationWriterInventory(t *testing.T) {
 			if _, err := tx.PublicationPolicy(ctx); err != nil {
 				return err
 			}
-			_, err := tx.PublicationPolicyHistory(ctx)
-			return err
+			return nil
 		})
 		before := coreWriterRevision(t, repo, binding.Scope)
 		err := repo.WithImmediateWorkspace(ctx, binding.Scope, func(tx *WorkspaceMutationTx) error {

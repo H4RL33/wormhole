@@ -257,11 +257,12 @@ func TestConfirmPublicationCommitRejectsThirdStateAndReadError(t *testing.T) {
 	commitErr := fmt.Errorf("%w: confirmation fixture", localstore.ErrCommitOutcomeUnknown)
 	t.Run("exact next", func(t *testing.T) {
 		fixture := newPublicationServiceFixture(t, "00000000-0000-4000-8000-000000000001", "https://github.com/acme/wormhole.git")
-		prior, priorHistory := readPublicationPolicyState(t, fixture.service, fixture.binding.Scope)
+		priorConfirmation := capturePublicationCommitConfirmationForTest(t, fixture.service.repo, fixture.binding.Scope, localstore.WorkspacePublicationConfigured)
 		configured := configurePublicationForTest(t, fixture, types.PublicationPublicGit, diffActorEnvelope(), time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC))
-		next, _ := readPublicationPolicyState(t, fixture.service, fixture.binding.Scope)
+		nextConfirmation := capturePublicationCommitConfirmationForTest(t, fixture.service.repo, fixture.binding.Scope, localstore.WorkspacePublicationConfigured)
 		attempt := publicationTransitionAttempt{
-			prior: prior, next: next, priorHistory: priorHistory,
+			scope:             fixture.binding.Scope,
+			priorConfirmation: priorConfirmation, nextConfirmation: nextConfirmation,
 			configuration: configured, completed: true,
 		}
 
@@ -273,11 +274,12 @@ func TestConfirmPublicationCommitRejectsThirdStateAndReadError(t *testing.T) {
 
 	t.Run("third valid revision", func(t *testing.T) {
 		fixture := newPublicationServiceFixture(t, "00000000-0000-4000-8000-000000000001", "https://github.com/acme/wormhole.git")
-		prior, priorHistory := readPublicationPolicyState(t, fixture.service, fixture.binding.Scope)
+		priorConfirmation := capturePublicationCommitConfirmationForTest(t, fixture.service.repo, fixture.binding.Scope, localstore.WorkspacePublicationConfigured)
 		configured := configurePublicationForTest(t, fixture, types.PublicationPublicGit, diffActorEnvelope(), time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC))
-		next, _ := readPublicationPolicyState(t, fixture.service, fixture.binding.Scope)
+		nextConfirmation := capturePublicationCommitConfirmationForTest(t, fixture.service.repo, fixture.binding.Scope, localstore.WorkspacePublicationConfigured)
 		attempt := publicationTransitionAttempt{
-			prior: prior, next: next, priorHistory: priorHistory,
+			scope:             fixture.binding.Scope,
+			priorConfirmation: priorConfirmation, nextConfirmation: nextConfirmation,
 			configuration: configured, completed: true,
 		}
 		fixture.service.now = func() time.Time { return time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC) }
@@ -295,11 +297,12 @@ func TestConfirmPublicationCommitRejectsThirdStateAndReadError(t *testing.T) {
 
 	t.Run("read error", func(t *testing.T) {
 		fixture := newPublicationServiceFixture(t, "00000000-0000-4000-8000-000000000001", "https://github.com/acme/wormhole.git")
-		prior, priorHistory := readPublicationPolicyState(t, fixture.service, fixture.binding.Scope)
+		priorConfirmation := capturePublicationCommitConfirmationForTest(t, fixture.service.repo, fixture.binding.Scope, localstore.WorkspacePublicationConfigured)
 		configured := configurePublicationForTest(t, fixture, types.PublicationPublicGit, diffActorEnvelope(), time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC))
-		next, _ := readPublicationPolicyState(t, fixture.service, fixture.binding.Scope)
+		nextConfirmation := capturePublicationCommitConfirmationForTest(t, fixture.service.repo, fixture.binding.Scope, localstore.WorkspacePublicationConfigured)
 		attempt := publicationTransitionAttempt{
-			prior: prior, next: next, priorHistory: priorHistory,
+			scope:             fixture.binding.Scope,
+			priorConfirmation: priorConfirmation, nextConfirmation: nextConfirmation,
 			configuration: configured, completed: true,
 		}
 		if err := fixture.store.Close(); err != nil {
@@ -311,6 +314,32 @@ func TestConfirmPublicationCommitRejectsThirdStateAndReadError(t *testing.T) {
 			t.Fatalf("read-error confirmation=(%+v,%v)", got, err)
 		}
 	})
+}
+
+func TestConfirmPublicationCommitRejectsAttemptFromDifferentScope(t *testing.T) {
+	fixture := newPublicationServiceFixture(t, "00000000-0000-4000-8000-000000000001", "https://github.com/acme/wormhole.git")
+	priorConfirmation := capturePublicationCommitConfirmationForTest(
+		t, fixture.service.repo, fixture.binding.Scope, localstore.WorkspacePublicationConfigured,
+	)
+	configured := configurePublicationForTest(
+		t, fixture, types.PublicationPublicGit, diffActorEnvelope(), time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC),
+	)
+	nextConfirmation := capturePublicationCommitConfirmationForTest(
+		t, fixture.service.repo, fixture.binding.Scope, localstore.WorkspacePublicationConfigured,
+	)
+	attempt := publicationTransitionAttempt{
+		scope:             fixture.binding.Scope,
+		priorConfirmation: priorConfirmation, nextConfirmation: nextConfirmation,
+		configuration: configured, completed: true,
+	}
+	wrongScope := fixture.binding.Scope
+	wrongScope.WorkspaceID = "00000000-0000-4000-8000-000000000012"
+	commitErr := fmt.Errorf("%w: wrong-scope confirmation fixture", localstore.ErrCommitOutcomeUnknown)
+
+	got, err := confirmPublicationCommit(context.Background(), fixture.service.repo, wrongScope, attempt, commitErr)
+	if !errors.Is(err, commitErr) || got != (PublicationConfiguration{}) {
+		t.Fatalf("wrong-scope publication confirmation=(%+v,%v), want zero result preserving unknown outcome", got, err)
+	}
 }
 
 func TestReconfigurePublicationRejectsInvalidCompleteRequestBeforeIO(t *testing.T) {
@@ -1104,24 +1133,37 @@ func publicationDigest(value byte) string {
 	return "sha256:" + strings.Repeat(string([]byte{value}), 64)
 }
 
-func readPublicationPolicyState(
+func readPublicationPolicy(
 	t *testing.T,
 	service *Service,
 	scope types.WorkspaceScope,
-) (localstore.WorkspacePublicationPolicyRecord, []localstore.WorkspacePublicationPolicyRecord) {
+) localstore.WorkspacePublicationPolicyRecord {
 	t.Helper()
 	var current localstore.WorkspacePublicationPolicyRecord
-	var history []localstore.WorkspacePublicationPolicyRecord
 	if err := service.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
 		var err error
 		current, err = tx.PublicationPolicy(context.Background())
-		if err != nil {
-			return err
-		}
-		history, err = tx.PublicationPolicyHistory(context.Background())
 		return err
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return current, history
+	return current
+}
+
+func capturePublicationCommitConfirmationForTest(
+	t *testing.T,
+	repo *localstore.WorkspaceRepo,
+	scope types.WorkspaceScope,
+	class localstore.WorkspacePublicationTransitionClass,
+) localstore.WorkspaceCommitConfirmation {
+	t.Helper()
+	var confirmation localstore.WorkspaceCommitConfirmation
+	if err := repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
+		var err error
+		confirmation, err = tx.CapturePublicationCommitConfirmation(context.Background(), class)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return confirmation
 }

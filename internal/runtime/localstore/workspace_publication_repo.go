@@ -73,26 +73,16 @@ func (tx *WorkspaceMutationTx) PublicationPolicy(ctx context.Context) (Workspace
 	return cloneWorkspacePublicationPolicyRecord(current.Record), nil
 }
 
-// PublicationPolicyHistory is a legacy-only complete reader retained for the
-// publication migrations in Tasks 13-14. New historical validation enters
-// through AuditWorkspaceHistory.
-func (tx *WorkspaceMutationTx) PublicationPolicyHistory(ctx context.Context) ([]WorkspacePublicationPolicyRecord, error) {
-	_, history, err := tx.publicationPolicyState(ctx)
-	if err != nil {
-		return nil, err
-	}
-	records := make([]WorkspacePublicationPolicyRecord, len(history))
-	for index := range history {
-		records[index] = cloneWorkspacePublicationPolicyRecord(history[index].Record)
-	}
-	return records, nil
-}
-
 func (tx *WorkspaceMutationTx) ReconfigurePublication(ctx context.Context, transition WorkspacePublicationPolicyTransition) (WorkspacePublicationPolicyRecord, error) {
 	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
 		return WorkspacePublicationPolicyRecord{}, ErrNotFound
 	}
-	current, existingHistory, err := tx.publicationPolicyState(ctx)
+	if _, _, err := queryWorkspaceByScope(ctx, tx.conn, tx.scope); errors.Is(err, sql.ErrNoRows) {
+		return WorkspacePublicationPolicyRecord{}, ErrNotFound
+	} else if err != nil {
+		return WorkspacePublicationPolicyRecord{}, fmt.Errorf("localstore: validate publication policy workspace: %w", err)
+	}
+	current, err := queryWorkspacePublicationPolicy(ctx, tx.conn, tx.scope)
 	if err != nil {
 		return WorkspacePublicationPolicyRecord{}, err
 	}
@@ -171,12 +161,11 @@ func (tx *WorkspaceMutationTx) ReconfigurePublication(ctx context.Context, trans
 		nullableStringValue(nextActor), nullableStringValue(nextChangedAt)).Scan(&recordedAt, &recordedRaw, &recordedClass); err != nil {
 		return WorkspacePublicationPolicyRecord{}, fmt.Errorf("localstore: append publication policy history: %w", err)
 	}
-	if !validStoredWorkspaceTimestamp(recordedAt, recordedRaw, recordedClass) ||
-		recordedAt.Before(existingHistory[len(existingHistory)-1].RecordedAt) {
+	if !validStoredWorkspaceTimestamp(recordedAt, recordedRaw, recordedClass) {
 		return WorkspacePublicationPolicyRecord{}, fmt.Errorf("localstore: invalid publication policy history timestamp")
 	}
 
-	post, history, err := tx.publicationPolicyState(ctx)
+	post, err := queryWorkspacePublicationPolicy(ctx, tx.conn, tx.scope)
 	if err != nil {
 		return WorkspacePublicationPolicyRecord{}, fmt.Errorf("localstore: reread publication policy transition: %w", err)
 	}
@@ -187,17 +176,13 @@ func (tx *WorkspaceMutationTx) ReconfigurePublication(ctx context.Context, trans
 	if !equalWorkspacePublicationBindingEvidence(bindingEvidence, postBindingEvidence) {
 		return WorkspacePublicationPolicyRecord{}, fmt.Errorf("localstore: publication policy binding drift")
 	}
-	final := history[len(history)-1]
 	if !equalWorkspacePublicationPolicyRecords(post.Record, transition.Next) ||
-		int64(len(history)) != transition.Next.PolicyRevision ||
-		!equalWorkspacePublicationHistoryPrefix(existingHistory, history) ||
-		post.RepositoryJSON != nextRepositoryJSON || final.RepositoryJSON != nextRepositoryJSON ||
-		!equalNullableStrings(post.OriginValue, nextOrigin) || !equalNullableStrings(final.OriginValue, nextOrigin) ||
-		!equalNullableStrings(post.ActorJSON, nextActor) || !equalNullableStrings(final.ActorJSON, nextActor) ||
-		!equalNullableStrings(post.ChangedAtRaw, nextChangedAt) || !equalNullableStrings(final.ChangedAtRaw, nextChangedAt) ||
+		post.RepositoryJSON != nextRepositoryJSON ||
+		!equalNullableStrings(post.OriginValue, nextOrigin) ||
+		!equalNullableStrings(post.ActorJSON, nextActor) ||
+		!equalNullableStrings(post.ChangedAtRaw, nextChangedAt) ||
 		post.CreatedAtRaw != current.CreatedAtRaw || !post.CreatedAt.Equal(current.CreatedAt) ||
-		post.UpdatedAtRaw != returnedRaw || !post.UpdatedAt.Equal(returnedAt) ||
-		final.RecordedAtRaw != recordedRaw || !final.RecordedAt.Equal(recordedAt) {
+		post.UpdatedAtRaw != returnedRaw || !post.UpdatedAt.Equal(returnedAt) {
 		return WorkspacePublicationPolicyRecord{}, fmt.Errorf("localstore: publication policy transition post-state mismatch")
 	}
 	if err := tx.markWorkspaceDirty(ctx); err != nil {
@@ -278,7 +263,7 @@ func (tx *WorkspaceMutationTx) publicationBindingEvidence(ctx context.Context) (
 	return evidence, nil
 }
 
-func (tx *WorkspaceMutationTx) publicationPolicyState(ctx context.Context) (workspacePublicationRawRecord, []workspacePublicationRawRecord, error) {
+func (tx *WorkspaceMutationTx) auditPublicationPolicyState(ctx context.Context) (workspacePublicationRawRecord, []workspacePublicationRawRecord, error) {
 	if tx == nil || tx.conn == nil || !validWorkspaceScope(tx.scope) {
 		return workspacePublicationRawRecord{}, nil, ErrNotFound
 	}
@@ -662,35 +647,6 @@ func equalWorkspacePublicationActors(left, right types.ActorEnvelope) bool {
 	left.OccurredAt = time.Time{}
 	right.OccurredAt = time.Time{}
 	return left == right && leftOccurredAt.Equal(rightOccurredAt)
-}
-
-func equalWorkspacePublicationHistoryPrefix(expected, actual []workspacePublicationRawRecord) bool {
-	if len(actual) != len(expected)+1 {
-		return false
-	}
-	for index := range expected {
-		if !equalWorkspacePublicationRawHistoryRecord(expected[index], actual[index]) {
-			return false
-		}
-	}
-	return true
-}
-
-func equalWorkspacePublicationRawHistoryRecord(left, right workspacePublicationRawRecord) bool {
-	if !equalWorkspacePublicationPolicyRecords(left.Record, right.Record) ||
-		left.RepositoryJSON != right.RepositoryJSON ||
-		!equalNullableStrings(left.OriginValue, right.OriginValue) ||
-		!equalNullableStrings(left.ActorJSON, right.ActorJSON) ||
-		!equalNullableStrings(left.ChangedAtRaw, right.ChangedAtRaw) ||
-		!left.RecordedAt.Equal(right.RecordedAt) || left.RecordedAtRaw != right.RecordedAtRaw {
-		return false
-	}
-	for index := 0; index < 10; index++ {
-		if left.StorageClasses[index] != right.StorageClasses[index] {
-			return false
-		}
-	}
-	return true
 }
 
 func equalWorkspacePublicationBindingEvidence(left, right workspacePublicationBindingEvidence) bool {

@@ -46,7 +46,7 @@ func (r *WorkspaceRepo) AuditWorkspaceHistory(ctx context.Context, scope types.W
 	if err := tx.auditWorkspaceConflictHistory(ctx); err != nil {
 		return err
 	}
-	if _, _, err := tx.publicationPolicyState(ctx); err != nil {
+	if _, _, err := tx.auditPublicationPolicyState(ctx); err != nil {
 		return fmt.Errorf("localstore: audit workspace publication policy history: %w", err)
 	}
 	if err := tx.auditWorkspaceReceiptHistory(ctx); err != nil {
