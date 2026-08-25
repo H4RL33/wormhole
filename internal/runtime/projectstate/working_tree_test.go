@@ -385,7 +385,7 @@ func TestDeadlineRegistrationGetsFiniteDeadline(t *testing.T) {
 
 	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
 	_, service := openProjectStateService(t, "")
-	service.registrationTimeout = 0
+	service.registration.registrationTimeout = 0
 	_, err := service.RegisterWorkspace(context.Background(), RegisterWorkspaceRequest{
 		Root: repository.root, ExpectedProjectID: repository.projectID,
 		ExpectedRepository: repository.identity, ExpectedCommit: repository.commit,

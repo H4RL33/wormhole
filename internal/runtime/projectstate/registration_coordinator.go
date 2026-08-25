@@ -18,10 +18,10 @@ type registrationCoordinator struct {
 	newWorkspaceID      func() (types.WorkspaceID, error)
 }
 
-func newRegistrationCoordinator(service *Service) *registrationCoordinator {
+func newRegistrationCoordinator(repo *localstore.WorkspaceRepo, legacyBackupRoot string, registrationTimeout time.Duration, workspaceID func() (types.WorkspaceID, error)) *registrationCoordinator {
 	return &registrationCoordinator{
-		repo: service.repo, legacyBackupRoot: service.legacyBackupRoot,
-		registrationTimeout: service.registrationTimeout, newWorkspaceID: newWorkspaceID,
+		repo: repo, legacyBackupRoot: legacyBackupRoot,
+		registrationTimeout: registrationTimeout, newWorkspaceID: workspaceID,
 	}
 }
 

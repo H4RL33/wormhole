@@ -18,7 +18,7 @@ import (
 
 func TestPublicationReviewInTransactionReturnsOwnedTask5Evidence(t *testing.T) {
 	fixture := newPublicationServiceFixture(t, "00000000-0000-4000-8000-000000000001", "https://github.com/acme/wormhole.git")
-	workspace, err := fixture.service.repo.Workspace(context.Background(), fixture.binding.Scope)
+	workspace, err := fixture.service.registration.repo.Workspace(context.Background(), fixture.binding.Scope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +29,7 @@ func TestPublicationReviewInTransactionReturnsOwnedTask5Evidence(t *testing.T) {
 	}
 	var evidence publicationReviewTransactionEvidence
 	var attempt publicationTransitionAttempt
-	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), fixture.binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		var transactionErr error
 		evidence, transactionErr = fixture.service.publication.publicationReviewInTransaction(
 			context.Background(), tx, workspace, outside, observer, &attempt,
@@ -495,7 +495,7 @@ func TestPublicationReviewDigestIsWorkspaceScopedForOtherwiseEqualReviews(t *tes
 	_, service := openProjectStateService(t, "")
 	first := registerGitRepository(t, service, firstRepository)
 	second := registerGitRepository(t, service, secondRepository)
-	firstAccepted, err := service.repo.Workspace(context.Background(), first.Binding.Scope)
+	firstAccepted, err := service.registration.repo.Workspace(context.Background(), first.Binding.Scope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -535,7 +535,7 @@ func TestPublicationReviewResultsAreOwnedAndRestartStable(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "gateway.db")
 	store, service := openProjectStateServiceAt(t, databasePath)
 	registered := registerGitRepository(t, service, repository)
-	accepted, err := service.repo.Workspace(context.Background(), registered.Binding.Scope)
+	accepted, err := service.registration.repo.Workspace(context.Background(), registered.Binding.Scope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -726,7 +726,7 @@ func TestPublicationReviewStickyInvalidationSurvivesRestart(t *testing.T) {
 	fixture := publicationServiceFixture{repository: repository, store: store, service: service, binding: registered.Binding}
 	configured := configurePublicationForTest(t, fixture, types.PublicationPrivateGit, diffActorEnvelope(), time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC))
 	runGit(t, repository.root, "remote", "set-url", "origin", "https://github.com/acme/two.git")
-	service.now = func() time.Time { return time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC) }
+	service.publication.now = func() time.Time { return time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC) }
 	want := mustServiceStatus(t, service, registered.Binding.Scope)
 	if want.PublicationClassification != types.PublicationUnclassified {
 		t.Fatalf("sticky invalidation Status=%+v", want)
@@ -745,7 +745,7 @@ func TestPublicationReviewStickyInvalidationSurvivesRestart(t *testing.T) {
 
 func (fixture publicationServiceFixture) mustAcceptedSnapshot(t *testing.T) state.Snapshot {
 	t.Helper()
-	record, err := fixture.service.repo.Workspace(context.Background(), fixture.binding.Scope)
+	record, err := fixture.service.registration.repo.Workspace(context.Background(), fixture.binding.Scope)
 	if err != nil {
 		t.Fatal(err)
 	}

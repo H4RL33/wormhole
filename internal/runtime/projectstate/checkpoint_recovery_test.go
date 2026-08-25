@@ -557,7 +557,7 @@ func TestRecoverHoldsOneImmediateTransactionAcrossOneGitBundleAndConvergence(t *
 	}
 	defer writerConn.Close()
 
-	realWithImmediate := fixture.service.repo.WithImmediateWorkspace
+	realWithImmediate := fixture.service.registration.repo.WithImmediateWorkspace
 	transactionCalls := 0
 	fixture.service.checkpoint.withImmediateWorkspace = func(ctx context.Context, scope types.WorkspaceScope, fn func(*localstore.WorkspaceMutationTx) error) error {
 		transactionCalls++
@@ -671,7 +671,7 @@ func TestRecoverUnknownCommitConfirmationMatrix(t *testing.T) {
 				filesystemCalls++
 				return test.filesystem, nil
 			}
-			realWithImmediate := fixture.service.repo.WithImmediateWorkspace
+			realWithImmediate := fixture.service.registration.repo.WithImmediateWorkspace
 			transactionCalls := 0
 			unknown := fmt.Errorf("synthetic recovery final commit: %w", localstore.ErrCommitOutcomeUnknown)
 			fixture.service.checkpoint.withImmediateWorkspace = func(
@@ -730,7 +730,7 @@ type checkpointRecoveryDatabaseState struct {
 func recoveryDatabaseState(t *testing.T, service *Service, scope types.WorkspaceScope) checkpointRecoveryDatabaseState {
 	t.Helper()
 	var result checkpointRecoveryDatabaseState
-	if err := service.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := service.registration.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
 		var err error
 		result.workspace, err = tx.Workspace(context.Background())
 		if err != nil {
@@ -751,7 +751,7 @@ func recoveryDatabaseState(t *testing.T, service *Service, scope types.Workspace
 func recoveryComposedStatus(t *testing.T, service *Service, scope types.WorkspaceScope) WorkspaceStatus {
 	t.Helper()
 	var result WorkspaceStatus
-	if err := service.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := service.registration.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
 		workspace, err := tx.Workspace(context.Background())
 		if err != nil {
 			return err

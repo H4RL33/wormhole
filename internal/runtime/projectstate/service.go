@@ -68,46 +68,33 @@ type withImmediateWorkspaceFunc func(
 ) error
 
 type Service struct {
-	repo                             *localstore.WorkspaceRepo
-	legacyBackupRoot                 string
-	registrationTimeout              time.Duration
-	registration                     *registrationCoordinator
-	workspace                        *workspaceCoordinator
-	publication                      *publicationCoordinator
-	checkpoint                       *checkpointCoordinator
-	gitBase                          *gitBaseCoordinator
-	transition                       *transitionCoordinator
-	observePublicationOrigin         func(context.Context, string) (publicationOriginObservation, error)
-	observePublicationTrust          func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error)
-	withImmediateWorkspace           withImmediateWorkspaceFunc
-	withImmediateWorkspaceTransition withImmediateWorkspaceTransitionFunc
-	now                              func() time.Time
+	registration *registrationCoordinator
+	workspace    *workspaceCoordinator
+	publication  *publicationCoordinator
+	checkpoint   *checkpointCoordinator
+	gitBase      *gitBaseCoordinator
+	transition   *transitionCoordinator
 }
 
 func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service, error) {
 	if repo == nil {
 		return nil, fmt.Errorf("projectstate: workspace repository is required")
 	}
-	service := &Service{
-		repo: repo, registrationTimeout: workspaceRegistrationTimeout,
-		observePublicationOrigin:         observePublicationOrigin,
-		withImmediateWorkspace:           repo.WithImmediateWorkspace,
-		withImmediateWorkspaceTransition: repo.WithImmediateWorkspaceTransition,
-		now:                              time.Now,
-	}
-	service.registration = newRegistrationCoordinator(service)
-	service.publication = &publicationCoordinator{
-		repo: repo, observeOrigin: service.observePublicationOrigin,
-		observeTrust: service.observePublicationTrust, observeGitBase: observeGitBaseOutside,
-		withImmediateWorkspace: service.withImmediateWorkspace, now: service.now,
+	registration := newRegistrationCoordinator(repo, "", workspaceRegistrationTimeout, newWorkspaceID)
+	publication := &publicationCoordinator{
+		repo: repo, observeOrigin: observePublicationOrigin,
+		observeTrust: nil, observeGitBase: observeGitBaseOutside,
+		withImmediateWorkspace: repo.WithImmediateWorkspace, now: time.Now,
 		confirmTransitionCommit: confirmPublicationCommit,
 	}
-	service.checkpoint = newCheckpointCoordinator(service)
-	service.gitBase = newGitBaseCoordinator(repo)
-	service.workspace = &workspaceCoordinator{repo: repo, readPublicationReview: service.publication.readPublicationReview}
-	service.transition = &transitionCoordinator{repo: repo, readWorkingTree: ReadWorkingTreeNoFollow,
-		withImmediateWorkspace: repo.WithImmediateWorkspace,
-		now:                    time.Now, newStashID: newCanonicalStashID}
+	checkpoint := newCheckpointCoordinator(repo, publication, repo.WithImmediateWorkspace)
+	service := &Service{registration: registration, publication: publication, checkpoint: checkpoint,
+		gitBase:   newGitBaseCoordinator(repo),
+		workspace: &workspaceCoordinator{repo: repo, readPublicationReview: publication.readPublicationReview},
+		transition: &transitionCoordinator{repo: repo, readWorkingTree: ReadWorkingTreeNoFollow,
+			withImmediateWorkspace: repo.WithImmediateWorkspace,
+			now:                    time.Now, newStashID: newCanonicalStashID},
+	}
 	if config.LegacyIntegrationBackupRoot == "" {
 		return service, nil
 	}
@@ -135,7 +122,6 @@ func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service,
 	if err != nil {
 		return nil, err
 	}
-	service.legacyBackupRoot = backupRoot
 	service.registration.legacyBackupRoot = backupRoot
 	return service, nil
 }
@@ -157,27 +143,6 @@ func (s *Service) ReconfigurePublication(ctx context.Context, req ReconfigurePub
 	return s.publication.reconfigure(ctx, req)
 }
 
-func (s *Service) publicationTrustObserver() func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error) {
-	if s == nil || s.publication == nil {
-		return nil
-	}
-	return s.publication.publicationTrustObserver()
-}
-
-func (s *Service) readPublicationReview(ctx context.Context, scope types.WorkspaceScope) (publicationReviewResult, error) {
-	if s == nil || s.publication == nil {
-		return publicationReviewResult{}, localstore.ErrNotFound
-	}
-	return s.publication.readPublicationReview(ctx, scope)
-}
-
-func (s *Service) publicationReviewInTransaction(ctx context.Context, tx *localstore.WorkspaceMutationTx, expectedWorkspace localstore.WorkspaceRecord, outside publicationTrustObservation, observer func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error), attempt *publicationTransitionAttempt) (publicationReviewTransactionEvidence, error) {
-	if s == nil || s.publication == nil {
-		return publicationReviewTransactionEvidence{}, localstore.ErrNotFound
-	}
-	return s.publication.publicationReviewInTransaction(ctx, tx, expectedWorkspace, outside, observer, attempt)
-}
-
 func registrationContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(parent, timeout)
 }
@@ -186,9 +151,7 @@ func (s *Service) RegisterWorkspace(ctx context.Context, req RegisterWorkspaceRe
 	if s == nil || s.registration == nil {
 		return RegisterWorkspaceResult{}, fmt.Errorf("projectstate: service is unavailable")
 	}
-	registration := *s.registration
-	registration.registrationTimeout = s.registrationTimeout
-	return registration.registerWorkspace(ctx, req)
+	return s.registration.registerWorkspace(ctx, req)
 }
 
 func (s *Service) ResolveWorkingDirectory(ctx context.Context, observed types.WorkspaceContext) (types.WorkspaceBinding, error) {

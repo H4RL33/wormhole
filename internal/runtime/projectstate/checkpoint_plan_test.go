@@ -549,7 +549,7 @@ func checkpointPlanFixture(t *testing.T) checkpointPlanInput {
 	t.Helper()
 	fixture := newPublicationServiceFixture(t, "00000000-0000-4000-8000-000000000001", "https://github.com/acme/wormhole.git")
 	configurePublicationForTest(t, fixture, types.PublicationLocalOnly, diffActorEnvelope(), time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC))
-	workspace, err := fixture.service.repo.Workspace(context.Background(), fixture.binding.Scope)
+	workspace, err := fixture.service.registration.repo.Workspace(context.Background(), fixture.binding.Scope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -562,7 +562,7 @@ func checkpointPlanFixture(t *testing.T) checkpointPlanInput {
 	var current *localstore.WorkspaceCandidateRecord
 	var disposition localstore.WorkspaceCurrentMaterialization
 	var attempt publicationTransitionAttempt
-	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), fixture.binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		var transactionErr error
 		evidence, transactionErr = fixture.service.publication.publicationReviewInTransaction(
 			context.Background(), tx, workspace, outside, observer, &attempt,

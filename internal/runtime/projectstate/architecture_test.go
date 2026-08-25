@@ -302,6 +302,42 @@ func TestServiceTransitionCoordinatorAuthority(t *testing.T) {
 	}
 }
 
+func TestProjectstateServiceIsCoordinatorFacade(t *testing.T) {
+	root := filepath.Join("..", "..", "..")
+	sources := architectureProductionGoSources(t, root)
+	service := sources["internal/runtime/projectstate/service.go"]
+	typeBody := architectureMethodBody(service, "type Service struct")
+	wantFields := []string{"registration", "workspace", "publication", "checkpoint", "gitBase", "transition"}
+	for _, field := range wantFields {
+		if !regexp.MustCompile(`(?m)^\t` + field + `\s+\*`).MatchString(typeBody) {
+			t.Fatalf("Service missing coordinator field %s", field)
+		}
+	}
+	coordinatorFields := 0
+	for _, line := range strings.Split(typeBody, "\n") {
+		if strings.HasPrefix(line, "\t") && strings.Contains(line, "*") {
+			coordinatorFields++
+		}
+	}
+	if coordinatorFields != len(wantFields) {
+		t.Fatalf("Service coordinator pointer fields=%d, want exactly %d", coordinatorFields, len(wantFields))
+	}
+	for _, forbidden := range []string{"repo ", "legacyBackupRoot", "registrationTimeout", "observePublication", "withImmediateWorkspace", "now ", "checkpointGate", "writer"} {
+		if strings.Contains(typeBody, forbidden) {
+			t.Fatalf("Service retains lifecycle dependency %q", forbidden)
+		}
+	}
+	for _, method := range []string{"PublicationConfiguration", "ReconfigurePublication", "RegisterWorkspace", "ResolveWorkingDirectory", "RegisteredWorkspaces", "ObserveGitBase", "RefreshWorkspace", "Status", "Diff", "Apply", "ApplyBatch", "Checkpoint", "Recover", "Import", "Stash", "RestoreStash"} {
+		body := architectureMethodBody(service, "func (s *Service) "+method)
+		if body == "" {
+			t.Fatalf("Service missing public facade method %s", method)
+		}
+		if strings.Contains(body, ".repo.") || strings.Contains(body, "WithImmediateWorkspace") || strings.Contains(body, "observePublication") || strings.Contains(body, "readWorkingTree(") || strings.Contains(body, "newStashID(") {
+			t.Fatalf("Service method %s retains direct lifecycle authority", method)
+		}
+	}
+}
+
 func architectureMethodBody(source, signature string) string {
 	start := strings.Index(source, signature)
 	if start < 0 {
@@ -317,7 +353,7 @@ func architectureMethodBody(source, signature string) string {
 func TestCompactTargetedCommitConfirmationNeverReplays(t *testing.T) {
 	t.Run("journal", func(t *testing.T) {
 		fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
-		realWithImmediate := fixture.service.repo.WithImmediateWorkspace
+		realWithImmediate := fixture.service.registration.repo.WithImmediateWorkspace
 		transactionCalls := 0
 		unknown := fmt.Errorf("synthetic compact confirmation: %w", localstore.ErrCommitOutcomeUnknown)
 		fixture.service.checkpoint.withImmediateWorkspace = func(
@@ -357,7 +393,7 @@ func TestCompactTargetedCommitConfirmationNeverReplays(t *testing.T) {
 		current := mustPublicationConfiguration(t, fixture.service, fixture.binding.Scope)
 		req := publicationRequest(t, fixture.binding, current, types.PublicationPublicGit, diffActorEnvelope())
 		fixture.service.publication.now = func() time.Time { return time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC) }
-		realWithImmediate := fixture.service.repo.WithImmediateWorkspace
+		realWithImmediate := fixture.service.registration.repo.WithImmediateWorkspace
 		transactionCalls := 0
 		unknown := fmt.Errorf("synthetic compact publication confirmation: %w", localstore.ErrCommitOutcomeUnknown)
 		fixture.service.publication.withImmediateWorkspace = func(
@@ -754,10 +790,10 @@ func TestCurrentWorksetIgnoresTerminalCorruptionAndAuditReportsIt(t *testing.T) 
 			corruptArchitectureUnrelatedTerminalOperation(t, fixture.store, fixture.target.Scope)
 
 			beforeAudit := captureArchitectureRawDB(t, fixture.store)
-			if err := fixture.service.repo.AuditWorkspaceHistory(context.Background(), fixture.target.Scope); err == nil {
+			if err := fixture.service.registration.repo.AuditWorkspaceHistory(context.Background(), fixture.target.Scope); err == nil {
 				t.Fatal("AuditWorkspaceHistory accepted corrupt terminal operation")
 			}
-			if err := fixture.service.repo.AuditWorkspaceHistory(context.Background(), fixture.sibling.Scope); err != nil {
+			if err := fixture.service.registration.repo.AuditWorkspaceHistory(context.Background(), fixture.sibling.Scope); err != nil {
 				t.Fatalf("sibling AuditWorkspaceHistory: %v", err)
 			}
 			if afterAudit := captureArchitectureRawDB(t, fixture.store); !reflect.DeepEqual(afterAudit, beforeAudit) {
@@ -960,7 +996,7 @@ func newArchitectureCheckpointFixture(t *testing.T) architectureFixture {
 func newArchitectureRecoveredNewFixture(t *testing.T) architectureFixture {
 	t.Helper()
 	fixture := newArchitectureRecoveryFixture(t)
-	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.recoverScope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), fixture.recoverScope, func(tx *localstore.WorkspaceMutationTx) error {
 		proof, err := loadCheckpointRecoveryDisposition(context.Background(), tx)
 		if err != nil {
 			return err

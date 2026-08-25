@@ -94,7 +94,7 @@ func TestWorkspaceStashExactRetryPreservesReceiptAndRevision(t *testing.T) {
 	}
 	beforeRevision := workspaceRevisionForServiceTest(t, fixture.store, fixture.req.Scope)
 	beforeRaw := captureStashRawState(t, fixture.store)
-	beforeReceipt, err := fixture.service.repo.TransitionReceipt(context.Background(), fixture.req.Scope, fixture.req.RequestID)
+	beforeReceipt, err := fixture.service.registration.repo.TransitionReceipt(context.Background(), fixture.req.Scope, fixture.req.RequestID)
 	if err != nil || beforeReceipt == nil {
 		t.Fatalf("first stash receipt=(%+v,%v)", beforeReceipt, err)
 	}
@@ -110,7 +110,7 @@ func TestWorkspaceStashExactRetryPreservesReceiptAndRevision(t *testing.T) {
 	if afterRaw := captureStashRawState(t, fixture.store); !reflect.DeepEqual(afterRaw, beforeRaw) {
 		t.Fatal("exact retry changed durable stash evidence")
 	}
-	afterReceipt, err := fixture.service.repo.TransitionReceipt(context.Background(), fixture.req.Scope, fixture.req.RequestID)
+	afterReceipt, err := fixture.service.registration.repo.TransitionReceipt(context.Background(), fixture.req.Scope, fixture.req.RequestID)
 	if err != nil || !reflect.DeepEqual(afterReceipt, beforeReceipt) {
 		t.Fatalf("exact retry receipt=(%+v,%v), want %+v", afterReceipt, err, beforeReceipt)
 	}
@@ -340,7 +340,7 @@ func TestRecoveryStatusCompositionUsesDatabaseOnly(t *testing.T) {
 			var want WorkspaceStatus
 			var wantDisposition localstore.WorkspaceCurrentMaterialization
 			var wantCandidate *localstore.WorkspaceCandidateRecord
-			if err := service.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
+			if err := service.registration.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
 				composed, err := loadComposedWorkspace(context.Background(), tx)
 				if err != nil {
 					return err
@@ -364,7 +364,7 @@ func TestRecoveryStatusCompositionUsesDatabaseOnly(t *testing.T) {
 
 			observerCalls := 0
 			var got checkpointRecoveryPlan
-			err := service.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
+			err := service.registration.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
 				var err error
 				got, err = planCheckpointRecovery(context.Background(), tx, func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
 					observerCalls++
@@ -396,7 +396,7 @@ func TestRecoveryStatusCompositionUsesDatabaseOnly(t *testing.T) {
 				t.Fatal("mutating returned recovery proof changed durable disposition")
 			}
 			var freshCandidate *localstore.WorkspaceCandidateRecord
-			if err := service.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
+			if err := service.registration.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
 				var err error
 				freshCandidate, err = tx.Candidate(context.Background())
 				return err
@@ -422,7 +422,7 @@ func TestRecoveryStatusCompositionUsesDatabaseOnly(t *testing.T) {
 				observerCalls := 0
 				var wantObservation checkpointRecoveryGitObservation
 				var got checkpointRecoveryPlan
-				if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), request.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+				if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), request.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 					var err error
 					got, err = planCheckpointRecovery(context.Background(), tx, func(_ context.Context, proof checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
 						observerCalls++
@@ -449,7 +449,7 @@ func TestRecoveryStatusCompositionUsesDatabaseOnly(t *testing.T) {
 				injected := errors.New("injected " + test.name + " recovery observer failure")
 				errorCalls := 0
 				var rejected checkpointRecoveryPlan
-				err := fixture.service.repo.WithImmediateWorkspace(context.Background(), request.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+				err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), request.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 					var err error
 					rejected, err = planCheckpointRecovery(context.Background(), tx, func(_ context.Context, proof checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
 						errorCalls++
@@ -468,7 +468,7 @@ func TestRecoveryStatusCompositionUsesDatabaseOnly(t *testing.T) {
 
 				if test.kind == checkpointRecoveryPrepared {
 					var missing checkpointRecoveryPlan
-					err := fixture.service.repo.WithImmediateWorkspace(context.Background(), request.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+					err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), request.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 						var err error
 						missing, err = planCheckpointRecovery(context.Background(), tx, nil)
 						return err
@@ -569,7 +569,7 @@ func recoveryNoWorkServiceFixture(t *testing.T, history string) (*Service, types
 		t.Fatal(err)
 	}
 
-	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), request.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), request.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		disposition, err := readCurrentMaterializationWorkset(context.Background(), tx)
 		if err != nil {
 			return err

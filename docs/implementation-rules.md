@@ -33,10 +33,17 @@ complete. The current amendment authorized R06 only: a closed-pre-alpha private 
 format hard cut to schema v6. R06 is complete in approved implementation commits
 `27f5b85`, `a18b6f4`, and `e1d2df5`; independent review, `make check` (84.8%),
 release-test, release-rehearsal, and clean detached-clone gates passed. R07-R14 and
-all other reduction work are now paused. The next authorized tranche is a separately
-planned decomposition of `projectstate.Service` behind its existing facade, followed
-by feature delivery toward the Git-native branch goal. Lifecycle extraction, Tasks 6,
-6A, 7, 8, Stage 2, and unrelated preparation require a later explicit go/no-go.
+all other reduction work are now paused. The separately approved decomposition of
+`projectstate.Service` behind its existing facade is complete. Subsequent work returns
+to feature delivery toward the Git-native branch goal. Tasks 6, 6A, 7, 8, Stage 2,
+R07-R14 reduction, and unrelated preparation require a later explicit go/no-go.
+
+The approved projectstate decomposition is now implemented behind the unchanged
+public facade. `projectstate.Service` contains exactly six coordinator pointers;
+all persistence, filesystem, Git, publication, clock, and fault-injection seams
+belong to their owning coordinator. Checkpoint and recovery retain a shared gate.
+Measured scope and verification evidence are recorded in
+`docs/superpowers/reviews/2026-08-25-projectstate-service-decomposition-report.md`.
 
 ---
 

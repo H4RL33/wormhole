@@ -69,15 +69,21 @@ existing private database before mutation. Approved implementation commits are
 release, rehearsal, and clean-clone gates passed.
 
 After R06's review boundary, all remaining reduction work (R07-R14) is paused.
-The next authorized tranche is decomposition of `projectstate.Service` behind its
-existing facade; it must be separately planned and reviewed, and it must not be
-silently folded into R06. Subsequent work returns to feature delivery toward the
-Git-native branch goal. Tasks 6, 6A, 7, 8, Stage 2, and unrelated preparation remain
+The separately approved decomposition of `projectstate.Service` behind its existing
+facade is complete. Subsequent work returns to feature delivery toward the Git-native
+branch goal. Tasks 6, 6A, 7, 8, Stage 2, and unrelated preparation remain
 non-executable unless the next explicit decision expands scope.
 Current code still contains legacy `join`/`connect`, single-profile bootstrap,
 Passport-only attribution, and pre-snapshot assumptions. Implementation plans
 must migrate those paths in tested slices. Do not document a target command or
 schema as shipped until its implementation and contract checks pass.
+
+The `projectstate.Service` decomposition tranche is complete: the public Service
+is a nil-safe facade over exactly six package-private coordinators (registration,
+workspace, publication, checkpoint/recovery, Git-base, and transition). The
+facade owns no repository, filesystem, clock, observer, writer, or gate seams;
+checkpoint and recovery continue to share one coordinator gate. See
+`docs/superpowers/reviews/2026-08-25-projectstate-service-decomposition-report.md`.
 
 ## Binaries
 

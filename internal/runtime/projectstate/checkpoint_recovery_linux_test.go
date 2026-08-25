@@ -2006,7 +2006,7 @@ func checkpointRecoveryUseRealPublisher(
 
 func checkpointRecoveryRestartService(t *testing.T, fixture *checkpointCoordinatorFixture) {
 	t.Helper()
-	restarted, err := NewService(fixture.service.repo, ServiceConfig{})
+	restarted, err := NewService(fixture.service.registration.repo, ServiceConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}

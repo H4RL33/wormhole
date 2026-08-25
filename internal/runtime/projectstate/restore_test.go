@@ -83,7 +83,7 @@ func TestServiceRestoreStashAlreadyConflictedIdenticalEvidenceProjectsReceiptRev
 	setServiceWorkspaceState(t, fixture.store, fixture.req.Scope, "pending")
 
 	var evidence []localstore.WorkspaceConflictEvidence
-	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), fixture.req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		persisted, err := tx.RestoreCurrentState(context.Background(), fixture.req.StashID)
 		if err != nil {
 			return err
@@ -100,7 +100,7 @@ func TestServiceRestoreStashAlreadyConflictedIdenticalEvidenceProjectsReceiptRev
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), fixture.req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		if _, err := tx.ReplaceOpenConflictOccurrences(context.Background(), evidence, time.Date(2026, 8, 24, 15, 0, 0, 0, time.UTC)); err != nil {
 			return err
 		}
@@ -108,7 +108,7 @@ func TestServiceRestoreStashAlreadyConflictedIdenticalEvidenceProjectsReceiptRev
 	}); err != nil {
 		t.Fatal(err)
 	}
-	before, err := fixture.service.repo.Workspace(context.Background(), fixture.req.Scope)
+	before, err := fixture.service.registration.repo.Workspace(context.Background(), fixture.req.Scope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func TestServiceRestoreStashCleanConsumesStashAndReceiptRetryIsReadOnly(t *testi
 	var candidate *localstore.WorkspaceCandidateRecord
 	var stash *localstore.WorkspaceStashRecord
 	var receipt *localstore.WorkspaceTransitionReceiptRecord
-	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), fixture.req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		var err error
 		candidate, err = tx.Candidate(context.Background())
 		if err != nil {
@@ -340,7 +340,7 @@ func TestServiceRestoreStashCleanPreservesCurrentProvenanceAndOperationOwnership
 		t.Fatalf("RestoreStash()=%+v", got)
 	}
 	var candidate *localstore.WorkspaceCandidateRecord
-	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		var err error
 		candidate, err = tx.Candidate(context.Background())
 		return err
@@ -402,7 +402,7 @@ func TestServiceRestoreStashCleanPreservesSystemCurrentProvenanceAndOperationOwn
 		t.Fatalf("RestoreStash()=%+v", got)
 	}
 	var candidate *localstore.WorkspaceCandidateRecord
-	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		var err error
 		candidate, err = tx.Candidate(context.Background())
 		return err
@@ -624,7 +624,7 @@ func TestServiceRestoreStashKeepsSiblingWorkspaceIsolated(t *testing.T) {
 		t.Fatalf("sibling status=%+v", status)
 	}
 	assertStashOperationState(t, fixture.service, sibling.Binding.Scope, 1, "active", "", siblingOperation)
-	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), sibling.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), sibling.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		stash, err := tx.Stash(context.Background(), fixture.req.StashID)
 		if err != nil {
 			return err
@@ -695,7 +695,7 @@ func TestServiceRestoreStashConflictRetainsStateAndExactRetryIsReadOnly(t *testi
 	assertStashOperationState(t, fixture.service, fixture.req.Scope, 8, "active", "", active)
 	assertStashOperationState(t, fixture.service, fixture.req.Scope, 9, "materialized", "", terminal)
 	var openConflicts []localstore.WorkspaceConflictOccurrence
-	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), fixture.req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		var err error
 		openConflicts, err = tx.OpenConflictOccurrences(context.Background())
 		return err
@@ -716,7 +716,7 @@ func TestServiceRestoreStashConflictRetainsStateAndExactRetryIsReadOnly(t *testi
 		t.Fatal(err)
 	}
 	commitErr := fmt.Errorf("%w: fixture", localstore.ErrCommitOutcomeUnknown)
-	confirmed, err := confirmRestoreStashCommit(context.Background(), fixture.service.repo, fixture.req, digest, got, commitErr)
+	confirmed, err := confirmRestoreStashCommit(context.Background(), fixture.service.registration.repo, fixture.req, digest, got, commitErr)
 	if err != nil || !reflect.DeepEqual(confirmed, got) {
 		t.Fatalf("conflicted confirmRestoreStashCommit()=(%+v,%v), want %+v", confirmed, err, got)
 	}
@@ -906,7 +906,7 @@ func TestServiceRestoreStashConflictedRetryDriftMatrixAfterRestart(t *testing.T)
 		}},
 		{name: "semantic conflict evidence", wantContains: "conflict evidence mismatch", mutate: func(t *testing.T, fixture restoreServiceFixture) {
 			var occurrences []localstore.WorkspaceConflictOccurrence
-			if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+			if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), fixture.req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 				var err error
 				occurrences, err = tx.OpenConflictOccurrences(context.Background())
 				return err
@@ -1222,7 +1222,7 @@ func TestConfirmRestoreStashCommitRequiresExactReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 	commitErr := fmt.Errorf("%w: fixture", localstore.ErrCommitOutcomeUnknown)
-	got, err := confirmRestoreStashCommit(context.Background(), fixture.service.repo, fixture.req, digest, want, commitErr)
+	got, err := confirmRestoreStashCommit(context.Background(), fixture.service.registration.repo, fixture.req, digest, want, commitErr)
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("confirmRestoreStashCommit()=(%+v,%v), want %+v", got, err, want)
 	}
@@ -1233,7 +1233,7 @@ func TestConfirmRestoreStashCommitRequiresExactReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err = confirmRestoreStashCommit(context.Background(), fixture.service.repo, missing, missingDigest, want, commitErr)
+	got, err = confirmRestoreStashCommit(context.Background(), fixture.service.registration.repo, missing, missingDigest, want, commitErr)
 	if !errors.Is(err, localstore.ErrCommitOutcomeUnknown) || errors.Is(err, ErrIdempotencyConflict) ||
 		!reflect.DeepEqual(got, RestoreStashResult{}) {
 		t.Fatalf("missing confirmRestoreStashCommit()=(%+v,%v)", got, err)
@@ -1286,7 +1286,7 @@ func TestConfirmRestoreStashCommitFailureMatrixPreservesUnknownOutcome(t *testin
 			}
 			expected := cloneRestoreStashResult(want)
 			test.mutate(t, fixture, &expected)
-			got, err := confirmRestoreStashCommit(context.Background(), fixture.service.repo, fixture.req, digest, expected, commitErr)
+			got, err := confirmRestoreStashCommit(context.Background(), fixture.service.registration.repo, fixture.req, digest, expected, commitErr)
 			if !errors.Is(err, localstore.ErrCommitOutcomeUnknown) || errors.Is(err, ErrIdempotencyConflict) ||
 				!reflect.DeepEqual(got, RestoreStashResult{}) {
 				t.Fatalf("confirmRestoreStashCommit()=(%+v,%v), want zero commit-unknown non-conflict error", got, err)
@@ -1313,7 +1313,7 @@ func TestConfirmRestoreStashConflictedCommitIgnoresRawTimestampDrift(t *testing.
 		t.Fatal(err)
 	}
 	commitErr := fmt.Errorf("%w: fixture", localstore.ErrCommitOutcomeUnknown)
-	got, err := confirmRestoreStashCommit(context.Background(), fixture.service.repo, fixture.req, digest, want, commitErr)
+	got, err := confirmRestoreStashCommit(context.Background(), fixture.service.registration.repo, fixture.req, digest, want, commitErr)
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("timestamp-only confirmRestoreStashCommit()=(%+v,%v), want (%+v,nil)", got, err, want)
 	}

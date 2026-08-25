@@ -40,13 +40,12 @@ commits `27f5b85`, `a18b6f4`, and `e1d2df5`; independent review, `make check` at
 84.8% merged statement coverage, release-test, release-rehearsal, and clean
 detached-clone gates passed.
 
-After the R06 review boundary, all reduction work R07-R14 is paused. The next
-authorized tranche is a separately planned decomposition of `projectstate.Service`
-behind its existing facade, followed by feature building toward the Git-native
-branch goal. No lifecycle coordinator extraction, package restructuring, Tasks 6,
-6A, 7, or 8 preparation, Stage 2 work, publication-class migration, filesystem
-recovery simplification, terminal pruning, or unrelated cleanup is executable unless
-the human later expands scope.
+After the R06 review boundary, all reduction work R07-R14 is paused. The separately
+approved decomposition of `projectstate.Service` behind its existing facade is now
+complete; feature building toward the Git-native branch goal is next. No additional
+lifecycle or package restructuring, Tasks 6, 6A, 7, or 8 preparation, Stage 2 work,
+publication-class migration, filesystem recovery simplification, terminal pruning,
+or unrelated cleanup is executable unless the human later expands scope.
 
 ## Authority and frozen constraints
 
@@ -117,9 +116,9 @@ tranche. The written-spec review was approved on 2026-08-17. That tranche is com
 green including 85.0% merged statement coverage, and its measured-simplification pause was
 reached. The later R06 hard-cut design was separately approved on 2026-08-24 and is
 complete in `27f5b85`, `a18b6f4`, and `e1d2df5`. After that review boundary, R07-R14
-remain paused; the next authorized work is the separately planned `projectstate.Service`
-decomposition, followed by feature delivery. No Stage 2, lifecycle extraction, or
-unrelated reduction work is authorized by this record.
+remain paused; the separately approved `projectstate.Service` decomposition is complete,
+and feature delivery is next. No Stage 2, further lifecycle extraction, or unrelated
+reduction work is authorized by this record.
 
 ### Stage 2: Minimal Gateway, setup, and native connectors
 

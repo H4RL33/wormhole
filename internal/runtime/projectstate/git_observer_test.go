@@ -144,7 +144,7 @@ func TestBranchSwitchDiscardApplicabilityAndDetachedSameSHA(t *testing.T) {
 					t.Fatal(err)
 				}
 				if test.rebasedOnly {
-					if err := service.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+					if err := service.registration.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 						audit, err := readAllOperationRows(context.Background(), tx)
 						if err != nil {
 							return err
@@ -176,11 +176,11 @@ func TestBranchSwitchDiscardApplicabilityAndDetachedSameSHA(t *testing.T) {
 			if !errors.Is(err, ErrBranchSwitchDiscardNotApplicable) || !reflect.DeepEqual(got, ObserveGitBaseResult{}) {
 				t.Fatalf("ObserveGitBase()=(%+v,%v), want not applicable", got, err)
 			}
-			workspace, readErr := service.repo.Workspace(context.Background(), registered.Binding.Scope)
+			workspace, readErr := service.registration.repo.Workspace(context.Background(), registered.Binding.Scope)
 			if readErr != nil || workspace.Binding != registered.Binding {
 				t.Fatalf("workspace after not-applicable=(%+v,%v)", workspace, readErr)
 			}
-			receipt, readErr := service.repo.TransitionReceiptByKey(context.Background(), req.Scope, req.RequestID)
+			receipt, readErr := service.registration.repo.TransitionReceiptByKey(context.Background(), req.Scope, req.RequestID)
 			if readErr != nil || receipt != nil {
 				t.Fatalf("receipt after not-applicable=(%+v,%v)", receipt, readErr)
 			}
@@ -245,7 +245,7 @@ func TestConfirmDiscardCommitUsesExactReceiptWithoutGitAndPreservesUnknownOnFail
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := service.registration.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		return tx.InsertTransitionReceipt(context.Background(), localstore.WorkspaceTransitionReceiptInsert{
 			RequestID: req.RequestID, Action: "discard", RequestDigest: digest,
 			Actor: req.Actor, ResultJSON: encoded, Outcome: "clean",
@@ -258,7 +258,7 @@ func TestConfirmDiscardCommitUsesExactReceiptWithoutGitAndPreservesUnknownOnFail
 	}
 	commitErr := fmt.Errorf("%w: synthetic commit ambiguity", localstore.ErrCommitOutcomeUnknown)
 
-	got, err := confirmDiscardCommit(context.Background(), service.repo, req, digest, result, commitErr)
+	got, err := confirmDiscardCommit(context.Background(), service.registration.repo, req, digest, result, commitErr)
 	if err != nil || !reflect.DeepEqual(got, result) || got.Conflicts == nil {
 		t.Fatalf("exact confirmation=(%+v,%v), want %+v", got, err, result)
 	}
@@ -283,7 +283,7 @@ func TestConfirmDiscardCommitUsesExactReceiptWithoutGitAndPreservesUnknownOnFail
 				t.Fatal(digestErr)
 			}
 			got, confirmErr := confirmDiscardCommit(
-				context.Background(), service.repo, test.request, requestDigest, test.expected, commitErr,
+				context.Background(), service.registration.repo, test.request, requestDigest, test.expected, commitErr,
 			)
 			if !errors.Is(confirmErr, commitErr) || !errors.Is(confirmErr, localstore.ErrCommitOutcomeUnknown) ||
 				errors.Is(confirmErr, ErrIdempotencyConflict) || !reflect.DeepEqual(got, ObserveGitBaseResult{}) {
@@ -335,7 +335,7 @@ func TestBranchSwitchDiscardUnknownCommitConfirmsExactReceiptWithoutGit(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := service.repo.TransitionReceiptByKey(context.Background(), req.Scope, req.RequestID)
+	receipt, err := service.registration.repo.TransitionReceiptByKey(context.Background(), req.Scope, req.RequestID)
 	if err != nil || receipt == nil {
 		t.Fatalf("confirmed receipt=(%+v,%v)", receipt, err)
 	}
@@ -356,7 +356,7 @@ func TestBranchSwitchDiscardConcurrentReceiptInsideWriterBarrierWins(t *testing.
 		Root: repository.root, ExpectedCommit: repository.commit,
 		BranchAction: BranchSwitchDiscard, RequestID: "10000000-0000-4000-8000-a0000000000b", Actor: actor,
 	}
-	if receipt, err := service.repo.TransitionReceiptByKey(context.Background(), req.Scope, req.RequestID); err != nil || receipt != nil {
+	if receipt, err := service.registration.repo.TransitionReceiptByKey(context.Background(), req.Scope, req.RequestID); err != nil || receipt != nil {
 		t.Fatalf("initial receipt=(%+v,%v), want absent", receipt, err)
 	}
 	competitor, err := NewService(localstore.NewWorkspaceRepo(store.DB()), ServiceConfig{})
@@ -399,7 +399,7 @@ func TestObserveGitBaseRequiresCompleteExpectedBindingCAS(t *testing.T) {
 	if err == nil || !reflect.DeepEqual(got, ObserveGitBaseResult{}) {
 		t.Fatalf("ObserveGitBase()=(%+v,%v), want complete-binding mismatch", got, err)
 	}
-	workspace, err := service.repo.Workspace(context.Background(), registered.Binding.Scope)
+	workspace, err := service.registration.repo.Workspace(context.Background(), registered.Binding.Scope)
 	if err != nil || workspace.Binding != registered.Binding || workspace.State != "clean" {
 		t.Fatalf("workspace after CAS mismatch=(%+v,%v)", workspace, err)
 	}
@@ -439,7 +439,7 @@ func TestObserveGitBaseSameRefAcceptsExactMaterialization(t *testing.T) {
 			}
 			var candidate *localstore.WorkspaceCandidateRecord
 			var eligible *localstore.WorkspaceMaterializationRecord
-			if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+			if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), fixture.registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 				var err error
 				candidate, err = tx.Candidate(context.Background())
 				if err != nil {
@@ -476,11 +476,11 @@ func TestObserveGitBaseMaterializationCandidateMismatchIsPrecondition(t *testing
 	if !errors.Is(err, ErrGitMaterializationPrecondition) || !reflect.DeepEqual(got, ObserveGitBaseResult{}) {
 		t.Fatalf("ObserveGitBase()=(%+v,%v), want materialization precondition", got, err)
 	}
-	workspace, err := fixture.service.repo.Workspace(context.Background(), fixture.registered.Binding.Scope)
+	workspace, err := fixture.service.registration.repo.Workspace(context.Background(), fixture.registered.Binding.Scope)
 	if err != nil || workspace.Binding != fixture.registered.Binding || workspace.State != "pending" {
 		t.Fatalf("workspace after mismatch=(%+v,%v)", workspace, err)
 	}
-	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), fixture.registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		candidate, err := tx.Candidate(context.Background())
 		if err != nil {
 			return err
@@ -500,7 +500,7 @@ func TestObserveGitBaseMaterializationCandidateMismatchIsPrecondition(t *testing
 
 func TestObserveGitBaseExactAcceptanceRejectsRebasedRowAboveBoundary(t *testing.T) {
 	fixture := prepareObserveExactMaterialization(t, "published")
-	seed, err := readObserveGitBaseAdjacentState(fixture.service.repo, fixture.registered.Binding.Scope)
+	seed, err := readObserveGitBaseAdjacentState(fixture.service.registration.repo, fixture.registered.Binding.Scope)
 	if err != nil || seed.candidate == nil {
 		t.Fatalf("candidate seed=(%+v,%v)", seed, err)
 	}
@@ -509,7 +509,7 @@ func TestObserveGitBaseExactAcceptanceRejectsRebasedRowAboveBoundary(t *testing.
 	if _, err := fixture.service.Apply(context.Background(), fixture.registered.Binding.Scope, operation); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), fixture.registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		audit, err := readAllOperationRows(context.Background(), tx)
 		if err != nil {
 			return err
@@ -521,11 +521,11 @@ func TestObserveGitBaseExactAcceptanceRejectsRebasedRowAboveBoundary(t *testing.
 	}); err != nil {
 		t.Fatal(err)
 	}
-	beforeWorkspace, err := fixture.service.repo.Workspace(context.Background(), fixture.registered.Binding.Scope)
+	beforeWorkspace, err := fixture.service.registration.repo.Workspace(context.Background(), fixture.registered.Binding.Scope)
 	if err != nil {
 		t.Fatal(err)
 	}
-	before, err := readObserveGitBaseAdjacentState(fixture.service.repo, fixture.registered.Binding.Scope)
+	before, err := readObserveGitBaseAdjacentState(fixture.service.registration.repo, fixture.registered.Binding.Scope)
 	if err != nil || len(before.audit) != 1 || before.audit[0].State != "rebased" ||
 		before.audit[0].Generation <= before.candidate.RebasedThroughGeneration {
 		t.Fatalf("rebased-above-boundary fixture=(%+v,%v)", before, err)
@@ -538,11 +538,11 @@ func TestObserveGitBaseExactAcceptanceRejectsRebasedRowAboveBoundary(t *testing.
 	if !errors.Is(err, ErrGitMaterializationPrecondition) || !reflect.DeepEqual(got, ObserveGitBaseResult{}) {
 		t.Fatalf("ObserveGitBase()=(%+v,%v), want exact-classification precondition", got, err)
 	}
-	afterWorkspace, err := fixture.service.repo.Workspace(context.Background(), fixture.registered.Binding.Scope)
+	afterWorkspace, err := fixture.service.registration.repo.Workspace(context.Background(), fixture.registered.Binding.Scope)
 	if err != nil || !reflect.DeepEqual(afterWorkspace, beforeWorkspace) {
 		t.Fatalf("workspace changed after failed exact classification\nbefore=%+v\nafter=(%+v,%v)", beforeWorkspace, afterWorkspace, err)
 	}
-	after, err := readObserveGitBaseAdjacentState(fixture.service.repo, fixture.registered.Binding.Scope)
+	after, err := readObserveGitBaseAdjacentState(fixture.service.registration.repo, fixture.registered.Binding.Scope)
 	if err != nil || !reflect.DeepEqual(after, before) {
 		t.Fatalf("journal/candidate/operations/conflicts changed after failed exact classification\nbefore=%+v\nafter=(%+v,%v)", before, after, err)
 	}
@@ -550,7 +550,7 @@ func TestObserveGitBaseExactAcceptanceRejectsRebasedRowAboveBoundary(t *testing.
 
 func TestBranchSwitchDiscardNonmatchingEligibleIsPreconditionAndRetained(t *testing.T) {
 	fixture := prepareObserveExactMaterialization(t, "published")
-	workspace, err := fixture.service.repo.Workspace(context.Background(), fixture.registered.Binding.Scope)
+	workspace, err := fixture.service.registration.repo.Workspace(context.Background(), fixture.registered.Binding.Scope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -569,11 +569,11 @@ func TestBranchSwitchDiscardNonmatchingEligibleIsPreconditionAndRetained(t *test
 		!reflect.DeepEqual(got, ObserveGitBaseResult{}) {
 		t.Fatalf("ObserveGitBase()=(%+v,%v), want materialization precondition", got, err)
 	}
-	after, err := fixture.service.repo.Workspace(context.Background(), fixture.registered.Binding.Scope)
+	after, err := fixture.service.registration.repo.Workspace(context.Background(), fixture.registered.Binding.Scope)
 	if err != nil || after.Binding != fixture.registered.Binding || after.State != "pending" {
 		t.Fatalf("workspace after mismatch=(%+v,%v)", after, err)
 	}
-	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), fixture.registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		candidate, err := tx.Candidate(context.Background())
 		if err != nil {
 			return err
@@ -589,7 +589,7 @@ func TestBranchSwitchDiscardNonmatchingEligibleIsPreconditionAndRetained(t *test
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if receipt, err := fixture.service.repo.TransitionReceiptByKey(context.Background(), req.Scope, req.RequestID); err != nil || receipt != nil {
+	if receipt, err := fixture.service.registration.repo.TransitionReceiptByKey(context.Background(), req.Scope, req.RequestID); err != nil || receipt != nil {
 		t.Fatalf("receipt after mismatch=(%+v,%v)", receipt, err)
 	}
 }
@@ -607,11 +607,11 @@ func TestBranchSwitchDiscardExactEligibleIsNotApplicableAndRetained(t *testing.T
 		!reflect.DeepEqual(got, ObserveGitBaseResult{}) {
 		t.Fatalf("ObserveGitBase()=(%+v,%v), want exact eligible not-applicable", got, err)
 	}
-	workspace, err := fixture.service.repo.Workspace(context.Background(), fixture.registered.Binding.Scope)
+	workspace, err := fixture.service.registration.repo.Workspace(context.Background(), fixture.registered.Binding.Scope)
 	if err != nil || workspace.Binding != fixture.registered.Binding || workspace.State != "pending" {
 		t.Fatalf("workspace after exact not-applicable=(%+v,%v)", workspace, err)
 	}
-	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), fixture.registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		candidate, err := tx.Candidate(context.Background())
 		if err != nil {
 			return err
@@ -631,7 +631,7 @@ func TestBranchSwitchDiscardExactEligibleIsNotApplicableAndRetained(t *testing.T
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if receipt, err := fixture.service.repo.TransitionReceiptByKey(context.Background(), req.Scope, req.RequestID); err != nil || receipt != nil {
+	if receipt, err := fixture.service.registration.repo.TransitionReceiptByKey(context.Background(), req.Scope, req.RequestID); err != nil || receipt != nil {
 		t.Fatalf("receipt after exact not-applicable=(%+v,%v)", receipt, err)
 	}
 }
@@ -642,7 +642,7 @@ func TestObserveGitBaseExactAcceptancePreservesLaterActiveRows(t *testing.T) {
 	registered := registerGitRepository(t, service, repository)
 	prepareObserveGitBaseCandidate(t, service, registered.Binding, repository.root)
 	var candidate *localstore.WorkspaceCandidateRecord
-	if err := service.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := service.registration.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		var err error
 		candidate, err = tx.Candidate(context.Background())
 		return err
@@ -667,7 +667,7 @@ func TestObserveGitBaseExactAcceptancePreservesLaterActiveRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	var firstRow, secondRow localstore.WorkspaceOperation
-	if err := service.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := service.registration.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		audit, err := readAllOperationRows(context.Background(), tx)
 		if err != nil {
 			return err
@@ -732,7 +732,7 @@ func TestObserveGitBaseExactAcceptancePreservesLaterActiveRows(t *testing.T) {
 		status.CandidateDigest != composed.Digest || status.OverlayGeneration != 2 {
 		t.Fatalf("Status()=%+v, want accepted=%s composed=%s", status, materialized.Digest, composed.Digest)
 	}
-	if err := service.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := service.registration.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		audit, err := readAllOperationRows(context.Background(), tx)
 		if err != nil {
 			return err
@@ -760,7 +760,7 @@ func TestObserveGitBaseCommitOnlyChangeRebasesProposal(t *testing.T) {
 	registered := registerGitRepository(t, service, repository)
 	prepareObserveGitBaseCandidate(t, service, registered.Binding, repository.root)
 	var before *localstore.WorkspaceCandidateRecord
-	if err := service.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := service.registration.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		var err error
 		before, err = tx.Candidate(context.Background())
 		return err
@@ -783,7 +783,7 @@ func TestObserveGitBaseCommitOnlyChangeRebasesProposal(t *testing.T) {
 		t.Fatalf("Status()=%+v", status)
 	}
 	var after *localstore.WorkspaceCandidateRecord
-	if err := service.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := service.registration.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		var err error
 		after, err = tx.Candidate(context.Background())
 		return err
@@ -819,7 +819,7 @@ func TestObserveGitBaseRebaseWithoutCandidateUsesSystemProvenance(t *testing.T) 
 	if err != nil || !got.Rebased || got.Conflicts == nil || len(got.Conflicts) != 0 {
 		t.Fatalf("ObserveGitBase()=(%+v,%v)", got, err)
 	}
-	if err := service.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := service.registration.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		candidate, err := tx.Candidate(context.Background())
 		if err != nil {
 			return err
@@ -866,7 +866,7 @@ func TestObserveGitBaseRebaseRepresentativeWriteFailuresRollback(t *testing.T) {
 			store, service := openProjectStateService(t, "")
 			registered := registerGitRepository(t, service, repository)
 			prepareObserveGitBaseCandidate(t, service, registered.Binding, repository.root)
-			seed, seedErr := readObserveGitBaseAdjacentState(service.repo, registered.Binding.Scope)
+			seed, seedErr := readObserveGitBaseAdjacentState(service.registration.repo, registered.Binding.Scope)
 			if seedErr != nil || seed.candidate == nil {
 				t.Fatalf("candidate seed=(%+v,%v)", seed, seedErr)
 			}
@@ -875,11 +875,11 @@ func TestObserveGitBaseRebaseRepresentativeWriteFailuresRollback(t *testing.T) {
 			if _, err := service.Apply(context.Background(), registered.Binding.Scope, operation); err != nil {
 				t.Fatal(err)
 			}
-			beforeWorkspace, err := service.repo.Workspace(context.Background(), registered.Binding.Scope)
+			beforeWorkspace, err := service.registration.repo.Workspace(context.Background(), registered.Binding.Scope)
 			if err != nil || beforeWorkspace.State != "pending" {
 				t.Fatalf("workspace before failure=(%+v,%v)", beforeWorkspace, err)
 			}
-			before, err := readObserveGitBaseAdjacentState(service.repo, registered.Binding.Scope)
+			before, err := readObserveGitBaseAdjacentState(service.registration.repo, registered.Binding.Scope)
 			if err != nil || before.candidate == nil || len(before.audit) == 0 {
 				t.Fatalf("adjacent state before failure=(%+v,%v)", before, err)
 			}
@@ -895,11 +895,11 @@ func TestObserveGitBaseRebaseRepresentativeWriteFailuresRollback(t *testing.T) {
 			if err == nil || errors.Is(err, localstore.ErrCommitOutcomeUnknown) || !reflect.DeepEqual(got, ObserveGitBaseResult{}) {
 				t.Fatalf("ObserveGitBase()=(%+v,%v), want deterministic rollback", got, err)
 			}
-			afterWorkspace, err := service.repo.Workspace(context.Background(), registered.Binding.Scope)
+			afterWorkspace, err := service.registration.repo.Workspace(context.Background(), registered.Binding.Scope)
 			if err != nil || !reflect.DeepEqual(afterWorkspace, beforeWorkspace) {
 				t.Fatalf("workspace changed across rollback\nbefore=%+v\nafter=(%+v,%v)", beforeWorkspace, afterWorkspace, err)
 			}
-			after, err := readObserveGitBaseAdjacentState(service.repo, registered.Binding.Scope)
+			after, err := readObserveGitBaseAdjacentState(service.registration.repo, registered.Binding.Scope)
 			if err != nil || !reflect.DeepEqual(after, before) {
 				t.Fatalf("adjacent state changed across rollback\nbefore=%+v\nafter=(%+v,%v)", before, after, err)
 			}
@@ -944,7 +944,7 @@ func TestObserveGitBaseRejectAndRefreshUnknownCommitReturnZero(t *testing.T) {
 					t.Fatalf("ObserveGitBase()=(%+v,%v)", got, err)
 				}
 			}
-			workspace, err := service.repo.Workspace(context.Background(), registered.Binding.Scope)
+			workspace, err := service.registration.repo.Workspace(context.Background(), registered.Binding.Scope)
 			if err != nil || workspace.Binding != registered.Binding || workspace.State != "clean" {
 				t.Fatalf("workspace after unknown commit=(%+v,%v)", workspace, err)
 			}
@@ -981,14 +981,14 @@ func TestBranchSwitchDiscardUnknownCommitReturnsZeroAndRollsBack(t *testing.T) {
 		!reflect.DeepEqual(got, ObserveGitBaseResult{}) {
 		t.Fatalf("ObserveGitBase()=(%+v,%v), want unknown commit", got, err)
 	}
-	workspace, err := service.repo.Workspace(context.Background(), registered.Binding.Scope)
+	workspace, err := service.registration.repo.Workspace(context.Background(), registered.Binding.Scope)
 	if err != nil || workspace.Binding != registered.Binding || workspace.State != "pending" {
 		t.Fatalf("workspace after unknown discard=(%+v,%v)", workspace, err)
 	}
-	if receipt, err := service.repo.TransitionReceiptByKey(context.Background(), req.Scope, req.RequestID); err != nil || receipt != nil {
+	if receipt, err := service.registration.repo.TransitionReceiptByKey(context.Background(), req.Scope, req.RequestID); err != nil || receipt != nil {
 		t.Fatalf("receipt after unknown discard=(%+v,%v)", receipt, err)
 	}
-	if err := service.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := service.registration.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		candidate, err := tx.Candidate(context.Background())
 		if err != nil {
 			return err
@@ -1033,11 +1033,11 @@ func TestBranchSwitchDiscardRepresentativeWriteFailuresRollback(t *testing.T) {
 			if _, err := fixture.service.Import(context.Background(), fixture.request); err != nil {
 				t.Fatal(err)
 			}
-			workspace, err := fixture.service.repo.Workspace(context.Background(), fixture.request.Scope)
+			workspace, err := fixture.service.registration.repo.Workspace(context.Background(), fixture.request.Scope)
 			if err != nil || workspace.State != "conflicted" {
 				t.Fatalf("conflicted workspace fixture=(%+v,%v)", workspace, err)
 			}
-			before, err := readObserveGitBaseAdjacentState(fixture.service.repo, fixture.request.Scope)
+			before, err := readObserveGitBaseAdjacentState(fixture.service.registration.repo, fixture.request.Scope)
 			if err != nil || before.candidate == nil || len(before.audit) == 0 || len(before.conflicts) == 0 {
 				t.Fatalf("adjacent fixture=(%+v,%v)", before, err)
 			}
@@ -1054,15 +1054,15 @@ func TestBranchSwitchDiscardRepresentativeWriteFailuresRollback(t *testing.T) {
 			if err == nil || errors.Is(err, localstore.ErrCommitOutcomeUnknown) || !reflect.DeepEqual(got, ObserveGitBaseResult{}) {
 				t.Fatalf("ObserveGitBase()=(%+v,%v), want deterministic write failure", got, err)
 			}
-			afterWorkspace, err := fixture.service.repo.Workspace(context.Background(), fixture.request.Scope)
+			afterWorkspace, err := fixture.service.registration.repo.Workspace(context.Background(), fixture.request.Scope)
 			if err != nil || !reflect.DeepEqual(afterWorkspace, workspace) {
 				t.Fatalf("workspace changed across rollback\nbefore=%+v\nafter=(%+v,%v)", workspace, afterWorkspace, err)
 			}
-			after, err := readObserveGitBaseAdjacentState(fixture.service.repo, fixture.request.Scope)
+			after, err := readObserveGitBaseAdjacentState(fixture.service.registration.repo, fixture.request.Scope)
 			if err != nil || !reflect.DeepEqual(after, before) {
 				t.Fatalf("adjacent state changed across rollback\nbefore=%+v\nafter=(%+v,%v)", before, after, err)
 			}
-			if receipt, err := fixture.service.repo.TransitionReceiptByKey(context.Background(), req.Scope, req.RequestID); err != nil || receipt != nil {
+			if receipt, err := fixture.service.registration.repo.TransitionReceiptByKey(context.Background(), req.Scope, req.RequestID); err != nil || receipt != nil {
 				t.Fatalf("receipt survived rollback=(%+v,%v)", receipt, err)
 			}
 		})
@@ -1154,7 +1154,7 @@ func prepareObserveExactMaterialization(t *testing.T, materializationState strin
 	registered := registerGitRepository(t, service, repository)
 	prepareObserveGitBaseCandidate(t, service, registered.Binding, repository.root)
 	var candidate *localstore.WorkspaceCandidateRecord
-	if err := service.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := service.registration.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		var err error
 		candidate, err = tx.Candidate(context.Background())
 		return err

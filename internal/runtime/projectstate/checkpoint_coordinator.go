@@ -20,15 +20,15 @@ type checkpointCoordinator struct {
 	recoverFilesystem         checkpointRecoveryFilesystemFunc
 }
 
-func newCheckpointCoordinator(service *Service) *checkpointCoordinator {
+func newCheckpointCoordinator(repo *localstore.WorkspaceRepo, publication *publicationCoordinator, withImmediateWorkspace withImmediateWorkspaceFunc) *checkpointCoordinator {
 	return &checkpointCoordinator{
-		repo:                      service.repo,
-		publication:               service.publication,
-		withImmediateWorkspace:    service.withImmediateWorkspace,
+		repo:                      repo,
+		publication:               publication,
+		withImmediateWorkspace:    withImmediateWorkspace,
 		readWorkingTree:           ReadWorkingTreeNoFollow,
 		gates:                     &checkpointGateSet{},
 		prepareCheckpointArtifact: defaultPrepareCheckpointArtifact,
-		confirmWorkspaceCommit:    service.repo.ConfirmWorkspaceCommit,
+		confirmWorkspaceCommit:    repo.ConfirmWorkspaceCommit,
 		observeRecoveryGit:        observeCheckpointRecoveryGit,
 		recoverFilesystem:         recoverCheckpointFilesystem,
 	}

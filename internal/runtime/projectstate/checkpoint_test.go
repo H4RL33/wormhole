@@ -142,7 +142,7 @@ func TestCheckpointPublisherFailureRetainsPreparedAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	setServiceWorkspaceState(t, fixture.store, req.Scope, "clean")
-	before, err := fixture.service.repo.Workspace(context.Background(), req.Scope)
+	before, err := fixture.service.registration.repo.Workspace(context.Background(), req.Scope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestCheckpointPublisherFailureRetainsPreparedAuthority(t *testing.T) {
 		disposition.Operations[0].OperationID != operation.ID {
 		t.Fatalf("publisher failure disposition = %+v", disposition)
 	}
-	workspace, err := fixture.service.repo.Workspace(context.Background(), req.Scope)
+	workspace, err := fixture.service.registration.repo.Workspace(context.Background(), req.Scope)
 	if err != nil || workspace.State != "clean" || workspace.Binding != before.Binding ||
 		!checkpointSnapshotsEqual(workspace.Snapshot, before.Snapshot) {
 		t.Fatalf("publisher failure workspace = (%+v, %v)", workspace, err)
@@ -179,7 +179,7 @@ func TestCheckpointPublisherFailureRetainsPreparedAuthority(t *testing.T) {
 	if workspace.WorkspaceRevision != revisionAtPublish {
 		t.Fatalf("publisher failure workspace revision=%d, want durable prepare %d", workspace.WorkspaceRevision, revisionAtPublish)
 	}
-	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		candidate, err := tx.Candidate(context.Background())
 		if err != nil {
 			return err
@@ -228,7 +228,7 @@ func TestCheckpointRejectsTemporaryUnpublishedPublicationDispositions(t *testing
 			} else if len(disposition.Journals) != 1 || disposition.Journals[0].State != test.journal {
 				t.Fatalf("temporary disposition changed database outcome: %+v", disposition)
 			}
-			if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+			if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 				candidate, err := tx.Candidate(context.Background())
 				if err != nil {
 					return err
@@ -254,7 +254,7 @@ func TestCheckpointFinalizationFailureRollsBackAllTentativeDatabaseWrites(t *tes
 		t.Fatal(err)
 	}
 	setServiceWorkspaceState(t, fixture.store, req.Scope, "clean")
-	before, err := fixture.service.repo.Workspace(context.Background(), req.Scope)
+	before, err := fixture.service.registration.repo.Workspace(context.Background(), req.Scope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +291,7 @@ func TestCheckpointFinalizationFailureRollsBackAllTentativeDatabaseWrites(t *tes
 		disposition.Operations[0].OperationID != operation.ID {
 		t.Fatalf("finalization rollback disposition = %+v", disposition)
 	}
-	after, err := fixture.service.repo.Workspace(context.Background(), req.Scope)
+	after, err := fixture.service.registration.repo.Workspace(context.Background(), req.Scope)
 	if err != nil || after.State != "clean" || after.Binding != before.Binding ||
 		!checkpointSnapshotsEqual(after.Snapshot, before.Snapshot) {
 		t.Fatalf("finalization rollback workspace = (%+v, %v), before=%+v", after, err, before)
@@ -299,7 +299,7 @@ func TestCheckpointFinalizationFailureRollsBackAllTentativeDatabaseWrites(t *tes
 	if revisionAtPublish != before.WorkspaceRevision+1 || after.WorkspaceRevision != revisionAtPublish {
 		t.Fatalf("finalization rollback revisions=(publisher=%d,after=%d), want durable prepare=%d and rolled-back finalization", revisionAtPublish, after.WorkspaceRevision, before.WorkspaceRevision+1)
 	}
-	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		candidate, err := tx.Candidate(context.Background())
 		if err != nil {
 			return err
@@ -483,7 +483,7 @@ func TestCheckpointFinalCommitUnknownClassifiesPublishedRecoveredOldPreparedAndT
 				}
 				return handle, nil
 			}
-			realWithImmediate := fixture.service.repo.WithImmediateWorkspace
+			realWithImmediate := fixture.service.registration.repo.WithImmediateWorkspace
 			transactionCalls := 0
 			unknown := fmt.Errorf("synthetic final commit: %w", localstore.ErrCommitOutcomeUnknown)
 			fixture.service.checkpoint.withImmediateWorkspace = func(
@@ -837,7 +837,7 @@ func TestCheckpointFirstMaterialPreflightPrecedesOriginInvalidation(t *testing.T
 		t.Fatal(err)
 	}
 	candidate := checkpointPlanCandidate(fixture.binding, accepted, &accepted, 1)
-	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		return tx.UpsertCandidate(context.Background(), *candidate)
 	}); err != nil {
 		t.Fatal(err)
@@ -895,7 +895,7 @@ func TestCheckpointStickyInvalidationUnknownCommitConfirmation(t *testing.T) {
 					return realObserver(ctx, binding)
 				}
 			}
-			realWithImmediate := fixture.service.repo.WithImmediateWorkspace
+			realWithImmediate := fixture.service.registration.repo.WithImmediateWorkspace
 			transactionCalls := 0
 			unknown := fmt.Errorf("synthetic invalidation: %w", localstore.ErrCommitOutcomeUnknown)
 			fixture.service.checkpoint.withImmediateWorkspace = func(
@@ -1000,7 +1000,7 @@ func TestCheckpointUnknownCommitConfirmationMatrix(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
-			realWithImmediate := fixture.service.repo.WithImmediateWorkspace
+			realWithImmediate := fixture.service.registration.repo.WithImmediateWorkspace
 			transactionCalls := 0
 			unknown := fmt.Errorf("synthetic: %w", localstore.ErrCommitOutcomeUnknown)
 			fixture.service.checkpoint.withImmediateWorkspace = func(
@@ -1074,7 +1074,7 @@ func TestDefaultCheckpointArtifactFactoryIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	setServiceWorkspaceState(t, fixture.store, req.Scope, "clean")
-	before, err := fixture.service.repo.Workspace(context.Background(), req.Scope)
+	before, err := fixture.service.registration.repo.Workspace(context.Background(), req.Scope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1113,12 +1113,12 @@ func TestDefaultCheckpointArtifactFactoryIntegration(t *testing.T) {
 	if err != nil || !equalCheckpointTree(live, journal.CandidateTree) {
 		t.Fatalf("published live tree = (%v, %v), want %v", live, err, journal.CandidateTree)
 	}
-	after, err := fixture.service.repo.Workspace(context.Background(), req.Scope)
+	after, err := fixture.service.registration.repo.Workspace(context.Background(), req.Scope)
 	if err != nil || after.State != "pending" || after.Binding != before.Binding ||
 		!checkpointSnapshotsEqual(after.Snapshot, before.Snapshot) {
 		t.Fatalf("real artifact workspace = (%+v, %v), before=%+v", after, err, before)
 	}
-	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		candidate, err := tx.Candidate(context.Background())
 		if err != nil {
 			return err
@@ -1381,7 +1381,7 @@ func TestCheckpointSecondTransactionPlanAndProofDriftPublishNothing(t *testing.T
 			checkpointOnSecondOutsideObservation(t, fixture, func() {
 				direct := checkpointPlanMutatedSnapshot(t, fixture.mustAcceptedSnapshot(t), "late candidate")
 				candidate := checkpointPlanCandidate(fixture.binding, direct, nil, 0)
-				if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+				if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 					return tx.UpsertCandidate(context.Background(), *candidate)
 				}); err != nil {
 					t.Fatal(err)
@@ -1424,7 +1424,7 @@ func TestCheckpointSecondTransactionIgnoresTerminalDispositionDrift(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		disposition, err := readCurrentMaterializationWorkset(context.Background(), tx)
 		if err != nil {
 			return err
@@ -1824,7 +1824,7 @@ func TestCheckpointLocalOnlyPublishesExactPlan(t *testing.T) {
 		}, nil
 	}
 
-	before, err := fixture.service.repo.Workspace(context.Background(), fixture.binding.Scope)
+	before, err := fixture.service.registration.repo.Workspace(context.Background(), fixture.binding.Scope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1842,14 +1842,14 @@ func TestCheckpointLocalOnlyPublishesExactPlan(t *testing.T) {
 		t.Fatalf("artifact calls publish=%d close=%d, want one each", publishCalls, closeCalls)
 	}
 
-	after, err := fixture.service.repo.Workspace(context.Background(), fixture.binding.Scope)
+	after, err := fixture.service.registration.repo.Workspace(context.Background(), fixture.binding.Scope)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if after.Binding != before.Binding || !checkpointSnapshotsEqual(after.Snapshot, before.Snapshot) || after.State != "pending" {
 		t.Fatalf("workspace after checkpoint = %+v, before = %+v", after, before)
 	}
-	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), fixture.binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		disposition, err := readCurrentMaterializationWorkset(context.Background(), tx)
 		if err != nil {
 			return err
@@ -2003,7 +2003,7 @@ func readCheckpointDisposition(
 ) localstore.WorkspaceCurrentMaterialization {
 	t.Helper()
 	var disposition localstore.WorkspaceCurrentMaterialization
-	if err := service.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := service.registration.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
 		var err error
 		disposition, err = readCurrentMaterializationWorkset(context.Background(), tx)
 		return err

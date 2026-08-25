@@ -55,7 +55,7 @@ func TestImportPersistsCleanDirectCandidate(t *testing.T) {
 		t.Fatalf("Status() = %+v", status)
 	}
 	var persisted *localstore.WorkspaceCandidateRecord
-	if err := service.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := service.registration.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		var err error
 		persisted, err = tx.Candidate(context.Background())
 		return err
@@ -366,7 +366,7 @@ func TestImportConflictIsSuccessfulAndPersistsOursTheirs(t *testing.T) {
 	}
 	var persistedCandidate *localstore.WorkspaceCandidateRecord
 	var persistedConflicts []Conflict
-	if err := reopened.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := reopened.registration.repo.WithImmediateWorkspace(context.Background(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		candidate, err := tx.Candidate(context.Background())
 		if err != nil {
 			return err

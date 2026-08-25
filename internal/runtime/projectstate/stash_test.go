@@ -274,7 +274,7 @@ func TestServiceStashCurrentWorksetRejectsWrongSideAndIgnoresCorruptTerminalRows
 				if err != nil || got.StashID != fixture.stashID {
 					t.Fatalf("Stash()=(%+v,%v), want current-workset success", got, err)
 				}
-				if err := fixture.service.repo.AuditWorkspaceHistory(context.Background(), fixture.req.Scope); err == nil {
+				if err := fixture.service.registration.repo.AuditWorkspaceHistory(context.Background(), fixture.req.Scope); err == nil {
 					t.Fatal("AuditWorkspaceHistory accepted corrupt terminal operation")
 				}
 				return
@@ -355,7 +355,7 @@ func TestServiceStashCrossActionReceiptIsIdempotencyConflict(t *testing.T) {
 		RequestDigest: state.Digest("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
 		Actor:         fixture.req.Actor, ResultJSON: []byte("{\"action\":\"restore\"}\n"), Outcome: "clean",
 	}
-	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := fixture.service.registration.repo.WithImmediateWorkspace(context.Background(), fixture.req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		return tx.InsertTransitionReceipt(context.Background(), receipt)
 	}); err != nil {
 		t.Fatal(err)
@@ -515,7 +515,7 @@ func TestConfirmStashCommitRequiresExactCompleteReceipt(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, err := confirmStashCommit(context.Background(), fixture.service.repo, fixture.req, want, commitErr)
+		got, err := confirmStashCommit(context.Background(), fixture.service.registration.repo, fixture.req, want, commitErr)
 		if err != nil || got != want {
 			t.Fatalf("confirmStashCommit()=(%+v,%v), want %+v", got, err, want)
 		}
@@ -556,7 +556,7 @@ func TestConfirmStashCommitRequiresExactCompleteReceipt(t *testing.T) {
 				t.Fatal(err)
 			}
 			req, expected := test.mutate(t, fixture, persisted)
-			got, err := confirmStashCommit(context.Background(), fixture.service.repo, req, expected, commitErr)
+			got, err := confirmStashCommit(context.Background(), fixture.service.registration.repo, req, expected, commitErr)
 			if !errors.Is(err, localstore.ErrCommitOutcomeUnknown) || errors.Is(err, ErrIdempotencyConflict) || got != (StashResult{}) {
 				t.Fatalf("confirmStashCommit()=(%+v,%v), want zero commit-unknown non-conflict error", got, err)
 			}
@@ -612,7 +612,7 @@ func TestServiceStashKeepsSiblingWorkspaceAndReceiptScopeIsolated(t *testing.T) 
 			t.Fatalf("%s sibling Status()=%+v", sibling.name, status)
 		}
 		assertStashOperationState(t, service, sibling.scope, 1, "active", "", sibling.operation)
-		if err := service.repo.WithImmediateWorkspace(context.Background(), sibling.scope, func(tx *localstore.WorkspaceMutationTx) error {
+		if err := service.registration.repo.WithImmediateWorkspace(context.Background(), sibling.scope, func(tx *localstore.WorkspaceMutationTx) error {
 			stash, err := tx.Stash(context.Background(), "20000000-0000-4000-8000-000000000001")
 			if err != nil {
 				return err
@@ -651,7 +651,7 @@ func assertAcceptedBaseStash(t *testing.T, service *Service, req StashRequest, w
 	}
 	var persisted *localstore.WorkspaceStashRecord
 	var receipt *localstore.WorkspaceTransitionReceiptRecord
-	if err := service.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := service.registration.repo.WithImmediateWorkspace(context.Background(), req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		var err error
 		persisted, err = tx.Stash(context.Background(), want.StashID)
 		if err != nil {
@@ -740,7 +740,7 @@ func newStashServiceFixture(t *testing.T) stashServiceFixture {
 func readServiceStash(t *testing.T, service *Service, scope types.WorkspaceScope, stashID string) *localstore.WorkspaceStashRecord {
 	t.Helper()
 	var result *localstore.WorkspaceStashRecord
-	if err := service.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := service.registration.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
 		var err error
 		result, err = tx.Stash(context.Background(), stashID)
 		return err
@@ -759,7 +759,7 @@ func assertStashFinished(t *testing.T, service *Service, scope types.WorkspaceSc
 	if status.State != "clean" {
 		t.Fatalf("workspace status=%q, want clean", status.State)
 	}
-	if err := service.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := service.registration.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
 		candidate, err := tx.Candidate(context.Background())
 		if err != nil {
 			return err
@@ -787,7 +787,7 @@ func assertStashOperationState(
 		t.Fatal(err)
 	}
 	found := false
-	if err := service.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
+	if err := service.registration.repo.WithImmediateWorkspace(context.Background(), scope, func(tx *localstore.WorkspaceMutationTx) error {
 		records, err := tx.OperationsByGenerations(context.Background(), []int64{generation})
 		if err != nil {
 			return err
