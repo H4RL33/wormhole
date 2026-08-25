@@ -72,6 +72,7 @@ type Service struct {
 	repo                               *localstore.WorkspaceRepo
 	legacyBackupRoot                   string
 	registrationTimeout                time.Duration
+	registration                       *registrationCoordinator
 	readWorkingTree                    func(string) (state.Tree, error)
 	observeGitBase                     func(context.Context, ObserveGitBaseRequest) (gitBaseObservation, error)
 	observePublicationOrigin           func(context.Context, string) (publicationOriginObservation, error)
@@ -106,6 +107,7 @@ func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service,
 		observeCheckpointRecoveryGit:       observeCheckpointRecoveryGit,
 		recoverCheckpointFilesystem:        recoverCheckpointFilesystem,
 	}
+	service.registration = newRegistrationCoordinator(service)
 	if config.LegacyIntegrationBackupRoot == "" {
 		return service, nil
 	}
@@ -134,94 +136,35 @@ func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service,
 		return nil, err
 	}
 	service.legacyBackupRoot = backupRoot
+	service.registration.legacyBackupRoot = backupRoot
 	return service, nil
-}
-
-func (s *Service) RegisterWorkspace(ctx context.Context, req RegisterWorkspaceRequest) (RegisterWorkspaceResult, error) {
-	if s == nil || s.repo == nil {
-		return RegisterWorkspaceResult{}, fmt.Errorf("projectstate: service is unavailable")
-	}
-	registrationCtx, cancel := registrationContext(ctx, s.registrationTimeout)
-	defer cancel()
-	if !types.CanonicalUUID(req.ExpectedProjectID) || !validCommit(req.ExpectedCommit) {
-		return RegisterWorkspaceResult{}, fmt.Errorf("%w: invalid project or commit identity", ErrInvalidRegistration)
-	}
-	if err := req.ExpectedRepository.Validate(); err != nil {
-		return RegisterWorkspaceResult{}, fmt.Errorf("%w: %v", ErrInvalidRegistration, err)
-	}
-	observed, err := inspectCommittedWorkspace(registrationCtx, req.Root, req.ExpectedCommit)
-	if err != nil {
-		return RegisterWorkspaceResult{}, fmt.Errorf("%w: %w", ErrInvalidRegistration, err)
-	}
-	if s.legacyBackupRoot != "" && pathsOverlap(s.legacyBackupRoot, observed.root) {
-		return RegisterWorkspaceResult{}, fmt.Errorf("%w: process-private backup root overlaps repository", ErrInvalidRegistration)
-	}
-	if observed.snapshot.Config.ProjectID != req.ExpectedProjectID {
-		return RegisterWorkspaceResult{}, fmt.Errorf("%w: committed project identity differs from request", ErrInvalidRegistration)
-	}
-	if observed.snapshot.Config.Repository != req.ExpectedRepository {
-		return RegisterWorkspaceResult{}, fmt.Errorf("%w: committed repository identity differs from request", ErrInvalidRegistration)
-	}
-	canonicalTree, err := state.EncodeTree(observed.snapshot)
-	if err != nil {
-		return RegisterWorkspaceResult{}, fmt.Errorf("%w: encode committed snapshot: %v", ErrInvalidRegistration, err)
-	}
-	revalidated, err := checkoutIdentity(observed.root)
-	if err != nil || revalidated != observed.checkout {
-		return RegisterWorkspaceResult{}, fmt.Errorf("%w: checkout identity changed before persistence", ErrInvalidRegistration)
-	}
-	workspaceID, err := newWorkspaceID()
-	if err != nil {
-		return RegisterWorkspaceResult{}, fmt.Errorf("projectstate: generate workspace ID: %w", err)
-	}
-	binding := types.WorkspaceBinding{
-		Scope:    types.WorkspaceScope{ProjectID: req.ExpectedProjectID, WorkspaceID: workspaceID},
-		Checkout: observed.checkout, Repository: req.ExpectedRepository,
-		AcceptedRef: observed.acceptedRef, AcceptedCommitSHA: req.ExpectedCommit,
-		AcceptedTreeDigest: string(observed.snapshot.Digest),
-	}
-	persisted, created, err := s.repo.RegisterWorkspace(registrationCtx, binding, canonicalTree)
-	if err != nil {
-		return RegisterWorkspaceResult{}, err
-	}
-	return RegisterWorkspaceResult{Binding: persisted, Created: created}, nil
 }
 
 func registrationContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(parent, timeout)
 }
 
+func (s *Service) RegisterWorkspace(ctx context.Context, req RegisterWorkspaceRequest) (RegisterWorkspaceResult, error) {
+	if s == nil || s.registration == nil {
+		return RegisterWorkspaceResult{}, fmt.Errorf("projectstate: service is unavailable")
+	}
+	registration := *s.registration
+	registration.registrationTimeout = s.registrationTimeout
+	return registration.registerWorkspace(ctx, req)
+}
+
 func (s *Service) ResolveWorkingDirectory(ctx context.Context, observed types.WorkspaceContext) (types.WorkspaceBinding, error) {
-	if s == nil || s.repo == nil {
+	if s == nil || s.registration == nil {
 		return types.WorkspaceBinding{}, localstore.ErrNotFound
 	}
-	if err := observed.Validate(); err != nil {
-		return types.WorkspaceBinding{}, localstore.ErrNotFound
-	}
-	resolved, err := filepath.EvalSymlinks(observed.WorkingDirectory)
-	if err != nil {
-		return types.WorkspaceBinding{}, localstore.ErrNotFound
-	}
-	resolved, err = filepath.Abs(resolved)
-	if err != nil {
-		return types.WorkspaceBinding{}, localstore.ErrNotFound
-	}
-	resolved = filepath.Clean(resolved)
-	binding, err := s.repo.ResolveWorkingDirectory(ctx, types.WorkspaceContext{WorkingDirectory: resolved})
-	if err != nil {
-		return types.WorkspaceBinding{}, err
-	}
-	if err := verifyBindingCheckout(binding); err != nil {
-		return types.WorkspaceBinding{}, localstore.ErrNotFound
-	}
-	return binding, nil
+	return s.registration.resolveWorkingDirectory(ctx, observed)
 }
 
 func (s *Service) RegisteredWorkspaces(ctx context.Context) ([]types.WorkspaceBinding, error) {
-	if s == nil || s.repo == nil {
+	if s == nil || s.registration == nil {
 		return nil, fmt.Errorf("projectstate: service is unavailable")
 	}
-	return s.repo.RegisteredWorkspaces(ctx)
+	return s.registration.registeredWorkspaces(ctx)
 }
 
 func (s *Service) Status(ctx context.Context, scope types.WorkspaceScope) (WorkspaceStatus, error) {

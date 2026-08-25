@@ -87,6 +87,47 @@ func TestStage1ASoleWorkspaceAuthorities(t *testing.T) {
 	})
 }
 
+func TestServiceRegistrationCoordinatorAuthority(t *testing.T) {
+	root := filepath.Join("..", "..", "..")
+	sources := architectureProductionGoSources(t, root)
+	service := sources["internal/runtime/projectstate/service.go"]
+	if !strings.Contains(service, "registrationCoordinator") {
+		t.Fatal("service.go must own a registrationCoordinator")
+	}
+	delegates := map[string]string{
+		"RegisterWorkspace":       "registration.registerWorkspace(",
+		"ResolveWorkingDirectory": "s.registration.resolveWorkingDirectory(",
+		"RegisteredWorkspaces":    "s.registration.registeredWorkspaces(",
+	}
+	for method, delegation := range delegates {
+		body := architectureMethodBody(service, "func (s *Service) "+method)
+		if body == "" {
+			t.Fatalf("service.go missing facade method %s", method)
+		}
+		if !strings.Contains(body, delegation) {
+			t.Fatalf("service.go method %s must delegate to registration coordinator", method)
+		}
+		if count := strings.Count(body, delegation); count != 1 {
+			t.Fatalf("service.go method %s has %d registration coordinator delegates, want exactly one", method, count)
+		}
+		if strings.Contains(body, "inspectCommittedWorkspace(") || strings.Contains(body, "filepath.EvalSymlinks(") || strings.Contains(body, "verifyBindingCheckout(") || strings.Contains(body, ".repo.RegisterWorkspace(") {
+			t.Fatalf("service.go method %s retains registration, path resolution, or checkout verification logic", method)
+		}
+	}
+}
+
+func architectureMethodBody(source, signature string) string {
+	start := strings.Index(source, signature)
+	if start < 0 {
+		return ""
+	}
+	next := strings.Index(source[start+len(signature):], "\nfunc ")
+	if next < 0 {
+		return source[start:]
+	}
+	return source[start : start+len(signature)+next]
+}
+
 func TestCompactTargetedCommitConfirmationNeverReplays(t *testing.T) {
 	t.Run("journal", func(t *testing.T) {
 		fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
