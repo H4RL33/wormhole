@@ -116,8 +116,8 @@ func TestCheckpointMalformedArtifactHandlesFailClosed(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
-			baseFactory := fixture.service.prepareCheckpointArtifact
-			fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
+			baseFactory := fixture.service.checkpoint.prepareCheckpointArtifact
+			fixture.service.checkpoint.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
 				handle, err := baseFactory(ctx, input)
 				return test.build(handle), err
 			}
@@ -148,8 +148,8 @@ func TestCheckpointPublisherFailureRetainsPreparedAuthority(t *testing.T) {
 	}
 	publishErr := errors.New("publisher failed")
 	revisionAtPublish := int64(0)
-	baseFactory := fixture.service.prepareCheckpointArtifact
-	fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
+	baseFactory := fixture.service.checkpoint.prepareCheckpointArtifact
+	fixture.service.checkpoint.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		handle, err := baseFactory(ctx, input)
 		handle.publish = func(context.Context) (checkpointPublicationDisposition, error) {
 			fixture.publishCalls++
@@ -206,8 +206,8 @@ func TestCheckpointRejectsTemporaryUnpublishedPublicationDispositions(t *testing
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
-			baseFactory := fixture.service.prepareCheckpointArtifact
-			fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
+			baseFactory := fixture.service.checkpoint.prepareCheckpointArtifact
+			fixture.service.checkpoint.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
 				handle, err := baseFactory(ctx, input)
 				handle.publish = func(context.Context) (checkpointPublicationDisposition, error) {
 					fixture.publishCalls++
@@ -266,8 +266,8 @@ func TestCheckpointFinalizationFailureRollsBackAllTentativeDatabaseWrites(t *tes
 		t.Fatal(err)
 	}
 	revisionAtPublish := int64(0)
-	baseFactory := fixture.service.prepareCheckpointArtifact
-	fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
+	baseFactory := fixture.service.checkpoint.prepareCheckpointArtifact
+	fixture.service.checkpoint.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		handle, err := baseFactory(ctx, input)
 		if err != nil {
 			return handle, err
@@ -337,8 +337,8 @@ func TestCheckpointHoldsFinalWriterAcrossPublicationAndPostimage(t *testing.T) {
 	}
 	defer writerConn.Close()
 
-	baseFactory := fixture.service.prepareCheckpointArtifact
-	fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
+	baseFactory := fixture.service.checkpoint.prepareCheckpointArtifact
+	fixture.service.checkpoint.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		handle, err := baseFactory(ctx, input)
 		if err != nil {
 			return handle, err
@@ -424,7 +424,7 @@ func TestCheckpointPostPublicationDatabaseFailureRetainsPreparedRecoveryAuthorit
 	`); err != nil {
 		t.Fatal(err)
 	}
-	fixture.service.prepareCheckpointArtifact = nil
+	fixture.service.checkpoint.prepareCheckpointArtifact = nil
 
 	got, err := fixture.service.Checkpoint(context.Background(), req)
 	if err == nil || !strings.Contains(err.Error(), "injected post-publication database failure") || got != (CheckpointResult{}) {
@@ -471,8 +471,8 @@ func TestCheckpointFinalCommitUnknownClassifiesPublishedRecoveredOldPreparedAndT
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
-			baseFactory := fixture.service.prepareCheckpointArtifact
-			fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
+			baseFactory := fixture.service.checkpoint.prepareCheckpointArtifact
+			fixture.service.checkpoint.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
 				handle, err := baseFactory(ctx, input)
 				if err != nil {
 					return handle, err
@@ -486,7 +486,7 @@ func TestCheckpointFinalCommitUnknownClassifiesPublishedRecoveredOldPreparedAndT
 			realWithImmediate := fixture.service.repo.WithImmediateWorkspace
 			transactionCalls := 0
 			unknown := fmt.Errorf("synthetic final commit: %w", localstore.ErrCommitOutcomeUnknown)
-			fixture.service.withImmediateWorkspace = func(
+			fixture.service.checkpoint.withImmediateWorkspace = func(
 				ctx context.Context,
 				scope types.WorkspaceScope,
 				fn func(*localstore.WorkspaceMutationTx) error,
@@ -499,7 +499,7 @@ func TestCheckpointFinalCommitUnknownClassifiesPublishedRecoveredOldPreparedAndT
 				return err
 			}
 			confirmCalls := 0
-			fixture.service.confirmWorkspaceCommit = func(
+			fixture.service.checkpoint.confirmWorkspaceCommit = func(
 				context.Context,
 				localstore.WorkspaceCommitConfirmation,
 				localstore.WorkspaceCommitConfirmation,
@@ -534,8 +534,8 @@ func TestCheckpointFinalCommitUnknownClassifiesPublishedRecoveredOldPreparedAndT
 func TestCheckpointPendingPrecedesOwnedRequestValidationAndMutation(t *testing.T) {
 	fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
 	publishErr := errors.New("retain prepared")
-	baseFactory := fixture.service.prepareCheckpointArtifact
-	fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
+	baseFactory := fixture.service.checkpoint.prepareCheckpointArtifact
+	fixture.service.checkpoint.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		handle, err := baseFactory(ctx, input)
 		handle.publish = func(context.Context) (checkpointPublicationDisposition, error) { return 0, publishErr }
 		return handle, err
@@ -550,8 +550,8 @@ func TestCheckpointPendingPrecedesOwnedRequestValidationAndMutation(t *testing.T
 		observerCalls++
 		return realObserver(ctx, binding)
 	}
-	fixture.service.readWorkingTree = func(string) (state.Tree, error) { panic("pending checkpoint read live tree") }
-	fixture.service.prepareCheckpointArtifact = func(context.Context, checkpointArtifactInput) (checkpointArtifactHandle, error) {
+	fixture.service.checkpoint.readWorkingTree = func(string) (state.Tree, error) { panic("pending checkpoint read live tree") }
+	fixture.service.checkpoint.prepareCheckpointArtifact = func(context.Context, checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		panic("pending checkpoint allocated artifact")
 	}
 	req.Root = filepath.Join(req.Root, "wrong")
@@ -568,30 +568,30 @@ func TestCheckpointPendingPrecedesOwnedRequestValidationAndMutation(t *testing.T
 }
 
 func TestCheckpointGateSerializesCancelsSeparatesAndPrunes(t *testing.T) {
-	var service Service
+	service := Service{checkpoint: &checkpointCoordinator{gates: &checkpointGateSet{}}}
 	scope := types.WorkspaceScope{
 		ProjectID:   "00000000-0000-4000-8000-000000000001",
 		WorkspaceID: "00000000-0000-4000-8000-000000000002",
 	}
 	other := scope
 	other.WorkspaceID = "00000000-0000-4000-8000-000000000003"
-	firstRelease, err := service.checkpointGates.acquire(context.Background(), scope)
+	firstRelease, err := service.checkpoint.gates.acquire(context.Background(), scope)
 	if err != nil {
 		t.Fatal(err)
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	waiter := make(chan error, 1)
 	go func() {
-		_, err := service.checkpointGates.acquire(canceled, scope)
+		_, err := service.checkpoint.gates.acquire(canceled, scope)
 		waiter <- err
 	}()
-	waitCheckpointGateRefs(t, &service.checkpointGates, scope, 2)
+	waitCheckpointGateRefs(t, service.checkpoint.gates, scope, 2)
 	select {
 	case err := <-waiter:
 		t.Fatalf("same-scope waiter did not serialize: %v", err)
 	default:
 	}
-	otherRelease, err := service.checkpointGates.acquire(context.Background(), other)
+	otherRelease, err := service.checkpoint.gates.acquire(context.Background(), other)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -612,7 +612,7 @@ func TestCheckpointGateSerializesCancelsSeparatesAndPrunes(t *testing.T) {
 		go func() {
 			defer group.Done()
 			<-start
-			release, err := service.checkpointGates.acquire(context.Background(), scope)
+			release, err := service.checkpoint.gates.acquire(context.Background(), scope)
 			if err != nil {
 				t.Errorf("simultaneous gate acquire: %v", err)
 				return
@@ -633,10 +633,10 @@ func TestCheckpointGateSerializesCancelsSeparatesAndPrunes(t *testing.T) {
 	if maximum != 1 {
 		t.Fatalf("same-scope maximum concurrent owners = %d, want 1", maximum)
 	}
-	service.checkpointGates.mu.Lock()
-	defer service.checkpointGates.mu.Unlock()
-	if len(service.checkpointGates.byScope) != 0 {
-		t.Fatalf("checkpoint gate map retained entries: %+v", service.checkpointGates.byScope)
+	service.checkpoint.gates.mu.Lock()
+	defer service.checkpoint.gates.mu.Unlock()
+	if len(service.checkpoint.gates.byScope) != 0 {
+		t.Fatalf("checkpoint gate map retained entries: %+v", service.checkpoint.gates.byScope)
 	}
 }
 
@@ -653,7 +653,7 @@ func TestCheckpointServiceGateSerializesSameScopeBeforeOutsideObservation(t *tes
 	var prepareCalls, publishCalls, closeCalls atomic.Int32
 	const journalID = "30000000-0000-4000-8000-000000000001"
 	privateRoot := t.TempDir()
-	fixture.service.prepareCheckpointArtifact = func(context.Context, checkpointArtifactInput) (checkpointArtifactHandle, error) {
+	fixture.service.checkpoint.prepareCheckpointArtifact = func(context.Context, checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		if prepareCalls.Add(1) == 1 {
 			close(entered)
 		}
@@ -688,7 +688,7 @@ func TestCheckpointServiceGateSerializesSameScopeBeforeOutsideObservation(t *tes
 		result, err := fixture.service.Checkpoint(context.Background(), req)
 		secondDone <- checkpointOutcome{result: result, err: err}
 	}()
-	waitCheckpointGateRefs(t, &fixture.service.checkpointGates, req.Scope, 2)
+	waitCheckpointGateRefs(t, fixture.service.checkpoint.gates, req.Scope, 2)
 	if got := observerCalls.Load(); got != 2 {
 		t.Fatalf("queued checkpoint observed outside gate: observer calls=%d", got)
 	}
@@ -710,7 +710,7 @@ func TestCheckpointServiceGateSerializesSameScopeBeforeOutsideObservation(t *tes
 func TestCheckpointQueuedRequestOwnsReviewDigestImmediately(t *testing.T) {
 	fixture, req, review := newCheckpointCoordinatorFixture(t, types.PublicationPublicGit, diffActorEnvelope())
 	req.PublicationReviewDigest = &review
-	release, err := fixture.service.checkpointGates.acquire(context.Background(), req.Scope)
+	release, err := fixture.service.checkpoint.gates.acquire(context.Background(), req.Scope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -723,7 +723,7 @@ func TestCheckpointQueuedRequestOwnsReviewDigestImmediately(t *testing.T) {
 		result, err := fixture.service.Checkpoint(context.Background(), req)
 		done <- outcome{result: result, err: err}
 	}()
-	waitCheckpointGateRefs(t, &fixture.service.checkpointGates, req.Scope, 2)
+	waitCheckpointGateRefs(t, fixture.service.checkpoint.gates, req.Scope, 2)
 	review = state.Digest("sha256:" + strings.Repeat("f", 64))
 	release()
 	got := <-done
@@ -750,8 +750,8 @@ func TestCheckpointPendingStatusPreservesTimestampAndMaterializesExactOperations
 	}
 	revisionBeforeCheckpoint := workspaceRevisionForProjectStateTest(t, fixture.service, req.Scope)
 	revisionAtPublish := int64(0)
-	baseFactory := fixture.service.prepareCheckpointArtifact
-	fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
+	baseFactory := fixture.service.checkpoint.prepareCheckpointArtifact
+	fixture.service.checkpoint.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		handle, err := baseFactory(ctx, input)
 		if err != nil {
 			return handle, err
@@ -898,7 +898,7 @@ func TestCheckpointStickyInvalidationUnknownCommitConfirmation(t *testing.T) {
 			realWithImmediate := fixture.service.repo.WithImmediateWorkspace
 			transactionCalls := 0
 			unknown := fmt.Errorf("synthetic invalidation: %w", localstore.ErrCommitOutcomeUnknown)
-			fixture.service.withImmediateWorkspace = func(
+			fixture.service.checkpoint.withImmediateWorkspace = func(
 				ctx context.Context,
 				scope types.WorkspaceScope,
 				fn func(*localstore.WorkspaceMutationTx) error,
@@ -1003,7 +1003,7 @@ func TestCheckpointUnknownCommitConfirmationMatrix(t *testing.T) {
 			realWithImmediate := fixture.service.repo.WithImmediateWorkspace
 			transactionCalls := 0
 			unknown := fmt.Errorf("synthetic: %w", localstore.ErrCommitOutcomeUnknown)
-			fixture.service.withImmediateWorkspace = func(
+			fixture.service.checkpoint.withImmediateWorkspace = func(
 				ctx context.Context,
 				scope types.WorkspaceScope,
 				fn func(*localstore.WorkspaceMutationTx) error,
@@ -1016,7 +1016,7 @@ func TestCheckpointUnknownCommitConfirmationMatrix(t *testing.T) {
 				return err
 			}
 			confirmCalls := 0
-			fixture.service.confirmWorkspaceCommit = func(
+			fixture.service.checkpoint.confirmWorkspaceCommit = func(
 				context.Context,
 				localstore.WorkspaceCommitConfirmation,
 				localstore.WorkspaceCommitConfirmation,
@@ -1078,7 +1078,7 @@ func TestDefaultCheckpointArtifactFactoryIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture.service.prepareCheckpointArtifact = nil
+	fixture.service.checkpoint.prepareCheckpointArtifact = nil
 	got, err := fixture.service.Checkpoint(context.Background(), req)
 	if err != nil || got.JournalID == "" {
 		t.Fatalf("real artifact Checkpoint = (%+v, %v)", got, err)
@@ -1153,13 +1153,13 @@ func TestCheckpointRequestAndLiveValidationPrecedence(t *testing.T) {
 		}},
 		{name: "digest syntax", mutate: func(fixture *checkpointCoordinatorFixture, req *CheckpointRequest) {
 			req.ExpectedWorkingTreeDigest = "bad"
-			fixture.service.readWorkingTree = func(string) (state.Tree, error) { panic("invalid digest read live") }
+			fixture.service.checkpoint.readWorkingTree = func(string) (state.Tree, error) { panic("invalid digest read live") }
 		}},
 		{name: "digest CAS", mutate: func(_ *checkpointCoordinatorFixture, req *CheckpointRequest) {
 			req.ExpectedWorkingTreeDigest = state.Digest("sha256:" + strings.Repeat("f", 64))
 		}, want: ErrCheckpointCAS},
 		{name: "live reader", mutate: func(fixture *checkpointCoordinatorFixture, _ *CheckpointRequest) {
-			fixture.service.readWorkingTree = func(string) (state.Tree, error) { return nil, readerErr }
+			fixture.service.checkpoint.readWorkingTree = func(string) (state.Tree, error) { return nil, readerErr }
 		}, want: readerErr},
 	}
 	for _, test := range tests {
@@ -1191,7 +1191,7 @@ func TestCheckpointArtifactPrepareErrorsCreateNoJournal(t *testing.T) {
 	for _, prepareErr := range []error{ErrCheckpointUnsupported, ErrCheckpointCAS, context.Canceled, errors.New("prepare failed")} {
 		t.Run(prepareErr.Error(), func(t *testing.T) {
 			fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
-			fixture.service.prepareCheckpointArtifact = func(context.Context, checkpointArtifactInput) (checkpointArtifactHandle, error) {
+			fixture.service.checkpoint.prepareCheckpointArtifact = func(context.Context, checkpointArtifactInput) (checkpointArtifactHandle, error) {
 				return checkpointArtifactHandle{}, prepareErr
 			}
 			got, err := fixture.service.Checkpoint(context.Background(), req)
@@ -1208,7 +1208,7 @@ func TestCheckpointArtifactPrepareErrorsCreateNoJournal(t *testing.T) {
 func TestCheckpointPrepareErrorClosesReturnedArtifactOwnership(t *testing.T) {
 	fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
 	prepareErr := errors.New("prepare returned owned residue")
-	fixture.service.prepareCheckpointArtifact = func(context.Context, checkpointArtifactInput) (checkpointArtifactHandle, error) {
+	fixture.service.checkpoint.prepareCheckpointArtifact = func(context.Context, checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		fixture.prepareCalls++
 		return checkpointArtifactHandle{
 			publish: func(context.Context) (checkpointPublicationDisposition, error) {
@@ -1279,8 +1279,8 @@ func TestCheckpointHelperFailuresRemainClosed(t *testing.T) {
 	if err := validateCheckpointAcknowledgement(types.PublicationClassification("future"), req.ExpectedWorkingTreeDigest, nil); err == nil {
 		t.Fatal("unknown publication classification was accepted")
 	}
-	fixture.service.readWorkingTree = func(string) (state.Tree, error) { return state.Tree{}, nil }
-	if tree, err := fixture.service.checkpointReadLive(req.Root, fixture.binding, req.ExpectedWorkingTreeDigest, nil); err == nil || tree != nil {
+	fixture.service.checkpoint.readWorkingTree = func(string) (state.Tree, error) { return state.Tree{}, nil }
+	if tree, err := fixture.service.checkpoint.checkpointReadLive(req.Root, fixture.binding, req.ExpectedWorkingTreeDigest, nil); err == nil || tree != nil {
 		t.Fatalf("invalid live tree = (%+v, %v)", tree, err)
 	}
 }
@@ -1339,7 +1339,7 @@ func TestCheckpointSecondTransactionPlanAndProofDriftPublishNothing(t *testing.T
 		configure func(*checkpointCoordinatorFixture, CheckpointRequest)
 	}{
 		{name: "live tree", configure: func(fixture *checkpointCoordinatorFixture, _ CheckpointRequest) {
-			original := fixture.service.readWorkingTree
+			original := fixture.service.checkpoint.readWorkingTree
 			if original == nil {
 				original = ReadWorkingTreeNoFollow
 			}
@@ -1349,7 +1349,7 @@ func TestCheckpointSecondTransactionPlanAndProofDriftPublishNothing(t *testing.T
 				t.Fatal(err)
 			}
 			calls := 0
-			fixture.service.readWorkingTree = func(root string) (state.Tree, error) {
+			fixture.service.checkpoint.readWorkingTree = func(root string) (state.Tree, error) {
 				calls++
 				if calls == 3 {
 					return cloneCheckpointTree(changedTree), nil
@@ -1440,7 +1440,7 @@ func TestCheckpointSecondTransactionIgnoresTerminalDispositionDrift(t *testing.T
 	fixture.prepareCalls, fixture.publishCalls, fixture.closeCalls = 0, 0, 0
 	const secondJournalID = "40000000-0000-4000-8000-000000000001"
 	privateRoot := t.TempDir()
-	fixture.service.prepareCheckpointArtifact = func(context.Context, checkpointArtifactInput) (checkpointArtifactHandle, error) {
+	fixture.service.checkpoint.prepareCheckpointArtifact = func(context.Context, checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		fixture.prepareCalls++
 		return checkpointArtifactHandle{
 			evidence: checkpointArtifactEvidence{
@@ -1550,8 +1550,8 @@ func TestCheckpointSecondTransactionIgnoresTerminalOperationDrift(t *testing.T) 
 func TestCheckpointPendingStructuralAndCardinalityValidation(t *testing.T) {
 	fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
 	publishErr := errors.New("retain prepared")
-	baseFactory := fixture.service.prepareCheckpointArtifact
-	fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
+	baseFactory := fixture.service.checkpoint.prepareCheckpointArtifact
+	fixture.service.checkpoint.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		handle, err := baseFactory(ctx, input)
 		handle.publish = func(context.Context) (checkpointPublicationDisposition, error) { return 0, publishErr }
 		return handle, err
@@ -1627,8 +1627,8 @@ func TestCheckpointPendingStructuralAndCardinalityValidation(t *testing.T) {
 func TestCheckpointPendingFastPathIgnoresRecoveredOldLegacyOperationEnvelope(t *testing.T) {
 	fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
 	publishErr := errors.New("retain prepared")
-	baseFactory := fixture.service.prepareCheckpointArtifact
-	fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
+	baseFactory := fixture.service.checkpoint.prepareCheckpointArtifact
+	fixture.service.checkpoint.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		handle, err := baseFactory(ctx, input)
 		handle.publish = func(context.Context) (checkpointPublicationDisposition, error) { return 0, publishErr }
 		return handle, err
@@ -1656,8 +1656,8 @@ func TestCheckpointPendingFastPathIgnoresRecoveredOldLegacyOperationEnvelope(t *
 func TestCheckpointPendingReviewRequiresExactAcceptedGitPosition(t *testing.T) {
 	fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
 	publishErr := errors.New("retain prepared")
-	baseFactory := fixture.service.prepareCheckpointArtifact
-	fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
+	baseFactory := fixture.service.checkpoint.prepareCheckpointArtifact
+	fixture.service.checkpoint.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		handle, err := baseFactory(ctx, input)
 		handle.publish = func(context.Context) (checkpointPublicationDisposition, error) { return 0, publishErr }
 		return handle, err
@@ -1809,7 +1809,7 @@ func TestCheckpointLocalOnlyPublishesExactPlan(t *testing.T) {
 	const journalID = "30000000-0000-4000-8000-000000000001"
 	privateRoot := t.TempDir()
 	publishCalls, closeCalls := 0, 0
-	fixture.service.prepareCheckpointArtifact = func(context.Context, checkpointArtifactInput) (checkpointArtifactHandle, error) {
+	fixture.service.checkpoint.prepareCheckpointArtifact = func(context.Context, checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		return checkpointArtifactHandle{
 			evidence: checkpointArtifactEvidence{
 				JournalID:  journalID,
@@ -1975,7 +1975,7 @@ func newCheckpointCoordinatorFixture(
 	fixture := &checkpointCoordinatorFixture{publicationServiceFixture: publication}
 	const journalID = "30000000-0000-4000-8000-000000000001"
 	privateRoot := t.TempDir()
-	fixture.service.prepareCheckpointArtifact = func(context.Context, checkpointArtifactInput) (checkpointArtifactHandle, error) {
+	fixture.service.checkpoint.prepareCheckpointArtifact = func(context.Context, checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		fixture.prepareCalls++
 		return checkpointArtifactHandle{
 			evidence: checkpointArtifactEvidence{

@@ -72,31 +72,31 @@ type checkpointRecoveryFilesystemFunc func(
 
 // Recover converges one proved checkpoint journal without advancing the
 // accepted Git base. Terminal history is composed entirely from SQLite.
-func (s *Service) Recover(ctx context.Context, scope types.WorkspaceScope) (WorkspaceStatus, error) {
-	if s == nil || s.repo == nil || ctx == nil || !validPublicationScope(scope) {
+func (c *checkpointCoordinator) recover(ctx context.Context, scope types.WorkspaceScope) (WorkspaceStatus, error) {
+	if c == nil || c.repo == nil || ctx == nil || !validPublicationScope(scope) {
 		return WorkspaceStatus{}, localstore.ErrNotFound
 	}
-	release, err := s.checkpointGates.acquire(ctx, scope)
+	release, err := c.gates.acquire(ctx, scope)
 	if err != nil {
 		return WorkspaceStatus{}, err
 	}
 	defer release()
 
-	withWorkspace := s.withImmediateWorkspace
+	withWorkspace := c.withImmediateWorkspace
 	if withWorkspace == nil {
-		withWorkspace = s.repo.WithImmediateWorkspace
+		withWorkspace = c.repo.WithImmediateWorkspace
 	}
-	observeGit := s.observeCheckpointRecoveryGit
+	observeGit := c.observeRecoveryGit
 	if observeGit == nil {
 		observeGit = observeCheckpointRecoveryGit
 	}
-	recoverFilesystem := s.recoverCheckpointFilesystem
+	recoverFilesystem := c.recoverFilesystem
 	if recoverFilesystem == nil {
 		recoverFilesystem = recoverCheckpointFilesystem
 	}
-	confirmCommit := s.confirmWorkspaceCommit
+	confirmCommit := c.confirmWorkspaceCommit
 	if confirmCommit == nil {
-		confirmCommit = s.repo.ConfirmWorkspaceCommit
+		confirmCommit = c.repo.ConfirmWorkspaceCommit
 	}
 
 	var result WorkspaceStatus

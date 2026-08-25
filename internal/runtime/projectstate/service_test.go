@@ -487,8 +487,8 @@ func recoveryDriverPlanFixture(t *testing.T, driverState string) (*checkpointCoo
 	fixture, request, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
 	if driverState == "prepared" {
 		publishErr := errors.New("retain prepared recovery driver")
-		baseFactory := fixture.service.prepareCheckpointArtifact
-		fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
+		baseFactory := fixture.service.checkpoint.prepareCheckpointArtifact
+		fixture.service.checkpoint.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
 			handle, err := baseFactory(ctx, input)
 			if err == nil {
 				handle.publish = func(context.Context) (checkpointPublicationDisposition, error) { return 0, publishErr }
@@ -554,8 +554,8 @@ func recoveryNoWorkServiceFixture(t *testing.T, history string) (*Service, types
 	fixture, request, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
 	if history == "recovered_old" {
 		publishErr := errors.New("retain prepared recovery fixture")
-		baseFactory := fixture.service.prepareCheckpointArtifact
-		fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
+		baseFactory := fixture.service.checkpoint.prepareCheckpointArtifact
+		fixture.service.checkpoint.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
 			handle, err := baseFactory(ctx, input)
 			if err == nil {
 				handle.publish = func(context.Context) (checkpointPublicationDisposition, error) { return 0, publishErr }

@@ -196,6 +196,39 @@ func TestServicePublicationCoordinatorAuthority(t *testing.T) {
 	}
 }
 
+func TestServiceCheckpointCoordinatorAuthority(t *testing.T) {
+	root := filepath.Join("..", "..", "..")
+	sources := architectureProductionGoSources(t, root)
+	service := sources["internal/runtime/projectstate/service.go"]
+	if !strings.Contains(service, "checkpointCoordinator") {
+		t.Fatal("service.go must own a checkpointCoordinator")
+	}
+	for method, delegation := range map[string]string{
+		"Checkpoint": "s.checkpoint.checkpoint(",
+		"Recover":    "s.checkpoint.recover(",
+	} {
+		body := architectureMethodBody(service, "func (s *Service) "+method)
+		if strings.Count(body, delegation) != 1 {
+			t.Fatalf("service.go method %s must delegate exactly once", method)
+		}
+		if strings.Contains(body, "WithImmediateWorkspace(") || strings.Contains(body, "checkpointGate") || strings.Contains(body, "prepareCheckpointArtifact") {
+			t.Fatalf("service.go method %s retains checkpoint or recovery authority", method)
+		}
+	}
+	coordinator := sources["internal/runtime/projectstate/checkpoint_coordinator.go"]
+	if strings.Count(coordinator, "*checkpointGateSet") != 1 {
+		t.Fatalf("checkpoint coordinator must own exactly one gate pointer")
+	}
+	for _, source := range []string{sources["internal/runtime/projectstate/checkpoint.go"], sources["internal/runtime/projectstate/checkpoint_recovery.go"]} {
+		if strings.Contains(source, "*Service") {
+			t.Fatal("checkpoint/recovery owners must not depend on Service")
+		}
+	}
+	if strings.Contains(coordinator, "checkpointGates") || strings.Contains(service, "checkpointGates") {
+		t.Fatal("checkpoint gate ownership must be coordinator-local")
+	}
+}
+
 func architectureMethodBody(source, signature string) string {
 	start := strings.Index(source, signature)
 	if start < 0 {
@@ -214,7 +247,7 @@ func TestCompactTargetedCommitConfirmationNeverReplays(t *testing.T) {
 		realWithImmediate := fixture.service.repo.WithImmediateWorkspace
 		transactionCalls := 0
 		unknown := fmt.Errorf("synthetic compact confirmation: %w", localstore.ErrCommitOutcomeUnknown)
-		fixture.service.withImmediateWorkspace = func(
+		fixture.service.checkpoint.withImmediateWorkspace = func(
 			ctx context.Context,
 			scope types.WorkspaceScope,
 			fn func(*localstore.WorkspaceMutationTx) error,
@@ -227,7 +260,7 @@ func TestCompactTargetedCommitConfirmationNeverReplays(t *testing.T) {
 			return err
 		}
 		confirmationCalls := 0
-		fixture.service.confirmWorkspaceCommit = func(
+		fixture.service.checkpoint.confirmWorkspaceCommit = func(
 			context.Context,
 			localstore.WorkspaceCommitConfirmation,
 			localstore.WorkspaceCommitConfirmation,
@@ -579,7 +612,7 @@ func TestCurrentWorksetIgnoresTerminalCorruptionAndAuditReportsIt(t *testing.T) 
 					fixture.target.Scope.ProjectID, fixture.target.Scope.WorkspaceID); err != nil {
 					t.Fatal(err)
 				}
-				fixture.service.prepareCheckpointArtifact = func(context.Context, checkpointArtifactInput) (checkpointArtifactHandle, error) {
+				fixture.service.checkpoint.prepareCheckpointArtifact = func(context.Context, checkpointArtifactInput) (checkpointArtifactHandle, error) {
 					panic("corrupt current checkpoint workset allocated an artifact")
 				}
 			},
@@ -910,10 +943,10 @@ func attemptArchitectureStatus(t *testing.T, fixture *architectureFixture) error
 
 func attemptArchitectureRecover(t *testing.T, fixture *architectureFixture) error {
 	t.Helper()
-	fixture.service.observeCheckpointRecoveryGit = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
+	fixture.service.checkpoint.observeRecoveryGit = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
 		panic("corrupt recovery journal observed Git")
 	}
-	fixture.service.recoverCheckpointFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+	fixture.service.checkpoint.recoverFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
 		panic("corrupt recovery journal touched filesystem")
 	}
 	got, err := fixture.service.Recover(context.Background(), fixture.recoverScope)
@@ -925,10 +958,10 @@ func attemptArchitectureRecover(t *testing.T, fixture *architectureFixture) erro
 
 func attemptArchitectureCurrentRecovery(t *testing.T, fixture *architectureFixture) error {
 	t.Helper()
-	fixture.service.observeCheckpointRecoveryGit = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
+	fixture.service.checkpoint.observeRecoveryGit = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
 		panic("current-workset no-op recovery observed Git")
 	}
-	fixture.service.recoverCheckpointFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+	fixture.service.checkpoint.recoverFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
 		panic("current-workset no-op recovery touched filesystem")
 	}
 	_, err := fixture.service.Recover(context.Background(), fixture.recoverScope)

@@ -173,7 +173,7 @@ func TestRecoverPreparedStageAbsentCandidateBackupIsBlocked(t *testing.T) {
 		renames++
 		return realRename(fromFD, from, toFD, to, flags)
 	}
-	fixture.service.recoverCheckpointFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+	fixture.service.checkpoint.recoverFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
 		return recoverCheckpointFilesystemWithDependencies(ctx, proof, checkpointArtifactDependencies{
 			readGit: readOnlyGitLimited, operations: operations,
 		})
@@ -246,7 +246,7 @@ func TestRecoverPrivateRootOpenFailureOwnsOnlyAcquiredFDs(t *testing.T) {
 			renames, fsyncs := 0, 0
 			operations.rename = func(int, string, int, string, uint) error { renames++; return errors.New("unexpected rename") }
 			operations.fsync = func(int) error { fsyncs++; return errors.New("unexpected fsync") }
-			fixture.service.recoverCheckpointFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+			fixture.service.checkpoint.recoverFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
 				return recoverCheckpointFilesystemWithDependencies(ctx, proof, checkpointArtifactDependencies{
 					readGit: readOnlyGitLimited, operations: operations,
 				})
@@ -283,15 +283,15 @@ func TestRecoverRejectsPublishedAndRecoveredNewPartialWorkspaceStateBeforeIO(t *
 				setServiceWorkspaceState(t, fixture.store, fixture.request.Scope, workspaceState)
 				before := recoveryDatabaseState(t, fixture.service, fixture.request.Scope)
 				gitCalls, pathCalls := 0, 0
-				realObserve := fixture.service.observeCheckpointRecoveryGit
+				realObserve := fixture.service.checkpoint.observeRecoveryGit
 				if realObserve == nil {
 					realObserve = observeCheckpointRecoveryGit
 				}
-				fixture.service.observeCheckpointRecoveryGit = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
+				fixture.service.checkpoint.observeRecoveryGit = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
 					gitCalls++
 					return realObserve(ctx, proof)
 				}
-				fixture.service.recoverCheckpointFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+				fixture.service.checkpoint.recoverFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
 					pathCalls++
 					return 0, errors.New("unexpected recovery path call")
 				}
@@ -326,9 +326,9 @@ func TestRecoverRestartConvergesExactCandidatePreLinearizationEvidence(t *testin
 	})
 
 	injected := errors.New("rollback recovered-old finalization")
-	realWithImmediate := fixture.service.withImmediateWorkspace
+	realWithImmediate := fixture.service.checkpoint.withImmediateWorkspace
 	transactions := 0
-	fixture.service.withImmediateWorkspace = func(
+	fixture.service.checkpoint.withImmediateWorkspace = func(
 		ctx context.Context,
 		scope types.WorkspaceScope,
 		fn func(*localstore.WorkspaceMutationTx) error,
@@ -365,7 +365,7 @@ func TestRecoverRestartConvergesExactCandidatePreLinearizationEvidence(t *testin
 		renames++
 		return realRename(fromFD, from, toFD, to, flags)
 	}
-	fixture.service.recoverCheckpointFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+	fixture.service.checkpoint.recoverFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
 		return recoverCheckpointFilesystemWithDependencies(ctx, proof, checkpointArtifactDependencies{
 			readGit: readOnlyGitLimited, operations: operations,
 		})
@@ -426,7 +426,7 @@ func TestRecoverRestartRestoresCandidateBackupFromInterruptedRenameRaceOnce(t *t
 		renames++
 		return realRename(fromFD, from, toFD, to, flags)
 	}
-	fixture.service.recoverCheckpointFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+	fixture.service.checkpoint.recoverFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
 		return recoverCheckpointFilesystemWithDependencies(ctx, proof, checkpointArtifactDependencies{
 			readGit: readOnlyGitLimited, operations: operations,
 		})
@@ -683,7 +683,7 @@ func TestCheckpointAndRecoverRejectNestedMountSubstitutionBeforeRename(t *testin
 					before = recoveryDatabaseState(t, preparedFixture.service, preparedFixture.request.Scope)
 					beforePaths := recoveryScopePaths(t, before)
 					prepared = preparedFixture.journal
-					preparedFixture.service.recoverCheckpointFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+					preparedFixture.service.checkpoint.recoverFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
 						dependencies := checkpointArtifactDependencies{readGit: readOnlyGitLimited}
 						artifact, _, _, err := openCheckpointRecoveryArtifact(ctx, proof, dependencies)
 						if err != nil {
@@ -827,7 +827,7 @@ func TestCheckpointAndRecoverRevalidatePersistentRootsAtClassifierTail(t *testin
 					return realFsync(fd)
 				}
 				dependencies.operations = operations
-				fixture.service.recoverCheckpointFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+				fixture.service.checkpoint.recoverFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
 					return recoverCheckpointFilesystemWithDependencies(ctx, proof, dependencies)
 				}
 				got, err := fixture.service.Recover(context.Background(), fixture.request.Scope)
@@ -877,7 +877,7 @@ func TestCheckpointAndRecoverRevalidatePersistentRootsImmediatelyBeforeEveryRena
 						}
 						return realFsync(fd)
 					}
-					fixture.service.recoverCheckpointFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+					fixture.service.checkpoint.recoverFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
 						return recoverCheckpointFilesystemWithDependencies(ctx, proof, checkpointArtifactDependencies{
 							readGit: func(ctx context.Context, root string, limit int, args ...string) ([]byte, error) {
 								output, err := readOnlyGitLimited(ctx, root, limit, args...)
@@ -1327,7 +1327,7 @@ func TestRecoverRestartConvergesRecoveryBackupToLiveBoundaries(t *testing.T) {
 					},
 					operations: operations,
 				}
-				fixture.service.recoverCheckpointFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+				fixture.service.checkpoint.recoverFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
 					return recoverCheckpointFilesystemWithDependencies(ctx, proof, dependencies)
 				}
 
@@ -1375,7 +1375,7 @@ func TestRecoverRestartConvergesRecoveryBackupToLiveBoundaries(t *testing.T) {
 					}
 					return restartFsync(fd)
 				}
-				fixture.service.recoverCheckpointFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+				fixture.service.checkpoint.recoverFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
 					return recoverCheckpointFilesystemWithDependencies(ctx, proof, checkpointArtifactDependencies{
 						readGit: readOnlyGitLimited, operations: restartOperations,
 					})
@@ -1446,7 +1446,7 @@ func TestRecoverFsyncFailureRetainsPreparedThenConvergesOnRetry(t *testing.T) {
 					}
 					return realFsync(fd)
 				}
-				fixture.service.recoverCheckpointFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+				fixture.service.checkpoint.recoverFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
 					return recoverCheckpointFilesystemWithDependencies(ctx, proof, checkpointArtifactDependencies{readGit: readOnlyGitLimited, operations: operations})
 				}
 
@@ -1776,7 +1776,7 @@ func TestRecoverClassifiesPersistentRootsAsPreconditionsAndContainedEvidenceAsBl
 			beforeDatabase := recoveryDatabaseState(t, fixture.service, fixture.request.Scope)
 			beforePaths := recoveryScopePaths(t, beforeDatabase)
 			dependencies := test.dependencies(t, fixture, cause)
-			fixture.service.recoverCheckpointFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+			fixture.service.checkpoint.recoverFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
 				return recoverCheckpointFilesystemWithDependencies(ctx, proof, dependencies)
 			}
 
@@ -1816,7 +1816,7 @@ func newCheckpointRecoveryLinuxFixture(t *testing.T, driverState string) checkpo
 	setServiceWorkspaceState(t, fixture.store, request.Scope, "clean")
 	if driverState == "prepared" {
 		injected := errors.New("retain prepared recovery journal")
-		fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
+		fixture.service.checkpoint.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
 			handle, err := defaultPrepareCheckpointArtifact(ctx, input)
 			if err == nil {
 				handle.publish = func(context.Context) (checkpointPublicationDisposition, error) { return 0, injected }
@@ -1827,7 +1827,7 @@ func newCheckpointRecoveryLinuxFixture(t *testing.T, driverState string) checkpo
 			t.Fatalf("prepare recovery fixture=(%+v,%v)", result, err)
 		}
 	} else if driverState == "published" {
-		fixture.service.prepareCheckpointArtifact = nil
+		fixture.service.checkpoint.prepareCheckpointArtifact = nil
 		if result, err := fixture.service.Checkpoint(context.Background(), request); err != nil || result.JournalID == "" {
 			t.Fatalf("publish recovery fixture=(%+v,%v)", result, err)
 		}
@@ -1867,7 +1867,7 @@ func checkpointRecoveryInstallFsyncRecorder(t *testing.T, fixture checkpointReco
 		}
 		return realFsync(fd)
 	}
-	fixture.service.recoverCheckpointFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+	fixture.service.checkpoint.recoverFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
 		return recoverCheckpointFilesystemWithDependencies(ctx, proof, checkpointArtifactDependencies{
 			readGit: readOnlyGitLimited, operations: operations,
 		})
@@ -1986,7 +1986,7 @@ func checkpointRecoveryUseRealPublisher(
 	configure func(*checkpointArtifact),
 ) {
 	t.Helper()
-	fixture.service.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
+	fixture.service.checkpoint.prepareCheckpointArtifact = func(ctx context.Context, input checkpointArtifactInput) (checkpointArtifactHandle, error) {
 		artifact, err := prepareCheckpointArtifactWithDependencies(ctx, input, checkpointArtifactDependencies{readGit: readOnlyGitLimited})
 		if err != nil {
 			return checkpointArtifactHandle{}, err
@@ -2102,9 +2102,9 @@ func checkpointRecoveryCapturePreparedJournal(
 	expected *localstore.WorkspaceMaterializationRecord,
 ) {
 	t.Helper()
-	realWithImmediate := fixture.service.withImmediateWorkspace
+	realWithImmediate := fixture.service.checkpoint.withImmediateWorkspace
 	transactions := 0
-	fixture.service.withImmediateWorkspace = func(
+	fixture.service.checkpoint.withImmediateWorkspace = func(
 		ctx context.Context,
 		scope types.WorkspaceScope,
 		fn func(*localstore.WorkspaceMutationTx) error,
@@ -2202,7 +2202,7 @@ func checkpointRecoveryExerciseRenameResult(t *testing.T, source, outcome string
 		}
 		return realFsync(fd)
 	}
-	fixture.service.recoverCheckpointFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+	fixture.service.checkpoint.recoverFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
 		return recoverCheckpointFilesystemWithDependencies(ctx, proof, checkpointArtifactDependencies{readGit: readOnlyGitLimited, operations: operations})
 	}
 

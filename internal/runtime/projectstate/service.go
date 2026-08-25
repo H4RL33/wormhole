@@ -68,26 +68,21 @@ type withImmediateWorkspaceFunc func(
 ) error
 
 type Service struct {
-	repo                               *localstore.WorkspaceRepo
-	legacyBackupRoot                   string
-	registrationTimeout                time.Duration
-	registration                       *registrationCoordinator
-	workspace                          *workspaceCoordinator
-	publication                        *publicationCoordinator
-	readWorkingTree                    func(string) (state.Tree, error)
-	observeGitBase                     func(context.Context, ObserveGitBaseRequest) (gitBaseObservation, error)
-	observePublicationOrigin           func(context.Context, string) (publicationOriginObservation, error)
-	observePublicationTrust            func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error)
-	withImmediateWorkspace             withImmediateWorkspaceFunc
-	withImmediateWorkspaceTransition   withImmediateWorkspaceTransitionFunc
-	now                                func() time.Time
-	newStashID                         func() (string, error)
-	prepareCheckpointArtifact          prepareCheckpointArtifactFunc
-	confirmWorkspaceCommit             confirmWorkspaceCommitFunc
-	confirmPublicationTransitionCommit confirmPublicationTransitionCommitFunc
-	observeCheckpointRecoveryGit       checkpointRecoveryGitObserver
-	recoverCheckpointFilesystem        checkpointRecoveryFilesystemFunc
-	checkpointGates                    checkpointGateSet
+	repo                             *localstore.WorkspaceRepo
+	legacyBackupRoot                 string
+	registrationTimeout              time.Duration
+	registration                     *registrationCoordinator
+	workspace                        *workspaceCoordinator
+	publication                      *publicationCoordinator
+	checkpoint                       *checkpointCoordinator
+	readWorkingTree                  func(string) (state.Tree, error)
+	observeGitBase                   func(context.Context, ObserveGitBaseRequest) (gitBaseObservation, error)
+	observePublicationOrigin         func(context.Context, string) (publicationOriginObservation, error)
+	observePublicationTrust          func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error)
+	withImmediateWorkspace           withImmediateWorkspaceFunc
+	withImmediateWorkspaceTransition withImmediateWorkspaceTransitionFunc
+	now                              func() time.Time
+	newStashID                       func() (string, error)
 }
 
 func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service, error) {
@@ -97,24 +92,20 @@ func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service,
 	service := &Service{
 		repo: repo, registrationTimeout: workspaceRegistrationTimeout,
 		readWorkingTree: ReadWorkingTreeNoFollow, observeGitBase: observeGitBaseOutside,
-		observePublicationOrigin:           observePublicationOrigin,
-		withImmediateWorkspace:             repo.WithImmediateWorkspace,
-		withImmediateWorkspaceTransition:   repo.WithImmediateWorkspaceTransition,
-		now:                                time.Now,
-		newStashID:                         newCanonicalStashID,
-		prepareCheckpointArtifact:          defaultPrepareCheckpointArtifact,
-		confirmWorkspaceCommit:             repo.ConfirmWorkspaceCommit,
-		confirmPublicationTransitionCommit: confirmPublicationCommit,
-		observeCheckpointRecoveryGit:       observeCheckpointRecoveryGit,
-		recoverCheckpointFilesystem:        recoverCheckpointFilesystem,
+		observePublicationOrigin:         observePublicationOrigin,
+		withImmediateWorkspace:           repo.WithImmediateWorkspace,
+		withImmediateWorkspaceTransition: repo.WithImmediateWorkspaceTransition,
+		now:                              time.Now,
+		newStashID:                       newCanonicalStashID,
 	}
 	service.registration = newRegistrationCoordinator(service)
 	service.publication = &publicationCoordinator{
 		repo: repo, observeOrigin: service.observePublicationOrigin,
 		observeTrust: service.observePublicationTrust, observeGitBase: service.observeGitBase,
 		withImmediateWorkspace: service.withImmediateWorkspace, now: service.now,
-		confirmTransitionCommit: service.confirmPublicationTransitionCommit,
+		confirmTransitionCommit: confirmPublicationCommit,
 	}
+	service.checkpoint = newCheckpointCoordinator(service)
 	service.workspace = &workspaceCoordinator{repo: repo, readPublicationReview: service.publication.readPublicationReview}
 	if config.LegacyIntegrationBackupRoot == "" {
 		return service, nil
@@ -386,4 +377,18 @@ func newWorkspaceID() (types.WorkspaceID, error) {
 	value[8] = (value[8] & 0x3f) | 0x80
 	return types.WorkspaceID(fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		value[0:4], value[4:6], value[6:8], value[8:10], value[10:16])), nil
+}
+
+func (s *Service) Checkpoint(ctx context.Context, req CheckpointRequest) (CheckpointResult, error) {
+	if s == nil || s.checkpoint == nil {
+		return CheckpointResult{}, localstore.ErrNotFound
+	}
+	return s.checkpoint.checkpoint(ctx, req)
+}
+
+func (s *Service) Recover(ctx context.Context, scope types.WorkspaceScope) (WorkspaceStatus, error) {
+	if s == nil || s.checkpoint == nil {
+		return WorkspaceStatus{}, localstore.ErrNotFound
+	}
+	return s.checkpoint.recover(ctx, scope)
 }

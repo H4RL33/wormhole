@@ -422,10 +422,10 @@ func TestRecoverTerminalOrEmptyHistoryReturnsDatabaseComposedStatusWithoutGitOrP
 			if err := os.Rename(root, root+"-moved-for-recovery"); err != nil {
 				t.Fatal(err)
 			}
-			service.observeCheckpointRecoveryGit = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
+			service.checkpoint.observeRecoveryGit = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
 				panic("no-work recovery observed Git")
 			}
-			service.recoverCheckpointFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+			service.checkpoint.recoverFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
 				panic("no-work recovery touched paths")
 			}
 
@@ -469,7 +469,7 @@ func TestRecoverFailsScopeCheckoutRootAndGitPreconditionsBeforePathMutation(t *t
 		wantCause error
 	}{
 		{name: "Git bundle", wantCause: gitFailure, mutate: func(fixture *checkpointCoordinatorFixture, _ CheckpointRequest) {
-			fixture.service.observeCheckpointRecoveryGit = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
+			fixture.service.checkpoint.observeRecoveryGit = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
 				return checkpointRecoveryGitObservation{}, gitFailure
 			}
 		}},
@@ -484,7 +484,7 @@ func TestRecoverFailsScopeCheckoutRootAndGitPreconditionsBeforePathMutation(t *t
 			before := recoveryDatabaseState(t, fixture.service, request.Scope)
 			test.mutate(fixture, request)
 			pathCalls := 0
-			fixture.service.recoverCheckpointFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+			fixture.service.checkpoint.recoverFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
 				pathCalls++
 				return checkpointRecoveryFilesystemOutcome(99), nil
 			}
@@ -510,10 +510,10 @@ func TestRecoverFailsScopeCheckoutRootAndGitPreconditionsBeforePathMutation(t *t
 			t.Fatal(err)
 		}
 		before := recoveryDatabaseState(t, fixture.service, request.Scope)
-		fixture.service.observeCheckpointRecoveryGit = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
+		fixture.service.checkpoint.observeRecoveryGit = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
 			panic("invalid journal path observed Git")
 		}
-		fixture.service.recoverCheckpointFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+		fixture.service.checkpoint.recoverFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
 			panic("invalid journal path touched filesystem")
 		}
 		got, err := fixture.service.Recover(context.Background(), request.Scope)
@@ -559,17 +559,17 @@ func TestRecoverHoldsOneImmediateTransactionAcrossOneGitBundleAndConvergence(t *
 
 	realWithImmediate := fixture.service.repo.WithImmediateWorkspace
 	transactionCalls := 0
-	fixture.service.withImmediateWorkspace = func(ctx context.Context, scope types.WorkspaceScope, fn func(*localstore.WorkspaceMutationTx) error) error {
+	fixture.service.checkpoint.withImmediateWorkspace = func(ctx context.Context, scope types.WorkspaceScope, fn func(*localstore.WorkspaceMutationTx) error) error {
 		transactionCalls++
 		return realWithImmediate(ctx, scope, fn)
 	}
 	gitCalls := 0
-	fixture.service.observeCheckpointRecoveryGit = func(_ context.Context, proof checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
+	fixture.service.checkpoint.observeRecoveryGit = func(_ context.Context, proof checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
 		gitCalls++
 		return recoveryPlannerObservation(t, proof, "prepared"), nil
 	}
 	filesystemCalls := 0
-	fixture.service.recoverCheckpointFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+	fixture.service.checkpoint.recoverFilesystem = func(ctx context.Context, proof checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
 		filesystemCalls++
 		blockedCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
 		defer cancel()
@@ -611,10 +611,10 @@ func TestWorkspaceRevisionRecoveryFinalizationAdvancesOnce(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			fixture, request := recoveryDriverPlanFixture(t, test.driver)
 			beforeRevision := workspaceRevisionForProjectStateTest(t, fixture.service, request.Scope)
-			fixture.service.observeCheckpointRecoveryGit = func(_ context.Context, proof checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
+			fixture.service.checkpoint.observeRecoveryGit = func(_ context.Context, proof checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
 				return recoveryPlannerObservation(t, proof, test.driver), nil
 			}
-			fixture.service.recoverCheckpointFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+			fixture.service.checkpoint.recoverFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
 				return test.filesystem, nil
 			}
 
@@ -663,18 +663,18 @@ func TestRecoverUnknownCommitConfirmationMatrix(t *testing.T) {
 			fixture, request := recoveryDriverPlanFixture(t, test.driver)
 			before := recoveryDatabaseState(t, fixture.service, request.Scope)
 			acceptedBefore := before.workspace.Binding
-			fixture.service.observeCheckpointRecoveryGit = func(_ context.Context, proof checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
+			fixture.service.checkpoint.observeRecoveryGit = func(_ context.Context, proof checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
 				return recoveryPlannerObservation(t, proof, test.driver), nil
 			}
 			filesystemCalls := 0
-			fixture.service.recoverCheckpointFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+			fixture.service.checkpoint.recoverFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
 				filesystemCalls++
 				return test.filesystem, nil
 			}
 			realWithImmediate := fixture.service.repo.WithImmediateWorkspace
 			transactionCalls := 0
 			unknown := fmt.Errorf("synthetic recovery final commit: %w", localstore.ErrCommitOutcomeUnknown)
-			fixture.service.withImmediateWorkspace = func(
+			fixture.service.checkpoint.withImmediateWorkspace = func(
 				ctx context.Context,
 				scope types.WorkspaceScope,
 				fn func(*localstore.WorkspaceMutationTx) error,
@@ -687,7 +687,7 @@ func TestRecoverUnknownCommitConfirmationMatrix(t *testing.T) {
 				return err
 			}
 			confirmCalls := 0
-			fixture.service.confirmWorkspaceCommit = func(
+			fixture.service.checkpoint.confirmWorkspaceCommit = func(
 				context.Context,
 				localstore.WorkspaceCommitConfirmation,
 				localstore.WorkspaceCommitConfirmation,
@@ -801,10 +801,10 @@ func recoveryAssertCrossScopeRejected(
 	neighborBefore := recoveryDatabaseState(t, service, neighborScope)
 	driverPathsBefore := recoveryScopePaths(t, driverBefore)
 	neighborPathsBefore := recoveryScopePaths(t, neighborBefore)
-	service.observeCheckpointRecoveryGit = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
+	service.checkpoint.observeRecoveryGit = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryGitObservation, error) {
 		panic("cross-scope recovery observed Git")
 	}
-	service.recoverCheckpointFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
+	service.checkpoint.recoverFilesystem = func(context.Context, checkpointRecoveryProof) (checkpointRecoveryFilesystemOutcome, error) {
 		panic("cross-scope recovery touched paths")
 	}
 	got, err := service.Recover(context.Background(), requested)

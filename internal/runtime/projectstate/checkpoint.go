@@ -86,16 +86,8 @@ func defaultPrepareCheckpointArtifact(ctx context.Context, input checkpointArtif
 	}, nil
 }
 
-func (s *Service) Checkpoint(ctx context.Context, req CheckpointRequest) (CheckpointResult, error) {
-	result, err := s.checkpoint(ctx, req)
-	if err != nil {
-		return CheckpointResult{}, err
-	}
-	return result, nil
-}
-
-func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (CheckpointResult, error) {
-	if s == nil || s.repo == nil || ctx == nil {
+func (c *checkpointCoordinator) checkpoint(ctx context.Context, req CheckpointRequest) (CheckpointResult, error) {
+	if c == nil || c.repo == nil || ctx == nil {
 		return CheckpointResult{}, localstore.ErrNotFound
 	}
 	if req.PublicationReviewDigest != nil {
@@ -105,31 +97,31 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 	if !validPublicationScope(req.Scope) {
 		return CheckpointResult{}, localstore.ErrNotFound
 	}
-	release, err := s.checkpointGates.acquire(ctx, req.Scope)
+	release, err := c.gates.acquire(ctx, req.Scope)
 	if err != nil {
 		return CheckpointResult{}, err
 	}
 	defer release()
 
-	firstOutside, err := s.checkpointOutsideTrust(ctx, req.Scope)
+	firstOutside, err := c.checkpointOutsideTrust(ctx, req.Scope)
 	if err != nil {
 		return CheckpointResult{}, err
 	}
-	withWorkspace := s.withImmediateWorkspace
+	withWorkspace := c.withImmediateWorkspace
 	if withWorkspace == nil {
-		withWorkspace = s.repo.WithImmediateWorkspace
+		withWorkspace = c.repo.WithImmediateWorkspace
 	}
-	prepareArtifact := s.prepareCheckpointArtifact
+	prepareArtifact := c.prepareCheckpointArtifact
 	if prepareArtifact == nil {
 		prepareArtifact = defaultPrepareCheckpointArtifact
 	}
-	confirmCommit := s.confirmWorkspaceCommit
+	confirmCommit := c.confirmWorkspaceCommit
 	if confirmCommit == nil {
-		confirmCommit = s.repo.ConfirmWorkspaceCommit
+		confirmCommit = c.repo.ConfirmWorkspaceCommit
 	}
 	var confirmPublication confirmPublicationTransitionCommitFunc
-	if s.publication != nil {
-		confirmPublication = s.publication.confirmTransitionCommit
+	if c.publication != nil {
+		confirmPublication = c.publication.confirmTransitionCommit
 	}
 	if confirmPublication == nil {
 		confirmPublication = confirmPublicationCommit
@@ -164,7 +156,7 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 		if err != nil {
 			return err
 		}
-		live, err := s.checkpointReadLive(req.Root, workspace.Binding, req.ExpectedWorkingTreeDigest, nil)
+		live, err := c.checkpointReadLive(req.Root, workspace.Binding, req.ExpectedWorkingTreeDigest, nil)
 		if err != nil {
 			return err
 		}
@@ -194,7 +186,7 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 			return err
 		}
 		var reviewAttempt publicationTransitionAttempt
-		firstReview, err = s.publication.publicationReviewInTransaction(
+		firstReview, err = c.publication.publicationReviewInTransaction(
 			ctx, tx, firstOutside.workspace, firstOutside.observed, firstOutside.observer, &reviewAttempt,
 		)
 		if err != nil {
@@ -231,7 +223,7 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 		if err := validateCheckpointArtifactHandle(artifact); err != nil {
 			return err
 		}
-		if _, err := s.checkpointReadLive(req.Root, workspace.Binding, req.ExpectedWorkingTreeDigest, firstPlan.PriorTree); err != nil {
+		if _, err := c.checkpointReadLive(req.Root, workspace.Binding, req.ExpectedWorkingTreeDigest, firstPlan.PriorTree); err != nil {
 			return err
 		}
 		firstPrior, err = tx.CaptureMaterializationCommitConfirmation(ctx, artifact.evidence.JournalID)
@@ -276,7 +268,7 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 			return CheckpointResult{}, firstErr
 		}
 		if firstInvalidated {
-			if _, confirmErr := confirmPublication(ctx, s.repo, req.Scope, firstPublicationAttempt, firstErr); confirmErr != nil {
+			if _, confirmErr := confirmPublication(ctx, c.repo, req.Scope, firstPublicationAttempt, firstErr); confirmErr != nil {
 				return CheckpointResult{}, confirmErr
 			}
 		} else {
@@ -293,7 +285,7 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 		return CheckpointResult{}, ErrPublicationUnclassified
 	}
 
-	secondOutside, err := s.checkpointOutsideTrust(ctx, req.Scope)
+	secondOutside, err := c.checkpointOutsideTrust(ctx, req.Scope)
 	if err != nil {
 		return CheckpointResult{}, err
 	}
@@ -321,7 +313,7 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 		if err != nil {
 			return err
 		}
-		live, err := s.checkpointReadLive(req.Root, workspace.Binding, req.ExpectedWorkingTreeDigest, firstPlan.PriorTree)
+		live, err := c.checkpointReadLive(req.Root, workspace.Binding, req.ExpectedWorkingTreeDigest, firstPlan.PriorTree)
 		if err != nil {
 			return err
 		}
@@ -355,7 +347,7 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 			return fmt.Errorf("projectstate: checkpoint plan changed before publication review")
 		}
 		var reviewAttempt publicationTransitionAttempt
-		review, err := s.publication.publicationReviewInTransaction(
+		review, err := c.publication.publicationReviewInTransaction(
 			ctx, tx, secondOutside.workspace, secondOutside.observed, secondOutside.observer, &reviewAttempt,
 		)
 		if err != nil {
@@ -446,7 +438,7 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 			return CheckpointResult{}, secondErr
 		}
 		if secondInvalidated {
-			if _, confirmErr := confirmPublication(ctx, s.repo, req.Scope, secondPublicationAttempt, secondErr); confirmErr != nil {
+			if _, confirmErr := confirmPublication(ctx, c.repo, req.Scope, secondPublicationAttempt, secondErr); confirmErr != nil {
 				return CheckpointResult{}, confirmErr
 			}
 		} else {
@@ -584,8 +576,8 @@ func (g *checkpointGateSet) releaseReference(scope types.WorkspaceScope, entry *
 	g.mu.Unlock()
 }
 
-func (s *Service) checkpointOutsideTrust(ctx context.Context, scope types.WorkspaceScope) (checkpointOutsideTrust, error) {
-	workspace, err := s.repo.Workspace(ctx, scope)
+func (c *checkpointCoordinator) checkpointOutsideTrust(ctx context.Context, scope types.WorkspaceScope) (checkpointOutsideTrust, error) {
+	workspace, err := c.repo.Workspace(ctx, scope)
 	if err != nil {
 		return checkpointOutsideTrust{}, err
 	}
@@ -593,7 +585,7 @@ func (s *Service) checkpointOutsideTrust(ctx context.Context, scope types.Worksp
 	if err != nil {
 		return checkpointOutsideTrust{}, err
 	}
-	observer := s.publication.publicationTrustObserver()
+	observer := c.publication.publicationTrustObserver()
 	observed, err := observer(ctx, workspace.Binding)
 	if err != nil {
 		return checkpointOutsideTrust{}, err
@@ -643,13 +635,13 @@ func checkpointValidateTransactionRequest(
 	return workspace, nil
 }
 
-func (s *Service) checkpointReadLive(
+func (c *checkpointCoordinator) checkpointReadLive(
 	root string,
 	binding types.WorkspaceBinding,
 	expected state.Digest,
 	first state.Tree,
 ) (state.Tree, error) {
-	reader := s.readWorkingTree
+	reader := c.readWorkingTree
 	if reader == nil {
 		reader = ReadWorkingTreeNoFollow
 	}
