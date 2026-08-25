@@ -544,9 +544,9 @@ func TestCheckpointPendingPrecedesOwnedRequestValidationAndMutation(t *testing.T
 		t.Fatal(err)
 	}
 	before := readCheckpointDisposition(t, fixture.service, req.Scope)
-	realObserver := fixture.service.publicationTrustObserver()
+	realObserver := fixture.service.publication.publicationTrustObserver()
 	observerCalls := 0
-	fixture.service.observePublicationTrust = func(ctx context.Context, binding types.WorkspaceBinding) (publicationTrustObservation, error) {
+	fixture.service.publication.observeTrust = func(ctx context.Context, binding types.WorkspaceBinding) (publicationTrustObservation, error) {
 		observerCalls++
 		return realObserver(ctx, binding)
 	}
@@ -642,9 +642,9 @@ func TestCheckpointGateSerializesCancelsSeparatesAndPrunes(t *testing.T) {
 
 func TestCheckpointServiceGateSerializesSameScopeBeforeOutsideObservation(t *testing.T) {
 	fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
-	realObserver := fixture.service.publicationTrustObserver()
+	realObserver := fixture.service.publication.publicationTrustObserver()
 	var observerCalls atomic.Int32
-	fixture.service.observePublicationTrust = func(ctx context.Context, binding types.WorkspaceBinding) (publicationTrustObservation, error) {
+	fixture.service.publication.observeTrust = func(ctx context.Context, binding types.WorkspaceBinding) (publicationTrustObservation, error) {
 		observerCalls.Add(1)
 		return realObserver(ctx, binding)
 	}
@@ -806,9 +806,9 @@ func TestCheckpointStableOriginMismatchInvalidatesInEachTransaction(t *testing.T
 	})
 	t.Run("second transaction", func(t *testing.T) {
 		fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
-		realObserver := fixture.service.publicationTrustObserver()
+		realObserver := fixture.service.publication.publicationTrustObserver()
 		calls := 0
-		fixture.service.observePublicationTrust = func(ctx context.Context, binding types.WorkspaceBinding) (publicationTrustObservation, error) {
+		fixture.service.publication.observeTrust = func(ctx context.Context, binding types.WorkspaceBinding) (publicationTrustObservation, error) {
 			calls++
 			if calls == 3 {
 				runGit(t, fixture.repository.root, "remote", "set-url", "origin", "https://github.com/acme/changed.git")
@@ -885,9 +885,9 @@ func TestCheckpointStickyInvalidationUnknownCommitConfirmation(t *testing.T) {
 			if test.transaction == 1 {
 				runGit(t, fixture.repository.root, "remote", "set-url", "origin", "https://github.com/acme/changed.git")
 			} else {
-				realObserver := fixture.service.publicationTrustObserver()
+				realObserver := fixture.service.publication.publicationTrustObserver()
 				observerCalls := 0
-				fixture.service.observePublicationTrust = func(ctx context.Context, binding types.WorkspaceBinding) (publicationTrustObservation, error) {
+				fixture.service.publication.observeTrust = func(ctx context.Context, binding types.WorkspaceBinding) (publicationTrustObservation, error) {
 					observerCalls++
 					if observerCalls == 3 {
 						runGit(t, fixture.repository.root, "remote", "set-url", "origin", "https://github.com/acme/changed.git")
@@ -911,7 +911,7 @@ func TestCheckpointStickyInvalidationUnknownCommitConfirmation(t *testing.T) {
 				return err
 			}
 			confirmCalls := 0
-			fixture.service.confirmPublicationTransitionCommit = func(
+			fixture.service.publication.confirmTransitionCommit = func(
 				_ context.Context,
 				_ *localstore.WorkspaceRepo,
 				_ types.WorkspaceScope,
@@ -945,9 +945,9 @@ func TestCheckpointStickyInvalidationUnknownCommitConfirmation(t *testing.T) {
 
 func TestCheckpointSecondPlanDriftPrecedesOriginInvalidation(t *testing.T) {
 	fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
-	realObserver := fixture.service.publicationTrustObserver()
+	realObserver := fixture.service.publication.publicationTrustObserver()
 	calls := 0
-	fixture.service.observePublicationTrust = func(ctx context.Context, binding types.WorkspaceBinding) (publicationTrustObservation, error) {
+	fixture.service.publication.observeTrust = func(ctx context.Context, binding types.WorkspaceBinding) (publicationTrustObservation, error) {
 		calls++
 		if calls == 3 {
 			accepted := fixture.mustAcceptedSnapshot(t)
@@ -1177,7 +1177,7 @@ func TestCheckpointRequestAndLiveValidationPrecedence(t *testing.T) {
 	}
 
 	fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
-	fixture.service.observePublicationTrust = func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error) {
+	fixture.service.publication.observeTrust = func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error) {
 		panic("invalid scope observed workspace")
 	}
 	req.Scope.WorkspaceID = "bad"
@@ -1270,7 +1270,7 @@ func TestCheckpointResolvedAndOtherWorkspaceConflictsDoNotBlock(t *testing.T) {
 func TestCheckpointHelperFailuresRemainClosed(t *testing.T) {
 	fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
 	observerErr := errors.New("outside observer failed")
-	fixture.service.observePublicationTrust = func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error) {
+	fixture.service.publication.observeTrust = func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error) {
 		return publicationTrustObservation{}, observerErr
 	}
 	if got, err := fixture.service.Checkpoint(context.Background(), req); !errors.Is(err, observerErr) || got != (CheckpointResult{}) {
@@ -1288,9 +1288,9 @@ func TestCheckpointHelperFailuresRemainClosed(t *testing.T) {
 func TestCheckpointSecondTransactionLateOperationAndConflictPublishNothing(t *testing.T) {
 	t.Run("late operation", func(t *testing.T) {
 		fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
-		realObserver := fixture.service.publicationTrustObserver()
+		realObserver := fixture.service.publication.publicationTrustObserver()
 		calls := 0
-		fixture.service.observePublicationTrust = func(ctx context.Context, binding types.WorkspaceBinding) (publicationTrustObservation, error) {
+		fixture.service.publication.observeTrust = func(ctx context.Context, binding types.WorkspaceBinding) (publicationTrustObservation, error) {
 			calls++
 			if calls == 3 {
 				accepted := fixture.mustAcceptedSnapshot(t)
@@ -1315,9 +1315,9 @@ func TestCheckpointSecondTransactionLateOperationAndConflictPublishNothing(t *te
 	})
 	t.Run("conflict", func(t *testing.T) {
 		fixture, req, _ := newCheckpointCoordinatorFixture(t, types.PublicationLocalOnly, diffActorEnvelope())
-		realObserver := fixture.service.publicationTrustObserver()
+		realObserver := fixture.service.publication.publicationTrustObserver()
 		calls := 0
-		fixture.service.observePublicationTrust = func(ctx context.Context, binding types.WorkspaceBinding) (publicationTrustObservation, error) {
+		fixture.service.publication.observeTrust = func(ctx context.Context, binding types.WorkspaceBinding) (publicationTrustObservation, error) {
 			calls++
 			if calls == 3 {
 				insertServiceConflict(t, fixture.store, req.Scope, "checkpoint conflict", state.RecordKey{Kind: "task", ID: "22222222-2222-4222-8222-222222222222"}, "open")
@@ -1937,9 +1937,9 @@ func waitCheckpointGateRefs(t *testing.T, gates *checkpointGateSet, scope types.
 
 func checkpointOnSecondOutsideObservation(t *testing.T, fixture *checkpointCoordinatorFixture, mutate func()) {
 	t.Helper()
-	realObserver := fixture.service.publicationTrustObserver()
+	realObserver := fixture.service.publication.publicationTrustObserver()
 	calls := 0
-	fixture.service.observePublicationTrust = func(ctx context.Context, binding types.WorkspaceBinding) (publicationTrustObservation, error) {
+	fixture.service.publication.observeTrust = func(ctx context.Context, binding types.WorkspaceBinding) (publicationTrustObservation, error) {
 		calls++
 		if calls == 3 {
 			mutate()

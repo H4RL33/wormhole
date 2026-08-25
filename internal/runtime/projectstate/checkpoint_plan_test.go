@@ -553,7 +553,7 @@ func checkpointPlanFixture(t *testing.T) checkpointPlanInput {
 	if err != nil {
 		t.Fatal(err)
 	}
-	observer := fixture.service.publicationTrustObserver()
+	observer := fixture.service.publication.publicationTrustObserver()
 	outside, err := observer(context.Background(), workspace.Binding)
 	if err != nil {
 		t.Fatal(err)
@@ -564,7 +564,7 @@ func checkpointPlanFixture(t *testing.T) checkpointPlanInput {
 	var attempt publicationTransitionAttempt
 	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		var transactionErr error
-		evidence, transactionErr = fixture.service.publicationReviewInTransaction(
+		evidence, transactionErr = fixture.service.publication.publicationReviewInTransaction(
 			context.Background(), tx, workspace, outside, observer, &attempt,
 		)
 		if transactionErr != nil {

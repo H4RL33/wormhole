@@ -127,7 +127,10 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 	if confirmCommit == nil {
 		confirmCommit = s.repo.ConfirmWorkspaceCommit
 	}
-	confirmPublication := s.confirmPublicationTransitionCommit
+	var confirmPublication confirmPublicationTransitionCommitFunc
+	if s.publication != nil {
+		confirmPublication = s.publication.confirmTransitionCommit
+	}
 	if confirmPublication == nil {
 		confirmPublication = confirmPublicationCommit
 	}
@@ -191,7 +194,7 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 			return err
 		}
 		var reviewAttempt publicationTransitionAttempt
-		firstReview, err = s.publicationReviewInTransaction(
+		firstReview, err = s.publication.publicationReviewInTransaction(
 			ctx, tx, firstOutside.workspace, firstOutside.observed, firstOutside.observer, &reviewAttempt,
 		)
 		if err != nil {
@@ -352,7 +355,7 @@ func (s *Service) checkpoint(ctx context.Context, req CheckpointRequest) (Checkp
 			return fmt.Errorf("projectstate: checkpoint plan changed before publication review")
 		}
 		var reviewAttempt publicationTransitionAttempt
-		review, err := s.publicationReviewInTransaction(
+		review, err := s.publication.publicationReviewInTransaction(
 			ctx, tx, secondOutside.workspace, secondOutside.observed, secondOutside.observer, &reviewAttempt,
 		)
 		if err != nil {
@@ -590,7 +593,7 @@ func (s *Service) checkpointOutsideTrust(ctx context.Context, scope types.Worksp
 	if err != nil {
 		return checkpointOutsideTrust{}, err
 	}
-	observer := s.publicationTrustObserver()
+	observer := s.publication.publicationTrustObserver()
 	observed, err := observer(ctx, workspace.Binding)
 	if err != nil {
 		return checkpointOutsideTrust{}, err

@@ -86,32 +86,15 @@ func observePublicationTrustWithObservers(
 	return clonePublicationTrustObservation(observed), nil
 }
 
-func (s *Service) publicationTrustObserver() func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error) {
-	if s.observePublicationTrust != nil {
-		return s.observePublicationTrust
-	}
-	gitObserver := s.observeGitBase
-	if gitObserver == nil {
-		gitObserver = observeGitBaseOutside
-	}
-	originObserver := s.observePublicationOrigin
-	if originObserver == nil {
-		originObserver = observePublicationOrigin
-	}
-	return func(ctx context.Context, binding types.WorkspaceBinding) (publicationTrustObservation, error) {
-		return observePublicationTrustWithObservers(ctx, binding, gitObserver, originObserver)
-	}
-}
-
-func (s *Service) readPublicationReview(ctx context.Context, scope types.WorkspaceScope) (publicationReviewResult, error) {
-	if !validPublicationScope(scope) || s == nil || s.repo == nil {
+func (c *publicationCoordinator) readPublicationReview(ctx context.Context, scope types.WorkspaceScope) (publicationReviewResult, error) {
+	if !validPublicationScope(scope) || c == nil || c.repo == nil {
 		return publicationReviewResult{}, localstore.ErrNotFound
 	}
-	outsideWorkspace, err := s.repo.Workspace(ctx, scope)
+	outsideWorkspace, err := c.repo.Workspace(ctx, scope)
 	if err != nil {
 		return publicationReviewResult{}, err
 	}
-	observer := s.publicationTrustObserver()
+	observer := c.publicationTrustObserver()
 	outside, err := observer(ctx, outsideWorkspace.Binding)
 	if err != nil {
 		return publicationReviewResult{}, err
@@ -121,22 +104,22 @@ func (s *Service) readPublicationReview(ctx context.Context, scope types.Workspa
 	}
 	outside = clonePublicationTrustObservation(outside)
 
-	withWorkspace := s.withImmediateWorkspace
+	withWorkspace := c.withImmediateWorkspace
 	if withWorkspace == nil {
-		withWorkspace = s.repo.WithImmediateWorkspace
+		withWorkspace = c.repo.WithImmediateWorkspace
 	}
 	var evidence publicationReviewTransactionEvidence
 	var attempt publicationTransitionAttempt
 	err = withWorkspace(ctx, scope, func(tx *localstore.WorkspaceMutationTx) error {
 		var transactionErr error
-		evidence, transactionErr = s.publicationReviewInTransaction(
+		evidence, transactionErr = c.publicationReviewInTransaction(
 			ctx, tx, outsideWorkspace, outside, observer, &attempt,
 		)
 		return transactionErr
 	})
 	if err != nil {
 		if errors.Is(err, localstore.ErrCommitOutcomeUnknown) && attempt.completed {
-			if _, confirmationErr := confirmPublicationCommit(ctx, s.repo, scope, attempt, err); confirmationErr != nil {
+			if _, confirmationErr := c.confirmPublication(ctx, scope, attempt, err); confirmationErr != nil {
 				return publicationReviewResult{}, confirmationErr
 			}
 		} else {
@@ -146,7 +129,7 @@ func (s *Service) readPublicationReview(ctx context.Context, scope types.Workspa
 	return clonePublicationReviewResult(publicationReviewResult{status: evidence.status, diff: evidence.diff})
 }
 
-func (s *Service) publicationReviewInTransaction(
+func (c *publicationCoordinator) publicationReviewInTransaction(
 	ctx context.Context,
 	tx *localstore.WorkspaceMutationTx,
 	expectedWorkspace localstore.WorkspaceRecord,
@@ -205,7 +188,7 @@ func (s *Service) publicationReviewInTransaction(
 
 	resolvedPolicy := policy
 	if kind := publicationInvalidationKind(workspace.Binding, policy, inside.origin.digest); kind != "" {
-		next, err := s.newPublicationInvalidation(workspace.Binding, policy, inside.origin.digest, kind)
+		next, err := c.newPublicationInvalidation(workspace.Binding, policy, inside.origin.digest, kind)
 		if err != nil {
 			return publicationReviewTransactionEvidence{}, err
 		}

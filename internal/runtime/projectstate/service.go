@@ -73,6 +73,7 @@ type Service struct {
 	registrationTimeout                time.Duration
 	registration                       *registrationCoordinator
 	workspace                          *workspaceCoordinator
+	publication                        *publicationCoordinator
 	readWorkingTree                    func(string) (state.Tree, error)
 	observeGitBase                     func(context.Context, ObserveGitBaseRequest) (gitBaseObservation, error)
 	observePublicationOrigin           func(context.Context, string) (publicationOriginObservation, error)
@@ -108,7 +109,13 @@ func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service,
 		recoverCheckpointFilesystem:        recoverCheckpointFilesystem,
 	}
 	service.registration = newRegistrationCoordinator(service)
-	service.workspace = &workspaceCoordinator{repo: repo, readPublicationReview: service.readPublicationReview}
+	service.publication = &publicationCoordinator{
+		repo: repo, observeOrigin: service.observePublicationOrigin,
+		observeTrust: service.observePublicationTrust, observeGitBase: service.observeGitBase,
+		withImmediateWorkspace: service.withImmediateWorkspace, now: service.now,
+		confirmTransitionCommit: service.confirmPublicationTransitionCommit,
+	}
+	service.workspace = &workspaceCoordinator{repo: repo, readPublicationReview: service.publication.readPublicationReview}
 	if config.LegacyIntegrationBackupRoot == "" {
 		return service, nil
 	}
@@ -139,6 +146,44 @@ func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service,
 	service.legacyBackupRoot = backupRoot
 	service.registration.legacyBackupRoot = backupRoot
 	return service, nil
+}
+
+func (s *Service) PublicationConfiguration(ctx context.Context, scope types.WorkspaceScope) (PublicationConfiguration, error) {
+	if s == nil || s.publication == nil {
+		return PublicationConfiguration{}, localstore.ErrNotFound
+	}
+	return s.publication.configuration(ctx, scope)
+}
+
+func (s *Service) ReconfigurePublication(ctx context.Context, req ReconfigurePublicationRequest) (PublicationConfiguration, error) {
+	if err := validateReconfigurePublicationRequest(req); err != nil {
+		return PublicationConfiguration{}, err
+	}
+	if s == nil || s.publication == nil {
+		return PublicationConfiguration{}, localstore.ErrNotFound
+	}
+	return s.publication.reconfigure(ctx, req)
+}
+
+func (s *Service) publicationTrustObserver() func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error) {
+	if s == nil || s.publication == nil {
+		return nil
+	}
+	return s.publication.publicationTrustObserver()
+}
+
+func (s *Service) readPublicationReview(ctx context.Context, scope types.WorkspaceScope) (publicationReviewResult, error) {
+	if s == nil || s.publication == nil {
+		return publicationReviewResult{}, localstore.ErrNotFound
+	}
+	return s.publication.readPublicationReview(ctx, scope)
+}
+
+func (s *Service) publicationReviewInTransaction(ctx context.Context, tx *localstore.WorkspaceMutationTx, expectedWorkspace localstore.WorkspaceRecord, outside publicationTrustObservation, observer func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error), attempt *publicationTransitionAttempt) (publicationReviewTransactionEvidence, error) {
+	if s == nil || s.publication == nil {
+		return publicationReviewTransactionEvidence{}, localstore.ErrNotFound
+	}
+	return s.publication.publicationReviewInTransaction(ctx, tx, expectedWorkspace, outside, observer, attempt)
 }
 
 func registrationContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {

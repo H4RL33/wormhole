@@ -22,7 +22,7 @@ func TestPublicationReviewInTransactionReturnsOwnedTask5Evidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	observer := fixture.service.publicationTrustObserver()
+	observer := fixture.service.publication.publicationTrustObserver()
 	outside, err := observer(context.Background(), workspace.Binding)
 	if err != nil {
 		t.Fatal(err)
@@ -31,7 +31,7 @@ func TestPublicationReviewInTransactionReturnsOwnedTask5Evidence(t *testing.T) {
 	var attempt publicationTransitionAttempt
 	if err := fixture.service.repo.WithImmediateWorkspace(context.Background(), fixture.binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		var transactionErr error
-		evidence, transactionErr = fixture.service.publicationReviewInTransaction(
+		evidence, transactionErr = fixture.service.publication.publicationReviewInTransaction(
 			context.Background(), tx, workspace, outside, observer, &attempt,
 		)
 		return transactionErr
@@ -96,11 +96,11 @@ func TestPublicationReviewComponentObserverFailuresAreNormalized(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newPublicationServiceFixture(t, "00000000-0000-4000-8000-000000000001", "https://github.com/acme/wormhole.git")
 			cause := errors.New("component observer failed")
-			gitObserver := fixture.service.observeGitBase
-			originObserver := fixture.service.observePublicationOrigin
+			gitObserver := fixture.service.publication.observeGitBase
+			originObserver := fixture.service.publication.observeOrigin
 			calls := 0
 			if test.git {
-				fixture.service.observeGitBase = func(ctx context.Context, req ObserveGitBaseRequest) (gitBaseObservation, error) {
+				fixture.service.publication.observeGitBase = func(ctx context.Context, req ObserveGitBaseRequest) (gitBaseObservation, error) {
 					calls++
 					if !test.inside || calls == 2 {
 						return gitBaseObservation{}, cause
@@ -108,7 +108,7 @@ func TestPublicationReviewComponentObserverFailuresAreNormalized(t *testing.T) {
 					return gitObserver(ctx, req)
 				}
 			} else {
-				fixture.service.observePublicationOrigin = func(ctx context.Context, root string) (publicationOriginObservation, error) {
+				fixture.service.publication.observeOrigin = func(ctx context.Context, root string) (publicationOriginObservation, error) {
 					calls++
 					if !test.inside || calls == 2 {
 						return publicationOriginObservation{}, cause
@@ -309,7 +309,7 @@ func TestPublicationReviewFullBundleRacesFailClosed(t *testing.T) {
 				t.Fatal(err)
 			}
 			calls := 0
-			fixture.service.observePublicationTrust = func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error) {
+			fixture.service.publication.observeTrust = func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error) {
 				calls++
 				if calls == 1 {
 					return clonePublicationTrustObservation(stable), nil
@@ -335,7 +335,7 @@ func TestPublicationReviewRejectsBundleWithDisagreeingHalves(t *testing.T) {
 		t.Fatal(err)
 	}
 	stable.origin.checkout.Inode++
-	fixture.service.observePublicationTrust = func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error) {
+	fixture.service.publication.observeTrust = func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error) {
 		return clonePublicationTrustObservation(stable), nil
 	}
 	got, err := fixture.service.Status(context.Background(), fixture.binding.Scope)
@@ -348,7 +348,7 @@ func TestPublicationReviewStableMismatchInvalidatesOnceAndContinues(t *testing.T
 	fixture := newPublicationServiceFixture(t, "00000000-0000-4000-8000-000000000001", "https://github.com/acme/one.git")
 	configured := configurePublicationForTest(t, fixture, types.PublicationPublicGit, diffActorEnvelope(), time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC))
 	runGit(t, fixture.repository.root, "remote", "set-url", "origin", "https://github.com/acme/two.git")
-	fixture.service.now = func() time.Time { return time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC) }
+	fixture.service.publication.now = func() time.Time { return time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC) }
 
 	first, err := fixture.service.Status(context.Background(), fixture.binding.Scope)
 	if err != nil || first.PublicationClassification != types.PublicationUnclassified || !validPublicationDigest(first.PublicationReviewDigest) {
@@ -358,7 +358,7 @@ func TestPublicationReviewStableMismatchInvalidatesOnceAndContinues(t *testing.T
 	if policy.PolicyRevision != configured.PolicyRevision+1 || policy.TransitionKind != "origin_invalidated" {
 		t.Fatalf("invalidated policy=%+v", policy)
 	}
-	fixture.service.now = func() time.Time { panic("sticky invalidation consulted clock twice") }
+	fixture.service.publication.now = func() time.Time { panic("sticky invalidation consulted clock twice") }
 	second, err := fixture.service.Status(context.Background(), fixture.binding.Scope)
 	if err != nil || !reflect.DeepEqual(second, first) {
 		t.Fatalf("second invalidated Status=(%+v,%v), want %+v", second, err, first)
@@ -379,7 +379,7 @@ func TestPublicationReviewCompositionCorruptionRollsBackInvalidation(t *testing.
 		"00000000-0000-4000-8000-000000000071", time.Date(2026, 8, 2, 12, 30, 0, 0, time.UTC)); err != nil {
 		t.Fatal(err)
 	}
-	fixture.service.now = func() time.Time { return time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC) }
+	fixture.service.publication.now = func() time.Time { return time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC) }
 	before := capturePublicationRawState(t, fixture.store)
 
 	got, err := fixture.service.Status(context.Background(), fixture.binding.Scope)
@@ -406,7 +406,7 @@ func TestPublicationReviewRepositoryMismatchPrecedesOriginMismatch(t *testing.T)
 		}
 	}
 	runGit(t, fixture.repository.root, "remote", "set-url", "origin", "https://github.com/acme/two.git")
-	fixture.service.now = func() time.Time { return time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC) }
+	fixture.service.publication.now = func() time.Time { return time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC) }
 
 	got, err := fixture.service.Status(context.Background(), fixture.binding.Scope)
 	if err != nil || got.PublicationClassification != types.PublicationUnclassified {
@@ -422,10 +422,10 @@ func TestPublicationReviewUnknownCommitConfirmationDoesNotRetry(t *testing.T) {
 	fixture := newPublicationServiceFixture(t, "00000000-0000-4000-8000-000000000001", "https://github.com/acme/one.git")
 	configured := configurePublicationForTest(t, fixture, types.PublicationPublicGit, diffActorEnvelope(), time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC))
 	runGit(t, fixture.repository.root, "remote", "set-url", "origin", "https://github.com/acme/two.git")
-	fixture.service.now = func() time.Time { return time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC) }
-	realTransaction := fixture.service.withImmediateWorkspace
+	fixture.service.publication.now = func() time.Time { return time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC) }
+	realTransaction := fixture.service.publication.withImmediateWorkspace
 	calls := 0
-	fixture.service.withImmediateWorkspace = func(ctx context.Context, scope types.WorkspaceScope, callback func(*localstore.WorkspaceMutationTx) error) error {
+	fixture.service.publication.withImmediateWorkspace = func(ctx context.Context, scope types.WorkspaceScope, callback func(*localstore.WorkspaceMutationTx) error) error {
 		calls++
 		if err := realTransaction(ctx, scope, callback); err != nil {
 			return err
@@ -445,8 +445,8 @@ func TestPublicationReviewUnknownCommitConfirmationDoesNotRetry(t *testing.T) {
 
 func TestPublicationReviewUnknownCommitWithoutTransitionReturnsZero(t *testing.T) {
 	fixture := newPublicationServiceFixture(t, "00000000-0000-4000-8000-000000000001", "https://github.com/acme/wormhole.git")
-	realTransaction := fixture.service.withImmediateWorkspace
-	fixture.service.withImmediateWorkspace = func(ctx context.Context, scope types.WorkspaceScope, callback func(*localstore.WorkspaceMutationTx) error) error {
+	realTransaction := fixture.service.publication.withImmediateWorkspace
+	fixture.service.publication.withImmediateWorkspace = func(ctx context.Context, scope types.WorkspaceScope, callback func(*localstore.WorkspaceMutationTx) error) error {
 		if err := realTransaction(ctx, scope, callback); err != nil {
 			return err
 		}
@@ -462,10 +462,10 @@ func TestPublicationReviewUnknownCommitWithoutTransitionReturnsZero(t *testing.T
 func TestApplyBatchDoesNotObservePublicationReview(t *testing.T) {
 	fixture := newPublicationServiceFixture(t, "00000000-0000-4000-8000-000000000001", "https://github.com/acme/wormhole.git")
 	accepted := fixture.mustAcceptedSnapshot(t)
-	fixture.service.observePublicationTrust = func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error) {
+	fixture.service.publication.observeTrust = func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error) {
 		panic("ApplyBatch observed publication trust")
 	}
-	fixture.service.now = func() time.Time { panic("ApplyBatch consulted publication clock") }
+	fixture.service.publication.now = func() time.Time { panic("ApplyBatch consulted publication clock") }
 	operation := servicePutTaskOperation(
 		accepted,
 		"99999999-9999-4999-8999-999999999991",
@@ -601,7 +601,7 @@ func TestPublicationReviewWriterBarrierExcludesConcurrentApply(t *testing.T) {
 	insideStarted := make(chan struct{})
 	releaseInside := make(chan struct{})
 	calls := 0
-	fixture.service.observePublicationTrust = func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error) {
+	fixture.service.publication.observeTrust = func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error) {
 		calls++
 		if calls == 2 {
 			close(insideStarted)

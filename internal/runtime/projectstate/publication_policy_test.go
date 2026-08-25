@@ -29,14 +29,14 @@ func TestPublicationConfigurationOriginRaceReturnsErrGitOriginChangedWithoutMuta
 		t.Fatal(err)
 	}
 	calls := 0
-	fixture.service.observePublicationOrigin = func(context.Context, string) (publicationOriginObservation, error) {
+	fixture.service.publication.observeOrigin = func(context.Context, string) (publicationOriginObservation, error) {
 		calls++
 		if calls == 1 {
 			return outside, nil
 		}
 		return inside, nil
 	}
-	fixture.service.now = func() time.Time { panic("read origin race consulted clock") }
+	fixture.service.publication.now = func() time.Time { panic("read origin race consulted clock") }
 	before := capturePublicationRawState(t, fixture.store)
 
 	got, err := fixture.service.PublicationConfiguration(context.Background(), fixture.binding.Scope)
@@ -53,10 +53,10 @@ func TestPublicationConfigurationUnknownCommitConfirmsStickyInvalidation(t *test
 	configured := configurePublicationForTest(t, fixture, types.PublicationPublicGit, diffActorEnvelope(), time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC))
 	runGit(t, fixture.repository.root, "remote", "set-url", "origin", "https://github.com/acme/two.git")
 	changedAt := time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC)
-	fixture.service.now = func() time.Time { return changedAt }
-	realTransaction := fixture.service.withImmediateWorkspace
+	fixture.service.publication.now = func() time.Time { return changedAt }
+	realTransaction := fixture.service.publication.withImmediateWorkspace
 	transactionCalls := 0
-	fixture.service.withImmediateWorkspace = func(
+	fixture.service.publication.withImmediateWorkspace = func(
 		ctx context.Context,
 		scope types.WorkspaceScope,
 		callback func(*localstore.WorkspaceMutationTx) error,
@@ -86,7 +86,7 @@ func TestPublicationConfigurationStableMismatchCommitsStickyInvalidation(t *test
 		}
 		changedAt := time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC)
 		clockCalls := 0
-		fixture.service.now = func() time.Time { clockCalls++; return changedAt }
+		fixture.service.publication.now = func() time.Time { clockCalls++; return changedAt }
 		beforeRevision := workspaceRevisionForProjectStateTest(t, fixture.service, fixture.binding.Scope)
 
 		got, err := fixture.service.PublicationConfiguration(context.Background(), fixture.binding.Scope)
@@ -104,7 +104,7 @@ func TestPublicationConfigurationStableMismatchCommitsStickyInvalidation(t *test
 		if afterInvalidationRevision != beforeRevision+1 {
 			t.Fatalf("sticky invalidation workspace revision=%d, want %d", afterInvalidationRevision, beforeRevision+1)
 		}
-		fixture.service.now = func() time.Time { panic("current invalidation read consulted clock") }
+		fixture.service.publication.now = func() time.Time { panic("current invalidation read consulted clock") }
 		again, err := fixture.service.PublicationConfiguration(context.Background(), fixture.binding.Scope)
 		if err != nil || !reflect.DeepEqual(again, got) {
 			t.Fatalf("current invalidation read=(%+v,%v), want %+v", again, err, got)
@@ -131,7 +131,7 @@ func TestPublicationConfigurationStableMismatchCommitsStickyInvalidation(t *test
 			}
 		}
 		changedAt := time.Date(2026, 8, 2, 14, 0, 0, 0, time.UTC)
-		fixture.service.now = func() time.Time { return changedAt }
+		fixture.service.publication.now = func() time.Time { return changedAt }
 
 		got, err := fixture.service.PublicationConfiguration(context.Background(), fixture.binding.Scope)
 		if err != nil || got.Classification != types.PublicationUnclassified ||
@@ -149,7 +149,7 @@ func TestReconfigurePublicationStableMismatchInvalidatesBeforeCallerCAS(t *testi
 	request := publicationRequest(t, fixture.binding, configured, types.PublicationPrivateGit, diffActorEnvelope())
 	runGit(t, fixture.repository.root, "remote", "set-url", "origin", "https://github.com/acme/two.git")
 	changedAt := time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC)
-	fixture.service.now = func() time.Time { return changedAt }
+	fixture.service.publication.now = func() time.Time { return changedAt }
 
 	got, err := fixture.service.ReconfigurePublication(context.Background(), request)
 	if !errors.Is(err, ErrPublicationConfigurationInvalidated) || got.Classification != types.PublicationUnclassified ||
@@ -168,10 +168,10 @@ func TestReconfigurePublicationUnknownCommitConfirmsConfiguredTransition(t *test
 	current := mustPublicationConfiguration(t, fixture.service, fixture.binding.Scope)
 	request := publicationRequest(t, fixture.binding, current, types.PublicationPrivateGit, diffActorEnvelope())
 	changedAt := time.Date(2026, 8, 2, 15, 0, 0, 0, time.UTC)
-	fixture.service.now = func() time.Time { return changedAt }
-	realTransaction := fixture.service.withImmediateWorkspace
+	fixture.service.publication.now = func() time.Time { return changedAt }
+	realTransaction := fixture.service.publication.withImmediateWorkspace
 	transactionCalls := 0
-	fixture.service.withImmediateWorkspace = func(
+	fixture.service.publication.withImmediateWorkspace = func(
 		ctx context.Context,
 		scope types.WorkspaceScope,
 		callback func(*localstore.WorkspaceMutationTx) error,
@@ -199,9 +199,9 @@ func TestReconfigurePublicationUnknownCommitConfirmsInvalidation(t *testing.T) {
 	request := publicationRequest(t, fixture.binding, configured, types.PublicationPrivateGit, diffActorEnvelope())
 	runGit(t, fixture.repository.root, "remote", "set-url", "origin", "https://github.com/acme/two.git")
 	changedAt := time.Date(2026, 8, 2, 16, 0, 0, 0, time.UTC)
-	fixture.service.now = func() time.Time { return changedAt }
-	realTransaction := fixture.service.withImmediateWorkspace
-	fixture.service.withImmediateWorkspace = func(
+	fixture.service.publication.now = func() time.Time { return changedAt }
+	realTransaction := fixture.service.publication.withImmediateWorkspace
+	fixture.service.publication.withImmediateWorkspace = func(
 		ctx context.Context,
 		scope types.WorkspaceScope,
 		callback func(*localstore.WorkspaceMutationTx) error,
@@ -227,7 +227,7 @@ func TestReconfigurePublicationUnknownCommitExactAbsenceRetainsOriginalError(t *
 	fixture := newPublicationServiceFixture(t, "00000000-0000-4000-8000-000000000001", "https://github.com/acme/wormhole.git")
 	current := mustPublicationConfiguration(t, fixture.service, fixture.binding.Scope)
 	request := publicationRequest(t, fixture.binding, current, types.PublicationLocalOnly, diffActorEnvelope())
-	fixture.service.now = func() time.Time { return time.Date(2026, 8, 2, 17, 0, 0, 0, time.UTC) }
+	fixture.service.publication.now = func() time.Time { return time.Date(2026, 8, 2, 17, 0, 0, 0, time.UTC) }
 	if _, err := fixture.store.DB().Exec(`
 		CREATE TABLE publication_deferred_failure(
 		  project_id TEXT NOT NULL,
@@ -282,7 +282,7 @@ func TestConfirmPublicationCommitRejectsThirdStateAndReadError(t *testing.T) {
 			priorConfirmation: priorConfirmation, nextConfirmation: nextConfirmation,
 			configuration: configured, completed: true,
 		}
-		fixture.service.now = func() time.Time { return time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC) }
+		fixture.service.publication.now = func() time.Time { return time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC) }
 		if _, err := fixture.service.ReconfigurePublication(context.Background(), publicationRequest(
 			t, fixture.binding, configured, types.PublicationPrivateGit, diffActorEnvelope(),
 		)); err != nil {
@@ -455,7 +455,7 @@ func TestReconfigurePublicationCompleteExpectedStateAndBindingCAS(t *testing.T) 
 			configured := configurePublicationForTest(t, fixture, types.PublicationPublicGit, diffActorEnvelope(), time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC))
 			request := publicationRequest(t, fixture.binding, configured, configured.Classification, diffActorEnvelope())
 			test.mutate(&request)
-			fixture.service.now = func() time.Time { panic("stale CAS consulted clock") }
+			fixture.service.publication.now = func() time.Time { panic("stale CAS consulted clock") }
 			before := capturePublicationRawState(t, fixture.store)
 
 			got, err := fixture.service.ReconfigurePublication(context.Background(), request)
@@ -475,7 +475,7 @@ func TestReconfigurePublicationStaleConstraintAgainstBootstrapIsZeroMutation(t *
 	current := mustPublicationConfiguration(t, fixture.service, fixture.binding.Scope)
 	request := publicationRequest(t, fixture.binding, current, types.PublicationUnclassified, diffActorEnvelope())
 	request.ExpectedPublicationBindingDigest = state.Digest(publicationDigest('f'))
-	fixture.service.now = func() time.Time { panic("bootstrap constraint CAS consulted clock") }
+	fixture.service.publication.now = func() time.Time { panic("bootstrap constraint CAS consulted clock") }
 	before := capturePublicationRawState(t, fixture.store)
 
 	got, err := fixture.service.ReconfigurePublication(context.Background(), request)
@@ -495,7 +495,7 @@ func TestReconfigurePublicationExpectedZeroOffsetTimesCompareByInstant(t *testin
 	changedAt := request.Expected.ChangedAt.In(zero)
 	request.Expected.ChangedAt = &changedAt
 	request.Expected.ChangedBy.OccurredAt = request.Expected.ChangedBy.OccurredAt.In(zero)
-	fixture.service.now = func() time.Time { panic("semantic no-op consulted clock") }
+	fixture.service.publication.now = func() time.Time { panic("semantic no-op consulted clock") }
 
 	got, err := fixture.service.ReconfigurePublication(context.Background(), request)
 	if err != nil || !reflect.DeepEqual(got, configured) {
@@ -507,13 +507,13 @@ func TestReconfigurePublicationInvalidationToExplicitUnclassifiedAdvancesRevisio
 	fixture := newPublicationServiceFixture(t, "00000000-0000-4000-8000-000000000001", "https://github.com/acme/one.git")
 	configured := configurePublicationForTest(t, fixture, types.PublicationPublicGit, diffActorEnvelope(), time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC))
 	runGit(t, fixture.repository.root, "remote", "set-url", "origin", "https://github.com/acme/two.git")
-	fixture.service.now = func() time.Time { return time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC) }
+	fixture.service.publication.now = func() time.Time { return time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC) }
 	invalidated := mustPublicationConfiguration(t, fixture.service, fixture.binding.Scope)
 	if invalidated.PolicyRevision != configured.PolicyRevision+1 || invalidated.TransitionKind != "origin_invalidated" {
 		t.Fatalf("invalidated=%+v", invalidated)
 	}
 	changedAt := time.Date(2026, 8, 2, 14, 0, 0, 0, time.UTC)
-	fixture.service.now = func() time.Time { return changedAt }
+	fixture.service.publication.now = func() time.Time { return changedAt }
 
 	got, err := fixture.service.ReconfigurePublication(context.Background(), publicationRequest(
 		t, fixture.binding, invalidated, types.PublicationUnclassified, diffActorEnvelope(),
@@ -530,14 +530,14 @@ func TestReconfigurePublicationClassAndOriginReversionNeverReactivatesHistory(t 
 		fixture := newPublicationServiceFixture(t, "00000000-0000-4000-8000-000000000001", "https://github.com/acme/wormhole.git")
 		actor := diffActorEnvelope()
 		public := configurePublicationForTest(t, fixture, types.PublicationPublicGit, actor, time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC))
-		fixture.service.now = func() time.Time { return time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC) }
+		fixture.service.publication.now = func() time.Time { return time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC) }
 		private, err := fixture.service.ReconfigurePublication(context.Background(), publicationRequest(
 			t, fixture.binding, public, types.PublicationPrivateGit, actor,
 		))
 		if err != nil {
 			t.Fatal(err)
 		}
-		fixture.service.now = func() time.Time { return time.Date(2026, 8, 2, 14, 0, 0, 0, time.UTC) }
+		fixture.service.publication.now = func() time.Time { return time.Date(2026, 8, 2, 14, 0, 0, 0, time.UTC) }
 		publicAgain, err := fixture.service.ReconfigurePublication(context.Background(), publicationRequest(
 			t, fixture.binding, private, types.PublicationPublicGit, actor,
 		))
@@ -556,9 +556,9 @@ func TestReconfigurePublicationClassAndOriginReversionNeverReactivatesHistory(t 
 		configuredA := configurePublicationForTest(t, fixture, types.PublicationPublicGit, actor, time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC))
 		originA := *configuredA.ConfiguredOriginDigest
 		runGit(t, fixture.repository.root, "remote", "set-url", "origin", "https://github.com/acme/b.git")
-		fixture.service.now = func() time.Time { return time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC) }
+		fixture.service.publication.now = func() time.Time { return time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC) }
 		invalidatedB := mustPublicationConfiguration(t, fixture.service, fixture.binding.Scope)
-		fixture.service.now = func() time.Time { return time.Date(2026, 8, 2, 14, 0, 0, 0, time.UTC) }
+		fixture.service.publication.now = func() time.Time { return time.Date(2026, 8, 2, 14, 0, 0, 0, time.UTC) }
 		configuredB, err := fixture.service.ReconfigurePublication(context.Background(), publicationRequest(
 			t, fixture.binding, invalidatedB, types.PublicationPrivateGit, actor,
 		))
@@ -567,7 +567,7 @@ func TestReconfigurePublicationClassAndOriginReversionNeverReactivatesHistory(t 
 		}
 		originB := *configuredB.ConfiguredOriginDigest
 		runGit(t, fixture.repository.root, "remote", "set-url", "origin", "https://github.com/acme/a.git")
-		fixture.service.now = func() time.Time { return time.Date(2026, 8, 2, 15, 0, 0, 0, time.UTC) }
+		fixture.service.publication.now = func() time.Time { return time.Date(2026, 8, 2, 15, 0, 0, 0, time.UTC) }
 		returnedA := mustPublicationConfiguration(t, fixture.service, fixture.binding.Scope)
 		if originA == originB || returnedA.PolicyRevision != configuredB.PolicyRevision+1 ||
 			returnedA.Classification != types.PublicationUnclassified || returnedA.TransitionKind != "origin_invalidated" ||
@@ -609,7 +609,7 @@ func TestReconfigurePublicationNonGitSSHUsernameRejectsWithoutLeakOrDigestPersis
 	configured := configurePublicationForTest(t, fixture, types.PublicationPrivateGit, diffActorEnvelope(), time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC))
 	request := publicationRequest(t, fixture.binding, configured, types.PublicationPublicGit, diffActorEnvelope())
 	runGit(t, fixture.repository.root, "remote", "set-url", "origin", "ssh://private-user@example.com/acme/wormhole.git")
-	fixture.service.now = func() time.Time { panic("invalid SSH origin consulted clock") }
+	fixture.service.publication.now = func() time.Time { panic("invalid SSH origin consulted clock") }
 	before := capturePublicationRawState(t, fixture.store)
 
 	got, err := fixture.service.ReconfigurePublication(context.Background(), request)
@@ -685,11 +685,11 @@ func TestReconfigurePublicationConcurrentSameExpectedAllowsOneTransition(t *test
 	fixture := newPublicationServiceFixture(t, "00000000-0000-4000-8000-000000000001", "https://github.com/acme/wormhole.git")
 	current := mustPublicationConfiguration(t, fixture.service, fixture.binding.Scope)
 	request := publicationRequest(t, fixture.binding, current, types.PublicationPublicGit, diffActorEnvelope())
-	fixture.service.now = func() time.Time { return time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC) }
-	realTransaction := fixture.service.withImmediateWorkspace
+	fixture.service.publication.now = func() time.Time { return time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC) }
+	realTransaction := fixture.service.publication.withImmediateWorkspace
 	ready := make(chan struct{}, 2)
 	release := make(chan struct{})
-	fixture.service.withImmediateWorkspace = func(
+	fixture.service.publication.withImmediateWorkspace = func(
 		ctx context.Context,
 		scope types.WorkspaceScope,
 		callback func(*localstore.WorkspaceMutationTx) error,
@@ -756,7 +756,7 @@ func TestPublicationServiceCurrentPolicyIgnoresHistoricalMismatch(t *testing.T) 
 			fixture := newPublicationServiceFixture(t, "00000000-0000-4000-8000-000000000001", "https://github.com/acme/wormhole.git")
 			configurePublicationForTest(t, fixture, types.PublicationPublicGit, diffActorEnvelope(), time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC))
 			test.mutate(t, fixture)
-			fixture.service.now = func() time.Time { panic("current policy read consulted clock") }
+			fixture.service.publication.now = func() time.Time { panic("current policy read consulted clock") }
 			before := capturePublicationRawState(t, fixture.store)
 			got, err := fixture.service.PublicationConfiguration(context.Background(), fixture.binding.Scope)
 			if err != nil || got.Classification != test.classification || got.PolicyRevision != 2 {
@@ -793,7 +793,7 @@ func TestReconfigurePublicationRejectsInvalidCurrentActorWithoutMutation(t *test
 			t.Fatal(err)
 		}
 	}
-	fixture.service.now = func() time.Time { panic("invalid policy consulted clock") }
+	fixture.service.publication.now = func() time.Time { panic("invalid policy consulted clock") }
 	before := capturePublicationRawState(t, fixture.store)
 	got, err := fixture.service.ReconfigurePublication(context.Background(), request)
 	if err == nil || errors.Is(err, ErrPublicationConfigurationCAS) || got != (PublicationConfiguration{}) {
@@ -824,7 +824,7 @@ func TestReconfigurePublicationWriteFailuresRollBackPolicyAndHistory(t *testing.
 				t.Fatal(err)
 			}
 			clockCalls := 0
-			fixture.service.now = func() time.Time {
+			fixture.service.publication.now = func() time.Time {
 				clockCalls++
 				return time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
 			}
@@ -846,7 +846,7 @@ func TestReconfigurePublicationInvalidClockRollsBackWithoutWrite(t *testing.T) {
 	fixture := newPublicationServiceFixture(t, "00000000-0000-4000-8000-000000000001", "https://github.com/acme/wormhole.git")
 	current := mustPublicationConfiguration(t, fixture.service, fixture.binding.Scope)
 	request := publicationRequest(t, fixture.binding, current, types.PublicationPublicGit, diffActorEnvelope())
-	fixture.service.now = func() time.Time { return time.Time{} }
+	fixture.service.publication.now = func() time.Time { return time.Time{} }
 	before := capturePublicationRawState(t, fixture.store)
 
 	got, err := fixture.service.ReconfigurePublication(context.Background(), request)
@@ -873,14 +873,14 @@ func TestReconfigurePublicationOriginRaceReturnsErrGitOriginChangedWithoutMutati
 		t.Fatal(err)
 	}
 	calls := 0
-	fixture.service.observePublicationOrigin = func(context.Context, string) (publicationOriginObservation, error) {
+	fixture.service.publication.observeOrigin = func(context.Context, string) (publicationOriginObservation, error) {
 		calls++
 		if calls == 1 {
 			return outside, nil
 		}
 		return inside, nil
 	}
-	fixture.service.now = func() time.Time { panic("origin race consulted clock") }
+	fixture.service.publication.now = func() time.Time { panic("origin race consulted clock") }
 	before := capturePublicationRawState(t, fixture.store)
 
 	got, err := fixture.service.ReconfigurePublication(context.Background(), request)
@@ -907,7 +907,7 @@ func TestReconfigurePublicationCurrentExactSameHumanIsNoOpWithoutClockOrWrite(t 
 	retryActor := actor
 	retryActor.OccurredAt = retryActor.OccurredAt.Add(time.Hour)
 	request := publicationRequest(t, fixture.binding, configured, configured.Classification, retryActor)
-	fixture.service.now = func() time.Time { panic("same-human no-op consulted clock") }
+	fixture.service.publication.now = func() time.Time { panic("same-human no-op consulted clock") }
 	before := capturePublicationRawState(t, fixture.store)
 	beforeRevision := workspaceRevisionForProjectStateTest(t, fixture.service, fixture.binding.Scope)
 
@@ -932,7 +932,7 @@ func TestReconfigurePublicationSameClassDifferentHumanAdvancesAttribution(t *tes
 	secondActor.OccurredAt = secondActor.OccurredAt.Add(time.Hour)
 	changedAt := time.Date(2026, 8, 2, 13, 0, 0, 0, time.UTC)
 	clockCalls := 0
-	fixture.service.now = func() time.Time { clockCalls++; return changedAt }
+	fixture.service.publication.now = func() time.Time { clockCalls++; return changedAt }
 	beforeRevision := workspaceRevisionForProjectStateTest(t, fixture.service, fixture.binding.Scope)
 
 	got, err := fixture.service.ReconfigurePublication(context.Background(), publicationRequest(
@@ -973,7 +973,7 @@ func TestReconfigurePublicationConfiguresEveryClassificationWithCompleteOwnedRea
 			actor := diffActorEnvelope()
 			changedAt := time.Date(2026, 8, 2, 12, 34, 56, 789, time.FixedZone("fixture", 3600))
 			clockCalls := 0
-			service.now = func() time.Time { clockCalls++; return changedAt }
+			service.publication.now = func() time.Time { clockCalls++; return changedAt }
 
 			got, err := service.ReconfigurePublication(context.Background(), ReconfigurePublicationRequest{
 				Scope: registered.Binding.Scope, ExpectedBinding: registered.Binding,
@@ -1119,7 +1119,7 @@ func configurePublicationForTest(
 ) PublicationConfiguration {
 	t.Helper()
 	current := mustPublicationConfiguration(t, fixture.service, fixture.binding.Scope)
-	fixture.service.now = func() time.Time { return changedAt }
+	fixture.service.publication.now = func() time.Time { return changedAt }
 	configured, err := fixture.service.ReconfigurePublication(context.Background(), publicationRequest(
 		t, fixture.binding, current, classification, actor,
 	))

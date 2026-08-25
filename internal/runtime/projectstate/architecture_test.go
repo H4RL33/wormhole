@@ -155,6 +155,47 @@ func TestServiceWorkspaceCoordinatorAuthority(t *testing.T) {
 	}
 }
 
+func TestServicePublicationCoordinatorAuthority(t *testing.T) {
+	root := filepath.Join("..", "..", "..")
+	sources := architectureProductionGoSources(t, root)
+	service := sources["internal/runtime/projectstate/service.go"]
+	if !strings.Contains(service, "publicationCoordinator") {
+		t.Fatal("service.go must own a publicationCoordinator")
+	}
+	for method, delegation := range map[string]string{
+		"PublicationConfiguration": "s.publication.configuration(",
+		"ReconfigurePublication":   "s.publication.reconfigure(",
+	} {
+		body := architectureMethodBody(service, "func (s *Service) "+method)
+		if strings.Count(body, delegation) != 1 {
+			t.Fatalf("service.go method %s must delegate exactly once", method)
+		}
+		if strings.Contains(body, "WithImmediateWorkspace(") || strings.Contains(body, "observePublication") || strings.Contains(body, "newPublicationInvalidation(") {
+			t.Fatalf("service.go method %s retains publication authority", method)
+		}
+	}
+	forbidden := []string{"s.publicationReviewInTransaction(", "s.publicationTrustObserver()"}
+	for _, source := range []string{sources["internal/runtime/projectstate/checkpoint.go"], sources["internal/runtime/projectstate/workspace_coordinator.go"]} {
+		for _, value := range forbidden {
+			if strings.Contains(source, value) {
+				t.Fatalf("production coordinator consumer retains Service publication shim %q", value)
+			}
+		}
+	}
+	if strings.Contains(service, "syncPublicationCoordinator") {
+		t.Fatal("service.go must not synchronize mutable publication seams at runtime")
+	}
+	for _, path := range []string{
+		"internal/runtime/projectstate/publication_coordinator.go",
+		"internal/runtime/projectstate/publication_policy.go",
+		"internal/runtime/projectstate/publication_review_service.go",
+	} {
+		if strings.Contains(sources[path], "*Service") {
+			t.Fatalf("publication owner %s must not depend on Service", path)
+		}
+	}
+}
+
 func architectureMethodBody(source, signature string) string {
 	start := strings.Index(source, signature)
 	if start < 0 {
@@ -209,11 +250,11 @@ func TestCompactTargetedCommitConfirmationNeverReplays(t *testing.T) {
 		fixture := newPublicationServiceFixture(t, "00000000-0000-4000-8000-000000000001", "https://github.com/acme/wormhole.git")
 		current := mustPublicationConfiguration(t, fixture.service, fixture.binding.Scope)
 		req := publicationRequest(t, fixture.binding, current, types.PublicationPublicGit, diffActorEnvelope())
-		fixture.service.now = func() time.Time { return time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC) }
+		fixture.service.publication.now = func() time.Time { return time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC) }
 		realWithImmediate := fixture.service.repo.WithImmediateWorkspace
 		transactionCalls := 0
 		unknown := fmt.Errorf("synthetic compact publication confirmation: %w", localstore.ErrCommitOutcomeUnknown)
-		fixture.service.withImmediateWorkspace = func(
+		fixture.service.publication.withImmediateWorkspace = func(
 			ctx context.Context,
 			scope types.WorkspaceScope,
 			fn func(*localstore.WorkspaceMutationTx) error,
@@ -859,7 +900,7 @@ func attemptArchitectureStashRetry(t *testing.T, fixture *architectureFixture) e
 
 func attemptArchitectureStatus(t *testing.T, fixture *architectureFixture) error {
 	t.Helper()
-	fixture.service.now = func() time.Time { panic("corrupt publication policy reached invalidation mutation") }
+	fixture.service.publication.now = func() time.Time { panic("corrupt publication policy reached invalidation mutation") }
 	got, err := fixture.service.Status(context.Background(), fixture.target.Scope)
 	if !reflect.DeepEqual(got, WorkspaceStatus{}) {
 		t.Fatalf("Status() result=%+v, want zero", got)

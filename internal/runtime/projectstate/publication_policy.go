@@ -38,15 +38,15 @@ type ReconfigurePublicationRequest struct {
 
 // PublicationConfiguration returns one coherent effective publication policy
 // resolved against an independently observed checkout origin.
-func (s *Service) PublicationConfiguration(ctx context.Context, scope types.WorkspaceScope) (PublicationConfiguration, error) {
-	if !validPublicationScope(scope) || s == nil || s.repo == nil {
+func (c *publicationCoordinator) configuration(ctx context.Context, scope types.WorkspaceScope) (PublicationConfiguration, error) {
+	if !validPublicationScope(scope) || c == nil || c.repo == nil {
 		return PublicationConfiguration{}, localstore.ErrNotFound
 	}
-	workspace, err := s.repo.Workspace(ctx, scope)
+	workspace, err := c.repo.Workspace(ctx, scope)
 	if err != nil {
 		return PublicationConfiguration{}, err
 	}
-	observer := s.observePublicationOrigin
+	observer := c.observeOrigin
 	if observer == nil {
 		observer = observePublicationOrigin
 	}
@@ -58,9 +58,9 @@ func (s *Service) PublicationConfiguration(ctx context.Context, scope types.Work
 		return PublicationConfiguration{}, fmt.Errorf("%w: observed checkout differs from persisted binding", ErrGitOriginChanged)
 	}
 
-	withWorkspace := s.withImmediateWorkspace
+	withWorkspace := c.withImmediateWorkspace
 	if withWorkspace == nil {
-		withWorkspace = s.repo.WithImmediateWorkspace
+		withWorkspace = c.repo.WithImmediateWorkspace
 	}
 	var result PublicationConfiguration
 	var attempt publicationTransitionAttempt
@@ -81,7 +81,7 @@ func (s *Service) PublicationConfiguration(ctx context.Context, scope types.Work
 		}
 		kind := publicationInvalidationKind(currentWorkspace.Binding, policy, observed.digest)
 		if kind != "" {
-			next, err := s.newPublicationInvalidation(currentWorkspace.Binding, policy, observed.digest, kind)
+			next, err := c.newPublicationInvalidation(currentWorkspace.Binding, policy, observed.digest, kind)
 			if err != nil {
 				return err
 			}
@@ -97,7 +97,7 @@ func (s *Service) PublicationConfiguration(ctx context.Context, scope types.Work
 	})
 	if err != nil {
 		if errors.Is(err, localstore.ErrCommitOutcomeUnknown) && attempt.completed {
-			return confirmPublicationCommit(ctx, s.repo, scope, attempt, err)
+			return c.confirmPublication(ctx, scope, attempt, err)
 		}
 		return PublicationConfiguration{}, err
 	}
@@ -106,18 +106,18 @@ func (s *Service) PublicationConfiguration(ctx context.Context, scope types.Work
 
 // ReconfigurePublication compare-and-swaps one complete machine-private
 // publication configuration using only independently observed origin evidence.
-func (s *Service) ReconfigurePublication(ctx context.Context, req ReconfigurePublicationRequest) (PublicationConfiguration, error) {
+func (c *publicationCoordinator) reconfigure(ctx context.Context, req ReconfigurePublicationRequest) (PublicationConfiguration, error) {
 	if err := validateReconfigurePublicationRequest(req); err != nil {
 		return PublicationConfiguration{}, err
 	}
-	if s == nil || s.repo == nil || s.now == nil {
+	if c == nil || c.repo == nil || c.now == nil {
 		return PublicationConfiguration{}, localstore.ErrNotFound
 	}
-	workspace, err := s.repo.Workspace(ctx, req.Scope)
+	workspace, err := c.repo.Workspace(ctx, req.Scope)
 	if err != nil {
 		return PublicationConfiguration{}, err
 	}
-	observer := s.observePublicationOrigin
+	observer := c.observeOrigin
 	if observer == nil {
 		observer = observePublicationOrigin
 	}
@@ -129,9 +129,9 @@ func (s *Service) ReconfigurePublication(ctx context.Context, req ReconfigurePub
 		return PublicationConfiguration{}, fmt.Errorf("%w: observed checkout differs from persisted binding", ErrGitOriginChanged)
 	}
 
-	withWorkspace := s.withImmediateWorkspace
+	withWorkspace := c.withImmediateWorkspace
 	if withWorkspace == nil {
-		withWorkspace = s.repo.WithImmediateWorkspace
+		withWorkspace = c.repo.WithImmediateWorkspace
 	}
 	var result PublicationConfiguration
 	var attempt publicationTransitionAttempt
@@ -152,7 +152,7 @@ func (s *Service) ReconfigurePublication(ctx context.Context, req ReconfigurePub
 		}
 		kind := publicationInvalidationKind(currentWorkspace.Binding, policy, observed.digest)
 		if kind != "" {
-			next, err := s.newPublicationInvalidation(currentWorkspace.Binding, policy, observed.digest, kind)
+			next, err := c.newPublicationInvalidation(currentWorkspace.Binding, policy, observed.digest, kind)
 			if err != nil {
 				return err
 			}
@@ -182,7 +182,7 @@ func (s *Service) ReconfigurePublication(ctx context.Context, req ReconfigurePub
 		if policy.PolicyRevision == math.MaxInt64 {
 			return fmt.Errorf("projectstate: publication policy revision overflow")
 		}
-		changedAt := s.now().UTC()
+		changedAt := c.now().UTC()
 		if changedAt.IsZero() {
 			return fmt.Errorf("projectstate: invalid publication configuration transaction time")
 		}
@@ -202,7 +202,7 @@ func (s *Service) ReconfigurePublication(ctx context.Context, req ReconfigurePub
 	})
 	if err != nil {
 		if errors.Is(err, localstore.ErrCommitOutcomeUnknown) && attempt.completed {
-			confirmed, confirmErr := confirmPublicationCommit(ctx, s.repo, req.Scope, attempt, err)
+			confirmed, confirmErr := c.confirmPublication(ctx, req.Scope, attempt, err)
 			if confirmErr != nil {
 				return PublicationConfiguration{}, confirmErr
 			}
@@ -305,7 +305,7 @@ func publicationInvalidationKind(
 	return ""
 }
 
-func (s *Service) newPublicationInvalidation(
+func (c *publicationCoordinator) newPublicationInvalidation(
 	binding types.WorkspaceBinding,
 	policy localstore.WorkspacePublicationPolicyRecord,
 	observed state.Digest,
@@ -314,10 +314,10 @@ func (s *Service) newPublicationInvalidation(
 	if policy.PolicyRevision == math.MaxInt64 {
 		return localstore.WorkspacePublicationPolicyRecord{}, fmt.Errorf("projectstate: publication policy revision overflow")
 	}
-	if s == nil || s.now == nil {
+	if c == nil || c.now == nil {
 		return localstore.WorkspacePublicationPolicyRecord{}, localstore.ErrNotFound
 	}
-	changedAt := s.now().UTC()
+	changedAt := c.now().UTC()
 	if changedAt.IsZero() {
 		return localstore.WorkspacePublicationPolicyRecord{}, fmt.Errorf("projectstate: invalid publication configuration transaction time")
 	}
