@@ -116,6 +116,45 @@ func TestServiceRegistrationCoordinatorAuthority(t *testing.T) {
 	}
 }
 
+func TestServiceWorkspaceCoordinatorAuthority(t *testing.T) {
+	root := filepath.Join("..", "..", "..")
+	sources := architectureProductionGoSources(t, root)
+	service := sources["internal/runtime/projectstate/service.go"]
+	if !strings.Contains(service, "workspaceCoordinator") {
+		t.Fatal("service.go must own a workspaceCoordinator")
+	}
+	delegates := map[string]string{
+		"Status":     "s.workspace.status(",
+		"Diff":       "s.workspace.diff(",
+		"Apply":      "s.workspace.apply(",
+		"ApplyBatch": "s.workspace.applyBatch(",
+	}
+	for method, delegation := range delegates {
+		body := architectureMethodBody(service, "func (s *Service) "+method)
+		if body == "" {
+			t.Fatalf("service.go missing facade method %s", method)
+		}
+		if strings.Count(body, delegation) != 1 {
+			t.Fatalf("service.go method %s must have exactly one workspace coordinator delegate", method)
+		}
+		if strings.Contains(body, "WithImmediateWorkspace(") || strings.Contains(body, "readComposedWorkspace(") || strings.Contains(body, "readPublicationReview(") {
+			t.Fatalf("service.go method %s retains workspace composition or transaction logic", method)
+		}
+	}
+	for _, forbidden := range []string{"readComposedWorkspace(", "loadComposedWorkspace(", "Compose("} {
+		if strings.Contains(service, forbidden) {
+			t.Fatalf("service.go retains workspace authority %q", forbidden)
+		}
+	}
+	workspace := sources["internal/runtime/projectstate/workspace_coordinator.go"]
+	if !strings.Contains(workspace, "func (c *workspaceCoordinator) applyBatch(") || !strings.Contains(workspace, "func readComposedWorkspace(") {
+		t.Fatal("workspace coordinator must own mutation and composition entrypoints")
+	}
+	if strings.Contains(workspace, ".Status(") || strings.Contains(workspace, ".Diff(") || strings.Contains(workspace, ".Apply(") || strings.Contains(workspace, ".ApplyBatch(") {
+		t.Fatal("workspace coordinator must not call public Service workspace methods")
+	}
+}
+
 func architectureMethodBody(source, signature string) string {
 	start := strings.Index(source, signature)
 	if start < 0 {
