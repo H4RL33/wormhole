@@ -95,7 +95,7 @@ func TestObserveGitBaseRejectsAndDiscardsBranchSwitchProposal(t *testing.T) {
 			if err := os.Rename(repository.root, repository.root+"-unavailable"); err != nil {
 				t.Fatal(err)
 			}
-			service.now = nil
+			service.gitBase.now = nil
 			retry, err := service.ObserveGitBase(context.Background(), req)
 			if err != nil || !reflect.DeepEqual(retry, got) || retry.Conflicts == nil {
 				t.Fatalf("retry ObserveGitBase()=(%+v,%v), want %+v", retry, err, got)
@@ -206,7 +206,7 @@ func TestBranchSwitchDiscardExactRetryPrecedesMissingGitBindingAndClock(t *testi
 	if err := os.Rename(repository.root, repository.root+"-missing"); err != nil {
 		t.Fatal(err)
 	}
-	service.now = nil
+	service.gitBase.now = nil
 	got, err := service.ObserveGitBase(context.Background(), req)
 	if err != nil || !reflect.DeepEqual(got, want) || got.Conflicts == nil {
 		t.Fatalf("receipt-first retry=(%+v,%v), want %+v", got, err, want)
@@ -304,11 +304,11 @@ func TestBranchSwitchDiscardUnknownCommitConfirmsExactReceiptWithoutGit(t *testi
 		Root: repository.root, ExpectedCommit: repository.commit,
 		BranchAction: BranchSwitchDiscard, RequestID: "10000000-0000-4000-8000-a0000000000c", Actor: actor,
 	}
-	realTransition := service.withImmediateWorkspaceTransition
+	realTransition := service.gitBase.withImmediateWorkspaceTransition
 	if realTransition == nil {
 		t.Fatal("service has no real workspace-transition dependency")
 	}
-	service.withImmediateWorkspaceTransition = func(
+	service.gitBase.withImmediateWorkspaceTransition = func(
 		ctx context.Context,
 		scope types.WorkspaceScope,
 		requestID string,
@@ -364,7 +364,7 @@ func TestBranchSwitchDiscardConcurrentReceiptInsideWriterBarrierWins(t *testing.
 		t.Fatal(err)
 	}
 	var want ObserveGitBaseResult
-	service.observeGitBase = func(ctx context.Context, observedRequest ObserveGitBaseRequest) (gitBaseObservation, error) {
+	service.gitBase.observeGitBase = func(ctx context.Context, observedRequest ObserveGitBaseRequest) (gitBaseObservation, error) {
 		outside, observeErr := observeGitBaseOutside(ctx, observedRequest)
 		if observeErr != nil {
 			return gitBaseObservation{}, observeErr
@@ -376,7 +376,7 @@ func TestBranchSwitchDiscardConcurrentReceiptInsideWriterBarrierWins(t *testing.
 		if renameErr := os.Rename(repository.root, repository.root+"-missing"); renameErr != nil {
 			return gitBaseObservation{}, renameErr
 		}
-		service.now = nil
+		service.gitBase.now = nil
 		return outside, nil
 	}
 
@@ -808,7 +808,7 @@ func TestObserveGitBaseRebaseWithoutCandidateUsesSystemProvenance(t *testing.T) 
 		t.Fatal(err)
 	}
 	fixedNow := time.Date(2026, 8, 1, 17, 30, 0, 123, time.FixedZone("fixture", -4*60*60))
-	service.now = func() time.Time { return fixedNow }
+	service.gitBase.now = func() time.Time { return fixedNow }
 	runGit(t, repository.root, "commit", "--allow-empty", "-m", "metadata-only base change")
 	newCommit := strings.TrimSpace(runGit(t, repository.root, "rev-parse", "HEAD"))
 

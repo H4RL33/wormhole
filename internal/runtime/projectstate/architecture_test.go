@@ -229,6 +229,42 @@ func TestServiceCheckpointCoordinatorAuthority(t *testing.T) {
 	}
 }
 
+func TestServiceGitBaseCoordinatorAuthority(t *testing.T) {
+	root := filepath.Join("..", "..", "..")
+	sources := architectureProductionGoSources(t, root)
+	service := sources["internal/runtime/projectstate/service.go"]
+	if !strings.Contains(service, "gitBaseCoordinator") {
+		t.Fatal("service.go must own a gitBaseCoordinator")
+	}
+	for method, delegation := range map[string]string{
+		"ObserveGitBase":   "s.gitBase.observe(",
+		"RefreshWorkspace": "s.gitBase.refresh(",
+	} {
+		body := architectureMethodBody(service, "func (s *Service) "+method)
+		if strings.Count(body, delegation) != 1 {
+			t.Fatalf("service.go method %s must delegate exactly once", method)
+		}
+		if strings.Contains(body, "observeGitBaseOutside(") || strings.Contains(body, "WithImmediateWorkspace") || strings.Contains(body, "readGitBasePosition(") {
+			t.Fatalf("service.go method %s retains Git-base authority", method)
+		}
+	}
+	if strings.Contains(service, "observeGitBase                   ") {
+		t.Fatal("Service must not own the Git observer seam")
+	}
+	for _, path := range []string{
+		"internal/runtime/projectstate/git_observer.go",
+		"internal/runtime/projectstate/git_base_coordinator.go",
+	} {
+		source := sources[path]
+		if strings.Contains(source, "*Service") || strings.Contains(source, ".ObserveGitBase(") || strings.Contains(source, ".RefreshWorkspace(") {
+			t.Fatalf("Git-base owner %s must not depend on Service or public facade", path)
+		}
+	}
+	if strings.Contains(service, "syncGitBase") {
+		t.Fatal("service.go must not synchronize mutable Git-base seams")
+	}
+}
+
 func architectureMethodBody(source, signature string) string {
 	start := strings.Index(source, signature)
 	if start < 0 {

@@ -84,7 +84,7 @@ type observeGitBaseState struct {
 
 // ObserveGitBase reconciles one independently observed committed Git base with
 // the exact persisted workspace under a single SQLite writer barrier.
-func (s *Service) ObserveGitBase(ctx context.Context, req ObserveGitBaseRequest) (ObserveGitBaseResult, error) {
+func (c *gitBaseCoordinator) observe(ctx context.Context, req ObserveGitBaseRequest) (ObserveGitBaseResult, error) {
 	if err := validateObserveGitBaseRequest(req); err != nil {
 		return ObserveGitBaseResult{}, err
 	}
@@ -96,12 +96,12 @@ func (s *Service) ObserveGitBase(ctx context.Context, req ObserveGitBaseRequest)
 			return ObserveGitBaseResult{}, err
 		}
 	}
-	if s == nil || s.repo == nil {
+	if c == nil || c.repo == nil {
 		return ObserveGitBaseResult{}, localstore.ErrNotFound
 	}
 
 	if req.BranchAction == BranchSwitchDiscard {
-		receipt, err := s.repo.TransitionReceiptByKey(ctx, req.Scope, req.RequestID)
+		receipt, err := c.repo.TransitionReceiptByKey(ctx, req.Scope, req.RequestID)
 		if err != nil {
 			return ObserveGitBaseResult{}, err
 		}
@@ -109,11 +109,11 @@ func (s *Service) ObserveGitBase(ctx context.Context, req ObserveGitBaseRequest)
 			return decodeExistingDiscardReceipt(receipt, req, requestDigest)
 		}
 	}
-	if s.now == nil {
+	if c.now == nil {
 		return ObserveGitBaseResult{}, localstore.ErrNotFound
 	}
 
-	observer := s.observeGitBase
+	observer := c.observeGitBase
 	if observer == nil {
 		observer = observeGitBaseOutside
 	}
@@ -132,7 +132,7 @@ func (s *Service) ObserveGitBase(ctx context.Context, req ObserveGitBaseRequest)
 		if err := reobserveGitBase(ctx, observed); err != nil {
 			return err
 		}
-		mutationTime := s.now().UTC()
+		mutationTime := c.now().UTC()
 		if mutationTime.IsZero() || !zeroOffsetTime(mutationTime) {
 			return fmt.Errorf("projectstate: invalid Git observation transaction time")
 		}
@@ -313,9 +313,9 @@ func (s *Service) ObserveGitBase(ctx context.Context, req ObserveGitBaseRequest)
 	}
 
 	if req.BranchAction == BranchSwitchDiscard {
-		withTransition := s.withImmediateWorkspaceTransition
+		withTransition := c.withImmediateWorkspaceTransition
 		if withTransition == nil {
-			withTransition = s.repo.WithImmediateWorkspaceTransition
+			withTransition = c.repo.WithImmediateWorkspaceTransition
 		}
 		err = withTransition(ctx, req.Scope, req.RequestID,
 			func(tx *localstore.WorkspaceMutationTx, receipt *localstore.WorkspaceTransitionReceiptRecord) error {
@@ -331,7 +331,7 @@ func (s *Service) ObserveGitBase(ctx context.Context, req ObserveGitBaseRequest)
 				return mutate(tx)
 			})
 	} else {
-		err = s.repo.WithImmediateWorkspace(ctx, req.Scope, mutate)
+		err = c.repo.WithImmediateWorkspace(ctx, req.Scope, mutate)
 	}
 	if err == nil {
 		return cloneObserveGitBaseResult(attempted), nil
@@ -339,16 +339,16 @@ func (s *Service) ObserveGitBase(ctx context.Context, req ObserveGitBaseRequest)
 	if req.BranchAction != BranchSwitchDiscard || !confirmableDiscard || !errors.Is(err, localstore.ErrCommitOutcomeUnknown) {
 		return ObserveGitBaseResult{}, err
 	}
-	return confirmDiscardCommit(ctx, s.repo, req, requestDigest, attempted, err)
+	return confirmDiscardCommit(ctx, c.repo, req, requestDigest, attempted, err)
 }
 
 // RefreshWorkspace independently resolves the current checkout position and
 // delegates the actual reconciliation to the zero-actor Reject path.
-func (s *Service) RefreshWorkspace(ctx context.Context, binding types.WorkspaceBinding) (types.WorkspaceBinding, error) {
+func (c *gitBaseCoordinator) refresh(ctx context.Context, binding types.WorkspaceBinding) (types.WorkspaceBinding, error) {
 	if err := binding.Validate(); err != nil {
 		return types.WorkspaceBinding{}, err
 	}
-	if s == nil || s.repo == nil {
+	if c == nil || c.repo == nil {
 		return types.WorkspaceBinding{}, localstore.ErrNotFound
 	}
 	position, err := readGitBasePosition(ctx, binding.Checkout.CanonicalPath)
@@ -358,14 +358,14 @@ func (s *Service) RefreshWorkspace(ctx context.Context, binding types.WorkspaceB
 	if position.root != binding.Checkout.CanonicalPath || position.checkout != binding.Checkout {
 		return types.WorkspaceBinding{}, fmt.Errorf("projectstate: refreshed checkout differs from binding")
 	}
-	observed, err := s.ObserveGitBase(ctx, ObserveGitBaseRequest{
+	observed, err := c.observe(ctx, ObserveGitBaseRequest{
 		Scope: binding.Scope, ExpectedBinding: binding, Root: position.root,
 		ExpectedCommit: position.commit, BranchAction: BranchSwitchReject,
 	})
 	if err != nil {
 		return types.WorkspaceBinding{}, err
 	}
-	workspace, err := s.repo.Workspace(ctx, binding.Scope)
+	workspace, err := c.repo.Workspace(ctx, binding.Scope)
 	if err != nil {
 		return types.WorkspaceBinding{}, err
 	}

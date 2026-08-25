@@ -75,8 +75,8 @@ type Service struct {
 	workspace                        *workspaceCoordinator
 	publication                      *publicationCoordinator
 	checkpoint                       *checkpointCoordinator
+	gitBase                          *gitBaseCoordinator
 	readWorkingTree                  func(string) (state.Tree, error)
-	observeGitBase                   func(context.Context, ObserveGitBaseRequest) (gitBaseObservation, error)
 	observePublicationOrigin         func(context.Context, string) (publicationOriginObservation, error)
 	observePublicationTrust          func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error)
 	withImmediateWorkspace           withImmediateWorkspaceFunc
@@ -91,7 +91,7 @@ func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service,
 	}
 	service := &Service{
 		repo: repo, registrationTimeout: workspaceRegistrationTimeout,
-		readWorkingTree: ReadWorkingTreeNoFollow, observeGitBase: observeGitBaseOutside,
+		readWorkingTree:                  ReadWorkingTreeNoFollow,
 		observePublicationOrigin:         observePublicationOrigin,
 		withImmediateWorkspace:           repo.WithImmediateWorkspace,
 		withImmediateWorkspaceTransition: repo.WithImmediateWorkspaceTransition,
@@ -101,11 +101,12 @@ func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service,
 	service.registration = newRegistrationCoordinator(service)
 	service.publication = &publicationCoordinator{
 		repo: repo, observeOrigin: service.observePublicationOrigin,
-		observeTrust: service.observePublicationTrust, observeGitBase: service.observeGitBase,
+		observeTrust: service.observePublicationTrust, observeGitBase: observeGitBaseOutside,
 		withImmediateWorkspace: service.withImmediateWorkspace, now: service.now,
 		confirmTransitionCommit: confirmPublicationCommit,
 	}
 	service.checkpoint = newCheckpointCoordinator(service)
+	service.gitBase = newGitBaseCoordinator(repo)
 	service.workspace = &workspaceCoordinator{repo: repo, readPublicationReview: service.publication.readPublicationReview}
 	if config.LegacyIntegrationBackupRoot == "" {
 		return service, nil
@@ -202,6 +203,20 @@ func (s *Service) RegisteredWorkspaces(ctx context.Context) ([]types.WorkspaceBi
 		return nil, fmt.Errorf("projectstate: service is unavailable")
 	}
 	return s.registration.registeredWorkspaces(ctx)
+}
+
+func (s *Service) ObserveGitBase(ctx context.Context, req ObserveGitBaseRequest) (ObserveGitBaseResult, error) {
+	if s == nil || s.gitBase == nil {
+		return ObserveGitBaseResult{}, localstore.ErrNotFound
+	}
+	return s.gitBase.observe(ctx, req)
+}
+
+func (s *Service) RefreshWorkspace(ctx context.Context, binding types.WorkspaceBinding) (types.WorkspaceBinding, error) {
+	if s == nil || s.gitBase == nil {
+		return types.WorkspaceBinding{}, localstore.ErrNotFound
+	}
+	return s.gitBase.refresh(ctx, binding)
 }
 
 func (s *Service) Status(ctx context.Context, scope types.WorkspaceScope) (WorkspaceStatus, error) {
