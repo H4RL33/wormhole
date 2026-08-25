@@ -17,15 +17,15 @@ var ErrIdempotencyConflict = errors.New("projectstate: idempotency conflict")
 
 // Stash atomically moves the exact workspace proposal into durable terminal
 // stash state and records a retry receipt.
-func (s *Service) Stash(ctx context.Context, req StashRequest) (StashResult, error) {
-	if s == nil || s.repo == nil || s.newStashID == nil {
+func (c *transitionCoordinator) stash(ctx context.Context, req StashRequest) (StashResult, error) {
+	if c == nil || c.repo == nil || c.newStashID == nil {
 		return StashResult{}, localstore.ErrNotFound
 	}
 	requestDigest, err := stashRequestDigest(req)
 	if err != nil {
 		return StashResult{}, err
 	}
-	stashID, err := s.newStashID()
+	stashID, err := c.newStashID()
 	if err != nil {
 		return StashResult{}, fmt.Errorf("projectstate: generate stash ID: %w", err)
 	}
@@ -34,7 +34,7 @@ func (s *Service) Stash(ctx context.Context, req StashRequest) (StashResult, err
 	}
 
 	var attempted StashResult
-	err = s.repo.WithImmediateWorkspace(ctx, req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	err = c.withImmediateWorkspace(ctx, req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		receipt, err := tx.TransitionReceipt(ctx, req.RequestID)
 		if err != nil {
 			return err
@@ -125,7 +125,7 @@ func (s *Service) Stash(ctx context.Context, req StashRequest) (StashResult, err
 	if !errors.Is(err, localstore.ErrCommitOutcomeUnknown) {
 		return StashResult{}, err
 	}
-	return confirmStashCommit(ctx, s.repo, req, attempted, err)
+	return confirmStashCommit(ctx, c.repo, req, attempted, err)
 }
 
 func newCanonicalStashID() (string, error) {

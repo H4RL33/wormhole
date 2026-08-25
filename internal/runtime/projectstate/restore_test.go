@@ -223,7 +223,7 @@ func TestServiceRestoreStashCleanConsumesStashAndReceiptRetryIsReadOnly(t *testi
 	fixture := newRestoreServiceFixture(t)
 	fixedNow := time.Date(2026, 7, 29, 12, 34, 56, 0, time.UTC)
 	clockCalls := 0
-	fixture.service.now = func() time.Time {
+	fixture.service.transition.now = func() time.Time {
 		clockCalls++
 		return fixedNow
 	}
@@ -290,7 +290,7 @@ func TestServiceRestoreStashCleanConsumesStashAndReceiptRetryIsReadOnly(t *testi
 	}
 	installRestoreWriteBlockTriggers(t, fixture.store)
 	before := captureStashRawState(t, fixture.store)
-	fixture.service.now = func() time.Time { panic("clean receipt retry consulted clock") }
+	fixture.service.transition.now = func() time.Time { panic("clean receipt retry consulted clock") }
 	retried, err := fixture.service.RestoreStash(context.Background(), fixture.req)
 	if err != nil || !reflect.DeepEqual(retried, got) {
 		t.Fatalf("retry RestoreStash()=(%+v,%v), want %+v", retried, err, got)
@@ -663,7 +663,7 @@ func TestServiceRestoreStashConflictRetainsStateAndExactRetryIsReadOnly(t *testi
 	setServiceWorkspaceState(t, fixture.store, fixture.req.Scope, "conflicted")
 	fixedNow := time.Date(2026, 7, 29, 13, 0, 0, 0, time.UTC)
 	clockCalls := 0
-	fixture.service.now = func() time.Time { clockCalls++; return fixedNow }
+	fixture.service.transition.now = func() time.Time { clockCalls++; return fixedNow }
 
 	beforeBinding := captureRestoreProtectedBindingRows(t, fixture.store)
 	beforeCandidate := captureRestoreCandidateRows(t, fixture.store)
@@ -731,7 +731,7 @@ func TestServiceRestoreStashConflictRetainsStateAndExactRetryIsReadOnly(t *testi
 	fixture.store, fixture.service = reopenedStore, reopenedService
 	installRestoreWriteBlockTriggers(t, fixture.store)
 	beforeRetry := captureStashRawState(t, fixture.store)
-	fixture.service.now = func() time.Time { panic("conflicted receipt retry consulted clock") }
+	fixture.service.transition.now = func() time.Time { panic("conflicted receipt retry consulted clock") }
 	retried, err := fixture.service.RestoreStash(context.Background(), fixture.req)
 	if err != nil || !reflect.DeepEqual(retried, got) {
 		t.Fatalf("conflicted retry RestoreStash()=(%+v,%v), want %+v", retried, err, got)
@@ -758,7 +758,7 @@ func TestServiceRestoreStashConflictedRetryIgnoresRawBindingTimestampDrift(t *te
 	current := restoreProjectName(t, fixture.accepted, "current project", 2*time.Minute)
 	insertServiceCandidate(t, fixture.store, fixture.req.Scope, fixture.accepted.Digest, current, nil, 0)
 	setServiceWorkspaceState(t, fixture.store, fixture.req.Scope, "pending")
-	fixture.service.now = func() time.Time { return time.Date(2026, 7, 29, 13, 30, 0, 0, time.UTC) }
+	fixture.service.transition.now = func() time.Time { return time.Date(2026, 7, 29, 13, 30, 0, 0, time.UTC) }
 	want, err := fixture.service.RestoreStash(context.Background(), fixture.req)
 	if err != nil {
 		t.Fatal(err)
@@ -770,7 +770,7 @@ func TestServiceRestoreStashConflictedRetryIgnoresRawBindingTimestampDrift(t *te
 		t.Fatal(err)
 	}
 	before := captureStashRawState(t, fixture.store)
-	fixture.service.now = func() time.Time { panic("drifted retry consulted clock") }
+	fixture.service.transition.now = func() time.Time { panic("drifted retry consulted clock") }
 	got, err := fixture.service.RestoreStash(context.Background(), fixture.req)
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("timestamp-only retry RestoreStash()=(%+v,%v), want (%+v,nil)", got, err, want)
@@ -800,7 +800,7 @@ func TestServiceRestoreStashConflictedRetryAfterRestartOwnsResult(t *testing.T) 
 	}
 	reopenedStore, reopenedService := openProjectStateServiceAt(t, fixture.databasePath)
 	fixture.store, fixture.service = reopenedStore, reopenedService
-	fixture.service.now = func() time.Time { panic("restart retry consulted clock") }
+	fixture.service.transition.now = func() time.Time { panic("restart retry consulted clock") }
 	retried, err := fixture.service.RestoreStash(context.Background(), fixture.req)
 	if err != nil || !reflect.DeepEqual(retried, want) {
 		t.Fatalf("restart retry RestoreStash()=(%+v,%v), want %+v", retried, err, want)
@@ -981,7 +981,7 @@ func TestServiceRestoreStashConflictedRetryDriftMatrixAfterRestart(t *testing.T)
 			fixture.store, fixture.service = reopenedStore, reopenedService
 			test.mutate(t, fixture)
 			before := captureStashRawState(t, fixture.store)
-			fixture.service.now = func() time.Time { panic("drift retry consulted clock") }
+			fixture.service.transition.now = func() time.Time { panic("drift retry consulted clock") }
 			got, err := fixture.service.RestoreStash(context.Background(), fixture.req)
 			if test.wantSuccess {
 				if err != nil || !reflect.DeepEqual(got, want) {
@@ -1021,7 +1021,7 @@ func TestServiceRestoreStashConflictPreservesAbsorbedPrefixAndSparseLaterRowsAcr
 		t.Fatal(err)
 	}
 	_, reopened := openProjectStateServiceAt(t, fixture.databasePath)
-	reopened.now = func() time.Time { panic("restart sparse retry consulted clock") }
+	reopened.transition.now = func() time.Time { panic("restart sparse retry consulted clock") }
 	retried, err := reopened.RestoreStash(context.Background(), fixture.req)
 	if err != nil || !reflect.DeepEqual(retried, first) {
 		t.Fatalf("restart RestoreStash()=(%+v,%v), want %+v", retried, err, first)
@@ -1072,7 +1072,7 @@ func TestServiceRestoreStashConflictedRetryRejectsStashOwnedRowDriftAfterRestart
 			fixture.store, fixture.service = reopenedStore, reopenedService
 			test.mutate(t, fixture)
 			before := captureStashRawState(t, fixture.store)
-			fixture.service.now = func() time.Time { panic("stash-owned drift retry consulted clock") }
+			fixture.service.transition.now = func() time.Time { panic("stash-owned drift retry consulted clock") }
 			got, err := fixture.service.RestoreStash(context.Background(), fixture.req)
 			if test.wantSuccess {
 				if err != nil || !reflect.DeepEqual(got, want) {

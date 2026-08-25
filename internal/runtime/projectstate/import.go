@@ -37,8 +37,8 @@ type ImportResult struct {
 	Conflicts                []Conflict
 }
 
-func (s *Service) Import(ctx context.Context, req ImportRequest) (ImportResult, error) {
-	if s == nil || s.repo == nil || s.readWorkingTree == nil || s.now == nil {
+func (c *transitionCoordinator) importWorkspace(ctx context.Context, req ImportRequest) (ImportResult, error) {
+	if c == nil || c.repo == nil || c.readWorkingTree == nil || c.now == nil {
 		return ImportResult{}, fmt.Errorf("projectstate: service is unavailable")
 	}
 	if err := req.Actor.ValidateLocalAction(); err != nil {
@@ -57,7 +57,7 @@ func (s *Service) Import(ctx context.Context, req ImportRequest) (ImportResult, 
 		}
 		return ImportResult{}, fmt.Errorf("projectstate: invalid import root: %w", err)
 	}
-	capturedTree, err := s.readWorkingTree(root)
+	capturedTree, err := c.readWorkingTree(root)
 	if err != nil {
 		return ImportResult{}, err
 	}
@@ -71,7 +71,7 @@ func (s *Service) Import(ctx context.Context, req ImportRequest) (ImportResult, 
 	}
 
 	var result ImportResult
-	err = s.repo.WithImmediateWorkspace(ctx, req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	err = c.withImmediateWorkspace(ctx, req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		workspace, err := tx.Workspace(ctx)
 		if err != nil {
 			return err
@@ -176,7 +176,7 @@ func (s *Service) Import(ctx context.Context, req ImportRequest) (ImportResult, 
 		if err != nil {
 			return err
 		}
-		mutationTime := s.now().UTC()
+		mutationTime := c.now().UTC()
 		importedBy := req.Actor.PrincipalID()
 		rebasedSnapshot, err := cloneImportSnapshot(merged.Snapshot)
 		if err != nil {
@@ -187,7 +187,7 @@ func (s *Service) Import(ctx context.Context, req ImportRequest) (ImportResult, 
 			return err
 		}
 
-		liveTree, err := s.readWorkingTree(root)
+		liveTree, err := c.readWorkingTree(root)
 		if err != nil {
 			return err
 		}

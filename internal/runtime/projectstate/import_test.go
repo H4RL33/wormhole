@@ -21,7 +21,7 @@ func TestImportPersistsCleanDirectCandidate(t *testing.T) {
 	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
 	_, service := openProjectStateService(t, "")
 	fixedNow := time.Date(2026, 7, 29, 18, 30, 0, 123, time.FixedZone("review-offset", -7*60*60))
-	service.now = func() time.Time { return fixedNow }
+	service.transition.now = func() time.Time { return fixedNow }
 	registered := registerGitRepository(t, service, repository)
 	neighborRepository := createGitRepository(t, "00000000-0000-4000-8000-000000000002")
 	neighbor := registerGitRepository(t, service, neighborRepository)
@@ -99,8 +99,8 @@ func TestImportValidatesRequestAndOptionalDigestBeforeMutation(t *testing.T) {
 	}
 
 	reads := 0
-	realReader := service.readWorkingTree
-	service.readWorkingTree = func(root string) (state.Tree, error) {
+	realReader := service.transition.readWorkingTree
+	service.transition.readWorkingTree = func(root string) (state.Tree, error) {
 		reads++
 		return realReader(root)
 	}
@@ -417,7 +417,7 @@ func TestImportSecondCaptureAndFinalCheckoutRacesReturnZero(t *testing.T) {
 			t.Fatalf("working tree has %d files, want at least two", len(shared))
 		}
 		calls := 0
-		service.readWorkingTree = func(string) (state.Tree, error) {
+		service.transition.readWorkingTree = func(string) (state.Tree, error) {
 			calls++
 			if calls == 2 {
 				shared[0], shared[1] = shared[1], shared[0]
@@ -441,7 +441,7 @@ func TestImportSecondCaptureAndFinalCheckoutRacesReturnZero(t *testing.T) {
 		second := checkpointCloneTree(first)
 		second[0].Data = append(bytes.Clone(second[0].Data), ' ')
 		calls := 0
-		service.readWorkingTree = func(string) (state.Tree, error) {
+		service.transition.readWorkingTree = func(string) (state.Tree, error) {
 			calls++
 			if calls == 1 {
 				return first, nil
@@ -458,9 +458,9 @@ func TestImportSecondCaptureAndFinalCheckoutRacesReturnZero(t *testing.T) {
 		repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
 		store, service := openProjectStateService(t, "")
 		registered := registerGitRepository(t, service, repository)
-		realReader := service.readWorkingTree
+		realReader := service.transition.readWorkingTree
 		calls := 0
-		service.readWorkingTree = func(root string) (state.Tree, error) {
+		service.transition.readWorkingTree = func(root string) (state.Tree, error) {
 			calls++
 			tree, err := realReader(root)
 			if err != nil {

@@ -25,7 +25,7 @@ func newCheckpointCoordinator(service *Service) *checkpointCoordinator {
 		repo:                      service.repo,
 		publication:               service.publication,
 		withImmediateWorkspace:    service.withImmediateWorkspace,
-		readWorkingTree:           service.readWorkingTree,
+		readWorkingTree:           ReadWorkingTreeNoFollow,
 		gates:                     &checkpointGateSet{},
 		prepareCheckpointArtifact: defaultPrepareCheckpointArtifact,
 		confirmWorkspaceCommit:    service.repo.ConfirmWorkspaceCommit,

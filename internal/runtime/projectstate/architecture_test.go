@@ -265,6 +265,43 @@ func TestServiceGitBaseCoordinatorAuthority(t *testing.T) {
 	}
 }
 
+func TestServiceTransitionCoordinatorAuthority(t *testing.T) {
+	root := filepath.Join("..", "..", "..")
+	sources := architectureProductionGoSources(t, root)
+	service := sources["internal/runtime/projectstate/service.go"]
+	if !strings.Contains(service, "transitionCoordinator") {
+		t.Fatal("service.go must own a transitionCoordinator")
+	}
+	for method, delegation := range map[string]string{
+		"Import":       "s.transition.importWorkspace(",
+		"Stash":        "s.transition.stash(",
+		"RestoreStash": "s.transition.restoreStash(",
+	} {
+		body := architectureMethodBody(service, "func (s *Service) "+method)
+		if strings.Count(body, delegation) != 1 {
+			t.Fatalf("service.go method %s must delegate exactly once", method)
+		}
+		if strings.Contains(body, "WithImmediateWorkspace") || strings.Contains(body, "readWorkingTree(") || strings.Contains(body, "newStashID(") {
+			t.Fatalf("service.go method %s retains transition authority", method)
+		}
+	}
+	serviceType := architectureMethodBody(service, "type Service struct")
+	if strings.Contains(serviceType, "readWorkingTree") || strings.Contains(serviceType, "newStashID") {
+		t.Fatal("Service must not own transition-specific seams")
+	}
+	for _, path := range []string{
+		"internal/runtime/projectstate/transition_coordinator.go",
+		"internal/runtime/projectstate/import.go",
+		"internal/runtime/projectstate/stash.go",
+		"internal/runtime/projectstate/restore.go",
+	} {
+		source := sources[path]
+		if strings.Contains(source, "*Service") || strings.Contains(source, ".Import(") || strings.Contains(source, ".Stash(") || strings.Contains(source, ".RestoreStash(") {
+			t.Fatalf("transition owner %s must not depend on Service or public facade", path)
+		}
+	}
+}
+
 func architectureMethodBody(source, signature string) string {
 	start := strings.Index(source, signature)
 	if start < 0 {
@@ -534,7 +571,7 @@ func TestCoarsePrivateCorruptionFailsClosedWithoutCrossScopeMutation(t *testing.
 			beforeTargetGit := captureArchitectureGit(t, fixture.targetRepository.root)
 			beforeSiblingGit := captureArchitectureGit(t, fixture.siblingRepository.root)
 			beforeArtifacts := captureArchitectureArtifacts(t, fixture.artifactRoots)
-			fixture.service.readWorkingTree = func(string) (state.Tree, error) {
+			fixture.service.transition.readWorkingTree = func(string) (state.Tree, error) {
 				panic("corrupt service call reached working-tree mutation path")
 			}
 			attempt := test.attempt
@@ -581,7 +618,7 @@ func TestCurrentWorksetIgnoresTerminalCorruptionAndAuditReportsIt(t *testing.T) 
 		{
 			name: "stash",
 			prepare: func(t *testing.T, fixture *architectureFixture) {
-				fixture.service.newStashID = func() (string, error) { return "20000000-0000-4000-8000-000000000011", nil }
+				fixture.service.transition.newStashID = func() (string, error) { return "20000000-0000-4000-8000-000000000011", nil }
 				direct := restoreProjectName(t, fixture.base.AcceptedSnapshot, "stashed project", time.Minute)
 				insertServiceCandidate(t, fixture.store, fixture.target.Scope, fixture.base.AcceptedSnapshot.Digest, direct, nil, 0)
 				setServiceWorkspaceState(t, fixture.store, fixture.target.Scope, "pending")
@@ -696,7 +733,7 @@ func TestCurrentWorksetIgnoresTerminalCorruptionAndAuditReportsIt(t *testing.T) 
 				if err != nil {
 					return err
 				}
-				fixture.service.now = func() time.Time { return time.Date(2026, 8, 24, 13, 0, 0, 0, time.UTC) }
+				fixture.service.transition.now = func() time.Time { return time.Date(2026, 8, 24, 13, 0, 0, 0, time.UTC) }
 				_, err = fixture.service.ReconfigurePublication(context.Background(), publicationRequest(
 					t, fixture.target, current, types.PublicationPublicGit, diffActorEnvelope(),
 				))
@@ -824,7 +861,7 @@ func newArchitectureFixture(t *testing.T) architectureFixture {
 func prepareArchitectureRestoreStash(t *testing.T, fixture *architectureFixture) {
 	t.Helper()
 	const stashID = "20000000-0000-4000-8000-000000000001"
-	fixture.service.newStashID = func() (string, error) { return stashID, nil }
+	fixture.service.transition.newStashID = func() (string, error) { return stashID, nil }
 	direct := restoreProjectName(t, fixture.base.AcceptedSnapshot, "stashed project", time.Minute)
 	insertServiceCandidate(t, fixture.store, fixture.target.Scope, fixture.base.AcceptedSnapshot.Digest, direct, nil, 0)
 	setServiceWorkspaceState(t, fixture.store, fixture.target.Scope, "pending")
@@ -850,7 +887,7 @@ func prepareArchitectureRestoreOpenConflict(t *testing.T, fixture *architectureF
 
 func prepareArchitectureStashReceipt(t *testing.T, fixture *architectureFixture) {
 	t.Helper()
-	fixture.service.newStashID = func() (string, error) { return "20000000-0000-4000-8000-000000000001", nil }
+	fixture.service.transition.newStashID = func() (string, error) { return "20000000-0000-4000-8000-000000000001", nil }
 	fixture.stashRequest = StashRequest{
 		Scope: fixture.target.Scope, RequestID: "40000000-0000-4000-8000-000000000001",
 		Actor: diffActorEnvelope(), Label: "architecture receipt",
@@ -950,7 +987,7 @@ func attemptArchitectureApply(t *testing.T, fixture *architectureFixture) error 
 
 func attemptArchitectureRestoreStash(t *testing.T, fixture *architectureFixture) error {
 	t.Helper()
-	fixture.service.now = func() time.Time { panic("corrupt stash restore consulted mutation clock") }
+	fixture.service.transition.now = func() time.Time { panic("corrupt stash restore consulted mutation clock") }
 	got, err := fixture.service.RestoreStash(context.Background(), fixture.restoreRequest)
 	if !reflect.DeepEqual(got, RestoreStashResult{}) {
 		t.Fatalf("RestoreStash() result=%+v, want zero", got)

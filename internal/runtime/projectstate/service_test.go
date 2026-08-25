@@ -98,7 +98,7 @@ func TestWorkspaceStashExactRetryPreservesReceiptAndRevision(t *testing.T) {
 	if err != nil || beforeReceipt == nil {
 		t.Fatalf("first stash receipt=(%+v,%v)", beforeReceipt, err)
 	}
-	fixture.service.newStashID = func() (string, error) { return "20000000-0000-4000-8000-000000000002", nil }
+	fixture.service.transition.newStashID = func() (string, error) { return "20000000-0000-4000-8000-000000000002", nil }
 
 	retry, err := fixture.service.Stash(context.Background(), fixture.req)
 	if err != nil || retry != first {

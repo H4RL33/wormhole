@@ -14,8 +14,8 @@ import (
 // RestoreStash atomically rebases one immutable stash onto the current
 // workspace proposal. Clean restores consume the stash; conflicted restores
 // retain it and bind an exact persisted-state digest into the retry receipt.
-func (s *Service) RestoreStash(ctx context.Context, req RestoreStashRequest) (RestoreStashResult, error) {
-	if s == nil || s.repo == nil || s.now == nil {
+func (c *transitionCoordinator) restoreStash(ctx context.Context, req RestoreStashRequest) (RestoreStashResult, error) {
+	if c == nil || c.repo == nil || c.now == nil {
 		return RestoreStashResult{}, localstore.ErrNotFound
 	}
 	requestDigest, err := restoreRequestDigest(req)
@@ -24,7 +24,7 @@ func (s *Service) RestoreStash(ctx context.Context, req RestoreStashRequest) (Re
 	}
 
 	var attempted RestoreStashResult
-	err = s.repo.WithImmediateWorkspace(ctx, req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+	err = c.withImmediateWorkspace(ctx, req.Scope, func(tx *localstore.WorkspaceMutationTx) error {
 		receipt, err := tx.TransitionReceipt(ctx, req.RequestID)
 		if err != nil {
 			return err
@@ -60,7 +60,7 @@ func (s *Service) RestoreStash(ctx context.Context, req RestoreStashRequest) (Re
 		if err != nil {
 			return err
 		}
-		mutationTime := s.now().UTC()
+		mutationTime := c.now().UTC()
 
 		if len(plan.Result.Conflicts) == 0 {
 			if err := applyCleanRestore(ctx, tx, req, requestDigest, before, plan, mutationTime); err != nil {
@@ -82,7 +82,7 @@ func (s *Service) RestoreStash(ctx context.Context, req RestoreStashRequest) (Re
 	if !errors.Is(err, localstore.ErrCommitOutcomeUnknown) {
 		return RestoreStashResult{}, err
 	}
-	return confirmRestoreStashCommit(ctx, s.repo, req, requestDigest, attempted, err)
+	return confirmRestoreStashCommit(ctx, c.repo, req, requestDigest, attempted, err)
 }
 
 func applyCleanRestore(

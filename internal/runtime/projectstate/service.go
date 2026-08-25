@@ -76,13 +76,12 @@ type Service struct {
 	publication                      *publicationCoordinator
 	checkpoint                       *checkpointCoordinator
 	gitBase                          *gitBaseCoordinator
-	readWorkingTree                  func(string) (state.Tree, error)
+	transition                       *transitionCoordinator
 	observePublicationOrigin         func(context.Context, string) (publicationOriginObservation, error)
 	observePublicationTrust          func(context.Context, types.WorkspaceBinding) (publicationTrustObservation, error)
 	withImmediateWorkspace           withImmediateWorkspaceFunc
 	withImmediateWorkspaceTransition withImmediateWorkspaceTransitionFunc
 	now                              func() time.Time
-	newStashID                       func() (string, error)
 }
 
 func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service, error) {
@@ -91,12 +90,10 @@ func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service,
 	}
 	service := &Service{
 		repo: repo, registrationTimeout: workspaceRegistrationTimeout,
-		readWorkingTree:                  ReadWorkingTreeNoFollow,
 		observePublicationOrigin:         observePublicationOrigin,
 		withImmediateWorkspace:           repo.WithImmediateWorkspace,
 		withImmediateWorkspaceTransition: repo.WithImmediateWorkspaceTransition,
 		now:                              time.Now,
-		newStashID:                       newCanonicalStashID,
 	}
 	service.registration = newRegistrationCoordinator(service)
 	service.publication = &publicationCoordinator{
@@ -108,6 +105,9 @@ func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service,
 	service.checkpoint = newCheckpointCoordinator(service)
 	service.gitBase = newGitBaseCoordinator(repo)
 	service.workspace = &workspaceCoordinator{repo: repo, readPublicationReview: service.publication.readPublicationReview}
+	service.transition = &transitionCoordinator{repo: repo, readWorkingTree: ReadWorkingTreeNoFollow,
+		withImmediateWorkspace: repo.WithImmediateWorkspace,
+		now:                    time.Now, newStashID: newCanonicalStashID}
 	if config.LegacyIntegrationBackupRoot == "" {
 		return service, nil
 	}
@@ -406,4 +406,25 @@ func (s *Service) Recover(ctx context.Context, scope types.WorkspaceScope) (Work
 		return WorkspaceStatus{}, localstore.ErrNotFound
 	}
 	return s.checkpoint.recover(ctx, scope)
+}
+
+func (s *Service) Import(ctx context.Context, req ImportRequest) (ImportResult, error) {
+	if s == nil || s.transition == nil {
+		return ImportResult{}, localstore.ErrNotFound
+	}
+	return s.transition.importWorkspace(ctx, req)
+}
+
+func (s *Service) Stash(ctx context.Context, req StashRequest) (StashResult, error) {
+	if s == nil || s.transition == nil {
+		return StashResult{}, localstore.ErrNotFound
+	}
+	return s.transition.stash(ctx, req)
+}
+
+func (s *Service) RestoreStash(ctx context.Context, req RestoreStashRequest) (RestoreStashResult, error) {
+	if s == nil || s.transition == nil {
+		return RestoreStashResult{}, localstore.ErrNotFound
+	}
+	return s.transition.restoreStash(ctx, req)
 }

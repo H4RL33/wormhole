@@ -40,7 +40,7 @@ func TestServiceStashValidatesRequestAndGeneratedIDBeforeTransaction(t *testing.
 	}
 
 	calls := 0
-	service.newStashID = func() (string, error) {
+	service.transition.newStashID = func() (string, error) {
 		calls++
 		return "20000000-0000-4000-8000-000000000001", nil
 	}
@@ -55,19 +55,19 @@ func TestServiceStashValidatesRequestAndGeneratedIDBeforeTransaction(t *testing.
 	}
 
 	generatorErr := errors.New("stash ID source unavailable")
-	service.newStashID = func() (string, error) { return "", generatorErr }
+	service.transition.newStashID = func() (string, error) { return "", generatorErr }
 	if got, err := service.Stash(context.Background(), valid); !errors.Is(err, generatorErr) || got != (StashResult{}) {
 		t.Fatalf("generator failure Stash()=(%+v,%v)", got, err)
 	}
 	for _, invalidID := range []string{
 		"", "BAD", "20000000-0000-1000-8000-000000000001", "20000000-0000-4000-7000-000000000001",
 	} {
-		service.newStashID = func() (string, error) { return invalidID, nil }
+		service.transition.newStashID = func() (string, error) { return invalidID, nil }
 		if got, err := service.Stash(context.Background(), valid); err == nil || got != (StashResult{}) {
 			t.Fatalf("generated ID %q Stash()=(%+v,%v)", invalidID, got, err)
 		}
 	}
-	service.newStashID = nil
+	service.transition.newStashID = nil
 	if got, err := service.Stash(context.Background(), valid); !errors.Is(err, localstore.ErrNotFound) || got != (StashResult{}) {
 		t.Fatalf("nil generator Stash()=(%+v,%v)", got, err)
 	}
@@ -83,7 +83,7 @@ func TestServiceStashAcceptedBaseEmptySuccess(t *testing.T) {
 	registered := registerGitRepository(t, service, repository)
 	accepted := mustServiceStatus(t, service, registered.Binding.Scope).AcceptedSnapshot
 	const stashID = "20000000-0000-4000-8000-000000000001"
-	service.newStashID = func() (string, error) { return stashID, nil }
+	service.transition.newStashID = func() (string, error) { return stashID, nil }
 	req := StashRequest{
 		Scope: registered.Binding.Scope, RequestID: "40000000-0000-4000-8000-000000000001",
 		Actor: diffActorEnvelope(), Label: "accepted base",
@@ -321,7 +321,7 @@ func TestServiceStashIdempotentReceiptIsReadOnlyAndCollisionsFail(t *testing.T) 
 	`); err != nil {
 		t.Fatal(err)
 	}
-	fixture.service.newStashID = func() (string, error) { return "20000000-0000-4000-8000-000000000002", nil }
+	fixture.service.transition.newStashID = func() (string, error) { return "20000000-0000-4000-8000-000000000002", nil }
 	before := captureStashRawState(t, fixture.store)
 	retry, err := fixture.service.Stash(context.Background(), fixture.req)
 	if err != nil || retry != first {
@@ -471,7 +471,7 @@ func TestServiceStashCommitUnknownReturnsZeroAndSameRequestRetrySucceeds(t *test
 		"20000000-0000-4000-8000-000000000002",
 	}
 	generated := 0
-	fixture.service.newStashID = func() (string, error) {
+	fixture.service.transition.newStashID = func() (string, error) {
 		id := ids[generated]
 		generated++
 		return id, nil
@@ -592,7 +592,7 @@ func TestServiceStashKeepsSiblingWorkspaceAndReceiptScopeIsolated(t *testing.T) 
 	setServiceWorkspaceState(t, store, b.Binding.Scope, "pending")
 	setServiceWorkspaceState(t, store, c.Binding.Scope, "pending")
 	const requestID = "40000000-0000-4000-8000-000000000001"
-	service.newStashID = func() (string, error) { return "20000000-0000-4000-8000-000000000001", nil }
+	service.transition.newStashID = func() (string, error) { return "20000000-0000-4000-8000-000000000001", nil }
 	reqA := StashRequest{Scope: a.Binding.Scope, RequestID: requestID, Actor: diffActorEnvelope(), Label: "isolated"}
 	if _, err := service.Stash(context.Background(), reqA); err != nil {
 		t.Fatal(err)
@@ -634,7 +634,7 @@ func TestServiceStashKeepsSiblingWorkspaceAndReceiptScopeIsolated(t *testing.T) 
 	}
 	for _, sibling := range siblings {
 		stashID := sibling.stashID
-		service.newStashID = func() (string, error) { return stashID, nil }
+		service.transition.newStashID = func() (string, error) { return stashID, nil }
 		req := reqA
 		req.Scope = sibling.scope
 		result, err := service.Stash(context.Background(), req)
@@ -727,7 +727,7 @@ func newStashServiceFixture(t *testing.T) stashServiceFixture {
 	registered := registerGitRepository(t, service, repository)
 	accepted := mustServiceStatus(t, service, registered.Binding.Scope).AcceptedSnapshot
 	const stashID = "20000000-0000-4000-8000-000000000001"
-	service.newStashID = func() (string, error) { return stashID, nil }
+	service.transition.newStashID = func() (string, error) { return stashID, nil }
 	return stashServiceFixture{
 		databasePath: databasePath, store: store, service: service, binding: registered.Binding, accepted: accepted, stashID: stashID,
 		req: StashRequest{
