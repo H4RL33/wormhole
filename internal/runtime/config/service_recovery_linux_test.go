@@ -113,6 +113,207 @@ func TestSystemdExchangeRecoveryResumesCrashAfterRescue(t *testing.T) {
 	assertDirectoryEvidence(t, filepath.Dir(unitPath), competitor, change.DesiredUnitDigest)
 }
 
+func TestSystemdExchangeRecoveryResumesCrashBeforeRescue(t *testing.T) {
+	fixture, change := installedUpgradeFixture(t)
+	service := fixture.service.(*systemdGatewayService)
+	unitPath := filepath.Join(fixture.configRoot, "systemd", "user", gatewayServiceUnit)
+	competitor := []byte("pre-rescue-third-party-unit")
+	service.hooks.beforeConditionalPublish = func() {
+		if err := os.WriteFile(unitPath, competitor, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service.hooks.fault = func(point string) error {
+		if point == "publish_after_restoring_record" {
+			return errors.New("injected crash before rescue")
+		}
+		return nil
+	}
+	if err := fixture.service.Install(t.Context(), change); err == nil {
+		t.Fatal("Install succeeded despite pre-rescue crash")
+	}
+	assertFileDigest(t, unitPath, change.DesiredUnitDigest)
+	restarted := NewGatewayService(fixture.runner)
+	if err := restarted.Install(t.Context(), reconstructConfirmedChange(change)); !errors.Is(err, ErrServiceChangeDrift) {
+		t.Fatalf("restart Install error = %v, want drift after exact restore", err)
+	}
+	assertFileBytes(t, unitPath, competitor)
+	assertDirectoryEvidence(t, filepath.Dir(unitPath), competitor, change.DesiredUnitDigest)
+}
+
+func TestSystemdRestoringJournalRejectsTemporaryNameReuse(t *testing.T) {
+	fixture, change := interruptedPreRescueFixture(t)
+	record := readServiceJournal(t, fixture)
+	unitPath := filepath.Join(fixture.configRoot, "systemd", "user", gatewayServiceUnit)
+	replacement := filepath.Join(filepath.Dir(unitPath), ".replacement-evidence")
+	reused := []byte("reused-temporary-name")
+	if err := os.WriteFile(replacement, reused, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, filepath.Join(filepath.Dir(unitPath), record.Publish.Temporary)); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewGatewayService(fixture.runner)
+	if err := restarted.Install(t.Context(), reconstructConfirmedChange(change)); !errors.Is(err, ErrServiceChangeDrift) {
+		t.Fatalf("restart Install error = %v, want name-reuse drift", err)
+	}
+	assertFileDigest(t, unitPath, change.DesiredUnitDigest)
+	assertFileBytes(t, filepath.Join(filepath.Dir(unitPath), record.Publish.Temporary), reused)
+}
+
+func TestSystemdRestoringJournalRejectsRescueNameReuse(t *testing.T) {
+	fixture, change := interruptedPreRescueFixture(t)
+	record := readServiceJournal(t, fixture)
+	unitDirectory := filepath.Join(fixture.configRoot, "systemd", "user")
+	reused := []byte("reused-rescue-name")
+	if err := os.WriteFile(filepath.Join(unitDirectory, record.Publish.Rescue), reused, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewGatewayService(fixture.runner)
+	if err := restarted.Install(t.Context(), reconstructConfirmedChange(change)); !errors.Is(err, ErrServiceChangeDrift) {
+		t.Fatalf("restart Install error = %v, want rescue-reuse drift", err)
+	}
+	assertFileDigest(t, filepath.Join(unitDirectory, gatewayServiceUnit), change.DesiredUnitDigest)
+	assertFileBytes(t, filepath.Join(unitDirectory, record.Publish.Rescue), reused)
+}
+
+func TestSystemdRestoringBlocksReplacementBeforeRescueRename(t *testing.T) {
+	fixture, change := installedUpgradeFixture(t)
+	service := fixture.service.(*systemdGatewayService)
+	unitDirectory := filepath.Join(fixture.configRoot, "systemd", "user")
+	unitPath := filepath.Join(unitDirectory, gatewayServiceUnit)
+	first := []byte("first-displaced-state")
+	second := []byte("replacement-before-rescue")
+	service.hooks.beforeConditionalPublish = func() {
+		if err := os.WriteFile(unitPath, first, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service.hooks.fault = func(point string) error {
+		if point != "publish_before_rescue_rename" {
+			return nil
+		}
+		replacement := filepath.Join(unitDirectory, ".pre-rescue-replacement")
+		if err := os.WriteFile(replacement, second, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := unix.Renameat2(unix.AT_FDCWD, replacement, unix.AT_FDCWD, unitPath, unix.RENAME_EXCHANGE); err != nil {
+			t.Fatal(err)
+		}
+		return nil
+	}
+	if err := fixture.service.Install(t.Context(), change); !errors.Is(err, ErrServiceChangeDrift) {
+		t.Fatalf("Install error = %v, want pre-rescue replacement drift", err)
+	}
+	assertFileBytes(t, unitPath, second)
+	assertDirectoryContainsBytes(t, unitDirectory, first)
+	assertDirectoryEvidence(t, unitDirectory, first, change.DesiredUnitDigest)
+}
+
+func TestSystemdRestoringBlocksReplacementBeforeRestoreRename(t *testing.T) {
+	fixture, change := installedUpgradeFixture(t)
+	service := fixture.service.(*systemdGatewayService)
+	unitDirectory := filepath.Join(fixture.configRoot, "systemd", "user")
+	unitPath := filepath.Join(unitDirectory, gatewayServiceUnit)
+	first := []byte("first-displaced-before-restore")
+	second := []byte("replacement-before-restore")
+	service.hooks.beforeConditionalPublish = func() {
+		if err := os.WriteFile(unitPath, first, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service.hooks.fault = func(point string) error {
+		if point != "publish_before_restore_rename" {
+			return nil
+		}
+		record := readServiceJournal(t, fixture)
+		temporary := filepath.Join(unitDirectory, record.Publish.Temporary)
+		replacement := filepath.Join(unitDirectory, ".pre-restore-replacement")
+		if err := os.WriteFile(replacement, second, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := unix.Renameat2(unix.AT_FDCWD, replacement, unix.AT_FDCWD, temporary, unix.RENAME_EXCHANGE); err != nil {
+			t.Fatal(err)
+		}
+		return nil
+	}
+	if err := fixture.service.Install(t.Context(), change); !errors.Is(err, ErrServiceChangeDrift) {
+		t.Fatalf("Install error = %v, want pre-restore replacement drift", err)
+	}
+	if _, err := os.Lstat(unitPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpected canonical unit after blocked restore: %v", err)
+	}
+	assertDirectoryContainsBytes(t, unitDirectory, first)
+	assertDirectoryContainsBytes(t, unitDirectory, second)
+	assertDirectoryEvidence(t, unitDirectory, first, change.DesiredUnitDigest)
+}
+
+func TestSystemdTerminalCleanupQuarantinesRacedCompetitor(t *testing.T) {
+	fixture, change := installedUpgradeFixture(t)
+	service := fixture.service.(*systemdGatewayService)
+	unitDirectory := filepath.Join(fixture.configRoot, "systemd", "user")
+	competitor := []byte("cleanup-race-third-party-evidence")
+	swapped := false
+	service.hooks.fault = func(point string) error {
+		if point != "publish_before_cleanup_quarantine" || swapped {
+			return nil
+		}
+		swapped = true
+		record := readServiceJournal(t, fixture)
+		replacement := filepath.Join(unitDirectory, ".cleanup-competitor")
+		if err := os.WriteFile(replacement, competitor, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(replacement, filepath.Join(unitDirectory, record.Publish.Temporary)); err != nil {
+			t.Fatal(err)
+		}
+		return nil
+	}
+	if err := fixture.service.Install(t.Context(), change); !errors.Is(err, ErrServiceChangeDrift) {
+		t.Fatalf("Install error = %v, want cleanup race drift", err)
+	}
+	if _, err := os.Stat(serviceJournalPath(fixture)); err != nil {
+		t.Fatalf("journal removed after cleanup race: %v", err)
+	}
+	assertDirectoryContainsBytes(t, unitDirectory, competitor)
+}
+
+func TestSystemdJournalRequiresExactEvidenceNameGrammar(t *testing.T) {
+	fixture := newSystemdFixture(t)
+	change := confirmedServiceChange(t, fixture.service, fixture.executable)
+	unitDirectory := filepath.Join(fixture.configRoot, "systemd", "user")
+	if err := os.MkdirAll(unitDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*unitPublishRecord)
+	}{
+		{name: "short nonhex temporary", mutate: func(p *unitPublishRecord) { p.Temporary = ".wormhole-gatewayd-unit-x" }},
+		{name: "short rescue", mutate: func(p *unitPublishRecord) { p.Rescue = ".wormhole-gatewayd-rescue-0" }},
+		{name: "uppercase suffix", mutate: func(p *unitPublishRecord) { p.Temporary = ".wormhole-gatewayd-unit-AAAAAAAAAAAAAAAAAAAAAAAA" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			publish := dummyValidatedPublish(change)
+			test.mutate(publish)
+			writeServiceJournal(t, fixture, installRecord{
+				SchemaVersion: 3, Prior: serviceMutationStateFrom(change.ExpectedPrior),
+				DesiredDigest: change.DesiredUnitDigest, Phase: installPrepared, Publish: publish,
+			})
+			directoryFD, err := openSecureDirectory(unitDirectory, false, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, readErr := readInstallRecord(directoryFD)
+			_ = unix.Close(directoryFD)
+			if !errors.Is(readErr, ErrServiceChangeDrift) {
+				t.Fatalf("readInstallRecord error = %v, want strict-name drift", readErr)
+			}
+		})
+	}
+}
+
 func TestSystemdUnitReferencesOwnerManagedDigestExecutable(t *testing.T) {
 	fixture := newSystemdFixture(t)
 	change := confirmedServiceChange(t, fixture.service, fixture.executable)
@@ -304,14 +505,37 @@ func TestSystemdUnitPublishedJournalAdvancesReloadedStateWithoutReload(t *testin
 	fixture, change := installedUpgradeFixture(t)
 	fixture.runner.active = false
 	change = confirmedServiceChange(t, fixture.service, change.Executable)
+	unitDirectory := filepath.Join(fixture.configRoot, "systemd", "user")
+	priorUnit, err := os.ReadFile(filepath.Join(unitDirectory, gatewayServiceUnit))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := fixture.service.Install(t.Context(), change); err != nil {
 		t.Fatal(err)
 	}
 	fixture.runner.active = false
+	publish := dummyValidatedPublish(change)
+	if err := os.WriteFile(filepath.Join(unitDirectory, publish.Quarantine), priorUnit, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	directoryFD, err := openSecureDirectory(unitDirectory, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publish.Expected, _, err = readServiceFileIdentityAt(directoryFD, publish.Quarantine)
+	if err != nil {
+		_ = unix.Close(directoryFD)
+		t.Fatal(err)
+	}
+	publish.Desired, _, err = readServiceFileIdentityAt(directoryFD, gatewayServiceUnit)
+	_ = unix.Close(directoryFD)
+	if err != nil {
+		t.Fatal(err)
+	}
 	writeServiceJournal(t, fixture, installRecord{
-		SchemaVersion: 2, Prior: serviceMutationStateFrom(change.ExpectedPrior),
+		SchemaVersion: 3, Prior: serviceMutationStateFrom(change.ExpectedPrior),
 		DesiredDigest: change.DesiredUnitDigest, Phase: installUnitPublished,
-		Publish: dummyValidatedPublish(change),
+		Publish: publish,
 	})
 	beforeReload := fixture.runner.Count("daemon-reload")
 	if err := fixture.service.Install(t.Context(), reconstructConfirmedChange(change)); err != nil {
@@ -341,7 +565,7 @@ func TestSystemdDesiredNoOpCleansMatchingTerminalJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeServiceJournal(t, fixture, installRecord{
-		SchemaVersion: 2,
+		SchemaVersion: 3,
 		Prior:         serviceMutationStateFrom(change.ExpectedPrior),
 		DesiredDigest: change.DesiredUnitDigest,
 		Phase:         installManagerApplied,
@@ -358,7 +582,7 @@ func TestSystemdDesiredNoOpCleansMatchingTerminalJournal(t *testing.T) {
 func TestSystemdUnitPublishedJournalRejectsPriorUnitBeforeReload(t *testing.T) {
 	fixture, change := installedUpgradeFixture(t)
 	writeServiceJournal(t, fixture, installRecord{
-		SchemaVersion: 2,
+		SchemaVersion: 3,
 		Prior:         serviceMutationStateFrom(change.ExpectedPrior),
 		DesiredDigest: change.DesiredUnitDigest,
 		Phase:         installUnitPublished,
@@ -378,7 +602,7 @@ func TestSystemdReloadedJournalRejectsPriorUnitBeforeManagerMutation(t *testing.
 	fixture.runner.active = false
 	change = confirmedServiceChange(t, fixture.service, change.Executable)
 	writeServiceJournal(t, fixture, installRecord{
-		SchemaVersion: 2,
+		SchemaVersion: 3,
 		Prior:         serviceMutationStateFrom(change.ExpectedPrior),
 		DesiredDigest: change.DesiredUnitDigest,
 		Phase:         installReloaded,
@@ -406,7 +630,7 @@ func TestSystemdJournalRejectsDuplicateKeysAndNonCanonicalDigest(t *testing.T) {
 	defer closeFD(directoryFD)
 
 	valid := installRecord{
-		SchemaVersion: 2,
+		SchemaVersion: 3,
 		Prior:         serviceMutationState{UnitDigest: AbsentServiceUnitDigest},
 		DesiredDigest: ServiceUnitDigest("sha256:" + strings.Repeat("0", 64)),
 		Phase:         installPrepared,
@@ -415,7 +639,7 @@ func TestSystemdJournalRejectsDuplicateKeysAndNonCanonicalDigest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	duplicate := strings.Replace(string(canonical), "{", `{"schema_version":2,`, 1) + "\n"
+	duplicate := strings.Replace(string(canonical), "{", `{"schema_version":3,`, 1) + "\n"
 	invalidDigest := valid
 	invalidDigest.DesiredDigest = ServiceUnitDigest("sha256:" + strings.Repeat("A", 64))
 	nonCanonicalDigest, err := json.Marshal(invalidDigest)
@@ -495,6 +719,28 @@ func installedUpgradeFixture(t *testing.T) (systemdFixture, ConfirmedServiceChan
 	return fixture, confirmedServiceChange(t, fixture.service, second)
 }
 
+func interruptedPreRescueFixture(t *testing.T) (systemdFixture, ConfirmedServiceChange) {
+	t.Helper()
+	fixture, change := installedUpgradeFixture(t)
+	service := fixture.service.(*systemdGatewayService)
+	unitPath := filepath.Join(fixture.configRoot, "systemd", "user", gatewayServiceUnit)
+	service.hooks.beforeConditionalPublish = func() {
+		if err := os.WriteFile(unitPath, []byte("recorded-displaced-unit"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service.hooks.fault = func(point string) error {
+		if point == "publish_after_restoring_record" {
+			return errors.New("injected pre-rescue interruption")
+		}
+		return nil
+	}
+	if err := fixture.service.Install(t.Context(), change); err == nil {
+		t.Fatal("Install succeeded despite pre-rescue interruption")
+	}
+	return fixture, change
+}
+
 func writeServiceJournal(t *testing.T, fixture systemdFixture, record installRecord) {
 	t.Helper()
 	unitDirectory := filepath.Join(fixture.configRoot, "systemd", "user")
@@ -515,6 +761,22 @@ func writeRawServiceJournal(t *testing.T, fixture systemdFixture, data string) {
 	}
 }
 
+func readServiceJournal(t *testing.T, fixture systemdFixture) installRecord {
+	t.Helper()
+	data, err := os.ReadFile(serviceJournalPath(fixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record installRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Publish == nil {
+		t.Fatal("journal has no publish evidence")
+	}
+	return record
+}
+
 func serviceJournalPath(fixture systemdFixture) string {
 	return filepath.Join(fixture.configRoot, "systemd", "user", servicePhaseName)
 }
@@ -533,10 +795,13 @@ func dummyValidatedPublish(change ConfirmedServiceChange) *unitPublishRecord {
 		expected = serviceFileIdentity{Digest: AbsentServiceUnitDigest}
 	}
 	return &unitPublishRecord{
-		Stage: publishValidated, Temporary: ".wormhole-gatewayd-unit-test",
-		Rescue: ".wormhole-gatewayd-rescue-test", Expected: expected,
-		Desired:   serviceFileIdentity{Device: 2, Inode: 2, Digest: change.DesiredUnitDigest},
-		WasAbsent: wasAbsent,
+		Stage:      publishValidated,
+		Temporary:  ".wormhole-gatewayd-unit-000000000000000000000000",
+		Rescue:     ".wormhole-gatewayd-rescue-111111111111111111111111",
+		Quarantine: ".wormhole-gatewayd-quarantine-222222222222222222222222",
+		Expected:   expected,
+		Desired:    serviceFileIdentity{Device: 2, Inode: 2, Digest: change.DesiredUnitDigest},
+		WasAbsent:  wasAbsent,
 	}
 }
 
@@ -583,6 +848,21 @@ func assertDirectoryEvidence(t *testing.T, directory string, competitor []byte, 
 	if !foundCompetitor || !foundDesired {
 		t.Fatalf("evidence missing: competitor=%v desired=%v", foundCompetitor, foundDesired)
 	}
+}
+
+func assertDirectoryContainsBytes(t *testing.T, directory string, expected []byte) {
+	t.Helper()
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		data, readErr := os.ReadFile(filepath.Join(directory, entry.Name()))
+		if readErr == nil && bytes.Equal(data, expected) {
+			return
+		}
+	}
+	t.Fatalf("directory %s does not retain %q", directory, expected)
 }
 
 func closeFD(fd int) {

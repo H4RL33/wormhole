@@ -24,6 +24,13 @@ its parent directory must remain owner-only. V1 adds no second local bearer
 token, so any process running as that OS user is inside the local trust
 boundary.
 
+Gateway service setup uses owner-private directories, an owner-managed
+content-addressed executable copy, exact pre/post-action identity checks, and a
+process lock to serialize Wormhole operations. These controls reject accidental
+or concurrent Wormhole drift; they do not make the service pathname immutable
+against a hostile process already running as the same OS user. Such a process is
+inside the local trust boundary and can race systemd's pathname open.
+
 ### Local daemon to Coordination Server
 
 Each organization profile carries a project-scoped bearer token. Use HTTPS for
