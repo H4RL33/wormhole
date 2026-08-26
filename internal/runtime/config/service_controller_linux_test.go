@@ -238,7 +238,7 @@ func TestSystemdConditionalPublishRejectsAncestorSwap(t *testing.T) {
 	}
 }
 
-func TestSystemdStartRejectsExecutableSwap(t *testing.T) {
+func TestSystemdStartIgnoresSourceSwapAfterManagedInstall(t *testing.T) {
 	fixture := newSystemdFixture(t)
 	change := confirmedServiceChange(t, fixture.service, fixture.executable)
 	if err := fixture.service.Install(t.Context(), change); err != nil {
@@ -251,8 +251,8 @@ func TestSystemdStartRejectsExecutableSwap(t *testing.T) {
 	if err := os.Symlink("/bin/true", fixture.executable); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.service.Start(t.Context()); !errors.Is(err, ErrUnsafeServicePath) {
-		t.Fatalf("Start error = %v, want unsafe executable", err)
+	if err := fixture.service.Start(t.Context()); err != nil {
+		t.Fatalf("Start uses mutable source executable: %v", err)
 	}
 }
 

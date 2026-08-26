@@ -18,7 +18,8 @@ import (
 
 func TestSystemdGatewayServiceUsesExactOwnerPrivatePaths(t *testing.T) {
 	fixture := newSystemdFixture(t)
-	if err := fixture.service.Install(t.Context(), confirmedServiceChange(t, fixture.service, fixture.executable)); err != nil {
+	change := confirmedServiceChange(t, fixture.service, fixture.executable)
+	if err := fixture.service.Install(t.Context(), change); err != nil {
 		t.Fatal(err)
 	}
 	unitPath := filepath.Join(fixture.configRoot, "systemd", "user", gatewayServiceUnit)
@@ -40,8 +41,9 @@ func TestSystemdGatewayServiceUsesExactOwnerPrivatePaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	managed := filepath.Join(fixture.configRoot, "wormhole", "service-bin", "gatewayd-"+strings.TrimPrefix(string(change.ExecutableDigest), "sha256:"))
 	want := "[Unit]\nDescription=Wormhole Gateway\nAfter=default.target\n\n" +
-		"[Service]\nType=simple\nExecStart=\"" + fixture.executable + "\"\n" +
+		"[Service]\nType=simple\nExecStart=\"" + managed + "\"\n" +
 		"Environment=\"XDG_RUNTIME_DIR=" + fixture.runtimeRoot + "\"\n" +
 		"Restart=on-failure\nRestartSec=2s\n\n[Install]\nWantedBy=default.target\n"
 	if string(bytes) != want {

@@ -20,6 +20,10 @@ var ErrCommandOutputLimit = errors.New("config: command output limit exceeded")
 // the remaining process group before returning.
 var ErrCommandWaitLimit = errors.New("config: command wait limit exceeded")
 
+// ErrCommandPlatformUnsupported is returned before process start on platforms
+// where this Stage-2 runner has no verified descendant-tree primitive. In
+// particular, Windows remains unsupported until a Job Object implementation is
+// added; callers must not fall back to leader-only termination.
 var ErrCommandPlatformUnsupported = errors.New("config: command process isolation unsupported on this platform")
 
 // CommandExitError reports an ordinary non-zero process exit without embedding

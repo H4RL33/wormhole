@@ -37,6 +37,10 @@ type ServiceState struct {
 	UnitDigest   ServiceUnitDigest
 	Loaded       bool
 	ReloadNeeded bool
+	// ManagerFragmentPath is the exact systemd FragmentPath readback. It is
+	// carried in confirmations so a loaded orphan cannot be mistaken for an
+	// absent service definition.
+	ManagerFragmentPath string
 }
 
 type ServiceUnitDigest string
@@ -53,6 +57,7 @@ func serviceUnitDigest(data []byte) ServiceUnitDigest {
 // always derived from the effective user environment.
 type ConfirmedServiceChange struct {
 	Executable        string
+	ExecutableDigest  ServiceUnitDigest
 	ExpectedPrior     ServiceState
 	DesiredUnitDigest ServiceUnitDigest
 }

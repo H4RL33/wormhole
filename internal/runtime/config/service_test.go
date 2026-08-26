@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 )
 
@@ -43,6 +44,7 @@ type recordingServiceRunner struct {
 	enabledOutput    string
 	unitPath         string
 	loaded           bool
+	loadedUnitDigest ServiceUnitDigest
 	needReload       bool
 	failDaemonReload int
 	failEnable       int
@@ -71,6 +73,9 @@ func (runner *recordingServiceRunner) Run(_ context.Context, executable string, 
 			return nil, nil, errors.New("injected daemon-reload failure")
 		}
 		runner.loaded, runner.needReload = true, false
+		if data, readErr := os.ReadFile(runner.unitPath); readErr == nil {
+			runner.loadedUnitDigest = serviceUnitDigest(data)
+		}
 		return nil, nil, nil
 	case "is-enabled":
 		if runner.enabledOutput != "" {
@@ -91,7 +96,15 @@ func (runner *recordingServiceRunner) Run(_ context.Context, executable string, 
 			fragment = runner.unitPath
 		}
 		needReload := "no"
-		if runner.needReload || !runner.loaded {
+		unitChanged := false
+		if runner.loaded && runner.loadedUnitDigest != "" {
+			if data, readErr := os.ReadFile(runner.unitPath); readErr == nil {
+				unitChanged = serviceUnitDigest(data) != runner.loadedUnitDigest
+			} else if errors.Is(readErr, os.ErrNotExist) {
+				unitChanged = true
+			}
+		}
+		if runner.needReload || unitChanged {
 			needReload = "yes"
 		}
 		return []byte("FragmentPath=" + fragment + "\nNeedDaemonReload=" + needReload + "\n"), nil, nil
