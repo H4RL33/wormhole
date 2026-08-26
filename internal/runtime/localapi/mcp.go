@@ -105,6 +105,9 @@ func newLocalRegistry(s *Server) *localRegistry {
 	}
 
 	reg("wormhole.agent.whoami", "Return the calling agent's identity, capabilities, and permissions.", whoAmIArgs{}, "", singleResult(whoAmIOutput{}), func(ctx context.Context, _ json.RawMessage) (any, error) {
+		if binding, err := ResolvedBinding(ctx); err == nil {
+			return s.proxyWhoAmIForProject(ctx, binding.Scope.ProjectID)
+		}
 		return s.proxyWhoAmI(ctx)
 	})
 	reg("wormhole.agent.get_guidance", "Read this project's approved role-applicable integration guidance and lifecycle state from Gateway's local cache without mutation.", integrationGuidanceArgs{}, "", singleResult(integrationGuidanceResult{Guidance: []integrationGuidanceItem{}}), func(ctx context.Context, args json.RawMessage) (any, error) {
@@ -307,14 +310,12 @@ type channelEventsArgs struct{}
 
 type channelPostArgs struct {
 	ChannelID string          `json:"channel_id"`
-	AgentID   string          `json:"agent_id,omitempty"`
 	EventType string          `json:"event_type"`
 	Payload   json.RawMessage `json:"payload,omitempty"`
 	Note      string          `json:"note,omitempty"`
 }
 
 type channelSubscribeArgs struct {
-	Namespace  string `json:"namespace,omitempty"`
 	EventType  string `json:"event_type,omitempty"`
 	Capability string `json:"capability,omitempty"`
 	AgentID    string `json:"agent_id,omitempty"`
@@ -327,7 +328,6 @@ type kbGetArgs struct {
 }
 
 type kbWriteArgs struct {
-	AgentID     string          `json:"agent_id,omitempty"`
 	Title       string          `json:"title"`
 	Body        string          `json:"body,omitempty"`
 	Frontmatter json.RawMessage `json:"frontmatter,omitempty"`
@@ -928,11 +928,17 @@ func (s *Server) handleToolsCall(ctx context.Context, sess *mcpSession, conn net
 	// Legacy constructors remain only until Task 3 replaces them. A configured
 	// Stage-2 runtime has no unscoped fallback: every tool call must carry the
 	// bridge-only cwd and receives only Gateway-owned scope/actor authority.
-	if s.projectState != nil || s.actorResolver != nil || s.identityStore != nil {
+	if s.privateRuntimeConfigured() {
 		var publicArguments json.RawMessage
 		var err error
 		callCtx, publicArguments, err = s.resolvePrivateRequest(ctx, params.Arguments)
 		if err != nil {
+			return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
+		}
+		if err := validatePrivateAgentSemantics(params.Name, publicArguments); err != nil {
+			return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
+		}
+		if err := authorizePrivateToolProvider(params.Name, publicArguments); err != nil {
 			return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
 		}
 		callArguments, err = bindResolvedProjectArguments(callCtx, publicArguments)
@@ -1015,6 +1021,19 @@ func (s *Server) handleChannelSubscribeMCP(ctx context.Context, sess *mcpSession
 	et, _ := argMap["event_type"].(string)
 	capability, _ := argMap["capability"].(string)
 	agentID, _ := argMap["agent_id"].(string)
+	if s.privateRuntimeConfigured() {
+		binding, err := ResolvedBinding(ctx)
+		if err != nil {
+			return nil, err
+		}
+		// The legacy eventbus combines dimensions with OR semantics. Until a
+		// binding-aware filtered provider exists, namespace-only subscription is
+		// the one form that cannot observe a sibling through another matching key.
+		if et != "" || capability != "" || agentID != "" {
+			return nil, fmt.Errorf("%w: filtered channel subscription", ErrBindingAwareProviderUnavailable)
+		}
+		ns = string(binding.Scope.WorkspaceID)
+	}
 
 	sub, err := s.eventbus.Subscribe(ns, et, capability, agentID)
 	if err != nil {

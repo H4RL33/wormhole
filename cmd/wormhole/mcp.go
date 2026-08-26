@@ -97,7 +97,7 @@ func bridge(stdin io.Reader, stdout io.Writer, conn net.Conn) error {
 }
 
 // stdinToSocket reads successive newline-delimited JSON-RPC messages off r,
-// observes cwd exactly once per message, overwrites tools/call's private
+// observes cwd exactly once for each tools/call, overwrites that call's private
 // context, and writes each frame to conn. Returns io.EOF on a clean end of input
 // (r closes exactly on a line boundary), any other error on a read or
 // write failure.
@@ -109,13 +109,22 @@ func stdinToSocket(r io.Reader, conn net.Conn) error {
 			return fmt.Errorf("stdin closed mid-message (no trailing newline)")
 		}
 		if body := strings.TrimRight(line, "\r\n"); len(body) > 0 {
-			cwd, cwdErr := os.Getwd()
-			if cwdErr != nil {
-				return fmt.Errorf("observe working directory: %w", cwdErr)
+			raw := json.RawMessage(body)
+			method, inspectErr := inspectMCPMethod(raw)
+			if inspectErr != nil {
+				return inspectErr
 			}
-			forwarded, contextErr := attachPrivateRequestContext(json.RawMessage(body), cwd)
-			if contextErr != nil {
-				return contextErr
+			forwarded := append(json.RawMessage(nil), raw...)
+			if method == "tools/call" {
+				cwd, cwdErr := os.Getwd()
+				if cwdErr != nil {
+					return fmt.Errorf("observe working directory: %w", cwdErr)
+				}
+				var contextErr error
+				forwarded, contextErr = attachToolsCallPrivateRequestContext(raw, cwd)
+				if contextErr != nil {
+					return contextErr
+				}
 			}
 			if _, werr := conn.Write(append(forwarded, '\n')); werr != nil {
 				return werr
@@ -130,15 +139,17 @@ func stdinToSocket(r io.Reader, conn net.Conn) error {
 // attachPrivateRequestContext overwrites any harness-supplied private cwd on
 // tools/call. Other MCP messages remain byte-for-byte unchanged.
 func attachPrivateRequestContext(raw json.RawMessage, cwd string) (json.RawMessage, error) {
-	var method struct {
-		Method string `json:"method"`
+	method, err := inspectMCPMethod(raw)
+	if err != nil {
+		return nil, err
 	}
-	if err := json.Unmarshal(raw, &method); err != nil {
-		return nil, fmt.Errorf("decode MCP request for private context: %w", err)
-	}
-	if method.Method != "tools/call" {
+	if method != "tools/call" {
 		return append(json.RawMessage(nil), raw...), nil
 	}
+	return attachToolsCallPrivateRequestContext(raw, cwd)
+}
+
+func attachToolsCallPrivateRequestContext(raw json.RawMessage, cwd string) (json.RawMessage, error) {
 	canonical, err := filepath.Abs(cwd)
 	if err != nil {
 		return nil, fmt.Errorf("canonicalize working directory: %w", err)
@@ -187,6 +198,75 @@ func attachPrivateRequestContext(raw json.RawMessage, cwd string) (json.RawMessa
 		return nil, fmt.Errorf("encode MCP request: %w", err)
 	}
 	return forwarded, nil
+}
+
+func inspectMCPMethod(raw json.RawMessage) (string, error) {
+	if err := rejectDuplicateMCPJSONMembers(raw); err != nil {
+		return "", fmt.Errorf("decode MCP request for private context: %w", err)
+	}
+	var method struct {
+		Method string `json:"method"`
+	}
+	if err := json.Unmarshal(raw, &method); err != nil {
+		return "", fmt.Errorf("decode MCP request for private context: %w", err)
+	}
+	return method.Method, nil
+}
+
+func rejectDuplicateMCPJSONMembers(raw []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var visit func() error
+	visit = func() error {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		delimiter, ok := token.(json.Delim)
+		if !ok {
+			return nil
+		}
+		switch delimiter {
+		case '{':
+			seen := make(map[string]struct{})
+			for decoder.More() {
+				keyToken, err := decoder.Token()
+				if err != nil {
+					return err
+				}
+				key, ok := keyToken.(string)
+				if !ok {
+					return errors.New("non-string object member")
+				}
+				if _, duplicate := seen[key]; duplicate {
+					return fmt.Errorf("duplicate object member %q", key)
+				}
+				seen[key] = struct{}{}
+				if err := visit(); err != nil {
+					return err
+				}
+			}
+			_, err := decoder.Token()
+			return err
+		case '[':
+			for decoder.More() {
+				if err := visit(); err != nil {
+					return err
+				}
+			}
+			_, err := decoder.Token()
+			return err
+		default:
+			return errors.New("unexpected JSON delimiter")
+		}
+	}
+	if err := visit(); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return errors.New("trailing JSON data")
+	}
+	return nil
 }
 
 // socketToStdout reads successive newline-delimited JSON-RPC messages off

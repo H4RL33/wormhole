@@ -803,9 +803,16 @@ func (s *Server) proxyAuthenticatedTool(ctx context.Context, toolName string, ar
 // locally on success (RFC-0003 G4: local durability, best-effort here —
 // a cache-write failure does not fail the caller's request).
 func (s *Server) proxyWhoAmI(ctx context.Context) (whoAmIOutput, error) {
-	orgCtx, err := s.resolveOrgContext(s.projectID)
+	return s.proxyWhoAmIForProject(ctx, s.projectID)
+}
+
+func (s *Server) proxyWhoAmIForProject(ctx context.Context, projectID string) (whoAmIOutput, error) {
+	orgCtx, err := s.resolveOrgContext(projectID)
 	if err != nil {
 		return whoAmIOutput{}, err
+	}
+	if orgCtx.ProjectID != projectID {
+		return whoAmIOutput{}, errors.New("localapi: resolved project is not configured for this Gateway")
 	}
 	out, remoteErr := s.fetchAndCacheWhoAmI(ctx, orgCtx)
 	if remoteErr == nil {
@@ -1122,8 +1129,12 @@ func (s *Server) localListChannels(ctx context.Context, args json.RawMessage) (m
 	if err != nil {
 		return nil, err
 	}
+	namespaceID, err := s.resolvedLocalNamespace(ctx, orgCtx.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: list channels: resolved workspace: %w", err)
+	}
 
-	channels, err := s.er.ListChannels(ctx, orgCtx.ProjectID)
+	channels, err := s.er.ListChannels(ctx, namespaceID)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: list channels: %w", err)
 	}
@@ -1158,8 +1169,12 @@ func (s *Server) localListChannelEvents(ctx context.Context, args json.RawMessag
 	if err != nil {
 		return nil, err
 	}
+	namespaceID, err := s.resolvedLocalNamespace(ctx, orgCtx.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: list channel events: resolved workspace: %w", err)
+	}
 
-	events, err := s.er.ListEventsByNamespace(ctx, orgCtx.ProjectID, 50, 0)
+	events, err := s.er.ListEventsByNamespace(ctx, namespaceID, 50, 0)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: list channel events: %w", err)
 	}
@@ -1199,8 +1214,12 @@ func (s *Server) localListArticles(ctx context.Context, args json.RawMessage) (m
 	if err != nil {
 		return nil, err
 	}
+	namespaceID, err := s.resolvedLocalNamespace(ctx, orgCtx.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: list articles: resolved workspace: %w", err)
+	}
 
-	articles, err := s.kb.ListArticles(ctx, orgCtx.ProjectID)
+	articles, err := s.kb.ListArticles(ctx, namespaceID)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: list articles: %w", err)
 	}
@@ -1241,6 +1260,10 @@ func (s *Server) localGetArticle(ctx context.Context, args json.RawMessage) (map
 	if err != nil {
 		return nil, err
 	}
+	namespaceID, err := s.resolvedLocalNamespace(ctx, orgCtx.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: get article: resolved workspace: %w", err)
+	}
 
 	articleID, _ := argMap["article_id"].(string)
 	if articleID == "" {
@@ -1248,7 +1271,7 @@ func (s *Server) localGetArticle(ctx context.Context, args json.RawMessage) (map
 		return s.localListArticles(ctx, args)
 	}
 
-	a, err := s.kb.GetArticle(ctx, orgCtx.ProjectID, articleID)
+	a, err := s.kb.GetArticle(ctx, namespaceID, articleID)
 	if errors.Is(err, localstore.ErrArticleNotFound) {
 		return nil, fmt.Errorf("localapi: article not found")
 	}
@@ -1316,6 +1339,10 @@ func (s *Server) handleAgentRegister(ctx context.Context, args json.RawMessage) 
 	if err != nil {
 		return nil, err
 	}
+	namespaceID, err := s.resolvedLocalNamespace(ctx, orgCtx.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: agent register: resolved workspace: %w", err)
+	}
 
 	caps := []string{}
 	if rawCaps, ok := argMap["capabilities"]; ok {
@@ -1328,7 +1355,7 @@ func (s *Server) handleAgentRegister(ctx context.Context, args json.RawMessage) 
 		}
 	}
 
-	agent, err := s.scheduler.RegisterAgent(agentID, orgCtx.ProjectID, caps)
+	agent, err := s.scheduler.RegisterAgent(agentID, namespaceID, caps)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: agent register: %w", err)
 	}
@@ -1339,11 +1366,11 @@ func (s *Server) handleAgentRegister(ctx context.Context, args json.RawMessage) 
 	payload, _ := json.Marshal(map[string]interface{}{
 		"agent":        agent.AgentID,
 		"status":       string(scheduler.StatusOnline),
-		"namespace":    orgCtx.ProjectID,
+		"namespace":    namespaceID,
 		"capabilities": agent.Capabilities,
 	})
 	if s.eventbus != nil {
-		s.eventbus.Publish(ctx, orgCtx.ProjectID, "presence.online", "", agent.AgentID, payload)
+		s.eventbus.Publish(ctx, namespaceID, "presence.online", "", agent.AgentID, payload)
 	}
 
 	return map[string]interface{}{
@@ -1384,6 +1411,17 @@ func (s *Server) handleAgentPresence(ctx context.Context, args json.RawMessage) 
 	if err != nil {
 		return nil, err
 	}
+	namespaceID, err := s.resolvedLocalNamespace(ctx, orgCtx.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: agent presence: resolved workspace: %w", err)
+	}
+	agent, err := s.scheduler.Agent(agentID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: agent presence: %w", err)
+	}
+	if agent.NamespaceID != namespaceID {
+		return nil, fmt.Errorf("localapi: agent presence: target agent is outside resolved workspace")
+	}
 
 	err = s.scheduler.UpdatePresence(agentID, scheduler.AgentStatus(statusStr))
 	if err != nil {
@@ -1395,7 +1433,7 @@ func (s *Server) handleAgentPresence(ctx context.Context, args json.RawMessage) 
 		"status": statusStr,
 	})
 	if s.eventbus != nil {
-		s.eventbus.Publish(ctx, orgCtx.ProjectID, "presence."+statusStr, "", agentID, payload)
+		s.eventbus.Publish(ctx, namespaceID, "presence."+statusStr, "", agentID, payload)
 	}
 
 	return map[string]interface{}{
@@ -1428,12 +1466,16 @@ func (s *Server) handleAgentList(ctx context.Context, args json.RawMessage) (map
 	if err != nil {
 		return nil, err
 	}
+	namespaceID, err := s.resolvedLocalNamespace(ctx, orgCtx.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: agent list: resolved workspace: %w", err)
+	}
 
 	agents := s.scheduler.ListAgents()
 	// Filter agents to this project only
 	var filtered []interface{}
 	for _, a := range agents {
-		if a.NamespaceID == orgCtx.ProjectID {
+		if a.NamespaceID == namespaceID {
 			filtered = append(filtered, map[string]interface{}{
 				"agent_id":     a.AgentID,
 				"namespace_id": a.NamespaceID,
@@ -1570,15 +1612,10 @@ func (s *Server) handleTaskRoute(ctx context.Context, args json.RawMessage) (map
 // Local write tools — task.create, kb.write, channel.post. Each writes the
 // entity to the local SQLite replica, then enqueues it on the outbound sync
 // queue (RFC-0003 §8.2) so the sync engine pushes it to the Coordination
-// Server on its next cycle. Namespace is resolved from s.projectID — the
-// value fixed at socket-construction time — same as every other handler in
-// this file (see localGetTask, localListChannelEvents, localGetArticle,
-// handleTaskRoute, handleAgentRegister). A client-supplied namespace_id in
-// the request args is never trusted for authorization: honoring it would let
-// any caller dialing a socket bound to one org/project write into another
-// org/project's namespace. If the request also supplies namespace_id, it is
-// ignored in favor of the resolved value (consistent with how the rest of
-// this file silently uses s.projectID regardless of request args).
+// Server on its next cycle. Legacy constructors retain their project
+// namespace. The configured private runtime derives the exact local namespace
+// from ResolvedBinding; caller namespace claims are rejected before these
+// handlers run.
 // =============================================================================
 
 // handleTaskCreate serves wormhole.task.create: creates a task locally and
@@ -1796,13 +1833,13 @@ func (s *Server) handleGitLinkCommit(ctx context.Context, args json.RawMessage) 
 
 // handleKBWrite serves wormhole.kb.write: writes a KB article locally and
 // enqueues it for sync.
-// Args: {"agent_id": "y", "title": "z", "body": "...",
+// Args: {"title": "z", "body": "...",
 //
 //	"project_id": "xxx" (optional in single-org, required in multi-org),
 //	"frontmatter": {...} (optional)}
 //
-// namespace_id, if present in args, is ignored — namespace is always resolved
-// from project_id (with multi-org bindings in P5+), never from the request.
+// namespace_id is never accepted from the request. The configured path uses
+// the resolved workspace; legacy constructors retain their project namespace.
 func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
 	if s.qr == nil {
 		return nil, fmt.Errorf("localapi: kb write: sync queue not available")
@@ -1815,9 +1852,9 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 		}
 	}
 
-	agentID, _ := argMap["agent_id"].(string)
 	title, _ := argMap["title"].(string)
 	body, _ := argMap["body"].(string)
+	legacyAgentID, _ := argMap["agent_id"].(string)
 	if title == "" {
 		return nil, fmt.Errorf("localapi: kb write: missing title")
 	}
@@ -1831,6 +1868,14 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 	orgCtx, err := s.resolveOrgContext(projectID)
 	if err != nil {
 		return nil, err
+	}
+	namespaceID, err := s.resolvedLocalNamespace(ctx, orgCtx.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: kb write: resolved workspace: %w", err)
+	}
+	agentID, err := s.resolvedActionPrincipal(ctx, legacyAgentID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: kb write: server actor: %w", err)
 	}
 
 	var frontmatter json.RawMessage
@@ -1846,7 +1891,7 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 	}
 	defer tx.Rollback()
 
-	article, err := s.kb.WriteArticleTx(ctx, tx, orgCtx.ProjectID, agentID, title, body, frontmatter)
+	article, err := s.kb.WriteArticleTx(ctx, tx, namespaceID, agentID, title, body, frontmatter)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: kb write: %w", err)
 	}
@@ -1869,7 +1914,7 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 	// KB articles have no priority concept (internal/core/kb has no Priority
 	// field, unlike tasks) — 0 here is the correct default, not a placeholder
 	// for a value that should have been threaded through.
-	if _, err := s.qr.EnqueueTx(ctx, tx, orgCtx.ProjectID, "kb", article.ID, "create", payload, 0); err != nil {
+	if _, err := s.qr.EnqueueTx(ctx, tx, namespaceID, "kb", article.ID, "create", payload, 0); err != nil {
 		return nil, fmt.Errorf("localapi: kb write: enqueue sync: %w", err)
 	}
 	if err := s.commitLocalWrite(tx); err != nil {
@@ -1881,14 +1926,14 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 
 // handleChannelPost serves wormhole.channel.post: publishes a durable event
 // to a channel locally and enqueues it for sync.
-// Args: {"channel_id": "y", "agent_id": "z",
+// Args: {"channel_id": "y",
 //
 //	"event_type": "discovery.logged",
 //	"project_id": "xxx" (optional in single-org, required in multi-org),
 //	"payload": {...} (optional), "note": "..." (optional)}
 //
-// namespace_id, if present in args, is ignored — namespace is always resolved
-// from project_id (with multi-org bindings in P5+), never from the request.
+// namespace_id is never accepted from the request. The configured path uses
+// the resolved workspace; legacy constructors retain their project namespace.
 func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
 	if s.qr == nil {
 		return nil, fmt.Errorf("localapi: channel post: sync queue not available")
@@ -1902,8 +1947,8 @@ func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (m
 	}
 
 	channelID, _ := argMap["channel_id"].(string)
-	agentID, _ := argMap["agent_id"].(string)
 	eventType, _ := argMap["event_type"].(string)
+	legacyAgentID, _ := argMap["agent_id"].(string)
 	if channelID == "" || eventType == "" {
 		return nil, fmt.Errorf("localapi: channel post: missing channel_id or event_type")
 	}
@@ -1917,6 +1962,14 @@ func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (m
 	orgCtx, err := s.resolveOrgContext(projectID)
 	if err != nil {
 		return nil, err
+	}
+	namespaceID, err := s.resolvedLocalNamespace(ctx, orgCtx.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: channel post: resolved workspace: %w", err)
+	}
+	agentID, err := s.resolvedActionPrincipal(ctx, legacyAgentID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: channel post: server actor: %w", err)
 	}
 
 	var eventPayload json.RawMessage
@@ -1937,7 +1990,7 @@ func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (m
 	}
 	defer tx.Rollback()
 
-	ev, err := s.er.PublishEventTx(ctx, tx, orgCtx.ProjectID, channelID, agentID, eventType, eventPayload, note)
+	ev, err := s.er.PublishEventTx(ctx, tx, namespaceID, channelID, agentID, eventType, eventPayload, note)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: channel post: %w", err)
 	}
@@ -1960,7 +2013,7 @@ func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (m
 	// Events have no priority concept (internal/core/events has no Priority
 	// field, unlike tasks) — 0 here is the correct default, not a placeholder
 	// for a value that should have been threaded through.
-	if _, err := s.qr.EnqueueTx(ctx, tx, orgCtx.ProjectID, "event", ev.ID, "create", payload, 0); err != nil {
+	if _, err := s.qr.EnqueueTx(ctx, tx, namespaceID, "event", ev.ID, "create", payload, 0); err != nil {
 		return nil, fmt.Errorf("localapi: channel post: enqueue sync: %w", err)
 	}
 	if err := s.commitLocalWrite(tx); err != nil {
@@ -1992,21 +2045,25 @@ func (s *Server) handleChannelCreate(ctx context.Context, args json.RawMessage) 
 	if err != nil {
 		return nil, err
 	}
+	namespaceID, err := s.resolvedLocalNamespace(ctx, orgCtx.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: channel create: resolved workspace: %w", err)
+	}
 	tx, err := s.beginLocalWrite(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: channel create: begin transaction: %w", err)
 	}
 	defer tx.Rollback()
-	channelID, err := s.er.CreateChannelTx(ctx, tx, orgCtx.ProjectID, name)
+	channelID, err := s.er.CreateChannelTx(ctx, tx, namespaceID, name)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: channel create: %w", err)
 	}
-	out := map[string]interface{}{"id": channelID, "namespace_id": orgCtx.ProjectID, "name": name}
+	out := map[string]interface{}{"id": channelID, "namespace_id": namespaceID, "name": name}
 	payload, err := json.Marshal(out)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: channel create: marshal payload: %w", err)
 	}
-	if _, err := s.qr.EnqueueTx(ctx, tx, orgCtx.ProjectID, "channel", channelID, "create", payload, 0); err != nil {
+	if _, err := s.qr.EnqueueTx(ctx, tx, namespaceID, "channel", channelID, "create", payload, 0); err != nil {
 		return nil, fmt.Errorf("localapi: channel create: enqueue sync: %w", err)
 	}
 	if err := s.commitLocalWrite(tx); err != nil {

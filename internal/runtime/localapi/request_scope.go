@@ -96,8 +96,8 @@ func (s *Server) resolvePrivateRequest(ctx context.Context, raw json.RawMessage)
 
 func privateAuthorityClaim(arguments map[string]json.RawMessage) string {
 	for _, field := range []string{
-		"workspace_id", "checkout_id", "namespace_id", "binding",
-		"working_directory", "actor", "actor_kind", "agent_id", "human_principal_id",
+		"workspace_id", "checkout_id", "namespace_id", "namespace", "binding",
+		"working_directory", "actor", "actor_kind", "human_principal_id",
 		"accountable_human_id", "assurance", "session_id", "fabric_instance_id",
 		"remote_project_id", "stream_id", "credential_ref",
 	} {

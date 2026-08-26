@@ -162,7 +162,7 @@ If the semantic provider or active index is unavailable, there is no lexical fal
 - Source-access implications: This tool does not read or return repository source.
 - Recommended follow-up: Link the event to the relevant task or KB article in its payload or note.
 - Minimal request example: `{"channel_id":"example","event_type":"example","project_id":"example"}`
-- Live request schema: `{"properties":{"agent_id":{"type":"string"},"channel_id":{"type":"string"},"event_type":{"type":"string"},"note":{"type":"string"},"payload":{},"project_id":{"type":"string"}},"required":["channel_id","event_type","project_id"],"type":"object"}`
+- Live request schema: `{"properties":{"channel_id":{"type":"string"},"event_type":{"type":"string"},"note":{"type":"string"},"payload":{},"project_id":{"type":"string"}},"required":["channel_id","event_type","project_id"],"type":"object"}`
 - Misuse warning: Do not put secrets, source copies, or unsupported event types in the payload.
 
 ## `wormhole.channel.subscribe`
@@ -177,7 +177,7 @@ If the semantic provider or active index is unavailable, there is no lexical fal
 - Source-access implications: This tool does not read or return repository source.
 - Recommended follow-up: Keep the connection open and use channel.events for prior context.
 - Minimal request example: `{"project_id":"example"}`
-- Live request schema: `{"properties":{"agent_id":{"type":"string"},"capability":{"type":"string"},"event_type":{"type":"string"},"namespace":{"type":"string"},"project_id":{"type":"string"}},"required":["project_id"],"type":"object"}`
+- Live request schema: `{"properties":{"agent_id":{"type":"string"},"capability":{"type":"string"},"event_type":{"type":"string"},"project_id":{"type":"string"}},"required":["project_id"],"type":"object"}`
 - Misuse warning: Do not assume a subscription survives reconnects or provides a complete audit stream.
 
 ## `wormhole.code_graph.query`
@@ -297,7 +297,7 @@ If the semantic provider or active index is unavailable, there is no lexical fal
 - Source-access implications: This tool does not read or return repository source.
 - Recommended follow-up: Post a typed event or link the article from the relevant task.
 - Minimal request example: `{"project_id":"example","title":"example"}`
-- Live request schema: `{"properties":{"agent_id":{"type":"string"},"body":{"type":"string"},"frontmatter":{},"project_id":{"type":"string"},"title":{"type":"string"}},"required":["title","project_id"],"type":"object"}`
+- Live request schema: `{"properties":{"body":{"type":"string"},"frontmatter":{},"project_id":{"type":"string"},"title":{"type":"string"}},"required":["title","project_id"],"type":"object"}`
 - Misuse warning: Do not store credentials or present Git-derived prose as authoritative code.
 
 ## `wormhole.sync.status`

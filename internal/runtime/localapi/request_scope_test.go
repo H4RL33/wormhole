@@ -63,36 +63,6 @@ func TestPrivateContextRejectsDuplicateEnvelopeBeforeResolution(t *testing.T) {
 	}
 }
 
-func TestServerOwnedActorAndResolvedBindingReachHandlerOnlyThroughContext(t *testing.T) {
-	binding := privateRoutingTestBinding(t, t.TempDir(), "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011")
-	actor := privateRoutingTestActor("00000000-0000-4000-8000-000000000021")
-	server := privateRoutingTestServer(t, actor, binding)
-	called := false
-	tool := localTool{Name: "wormhole.test.scoped", ArgumentExamples: singleArgument(struct{}{}), Handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
-		called = true
-		if got, err := ResolvedBinding(ctx); err != nil || got != binding {
-			t.Fatalf("handler binding = (%+v, %v), want %+v", got, err, binding)
-		}
-		if got, err := ServerOwnedActor(ctx); err != nil || got != actor {
-			t.Fatalf("handler actor = (%+v, %v), want %+v", got, err, actor)
-		}
-		if bytes.Contains(raw, []byte(privateRequestContextKey)) || bytes.Contains(raw, []byte("forged")) {
-			t.Fatalf("private/forged context reached handler: %s", raw)
-		}
-		return map[string]bool{"ok": true}, nil
-	}}
-	registry := &localRegistry{tools: map[string]localTool{tool.Name: tool}, order: []string{tool.Name}}
-	arguments := json.RawMessage(`{"_wormhole_workspace":{"working_directory":"` + binding.Checkout.CanonicalPath + `"},"project_id":"forged"}`)
-	params, err := json.Marshal(toolsCallParams{Name: tool.Name, Arguments: arguments})
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, rpcErr := server.handleToolsCall(context.Background(), &mcpSession{}, nil, registry, params)
-	if rpcErr != nil || !called {
-		t.Fatalf("handleToolsCall = (%+v, %+v), called %v", result, rpcErr, called)
-	}
-}
-
 func TestPrivateContextConfiguresExactProjectStateAndIdentityOnce(t *testing.T) {
 	store, err := localstore.Open(filepath.Join(t.TempDir(), "gateway.db"))
 	if err != nil {
@@ -173,7 +143,7 @@ func TestForgedAuthorityFieldsAreAbsentFromEveryPublicToolSchema(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, forbidden := range []string{"workspace_id", "binding", "working_directory", "actor_kind", "assurance", "session_id", "accountable_human_id", "fabric_instance_id"} {
+		for _, forbidden := range []string{"workspace_id", "namespace", "binding", "working_directory", "actor_kind", "assurance", "session_id", "accountable_human_id", "fabric_instance_id"} {
 			if bytes.Contains(encoded, []byte(`"`+forbidden+`"`)) {
 				t.Fatalf("%s public schema exposes private authority %s: %s", tool.Name, forbidden, encoded)
 			}

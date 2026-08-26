@@ -5313,12 +5313,6 @@
               "type": "object",
               "properties": [
                 {
-                  "name": "agent_id",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
                   "name": "channel_id",
                   "schema": {
                     "type": "string"
@@ -5453,12 +5447,6 @@
                 },
                 {
                   "name": "event_type",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "namespace",
                   "schema": {
                     "type": "string"
                   }
@@ -6892,12 +6880,6 @@
             "schema": {
               "type": "object",
               "properties": [
-                {
-                  "name": "agent_id",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
                 {
                   "name": "body",
                   "schema": {

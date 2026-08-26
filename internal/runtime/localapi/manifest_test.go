@@ -13,7 +13,7 @@ import (
 	syncpkg "github.com/H4RL33/wormhole/internal/runtime/sync"
 )
 
-const manifestTestToolDigest = "sha256:5052db0454696440cd27c40f4f2ef89b4e4c13b2b5c835ea19a79442cc02a7df"
+const manifestTestToolDigest = "sha256:ff8fc1108b61ad1886760280adc70d23b78f4cbe879be07efe682a53643dedb1"
 
 type recordingManifestReceiverConfigurer struct {
 	receiver syncpkg.IntegrationManifestReceiver
