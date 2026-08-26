@@ -31,6 +31,9 @@ func executeTransactional(ctx context.Context, adapter Adapter, desired Connecto
 	}
 	var result TransactionResult
 	err := coordinator.WithOperationLock(ctx, change.Adapter, change.Name, func(locked context.Context) error {
+		if err := requireExactAdapterDiscovery(locked, adapter); err != nil {
+			return err
+		}
 		if err := recoverTransactionsLocked(locked, adapter, change.Name, backups, journal); err != nil {
 			return err
 		}
@@ -122,8 +125,31 @@ func RecoverTransactions(ctx context.Context, adapter Adapter, name string, back
 		return ErrInvalidConnectorPlan
 	}
 	return coordinator.WithOperationLock(ctx, adapter.AdapterName(), name, func(locked context.Context) error {
+		if err := requireExactAdapterDiscovery(locked, adapter); err != nil {
+			return err
+		}
 		return recoverTransactionsLocked(locked, adapter, name, backups, journal)
 	})
+}
+
+func requireExactAdapterDiscovery(ctx context.Context, adapter Adapter) error {
+	availability, err := adapter.Discover(ctx)
+	if err != nil {
+		return sanitizeConnectorError(err)
+	}
+	want := ""
+	switch adapter.AdapterName() {
+	case AdapterCodex:
+		want = "0.149.0"
+	case AdapterClaude:
+		want = "2.1.220"
+	default:
+		return ErrConnectorUnavailable
+	}
+	if !availability.Available || availability.Version != want {
+		return ErrConnectorUnavailable
+	}
+	return nil
 }
 
 func recoverTransactionsLocked(ctx context.Context, adapter Adapter, name string, backups BackupStore, journal OperationJournal) error {

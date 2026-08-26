@@ -33,9 +33,10 @@ func (s *memoryBackupStore) Get(_ context.Context, reference config.BackupRefere
 }
 
 type memoryJournal struct {
-	record OperationRecord
-	active bool
-	fault  map[OperationStage]error
+	record      OperationRecord
+	active      bool
+	fault       map[OperationStage]error
+	activeCalls int
 }
 
 func (j *memoryJournal) Prepare(_ context.Context, operation PrepareOperation) (OperationRecord, error) {
@@ -48,6 +49,7 @@ func (j *memoryJournal) Prepare(_ context.Context, operation PrepareOperation) (
 }
 
 func (j *memoryJournal) Active(_ context.Context, adapter AdapterName, name string) (OperationRecord, bool, error) {
+	j.activeCalls++
 	if !j.active || j.record.Adapter != adapter || j.record.Name != name {
 		return OperationRecord{}, false, nil
 	}
@@ -65,29 +67,49 @@ func (j *memoryJournal) Advance(_ context.Context, id string, stage OperationSta
 	return j.fault[stage]
 }
 
-type memoryCoordinator struct{ mu sync.Mutex }
+type memoryCoordinator struct {
+	mu   sync.Mutex
+	held bool
+}
 
 func (c *memoryCoordinator) WithOperationLock(ctx context.Context, _ AdapterName, _ string, operation func(context.Context) error) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.held = true
+	defer func() { c.held = false }()
 	return operation(ctx)
 }
 
 type stateAdapter struct {
-	name          AdapterName
-	connectorName string
-	current       ConnectorEntry
-	applyErr      error
-	verifyErr     error
-	rollbackErr   error
-	thirdOnApply  *ConnectorEntry
+	name           AdapterName
+	connectorName  string
+	current        ConnectorEntry
+	applyErr       error
+	verifyErr      error
+	rollbackErr    error
+	thirdOnApply   *ConnectorEntry
+	discover       Availability
+	discoverErr    error
+	discoverCalls  int
+	inspectCalls   int
+	mutationCalls  int
+	lock           *memoryCoordinator
+	discoverLocked bool
 }
 
 func (a *stateAdapter) AdapterName() AdapterName { return a.name }
 func (a *stateAdapter) Discover(context.Context) (Availability, error) {
-	return Availability{Available: true, Version: "test"}, nil
+	a.discoverCalls++
+	if a.lock != nil && a.lock.held {
+		a.discoverLocked = true
+	}
+	if a.discover == (Availability{}) && a.discoverErr == nil {
+		return Availability{Available: true, Version: "0.149.0"}, nil
+	}
+	return a.discover, a.discoverErr
 }
 func (a *stateAdapter) Inspect(context.Context) (ConnectorEntry, error) {
+	a.inspectCalls++
 	return cloneConnectorEntry(a.current), nil
 }
 func (a *stateAdapter) Plan(_ context.Context, prior, desired ConnectorEntry) (ChangePlan, error) {
@@ -98,6 +120,7 @@ func (a *stateAdapter) Plan(_ context.Context, prior, desired ConnectorEntry) (C
 	return BuildChangePlan(a.name, a.connectorName, action, prior, desired)
 }
 func (a *stateAdapter) Apply(_ context.Context, plan ChangePlan) error {
+	a.mutationCalls++
 	if a.thirdOnApply != nil {
 		a.current = cloneConnectorEntry(*a.thirdOnApply)
 	} else {
@@ -117,6 +140,7 @@ func (a *stateAdapter) Verify(_ context.Context, desired ConnectorEntry) error {
 	return nil
 }
 func (a *stateAdapter) Rollback(_ context.Context, plan ChangePlan) error {
+	a.mutationCalls++
 	if a.rollbackErr != nil {
 		return a.rollbackErr
 	}
@@ -130,6 +154,7 @@ func (a *stateAdapter) Rollback(_ context.Context, plan ChangePlan) error {
 	return nil
 }
 func (a *stateAdapter) Remove(_ context.Context, prior ConnectorEntry) error {
+	a.mutationCalls++
 	if !EqualConnectorEntry(a.current, prior) {
 		return ErrConnectorStateDrift
 	}
@@ -145,7 +170,8 @@ func transactionalFixture(t *testing.T, action OperationAction) (*stateAdapter, 
 	if action == OperationRemove {
 		prior, desired = present, absent
 	}
-	adapter := &stateAdapter{name: AdapterCodex, connectorName: "wormhole", current: prior}
+	locks := &memoryCoordinator{}
+	adapter := &stateAdapter{name: AdapterCodex, connectorName: "wormhole", current: prior, lock: locks}
 	plan, err := adapter.Plan(t.Context(), prior, desired)
 	if err != nil {
 		t.Fatal(err)
@@ -153,7 +179,45 @@ func transactionalFixture(t *testing.T, action OperationAction) (*stateAdapter, 
 	priorDigest, _ := DigestConnectorEntry(prior)
 	desiredDigest, _ := DigestConnectorEntry(desired)
 	change := ConfirmedConnectorChange{Adapter: AdapterCodex, Name: "wormhole", Action: action, PlanDigest: plan.Digest, ExpectedPriorDigest: priorDigest, DesiredDigest: desiredDigest}
-	return adapter, desired, change, &memoryBackupStore{}, &memoryJournal{fault: map[OperationStage]error{}}, &memoryCoordinator{}
+	return adapter, desired, change, &memoryBackupStore{}, &memoryJournal{fault: map[OperationStage]error{}}, locks
+}
+
+func TestTransactionsGateExactDiscoveryInsidePairLock(t *testing.T) {
+	for _, operation := range []string{"apply", "remove", "recover"} {
+		for _, failure := range []string{"unsupported", "error"} {
+			t.Run(operation+"/"+failure, func(t *testing.T) {
+				action := OperationInstall
+				if operation == "remove" {
+					action = OperationRemove
+				}
+				adapter, desired, change, backups, journal, locks := transactionalFixture(t, action)
+				if failure == "unsupported" {
+					adapter.discover = Availability{Available: true, Version: "0.150.0"}
+				} else {
+					adapter.discoverErr = errors.New("version probe secret-token")
+				}
+				var err error
+				switch operation {
+				case "apply":
+					_, err = ApplyTransactional(t.Context(), adapter, desired, change, backups, journal, locks)
+				case "remove":
+					_, err = RemoveTransactional(t.Context(), adapter, change, backups, journal, locks)
+				case "recover":
+					err = RecoverTransactions(t.Context(), adapter, "wormhole", backups, journal, locks)
+				}
+				want := ErrConnectorUnavailable
+				if failure == "error" {
+					want = ErrConnectorCommandFailed
+				}
+				if !errors.Is(err, want) {
+					t.Fatalf("error=%v want=%v", err, want)
+				}
+				if adapter.discoverCalls != 1 || !adapter.discoverLocked || adapter.inspectCalls != 0 || adapter.mutationCalls != 0 || backups.puts != 0 || journal.activeCalls != 0 {
+					t.Fatalf("discover=%d locked=%v inspect=%d mutate=%d backups=%d journal=%d", adapter.discoverCalls, adapter.discoverLocked, adapter.inspectCalls, adapter.mutationCalls, backups.puts, journal.activeCalls)
+				}
+			})
+		}
+	}
 }
 
 func TestApplyTransactionalCASBackupMutationVerifyAndCompletion(t *testing.T) {

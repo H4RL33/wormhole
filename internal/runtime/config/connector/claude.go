@@ -17,39 +17,104 @@ import (
 var claudeVersionPattern = regexp.MustCompile(`^2\.1\.220 \(Claude Code\)\n$`)
 
 type ClaudeAdapter struct {
-	runner         config.CommandRunner
-	executable     string
-	name           string
-	userConfigPath string
-	projectRoot    string
+	runner            config.CommandRunner
+	executable        string
+	name              string
+	userConfigPath    string
+	workingDirectory  string
+	localProjectKey   string
+	resolveUserConfig func() (string, error)
 }
 
 func NewClaudeAdapter(runner config.CommandRunner, executable, name string) (*ClaudeAdapter, error) {
-	home, homeErr := os.UserHomeDir()
+	userConfigPath, pathErr := resolveClaudeUserConfigPath()
 	root, rootErr := os.Getwd()
-	if homeErr != nil || rootErr != nil {
+	if pathErr != nil || rootErr != nil {
 		return nil, ErrInvalidConnectorPlan
 	}
 	canonicalRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return nil, ErrInvalidConnectorPlan
 	}
-	return NewClaudeAdapterAt(runner, executable, name, filepath.Join(home, ".claude.json"), canonicalRoot)
+	adapter, err := NewClaudeAdapterAt(runner, executable, name, userConfigPath, canonicalRoot)
+	if err != nil {
+		return nil, err
+	}
+	adapter.resolveUserConfig = resolveClaudeUserConfigPath
+	return adapter, nil
 }
 
-func NewClaudeAdapterAt(runner config.CommandRunner, executable, name, userConfigPath, projectRoot string) (*ClaudeAdapter, error) {
-	if runner == nil || !validConnectorValue(executable) || name != "wormhole" || !filepath.IsAbs(userConfigPath) || filepath.Clean(userConfigPath) != userConfigPath || !filepath.IsAbs(projectRoot) || filepath.Clean(projectRoot) != projectRoot {
+func NewClaudeAdapterAt(runner config.CommandRunner, executable, name, userConfigPath, workingDirectory string) (*ClaudeAdapter, error) {
+	if runner == nil || !validConnectorValue(executable) || name != "wormhole" || !filepath.IsAbs(userConfigPath) || filepath.Clean(userConfigPath) != userConfigPath || !filepath.IsAbs(workingDirectory) || filepath.Clean(workingDirectory) != workingDirectory {
 		return nil, ErrInvalidConnectorPlan
 	}
-	info, err := os.Lstat(projectRoot)
+	info, err := os.Lstat(workingDirectory)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return nil, ErrInvalidConnectorPlan
 	}
-	resolved, err := filepath.EvalSymlinks(projectRoot)
-	if err != nil || resolved != projectRoot {
+	resolved, err := filepath.EvalSymlinks(workingDirectory)
+	if err != nil || resolved != workingDirectory {
 		return nil, ErrInvalidConnectorPlan
 	}
-	return &ClaudeAdapter{runner: runner, executable: executable, name: name, userConfigPath: userConfigPath, projectRoot: projectRoot}, nil
+	localProjectKey, err := claudeLocalProjectKey(workingDirectory)
+	if err != nil {
+		return nil, ErrInvalidConnectorPlan
+	}
+	return &ClaudeAdapter{runner: runner, executable: executable, name: name, userConfigPath: userConfigPath, workingDirectory: workingDirectory, localProjectKey: localProjectKey}, nil
+}
+
+func resolveClaudeUserConfigPath() (string, error) {
+	configDirectory, overridden := os.LookupEnv("CLAUDE_CONFIG_DIR")
+	if !overridden {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", ErrInvalidConnectorPlan
+		}
+		configDirectory = home
+	}
+	if !validConnectorValue(configDirectory) || !filepath.IsAbs(configDirectory) || filepath.Clean(configDirectory) != configDirectory {
+		return "", ErrInvalidConnectorPlan
+	}
+	info, err := os.Lstat(configDirectory)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o022 != 0 || !nativeConnectorFileOwner(info) {
+		return "", ErrInvalidConnectorPlan
+	}
+	resolved, err := filepath.EvalSymlinks(configDirectory)
+	if err != nil || resolved != configDirectory {
+		return "", ErrInvalidConnectorPlan
+	}
+	return filepath.Join(configDirectory, ".claude.json"), nil
+}
+
+func claudeLocalProjectKey(workingDirectory string) (string, error) {
+	for directory := workingDirectory; ; directory = filepath.Dir(directory) {
+		marker := filepath.Join(directory, ".git")
+		info, err := os.Lstat(marker)
+		if err == nil {
+			if info.Mode()&os.ModeSymlink != 0 || (!info.IsDir() && !info.Mode().IsRegular()) {
+				return "", ErrInvalidConnectorPlan
+			}
+			return directory, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", ErrInvalidConnectorPlan
+		}
+		parent := filepath.Dir(directory)
+		if parent == directory {
+			return workingDirectory, nil
+		}
+	}
+}
+
+func (a *ClaudeAdapter) validateUserConfigBinding() error {
+	if a.resolveUserConfig == nil {
+		return nil
+	}
+	path, err := a.resolveUserConfig()
+	if err != nil || path != a.userConfigPath {
+		return ErrUnsupportedConnectorEntry
+	}
+	return nil
 }
 
 func (a *ClaudeAdapter) AdapterName() AdapterName { return AdapterClaude }
@@ -69,11 +134,14 @@ func (a *ClaudeAdapter) Discover(ctx context.Context) (Availability, error) {
 }
 
 func (a *ClaudeAdapter) Inspect(context.Context) (ConnectorEntry, error) {
+	if err := a.validateUserConfigBinding(); err != nil {
+		return ConnectorEntry{}, err
+	}
 	userRoot, userExists, err := readClaudeJSONObject(a.userConfigPath)
 	if err != nil {
 		return ConnectorEntry{}, err
 	}
-	projectRoot, projectExists, err := readClaudeJSONObject(filepath.Join(a.projectRoot, ".mcp.json"))
+	projectRoot, projectExists, err := readClaudeJSONObject(filepath.Join(a.workingDirectory, ".mcp.json"))
 	if err != nil {
 		return ConnectorEntry{}, err
 	}
@@ -87,7 +155,7 @@ func (a *ClaudeAdapter) Inspect(context.Context) (ConnectorEntry, error) {
 		if exists {
 			found = append(found, claudeScopedEntry{scope: ScopeUser, raw: entry})
 		}
-		local, exists, localErr := claudeProjectEntry(userRoot, a.projectRoot, a.name)
+		local, exists, localErr := claudeProjectEntry(userRoot, a.localProjectKey, a.name)
 		if localErr != nil {
 			return ConnectorEntry{}, localErr
 		}
@@ -291,20 +359,23 @@ func claudeRepresentableEntry(entry ConnectorEntry) bool {
 }
 
 func (a *ClaudeAdapter) add(ctx context.Context, entry ConnectorEntry) error {
-	if validateConnectorEntry(entry) != nil || entry.State != EntryPresent {
+	if a.validateUserConfigBinding() != nil || validateConnectorEntry(entry) != nil || entry.State != EntryPresent {
 		return ErrUnsupportedConnectorEntry
 	}
-	arguments := []string{"mcp", "add", "--scope", "user"}
+	arguments := []string{"mcp", "add", "--scope", "user", a.name}
 	for _, variable := range entry.Env {
 		arguments = append(arguments, "--env", variable.Name+"="+variable.Value)
 	}
-	arguments = append(arguments, a.name, "--", entry.Command)
+	arguments = append(arguments, "--", entry.Command)
 	arguments = append(arguments, entry.Args...)
 	_, _, err := a.runner.Run(ctx, a.executable, arguments...)
 	return redactedCommandError(err)
 }
 
 func (a *ClaudeAdapter) remove(ctx context.Context) error {
+	if err := a.validateUserConfigBinding(); err != nil {
+		return err
+	}
 	_, _, err := a.runner.Run(ctx, a.executable, "mcp", "remove", "--scope", "user", a.name)
 	return redactedCommandError(err)
 }

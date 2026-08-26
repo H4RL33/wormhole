@@ -59,6 +59,23 @@ func (r *recordingRunner) Run(_ context.Context, executable string, args ...stri
 	return reply.stdout, reply.stderr, reply.err
 }
 
+type claudeConfigRunner struct {
+	path  string
+	calls [][]string
+}
+
+func (r *claudeConfigRunner) Run(_ context.Context, executable string, args ...string) ([]byte, []byte, error) {
+	r.calls = append(r.calls, append([]string{executable}, args...))
+	if reflect.DeepEqual(args, []string{"mcp", "add", "--scope", "user", "wormhole", "--", "/opt/wormhole", "mcp"}) {
+		data := []byte(`{"mcpServers":{"wormhole":{"type":"stdio","command":"/opt/wormhole","args":["mcp"],"env":{}}}}`)
+		return nil, nil, os.WriteFile(r.path, data, 0o600)
+	}
+	if reflect.DeepEqual(args, []string{"mcp", "remove", "--scope", "user", "wormhole"}) {
+		return nil, nil, os.WriteFile(r.path, []byte(`{"mcpServers":{}}`), 0o600)
+	}
+	return nil, nil, errors.New("unexpected fake Claude argv")
+}
+
 func TestCodexExactVersionDiscoveryAndStrictInspection(t *testing.T) {
 	runner := &recordingRunner{replies: []runnerReply{
 		{stdout: []byte("codex-cli 0.149.0\n")},
@@ -259,6 +276,130 @@ func TestClaudeMutationUsesExplicitUserScope(t *testing.T) {
 	want := [][]string{{"claude", "mcp", "add", "--scope", "user", "wormhole", "--", "/opt/wormhole", "mcp"}, {"claude", "mcp", "remove", "--scope", "user", "wormhole"}}
 	if !reflect.DeepEqual(runner.calls, want) {
 		t.Fatalf("calls = %#v", runner.calls)
+	}
+}
+
+func TestClaudeRollbackAddPlacesMultipleEnvironmentFlagsAfterName(t *testing.T) {
+	runner := &recordingRunner{replies: []runnerReply{{}}}
+	adapter := newClaudeFixture(t, runner, `{"mcpServers":{}}`, "")
+	prior := ConnectorEntry{State: EntryPresent, Scope: ScopeUser, Transport: TransportStdio, Command: "/opt/prior server", Args: []string{"serve", "two words", ""}, Env: []EnvironmentVariable{{Name: "A", Value: "one"}, {Name: "EMPTY", Value: ""}}}
+	if err := adapter.add(t.Context(), prior); err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{{"claude", "mcp", "add", "--scope", "user", "wormhole", "--env", "A=one", "--env", "EMPTY=", "--", "/opt/prior server", "serve", "two words", ""}}
+	if !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("calls=%#v", runner.calls)
+	}
+}
+
+func TestClaudeConfigDirBindsInspectApplyVerifyAndRollback(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "claude-config")
+	homeDir := filepath.Join(root, "home")
+	workingDir := filepath.Join(root, "work")
+	for _, directory := range []string{configDir, homeDir, workingDir} {
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	priorWorkingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(workingDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(priorWorkingDirectory) })
+
+	userPath := filepath.Join(configDir, ".claude.json")
+	runner := &claudeConfigRunner{path: userPath}
+	adapter, err := NewClaudeAdapter(runner, "claude", "wormhole")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior := ConnectorEntry{State: EntryAbsent}
+	desired := ConnectorEntry{State: EntryPresent, Scope: ScopeUser, Transport: TransportStdio, Command: "/opt/wormhole", Args: []string{"mcp"}, Env: []EnvironmentVariable{}}
+	plan, err := adapter.Plan(t.Context(), prior, desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Apply(t.Context(), plan); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if err := adapter.Verify(t.Context(), desired); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if err := adapter.Rollback(t.Context(), plan); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(homeDir, ".claude.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpected home config: %v", err)
+	}
+}
+
+func TestClaudeConfigDirChangeFailsWithoutNativeFallback(t *testing.T) {
+	root := t.TempDir()
+	first := filepath.Join(root, "first")
+	second := filepath.Join(root, "second")
+	for _, directory := range []string{first, second} {
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", first)
+	runner := &recordingRunner{}
+	adapter, err := NewClaudeAdapter(runner, "claude", "wormhole")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", second)
+	entry := ConnectorEntry{State: EntryPresent, Scope: ScopeUser, Transport: TransportStdio, Command: "/opt/wormhole", Args: []string{"mcp"}, Env: []EnvironmentVariable{}}
+	if err := adapter.add(t.Context(), entry); !errors.Is(err, ErrUnsupportedConnectorEntry) {
+		t.Fatalf("add error=%v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("native fallback calls=%#v", runner.calls)
+	}
+}
+
+func TestClaudeConfigDirRejectsNoncanonicalOrUnboundedOverrides(t *testing.T) {
+	for name, value := range map[string]string{
+		"empty":     "",
+		"relative":  "relative/config",
+		"unbounded": "/" + strings.Repeat("a", maxConnectorValueBytes+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("CLAUDE_CONFIG_DIR", value)
+			if _, err := NewClaudeAdapter(&recordingRunner{}, "claude", "wormhole"); !errors.Is(err, ErrInvalidConnectorPlan) {
+				t.Fatalf("constructor error=%v", err)
+			}
+		})
+	}
+}
+
+func TestClaudeNestedGitLocalScopeCannotHideBehindUserEntry(t *testing.T) {
+	root := t.TempDir()
+	gitRoot := filepath.Join(root, "repository")
+	nested := filepath.Join(gitRoot, "sub", "dir")
+	if err := os.MkdirAll(filepath.Join(gitRoot, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	userPath := filepath.Join(root, ".claude.json")
+	data := `{"mcpServers":{"wormhole":{"type":"stdio","command":"/user","args":["mcp"],"env":{}}},"projects":{"` + gitRoot + `":{"mcpServers":{"wormhole":{"type":"stdio","command":"/local","args":["mcp"],"env":{}}}}}}`
+	if err := os.WriteFile(userPath, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter, err := NewClaudeAdapterAt(&recordingRunner{}, "claude", "wormhole", userPath, nested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.Inspect(t.Context()); !errors.Is(err, ErrUnsupportedConnectorEntry) {
+		t.Fatalf("hidden local error=%v", err)
 	}
 }
 
