@@ -281,7 +281,7 @@ func TestExecuteCodeGraphLifecycleUsesPrivateRPCWithClosedClaims(t *testing.T) {
 			if captured.method != "wormhole/code-graph/lifecycle" {
 				t.Errorf("%s method = %q", request.Operation, captured.method)
 			}
-			wantKeys := map[string]bool{"operation": true, "project_id": true}
+			wantKeys := map[string]bool{"operation": true, "project_id": true, "_wormhole_workspace": true}
 			if request.Checkout != "" {
 				wantKeys["checkout"] = true
 			}
@@ -292,6 +292,10 @@ func TestExecuteCodeGraphLifecycleUsesPrivateRPCWithClosedClaims(t *testing.T) {
 				if !wantKeys[key] {
 					t.Errorf("%s sent forbidden wire claim %q", request.Operation, key)
 				}
+			}
+			var private localapi.PrivateRequestContext
+			if err := json.Unmarshal(captured.params["_wormhole_workspace"], &private); err != nil || private.WorkingDirectory == "" {
+				t.Errorf("%s private workspace = %+v decode=%v", request.Operation, private, err)
 			}
 		case <-time.After(3 * time.Second):
 			t.Fatalf("%s did not call the private Gateway RPC", request.Operation)

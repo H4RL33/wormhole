@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPrivateContextBridgeOverwritesForgedCWD(t *testing.T) {
@@ -112,5 +114,26 @@ func TestPrivateContextBridgeRejectsDuplicateMembersBeforeRewrite(t *testing.T) 
 	_ = client.Close()
 	if got := <-forwarded; got != "" {
 		t.Fatalf("duplicate request was forwarded: %q", got)
+	}
+}
+
+func TestPrivateContextBridgeForwardsMalformedFrameForGatewayParseResponse(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	if err := server.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- stdinToSocket(strings.NewReader("not-json\n"), client) }()
+	line, err := bufio.NewReader(server).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != "not-json\n" {
+		t.Fatalf("forwarded malformed frame = %q", line)
+	}
+	if err := <-done; !errors.Is(err, io.EOF) {
+		t.Fatalf("stdinToSocket error = %v, want io.EOF", err)
 	}
 }

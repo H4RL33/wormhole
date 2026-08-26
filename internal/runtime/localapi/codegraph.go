@@ -17,7 +17,6 @@ import (
 	codegraphindex "github.com/H4RL33/wormhole/internal/runtime/codegraph/index"
 	codegraphquery "github.com/H4RL33/wormhole/internal/runtime/codegraph/query"
 	codegraphstore "github.com/H4RL33/wormhole/internal/runtime/codegraph/store"
-	runtimeconfig "github.com/H4RL33/wormhole/internal/runtime/config"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 )
 
@@ -78,25 +77,28 @@ func (lifecycle *CodeGraphLifecycle) Execute(ctx context.Context, request CodeGr
 }
 
 func (s *Server) executePrivateCodeGraphLifecycle(ctx context.Context, request CodeGraphLifecycleRequest) (CodeGraphLifecycleStatus, error) {
-	if request.ProjectID == "" {
-		return CodeGraphLifecycleStatus{}, errors.New("code graph lifecycle: project_id is required")
-	}
 	if !codeGraphLifecycleOperationSupported(request.Operation) {
 		return CodeGraphLifecycleStatus{}, errors.New("code graph lifecycle: unsupported operation")
 	}
-	binding := codeGraphRepositoryBinding{}
-	if codeGraphLifecycleRequiresBinding(request.Operation) {
-		var err error
-		binding, err = s.resolveCodeGraphLifecycleBinding(ctx, request.ProjectID)
-		if err != nil {
-			return CodeGraphLifecycleStatus{}, err
-		}
-	}
-	runtime, err := s.ensureCodeGraphRuntime(ctx, request.ProjectID)
+	binding, err := ResolvedBinding(ctx)
 	if err != nil {
 		return CodeGraphLifecycleStatus{}, err
 	}
-	return runtime.Lifecycle.executeWithBinding(ctx, request, binding)
+	if request.ProjectID != "" && request.ProjectID != binding.Scope.ProjectID {
+		return CodeGraphLifecycleStatus{}, errors.New("code graph lifecycle: resolved project mismatch")
+	}
+	request.ProjectID = binding.Scope.ProjectID
+	if s == nil || s.codeGraphProvider == nil {
+		return CodeGraphLifecycleStatus{}, ErrCodeGraphUnavailable
+	}
+	switch request.Operation {
+	case CodeGraphStatus, CodeGraphCheckoutShow:
+		return s.codeGraphProvider.Status(ctx, binding)
+	case CodeGraphRebuild:
+		return s.codeGraphProvider.Rebuild(ctx, binding)
+	default:
+		return CodeGraphLifecycleStatus{}, ErrCodeGraphUnavailable
+	}
 }
 
 func codeGraphLifecycleOperationSupported(operation CodeGraphLifecycleOperation) bool {
@@ -106,41 +108,6 @@ func codeGraphLifecycleOperationSupported(operation CodeGraphLifecycleOperation)
 	default:
 		return false
 	}
-}
-
-func codeGraphLifecycleRequiresBinding(operation CodeGraphLifecycleOperation) bool {
-	return operation == CodeGraphEnable || operation == CodeGraphCheckoutSet || operation == CodeGraphRebuild
-}
-
-func (s *Server) resolveCodeGraphLifecycleBinding(ctx context.Context, projectID string) (codeGraphRepositoryBinding, error) {
-	multi, err := runtimeconfig.LoadMultiOrg()
-	if err != nil {
-		if errors.Is(err, runtimeconfig.ErrNoCredentials) {
-			return codeGraphRepositoryBinding{}, errors.New("code graph lifecycle: no credential profile binds this project")
-		}
-		return codeGraphRepositoryBinding{}, fmt.Errorf("code graph lifecycle: load credential inventory: %w", err)
-	}
-	matchedProfile := ""
-	var matched runtimeconfig.Credentials
-	for profile, org := range multi.Orgs {
-		if org.Credentials.ProjectID != projectID {
-			continue
-		}
-		if matchedProfile != "" {
-			return codeGraphRepositoryBinding{}, errors.New("code graph lifecycle: multiple credential profiles bind this project")
-		}
-		matchedProfile, matched = profile, org.Credentials
-	}
-	if matchedProfile == "" {
-		return codeGraphRepositoryBinding{}, errors.New("code graph lifecycle: no credential profile binds this project")
-	}
-	if s == nil || s.store == nil {
-		return codeGraphRepositoryBinding{}, errors.New("code graph lifecycle: Gateway store unavailable")
-	}
-	if err := s.store.ValidateReadyCheckpoint(ctx, projectID, matched.AgentID, matched.PassportID, matchedProfile); err != nil {
-		return codeGraphRepositoryBinding{}, fmt.Errorf("code graph lifecycle: active credential is not a ready bootstrapped checkpoint: %w", err)
-	}
-	return codeGraphRepositoryBinding{profile: matchedProfile, agent: matched.AgentID, passport: matched.PassportID}, nil
 }
 
 func (lifecycle *CodeGraphLifecycle) executeWithBinding(ctx context.Context, request CodeGraphLifecycleRequest, binding codeGraphRepositoryBinding) (CodeGraphLifecycleStatus, error) {

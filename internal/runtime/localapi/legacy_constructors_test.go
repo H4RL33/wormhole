@@ -4,6 +4,8 @@ package localapi
 // test-only topology. Production builds expose only NewSupervisor.
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -45,5 +47,59 @@ func legacyTestServer(socketPath, coordServerURL, token, projectID string, store
 		server.gr = localstore.NewGitRepo(store.DB())
 	}
 	server.registry = newLocalRegistry(server)
+	server.testCodeGraphLifecycle = server.executeLegacyTestCodeGraphLifecycle
 	return server, nil
+}
+
+func (s *Server) executeLegacyTestCodeGraphLifecycle(ctx context.Context, request CodeGraphLifecycleRequest) (CodeGraphLifecycleStatus, error) {
+	if request.ProjectID == "" {
+		return CodeGraphLifecycleStatus{}, errors.New("code graph lifecycle: project_id is required")
+	}
+	if !codeGraphLifecycleOperationSupported(request.Operation) {
+		return CodeGraphLifecycleStatus{}, errors.New("code graph lifecycle: unsupported operation")
+	}
+	binding := codeGraphRepositoryBinding{}
+	if request.Operation == CodeGraphEnable || request.Operation == CodeGraphCheckoutSet || request.Operation == CodeGraphRebuild {
+		var err error
+		binding, err = s.resolveLegacyTestCodeGraphLifecycleBinding(ctx, request.ProjectID)
+		if err != nil {
+			return CodeGraphLifecycleStatus{}, err
+		}
+	}
+	runtime, err := s.ensureCodeGraphRuntime(ctx, request.ProjectID)
+	if err != nil {
+		return CodeGraphLifecycleStatus{}, err
+	}
+	return runtime.Lifecycle.executeWithBinding(ctx, request, binding)
+}
+
+func (s *Server) resolveLegacyTestCodeGraphLifecycleBinding(ctx context.Context, projectID string) (codeGraphRepositoryBinding, error) {
+	multi, err := config.LoadMultiOrg()
+	if err != nil {
+		if errors.Is(err, config.ErrNoCredentials) {
+			return codeGraphRepositoryBinding{}, errors.New("code graph lifecycle: no credential profile binds this project")
+		}
+		return codeGraphRepositoryBinding{}, fmt.Errorf("code graph lifecycle: load credential inventory: %w", err)
+	}
+	matchedProfile := ""
+	var matched config.Credentials
+	for profile, org := range multi.Orgs {
+		if org.Credentials.ProjectID != projectID {
+			continue
+		}
+		if matchedProfile != "" {
+			return codeGraphRepositoryBinding{}, errors.New("code graph lifecycle: multiple credential profiles bind this project")
+		}
+		matchedProfile, matched = profile, org.Credentials
+	}
+	if matchedProfile == "" {
+		return codeGraphRepositoryBinding{}, errors.New("code graph lifecycle: no credential profile binds this project")
+	}
+	if s == nil || s.store == nil {
+		return codeGraphRepositoryBinding{}, errors.New("code graph lifecycle: Gateway store unavailable")
+	}
+	if err := s.store.ValidateReadyCheckpoint(ctx, projectID, matched.AgentID, matched.PassportID, matchedProfile); err != nil {
+		return codeGraphRepositoryBinding{}, fmt.Errorf("code graph lifecycle: active credential is not a ready bootstrapped checkpoint: %w", err)
+	}
+	return codeGraphRepositoryBinding{profile: matchedProfile, agent: matched.AgentID, passport: matched.PassportID}, nil
 }

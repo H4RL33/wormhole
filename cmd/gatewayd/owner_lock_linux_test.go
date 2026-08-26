@@ -3,17 +3,232 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/H4RL33/wormhole/internal/runtime/localapi"
+	"github.com/H4RL33/wormhole/internal/runtime/localidentity"
+	"github.com/H4RL33/wormhole/internal/runtime/localstore"
+	"github.com/H4RL33/wormhole/internal/runtime/projectstate"
+	syncpkg "github.com/H4RL33/wormhole/internal/runtime/sync"
+	"github.com/H4RL33/wormhole/internal/types"
+	state "github.com/H4RL33/wormhole/internal/types/projectstate"
 	"golang.org/x/sys/unix"
 )
+
+const (
+	supervisorOwnerHelperMode    = "GATEWAYD_SUPERVISOR_OWNER_HELPER"
+	supervisorOwnerHelperDB      = "GATEWAYD_SUPERVISOR_OWNER_DB"
+	supervisorOwnerHelperSocket  = "GATEWAYD_SUPERVISOR_OWNER_SOCKET"
+	supervisorOwnerHelperStarted = "GATEWAYD_SUPERVISOR_OWNER_STARTED"
+	supervisorOwnerHelperRelease = "GATEWAYD_SUPERVISOR_OWNER_RELEASE"
+)
+
+type blockingLocalFabric struct{ started, release string }
+
+func (provider blockingLocalFabric) Status(context.Context, types.WorkspaceBinding) (syncpkg.Status, error) {
+	if err := os.WriteFile(provider.started, []byte("started"), 0o600); err != nil {
+		return syncpkg.Status{}, err
+	}
+	for {
+		if _, err := os.Stat(provider.release); err == nil {
+			return syncpkg.Status{}, localapi.ErrFabricUnavailable
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return syncpkg.Status{}, err
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func (blockingLocalFabric) Call(context.Context, types.WorkspaceBinding, string, json.RawMessage) (json.RawMessage, error) {
+	return nil, localapi.ErrFabricUnavailable
+}
+
+func TestProcessSupervisorOwnerHelper(t *testing.T) {
+	if os.Getenv(supervisorOwnerHelperMode) != "1" {
+		return
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM)
+	defer cancel()
+	owner, err := acquireDatabaseOwnerLock(os.Getenv(supervisorOwnerHelperDB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	store, err := localstore.Open(owner.DatabasePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	const projectID = "00000000-0000-4000-8000-000000000001"
+	checkout := filepath.Join(filepath.Dir(owner.DatabasePath()), "checkout")
+	if err := os.MkdirAll(checkout, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat := info.Sys().(*syscall.Stat_t)
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	snapshot := state.Snapshot{Config: state.ConfigV1{SnapshotVersion: 1, ProjectID: projectID, Handle: types.ProjectHandle{Namespace: "acme", Name: "wormhole"}}, Project: state.ProjectV1{SchemaVersion: 1, Kind: "project", ID: projectID, Name: "Wormhole", Aliases: []string{}, CreatedAt: now, UpdatedAt: now, Extensions: state.ExtensionsV1{}}, Actors: map[string]state.Record[state.ActorV1]{}, Tasks: map[string]state.Record[state.TaskV1]{}, TaskLinks: map[string]state.Record[state.TaskLinkV1]{}, Articles: map[string]state.KBRecord{}, Channels: map[string]state.Record[state.ChannelV1]{}, Events: map[string]state.EventV1{}, GitLinks: map[string]state.Record[state.GitLinkV1]{}}
+	tree, err := state.EncodeTree(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := state.DecodeTree(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := types.WorkspaceBinding{Scope: types.WorkspaceScope{ProjectID: projectID, WorkspaceID: "00000000-0000-4000-8000-000000000011"}, Checkout: types.CheckoutIdentity{CanonicalPath: checkout, Device: uint64(stat.Dev), Inode: uint64(stat.Ino)}, AcceptedCommitSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", AcceptedTreeDigest: string(decoded.Digest)}
+	repo := localstore.NewWorkspaceRepo(store.DB())
+	if _, _, err := repo.RegisterWorkspace(ctx, binding, tree); err != nil {
+		t.Fatal(err)
+	}
+	service, err := projectstate.NewService(repo, projectstate.ServiceConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := localidentity.Open(filepath.Join(filepath.Dir(owner.DatabasePath()), "identities"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := identity.EnsureSelectedForSetup(ctx, "00000000-0000-4000-8000-000000000031", types.ConfirmedIdentitySelection{DisplayName: "Owner"}); err != nil {
+		t.Fatal(err)
+	}
+	supervisor, err := localapi.NewSupervisor(localapi.SupervisorDependencies{Store: store, ProjectState: service, Identity: identity, Fabric: blockingLocalFabric{started: os.Getenv(supervisorOwnerHelperStarted), release: os.Getenv(supervisorOwnerHelperRelease)}, CodeGraph: localapi.NewDisabledCodeGraphProvider()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer supervisor.Close()
+	server, err := supervisor.Listen(os.Getenv(supervisorOwnerHelperSocket))
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- server.Serve(ctx) }()
+	<-server.Serving()
+	connection, err := net.Dial("unix", os.Getenv(supervisorOwnerHelperSocket))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	reader := bufio.NewReader(connection)
+	mcpInitialize(t, connection, reader)
+	arguments, _ := json.Marshal(map[string]any{"project_id": projectID, "_wormhole_workspace": map[string]string{"working_directory": checkout}})
+	params, _ := json.Marshal(mcpToolsCallParams{Name: "wormhole.sync.status", Arguments: arguments})
+	request, _ := json.Marshal(mcpRpcRequest{JSONRPC: "2.0", ID: json.RawMessage("2"), Method: "tools/call", Params: params})
+	if _, err := connection.Write(append(request, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	<-ctx.Done()
+	if err := supervisor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serveDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSupervisorOwnerLockHeldUntilHandlerAndStoreQuiesce(t *testing.T) {
+	process, databasePath, release, output := startSupervisorOwnerHelper(t)
+	if err := process.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	contender, contentionErr := acquireDatabaseOwnerLock(databasePath)
+	if contender != nil {
+		_ = contender.Close()
+	}
+	if contender != nil || !errors.Is(contentionErr, errGatewayAlreadyRunning) {
+		t.Fatalf("owner lock released before handler/store quiescence: lock=%v err=%v\n%s", contender, contentionErr, output.String())
+	}
+	if err := os.WriteFile(release, []byte("release"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitSupervisorOwnerHelper(process); err != nil {
+		t.Fatalf("helper shutdown: %v\n%s", err, output.String())
+	}
+	reacquired, err := acquireDatabaseOwnerLock(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = reacquired.Close()
+}
+
+func TestSupervisorKilledOwnerAllowsImmediateTakeover(t *testing.T) {
+	process, databasePath, _, output := startSupervisorOwnerHelper(t)
+	if err := process.Process.Signal(syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitSupervisorOwnerHelper(process); err == nil {
+		t.Fatalf("killed helper exited successfully\n%s", output.String())
+	}
+	owner, err := acquireDatabaseOwnerLock(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = owner.Close()
+}
+
+func startSupervisorOwnerHelper(t *testing.T) (*exec.Cmd, string, string, *bytes.Buffer) {
+	t.Helper()
+	root := t.TempDir()
+	databasePath := filepath.Join(root, "data", "gateway.db")
+	socketPath := filepath.Join(root, "gateway.sock")
+	started := filepath.Join(root, "started")
+	release := filepath.Join(root, "release")
+	command := exec.Command(os.Args[0], "-test.run=^TestProcessSupervisorOwnerHelper$")
+	command.Env = append(os.Environ(), supervisorOwnerHelperMode+"=1", supervisorOwnerHelperDB+"="+databasePath, supervisorOwnerHelperSocket+"="+socketPath, supervisorOwnerHelperStarted+"="+started, supervisorOwnerHelperRelease+"="+release)
+	output := &bytes.Buffer{}
+	command.Stdout, command.Stderr = output, output
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if command.ProcessState == nil {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+		}
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+			t.Fatalf("helper did not admit blocking provider\n%s", output.String())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return command, databasePath, release, output
+}
+
+func waitSupervisorOwnerHelper(command *exec.Cmd) error {
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(5 * time.Second):
+		_ = command.Process.Kill()
+		return <-done
+	}
+}
 
 func TestDatabaseOwnerLockCanonicalAliases(t *testing.T) {
 	workingDirectory, err := os.Getwd()

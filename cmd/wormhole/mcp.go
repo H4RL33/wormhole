@@ -17,6 +17,8 @@ import (
 	"time"
 )
 
+var errDuplicateMCPJSONMember = errors.New("duplicate MCP JSON member")
+
 // runMCP implements the MCP stdio↔socket bridge subcommand.
 // It dials Gateway's local socket and relays newline-delimited JSON-RPC
 // messages between stdin/stdout and the socket until either side closes
@@ -111,11 +113,11 @@ func stdinToSocket(r io.Reader, conn net.Conn) error {
 		if body := strings.TrimRight(line, "\r\n"); len(body) > 0 {
 			raw := json.RawMessage(body)
 			method, inspectErr := inspectMCPMethod(raw)
-			if inspectErr != nil {
+			if errors.Is(inspectErr, errDuplicateMCPJSONMember) {
 				return inspectErr
 			}
 			forwarded := append(json.RawMessage(nil), raw...)
-			if method == "tools/call" {
+			if inspectErr == nil && method == "tools/call" {
 				cwd, cwdErr := os.Getwd()
 				if cwdErr != nil {
 					return fmt.Errorf("observe working directory: %w", cwdErr)
@@ -239,7 +241,7 @@ func rejectDuplicateMCPJSONMembers(raw []byte) error {
 					return errors.New("non-string object member")
 				}
 				if _, duplicate := seen[key]; duplicate {
-					return fmt.Errorf("duplicate object member %q", key)
+					return fmt.Errorf("%w: duplicate object member %q", errDuplicateMCPJSONMember, key)
 				}
 				seen[key] = struct{}{}
 				if err := visit(); err != nil {

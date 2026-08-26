@@ -186,6 +186,9 @@ type Server struct {
 	// testBeforeLocalWriteCommit injects a pre-commit abort for atomic-write
 	// rollback tests. It does not claim to simulate a storage-engine commit failure.
 	testBeforeLocalWriteCommit func(*sql.Tx) error
+	// testCodeGraphLifecycle preserves historical handler tests without
+	// compiling an ambient credential/runtime path into production dispatch.
+	testCodeGraphLifecycle func(context.Context, CodeGraphLifecycleRequest) (CodeGraphLifecycleStatus, error)
 
 	// registry is the local MCP tool registry (mcp.go), built once at
 	// construction time from the Server that will service every
@@ -744,6 +747,16 @@ func (s *Server) cachedWhoAmIForCredential(ctx context.Context, projectID string
 }
 
 func (s *Server) localSyncStatus(ctx context.Context, args json.RawMessage) (syncpkg.Status, error) {
+	if s.privateRuntimeConfigured() {
+		binding, err := ResolvedBinding(ctx)
+		if err != nil {
+			return syncpkg.Status{}, err
+		}
+		if s.fabricRouter == nil {
+			return syncpkg.Status{}, ErrFabricUnavailable
+		}
+		return s.fabricRouter.Status(ctx, binding)
+	}
 	var input struct {
 		ProjectID string `json:"project_id"`
 	}

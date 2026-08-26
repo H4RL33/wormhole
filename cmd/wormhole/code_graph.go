@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	projectconfig "github.com/H4RL33/wormhole/internal/config"
@@ -161,8 +162,20 @@ func resolveCodeGraphProject(explicit string) (string, error) {
 }
 
 func executeCodeGraphLifecycle(ctx context.Context, request localapi.CodeGraphLifecycleRequest) (localapi.CodeGraphLifecycleStatus, error) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		return localapi.CodeGraphLifecycleStatus{}, fmt.Errorf("observe working directory: %w", err)
+	}
+	workingDirectory, err = filepath.EvalSymlinks(workingDirectory)
+	if err != nil {
+		return localapi.CodeGraphLifecycleStatus{}, fmt.Errorf("canonicalize working directory: %w", err)
+	}
+	privateRequest := struct {
+		localapi.CodeGraphLifecycleRequest
+		Workspace localapi.PrivateRequestContext `json:"_wormhole_workspace"`
+	}{CodeGraphLifecycleRequest: request, Workspace: localapi.PrivateRequestContext{WorkingDirectory: filepath.Clean(workingDirectory)}}
 	var response localapi.CodeGraphLifecycleStatus
-	if err := callGatewayPrivateMethod(ctx, gatewaySocketPath(), codeGraphLifecycleRPCMethod, request, &response); err != nil {
+	if err := callGatewayPrivateMethod(ctx, gatewaySocketPath(), codeGraphLifecycleRPCMethod, privateRequest, &response); err != nil {
 		return localapi.CodeGraphLifecycleStatus{}, err
 	}
 	return response, nil

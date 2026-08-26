@@ -978,11 +978,8 @@ func TestE2E_StdioBridgeProtocolAndSignalBoundaries(t *testing.T) {
 			t.Fatalf("write oversized stdio input: %v", err)
 		}
 		body, err = readNewlineFrame(client.stdout)
-		if err != nil && !errors.Is(err, io.EOF) {
+		if err != nil {
 			t.Fatalf("read oversized response: %v", err)
-		}
-		if errors.Is(err, io.EOF) {
-			return
 		}
 		if err := json.Unmarshal(body, &resp); err != nil || resp.Error == nil || resp.Error.Code != -32700 {
 			t.Fatalf("oversized response = %s decode=%v rpc=%+v", body, err, resp.Error)

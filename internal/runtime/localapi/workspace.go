@@ -44,7 +44,7 @@ func (s *Server) privateRuntimeConfigured() bool {
 // workspace-bound request.
 func authorizePrivateToolProvider(toolName string, public json.RawMessage) error {
 	switch toolName {
-	case "wormhole.agent.presence", "wormhole.agent.list",
+	case "wormhole.sync.status", "wormhole.agent.presence", "wormhole.agent.list",
 		"wormhole.channel.list", "wormhole.channel.create", "wormhole.channel.events", "wormhole.channel.post", "wormhole.channel.subscribe",
 		"wormhole.kb.list", "wormhole.kb.get", "wormhole.kb.write":
 		return nil

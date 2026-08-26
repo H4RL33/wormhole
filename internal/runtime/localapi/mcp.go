@@ -1151,11 +1151,34 @@ func (s *Server) dispatchMCPMessage(ctx context.Context, sess *mcpSession, conn 
 			return
 		}
 		var command CodeGraphLifecycleRequest
-		if err := decodeClosedJSON(req.Params, &command); err != nil {
-			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: "invalid Code Graph lifecycle request"}})
-			return
+		callCtx := ctx
+		if s.privateRuntimeConfigured() {
+			var public json.RawMessage
+			var resolveErr error
+			callCtx, public, resolveErr = s.resolvePrivateRequest(ctx, req.Params)
+			if resolveErr != nil {
+				writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: resolveErr.Error()}})
+				return
+			}
+			if err := decodeClosedJSON(public, &command); err != nil {
+				writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: "invalid Code Graph lifecycle request"}})
+				return
+			}
+		} else {
+			if err := decodeClosedJSON(req.Params, &command); err != nil {
+				writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: "invalid Code Graph lifecycle request"}})
+				return
+			}
 		}
-		result, err := s.executePrivateCodeGraphLifecycle(ctx, command)
+		var result CodeGraphLifecycleStatus
+		var err error
+		if s.privateRuntimeConfigured() {
+			result, err = s.executePrivateCodeGraphLifecycle(callCtx, command)
+		} else if s.testCodeGraphLifecycle != nil {
+			result, err = s.testCodeGraphLifecycle(ctx, command)
+		} else {
+			err = ErrCodeGraphUnavailable
+		}
 		if err != nil {
 			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: err.Error()}})
 			return

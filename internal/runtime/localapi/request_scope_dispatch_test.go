@@ -240,6 +240,7 @@ func TestConfiguredPrivateRuntimeFailsEveryUnscopedRealHandlerClosedRegistryWide
 	first, second := privateDispatchSiblingBindings(t)
 	server := privateDispatchTestServer(t, privateRoutingTestActor("00000000-0000-4000-8000-000000000021"), first, second)
 	allowed := map[string]bool{
+		"wormhole.sync.status":    true,
 		"wormhole.agent.register": true, "wormhole.agent.presence": true, "wormhole.agent.list": true,
 		"wormhole.channel.list": true, "wormhole.channel.create": true, "wormhole.channel.events": true, "wormhole.channel.post": true, "wormhole.channel.subscribe": true,
 		"wormhole.kb.list": true, "wormhole.kb.get": true, "wormhole.kb.write": true,

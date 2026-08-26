@@ -6,10 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,7 +18,6 @@ import (
 	"github.com/H4RL33/wormhole/internal/runtime/localapi"
 	"github.com/H4RL33/wormhole/internal/runtime/localidentity"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
-	"github.com/H4RL33/wormhole/internal/types"
 )
 
 func TestSupervisorDependenciesConstructLocalOnlyGraph(t *testing.T) {
@@ -47,22 +43,6 @@ func TestSupervisorDependenciesConstructLocalOnlyGraph(t *testing.T) {
 	if _, err := newLocalSupervisor(nil, identity); err == nil {
 		t.Fatal("incomplete production graph accepted")
 	}
-}
-
-func gatewayTestBootstrapOutput(projectID, agentID, passportID string) map[string]any {
-	now := time.Date(2026, 7, 25, 12, 0, 0, 123, time.UTC)
-	org := types.BootstrapOrgConfigV1{
-		SchemaVersion: types.BootstrapSchemaVersionV1,
-		Project:       types.BootstrapProjectV1{ID: projectID, Name: "project", Owner: "owner", CreatedAt: now},
-		Identity: types.BootstrapIdentityV1{
-			Agent:       types.BootstrapAgentV1{ID: agentID, Owner: "owner", Model: "model", Capabilities: []string{}, CreatedAt: now},
-			Passport:    types.BootstrapPassportV1{ID: passportID, AgentID: agentID, ProjectID: projectID, Repositories: []string{}, Roles: []string{}, IssuedAt: now},
-			Permissions: []string{"task.create", "read_kb"},
-		},
-		Channels: []types.BootstrapChannelV1{}, Events: []types.BootstrapEventV1{}, Tasks: []types.BootstrapTaskV1{},
-		KB: types.BootstrapKBV1{Articles: []types.BootstrapArticleV1{}}, IntegrationManifestMetadata: json.RawMessage(`null`),
-	}
-	return map[string]any{"org_config": org, "project_list": []string{}, "task_list": org.Tasks, "kb_list": org.KB.Articles, "timestamp": now.Format(time.RFC3339Nano), "version": 1}
 }
 
 func TestRun_FreshSupervisorRequiresBindingContext(t *testing.T) {
@@ -249,6 +229,21 @@ func TestRun_StalePathRegularFileRejectedWithoutRemoval(t *testing.T) {
 	}
 	if string(got) != contents {
 		t.Fatalf("stale-path sentinel = %q, want %q", got, contents)
+	}
+	databasePath := filepath.Join(os.Getenv("XDG_DATA_HOME"), "wormhole", "wormholed.db")
+	owner, err := acquireDatabaseOwnerLock(databasePath)
+	if err != nil {
+		t.Fatalf("Run error retained owner lock: %v", err)
+	}
+	if err := owner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := localstore.Open(databasePath)
+	if err != nil {
+		t.Fatalf("Run error retained or closed Store incorrectly: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -649,144 +644,6 @@ func waitForCondition(t *testing.T, timeout time.Duration, description string, c
 	}
 }
 
-type isolatedPush struct {
-	NamespaceID string
-	Title       string
-}
-
-type isolatedCoordServer struct {
-	server *httptest.Server
-	token  string
-	mu     stdsync.Mutex
-	accept bool
-	tokens []string
-	tools  []string
-	pushes []isolatedPush
-}
-
-func newIsolatedCoordServer(t *testing.T, token string) *isolatedCoordServer {
-	t.Helper()
-	s := &isolatedCoordServer{token: token}
-	s.server = httptest.NewServer(http.HandlerFunc(s.serveHTTP))
-	t.Cleanup(s.server.Close)
-	return s
-}
-
-func (s *isolatedCoordServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
-	var req mcpRpcRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	var params mcpToolsCallParams
-	if err := json.Unmarshal(req.Params, &params); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	auth := r.Header.Get("Authorization")
-	s.mu.Lock()
-	s.tokens = append(s.tokens, auth)
-	s.tools = append(s.tools, params.Name)
-	s.mu.Unlock()
-	if auth != "Bearer "+s.token {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	var result any
-	switch params.Name {
-	case "wormhole.agent.whoami":
-		var args struct {
-			ProjectID string `json:"project_id"`
-		}
-		if err := json.Unmarshal(params.Arguments, &args); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		result = map[string]any{"agent_id": "isolated-agent", "owner": "test", "model": "test", "capabilities": []string{}, "project_id": args.ProjectID, "permissions": []string{"task.create"}}
-	case "wormhole.sync.bootstrap":
-		var args struct {
-			NamespaceID string `json:"namespace_id"`
-		}
-		if err := json.Unmarshal(params.Arguments, &args); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		result = gatewayTestBootstrapOutput(args.NamespaceID, "isolated-agent", "isolated-passport")
-	case "wormhole.sync.incremental_pull":
-		result = map[string]any{
-			"updates": []any{}, "timestamp": time.Now().UTC().Format(time.RFC3339), "version": 1,
-		}
-	case "wormhole.sync.incremental_push":
-		var in struct {
-			NamespaceID string `json:"namespace_id"`
-			Items       []struct {
-				EntityType string `json:"entity_type"`
-				EntityID   string `json:"entity_id"`
-				Payload    struct {
-					Title string `json:"title"`
-				} `json:"payload"`
-			} `json:"items"`
-		}
-		if err := json.Unmarshal(params.Arguments, &in); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		s.mu.Lock()
-		accept := s.accept
-		if accept {
-			for _, item := range in.Items {
-				s.pushes = append(s.pushes, isolatedPush{NamespaceID: in.NamespaceID, Title: item.Payload.Title})
-			}
-		}
-		s.mu.Unlock()
-		if !accept {
-			writeToolRPCResponse(w, req.ID, nil, "temporarily offline")
-			return
-		}
-		applied := make([]map[string]any, 0, len(in.Items))
-		for _, item := range in.Items {
-			applied = append(applied, map[string]any{"id": item.EntityID, "type": item.EntityType, "error": ""})
-		}
-		result = map[string]any{
-			"items_received": len(in.Items), "applied": applied,
-			"timestamp": time.Now().UTC().Format(time.RFC3339), "version": 1,
-		}
-	default:
-		http.Error(w, fmt.Sprintf("unexpected tool %q", params.Name), http.StatusNotFound)
-		return
-	}
-	writeToolRPCResponse(w, req.ID, result, "")
-}
-
-func writeToolRPCResponse(w http.ResponseWriter, id json.RawMessage, result any, toolErr string) {
-	contentText, _ := json.Marshal(result)
-	toolResult := map[string]any{
-		"content": []map[string]string{{"type": "text", "text": string(contentText)}},
-	}
-	if toolErr != "" {
-		toolResult["isError"] = true
-		toolResult["content"] = []map[string]string{{"type": "text", "text": toolErr}}
-	}
-	resultRaw, _ := json.Marshal(toolResult)
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"jsonrpc": "2.0", "id": id, "result": json.RawMessage(resultRaw),
-	})
-}
-
-func (s *isolatedCoordServer) setAccept(accept bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.accept = accept
-}
-
-func (s *isolatedCoordServer) snapshot() ([]string, []string, []isolatedPush) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]string(nil), s.tokens...), append([]string(nil), s.tools...), append([]isolatedPush(nil), s.pushes...)
-}
-
 func mcpInitialize(t *testing.T, conn net.Conn, reader *bufio.Reader) {
 	t.Helper()
 	req := mcpRpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "initialize", Params: json.RawMessage(`{}`)}
@@ -846,169 +703,4 @@ func mcpCallTool(t *testing.T, conn net.Conn, reader *bufio.Reader, id int, tool
 		return mcpToolResponse{Error: result.Content[0].Text}
 	}
 	return mcpToolResponse{Result: json.RawMessage(result.Content[0].Text)}
-}
-
-func TestRun_WhoAmIBindingFailClosed(t *testing.T) {
-	coord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer test-token" {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		var req mcpRpcRequest
-		json.NewDecoder(r.Body).Decode(&req)
-		var params mcpToolsCallParams
-		_ = json.Unmarshal(req.Params, &params)
-		var out any
-		if params.Name == "wormhole.sync.bootstrap" {
-			out = gatewayTestBootstrapOutput("project-1", "agent-1", "passport-1")
-		} else if params.Name == "wormhole.sync.incremental_pull" {
-			out = map[string]any{"updates": []any{}, "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "version": 1}
-		} else {
-			out = map[string]any{
-				"agent_id": "agent-1", "owner": "harley", "model": "claude-sonnet-5",
-				"capabilities": []string{"code"}, "project_id": "project-1", "permissions": []string{"read_kb"},
-			}
-		}
-		outRaw, _ := json.Marshal(out)
-		result := map[string]any{"content": []map[string]string{{"type": "text", "text": string(outRaw)}}}
-		resultRaw, _ := json.Marshal(result)
-		resp := map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": json.RawMessage(resultRaw)}
-		json.NewEncoder(w).Encode(resp)
-	}))
-	defer coord.Close()
-
-	home := t.TempDir()
-	os.Setenv("HOME", home)
-	defer os.Unsetenv("HOME")
-	runDir := filepath.Join(home, "run")
-	os.Setenv("XDG_RUNTIME_DIR", runDir)
-	defer os.Unsetenv("XDG_RUNTIME_DIR")
-	dataDir := filepath.Join(home, "data")
-	os.Setenv("XDG_DATA_HOME", dataDir)
-	defer os.Unsetenv("XDG_DATA_HOME")
-
-	credDir := filepath.Join(home, ".wormhole", "credentials")
-	os.MkdirAll(credDir, 0o700)
-	credData, _ := json.Marshal(map[string]string{
-		"server": coord.URL, "project_id": "project-1", "agent_id": "agent-1", "passport_id": "passport-1", "token": "test-token",
-	})
-	os.WriteFile(filepath.Join(credDir, "default.json"), credData, 0o600)
-	seedEnrolledGatewayCheckpoint(t, filepath.Join(dataDir, "wormhole", "wormholed.db"), coord.URL, "project-1", "agent-1", "passport-1", "test-token", "default")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() { errCh <- Run(ctx, "default") }()
-
-	socketPath := filepath.Join(runDir, "wormhole", "wormholed.sock")
-	var conn net.Conn
-	var err error
-	for i := 0; i < 100; i++ {
-		conn, err = net.Dial("unix", socketPath)
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if err != nil {
-		cancel()
-		t.Fatalf("dial socket: %v", err)
-	}
-	defer conn.Close()
-
-	reader := bufio.NewReader(conn)
-	mcpInitialize(t, conn, reader)
-
-	resp := mcpCallTool(t, conn, reader, 2, "wormhole.agent.whoami", nil)
-	if !strings.Contains(resp.Error, "invalid private request context") {
-		cancel()
-		t.Fatalf("whoami error = %q, want binding-aware fail-closed error", resp.Error)
-	}
-
-	cancel()
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("Run returned error after cancel: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run did not shut down after context cancel")
-	}
-}
-
-// TestRun_AgentRegisterReachesSchedulerAndEventBus asserts that Run wires a
-// real scheduler.Scheduler and eventbus.EventBus into the localapi.Server it
-// starts (P3), rather than the plain localapi.New(...) call that leaves
-// sched/eb nil and makes wormhole.agent.register fail with "scheduler not
-// available" (internal/runtime/localapi/localapi.go:657-658). A single
-// credential profile should resolve to single-org NewWithRuntime wiring.
-func TestRun_AgentRegisterBindingFailClosed(t *testing.T) {
-	coord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req mcpRpcRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		writeToolRPCResponse(w, req.ID, gatewayTestBootstrapOutput("project-1", "agent-1", "passport-1"), "")
-	}))
-	defer coord.Close()
-
-	home := t.TempDir()
-	os.Setenv("HOME", home)
-	defer os.Unsetenv("HOME")
-	runDir := filepath.Join(home, "run")
-	os.Setenv("XDG_RUNTIME_DIR", runDir)
-	defer os.Unsetenv("XDG_RUNTIME_DIR")
-	dataDir := filepath.Join(home, "data")
-	os.Setenv("XDG_DATA_HOME", dataDir)
-	defer os.Unsetenv("XDG_DATA_HOME")
-
-	credDir := filepath.Join(home, ".wormhole", "credentials")
-	os.MkdirAll(credDir, 0o700)
-	credData, _ := json.Marshal(map[string]string{
-		"server": coord.URL, "project_id": "project-1", "agent_id": "agent-1", "passport_id": "passport-1", "token": "test-token",
-	})
-	os.WriteFile(filepath.Join(credDir, "default.json"), credData, 0o600)
-	seedEnrolledGatewayCheckpoint(t, filepath.Join(dataDir, "wormhole", "wormholed.db"), coord.URL, "project-1", "agent-1", "passport-1", "test-token", "default")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() { errCh <- Run(ctx, "default") }()
-
-	socketPath := filepath.Join(runDir, "wormhole", "wormholed.sock")
-	var conn net.Conn
-	var err error
-	for i := 0; i < 100; i++ {
-		conn, err = net.Dial("unix", socketPath)
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if err != nil {
-		cancel()
-		t.Fatalf("dial socket: %v", err)
-	}
-	defer conn.Close()
-
-	reader := bufio.NewReader(conn)
-	mcpInitialize(t, conn, reader)
-
-	resp := mcpCallTool(t, conn, reader, 2, "wormhole.agent.register", map[string]interface{}{
-		"agent_id":     "agent-1",
-		"capabilities": []string{"code"},
-	})
-	if !strings.Contains(resp.Error, "invalid private request context") {
-		cancel()
-		t.Fatalf("wormhole.agent.register error = %q, want binding-aware fail-closed error", resp.Error)
-	}
-
-	cancel()
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("Run returned error after cancel: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run did not shut down after context cancel")
-	}
 }
