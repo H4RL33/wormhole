@@ -286,21 +286,52 @@ func listSetupJournalNames(rootFD int) ([]string, error) {
 		return nil, ErrUnsafeSetupJournalStore
 	}
 	defer directory.Close()
-	entries, err := directory.ReadDir(maxSetupJournalStoreEntries + 1)
+	entries, err := directory.ReadDir(maxSetupJournalStoreEntries + maxSetupJournalTempEntries + 1)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
-	if len(entries) > maxSetupJournalStoreEntries {
+	if len(entries) > maxSetupJournalStoreEntries+maxSetupJournalTempEntries {
 		return nil, ErrInvalidSetupJournal
 	}
 	names := make([]string, 0, len(entries))
+	durableEntries := 0
+	temporaryEntries := 0
 	for _, entry := range entries {
 		if !validSetupJournalName(entry.Name()) {
 			return nil, ErrUnsafeSetupJournalStore
 		}
+		if isSetupJournalTemporaryName(entry.Name()) {
+			temporaryEntries++
+		} else {
+			durableEntries++
+		}
 		names = append(names, entry.Name())
 	}
+	if durableEntries > maxSetupJournalStoreEntries || temporaryEntries > maxSetupJournalTempEntries {
+		return nil, ErrInvalidSetupJournal
+	}
 	return names, nil
+}
+
+func retireSetupJournalTemporaryFiles(rootFD int, names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	for _, name := range names {
+		if !isSetupJournalTemporaryName(name) {
+			return ErrUnsafeSetupJournalStore
+		}
+		if _, exists, err := readSetupJournalFile(rootFD, name); err != nil || !exists {
+			if err != nil {
+				return err
+			}
+			return ErrInvalidSetupJournal
+		}
+		if err := unix.Unlinkat(rootFD, name, 0); err != nil {
+			return err
+		}
+	}
+	return unix.Fsync(rootFD)
 }
 
 func validSetupJournalName(name string) bool {

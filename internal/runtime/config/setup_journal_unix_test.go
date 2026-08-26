@@ -5,6 +5,7 @@ package config
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -237,6 +238,188 @@ func TestSetupJournalDoesNotRecoverUnconfirmedReplacementPair(t *testing.T) {
 	assertSetupJournalTreeEqual(t, store.root, before)
 }
 
+func TestSetupJournalWholeStoreValidationPrecedesRecoveryWrites(t *testing.T) {
+	store, projectRoot := newSetupJournalTestStore(t)
+	old, err := store.Begin(context.Background(), projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSelection(context.Background(), old.JournalID, testSetupSelection()); err != nil {
+		t.Fatal(err)
+	}
+	old, _, err = store.Resumable(context.Background(), projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	selection := testSetupSelection()
+	replacement := SetupJournal{
+		SchemaVersion:     setupJournalSchemaVersion,
+		JournalID:         "50000000-0000-4000-8000-000000000001",
+		CanonicalRoot:     old.CanonicalRoot,
+		State:             SetupJournalActive,
+		Selection:         &selection,
+		CompletedStages:   []SetupStage{},
+		ConnectorBackups:  []BackupReference{},
+		ReplacesJournalID: old.JournalID,
+		CreatedAt:         old.UpdatedAt,
+		UpdatedAt:         old.UpdatedAt,
+	}
+	otherRoot := filepath.Join(t.TempDir(), "other-project")
+	if err := os.Mkdir(otherRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	invalidTerminal := SetupJournal{
+		SchemaVersion:       setupJournalSchemaVersion,
+		JournalID:           "60000000-0000-4000-8000-000000000001",
+		CanonicalRoot:       otherRoot,
+		State:               SetupJournalReplaced,
+		Selection:           &selection,
+		CompletedStages:     []SetupStage{},
+		ConnectorBackups:    []BackupReference{},
+		ReplacedByJournalID: "70000000-0000-4000-8000-000000000001",
+		CreatedAt:           old.CreatedAt,
+		UpdatedAt:           old.UpdatedAt,
+		CompletedAt:         timePointer(old.UpdatedAt),
+	}
+	writeSetupJournalFixture(t, store.root, replacement)
+	writeSetupJournalFixture(t, store.root, invalidTerminal)
+	temporaryName := setupJournalTemporaryPrefix + strings.Repeat("b", 32)
+	temporaryPath := filepath.Join(store.root, temporaryName)
+	if err := os.WriteFile(temporaryPath, []byte("recognized interrupted write"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotAllSetupJournalEntries(t, store.root)
+	if _, _, err := store.Resumable(context.Background(), projectRoot); !errors.Is(err, ErrInvalidSetupJournal) {
+		t.Fatalf("Resumable(mixed invalid topology) error = %v, want ErrInvalidSetupJournal", err)
+	}
+	after := snapshotAllSetupJournalEntries(t, store.root)
+	if !reflectSetupTreesEqual(before, after) {
+		t.Fatalf("mixed invalid topology mutated store:\n got=%q\nwant=%q", after, before)
+	}
+}
+
+func TestSetupJournalTopologyRecoveryActionsAreDeterministic(t *testing.T) {
+	selection := testSetupSelection()
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	pair := func(root, oldID, replacementID string) (SetupJournal, SetupJournal) {
+		old := SetupJournal{
+			SchemaVersion: setupJournalSchemaVersion, JournalID: oldID, CanonicalRoot: root,
+			State: SetupJournalActive, Selection: &selection, CompletedStages: []SetupStage{}, ConnectorBackups: []BackupReference{},
+			CreatedAt: now, UpdatedAt: now,
+		}
+		replacement := SetupJournal{
+			SchemaVersion: setupJournalSchemaVersion, JournalID: replacementID, CanonicalRoot: root,
+			State: SetupJournalActive, Selection: &selection, CompletedStages: []SetupStage{}, ConnectorBackups: []BackupReference{},
+			ReplacesJournalID: oldID, CreatedAt: now, UpdatedAt: now,
+		}
+		return old, replacement
+	}
+	oldZ, replacementZ := pair("/z-project", "a1000000-0000-4000-8000-000000000001", "a2000000-0000-4000-8000-000000000001")
+	oldA, replacementA := pair("/a-project", "b1000000-0000-4000-8000-000000000001", "b2000000-0000-4000-8000-000000000001")
+	records := map[string]SetupJournal{
+		oldZ.JournalID: oldZ, replacementA.JournalID: replacementA,
+		replacementZ.JournalID: replacementZ, oldA.JournalID: oldA,
+	}
+	actions, err := classifySetupJournalTopology(records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(actions) != 2 || actions[0].predecessorID != oldA.JournalID || actions[0].successorID != replacementA.JournalID ||
+		actions[1].predecessorID != oldZ.JournalID || actions[1].successorID != replacementZ.JournalID {
+		t.Fatalf("recovery actions = %+v, want canonical-root order", actions)
+	}
+}
+
+func TestSetupJournalMixedAmbiguousRootCannotPartiallyRecover(t *testing.T) {
+	store, projectRoot := newSetupJournalTestStore(t)
+	old, err := store.Begin(context.Background(), projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSelection(context.Background(), old.JournalID, testSetupSelection()); err != nil {
+		t.Fatal(err)
+	}
+	old, _, err = store.Resumable(context.Background(), projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection := testSetupSelection()
+	replacement := SetupJournal{
+		SchemaVersion: setupJournalSchemaVersion, JournalID: "50000000-0000-4000-8000-000000000001", CanonicalRoot: old.CanonicalRoot,
+		State: SetupJournalActive, Selection: &selection, CompletedStages: []SetupStage{}, ConnectorBackups: []BackupReference{},
+		ReplacesJournalID: old.JournalID, CreatedAt: old.UpdatedAt, UpdatedAt: old.UpdatedAt,
+	}
+	otherRoot := filepath.Join(t.TempDir(), "ambiguous-project")
+	if err := os.Mkdir(otherRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	firstOther := SetupJournal{
+		SchemaVersion: setupJournalSchemaVersion, JournalID: "60000000-0000-4000-8000-000000000001", CanonicalRoot: otherRoot,
+		State: SetupJournalActive, Selection: &selection, CompletedStages: []SetupStage{}, ConnectorBackups: []BackupReference{},
+		CreatedAt: old.CreatedAt, UpdatedAt: old.UpdatedAt,
+	}
+	secondOther := cloneSetupJournal(firstOther)
+	secondOther.JournalID = "70000000-0000-4000-8000-000000000001"
+	for _, journal := range []SetupJournal{replacement, firstOther, secondOther} {
+		writeSetupJournalFixture(t, store.root, journal)
+	}
+	before := snapshotAllSetupJournalEntries(t, store.root)
+	if _, _, err := store.Resumable(context.Background(), projectRoot); !errors.Is(err, ErrAmbiguousSetupJournal) {
+		t.Fatalf("Resumable(mixed ambiguous roots) error = %v, want ErrAmbiguousSetupJournal", err)
+	}
+	if after := snapshotAllSetupJournalEntries(t, store.root); !reflectSetupTreesEqual(before, after) {
+		t.Fatalf("mixed ambiguous roots mutated store:\n got=%q\nwant=%q", after, before)
+	}
+}
+
+func TestSetupJournalRetiresRecognizedTemporaryFilesOnlyAfterValidation(t *testing.T) {
+	store, projectRoot := newSetupJournalTestStore(t)
+	if _, err := store.Begin(context.Background(), projectRoot); err != nil {
+		t.Fatal(err)
+	}
+	for index, character := range []string{"a", "b", "c"} {
+		name := setupJournalTemporaryPrefix + strings.Repeat(character, 32)
+		if err := os.WriteFile(filepath.Join(store.root, name), []byte{byte(index + 1)}, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := store.Resumable(context.Background(), projectRoot); err != nil {
+		t.Fatal(err)
+	}
+	for _, character := range []string{"a", "b", "c"} {
+		name := setupJournalTemporaryPrefix + strings.Repeat(character, 32)
+		if _, err := os.Lstat(filepath.Join(store.root, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("recognized temporary %q was not retired: %v", name, err)
+		}
+	}
+}
+
+func TestSetupJournalTemporaryCleanupCanCrossRecordEntryCap(t *testing.T) {
+	store, projectRoot := newSetupJournalTestStore(t)
+	if _, err := store.Begin(context.Background(), projectRoot); err != nil {
+		t.Fatal(err)
+	}
+	// Lock + record + these recognized temps exceeds the durable-record cap by
+	// one. Cleanup must remain reachable under its own bounded temp allowance.
+	for index := 0; index < maxSetupJournalStoreEntries-1; index++ {
+		name := setupJournalTemporaryPrefix + fmt.Sprintf("%032x", index)
+		if err := os.WriteFile(filepath.Join(store.root, name), []byte("interrupted"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := store.Resumable(context.Background(), projectRoot); err != nil {
+		t.Fatalf("Resumable(over old total-entry cap with bounded temps): %v", err)
+	}
+	entries, err := os.ReadDir(store.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries after temp cleanup = %d, want lock + record", len(entries))
+	}
+}
+
 func TestSetupJournalRejectsReplacementAuthorityCycle(t *testing.T) {
 	store, projectRoot := newSetupJournalTestStore(t)
 	first, err := store.Begin(context.Background(), projectRoot)
@@ -427,4 +610,35 @@ func reflectSetupTreesEqual(left, right map[string][]byte) bool {
 		}
 	}
 	return true
+}
+
+func writeSetupJournalFixture(t *testing.T, root string, journal SetupJournal) {
+	t.Helper()
+	data, err := marshalCanonicalSetupJournal(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, setupJournalRecordName(journal.JournalID)), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func snapshotAllSetupJournalEntries(t *testing.T, root string) map[string][]byte {
+	t.Helper()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(map[string][]byte, len(entries))
+	for _, entry := range entries {
+		if entry.Name() == setupJournalLockName {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(root, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		result[entry.Name()] = data
+	}
+	return result
 }

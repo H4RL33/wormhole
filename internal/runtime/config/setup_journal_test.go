@@ -81,7 +81,6 @@ func TestConfirmedPlanRequiresOrderedUniqueChanges(t *testing.T) {
 		func(value *SetupSelection) { value.Changes[0].DesiredDigest = value.Changes[0].PriorDigest },
 		func(value *SetupSelection) { value.ConnectorAdapters = []string{"codex", "codex"} },
 		func(value *SetupSelection) { value.ConnectorAdapters = []string{"fabric"} },
-		func(value *SetupSelection) { value.PublicationVisibility = "unclassified" },
 		func(value *SetupSelection) { value.Changes[0].Subject = "/home/alice/.config/private" },
 		func(value *SetupSelection) { value.Changes = nil },
 	}
@@ -90,6 +89,63 @@ func TestConfirmedPlanRequiresOrderedUniqueChanges(t *testing.T) {
 		mutate(&candidate)
 		if err := validateSetupSelection(candidate); !errors.Is(err, ErrInvalidConfirmedPlan) {
 			t.Errorf("mutation %d error = %v, want ErrInvalidConfirmedPlan", index, err)
+		}
+	}
+}
+
+func TestConfirmedPlanAcceptsExplicitUnclassifiedPublication(t *testing.T) {
+	selection := testSetupSelection()
+	selection.PublicationVisibility = string(types.PublicationUnclassified)
+	if err := validateSetupSelection(selection); err != nil {
+		t.Fatalf("explicit unclassified publication: %v", err)
+	}
+	store, projectRoot := newSetupJournalTestStore(t)
+	journal, err := store.Begin(context.Background(), projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSelection(context.Background(), journal.JournalID, selection); err != nil {
+		t.Fatalf("persist explicit unclassified publication: %v", err)
+	}
+	got, resumable, err := store.Resumable(context.Background(), projectRoot)
+	if err != nil || !resumable || got.Selection == nil || got.Selection.PublicationVisibility != string(types.PublicationUnclassified) {
+		t.Fatalf("resumed explicit unclassified publication = %+v, %v, %v", got, resumable, err)
+	}
+}
+
+func TestConfirmedPlanRejectsUnsafeVocabularyWithoutPersistence(t *testing.T) {
+	for _, mutation := range []func(*SetupSelection){
+		func(value *SetupSelection) { value.Changes[0].Subject = "bearer:top-secret-token" },
+		func(value *SetupSelection) { value.Changes[0].Subject = "config.toml" },
+		func(value *SetupSelection) { value.Changes[0].Action = "aws_secret_access_key:value" },
+		func(value *SetupSelection) { value.Changes[0].Action = "credential.config" },
+		func(value *SetupSelection) { value.Changes[0].Action = "ensure" },
+	} {
+		candidate := testSetupSelection()
+		mutation(&candidate)
+		if err := validateSetupSelection(candidate); !errors.Is(err, ErrInvalidConfirmedPlan) {
+			t.Errorf("unsafe vocabulary error = %v, want ErrInvalidConfirmedPlan", err)
+		}
+	}
+
+	store, projectRoot := newSetupJournalTestStore(t)
+	journal, err := store.Begin(context.Background(), projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection := testSetupSelection()
+	selection.Changes[0].Action = "aws_secret_access_key:top-secret-token"
+	before := snapshotSetupJournalTree(t, store.root)
+	if err := store.SetSelection(context.Background(), journal.JournalID, selection); !errors.Is(err, ErrInvalidConfirmedPlan) {
+		t.Errorf("SetSelection(secret-shaped action) error = %v, want ErrInvalidConfirmedPlan", err)
+	}
+	assertSetupJournalTreeEqual(t, store.root, before)
+	for _, data := range snapshotSetupJournalTree(t, store.root) {
+		lower := strings.ToLower(string(data))
+		for _, forbidden := range []string{"aws_secret", "top-secret", "credential.config", "config.toml", "bearer:"} {
+			if strings.Contains(lower, forbidden) {
+				t.Errorf("journal persisted forbidden confirmed-plan content %q: %s", forbidden, data)
+			}
 		}
 	}
 }
@@ -103,9 +159,9 @@ func TestConfirmedPlanAllowsOmittedNoOpsAndMultipleStageChanges(t *testing.T) {
 
 	multiple := testSetupSelection()
 	firstConnector := multiple.Changes[6]
-	firstConnector.Subject = "connector.codex"
+	firstConnector.Subject = "connector:codex"
 	secondConnector := firstConnector
-	secondConnector.Subject = "connector.claude"
+	secondConnector.Subject = "connector:claude"
 	secondConnector.PriorDigest = SHA256StateDigest([]byte("claude-prior"))
 	secondConnector.DesiredDigest = SHA256StateDigest([]byte("claude-desired"))
 	multiple.Changes = append(append(append([]ConfirmedChange{}, multiple.Changes[:6]...), firstConnector, secondConnector), multiple.Changes[7])
@@ -286,6 +342,72 @@ func TestSetupJournalConfirmedReplacementHasNoCopiedEffects(t *testing.T) {
 	}
 }
 
+func TestSetupJournalReplacementRejectsBackwardClockWithoutMutation(t *testing.T) {
+	store, projectRoot := newSetupJournalTestStore(t)
+	old, err := store.Begin(context.Background(), projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSelection(context.Background(), old.JournalID, testSetupSelection()); err != nil {
+		t.Fatal(err)
+	}
+	old, _, err = store.Resumable(context.Background(), projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotSetupJournalTree(t, store.root)
+	store.clock = func() time.Time { return old.UpdatedAt.Add(-time.Second) }
+	if _, err := store.BeginConfirmedReplacement(context.Background(), projectRoot, old.JournalID, testSetupSelection()); !errors.Is(err, ErrInvalidSetupJournal) {
+		t.Fatalf("BeginConfirmedReplacement(backward clock) error = %v, want ErrInvalidSetupJournal", err)
+	}
+	assertSetupJournalTreeEqual(t, store.root, before)
+}
+
+func TestConnectorBackupExactReplayAfterStageIsReadOnly(t *testing.T) {
+	store, projectRoot := newSetupJournalTestStore(t)
+	journal, err := store.Begin(context.Background(), projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSelection(context.Background(), journal.JournalID, testSetupSelection()); err != nil {
+		t.Fatal(err)
+	}
+	backup := BackupReference("connector-backup:v1:codex:40000000-0000-4000-8000-000000000001")
+	for _, stage := range orderedSetupStages[:7] {
+		switch stage {
+		case StageWorkspaceRegistered:
+			if err := store.BindWorkspace(context.Background(), journal.JournalID, testSetupWorkspaceID); err != nil {
+				t.Fatal(err)
+			}
+		case StageIdentitySelected:
+			if err := store.BindIdentity(context.Background(), journal.JournalID, testSetupHumanID); err != nil {
+				t.Fatal(err)
+			}
+		case StageConnectorsApplied:
+			if err := store.RecordConnectorBackup(context.Background(), journal.JournalID, backup); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := store.MarkCompleted(context.Background(), journal.JournalID, stage); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := snapshotSetupJournalTree(t, store.root)
+	if err := store.RecordConnectorBackup(context.Background(), journal.JournalID, backup); err != nil {
+		t.Fatalf("exact backup replay after stage: %v", err)
+	}
+	assertSetupJournalTreeEqual(t, store.root, before)
+	for _, changed := range []BackupReference{
+		"connector-backup:v1:codex:40000000-0000-4000-8000-000000000002",
+		"connector-backup:v1:claude:40000000-0000-4000-8000-000000000003",
+	} {
+		if err := store.RecordConnectorBackup(context.Background(), journal.JournalID, changed); !errors.Is(err, ErrConfirmedPlanDrift) {
+			t.Errorf("changed backup %q error = %v, want ErrConfirmedPlanDrift", changed, err)
+		}
+		assertSetupJournalTreeEqual(t, store.root, before)
+	}
+}
+
 func TestRedactSetupJournalFailureNeverPersistsSecretsOrPaths(t *testing.T) {
 	store, projectRoot := newSetupJournalTestStore(t)
 	journal, err := store.Begin(context.Background(), projectRoot)
@@ -382,7 +504,7 @@ func testSetupSelection() SetupSelection {
 		prior := sha256.Sum256([]byte("prior:" + string(stage)))
 		desired := sha256.Sum256([]byte("desired:" + string(stage)))
 		changes[index] = ConfirmedChange{
-			Stage: stage, Subject: testStageSubject(stage), Action: "ensure",
+			Stage: stage, Subject: testStageSubject(stage), Action: testStageAction(stage),
 			PriorDigest:   StateDigest("sha256:" + strings.ToLower(hexDigest(prior[:]))),
 			DesiredDigest: StateDigest("sha256:" + strings.ToLower(hexDigest(desired[:]))),
 		}
@@ -400,7 +522,7 @@ func testStageSubject(stage SetupStage) string {
 	case StageProjectValidated:
 		return "project"
 	case StageGatewayReady:
-		return "gateway"
+		return "gateway-service"
 	case StageWorkspaceRegistered:
 		return "workspace"
 	case StageIdentitySelected:
@@ -410,9 +532,30 @@ func testStageSubject(stage SetupStage) string {
 	case StageBaseImported:
 		return "base"
 	case StageConnectorsApplied:
-		return "connectors"
+		return "connector:codex"
 	default:
-		return "verification"
+		return "setup"
+	}
+}
+
+func testStageAction(stage SetupStage) string {
+	switch stage {
+	case StageProjectValidated:
+		return "validate"
+	case StageGatewayReady:
+		return "ensure"
+	case StageWorkspaceRegistered:
+		return "register"
+	case StageIdentitySelected:
+		return "ensure-selected"
+	case StagePublicationClassified:
+		return "classify"
+	case StageBaseImported:
+		return "import"
+	case StageConnectorsApplied:
+		return "install"
+	default:
+		return "verify"
 	}
 }
 

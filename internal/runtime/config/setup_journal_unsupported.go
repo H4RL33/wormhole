@@ -33,3 +33,7 @@ func atomicSetupJournalWrite(int, string, []byte, []byte, fs.FileMode, bool, fun
 func listSetupJournalNames(int) ([]string, error) {
 	return nil, ErrSetupJournalFilesystemUnsupported
 }
+
+func retireSetupJournalTemporaryFiles(int, []string) error {
+	return ErrSetupJournalFilesystemUnsupported
+}

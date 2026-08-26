@@ -14,9 +14,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/H4RL33/wormhole/internal/types"
 )
@@ -27,8 +27,8 @@ const (
 	setupJournalTemporaryPrefix = ".tmp-"
 	maxSetupJournalRecordBytes  = 64 * 1024
 	maxSetupJournalStoreEntries = 512
+	maxSetupJournalTempEntries  = 512
 	maxSetupRootBytes           = 4096
-	maxSetupPlanTokenBytes      = 64
 	maxSetupConfirmedChanges    = 64
 	redactedSetupFailureMessage = "setup stage failed; inspect the owning component for details"
 )
@@ -320,7 +320,7 @@ func (s *SetupJournalStore) RecordConnectorBackup(ctx context.Context, journalID
 		if err := requireConfirmedActive(journal); err != nil {
 			return false, err
 		}
-		if !containsString(journal.Selection.ConnectorAdapters, adapter) || len(journal.CompletedStages) != setupStageIndex(StageConnectorsApplied) {
+		if !containsString(journal.Selection.ConnectorAdapters, adapter) {
 			return false, ErrConfirmedPlanDrift
 		}
 		for _, existing := range journal.ConnectorBackups {
@@ -331,6 +331,9 @@ func (s *SetupJournalStore) RecordConnectorBackup(ctx context.Context, journalID
 			if existingAdapter == adapter {
 				return false, ErrConfirmedPlanDrift
 			}
+		}
+		if len(journal.CompletedStages) != setupStageIndex(StageConnectorsApplied) {
+			return false, ErrConfirmedPlanDrift
 		}
 		journal.ConnectorBackups = append(journal.ConnectorBackups, reference)
 		return true, nil
@@ -426,6 +429,9 @@ func (s *SetupJournalStore) BeginConfirmedReplacement(ctx context.Context, root,
 		now, err := s.now()
 		if err != nil {
 			return SetupJournal{}, err
+		}
+		if now.Before(old.UpdatedAt) {
+			return SetupJournal{}, ErrInvalidSetupJournal
 		}
 		replacement := SetupJournal{
 			SchemaVersion: setupJournalSchemaVersion, JournalID: identifier, CanonicalRoot: canonicalRoot,
@@ -546,12 +552,25 @@ func (s *SetupJournalStore) withLockedJournalResult(ctx context.Context, operati
 	return operation(fd, records)
 }
 
+type setupJournalRecoveryAction struct {
+	canonicalRoot string
+	predecessorID string
+	successorID   string
+}
+
+type preparedSetupJournalRecovery struct {
+	prior SetupJournal
+	next  SetupJournal
+}
+
 func (s *SetupJournalStore) loadAndRecoverTopology(fd int) (map[string]SetupJournal, error) {
 	names, err := listSetupJournalNames(fd)
 	if err != nil {
 		return nil, err
 	}
+	sort.Strings(names)
 	records := map[string]SetupJournal{}
+	temporaryNames := make([]string, 0)
 	for _, name := range names {
 		if name == setupJournalLockName {
 			continue
@@ -563,6 +582,7 @@ func (s *SetupJournalStore) loadAndRecoverTopology(fd int) (map[string]SetupJour
 				}
 				return nil, ErrInvalidSetupJournal
 			}
+			temporaryNames = append(temporaryNames, name)
 			continue
 		}
 		identifier := parseSetupJournalRecordName(name)
@@ -578,24 +598,67 @@ func (s *SetupJournalStore) loadAndRecoverTopology(fd int) (map[string]SetupJour
 		}
 		records[identifier] = journal
 	}
+	actions, err := classifySetupJournalTopology(records)
+	if err != nil {
+		return nil, err
+	}
+	prepared, err := s.prepareSetupJournalRecovery(records, actions)
+	if err != nil {
+		return nil, err
+	}
+	for _, recovery := range prepared {
+		if err := s.writeJournal(fd, recovery.next, &recovery.prior); err != nil {
+			return nil, err
+		}
+		records[recovery.next.JournalID] = recovery.next
+	}
+	if err := retireSetupJournalTemporaryFiles(fd, temporaryNames); err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+// classifySetupJournalTopology is pure: it validates every record, root,
+// replacement link, and cycle against a projected recovered topology and
+// returns a canonical-root-ordered action list without consulting the clock or
+// filesystem. Callers must finish preparing every action before applying any.
+func classifySetupJournalTopology(records map[string]SetupJournal) ([]setupJournalRecoveryAction, error) {
+	identifiers := make([]string, 0, len(records))
+	projected := make(map[string]SetupJournal, len(records))
+	for identifier, journal := range records {
+		if identifier != journal.JournalID || validateSetupJournal(journal) != nil {
+			return nil, ErrInvalidSetupJournal
+		}
+		identifiers = append(identifiers, identifier)
+		projected[identifier] = cloneSetupJournal(journal)
+	}
+	sort.Strings(identifiers)
 	byRoot := map[string][]string{}
-	for id, journal := range records {
+	for id, journal := range projected {
 		if journal.State == SetupJournalActive {
 			byRoot[journal.CanonicalRoot] = append(byRoot[journal.CanonicalRoot], id)
 		}
 	}
-	for root, identifiers := range byRoot {
-		switch len(identifiers) {
+	roots := make([]string, 0, len(byRoot))
+	for root := range byRoot {
+		roots = append(roots, root)
+	}
+	sort.Strings(roots)
+	actions := make([]setupJournalRecoveryAction, 0)
+	for _, root := range roots {
+		rootIdentifiers := byRoot[root]
+		sort.Strings(rootIdentifiers)
+		switch len(rootIdentifiers) {
 		case 1:
-			journal := records[identifiers[0]]
+			journal := projected[rootIdentifiers[0]]
 			if journal.ReplacesJournalID != "" {
-				old, ok := records[journal.ReplacesJournalID]
+				old, ok := projected[journal.ReplacesJournalID]
 				if !ok || old.CanonicalRoot != root || old.State != SetupJournalReplaced || old.ReplacedByJournalID != journal.JournalID {
 					return nil, ErrAmbiguousSetupJournal
 				}
 			}
 		case 2:
-			first, second := records[identifiers[0]], records[identifiers[1]]
+			first, second := projected[rootIdentifiers[0]], projected[rootIdentifiers[1]]
 			old, replacement, ok := exactInterruptedReplacement(first, second)
 			if !ok {
 				old, replacement, ok = exactInterruptedReplacement(second, first)
@@ -603,38 +666,38 @@ func (s *SetupJournalStore) loadAndRecoverTopology(fd int) (map[string]SetupJour
 			if !ok {
 				return nil, ErrAmbiguousSetupJournal
 			}
-			now, err := s.now()
-			if err != nil || now.Before(old.UpdatedAt) || now.Before(replacement.CreatedAt) {
-				return nil, ErrInvalidSetupJournal
-			}
-			priorOld := cloneSetupJournal(old)
+			actions = append(actions, setupJournalRecoveryAction{
+				canonicalRoot: root,
+				predecessorID: old.JournalID,
+				successorID:   replacement.JournalID,
+			})
 			old.State = SetupJournalReplaced
 			old.ReplacedByJournalID = replacement.JournalID
-			old.UpdatedAt = now
-			old.CompletedAt = timePointer(now)
-			if err := s.writeJournal(fd, old, &priorOld); err != nil {
-				return nil, err
+			old.CompletedAt = timePointer(old.UpdatedAt)
+			if err := validateSetupJournal(old); err != nil {
+				return nil, ErrInvalidSetupJournal
 			}
-			records[old.JournalID] = old
+			projected[old.JournalID] = old
 		default:
 			return nil, ErrAmbiguousSetupJournal
 		}
 	}
-	for _, journal := range records {
+	for _, identifier := range identifiers {
+		journal := projected[identifier]
 		if journal.State == SetupJournalReplaced {
-			replacement, ok := records[journal.ReplacedByJournalID]
+			replacement, ok := projected[journal.ReplacedByJournalID]
 			if !ok || replacement.ReplacesJournalID != journal.JournalID || replacement.CanonicalRoot != journal.CanonicalRoot {
 				return nil, ErrInvalidSetupJournal
 			}
 		}
 		if journal.ReplacesJournalID != "" {
-			predecessor, ok := records[journal.ReplacesJournalID]
+			predecessor, ok := projected[journal.ReplacesJournalID]
 			if !ok || predecessor.State != SetupJournalReplaced || predecessor.ReplacedByJournalID != journal.JournalID || predecessor.CanonicalRoot != journal.CanonicalRoot {
 				return nil, ErrInvalidSetupJournal
 			}
 		}
 	}
-	for identifier := range records {
+	for _, identifier := range identifiers {
 		seen := map[string]bool{}
 		current := identifier
 		for current != "" {
@@ -642,14 +705,49 @@ func (s *SetupJournalStore) loadAndRecoverTopology(fd int) (map[string]SetupJour
 				return nil, ErrInvalidSetupJournal
 			}
 			seen[current] = true
-			journal, ok := records[current]
+			journal, ok := projected[current]
 			if !ok {
 				return nil, ErrInvalidSetupJournal
 			}
 			current = journal.ReplacesJournalID
 		}
 	}
-	return records, nil
+	return actions, nil
+}
+
+func (s *SetupJournalStore) prepareSetupJournalRecovery(records map[string]SetupJournal, actions []setupJournalRecoveryAction) ([]preparedSetupJournalRecovery, error) {
+	if len(actions) == 0 {
+		return nil, nil
+	}
+	now, err := s.now()
+	if err != nil {
+		return nil, err
+	}
+	prepared := make([]preparedSetupJournalRecovery, 0, len(actions))
+	for _, action := range actions {
+		old, oldExists := records[action.predecessorID]
+		replacement, replacementExists := records[action.successorID]
+		if !oldExists || !replacementExists || old.CanonicalRoot != action.canonicalRoot ||
+			now.Before(old.UpdatedAt) || now.Before(replacement.CreatedAt) {
+			return nil, ErrInvalidSetupJournal
+		}
+		prior := cloneSetupJournal(old)
+		old.State = SetupJournalReplaced
+		old.ReplacedByJournalID = replacement.JournalID
+		old.UpdatedAt = now
+		old.CompletedAt = timePointer(now)
+		if err := validateSetupJournal(old); err != nil {
+			return nil, ErrInvalidSetupJournal
+		}
+		if _, err := marshalCanonicalSetupJournal(prior); err != nil {
+			return nil, ErrInvalidSetupJournal
+		}
+		if _, err := marshalCanonicalSetupJournal(old); err != nil {
+			return nil, ErrInvalidSetupJournal
+		}
+		prepared = append(prepared, preparedSetupJournalRecovery{prior: prior, next: old})
+	}
+	return prepared, nil
 }
 
 func exactInterruptedReplacement(old, replacement SetupJournal) (SetupJournal, SetupJournal, bool) {
@@ -760,7 +858,7 @@ func validateSetupSelection(selection SetupSelection) error {
 		return ErrInvalidConfirmedPlan
 	}
 	classification := types.PublicationClassification(selection.PublicationVisibility)
-	if classification.Validate() != nil || classification == types.PublicationUnclassified {
+	if classification.Validate() != nil {
 		return ErrInvalidConfirmedPlan
 	}
 	seenAdapters := map[string]bool{}
@@ -775,7 +873,7 @@ func validateSetupSelection(selection SetupSelection) error {
 	for _, change := range selection.Changes {
 		stage := setupStageIndex(change.Stage)
 		key := string(change.Stage) + "\x00" + change.Subject
-		if stage < 0 || stage < priorStage || seenChanges[key] || !validPlanToken(change.Subject) || !validPlanToken(change.Action) ||
+		if stage < 0 || stage < priorStage || seenChanges[key] || !validConfirmedChangeVocabulary(change, seenAdapters) ||
 			!validStateDigest(change.PriorDigest) || !validStateDigest(change.DesiredDigest) || change.PriorDigest == change.DesiredDigest {
 			return ErrInvalidConfirmedPlan
 		}
@@ -785,17 +883,54 @@ func validateSetupSelection(selection SetupSelection) error {
 	return nil
 }
 
-func validPlanToken(value string) bool {
-	if value == "" || len(value) > maxSetupPlanTokenBytes || !utf8.ValidString(value) || strings.ToLower(value) != value {
+type setupChangeSubject string
+type setupChangeAction string
+
+const (
+	setupSubjectProject         setupChangeSubject = "project"
+	setupSubjectGatewayService  setupChangeSubject = "gateway-service"
+	setupSubjectWorkspace       setupChangeSubject = "workspace"
+	setupSubjectIdentity        setupChangeSubject = "identity"
+	setupSubjectPublication     setupChangeSubject = "publication"
+	setupSubjectBase            setupChangeSubject = "base"
+	setupSubjectConnectorCodex  setupChangeSubject = "connector:codex"
+	setupSubjectConnectorClaude setupChangeSubject = "connector:claude"
+	setupSubjectFinal           setupChangeSubject = "setup"
+
+	setupActionValidate       setupChangeAction = "validate"
+	setupActionEnsure         setupChangeAction = "ensure"
+	setupActionRegister       setupChangeAction = "register"
+	setupActionEnsureSelected setupChangeAction = "ensure-selected"
+	setupActionClassify       setupChangeAction = "classify"
+	setupActionImport         setupChangeAction = "import"
+	setupActionInstall        setupChangeAction = "install"
+	setupActionVerify         setupChangeAction = "verify"
+)
+
+func validConfirmedChangeVocabulary(change ConfirmedChange, adapters map[string]bool) bool {
+	subject, action := setupChangeSubject(change.Subject), setupChangeAction(change.Action)
+	switch change.Stage {
+	case StageProjectValidated:
+		return subject == setupSubjectProject && action == setupActionValidate
+	case StageGatewayReady:
+		return subject == setupSubjectGatewayService && action == setupActionEnsure
+	case StageWorkspaceRegistered:
+		return subject == setupSubjectWorkspace && action == setupActionRegister
+	case StageIdentitySelected:
+		return subject == setupSubjectIdentity && action == setupActionEnsureSelected
+	case StagePublicationClassified:
+		return subject == setupSubjectPublication && action == setupActionClassify
+	case StageBaseImported:
+		return subject == setupSubjectBase && action == setupActionImport
+	case StageConnectorsApplied:
+		return action == setupActionInstall &&
+			((subject == setupSubjectConnectorCodex && adapters["codex"]) ||
+				(subject == setupSubjectConnectorClaude && adapters["claude"]))
+	case StageFinalVerified:
+		return subject == setupSubjectFinal && action == setupActionVerify
+	default:
 		return false
 	}
-	for _, character := range value {
-		if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || strings.ContainsRune("._:-", character) {
-			continue
-		}
-		return false
-	}
-	return true
 }
 
 func validateSetupJournal(journal SetupJournal) error {
