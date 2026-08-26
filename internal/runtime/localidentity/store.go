@@ -25,6 +25,7 @@ const (
 var (
 	ErrNoSelectedIdentity         = errors.New("localidentity: no selected identity")
 	ErrSetupIdentityDrift         = errors.New("localidentity: setup identity drift")
+	ErrIdentityConflict           = errors.New("localidentity: identity authority conflict")
 	ErrInvalidStoreRecord         = errors.New("localidentity: invalid store record")
 	ErrUnsafeStore                = errors.New("localidentity: unsafe owner-only store")
 	ErrStoreFilesystemUnsupported = errors.New("localidentity: owner-only filesystem operations unsupported")
@@ -130,17 +131,21 @@ func (s *Store) ensureSelectedLocked(ctx context.Context, fd int, journalID stri
 	if err != nil {
 		return PublicHumanProfile{}, err
 	}
-	if exists {
-		if setup.Selection != selection {
-			return PublicHumanProfile{}, ErrSetupIdentityDrift
-		}
-	} else {
+	if exists && setup.Selection != selection {
+		return PublicHumanProfile{}, ErrSetupIdentityDrift
+	}
+	selected, selectedExists, err := readSelectedRecord(fd)
+	if err != nil {
+		return PublicHumanProfile{}, err
+	}
+	if exists && selectedExists && selected.HumanPrincipalID != setup.HumanPrincipalID {
+		return PublicHumanProfile{}, ErrIdentityConflict
+	}
+	if !exists {
 		if err := ctx.Err(); err != nil {
 			return PublicHumanProfile{}, err
 		}
-		if selected, selectedExists, selectedErr := readSelectedRecord(fd); selectedErr != nil {
-			return PublicHumanProfile{}, selectedErr
-		} else if selectedExists {
+		if selectedExists {
 			human, humanExists, humanErr := readHumanRecord(fd, selected.HumanPrincipalID)
 			if humanErr != nil || !humanExists {
 				if humanErr != nil {
@@ -149,19 +154,27 @@ func (s *Store) ensureSelectedLocked(ctx context.Context, fd int, journalID stri
 				return PublicHumanProfile{}, fmt.Errorf("%w: selected human is missing", ErrInvalidStoreRecord)
 			}
 			if human.DisplayName != selection.DisplayName || human.Email != selection.Email {
-				return PublicHumanProfile{}, ErrSetupIdentityDrift
+				return PublicHumanProfile{}, ErrIdentityConflict
 			}
 			setup = setupRecord{HumanPrincipalID: human.HumanPrincipalID, Selection: selection, CreatedAt: human.CreatedAt}
 		} else {
-			identifier, identifierErr := s.newUUID()
-			if identifierErr != nil {
-				return PublicHumanProfile{}, identifierErr
+			pending, found, pendingErr := reconcileUnselectedIdentity(fd, selection)
+			if pendingErr != nil {
+				return PublicHumanProfile{}, pendingErr
 			}
-			now := s.clock().UTC()
-			if now.IsZero() {
-				return PublicHumanProfile{}, fmt.Errorf("%w: zero clock", ErrInvalidStoreRecord)
+			if found {
+				setup = pending
+			} else {
+				identifier, identifierErr := s.newUUID()
+				if identifierErr != nil {
+					return PublicHumanProfile{}, identifierErr
+				}
+				now := s.clock().UTC()
+				if now.IsZero() {
+					return PublicHumanProfile{}, fmt.Errorf("%w: zero clock", ErrInvalidStoreRecord)
+				}
+				setup = setupRecord{HumanPrincipalID: identifier, Selection: selection, CreatedAt: now}
 			}
-			setup = setupRecord{HumanPrincipalID: identifier, Selection: selection, CreatedAt: now}
 		}
 		encoded, encodeErr := marshalCanonical(setup)
 		if encodeErr != nil {
@@ -169,6 +182,14 @@ func (s *Store) ensureSelectedLocked(ctx context.Context, fd int, journalID stri
 		}
 		if writeErr := s.atomicWrite(fd, setupName, encoded, 0o600, false); writeErr != nil {
 			return PublicHumanProfile{}, writeErr
+		}
+	} else if !selectedExists {
+		pending, found, pendingErr := reconcileUnselectedIdentity(fd, selection)
+		if pendingErr != nil || !found || pending.HumanPrincipalID != setup.HumanPrincipalID || !pending.CreatedAt.Equal(setup.CreatedAt) {
+			if pendingErr != nil {
+				return PublicHumanProfile{}, pendingErr
+			}
+			return PublicHumanProfile{}, ErrIdentityConflict
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -195,14 +216,155 @@ func (s *Store) ensureSelectedLocked(ctx context.Context, fd int, journalID stri
 	} else if human.DisplayName != setup.Selection.DisplayName || human.Email != setup.Selection.Email || string(human.PublicKey) != string(publicKey) || !human.CreatedAt.Equal(setup.CreatedAt) {
 		return PublicHumanProfile{}, fmt.Errorf("%w: human record differs from setup intent", ErrInvalidStoreRecord)
 	}
-	selectedBytes, err := marshalCanonical(selectedRecord{HumanPrincipalID: setup.HumanPrincipalID})
-	if err != nil {
-		return PublicHumanProfile{}, err
-	}
-	if err := s.atomicWrite(fd, selectedRecordName, selectedBytes, 0o600, true); err != nil {
+	if err := s.ensureSelectedPointer(fd, setup.HumanPrincipalID); err != nil {
 		return PublicHumanProfile{}, err
 	}
 	return publicProfile(human), nil
+}
+
+func (s *Store) ensureSelectedPointer(fd int, humanID string) error {
+	selected, exists, err := readSelectedRecord(fd)
+	if err != nil {
+		return err
+	}
+	if exists {
+		if selected.HumanPrincipalID == humanID {
+			return nil
+		}
+		return ErrIdentityConflict
+	}
+	encoded, err := marshalCanonical(selectedRecord{HumanPrincipalID: humanID})
+	if err != nil {
+		return err
+	}
+	writeErr := s.atomicWrite(fd, selectedRecordName, encoded, 0o600, false)
+	if writeErr == nil {
+		return nil
+	}
+	selected, exists, rereadErr := readSelectedRecord(fd)
+	if rereadErr != nil {
+		return rereadErr
+	}
+	if exists {
+		if selected.HumanPrincipalID == humanID {
+			return nil
+		}
+		return ErrIdentityConflict
+	}
+	return writeErr
+}
+
+func reconcileUnselectedIdentity(fd int, selection types.ConfirmedIdentitySelection) (setupRecord, bool, error) {
+	names, err := listLocalIdentityRecordNames(fd)
+	if err != nil {
+		return setupRecord{}, false, err
+	}
+	candidates := map[string]setupRecord{}
+	keyIDs := map[string]struct{}{}
+	hasIdentityArtifact := false
+	addCandidate := func(candidate setupRecord) error {
+		if prior, exists := candidates[candidate.HumanPrincipalID]; exists && (prior.Selection != candidate.Selection || !prior.CreatedAt.Equal(candidate.CreatedAt)) {
+			return ErrIdentityConflict
+		}
+		candidates[candidate.HumanPrincipalID] = candidate
+		return nil
+	}
+	for _, name := range names {
+		switch {
+		case name == lockRecordName || name == selectedRecordName:
+			continue
+		case isLocalIdentityTemporaryName(name):
+			if _, exists, readErr := readLocalIdentityFile(fd, name); readErr != nil || !exists {
+				return setupRecord{}, false, ErrInvalidStoreRecord
+			}
+			continue
+		case parseSetupRecordName(name) != "":
+			hasIdentityArtifact = true
+			record, exists, readErr := readSetupRecord(fd, name)
+			if readErr != nil || !exists {
+				return setupRecord{}, false, ErrInvalidStoreRecord
+			}
+			if record.Selection != selection {
+				return setupRecord{}, false, ErrIdentityConflict
+			}
+			if err := addCandidate(record); err != nil {
+				return setupRecord{}, false, err
+			}
+		case parseHumanRecordName(name) != "":
+			hasIdentityArtifact = true
+			identifier := parseHumanRecordName(name)
+			record, exists, readErr := readHumanRecord(fd, identifier)
+			if readErr != nil || !exists {
+				return setupRecord{}, false, ErrInvalidStoreRecord
+			}
+			candidate := setupRecord{HumanPrincipalID: record.HumanPrincipalID, Selection: types.ConfirmedIdentitySelection{DisplayName: record.DisplayName, Email: record.Email}, CreatedAt: record.CreatedAt}
+			if candidate.Selection != selection {
+				return setupRecord{}, false, ErrIdentityConflict
+			}
+			if err := addCandidate(candidate); err != nil {
+				return setupRecord{}, false, err
+			}
+		case parsePrivateKeyRecordName(name) != "":
+			hasIdentityArtifact = true
+			keyIDs[parsePrivateKeyRecordName(name)] = struct{}{}
+		default:
+			return setupRecord{}, false, fmt.Errorf("%w: unknown identity store entry", ErrInvalidStoreRecord)
+		}
+	}
+	if len(candidates) == 0 {
+		if hasIdentityArtifact {
+			return setupRecord{}, false, ErrIdentityConflict
+		}
+		return setupRecord{}, false, nil
+	}
+	if len(candidates) != 1 {
+		return setupRecord{}, false, ErrIdentityConflict
+	}
+	for identifier := range keyIDs {
+		if _, exists := candidates[identifier]; !exists {
+			return setupRecord{}, false, ErrIdentityConflict
+		}
+	}
+	for _, candidate := range candidates {
+		return candidate, true, nil
+	}
+	return setupRecord{}, false, ErrInvalidStoreRecord
+}
+
+func parseSetupRecordName(name string) string {
+	return parseIdentityRecordName(name, "setup-", ".json")
+}
+
+func parseHumanRecordName(name string) string {
+	return parseIdentityRecordName(name, "human-", ".json")
+}
+
+func parsePrivateKeyRecordName(name string) string {
+	return parseIdentityRecordName(name, "key-", ".ed25519")
+}
+
+func parseIdentityRecordName(name, prefix, suffix string) string {
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) {
+		return ""
+	}
+	identifier := strings.TrimSuffix(strings.TrimPrefix(name, prefix), suffix)
+	if !types.CanonicalUUID(identifier) {
+		return ""
+	}
+	return identifier
+}
+
+func isLocalIdentityTemporaryName(name string) bool {
+	const prefix = ".tmp-"
+	if !strings.HasPrefix(name, prefix) || len(name) != len(prefix)+32 {
+		return false
+	}
+	for _, character := range name[len(prefix):] {
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) ensurePrivateKey(fd int, humanID string) (ed25519.PrivateKey, error) {

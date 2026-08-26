@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -67,6 +68,174 @@ func TestEnsureSelectedIsJournalIdempotentAndRejectsDrift(t *testing.T) {
 	_, err = store.EnsureSelectedForSetup(context.Background(), testJournalID, types.ConfirmedIdentitySelection{DisplayName: "Bob Example"})
 	if !errors.Is(err, ErrSetupIdentityDrift) {
 		t.Fatalf("selection drift error = %v, want ErrSetupIdentityDrift", err)
+	}
+}
+
+func TestEnsureSelectedReusesOneMatchingPendingAuthorityAcrossJournals(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "identity")
+	store, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realAtomicWrite := store.atomicWrite
+	store.atomicWrite = func(fd int, name string, data []byte, mode os.FileMode, replace bool) error {
+		if err := realAtomicWrite(fd, name, data, mode, replace); err != nil {
+			return err
+		}
+		if name == "setup-"+testJournalID+".json" {
+			return errors.New("interrupt after durable receipt")
+		}
+		return nil
+	}
+	if _, err := store.EnsureSelectedForSetup(context.Background(), testJournalID, testSelection()); err == nil {
+		t.Fatal("first journal unexpectedly completed")
+	}
+	firstReceipt, exists, err := readSetupRecordFromRoot(root, testJournalID)
+	if err != nil || !exists {
+		t.Fatalf("first receipt = %#v, %v, %v", firstReceipt, exists, err)
+	}
+	secondJournal := "22222222-2222-4222-8222-222222222222"
+	reopened, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := reopened.EnsureSelectedForSetup(context.Background(), secondJournal, testSelection())
+	if err != nil {
+		t.Fatalf("second matching journal: %v", err)
+	}
+	if second.HumanPrincipalID != firstReceipt.HumanPrincipalID {
+		t.Fatalf("second journal human = %q, want reserved %q", second.HumanPrincipalID, firstReceipt.HumanPrincipalID)
+	}
+	secondReceipt, exists, err := readSetupRecordFromRoot(root, secondJournal)
+	if err != nil || !exists || secondReceipt.HumanPrincipalID != firstReceipt.HumanPrincipalID {
+		t.Fatalf("second receipt = %#v, %v, %v", secondReceipt, exists, err)
+	}
+	first, err := reopened.EnsureSelectedForSetup(context.Background(), testJournalID, testSelection())
+	if err != nil {
+		t.Fatalf("recover first journal: %v", err)
+	}
+	if first.HumanPrincipalID != second.HumanPrincipalID {
+		t.Fatalf("recovered first human = %q, want %q", first.HumanPrincipalID, second.HumanPrincipalID)
+	}
+	assertOneIdentityAuthority(t, root, first.HumanPrincipalID)
+}
+
+func TestEnsureSelectedBlocksDifferentJournalAgainstPendingAuthorityWithoutWrites(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "identity")
+	store, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realAtomicWrite := store.atomicWrite
+	store.atomicWrite = func(fd int, name string, data []byte, mode os.FileMode, replace bool) error {
+		if err := realAtomicWrite(fd, name, data, mode, replace); err != nil {
+			return err
+		}
+		if name == "setup-"+testJournalID+".json" {
+			return errors.New("interrupt after durable receipt")
+		}
+		return nil
+	}
+	if _, err := store.EnsureSelectedForSetup(context.Background(), testJournalID, testSelection()); err == nil {
+		t.Fatal("first journal unexpectedly completed")
+	}
+	before := snapshotIdentityTree(t, root)
+	reopened, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = reopened.EnsureSelectedForSetup(context.Background(), "22222222-2222-4222-8222-222222222222", types.ConfirmedIdentitySelection{DisplayName: "Bob Example"})
+	if !errors.Is(err, ErrIdentityConflict) {
+		t.Fatalf("different pending journal error = %v, want ErrIdentityConflict", err)
+	}
+	if after := snapshotIdentityTree(t, root); !reflect.DeepEqual(after, before) {
+		t.Fatalf("different pending journal mutated tree: got %#v, want %#v", after, before)
+	}
+}
+
+func TestEnsureSelectedRejectsThirdSelectedStateWithoutMutation(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "identity")
+	store, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realAtomicWrite := store.atomicWrite
+	store.atomicWrite = func(fd int, name string, data []byte, mode os.FileMode, replace bool) error {
+		if err := realAtomicWrite(fd, name, data, mode, replace); err != nil {
+			return err
+		}
+		if name == "setup-"+testJournalID+".json" {
+			return errors.New("interrupt after durable receipt")
+		}
+		return nil
+	}
+	if _, err := store.EnsureSelectedForSetup(context.Background(), testJournalID, testSelection()); err == nil {
+		t.Fatal("first journal unexpectedly completed")
+	}
+	third := selectedRecord{HumanPrincipalID: "22222222-2222-4222-8222-222222222222"}
+	bytes, err := marshalCanonical(third)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, selectedRecordName), bytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotIdentityTree(t, root)
+	reopened, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = reopened.EnsureSelectedForSetup(context.Background(), testJournalID, testSelection())
+	if !errors.Is(err, ErrIdentityConflict) {
+		t.Fatalf("third selected state error = %v, want ErrIdentityConflict", err)
+	}
+	if after := snapshotIdentityTree(t, root); !reflect.DeepEqual(after, before) {
+		t.Fatalf("third selected state mutated tree: got %#v, want %#v", after, before)
+	}
+}
+
+func TestEnsureSelectedTreatsDesiredSelectedPointerAsNoOp(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "identity")
+	store, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err := store.EnsureSelectedForSetup(context.Background(), testJournalID, testSelection())
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotIdentityTree(t, root)
+	realAtomicWrite := store.atomicWrite
+	store.atomicWrite = func(fd int, name string, data []byte, mode os.FileMode, replace bool) error {
+		if name == selectedRecordName {
+			return errors.New("selected pointer must not be rewritten")
+		}
+		return realAtomicWrite(fd, name, data, mode, replace)
+	}
+	again, err := store.EnsureSelectedForSetup(context.Background(), testJournalID, testSelection())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.HumanPrincipalID != profile.HumanPrincipalID {
+		t.Fatalf("replay human = %q, want %q", again.HumanPrincipalID, profile.HumanPrincipalID)
+	}
+	if after := snapshotIdentityTree(t, root); !reflect.DeepEqual(after, before) {
+		t.Fatalf("desired selected replay mutated tree: got %#v, want %#v", after, before)
+	}
+}
+
+func TestEnsureSelectedRecoversPastNonAuthoritativeTemporaryFile(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "identity")
+	store, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	temporary := ".tmp-00000000000000000000000000000000"
+	if err := os.WriteFile(filepath.Join(root, temporary), []byte("interrupted publication"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnsureSelectedForSetup(context.Background(), testJournalID, testSelection()); err != nil {
+		t.Fatalf("EnsureSelectedForSetup with temporary file: %v", err)
 	}
 }
 
@@ -225,4 +394,40 @@ func readSetupRecordFromRoot(root, journalID string) (setupRecord, bool, error) 
 	}
 	defer closeLocalIdentityFD(fd)
 	return readSetupRecord(fd, "setup-"+journalID+".json")
+}
+
+func snapshotIdentityTree(t *testing.T, root string) map[string][]byte {
+	t.Helper()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := make(map[string][]byte, len(entries))
+	for _, entry := range entries {
+		if entry.Name() == lockRecordName {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(root, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshot[entry.Name()] = data
+	}
+	return snapshot
+}
+
+func assertOneIdentityAuthority(t *testing.T, root, humanID string) {
+	t.Helper()
+	snapshot := snapshotIdentityTree(t, root)
+	if len(snapshot[humanRecordName(humanID)]) == 0 || len(snapshot[privateKeyRecordName(humanID)]) != ed25519.PrivateKeySize {
+		t.Fatalf("missing expected human/key authority: %#v", snapshot)
+	}
+	for name := range snapshot {
+		if strings.HasPrefix(name, "human-") && name != humanRecordName(humanID) {
+			t.Fatalf("competing human record %q in %#v", name, snapshot)
+		}
+		if strings.HasPrefix(name, "key-") && name != privateKeyRecordName(humanID) {
+			t.Fatalf("competing key record %q in %#v", name, snapshot)
+		}
+	}
 }

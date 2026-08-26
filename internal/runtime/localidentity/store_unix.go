@@ -240,3 +240,28 @@ func localIdentityTemporaryName(random func([]byte) (int, error)) (string, error
 func validLocalIdentityName(name string) bool {
 	return name != "" && name != "." && name != ".." && !strings.ContainsAny(name, `/\\`)
 }
+
+func listLocalIdentityRecordNames(rootFD int) ([]string, error) {
+	duplicated, err := unix.Dup(rootFD)
+	if err != nil {
+		return nil, err
+	}
+	directory := os.NewFile(uintptr(duplicated), "localidentity-root")
+	if directory == nil {
+		_ = unix.Close(duplicated)
+		return nil, errors.New("localidentity: open root directory handle")
+	}
+	defer directory.Close()
+	entries, err := directory.ReadDir(-1)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !validLocalIdentityName(entry.Name()) {
+			return nil, fmt.Errorf("%w: invalid root entry", ErrUnsafeStore)
+		}
+		names = append(names, entry.Name())
+	}
+	return names, nil
+}

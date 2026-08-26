@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -123,19 +124,23 @@ func TestEnsureSelectedRecoversEveryDurableWriteFailureBoundary(t *testing.T) {
 			}
 			realAtomicWrite := store.atomicWrite
 			writes := 0
+			injected := false
 			store.atomicWrite = func(fd int, name string, data []byte, mode os.FileMode, replace bool) error {
 				writes++
 				if err := realAtomicWrite(fd, name, data, mode, replace); err != nil {
 					return err
 				}
 				if writes == boundary {
+					injected = true
 					return errors.New("injected durable write failure")
 				}
 				return nil
 			}
-			if _, err := store.EnsureSelectedForSetup(context.Background(), testJournalID, testSelection()); err == nil {
-				t.Fatalf("boundary %d returned nil", boundary)
+			_, _ = store.EnsureSelectedForSetup(context.Background(), testJournalID, testSelection())
+			if !injected {
+				t.Fatalf("boundary %d was not reached; writes=%d", boundary, writes)
 			}
+			prefix := snapshotIdentityTree(t, root)
 			reopened, err := Open(root)
 			if err != nil {
 				t.Fatal(err)
@@ -144,9 +149,7 @@ func TestEnsureSelectedRecoversEveryDurableWriteFailureBoundary(t *testing.T) {
 			if err != nil {
 				t.Fatalf("recover boundary %d: %v", boundary, err)
 			}
-			if !types.CanonicalUUID(profile.HumanPrincipalID) || profile.DisplayName != testSelection().DisplayName {
-				t.Fatalf("recovered boundary %d profile = %#v", boundary, profile)
-			}
+			assertRecoveredIdentityPrefix(t, root, testJournalID, testSelection(), prefix, profile)
 			again, err := reopened.EnsureSelectedForSetup(context.Background(), testJournalID, testSelection())
 			if err != nil {
 				t.Fatal(err)
@@ -176,17 +179,51 @@ func TestEnsureSelectedRecoversPreWriteFailureBoundaries(t *testing.T) {
 				return realAtomicWrite(fd, name, data, mode, replace)
 			}
 			if _, err := store.EnsureSelectedForSetup(context.Background(), testJournalID, testSelection()); err == nil {
-				t.Fatalf("boundary %d returned nil", boundary)
+				t.Fatalf("boundary %d returned nil after %d writes", boundary, writes)
 			}
+			prefix := snapshotIdentityTree(t, root)
 			reopened, err := Open(root)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := reopened.EnsureSelectedForSetup(context.Background(), testJournalID, testSelection()); err != nil {
+			profile, err := reopened.EnsureSelectedForSetup(context.Background(), testJournalID, testSelection())
+			if err != nil {
 				t.Fatalf("recover boundary %d: %v", boundary, err)
 			}
+			assertRecoveredIdentityPrefix(t, root, testJournalID, testSelection(), prefix, profile)
 		})
 	}
+}
+
+func assertRecoveredIdentityPrefix(t *testing.T, root, journalID string, selection types.ConfirmedIdentitySelection, prefix map[string][]byte, profile PublicHumanProfile) {
+	t.Helper()
+	after := snapshotIdentityTree(t, root)
+	for name, beforeBytes := range prefix {
+		if afterBytes, exists := after[name]; !exists || !reflect.DeepEqual(afterBytes, beforeBytes) {
+			t.Fatalf("durable prefix %q changed: got %q, want %q", name, afterBytes, beforeBytes)
+		}
+	}
+	receipt, exists, err := readSetupRecordFromRoot(root, journalID)
+	if err != nil || !exists {
+		t.Fatalf("recovered receipt = %#v, %v, %v", receipt, exists, err)
+	}
+	if receipt.HumanPrincipalID != profile.HumanPrincipalID || receipt.Selection != selection {
+		t.Fatalf("recovered receipt = %#v, profile = %#v", receipt, profile)
+	}
+	selected, exists, err := readSelectedRecordFromRoot(root)
+	if err != nil || !exists || selected.HumanPrincipalID != profile.HumanPrincipalID {
+		t.Fatalf("recovered selected = %#v, %v, %v", selected, exists, err)
+	}
+	assertOneIdentityAuthority(t, root, profile.HumanPrincipalID)
+}
+
+func readSelectedRecordFromRoot(root string) (selectedRecord, bool, error) {
+	_, fd, err := openLocalIdentityRoot(root)
+	if err != nil {
+		return selectedRecord{}, false, err
+	}
+	defer closeLocalIdentityFD(fd)
+	return readSelectedRecord(fd)
 }
 
 func TestOwnerOnlyFilesystemPrimitivesRejectUnsafeObjectsAndSerialize(t *testing.T) {

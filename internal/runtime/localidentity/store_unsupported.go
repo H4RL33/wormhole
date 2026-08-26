@@ -25,3 +25,7 @@ func readLocalIdentityFile(int, string) ([]byte, bool, error) {
 func atomicLocalIdentityWrite(int, string, []byte, fs.FileMode, bool, func([]byte) (int, error)) error {
 	return fmt.Errorf("%w", ErrStoreFilesystemUnsupported)
 }
+
+func listLocalIdentityRecordNames(int) ([]string, error) {
+	return nil, ErrStoreFilesystemUnsupported
+}
