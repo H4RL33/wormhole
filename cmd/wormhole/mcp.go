@@ -3,12 +3,14 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -50,11 +52,10 @@ func runMCP(args []string, stdout, stderr io.Writer) int {
 }
 
 // bridge relays MCP JSON-RPC messages in both directions between a stdio
-// MCP client (stdin/stdout) and Gateway's socket (conn). Both sides use
-// the same newline-delimited JSON-RPC framing, so this is a straight copy
-// with no re-framing. It performs no interpretation of message contents, so
-// all MCP semantics (initialize, tools/list, tools/call, notifications)
-// remain Gateway's responsibility on the other end of conn.
+// MCP client (stdin/stdout) and Gateway's socket (conn). Both sides use the
+// same newline-delimited JSON-RPC framing. The stdin half performs one narrow
+// bridge responsibility: it overwrites tools/call's private cwd envelope.
+// All public MCP semantics remain Gateway's responsibility.
 //
 // Two goroutines do the actual copying: one drains stdin -> conn, the other
 // drains conn -> stdout. Shutdown is synchronized by closing conn on signal
@@ -95,9 +96,9 @@ func bridge(stdin io.Reader, stdout io.Writer, conn net.Conn) error {
 	return first
 }
 
-// stdinToSocket reads successive newline-delimited JSON-RPC messages off r
-// and writes each one straight to conn with a trailing newline, matching
-// Gateway's socket framing. Returns io.EOF on a clean end of input
+// stdinToSocket reads successive newline-delimited JSON-RPC messages off r,
+// observes cwd exactly once per message, overwrites tools/call's private
+// context, and writes each frame to conn. Returns io.EOF on a clean end of input
 // (r closes exactly on a line boundary), any other error on a read or
 // write failure.
 func stdinToSocket(r io.Reader, conn net.Conn) error {
@@ -108,7 +109,15 @@ func stdinToSocket(r io.Reader, conn net.Conn) error {
 			return fmt.Errorf("stdin closed mid-message (no trailing newline)")
 		}
 		if body := strings.TrimRight(line, "\r\n"); len(body) > 0 {
-			if _, werr := conn.Write([]byte(body + "\n")); werr != nil {
+			cwd, cwdErr := os.Getwd()
+			if cwdErr != nil {
+				return fmt.Errorf("observe working directory: %w", cwdErr)
+			}
+			forwarded, contextErr := attachPrivateRequestContext(json.RawMessage(body), cwd)
+			if contextErr != nil {
+				return contextErr
+			}
+			if _, werr := conn.Write(append(forwarded, '\n')); werr != nil {
 				return werr
 			}
 		}
@@ -116,6 +125,68 @@ func stdinToSocket(r io.Reader, conn net.Conn) error {
 			return err
 		}
 	}
+}
+
+// attachPrivateRequestContext overwrites any harness-supplied private cwd on
+// tools/call. Other MCP messages remain byte-for-byte unchanged.
+func attachPrivateRequestContext(raw json.RawMessage, cwd string) (json.RawMessage, error) {
+	var method struct {
+		Method string `json:"method"`
+	}
+	if err := json.Unmarshal(raw, &method); err != nil {
+		return nil, fmt.Errorf("decode MCP request for private context: %w", err)
+	}
+	if method.Method != "tools/call" {
+		return append(json.RawMessage(nil), raw...), nil
+	}
+	canonical, err := filepath.Abs(cwd)
+	if err != nil {
+		return nil, fmt.Errorf("canonicalize working directory: %w", err)
+	}
+	canonical, err = filepath.EvalSymlinks(canonical)
+	if err != nil {
+		return nil, fmt.Errorf("canonicalize working directory: %w", err)
+	}
+	canonical = filepath.Clean(canonical)
+	info, err := os.Stat(canonical)
+	if err != nil || !info.IsDir() {
+		return nil, fmt.Errorf("canonicalize working directory: not a directory")
+	}
+
+	var request map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &request); err != nil || request == nil {
+		return nil, fmt.Errorf("decode MCP request object")
+	}
+	var params map[string]json.RawMessage
+	if err := json.Unmarshal(request["params"], &params); err != nil || params == nil {
+		return nil, fmt.Errorf("tools/call params must be an object")
+	}
+	arguments := map[string]json.RawMessage{}
+	if current := params["arguments"]; len(current) != 0 && string(current) != "null" {
+		if err := json.Unmarshal(current, &arguments); err != nil || arguments == nil {
+			return nil, fmt.Errorf("tools/call arguments must be an object")
+		}
+	}
+	privateContext, err := json.Marshal(struct {
+		WorkingDirectory string `json:"working_directory"`
+	}{WorkingDirectory: canonical})
+	if err != nil {
+		return nil, fmt.Errorf("encode private workspace context: %w", err)
+	}
+	arguments["_wormhole_workspace"] = privateContext
+	params["arguments"], err = json.Marshal(arguments)
+	if err != nil {
+		return nil, fmt.Errorf("encode tools/call arguments: %w", err)
+	}
+	request["params"], err = json.Marshal(params)
+	if err != nil {
+		return nil, fmt.Errorf("encode tools/call params: %w", err)
+	}
+	forwarded, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("encode MCP request: %w", err)
+	}
+	return forwarded, nil
 }
 
 // socketToStdout reads successive newline-delimited JSON-RPC messages off

@@ -923,15 +923,32 @@ func (s *Server) handleToolsCall(ctx context.Context, sess *mcpSession, conn net
 	if !ok {
 		return nil, &rpcError{Code: rpcInvalidParams, Message: "unknown tool: " + params.Name}
 	}
-	if err := s.authorizeRecoverySurface(params.Name, params.Arguments); err != nil {
+	callCtx := ctx
+	callArguments := params.Arguments
+	// Legacy constructors remain only until Task 3 replaces them. A configured
+	// Stage-2 runtime has no unscoped fallback: every tool call must carry the
+	// bridge-only cwd and receives only Gateway-owned scope/actor authority.
+	if s.projectState != nil || s.actorResolver != nil || s.identityStore != nil {
+		var publicArguments json.RawMessage
+		var err error
+		callCtx, publicArguments, err = s.resolvePrivateRequest(ctx, params.Arguments)
+		if err != nil {
+			return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
+		}
+		callArguments, err = bindResolvedProjectArguments(callCtx, publicArguments)
+		if err != nil {
+			return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
+		}
+	}
+	if err := s.authorizeRecoverySurface(params.Name, callArguments); err != nil {
 		return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
 	}
-	if err := s.authorizeLocalTool(ctx, tool, params.Arguments); err != nil {
+	if err := s.authorizeLocalTool(callCtx, tool, callArguments); err != nil {
 		return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
 	}
 
 	if params.Name == "wormhole.channel.subscribe" {
-		ack, err := s.handleChannelSubscribeMCP(ctx, sess, conn, params.Arguments)
+		ack, err := s.handleChannelSubscribeMCP(callCtx, sess, conn, callArguments)
 		if err != nil {
 			s.logError("tool "+params.Name, err)
 			return toolCallResult{
@@ -943,7 +960,7 @@ func (s *Server) handleToolsCall(ctx context.Context, sess *mcpSession, conn net
 		return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: string(ackJSON)}}}, nil
 	}
 
-	result, err := tool.Handler(ctx, params.Arguments)
+	result, err := tool.Handler(callCtx, callArguments)
 	if err != nil {
 		s.logError("tool "+params.Name, err)
 		return toolCallResult{
@@ -1092,6 +1109,28 @@ func (s *Server) dispatchMCPMessage(ctx context.Context, sess *mcpSession, conn 
 			return
 		}
 		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: marshalResult(result)})
+
+	case PrivateSetupEnsureIdentityRPCMethod:
+		// Same-user human setup control. It is deliberately absent from the
+		// public MCP tool inventory and returns only the bounded public profile.
+		if isNotification {
+			return
+		}
+		if !sess.initialized {
+			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcServerNotInitialized, Message: "server not initialized: send initialize and notifications/initialized before private setup"}})
+			return
+		}
+		var setupRequest SetupIdentityRequest
+		if err := decodeClosedJSON(req.Params, &setupRequest); err != nil {
+			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: "invalid private setup identity request"}})
+			return
+		}
+		profile, err := s.PrivateSetupEnsureIdentityRPC(ctx, setupRequest)
+		if err != nil {
+			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: err.Error()}})
+			return
+		}
+		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: marshalResult(profile)})
 
 	case codeGraphLifecycleRPCMethod:
 		// Private same-user human CLI method. It is deliberately not a tool,

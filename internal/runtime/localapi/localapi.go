@@ -41,7 +41,9 @@ import (
 	codegraphstore "github.com/H4RL33/wormhole/internal/runtime/codegraph/store"
 	"github.com/H4RL33/wormhole/internal/runtime/config"
 	"github.com/H4RL33/wormhole/internal/runtime/eventbus"
+	"github.com/H4RL33/wormhole/internal/runtime/localidentity"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
+	"github.com/H4RL33/wormhole/internal/runtime/projectstate"
 	"github.com/H4RL33/wormhole/internal/runtime/scheduler"
 	syncpkg "github.com/H4RL33/wormhole/internal/runtime/sync"
 )
@@ -124,10 +126,14 @@ type SyncStatusProvider interface {
 // P3 adds eventbus, scheduler, and subscription support.
 // P5 adds multi-org support (RFC-0003 §7.1, §8.1).
 type Server struct {
-	listener   net.Listener
-	socketPath string
-	httpClient *http.Client
-	version    string
+	listener      net.Listener
+	socketPath    string
+	httpClient    *http.Client
+	version       string
+	projectState  *projectstate.Service
+	actorResolver LocalActorResolver
+	identityStore *localidentity.Store
+	clock         func() time.Time
 
 	// Single-org mode (P1-P4 backward compatibility)
 	coordServer string
