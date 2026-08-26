@@ -2,6 +2,7 @@ package types
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -159,5 +160,28 @@ func TestValidCandidateImportOriginAcceptsExactUnion(t *testing.T) {
 	}
 	if CanonicalUUID(CandidateImportOriginGitObservationRebaseV1) {
 		t.Fatal("fixed candidate import origin unexpectedly broadened CanonicalUUID")
+	}
+}
+
+func TestConfirmedIdentitySelectionValidationIsStrictAndBounded(t *testing.T) {
+	valid := ConfirmedIdentitySelection{DisplayName: "Alice O’Neil, Ph.D. (UK)", Email: "alice@example.test"}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("Validate(valid): %v", err)
+	}
+	for _, selection := range []ConfirmedIdentitySelection{
+		{},
+		{DisplayName: " Alice"},
+		{DisplayName: "Alice  Example"},
+		{DisplayName: "Alice/Example"},
+		{DisplayName: "private key"},
+		{DisplayName: strings.Repeat("a", MaxConfirmedIdentityDisplayNameBytes+1)},
+		{DisplayName: string([]byte{0xff})},
+		{DisplayName: "Alice Example", Email: "alice example.test"},
+		{DisplayName: "Alice Example", Email: "Alice <alice@example.test>"},
+		{DisplayName: "Alice Example", Email: strings.Repeat("a", MaxConfirmedIdentityEmailBytes-12) + "@example.test"},
+	} {
+		if err := selection.Validate(); !errors.Is(err, ErrInvalidConfirmedIdentitySelection) {
+			t.Errorf("Validate(%+v) error = %v, want ErrInvalidConfirmedIdentitySelection", selection, err)
+		}
 	}
 }

@@ -3,7 +3,11 @@ package types
 import (
 	"errors"
 	"fmt"
+	"net/mail"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 type ActorKind string
@@ -26,6 +30,60 @@ const (
 )
 
 var ErrInvalidActorEnvelope = errors.New("types: invalid actor envelope")
+
+const (
+	MaxConfirmedIdentityDisplayNameBytes = 128
+	MaxConfirmedIdentityEmailBytes       = 254
+)
+
+var ErrInvalidConfirmedIdentitySelection = errors.New("types: invalid confirmed identity selection")
+
+// ConfirmedIdentitySelection is the exact human-visible identity data approved
+// during setup. It is deliberately a small value type so private setup state
+// can carry no unbounded Git configuration or credential-shaped values.
+type ConfirmedIdentitySelection struct {
+	DisplayName string `json:"display_name"`
+	Email       string `json:"email,omitempty"`
+}
+
+func (s ConfirmedIdentitySelection) Validate() error {
+	if !validConfirmedDisplayName(s.DisplayName) {
+		return fmt.Errorf("%w: display name", ErrInvalidConfirmedIdentitySelection)
+	}
+	if s.Email == "" {
+		return nil
+	}
+	if len(s.Email) < 3 || len(s.Email) > MaxConfirmedIdentityEmailBytes || strings.ContainsFunc(s.Email, unicode.IsSpace) || strings.ContainsFunc(s.Email, unicode.IsControl) {
+		return fmt.Errorf("%w: email", ErrInvalidConfirmedIdentitySelection)
+	}
+	parsed, err := mail.ParseAddress(s.Email)
+	if err != nil || parsed.Address != s.Email || parsed.Name != "" {
+		return fmt.Errorf("%w: email", ErrInvalidConfirmedIdentitySelection)
+	}
+	return nil
+}
+
+func validConfirmedDisplayName(value string) bool {
+	if !utf8.ValidString(value) || len(value) == 0 || len(value) > MaxConfirmedIdentityDisplayNameBytes || strings.TrimSpace(value) != value || strings.Contains(value, "  ") {
+		return false
+	}
+	for _, sentinel := range []string{"private key", "token", "password", "secret", "credential", "authorization", "bearer", "-----begin", "-----end"} {
+		if strings.Contains(strings.ToLower(value), sentinel) {
+			return false
+		}
+	}
+	for _, runeValue := range value {
+		if unicode.IsLetter(runeValue) || unicode.IsMark(runeValue) || unicode.IsNumber(runeValue) {
+			continue
+		}
+		switch runeValue {
+		case ' ', '\'', '’', '-', '.', ',', '(', ')':
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 type ActorEnvelope struct {
 	ActorKind          ActorKind `json:"actor_kind"`
