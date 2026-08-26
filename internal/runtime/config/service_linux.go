@@ -3,54 +3,38 @@
 package config
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
-const systemctlExecutable = "/usr/bin/systemctl"
-
-type serviceFilesystem interface {
-	Lstat(string) (os.FileInfo, error)
-	ReadFile(string) ([]byte, error)
-	Mkdir(string, os.FileMode) error
-	Chmod(string, os.FileMode) error
-	CreateTemp(string, string) (*os.File, error)
-	Rename(string, string) error
-	Remove(string) error
-	Open(string) (*os.File, error)
-}
-
-type osServiceFilesystem struct{}
-
-func (osServiceFilesystem) Lstat(path string) (os.FileInfo, error) { return os.Lstat(path) }
-func (osServiceFilesystem) ReadFile(path string) ([]byte, error)   { return os.ReadFile(path) }
-func (osServiceFilesystem) Mkdir(path string, mode os.FileMode) error {
-	return os.Mkdir(path, mode)
-}
-func (osServiceFilesystem) Chmod(path string, mode os.FileMode) error { return os.Chmod(path, mode) }
-func (osServiceFilesystem) CreateTemp(path, pattern string) (*os.File, error) {
-	return os.CreateTemp(path, pattern)
-}
-func (osServiceFilesystem) Rename(oldPath, newPath string) error { return os.Rename(oldPath, newPath) }
-func (osServiceFilesystem) Remove(path string) error             { return os.Remove(path) }
-func (osServiceFilesystem) Open(path string) (*os.File, error)   { return os.Open(path) }
+const (
+	systemctlExecutable = "/usr/bin/systemctl"
+	serviceLockName     = ".wormhole-gatewayd.lock"
+	servicePhaseName    = ".wormhole-gatewayd.install.json"
+)
 
 type gatewayServiceHooks struct {
-	filesystem   serviceFilesystem
-	getenv       func(string) string
-	homeDir      func() (string, error)
-	tempDir      func() string
-	dial         func(context.Context, string, string) (net.Conn, error)
-	sleep        func(context.Context, time.Duration) error
-	beforeCommit func()
+	getenv                   func(string) string
+	homeDir                  func() (string, error)
+	tempDir                  func() string
+	dial                     func(context.Context, string, string) (net.Conn, error)
+	sleep                    func(context.Context, time.Duration) error
+	beforeCommit             func()
+	beforeConditionalPublish func()
+	fault                    func(string) error
 }
 
 type systemdGatewayService struct {
@@ -61,11 +45,8 @@ type systemdGatewayService struct {
 func NewGatewayService(runner CommandRunner) GatewayService {
 	dialer := &net.Dialer{}
 	return newGatewayServiceWithHooks(runner, gatewayServiceHooks{
-		filesystem: osServiceFilesystem{},
-		getenv:     os.Getenv,
-		homeDir:    os.UserHomeDir,
-		tempDir:    os.TempDir,
-		dial:       dialer.DialContext,
+		getenv: os.Getenv, homeDir: os.UserHomeDir, tempDir: os.TempDir,
+		dial: dialer.DialContext,
 		sleep: func(ctx context.Context, duration time.Duration) error {
 			timer := time.NewTimer(duration)
 			defer timer.Stop()
@@ -83,103 +64,249 @@ func newGatewayServiceWithHooks(runner CommandRunner, hooks gatewayServiceHooks)
 	return &systemdGatewayService{runner: runner, hooks: hooks}
 }
 
-func prepareCommandProcessGroup(command *exec.Cmd) {
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-}
-
-func terminateCommandProcessGroup(command *exec.Cmd) error {
-	if command.Process == nil {
-		return nil
-	}
-	err := syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
-	if errors.Is(err, syscall.ESRCH) {
-		return nil
-	}
-	return err
-}
-
 func (service *systemdGatewayService) Inspect(ctx context.Context) (ServiceState, error) {
 	if err := service.managerAvailable(ctx); err != nil {
 		return ServiceState{}, err
 	}
-	state, _, err := service.inspectAvailable(ctx)
-	return state, err
+	paths, err := service.resolvePaths()
+	if err != nil {
+		return ServiceState{}, err
+	}
+	directoryFD, err := openSecureDirectory(filepath.Dir(paths.unitPath), false, true)
+	if errors.Is(err, os.ErrNotExist) {
+		return ServiceState{UnitDigest: AbsentServiceUnitDigest}, nil
+	}
+	if err != nil {
+		return ServiceState{}, err
+	}
+	defer unix.Close(directoryFD)
+	return service.inspectPinned(ctx, paths, directoryFD)
+}
+
+func (service *systemdGatewayService) confirmChange(ctx context.Context, executable string, prior ServiceState) (ConfirmedServiceChange, error) {
+	if err := ctx.Err(); err != nil {
+		return ConfirmedServiceChange{}, err
+	}
+	pinned, err := openSecureExecutable(executable, uint32(os.Geteuid()), true)
+	if err != nil {
+		return ConfirmedServiceChange{}, err
+	}
+	_ = unix.Close(pinned)
+	paths, err := service.resolvePaths()
+	if err != nil {
+		return ConfirmedServiceChange{}, err
+	}
+	unit, err := renderGatewayUnit(executable, paths.runtimeRoot)
+	if err != nil {
+		return ConfirmedServiceChange{}, err
+	}
+	if prior.UnitDigest == "" {
+		return ConfirmedServiceChange{}, fmt.Errorf("%w: prior unit digest is required", ErrServiceChangeDrift)
+	}
+	return ConfirmedServiceChange{Executable: executable, ExpectedPrior: prior, DesiredUnitDigest: serviceUnitDigest(unit)}, nil
 }
 
 func (service *systemdGatewayService) Install(ctx context.Context, change ConfirmedServiceChange) error {
 	if err := service.managerAvailable(ctx); err != nil {
 		return err
 	}
-	executable, err := service.validateExecutable(change.Executable)
+	paths, desired, err := service.validateConfirmedChange(ctx, change)
 	if err != nil {
 		return err
 	}
-	paths, err := service.resolvePaths()
+	current, err := service.inspectForInstall(ctx, paths)
 	if err != nil {
 		return err
 	}
-	desired, err := renderGatewayUnit(executable, paths.runtimeRoot)
+	if isDesiredServiceState(current, change.DesiredUnitDigest) {
+		return nil
+	}
+
+	directoryFD, err := openSecureDirectory(filepath.Dir(paths.unitPath), false, true)
+	if errors.Is(err, os.ErrNotExist) {
+		if !sameServiceMutationState(current, change.ExpectedPrior) {
+			return ErrServiceChangeDrift
+		}
+		directoryFD, err = openSecureDirectory(filepath.Dir(paths.unitPath), true, true)
+	}
 	if err != nil {
 		return err
 	}
-	current, installed, err := service.inspectAvailable(ctx)
+	defer unix.Close(directoryFD)
+	unlock, err := lockServiceDirectory(ctx, directoryFD)
 	if err != nil {
 		return err
 	}
-	identical := current.Installed && string(installed.bytes) == string(desired)
-	if !identical && !sameConfirmedServiceState(current, change.ExpectedPrior) {
-		return ErrServiceChangeDrift
+	defer unlock()
+	if err := verifyPinnedDirectory(filepath.Dir(paths.unitPath), directoryFD); err != nil {
+		return err
+	}
+	current, err = service.inspectPinned(ctx, paths, directoryFD)
+	if err != nil {
+		return err
+	}
+	record, hasRecord, err := readInstallRecord(directoryFD)
+	if err != nil {
+		return err
+	}
+	if hasRecord {
+		if record.PriorDigest != change.ExpectedPrior.UnitDigest || record.DesiredDigest != change.DesiredUnitDigest {
+			return ErrServiceChangeDrift
+		}
+		if current.UnitDigest != change.ExpectedPrior.UnitDigest && current.UnitDigest != change.DesiredUnitDigest {
+			return ErrServiceChangeDrift
+		}
+	} else {
+		if isDesiredServiceState(current, change.DesiredUnitDigest) {
+			return nil
+		}
+		if !sameServiceMutationState(current, change.ExpectedPrior) {
+			return ErrServiceChangeDrift
+		}
+		phase := installPrepared
+		if current.UnitDigest == change.DesiredUnitDigest && current.Loaded && !current.ReloadNeeded {
+			phase = installReloaded
+		}
+		record = installRecord{SchemaVersion: 1, PriorDigest: change.ExpectedPrior.UnitDigest, DesiredDigest: change.DesiredUnitDigest, Phase: phase}
+		if err := writeInstallRecord(directoryFD, record); err != nil {
+			return err
+		}
 	}
 	if err := service.ensureRuntimeDirectories(paths); err != nil {
 		return err
 	}
-	if !identical {
-		if err := service.writeUnitCAS(paths.unitPath, desired, installed); err != nil {
+	if record.Phase == installPrepared {
+		snapshot, err := readUnitSnapshot(directoryFD)
+		if err != nil {
 			return err
 		}
+		switch snapshot.digest {
+		case change.DesiredUnitDigest:
+		case change.ExpectedPrior.UnitDigest:
+			if err := service.publishUnitConditional(directoryFD, desired, snapshot.digest); err != nil {
+				return err
+			}
+		default:
+			return ErrServiceChangeDrift
+		}
+		if err := verifyPinnedDirectory(filepath.Dir(paths.unitPath), directoryFD); err != nil {
+			return err
+		}
+		record.Phase = installUnitPublished
+		if err := writeInstallRecord(directoryFD, record); err != nil {
+			return err
+		}
+	}
+	if record.Phase == installUnitPublished {
 		if err := service.runSystemctl(ctx, "daemon-reload"); err != nil {
 			return fmt.Errorf("config: reload gatewayd unit: %w", err)
 		}
-		return service.runSystemctl(ctx, "enable", "--now", gatewayServiceUnit)
+		loaded, err := service.inspectPinned(ctx, paths, directoryFD)
+		if err != nil {
+			return err
+		}
+		if loaded.UnitDigest != change.DesiredUnitDigest || !loaded.Loaded || loaded.ReloadNeeded {
+			return ErrServiceStateUnknown
+		}
+		record.Phase = installReloaded
+		if err := writeInstallRecord(directoryFD, record); err != nil {
+			return err
+		}
 	}
-	if current.Enabled && current.Active {
-		return nil
+	if record.Phase == installReloaded {
+		state, err := service.inspectPinned(ctx, paths, directoryFD)
+		if err != nil {
+			return err
+		}
+		switch {
+		case !state.Enabled:
+			err = service.runSystemctl(ctx, "enable", "--now", gatewayServiceUnit)
+		case !state.Active:
+			err = service.runSystemctl(ctx, "start", gatewayServiceUnit)
+		}
+		if err != nil {
+			return err
+		}
+		state, err = service.inspectPinned(ctx, paths, directoryFD)
+		if err != nil {
+			return err
+		}
+		if !isDesiredServiceState(state, change.DesiredUnitDigest) {
+			return ErrServiceStateUnknown
+		}
+		record.Phase = installManagerApplied
+		if err := writeInstallRecord(directoryFD, record); err != nil {
+			return err
+		}
 	}
-	if current.Enabled {
-		return service.runSystemctl(ctx, "start", gatewayServiceUnit)
+	final, err := service.inspectPinned(ctx, paths, directoryFD)
+	if err != nil {
+		return err
 	}
-	return service.runSystemctl(ctx, "enable", "--now", gatewayServiceUnit)
+	if !isDesiredServiceState(final, change.DesiredUnitDigest) {
+		return ErrServiceStateUnknown
+	}
+	return removeInstallRecord(directoryFD)
 }
 
 func (service *systemdGatewayService) Start(ctx context.Context) error {
 	if err := service.managerAvailable(ctx); err != nil {
 		return err
 	}
-	state, unit, err := service.inspectAvailable(ctx)
+	paths, err := service.resolvePaths()
+	if err != nil {
+		return err
+	}
+	directoryFD, err := openSecureDirectory(filepath.Dir(paths.unitPath), false, true)
+	if errors.Is(err, os.ErrNotExist) {
+		return ErrServiceNotInstalled
+	}
+	if err != nil {
+		return err
+	}
+	defer unix.Close(directoryFD)
+	unlock, err := lockServiceDirectory(ctx, directoryFD)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	state, err := service.inspectPinned(ctx, paths, directoryFD)
 	if err != nil {
 		return err
 	}
 	if !state.Installed {
 		return ErrServiceNotInstalled
 	}
-	paths, err := service.resolvePaths()
+	snapshot, err := readUnitSnapshot(directoryFD)
 	if err != nil {
 		return err
 	}
-	executable, ok := parseGatewayUnit(unit.bytes, paths.runtimeRoot)
+	executable, ok := parseGatewayUnit(snapshot.bytes, paths.runtimeRoot)
 	if !ok {
 		return ErrServiceStateUnknown
 	}
-	if _, err := service.validateExecutable(executable); err != nil {
+	executableFD, err := openSecureExecutable(executable, uint32(os.Geteuid()), true)
+	if err != nil {
 		return err
 	}
-	if err := service.ensureRuntimeDirectories(paths); err != nil {
-		return err
+	_ = unix.Close(executableFD)
+	if !state.Loaded || state.ReloadNeeded {
+		return ErrServiceStateUnknown
 	}
 	if state.Active {
 		return nil
 	}
-	return service.runSystemctl(ctx, "start", gatewayServiceUnit)
+	if err := service.runSystemctl(ctx, "start", gatewayServiceUnit); err != nil {
+		return err
+	}
+	state, err = service.inspectPinned(ctx, paths, directoryFD)
+	if err != nil {
+		return err
+	}
+	if !state.Active || !state.Loaded || state.ReloadNeeded || state.UnitDigest != snapshot.digest {
+		return ErrServiceStateUnknown
+	}
+	return nil
 }
 
 func (service *systemdGatewayService) WaitReady(ctx context.Context) error {
@@ -196,6 +323,8 @@ func (service *systemdGatewayService) WaitReady(ctx context.Context) error {
 		}
 		if err := probeGatewayReady(ctx, paths.socketPath, service.hooks.dial); err == nil {
 			return nil
+		} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
 		}
 		if err := service.hooks.sleep(ctx, 25*time.Millisecond); err != nil {
 			return fmt.Errorf("%w: %w", ErrServiceNotReady, err)
@@ -203,11 +332,7 @@ func (service *systemdGatewayService) WaitReady(ctx context.Context) error {
 	}
 }
 
-type servicePaths struct {
-	unitPath    string
-	runtimeRoot string
-	socketPath  string
-}
+type servicePaths struct{ unitPath, runtimeRoot, socketPath string }
 
 func (service *systemdGatewayService) resolvePaths() (servicePaths, error) {
 	configRoot := service.hooks.getenv("XDG_CONFIG_HOME")
@@ -222,69 +347,115 @@ func (service *systemdGatewayService) resolvePaths() (servicePaths, error) {
 	if runtimeRoot == "" {
 		runtimeRoot = filepath.Join(service.hooks.tempDir(), "wormhole-runtime")
 	}
-	if !filepath.IsAbs(configRoot) || !filepath.IsAbs(runtimeRoot) {
-		return servicePaths{}, fmt.Errorf("%w: service roots must be absolute", ErrUnsafeServicePath)
+	if !filepath.IsAbs(configRoot) || !filepath.IsAbs(runtimeRoot) || filepath.Clean(configRoot) != configRoot || filepath.Clean(runtimeRoot) != runtimeRoot {
+		return servicePaths{}, fmt.Errorf("%w: service roots must be canonical and absolute", ErrUnsafeServicePath)
 	}
-	return servicePaths{
-		unitPath:    filepath.Join(configRoot, "systemd", "user", gatewayServiceUnit),
-		runtimeRoot: filepath.Clean(runtimeRoot),
-		socketPath:  filepath.Join(filepath.Clean(runtimeRoot), "wormhole", "wormholed.sock"),
-	}, nil
+	return servicePaths{filepath.Join(configRoot, "systemd", "user", gatewayServiceUnit), runtimeRoot, filepath.Join(runtimeRoot, "wormhole", "wormholed.sock")}, nil
 }
 
 func (service *systemdGatewayService) managerAvailable(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if service.runner == nil {
 		return ErrServiceManagerUnavailable
 	}
-	_, _, err := service.runner.Run(ctx, systemctlExecutable, "--user", "show-environment")
+	systemctlFD, err := openSecureExecutable(systemctlExecutable, 0, false)
 	if err != nil {
+		return ErrServiceManagerUnavailable
+	}
+	_ = unix.Close(systemctlFD)
+	_, _, err = service.runner.Run(ctx, systemctlExecutable, "--user", "show-environment")
+	if err != nil {
+		if contextErr := commandContextError(ctx, err); contextErr != nil {
+			return contextErr
+		}
 		return ErrServiceManagerUnavailable
 	}
 	return nil
 }
 
-type unitSnapshot struct {
-	exists bool
-	info   os.FileInfo
-	bytes  []byte
+func commandContextError(ctx context.Context, err error) error {
+	if contextErr := ctx.Err(); contextErr != nil {
+		return contextErr
+	}
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	return nil
 }
 
-func (service *systemdGatewayService) inspectAvailable(ctx context.Context) (ServiceState, unitSnapshot, error) {
+func (service *systemdGatewayService) validateConfirmedChange(ctx context.Context, change ConfirmedServiceChange) (servicePaths, []byte, error) {
+	if err := ctx.Err(); err != nil {
+		return servicePaths{}, nil, err
+	}
+	executableFD, err := openSecureExecutable(change.Executable, uint32(os.Geteuid()), true)
+	if err != nil {
+		return servicePaths{}, nil, err
+	}
+	_ = unix.Close(executableFD)
 	paths, err := service.resolvePaths()
 	if err != nil {
-		return ServiceState{}, unitSnapshot{}, err
+		return servicePaths{}, nil, err
 	}
-	info, err := service.hooks.filesystem.Lstat(paths.unitPath)
+	desired, err := renderGatewayUnit(change.Executable, paths.runtimeRoot)
+	if err != nil {
+		return servicePaths{}, nil, err
+	}
+	if change.ExpectedPrior.UnitDigest == "" || change.DesiredUnitDigest == "" || serviceUnitDigest(desired) != change.DesiredUnitDigest {
+		return servicePaths{}, nil, ErrServiceChangeDrift
+	}
+	return paths, desired, nil
+}
+
+func (service *systemdGatewayService) inspectForInstall(ctx context.Context, paths servicePaths) (ServiceState, error) {
+	directoryFD, err := openSecureDirectory(filepath.Dir(paths.unitPath), false, true)
 	if errors.Is(err, os.ErrNotExist) {
-		return ServiceState{}, unitSnapshot{}, nil
+		return ServiceState{UnitDigest: AbsentServiceUnitDigest}, nil
 	}
 	if err != nil {
-		return ServiceState{}, unitSnapshot{}, fmt.Errorf("config: inspect gatewayd unit: %w", err)
+		return ServiceState{}, err
 	}
-	if err := validateOwnerFile(info, 0o600); err != nil {
-		return ServiceState{}, unitSnapshot{}, err
+	defer unix.Close(directoryFD)
+	return service.inspectPinned(ctx, paths, directoryFD)
+}
+
+func (service *systemdGatewayService) inspectPinned(ctx context.Context, paths servicePaths, directoryFD int) (ServiceState, error) {
+	if err := verifyPinnedDirectory(filepath.Dir(paths.unitPath), directoryFD); err != nil {
+		return ServiceState{}, err
 	}
-	if info.Size() > 64<<10 {
-		return ServiceState{}, unitSnapshot{}, fmt.Errorf("%w: oversized unit", ErrUnsafeServicePath)
-	}
-	unit, err := service.hooks.filesystem.ReadFile(paths.unitPath)
+	snapshot, err := readUnitSnapshot(directoryFD)
 	if err != nil {
-		return ServiceState{}, unitSnapshot{}, fmt.Errorf("config: read gatewayd unit: %w", err)
+		return ServiceState{}, err
 	}
-	snapshot := unitSnapshot{exists: true, info: info, bytes: unit}
-	state := ServiceState{Installed: true}
-	if executable, ok := parseGatewayUnit(unit, paths.runtimeRoot); !ok {
+	state := ServiceState{UnitDigest: snapshot.digest, Installed: snapshot.exists}
+	if !snapshot.exists {
+		return state, nil
+	}
+	executable, managed := parseGatewayUnit(snapshot.bytes, paths.runtimeRoot)
+	if !managed {
 		state.Diagnostic = "gatewayd service definition is stale"
-	} else if _, err := service.validateExecutable(executable); err != nil {
-		return ServiceState{}, unitSnapshot{}, err
+	} else {
+		executableFD, err := openSecureExecutable(executable, uint32(os.Geteuid()), true)
+		if err != nil {
+			return ServiceState{}, err
+		}
+		_ = unix.Close(executableFD)
 	}
 	state.Enabled, err = service.readSystemctlState(ctx, "is-enabled", map[int]string{0: "enabled", 1: "disabled"}, "enabled")
 	if err != nil {
-		return ServiceState{}, unitSnapshot{}, err
+		return ServiceState{}, err
 	}
 	state.Active, err = service.readSystemctlState(ctx, "is-active", map[int]string{0: "active", 3: "inactive"}, "active")
 	if err != nil {
-		return ServiceState{}, unitSnapshot{}, err
+		return ServiceState{}, err
+	}
+	state.Loaded, state.ReloadNeeded, err = service.readLoadedState(ctx, paths.unitPath)
+	if err != nil {
+		return ServiceState{}, err
 	}
 	if state.Diagnostic == "" {
 		switch {
@@ -292,19 +463,29 @@ func (service *systemdGatewayService) inspectAvailable(ctx context.Context) (Ser
 			state.Diagnostic = "gatewayd service is installed but disabled"
 		case !state.Active:
 			state.Diagnostic = "gatewayd service is enabled but inactive"
+		case !state.Loaded || state.ReloadNeeded:
+			state.Diagnostic = "gatewayd service definition requires reload"
 		default:
-			if probeGatewayReady(ctx, paths.socketPath, service.hooks.dial) == nil {
+			probeErr := probeGatewayReady(ctx, paths.socketPath, service.hooks.dial)
+			if probeErr == nil {
 				state.Ready = true
+			} else if errors.Is(probeErr, context.Canceled) || errors.Is(probeErr, context.DeadlineExceeded) {
+				return ServiceState{}, probeErr
+			} else {
+				state.Diagnostic = "gatewayd service is active but not ready"
 			}
 		}
 	}
-	return state, snapshot, nil
+	return state, nil
 }
 
 func (service *systemdGatewayService) readSystemctlState(ctx context.Context, action string, recognized map[int]string, truth string) (bool, error) {
 	stdout, _, err := service.runner.Run(ctx, systemctlExecutable, "--user", action, gatewayServiceUnit)
 	exit := 0
 	if err != nil {
+		if contextErr := commandContextError(ctx, err); contextErr != nil {
+			return false, contextErr
+		}
 		var exitErr *CommandExitError
 		if !errors.As(err, &exitErr) {
 			return false, ErrServiceStateUnknown
@@ -319,59 +500,418 @@ func (service *systemdGatewayService) readSystemctlState(ctx context.Context, ac
 	return value == truth, nil
 }
 
+func (service *systemdGatewayService) readLoadedState(ctx context.Context, unitPath string) (bool, bool, error) {
+	stdout, _, err := service.runner.Run(ctx, systemctlExecutable, "--user", "show", gatewayServiceUnit, "--property=FragmentPath", "--property=NeedDaemonReload", "--no-pager")
+	if err != nil {
+		if contextErr := commandContextError(ctx, err); contextErr != nil {
+			return false, false, contextErr
+		}
+		return false, false, ErrServiceStateUnknown
+	}
+	values := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSuffix(string(stdout), "\n"), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			return false, false, ErrServiceStateUnknown
+		}
+		if _, duplicate := values[key]; duplicate {
+			return false, false, ErrServiceStateUnknown
+		}
+		values[key] = value
+	}
+	if len(values) != 2 || (values["NeedDaemonReload"] != "yes" && values["NeedDaemonReload"] != "no") {
+		return false, false, ErrServiceStateUnknown
+	}
+	return values["FragmentPath"] == unitPath && values["NeedDaemonReload"] == "no", values["NeedDaemonReload"] == "yes", nil
+}
+
 func (service *systemdGatewayService) runSystemctl(ctx context.Context, args ...string) error {
 	_, _, err := service.runner.Run(ctx, systemctlExecutable, append([]string{"--user"}, args...)...)
+	if contextErr := commandContextError(ctx, err); contextErr != nil {
+		return contextErr
+	}
 	return err
 }
 
-func sameConfirmedServiceState(current, expected ServiceState) bool {
-	return current.Installed == expected.Installed && current.Enabled == expected.Enabled && current.Active == expected.Active && current.Ready == expected.Ready
+func sameServiceMutationState(left, right ServiceState) bool {
+	return left.Installed == right.Installed && left.Enabled == right.Enabled && left.Active == right.Active && left.UnitDigest == right.UnitDigest && left.Loaded == right.Loaded && left.ReloadNeeded == right.ReloadNeeded
 }
 
-func (service *systemdGatewayService) validateExecutable(path string) (string, error) {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return "", fmt.Errorf("%w: gatewayd executable must be canonical and absolute", ErrUnsafeServicePath)
+func isDesiredServiceState(state ServiceState, digest ServiceUnitDigest) bool {
+	return state.Installed && state.Enabled && state.Active && state.UnitDigest == digest && state.Loaded && !state.ReloadNeeded
+}
+
+type unitSnapshot struct {
+	exists bool
+	digest ServiceUnitDigest
+	bytes  []byte
+}
+
+func readUnitSnapshot(directoryFD int) (unitSnapshot, error) {
+	fd, err := unix.Openat(directoryFD, gatewayServiceUnit, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	if errors.Is(err, unix.ENOENT) {
+		return unitSnapshot{digest: AbsentServiceUnitDigest}, nil
 	}
-	if root := findRepositoryRoot(service.hooks.filesystem, filepath.Dir(path)); root != "" && pathWithin(root, path) {
-		return "", ErrRepositoryContent
+	if err != nil {
+		return unitSnapshot{}, fmt.Errorf("%w: open gatewayd unit", ErrUnsafeServicePath)
 	}
-	if err := validateTrustedDirectoryAncestors(service.hooks.filesystem, filepath.Dir(path)); err != nil {
+	file := os.NewFile(uintptr(fd), gatewayServiceUnit)
+	defer file.Close()
+	if err := validateRegularFD(fd, uint32(os.Geteuid()), 0o600, false); err != nil {
+		return unitSnapshot{}, err
+	}
+	data, err := io.ReadAll(io.LimitReader(file, (64<<10)+1))
+	if err != nil {
+		return unitSnapshot{}, fmt.Errorf("config: read gatewayd unit: %w", err)
+	}
+	if len(data) > 64<<10 {
+		return unitSnapshot{}, fmt.Errorf("%w: oversized unit", ErrUnsafeServicePath)
+	}
+	return unitSnapshot{true, serviceUnitDigest(data), data}, nil
+}
+
+type installPhase string
+
+const (
+	installPrepared       installPhase = "prepared"
+	installUnitPublished  installPhase = "unit_published"
+	installReloaded       installPhase = "reloaded"
+	installManagerApplied installPhase = "manager_applied"
+)
+
+type installRecord struct {
+	SchemaVersion int               `json:"schema_version"`
+	PriorDigest   ServiceUnitDigest `json:"prior_digest"`
+	DesiredDigest ServiceUnitDigest `json:"desired_digest"`
+	Phase         installPhase      `json:"phase"`
+}
+
+func readInstallRecord(directoryFD int) (installRecord, bool, error) {
+	data, exists, err := readOwnerFileAt(directoryFD, servicePhaseName, 16<<10)
+	if err != nil || !exists {
+		return installRecord{}, exists, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var record installRecord
+	if err := decoder.Decode(&record); err != nil {
+		return installRecord{}, false, fmt.Errorf("%w: invalid service phase", ErrServiceChangeDrift)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return installRecord{}, false, fmt.Errorf("%w: trailing service phase data", ErrServiceChangeDrift)
+	}
+	validPhase := record.Phase == installPrepared || record.Phase == installUnitPublished || record.Phase == installReloaded || record.Phase == installManagerApplied
+	if record.SchemaVersion != 1 || record.PriorDigest == "" || record.DesiredDigest == "" || !validPhase {
+		return installRecord{}, false, fmt.Errorf("%w: invalid service phase", ErrServiceChangeDrift)
+	}
+	return record, true, nil
+}
+
+func writeInstallRecord(directoryFD int, record installRecord) error {
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	return atomicWriteOwnerFileAt(directoryFD, servicePhaseName, append(data, '\n'))
+}
+
+func removeInstallRecord(directoryFD int) error {
+	if err := unix.Unlinkat(directoryFD, servicePhaseName, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+		return fmt.Errorf("config: remove service phase: %w", err)
+	}
+	return unix.Fsync(directoryFD)
+}
+
+func readOwnerFileAt(directoryFD int, name string, limit int64) ([]byte, bool, error) {
+	fd, err := unix.Openat(directoryFD, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	if errors.Is(err, unix.ENOENT) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: open %s", ErrUnsafeServicePath, name)
+	}
+	file := os.NewFile(uintptr(fd), name)
+	defer file.Close()
+	if err := validateRegularFD(fd, uint32(os.Geteuid()), 0o600, false); err != nil {
+		return nil, false, err
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil || int64(len(data)) > limit {
+		return nil, false, fmt.Errorf("%w: invalid %s", ErrUnsafeServicePath, name)
+	}
+	return data, true, nil
+}
+
+func atomicWriteOwnerFileAt(directoryFD int, name string, data []byte) error {
+	temporary, err := randomTemporaryName(".wormhole-service-phase-")
+	if err != nil {
+		return err
+	}
+	fd, err := unix.Openat(directoryFD, temporary, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		_ = unix.Close(fd)
+		if !committed {
+			_ = unix.Unlinkat(directoryFD, temporary, 0)
+		}
+	}()
+	if err := writeAllFD(fd, data); err != nil {
+		return err
+	}
+	if err := unix.Fsync(fd); err != nil {
+		return err
+	}
+	if err := unix.Renameat(directoryFD, temporary, directoryFD, name); err != nil {
+		return err
+	}
+	committed = true
+	return unix.Fsync(directoryFD)
+}
+
+func (service *systemdGatewayService) publishUnitConditional(directoryFD int, desired []byte, expected ServiceUnitDigest) error {
+	temporary, err := randomTemporaryName(".wormhole-gatewayd-unit-")
+	if err != nil {
+		return err
+	}
+	fd, err := unix.Openat(directoryFD, temporary, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		return err
+	}
+	keepTemporary := true
+	defer func() {
+		_ = unix.Close(fd)
+		if keepTemporary {
+			_ = unix.Unlinkat(directoryFD, temporary, 0)
+		}
+	}()
+	if err := writeAllFD(fd, desired); err != nil {
+		return err
+	}
+	if err := unix.Fsync(fd); err != nil {
+		return err
+	}
+	if service.hooks.beforeCommit != nil {
+		service.hooks.beforeCommit()
+	}
+	if service.hooks.beforeConditionalPublish != nil {
+		service.hooks.beforeConditionalPublish()
+	}
+	if expected == AbsentServiceUnitDigest {
+		if err := unix.Renameat2(directoryFD, temporary, directoryFD, gatewayServiceUnit, unix.RENAME_NOREPLACE); err != nil {
+			if errors.Is(err, unix.EEXIST) {
+				return ErrServiceChangeDrift
+			}
+			return err
+		}
+		keepTemporary = false
+	} else {
+		if err := unix.Renameat2(directoryFD, temporary, directoryFD, gatewayServiceUnit, unix.RENAME_EXCHANGE); err != nil {
+			if errors.Is(err, unix.ENOENT) {
+				return ErrServiceChangeDrift
+			}
+			return err
+		}
+		displaced, _, readErr := readOwnerFileAt(directoryFD, temporary, 64<<10)
+		if readErr != nil || serviceUnitDigest(displaced) != expected {
+			if rollbackErr := unix.Renameat2(directoryFD, temporary, directoryFD, gatewayServiceUnit, unix.RENAME_EXCHANGE); rollbackErr != nil {
+				return fmt.Errorf("config: preserve concurrent service unit: %w", rollbackErr)
+			}
+			return ErrServiceChangeDrift
+		}
+		if err := unix.Unlinkat(directoryFD, temporary, 0); err != nil {
+			return err
+		}
+		keepTemporary = false
+	}
+	if service.hooks.fault != nil {
+		if err := service.hooks.fault("unit_directory_sync"); err != nil {
+			return err
+		}
+	}
+	return unix.Fsync(directoryFD)
+}
+
+func writeAllFD(fd int, data []byte) error {
+	for len(data) > 0 {
+		n, err := unix.Write(fd, data)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		data = data[n:]
+	}
+	return nil
+}
+
+func randomTemporaryName(prefix string) (string, error) {
+	var value [12]byte
+	if _, err := rand.Read(value[:]); err != nil {
 		return "", err
 	}
-	info, err := service.hooks.filesystem.Lstat(path)
-	if err != nil {
-		return "", fmt.Errorf("%w: inspect gatewayd executable", ErrUnsafeServicePath)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 || info.Mode().Perm()&0o022 != 0 {
-		return "", fmt.Errorf("%w: gatewayd executable must be a non-writable regular owner executable", ErrUnsafeServicePath)
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 {
-		return "", fmt.Errorf("%w: gatewayd executable ownership", ErrUnsafeServicePath)
-	}
-	return path, nil
+	return prefix + hex.EncodeToString(value[:]), nil
 }
 
-func findRepositoryRoot(filesystem serviceFilesystem, start string) string {
-	current, err := filepath.Abs(start)
+func lockServiceDirectory(ctx context.Context, directoryFD int) (func(), error) {
+	fd, err := unix.Openat(directoryFD, serviceLockName, unix.O_RDWR|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
 	if err != nil {
-		return ""
+		return nil, err
+	}
+	if err := validateRegularFD(fd, uint32(os.Geteuid()), 0o600, false); err != nil {
+		_ = unix.Close(fd)
+		return nil, err
 	}
 	for {
-		if _, err := filesystem.Lstat(filepath.Join(current, ".git")); err == nil {
-			return current
+		if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err == nil {
+			return func() { _ = unix.Flock(fd, unix.LOCK_UN); _ = unix.Close(fd) }, nil
+		} else if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
+			_ = unix.Close(fd)
+			return nil, err
 		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return ""
+		if err := ctx.Err(); err != nil {
+			_ = unix.Close(fd)
+			return nil, err
 		}
-		current = parent
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
-func pathWithin(root, path string) bool {
-	relative, err := filepath.Rel(root, path)
-	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+func openSecureDirectory(path string, create, exactOwner bool) (int, error) {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return -1, fmt.Errorf("%w: directory must be canonical and absolute", ErrUnsafeServicePath)
+	}
+	current, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, err
+	}
+	components := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	for index, component := range components {
+		if component == "" {
+			continue
+		}
+		next, openErr := unix.Openat(current, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if errors.Is(openErr, unix.ENOENT) && create {
+			if mkdirErr := unix.Mkdirat(current, component, 0o700); mkdirErr != nil && !errors.Is(mkdirErr, unix.EEXIST) {
+				_ = unix.Close(current)
+				return -1, mkdirErr
+			}
+			next, openErr = unix.Openat(current, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		}
+		if openErr != nil {
+			_ = unix.Close(current)
+			if errors.Is(openErr, unix.ENOENT) {
+				return -1, os.ErrNotExist
+			}
+			return -1, fmt.Errorf("%w: open directory component %s", ErrUnsafeServicePath, component)
+		}
+		_ = unix.Close(current)
+		current = next
+		final := index == len(components)-1
+		if err := validateDirectoryFD(current, final && exactOwner); err != nil {
+			_ = unix.Close(current)
+			return -1, err
+		}
+	}
+	return current, nil
+}
+
+func validateDirectoryFD(fd int, exactOwner bool) error {
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return err
+	}
+	uid := uint32(os.Geteuid())
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || (stat.Uid != uid && stat.Uid != 0) {
+		return fmt.Errorf("%w: untrusted directory", ErrUnsafeServicePath)
+	}
+	if exactOwner {
+		if stat.Uid != uid || stat.Mode&0o7777 != 0o700 {
+			return fmt.Errorf("%w: owner-private directory required", ErrUnsafeServicePath)
+		}
+		return nil
+	}
+	writable := stat.Mode&0o022 != 0
+	rootSticky := stat.Uid == 0 && stat.Mode&unix.S_ISVTX != 0
+	if writable && !rootSticky {
+		return fmt.Errorf("%w: writable directory ancestor", ErrUnsafeServicePath)
+	}
+	return nil
+}
+
+func verifyPinnedDirectory(path string, pinnedFD int) error {
+	freshFD, err := openSecureDirectory(path, false, true)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(freshFD)
+	var pinned, fresh unix.Stat_t
+	if unix.Fstat(pinnedFD, &pinned) != nil || unix.Fstat(freshFD, &fresh) != nil || pinned.Dev != fresh.Dev || pinned.Ino != fresh.Ino {
+		return ErrServiceChangeDrift
+	}
+	return nil
+}
+
+func openSecureExecutable(path string, ownerUID uint32, rejectRepository bool) (int, error) {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return -1, fmt.Errorf("%w: executable must be canonical and absolute", ErrUnsafeServicePath)
+	}
+	if rejectRepository && repositoryMarkerInAncestry(path) {
+		return -1, ErrRepositoryContent
+	}
+	directoryFD, err := openSecureDirectory(filepath.Dir(path), false, false)
+	if err != nil {
+		return -1, err
+	}
+	defer unix.Close(directoryFD)
+	fd, err := unix.Openat(directoryFD, filepath.Base(path), unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return -1, fmt.Errorf("%w: open executable", ErrUnsafeServicePath)
+	}
+	if err := validateRegularFD(fd, ownerUID, 0, true); err != nil {
+		_ = unix.Close(fd)
+		return -1, err
+	}
+	return fd, nil
+}
+func repositoryMarkerInAncestry(path string) bool {
+	for current := filepath.Dir(path); ; current = filepath.Dir(current) {
+		var stat unix.Stat_t
+		if err := unix.Lstat(filepath.Join(current, ".git"), &stat); err == nil {
+			return true
+		}
+		if current == "/" {
+			return false
+		}
+	}
+}
+
+func validateRegularFD(fd int, ownerUID uint32, mode uint32, executable bool) error {
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != ownerUID || stat.Nlink != 1 || stat.Mode&0o022 != 0 {
+		return fmt.Errorf("%w: unsafe regular file", ErrUnsafeServicePath)
+	}
+	if mode != 0 && stat.Mode&0o7777 != mode {
+		return fmt.Errorf("%w: unsafe file mode", ErrUnsafeServicePath)
+	}
+	if executable && stat.Mode&0o111 == 0 {
+		return fmt.Errorf("%w: executable mode required", ErrUnsafeServicePath)
+	}
+	return nil
+}
+
+func (service *systemdGatewayService) ensureRuntimeDirectories(paths servicePaths) error {
+	fd, err := openSecureDirectory(filepath.Dir(paths.socketPath), true, true)
+	if err != nil {
+		return err
+	}
+	return unix.Close(fd)
 }
 
 func renderGatewayUnit(executable, runtimeRoot string) ([]byte, error) {
@@ -450,154 +990,4 @@ func unescapeSystemdValue(value string) (string, bool) {
 		}
 	}
 	return decoded.String(), true
-}
-
-func validateOwnerFile(info os.FileInfo, mode os.FileMode) error {
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != mode || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 {
-		return fmt.Errorf("%w: require owner-only regular unit", ErrUnsafeServicePath)
-	}
-	return nil
-}
-
-func (service *systemdGatewayService) writeUnitCAS(path string, desired []byte, expected unitSnapshot) error {
-	directory := filepath.Dir(path)
-	if err := service.ensureUnitDirectory(directory); err != nil {
-		return err
-	}
-	temporary, err := service.hooks.filesystem.CreateTemp(directory, ".wormhole-gatewayd-*.tmp")
-	if err != nil {
-		return fmt.Errorf("config: create temporary gatewayd unit: %w", err)
-	}
-	temporaryPath := temporary.Name()
-	committed := false
-	defer func() {
-		_ = temporary.Close()
-		if !committed {
-			_ = service.hooks.filesystem.Remove(temporaryPath)
-		}
-	}()
-	if err := temporary.Chmod(0o600); err != nil {
-		return fmt.Errorf("config: restrict temporary gatewayd unit: %w", err)
-	}
-	if _, err := temporary.Write(desired); err != nil {
-		return fmt.Errorf("config: write temporary gatewayd unit: %w", err)
-	}
-	if err := temporary.Sync(); err != nil {
-		return fmt.Errorf("config: sync temporary gatewayd unit: %w", err)
-	}
-	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("config: close temporary gatewayd unit: %w", err)
-	}
-	if service.hooks.beforeCommit != nil {
-		service.hooks.beforeCommit()
-	}
-	currentInfo, statErr := service.hooks.filesystem.Lstat(path)
-	if !expected.exists && errors.Is(statErr, os.ErrNotExist) {
-		// Expected absence remains absent.
-	} else if statErr != nil || !expected.exists || !os.SameFile(currentInfo, expected.info) {
-		return ErrServiceChangeDrift
-	} else {
-		if err := validateOwnerFile(currentInfo, 0o600); err != nil {
-			return ErrServiceChangeDrift
-		}
-		current, err := service.hooks.filesystem.ReadFile(path)
-		if err != nil || string(current) != string(expected.bytes) {
-			return ErrServiceChangeDrift
-		}
-	}
-	if err := service.hooks.filesystem.Rename(temporaryPath, path); err != nil {
-		return fmt.Errorf("config: commit gatewayd unit: %w", err)
-	}
-	committed = true
-	dir, err := service.hooks.filesystem.Open(directory)
-	if err != nil {
-		return fmt.Errorf("config: open service directory for sync: %w", err)
-	}
-	defer dir.Close()
-	if err := dir.Sync(); err != nil {
-		return fmt.Errorf("config: sync service directory: %w", err)
-	}
-	return nil
-}
-
-func (service *systemdGatewayService) ensureUnitDirectory(directory string) error {
-	if err := validateTrustedDirectoryAncestors(service.hooks.filesystem, directory); err != nil {
-		return err
-	}
-	configRoot := filepath.Dir(filepath.Dir(directory))
-	paths := []string{configRoot, filepath.Join(configRoot, "systemd"), directory}
-	for index, path := range paths {
-		info, err := service.hooks.filesystem.Lstat(path)
-		if errors.Is(err, os.ErrNotExist) {
-			if err := service.hooks.filesystem.Mkdir(path, 0o700); err != nil {
-				return fmt.Errorf("config: create service directory: %w", err)
-			}
-			info, err = service.hooks.filesystem.Lstat(path)
-		}
-		if err != nil {
-			return fmt.Errorf("config: inspect service directory: %w", err)
-		}
-		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || stat.Uid != uint32(os.Geteuid()) || info.Mode().Perm()&0o022 != 0 {
-			return fmt.Errorf("%w: service directory", ErrUnsafeServicePath)
-		}
-		if index == len(paths)-1 && info.Mode().Perm() != 0o700 {
-			if err := service.hooks.filesystem.Chmod(path, 0o700); err != nil {
-				return fmt.Errorf("config: restrict service directory: %w", err)
-			}
-		}
-	}
-	return nil
-}
-
-func (service *systemdGatewayService) ensureRuntimeDirectories(paths servicePaths) error {
-	if err := validateTrustedDirectoryAncestors(service.hooks.filesystem, filepath.Dir(paths.socketPath)); err != nil {
-		return err
-	}
-	for _, path := range []string{paths.runtimeRoot, filepath.Dir(paths.socketPath)} {
-		info, err := service.hooks.filesystem.Lstat(path)
-		if errors.Is(err, os.ErrNotExist) {
-			if err := service.hooks.filesystem.Mkdir(path, 0o700); err != nil {
-				return fmt.Errorf("config: create runtime directory: %w", err)
-			}
-			info, err = service.hooks.filesystem.Lstat(path)
-		}
-		if err != nil {
-			return fmt.Errorf("config: inspect runtime directory: %w", err)
-		}
-		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || stat.Uid != uint32(os.Geteuid()) || info.Mode().Perm() != 0o700 {
-			return fmt.Errorf("%w: runtime directory must be owner-only", ErrUnsafeServicePath)
-		}
-	}
-	return nil
-}
-
-// validateTrustedDirectoryAncestors rejects aliases before any path-based
-// mutation. Root-owned non-writable directories are trusted; a root-owned
-// sticky shared directory such as /tmp is the sole writable-ancestor case.
-func validateTrustedDirectoryAncestors(filesystem serviceFilesystem, path string) error {
-	current := filepath.Clean(path)
-	for {
-		info, err := filesystem.Lstat(current)
-		if err == nil {
-			stat, ok := info.Sys().(*syscall.Stat_t)
-			if !ok || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || (stat.Uid != uint32(os.Geteuid()) && stat.Uid != 0) {
-				return fmt.Errorf("%w: untrusted directory ancestor %s", ErrUnsafeServicePath, current)
-			}
-			writable := info.Mode().Perm()&0o022 != 0
-			rootSticky := stat.Uid == 0 && info.Mode()&os.ModeSticky != 0
-			if writable && !rootSticky {
-				return fmt.Errorf("%w: writable directory ancestor %s", ErrUnsafeServicePath, current)
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("%w: inspect directory ancestor %s", ErrUnsafeServicePath, current)
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return nil
-		}
-		current = parent
-	}
 }

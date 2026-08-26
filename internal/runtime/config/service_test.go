@@ -36,15 +36,26 @@ type serviceCall struct {
 }
 
 type recordingServiceRunner struct {
-	calls         []serviceCall
-	enabled       bool
-	active        bool
-	unusable      bool
-	enabledOutput string
+	calls            []serviceCall
+	enabled          bool
+	active           bool
+	unusable         bool
+	enabledOutput    string
+	unitPath         string
+	loaded           bool
+	needReload       bool
+	failDaemonReload int
+	failEnable       int
+	failStart        int
+	enableNoEffect   bool
+	forcedError      error
 }
 
 func (runner *recordingServiceRunner) Run(_ context.Context, executable string, args ...string) ([]byte, []byte, error) {
 	runner.calls = append(runner.calls, serviceCall{executable: executable, args: append([]string(nil), args...)})
+	if runner.forcedError != nil {
+		return nil, nil, runner.forcedError
+	}
 	if runner.unusable {
 		return nil, nil, errors.New("not usable")
 	}
@@ -52,7 +63,14 @@ func (runner *recordingServiceRunner) Run(_ context.Context, executable string, 
 		return nil, nil, errors.New("unexpected command")
 	}
 	switch args[1] {
-	case "show-environment", "daemon-reload":
+	case "show-environment":
+		return nil, nil, nil
+	case "daemon-reload":
+		if runner.failDaemonReload > 0 {
+			runner.failDaemonReload--
+			return nil, nil, errors.New("injected daemon-reload failure")
+		}
+		runner.loaded, runner.needReload = true, false
 		return nil, nil, nil
 	case "is-enabled":
 		if runner.enabledOutput != "" {
@@ -67,10 +85,30 @@ func (runner *recordingServiceRunner) Run(_ context.Context, executable string, 
 			return []byte("active\n"), nil, nil
 		}
 		return []byte("inactive\n"), nil, &CommandExitError{ExitCode: 3}
+	case "show":
+		fragment := ""
+		if runner.loaded {
+			fragment = runner.unitPath
+		}
+		needReload := "no"
+		if runner.needReload || !runner.loaded {
+			needReload = "yes"
+		}
+		return []byte("FragmentPath=" + fragment + "\nNeedDaemonReload=" + needReload + "\n"), nil, nil
 	case "enable":
-		runner.enabled, runner.active = true, true
+		if runner.failEnable > 0 {
+			runner.failEnable--
+			return nil, nil, errors.New("injected enable failure")
+		}
+		if !runner.enableNoEffect {
+			runner.enabled, runner.active = true, true
+		}
 		return nil, nil, nil
 	case "start":
+		if runner.failStart > 0 {
+			runner.failStart--
+			return nil, nil, errors.New("injected start failure")
+		}
 		runner.active = true
 		return nil, nil, nil
 	default:

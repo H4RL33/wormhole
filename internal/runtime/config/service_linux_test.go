@@ -18,7 +18,7 @@ import (
 
 func TestSystemdGatewayServiceUsesExactOwnerPrivatePaths(t *testing.T) {
 	fixture := newSystemdFixture(t)
-	if err := fixture.service.Install(t.Context(), ConfirmedServiceChange{Executable: fixture.executable}); err != nil {
+	if err := fixture.service.Install(t.Context(), confirmedServiceChange(t, fixture.service, fixture.executable)); err != nil {
 		t.Fatal(err)
 	}
 	unitPath := filepath.Join(fixture.configRoot, "systemd", "user", gatewayServiceUnit)
@@ -67,7 +67,7 @@ func TestSystemdGatewayServiceUsesExactOwnerPrivatePaths(t *testing.T) {
 
 func TestSystemdGatewayServiceInstallIsActiveIdempotent(t *testing.T) {
 	fixture := newSystemdFixture(t)
-	change := ConfirmedServiceChange{Executable: fixture.executable}
+	change := confirmedServiceChange(t, fixture.service, fixture.executable)
 	if err := fixture.service.Install(t.Context(), change); err != nil {
 		t.Fatal(err)
 	}
@@ -82,18 +82,19 @@ func TestSystemdGatewayServiceInstallIsActiveIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !state.Installed || !state.Enabled || !state.Active || state.Diagnostic != "" {
+	if !state.Installed || !state.Enabled || !state.Active || state.Diagnostic != "gatewayd service is active but not ready" {
 		t.Fatalf("state = %+v", state)
 	}
 }
 
 func TestSystemdGatewayServiceRepairsOnlyRecognizedIncompleteState(t *testing.T) {
 	fixture := newSystemdFixture(t)
-	change := ConfirmedServiceChange{Executable: fixture.executable}
+	change := confirmedServiceChange(t, fixture.service, fixture.executable)
 	if err := fixture.service.Install(t.Context(), change); err != nil {
 		t.Fatal(err)
 	}
 	fixture.runner.active = false
+	change = confirmedServiceChange(t, fixture.service, fixture.executable)
 	before := len(fixture.runner.calls)
 	if err := fixture.service.Install(t.Context(), change); err != nil {
 		t.Fatal(err)
@@ -104,6 +105,7 @@ func TestSystemdGatewayServiceRepairsOnlyRecognizedIncompleteState(t *testing.T)
 	}
 
 	fixture.runner.enabled, fixture.runner.active = false, false
+	change = confirmedServiceChange(t, fixture.service, fixture.executable)
 	before = len(fixture.runner.calls)
 	if err := fixture.service.Install(t.Context(), change); err != nil {
 		t.Fatal(err)
@@ -132,7 +134,7 @@ func TestSystemdGatewayServiceUnavailableManagerDoesNotWrite(t *testing.T) {
 
 func TestSystemdGatewayServiceRejectsUnknownStateOutput(t *testing.T) {
 	fixture := newSystemdFixture(t)
-	if err := fixture.service.Install(t.Context(), ConfirmedServiceChange{Executable: fixture.executable}); err != nil {
+	if err := fixture.service.Install(t.Context(), confirmedServiceChange(t, fixture.service, fixture.executable)); err != nil {
 		t.Fatal(err)
 	}
 	fixture.runner.enabledOutput = "generated\n"
@@ -146,7 +148,7 @@ func TestSystemdGatewayServiceStartIsInstalledAndActiveIdempotent(t *testing.T) 
 	if err := fixture.service.Start(t.Context()); !errors.Is(err, ErrServiceNotInstalled) {
 		t.Fatalf("uninstalled Start error = %v", err)
 	}
-	if err := fixture.service.Install(t.Context(), ConfirmedServiceChange{Executable: fixture.executable}); err != nil {
+	if err := fixture.service.Install(t.Context(), confirmedServiceChange(t, fixture.service, fixture.executable)); err != nil {
 		t.Fatal(err)
 	}
 	before := len(mutatingSystemdCalls(fixture.runner.calls))
@@ -168,7 +170,7 @@ func TestSystemdGatewayServiceUnitCASPreservesConcurrentReplacement(t *testing.T
 			t.Fatal(err)
 		}
 	}
-	err := service.Install(t.Context(), ConfirmedServiceChange{Executable: fixture.executable})
+	err := service.Install(t.Context(), confirmedServiceChange(t, fixture.service, fixture.executable))
 	if !errors.Is(err, ErrServiceChangeDrift) {
 		t.Fatalf("Install error = %v, want drift", err)
 	}
@@ -247,9 +249,9 @@ func TestSystemdGatewayServiceFallbackRuntimeMatchesSocket(t *testing.T) {
 	if err := os.WriteFile(executable, []byte("gateway"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	runner := &recordingServiceRunner{}
+	runner := &recordingServiceRunner{unitPath: filepath.Join(home, "config", "systemd", "user", gatewayServiceUnit)}
 	service := NewGatewayService(runner)
-	if err := service.Install(t.Context(), ConfirmedServiceChange{Executable: executable}); err != nil {
+	if err := service.Install(t.Context(), confirmedServiceChange(t, service, executable)); err != nil {
 		t.Fatal(err)
 	}
 	unitPath := filepath.Join(home, "config", "systemd", "user", gatewayServiceUnit)
@@ -272,6 +274,7 @@ func TestSystemdGatewayServiceFallbackRuntimeMatchesSocket(t *testing.T) {
 
 func TestSystemdGatewayServiceRejectsUnsafeUnitAndExecutable(t *testing.T) {
 	fixture := newSystemdFixture(t)
+	change := confirmedServiceChange(t, fixture.service, fixture.executable)
 	unitDir := filepath.Join(fixture.configRoot, "systemd", "user")
 	if err := os.MkdirAll(unitDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -283,7 +286,7 @@ func TestSystemdGatewayServiceRejectsUnsafeUnitAndExecutable(t *testing.T) {
 	if err := os.Symlink(target, filepath.Join(unitDir, gatewayServiceUnit)); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.service.Install(t.Context(), ConfirmedServiceChange{Executable: fixture.executable}); !errors.Is(err, ErrUnsafeServicePath) {
+	if err := fixture.service.Install(t.Context(), change); !errors.Is(err, ErrUnsafeServicePath) {
 		t.Fatalf("symlink unit error = %v", err)
 	}
 
@@ -358,7 +361,7 @@ func TestSystemdGatewayServiceRejectsSymlinkedExecutableAndRootAncestors(t *test
 		t.Fatal(err)
 	}
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(aliasConfigParent, "config"))
-	if err := other.service.Install(t.Context(), ConfirmedServiceChange{Executable: other.executable}); !errors.Is(err, ErrUnsafeServicePath) {
+	if _, err := other.service.Inspect(t.Context()); !errors.Is(err, ErrUnsafeServicePath) {
 		t.Fatalf("symlinked config ancestor error = %v", err)
 	}
 	if mutating := mutatingSystemdCalls(other.runner.calls); len(mutating) != 0 {
@@ -386,7 +389,7 @@ func newSystemdFixture(t *testing.T) systemdFixture {
 	if err := os.WriteFile(executable, []byte("gateway"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	runner := &recordingServiceRunner{}
+	runner := &recordingServiceRunner{unitPath: filepath.Join(configRoot, "systemd", "user", gatewayServiceUnit)}
 	return systemdFixture{service: NewGatewayService(runner), runner: runner, configRoot: configRoot, runtimeRoot: runtimeRoot, executable: executable}
 }
 

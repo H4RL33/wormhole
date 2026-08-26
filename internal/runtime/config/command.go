@@ -20,6 +20,8 @@ var ErrCommandOutputLimit = errors.New("config: command output limit exceeded")
 // the remaining process group before returning.
 var ErrCommandWaitLimit = errors.New("config: command wait limit exceeded")
 
+var ErrCommandPlatformUnsupported = errors.New("config: command process isolation unsupported on this platform")
+
 // CommandExitError reports an ordinary non-zero process exit without embedding
 // command arguments or captured output in the error.
 type CommandExitError struct {
@@ -50,7 +52,9 @@ func (execCommandRunner) Run(ctx context.Context, executable string, args ...str
 		return nil, nil, err
 	}
 	command := exec.Command(executable, args...)
-	prepareCommandProcessGroup(command)
+	if err := prepareCommandProcessGroup(command); err != nil {
+		return nil, nil, err
+	}
 	command.WaitDelay = 250 * time.Millisecond
 	stdout := &boundedCommandBuffer{limit: commandOutputLimit}
 	stderr := &boundedCommandBuffer{limit: commandOutputLimit}
