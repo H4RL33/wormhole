@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -57,23 +58,6 @@ func (r *recordingRunner) Run(_ context.Context, executable string, args ...stri
 	reply := r.replies[0]
 	r.replies = r.replies[1:]
 	return reply.stdout, reply.stderr, reply.err
-}
-
-type claudeConfigRunner struct {
-	path  string
-	calls [][]string
-}
-
-func (r *claudeConfigRunner) Run(_ context.Context, executable string, args ...string) ([]byte, []byte, error) {
-	r.calls = append(r.calls, append([]string{executable}, args...))
-	if reflect.DeepEqual(args, []string{"mcp", "add", "--scope", "user", "wormhole", "--", "/opt/wormhole", "mcp"}) {
-		data := []byte(`{"mcpServers":{"wormhole":{"type":"stdio","command":"/opt/wormhole","args":["mcp"],"env":{}}}}`)
-		return nil, nil, os.WriteFile(r.path, data, 0o600)
-	}
-	if reflect.DeepEqual(args, []string{"mcp", "remove", "--scope", "user", "wormhole"}) {
-		return nil, nil, os.WriteFile(r.path, []byte(`{"mcpServers":{}}`), 0o600)
-	}
-	return nil, nil, errors.New("unexpected fake Claude argv")
 }
 
 func TestCodexExactVersionDiscoveryAndStrictInspection(t *testing.T) {
@@ -292,114 +276,208 @@ func TestClaudeRollbackAddPlacesMultipleEnvironmentFlagsAfterName(t *testing.T) 
 	}
 }
 
-func TestClaudeConfigDirBindsInspectApplyVerifyAndRollback(t *testing.T) {
-	root := t.TempDir()
-	configDir := filepath.Join(root, "claude-config")
-	homeDir := filepath.Join(root, "home")
-	workingDir := filepath.Join(root, "work")
-	for _, directory := range []string{configDir, homeDir, workingDir} {
-		if err := os.Mkdir(directory, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Setenv("HOME", homeDir)
-	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
-	priorWorkingDirectory, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(workingDir); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(priorWorkingDirectory) })
-
-	userPath := filepath.Join(configDir, ".claude.json")
-	runner := &claudeConfigRunner{path: userPath}
-	adapter, err := NewClaudeAdapter(runner, "claude", "wormhole")
-	if err != nil {
-		t.Fatal(err)
-	}
-	prior := ConnectorEntry{State: EntryAbsent}
-	desired := ConnectorEntry{State: EntryPresent, Scope: ScopeUser, Transport: TransportStdio, Command: "/opt/wormhole", Args: []string{"mcp"}, Env: []EnvironmentVariable{}}
-	plan, err := adapter.Plan(t.Context(), prior, desired)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := adapter.Apply(t.Context(), plan); err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-	if err := adapter.Verify(t.Context(), desired); err != nil {
-		t.Fatalf("Verify: %v", err)
-	}
-	if err := adapter.Rollback(t.Context(), plan); err != nil {
-		t.Fatalf("Rollback: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(homeDir, ".claude.json")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("unexpected home config: %v", err)
-	}
+type blockedClaudeRunner struct {
+	entered chan struct{}
+	release chan struct{}
 }
 
-func TestClaudeConfigDirChangeFailsWithoutNativeFallback(t *testing.T) {
-	root := t.TempDir()
-	first := filepath.Join(root, "first")
-	second := filepath.Join(root, "second")
-	for _, directory := range []string{first, second} {
-		if err := os.Mkdir(directory, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Setenv("CLAUDE_CONFIG_DIR", first)
-	runner := &recordingRunner{}
-	adapter, err := NewClaudeAdapter(runner, "claude", "wormhole")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CLAUDE_CONFIG_DIR", second)
-	entry := ConnectorEntry{State: EntryPresent, Scope: ScopeUser, Transport: TransportStdio, Command: "/opt/wormhole", Args: []string{"mcp"}, Env: []EnvironmentVariable{}}
-	if err := adapter.add(t.Context(), entry); !errors.Is(err, ErrUnsupportedConnectorEntry) {
-		t.Fatalf("add error=%v", err)
-	}
-	if len(runner.calls) != 0 {
-		t.Fatalf("native fallback calls=%#v", runner.calls)
-	}
+type blockedConnectorCoordinator struct {
+	entered chan struct{}
+	release chan struct{}
 }
 
-func TestClaudeConfigDirRejectsNoncanonicalOrUnboundedOverrides(t *testing.T) {
-	for name, value := range map[string]string{
-		"empty":     "",
-		"relative":  "relative/config",
-		"unbounded": "/" + strings.Repeat("a", maxConnectorValueBytes+1),
-	} {
+func (c *blockedConnectorCoordinator) WithOperationLock(ctx context.Context, _ AdapterName, _ string, operation func(context.Context) error) error {
+	close(c.entered)
+	<-c.release
+	return operation(ctx)
+}
+
+func (r *blockedClaudeRunner) Run(context.Context, string, ...string) ([]byte, []byte, error) {
+	select {
+	case r.entered <- struct{}{}:
+	default:
+	}
+	<-r.release
+	return nil, nil, ErrConnectorUnavailable
+}
+
+func TestClaudeConfigDirPresenceAfterConstructionBlocksBeforeChildOrState(t *testing.T) {
+	for name, value := range map[string]string{"empty": "", "malformed": "relative/config", "absolute": filepath.Join(t.TempDir(), "override")} {
 		t.Run(name, func(t *testing.T) {
-			t.Setenv("CLAUDE_CONFIG_DIR", value)
-			if _, err := NewClaudeAdapter(&recordingRunner{}, "claude", "wormhole"); !errors.Is(err, ErrInvalidConnectorPlan) {
-				t.Fatalf("constructor error=%v", err)
+			priorOverride, overrideWasPresent := os.LookupEnv("CLAUDE_CONFIG_DIR")
+			if err := os.Unsetenv("CLAUDE_CONFIG_DIR"); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if overrideWasPresent {
+					_ = os.Setenv("CLAUDE_CONFIG_DIR", priorOverride)
+				} else {
+					_ = os.Unsetenv("CLAUDE_CONFIG_DIR")
+				}
+			})
+			root := t.TempDir()
+			userPath := filepath.Join(root, ".claude.json")
+			working := filepath.Join(root, "work")
+			if err := os.Mkdir(working, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			runner := &blockedClaudeRunner{entered: make(chan struct{}, 1), release: make(chan struct{})}
+			adapter, err := NewClaudeAdapterAt(runner, "claude", "wormhole", userPath, working)
+			if err != nil {
+				t.Fatal(err)
+			}
+			prior := ConnectorEntry{State: EntryAbsent}
+			desired := ConnectorEntry{State: EntryPresent, Scope: ScopeUser, Transport: TransportStdio, Command: "/opt/wormhole", Args: []string{"mcp"}, Env: []EnvironmentVariable{}}
+			plan, _ := adapter.Plan(t.Context(), prior, desired)
+			priorDigest, _ := DigestConnectorEntry(prior)
+			desiredDigest, _ := DigestConnectorEntry(desired)
+			change := ConfirmedConnectorChange{Adapter: AdapterClaude, Name: "wormhole", Action: OperationInstall, PlanDigest: plan.Digest, ExpectedPriorDigest: priorDigest, DesiredDigest: desiredDigest}
+			backups := &memoryBackupStore{}
+			journal := &memoryJournal{fault: map[OperationStage]error{}}
+			coordinator := &blockedConnectorCoordinator{entered: make(chan struct{}), release: make(chan struct{})}
+
+			result := make(chan error, 1)
+			go func() {
+				_, applyErr := ApplyTransactional(context.Background(), adapter, desired, change, backups, journal, coordinator)
+				result <- applyErr
+			}()
+			<-coordinator.entered
+			if err := os.Setenv("CLAUDE_CONFIG_DIR", value); err != nil {
+				t.Fatal(err)
+			}
+			close(coordinator.release)
+			select {
+			case <-runner.entered:
+				close(runner.release)
+				<-result
+				t.Fatal("Claude child started with CLAUDE_CONFIG_DIR present")
+			case applyErr := <-result:
+				if !errors.Is(applyErr, ErrUnsupportedConnectorEntry) {
+					t.Fatalf("Apply error=%v", applyErr)
+				}
+			}
+			if backups.puts != 0 || journal.activeCalls != 0 {
+				t.Fatalf("backups=%d journal=%d", backups.puts, journal.activeCalls)
+			}
+			for _, path := range []string{userPath, filepath.Join(value, ".claude.json")} {
+				if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("changed file %q: %v", path, statErr)
+				}
 			}
 		})
 	}
 }
 
-func TestClaudeNestedGitLocalScopeCannotHideBehindUserEntry(t *testing.T) {
+func TestClaudeConfigDirPresenceAtConstructionIsUnsupported(t *testing.T) {
+	for name, value := range map[string]string{"empty": "", "malformed": "relative/config", "absolute": filepath.Join(t.TempDir(), "override")} {
+		t.Run(name, func(t *testing.T) {
+			working := t.TempDir()
+			runner := &recordingRunner{}
+			t.Setenv("CLAUDE_CONFIG_DIR", value)
+			_, err := NewClaudeAdapterAt(runner, "claude", "wormhole", filepath.Join(t.TempDir(), ".claude.json"), working)
+			if !errors.Is(err, ErrUnsupportedConnectorEntry) || len(runner.calls) != 0 {
+				t.Fatalf("constructor error=%v calls=%#v", err, runner.calls)
+			}
+		})
+	}
+}
+
+func runConnectorGit(t *testing.T, directory string, args ...string) {
+	t.Helper()
+	command := exec.Command("git", append([]string{"-C", directory}, args...)...)
+	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+filepath.Join(t.TempDir(), "global.gitconfig"))
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, output)
+	}
+}
+
+func TestClaudeLocalScopeUsesMainRootForNormalAndLinkedWorktrees(t *testing.T) {
 	root := t.TempDir()
-	gitRoot := filepath.Join(root, "repository")
-	nested := filepath.Join(gitRoot, "sub", "dir")
-	if err := os.MkdirAll(filepath.Join(gitRoot, ".git"), 0o700); err != nil {
+	mainRoot := filepath.Join(root, "main")
+	linkedRoot := filepath.Join(root, "linked")
+	if err := os.Mkdir(mainRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(nested, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	runConnectorGit(t, mainRoot, "init")
+	runConnectorGit(t, mainRoot, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "initial")
+	runConnectorGit(t, mainRoot, "worktree", "add", "-b", "linked-test", linkedRoot)
 	userPath := filepath.Join(root, ".claude.json")
-	data := `{"mcpServers":{"wormhole":{"type":"stdio","command":"/user","args":["mcp"],"env":{}}},"projects":{"` + gitRoot + `":{"mcpServers":{"wormhole":{"type":"stdio","command":"/local","args":["mcp"],"env":{}}}}}}`
+	data := `{"mcpServers":{"wormhole":{"type":"stdio","command":"/user","args":["mcp"],"env":{}}},"projects":{"` + mainRoot + `":{"mcpServers":{"wormhole":{"type":"stdio","command":"/local","args":["mcp"],"env":{}}}}}}`
 	if err := os.WriteFile(userPath, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, worktree := range map[string]string{"normal": mainRoot, "linked": linkedRoot} {
+		t.Run(name, func(t *testing.T) {
+			nested := filepath.Join(worktree, "sub", "dir")
+			if err := os.MkdirAll(nested, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			adapter, err := NewClaudeAdapterAt(&recordingRunner{}, "claude", "wormhole", userPath, nested)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if adapter.localProjectKey != mainRoot {
+				t.Fatalf("local key=%q want=%q", adapter.localProjectKey, mainRoot)
+			}
+			if _, err := adapter.Inspect(t.Context()); !errors.Is(err, ErrUnsupportedConnectorEntry) {
+				t.Fatalf("hidden local error=%v", err)
+			}
+		})
+	}
+	if err := os.WriteFile(userPath, []byte(`{"mcpServers":{},"projects":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(linkedRoot, "sub", "dir")
+	mainProjectFile := filepath.Join(mainRoot, ".mcp.json")
+	projectEntry := []byte(`{"mcpServers":{"wormhole":{"type":"stdio","command":"/project","args":["mcp"],"env":{}}}}`)
+	if err := os.WriteFile(mainProjectFile, projectEntry, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	adapter, err := NewClaudeAdapterAt(&recordingRunner{}, "claude", "wormhole", userPath, nested)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if entry, err := adapter.Inspect(t.Context()); err != nil || entry.State != EntryAbsent {
+		t.Fatalf("main-root project file leaked into cwd scope: entry=%#v err=%v", entry, err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, ".mcp.json"), projectEntry, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := adapter.Inspect(t.Context()); !errors.Is(err, ErrUnsupportedConnectorEntry) {
-		t.Fatalf("hidden local error=%v", err)
+		t.Fatalf("cwd project scope error=%v", err)
+	}
+}
+
+func TestClaudeRejectsMalformedAndBareGitTopology(t *testing.T) {
+	for name, setup := range map[string]func(*testing.T, string){
+		"malformed pointer": func(t *testing.T, root string) {
+			if err := os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: missing\nextra\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"ambiguous pointer": func(t *testing.T, root string) {
+			other := filepath.Join(filepath.Dir(root), "other")
+			if err := os.Mkdir(other, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			runConnectorGit(t, other, "init")
+			if err := os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: "+filepath.Join(other, ".git")+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"bare": func(t *testing.T, root string) { runConnectorGit(t, root, "init", "--bare") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "topology")
+			if err := os.Mkdir(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			setup(t, root)
+			_, err := NewClaudeAdapterAt(&recordingRunner{}, "claude", "wormhole", filepath.Join(t.TempDir(), ".claude.json"), root)
+			if !errors.Is(err, ErrInvalidConnectorPlan) {
+				t.Fatalf("constructor error=%v", err)
+			}
+		})
 	}
 }
 

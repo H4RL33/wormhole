@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 
 	"github.com/H4RL33/wormhole/internal/runtime/config"
 )
@@ -45,6 +46,9 @@ func NewClaudeAdapter(runner config.CommandRunner, executable, name string) (*Cl
 }
 
 func NewClaudeAdapterAt(runner config.CommandRunner, executable, name, userConfigPath, workingDirectory string) (*ClaudeAdapter, error) {
+	if _, present := os.LookupEnv("CLAUDE_CONFIG_DIR"); present {
+		return nil, ErrUnsupportedConnectorEntry
+	}
 	if runner == nil || !validConnectorValue(executable) || name != "wormhole" || !filepath.IsAbs(userConfigPath) || filepath.Clean(userConfigPath) != userConfigPath || !filepath.IsAbs(workingDirectory) || filepath.Clean(workingDirectory) != workingDirectory {
 		return nil, ErrInvalidConnectorPlan
 	}
@@ -64,13 +68,12 @@ func NewClaudeAdapterAt(runner config.CommandRunner, executable, name, userConfi
 }
 
 func resolveClaudeUserConfigPath() (string, error) {
-	configDirectory, overridden := os.LookupEnv("CLAUDE_CONFIG_DIR")
-	if !overridden {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", ErrInvalidConnectorPlan
-		}
-		configDirectory = home
+	if _, present := os.LookupEnv("CLAUDE_CONFIG_DIR"); present {
+		return "", ErrUnsupportedConnectorEntry
+	}
+	configDirectory, err := os.UserHomeDir()
+	if err != nil {
+		return "", ErrInvalidConnectorPlan
 	}
 	if !validConnectorValue(configDirectory) || !filepath.IsAbs(configDirectory) || filepath.Clean(configDirectory) != configDirectory {
 		return "", ErrInvalidConnectorPlan
@@ -88,13 +91,25 @@ func resolveClaudeUserConfigPath() (string, error) {
 
 func claudeLocalProjectKey(workingDirectory string) (string, error) {
 	for directory := workingDirectory; ; directory = filepath.Dir(directory) {
+		if claudeGitDirectory(directory) == nil {
+			return "", ErrInvalidConnectorPlan
+		}
 		marker := filepath.Join(directory, ".git")
 		info, err := os.Lstat(marker)
 		if err == nil {
-			if info.Mode()&os.ModeSymlink != 0 || (!info.IsDir() && !info.Mode().IsRegular()) {
+			if info.Mode()&os.ModeSymlink != 0 {
 				return "", ErrInvalidConnectorPlan
 			}
-			return directory, nil
+			if info.IsDir() {
+				if claudeGitDirectory(marker) != nil {
+					return "", ErrInvalidConnectorPlan
+				}
+				return directory, nil
+			}
+			if !info.Mode().IsRegular() {
+				return "", ErrInvalidConnectorPlan
+			}
+			return claudeLinkedWorktreeRoot(marker)
 		}
 		if !errors.Is(err, os.ErrNotExist) {
 			return "", ErrInvalidConnectorPlan
@@ -106,7 +121,121 @@ func claudeLocalProjectKey(workingDirectory string) (string, error) {
 	}
 }
 
+func claudeLinkedWorktreeRoot(marker string) (string, error) {
+	gitdirValue, err := readClaudeGitPath(marker, "gitdir: ")
+	if err != nil {
+		return "", err
+	}
+	gitdir, err := canonicalClaudeGitPath(filepath.Dir(marker), gitdirValue)
+	if err != nil {
+		return "", err
+	}
+	commonValue, err := readClaudeGitPath(filepath.Join(gitdir, "commondir"), "")
+	if err != nil {
+		return "", err
+	}
+	commonDirectory, err := canonicalClaudeGitPath(gitdir, commonValue)
+	if err != nil || filepath.Base(commonDirectory) != ".git" || claudeGitDirectory(commonDirectory) != nil {
+		return "", ErrInvalidConnectorPlan
+	}
+	relativeGitdir, err := filepath.Rel(commonDirectory, gitdir)
+	parts := strings.Split(relativeGitdir, string(filepath.Separator))
+	if err != nil || len(parts) != 2 || parts[0] != "worktrees" || parts[1] == "" || parts[1] == "." || parts[1] == ".." {
+		return "", ErrInvalidConnectorPlan
+	}
+	backlinkValue, err := readClaudeGitPath(filepath.Join(gitdir, "gitdir"), "")
+	if err != nil {
+		return "", err
+	}
+	backlink, err := canonicalClaudeGitPath(gitdir, backlinkValue)
+	if err != nil || backlink != marker {
+		return "", ErrInvalidConnectorPlan
+	}
+	mainRoot := filepath.Dir(commonDirectory)
+	info, err := os.Lstat(mainRoot)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", ErrInvalidConnectorPlan
+	}
+	resolved, err := filepath.EvalSymlinks(mainRoot)
+	if err != nil || resolved != mainRoot {
+		return "", ErrInvalidConnectorPlan
+	}
+	return mainRoot, nil
+}
+
+func readClaudeGitPath(path, prefix string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o022 != 0 || !nativeConnectorFileOwner(info) || info.Size() < 2 || info.Size() > maxConnectorValueBytes {
+		return "", ErrInvalidConnectorPlan
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", ErrInvalidConnectorPlan
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		return "", ErrInvalidConnectorPlan
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxConnectorValueBytes+1))
+	if err != nil || int64(len(data)) != info.Size() || len(data) > maxConnectorValueBytes || !strings.HasSuffix(string(data), "\n") || strings.Count(string(data), "\n") != 1 {
+		return "", ErrInvalidConnectorPlan
+	}
+	value := strings.TrimSuffix(string(data), "\n")
+	if prefix != "" {
+		if !strings.HasPrefix(value, prefix) {
+			return "", ErrInvalidConnectorPlan
+		}
+		value = strings.TrimPrefix(value, prefix)
+	}
+	if !validConnectorValue(value) {
+		return "", ErrInvalidConnectorPlan
+	}
+	return value, nil
+}
+
+func canonicalClaudeGitPath(base, value string) (string, error) {
+	path := value
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(base, path)
+	}
+	path = filepath.Clean(path)
+	if !filepath.IsAbs(path) {
+		return "", ErrInvalidConnectorPlan
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil || resolved != path {
+		return "", ErrInvalidConnectorPlan
+	}
+	return path, nil
+}
+
+func claudeGitDirectory(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return ErrInvalidConnectorPlan
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil || resolved != path {
+		return ErrInvalidConnectorPlan
+	}
+	for _, name := range []string{"HEAD", "config"} {
+		child, childErr := os.Lstat(filepath.Join(path, name))
+		if childErr != nil || !child.Mode().IsRegular() || child.Mode()&os.ModeSymlink != 0 {
+			return ErrInvalidConnectorPlan
+		}
+	}
+	objects, err := os.Lstat(filepath.Join(path, "objects"))
+	if err != nil || !objects.IsDir() || objects.Mode()&os.ModeSymlink != 0 {
+		return ErrInvalidConnectorPlan
+	}
+	return nil
+}
+
 func (a *ClaudeAdapter) validateUserConfigBinding() error {
+	if _, present := os.LookupEnv("CLAUDE_CONFIG_DIR"); present {
+		return ErrUnsupportedConnectorEntry
+	}
 	if a.resolveUserConfig == nil {
 		return nil
 	}
@@ -120,6 +249,9 @@ func (a *ClaudeAdapter) validateUserConfigBinding() error {
 func (a *ClaudeAdapter) AdapterName() AdapterName { return AdapterClaude }
 
 func (a *ClaudeAdapter) Discover(ctx context.Context) (Availability, error) {
+	if err := a.validateUserConfigBinding(); err != nil {
+		return Availability{}, err
+	}
 	stdout, stderr, err := a.runner.Run(ctx, a.executable, "--version")
 	if len(stderr) != 0 {
 		return Availability{}, ErrConnectorUnavailable
