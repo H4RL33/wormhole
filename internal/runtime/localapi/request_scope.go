@@ -94,6 +94,29 @@ func (s *Server) resolvePrivateRequest(ctx context.Context, raw json.RawMessage)
 	return ctx, public, nil
 }
 
+// validatePrivateProjectClaim treats project_id only as untrusted comparison
+// evidence for private provider routes. The resolved workspace binding remains
+// the sole scope authority, and the claim is never returned for public decode.
+func validatePrivateProjectClaim(ctx context.Context, raw json.RawMessage) error {
+	binding, err := ResolvedBinding(ctx)
+	if err != nil {
+		return err
+	}
+	var arguments map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &arguments); err != nil || arguments == nil {
+		return fmt.Errorf("%w: arguments must be an object", ErrPrivateRequestContext)
+	}
+	projectRaw, supplied := arguments["project_id"]
+	if !supplied {
+		return nil
+	}
+	var projectID string
+	if err := json.Unmarshal(projectRaw, &projectID); err != nil || projectID != binding.Scope.ProjectID {
+		return errors.New("localapi: resolved project mismatch")
+	}
+	return nil
+}
+
 func privateAuthorityClaim(arguments map[string]json.RawMessage) string {
 	for _, field := range []string{
 		"workspace_id", "checkout_id", "namespace_id", "namespace", "binding",

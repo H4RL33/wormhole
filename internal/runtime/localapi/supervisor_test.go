@@ -1,6 +1,8 @@
 package localapi
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -174,6 +177,125 @@ func TestSupervisorIsolatesMultipleWorkspacesThroughOneGateway(t *testing.T) {
 		t.Fatalf("configured whoami = %+v, want exact fail-closed provider error", whoami)
 	}
 }
+
+func TestPrivateProviderRPCValidatesExplicitProjectClaimAgainstResolvedBinding(t *testing.T) {
+	const (
+		boundProject  = "00000000-0000-4000-8000-000000000001"
+		forgedProject = "00000000-0000-4000-8000-000000000002"
+		workspaceID   = "00000000-0000-4000-8000-000000000011"
+	)
+	tests := []struct {
+		name      string
+		projectID *string
+		mismatch  bool
+	}{
+		{name: "absent"},
+		{name: "exact match", projectID: pointerTo(boundProject)},
+		{name: "mismatch", projectID: pointerTo(forgedProject), mismatch: true},
+	}
+	for _, route := range []string{"Code Graph lifecycle", "Fabric sync status"} {
+		for _, tt := range tests {
+			t.Run(route+"/"+tt.name, func(t *testing.T) {
+				checkout := filepath.Join(t.TempDir(), "checkout")
+				binding := privateRoutingTestBinding(t, checkout, boundProject, workspaceID)
+				_, binding.AcceptedTreeDigest = privateRoutingWorkspaceTree(t, boundProject, binding.Repository)
+				server := privateRoutingTestServer(t, privateRoutingTestActor("00000000-0000-4000-8000-000000000021"), binding)
+				codeGraph := &recordingCodeGraphProvider{err: ErrCodeGraphUnavailable}
+				fabric := &recordingFabricRouter{err: ErrFabricUnavailable}
+				server.codeGraphProvider = codeGraph
+				server.fabricRouter = fabric
+				server.registry = newLocalRegistry(server)
+
+				arguments := map[string]any{
+					privateRequestContextKey: map[string]string{"working_directory": binding.Checkout.CanonicalPath},
+				}
+				if tt.projectID != nil {
+					arguments["project_id"] = *tt.projectID
+				}
+				argumentsRaw, err := json.Marshal(arguments)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				var response rpcResponse
+				switch route {
+				case "Code Graph lifecycle":
+					arguments["operation"] = CodeGraphStatus
+					argumentsRaw, err = json.Marshal(arguments)
+					if err != nil {
+						t.Fatal(err)
+					}
+					response = dispatchPrivateRPCForTest(t, server, rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("7"), Method: codeGraphLifecycleRPCMethod, Params: argumentsRaw})
+				case "Fabric sync status":
+					params, marshalErr := json.Marshal(toolsCallParams{Name: "wormhole.sync.status", Arguments: argumentsRaw})
+					if marshalErr != nil {
+						t.Fatal(marshalErr)
+					}
+					response = dispatchPrivateRPCForTest(t, server, rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("7"), Method: "tools/call", Params: params})
+				}
+
+				providerCalls := codeGraph.calls + fabric.calls
+				if tt.mismatch {
+					if providerCalls != 0 {
+						t.Fatalf("mismatched project invoked provider %d times", providerCalls)
+					}
+					if got := privateRPCErrorText(t, response); !strings.Contains(got, "resolved project mismatch") {
+						t.Fatalf("mismatched project error = %q, want resolved project mismatch", got)
+					}
+					return
+				}
+				if providerCalls != 1 {
+					t.Fatalf("valid project invoked provider %d times, want one", providerCalls)
+				}
+				if codeGraph.calls == 1 && codeGraph.binding != binding {
+					t.Fatalf("Code Graph binding = %+v, want exact %+v", codeGraph.binding, binding)
+				}
+				if fabric.calls == 1 && fabric.binding != binding {
+					t.Fatalf("Fabric binding = %+v, want exact %+v", fabric.binding, binding)
+				}
+			})
+		}
+	}
+}
+
+func dispatchPrivateRPCForTest(t *testing.T, server *Server, request rpcRequest) rpcResponse {
+	t.Helper()
+	gateway, client := net.Pipe()
+	defer client.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer gateway.Close()
+		server.dispatchMCPMessage(context.Background(), &mcpSession{initialized: true}, gateway, server.registry, request)
+	}()
+	line, err := bufio.NewReader(client).ReadBytes('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	var response rpcResponse
+	if err := json.Unmarshal(bytes.TrimSpace(line), &response); err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
+func privateRPCErrorText(t *testing.T, response rpcResponse) string {
+	t.Helper()
+	if response.Error != nil {
+		return response.Error.Message
+	}
+	var result toolCallResult
+	if err := json.Unmarshal(response.Result, &result); err != nil {
+		t.Fatalf("decode tool response: %v", err)
+	}
+	if !result.IsError || len(result.Content) != 1 {
+		t.Fatalf("response = %+v, want one error result", response)
+	}
+	return result.Content[0].Text
+}
+
+func pointerTo(value string) *string { return &value }
 
 func TestSupervisorSchemaV6ReopensExactlyAndRefusesChangedLedger(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "gateway.db")
