@@ -170,7 +170,7 @@ func newLocalRegistry(s *Server) *localRegistry {
 	// special-cased in handleToolsCall because event delivery happens as
 	// server-initiated MCP notifications after the initial ack, not a
 	// single (result, error) return (design doc §1 tools/call, §5).
-	reg("wormhole.channel.subscribe", "Subscribe to events on this connection; matching events are delivered as notifications/wormhole.event messages until the subscription ends.", channelSubscribeArgs{}, "", singleResult(localSubscriptionResult{}), nil)
+	reg("wormhole.channel.subscribe", "Subscribe this connection to all future events in its resolved local workspace; events are delivered as notifications/wormhole.event messages until the subscription ends.", channelSubscribeArgs{}, "", singleResult(localSubscriptionResult{}), nil)
 
 	reg("wormhole.kb.list", "List KB articles in the local knowledge base replica.", kbListArgs{}, "", singleResult(localArticleListResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localListArticles(ctx, args)
@@ -315,11 +315,7 @@ type channelPostArgs struct {
 	Note      string          `json:"note,omitempty"`
 }
 
-type channelSubscribeArgs struct {
-	EventType  string `json:"event_type,omitempty"`
-	Capability string `json:"capability,omitempty"`
-	AgentID    string `json:"agent_id,omitempty"`
-}
+type channelSubscribeArgs struct{}
 
 type kbListArgs struct{}
 
@@ -503,9 +499,6 @@ type localEventWriteResult struct {
 type localSubscriptionResult struct {
 	SubscriptionID string `json:"subscription_id"`
 	Namespace      string `json:"namespace"`
-	EventType      string `json:"event_type"`
-	Capability     string `json:"capability"`
-	AgentID        string `json:"agent_id"`
 }
 
 type localArticleResult struct {
@@ -1000,7 +993,7 @@ func (s *Server) authorizeRecoverySurface(toolName string, args json.RawMessage)
 // handleChannelSubscribeMCP creates an eventbus subscription for the
 // caller's connection, returns an ack synchronously (mirroring the old
 // handleChannelSubscribe's first write), then spawns a goroutine that
-// delivers matching events as notifications/wormhole.event messages until
+// delivers subscribed events as notifications/wormhole.event messages until
 // the subscription ends, ctx is cancelled (server shutdown), or a write to
 // conn fails (client disconnected — unsubscribe to release the eventbus's
 // subscriber-map entry rather than leak the goroutine). This is the "option
@@ -1063,9 +1056,6 @@ func (s *Server) handleChannelSubscribeMCP(ctx context.Context, sess *mcpSession
 	return map[string]string{
 		"subscription_id": sub.ID,
 		"namespace":       ns,
-		"event_type":      et,
-		"capability":      capability,
-		"agent_id":        agentID,
 	}, nil
 }
 

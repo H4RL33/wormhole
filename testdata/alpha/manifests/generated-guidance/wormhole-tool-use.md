@@ -167,8 +167,8 @@ If the semantic provider or active index is unavailable, there is no lexical fal
 
 ## `wormhole.channel.subscribe`
 
-- Purpose: Subscribe this MCP connection to matching event notifications.
-- Use when: When subsequent local events are needed during the active session.
+- Purpose: Subscribe this MCP connection to all future event notifications in its resolved workspace.
+- Use when: When subsequent events from the exact local workspace are needed during the active session.
 - Do not use when: Do not use it to recover historical events or create durable shared state.
 - Mutates state: true
 - Required permissions: none
@@ -177,7 +177,7 @@ If the semantic provider or active index is unavailable, there is no lexical fal
 - Source-access implications: This tool does not read or return repository source.
 - Recommended follow-up: Keep the connection open and use channel.events for prior context.
 - Minimal request example: `{"project_id":"example"}`
-- Live request schema: `{"properties":{"agent_id":{"type":"string"},"capability":{"type":"string"},"event_type":{"type":"string"},"project_id":{"type":"string"}},"required":["project_id"],"type":"object"}`
+- Live request schema: `{"properties":{"project_id":{"type":"string"}},"required":["project_id"],"type":"object"}`
 - Misuse warning: Do not assume a subscription survives reconnects or provides a complete audit stream.
 
 ## `wormhole.code_graph.query`

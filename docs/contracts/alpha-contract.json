@@ -5434,24 +5434,6 @@
               "type": "object",
               "properties": [
                 {
-                  "name": "agent_id",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "capability",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "event_type",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
                   "name": "project_id",
                   "schema": {
                     "type": "string"
@@ -5471,24 +5453,6 @@
               "type": "object",
               "properties": [
                 {
-                  "name": "agent_id",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "capability",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "event_type",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
                   "name": "namespace",
                   "schema": {
                     "type": "string"
@@ -5502,9 +5466,6 @@
                 }
               ],
               "required": [
-                "agent_id",
-                "capability",
-                "event_type",
                 "namespace",
                 "subscription_id"
               ]

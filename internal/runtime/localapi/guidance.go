@@ -522,8 +522,8 @@ func gatewayGuidanceText() map[string]guidanceText {
 			MisuseWarning:            "Do not put secrets, source copies, or unsupported event types in the payload.",
 		},
 		"wormhole.channel.subscribe": {
-			Purpose:                  "Subscribe this MCP connection to matching event notifications.",
-			UseWhen:                  "When subsequent local events are needed during the active session.",
+			Purpose:                  "Subscribe this MCP connection to all future event notifications in its resolved workspace.",
+			UseWhen:                  "When subsequent events from the exact local workspace are needed during the active session.",
 			DoNotUseWhen:             "Do not use it to recover historical events or create durable shared state.",
 			MutatesState:             true,
 			Prerequisites:            "An initialized MCP connection and a bound project.",

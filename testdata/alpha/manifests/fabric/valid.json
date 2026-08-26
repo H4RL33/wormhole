@@ -5,8 +5,8 @@
   "project_id": "e724dd25-5bc9-40db-bcad-0b21716d1ca4",
   "source": "fabric",
   "created_at": "2026-07-26T12:00:00Z",
-  "tool_contract_digest": "sha256:ff8fc1108b61ad1886760280adc70d23b78f4cbe879be07efe682a53643dedb1",
-  "manifest_digest": "sha256:f0889615fff3d3dfe3cd5a21f7974cec55121641c2e0fd970d6e53758b426c66",
+  "tool_contract_digest": "sha256:1923b859af824ff18c2d70fcf2acaf2a980e2b84867b77c8339ef1897e97ffc1",
+  "manifest_digest": "sha256:efdc4b0210f3e3e69a696fa468b8fda2ebe4e2db7a6466aec4fb4165a7d627d4",
   "role_filters": ["contributor"],
   "entries": [
     {

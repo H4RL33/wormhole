@@ -25,12 +25,6 @@ func TestConfiguredPrivateRuntimeKeepsTargetAgentOperationsUsableAndWorkspaceSco
 	server := privateDispatchTestServer(t, privateRoutingTestActor("00000000-0000-4000-8000-000000000021"), first, second)
 	targetA := "00000000-0000-4000-8000-000000000031"
 	targetB := "00000000-0000-4000-8000-000000000032"
-	for _, binding := range []types.WorkspaceBinding{first, second} {
-		who := privateDispatchSuccess(t, server, binding, "wormhole.agent.whoami", nil, nil)
-		if who["project_id"] != binding.Scope.ProjectID {
-			t.Fatalf("sibling whoami project = %v, want %s", who["project_id"], binding.Scope.ProjectID)
-		}
-	}
 
 	privateDispatchSuccess(t, server, first, "wormhole.agent.register", map[string]any{"agent_id": targetA, "capabilities": []string{"review"}}, nil)
 	privateDispatchSuccess(t, server, second, "wormhole.agent.register", map[string]any{"agent_id": targetB, "capabilities": []string{"code"}}, nil)
@@ -63,7 +57,7 @@ func TestConfiguredPrivateRuntimeKeepsTargetAgentOperationsUsableAndWorkspaceSco
 	}
 }
 
-func TestConfiguredAttributionSchemasExcludeCallerAgentButTargetOperationsRetainIt(t *testing.T) {
+func TestConfiguredPublicSchemasExposeOnlySupportedAgentTargetsAndNamespaceOnlySubscription(t *testing.T) {
 	registry := newLocalRegistry(&Server{})
 	for _, name := range []string{"wormhole.channel.post", "wormhole.kb.write"} {
 		tool, _ := registry.Get(name)
@@ -75,7 +69,7 @@ func TestConfiguredAttributionSchemasExcludeCallerAgentButTargetOperationsRetain
 			t.Fatalf("%s still exposes caller-owned attribution: %s", name, raw)
 		}
 	}
-	for _, name := range []string{"wormhole.agent.register", "wormhole.agent.presence", "wormhole.channel.subscribe"} {
+	for _, name := range []string{"wormhole.agent.register", "wormhole.agent.presence"} {
 		tool, _ := registry.Get(name)
 		raw, err := json.Marshal(buildInputSchema(tool))
 		if err != nil {
@@ -83,6 +77,25 @@ func TestConfiguredAttributionSchemasExcludeCallerAgentButTargetOperationsRetain
 		}
 		if !strings.Contains(string(raw), `"agent_id"`) {
 			t.Fatalf("%s lost legitimate target agent_id: %s", name, raw)
+		}
+	}
+	subscription, _ := registry.Get("wormhole.channel.subscribe")
+	raw, err := json.Marshal(buildInputSchema(subscription))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, unsupported := range []string{"agent_id", "capability", "event_type"} {
+		if strings.Contains(string(raw), `"`+unsupported+`"`) {
+			t.Errorf("channel.subscribe exposes unsupported filter %s: %s", unsupported, raw)
+		}
+	}
+	response, err := json.Marshal(subscription.ResultExamples["default"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, unsupported := range []string{"agent_id", "capability", "event_type"} {
+		if strings.Contains(string(response), `"`+unsupported+`"`) {
+			t.Errorf("channel.subscribe response exposes unsupported filter %s: %s", unsupported, response)
 		}
 	}
 }
@@ -160,6 +173,11 @@ func TestConfiguredChannelSubscriptionUsesOnlyResolvedWorkspaceNamespace(t *test
 	if ack["namespace"] != string(first.Scope.WorkspaceID) {
 		t.Fatalf("subscription namespace = %v, want %s", ack["namespace"], first.Scope.WorkspaceID)
 	}
+	for _, unsupported := range []string{"agent_id", "capability", "event_type"} {
+		if _, exposed := ack[unsupported]; exposed {
+			t.Errorf("namespace-only subscription ack exposes unsupported filter %s: %#v", unsupported, ack)
+		}
+	}
 
 	server.eventbus.Publish(context.Background(), string(second.Scope.WorkspaceID), "presence.online", "", "", []byte(`{"workspace":"second"}`))
 	if err := client.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
@@ -184,11 +202,14 @@ func TestConfiguredChannelSubscriptionUsesOnlyResolvedWorkspaceNamespace(t *test
 	}
 }
 
-func TestConfiguredWhoAmIDispatchUsesResolvedProjectAcrossProjects(t *testing.T) {
+func TestConfiguredWhoAmIFailsClosedWithoutTransportOrCredentialAttribution(t *testing.T) {
 	ambientProject := "00000000-0000-4000-8000-000000000001"
 	resolvedProject := "00000000-0000-4000-8000-000000000002"
 	binding := privateRoutingTestBinding(t, t.TempDir(), resolvedProject, "00000000-0000-4000-8000-000000000012")
-	server := privateDispatchTestServer(t, privateRoutingTestActor("00000000-0000-4000-8000-000000000021"), binding)
+	actorID := "00000000-0000-4000-8000-000000000021"
+	server := privateDispatchTestServer(t, privateRoutingTestActor(actorID), binding)
+	transport := &privateDispatchCountingTransport{}
+	server.httpClient = &http.Client{Transport: transport}
 	server.projectID = ambientProject
 	server.isMultiOrg = true
 	server.orgs = map[string]runtimeconfig.Org{
@@ -203,9 +224,15 @@ func TestConfiguredWhoAmIDispatchUsesResolvedProjectAcrossProjects(t *testing.T)
 		t.Fatal(err)
 	}
 
-	who := privateDispatchSuccess(t, server, binding, "wormhole.agent.whoami", nil, nil)
-	if who["project_id"] != resolvedProject || who["agent_id"] != "resolved-agent" {
-		t.Fatalf("whoami = %#v, want resolved project %s", who, resolvedProject)
+	result := privateDispatchResult(t, server, binding, "wormhole.agent.whoami", nil, nil)
+	if !result.IsError || !strings.Contains(result.Content[0].Text, "binding-aware provider unavailable") {
+		t.Errorf("configured whoami = %+v, want binding-aware provider unavailable", result)
+	}
+	if transport.calls != 0 {
+		t.Errorf("configured whoami made %d transport calls, want zero", transport.calls)
+	}
+	if strings.Contains(result.Content[0].Text, "resolved-agent") || strings.Contains(result.Content[0].Text, actorID) {
+		t.Errorf("configured whoami attributed an identity through incompatible contract: %+v", result)
 	}
 }
 
@@ -213,7 +240,7 @@ func TestConfiguredPrivateRuntimeFailsEveryUnscopedRealHandlerClosedRegistryWide
 	first, second := privateDispatchSiblingBindings(t)
 	server := privateDispatchTestServer(t, privateRoutingTestActor("00000000-0000-4000-8000-000000000021"), first, second)
 	allowed := map[string]bool{
-		"wormhole.agent.whoami": true, "wormhole.agent.register": true, "wormhole.agent.presence": true, "wormhole.agent.list": true,
+		"wormhole.agent.register": true, "wormhole.agent.presence": true, "wormhole.agent.list": true,
 		"wormhole.channel.list": true, "wormhole.channel.create": true, "wormhole.channel.events": true, "wormhole.channel.post": true, "wormhole.channel.subscribe": true,
 		"wormhole.kb.list": true, "wormhole.kb.get": true, "wormhole.kb.write": true,
 	}
@@ -293,6 +320,15 @@ func privateDispatchTestServer(t *testing.T, actor types.ActorEnvelope, bindings
 type privateDispatchRejectTransport struct{}
 
 func (privateDispatchRejectTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("network disabled in private dispatch test")
+}
+
+type privateDispatchCountingTransport struct {
+	calls int
+}
+
+func (t *privateDispatchCountingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	t.calls++
 	return nil, fmt.Errorf("network disabled in private dispatch test")
 }
 
