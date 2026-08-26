@@ -918,8 +918,7 @@ func (s *Server) handleToolsCall(ctx context.Context, sess *mcpSession, conn net
 	}
 	callCtx := ctx
 	callArguments := params.Arguments
-	// Legacy constructors remain only until Task 3 replaces them. A configured
-	// Stage-2 runtime has no unscoped fallback: every tool call must carry the
+	// A configured Stage-2 runtime has no unscoped fallback: every tool call must carry the
 	// bridge-only cwd and receives only Gateway-owned scope/actor authority.
 	if s.privateRuntimeConfigured() {
 		var publicArguments json.RawMessage

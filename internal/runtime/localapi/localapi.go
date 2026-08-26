@@ -115,8 +115,6 @@ type connectionState struct {
 }
 
 // SyncStatusProvider supplies one project's runtime-owned connection state.
-// syncGroup implements it in gatewayd; the interface keeps localapi unaware
-// of process wiring details.
 type SyncStatusProvider interface {
 	Status(context.Context, string) (syncpkg.Status, error)
 }
@@ -126,14 +124,16 @@ type SyncStatusProvider interface {
 // P3 adds eventbus, scheduler, and subscription support.
 // P5 adds multi-org support (RFC-0003 §7.1, §8.1).
 type Server struct {
-	listener      net.Listener
-	socketPath    string
-	httpClient    *http.Client
-	version       string
-	projectState  *projectstate.Service
-	actorResolver LocalActorResolver
-	identityStore *localidentity.Store
-	clock         func() time.Time
+	listener          net.Listener
+	socketPath        string
+	httpClient        *http.Client
+	version           string
+	projectState      *projectstate.Service
+	actorResolver     LocalActorResolver
+	identityStore     *localidentity.Store
+	fabricRouter      FabricRouter
+	codeGraphProvider CodeGraphProvider
+	clock             func() time.Time
 
 	// Single-org mode (P1-P4 backward compatibility)
 	coordServer string
@@ -342,101 +342,6 @@ func (s *Server) SetEnrolmentRuntime(source EnrolmentPolicySource, credentialsDi
 	s.enrolmentPolicy = source
 	s.credentialsDir = credentialsDir
 	s.writeCredentialProfile = config.WriteCredentialProfile
-}
-
-// New binds the Unix domain socket at socketPath. Callers must call Serve
-// to start accepting connections, and Close to release the socket.
-// Single-org mode (P1-P4).
-func New(socketPath, coordServerURL, token, projectID string, store *localstore.Store, tr *localstore.TaskRepo, er *localstore.EventRepo, kb *localstore.KBRepo, qr *syncpkg.QueueRepo) (*Server, error) {
-	ln, err := listenLocalSocket(socketPath)
-	if err != nil {
-		return nil, fmt.Errorf("localapi: listen on %s: %w", socketPath, err)
-	}
-	srv := &Server{
-		listener:    ln,
-		socketPath:  socketPath,
-		httpClient:  &http.Client{Timeout: 10 * time.Second},
-		coordServer: coordServerURL,
-		token:       token,
-		projectID:   projectID,
-		isMultiOrg:  false,
-		store:       store,
-		tr:          tr,
-		er:          er,
-		kb:          kb,
-		gr:          localstore.NewGitRepo(store.DB()),
-		qr:          qr,
-		handlers:    make(chan struct{}, maxActiveConnections),
-		serveReady:  make(chan struct{}),
-	}
-	srv.registry = newLocalRegistry(srv)
-	return srv, nil
-}
-
-// NewWithRuntime binds the Unix domain socket at socketPath and wires eventbus
-// + scheduler (P3). Callers must call Serve to start accepting connections,
-// and Close to release the socket.
-// The socket is restricted to the owning user immediately after listen.
-func NewWithRuntime(socketPath, coordServerURL, token, projectID string, store *localstore.Store, tr *localstore.TaskRepo, er *localstore.EventRepo, kb *localstore.KBRepo, eb *eventbus.EventBus, sched *scheduler.Scheduler, qr *syncpkg.QueueRepo) (*Server, error) {
-	ln, err := listenLocalSocket(socketPath)
-	if err != nil {
-		return nil, fmt.Errorf("localapi: listen on %s: %w", socketPath, err)
-	}
-	srv := &Server{
-		listener:    ln,
-		socketPath:  socketPath,
-		httpClient:  &http.Client{Timeout: 10 * time.Second},
-		coordServer: coordServerURL,
-		token:       token,
-		projectID:   projectID,
-		isMultiOrg:  false,
-		store:       store,
-		tr:          tr,
-		er:          er,
-		kb:          kb,
-		gr:          localstore.NewGitRepo(store.DB()),
-		qr:          qr,
-		eventbus:    eb,
-		scheduler:   sched,
-		handlers:    make(chan struct{}, maxActiveConnections),
-		serveReady:  make(chan struct{}),
-	}
-	srv.registry = newLocalRegistry(srv)
-	return srv, nil
-}
-
-// NewMultiOrg binds the Unix domain socket and configures multi-org support (P5+, RFC-0003 §7.1).
-// Orgs is a map of org_name → Org credentials. Bindings map project contexts to org names.
-// Callers must call Serve to start accepting connections, and Close to release the socket.
-// The socket is restricted to the owning user immediately after listen.
-func NewMultiOrg(socketPath string, orgs map[string]config.Org, bindings []config.ProjectBinding, store *localstore.Store, tr *localstore.TaskRepo, er *localstore.EventRepo, kb *localstore.KBRepo, eb *eventbus.EventBus, sched *scheduler.Scheduler, qr *syncpkg.QueueRepo) (*Server, error) {
-	if len(orgs) == 0 {
-		return nil, fmt.Errorf("localapi: NewMultiOrg: no orgs provided")
-	}
-	ln, err := listenLocalSocket(socketPath)
-	if err != nil {
-		return nil, fmt.Errorf("localapi: listen on %s: %w", socketPath, err)
-	}
-	srv := &Server{
-		listener:   ln,
-		socketPath: socketPath,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
-		orgs:       orgs,
-		bindings:   bindings,
-		isMultiOrg: true,
-		store:      store,
-		tr:         tr,
-		er:         er,
-		kb:         kb,
-		gr:         localstore.NewGitRepo(store.DB()),
-		qr:         qr,
-		eventbus:   eb,
-		scheduler:  sched,
-		handlers:   make(chan struct{}, maxActiveConnections),
-		serveReady: make(chan struct{}),
-	}
-	srv.registry = newLocalRegistry(srv)
-	return srv, nil
 }
 
 func listenLocalSocket(socketPath string) (net.Listener, error) {
@@ -1610,12 +1515,10 @@ func (s *Server) handleTaskRoute(ctx context.Context, args json.RawMessage) (map
 
 // =============================================================================
 // Local write tools — task.create, kb.write, channel.post. Each writes the
-// entity to the local SQLite replica, then enqueues it on the outbound sync
-// queue (RFC-0003 §8.2) so the sync engine pushes it to the Coordination
-// Server on its next cycle. Legacy constructors retain their project
-// namespace. The configured private runtime derives the exact local namespace
-// from ResolvedBinding; caller namespace claims are rejected before these
-// handlers run.
+// entity to the local SQLite replica, then records durable outbound intent.
+// The configured private runtime derives the exact local namespace from
+// ResolvedBinding; caller namespace claims are rejected before these handlers
+// run.
 // =============================================================================
 
 // handleTaskCreate serves wormhole.task.create: creates a task locally and
@@ -1839,7 +1742,7 @@ func (s *Server) handleGitLinkCommit(ctx context.Context, args json.RawMessage) 
 //	"frontmatter": {...} (optional)}
 //
 // namespace_id is never accepted from the request. The configured path uses
-// the resolved workspace; legacy constructors retain their project namespace.
+// the resolved workspace.
 func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
 	if s.qr == nil {
 		return nil, fmt.Errorf("localapi: kb write: sync queue not available")
@@ -1933,7 +1836,7 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 //	"payload": {...} (optional), "note": "..." (optional)}
 //
 // namespace_id is never accepted from the request. The configured path uses
-// the resolved workspace; legacy constructors retain their project namespace.
+// the resolved workspace.
 func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
 	if s.qr == nil {
 		return nil, fmt.Errorf("localapi: channel post: sync queue not available")

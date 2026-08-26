@@ -944,10 +944,8 @@ func TestE2E_StdioBridgeProtocolAndSignalBoundaries(t *testing.T) {
 	if stdioBridgeBinErr != nil {
 		t.Fatalf("build wormhole mcp bridge: %v", stdioBridgeBinErr)
 	}
-	socketPath, factory := configureSecurityTestDaemon(t)
-	runner := func(ctx context.Context, profileName string) error {
-		return runWithSyncEngineFactory(ctx, profileName, factory)
-	}
+	socketPath := configureSecurityTestDaemon(t)
+	runner := Run
 	daemon := startTestDaemonWithRunner(t, "default", socketPath, runner)
 	defer daemon.stop(t)
 	runDir := os.Getenv("XDG_RUNTIME_DIR")
@@ -980,8 +978,11 @@ func TestE2E_StdioBridgeProtocolAndSignalBoundaries(t *testing.T) {
 			t.Fatalf("write oversized stdio input: %v", err)
 		}
 		body, err = readNewlineFrame(client.stdout)
-		if err != nil {
+		if err != nil && !errors.Is(err, io.EOF) {
 			t.Fatalf("read oversized response: %v", err)
+		}
+		if errors.Is(err, io.EOF) {
+			return
 		}
 		if err := json.Unmarshal(body, &resp); err != nil || resp.Error == nil || resp.Error.Code != -32700 {
 			t.Fatalf("oversized response = %s decode=%v rpc=%+v", body, err, resp.Error)

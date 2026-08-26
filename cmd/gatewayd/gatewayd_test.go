@@ -14,43 +14,38 @@ import (
 	"path/filepath"
 	"strings"
 	stdsync "sync"
-	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
-	"github.com/H4RL33/wormhole/internal/runtime/config"
 	"github.com/H4RL33/wormhole/internal/runtime/localapi"
+	"github.com/H4RL33/wormhole/internal/runtime/localidentity"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
-	runtimesync "github.com/H4RL33/wormhole/internal/runtime/sync"
 	"github.com/H4RL33/wormhole/internal/types"
 )
 
-func TestWireCodeGraphRuntimesIsolatesReadyRecoveryAndUnavailableProjects(t *testing.T) {
+func TestSupervisorDependenciesConstructLocalOnlyGraph(t *testing.T) {
 	store, err := localstore.Open(filepath.Join(t.TempDir(), "gateway.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	er := localstore.NewEventRepo(store.DB())
-	srv, err := localapi.New(filepath.Join(t.TempDir(), "gateway.sock"), "", "", "project-a", store, localstore.NewTaskRepo(store.DB(), er), er, localstore.NewKBRepo(store.DB()), nil)
+	defer store.Close()
+	identity, err := localidentity.Open(filepath.Join(t.TempDir(), "identities"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = srv.Close() })
-	ready := wireCodeGraphRuntimes(context.Background(), srv, []string{"project-a", "project-b", "project-a"}, nil)
-	if len(ready) != 2 || ready["project-a"] != nil || ready["project-b"] != nil {
-		t.Fatalf("ready wiring outcomes = %+v, want one successful runtime per unique project", ready)
-	}
-	recovery := wireCodeGraphRuntimes(context.Background(), srv, []string{"project-ready", "project-recovery"}, map[string]bool{"project-recovery": true})
-	if recovery["project-ready"] != nil || !errors.Is(recovery["project-recovery"], errCodeGraphRecoveryOnly) {
-		t.Fatalf("recovery wiring outcomes = %+v", recovery)
-	}
-	if err := store.Close(); err != nil {
+	supervisor, err := newLocalSupervisor(store, identity)
+	if err != nil {
 		t.Fatal(err)
 	}
-	unavailable := wireCodeGraphRuntimes(context.Background(), srv, []string{"project-unavailable"}, nil)
-	if unavailable["project-unavailable"] == nil {
-		t.Fatalf("closed derivative store unexpectedly wired: %+v", unavailable)
+	if err := supervisor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().PingContext(context.Background()); err != nil {
+		t.Fatalf("supervisor took ownership of injected Store: %v", err)
+	}
+	if _, err := newLocalSupervisor(nil, identity); err == nil {
+		t.Fatal("incomplete production graph accepted")
 	}
 }
 
@@ -70,7 +65,7 @@ func gatewayTestBootstrapOutput(projectID, agentID, passportID string) map[strin
 	return map[string]any{"org_config": org, "project_list": []string{}, "task_list": org.Tasks, "kb_list": org.KB.Articles, "timestamp": now.Format(time.RFC3339Nano), "version": 1}
 }
 
-func TestRun_FreshGatewayExposesPreCredentialEnrolmentEndpoint(t *testing.T) {
+func TestRun_FreshSupervisorRequiresBindingContext(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	runDir := filepath.Join(home, "run")
@@ -79,7 +74,7 @@ func TestRun_FreshGatewayExposesPreCredentialEnrolmentEndpoint(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
-	go func() { errCh <- runWithSyncEngineFactory(ctx, "default", nil) }()
+	go func() { errCh <- Run(ctx, "default") }()
 
 	socketPath := filepath.Join(runDir, "wormhole", "wormholed.sock")
 	var conn net.Conn
@@ -105,9 +100,9 @@ func TestRun_FreshGatewayExposesPreCredentialEnrolmentEndpoint(t *testing.T) {
 	reader := bufio.NewReader(conn)
 	mcpInitialize(t, conn, reader)
 	resp := mcpCallTool(t, conn, reader, 2, localapi.EnrolmentToolName, map[string]interface{}{})
-	if !strings.Contains(resp.Error, "enrolment policy unavailable") {
+	if !strings.Contains(resp.Error, "invalid private request context") {
 		cancel()
-		t.Fatalf("fresh Gateway enrolment endpoint error = %q, want deny-closed policy error", resp.Error)
+		t.Fatalf("fresh Gateway enrolment endpoint error = %q, want binding-aware fail-closed error", resp.Error)
 	}
 
 	cancel()
@@ -168,7 +163,7 @@ type runningTestDaemon struct {
 	stopOnce stdsync.Once
 }
 
-func configureSecurityTestDaemon(t *testing.T) (string, syncEngineFactory) {
+func configureSecurityTestDaemon(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -188,15 +183,11 @@ func configureSecurityTestDaemon(t *testing.T) (string, syncEngineFactory) {
 	if err := os.WriteFile(filepath.Join(credDir, "default.json"), credData, 0o600); err != nil {
 		t.Fatalf("write credentials: %v", err)
 	}
-	events := []string{}
-	factory := func(string, string, string, *runtimesync.QueueRepo, *runtimesync.AuditRepo, *localstore.TaskRepo, *localstore.KBRepo, runtimesync.Config) (syncEngine, error) {
-		return &fakeGroupEngine{name: "security-test", events: &events}, nil
-	}
-	return filepath.Join(runDir, "wormhole", "wormholed.sock"), factory
+	return filepath.Join(runDir, "wormhole", "wormholed.sock")
 }
 
 func TestRun_StalePathSocketReplaced(t *testing.T) {
-	socketPath, factory := configureSecurityTestDaemon(t)
+	socketPath := configureSecurityTestDaemon(t)
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
 		t.Fatalf("create socket directory: %v", err)
 	}
@@ -213,9 +204,7 @@ func TestRun_StalePathSocketReplaced(t *testing.T) {
 		t.Fatalf("close stale socket: %v", err)
 	}
 
-	runner := func(ctx context.Context, profileName string) error {
-		return runWithSyncEngineFactory(ctx, profileName, factory)
-	}
+	runner := Run
 	daemon := startTestDaemonWithRunner(t, "default", socketPath, runner)
 	info, err := os.Lstat(socketPath)
 	if err != nil {
@@ -228,7 +217,7 @@ func TestRun_StalePathSocketReplaced(t *testing.T) {
 }
 
 func TestRun_StalePathRegularFileRejectedWithoutRemoval(t *testing.T) {
-	socketPath, factory := configureSecurityTestDaemon(t)
+	socketPath := configureSecurityTestDaemon(t)
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
 		t.Fatalf("create socket directory: %v", err)
 	}
@@ -240,7 +229,7 @@ func TestRun_StalePathRegularFileRejectedWithoutRemoval(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
-	go func() { errCh <- runWithSyncEngineFactory(ctx, "default", factory) }()
+	go func() { errCh <- Run(ctx, "default") }()
 	select {
 	case err := <-errCh:
 		if err == nil || !strings.Contains(err.Error(), "not a socket") {
@@ -798,333 +787,13 @@ func (s *isolatedCoordServer) snapshot() ([]string, []string, []isolatedPush) {
 	return append([]string(nil), s.tokens...), append([]string(nil), s.tools...), append([]isolatedPush(nil), s.pushes...)
 }
 
-type fakeGroupEngine struct {
-	name         string
-	bootstrapErr error
-	events       *[]string
-	startCalls   int
-	stopCalls    int
-}
-
-func (e *fakeGroupEngine) Bootstrap(context.Context) error {
-	*e.events = append(*e.events, "bootstrap "+e.name)
-	return e.bootstrapErr
-}
-
-func (e *fakeGroupEngine) Start(context.Context) {
-	e.startCalls++
-	*e.events = append(*e.events, "start "+e.name)
-}
-
-func (e *fakeGroupEngine) Stop() {
-	e.stopCalls++
-	*e.events = append(*e.events, "stop "+e.name)
-}
-
-func TestSyncGroupRestartDoesNotBootstrap(t *testing.T) {
-	events := []string{}
-	first := &fakeGroupEngine{name: "first", events: &events}
-	second := &fakeGroupEngine{name: "second", events: &events, bootstrapErr: fmt.Errorf("bootstrap failed")}
-	third := &fakeGroupEngine{name: "third", events: &events}
-	group := &syncGroup{engines: []syncEngine{first, second, third}}
-
-	if err := group.Start(context.Background()); err != nil {
-		t.Fatalf("syncGroup.Start: %v", err)
-	}
-	want := []string{"start first", "start second", "start third"}
-	if fmt.Sprint(events) != fmt.Sprint(want) {
-		t.Fatalf("lifecycle events = %v, want %v", events, want)
-	}
-	if first.startCalls != 1 || second.startCalls != 1 || third.startCalls != 1 {
-		t.Fatalf("start calls = (%d, %d, %d), want each engine started once", first.startCalls, second.startCalls, third.startCalls)
-	}
-}
-
-func TestSyncGroupStartsEveryReadyEngineWithoutBootstrap(t *testing.T) {
-	events := []string{}
-	first := &fakeGroupEngine{name: "first", events: &events}
-	second := &fakeGroupEngine{name: "second", events: &events}
-	group := &syncGroup{engines: []syncEngine{first, second}}
-	if err := group.Start(context.Background()); err != nil {
-		t.Fatalf("syncGroup.Start: %v", err)
-	}
-	want := []string{"start first", "start second"}
-	if fmt.Sprint(events) != fmt.Sprint(want) {
-		t.Fatalf("lifecycle events = %v, want %v", events, want)
-	}
-}
-
-type blockingBootstrapEngine struct {
-	entered    chan struct{}
-	startCalls atomic.Int32
-	stopCalls  atomic.Int32
-}
-
-type acceptingBarrierEngine struct {
-	socketPath string
-	result     chan error
-}
-
-func (e *acceptingBarrierEngine) Bootstrap(context.Context) error { return nil }
-func (e *acceptingBarrierEngine) Stop()                           {}
-func (e *acceptingBarrierEngine) Start(context.Context) {
-	conn, err := net.DialTimeout("unix", e.socketPath, time.Second)
-	if err == nil {
-		defer conn.Close()
-		_ = conn.SetDeadline(time.Now().Add(time.Second))
-		request, _ := json.Marshal(mcpRpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "initialize", Params: json.RawMessage(`{}`)})
-		if _, err = conn.Write(append(request, '\n')); err == nil {
-			_, err = bufio.NewReader(conn).ReadBytes('\n')
-		}
-	}
-	e.result <- err
-}
-
-func TestServeWithSyncAcceptsMCPBeforeIncrementalStart(t *testing.T) {
-	store, err := localstore.Open(filepath.Join(t.TempDir(), "barrier.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	socketPath := filepath.Join(t.TempDir(), "gateway.sock")
-	events := localstore.NewEventRepo(store.DB())
-	server, err := localapi.New(socketPath, "", "", "project-1", store,
-		localstore.NewTaskRepo(store.DB(), events), events, localstore.NewKBRepo(store.DB()), runtimesync.NewQueueRepo(store.DB()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer server.Close()
-	engine := &acceptingBarrierEngine{socketPath: socketPath, result: make(chan error, 1)}
-	group := &syncGroup{engines: []syncEngine{engine}}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- serveWithSync(ctx, server, group) }()
-	if err := <-engine.result; err != nil {
-		cancel()
-		t.Fatalf("incremental Start ran before MCP accept loop was serving: %v", err)
-	}
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatalf("serveWithSync shutdown: %v", err)
-	}
-}
-
-type engineLifecycleCounts struct {
-	mu          stdsync.Mutex
-	constructed map[string]int
-	bootstraps  map[string]int
-	starts      map[string]int
-}
-
-func newEngineLifecycleCounts() *engineLifecycleCounts {
-	return &engineLifecycleCounts{
-		constructed: make(map[string]int), bootstraps: make(map[string]int), starts: make(map[string]int),
-	}
-}
-
-func (c *engineLifecycleCounts) increment(counter map[string]int, projectID string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	counter[projectID]++
-}
-
-func (c *engineLifecycleCounts) project(projectID string) (constructed, bootstraps, starts int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.constructed[projectID], c.bootstraps[projectID], c.starts[projectID]
-}
-
-type countingSyncEngine struct {
-	syncEngine
-	projectID string
-	counts    *engineLifecycleCounts
-}
-
-func (e *countingSyncEngine) ConfigureBootstrap(store *localstore.Store, agentID, passportID string, attempt *localstore.EnrolmentAttemptRecord) error {
-	configurable, ok := e.syncEngine.(bootstrapConfigurableSyncEngine)
-	if !ok {
-		return fmt.Errorf("wrapped engine does not support bootstrap configuration")
-	}
-	return configurable.ConfigureBootstrap(store, agentID, passportID, attempt)
-}
-
-func (e *countingSyncEngine) Bootstrap(ctx context.Context) error {
-	e.counts.increment(e.counts.bootstraps, e.projectID)
-	return e.syncEngine.Bootstrap(ctx)
-}
-
-func (e *countingSyncEngine) Start(ctx context.Context) {
-	e.counts.increment(e.counts.starts, e.projectID)
-	e.syncEngine.Start(ctx)
-}
-
-func (e *countingSyncEngine) Status(ctx context.Context) (runtimesync.Status, error) {
-	statusEngine, ok := e.syncEngine.(syncStatusEngine)
-	if !ok {
-		return runtimesync.Status{}, errors.New("wrapped engine does not expose status")
-	}
-	return statusEngine.Status(ctx)
-}
-
-func countingEngineFactory(counts *engineLifecycleCounts) syncEngineFactory {
-	return func(server, token, projectID string, queue *runtimesync.QueueRepo, audit *runtimesync.AuditRepo, tasks *localstore.TaskRepo, articles *localstore.KBRepo, cfg runtimesync.Config) (syncEngine, error) {
-		engine, err := runtimesync.New(server, token, projectID, queue, audit, tasks, articles, cfg)
-		if err != nil {
-			return nil, err
-		}
-		counts.increment(counts.constructed, projectID)
-		return &countingSyncEngine{syncEngine: engine, projectID: projectID, counts: counts}, nil
-	}
-}
-
-func (e *blockingBootstrapEngine) Bootstrap(ctx context.Context) error {
-	close(e.entered)
-	<-ctx.Done()
-	return ctx.Err()
-}
-
-func (e *blockingBootstrapEngine) Start(context.Context) { e.startCalls.Add(1) }
-func (e *blockingBootstrapEngine) Stop()                 { e.stopCalls.Add(1) }
-
-func TestSyncGroupStopAfterStartStopsEngineOnce(t *testing.T) {
-	engine := &blockingBootstrapEngine{entered: make(chan struct{})}
-	group := &syncGroup{engines: []syncEngine{engine}}
-	if err := group.Start(context.Background()); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	group.Stop()
-	if got := engine.startCalls.Load(); got != 1 {
-		t.Fatalf("Start calls = %d, want 1", got)
-	}
-	if got := engine.stopCalls.Load(); got != 1 {
-		t.Fatalf("Stop calls = %d, want 1", got)
-	}
-}
-
-func TestSyncGroupStopBeforeStartPreventsStart(t *testing.T) {
-	events := []string{}
-	engine := &fakeGroupEngine{name: "only", events: &events}
-	reached := make(chan struct{})
-	release := make(chan struct{})
-	group := &syncGroup{
-		engines: []syncEngine{engine},
-		testBeforeStart: func() {
-			close(reached)
-			<-release
-		},
-	}
-	errCh := make(chan error, 1)
-	go func() { errCh <- group.Start(context.Background()) }()
-	<-reached
-	group.Stop()
-	close(release)
-	if err := <-errCh; err == nil {
-		t.Fatal("Start returned nil after terminal Stop")
-	}
-	if engine.startCalls != 0 {
-		t.Fatalf("Start calls = %d, want 0", engine.startCalls)
-	}
-
-	if err := group.Start(context.Background()); err == nil {
-		t.Fatal("later Start returned nil after terminal Stop")
-	}
-	if engine.startCalls != 0 {
-		t.Fatalf("later Start calls = %d, want 0", engine.startCalls)
-	}
-}
-
-func TestSyncGroupStopIsIdempotent(t *testing.T) {
-	events := []string{}
-	first := &fakeGroupEngine{name: "first", events: &events}
-	second := &fakeGroupEngine{name: "second", events: &events}
-	group := &syncGroup{engines: []syncEngine{first, second}}
-	if err := group.Start(context.Background()); err != nil {
-		t.Fatalf("syncGroup.Start: %v", err)
-	}
-	group.Stop()
-	group.Stop()
-	if first.stopCalls != 1 || second.stopCalls != 1 {
-		t.Fatalf("stop calls = (%d, %d), want (1, 1)", first.stopCalls, second.stopCalls)
-	}
-}
-
-func TestSyncGroupStartAfterSuccessfulStopReturnsTerminalErrorWithoutWork(t *testing.T) {
-	events := []string{}
-	engine := &fakeGroupEngine{name: "only", events: &events}
-	group := &syncGroup{engines: []syncEngine{engine}}
-	if err := group.Start(context.Background()); err != nil {
-		t.Fatalf("initial Start: %v", err)
-	}
-	group.Stop()
-	eventsBefore := append([]string(nil), events...)
-	startCallsBefore := engine.startCalls
-
-	if err := group.Start(context.Background()); !errors.Is(err, errSyncGroupStopped) {
-		t.Fatalf("Start after Stop error = %v, want errSyncGroupStopped", err)
-	}
-	if engine.startCalls != startCallsBefore {
-		t.Fatalf("Start calls after terminal Start = %d, want unchanged %d", engine.startCalls, startCallsBefore)
-	}
-	if fmt.Sprint(events) != fmt.Sprint(eventsBefore) {
-		t.Fatalf("events after terminal Start = %v, want unchanged %v", events, eventsBefore)
-	}
-}
-
-func TestNewMultiOrgSyncGroupValidatesBindings(t *testing.T) {
-	store, err := localstore.Open(filepath.Join(t.TempDir(), "bindings.db"))
-	if err != nil {
-		t.Fatalf("open local store: %v", err)
-	}
-	defer store.Close()
-	queue := runtimesync.NewQueueRepo(store.DB())
-	audit := runtimesync.NewAuditRepo(store.DB())
-	taskRepo := localstore.NewTaskRepo(store.DB(), localstore.NewEventRepo(store.DB()))
-	kbRepo := localstore.NewKBRepo(store.DB())
-	orgs := map[string]config.Org{
-		"org-a": {Name: "org-a", Credentials: config.Credentials{Server: "https://a.example", ProjectID: "project-1", AgentID: "agent-a", PassportID: "passport-a", Token: "token-a"}},
-		"org-b": {Name: "org-b", Credentials: config.Credentials{Server: "https://b.example", ProjectID: "project-1", AgentID: "agent-b", PassportID: "passport-b", Token: "token-b"}},
-		"alias": {Name: "alias", Credentials: config.Credentials{Server: "https://a.example", ProjectID: "project-1", AgentID: "agent-a", PassportID: "passport-a", Token: "token-a"}},
-	}
-
-	tests := []struct {
-		name     string
-		bindings []config.ProjectBinding
-		wantErr  string
-		wantLen  int
-	}{
-		{name: "missing org", bindings: []config.ProjectBinding{{ProjectID: "project-1", OrgName: "missing"}}, wantErr: "not found"},
-		{name: "conflicting project", bindings: []config.ProjectBinding{{ProjectID: "project-1", OrgName: "org-a"}, {ProjectID: "project-1", OrgName: "org-b"}}, wantErr: "conflicting"},
-		{name: "identical tuple deduplicated", bindings: []config.ProjectBinding{{ProjectID: "project-1", OrgName: "org-a"}, {ProjectID: "project-1", OrgName: "alias"}}, wantLen: 1},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			group, err := newMultiOrgSyncGroup(orgs, tc.bindings, store, queue, audit, taskRepo, kbRepo, runtimesync.DefaultConfig(), defaultSyncEngineFactory)
-			if tc.wantErr != "" {
-				if err == nil || !bytes.Contains([]byte(err.Error()), []byte(tc.wantErr)) {
-					t.Fatalf("error = %v, want containing %q", err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("newMultiOrgSyncGroup: %v", err)
-			}
-			if len(group.engines) != tc.wantLen {
-				t.Fatalf("engine count = %d, want %d", len(group.engines), tc.wantLen)
-			}
-		})
-	}
-}
-
-// mcpInitialize sends initialize and notifications/initialized handshake.
 func mcpInitialize(t *testing.T, conn net.Conn, reader *bufio.Reader) {
 	t.Helper()
-
 	req := mcpRpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "initialize", Params: json.RawMessage(`{}`)}
 	reqRaw, _ := json.Marshal(req)
 	if _, err := conn.Write(append(reqRaw, '\n')); err != nil {
 		t.Fatalf("write initialize: %v", err)
 	}
-
 	line, err := reader.ReadBytes('\n')
 	if err != nil {
 		t.Fatalf("read initialize response: %v", err)
@@ -1136,35 +805,25 @@ func mcpInitialize(t *testing.T, conn net.Conn, reader *bufio.Reader) {
 	if resp.Error != nil {
 		t.Fatalf("initialize error: %+v", resp.Error)
 	}
-
-	notif := mcpRpcRequest{JSONRPC: "2.0", Method: "notifications/initialized"}
-	notifRaw, _ := json.Marshal(notif)
-	if _, err := conn.Write(append(notifRaw, '\n')); err != nil {
+	notification := mcpRpcRequest{JSONRPC: "2.0", Method: "notifications/initialized"}
+	notificationRaw, _ := json.Marshal(notification)
+	if _, err := conn.Write(append(notificationRaw, '\n')); err != nil {
 		t.Fatalf("write notifications/initialized: %v", err)
 	}
 }
 
-// mcpCallTool sends a tools/call request and returns the result.
 func mcpCallTool(t *testing.T, conn net.Conn, reader *bufio.Reader, id int, tool string, args map[string]interface{}) mcpToolResponse {
 	t.Helper()
-
-	var argsRaw json.RawMessage
+	argsRaw := json.RawMessage(`{}`)
 	if args != nil {
-		b, _ := json.Marshal(args)
-		argsRaw = b
-	} else {
-		argsRaw = json.RawMessage(`{}`)
+		argsRaw, _ = json.Marshal(args)
 	}
-
-	params := mcpToolsCallParams{Name: tool, Arguments: argsRaw}
-	paramsRaw, _ := json.Marshal(params)
+	paramsRaw, _ := json.Marshal(mcpToolsCallParams{Name: tool, Arguments: argsRaw})
 	idRaw, _ := json.Marshal(id)
-	req := mcpRpcRequest{JSONRPC: "2.0", ID: idRaw, Method: "tools/call", Params: paramsRaw}
-	reqRaw, _ := json.Marshal(req)
+	reqRaw, _ := json.Marshal(mcpRpcRequest{JSONRPC: "2.0", ID: idRaw, Method: "tools/call", Params: paramsRaw})
 	if _, err := conn.Write(append(reqRaw, '\n')); err != nil {
 		t.Fatalf("write tools/call: %v", err)
 	}
-
 	line, err := reader.ReadBytes('\n')
 	if err != nil {
 		t.Fatalf("read tools/call response: %v", err)
@@ -1176,25 +835,20 @@ func mcpCallTool(t *testing.T, conn net.Conn, reader *bufio.Reader, id int, tool
 	if resp.Error != nil {
 		return mcpToolResponse{Error: resp.Error.Message}
 	}
-
 	var result mcpToolCallResult
 	if err := json.Unmarshal(resp.Result, &result); err != nil {
 		t.Fatalf("decode tools/call result: %v", err)
 	}
-	if result.IsError {
-		text := ""
-		if len(result.Content) > 0 {
-			text = result.Content[0].Text
-		}
-		return mcpToolResponse{Error: text}
-	}
 	if len(result.Content) == 0 {
 		return mcpToolResponse{}
+	}
+	if result.IsError {
+		return mcpToolResponse{Error: result.Content[0].Text}
 	}
 	return mcpToolResponse{Result: json.RawMessage(result.Content[0].Text)}
 }
 
-func TestRun_EndToEndWhoAmI(t *testing.T) {
+func TestRun_WhoAmIBindingFailClosed(t *testing.T) {
 	coord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer test-token" {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -1265,17 +919,9 @@ func TestRun_EndToEndWhoAmI(t *testing.T) {
 	mcpInitialize(t, conn, reader)
 
 	resp := mcpCallTool(t, conn, reader, 2, "wormhole.agent.whoami", nil)
-	if resp.Error != "" {
+	if !strings.Contains(resp.Error, "invalid private request context") {
 		cancel()
-		t.Fatalf("got error: %s", resp.Error)
-	}
-	var out struct {
-		AgentID string `json:"agent_id"`
-	}
-	json.Unmarshal(resp.Result, &out)
-	if out.AgentID != "agent-1" {
-		cancel()
-		t.Fatalf("got agent_id %q, want agent-1", out.AgentID)
+		t.Fatalf("whoami error = %q, want binding-aware fail-closed error", resp.Error)
 	}
 
 	cancel()
@@ -1295,7 +941,7 @@ func TestRun_EndToEndWhoAmI(t *testing.T) {
 // sched/eb nil and makes wormhole.agent.register fail with "scheduler not
 // available" (internal/runtime/localapi/localapi.go:657-658). A single
 // credential profile should resolve to single-org NewWithRuntime wiring.
-func TestRun_AgentRegisterReachesSchedulerAndEventBus(t *testing.T) {
+func TestRun_AgentRegisterBindingFailClosed(t *testing.T) {
 	coord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req mcpRpcRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1351,9 +997,9 @@ func TestRun_AgentRegisterReachesSchedulerAndEventBus(t *testing.T) {
 		"agent_id":     "agent-1",
 		"capabilities": []string{"code"},
 	})
-	if resp.Error != "" {
+	if !strings.Contains(resp.Error, "invalid private request context") {
 		cancel()
-		t.Fatalf("wormhole.agent.register returned error: %s", resp.Error)
+		t.Fatalf("wormhole.agent.register error = %q, want binding-aware fail-closed error", resp.Error)
 	}
 
 	cancel()
@@ -1364,193 +1010,5 @@ func TestRun_AgentRegisterReachesSchedulerAndEventBus(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not shut down after context cancel")
-	}
-}
-
-func TestRun_MultiOrgSyncIsolation(t *testing.T) {
-	const (
-		projectA = "project-org-a"
-		projectB = "project-org-b"
-		tokenA   = "token-org-a"
-		tokenB   = "token-org-b"
-		titleA   = "only org A receives this task"
-		titleB   = "only org B receives this task"
-	)
-	coordA := newIsolatedCoordServer(t, tokenA)
-	coordB := newIsolatedCoordServer(t, tokenB)
-	engineCounts := newEngineLifecycleCounts()
-	runner := func(ctx context.Context, profileName string) error {
-		return runWithSyncEngineFactory(ctx, profileName, countingEngineFactory(engineCounts))
-	}
-
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	runDir := filepath.Join(home, "run")
-	t.Setenv("XDG_RUNTIME_DIR", runDir)
-	dataDir := filepath.Join(home, "data")
-	t.Setenv("XDG_DATA_HOME", dataDir)
-	credDir := filepath.Join(home, ".wormhole", "credentials")
-	if err := os.MkdirAll(credDir, 0o700); err != nil {
-		t.Fatalf("create credentials directory: %v", err)
-	}
-	for _, profile := range []struct {
-		name, server, project, token string
-	}{
-		{name: "org-a", server: coordA.server.URL, project: projectA, token: tokenA},
-		{name: "org-b", server: coordB.server.URL, project: projectB, token: tokenB},
-	} {
-		data, err := json.Marshal(map[string]string{
-			"server": profile.server, "project_id": profile.project,
-			"agent_id": "isolated-agent", "passport_id": "isolated-passport", "token": profile.token,
-		})
-		if err != nil {
-			t.Fatalf("marshal %s credentials: %v", profile.name, err)
-		}
-		if err := os.WriteFile(filepath.Join(credDir, profile.name+".json"), data, 0o600); err != nil {
-			t.Fatalf("write %s credentials: %v", profile.name, err)
-		}
-	}
-	dbPath := filepath.Join(dataDir, "wormhole", "wormholed.db")
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	checkpointStore, err := localstore.Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, identity := range []struct{ project, agent, passport, profile string }{
-		{projectA, "isolated-agent", "isolated-passport", "org-a"},
-		{projectB, "isolated-agent", "isolated-passport", "org-b"},
-	} {
-		snapshot := gatewayTestBootstrapOutput(identity.project, identity.agent, identity.passport)["org_config"].(types.BootstrapOrgConfigV1)
-		attempt, _, err := checkpointStore.ResolveEnrolmentAttempt(context.Background(), localstore.EnrolmentAttemptRecord{
-			ProjectID: identity.project, IdempotencyKey: "018f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1", RequestHash: strings.Repeat("a", 64),
-			State: "credentials_persisted", CredentialProfile: identity.profile, AgentID: identity.agent, PassportID: identity.passport,
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := checkpointStore.UpdateEnrolmentAttempt(context.Background(), attempt, "credentials_persisted", identity.agent, identity.passport, false); err != nil {
-			t.Fatal(err)
-		}
-		attempt.AgentID, attempt.PassportID = identity.agent, identity.passport
-		if err := checkpointStore.ApplyBootstrap(context.Background(), identity.project, snapshot, time.Now().UTC(), &attempt); err != nil {
-			_ = checkpointStore.Close()
-			t.Fatalf("seed %s ready checkpoint: %v", identity.project, err)
-		}
-	}
-	if err := checkpointStore.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	socketPath := filepath.Join(runDir, "wormhole", "wormholed.sock")
-	firstRun := startTestDaemonWithRunner(t, "org-a", socketPath, runner)
-	conn, err := net.Dial("unix", socketPath)
-	if err != nil {
-		t.Fatalf("dial first daemon: %v", err)
-	}
-	reader := bufio.NewReader(conn)
-	mcpInitialize(t, conn, reader)
-	for i, tc := range []struct {
-		project, title string
-	}{{project: projectA, title: titleA}, {project: projectB, title: titleB}} {
-		resp := mcpCallTool(t, conn, reader, i+2, "wormhole.task.create", map[string]interface{}{
-			"project_id": tc.project, "title": tc.title, "description": "multi-org queue isolation", "priority": 0,
-		})
-		if resp.Error != "" {
-			_ = conn.Close()
-			t.Fatalf("create task for %s: %s", tc.project, resp.Error)
-		}
-	}
-	_ = conn.Close()
-	firstRun.stop(t)
-	for _, projectID := range []string{projectA, projectB} {
-		constructed, bootstraps, starts := engineCounts.project(projectID)
-		if constructed != 1 || bootstraps != 0 || starts != 1 {
-			t.Fatalf("first run %s engine counts = constructed:%d bootstrap:%d start:%d, want 1/0/1", projectID, constructed, bootstraps, starts)
-		}
-	}
-
-	inspectionStore, err := localstore.Open(dbPath)
-	if err != nil {
-		t.Fatalf("open persisted local store: %v", err)
-	}
-	defer inspectionStore.Close()
-	queue := runtimesync.NewQueueRepo(inspectionStore.DB())
-	if _, err := inspectionStore.DB().ExecContext(context.Background(), `UPDATE sync_queue SET priority = 2 WHERE delivered_at IS NULL`); err != nil {
-		t.Fatalf("promote persisted queue rows for fast retry: %v", err)
-	}
-	for _, projectID := range []string{projectA, projectB} {
-		pending, err := queue.ListPending(context.Background(), projectID, 10)
-		if err != nil {
-			t.Fatalf("list %s pending queue after restart boundary: %v", projectID, err)
-		}
-		if len(pending) != 1 {
-			t.Fatalf("%s pending queue length = %d, want 1", projectID, len(pending))
-		}
-	}
-
-	coordA.setAccept(true)
-	secondRun := startTestDaemonWithRunner(t, "org-a", socketPath, runner)
-	waitForCondition(t, 5*time.Second, "org A queue to drain", func() (bool, error) {
-		pending, err := queue.ListPending(context.Background(), projectA, 10)
-		return len(pending) == 0, err
-	})
-	pendingB, err := queue.ListPending(context.Background(), projectB, 10)
-	if err != nil {
-		t.Fatalf("list org B queue while org A drains: %v", err)
-	}
-	if len(pendingB) != 1 {
-		t.Fatalf("org B queue length while endpoint B is offline = %d, want 1", len(pendingB))
-	}
-
-	coordB.setAccept(true)
-	waitForCondition(t, 5*time.Second, "org B queue to drain independently", func() (bool, error) {
-		pending, err := queue.ListPending(context.Background(), projectB, 10)
-		return len(pending) == 0, err
-	})
-	secondRun.stop(t)
-	for _, projectID := range []string{projectA, projectB} {
-		constructed, bootstraps, starts := engineCounts.project(projectID)
-		if constructed != 2 || bootstraps != 0 || starts != 2 {
-			t.Fatalf("two runs %s engine counts = constructed:%d bootstrap:%d start:%d, want 2/0/2", projectID, constructed, bootstraps, starts)
-		}
-	}
-
-	for name, snapshot := range map[string]struct {
-		token   string
-		project string
-		title   string
-		server  *isolatedCoordServer
-	}{
-		"org A": {token: tokenA, project: projectA, title: titleA, server: coordA},
-		"org B": {token: tokenB, project: projectB, title: titleB, server: coordB},
-	} {
-		tokens, tools, pushes := snapshot.server.snapshot()
-		if len(tokens) == 0 {
-			t.Fatalf("%s endpoint received no authenticated sync calls", name)
-		}
-		for _, token := range tokens {
-			if token != "Bearer "+snapshot.token {
-				t.Errorf("%s endpoint token = %q, want its own bearer token", name, token)
-			}
-		}
-		bootstrapCalls := 0
-		for _, tool := range tools {
-			if tool == "wormhole.sync.bootstrap" {
-				bootstrapCalls++
-			}
-		}
-		if bootstrapCalls != 0 {
-			t.Errorf("%s bootstrap calls = %d, want none across daemon restarts (tools=%v)", name, bootstrapCalls, tools)
-		}
-		if len(pushes) == 0 {
-			t.Fatalf("%s accepted no pushes, tools = %v", name, tools)
-		}
-		for _, push := range pushes {
-			if push.NamespaceID != snapshot.project || push.Title != snapshot.title {
-				t.Errorf("%s accepted push = %+v, want only namespace %q title %q", name, push, snapshot.project, snapshot.title)
-			}
-		}
 	}
 }

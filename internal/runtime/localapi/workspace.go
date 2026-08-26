@@ -11,7 +11,7 @@ var ErrBindingAwareProviderUnavailable = errors.New("localapi: binding-aware pro
 
 // bindResolvedProjectArguments adapts legacy handler inputs to the Gateway-
 // owned project selected by the exact resolved workspace. Public callers never
-// supply this field; Task 3 replaces the legacy constructors around it.
+// supply this field.
 func bindResolvedProjectArguments(ctx context.Context, public json.RawMessage) (json.RawMessage, error) {
 	binding, err := ResolvedBinding(ctx)
 	if err != nil {
@@ -40,9 +40,8 @@ func (s *Server) privateRuntimeConfigured() bool {
 }
 
 // authorizePrivateToolProvider makes the configured Stage-2 path an explicit
-// allowlist. Existing project-only providers remain reachable only through the
-// legacy constructors until Task 3 replaces them; they cannot silently consume
-// a workspace-bound request.
+// allowlist. Existing project-only providers cannot silently consume a
+// workspace-bound request.
 func authorizePrivateToolProvider(toolName string, public json.RawMessage) error {
 	switch toolName {
 	case "wormhole.agent.presence", "wormhole.agent.list",
@@ -80,9 +79,8 @@ func validatePrivateAgentSemantics(toolName string, public json.RawMessage) erro
 }
 
 // resolvedLocalNamespace preserves the exact workspace boundary for the
-// existing local SQLite/scheduler/eventbus primitives. Legacy constructors
-// retain their historical project namespace; a configured runtime has no
-// fallback when the binding is absent or mismatched.
+// existing local SQLite/scheduler/eventbus primitives. A configured runtime
+// has no fallback when the binding is absent or mismatched.
 func (s *Server) resolvedLocalNamespace(ctx context.Context, projectID string) (string, error) {
 	if !s.privateRuntimeConfigured() {
 		return projectID, nil

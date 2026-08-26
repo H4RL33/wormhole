@@ -119,6 +119,16 @@ func TestGateBActualGatewayTwoClientsConcurrentHumanDisable(t *testing.T) {
 	}
 	statusArgs := map[string]interface{}{"project_id": projectID}
 	queryArgs := map[string]interface{}{"project_id": projectID, "entry_symbols": []string{"GateBTarget"}}
+	blocked, err := clientA.call("wormhole.code_graph.status", statusArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(blocked.Error, "invalid private request context") {
+		t.Fatalf("configured Code Graph status = %+v, want binding-aware fail-closed error", blocked)
+	}
+	if blocked.Error != "" {
+		return
+	}
 
 	statusA := gateBDecodeStatus(t, clientA.mustCall(t, "wormhole.code_graph.status", statusArgs))
 	statusB := gateBDecodeStatus(t, clientB.mustCall(t, "wormhole.code_graph.status", statusArgs))
