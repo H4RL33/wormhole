@@ -252,9 +252,12 @@ func listLocalIdentityRecordNames(rootFD int) ([]string, error) {
 		return nil, errors.New("localidentity: open root directory handle")
 	}
 	defer directory.Close()
-	entries, err := directory.ReadDir(-1)
-	if err != nil {
+	entries, err := directory.ReadDir(maxLocalIdentityStoreEntries + 1)
+	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
+	}
+	if len(entries) > maxLocalIdentityStoreEntries {
+		return nil, fmt.Errorf("%w: root entry limit", ErrInvalidStoreRecord)
 	}
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {

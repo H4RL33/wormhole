@@ -5,6 +5,7 @@ package localidentity
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -155,7 +156,7 @@ func TestEnsureSelectedRecoversEveryDurableWriteFailureBoundary(t *testing.T) {
 				t.Fatal(err)
 			}
 			if profile.HumanPrincipalID != again.HumanPrincipalID || string(profile.PublicKey) != string(again.PublicKey) {
-				t.Fatalf("boundary %d replay profile = %#v, want %#v", boundary, again, profile)
+				t.Fatalf("boundary %d replay profile changed", boundary)
 			}
 		})
 	}
@@ -200,21 +201,40 @@ func assertRecoveredIdentityPrefix(t *testing.T, root, journalID string, selecti
 	after := snapshotIdentityTree(t, root)
 	for name, beforeBytes := range prefix {
 		if afterBytes, exists := after[name]; !exists || !reflect.DeepEqual(afterBytes, beforeBytes) {
-			t.Fatalf("durable prefix %q changed: got %q, want %q", name, afterBytes, beforeBytes)
+			t.Fatalf("durable prefix %q changed (got %d bytes, want %d bytes)", name, len(afterBytes), len(beforeBytes))
 		}
 	}
 	receipt, exists, err := readSetupRecordFromRoot(root, journalID)
 	if err != nil || !exists {
-		t.Fatalf("recovered receipt = %#v, %v, %v", receipt, exists, err)
+		t.Fatalf("recovered receipt missing or invalid: exists=%v err=%v", exists, err)
 	}
 	if receipt.HumanPrincipalID != profile.HumanPrincipalID || receipt.Selection != selection {
-		t.Fatalf("recovered receipt = %#v, profile = %#v", receipt, profile)
+		t.Fatal("recovered receipt does not match the public profile")
 	}
 	selected, exists, err := readSelectedRecordFromRoot(root)
 	if err != nil || !exists || selected.HumanPrincipalID != profile.HumanPrincipalID {
-		t.Fatalf("recovered selected = %#v, %v, %v", selected, exists, err)
+		t.Fatalf("recovered selected pointer missing or invalid: exists=%v err=%v", exists, err)
 	}
 	assertOneIdentityAuthority(t, root, profile.HumanPrincipalID)
+}
+
+func TestEnsureSelectedFailsClosedWhenIdentityRootEntryLimitIsExceeded(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "identity")
+	store, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < maxLocalIdentityStoreEntries; index++ {
+		name := fmt.Sprintf(".tmp-%032x", index)
+		if err := os.WriteFile(filepath.Join(root, name), []byte("interrupted publication"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := snapshotIdentityTree(t, root)
+	if _, err := store.EnsureSelectedForSetup(context.Background(), testJournalID, testSelection()); !errors.Is(err, ErrInvalidStoreRecord) {
+		t.Fatalf("entry-limit error = %v, want ErrInvalidStoreRecord", err)
+	}
+	assertIdentityTreeEqual(t, root, before)
 }
 
 func readSelectedRecordFromRoot(root string) (selectedRecord, bool, error) {
@@ -250,7 +270,7 @@ func TestOwnerOnlyFilesystemPrimitivesRejectUnsafeObjectsAndSerialize(t *testing
 	}
 	data, exists, err := readLocalIdentityFile(fd, "record.json")
 	if err != nil || !exists || string(data) != "second" {
-		t.Fatalf("read record = %q, %v, %v", data, exists, err)
+		t.Fatalf("read record missing, invalid, or unexpected size: exists=%v bytes=%d err=%v", exists, len(data), err)
 	}
 	if _, _, err := readLocalIdentityFile(fd, "../escape"); !errors.Is(err, ErrUnsafeStore) {
 		t.Fatalf("unsafe record name error = %v, want ErrUnsafeStore", err)

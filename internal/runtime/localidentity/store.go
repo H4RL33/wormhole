@@ -20,6 +20,10 @@ const (
 	selectedRecordName          = "selected.json"
 	lockRecordName              = ".store.lock"
 	maxLocalIdentityRecordBytes = 16 * 1024
+	// The identity root only needs a receipt, key, profile, selection, lock,
+	// and a bounded number of interrupted-publication temporary files. Refuse
+	// oversized directories before examining or changing their contents.
+	maxLocalIdentityStoreEntries = 64
 )
 
 var (
@@ -138,43 +142,35 @@ func (s *Store) ensureSelectedLocked(ctx context.Context, fd int, journalID stri
 	if err != nil {
 		return PublicHumanProfile{}, err
 	}
-	if exists && selectedExists && selected.HumanPrincipalID != setup.HumanPrincipalID {
+	topology, topologyErr := inspectIdentityTopology(fd, selection)
+	if topologyErr != nil {
+		return PublicHumanProfile{}, topologyErr
+	}
+	if selectedExists && (!topology.found || !topology.complete || topology.setup.HumanPrincipalID != selected.HumanPrincipalID) {
+		return PublicHumanProfile{}, ErrIdentityConflict
+	}
+	if exists && (!topology.found || topology.setup.HumanPrincipalID != setup.HumanPrincipalID || !topology.setup.CreatedAt.Equal(setup.CreatedAt)) {
 		return PublicHumanProfile{}, ErrIdentityConflict
 	}
 	if !exists {
 		if err := ctx.Err(); err != nil {
 			return PublicHumanProfile{}, err
 		}
-		if selectedExists {
-			human, humanExists, humanErr := readHumanRecord(fd, selected.HumanPrincipalID)
-			if humanErr != nil || !humanExists {
-				if humanErr != nil {
-					return PublicHumanProfile{}, humanErr
-				}
-				return PublicHumanProfile{}, fmt.Errorf("%w: selected human is missing", ErrInvalidStoreRecord)
-			}
-			if human.DisplayName != selection.DisplayName || human.Email != selection.Email {
+		if topology.found {
+			setup = topology.setup
+		} else {
+			if selectedExists {
 				return PublicHumanProfile{}, ErrIdentityConflict
 			}
-			setup = setupRecord{HumanPrincipalID: human.HumanPrincipalID, Selection: selection, CreatedAt: human.CreatedAt}
-		} else {
-			pending, found, pendingErr := reconcileUnselectedIdentity(fd, selection)
-			if pendingErr != nil {
-				return PublicHumanProfile{}, pendingErr
+			identifier, identifierErr := s.newUUID()
+			if identifierErr != nil {
+				return PublicHumanProfile{}, identifierErr
 			}
-			if found {
-				setup = pending
-			} else {
-				identifier, identifierErr := s.newUUID()
-				if identifierErr != nil {
-					return PublicHumanProfile{}, identifierErr
-				}
-				now := s.clock().UTC()
-				if now.IsZero() {
-					return PublicHumanProfile{}, fmt.Errorf("%w: zero clock", ErrInvalidStoreRecord)
-				}
-				setup = setupRecord{HumanPrincipalID: identifier, Selection: selection, CreatedAt: now}
+			now := s.clock().UTC()
+			if now.IsZero() {
+				return PublicHumanProfile{}, fmt.Errorf("%w: zero clock", ErrInvalidStoreRecord)
 			}
+			setup = setupRecord{HumanPrincipalID: identifier, Selection: selection, CreatedAt: now}
 		}
 		encoded, encodeErr := marshalCanonical(setup)
 		if encodeErr != nil {
@@ -182,14 +178,6 @@ func (s *Store) ensureSelectedLocked(ctx context.Context, fd int, journalID stri
 		}
 		if writeErr := s.atomicWrite(fd, setupName, encoded, 0o600, false); writeErr != nil {
 			return PublicHumanProfile{}, writeErr
-		}
-	} else if !selectedExists {
-		pending, found, pendingErr := reconcileUnselectedIdentity(fd, selection)
-		if pendingErr != nil || !found || pending.HumanPrincipalID != setup.HumanPrincipalID || !pending.CreatedAt.Equal(setup.CreatedAt) {
-			if pendingErr != nil {
-				return PublicHumanProfile{}, pendingErr
-			}
-			return PublicHumanProfile{}, ErrIdentityConflict
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -254,81 +242,98 @@ func (s *Store) ensureSelectedPointer(fd int, humanID string) error {
 	return writeErr
 }
 
-func reconcileUnselectedIdentity(fd int, selection types.ConfirmedIdentitySelection) (setupRecord, bool, error) {
+type identityTopology struct {
+	setup    setupRecord
+	found    bool
+	complete bool
+}
+
+func inspectIdentityTopology(fd int, selection types.ConfirmedIdentitySelection) (identityTopology, error) {
 	names, err := listLocalIdentityRecordNames(fd)
 	if err != nil {
-		return setupRecord{}, false, err
+		return identityTopology{}, err
 	}
-	candidates := map[string]setupRecord{}
-	keyIDs := map[string]struct{}{}
-	hasIdentityArtifact := false
-	addCandidate := func(candidate setupRecord) error {
-		if prior, exists := candidates[candidate.HumanPrincipalID]; exists && (prior.Selection != candidate.Selection || !prior.CreatedAt.Equal(candidate.CreatedAt)) {
-			return ErrIdentityConflict
-		}
-		candidates[candidate.HumanPrincipalID] = candidate
-		return nil
-	}
+	receipts := map[string]setupRecord{}
+	humans := map[string]humanRecord{}
+	keys := map[string]ed25519.PrivateKey{}
 	for _, name := range names {
 		switch {
 		case name == lockRecordName || name == selectedRecordName:
 			continue
 		case isLocalIdentityTemporaryName(name):
 			if _, exists, readErr := readLocalIdentityFile(fd, name); readErr != nil || !exists {
-				return setupRecord{}, false, ErrInvalidStoreRecord
+				return identityTopology{}, ErrInvalidStoreRecord
 			}
 			continue
 		case parseSetupRecordName(name) != "":
-			hasIdentityArtifact = true
 			record, exists, readErr := readSetupRecord(fd, name)
 			if readErr != nil || !exists {
-				return setupRecord{}, false, ErrInvalidStoreRecord
+				return identityTopology{}, ErrInvalidStoreRecord
 			}
 			if record.Selection != selection {
-				return setupRecord{}, false, ErrIdentityConflict
+				return identityTopology{}, ErrIdentityConflict
 			}
-			if err := addCandidate(record); err != nil {
-				return setupRecord{}, false, err
+			if prior, duplicate := receipts[record.HumanPrincipalID]; duplicate && !prior.CreatedAt.Equal(record.CreatedAt) {
+				return identityTopology{}, ErrIdentityConflict
 			}
+			receipts[record.HumanPrincipalID] = record
 		case parseHumanRecordName(name) != "":
-			hasIdentityArtifact = true
 			identifier := parseHumanRecordName(name)
 			record, exists, readErr := readHumanRecord(fd, identifier)
 			if readErr != nil || !exists {
-				return setupRecord{}, false, ErrInvalidStoreRecord
+				return identityTopology{}, ErrInvalidStoreRecord
 			}
-			candidate := setupRecord{HumanPrincipalID: record.HumanPrincipalID, Selection: types.ConfirmedIdentitySelection{DisplayName: record.DisplayName, Email: record.Email}, CreatedAt: record.CreatedAt}
-			if candidate.Selection != selection {
-				return setupRecord{}, false, ErrIdentityConflict
-			}
-			if err := addCandidate(candidate); err != nil {
-				return setupRecord{}, false, err
-			}
+			humans[identifier] = record
 		case parsePrivateKeyRecordName(name) != "":
-			hasIdentityArtifact = true
-			keyIDs[parsePrivateKeyRecordName(name)] = struct{}{}
+			identifier := parsePrivateKeyRecordName(name)
+			data, exists, readErr := readLocalIdentityFile(fd, name)
+			if readErr != nil || !exists {
+				return identityTopology{}, ErrInvalidStoreRecord
+			}
+			key, keyErr := parsePrivateKey(data)
+			if keyErr != nil {
+				return identityTopology{}, keyErr
+			}
+			keys[identifier] = key
 		default:
-			return setupRecord{}, false, fmt.Errorf("%w: unknown identity store entry", ErrInvalidStoreRecord)
+			return identityTopology{}, fmt.Errorf("%w: unknown identity store entry", ErrInvalidStoreRecord)
 		}
 	}
-	if len(candidates) == 0 {
-		if hasIdentityArtifact {
-			return setupRecord{}, false, ErrIdentityConflict
+	if len(receipts) == 0 {
+		if len(humans) != 0 || len(keys) != 0 {
+			return identityTopology{}, ErrIdentityConflict
 		}
-		return setupRecord{}, false, nil
+		return identityTopology{}, nil
 	}
-	if len(candidates) != 1 {
-		return setupRecord{}, false, ErrIdentityConflict
+	if len(receipts) != 1 {
+		return identityTopology{}, ErrIdentityConflict
 	}
-	for identifier := range keyIDs {
-		if _, exists := candidates[identifier]; !exists {
-			return setupRecord{}, false, ErrIdentityConflict
+	var candidate setupRecord
+	for _, candidate = range receipts {
+		break
+	}
+	for identifier, human := range humans {
+		if identifier != candidate.HumanPrincipalID || human.DisplayName != candidate.Selection.DisplayName || human.Email != candidate.Selection.Email || !human.CreatedAt.Equal(candidate.CreatedAt) {
+			return identityTopology{}, ErrIdentityConflict
 		}
 	}
-	for _, candidate := range candidates {
-		return candidate, true, nil
+	for identifier := range keys {
+		if identifier != candidate.HumanPrincipalID {
+			return identityTopology{}, ErrIdentityConflict
+		}
 	}
-	return setupRecord{}, false, ErrInvalidStoreRecord
+	human, hasHuman := humans[candidate.HumanPrincipalID]
+	key, hasKey := keys[candidate.HumanPrincipalID]
+	// The durable order is receipt, key, profile, selected pointer. A key
+	// without a profile is therefore an interrupted but repairable prefix only
+	// while no selected pointer exists; a profile without a key is unreachable.
+	if hasHuman && !hasKey {
+		return identityTopology{}, ErrIdentityConflict
+	}
+	if hasHuman && string(human.PublicKey) != string(key.Public().(ed25519.PublicKey)) {
+		return identityTopology{}, ErrIdentityConflict
+	}
+	return identityTopology{setup: candidate, found: true, complete: hasHuman && hasKey}, nil
 }
 
 func parseSetupRecordName(name string) string {
@@ -374,10 +379,7 @@ func (s *Store) ensurePrivateKey(fd int, humanID string) (ed25519.PrivateKey, er
 		return nil, err
 	}
 	if exists {
-		if len(data) != ed25519.PrivateKeySize {
-			return nil, fmt.Errorf("%w: invalid Ed25519 private key length", ErrInvalidStoreRecord)
-		}
-		return ed25519.PrivateKey(append([]byte(nil), data...)), nil
+		return parsePrivateKey(data)
 	}
 	seed := make([]byte, ed25519.SeedSize)
 	if _, err := io.ReadFull(readerFromRandom(s.random), seed); err != nil {
@@ -414,11 +416,18 @@ func (s *Store) Selected(ctx context.Context) (PublicHumanProfile, error) {
 	if !exists {
 		return PublicHumanProfile{}, fmt.Errorf("%w: selected human is missing", ErrInvalidStoreRecord)
 	}
-	privateKey, exists, err := readLocalIdentityFile(fd, privateKeyRecordName(human.HumanPrincipalID))
+	privateKeyBytes, exists, err := readLocalIdentityFile(fd, privateKeyRecordName(human.HumanPrincipalID))
 	if err != nil {
 		return PublicHumanProfile{}, err
 	}
-	if !exists || len(privateKey) != ed25519.PrivateKeySize || string(ed25519.PrivateKey(privateKey).Public().(ed25519.PublicKey)) != string(human.PublicKey) {
+	if !exists {
+		return PublicHumanProfile{}, fmt.Errorf("%w: selected human key is missing or mismatched", ErrInvalidStoreRecord)
+	}
+	privateKey, err := parsePrivateKey(privateKeyBytes)
+	if err != nil {
+		return PublicHumanProfile{}, err
+	}
+	if string(privateKey.Public().(ed25519.PublicKey)) != string(human.PublicKey) {
 		return PublicHumanProfile{}, fmt.Errorf("%w: selected human key is missing or mismatched", ErrInvalidStoreRecord)
 	}
 	return publicProfile(human), nil
@@ -462,6 +471,17 @@ func (s *Store) atomicWriteFile(fd int, name string, data []byte, mode fs.FileMo
 
 func humanRecordName(identifier string) string      { return "human-" + identifier + ".json" }
 func privateKeyRecordName(identifier string) string { return "key-" + identifier + ".ed25519" }
+
+func parsePrivateKey(data []byte) (ed25519.PrivateKey, error) {
+	if len(data) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("%w: invalid Ed25519 private key length", ErrInvalidStoreRecord)
+	}
+	privateKey := ed25519.PrivateKey(append([]byte(nil), data...))
+	if string(ed25519.NewKeyFromSeed(privateKey.Seed())) != string(privateKey) {
+		return nil, fmt.Errorf("%w: invalid Ed25519 private key", ErrInvalidStoreRecord)
+	}
+	return privateKey, nil
+}
 
 func readSetupRecord(fd int, name string) (setupRecord, bool, error) {
 	var record setupRecord
