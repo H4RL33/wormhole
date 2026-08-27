@@ -1,7 +1,7 @@
 # R06 Private-Format Hard-Cut Design
 
-**Status:** Approved design  
-**Date:** 2026-08-24  
+**Status:** Approved design
+**Date:** 2026-08-24
 **Scope:** R06 only
 
 ## 1. Decision

@@ -35,9 +35,6 @@ func newProductionConnectorCommands() (connectorCommandDependencies, error) {
 	if runtime.GOOS != "linux" {
 		return nil, connector.ErrConnectorFilesystemUnsupported
 	}
-	if _, present := os.LookupEnv("CLAUDE_CONFIG_DIR"); present {
-		return nil, connector.ErrUnsupportedConnectorEntry
-	}
 	root, err := canonicalCurrentDirectory()
 	if err != nil {
 		return nil, err

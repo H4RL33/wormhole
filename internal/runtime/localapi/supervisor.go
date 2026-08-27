@@ -27,6 +27,7 @@ type SupervisorDependencies struct {
 	ProjectState *projectstate.Service
 	Identity     *localidentity.Store
 	Fabric       FabricRouter
+	CodeGraph    CodeGraphProvider
 }
 
 // Supervisor owns the one local API server and its listener. Its injected
@@ -47,7 +48,7 @@ type Supervisor struct {
 }
 
 func NewSupervisor(dependencies SupervisorDependencies) (*Supervisor, error) {
-	if dependencies.Store == nil || dependencies.ProjectState == nil || dependencies.Identity == nil || interfaceNil(dependencies.Fabric) {
+	if dependencies.Store == nil || dependencies.ProjectState == nil || dependencies.Identity == nil || interfaceNil(dependencies.Fabric) || interfaceNil(dependencies.CodeGraph) {
 		return nil, ErrIncompleteSupervisorDependencies
 	}
 	if dependencies.Store.DB() == nil || dependencies.Store.DB().PingContext(context.Background()) != nil {

@@ -102,7 +102,7 @@ func TestProcessSupervisorOwnerHelper(t *testing.T) {
 	if _, err := identity.EnsureSelectedForSetup(ctx, "00000000-0000-4000-8000-000000000031", types.ConfirmedIdentitySelection{DisplayName: "Owner"}); err != nil {
 		t.Fatal(err)
 	}
-	supervisor, err := localapi.NewSupervisor(localapi.SupervisorDependencies{Store: store, ProjectState: service, Identity: identity, Fabric: localapi.NewLocalOnlyFabricRouter()})
+	supervisor, err := localapi.NewSupervisor(localapi.SupervisorDependencies{Store: store, ProjectState: service, Identity: identity, Fabric: localapi.NewLocalOnlyFabricRouter(), CodeGraph: localapi.NewDisabledCodeGraphProvider()})
 	if err != nil {
 		t.Fatal(err)
 	}

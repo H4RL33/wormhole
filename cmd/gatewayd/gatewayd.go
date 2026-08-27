@@ -150,7 +150,8 @@ func newLocalSupervisorWithProjectState(store *localstore.Store, service *projec
 	}
 	supervisor, err := localapi.NewSupervisor(localapi.SupervisorDependencies{
 		Store: store, ProjectState: service, Identity: identity,
-		Fabric: localapi.NewLocalOnlyFabricRouter(),
+		Fabric:    localapi.NewLocalOnlyFabricRouter(),
+		CodeGraph: localapi.NewDisabledCodeGraphProvider(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("construct Gateway supervisor: %w", err)

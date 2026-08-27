@@ -31,3 +31,16 @@ func (localOnlyFabricRouter) Status(context.Context, types.WorkspaceBinding) (sy
 func (localOnlyFabricRouter) Call(context.Context, types.WorkspaceBinding, string, json.RawMessage) (json.RawMessage, error) {
 	return nil, ErrFabricUnavailable
 }
+
+// CodeGraphProvider marks the supervisor-owned Code Graph boundary. The
+// disabled provider is explicit until a later Code Graph slice supplies a
+// binding-scoped implementation.
+type CodeGraphProvider interface {
+	codeGraphProvider()
+}
+
+type disabledCodeGraphProvider struct{}
+
+func NewDisabledCodeGraphProvider() CodeGraphProvider { return disabledCodeGraphProvider{} }
+
+func (disabledCodeGraphProvider) codeGraphProvider() {}

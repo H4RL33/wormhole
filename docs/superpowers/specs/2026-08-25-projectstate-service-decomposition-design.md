@@ -1,7 +1,7 @@
 # Projectstate Service Decomposition Design
 
-**Date:** 2026-08-25  
-**Status:** Approved design for implementation planning  
+**Date:** 2026-08-25
+**Status:** Approved design for implementation planning
 **Scope:** Behavior-preserving decomposition of `internal/runtime/projectstate.Service`
 
 ## 1. Objective

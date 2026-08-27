@@ -30,6 +30,8 @@ func TestNewSupervisorRejectsIncompleteDependencies(t *testing.T) {
 		{name: "identity", mutate: func(d *SupervisorDependencies) { d.Identity = nil }},
 		{name: "Fabric", mutate: func(d *SupervisorDependencies) { d.Fabric = nil }},
 		{name: "typed nil Fabric", mutate: func(d *SupervisorDependencies) { var value *nilFabricRouter; d.Fabric = value }},
+		{name: "Code Graph", mutate: func(d *SupervisorDependencies) { d.CodeGraph = nil }},
+		{name: "typed nil Code Graph", mutate: func(d *SupervisorDependencies) { var value *nilCodeGraphProvider; d.CodeGraph = value }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -47,6 +49,22 @@ func TestNewSupervisorRejectsIncompleteDependencies(t *testing.T) {
 	}
 	if _, err := NewSupervisor(closed); !errors.Is(err, ErrIncompleteSupervisorDependencies) {
 		t.Fatalf("closed Store error = %v, want ErrIncompleteSupervisorDependencies", err)
+	}
+}
+
+func TestDisabledCodeGraphProviderIsExplicitAndNonNil(t *testing.T) {
+	provider := NewDisabledCodeGraphProvider()
+	if interfaceNil(provider) {
+		t.Fatal("disabled Code Graph provider is nil")
+	}
+	dependencies := supervisorTestDependencies(t)
+	dependencies.CodeGraph = provider
+	supervisor, err := NewSupervisor(dependencies)
+	if err != nil {
+		t.Fatalf("NewSupervisor with disabled Code Graph provider: %v", err)
+	}
+	if err := supervisor.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -103,7 +121,7 @@ func TestSupervisorIsolatesMultipleWorkspacesThroughOneGateway(t *testing.T) {
 		t.Fatal(err)
 	}
 	fabric := &recordingFabricRouter{err: ErrFabricUnavailable}
-	supervisor, err := NewSupervisor(SupervisorDependencies{Store: store, ProjectState: service, Identity: identity, Fabric: fabric})
+	supervisor, err := NewSupervisor(SupervisorDependencies{Store: store, ProjectState: service, Identity: identity, Fabric: fabric, CodeGraph: NewDisabledCodeGraphProvider()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +195,7 @@ func TestSupervisorSchemaV6ReopensExactlyAndRefusesChangedLedger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewSupervisor(SupervisorDependencies{Store: reopened, ProjectState: service, Identity: identity, Fabric: NewLocalOnlyFabricRouter()}); err != nil {
+	if _, err := NewSupervisor(SupervisorDependencies{Store: reopened, ProjectState: service, Identity: identity, Fabric: NewLocalOnlyFabricRouter(), CodeGraph: NewDisabledCodeGraphProvider()}); err != nil {
 		t.Fatalf("construct over exact schema v6: %v", err)
 	}
 	if _, err := reopened.DB().Exec(`UPDATE gateway_schema_migrations SET version=5`); err != nil {
@@ -355,7 +373,7 @@ func supervisorTestDependencies(t *testing.T) SupervisorDependencies {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return SupervisorDependencies{Store: store, ProjectState: service, Identity: identity, Fabric: NewLocalOnlyFabricRouter()}
+	return SupervisorDependencies{Store: store, ProjectState: service, Identity: identity, Fabric: NewLocalOnlyFabricRouter(), CodeGraph: NewDisabledCodeGraphProvider()}
 }
 
 type nilFabricRouter struct{}
@@ -366,6 +384,10 @@ func (*nilFabricRouter) Status(context.Context, types.WorkspaceBinding) (syncpkg
 func (*nilFabricRouter) Call(context.Context, types.WorkspaceBinding, string, json.RawMessage) (json.RawMessage, error) {
 	return nil, nil
 }
+
+type nilCodeGraphProvider struct{}
+
+func (*nilCodeGraphProvider) codeGraphProvider() {}
 
 type recordingFabricRouter struct {
 	calls   int

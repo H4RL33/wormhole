@@ -307,7 +307,7 @@ func newStage2ParityRuntime(t *testing.T, fixture stage2ParityGitFixture, name s
 		}
 	}
 	supervisor, err := localapi.NewSupervisor(localapi.SupervisorDependencies{
-		Store: store, ProjectState: service, Identity: identity, Fabric: localapi.NewLocalOnlyFabricRouter(),
+		Store: store, ProjectState: service, Identity: identity, Fabric: localapi.NewLocalOnlyFabricRouter(), CodeGraph: localapi.NewDisabledCodeGraphProvider(),
 	})
 	if err != nil {
 		t.Fatal(err)

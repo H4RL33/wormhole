@@ -85,8 +85,15 @@ func TestProductionConnectorWiringPropagatesClaudeSecurityBoundary(t *testing.T)
 			}
 			t.Setenv("PATH", bin)
 			t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(t.TempDir(), "override"))
-			if _, err := newProductionConnectorCommands(); !errors.Is(err, connector.ErrUnsupportedConnectorEntry) {
-				t.Fatalf("constructor error = %v", err)
+			commands, err := newProductionConnectorCommands()
+			if !installed {
+				if err != nil || commands == nil {
+					t.Fatalf("uninstalled Claude constructor: commands=%T err=%v", commands, err)
+				}
+				return
+			}
+			if !errors.Is(err, connector.ErrUnsupportedConnectorEntry) {
+				t.Fatalf("Claude constructor error = %v", err)
 			}
 		})
 	}
