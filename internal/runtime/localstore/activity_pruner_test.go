@@ -157,6 +157,17 @@ func TestActivityPrunerTerminalExpiryAndPromotionReceiptProtection(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	var storedExpiry time.Time
+	var sqliteExpiryParseable int
+	if err := fixture.store.DB().QueryRow(`SELECT expires_at,julianday(expires_at) IS NOT NULL FROM activity_lifecycle WHERE activity_id=?`, record.Key.ActivityID).Scan(&storedExpiry, &sqliteExpiryParseable); err != nil {
+		t.Fatal(err)
+	}
+	if sqliteExpiryParseable != 1 {
+		t.Fatalf("database-created lifecycle expiry is not SQLite-comparable: %v", storedExpiry)
+	}
+	if _, err := fixture.store.DB().Exec(`UPDATE activity_lifecycle SET terminal_at='2099-01-01T00:00:00Z',expires_at='2099-02-01T00:00:00Z' WHERE activity_id=?`, record.Key.ActivityID); err != nil {
+		t.Fatal(err)
+	}
 	if pruned, err := fixture.repo.Prune(context.Background(), fixture.route, record.Key.SourceWorkspaceID, 10); err != nil || pruned != 0 {
 		t.Fatalf("unexpired promotion prune=(%d,%v)", pruned, err)
 	}

@@ -47,6 +47,26 @@ func TestActivityPullDuplicateBatchIsReadOnly(t *testing.T) {
 	}
 }
 
+func TestActivityPullEmptyBatchAtCurrentCursorIsReadOnly(t *testing.T) {
+	fixture := newLocalActivityFixture(t, true)
+	defer fixture.store.Close()
+	const preimage = "2000-01-01T00:00:00Z"
+	if _, err := fixture.store.DB().Exec(`UPDATE activity_cursors SET updated_at=?`, preimage); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.repo.AcceptPullBatch(context.Background(), fixture.route,
+		localPullBatch(t, fixture.policy, 0, 0, false)); err != nil {
+		t.Fatal(err)
+	}
+	var updatedAt string
+	if err := fixture.store.DB().QueryRow(`SELECT updated_at FROM activity_cursors`).Scan(&updatedAt); err != nil {
+		t.Fatal(err)
+	}
+	if updatedAt != preimage {
+		t.Fatalf("empty duplicate batch changed cursor timestamp to %q", updatedAt)
+	}
+}
+
 func TestActivityPullOneInvalidDeliveryRollsBackBatchAndCursor(t *testing.T) {
 	fixture := newLocalActivityFixture(t, true)
 	defer fixture.store.Close()

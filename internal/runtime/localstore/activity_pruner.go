@@ -40,7 +40,7 @@ func (r *ActivityRepo) Prune(ctx context.Context, route types.ActivityRouteKey, 
 				AND p.source_activity_id=a.activity_id)
 		), eligible AS (
 			SELECT source_workspace_id,activity_id,created_at,policy_version,policy_digest FROM ordinary_ranked
-			WHERE created_at<=strftime('%Y-%m-%dT%H:%M:%SZ','now','-2592000 seconds') OR newest_rank>10000
+			WHERE julianday(created_at)<=julianday('now','-2592000 seconds') OR newest_rank>10000
 			UNION ALL
 			SELECT a.source_workspace_id,a.activity_id,a.created_at,
 			       COALESCE(i.policy_version,q.created_policy_version),COALESCE(i.policy_digest,q.created_policy_digest)
@@ -58,7 +58,7 @@ func (r *ActivityRepo) Prune(ctx context.Context, route types.ActivityRouteKey, 
 				AND l.state IN ('pending','open','blocked'))
 			AND (SELECT max(julianday(l.expires_at)) FROM activity_lifecycle l WHERE l.project_id=a.project_id AND l.workspace_id=a.workspace_id
 				AND l.fabric_instance_id=a.fabric_instance_id AND l.remote_project_id=a.remote_project_id AND l.stream_id=a.stream_id
-				AND l.canonical_ref=a.canonical_ref AND l.source_workspace_id=a.source_workspace_id AND l.activity_id=a.activity_id)<=strftime('%Y-%m-%dT%H:%M:%SZ','now')
+				AND l.canonical_ref=a.canonical_ref AND l.source_workspace_id=a.source_workspace_id AND l.activity_id=a.activity_id)<=julianday('now')
 		)
 		SELECT source_workspace_id,activity_id,policy_version,policy_digest FROM eligible
 		ORDER BY created_at,activity_id LIMIT ?8`, arguments...)

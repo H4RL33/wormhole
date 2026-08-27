@@ -256,7 +256,7 @@ func (r *ActivityRepo) AcknowledgeOutbound(ctx context.Context, key types.Activi
 		}
 		arguments := activityOriginArgs(key)
 		arguments = append(arguments, string(receipt.ActivityDigest), receipt.Sequence, receipt.PolicyVersion,
-			string(receipt.PolicyDigest), receipt.AcceptedAt)
+			string(receipt.PolicyDigest), sqliteActivityTimestamp(receipt.AcceptedAt))
 		if _, err := conn.ExecContext(ctx, `INSERT INTO activity_ingress_receipts
 			(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,canonical_ref,source_workspace_id,activity_id,
 			 activity_digest,sequence,policy_version,policy_digest,accepted_at)
@@ -282,7 +282,7 @@ func (r *ActivityRepo) AcknowledgeOutbound(ctx context.Context, key types.Activi
 			return fmt.Errorf("localstore: acknowledge Activity lifecycle: %w", ErrActivityLifecycleConflict)
 		}
 		expiresAt := now.Add(time.Duration(deliveryRetention) * time.Second)
-		arguments = []any{now, expiresAt, now}
+		arguments = []any{sqliteActivityTimestamp(now), sqliteActivityTimestamp(expiresAt), now}
 		arguments = append(arguments, activityOriginArgs(key)...)
 		result, err = conn.ExecContext(ctx, `UPDATE activity_lifecycle
 			SET state='delivered',terminal_at=?,expires_at=?,updated_at=?

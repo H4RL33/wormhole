@@ -36,7 +36,10 @@ func (r *ActivityRepo) TransitionLifecycle(ctx context.Context, key types.Activi
 			return fmt.Errorf("localstore: transition Activity lifecycle: %w", err)
 		}
 		if current == change.NextState {
-			return nil
+			if change.ExpectedState == current || allowedActivityLifecycleTransition(change.Kind, change.ExpectedState, current) {
+				return nil
+			}
+			return fmt.Errorf("localstore: transition Activity lifecycle: %w", ErrActivityLifecycleConflict)
 		}
 		if current != change.ExpectedState || !allowedActivityLifecycleTransition(change.Kind, current, change.NextState) {
 			return fmt.Errorf("localstore: transition Activity lifecycle: %w", ErrActivityLifecycleConflict)
@@ -47,8 +50,8 @@ func (r *ActivityRepo) TransitionLifecycle(ctx context.Context, key types.Activi
 		}
 		var terminal, expires any
 		if terminalActivityLifecycleState(change.Kind, change.NextState) {
-			terminal = now
-			expires = now.Add(time.Duration(retention) * time.Second)
+			terminal = sqliteActivityTimestamp(now)
+			expires = sqliteActivityTimestamp(now.Add(time.Duration(retention) * time.Second))
 		}
 		arguments = []any{change.NextState, terminal, expires, now}
 		arguments = append(arguments, activityOriginArgs(key)...)

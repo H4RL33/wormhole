@@ -30,6 +30,14 @@ func TestActivityLifecycleRowsStayProtectedUntilTerminal(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := fixture.repo.TransitionLifecycle(context.Background(), record.Key,
+		ActivityLifecycleChange{Kind: "recovery", ReferenceID: reference, ExpectedState: "blocked", NextState: "recovered"}); err != nil {
+		t.Fatalf("exact terminal replay=%v", err)
+	}
+	if err := fixture.repo.TransitionLifecycle(context.Background(), record.Key,
+		ActivityLifecycleChange{Kind: "recovery", ReferenceID: reference, ExpectedState: "cancelled", NextState: "recovered"}); !errors.Is(err, ErrActivityLifecycleConflict) {
+		t.Fatalf("non-edge terminal replay=%v", err)
+	}
+	if err := fixture.repo.TransitionLifecycle(context.Background(), record.Key,
 		ActivityLifecycleChange{Kind: "recovery", ReferenceID: reference, ExpectedState: "blocked", NextState: "pending"}); !errors.Is(err, ErrActivityLifecycleConflict) {
 		t.Fatalf("terminal rewrite=%v", err)
 	}

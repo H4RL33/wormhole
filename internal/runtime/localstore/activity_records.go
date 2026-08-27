@@ -144,6 +144,10 @@ func databaseActivityNow(ctx context.Context, db activityDB) (time.Time, error) 
 	return now.UTC(), nil
 }
 
+func sqliteActivityTimestamp(value time.Time) string {
+	return value.UTC().Format(time.RFC3339)
+}
+
 func canonicalActivityEvidence(activity projectstate.ActivityV1) ([]byte, projectstate.Digest, []byte, error) {
 	canonical, err := projectstate.CanonicalActivity(activity)
 	if err != nil {
@@ -260,7 +264,7 @@ func insertActivityLedger(ctx context.Context, db activityDB, key types.Activity
 	arguments := activityOriginArgs(key)
 	arguments = append(arguments, string(activity.Class), raw, string(digest), actorJSON)
 	arguments = append(arguments, activityProjectionArgs(activity)...)
-	arguments = append(arguments, activity.CreatedAt, acceptedAt, sequence)
+	arguments = append(arguments, sqliteActivityTimestamp(activity.CreatedAt), sqliteActivityTimestamp(acceptedAt), sequence)
 	_, err := db.ExecContext(ctx, `INSERT INTO activity_ledger
 		(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,canonical_ref,source_workspace_id,activity_id,
 		 activity_class,canonical_activity_json,activity_digest,source_actor_json,

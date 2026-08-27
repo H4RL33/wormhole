@@ -93,6 +93,9 @@ func (r *ActivityRepo) AcceptPullBatch(ctx context.Context, route types.Activity
 		if cursor != batch.ExpectedAfter && !duplicate {
 			return fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityCursorConflict)
 		}
+		if cursor == batch.ExpectedAfter && batch.NextSequence == batch.ExpectedAfter && len(validated) == 0 {
+			return nil
+		}
 		if duplicate {
 			if err := validateDuplicatePullWindow(ctx, conn, route, batch.ExpectedAfter, batch.NextSequence, validated); err != nil {
 				return err
@@ -201,7 +204,7 @@ func acceptPulledActivity(ctx context.Context, db activityDB, route types.Activi
 	}
 	arguments := activityOriginArgs(key)
 	arguments = append(arguments, string(delivery.activityDigest), delivery.receipt.Sequence, delivery.receipt.PolicyVersion,
-		string(delivery.receipt.PolicyDigest), delivery.receipt.AcceptedAt)
+		string(delivery.receipt.PolicyDigest), sqliteActivityTimestamp(delivery.receipt.AcceptedAt))
 	if _, err := db.ExecContext(ctx, `INSERT INTO activity_ingress_receipts
 		(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,canonical_ref,source_workspace_id,activity_id,
 		 activity_digest,sequence,policy_version,policy_digest,accepted_at)
