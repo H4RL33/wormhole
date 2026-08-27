@@ -55,6 +55,14 @@ type WorkspaceDiff struct {
 	PublicationReviewDigest   state.Digest
 }
 
+// WorkspaceView is the coherent composed snapshot visible in a workspace.
+// It includes the accepted base, selected candidate, and active overlay
+// operations through ThroughGeneration.
+type WorkspaceView struct {
+	Snapshot          state.Snapshot
+	ThroughGeneration int64
+}
+
 type withImmediateWorkspaceTransitionFunc func(
 	context.Context,
 	types.WorkspaceScope,
@@ -215,6 +223,13 @@ func (s *Service) Diff(ctx context.Context, scope types.WorkspaceScope) (Workspa
 		return WorkspaceDiff{}, localstore.ErrNotFound
 	}
 	return s.workspace.diff(ctx, scope)
+}
+
+func (s *Service) View(ctx context.Context, scope types.WorkspaceScope) (WorkspaceView, error) {
+	if s == nil || s.workspace == nil {
+		return WorkspaceView{}, localstore.ErrNotFound
+	}
+	return s.workspace.view(ctx, scope)
 }
 
 func (s *Service) Apply(ctx context.Context, scope types.WorkspaceScope, operation state.OperationV1) (WorkspaceStatus, error) {

@@ -37,6 +37,29 @@ func (c *workspaceCoordinator) diff(ctx context.Context, scope types.WorkspaceSc
 	return clonePublicationReviewDiff(review.diff)
 }
 
+func (c *workspaceCoordinator) view(ctx context.Context, scope types.WorkspaceScope) (WorkspaceView, error) {
+	if c == nil || c.repo == nil {
+		return WorkspaceView{}, localstore.ErrNotFound
+	}
+	var result WorkspaceView
+	err := c.repo.WithImmediateWorkspace(ctx, scope, func(tx *localstore.WorkspaceMutationTx) error {
+		loaded, err := loadComposedWorkspace(ctx, tx)
+		if err != nil {
+			return err
+		}
+		snapshot, err := cloneImportSnapshot(loaded.view.Snapshot)
+		if err != nil {
+			return fmt.Errorf("projectstate: clone composed workspace view: %w", err)
+		}
+		result = WorkspaceView{Snapshot: snapshot, ThroughGeneration: loaded.view.ThroughGeneration}
+		return nil
+	})
+	if err != nil {
+		return WorkspaceView{}, err
+	}
+	return result, nil
+}
+
 func (c *workspaceCoordinator) apply(ctx context.Context, scope types.WorkspaceScope, operation state.OperationV1) (WorkspaceStatus, error) {
 	return c.applyBatch(ctx, scope, []state.OperationV1{operation})
 }

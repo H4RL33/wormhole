@@ -333,6 +333,185 @@ func TestStatusExposesCandidateDigestAndOverlayGeneration(t *testing.T) {
 	}
 }
 
+func TestServiceViewReturnsOwnedComposedSnapshots(t *testing.T) {
+	t.Run("accepted only", func(t *testing.T) {
+		repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+		_, service := openProjectStateService(t, "")
+		registered := registerGitRepository(t, service, repository)
+		accepted := mustServiceStatus(t, service, registered.Binding.Scope).AcceptedSnapshot
+
+		got, err := service.View(context.Background(), registered.Binding.Scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ThroughGeneration != 0 || !reflect.DeepEqual(got.Snapshot, accepted) {
+			t.Fatalf("accepted View = %+v, want generation 0 and accepted snapshot", got)
+		}
+	})
+
+	t.Run("overlay operation and deep ownership", func(t *testing.T) {
+		repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+		_, service := openProjectStateService(t, "")
+		registered := registerGitRepository(t, service, repository)
+		accepted := mustServiceStatus(t, service, registered.Binding.Scope).AcceptedSnapshot
+		operation := servicePutTaskOperation(accepted,
+			"99999999-9999-4999-8999-999999999991",
+			"22222222-2222-4222-8222-222222222222",
+			"overlay task",
+		)
+		want, err := state.ApplyOperation(accepted, operation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := service.Apply(context.Background(), registered.Binding.Scope, operation); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := service.View(context.Background(), registered.Binding.Scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ThroughGeneration != 1 || !reflect.DeepEqual(got.Snapshot, want) {
+			t.Fatalf("overlay View = %+v, want generation 1 and composed snapshot", got)
+		}
+		got.Snapshot.Tasks[operation.PutRecord.Record.Task.ID].Value.Title = "mutated caller result"
+		fresh, err := service.View(context.Background(), registered.Binding.Scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(fresh.Snapshot, want) {
+			t.Fatal("mutating returned View snapshot changed a later view")
+		}
+	})
+}
+
+func TestServiceViewSelectsCandidatesAndSurvivesConflictAndRestart(t *testing.T) {
+	t.Run("direct candidate", func(t *testing.T) {
+		repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+		store, service := openProjectStateService(t, "")
+		registered := registerGitRepository(t, service, repository)
+		accepted := mustServiceStatus(t, service, registered.Binding.Scope).AcceptedSnapshot
+		directOperation := servicePutTaskOperation(accepted,
+			"99999999-9999-4999-8999-999999999991",
+			"22222222-2222-4222-8222-222222222222", "direct candidate")
+		direct, err := state.ApplyOperation(accepted, directOperation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		insertServiceCandidate(t, store, registered.Binding.Scope, accepted.Digest, direct, nil, 0)
+
+		got, err := service.View(context.Background(), registered.Binding.Scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ThroughGeneration != 0 || !reflect.DeepEqual(got.Snapshot, direct) {
+			t.Fatalf("direct candidate View = %+v, want generation 0 and direct snapshot", got)
+		}
+	})
+
+	t.Run("rebased candidate with later operation", func(t *testing.T) {
+		repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+		store, service := openProjectStateService(t, "")
+		registered := registerGitRepository(t, service, repository)
+		accepted := mustServiceStatus(t, service, registered.Binding.Scope).AcceptedSnapshot
+		directOperation := servicePutTaskOperation(accepted,
+			"99999999-9999-4999-8999-999999999991",
+			"22222222-2222-4222-8222-222222222222", "direct candidate")
+		direct, err := state.ApplyOperation(accepted, directOperation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rebasedOperation := servicePutTaskOperation(accepted,
+			"99999999-9999-4999-8999-999999999992",
+			"33333333-3333-4333-8333-333333333333", "rebased candidate")
+		rebased, err := state.ApplyOperation(accepted, rebasedOperation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		insertServiceCandidate(t, store, registered.Binding.Scope, accepted.Digest, direct, &rebased, 7)
+		active := servicePutTaskOperation(rebased,
+			"99999999-9999-4999-8999-999999999993",
+			"44444444-4444-4444-8444-444444444444", "after rebase")
+		want, err := state.ApplyOperation(rebased, active)
+		if err != nil {
+			t.Fatal(err)
+		}
+		insertServiceOperation(t, store, registered.Binding.Scope, 9, active, "active")
+
+		got, err := service.View(context.Background(), registered.Binding.Scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ThroughGeneration != 9 || !reflect.DeepEqual(got.Snapshot, want) {
+			t.Fatalf("rebased View = %+v, want generation 9 and rebased composition", got)
+		}
+	})
+
+	t.Run("conflict and restart", func(t *testing.T) {
+		repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+		databasePath := filepath.Join(t.TempDir(), "gateway.db")
+		store, service := openProjectStateServiceAt(t, databasePath)
+		registered := registerGitRepository(t, service, repository)
+		accepted := mustServiceStatus(t, service, registered.Binding.Scope).AcceptedSnapshot
+		operation := servicePutTaskOperation(accepted,
+			"99999999-9999-4999-8999-999999999991",
+			"22222222-2222-4222-8222-222222222222", "conflicted overlay")
+		want, err := state.ApplyOperation(accepted, operation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		insertServiceOperation(t, store, registered.Binding.Scope, 1, operation, "active")
+		insertServiceConflict(t, store, registered.Binding.Scope, "view-conflict", state.RecordKey{Kind: "task", ID: operation.PutRecord.Record.Task.ID}, "open")
+		setServiceWorkspaceState(t, store, registered.Binding.Scope, "conflicted")
+
+		beforeRestart, err := service.View(context.Background(), registered.Binding.Scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if beforeRestart.ThroughGeneration != 1 || !reflect.DeepEqual(beforeRestart.Snapshot, want) {
+			t.Fatalf("conflicted View = %+v, want generation 1 and composed snapshot", beforeRestart)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		_, reopened := openProjectStateServiceAt(t, databasePath)
+		afterRestart, err := reopened.View(context.Background(), registered.Binding.Scope)
+		if err != nil || !reflect.DeepEqual(afterRestart, beforeRestart) {
+			t.Fatalf("restarted View = %+v, %v; want %+v", afterRestart, err, beforeRestart)
+		}
+	})
+}
+
+func TestServiceViewIsolatesSiblingWorkspaces(t *testing.T) {
+	firstRepository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+	secondRepository := createGitRepository(t, "00000000-0000-4000-8000-000000000002")
+	_, service := openProjectStateService(t, "")
+	first := registerGitRepository(t, service, firstRepository)
+	second := registerGitRepository(t, service, secondRepository)
+	firstAccepted := mustServiceStatus(t, service, first.Binding.Scope).AcceptedSnapshot
+	operation := servicePutTaskOperation(firstAccepted,
+		"99999999-9999-4999-8999-999999999991",
+		"22222222-2222-4222-8222-222222222222", "first workspace only")
+	if _, err := service.Apply(context.Background(), first.Binding.Scope, operation); err != nil {
+		t.Fatal(err)
+	}
+
+	firstView, err := service.View(context.Background(), first.Binding.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondView, err := service.View(context.Background(), second.Binding.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstView.ThroughGeneration != 1 || firstView.Snapshot.Tasks[operation.PutRecord.Record.Task.ID].Value == nil {
+		t.Fatalf("first workspace View = %+v, want its operation", firstView)
+	}
+	if secondView.ThroughGeneration != 0 || len(secondView.Snapshot.Tasks) != 0 {
+		t.Fatalf("sibling workspace View = %+v, want accepted-only snapshot", secondView)
+	}
+}
+
 func TestRecoveryStatusCompositionUsesDatabaseOnly(t *testing.T) {
 	for _, history := range []string{"empty", "accepted", "recovered_old", "recovered_new"} {
 		t.Run(history, func(t *testing.T) {
