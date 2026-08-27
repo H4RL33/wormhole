@@ -1,225 +1,152 @@
-# Wormhole MCP Protocol — Transport & Auth
+# MCP Protocol
 
-**Implementation status (RFC-0001 §9):** the MCP tool surface is "indicative, not finalised."
-Tool *names* below are fixed by the RFC's naming grammar. The JSON-RPC envelope, field
-placement, and error-code mapping document the transport contract implemented today. Future
-transport changes that remain undecided after consulting the RFC and existing code must follow
-the ambiguity ladder in `docs/implementation-rules.md` §2.4.
+Wormhole Stage 2 serves a local-only 17-tool MCP registry from `gatewayd`.
+Harnesses launch `wormhole mcp`; they do not connect directly to an optional
+Fabric server.
 
-## 1. Transport contract
+## Transport
 
-`fabric` exposes a single JSON-RPC 2.0 MCP endpoint at `/mcp`. The contract below
-keeps the server compatible with standard MCP clients, including Claude Code, without a
-custom tool-call envelope.
-
-Harnesses normally use `gatewayd` (Gateway) through the local Unix socket and
-`wormhole mcp` bridge; they do not use this Fabric endpoint directly. The retained
-`wormholed.sock` and `wormholed.db` names are local-state paths, not executable
-aliases for Gateway.
-
-On that local path, MCP `clientInfo` harness/model fields are self-declared client
-provenance. Gateway binds them to a server-generated connection session; local
-assurance proves the binding, not independent authenticity of a harness or model.
-The public stdio bridge forwards only the public MCP lifecycle and tools and
-rejects all private Gateway methods. Same-user CLI RPCs use a separate
-machine-private, startup-owned capability which is verified and stripped before
-handler dispatch. That capability prevents confusion between compliant public
-MCP and private CLI protocol paths and binds local accountability; it does not
-authenticate physical human presence or defend against a hostile same-user
-process, which is inside the local trust boundary. A human-attributed connection
-session is published only on the first capability-verified private call after a
-selected local identity exists, never from `clientInfo` alone.
-
-## 2. Transport: Streamable HTTP, single `/mcp` endpoint
-
-- One HTTP route, `/mcp`, replacing both `/mcp/tools` and `/mcp/tools/call`.
-- `POST /mcp`: client-to-server JSON-RPC 2.0 requests and notifications, one JSON-RPC message
-  per HTTP request body (batching is not currently required — Wormhole has no server-initiated
-  requests yet, so batched responses add complexity with no consumer).
-- `GET /mcp`: reserved for the server-to-client SSE stream the Streamable HTTP transport spec
-  defines for server-initiated messages. Wormhole has no server-initiated MCP messages in
-  the current implementation (no sampling requests, no server notifications), so this route
-  returns `405 Method Not Allowed`. The Claude Code connector uses the local `wormhole mcp`
-  stdio bridge and does not depend on a server-to-client SSE stream. Building a real SSE
-  stream for zero current consumers would violate the smallest-correct-diff rule in
-  `docs/implementation-rules.md` §2.5.
-- Every request and response body is `Content-Type: application/json`.
-
-HTTP status codes carry only transport-level meaning, never RPC-level outcome: every
-well-formed JSON-RPC request/response exchange over `POST /mcp` returns HTTP `200 OK`
-regardless of whether the RPC call succeeds or the response body's `error` field is populated
-(a JSON-RPC error is still valid JSON-RPC, decoded from a normal 200 body). `GET /mcp` always
-returns `405 Method Not Allowed` (no SSE stream implemented, see below). A notification (no
-`id` field) gets no response body at all — HTTP `202 Accepted`, empty, since there is nothing
-to decode. Malformed input that fails before a `RPCRequest` can even be decoded (invalid JSON)
-still returns `200` with a JSON-RPC `-32700` error body, not an HTTP `4xx` — the malformed body
-is a protocol-level failure the client parses via the JSON-RPC envelope, not the HTTP layer.
-
-## 3. JSON-RPC 2.0 envelope
-
-Request:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "tools/call",
-  "params": { "...": "..." }
-}
+```text
+harness stdio <-> wormhole mcp <-> owner-private Unix socket <-> gatewayd
 ```
 
-Success response:
+Both legs use newline-delimited JSON-RPC 2.0. Each message is one JSON object
+followed by `\n`; there is no content-length header. The bridge observes its
+canonical current directory for each `tools/call` and overwrites the private
+`_wormhole_workspace` envelope before forwarding the frame.
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": { "...": "..." }
-}
+That private working-directory context selects no public authority. Gateway
+resolves it to a previously registered checkout; it is removed before public schema validation.
+Gateway also removes an optional untrusted `project_id` comparison claim, then
+injects its resolved project for internal handlers. Public clients cannot set
+workspace ID, checkout, actor, human principal, accountable human, assurance,
+session, harness/model authority, or private path fields.
+
+The bridge rejects `wormhole.private.*` and private integration methods. It
+never reads or forwards the owner-private CLI capability.
+
+Default endpoint:
+
+```text
+$XDG_RUNTIME_DIR/wormhole/wormholed.sock
 ```
 
-Error response:
+If `XDG_RUNTIME_DIR` is absent, Gateway and CLI use the documented
+`$TMPDIR/wormhole-runtime/wormhole/wormholed.sock` fallback.
+
+## Handshake
+
+Clients send `initialize`, wait for a successful response, then send
+`notifications/initialized`. `tools/list` and `tools/call` before the completed
+handshake fail closed.
+
+Example:
 
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "error": { "code": -32602, "message": "invalid params", "data": { "...": "..." } }
-}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"codex","version":"1","modelName":"example","modelVersion":"1"}}}
 ```
 
-Notifications (no `id` field, e.g. `notifications/initialized`) get no response body — server
-returns HTTP `202 Accepted` with an empty body.
+Gateway binds bounded `clientInfo` strings to a server-generated connection
+session. It derives a durable harness agent from selected human plus normalised
+harness name. `clientInfo` is provenance, not authenticated identity. The
+selected human, agent, session, accountable human, and local assurance are
+machine-private Gateway authority.
 
-### 3.1 Error code mapping
+## Live Gateway tools
 
-Standard JSON-RPC 2.0 codes, used exactly as the spec defines them (new negative codes must not
-be invented in this range):
+The exact Stage 2 Gateway inventory is:
 
-| Code | Meaning | Wormhole trigger |
-|---|---|---|
-| -32700 | Parse error | Request body is not valid JSON |
-| -32600 | Invalid Request | Missing/malformed `jsonrpc`, `method`, or `id` field |
-| -32601 | Method not found | `method` is not `initialize`, `tools/list`, or `tools/call` |
-| -32602 | Invalid params | `params` fails the method's expected shape (e.g. `tools/call` missing `name`) |
-| -32603 | Internal error | Unexpected server-side failure (DB error, etc.) |
-
-A **tool execution failure** (e.g. `wormhole.task.create` rejecting an invalid status) is
-**not** a JSON-RPC error. It is a successful RPC call whose `result` carries the tool's own
-failure shape: `{ "content": [{ "type": "text", "text": "<error message>" }], "isError": true }`.
-This matches the current `CallResponse{Error: "..."}` behavior (HTTP 200-equivalent, error in
-the body) and matches the MCP spec's convention of separating protocol errors from tool errors.
-Unauthenticated/unauthorized calls to an auth-required tool ARE JSON-RPC errors (see §5), since
-that is a transport-boundary failure, not a tool-logic failure.
-
-## 4. Methods
-
-Three methods are supported:
-
-### `initialize`
-
-Client-to-server, sent once at connection start.
-
-Request `params`:
-```json
-{
-  "protocolVersion": "2025-11-25",
-  "capabilities": {},
-  "clientInfo": { "name": "claude-code", "version": "..." }
-}
+```text
+wormhole.agent.list
+wormhole.agent.presence
+wormhole.agent.register
+wormhole.channel.create
+wormhole.channel.events
+wormhole.channel.list
+wormhole.channel.post
+wormhole.channel.subscribe
+wormhole.kb.get
+wormhole.kb.list
+wormhole.kb.write
+wormhole.sync.status
+wormhole.workspace.checkpoint
+wormhole.workspace.diff
+wormhole.workspace.import
+wormhole.workspace.stash
+wormhole.workspace.status
 ```
 
-Response `result`:
-```json
-{
-  "protocolVersion": "2025-11-25",
-  "capabilities": { "tools": {} },
-  "serverInfo": { "name": "wormhole", "version": "0.2.4-alpha" }
-}
-```
+`tools/list` is the runtime authority for names and generated JSON schemas.
+Every normal result is MCP text content containing one JSON value. A provider
+or validation failure is returned as `isError: true` text; it is not converted
+into a successful empty result.
 
-`protocolVersion` is pinned to the MCP revision implemented by this server. Re-verify the stable
-MCP specification before any protocol-version bump.
+The five `wormhole.workspace.*` tools use Gateway-owned binding and action
+attribution. Status and diff inspect accepted and candidate state. Import
+reconciles direct tracked portable edits. Checkpoint materialises without Git
+staging, commit, or push. Stash records a private proposal, not a Git stash.
 
-Server capabilities are `{"tools": {}}` only — no `resources`, `prompts`, `sampling`, or
-`logging` capability objects, since Wormhole exposes only tools (RFC-0001 §5.5: every
-capability ships as an MCP tool or it doesn't exist).
+Channel definitions and KB records read from the composed portable view.
+Channel and KB writes enter the private overlay. A KB author must already have
+a matching portable actor record. `channel.post` creates clone-local
+operational activity after validating the portable channel; it never creates a
+portable Event record. Agent registration and presence are clone-local
+scheduler state.
 
-### `tools/list`
+`wormhole.sync.status` does not probe a server. In local-only Stage 2 it reports
+`offline` and zero pending writes without network access.
 
-Request `params`: none (empty object or omitted).
+There is no live Gateway enrolment, whoami, generated-guidance read, semantic
+search, task mutation, Git-link mutation, remote bootstrap, or live sync tool.
+The guidance fixture is generated from the same live registry and is checked
+against these exact 17 descriptors.
 
-Response `result`:
-```json
-{
-  "tools": [
-    {
-      "name": "wormhole.task.create",
-      "description": "...",
-      "inputSchema": { "type": "object", "properties": { "...": "..." }, "required": ["..."] }
-    }
-  ]
-}
-```
+## Subscription
 
-Auto-derived from the existing `Registry`; tool schemas are not manually duplicated. Each tool's
-`inputSchema` MUST include `project_id` as a required
-string property (see §4.3 below) unless the tool is project-agnostic (`wormhole.agent.whoami`
-takes no project_id per RFC-0001 §9).
+`wormhole.channel.subscribe` acknowledges the current resolved workspace, then
+uses the same open connection for future
+`notifications/wormhole.event` messages. It is future-only, clone-local, and
+does not replay history or survive reconnection. Use `channel.events` for
+existing operational activity.
 
-### `tools/call`
+## Private CLI RPCs
 
-Request `params`:
-```json
-{
-  "name": "wormhole.task.create",
-  "arguments": { "project_id": "...", "title": "...", "description": "..." }
-}
-```
+Setup and human workspace commands use separate methods on the same socket,
+guarded by a startup-created capability held outside the repository. Setup
+registers a workspace, selects a human identity, records publication policy,
+imports the Git base, and verifies exact readback. Workspace CLI methods share
+the projectstate operation layer with MCP but are human-attributed.
 
-Response `result` (success): `{ "content": [{ "type": "text", "text": "<JSON-encoded tool result>" }] }`
-Response `result` (tool-level failure): see §3.1's `isError: true` shape.
+Private requests bind to exact confirmed-plan digests and fail on drift. They
+are absent from `tools/list`, rejected by the stdio bridge, and rely on the
+same-user threat boundary. Capability possession does not prove physical human
+presence and does not defend against hostile processes already running as the
+same OS user.
 
-### 4.1 Where `project_id` goes (the envelope decision this chapter had to make)
+## Error codes
 
-The current bespoke shape carries `project_id` as a top-level `CallRequest` field, sibling to
-`arguments`. Standard MCP `tools/call` has no such sibling field — `params` is exactly
-`{name, arguments}`. No RFC text or existing precedent resolves this (ambiguity ladder rung 3
-turns up nothing: this is the first time Wormhole's tool envelope is constrained by an external
-protocol shape). Decision: **`project_id` moves inside `arguments`**, as a required property on
-every project-scoped tool's `inputSchema`, populated by the calling client exactly like any
-other argument. This is the only option compatible with an unmodified standard MCP client
-(Claude Code) — a custom sibling field is not something a real MCP client would ever send.
-The `tools/list` schema generator and `tools/call` handler read `project_id` from `arguments`,
-not from a transport-envelope field.
+Gateway uses standard JSON-RPC codes plus one local handshake code:
 
-## 5. Auth carry-over
+| Code | Meaning |
+|---:|---|
+| `-32700` | parse error |
+| `-32600` | invalid request |
+| `-32601` | method not found |
+| `-32602` | invalid params or private plan drift |
+| `-32603` | internal error |
+| `-32002` | server not initialised |
 
-Decision: **the existing bearer-token-per-passport scheme stays exactly as-is** — same token
-format, same `identityStore.WhoAmI(ctx, projectID, token)` resolution, same
-`AuthenticatedScope` result type consumed by `tool.Handler`. What moves is *where* the token is
-read from:
+Error text is bounded and must not include private capabilities, credentials,
+tokens, request headers, private keys, or environment contents.
 
-- `bearerToken(r.Header.Get("Authorization"))` is read by the JSON-RPC `tools/call` handler
-  after it resolves `tool.RequiresAuth` from the registry and before it invokes `tool.Handler`.
-  `initialize` and `tools/list` never require auth because listing tool schemas is not a scoped
-  operation.
-- Auth failure on a `tools/call` request is a JSON-RPC error, not a tool-result `isError`:
-  missing token → `{"code": -32602, "message": "missing bearer token"}`; invalid/expired token
-  (`identity.ErrInvalidToken`) → a new code in the server-error range, `{"code": -32001,
-  "message": "invalid or expired token"}` (JSON-RPC reserves -32000 to -32099 for
-  implementation-defined server errors; -32001 is arbitrary within that range, chosen for no
-  reason beyond being the first free slot — flagged as arbitrary, not RFC-derived).
-- No new auth mechanism, OAuth flow, or session cookies. Authentication is resolved once at the
-  MCP boundary before core packages receive the request, as required by
-  `docs/implementation-rules.md` §4.
+## Optional Fabric protocol
 
-## 6. Deliberately unspecified
+The optional Fabric binary has a separate 20-tool authenticated HTTP MCP
+registry backed by PostgreSQL. It retains server enrolment, identity, semantic
+KB, task, Git-link, and sync operations. That surface is Gateway-to-server
+design/coverage, not the live Stage 2 harness path and not a Stage 2 acceptance
+dependency.
 
-- Whether request batching (JSON-RPC batch arrays) is ever needed — deferred; not used because
-  no current caller needs it (see §2).
-- The real SSE server-push stream on `GET /mcp` — stubbed to `405` per §2, revisit only if a
-  future server-initiated MCP message type requires it.
-- Any MCP SDK or library choice (hand-rolled JSON-RPC types versus an existing Go MCP SDK) — a
-  new external dependency requires explicit human sign-off under
-  `docs/implementation-rules.md` §4 R4.
+Fabric descriptors and sync wire records remain inventoried in
+[`contracts/alpha-contract.json`](contracts/alpha-contract.json). Their
+presence does not authorise adding those names to Gateway `tools/list`.

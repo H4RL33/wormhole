@@ -1,129 +1,99 @@
 # Alpha interface inventory
 
-`alpha-contract.json` is the reviewed inventory of Wormhole's externally
-observable alpha interfaces. It records the current MCP descriptors, CLI
-surface, environment and path conventions, Gateway local protocol, sync wire
-protocol, migrations, and release artifacts.
+[`alpha-contract.json`](alpha-contract.json) is the reviewed inventory of
+Wormhole's externally observable alpha interfaces. It records MCP descriptors,
+CLI commands, environment/path conventions, local socket protocol, optional
+Fabric sync protocol, database migrations, and release artifacts.
 
-The CLI inventory includes the local-only `trial-metrics validate` and
-`trial-metrics format` commands. They accept participant previews, submitted
-participant exports, or aggregates from a file or stdin; they do not contact
-Gateway or Fabric.
+The inventory is in `alpha-inventory` mode. Reviewed interface changes update
+the file in the same change so drift is visible; this is not a beta
+compatibility promise.
 
-`designed_interfaces` is separate from those live inventories. It records
-decision-complete public contracts that have human design review and may be
-implemented in independently inventoried stages. `integration_manifest_v1` is
-currently `fabric_distribution_materialization_guidance_and_gateway_cache_binding_implemented`:
-its exact
-manifest/entry constraints, managed markers, CLI names, and full closed
-read-only MCP request/response schemas are fixed by
-[`integration-manifest-design.md`](../architecture/integration-manifest-design.md).
-Its six repository-materialisation commands appear under `cli.commands`, and
-its read-only `wormhole.agent.get_guidance` contract appears in the live Gateway
-registry. The authoritative SQLite cache/provider binding is live; an unbound
-provider still fails closed.
-The design requires descriptor-relative, no-follow repository operations and
-immediate journaled removal of unchanged managed bytes after revocation; drift
-is preserved and reported as `removal_required`.
+## Live MCP inventories
 
-`mcp_tools` keeps the Fabric and Gateway registries separate because they are
-different externally observable surfaces. Fabric descriptors include their
-authentication and permission requirements; Gateway descriptors include every
-local permission gate, while same-user socket access remains part of the local
-protocol boundary. Request and successful-response schemas are derived from
-named examples on the canonical registry descriptors. Gateway's
-`wormhole.agent.register` contract is presence-only: its closed request accepts
-only the local presence identity and optional capability declaration, never
-ownership, model, role, permission, repository, Passport, or credential fields.
-Its response reports the trusted local presence record. Variant responses such as `wormhole.kb.get`
-remain inventoried explicitly rather than flattened into synthetic shapes.
-Fabric exposes exactly 20 descriptors and no `wormhole.agent.register` entry;
-its only pre-credential identity creation route is Gateway-owned
-`wormhole.agent.enrol`. There is no compatibility alias for the removed
-join-shaped registration contract.
+`mcp_tools.gateway` and `mcp_tools.fabric` are separate authorities.
 
-Gateway's `wormhole.agent.enrol` entry is the version-1 pre-credential local
-contract. Its closed request records the explicit project binding, requested
-identity and scope, Fabric address, stable attempt key, and a profile identifier
-contained beneath Gateway's credential root. Its response schemas list strict
-per-code variants, including the nonterminal credential-persisted stage, with
-fixed lifecycle state and retryability. The empty permission list is intentional: same-user
-socket protection is the trust boundary before a Passport exists. Result
-schemas contain identity references but never raw
-credential material. See
-[`gateway-enrolment-lifecycle.md`](../architecture/gateway-enrolment-lifecycle.md).
+- Gateway has exactly 17 live agent-facing descriptors: local presence,
+  portable Channel/KB, clone-local operational activity, truthful offline sync
+  status, and portable workspace operations.
+- Optional Fabric has exactly 20 authenticated HTTP descriptors backed by
+  PostgreSQL. It is not a direct Stage 2 harness endpoint.
 
-Gateway's read-only `wormhole.sync.status` entry is local runtime state, not a
-Fabric probe. Its request contains only `project_id`; its response contains
-only `state` and `pending_writes`.
+The optional server inventory is not additive to Gateway. Server enrolment,
+whoami, semantic KB search, task mutation, Git-link mutation, remote bootstrap,
+and remote sync are not in the Stage 2 Gateway inventory. A descriptor is live
+only in the registry where it appears.
 
-## Gateway tool-guidance inventory
+Gateway `agent.register` is presence-only. Its public request identifies the
+target agent and optional local capabilities; it cannot supply owner, model,
+role, permission, repository, credential, actor, session, assurance, or
+workspace authority. Gateway derives the action actor and exact workspace from
+machine-private state.
 
-The live Gateway registry currently has 27 agent-facing tools and every one
-has exactly one structured guidance record. A record carries purpose, use and
-misuse boundaries, mutation behaviour, descriptor-derived permissions and
-minimal request example, prerequisites, freshness and source-access
-implications, and the recommended follow-up. Permission lists and examples
-come from the live descriptor: examples are synthesized from
-`buildInputSchema`, then validated against that schema rather than maintaining
-another parameter inventory.
+The five `wormhole.workspace.{status,diff,import,checkpoint,stash}` descriptors
+share the projectstate operation layer with top-level CLI commands. Diff returns
+the exact publication-review digest. A `public_git` checkpoint requires that
+current digest; checkpoint never stages, commits, or pushes Git.
 
-The inventory covers only live descriptors. Metadata-only Git commit pointers,
-semantic KB search, and local-first task status transitions are live Gateway
-tools with explicit permission, freshness, and no-fallback guidance. Integration
-guidance has one live read-only record. `wormhole.agent.get_guidance` accepts
-only the bound project UUID, reads the cached approved state once, exposes
-applicable role-filtered content without repository targets or merge policy,
-and reports a newer unapproved version separately. Offline reads may continue
-to return compatible, non-revoked approved guidance; revoked or incompatible
-guidance is withheld. The call performs no refresh, approval, rendering,
-materialisation, filesystem, audit, or persistence mutation.
+`wormhole.sync.status` is a local-only state read, not a Fabric probe. It
+reports `offline` and zero pending writes without network access.
 
-The five `wormhole.workspace.{status,diff,import,checkpoint,stash}` tools expose
-the same Gateway project-operation layer as the five top-level CLI commands.
-Gateway resolves workspace binding and actor attribution; public clients cannot
-supply either. Diff returns the deterministic semantic review digest. A
-`public_git` checkpoint must acknowledge that exact digest and rechecks it before
-materialisation. All results are operation readbacks, and checkpoint never
-stages, commits, or pushes Git state.
+## Generated tool guidance
 
-Fabric's version-1 `wormhole.sync.bootstrap` response has a fixed six-field
-outer shape and a strict nested `org_config` snapshot. The nested snapshot
-contains project, authenticated identity and authorization, Channels, Events,
-Tasks, KB articles, and the applicable Fabric integration-manifest offer or
-revocation. When the project has no applicable manifest, integration-manifest
-metadata is JSON `null`. Manifest bodies remain declarative data: Fabric
-preserves immutable version history and digest strings, while Gateway owns
-verification, approval, caching, audit, and repository application. Publication
-and revocation require the explicit `integration_manifest.publish` and
-`integration_manifest.revoke` permissions respectively; they are not exposed
-as model-facing MCP authoring tools.
-The top-level
-Task and KB lists mirror the nested lists exactly; `project_list` is a non-null
-empty array in version 1.
+The live Gateway registry has one structured guidance record for each of its
+17 descriptors. Names, permissions, examples, and request/response schema
+snapshots derive from the registry rather than a second tool allowlist.
 
-`wormhole.sync.incremental_pull` carries later offers and revocations inside
-the existing `{type,data}` update envelope with type `integration_manifest`.
-The `integration_manifest_change` wire record binds every change to project,
-manifest ID, version, full digest, operation, and timestamp. Offered changes
-contain the exact manifest body; revocations use a null body.
+The generated `wormhole-tool-use` skill is checked against the exact 17 names
+and the generated manifest binds its exact bytes with `content_digest`. It
+contains no section for a server-only or removed Gateway tool. Other generated
+skills describe orientation, the local operating loop, contribution, and
+review without claiming remote coordination.
 
-The inventory is intentionally in `alpha-inventory` mode. It makes drift
-visible during review, but it does not activate a beta compatibility promise
-or a general stability guarantee. A reviewed alpha addition or change updates
-the manifest in the same change. Entries that are deliberately less settled
-must include `"stability": "experimental"`.
+## Designed and retained interfaces
 
-Keep arrays sorted and preserve the existing top-level key order so diffs stay
-deterministic. The contract tests only read this file; they never generate or
-rewrite it. `.github/scripts/check-contract-manifest.sh` runs the focused
-packages twice, verifies that the file's hash does not change, and compares
-normalized test output between runs.
+`designed_interfaces` is separate from live MCP inventories. It records
+reviewed contracts that may be implemented or retained in non-Stage-2 layers.
+The integration-manifest cache, private CLI materialisation commands, and
+optional Fabric distribution structures remain inventoried, while the planned
+model-facing guidance-read descriptor is not in the Stage 2 Gateway inventory.
 
-Fabric's successful `wormhole.kb.search` response includes generation-scoped
-ranking metadata (`semantic_applied`, provider, model, version, dimension,
-generation, and cosine metric). Cohere/provider or active-index unavailability
-is not a successful empty response: it is a structured tool error with
-`semantic_ranking=false`, `degraded=true`, `fallback="none"`, and `retryable`.
-There is no lexical fallback. `wormhole.kb.write` likewise fails without a
-database commit when embedding is unavailable.
+Integration manifests are declarative Markdown data. Digests bind exact
+content, manifest bytes, and the running Gateway tool contract. Human preview,
+confirmed digest, no-follow filesystem operations, journalled recovery, and
+drift preservation remain required. Their presence in `designed_interfaces`
+does not make a tool live.
+
+Fabric bootstrap and incremental records retain their strict server wire
+shapes, including integration offers/revocations. Optional Fabric semantic
+search retains generation-scoped ranking metadata and a structured degraded
+error with no lexical fallback. These are server contracts, not Stage 2
+Gateway claims.
+
+## CLI and private protocol
+
+The public CLI inventory includes canonical `setup`, top-level portable
+workspace commands, connector lifecycle, optional integration commands, and
+local-only trial-metrics validation/formatting. Removed initialisation, join,
+combined connection, and join-shaped registration commands have no aliases.
+
+Same-user setup/workspace control uses private socket methods absent from
+`tools/list`. The stdio bridge rejects them and never forwards the private CLI
+capability. The private protocol binds exact confirmed-plan predicates; it is
+not model-facing.
+
+## Maintaining the file
+
+Keep arrays sorted and preserve top-level key order for deterministic review.
+Contract tests only read the inventory. The stability script runs the focused
+packages twice, verifies the file hash is unchanged, and compares normalised
+test output:
+
+```bash
+.github/scripts/check-contract-manifest.sh
+```
+
+An intentionally experimental entry must retain explicit experimental
+stability metadata. Moving a name between `designed_interfaces`, Fabric, and
+Gateway requires implementation, documentation, generated-guidance, process,
+and contract tests in the same reviewed change.

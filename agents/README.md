@@ -2,11 +2,11 @@
 
 ## Mission and State
 
-Wormhole gives humans and agents shared, durable project context. Git is
-the sole code truth and accepts explicitly curated portable Wormhole project state.
-Gateway/Fabric own finite-retention operational collaboration. Wormhole gives
-typed semantics to events, task state, KB records, identities, permissions, and
-links to code. The repository builds the CLI, local Gateway, and optional Fabric.
+Wormhole gives humans and agents durable, Git-native project context. Git is the sole accepted
+source and portable-state authority. The Stage 2 Gateway is
+local-only, exposes exactly 17 agent-facing tools, and never contacts the
+optional Fabric binary. Gateway owns clone-local operational and
+machine-private state; tracked `.wormhole/state/v1/` owns portable state.
 V1 is project/repository-lineage scoped and agent-first; it defines no implicit
 organisation-wide graph, merged KB, inherited policy, or cross-project authority.
 
@@ -38,19 +38,16 @@ must not leak into Core code.
 - Stateless harness connectors call the one user-level `gatewayd` supervisor by
   local MCP IPC.
 - The human-first `wormhole` CLI installs and configures Gateway, workspaces,
-  identities, optional Fabrics, and harness connectors.
+  selected human identity, publication policy, and harness connectors.
 - A tracked, typed `.wormhole/state/v1/` tree at an observed Git commit is the
-  accepted base. Gateway writes a private per-workspace overlay durably before
-  optional sync and materialises it as an uncommitted working-tree candidate
+  accepted base. Gateway writes a private per-workspace overlay durably and
+  materialises it as an uncommitted working-tree candidate
   with `wormhole checkpoint`; checkpoint alone never advances the base.
-- One Gateway supports many projects, worktrees, and explicit Fabric profiles.
-  Each workspace has zero or one writable Fabric stream.
-- Fabric is optional for public and private projects. It owns its Postgres plus
-  pgvector projection, membership, remote audit, and operational activity under an
-  exposed finite retention policy; it cannot overwrite a
-  divergent Git base. A canonical-public hint activates only when `origin`
-  matches the canonical repository identity; a fork/mismatch makes no upstream
-  Fabric contact, read, or write and may bind only an independent realm.
+- One Gateway supports many registered projects and worktrees with distinct
+  workspace IDs and overlays. `wormhole.sync.status` reports `offline` and zero
+  pending writes.
+- Fabric remains an optional separately tested 20-tool PostgreSQL server. It is
+  not attached to the Stage 2 Gateway and is not a direct harness endpoint.
 - Isolated on-demand Code Graph workers are local, deterministic, model-free,
   and per checkout. They do not sync through Fabric.
 
@@ -59,7 +56,8 @@ Permissions. Wormhole stores no competing copy of repository source.
 
 ## Transition State
 
-The 2026-07-28 architecture is authoritative but not yet fully implemented.
+The 2026-07-28 architecture remains design authority where later approved
+Stage 2 decisions do not amend it.
 Task-5 `5F`/`5G`, the mandatory Stage 1A review, the approved R01-R05
 measured-simplification tranche, and R06 are complete. R06's closed-pre-alpha
 private-format hard cut initializes fresh Gateway state directly as schema v6,
@@ -86,13 +84,13 @@ checkpoint and recovery continue to share one coordinator gate. See
 
 ## Binaries
 
-- `wormhole`: setup, identity/auth, project/Fabric/connector administration,
+- `wormhole`: setup, identity, publication, connector administration,
   first-party Codex/Claude connector lifecycle, portable status/diff/import/
   checkpoint/stash operations, and stdio MCP bridge.
-- `gatewayd`: one per-user passive supervisor, stable Unix socket API, SQLite
-  control/read model, durable overlays and queues, and worker lifecycle.
-- `fabric`: optional public/private coordination service, HTTP MCP boundary,
-  Git-aware stream verifier, and Postgres-backed Core.
+- `gatewayd`: one per-user local-only supervisor, stable owner-private Unix
+  socket, schema-v6 SQLite state, durable overlays, and 17-tool MCP registry.
+- `fabric`: optional 20-tool HTTP MCP server backed by PostgreSQL; not a Stage 2
+  Gateway dependency or acceptance authority.
 
 ## Package Ownership and Dependency Bans
 
@@ -103,7 +101,8 @@ checkpoint and recovery continue to share one coordinator gate. See
   durable agents, ownership, sessions, Passports, credentials, and audit.
 - `internal/runtime/localapi`, `localstore`, `eventbus`, `scheduler`, `sync`, `config`:
   local runtime, including explicit project/workspace routing, Git bases,
-  private overlays, checkpoints, and multiple Fabric profiles.
+  private overlays, checkpoints, and retained optional-Fabric packages/profile
+  types. The local-only Stage 2 supervisor does not route or instantiate them.
 - `internal/runtime/codegraph/{config,golang,schema,store,index,query,source}`: Gateway-local
   Code Graph configuration, compiler analysis, derivative SQLite state, revision
   publication, bounded query, and transient hash-validated source assembly only;
@@ -143,14 +142,14 @@ checkpoint and recovery continue to share one coordinator gate. See
   origin or repository-identity changes stickily invalidate it with a monotonic policy
   revision; same-identity visibility changes require explicit setup reconfiguration.
   Machine-private state and secrets stay outside the repository.
-- All project-scoped Fabric data is protected by Postgres RLS. Only explicitly
+- Optional Fabric project data is protected by Postgres RLS. Only explicitly
   project-agnostic principal, authenticator, and agent records, plus explicitly
   global registration configuration such as `role_templates`, are global (see
   `docs/implementation-rules.md` D3).
 - Localstore queries require explicit project namespace and workspace scope.
   Add cross-namespace and cross-workspace tests for localstore changes.
-- Local writes become durable before sync. Ephemeral presence/heartbeat events stay in
-  eventbus. Generic task/channel/progress/runtime activity is operational and never
+- Portable candidate writes become durable in the private overlay before
+  checkpoint. Presence and `channel.post` events are operational and never
   automatically becomes `EventV1`; explicit source-bound promotion alone makes selected
   audit evidence portable. Promotion copies the source event projection exactly, keeps
   the source actor in `EventV1`, and records the distinct promoter on `OperationV1`.
@@ -159,25 +158,22 @@ checkpoint and recovery continue to share one coordinator gate. See
   an exact 30-day default or a finite advertised longer duration.
 - Passport tokens and credentials are secrets. Do not log them. Server stores token
   hashes. Keep socket and credential file permissions restrictive.
-- Humans and agents have equivalent authorised project operations through CLI and MCP,
-  while typed schemas, progressive disclosure, autonomous durability, attribution, and
-  handoff remain agent-first.
-  Human authentication, ownership transfer, credential recovery, membership,
-  and policy administration remain human control-plane operations.
-- Git/Fabric divergence uses semantic three-way rebase with explicit conflicts;
-  never introduce last-write-wins.
+- Setup and top-level workspace commands are human private-control operations;
+  public MCP tool calls are agent-attributed. Both share projectstate semantics
+  but not the same authority surface.
 
 ## MCP Surface
 
-MCP is the stateless agent-facing project-operation contract. Core names use
-`wormhole.<pillar>.<verb>` for agent, channel, task, KB, and git operations.
-`wormhole.sync.*` is Gateway-to-Fabric sync;
-`wormhole.workspace.{status,diff,import,checkpoint,stash}` provides equivalent
-local project-state operations for agents. This namespace is not a Core pillar.
-Harnesses use local Gateway; do not add a direct remote harness path. Human CLI project operations
-must share the same Gateway domain semantics. Private remote auth and
-permission enforcement remain at the Fabric boundary; local/public assurance
-is explicit in the actor envelope.
+MCP is the stateless agent-facing project-operation contract. The live Gateway
+surface is exactly 17 tools: three local agent-presence tools, five channel
+tools, three deterministic KB tools, truthful local-only `sync.status`, and
+five workspace tools. There is no live Gateway enrolment, whoami, guidance
+read, semantic search, task, Git-link, remote bootstrap, or live sync tool.
+
+Harnesses use `wormhole mcp` and the local Gateway; never add a direct remote
+harness path. The bridge injects private working-directory context and Gateway
+removes it before public schema validation. Clients cannot choose binding,
+human, assurance, accountable owner, session, or action actor.
 
 ## Development Protocol
 
@@ -189,20 +185,19 @@ unrelated worktree changes.
 
 ## Identity and Session Decision
 
-Humans and agents are separate durable principals. Authenticators prove a human
-identity; project memberships authorise private Fabric access; ownership records
-make a human accountable for an agent. Passports are project-scoped Fabric
-capability grants, not the human identity or the agent itself. Agent actions
-capture agent, accountable human, harness/model session, and assurance at action
-time. Local MCP `clientInfo` harness/model values are self-declared provenance
+Humans and agents are separate durable machine-private principals. Setup
+selects one human. Gateway derives a durable harness agent for that human and
+creates a fresh connection session. Agent actions capture agent, accountable
+human, harness/model session, and assurance at action time. Local MCP
+`clientInfo` harness/model values are self-declared provenance
 bound by Gateway to its own session; local assurance does not independently
-verify either value. Local/fork actors are self-declared, public Fabric uses key
-continuity, and private Fabric uses authenticated membership. CLI-attributed
-human envelopes retain their Gateway session and `wormhole-cli` version
+verify either value. Portable actor records are repository-visible identity
+statements, not local credentials or authority. CLI-attributed human envelopes
+retain their Gateway session and `wormhole-cli` version
 provenance without agent, owner, or model fields. The owner-private CLI
 capability separates compliant local protocol paths and binds accountability;
 it does not prove physical human presence or defend against hostile same-user
-processes, which remain inside the approved local trust boundary.
+processes, which remain inside the approved same-user local trust boundary.
 
 ## Build and Test Commands
 
@@ -229,7 +224,7 @@ available and may skip unless `WORMHOLE_INTEGRATION_REQUIRED=1`.
 - Runtime SQLite: `$XDG_DATA_HOME/wormhole/wormholed.db`, else
   `~/.local/share/wormhole/wormholed.db`.
 
-Workspace IDs, overlays, stashes, recovery journals, Fabric credentials,
+Workspace IDs, overlays, stashes, recovery journals, optional Fabric credentials,
 connector backups, and Code Graph databases are machine-private and remain
 outside the repository. Legacy `.wormhole/integration-state.json` must be
 migrated/ignored, never committed.

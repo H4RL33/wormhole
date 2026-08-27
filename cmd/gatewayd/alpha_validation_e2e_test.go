@@ -1,1036 +1,850 @@
+//go:build linux
+
 package main
 
 import (
+	"bufio"
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/H4RL33/wormhole/internal/core/events"
-	"github.com/H4RL33/wormhole/internal/core/identity"
-	"github.com/H4RL33/wormhole/internal/core/kb"
-	"github.com/H4RL33/wormhole/internal/core/tasks"
-	"github.com/H4RL33/wormhole/internal/mcp"
+	"github.com/H4RL33/wormhole/internal/runtime/config"
 	"github.com/H4RL33/wormhole/internal/runtime/localapi"
+	"github.com/H4RL33/wormhole/internal/runtime/localidentity"
+	"github.com/H4RL33/wormhole/internal/runtime/projectstate"
 	"github.com/H4RL33/wormhole/internal/types"
+	state "github.com/H4RL33/wormhole/internal/types/projectstate"
 )
 
-type alphaValidationFixture struct {
-	SchemaVersion int `json:"schema_version"`
-	Project       struct {
-		ID, Name, Owner string
-	} `json:"project"`
-	Publisher   alphaFixtureActor `json:"publisher"`
-	Contributor alphaFixtureActor `json:"contributor"`
-	Reviewer    alphaFixtureActor `json:"reviewer"`
-	Task        struct {
-		ID, Title, Description, Status string
-		Priority                       int
-	} `json:"task"`
-	Channel struct {
-		ID, Name string
-	} `json:"channel"`
-	SeedEvent struct {
-		ID        string          `json:"id"`
-		EventType string          `json:"event_type"`
-		Payload   json.RawMessage `json:"payload"`
-	} `json:"seed_event"`
-	KBArticle struct {
-		ID, Title, Body string
-		Frontmatter     json.RawMessage `json:"frontmatter"`
-	} `json:"kb_article"`
-	Manifest struct {
-		Path, ID, Digest string
-		Version          int64
-	} `json:"manifest"`
-	RepositoryContext struct {
-		ExpectedPath string `json:"expected_path"`
-	} `json:"repository_context"`
-	MeaningfulUpdate struct {
-		EventType string `json:"event_type"`
-		Note      string `json:"note"`
-	} `json:"meaningful_update"`
-	OfflineTask struct {
-		Title, Description string
-		Priority           int
-	} `json:"offline_task"`
-	Discovery struct {
-		Title, Body string
-		Frontmatter json.RawMessage
-	} `json:"discovery"`
+const stage2ProcessProjectID = "00000000-0000-4000-8000-000000000001"
+
+var stage2ProcessGatewayTools = []string{
+	"wormhole.agent.list", "wormhole.agent.presence", "wormhole.agent.register",
+	"wormhole.channel.create", "wormhole.channel.events", "wormhole.channel.list", "wormhole.channel.post", "wormhole.channel.subscribe",
+	"wormhole.kb.get", "wormhole.kb.list", "wormhole.kb.write", "wormhole.sync.status",
+	"wormhole.workspace.checkpoint", "wormhole.workspace.diff", "wormhole.workspace.import", "wormhole.workspace.stash", "wormhole.workspace.status",
 }
 
-type alphaFixtureActor struct {
-	Owner, Model string
-	Capabilities []string
-	Roles        []string
-	Permissions  []string
-}
-
-type alphaCredential struct {
-	Server     string `json:"server"`
-	ProjectID  string `json:"project_id"`
-	AgentID    string `json:"agent_id"`
-	PassportID string `json:"passport_id"`
-	Token      string `json:"token"`
-}
-
-// TestAlphaValidation_FullAutomatedAcceptanceLoop is the alpha release gate.
-// It uses real gatewayd/fabric processes, Fabric HTTP, PostgreSQL, two
-// independent SQLite replicas, two deterministic socket clients, human CLI
-// approval, and a real indexed Wormhole checkout. Integration-required mode
-// fails closed when Postgres is unavailable.
-func TestAlphaValidation_FullAutomatedAcceptanceLoop(t *testing.T) {
-	fixture := loadAlphaValidationFixture(t)
-	db := e2eTestDB(t)
-	seed := seedAlphaValidationFixture(t, db, fixture)
-
+// TestStage2LocalOnlyRealProcessAcceptance is the hermetic Stage 2 release
+// topology. It executes the production daemon and setup primitives, then the
+// production stdio bridge. Host service-manager installation is deliberately
+// covered by the separate setup/systemd lifecycle tests; this test adds no
+// bypass or alternative production configuration seam.
+func TestStage2LocalOnlyRealProcessAcceptance(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real-process acceptance")
+	}
 	wormholeBin := e2eBuildStdioBridgeBinary(t)
 	if stdioBridgeBinErr != nil {
-		t.Fatalf("build wormhole CLI: %v", stdioBridgeBinErr)
+		t.Fatal(stdioBridgeBinErr)
 	}
 	gatewayBin := task4BuildGatewayBinary(t)
 	if task4GatewayBinErr != nil {
-		t.Fatalf("build gatewayd: %v", task4GatewayBinErr)
-	}
-	fabricBin := task4BuildFabricBinary(t)
-	if task4FabricBinErr != nil {
-		t.Fatalf("build Fabric: %v", task4FabricBinErr)
-	}
-	fabric, fabricURL := startTask4FabricProcess(t, fabricBin, typesDatabaseURL())
-
-	repoRoot := filepath.Clean(repoRootForTest(t))
-	checkoutA := cloneAlphaWormhole(t, repoRoot, fixture.Project.ID, "contributor")
-	checkoutB := cloneAlphaWormhole(t, repoRoot, fixture.Project.ID, "reviewer")
-	commitSHA := alphaGitOutput(t, checkoutA, "rev-parse", "HEAD")
-	remote := alphaGitOutput(t, checkoutA, "remote", "get-url", "origin")
-
-	a := startAlphaGateway(t, gatewayBin, fabricURL, fixture.Project.ID, remote, "alpha-a", checkoutA, fixture.Contributor)
-	b := startAlphaGateway(t, gatewayBin, fabricURL, fixture.Project.ID, remote, "alpha-b", checkoutB, fixture.Reviewer)
-	if a.dbPath == b.dbPath {
-		t.Fatalf("Gateways share SQLite path %q", a.dbPath)
-	}
-	alphaAssertIndependentFiles(t, a.dbPath, b.dbPath)
-
-	applyAlphaManifest(t, wormholeBin, a, fixture.Manifest.Digest)
-	applyAlphaManifest(t, wormholeBin, b, fixture.Manifest.Digest)
-	a.restart(t, gatewayBin)
-	b.restart(t, gatewayBin)
-	defer a.closeClient()
-	defer b.closeClient()
-
-	t.Run("required Gateway operating-loop contracts are live", func(t *testing.T) {
-		got := alphaListGatewayTools(t, a.client)
-		want := []string{
-			"wormhole.agent.enrol", "wormhole.agent.get_guidance", "wormhole.agent.list", "wormhole.agent.presence", "wormhole.agent.register", "wormhole.agent.whoami",
-			"wormhole.channel.create", "wormhole.channel.events", "wormhole.channel.list", "wormhole.channel.post", "wormhole.channel.subscribe",
-			"wormhole.git.link_commit",
-			"wormhole.kb.get", "wormhole.kb.list", "wormhole.kb.search", "wormhole.kb.write", "wormhole.sync.status",
-			"wormhole.task.create", "wormhole.task.get", "wormhole.task.list", "wormhole.task.route", "wormhole.task.update_status",
-			"wormhole.workspace.checkpoint", "wormhole.workspace.diff", "wormhole.workspace.import", "wormhole.workspace.stash", "wormhole.workspace.status",
-		}
-		sort.Strings(want)
-		if !equalAlphaStrings(got, want) {
-			t.Fatalf("Gateway tools = %q, want exact 27 %q", got, want)
-		}
-	})
-
-	alphaWaitOnline(t, a)
-	alphaWaitOnline(t, b)
-	assertAlphaGuidance(t, a.client, fixture.Project.ID, fixture.Manifest.Digest, "contributor")
-	assertAlphaGuidance(t, b.client, fixture.Project.ID, fixture.Manifest.Digest, "reviewer")
-
-	var meaningfulEventID, wipStatusEventID string
-	t.Run("Agent A follows the operating loop", func(t *testing.T) {
-		who := alphaMustGatewayCall(t, a.client, "wormhole.agent.whoami", map[string]interface{}{})
-		alphaJSONFieldEquals(t, who, "agent_id", a.credential.AgentID)
-		alphaJSONFieldEquals(t, who, "project_id", fixture.Project.ID)
-
-		tasksRaw := alphaMustGatewayCall(t, a.client, "wormhole.task.list", map[string]interface{}{"project_id": fixture.Project.ID})
-		if !alphaJSONArrayHas(t, tasksRaw, "tasks", "id", fixture.Task.ID) {
-			t.Fatalf("Agent A task list lacks fixture task: %s", tasksRaw)
-		}
-		kbRaw := alphaMustGatewayCall(t, a.client, "wormhole.kb.list", map[string]interface{}{"project_id": fixture.Project.ID})
-		if !alphaJSONArrayHas(t, kbRaw, "articles", "id", fixture.KBArticle.ID) {
-			t.Fatalf("Agent A KB replica lacks fixture article: %s", kbRaw)
-		}
-		searchRaw := alphaMustGatewayCall(t, a.client, "wormhole.kb.search", map[string]interface{}{
-			"project_id": fixture.Project.ID, "query": fixture.KBArticle.Title + "\n\n" + fixture.KBArticle.Body, "limit": 5,
-		})
-		if !alphaJSONArrayHas(t, searchRaw, "articles", "article_id", fixture.KBArticle.ID) {
-			t.Fatalf("semantic search lacks fixture article: %s", searchRaw)
-		}
-		eventsRaw := alphaMustGatewayCall(t, a.client, "wormhole.channel.events", map[string]interface{}{"project_id": fixture.Project.ID})
-		if !alphaJSONArrayHas(t, eventsRaw, "events", "id", fixture.SeedEvent.ID) {
-			t.Fatalf("Agent A event inspection lacks seed event: %s", eventsRaw)
-		}
-
-		meaningfulEventID = alphaJSONID(t, alphaMustGatewayCall(t, a.client, "wormhole.channel.post", map[string]interface{}{
-			"project_id": fixture.Project.ID, "channel_id": fixture.Channel.ID, "agent_id": a.credential.AgentID,
-			"event_type": fixture.MeaningfulUpdate.EventType, "payload": map[string]interface{}{"task_id": fixture.Task.ID}, "note": fixture.MeaningfulUpdate.Note,
-		}))
-		alphaMustGatewayCall(t, a.client, "wormhole.task.update_status", map[string]interface{}{
-			"project_id": fixture.Project.ID, "task_id": fixture.Task.ID, "new_status": "wip", "channel_id": fixture.Channel.ID,
-		})
-		wipStatusEventID = alphaSQLiteStatusEventID(t, a.dbPath, fixture.Task.ID, "todo", "wip", a.credential.AgentID)
-		alphaMustGatewayCall(t, a.client, "wormhole.git.link_commit", map[string]interface{}{
-			"project_id": fixture.Project.ID, "task_id": fixture.Task.ID, "repo": remote,
-			"commit_sha": commitSHA, "summary": "Process path verified for reviewer handoff.",
-		})
-	})
-
-	// Fabric goes away during work. Gateway A is restarted while offline, then
-	// accepts the documented local-first Task/KB/Event writes.
-	fabric.Stop(t)
-	a.closeClient()
-	a.daemon.Stop(t)
-	a.restart(t, gatewayBin)
-	discoveryBody := fixture.Discovery.Body + " Git commit: " + commitSHA + ". Task: " + fixture.Task.ID + "."
-	offlineTask := alphaMustGatewayCall(t, a.client, "wormhole.task.create", map[string]interface{}{
-		"project_id": fixture.Project.ID, "title": fixture.OfflineTask.Title,
-		"description": fixture.OfflineTask.Description, "priority": fixture.OfflineTask.Priority,
-	})
-	offlineTaskID := alphaJSONID(t, offlineTask)
-	offlineKB := alphaMustGatewayCall(t, a.client, "wormhole.kb.write", map[string]interface{}{
-		"project_id": fixture.Project.ID, "agent_id": a.credential.AgentID, "title": fixture.Discovery.Title,
-		"body": discoveryBody, "frontmatter": alphaDecodeObject(t, fixture.Discovery.Frontmatter),
-	})
-	offlineKBID := alphaJSONID(t, offlineKB)
-	offlineEvent := alphaMustGatewayCall(t, a.client, "wormhole.channel.post", map[string]interface{}{
-		"project_id": fixture.Project.ID, "channel_id": fixture.Channel.ID, "agent_id": a.credential.AgentID,
-		"event_type": "discovery.logged", "payload": map[string]interface{}{
-			"summary": fixture.Discovery.Body, "kb_article_id": offlineKBID, "agent_id": a.credential.AgentID,
-			"task_id": fixture.Task.ID, "commit_sha": commitSHA, "code_path": fixture.RepositoryContext.ExpectedPath,
-		},
-	})
-	offlineEventID := alphaJSONID(t, offlineEvent)
-	alphaWaitPending(t, a, 3)
-
-	fabric = startTask4FabricProcessAtURL(t, fabricBin, typesDatabaseURL(), fabricURL)
-	_ = fabric
-	alphaWaitPostgresCount(t, db, "tasks", offlineTaskID, 1)
-	alphaWaitPostgresCount(t, db, "kb_articles", offlineKBID, 1)
-	alphaWaitPostgresCount(t, db, "events", offlineEventID, 1)
-	alphaWaitSQLiteCount(t, b.dbPath, "tasks", offlineTaskID, 1)
-	alphaWaitSQLiteCount(t, b.dbPath, "kb_articles", offlineKBID, 1)
-	alphaWaitSQLiteCount(t, b.dbPath, "events", offlineEventID, 1)
-	alphaWaitSQLiteCount(t, b.dbPath, "events", meaningfulEventID, 1)
-	alphaWaitOnline(t, a)
-	alphaWaitOnline(t, b)
-
-	alphaMustGatewayCall(t, a.client, "wormhole.task.update_status", map[string]interface{}{
-		"project_id": fixture.Project.ID, "task_id": fixture.Task.ID, "new_status": "done", "channel_id": fixture.Channel.ID,
-	})
-	doneStatusEventID := alphaSQLiteStatusEventID(t, a.dbPath, fixture.Task.ID, "wip", "done", a.credential.AgentID)
-	alphaWaitSQLiteTaskStatus(t, b.dbPath, fixture.Task.ID, "done")
-	gitLinkID := alphaPostgresGitLinkID(t, db, fixture.Project.ID, fixture.Task.ID, commitSHA)
-	alphaWaitPostgresCount(t, db, "git_links", gitLinkID, 1)
-	alphaWaitSQLiteCount(t, b.dbPath, "git_links", gitLinkID, 1)
-	reviewerGit := alphaSQLiteGitLink(t, b.dbPath, gitLinkID)
-	if reviewerGit.ProjectID != fixture.Project.ID || reviewerGit.TaskID != fixture.Task.ID || reviewerGit.Repo != remote || reviewerGit.CommitSHA != commitSHA || reviewerGit.AgentID != a.credential.AgentID {
-		t.Fatalf("reviewer Git replica has wrong stable handoff pointer: %+v", reviewerGit)
+		t.Fatal(task4GatewayBinErr)
 	}
 
-	t.Run("Agent B reconstructs the handoff without human relay", func(t *testing.T) {
-		tasksRaw := alphaMustGatewayCall(t, b.client, "wormhole.task.list", map[string]interface{}{"project_id": fixture.Project.ID})
-		if !alphaJSONArrayObjectMatches(t, tasksRaw, "tasks", map[string]string{"id": fixture.Task.ID, "status": "done"}) {
-			t.Fatalf("reviewer lacks completed task intent: %s", tasksRaw)
-		}
-		kbRaw := alphaMustGatewayCall(t, b.client, "wormhole.kb.list", map[string]interface{}{"project_id": fixture.Project.ID})
-		if !bytes.Contains(kbRaw, []byte(reviewerGit.CommitSHA)) || !bytes.Contains(kbRaw, []byte(fixture.RepositoryContext.ExpectedPath)) {
-			t.Fatalf("reviewer KB lacks Git pointer or discovery path: %s", kbRaw)
-		}
-		eventsRaw := alphaMustGatewayCall(t, b.client, "wormhole.channel.events", map[string]interface{}{"project_id": fixture.Project.ID})
-		if !alphaJSONArrayHas(t, eventsRaw, "events", "id", offlineEventID) || !bytes.Contains(eventsRaw, []byte(reviewerGit.CommitSHA)) {
-			t.Fatalf("reviewer events lack durable discovery/Git handoff: %s", eventsRaw)
-		}
+	gitFixture := newStage2ProcessGitFixture(t)
+	cloneA := gitFixture.clone(t, "clone-a")
+	runtimeA := newStage2ProcessRuntime(t, "clone-a")
+	daemonA := runtimeA.startGateway(t, gatewayBin)
+	setupA := runtimeA.bootstrap(t, cloneA, "Alice Clone A")
+	bridgeA := runtimeA.startBridge(t, wormholeBin, cloneA)
+	assertStage2ProcessToolsAndGuidance(t, bridgeA)
+
+	sessionA := stage2ProcessAgentSession(t, runtimeA.identityRoot, "stage2-acceptance")
+	agentA := sessionA.AgentID
+	if !types.CanonicalUUID(agentA) || setupA.HumanID == "" || setupA.WorkspaceID == "" {
+		t.Fatalf("private identity selection = human %q agent %q workspace %q", setupA.HumanID, agentA, setupA.WorkspaceID)
+	}
+	publishStage2ProcessActor(t, cloneA, agentA)
+	stage2ProcessCall(t, bridgeA, "wormhole.workspace.import", nil)
+
+	channel := stage2ProcessCall(t, bridgeA, "wormhole.channel.create", map[string]any{"name": "portable-review"})
+	channelID := stage2ProcessString(t, channel, "id")
+	article := stage2ProcessCall(t, bridgeA, "wormhole.kb.write", map[string]any{
+		"title": "Portable decision", "body": "clone A\r\n", "frontmatter": map[string]any{"type": "decision"},
 	})
-
-	// A valid newer Fabric offer remains pending and cannot replace approved
-	// guidance until a human explicitly approves it.
-	manifestV2 := alphaManifestV2(t, seed.manifest)
-	if _, err := seed.manifestStore.Publish(context.Background(), seed.publisherScope, manifestV2); err != nil {
-		t.Fatalf("publish manifest v2: %v", err)
-	}
-	alphaWaitPendingManifest(t, b.client, fixture.Project.ID, fixture.Manifest.Digest, manifestV2.ManifestDigest)
-
-	// Remove the real active semantic generation. Gateway must return the
-	// Fabric structured degraded error, never a successful lexical fallback.
-	if _, err := db.Exec(`UPDATE kb_embedding_generations SET state = 'retired', retired_at = now() WHERE project_id = $1 AND state = 'active'`, fixture.Project.ID); err != nil {
-		t.Fatalf("make semantic index unavailable: %v", err)
-	}
-	degraded, transportErr := a.client.call("wormhole.kb.search", map[string]interface{}{
-		"project_id": fixture.Project.ID, "query": "alpha handoff", "limit": 5,
+	articleID := stage2ProcessString(t, article, "id")
+	activity := stage2ProcessCall(t, bridgeA, "wormhole.channel.post", map[string]any{
+		"channel_id": channelID, "event_type": "review.ready", "payload": map[string]any{"clone": "A"},
 	})
-	if transportErr != nil || degraded.Error == "" || !strings.Contains(degraded.Error, `"degraded":true`) || !strings.Contains(degraded.Error, `"fallback":"none"`) {
-		t.Fatalf("unavailable embedder/index transport=%v response=%+v", transportErr, degraded)
+	activityID := stage2ProcessString(t, activity, "id")
+	stage2ProcessCall(t, bridgeA, "wormhole.agent.register", map[string]any{"agent_id": agentA, "capabilities": []string{"code", "review"}})
+	stage2ProcessCall(t, bridgeA, "wormhole.agent.presence", map[string]any{"agent_id": agentA, "status": "busy"})
+	assertStage2ProcessContainsID(t, stage2ProcessCall(t, bridgeA, "wormhole.channel.list", nil), "channels", channelID, true)
+	assertStage2ProcessContainsID(t, stage2ProcessCall(t, bridgeA, "wormhole.kb.list", nil), "articles", articleID, true)
+	assertStage2ProcessContainsID(t, stage2ProcessCall(t, bridgeA, "wormhole.channel.events", nil), "events", activityID, true)
+	assertStage2ProcessContainsID(t, stage2ProcessCall(t, bridgeA, "wormhole.agent.list", nil), "agents", agentA, true)
+	assertStage2ProcessOffline(t, stage2ProcessCall(t, bridgeA, "wormhole.sync.status", nil))
+	assertStage2ProcessLegacyRows(t, runtimeA.dbPath, 1)
+
+	// Restart both real processes against the same owner-private state.
+	bridgeA.close(t)
+	daemonA.Stop(t)
+	daemonA = runtimeA.startGateway(t, gatewayBin)
+	bridgeA = runtimeA.startBridge(t, wormholeBin, cloneA)
+	assertStage2ProcessToolsAndGuidance(t, bridgeA)
+	restartedSessionA := stage2ProcessAgentSession(t, runtimeA.identityRoot, "stage2-acceptance")
+	if restartedSessionA.AgentID != agentA || restartedSessionA.SessionID == sessionA.SessionID {
+		t.Fatalf("restart session = %+v, want durable agent %s and new session after %s", restartedSessionA, agentA, sessionA.SessionID)
 	}
+	assertStage2ProcessContainsID(t, stage2ProcessCall(t, bridgeA, "wormhole.channel.list", nil), "channels", channelID, true)
+	articleAfterRestart := stage2ProcessCall(t, bridgeA, "wormhole.kb.get", map[string]any{"article_id": articleID})
+	if stage2ProcessString(t, articleAfterRestart, "id") != articleID || stage2ProcessString(t, articleAfterRestart, "body") != "clone A\n" {
+		t.Fatalf("article after restart = %s", articleAfterRestart)
+	}
+	assertStage2ProcessContainsID(t, stage2ProcessCall(t, bridgeA, "wormhole.channel.events", nil), "events", activityID, true)
 
-	// Replayed pull cycles and Gateway restarts must not duplicate the three
-	// outage writes in either authoritative or reviewer replicas.
-	time.Sleep(6 * time.Second)
-	alphaAssertCount(t, db, `SELECT count(*) FROM tasks WHERE id=$1`, offlineTaskID, 1)
-	alphaAssertCount(t, db, `SELECT count(*) FROM kb_articles WHERE id=$1`, offlineKBID, 1)
-	alphaAssertCount(t, db, `SELECT count(*) FROM events WHERE id=$1`, offlineEventID, 1)
-	alphaAssertSQLiteCount(t, b.dbPath, "tasks", offlineTaskID, 1)
-	alphaAssertSQLiteCount(t, b.dbPath, "kb_articles", offlineKBID, 1)
-	alphaAssertSQLiteCount(t, b.dbPath, "events", offlineEventID, 1)
-	alphaAssertSQLiteCount(t, b.dbPath, "git_links", gitLinkID, 1)
+	diff := stage2ProcessCall(t, bridgeA, "wormhole.workspace.diff", nil)
+	if stage2ProcessString(t, diff, "candidate_digest") == "" || stage2ProcessString(t, diff, "publication_review_digest") == "" || stage2ProcessArrayLen(t, diff, "changes") < 3 {
+		t.Fatalf("portable candidate diff = %s", diff)
+	}
+	beforeCheckpoint := captureStage2ProcessGit(t, cloneA, gitFixture.remote)
+	stage2ProcessCall(t, bridgeA, "wormhole.workspace.checkpoint", nil)
+	if after := captureStage2ProcessGit(t, cloneA, gitFixture.remote); after != beforeCheckpoint {
+		t.Fatalf("checkpoint changed Git: before=%+v after=%+v", beforeCheckpoint, after)
+	}
+	stage2ProcessGitGrepAbsent(t, cloneA, activityID)
 
-	// Reopen both durable replicas and force another pull/replay cycle. The
-	// Gateway-owned status Event ID must remain the sole ID for the exact
-	// transition in Gateway A, Fabric, and Gateway B after restart.
-	a.restart(t, gatewayBin)
-	b.restart(t, gatewayBin)
-	alphaWaitOnline(t, a)
-	alphaWaitOnline(t, b)
-	alphaAssertStatusEventStableEverywhere(t, db, a.dbPath, b.dbPath, fixture.Project.ID, fixture.Task.ID, "todo", "wip", fixture.Channel.ID, a.credential.AgentID, wipStatusEventID)
-	alphaAssertStatusEventStableEverywhere(t, db, a.dbPath, b.dbPath, fixture.Project.ID, fixture.Task.ID, "wip", "done", fixture.Channel.ID, a.credential.AgentID, doneStatusEventID)
+	stage2ProcessGit(t, cloneA, "config", "user.name", "Stage 2 Process")
+	stage2ProcessGit(t, cloneA, "config", "user.email", "stage2@example.test")
+	stage2ProcessGit(t, cloneA, "add", ".wormhole")
+	stage2ProcessGit(t, cloneA, "commit", "-m", "test: accept portable channel and KB")
+	stage2ProcessGit(t, cloneA, "push", "origin", "HEAD:main")
+	acceptedCommit := stage2ProcessGitOutput(t, cloneA, "rev-parse", "HEAD")
+	accepted := stage2ProcessCall(t, bridgeA, "wormhole.workspace.status", nil)
+	if stage2ProcessString(t, accepted, "accepted_commit_sha") != acceptedCommit || stage2ProcessBool(t, accepted, "candidate_present") {
+		t.Fatalf("Git acceptance status = %s, want commit %s and no candidate", accepted, acceptedCommit)
+	}
+	stage2ProcessGitGrepAbsent(t, cloneA, activityID)
+	bridgeA.close(t)
+	daemonA.Stop(t)
+
+	cloneB := gitFixture.clone(t, "clone-b")
+	runtimeB := newStage2ProcessRuntime(t, "clone-b")
+	daemonB := runtimeB.startGateway(t, gatewayBin)
+	setupB := runtimeB.bootstrap(t, cloneB, "Alice Clone B")
+	bridgeB := runtimeB.startBridge(t, wormholeBin, cloneB)
+	assertStage2ProcessToolsAndGuidance(t, bridgeB)
+	sessionB := stage2ProcessAgentSession(t, runtimeB.identityRoot, "stage2-acceptance")
+	if setupB.AcceptedDigest != stage2ProcessString(t, accepted, "candidate_digest") || setupB.WorkspaceID == setupA.WorkspaceID || setupB.HumanID == setupA.HumanID {
+		t.Fatalf("fresh clone private/portable equivalence: A=%+v B=%+v accepted=%s", setupA, setupB, accepted)
+	}
+	if sessionB.AgentID == agentA || sessionB.SessionID == restartedSessionA.SessionID || sessionB.AccountableHumanID != setupB.HumanID {
+		t.Fatalf("fresh clone private session = %+v, clone A agent/session = %s/%s", sessionB, agentA, restartedSessionA.SessionID)
+	}
+	assertStage2ProcessPortableActor(t, cloneB, agentA)
+	assertStage2ProcessContainsID(t, stage2ProcessCall(t, bridgeB, "wormhole.channel.list", nil), "channels", channelID, true)
+	articleB := stage2ProcessCall(t, bridgeB, "wormhole.kb.get", map[string]any{"article_id": articleID})
+	if stage2ProcessString(t, articleB, "title") != stage2ProcessString(t, articleAfterRestart, "title") || stage2ProcessString(t, articleB, "body") != "clone A\n" {
+		t.Fatalf("fresh clone KB = %s, want %s", articleB, articleAfterRestart)
+	}
+	assertStage2ProcessContainsID(t, stage2ProcessCall(t, bridgeB, "wormhole.channel.events", nil), "events", activityID, false)
+	assertStage2ProcessContainsID(t, stage2ProcessCall(t, bridgeB, "wormhole.agent.list", nil), "agents", agentA, false)
+	assertStage2ProcessOffline(t, stage2ProcessCall(t, bridgeB, "wormhole.sync.status", nil))
+	assertStage2ProcessLegacyRows(t, runtimeB.dbPath, 0)
+	assertStage2ProcessFreshPrivateState(t, runtimeA.dbPath, runtimeB.dbPath)
+	assertStage2ProcessTrackedSurface(t, cloneB)
+	bridgeB.close(t)
+	daemonB.Stop(t)
 }
 
-type alphaSeedState struct {
-	publisherScope *identity.AuthenticatedScope
-	manifestStore  *mcp.IntegrationManifestStore
-	manifest       mcp.IntegrationManifest
+type stage2ProcessGitFixture struct {
+	root   string
+	remote string
 }
 
-func loadAlphaValidationFixture(t *testing.T) alphaValidationFixture {
+func newStage2ProcessGitFixture(t *testing.T) stage2ProcessGitFixture {
 	t.Helper()
-	path := filepath.Join(repoRootForTest(t), "testdata", "alpha", "projects", "full-loop", "fixture.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("load full alpha loop fixture %q: %v", path, err)
-	}
-	var fixture alphaValidationFixture
-	if err := json.Unmarshal(data, &fixture); err != nil {
-		t.Fatalf("decode full alpha loop fixture: %v", err)
-	}
-	if fixture.SchemaVersion != 1 || fixture.Project.ID == "" || fixture.Task.Status != "todo" || len(fixture.KBArticle.Body) == 0 || fixture.Manifest.Digest == "" {
-		t.Fatalf("incomplete alpha fixture: %+v", fixture)
-	}
-	return fixture
-}
-
-func seedAlphaValidationFixture(t *testing.T, db *sql.DB, fixture alphaValidationFixture) alphaSeedState {
-	t.Helper()
-	clean := func() {
-		_, _ = db.Exec(`DELETE FROM projects WHERE id=$1`, fixture.Project.ID)
-		for _, owner := range []string{fixture.Publisher.Owner, fixture.Contributor.Owner, fixture.Reviewer.Owner} {
-			_, _ = db.Exec(`DELETE FROM agents WHERE owner=$1`, owner)
-		}
-	}
-	clean()
-	t.Cleanup(clean)
-	if _, err := db.Exec(`INSERT INTO projects(id,name,owner) VALUES($1,$2,$3)`, fixture.Project.ID, fixture.Project.Name, fixture.Project.Owner); err != nil {
-		t.Fatalf("seed project: %v", err)
-	}
-	identityStore := identity.NewStore(db)
-	publisher, _, _, err := identityStore.Register(context.Background(), fixture.Project.ID, fixture.Publisher.Permissions,
-		fixture.Publisher.Owner, fixture.Publisher.Model, fixture.Publisher.Capabilities, nil, fixture.Publisher.Roles)
-	if err != nil {
-		t.Fatalf("seed publisher: %v", err)
-	}
-	eventsStore := events.NewStore(db)
-	if _, err := eventsStore.CreateChannelWithID(context.Background(), fixture.Channel.ID, fixture.Project.ID, fixture.Channel.Name); err != nil {
-		t.Fatalf("seed channel: %v", err)
-	}
-	tasksStore := tasks.NewStore(db, eventsStore)
-	if _, err := tasksStore.CreateWithID(context.Background(), fixture.Task.ID, fixture.Project.ID, fixture.Task.Title, fixture.Task.Description, nil, fixture.Task.Priority, nil); err != nil {
-		t.Fatalf("seed task: %v", err)
-	}
-	kbStore := kb.NewStore(db, kb.StubEmbedder{}, 0.85, 4000, 1, 1, 1)
-	if _, err := kbStore.WriteArticleWithID(context.Background(), fixture.KBArticle.ID, fixture.Project.ID, publisher.ID,
-		fixture.KBArticle.Title, fixture.KBArticle.Body, fixture.KBArticle.Frontmatter, nil, true); err != nil {
-		t.Fatalf("seed KB: %v", err)
-	}
-	if _, err := eventsStore.PublishEventWithID(context.Background(), fixture.SeedEvent.ID, fixture.Project.ID, fixture.Channel.ID,
-		publisher.ID, fixture.SeedEvent.EventType, fixture.SeedEvent.Payload, nil); err != nil {
-		t.Fatalf("seed event: %v", err)
-	}
-	manifestData, err := os.ReadFile(filepath.Join(repoRootForTest(t), fixture.Manifest.Path))
-	if err != nil {
-		t.Fatalf("read fixture manifest: %v", err)
-	}
-	var manifest mcp.IntegrationManifest
-	if err := json.Unmarshal(manifestData, &manifest); err != nil {
-		t.Fatalf("decode fixture manifest: %v", err)
-	}
-	if manifest.ProjectID != fixture.Project.ID || manifest.ManifestID != fixture.Manifest.ID || manifest.ManifestVersion != fixture.Manifest.Version || manifest.ManifestDigest != fixture.Manifest.Digest {
-		t.Fatalf("fixture manifest reference drift: got %+v, fixture %+v", manifest, fixture.Manifest)
-	}
-	scope := &identity.AuthenticatedScope{Agent: publisher, ProjectID: fixture.Project.ID, Permissions: fixture.Publisher.Permissions, Roles: fixture.Publisher.Roles}
-	manifestStore := mcp.NewIntegrationManifestStore(db)
-	if _, err := manifestStore.Publish(context.Background(), scope, manifest); err != nil {
-		t.Fatalf("publish fixture manifest: %v", err)
-	}
-	return alphaSeedState{publisherScope: scope, manifestStore: manifestStore, manifest: manifest}
-}
-
-type alphaGateway struct {
-	profile, checkout, home, runtimeDir, dataDir, dbPath, socketPath string
-	env                                                              []string
-	credential                                                       alphaCredential
-	daemon                                                           *task4ProcessDaemon
-	client                                                           *gateBMCPClient
-}
-
-func startAlphaGateway(t *testing.T, gatewayBin, fabricURL, projectID, remote, profile, checkout string, actor alphaFixtureActor) *alphaGateway {
-	t.Helper()
-	home := t.TempDir()
-	runtimeDir := filepath.Join(home, "run")
-	dataDir := filepath.Join(home, "data")
-	goEnvironment := exec.Command("go", "env", "GOMODCACHE", "GOCACHE")
-	goEnvironment.Dir = repoRootForTest(t)
-	goEnvironmentOutput, err := goEnvironment.Output()
-	if err != nil {
-		t.Fatalf("resolve Go cache directories: %v", err)
-	}
-	goCachePaths := strings.Fields(string(goEnvironmentOutput))
-	if len(goCachePaths) != 2 {
-		t.Fatalf("resolve Go cache directories: unexpected output shape")
-	}
-	env := append(os.Environ(),
-		"HOME="+home, "XDG_RUNTIME_DIR="+runtimeDir, "XDG_DATA_HOME="+dataDir,
-		"GOMODCACHE="+goCachePaths[0], "GOCACHE="+goCachePaths[1],
-		"WORMHOLE_ENROLMENT_ROLES="+strings.Join(actor.Roles, ","),
-		"WORMHOLE_ENROLMENT_PERMISSIONS="+strings.Join(actor.Permissions, ","),
-	)
-	gateway := &alphaGateway{
-		profile: profile, checkout: checkout, home: home, runtimeDir: runtimeDir, dataDir: dataDir,
-		dbPath: filepath.Join(dataDir, "wormhole", "wormholed.db"), socketPath: filepath.Join(runtimeDir, "wormhole", "wormholed.sock"), env: env,
-	}
-	gateway.daemon = startTask4ProcessDaemon(t, gatewayBin, profile, env, gateway.socketPath)
-	idempotencyKey := "018f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1"
-	if profile == "alpha-b" {
-		idempotencyKey = "028f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1"
-	}
-	client := gateBDialMCPClient(t, gateway.socketPath)
-	response, err := client.call(localapi.EnrolmentToolName, map[string]interface{}{
-		"version": localapi.EnrolmentProtocolVersion, "project_id": projectID,
-		"owner": actor.Owner, "model": actor.Model, "capabilities": actor.Capabilities,
-		"repositories": []string{remote}, "roles": actor.Roles, "requested_permissions": actor.Permissions,
-		"fabric_address": fabricURL, "idempotency_key": idempotencyKey, "credential_profile": profile,
-	})
-	client.Close()
-	if err != nil || response.Error != "" {
-		t.Fatalf("Gateway enrolment %s: error=%v response=%q; gateway stderr=%q", profile, err, response.Error, gateway.daemon.stderr.String())
-	}
-	var result localapi.EnrolmentResult
-	if err := json.Unmarshal(response.Result, &result); err != nil {
-		t.Fatalf("decode Gateway enrolment %s: %v", profile, err)
-	}
-	if result.Code != localapi.EnrolmentSuccess || result.State != localapi.EnrolmentReady || result.PassportID == "" {
-		t.Fatalf("Gateway enrolment %s did not become ready: %+v", profile, result)
-	}
-	credentialData, err := os.ReadFile(filepath.Join(home, ".wormhole", "credentials", profile+".json"))
-	if err != nil {
-		t.Fatalf("read %s credentials: %v", profile, err)
-	}
-	if err := json.Unmarshal(credentialData, &gateway.credential); err != nil {
-		t.Fatalf("decode %s credentials: %v", profile, err)
-	}
-	if gateway.credential.ProjectID != projectID || gateway.credential.Token == "" {
-		t.Fatalf("%s credential binding incomplete", profile)
-	}
-	return gateway
-}
-
-func (gateway *alphaGateway) restart(t *testing.T, gatewayBin string) {
-	t.Helper()
-	gateway.closeClient()
-	if gateway.daemon != nil {
-		gateway.daemon.Stop(t)
-	}
-	gateway.daemon = startTask4ProcessDaemon(t, gatewayBin, gateway.profile, gateway.env, gateway.socketPath)
-	gateway.client = gateBDialMCPClient(t, gateway.socketPath)
-}
-
-func (gateway *alphaGateway) closeClient() {
-	if gateway.client != nil {
-		gateway.client.Close()
-		gateway.client = nil
-	}
-}
-
-func cloneAlphaWormhole(t *testing.T, repoRoot, projectID, role string) string {
-	t.Helper()
-	checkout := filepath.Join(t.TempDir(), "wormhole")
-	command := exec.Command("git", "clone", "--quiet", "--no-hardlinks", repoRoot, checkout)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("clone Wormhole checkout: %v: %s", err, output)
-	}
-	configDir := filepath.Join(checkout, ".wormhole")
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	seed := filepath.Join(root, "seed")
+	if err := os.Mkdir(seed, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	config := fmt.Sprintf("project = %q\nrole = %q\n", projectID, role)
-	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(config), 0o644); err != nil {
+	stage2ProcessGit(t, root, "init", "--bare", "--initial-branch=main", remote)
+	stage2ProcessGit(t, seed, "init", "--initial-branch=main")
+	stage2ProcessGit(t, seed, "config", "user.name", "Stage 2 Seed")
+	stage2ProcessGit(t, seed, "config", "user.email", "seed@example.test")
+	stage2ProcessGit(t, seed, "remote", "add", "origin", remote)
+
+	fixtureDir := filepath.Join(repoRootForTest(t), "internal", "types", "projectstate", "testdata", "v1", "valid", ".wormhole")
+	tree := stage2ProcessReadTree(t, fixtureDir)
+	snapshot, err := state.DecodeTree(tree)
+	if err != nil {
+		t.Fatalf("decode portable seed: %v", err)
+	}
+	snapshot.Config.Repository = types.RepositoryIdentity{}
+	snapshot.Remotes = nil
+	tree, err = state.EncodeTree(snapshot)
+	if err != nil {
+		t.Fatalf("encode portable seed: %v", err)
+	}
+	stage2ProcessWriteTree(t, filepath.Join(seed, ".wormhole"), tree)
+	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("stage 2 process fixture\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return checkout
+	stage2ProcessGit(t, seed, "add", ".")
+	stage2ProcessGit(t, seed, "commit", "-m", "test: seed portable project")
+	stage2ProcessGit(t, seed, "push", "origin", "main")
+	return stage2ProcessGitFixture{root: root, remote: remote}
 }
 
-func applyAlphaManifest(t *testing.T, wormholeBin string, gateway *alphaGateway, digest string) {
+func (f stage2ProcessGitFixture) clone(t *testing.T, name string) string {
 	t.Helper()
-	output := runAlphaCLI(t, wormholeBin, gateway.env, gateway.checkout, "integration", "apply", "--project", gateway.credential.ProjectID, "--confirm-digest", digest)
-	if !bytes.Contains(output, []byte("integration apply committed for project "+gateway.credential.ProjectID+" at "+digest)) {
-		t.Fatalf("integration apply did not report the committed project/digest")
+	destination := filepath.Join(f.root, name)
+	stage2ProcessGit(t, f.root, "clone", "--no-local", f.remote, destination)
+	canonical, err := filepath.EvalSymlinks(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical
+}
+
+type stage2ProcessRuntime struct {
+	home         string
+	runtimeDir   string
+	dataDir      string
+	configDir    string
+	dbPath       string
+	socketPath   string
+	identityRoot string
+	env          []string
+}
+
+func newStage2ProcessRuntime(t *testing.T, name string) stage2ProcessRuntime {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), name)
+	home := filepath.Join(root, "home")
+	runtimeDir := filepath.Join(root, "run")
+	dataDir := filepath.Join(root, "data")
+	configDir := filepath.Join(root, "config")
+	for _, directory := range []string{home, runtimeDir, dataDir, configDir} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return stage2ProcessRuntime{
+		home: home, runtimeDir: runtimeDir, dataDir: dataDir, configDir: configDir,
+		dbPath:       filepath.Join(dataDir, "wormhole", "wormholed.db"),
+		socketPath:   filepath.Join(runtimeDir, "wormhole", "wormholed.sock"),
+		identityRoot: filepath.Join(dataDir, "wormhole", "identities"),
+		env: append(os.Environ(), "HOME="+home, "XDG_RUNTIME_DIR="+runtimeDir,
+			"XDG_DATA_HOME="+dataDir, "XDG_CONFIG_HOME="+configDir),
 	}
 }
 
-func runAlphaCLI(t *testing.T, binary string, env []string, directory string, args ...string) []byte {
+func (r stage2ProcessRuntime) startGateway(t *testing.T, gatewayBin string) *task4ProcessDaemon {
 	t.Helper()
-	command := exec.Command(binary, args...)
-	command.Env, command.Dir = env, directory
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("wormhole %s: %v: %s", strings.Join(args, " "), err, output)
-	}
-	return output
+	return startTask4ProcessDaemon(t, gatewayBin, "default", r.env, r.socketPath)
 }
 
-func alphaGitOutput(t *testing.T, directory string, args ...string) string {
+func (r stage2ProcessRuntime) startBridge(t *testing.T, wormholeBin, checkout string) *e2eStdioClient {
 	t.Helper()
-	command := exec.Command("git", append([]string{"-C", directory}, args...)...)
+	command := exec.Command(wormholeBin, "mcp")
+	command.Dir = checkout
+	command.Env = r.env
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	stdin, err := command.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Start(); err != nil {
+		t.Fatalf("start wormhole mcp: %v: %s", err, stderr.String())
+	}
+	client := &e2eStdioClient{cmd: command, stdin: stdin, stdout: bufio.NewReader(stdout)}
+	initialize := client.call(t, "initialize", json.RawMessage(`{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"stage2-acceptance","version":"1","modelName":"process-fixture","modelVersion":"1"}}`))
+	if initialize.Error != nil {
+		t.Fatalf("initialize wormhole mcp: %+v", initialize.Error)
+	}
+	client.notify(t, "notifications/initialized")
+	return client
+}
+
+func (c *e2eStdioClient) close(t *testing.T) {
+	t.Helper()
+	if c == nil || c.cmd == nil || c.cmd.ProcessState != nil {
+		return
+	}
+	_ = c.stdin.Close()
+	done := make(chan error, 1)
+	go func() { done <- c.cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("wormhole mcp exit: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		_ = c.cmd.Process.Kill()
+		t.Fatal("wormhole mcp did not stop")
+	}
+}
+
+type stage2SetupResult struct {
+	HumanID        string
+	WorkspaceID    string
+	AcceptedDigest string
+}
+
+func (r stage2ProcessRuntime) bootstrap(t *testing.T, checkout, displayName string) stage2SetupResult {
+	t.Helper()
+	identity, err := localidentity.Open(r.identityRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capability, err := identity.CLICapability(t.Context())
+	if err != nil {
+		t.Fatalf("read production setup capability: %v", err)
+	}
+	client := openStage2PrivateClient(t, r.socketPath, capability)
+	defer client.close()
+	commit := stage2ProcessGitOutput(t, checkout, "rev-parse", "HEAD")
+	workspaceRaw := client.call(t, localapi.PrivateSetupRegisterWorkspaceRPCMethod, localapi.SetupWorkspaceRequest{
+		WorkingDirectory: checkout, ExpectedProjectID: stage2ProcessProjectID, ExpectedRepository: types.RepositoryIdentity{},
+		ExpectedCommit: commit, ExpectedPriorDigest: localapi.DigestSetupWorkspaceAbsent(),
+	})
+	var workspace localapi.SetupWorkspaceReadback
+	stage2ProcessDecode(t, workspaceRaw, &workspace)
+	selection := types.ConfirmedIdentitySelection{DisplayName: displayName}
+	identityRaw := client.call(t, localapi.PrivateSetupEnsureIdentityRPCMethod, localapi.SetupIdentityRequest{
+		WorkingDirectory: checkout, JournalID: stage2ProcessSetupID(displayName), Selection: selection,
+		ExpectedPriorDigest: localapi.DigestSetupIdentityUnselected(),
+	})
+	var selected localapi.SetupIdentityReadback
+	stage2ProcessDecode(t, identityRaw, &selected)
+	origin, err := projectstate.InspectPublicationOrigin(t.Context(), checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindingDigest, err := projectstate.DigestPublicationBindingConstraint(types.RepositoryIdentity{}, origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.call(t, localapi.PrivateSetupPublicationRPCMethod, localapi.SetupPublicationRequest{
+		WorkingDirectory: checkout, Classification: types.PublicationLocalOnly,
+		ExpectedBindingDigest: config.StateDigest(bindingDigest),
+		ExpectedPriorDigest: localapi.DigestSetupPublicationPredicate(localapi.SetupPublicationPredicate{
+			Classification: types.PublicationUnclassified, PolicyRevision: 1, ObservedOriginDigest: origin, TransitionKind: "bootstrap",
+		}),
+	})
+	client.call(t, localapi.PrivateSetupImportRPCMethod, localapi.SetupImportRequest{
+		WorkingDirectory: checkout, ExpectedCommitSHA: commit, ExpectedTreeDigest: state.Digest(workspace.AcceptedTreeDigest),
+		ExpectedPriorDigest: localapi.DigestSetupBasePredicate(localapi.SetupBasePredicate{CandidatePresent: false, CandidateDigest: state.Digest(workspace.AcceptedTreeDigest), WorkspaceState: "clean"}),
+		DesiredDigest:       localapi.DigestSetupBasePredicate(localapi.SetupBasePredicate{CandidatePresent: true, CandidateDigest: state.Digest(workspace.AcceptedTreeDigest), WorkspaceState: "pending"}),
+	})
+	verifyRaw := client.call(t, localapi.PrivateSetupVerifyRPCMethod, localapi.SetupWorkingDirectoryRequest{
+		WorkingDirectory: checkout, Identity: selection, ExpectedTree: state.Digest(workspace.AcceptedTreeDigest),
+	})
+	var verified localapi.SetupVerifyReadback
+	stage2ProcessDecode(t, verifyRaw, &verified)
+	return stage2SetupResult{HumanID: selected.HumanPrincipalID, WorkspaceID: string(workspace.WorkspaceID), AcceptedDigest: workspace.AcceptedTreeDigest}
+}
+
+type stage2PrivateClient struct {
+	connection net.Conn
+	reader     *bufio.Reader
+	capability string
+	nextID     int
+}
+
+func openStage2PrivateClient(t *testing.T, socketPath, capability string) *stage2PrivateClient {
+	t.Helper()
+	connection, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &stage2PrivateClient{connection: connection, reader: bufio.NewReader(connection), capability: capability}
+	client.rawCall(t, "initialize", map[string]any{
+		"protocolVersion": "2025-11-25", "capabilities": map[string]any{},
+		"clientInfo": map[string]any{"name": "wormhole-setup", "version": "stage2-process"},
+	})
+	client.notify(t, "notifications/initialized")
+	return client
+}
+
+func (c *stage2PrivateClient) call(t *testing.T, method string, request any) json.RawMessage {
+	t.Helper()
+	requestRaw, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c.rawCall(t, method, map[string]any{"capability": c.capability, "request": json.RawMessage(requestRaw)})
+}
+
+func (c *stage2PrivateClient) rawCall(t *testing.T, method string, params any) json.RawMessage {
+	t.Helper()
+	c.nextID++
+	request := map[string]any{"jsonrpc": "2.0", "id": c.nextID, "method": method, "params": params}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeNewlineFrame(c.connection, encoded); err != nil {
+		t.Fatal(err)
+	}
+	responseBody, err := readNewlineFrame(c.reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(responseBody, &response); err != nil {
+		t.Fatalf("decode private %s response %q: %v", method, responseBody, err)
+	}
+	if response.Error != nil {
+		t.Fatalf("private %s error %d: %s", method, response.Error.Code, response.Error.Message)
+	}
+	return response.Result
+}
+
+func (c *stage2PrivateClient) notify(t *testing.T, method string) {
+	t.Helper()
+	encoded, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": method})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeNewlineFrame(c.connection, encoded); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (c *stage2PrivateClient) close() {
+	_ = c.connection.Close()
+}
+
+func stage2ProcessSetupID(displayName string) string {
+	if strings.Contains(displayName, "Clone B") {
+		return "00000000-0000-4000-8000-000000000032"
+	}
+	return "00000000-0000-4000-8000-000000000031"
+}
+
+func assertStage2ProcessToolsAndGuidance(t *testing.T, client *e2eStdioClient) {
+	t.Helper()
+	response := client.call(t, "tools/list", json.RawMessage(`{}`))
+	if response.Error != nil {
+		t.Fatalf("tools/list: %+v", response.Error)
+	}
+	var listed struct {
+		Tools []struct {
+			Name        string          `json:"name"`
+			Description string          `json:"description"`
+			InputSchema json.RawMessage `json:"inputSchema"`
+		} `json:"tools"`
+	}
+	stage2ProcessDecode(t, response.Result, &listed)
+	names := make([]string, 0, len(listed.Tools))
+	for _, tool := range listed.Tools {
+		if tool.Name == "" || strings.TrimSpace(tool.Description) == "" {
+			t.Fatalf("incomplete real-process descriptor: %+v", tool)
+		}
+		names = append(names, tool.Name)
+	}
+	sort.Strings(names)
+	want := append([]string(nil), stage2ProcessGatewayTools...)
+	sort.Strings(want)
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("real Gateway tools = %q, want exact 17 %q", names, want)
+	}
+
+	root := repoRootForTest(t)
+	guidance, err := os.ReadFile(filepath.Join(root, "testdata", "alpha", "manifests", "generated-guidance", "wormhole-tool-use.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestRaw, err := os.ReadFile(filepath.Join(root, "testdata", "alpha", "manifests", "generated-guidance", "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest struct {
+		Entries []struct {
+			Target  string `json:"target"`
+			Content string `json:"content"`
+			Digest  string `json:"content_digest"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(manifestRaw, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	matched := false
+	for _, entry := range manifest.Entries {
+		if entry.Target != ".agents/skills/wormhole-tool-use/SKILL.md" {
+			continue
+		}
+		matched = true
+		if entry.Content != string(guidance) || entry.Digest != stage2ProcessSHA256(guidance) {
+			t.Fatalf("generated tool guidance bytes/digest differ from manifest")
+		}
+	}
+	if !matched {
+		t.Fatal("generated tool guidance missing from manifest")
+	}
+	for _, name := range want {
+		if !bytes.Contains(guidance, []byte("## `"+name+"`")) {
+			t.Errorf("generated guidance missing real-process tool %s", name)
+		}
+	}
+	for _, removed := range []string{"wormhole.agent.enrol", "wormhole.agent.get_guidance", "wormhole.agent.whoami", "wormhole.kb.search", "wormhole.task.list", "wormhole.git.link_commit"} {
+		if bytes.Contains(guidance, []byte("## `"+removed+"`")) {
+			t.Errorf("generated Gateway guidance retains removed tool %s", removed)
+		}
+	}
+}
+
+func stage2ProcessCall(t *testing.T, client *e2eStdioClient, tool string, arguments map[string]any) json.RawMessage {
+	t.Helper()
+	raw, callErr := client.callTool(t, tool, arguments)
+	if callErr != "" {
+		t.Fatalf("%s: %s", tool, callErr)
+	}
+	if len(raw) == 0 {
+		t.Fatalf("%s returned empty result", tool)
+	}
+	return raw
+}
+
+func stage2ProcessAgentID(t *testing.T, root, harness string) string {
+	t.Helper()
+	return stage2ProcessAgentSession(t, root, harness).AgentID
+}
+
+func stage2ProcessAgentSession(t *testing.T, root, harness string) localidentity.ConnectionSession {
+	t.Helper()
+	identity, err := localidentity.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := identity.ConnectionSessions(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := len(sessions) - 1; i >= 0; i-- {
+		if sessions[i].HarnessName == harness && sessions[i].AgentID != "" {
+			if sessions[i].SessionID == "" || sessions[i].AccountableHumanID == "" || sessions[i].ModelName != "process-fixture" {
+				t.Fatalf("incomplete selected agent/session provenance: %+v", sessions[i])
+			}
+			return sessions[i]
+		}
+	}
+	t.Fatalf("no %s agent session in %+v", harness, sessions)
+	return localidentity.ConnectionSession{}
+}
+
+func publishStage2ProcessActor(t *testing.T, checkout, agentID string) {
+	t.Helper()
+	tree := stage2ProcessReadTree(t, filepath.Join(checkout, ".wormhole"))
+	snapshot, err := state.DecodeTree(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := state.ActorV1{
+		SchemaVersion: 1, Kind: "actor", ID: agentID, ActorKind: types.ActorAgent,
+		DisplayName: "Stage 2 Process Agent", PublicKeys: []state.PublicKeyV1{}, Extensions: state.ExtensionsV1{},
+	}
+	snapshot.Actors[agentID] = state.Record[state.ActorV1]{Value: &actor}
+	tree, err = state.EncodeTree(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage2ProcessWriteTree(t, filepath.Join(checkout, ".wormhole"), tree)
+}
+
+func assertStage2ProcessPortableActor(t *testing.T, checkout, agentID string) {
+	t.Helper()
+	tree := stage2ProcessReadTree(t, filepath.Join(checkout, ".wormhole"))
+	snapshot, err := state.DecodeTree(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, ok := snapshot.Actors[agentID]
+	if !ok || record.Value == nil || record.Value.ID != agentID || record.Value.ActorKind != types.ActorAgent {
+		t.Fatalf("portable actor %s in fresh clone = %+v", agentID, record)
+	}
+}
+
+func stage2ProcessString(t *testing.T, raw json.RawMessage, field string) string {
+	t.Helper()
+	var object map[string]any
+	stage2ProcessDecode(t, raw, &object)
+	value, ok := object[field].(string)
+	if !ok {
+		t.Fatalf("%s is not a string in %s", field, raw)
+	}
+	return value
+}
+
+func stage2ProcessBool(t *testing.T, raw json.RawMessage, field string) bool {
+	t.Helper()
+	var object map[string]any
+	stage2ProcessDecode(t, raw, &object)
+	value, ok := object[field].(bool)
+	if !ok {
+		t.Fatalf("%s is not a bool in %s", field, raw)
+	}
+	return value
+}
+
+func stage2ProcessArrayLen(t *testing.T, raw json.RawMessage, field string) int {
+	t.Helper()
+	var object map[string]any
+	stage2ProcessDecode(t, raw, &object)
+	value, ok := object[field].([]any)
+	if !ok {
+		t.Fatalf("%s is not an array in %s", field, raw)
+	}
+	return len(value)
+}
+
+func assertStage2ProcessContainsID(t *testing.T, raw json.RawMessage, field, id string, want bool) {
+	t.Helper()
+	var object map[string]any
+	stage2ProcessDecode(t, raw, &object)
+	if object[field] == nil {
+		if want {
+			t.Fatalf("%s is empty, want %s: %s", field, id, raw)
+		}
+		return
+	}
+	items, ok := object[field].([]any)
+	if !ok {
+		t.Fatalf("%s is not an array in %s", field, raw)
+	}
+	found := false
+	for _, item := range items {
+		entry, objectOK := item.(map[string]any)
+		if objectOK && (entry["id"] == id || entry["agent_id"] == id) {
+			found = true
+		}
+	}
+	if found != want {
+		t.Fatalf("%s contains %s = %t, want %t: %s", field, id, found, want, raw)
+	}
+}
+
+func assertStage2ProcessOffline(t *testing.T, raw json.RawMessage) {
+	t.Helper()
+	var status struct {
+		State         string `json:"state"`
+		PendingWrites int    `json:"pending_writes"`
+	}
+	stage2ProcessDecode(t, raw, &status)
+	if status.State != "offline" || status.PendingWrites != 0 {
+		t.Fatalf("local-only sync status = %+v", status)
+	}
+}
+
+func assertStage2ProcessLegacyRows(t *testing.T, dbPath string, wantEvents int) {
+	t.Helper()
+	database := openStage2ProcessDB(t, dbPath)
+	defer database.Close()
+	for _, table := range []string{"channels", "kb_articles", "tasks", "git_links", "sync_queue", "sync_audit", "enrolment_attempts", "bootstrap_metadata"} {
+		if got := stage2ProcessTableCount(t, database, table); got != 0 {
+			t.Errorf("non-portable legacy/sync table %s has %d rows, want zero", table, got)
+		}
+	}
+	if got := stage2ProcessTableCount(t, database, "events"); got != wantEvents {
+		t.Errorf("clone-local operational events = %d, want %d", got, wantEvents)
+	}
+}
+
+func assertStage2ProcessFreshPrivateState(t *testing.T, firstPath, secondPath string) {
+	t.Helper()
+	if firstPath == secondPath {
+		t.Fatal("two clones share private database path")
+	}
+	firstInfo, err := os.Stat(firstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondInfo, err := os.Stat(secondPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(firstInfo, secondInfo) {
+		t.Fatal("two clones share private database inode")
+	}
+	first := openStage2ProcessDB(t, firstPath)
+	defer first.Close()
+	second := openStage2ProcessDB(t, secondPath)
+	defer second.Close()
+	if stage2ProcessTableCount(t, first, "workspace_overlay_operations") < 2 || stage2ProcessTableCount(t, first, "workspace_materializations") < 1 {
+		t.Fatal("clone A lacks private overlay/materialization evidence")
+	}
+	for _, table := range []string{"workspace_overlay_operations", "workspace_materializations", "workspace_stashes", "workspace_transition_receipts"} {
+		if got := stage2ProcessTableCount(t, second, table); got != 0 {
+			t.Errorf("fresh clone B private table %s has %d rows, want zero", table, got)
+		}
+	}
+}
+
+func openStage2ProcessDB(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.PingContext(t.Context()); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	return database
+}
+
+func stage2ProcessTableCount(t *testing.T, database *sql.DB, table string) int {
+	t.Helper()
+	var count int
+	if err := database.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM "+table).Scan(&count); err != nil {
+		t.Fatalf("count %s: %v", table, err)
+	}
+	return count
+}
+
+func assertStage2ProcessTrackedSurface(t *testing.T, checkout string) {
+	t.Helper()
+	root := filepath.Join(checkout, ".wormhole")
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		portable := relative == "config.toml" || strings.HasPrefix(filepath.ToSlash(relative), "state/v1/")
+		if !portable || strings.Contains(strings.ToLower(relative), "private") || strings.HasSuffix(relative, ".db") {
+			return fmt.Errorf("non-portable tracked file %s", relative)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+type stage2ProcessGitState struct {
+	Head   string
+	Index  string
+	Remote string
+}
+
+func captureStage2ProcessGit(t *testing.T, checkout, remote string) stage2ProcessGitState {
+	t.Helper()
+	return stage2ProcessGitState{
+		Head:   stage2ProcessGitOutput(t, checkout, "rev-parse", "HEAD"),
+		Index:  stage2ProcessGitOutput(t, checkout, "write-tree"),
+		Remote: stage2ProcessGitOutput(t, remote, "rev-parse", "refs/heads/main"),
+	}
+}
+
+func stage2ProcessGitGrepAbsent(t *testing.T, checkout, needle string) {
+	t.Helper()
+	tree := stage2ProcessReadTree(t, filepath.Join(checkout, ".wormhole"))
+	for _, file := range tree {
+		if bytes.Contains(file.Data, []byte(needle)) {
+			t.Fatalf("non-portable activity %s entered tracked %s", needle, file.Path)
+		}
+	}
+}
+
+func stage2ProcessGit(t *testing.T, directory string, arguments ...string) {
+	t.Helper()
+	_ = stage2ProcessGitOutput(t, directory, arguments...)
+}
+
+func stage2ProcessGitOutput(t *testing.T, directory string, arguments ...string) string {
+	t.Helper()
+	command := exec.Command("git", append([]string{"-C", directory}, arguments...)...)
 	output, err := command.CombinedOutput()
 	if err != nil {
-		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, output)
+		t.Fatalf("git -C %s %s: %v: %s", directory, strings.Join(arguments, " "), err, output)
 	}
 	return strings.TrimSpace(string(output))
 }
 
-func alphaMustGatewayCall(t *testing.T, client *gateBMCPClient, tool string, args map[string]interface{}) json.RawMessage {
+func stage2ProcessReadTree(t *testing.T, root string) state.Tree {
 	t.Helper()
-	return client.mustCall(t, tool, args)
-}
-
-func alphaListGatewayTools(t *testing.T, client *gateBMCPClient) []string {
-	t.Helper()
-	client.nextID++
-	id, _ := json.Marshal(client.nextID)
-	request, _ := json.Marshal(mcpRpcRequest{JSONRPC: "2.0", ID: id, Method: "tools/list", Params: json.RawMessage(`{}`)})
-	if err := client.connection.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	defer client.connection.SetDeadline(time.Time{})
-	if _, err := client.connection.Write(append(request, '\n')); err != nil {
-		t.Fatal(err)
-	}
-	line, err := client.reader.ReadBytes('\n')
-	if err != nil {
-		t.Fatal(err)
-	}
-	var response mcpRpcResponse
-	if err := json.Unmarshal(bytes.TrimSpace(line), &response); err != nil {
-		t.Fatal(err)
-	}
-	if response.Error != nil {
-		t.Fatalf("tools/list: %s", response.Error.Message)
-	}
-	var listed struct {
-		Tools []struct {
-			Name string `json:"name"`
-		} `json:"tools"`
-	}
-	if err := json.Unmarshal(response.Result, &listed); err != nil {
-		t.Fatal(err)
-	}
-	names := make([]string, 0, len(listed.Tools))
-	for _, tool := range listed.Tools {
-		names = append(names, tool.Name)
-	}
-	sort.Strings(names)
-	return names
-}
-
-func alphaWaitOnline(t *testing.T, gateway *alphaGateway) {
-	t.Helper()
-	deadline := time.Now().Add(25 * time.Second)
-	var lastState, lastError string
-	var lastPending int
-	for {
-		result, err := gateway.client.call("wormhole.sync.status", map[string]interface{}{"project_id": gateway.credential.ProjectID})
-		switch {
-		case err != nil:
-			lastError = err.Error()
-		case result.Error != "":
-			lastError = result.Error
-		default:
-			var status struct {
-				State   string `json:"state"`
-				Pending int    `json:"pending_writes"`
-			}
-			if err := json.Unmarshal(result.Result, &status); err != nil {
-				t.Fatalf("decode %s sync status: %v", gateway.profile, err)
-			}
-			lastState, lastPending, lastError = status.State, status.Pending, ""
-			if status.State == "online" && status.Pending == 0 {
-				return
-			}
+	tree := state.Tree{}
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s online with empty queue: state=%q pending=%d call_error=%q gateway_stderr=%q",
-				gateway.profile, lastState, lastPending, lastError, gateway.daemon.stderr.String())
+		if entry.IsDir() {
+			return nil
 		}
-		time.Sleep(20 * time.Millisecond)
-	}
-}
-
-func alphaWaitPending(t *testing.T, gateway *alphaGateway, minimum int) {
-	t.Helper()
-	waitForCondition(t, 5*time.Second, gateway.profile+" durable offline queue", func() (bool, error) {
-		result, err := gateway.client.call("wormhole.sync.status", map[string]interface{}{"project_id": gateway.credential.ProjectID})
-		if err != nil || result.Error != "" {
-			return false, nil
-		}
-		var status struct {
-			Pending int `json:"pending_writes"`
-		}
-		if err := json.Unmarshal(result.Result, &status); err != nil {
-			return false, err
-		}
-		return status.Pending >= minimum, nil
-	})
-}
-
-func assertAlphaGuidance(t *testing.T, client *gateBMCPClient, projectID, digest, role string) {
-	t.Helper()
-	raw := alphaMustGatewayCall(t, client, "wormhole.agent.get_guidance", map[string]interface{}{"project_id": projectID})
-	var guidance struct {
-		ManifestDigest       *string           `json:"manifest_digest"`
-		ResolvedRole         *string           `json:"resolved_role"`
-		ApprovalState        string            `json:"approval_state"`
-		MaterializationState string            `json:"materialization_state"`
-		Guidance             []json.RawMessage `json:"guidance"`
-	}
-	if err := json.Unmarshal(raw, &guidance); err != nil {
-		t.Fatal(err)
-	}
-	if guidance.ManifestDigest == nil || *guidance.ManifestDigest != digest || guidance.ResolvedRole == nil || *guidance.ResolvedRole != role || guidance.ApprovalState != "approved" || guidance.MaterializationState != "applied" || len(guidance.Guidance) == 0 {
-		t.Fatalf("approved cached %s guidance = %+v", role, guidance)
-	}
-}
-
-func alphaJSONFieldEquals(t *testing.T, raw json.RawMessage, field, want string) {
-	t.Helper()
-	var object map[string]interface{}
-	if err := json.Unmarshal(raw, &object); err != nil {
-		t.Fatal(err)
-	}
-	if got, _ := object[field].(string); got != want {
-		t.Fatalf("%s = %q, want %q in %s", field, got, want, raw)
-	}
-}
-
-func alphaJSONID(t *testing.T, raw json.RawMessage) string {
-	t.Helper()
-	var object map[string]interface{}
-	if err := json.Unmarshal(raw, &object); err != nil {
-		t.Fatal(err)
-	}
-	id, _ := object["id"].(string)
-	if id == "" {
-		t.Fatalf("response lacks stable id: %s", raw)
-	}
-	return id
-}
-
-func alphaDecodeObject(t *testing.T, raw json.RawMessage) map[string]interface{} {
-	t.Helper()
-	var object map[string]interface{}
-	if err := json.Unmarshal(raw, &object); err != nil {
-		t.Fatal(err)
-	}
-	return object
-}
-
-func alphaJSONArrayHas(t *testing.T, raw json.RawMessage, array, field, value string) bool {
-	t.Helper()
-	return alphaJSONArrayObjectMatches(t, raw, array, map[string]string{field: value})
-}
-
-func alphaJSONArrayObjectMatches(t *testing.T, raw json.RawMessage, array string, fields map[string]string) bool {
-	t.Helper()
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &object); err != nil {
-		t.Fatal(err)
-	}
-	var values []map[string]interface{}
-	if err := json.Unmarshal(object[array], &values); err != nil {
-		t.Fatalf("decode %s in %s: %v", array, raw, err)
-	}
-	for _, value := range values {
-		matches := true
-		for field, want := range fields {
-			if got, _ := value[field].(string); got != want {
-				matches = false
-			}
-		}
-		if matches {
-			return true
-		}
-	}
-	return false
-}
-
-func alphaWaitPostgresCount(t *testing.T, db *sql.DB, table, id string, want int) {
-	t.Helper()
-	waitForCondition(t, 25*time.Second, "Postgres "+table+" exactly once", func() (bool, error) {
-		var count int
-		err := db.QueryRow(`SELECT count(*) FROM `+table+` WHERE id=$1`, id).Scan(&count)
-		return count == want, err
-	})
-}
-
-func alphaWaitSQLiteCount(t *testing.T, dbPath, table, id string, want int) {
-	t.Helper()
-	waitForCondition(t, 25*time.Second, "reviewer SQLite "+table+" exactly once", func() (bool, error) {
-		db, err := sql.Open("sqlite", dbPath)
+		data, err := os.ReadFile(path)
 		if err != nil {
-			return false, err
-		}
-		defer db.Close()
-		var count int
-		err = db.QueryRow(`SELECT count(*) FROM `+table+` WHERE id=?`, id).Scan(&count)
-		return count == want, err
-	})
-}
-
-func alphaWaitSQLiteTaskStatus(t *testing.T, dbPath, taskID, status string) {
-	t.Helper()
-	waitForCondition(t, 25*time.Second, "reviewer completed task", func() (bool, error) {
-		db, err := sql.Open("sqlite", dbPath)
-		if err != nil {
-			return false, err
-		}
-		defer db.Close()
-		var got string
-		err = db.QueryRow(`SELECT status FROM tasks WHERE id=?`, taskID).Scan(&got)
-		return got == status, err
-	})
-}
-
-func alphaSQLiteStatusEventID(t *testing.T, dbPath, taskID, fromStatus, toStatus, agentID string) string {
-	t.Helper()
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	var id string
-	if err := db.QueryRow(`SELECT id FROM events
-		WHERE event_type='task.status_changed' AND agent_id=?
-		AND json_extract(payload, '$.task_id')=?
-		AND json_extract(payload, '$.from_status')=?
-		AND json_extract(payload, '$.to_status')=?`, agentID, taskID, fromStatus, toStatus).Scan(&id); err != nil {
-		t.Fatalf("read Gateway status Event %s -> %s: %v", fromStatus, toStatus, err)
-	}
-	return id
-}
-
-func alphaAssertStatusEventStableEverywhere(t *testing.T, fabric *sql.DB, gatewayAPath, gatewayBPath, projectID, taskID, fromStatus, toStatus, channelID, agentID, eventID string) {
-	t.Helper()
-	if eventID == "" {
-		t.Fatalf("empty stable status Event ID for %s -> %s", fromStatus, toStatus)
-	}
-	var fabricCount int
-	if err := fabric.QueryRow(`SELECT count(*) FROM events
-		WHERE id=$1 AND project_id=$2 AND channel_id=$3 AND agent_id=$4
-		AND event_type='task.status_changed' AND note IS NULL
-		AND payload->>'task_id'=$5 AND payload->>'from_status'=$6 AND payload->>'to_status'=$7`,
-		eventID, projectID, channelID, agentID, taskID, fromStatus, toStatus).Scan(&fabricCount); err != nil || fabricCount != 1 {
-		t.Fatalf("Fabric stable status Event %s (%s -> %s) count=%d err=%v, want 1", eventID, fromStatus, toStatus, fabricCount, err)
-	}
-	var fabricTransitionCount int
-	if err := fabric.QueryRow(`SELECT count(*) FROM events
-		WHERE project_id=$1 AND channel_id=$2 AND agent_id=$3
-		AND event_type='task.status_changed' AND note IS NULL
-		AND payload->>'task_id'=$4 AND payload->>'from_status'=$5 AND payload->>'to_status'=$6`,
-		projectID, channelID, agentID, taskID, fromStatus, toStatus).Scan(&fabricTransitionCount); err != nil || fabricTransitionCount != 1 {
-		t.Fatalf("Fabric status transition %s -> %s count=%d err=%v, want exactly 1", fromStatus, toStatus, fabricTransitionCount, err)
-	}
-	for name, path := range map[string]string{"Gateway A": gatewayAPath, "Gateway B": gatewayBPath} {
-		db, err := sql.Open("sqlite", path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var matchingIDCount, transitionCount int
-		matchingErr := db.QueryRow(`SELECT count(*) FROM events
-			WHERE id=? AND namespace_id=? AND channel_id=? AND agent_id=?
-			AND event_type='task.status_changed' AND note IS NULL
-			AND json_extract(payload, '$.task_id')=?
-			AND json_extract(payload, '$.from_status')=?
-			AND json_extract(payload, '$.to_status')=?`,
-			eventID, projectID, channelID, agentID, taskID, fromStatus, toStatus).Scan(&matchingIDCount)
-		transitionErr := db.QueryRow(`SELECT count(*) FROM events
-			WHERE namespace_id=? AND channel_id=? AND agent_id=?
-			AND event_type='task.status_changed' AND note IS NULL
-			AND json_extract(payload, '$.task_id')=?
-			AND json_extract(payload, '$.from_status')=?
-			AND json_extract(payload, '$.to_status')=?`,
-			projectID, channelID, agentID, taskID, fromStatus, toStatus).Scan(&transitionCount)
-		_ = db.Close()
-		if matchingErr != nil || transitionErr != nil || matchingIDCount != 1 || transitionCount != 1 {
-			t.Fatalf("%s stable status Event %s (%s -> %s): matching ID count=%d err=%v transition count=%d err=%v; want 1/1", name, eventID, fromStatus, toStatus, matchingIDCount, matchingErr, transitionCount, transitionErr)
-		}
-	}
-}
-
-func alphaPostgresGitLinkID(t *testing.T, db *sql.DB, projectID, taskID, commit string) string {
-	t.Helper()
-	var id string
-	waitForCondition(t, 25*time.Second, "linked Git pointer", func() (bool, error) {
-		err := db.QueryRow(`SELECT id FROM git_links WHERE project_id=$1 AND task_id=$2 AND commit_sha=$3`, projectID, taskID, commit).Scan(&id)
-		if errors.Is(err, sql.ErrNoRows) {
-			return false, nil
-		}
-		return err == nil && id != "", err
-	})
-	return id
-}
-
-func alphaSQLiteGitLink(t *testing.T, dbPath, id string) alphaSQLiteGitLinkRecord {
-	t.Helper()
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	var link alphaSQLiteGitLinkRecord
-	if err := db.QueryRow(`SELECT id, project_id, task_id, repo, commit_sha, summary, agent_id FROM git_links WHERE id=?`, id).
-		Scan(&link.ID, &link.ProjectID, &link.TaskID, &link.Repo, &link.CommitSHA, &link.Summary, &link.AgentID); err != nil {
-		t.Fatalf("read reviewer Git pointer %s: %v", id, err)
-	}
-	return link
-}
-
-type alphaSQLiteGitLinkRecord struct {
-	ID        string
-	ProjectID string
-	TaskID    string
-	Repo      string
-	CommitSHA string
-	Summary   string
-	AgentID   string
-}
-
-func alphaAssertCount(t *testing.T, db *sql.DB, query, id string, want int) {
-	t.Helper()
-	var count int
-	if err := db.QueryRow(query, id).Scan(&count); err != nil || count != want {
-		t.Fatalf("count for %s = %d, err=%v, want %d", id, count, err, want)
-	}
-}
-
-func alphaAssertSQLiteCount(t *testing.T, dbPath, table, id string, want int) {
-	t.Helper()
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	var count int
-	if err := db.QueryRow(`SELECT count(*) FROM `+table+` WHERE id=?`, id).Scan(&count); err != nil || count != want {
-		t.Fatalf("SQLite %s/%s count=%d err=%v want=%d", table, id, count, err, want)
-	}
-}
-
-func alphaAssertIndependentFiles(t *testing.T, left, right string) {
-	t.Helper()
-	leftInfo, err := os.Stat(left)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rightInfo, err := os.Stat(right)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if os.SameFile(leftInfo, rightInfo) {
-		t.Fatal("Gateway replicas resolve to the same SQLite file")
-	}
-}
-
-func alphaManifestV2(t *testing.T, first mcp.IntegrationManifest) mcp.IntegrationManifest {
-	t.Helper()
-	next := first
-	next.ManifestVersion = first.ManifestVersion + 1
-	next.CreatedAt = "2026-07-26T14:00:00Z"
-	next.Entries = append([]mcp.IntegrationManifestEntry(nil), first.Entries...)
-	next.Entries[0].Content += "\nVersion two remains unapproved during alpha acceptance.\n"
-	next.Entries[0].ContentDigest = alphaSHA256([]byte(next.Entries[0].Content))
-	next.ManifestDigest = ""
-	digest, err := alphaCanonicalManifestDigest(next)
-	if err != nil {
-		t.Fatal(err)
-	}
-	next.ManifestDigest = digest
-	return next
-}
-
-func alphaWaitPendingManifest(t *testing.T, client *gateBMCPClient, projectID, active, pending string) {
-	t.Helper()
-	waitForCondition(t, 90*time.Second, "unapproved manifest candidate", func() (bool, error) {
-		result, err := client.call("wormhole.agent.get_guidance", map[string]interface{}{"project_id": projectID})
-		if err != nil || result.Error != "" {
-			return false, nil
-		}
-		var state struct {
-			ManifestDigest *string `json:"manifest_digest"`
-			PendingDigest  *string `json:"pending_manifest_digest"`
-			PendingVersion *int64  `json:"pending_manifest_version"`
-			Guidance       []struct {
-				Content string `json:"content"`
-			} `json:"guidance"`
-		}
-		if err := json.Unmarshal(result.Result, &state); err != nil {
-			return false, err
-		}
-		if state.ManifestDigest == nil || *state.ManifestDigest != active || state.PendingDigest == nil || *state.PendingDigest != pending || state.PendingVersion == nil || *state.PendingVersion != 2 {
-			return false, nil
-		}
-		for _, item := range state.Guidance {
-			if strings.Contains(item.Content, "Version two remains unapproved") {
-				return false, errors.New("unapproved guidance became active")
-			}
-		}
-		return true, nil
-	})
-}
-
-func alphaCanonicalManifestDigest(manifest mcp.IntegrationManifest) (string, error) {
-	raw, err := json.Marshal(manifest)
-	if err != nil {
-		return "", err
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	var value map[string]interface{}
-	if err := decoder.Decode(&value); err != nil {
-		return "", err
-	}
-	delete(value, "manifest_digest")
-	var canonical bytes.Buffer
-	if err := alphaAppendCanonicalJSON(&canonical, value); err != nil {
-		return "", err
-	}
-	return alphaSHA256(canonical.Bytes()), nil
-}
-
-func alphaAppendCanonicalJSON(output *bytes.Buffer, value interface{}) error {
-	switch typed := value.(type) {
-	case nil:
-		output.WriteString("null")
-	case bool:
-		if typed {
-			output.WriteString("true")
-		} else {
-			output.WriteString("false")
-		}
-	case string:
-		alphaAppendCanonicalString(output, typed)
-	case json.Number:
-		if strings.ContainsAny(string(typed), ".eE") {
-			return errors.New("non-integer canonical number")
-		}
-		if _, err := strconv.ParseInt(string(typed), 10, 64); err != nil {
 			return err
 		}
-		output.WriteString(string(typed))
-	case []interface{}:
-		output.WriteByte('[')
-		for i, item := range typed {
-			if i > 0 {
-				output.WriteByte(',')
-			}
-			if err := alphaAppendCanonicalJSON(output, item); err != nil {
-				return err
-			}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
 		}
-		output.WriteByte(']')
-	case map[string]interface{}:
-		keys := make([]string, 0, len(typed))
-		for key := range typed {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		output.WriteByte('{')
-		for i, key := range keys {
-			if i > 0 {
-				output.WriteByte(',')
-			}
-			alphaAppendCanonicalString(output, key)
-			output.WriteByte(':')
-			if err := alphaAppendCanonicalJSON(output, typed[key]); err != nil {
-				return err
-			}
-		}
-		output.WriteByte('}')
-	default:
-		return fmt.Errorf("unsupported canonical JSON value %T", value)
+		tree = append(tree, state.File{Path: filepath.ToSlash(relative), Data: data})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	return nil
+	sort.Slice(tree, func(i, j int) bool { return tree[i].Path < tree[j].Path })
+	return tree
 }
 
-func alphaAppendCanonicalString(output *bytes.Buffer, value string) {
-	const hexadecimal = "0123456789abcdef"
-	output.WriteByte('"')
-	for _, character := range []byte(value) {
-		switch character {
-		case '"', '\\':
-			output.WriteByte('\\')
-			output.WriteByte(character)
-		case '\b':
-			output.WriteString(`\b`)
-		case '\t':
-			output.WriteString(`\t`)
-		case '\n':
-			output.WriteString(`\n`)
-		case '\f':
-			output.WriteString(`\f`)
-		case '\r':
-			output.WriteString(`\r`)
-		default:
-			if character < 0x20 {
-				output.WriteString(`\u00`)
-				output.WriteByte(hexadecimal[character>>4])
-				output.WriteByte(hexadecimal[character&0x0f])
-			} else {
-				output.WriteByte(character)
-			}
+func stage2ProcessWriteTree(t *testing.T, root string, tree state.Tree) {
+	t.Helper()
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range tree {
+		path := filepath.Join(root, filepath.FromSlash(file.Path))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, file.Data, 0o600); err != nil {
+			t.Fatal(err)
 		}
 	}
-	output.WriteByte('"')
 }
 
-func alphaSHA256(value []byte) string {
+func stage2ProcessDecode(t *testing.T, raw []byte, destination any) {
+	t.Helper()
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		t.Fatalf("decode %q: %v", raw, err)
+	}
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		t.Fatalf("trailing JSON in %q", raw)
+	}
+}
+
+func stage2ProcessSHA256(value []byte) string {
 	digest := sha256.Sum256(value)
 	return "sha256:" + hex.EncodeToString(digest[:])
-}
-
-func equalAlphaStrings(left, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for i := range left {
-		if left[i] != right[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func typesDatabaseURL() string {
-	return types.LoadConfig().DatabaseURL
 }

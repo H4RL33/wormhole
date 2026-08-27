@@ -2,405 +2,180 @@
 
 # Wormhole
 
-**Shared, durable organisational context for every agent, harness, model, and
-human on your team.**
+Wormhole is open-source, Git-native coordination infrastructure for agentic
+work. Stage 2 gives MCP harnesses a local Gateway for durable project context
+without creating a competing source-code authority.
 
-Wormhole is open-source coordination infrastructure for agentic work. It gives
-different coding harnesses and models one shared event stream, task graph,
-knowledge base, identity system, and set of Git pointers. Git remains the
-source of truth for code; Wormhole preserves the organisational context around
-the code.
+Git is the sole acceptance authority for both source and portable Wormhole
+project state. Gateway can prepare a candidate in the working tree, but it
+never stages, commits, or pushes it.
 
-Wormhole is not another agent, model, or orchestration framework. It is the
-common layer beneath them.
+## Stage 2 today
 
-## Mission
-
-Wormhole exists to make agentic harnesses and models from any provider work as
-one.
-
-Its primary mission is **total interoperability**: a task started in one
-harness, continued by another model, and reviewed by a third should retain the
-same identity, history, decisions, and organisational memory.
-
-Its second mission is to bridge the gap between humans and agents while
-preserving human control. Agents can coordinate and act through explicit
-permissions, durable audit trails, and project-scoped identities; humans retain
-authority over destructive actions, policy, credentials, and deployment.
-
-Its third mission is exploratory: to push the boundaries of what agents can do
-together and venture into new ground with innovative, experimental systems.
-Wormhole is a practical tool today and a platform for discovering better forms
-of human-agent and agent-agent collaboration tomorrow.
-
-## What Wormhole provides
-
-- **Shared organisational memory** — atomic, linked knowledge articles available
-  across sessions, models, and machines.
-- **Structured coordination** — typed events, channels, tasks, dependencies,
-  ownership, and status transitions.
-- **Portable agent identity** — project-scoped Passports, explicit permissions,
-  roles, and append-only audit records.
-- **Local-first operation** — a per-user daemon with a SQLite replica and
-  durable outbound sync queue.
-- **Multi-device collaboration** — a Coordination Server that reconciles
-  runtimes through project-scoped PostgreSQL state.
-- **Provider neutrality** — interoperability is defined by open protocols and
-  harness capabilities, not by the model vendor.
-- **Git-native boundaries** — Wormhole stores commit SHAs, PR URLs, and
-  commentary; it never copies or replaces repository code.
-
-The platform contract is the
-[Model Context Protocol](https://modelcontextprotocol.io/). Any compatible
-harness can use Wormhole directly or through a community connector.
-
-## Architecture
+The supported Stage 2 path is local-only:
 
 ```text
 Codex, Claude Code, or another MCP harness
-                     |
+                    |
               wormhole mcp
-           stdio-to-socket bridge
-                     |
-                 gatewayd
-       local MCP API + SQLite replica
-          durable local sync queue
-                     |
-          wormhole.sync.* over HTTP(S)
-                     |
-                fabric
-       coordination + PostgreSQL/pgvector
+          real stdio/socket bridge
+                    |
+                gatewayd
+      owner-private Unix socket + SQLite
+                    |
+       tracked .wormhole/state/v1 via Git
 ```
 
-Harnesses talk only to the local `gatewayd` daemon. The Gateway makes local
-writes durable before attempting network synchronization. The Coordination
-Server provides the authority required across users and machines: enrollment,
-project-scoped identity, shared discovery, conflict authority, and durable
-multi-runtime coordination.
+The Gateway exposes exactly 17 agent-facing tools:
 
-Wormhole builds three binaries:
+```text
+wormhole.agent.list
+wormhole.agent.presence
+wormhole.agent.register
+wormhole.channel.create
+wormhole.channel.events
+wormhole.channel.list
+wormhole.channel.post
+wormhole.channel.subscribe
+wormhole.kb.get
+wormhole.kb.list
+wormhole.kb.write
+wormhole.sync.status
+wormhole.workspace.checkpoint
+wormhole.workspace.diff
+wormhole.workspace.import
+wormhole.workspace.stash
+wormhole.workspace.status
+```
 
-| Binary | Role |
-|---|---|
-| `wormhole` | Setup, portable workspace operations, connector management, and MCP stdio bridge |
-| `gatewayd` | Gateway: per-user local runtime, SQLite replica, local MCP API, and sync queue |
-| `fabric` | Fabric: Coordination Server backed by PostgreSQL and pgvector |
+Portable channel definitions and KB articles are composed into a private
+candidate, materialised by checkpoint, and shared only after ordinary Git
+acceptance. Channel operational activity, agent registration and presence,
+workspace bookkeeping, identities, sessions, capabilities, credentials,
+stashes, journals, receipts, and SQLite rows are not portable.
 
-## Status
+`wormhole.sync.status` truthfully reports `offline` with zero pending writes.
+The Stage 2 Gateway does not contact Fabric. Enrolment, identity lookup,
+semantic search, task mutation, Git-link mutation, remote bootstrap, and live
+sync are not Gateway capabilities in this stage.
 
-Wormhole is alpha software under active development.
+The repository also builds an optional Fabric binary with a separately tested
+20-tool PostgreSQL-backed server inventory. That inventory is not attached to
+the Stage 2 Gateway, is not part of Stage 2 acceptance, and is not a direct
+harness endpoint. See [Automated alpha validation](docs/testing/alpha-validation.md).
 
-- `gatewayd` is currently supported on Linux. Windows users should use WSL.
-- Codex and Claude Code have first-party connection flows.
-- Other MCP-capable harnesses can use `wormhole mcp` or community connectors.
-- Fabric uses the approved Cohere `embed-v4.0` semantic embedder; the
-  deterministic stub is test-only.
-- Canonical setup is Git-native and reconstructs a workspace from tracked
-  `.wormhole/state/v1/` without requiring a Coordination Server.
+## State and authority
 
-Interfaces may change before a stable release. Do not expose an alpha
-Coordination Server directly to the public internet without reviewing the
-[security policy](SECURITY.md).
+Wormhole separates three kinds of state:
 
-The current compatibility mode is `alpha-inventory`: reviewed interface changes
-update the checked-in inventory, but this alpha state makes no beta compatibility
-promise. See [Compatibility policy](docs/compatibility.md).
+- Portable project state is the typed tree beneath `.wormhole/`, accepted and
+  exchanged through Git. It includes project, actor, task, task-link, channel,
+  KB, portable event, Git-link, tombstone, and optional Fabric-hint records.
+- Operational activity is clone-local finite collaboration state, such as
+  `channel.post` events and scheduler presence. It is not checkpointed.
+- Machine-private state includes the Gateway database, workspace IDs and
+  overlays, selected human identity and private keys, durable harness-agent
+  identity, connection sessions, CLI capability, journals, and credentials.
 
-### Private Gateway data is intentionally disposable in pre-alpha
+Tracked portable records confer no credentials, membership, or execution
+authority. Git access determines who can read repository-visible state; Git
+review and acceptance determine what becomes the accepted portable base.
 
-The private SQLite database used by `gatewayd` has no backward-compatibility
-promise. The current R06 format is schema-v6: a missing or genuinely empty
-database is initialized atomically, and an exact v6 database reopens without
-schema mutation. Older, future, malformed, partial, unexpected, or
-proof-incompatible databases are preserved and refused before mutation; they are
-not migrated, exported, normalized, reset, quarantined, renamed, or deleted.
+## Build and setup
 
-If Gateway reports an unsupported private database, stop it first. Inspect for
-unpublished overlays, stashes, and pending checkpoints, make an operator backup,
-then remove the private database only as an explicit manual action before rerunning
-setup. The current binary provides no reset or export command. This rule concerns
-machine-private Gateway state only; the tracked portable project state in
-`.wormhole/state/v1/` remains the supported Git interchange and clean-clone format.
-
-## Get started
-
-Choose the path that matches how you want to use Wormhole.
-
-### Single device and offline-capable operation
-
-Use this path when one machine and its local agents need to share an existing
-Wormhole project. Once enrolled and bootstrapped, harness calls go through
-`gatewayd`, local state lives in SQLite, and local writes enter a
-restart-surviving queue.
-
-Prerequisites:
-
-- Go 1.24 or newer
-- Linux, or Windows through WSL
-- a Git repository containing `.wormhole/config.toml` and `.wormhole/state/v1/`
-
-Build the CLI and daemon:
+Prerequisites are Go 1.24 or newer, Linux (or WSL), Git, and a repository with
+`.wormhole/config.toml` plus `.wormhole/state/v1/`.
 
 ```bash
-git clone https://github.com/H4RL33/wormhole.git
-cd wormhole
 make build
-```
-
-Run the resumable setup workflow from the repository root. It validates the
-portable tree, ensures the owner-only Gateway service, registers this checkout,
-selects the local human identity, records publication policy, imports the Git
-base, and installs detected first-party connectors:
-
-```bash
 ./dist/wormhole setup --publication local_only
 ```
 
-Use `--yes` only after reviewing the printed plan. For a repository whose
-portable state is intended for public Git, select `public_git`; checkpoint then
-requires the exact digest returned by `diff`:
+Setup prints a confirmed plan, installs or verifies the user-level Gateway
+service, registers the exact checkout, selects the local human identity,
+records publication policy, imports the tracked base, verifies the result, and
+installs detected first-party connectors. `--yes` confirms the printed plan;
+it does not bypass plan-drift or service-manager checks.
+
+For repository-visible state, select `public_git`; public publication requires
+the exact digest returned by `diff`:
 
 ```bash
 ./dist/wormhole setup --publication public_git --yes
 ./dist/wormhole status
 ./dist/wormhole diff
 ./dist/wormhole checkpoint --publication-review-digest sha256:<review-digest>
+git diff -- .wormhole
+git add .wormhole
+git commit
+git push
 ```
 
-Checkpoint materialises portable state in the working tree. Wormhole never
-stages, commits, or pushes it; review and accept it with ordinary Git commands.
+For `local_only`, checkpoint does not require the public-Git acknowledgement,
+but Git remains the only mechanism that accepts or transports the resulting
+portable tree.
 
-Setup installs detected Codex and Claude connectors. You can also inspect or
-change one explicitly:
+Connector management is explicit and transactional:
 
 ```bash
 ./dist/wormhole connector list claude
 ./dist/wormhole connector install --yes claude
 ```
 
-The harness launches `wormhole mcp`, which bridges stdio to the daemon socket;
-it does not call a Coordination Server directly. Gateway binds the harness and
-optional model values self-declared in MCP `clientInfo` to a server-generated
-connection session. Local assurance proves that server-owned binding, not the
-authenticity of the declared harness or model.
+## Local trust boundary
 
-Same-user setup, workspace, and integration RPCs use a startup-owned private
-CLI capability outside the repository. It separates compliant CLI control-plane
-traffic from the public MCP protocol and binds local accountability; it does not
-authenticate physical human presence or defend against a hostile process already
-running as the same OS user. The public `wormhole mcp` bridge rejects those
-methods and never forwards the capability.
+Gateway owns the workspace binding and selected action actor. MCP `clientInfo`
+supplies bounded harness/model provenance only; Gateway binds it to a
+server-generated durable agent and connection session accountable to the
+selected human. Self-declared harness/model values are not independently
+authenticated.
 
-The tracked portable tree is the clean-clone interchange. Workspace IDs,
-identity keys, overlays, stashes, journals, receipts, credentials, and SQLite
-rows remain machine-private.
+The Unix socket, SQLite database, identity records, and private CLI capability
+are owner-only machine-private authority. The capability separates
+setup/workspace control RPCs from the public agent inventory and is never
+forwarded by `wormhole mcp`. This is a same-OS-user boundary: it is not designed
+to resist hostile same-user processes, administrator/root access, or a
+compromised user session.
 
-Local paths:
+Default paths:
 
-- Credentials: `~/.wormhole/credentials/<profile>.json`
-- SQLite replica: `$XDG_DATA_HOME/wormhole/wormholed.db`, or
-  `~/.local/share/wormhole/wormholed.db`
-- Daemon socket: `$XDG_RUNTIME_DIR/wormhole/wormholed.sock`, or the
-  `$TMPDIR/wormhole-runtime/` fallback
+- database: `$XDG_DATA_HOME/wormhole/wormholed.db`
+- identity: `$XDG_DATA_HOME/wormhole/identities/`
+- socket: `$XDG_RUNTIME_DIR/wormhole/wormholed.sock`
 
-The retained `wormholed.sock` and `wormholed.db` basenames identify on-disk
-runtime state from before the hard executable rename. They are data-path
-compatibility names only: neither is a command, binary, symlink, or alias for
-`gatewayd`.
+The retained `wormholed.*` basenames are data-path compatibility names, not
+legacy executable aliases. Credential and identity material must never be
+committed.
 
-Credential profiles contain bearer tokens. Never commit or share them.
+## Private format policy
 
-### Multi-device and team coordination
+The private Gateway database is a closed-pre-alpha schema-v6 format. A missing
+or empty database is initialised; an exact current database reopens without
+schema mutation. Older, future, malformed, partial, unexpected, or
+proof-incompatible databases are preserved and refused before mutation. There
+is no automatic migration, reset, export, quarantine, rename, or deletion.
 
-Use this path when multiple machines, people, or runtimes need to share the
-same project state. Each machine still talks to its own `gatewayd`; Fabric is
-the authenticated meeting point between them.
+Before deliberate removal, stop Gateway, inspect for unpublished overlays,
+stashes, and checkpoints, and make an operator backup. This policy does not
+apply to the tracked portable tree, which is the supported clean-clone
+interchange.
 
-Prerequisites:
-
-- Go 1.24 or newer
-- Docker with Compose
-- [`golang-migrate`](https://github.com/golang-migrate/migrate)
-- Linux or WSL for every machine running `gatewayd`
-
-#### 1. Build Wormhole
+## Verification and documentation
 
 ```bash
-git clone https://github.com/H4RL33/wormhole.git
-cd wormhole
-make build
+make check
+make release-test
+make release-rehearsal
 ```
 
-#### 2. Start PostgreSQL and apply migrations
-
-```bash
-docker compose up -d db
-
-migrate \
-  -path migrations \
-  -database "postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable" \
-  up
-```
-
-The Compose database listens on `127.0.0.1:5432` with development-only
-credentials: database, username, and password are all `wormhole`.
-
-Create a project:
-
-```bash
-export WORMHOLE_PROJECT_ID=00000000-0000-0000-0000-000000000001
-
-docker compose exec -T db psql -U wormhole -d wormhole -v ON_ERROR_STOP=1 -c \
-  "INSERT INTO projects (id, name, owner)
-   VALUES ('$WORMHOLE_PROJECT_ID', 'Demo Project', 'demo-owner')
-   ON CONFLICT (id) DO NOTHING;"
-```
-
-#### 3. Start the Coordination Server
-
-```bash
-export WORMHOLE_DATABASE_URL="postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable"
-export WORMHOLE_COHERE_API_KEY="<cohere-api-key>"
-./dist/fabric
-```
-
-Fabric fails startup unless the approved Cohere `embed-v4.0` configuration and
-API key are present. KB article and query text sent for embedding must be
-classified non-sensitive unless a verified zero-data-retention agreement is in
-place.
-
-The default listener is `http://localhost:8080`. Set
-`WORMHOLE_LISTEN_ADDR` to change it. Use HTTPS for any non-loopback
-deployment; bearer tokens must never cross an unencrypted network.
-
-The Coordination Server:
-
-- enrolls agents and issues project-scoped credentials;
-- stores authoritative shared state in PostgreSQL;
-- accepts incremental pushes from local runtimes;
-- serves bootstrap and incremental pulls;
-- enforces permissions and project isolation at the MCP boundary;
-- provides conflict authority and durable audit history across runtimes.
-
-It is not the harness endpoint. Every harness still connects to its local
-daemon:
-
-```text
-Harness A -> Gateway A --\
-                          -> Fabric -> PostgreSQL
-Harness B -> Gateway B --/
-```
-
-#### 4. Set up each clone
-
-On each device, clone the repository and run the same Git-native setup:
-
-```bash
-./dist/wormhole setup --publication private_git
-```
-
-Each clone gets fresh private Gateway and identity state while importing the
-same accepted portable Git snapshot.
-
-#### 5. Verify the path
-
-```bash
-./dist/wormhole profile list
-./dist/wormhole whoami --profile demo
-```
-
-Ask the connected harness to list Wormhole tools and call
-`wormhole.task.list`. The request should travel through its local daemon; state
-written on one runtime becomes available to the others through incremental
-synchronization.
-
-## CLI
-
-Run:
-
-```bash
-./dist/wormhole help
-./dist/wormhole <command> --help
-```
-
-| Command | Purpose |
-|---|---|
-| `wormhole setup` | Confirm and resume canonical Git-native setup |
-| `wormhole connector list/install/remove` | Inspect or transactionally manage native connectors |
-| `wormhole whoami` | Inspect the identity associated with a profile |
-| `wormhole status` | Inspect the bound workspace and publication review state |
-| `wormhole diff` | Inspect the semantic portable-state diff and review digest |
-| `wormhole import` | Import direct tracked portable-state edits |
-| `wormhole checkpoint` | Materialise the candidate without Git staging, commit, or push |
-| `wormhole stash` | Durably stash the private overlay under an explicit request ID and label |
-| `wormhole profile list` | List stored credential profiles |
-| `wormhole viewer-key create` | Issue a project-scoped dashboard viewer key |
-| `wormhole mcp` | Run the harness stdio-to-daemon bridge |
-| `gatewayd <profile>` | Run the local Gateway for a credential profile |
-
-Configuration precedence for setup commands:
-
-```text
-explicit flag > project config > global config > environment or Git > default > error
-```
-
-The detailed [CLI Guide](https://github.com/H4RL33/wormhole/wiki/CLI-Guide)
-covers flags, profiles, paths, and connection patterns.
-
-## Human control and security
-
-Wormhole treats human authority as an architectural boundary:
-
-- identities and permissions are explicit and project-scoped;
-- credentials are hashed server-side and restricted on local disk;
-- destructive or policy-changing actions remain human-controlled;
-- PostgreSQL RLS and mandatory namespace parameters protect tenant boundaries;
-- audit records are append-only;
-- Git remains the sole source of truth for code.
-
-Read the canonical [Security Policy](SECURITY.md) before deployment. The Wiki's
-[Security Model](https://github.com/H4RL33/wormhole/wiki/Security-Model) is an
-approachable guide, not a replacement for the repository policy.
-
-Security vulnerabilities should be reported privately through GitHub Private
-Vulnerability Reporting or `security@wormhole.systems`, never through a public
-issue.
-
-## Documentation
-
-- [GitHub Wiki](https://github.com/H4RL33/wormhole/wiki)
-- [CLI Guide](https://github.com/H4RL33/wormhole/wiki/CLI-Guide)
-- [Security Model](https://github.com/H4RL33/wormhole/wiki/Security-Model)
-- [Architecture and implementation rules](docs/implementation-rules.md)
+- [Architecture](docs/architecture.md)
 - [MCP protocol](docs/mcp-protocol.md)
-- [Release policy](docs/releasing.md)
+- [Security model](docs/wiki/Security-Model.md)
 - [Compatibility policy](docs/compatibility.md)
-- [Data entities](docs/db-entities.md)
-- [RFC-0001: Core](docs/rfcs/wormhole_rfc.md)
-- [RFC-0002: Governance](docs/rfcs/wormhole_rfc_governance.md)
-- [RFC-0003: Local Runtime](docs/rfcs/wormhole_rfc_local_runtime.md)
+- [Interface inventory](docs/contracts/README.md)
 - [Contributing](CONTRIBUTING.md)
-- [Security Policy](SECURITY.md)
+- [Security policy](SECURITY.md)
 
-Repository files are canonical. Wiki pages provide a friendlier navigation
-layer and link back to their source material.
-
-## Development
-
-```bash
-make build
-make vet
-make test
-```
-
-For required PostgreSQL integration coverage:
-
-```bash
-WORMHOLE_INTEGRATION_REQUIRED=1 go test ./...
-```
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
-
-## License
-
-Wormhole is released under the [MIT License](LICENSE).
+Wormhole remains alpha software. `gatewayd` is supported on Linux; Windows
+users should use WSL. Interfaces may change before a later explicit beta
+baseline.

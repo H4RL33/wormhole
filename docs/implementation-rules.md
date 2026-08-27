@@ -212,38 +212,38 @@ durable state, a compatibility commitment, a new mutation boundary, or redundant
 
 ## 3. System in One Paragraph
 
-Wormhole has four layers: stateless harness MCP connectors, the human-first
-`wormhole` CLI, one user-level Gateway supervisor, and optional public/private
-Fabrics. A repository's typed `.wormhole/state/v1/` tree at an observed commit is
-the accepted Git base; Gateway stores a durable private overlay per
-checkout/worktree and materialises an uncommitted candidate through deterministic,
-compare-and-swap checkpoints. Checkpoint alone never advances the base. Gateway
-may connect different workspaces to
-different Fabrics, but each workspace has at most one writable stream. Git is the
-sole code truth and accepts explicitly curated portable project-state changes.
-Gateway/Fabric own finite-retention operational collaboration without overwriting
-divergent Git state. The four Core pillars remain
-Event Bus, Task Graph, Knowledge Base, and Identity & Permissions. Governance is
-optional and must not leak into Core.
+The shipped Stage 2 topology has three live layers: stateless harness MCP
+connectors, the human-first `wormhole` CLI, and one user-level local-only Gateway
+supervisor. A repository's typed `.wormhole/state/v1/` tree at an observed commit
+is the accepted Git base; Gateway stores a durable private overlay per checkout
+and materialises an uncommitted candidate through deterministic compare-and-swap
+checkpoints. Checkpoint alone never advances the base. Ordinary Git review and
+commit are the sole acceptance authority for portable state. The exact 17-tool
+Gateway serves agent, Channel, KB, sync-status, and workspace operations without
+Fabric or PostgreSQL. Operational activity and selected human/agent/session state
+remain private to the local Gateway.
+
+The repository also retains an optional 20-tool Fabric server and broader Core,
+sync, Code Graph, and integration-manifest packages. Those packages have their
+own rules below, but their presence does not make their tools or network paths a
+live Stage 2 Gateway feature. Governance is optional and must not leak into Core.
 
 ```text
 Human CLI                         Harness MCP bridges
     \                                 /
      +---- one gatewayd supervisor --+
-           | bases + overlays + queues
+           | private SQLite: bases, overlays, activity, identity
            | explicit workspace routes
-           +---- isolated model-free Code Graph workers
-           |
-           +---- optional Fabric A / Fabric B / ...
-                      |
-               Postgres + pgvector per Fabric
+           +---- reviewed portable checkpoint candidate
 
 Git checkout: .wormhole/state/v1/ <-> checkpoint/review/merge
+
+Separate non-Stage 2 server path: fabric -> Postgres + pgvector
 ```
 
-The 2026-07-28 target is authoritative but migration is incomplete. Match the
-approved slice plan and tests; do not mistake legacy current code for a new
-architectural decision or claim an unimplemented target as shipped.
+The local-only Stage 2 slice of the 2026-07-28 design is implemented. Match its
+approved slice plan and tests; do not mistake retained optional or future code
+for a shipped Gateway surface.
 
 ---
 
@@ -252,7 +252,7 @@ architectural decision or claim an unimplemented target as shipped.
 | Package | Owns | May import |
 |---|---|---|
 | `cmd/fabric` | Process wiring: config, HTTP server, registry construction | `internal/core/*`, `internal/mcp`, `internal/storage`, `internal/types`, `internal/webui` |
-| `cmd/wormhole` | Human-first CLI entrypoint (`setup`, identity/auth, project/Fabric/connector lifecycle, status/diff/import/checkpoint/stash, MCP bridge) | `internal/config`, client-side code, stdlib |
+| `cmd/wormhole` | Human-first CLI entrypoint (setup, connector lifecycle, status/diff/import/checkpoint/stash, MCP bridge, plus separately tested optional-server administration) | `internal/config`, client-side code, stdlib |
 | `internal/config` | CLI global/project TOML configuration | stdlib, BurntSushi TOML |
 | `internal/mcp` | MCP tool descriptors, registry, request/response schemas, auth middleware | `internal/core/*`, `internal/types` |
 | `internal/core/identity` | Human and agent principals, authenticators, memberships, ownership, sessions, Passports/tokens, whoami, audit trail | `internal/types`, stdlib |
@@ -275,13 +275,13 @@ the same layering pattern and isolation discipline.
 
 | Package | Owns | May import |
 |---|---|---|
-| `cmd/gatewayd` | Process wiring: config load, localstore, localapi, sync engine, graceful shutdown | `internal/runtime/*`, `internal/types` |
-| `internal/runtime/config` | XDG-compliant paths, immutable workspace bindings, identity refs, and multiple Fabric profiles | `internal/types`, stdlib |
-| `internal/runtime/localstore` | SQLite-backed bases, overlays, domain records, queues, conflicts, checkpoints, and private-format preflight scoped by project and workspace | `internal/types`, `internal/runtime/codegraph/schema` (pure catalog authority only), stdlib, modernc SQLite driver |
+| `cmd/gatewayd` | Process wiring: config load, localstore, exact 17-tool localapi, owner-private socket, graceful shutdown | `internal/runtime/*`, `internal/types` |
+| `internal/runtime/config` | XDG-compliant paths, immutable workspace bindings, identity refs, and retained optional-Fabric profile types | `internal/types`, stdlib |
+| `internal/runtime/localstore` | SQLite-backed bases, overlays, domain records, operational activity, checkpoints, private identity, and retained optional queues/conflicts, all scoped by project and workspace | `internal/types`, `internal/runtime/codegraph/schema` (pure catalog authority only), stdlib, modernc SQLite driver |
 | `internal/runtime/localapi` | Stable local IPC, project-operation registry, cwd/workspace routing, and actor-envelope resolution | All sibling `internal/runtime/*` packages, `internal/types`, stdlib |
 | `internal/runtime/eventbus` | In-memory pub/sub for ephemeral events (presence, heartbeats); never persists | `internal/types`, stdlib |
-| `internal/runtime/scheduler` | Agent registration, presence tracking, capability matching, local task routing | `internal/types`, stdlib |
-| `internal/runtime/sync` | Explicit per-binding Fabric clients, durable queues, bootstrap/incremental streams, Git-base preconditions, and conflict audit | `internal/runtime/localstore`, `internal/types`, stdlib |
+| `internal/runtime/scheduler` | Agent registration, presence tracking, capability matching, and retained scheduling primitives; no Stage 2 Task MCP surface | `internal/types`, stdlib |
+| `internal/runtime/sync` | Retained optional-Fabric clients, durable queues, bootstrap/incremental streams, Git-base preconditions, and conflict audit; not instantiated by the Stage 2 local-only supervisor | `internal/runtime/localstore`, `internal/types`, stdlib |
 | `internal/runtime/codegraph/config` | Disabled-by-default, workspace-scoped local Code Graph configuration | stdlib |
 | `internal/runtime/codegraph/golang` | Read-only Go compiler analysis into the language-neutral graph model | `golang.org/x/tools/go/packages`, stdlib |
 | `internal/runtime/codegraph/schema` | Pure canonical Code Graph SQLite catalog SQL, version, fingerprint, and read-only validation authority | stdlib |
@@ -306,11 +306,14 @@ the same layering pattern and isolation discipline.
   operations. Task definition/owner/portable candidate status may use `OperationV1`.
   Explicit promotion alone strict-binds a source activity ID/digest into portable
   audit evidence.
-- LR5: Sync queues are SQLite-backed, restart-surviving, and keyed by explicit Fabric
-  instance/project/stream binding. Local writes become durable before sync; one Fabric
-  failure never blocks local work or another binding. Nonterminal queues, conflicts,
-  recovery state, and receipts are excluded from age/rank pruning. After terminal the
-  exact default retention is 30 days; a configured longer value must remain finite.
+- LR5: Retained optional-Fabric sync queues, when separately exercised, are
+  SQLite-backed, restart-surviving, and keyed by explicit Fabric
+  instance/project/stream binding. The Stage 2 local-only runtime does not instantiate
+  a Fabric client or create live sync/legacy queue rows. In the optional path, local
+  writes become durable before sync; one Fabric failure never blocks local work or
+  another binding. Nonterminal queues, conflicts, recovery state, and receipts are
+  excluded from age/rank pruning. After terminal the exact default retention is 30
+  days; a configured longer value must remain finite.
   Ordinary activity is eligible when it is older than 30 days **or** falls outside the
   newest 10,000 unprotected workspace rows, and is pruned deterministically in
   `(created_at, activity_id)` ascending order. Protected rows may exceed the cap.
@@ -347,14 +350,13 @@ the same layering pattern and isolation discipline.
   `github.com/lib/pq`, and `modernc.org/sqlite`; the complete locked module graph is
   recorded in `go.mod`/`go.sum`. `golang-migrate` remains external schema tooling rather
   than a linked Go module.
-- R5: Each Fabric instance has one datastore: Postgres + pgvector. RFC-0003 separately
-  requires Gateway's local SQLite replica and durable sync queue; that SQLite database
-  is not a Fabric datastore. Do not add Redis, NATS, another datastore, or
-  another storage service without explicit human approval. RFC-0001 §15 decides that
-  durable Fabric change discovery is "Postgres table, polled by Gateway". Multiple
-  Fabric profiles in one Gateway do not create another Fabric datastore or merge
-  namespaces. Harnesses consume local SQLite/runtime state; ephemeral local
-  notifications and the in-memory eventbus remain permitted under LR4.
+- R5: Each optional Fabric instance has one datastore: Postgres + pgvector. RFC-0003's
+  durable Gateway sync queue and Postgres polling rules constrain that separately
+  tested optional path; they are not requirements of the live Stage 2 local-only
+  process. Gateway SQLite is never a Fabric datastore. Do not add Redis, NATS, another
+  datastore, or another storage service without explicit human approval. Harnesses
+  consume local SQLite/runtime state; ephemeral local notifications and the in-memory
+  eventbus remain permitted under LR4.
 
 ---
 
@@ -459,14 +461,13 @@ the same layering pattern and isolation discipline.
   inventory. The 2026-07-28 migration may intentionally revise that inventory in
   its approved slice, with compatibility tests and documentation changed together.
   Outside such a slice, do not invent or silently drift a tool contract.
-- M2: Naming grammar is `wormhole.<namespace-noun>.<verb>`. Core pillar namespaces
-  are `agent`, `channel`, `task`, `kb`, and `git`; RFC-0003 additionally ratifies
-  `sync` for Gateway-to-Fabric operations and `workspace` for Gateway-local status,
-  diff, import, checkpoint, and stash operations. `workspace` is not a Core pillar.
-  Its contract-inventory changes ship
-  atomically with the approved migration slice. No other namespace prefix may be
-  added without an RFC change; `wormhole.governance.*` is governed by optional
-  RFC-0002 and remains out of Core.
+- M2: Naming grammar is `wormhole.<namespace-noun>.<verb>`. The exact 17-tool Gateway
+  inventory uses only `agent`, `channel`, `kb`, `sync.status`, and the Gateway-local
+  `workspace` status/diff/import/checkpoint/stash operations. The optional 20-tool
+  Fabric registry separately uses agent, channel, task, kb, git, and sync namespaces.
+  A namespace present in retained code is not automatically live in either registry.
+  No other prefix may be added without an RFC change; `wormhole.governance.*` is
+  governed by optional RFC-0002 and remains out of Core.
 - M3: Every ordinary project operation available through the human CLI has an
   equivalent agent MCP operation over the same Gateway domain semantics. Human
   authentication/recovery, ownership transfer, membership/policy administration,
@@ -505,12 +506,11 @@ the same layering pattern and isolation discipline.
   source actor, type, payload, note, and creation time are exact deep-owned source copies;
   `OperationV1.Actor` is the distinct promoter. Caller-selected semantics, attribution,
   or extra extensions reject the operation.
-- Durable Fabric change discovery uses Postgres-backed polling by Gateway
-  (RFC-0001 §15). Harnesses consume local SQLite/runtime state over
-  MCP IPC. Ephemeral local notifications and the in-memory eventbus are
-  permitted for wake-ups, presence, and heartbeats, but never as a second
-  durable coordination datastore. Do not add server-side push/streaming
-  infrastructure or another durable delivery service.
+- In separately tested optional-Fabric mode, durable change discovery uses
+  Postgres-backed polling by Gateway (RFC-0001 §15). The Stage 2 local-only process
+  does not instantiate this path. Harnesses consume local SQLite/runtime state over
+  MCP IPC. Ephemeral local notifications and the in-memory eventbus are permitted for
+  wake-ups, presence, and heartbeats, but never as a second durable datastore.
 
 ### Tasks
 - Hierarchy is Project → Task → Subtask via `parent_task_id`. Status enum exactly
@@ -550,15 +550,13 @@ the same layering pattern and isolation discipline.
   Audit rows are append-only and server/Gateway generated, not client-trusted.
 
 ### Git integration
-- Source integration remains pointers only (`git_links`, commit SHA, PR URL,
-  summary); Wormhole never stores or mirrors code bodies. Separately, typed
-  Wormhole project records live under `.wormhole/state/v1/` and use a private
-  Gateway overlay plus deterministic checkpoint. Fabric may inspect Git refs and
-  the `.wormhole/` subtree for canonical acceptance but must not ingest or execute
-  repository source. Canonical-public activation requires `origin` to match the
-  canonical repository identity. A fork/mismatch leaves the upstream hint inactive,
-  makes no upstream Fabric contact/read/write, and remains local or binds an
-  independent realm. Worktree isolation is mandatory.
+- Optional-server source integration remains pointers only (`git_links`, commit SHA,
+  PR URL, summary); Wormhole never stores or mirrors code bodies. These Fabric Git
+  tools are not live Gateway tools. Typed project records live under
+  `.wormhole/state/v1/` and use a private Gateway overlay plus deterministic
+  checkpoint. Ordinary Git is the only Stage 2 acceptance path. A fork/mismatch
+  leaves any upstream hint inactive, makes no optional-Fabric contact, and remains
+  local. Worktree isolation is mandatory.
 - Checkpoint publication must compare-and-swap the expected live `.wormhole/`
   digest so direct edits cannot be overwritten. It records materialised-pending-
   commit state privately. Before staging, one existing prepared/published/recovered-new

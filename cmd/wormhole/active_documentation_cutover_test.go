@@ -90,12 +90,10 @@ func TestStage2AlphaValidationDocumentsExactMCPInventories(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantGateway := []string{
-		"wormhole.agent.enrol", "wormhole.agent.get_guidance", "wormhole.agent.list", "wormhole.agent.presence", "wormhole.agent.register", "wormhole.agent.whoami",
+		"wormhole.agent.list", "wormhole.agent.presence", "wormhole.agent.register",
 		"wormhole.channel.create", "wormhole.channel.events", "wormhole.channel.list", "wormhole.channel.post", "wormhole.channel.subscribe",
-		"wormhole.git.link_commit",
-		"wormhole.kb.get", "wormhole.kb.list", "wormhole.kb.search", "wormhole.kb.write",
+		"wormhole.kb.get", "wormhole.kb.list", "wormhole.kb.write",
 		"wormhole.sync.status",
-		"wormhole.task.create", "wormhole.task.get", "wormhole.task.list", "wormhole.task.route", "wormhole.task.update_status",
 		"wormhole.workspace.checkpoint", "wormhole.workspace.diff", "wormhole.workspace.import", "wormhole.workspace.stash", "wormhole.workspace.status",
 	}
 	wantFabric := []string{
@@ -110,7 +108,7 @@ func TestStage2AlphaValidationDocumentsExactMCPInventories(t *testing.T) {
 		heading string
 		want    []string
 	}{
-		{heading: "### Gateway MCP (27 tools)", want: wantGateway},
+		{heading: "### Gateway MCP (17 tools)", want: wantGateway},
 		{heading: "### Fabric MCP (20 tools)", want: wantFabric},
 	} {
 		got := markdownToolInventory(t, string(content), inventory.heading)
@@ -118,6 +116,85 @@ func TestStage2AlphaValidationDocumentsExactMCPInventories(t *testing.T) {
 		sort.Strings(inventory.want)
 		if strings.Join(got, "\n") != strings.Join(inventory.want, "\n") {
 			t.Errorf("%s inventory = %q, want exact %q", inventory.heading, got, inventory.want)
+		}
+	}
+}
+
+func TestStage2ActiveDocumentationStatesLocalOnlyAcceptanceBoundary(t *testing.T) {
+	t.Parallel()
+
+	requirements := map[string][]string{
+		"README.md": {
+			"17 agent-facing tools", "Git is the sole acceptance authority", "optional Fabric binary",
+			"hostile same-user processes", "operational activity", "machine-private",
+		},
+		"agents/README.md": {
+			"exactly 17", "optional Fabric", "Git is the sole accepted", "same-user",
+		},
+		"docs/wiki/Security-Model.md": {
+			"Git acceptance authority", "Portable project state", "Operational state", "Machine-private state",
+			"hostile same-user process", "does not contact Fabric",
+		},
+		"docs/testing/alpha-validation.md": {
+			"TestStage2LocalOnlyRealProcessAcceptance", "requires neither PostgreSQL nor Fabric",
+			"real `wormhole mcp` stdio bridge", "Gateway MCP (17 tools)", "Fabric MCP (20 tools)",
+			"service-manager installation is covered separately",
+		},
+		"docs/architecture/gateway-enrolment-lifecycle.md": {
+			"Historical/future optional-Fabric design", "not a live Stage 2 Gateway operation",
+		},
+		"docs/mcp-protocol.md": {
+			"17-tool", "private working-directory context", "removed before public schema validation",
+			"optional Fabric", "wormhole.workspace.status",
+		},
+		"docs/contracts/README.md": {
+			"exactly 17", "exactly 20", "not in the Stage 2 Gateway inventory",
+		},
+		"docs/compatibility.md": {
+			"17-tool", "optional 20-tool Fabric", "Git acceptance", "machine-private",
+		},
+		"docs/wiki/Home.md": {
+			"local-only Stage 2", "Git is the sole acceptance authority", "Fabric is optional",
+		},
+		"docs/wiki/CLI-Guide.md": {
+			"exact 17-tool Gateway", "not a Stage 2 runtime dependency", "ordinary Git",
+		},
+		"docs/operators/alpha-validation-trial.md": {
+			"local-only Stage 2", "17-tool Gateway", "does not exercise Fabric", "second fresh clone",
+		},
+		"docs/implementation-rules.md": {
+			"exact 17-tool Gateway", "Stage 2 local-only runtime does not instantiate",
+		},
+		"docs/testing/closed-trial-metrics.md": {
+			"current local-only Stage 2 trial", "compatibility-only schema labels",
+			"no live managed-guidance feature", "no live Task MCP feature",
+		},
+	}
+
+	for relative, fragments := range requirements {
+		content, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(relative)))
+		if err != nil {
+			t.Fatalf("read %s: %v", relative, err)
+		}
+		for _, fragment := range fragments {
+			if !strings.Contains(string(content), fragment) {
+				t.Errorf("%s does not state required Stage 2 boundary %q", relative, fragment)
+			}
+		}
+	}
+
+	alpha, err := os.ReadFile("../../docs/testing/alpha-validation.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage2Section := strings.SplitN(string(alpha), "## Optional Fabric/PostgreSQL coverage", 2)[0]
+	for _, forbidden := range []string{
+		"TestAlphaValidation_FullAutomatedAcceptanceLoop", "WORMHOLE_INTEGRATION_REQUIRED=1",
+		"wormhole.agent.enrol", "wormhole.agent.get_guidance", "wormhole.agent.whoami",
+		"wormhole.kb.search", "wormhole.task.list", "wormhole.git.link_commit",
+	} {
+		if strings.Contains(stage2Section, forbidden) {
+			t.Errorf("Stage 2 alpha-validation section retains non-local claim %q", forbidden)
 		}
 	}
 }
