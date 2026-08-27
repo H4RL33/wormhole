@@ -121,7 +121,7 @@ func rollbackFailedTransaction(ctx context.Context, adapter Adapter, plan Change
 	if err := journal.Advance(ctx, record.OperationID, StageRolledBack); err != nil {
 		return sanitizeConnectorError(err)
 	}
-	if err := journal.Advance(ctx, record.OperationID, StageComplete); err != nil {
+	if err := journal.Advance(ctx, record.OperationID, StageRestored); err != nil {
 		return sanitizeConnectorError(err)
 	}
 	return sanitizeConnectorError(cause)
@@ -247,7 +247,7 @@ func recoverTransactionsLocked(ctx context.Context, adapter Adapter, name string
 	switch record.Stage {
 	case StagePrepared:
 		if isPrior {
-			return sanitizeConnectorError(journal.Advance(ctx, record.OperationID, StageComplete))
+			return sanitizeConnectorError(journal.Advance(ctx, record.OperationID, StageRestored))
 		}
 		return recoverRollbackDesired(ctx, adapter, plan, record, journal)
 	case StageApplied:
@@ -260,7 +260,7 @@ func recoverTransactionsLocked(ctx context.Context, adapter Adapter, name string
 		if err := journal.Advance(ctx, record.OperationID, StageRolledBack); err != nil {
 			return sanitizeConnectorError(err)
 		}
-		return sanitizeConnectorError(journal.Advance(ctx, record.OperationID, StageComplete))
+		return sanitizeConnectorError(journal.Advance(ctx, record.OperationID, StageRestored))
 	case StageVerified:
 		if !isDesired {
 			return ErrConnectorStateDrift
@@ -273,7 +273,7 @@ func recoverTransactionsLocked(ctx context.Context, adapter Adapter, name string
 		if !isPrior {
 			return ErrConnectorStateDrift
 		}
-		return sanitizeConnectorError(journal.Advance(ctx, record.OperationID, StageComplete))
+		return sanitizeConnectorError(journal.Advance(ctx, record.OperationID, StageRestored))
 	case StageComplete:
 		return ErrInvalidConnectorStore
 	default:
@@ -291,7 +291,7 @@ func recoverRollbackDesired(ctx context.Context, adapter Adapter, plan ChangePla
 	if err := journal.Advance(ctx, record.OperationID, StageRolledBack); err != nil {
 		return sanitizeConnectorError(err)
 	}
-	return sanitizeConnectorError(journal.Advance(ctx, record.OperationID, StageComplete))
+	return sanitizeConnectorError(journal.Advance(ctx, record.OperationID, StageRestored))
 }
 
 func sanitizeConnectorError(err error) error {

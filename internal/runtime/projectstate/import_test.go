@@ -73,6 +73,61 @@ func TestImportPersistsCleanDirectCandidate(t *testing.T) {
 	}
 }
 
+func TestReconcileImportClassifiesExactPriorDesiredAndThirdInsideTransaction(t *testing.T) {
+	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
+	_, service := openProjectStateService(t, "")
+	registered := registerGitRepository(t, service, repository)
+	accepted := mustServiceStatus(t, service, registered.Binding.Scope)
+	prior := ImportWorkspacePredicate{CandidatePresent: false, CandidateDigest: accepted.CandidateDigest, OverlayGeneration: 0, WorkspaceState: "clean"}
+	desired := ImportWorkspacePredicate{CandidatePresent: true, CandidateDigest: accepted.CandidateDigest, OverlayGeneration: 0, WorkspaceState: "pending"}
+	request := ReconcileImportRequest{
+		Import:        ImportRequest{Scope: registered.Binding.Scope, Root: repository.root, ExpectedWorkingTreeDigest: &accepted.CandidateDigest, Actor: diffActorEnvelope()},
+		ExpectedPrior: prior, Desired: desired,
+	}
+
+	first, err := service.ReconcileImport(t.Context(), request)
+	if err != nil || !first.Changed || importWorkspacePredicate(first.Status) != desired {
+		t.Fatalf("prior reconciliation = %+v, err %v", first, err)
+	}
+	var firstImportedAt time.Time
+	if err := service.registration.repo.WithImmediateWorkspace(t.Context(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+		candidate, candidateErr := tx.Candidate(t.Context())
+		if candidateErr == nil && candidate != nil {
+			firstImportedAt = candidate.ImportedAt
+		}
+		return candidateErr
+	}); err != nil || firstImportedAt.IsZero() {
+		t.Fatalf("first attribution = %v, err %v", firstImportedAt, err)
+	}
+
+	second, err := service.ReconcileImport(t.Context(), request)
+	if err != nil || second.Changed || importWorkspacePredicate(second.Status) != desired {
+		t.Fatalf("desired reconciliation = %+v, err %v", second, err)
+	}
+	thirdOperation := servicePutTaskOperation(second.Status.AcceptedSnapshot, "99999999-9999-4999-8999-999999999991", "22222222-2222-4222-8222-222222222222", "third overlay")
+	thirdOperation.ExpectedViewDigest = second.Status.CandidateDigest
+	thirdStatus, err := service.Apply(t.Context(), registered.Binding.Scope, thirdOperation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ReconcileImport(t.Context(), request); !errors.Is(err, ErrImportStateDrift) {
+		t.Fatalf("third reconciliation error = %v", err)
+	}
+	after := mustServiceStatus(t, service, registered.Binding.Scope)
+	if importWorkspacePredicate(after) != importWorkspacePredicate(thirdStatus) {
+		t.Fatalf("third state changed: before=%+v after=%+v", thirdStatus, after)
+	}
+	if err := service.registration.repo.WithImmediateWorkspace(t.Context(), registered.Binding.Scope, func(tx *localstore.WorkspaceMutationTx) error {
+		candidate, candidateErr := tx.Candidate(t.Context())
+		if candidateErr == nil && (candidate == nil || candidate.ImportedAt != firstImportedAt) {
+			return errors.New("third reconciliation rewrote candidate attribution")
+		}
+		return candidateErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestImportValidatesRequestAndOptionalDigestBeforeMutation(t *testing.T) {
 	repository := createGitRepository(t, "00000000-0000-4000-8000-000000000001")
 	store, service := openProjectStateService(t, "")

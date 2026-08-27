@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/H4RL33/wormhole/internal/runtime/config"
 	"github.com/H4RL33/wormhole/internal/runtime/localidentity"
@@ -230,6 +231,51 @@ func TestPrivateSetupRPCEndToEndAcknowledgesPublicationAndImportedBase(t *testin
 	})
 	if err != nil || publication.BindingDigest != config.StateDigest(bindingDigest) || publication.ChangedByHumanID != profile.HumanPrincipalID {
 		t.Fatalf("publication = %+v, err %v", publication, err)
+	}
+	accepted, err := service.Status(t.Context(), types.WorkspaceScope{ProjectID: projectID, WorkspaceID: workspace.WorkspaceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	operation := state.OperationV1{
+		SchemaVersion: 1, ID: "99999999-9999-4999-8999-999999999991", Kind: state.OperationPutRecord, ExpectedViewDigest: accepted.CandidateDigest,
+		Actor: types.ActorEnvelope{ActorKind: types.ActorHuman, HumanPrincipalID: profile.HumanPrincipalID, Assurance: types.AssuranceLocal, OccurredAt: now},
+		PutRecord: &state.PutRecordV1{Record: state.RecordValueV1{Task: &state.TaskV1{
+			SchemaVersion: 1, Kind: "task", ID: "22222222-2222-4222-8222-222222222222", Title: "raced overlay", Description: "preserve exact third state",
+			Status: "todo", Priority: 1, CreatedAt: now, UpdatedAt: now, Extensions: state.ExtensionsV1{},
+		}}},
+	}
+	server.beforeSetupImportTransaction = func(ctx context.Context) error {
+		server.beforeSetupImportTransaction = nil
+		_, applyErr := service.Apply(ctx, types.WorkspaceScope{ProjectID: projectID, WorkspaceID: workspace.WorkspaceID}, operation)
+		return applyErr
+	}
+	if _, err := server.PrivateSetupImportRPC(t.Context(), SetupImportRequest{
+		WorkingDirectory: root, ExpectedCommitSHA: commit, ExpectedTreeDigest: state.Digest(treeDigest),
+		ExpectedPriorDigest: DigestSetupBasePredicate(SetupBasePredicate{CandidatePresent: false, CandidateDigest: state.Digest(treeDigest), WorkspaceState: "clean"}),
+		DesiredDigest:       DigestSetupBasePredicate(SetupBasePredicate{CandidatePresent: true, CandidateDigest: state.Digest(treeDigest), WorkspaceState: "pending"}),
+	}); !errors.Is(err, config.ErrConfirmedPlanDrift) {
+		t.Fatalf("raced import error = %v", err)
+	}
+	var candidateCount int
+	var operationState, workspaceState string
+	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM workspace_candidates WHERE project_id=? AND workspace_id=?`, projectID, workspace.WorkspaceID).Scan(&candidateCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRow(`SELECT state FROM workspace_overlay_operations WHERE project_id=? AND workspace_id=? AND operation_id=?`, projectID, workspace.WorkspaceID, operation.ID).Scan(&operationState); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRow(`SELECT status FROM workspace_bindings WHERE project_id=? AND workspace_id=?`, projectID, workspace.WorkspaceID).Scan(&workspaceState); err != nil {
+		t.Fatal(err)
+	}
+	if candidateCount != 0 || operationState != "active" || workspaceState != "pending" {
+		t.Fatalf("raced third state mutated: candidates=%d operation=%q workspace=%q", candidateCount, operationState, workspaceState)
+	}
+	if _, err := store.DB().Exec(`DELETE FROM workspace_overlay_operations WHERE project_id=? AND workspace_id=?`, projectID, workspace.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`UPDATE workspace_bindings SET status='clean' WHERE project_id=? AND workspace_id=?`, projectID, workspace.WorkspaceID); err != nil {
+		t.Fatal(err)
 	}
 	imported, err := server.PrivateSetupImportRPC(t.Context(), SetupImportRequest{
 		WorkingDirectory: root, ExpectedCommitSHA: commit, ExpectedTreeDigest: state.Digest(treeDigest),

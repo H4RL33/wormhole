@@ -19,6 +19,7 @@ var (
 	ErrDirectEditTombstone           = errors.New("projectstate: direct tombstone edit")
 	ErrDirectResurrection            = errors.New("projectstate: direct resurrection")
 	ErrDirectImmutableFieldMutation  = errors.New("projectstate: direct immutable field mutation")
+	ErrImportStateDrift              = errors.New("projectstate: confirmed import state drift")
 )
 
 type ImportRequest struct {
@@ -26,6 +27,31 @@ type ImportRequest struct {
 	Root                      string
 	ExpectedWorkingTreeDigest *state.Digest
 	Actor                     types.ActorEnvelope
+	confirmed                 *confirmedImportPredicates
+}
+
+type ImportWorkspacePredicate struct {
+	CandidatePresent  bool
+	CandidateDigest   state.Digest
+	OverlayGeneration int64
+	WorkspaceState    string
+}
+
+type ReconcileImportRequest struct {
+	Import        ImportRequest
+	ExpectedPrior ImportWorkspacePredicate
+	Desired       ImportWorkspacePredicate
+}
+
+type ReconcileImportResult struct {
+	Import  ImportResult
+	Status  WorkspaceStatus
+	Changed bool
+}
+
+type confirmedImportPredicates struct {
+	prior   ImportWorkspacePredicate
+	desired ImportWorkspacePredicate
 }
 
 type ImportResult struct {
@@ -35,6 +61,8 @@ type ImportResult struct {
 	ImportedChangeCount      int
 	RebasedThroughGeneration int64
 	Conflicts                []Conflict
+	reconciledStatus         WorkspaceStatus
+	changed                  bool
 }
 
 func (c *transitionCoordinator) importWorkspace(ctx context.Context, req ImportRequest) (ImportResult, error) {
@@ -85,6 +113,25 @@ func (c *transitionCoordinator) importWorkspace(ctx context.Context, req ImportR
 		}
 		if err := validateImportCheckout(workspace.Binding, root); err != nil {
 			return err
+		}
+		if req.confirmed != nil {
+			loaded, err := loadComposedWorkspaceRecord(ctx, tx, workspace)
+			if err != nil {
+				return err
+			}
+			observed := importWorkspacePredicate(loaded.status)
+			switch observed {
+			case req.confirmed.desired:
+				result = ImportResult{
+					ImportedCandidateDigest: loaded.status.CandidateDigest,
+					ComposedViewDigest:      loaded.status.CandidateDigest,
+					reconciledStatus:        loaded.status,
+				}
+				return nil
+			case req.confirmed.prior:
+			default:
+				return ErrImportStateDrift
+			}
 		}
 		openConflicts, err := tx.OpenConflictOccurrences(ctx)
 		if err != nil {
@@ -224,6 +271,21 @@ func (c *transitionCoordinator) importWorkspace(ctx context.Context, req ImportR
 		if err := tx.SetStatus(ctx, workspaceState); err != nil {
 			return err
 		}
+		var reconciled WorkspaceStatus
+		if req.confirmed != nil {
+			updatedWorkspace, err := tx.Workspace(ctx)
+			if err != nil {
+				return err
+			}
+			loaded, err := loadComposedWorkspaceRecord(ctx, tx, updatedWorkspace)
+			if err != nil {
+				return err
+			}
+			if importWorkspacePredicate(loaded.status) != req.confirmed.desired {
+				return ErrImportStateDrift
+			}
+			reconciled = loaded.status
+		}
 
 		var previous *state.Digest
 		if candidate != nil || len(activeRows) != 0 {
@@ -234,6 +296,7 @@ func (c *transitionCoordinator) importWorkspace(ctx context.Context, req ImportR
 			PreviousCandidateDigest: previous, ImportedCandidateDigest: liveSnapshot.Digest,
 			ComposedViewDigest: merged.Snapshot.Digest, ImportedChangeCount: len(directDiff.Changes),
 			RebasedThroughGeneration: oldComposed.ThroughGeneration, Conflicts: cloneImportConflicts(merged.Conflicts),
+			reconciledStatus: reconciled, changed: true,
 		}
 		return nil
 	})
@@ -241,6 +304,25 @@ func (c *transitionCoordinator) importWorkspace(ctx context.Context, req ImportR
 		return ImportResult{}, err
 	}
 	return result, nil
+}
+
+func validateImportWorkspacePredicate(predicate ImportWorkspacePredicate) error {
+	if !validImportDigest(predicate.CandidateDigest) || predicate.OverlayGeneration < 0 {
+		return fmt.Errorf("projectstate: invalid confirmed import predicate")
+	}
+	switch predicate.WorkspaceState {
+	case "clean", "pending", "conflicted", "blocked":
+		return nil
+	default:
+		return fmt.Errorf("projectstate: invalid confirmed import predicate")
+	}
+}
+
+func importWorkspacePredicate(status WorkspaceStatus) ImportWorkspacePredicate {
+	return ImportWorkspacePredicate{
+		CandidatePresent: status.CandidatePresent, CandidateDigest: status.CandidateDigest,
+		OverlayGeneration: status.OverlayGeneration, WorkspaceState: status.State,
+	}
 }
 
 func loadCurrentMaterializationWorkset(

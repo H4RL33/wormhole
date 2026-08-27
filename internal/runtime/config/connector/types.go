@@ -110,6 +110,7 @@ const (
 	StageApplied     OperationStage = "applied"
 	StageVerified    OperationStage = "verified"
 	StageRolledBack  OperationStage = "rolled_back"
+	StageRestored    OperationStage = "restored"
 	StageComplete    OperationStage = "complete"
 	StageCompensated OperationStage = "compensated"
 )

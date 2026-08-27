@@ -273,9 +273,10 @@ func TestServiceTransitionCoordinatorAuthority(t *testing.T) {
 		t.Fatal("service.go must own a transitionCoordinator")
 	}
 	for method, delegation := range map[string]string{
-		"Import":       "s.transition.importWorkspace(",
-		"Stash":        "s.transition.stash(",
-		"RestoreStash": "s.transition.restoreStash(",
+		"Import":          "s.transition.importWorkspace(",
+		"ReconcileImport": "s.transition.importWorkspace(",
+		"Stash":           "s.transition.stash(",
+		"RestoreStash":    "s.transition.restoreStash(",
 	} {
 		body := architectureMethodBody(service, "func (s *Service) "+method)
 		if strings.Count(body, delegation) != 1 {

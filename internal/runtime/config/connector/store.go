@@ -529,14 +529,17 @@ func validateOperationRecord(record OperationRecord) error {
 }
 
 func validOperationStage(stage OperationStage) bool {
-	return stage == StagePrepared || stage == StageApplied || stage == StageVerified || stage == StageRolledBack || stage == StageComplete || stage == StageCompensated
+	return stage == StagePrepared || stage == StageApplied || stage == StageVerified || stage == StageRolledBack || stage == StageRestored || stage == StageComplete || stage == StageCompensated
 }
 func validOperationTransition(from, to OperationStage) bool {
 	if to == StageRolledBack {
 		return from == StagePrepared || from == StageApplied
 	}
 	if to == StageComplete {
-		return from == StageVerified || from == StageRolledBack
+		return from == StageVerified
+	}
+	if to == StageRestored {
+		return from == StagePrepared || from == StageRolledBack
 	}
 	if to == StageCompensated {
 		return from == StageComplete
@@ -544,7 +547,7 @@ func validOperationTransition(from, to OperationStage) bool {
 	return (from == StagePrepared && to == StageApplied) || (from == StageApplied && to == StageVerified)
 }
 func terminalOperationStage(stage OperationStage) bool {
-	return stage == StageComplete || stage == StageCompensated
+	return stage == StageRestored || stage == StageComplete || stage == StageCompensated
 }
 func actionForDesired(entry ConnectorEntry) OperationAction {
 	if entry.State == EntryAbsent {

@@ -304,34 +304,29 @@ func (s *Server) PrivateSetupImportRPC(ctx context.Context, req SetupImportReque
 	if req.ExpectedPriorDigest != exactPrior || req.DesiredDigest != exactDesired {
 		return SetupImportReadback{}, config.ErrConfirmedPlanDrift
 	}
-	status, err := s.projectState.Status(ctx, binding.Scope)
-	if err != nil || status.Binding != binding {
-		return SetupImportReadback{}, ErrPrivateSetupRequest
+	if s.beforeSetupImportTransaction != nil {
+		if err := s.beforeSetupImportTransaction(ctx); err != nil {
+			return SetupImportReadback{}, ErrPrivateSetupRequest
+		}
 	}
-	observed := DigestSetupBasePredicate(setupBasePredicate(status))
-	if observed == req.DesiredDigest {
-		return SetupImportReadback{AcceptedCommitSHA: binding.AcceptedCommitSHA, AcceptedTreeDigest: binding.AcceptedTreeDigest, ImportedCandidateDigest: status.CandidateDigest, Conflicted: status.State == "conflicted"}, nil
-	}
-	if observed != req.ExpectedPriorDigest {
-		return SetupImportReadback{}, config.ErrConfirmedPlanDrift
-	}
-	result, err := s.projectState.Import(ctx, projectstate.ImportRequest{
-		Scope: binding.Scope, Root: binding.Checkout.CanonicalPath, ExpectedWorkingTreeDigest: &req.ExpectedTreeDigest, Actor: actor,
+	reconciled, err := s.projectState.ReconcileImport(ctx, projectstate.ReconcileImportRequest{
+		Import:        projectstate.ImportRequest{Scope: binding.Scope, Root: binding.Checkout.CanonicalPath, ExpectedWorkingTreeDigest: &req.ExpectedTreeDigest, Actor: actor},
+		ExpectedPrior: projectstate.ImportWorkspacePredicate{CandidatePresent: false, CandidateDigest: req.ExpectedTreeDigest, WorkspaceState: "clean"},
+		Desired:       projectstate.ImportWorkspacePredicate{CandidatePresent: true, CandidateDigest: req.ExpectedTreeDigest, WorkspaceState: "pending"},
 	})
 	if err != nil {
-		if errors.Is(err, projectstate.ErrWorkingTreeChanged) {
+		if errors.Is(err, projectstate.ErrWorkingTreeChanged) || errors.Is(err, projectstate.ErrImportStateDrift) {
 			return SetupImportReadback{}, config.ErrConfirmedPlanDrift
 		}
 		return SetupImportReadback{}, ErrPrivateSetupRequest
 	}
-	status, err = s.projectState.Status(ctx, binding.Scope)
-	if err != nil || DigestSetupBasePredicate(setupBasePredicate(status)) != req.DesiredDigest {
+	if reconciled.Status.Binding != binding || DigestSetupBasePredicate(setupBasePredicate(reconciled.Status)) != req.DesiredDigest {
 		return SetupImportReadback{}, config.ErrConfirmedPlanDrift
 	}
 	return SetupImportReadback{
 		AcceptedCommitSHA: binding.AcceptedCommitSHA, AcceptedTreeDigest: binding.AcceptedTreeDigest,
-		ImportedCandidateDigest: result.ImportedCandidateDigest, ImportedChangeCount: result.ImportedChangeCount,
-		Conflicted: len(result.Conflicts) != 0,
+		ImportedCandidateDigest: reconciled.Status.CandidateDigest, ImportedChangeCount: reconciled.Import.ImportedChangeCount,
+		Conflicted: reconciled.Status.State == "conflicted",
 	}, nil
 }
 

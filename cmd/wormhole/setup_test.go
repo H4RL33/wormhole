@@ -333,6 +333,66 @@ func TestProductionSetupConnectorResumeRetiresCompensationCrashBeforeSuccessor(t
 	}
 }
 
+func TestProductionSetupConnectorRecoveryOutcomeDoesNotCollideWithSuccessor(t *testing.T) {
+	for _, crashedStage := range []connector.OperationStage{connector.StagePrepared, connector.StageApplied, connector.StageRolledBack} {
+		t.Run(string(crashedStage), func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "connectors")
+			store, err := connector.OpenStoreAt(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			desired := connector.ConnectorEntry{State: connector.EntryPresent, Scope: connector.ScopeUser, Transport: connector.TransportStdio, Command: "/usr/bin/wormhole", Args: []string{"mcp"}, Env: []connector.EnvironmentVariable{}}
+			absent := connector.ConnectorEntry{State: connector.EntryAbsent}
+			codex := &setupStateAdapter{name: connector.AdapterCodex, current: absent, version: "0.149.0"}
+			claude := &setupStateAdapter{name: connector.AdapterClaude, current: absent, version: "2.1.220", applyErr: errors.New("claude install failed")}
+			selection := runtimeconfig.SetupSelection{ConnectorAdapters: []string{"codex", "claude"}, PlanDigest: runtimeconfig.SHA256StateDigest([]byte("setup-recovery-" + string(crashedStage)))}
+			owner := setupConnectorOwner("00000000-0000-4000-8000-000000000066", selection.PlanDigest)
+			priorDigest, _ := connector.DigestConnectorEntry(absent)
+			desiredDigest, _ := connector.DigestConnectorEntry(desired)
+			for _, adapter := range []*setupStateAdapter{codex, claude} {
+				selection.Changes = append(selection.Changes, runtimeconfig.ConfirmedChange{Stage: runtimeconfig.StageConnectorsApplied, Subject: "connector:" + string(adapter.name), Action: "install", PriorDigest: priorDigest, DesiredDigest: desiredDigest})
+			}
+			plan, err := codex.Plan(t.Context(), absent, desired)
+			if err != nil {
+				t.Fatal(err)
+			}
+			change := connector.ConfirmedConnectorChange{Adapter: connector.AdapterCodex, Name: "wormhole", Action: connector.OperationInstall, PlanDigest: plan.Digest, ExpectedPriorDigest: priorDigest, DesiredDigest: desiredDigest}
+			reference, err := store.Put(t.Context(), connector.ConnectorBackup{SchemaVersion: 1, Adapter: connector.AdapterCodex, Name: "wormhole", Prior: absent, Desired: desired, PlanDigest: plan.Digest})
+			if err != nil {
+				t.Fatal(err)
+			}
+			record, err := store.Prepare(t.Context(), connector.PrepareOperation{Change: change, BackupReference: reference, OwnerDigest: owner})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if crashedStage != connector.StagePrepared {
+				if err := store.Advance(t.Context(), record.OperationID, crashedStage); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			driver := &productionSetupDriver{connectors: &productionConnectorCommands{store: store, desired: desired, adapters: map[connector.AdapterName]connector.Adapter{connector.AdapterCodex: codex, connector.AdapterClaude: claude}}}
+			if _, err := driver.reconcileConnectors(t.Context(), selection, owner); err == nil {
+				t.Fatal("later connector failure unexpectedly succeeded")
+			}
+			if !connector.EqualConnectorEntry(codex.current, absent) || !connector.EqualConnectorEntry(claude.current, absent) {
+				t.Fatalf("recovery successor was not compensated: codex=%+v claude=%+v", codex.current, claude.current)
+			}
+			freshStore, err := connector.OpenStoreAt(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			freshDriver := &productionSetupDriver{connectors: &productionConnectorCommands{store: freshStore, desired: desired, adapters: map[connector.AdapterName]connector.Adapter{connector.AdapterCodex: codex, connector.AdapterClaude: claude}}}
+			if _, err := freshDriver.reconcileConnectors(t.Context(), selection, owner); err == nil {
+				t.Fatal("fresh-process later connector failure unexpectedly succeeded")
+			}
+			if !connector.EqualConnectorEntry(codex.current, absent) || !connector.EqualConnectorEntry(claude.current, absent) || codex.applyCalls != 2 {
+				t.Fatalf("fresh recovery not resumable: codex=%+v claude=%+v applies=%d", codex.current, claude.current, codex.applyCalls)
+			}
+		})
+	}
+}
+
 type compensationAdvanceFailure struct {
 	*connector.Store
 }

@@ -69,7 +69,7 @@ func (j *memoryJournal) Advance(_ context.Context, id string, stage OperationSta
 		return ErrConnectorOperationNotFound
 	}
 	j.record.Stage = stage
-	if stage == StageComplete {
+	if terminalOperationStage(stage) {
 		j.active = false
 	}
 	return j.fault[stage]
@@ -395,6 +395,13 @@ func TestRecoveryExactPriorDesiredThirdMatrixAtEveryStage(t *testing.T) {
 				}
 				if journal.active {
 					t.Fatal("journal remains active")
+				}
+				wantStage := StageRestored
+				if stage == StageVerified {
+					wantStage = StageComplete
+				}
+				if journal.record.Stage != wantStage {
+					t.Fatalf("terminal stage=%s want=%s", journal.record.Stage, wantStage)
 				}
 				if stage != StageVerified {
 					if !EqualConnectorEntry(adapter.current, prior) {

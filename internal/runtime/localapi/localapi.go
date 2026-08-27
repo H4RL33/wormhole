@@ -124,16 +124,17 @@ type SyncStatusProvider interface {
 // P3 adds eventbus, scheduler, and subscription support.
 // P5 adds multi-org support (RFC-0003 §7.1, §8.1).
 type Server struct {
-	listener          net.Listener
-	socketPath        string
-	httpClient        *http.Client
-	version           string
-	projectState      *projectstate.Service
-	actorResolver     LocalActorResolver
-	identityStore     *localidentity.Store
-	fabricRouter      FabricRouter
-	codeGraphProvider CodeGraphProvider
-	clock             func() time.Time
+	listener                     net.Listener
+	socketPath                   string
+	httpClient                   *http.Client
+	version                      string
+	projectState                 *projectstate.Service
+	actorResolver                LocalActorResolver
+	identityStore                *localidentity.Store
+	fabricRouter                 FabricRouter
+	codeGraphProvider            CodeGraphProvider
+	clock                        func() time.Time
+	beforeSetupImportTransaction func(context.Context) error
 
 	// Single-org mode (P1-P4 backward compatibility)
 	coordServer string

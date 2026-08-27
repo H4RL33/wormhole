@@ -379,6 +379,21 @@ func (s *Service) Import(ctx context.Context, req ImportRequest) (ImportResult, 
 	return s.transition.importWorkspace(ctx, req)
 }
 
+func (s *Service) ReconcileImport(ctx context.Context, req ReconcileImportRequest) (ReconcileImportResult, error) {
+	if validateImportWorkspacePredicate(req.ExpectedPrior) != nil || validateImportWorkspacePredicate(req.Desired) != nil || req.ExpectedPrior == req.Desired {
+		return ReconcileImportResult{}, ErrImportStateDrift
+	}
+	if s == nil || s.transition == nil {
+		return ReconcileImportResult{}, localstore.ErrNotFound
+	}
+	req.Import.confirmed = &confirmedImportPredicates{prior: req.ExpectedPrior, desired: req.Desired}
+	result, err := s.transition.importWorkspace(ctx, req.Import)
+	if err != nil {
+		return ReconcileImportResult{}, err
+	}
+	return ReconcileImportResult{Import: result, Status: result.reconciledStatus, Changed: result.changed}, nil
+}
+
 func (s *Service) Stash(ctx context.Context, req StashRequest) (StashResult, error) {
 	if s == nil || s.transition == nil {
 		return StashResult{}, localstore.ErrNotFound
