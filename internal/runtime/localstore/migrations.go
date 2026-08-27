@@ -1,3 +1,3 @@
 package localstore
 
-const GatewaySchemaVersion = 6
+const GatewaySchemaVersion = 7

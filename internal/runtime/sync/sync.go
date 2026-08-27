@@ -35,6 +35,16 @@ type bootstrapIntegrationManifestRollback interface {
 	RollbackBootstrapIntegrationManifest(ctx context.Context, projectID, passportID string, roles []string, raw json.RawMessage) error
 }
 
+// CredentialSource resolves only profile-owned credential references. The
+// returned secret is used for one request and is never retained by Engine.
+type CredentialSource interface {
+	Read(context.Context, string) (string, error)
+}
+
+type FabricRouteSource interface {
+	GetRoute(context.Context, types.WorkspaceScope) (types.FabricBinding, types.FabricProfile, error)
+}
+
 // Engine orchestrates the local sync lifecycle: bootstrap, incremental push/pull,
 // and batching (RFC-0003 §8). It holds per-org state including queue and audit repos.
 type Engine struct {
@@ -42,6 +52,12 @@ type Engine struct {
 	coordServer           string
 	token                 string
 	namespaceID           string
+	workspaceScope        types.WorkspaceScope
+	remoteKey             types.RemoteBindingKey
+	profileID             string
+	routeRepo             FabricRouteSource
+	credentialSource      CredentialSource
+	conflictGate          localstore.WorkspaceConflictGate
 	queueRepo             *QueueRepo
 	auditRepo             *AuditRepo
 	taskRepo              *localstore.TaskRepo
@@ -166,6 +182,32 @@ func New(coordServerURL, token, namespaceID string, queueRepo *QueueRepo, auditR
 	}, nil
 }
 
+// NewRouted creates a v2 engine pinned to one immutable workspace/Fabric route.
+// Profile URL and credential-reference rotations are resolved for every request.
+func NewRouted(ctx context.Context, scope types.WorkspaceScope, routes FabricRouteSource,
+	credentials CredentialSource, conflicts localstore.WorkspaceConflictGate,
+	queueRepo *QueueRepo, auditRepo *AuditRepo, taskRepo *localstore.TaskRepo,
+	kbRepo *localstore.KBRepo, cfg Config) (*Engine, error) {
+	if routes == nil || credentials == nil || conflicts == nil || queueRepo == nil || auditRepo == nil {
+		return nil, errors.New("sync: routed engine requires routes, credentials, conflict gate, queue, and audit")
+	}
+	binding, profile, err := routes.GetRoute(ctx, scope)
+	if err != nil {
+		return nil, fmt.Errorf("sync: resolve initial Fabric route: %w", err)
+	}
+	engine, err := New(profile.BaseURL, "", scope.ProjectID, queueRepo, auditRepo, taskRepo, kbRepo, cfg)
+	if err != nil {
+		return nil, err
+	}
+	engine.workspaceScope = scope
+	engine.remoteKey = binding.RemoteKey()
+	engine.profileID = profile.ProfileID
+	engine.routeRepo = routes
+	engine.credentialSource = credentials
+	engine.conflictGate = conflicts
+	return engine, nil
+}
+
 // Start begins the background sync loop. Callers must call Stop to cleanly shut down.
 func (e *Engine) Start(ctx context.Context) {
 	e.startOnce.Do(func() {
@@ -248,7 +290,7 @@ func (e *Engine) reportSyncError(ctx context.Context, err error) {
 // states to synchronizing but preserves attention_required until a successful
 // scheduled pull; failures become visible before observers receive the error.
 func (e *Engine) syncBatch(ctx context.Context) {
-	pending, err := e.queueRepo.PendingCount(ctx, e.namespaceID)
+	pending, err := e.queueRepo.PendingCount(ctx, e.remoteKey)
 	if err != nil {
 		e.setConnectionState(StateAttentionRequired)
 		e.reportSyncError(ctx, fmt.Errorf("sync: inspect pending writes before batch: %w", err))
@@ -279,7 +321,7 @@ func (e *Engine) syncOnce(ctx context.Context) error {
 		}
 		return err
 	}
-	pending, err := e.queueRepo.PendingCount(ctx, e.namespaceID)
+	pending, err := e.queueRepo.PendingCount(ctx, e.remoteKey)
 	if err != nil {
 		e.setConnectionState(StateAttentionRequired)
 		return fmt.Errorf("sync: inspect pending writes: %w", err)
@@ -302,7 +344,7 @@ func (e *Engine) pushBatch(ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	entries, err := e.queueRepo.ListPending(ctx, e.namespaceID, e.batchSize)
+	entries, err := e.queueRepo.ListPending(ctx, e.remoteKey, e.batchSize)
 	if err != nil {
 		return fmt.Errorf("sync: push batch: list pending: %w", err)
 	}
@@ -315,13 +357,13 @@ func (e *Engine) pushBatch(ctx context.Context) error {
 	pushItems := make([]map[string]interface{}, len(entries))
 	for i, entry := range entries {
 		var payload interface{}
-		if err := json.Unmarshal(entry.Payload, &payload); err != nil {
-			payload = string(entry.Payload)
+		if err := json.Unmarshal(entry.OperationJSON, &payload); err != nil {
+			payload = string(entry.OperationJSON)
 		}
 		pushItems[i] = map[string]interface{}{
-			"entity_type": entry.EntityType,
-			"entity_id":   entry.EntityID,
-			"operation":   entry.Operation,
+			"entity_type": string(entry.Operation.Kind),
+			"entity_id":   entry.Operation.ID,
+			"operation":   "apply",
 			"payload":     payload,
 		}
 	}
@@ -357,15 +399,15 @@ func (e *Engine) pushBatch(ctx context.Context) error {
 	// Mark only successful entries as delivered. Failed entries remain in the queue for retry.
 	var rejected []string
 	for _, entry := range entries {
-		key := acknowledgementKey{entityType: entry.EntityType, entityID: entry.EntityID}
+		key := acknowledgementKey{entityType: string(entry.Operation.Kind), entityID: entry.Operation.ID}
 		if acknowledgement := acknowledgements[key]; acknowledgement.Error == "" {
-			if err := e.queueRepo.MarkDelivered(ctx, e.namespaceID, entry.ID); err != nil {
+			if err := e.queueRepo.MarkDelivered(ctx, e.remoteKey, entry.ID); err != nil {
 				// Earlier rows remain delivered; this row and all later rows remain
 				// pending so the next cycle can retry without hiding local data loss.
 				return fmt.Errorf("sync: push batch: mark queue entry %q delivered: %w", entry.ID, err)
 			}
 		} else {
-			rejected = append(rejected, fmt.Sprintf("%s/%s: %s", entry.EntityType, entry.EntityID, acknowledgement.Error))
+			rejected = append(rejected, fmt.Sprintf("%s/%s: %s", entry.Operation.Kind, entry.Operation.ID, acknowledgement.Error))
 		}
 	}
 	if len(rejected) > 0 {
@@ -387,7 +429,7 @@ func validatePushAcknowledgements(entries []QueueEntry, result incrementalPushRe
 
 	expected := make(map[acknowledgementKey]int, len(entries))
 	for _, entry := range entries {
-		key := acknowledgementKey{entityType: entry.EntityType, entityID: entry.EntityID}
+		key := acknowledgementKey{entityType: string(entry.Operation.Kind), entityID: entry.Operation.ID}
 		expected[key]++
 		if expected[key] != 1 {
 			return nil, fmt.Errorf("sent pair (%q, %q) is not unique", key.entityType, key.entityID)
@@ -421,7 +463,7 @@ func validatePushAcknowledgements(entries []QueueEntry, result incrementalPushRe
 // that matters.
 func (e *Engine) checkLatencySensitive(ctx context.Context) error {
 	e.mu.Lock()
-	entries, err := e.queueRepo.ListPending(ctx, e.namespaceID, 1)
+	entries, err := e.queueRepo.ListPending(ctx, e.remoteKey, 1)
 	e.mu.Unlock()
 	if err != nil {
 		return fmt.Errorf("sync: check latency-sensitive: list pending: %w", err)
@@ -438,7 +480,7 @@ func (e *Engine) checkLatencySensitive(ctx context.Context) error {
 func (e *Engine) PullIncremental(ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	pending, err := e.queueRepo.ListPending(ctx, e.namespaceID, 1)
+	pending, err := e.queueRepo.ListPending(ctx, e.remoteKey, 1)
 	if err != nil {
 		return fmt.Errorf("sync: pull incremental: inspect pending writes: %w", err)
 	}
@@ -1303,6 +1345,10 @@ func (e *Engine) callSyncTool(ctx context.Context, toolName string, args map[str
 // Mirrors localapi's proxyWhoAmI pattern for coordinating with the server.
 // If testCallSyncToolWithResultFn is set (testing only), it is used instead.
 func (e *Engine) callSyncToolWithResult(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
+	coordServer, token, err := e.networkTarget(ctx)
+	if err != nil {
+		return nil, err
+	}
 	// Test hook for injection (testing only).
 	if e.testCallSyncToolWithResultFn != nil {
 		return e.testCallSyncToolWithResultFn(ctx, toolName, args)
@@ -1327,12 +1373,14 @@ func (e *Engine) callSyncToolWithResult(ctx context.Context, toolName string, ar
 		return nil, fmt.Errorf("sync: marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(e.coordServer, "/")+"/mcp", bytes.NewReader(reqBody))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(coordServer, "/")+"/mcp", bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, fmt.Errorf("sync: build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+e.token)
+	if token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+	}
 
 	resp, err := e.httpClient.Do(httpReq)
 	if err != nil {
@@ -1397,6 +1445,34 @@ func (e *Engine) callSyncToolWithResult(ctx context.Context, toolName string, ar
 	return result, nil
 }
 
+func (e *Engine) networkTarget(ctx context.Context) (string, string, error) {
+	if e.routeRepo == nil {
+		return e.coordServer, e.token, nil
+	}
+	conflicted, err := e.conflictGate.HasOpenConflicts(ctx, e.workspaceScope)
+	if err != nil {
+		return "", "", fmt.Errorf("sync: inspect workspace conflicts: %w", err)
+	}
+	if conflicted {
+		return "", "", localstore.ErrWorkspaceConflicted
+	}
+	binding, profile, err := e.routeRepo.GetRoute(ctx, e.workspaceScope)
+	if err != nil {
+		return "", "", fmt.Errorf("sync: resolve Fabric route: %w", err)
+	}
+	if binding.RemoteKey() != e.remoteKey || profile.ProfileID != e.profileID || profile.FabricInstanceID != e.remoteKey.FabricInstanceID {
+		return "", "", fmt.Errorf("sync: immutable Fabric route changed")
+	}
+	if profile.CredentialRef == "" {
+		return profile.BaseURL, "", nil
+	}
+	token, err := e.credentialSource.Read(ctx, profile.CredentialRef)
+	if err != nil {
+		return "", "", errors.New("sync: resolve Fabric credential")
+	}
+	return profile.BaseURL, token, nil
+}
+
 // ReportConflict reports a conflict that occurred during push to the server.
 // The server's last-write-wins resolution becomes authoritative (RFC-0003 §8.3).
 func (e *Engine) ReportConflict(ctx context.Context, entityType, entityID, conflictType, serverValue, localValue string) error {
@@ -1428,7 +1504,12 @@ func (e *Engine) ReportConflict(ctx context.Context, entityType, entityID, confl
 	}
 
 	// Log the conflict in the audit trail (RFC-0003 §8.3).
-	_, err = e.auditRepo.LogConflict(ctx, e.namespaceID, entityType, entityID, conflictType, serverValue, localValue, resolved.ResolvedValue, "last_write_wins")
+	conflictJSON, _ := json.Marshal(map[string]string{
+		"entity_type": entityType, "entity_id": entityID, "conflict_type": conflictType,
+		"server_value": serverValue, "local_value": localValue, "resolved_value": resolved.ResolvedValue,
+	})
+	actorJSON := json.RawMessage(`{"resolved_by":"last_write_wins"}`)
+	_, err = e.auditRepo.LogConflict(ctx, e.remoteKey, conflictJSON, actorJSON)
 	if err != nil {
 		// Audit log failure is not a blocking error; continue.
 		_ = err

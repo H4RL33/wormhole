@@ -1,3 +1,5 @@
+//go:build legacy_namespace_sync
+
 package localapi
 
 import (

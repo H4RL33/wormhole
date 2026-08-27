@@ -1,7 +1,7 @@
 // Package localstore is Gateway's durable local state (RFC-0003 §6.3,
 // §7.2). It follows the Store-struct/sentinel-error/wrapped-error shape
 // established by internal/core/identity (docs/implementation-rules.md §5),
-// adapted for SQLite. Private Gateway state is a strict v6 format epoch;
+// adapted for SQLite. Private Gateway state is a strict v7 format epoch;
 // tracked portable state remains governed by its own Git format.
 package localstore
 
@@ -137,29 +137,38 @@ CREATE TABLE IF NOT EXISTS git_links (
 );
 
 CREATE TABLE IF NOT EXISTS sync_queue (
-	id             TEXT PRIMARY KEY,
-	namespace_id   TEXT NOT NULL,
-	entity_type    TEXT NOT NULL,
-	entity_id      TEXT NOT NULL,
-	operation      TEXT NOT NULL,
-	payload        TEXT NOT NULL,
-	priority       INTEGER NOT NULL DEFAULT 0,
-	created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-	updated_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-	delivered_at   TIMESTAMP
+	project_id        TEXT NOT NULL,
+	workspace_id      TEXT NOT NULL,
+	fabric_instance_id TEXT NOT NULL,
+	remote_project_id TEXT NOT NULL,
+	stream_id         TEXT NOT NULL,
+	id                TEXT NOT NULL,
+	operation_json    TEXT NOT NULL,
+	operation_digest  TEXT NOT NULL CHECK(operation_digest GLOB 'sha256:[0-9a-f]*' AND length(operation_digest)=71),
+	priority          INTEGER NOT NULL DEFAULT 0,
+	created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	delivered_at      TIMESTAMP,
+	PRIMARY KEY(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,id),
+	FOREIGN KEY(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id)
+		REFERENCES workspace_fabric_bindings(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id)
+		ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS sync_audit (
-	id             TEXT PRIMARY KEY,
-	namespace_id   TEXT NOT NULL,
-	entity_type    TEXT NOT NULL,
-	entity_id      TEXT NOT NULL,
-	conflict_type  TEXT,
-	server_value   TEXT,
-	local_value    TEXT,
-	resolved_value TEXT,
-	resolved_by    TEXT,
-	created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+	project_id        TEXT NOT NULL,
+	workspace_id      TEXT NOT NULL,
+	fabric_instance_id TEXT NOT NULL,
+	remote_project_id TEXT NOT NULL,
+	stream_id         TEXT NOT NULL,
+	id                TEXT NOT NULL,
+	conflict_json     TEXT NOT NULL,
+	actor_json        TEXT NOT NULL,
+	created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,id),
+	FOREIGN KEY(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id)
+		REFERENCES workspace_fabric_bindings(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id)
+		ON DELETE CASCADE
 );
 
 	CREATE TABLE IF NOT EXISTS enrolment_attempts (
@@ -289,7 +298,7 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("localstore: open %s: %w", path, err)
 	}
 	if format == privateFormatFresh {
-		if err := initializePrivateSchemaV6(context.Background(), db); err != nil {
+		if err := initializePrivateSchemaV7(context.Background(), db); err != nil {
 			_ = db.Close()
 			if restoreErr := restoreFreshPrivatePreimage(path, preimage); restoreErr != nil {
 				return nil, fmt.Errorf("%w; restore fresh private preimage: %v", err, restoreErr)

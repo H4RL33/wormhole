@@ -263,6 +263,15 @@ git commit -m "feat: freeze Fabric routing contracts"
 
 ### Task 2: Install one-way local schemas v6/v7 and complete-key repositories
 
+> **Approved Stage 3 supersession (2026-08-27):** R06 remains the private-format
+> architecture. Task 2 advances the single consolidated hard-cut snapshot directly
+> from v6 to v7. Fresh or genuinely empty databases initialize atomically at exact
+> v7; exact v7 reopens without mutation; every existing non-v7 database, including
+> former exact v6, is preserved and refused. The numbered loader, upgrade/backfill,
+> quarantine-copy, and reverse-SQL steps below are historical plan text and are not
+> executable authority. The final v7 Fabric route/profile/cursor, complete-key queue,
+> audit, recovery, constraint, and index shapes remain binding.
+
 **Files:**
 - Create: `internal/runtime/localstore/migrations/000006_fabric_routes.sql`
 - Create: `internal/runtime/localstore/migrations/000007_sync_binding.sql`

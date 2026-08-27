@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -20,6 +21,38 @@ func TestGatewayMigrationLedger(t *testing.T) {
 	}
 	if version != GatewaySchemaVersion || count != 1 {
 		t.Fatalf("migration ledger version=%d count=%d, want (%d,1)", version, count, GatewaySchemaVersion)
+	}
+}
+
+func TestGatewayPrivateSchemaV7Fresh(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	for _, table := range []string{
+		"fabric_profiles", "workspace_fabric_bindings", "fabric_cursors",
+		"legacy_fabric_profile_recoveries", "legacy_fabric_hint_recoveries",
+		"legacy_sync_queue_recoveries", "legacy_sync_history",
+	} {
+		var name string
+		if err := store.DB().QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name); err != nil {
+			t.Fatalf("required v7 table %s: %v", table, err)
+		}
+	}
+	if got := tableColumns(t, store.DB(), "sync_queue"); !reflect.DeepEqual(got, []string{
+		"project_id", "workspace_id", "fabric_instance_id", "remote_project_id", "stream_id",
+		"id", "operation_json", "operation_digest", "priority", "created_at", "updated_at", "delivered_at",
+	}) {
+		t.Fatalf("sync_queue v7 columns=%v", got)
+	}
+	var versions string
+	if err := store.DB().QueryRow(`SELECT group_concat(version, ',') FROM gateway_schema_migrations`).Scan(&versions); err != nil {
+		t.Fatal(err)
+	}
+	if versions != "7" {
+		t.Fatalf("v7 ledger=%q, want singleton 7", versions)
 	}
 }
 
@@ -95,7 +128,7 @@ func TestGatewayCurrentSchemaIsReadOnlyDuringReopen(t *testing.T) {
 	}
 	defer store.Close()
 	var count int
-	if err := store.DB().QueryRowContext(context.Background(), `SELECT count(*) FROM gateway_schema_migrations WHERE version=6`).Scan(&count); err != nil {
+	if err := store.DB().QueryRowContext(context.Background(), `SELECT count(*) FROM gateway_schema_migrations WHERE version=7`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 1 {

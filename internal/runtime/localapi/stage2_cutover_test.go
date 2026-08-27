@@ -59,7 +59,8 @@ func TestStage2ConfiguredSyncStatusReportsQueueFreeLocalOnlyState(t *testing.T) 
 	if status["state"] != "offline" || status["pending_writes"] != float64(0) {
 		t.Fatalf("configured local-only sync status = %#v, want offline with no pending Fabric writes", status)
 	}
-	if pending, err := server.qr.PendingCount(context.Background(), string(first.Scope.WorkspaceID)); err != nil || pending != 0 {
+	var pending int
+	if err := server.store.DB().QueryRowContext(context.Background(), `SELECT count(*) FROM sync_queue`).Scan(&pending); err != nil || pending != 0 {
 		t.Fatalf("configured local-only sync queue = (%d, %v), want no Fabric writes", pending, err)
 	}
 }

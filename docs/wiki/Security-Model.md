@@ -72,18 +72,19 @@ Machine-private state includes:
 - workspace IDs, checkout identity, accepted-base bookkeeping, overlays,
   candidates, publication policy, stashes, conflicts, journals, receipts, and
   materialisation proofs;
-- schema-v6 SQLite rows and owner lock; and
+- schema-v7 SQLite rows and owner lock; and
 - connector backups and any optional Fabric credentials.
 
 It remains outside the repository and is intentionally different between two
 clones. Private state may survive a daemon restart on the same machine; it must
 not appear in checkpoint output or a fresh clone.
 
-The private database is closed pre-alpha. Only a missing/empty database or an
-exact current schema-v6 database is accepted. Older, future, malformed,
-partial, unexpected, or proof-incompatible databases are preserved and
-refused before mutation. Operators must stop Gateway, inspect and back up
-unpublished state, then make any deletion decision manually.
+The private database is closed pre-alpha. Only a missing/genuinely empty
+database or an exact current schema-v7 database is accepted. Every other
+existing database, including former exact v6, older, future, malformed,
+partial, unexpected, or proof-incompatible state, is preserved and refused
+before mutation. Operators must stop Gateway, inspect and back up unpublished
+state, then make any deletion decision manually.
 
 ## Identity and action attribution
 

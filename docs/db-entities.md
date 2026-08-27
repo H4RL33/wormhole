@@ -2,7 +2,7 @@
 
 **Status:** retained PostgreSQL/server model, not the live Stage 2 Gateway
 surface. Stage 2 portable state is `.wormhole/state/v1/`; Gateway operational
-and machine-private state is schema-v6 SQLite. The local-only Gateway does not
+and machine-private state is schema-v7 SQLite. The local-only Gateway does not
 enrol with, bootstrap from, search, mutate Tasks through, or sync to Fabric.
 
 No SQL yet — entities and relations only, per RFC-0001 §7.1 (indicative storage shape), §8 (pillars), §13 (multi-tenancy).

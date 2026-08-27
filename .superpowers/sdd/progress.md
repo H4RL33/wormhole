@@ -1425,3 +1425,19 @@ authority or dependency.
 Stage 3 Task 1: complete (commits `3519cc4..3bc47e3`, independent review clean:
 Critical 0 / Important 0 / Minor 0). Focused type tests and vet passed; the
 implementation commit's `make check` passed at 81.1% statement coverage.
+
+Stage 3 Task 2 authority amendment (2026-08-27): preserve R06's consolidated
+private-format hard cut while advancing the current snapshot directly to v7.
+No numbered migration loader, v1-v6 upgrade/backfill/quarantine-copy path, or
+reverse SQL may return. Only fresh/empty initializes at v7 and exact v7 reopens;
+every existing non-v7 database, especially former exact v6, is preserved and
+refused before mutation. Task 2 retains the final Fabric route/profile/cursor,
+complete-key sync queue/audit/recovery, credential isolation, and atomic exact-
+workspace conflict boundary from its brief.
+
+Stage 3 Task 2: complete. Fresh/empty state initializes atomically at exact v7;
+exact v7 reopens; every other existing database, including former exact v6, is
+preserved and refused. Complete-key Fabric routes, cursors, queue/audit records,
+credential rotation, exact-workspace conflict gates, and routed engine lifecycle
+are implemented. Focused and race suites passed; canonical `make check` passed
+with 80.0% merged statement coverage. No Task 3 implementation was included.

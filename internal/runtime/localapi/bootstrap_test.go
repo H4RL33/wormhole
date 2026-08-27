@@ -146,7 +146,7 @@ func writeFabricToolResponse(t *testing.T, w http.ResponseWriter, id json.RawMes
 	}
 }
 
-func TestEnrolmentBootstrapFailureRecoversWithoutReregistrationAndStartsIncrementalAfterCommit(t *testing.T) {
+func TestEnrolmentBootstrapFailureRecoversWithoutReregistrationAndWaitsForImmutableRoute(t *testing.T) {
 	var mu sync.Mutex
 	registrationCalls := 0
 	bootstrapCalls := 0
@@ -224,16 +224,6 @@ func TestEnrolmentBootstrapFailureRecoversWithoutReregistrationAndStartsIncremen
 	if second.Code != EnrolmentSuccess || second.State != EnrolmentReady || second.Retryable {
 		t.Fatalf("recovery result = %+v", second)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		mu.Lock()
-		pulled := len(incrementalArgs) > 0
-		mu.Unlock()
-		if pulled || time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
 	third := server.executeEnrolment(context.Background(), req)
 	if third.Code != EnrolmentSuccess {
 		t.Fatalf("ready replay result = %+v", third)
@@ -243,10 +233,7 @@ func TestEnrolmentBootstrapFailureRecoversWithoutReregistrationAndStartsIncremen
 	if registrationCalls != 1 || bootstrapCalls != 2 {
 		t.Fatalf("Fabric registration/bootstrap calls = %d/%d, want 1/2", registrationCalls, bootstrapCalls)
 	}
-	if len(incrementalArgs) == 0 {
-		t.Fatal("incremental sync did not start after ready commit")
-	}
-	if _, present := incrementalArgs[0]["last_sync"]; present {
-		t.Fatalf("first incremental pull included last_sync: %#v", incrementalArgs[0])
+	if len(incrementalArgs) != 0 {
+		t.Fatalf("project-only enrolment started incremental sync without immutable route: %#v", incrementalArgs)
 	}
 }

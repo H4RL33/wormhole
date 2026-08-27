@@ -35,8 +35,8 @@ const (
 )
 
 var (
-	//go:embed private_schema_v6.sql
-	privateSchemaV6 string
+	//go:embed private_schema_v7.sql
+	privateSchemaV7 string
 
 	privateSchemaFingerprintOnce         sync.Once
 	privateSchemaFingerprintValue        string
@@ -45,9 +45,9 @@ var (
 	privateWithCodeGraphFingerprintValue string
 	privateWithCodeGraphFingerprintErr   error
 
-	// privateSchemaV6ValidationHook is a failure-injection seam for proving
+	// privateSchemaV7ValidationHook is a failure-injection seam for proving
 	// fresh initialization rollback. It is nil in normal Gateway operation.
-	privateSchemaV6ValidationHook func(*sql.Tx) error
+	privateSchemaV7ValidationHook func(*sql.Tx) error
 )
 
 type privateSchemaQueryer interface {
@@ -67,6 +67,9 @@ var requiredPrivateTables = map[string]struct{}{
 	"workspace_conflicts": {}, "legacy_integration_state_migrations": {},
 	"workspace_transition_receipts": {}, "workspace_publication_policies": {},
 	"workspace_publication_policy_history": {},
+	"fabric_profiles":                      {}, "workspace_fabric_bindings": {}, "fabric_cursors": {},
+	"legacy_fabric_profile_recoveries": {}, "legacy_fabric_hint_recoveries": {},
+	"legacy_sync_queue_recoveries": {}, "legacy_sync_history": {},
 }
 
 var requiredPrivateColumns = map[string][]string{
@@ -159,13 +162,13 @@ func validateCurrentPrivateSchema(db privateSchemaQueryer) error {
 	}
 	expectedFingerprint, err := canonicalPrivateSchemaFingerprint()
 	if err != nil {
-		return fmt.Errorf("private schema object definitions are not exact v6")
+		return fmt.Errorf("private schema object definitions are not exact v7")
 	}
 	graphCatalogPresent := false
 	if actualFingerprint != expectedFingerprint {
 		withCodeGraph, graphErr := canonicalPrivateSchemaWithCodeGraphFingerprint()
 		if graphErr != nil || actualFingerprint != withCodeGraph {
-			return fmt.Errorf("private schema object definitions are not exact v6")
+			return fmt.Errorf("private schema object definitions are not exact v7")
 		}
 		graphCatalogPresent = true
 	}
@@ -186,11 +189,11 @@ func validateCurrentPrivateSchema(db privateSchemaQueryer) error {
 		return fmt.Errorf("private schema ledger is unreadable")
 	}
 	if version != GatewaySchemaVersion || count != 1 {
-		return fmt.Errorf("private schema ledger is not exact v6")
+		return fmt.Errorf("private schema ledger is not exact v7")
 	}
 	var ledgerVersion int
 	if err := db.QueryRow(`SELECT version FROM gateway_schema_migrations`).Scan(&ledgerVersion); err != nil || ledgerVersion != GatewaySchemaVersion {
-		return fmt.Errorf("private schema ledger is not exact v6")
+		return fmt.Errorf("private schema ledger is not exact v7")
 	}
 
 	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'codegraph_%'`)
@@ -332,7 +335,7 @@ func canonicalPrivateSchemaFingerprint() (string, error) {
 			privateSchemaFingerprintErr = err
 			return
 		}
-		if _, err := db.Exec(privateSchemaV6); err != nil {
+		if _, err := db.Exec(privateSchemaV7); err != nil {
 			privateSchemaFingerprintErr = err
 			return
 		}
@@ -353,7 +356,7 @@ func canonicalPrivateSchemaWithCodeGraphFingerprint() (string, error) {
 			privateWithCodeGraphFingerprintErr = err
 			return
 		}
-		if _, err := db.Exec(privateSchemaV6); err != nil {
+		if _, err := db.Exec(privateSchemaV7); err != nil {
 			privateWithCodeGraphFingerprintErr = err
 			return
 		}
@@ -394,28 +397,28 @@ func sqliteReadOnlyDSN(path string) string {
 	return u.String()
 }
 
-func initializePrivateSchemaV6(ctx context.Context, db *sql.DB) error {
+func initializePrivateSchemaV7(ctx context.Context, db *sql.DB) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("localstore: begin private v6 initialization: %w", err)
+		return fmt.Errorf("localstore: begin private v7 initialization: %w", err)
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("localstore: initialize base private schema: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, privateSchemaV6); err != nil {
-		return fmt.Errorf("localstore: initialize private schema v6: %w", err)
+	if _, err := tx.ExecContext(ctx, privateSchemaV7); err != nil {
+		return fmt.Errorf("localstore: initialize private schema v7: %w", err)
 	}
-	if privateSchemaV6ValidationHook != nil {
-		if err := privateSchemaV6ValidationHook(tx); err != nil {
+	if privateSchemaV7ValidationHook != nil {
+		if err := privateSchemaV7ValidationHook(tx); err != nil {
 			return err
 		}
 	}
 	if err := validateCurrentPrivateSchema(tx); err != nil {
-		return fmt.Errorf("localstore: validate private schema v6: %w", err)
+		return fmt.Errorf("localstore: validate private schema v7: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("localstore: commit private schema v6: %w", err)
+		return fmt.Errorf("localstore: commit private schema v7: %w", err)
 	}
 	return nil
 }

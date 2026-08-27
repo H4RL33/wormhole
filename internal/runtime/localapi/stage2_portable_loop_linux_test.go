@@ -468,10 +468,10 @@ func workspaceMutationCounts(t *testing.T, store *localstore.Store) portableMuta
 func assertFreshClonePrivateInventory(t *testing.T, store *localstore.Store, binding types.WorkspaceBinding, root string) {
 	t.Helper()
 	wantTables := []string{
-		"agents", "auth_scopes", "bootstrap_metadata", "channels", "enrolment_attempts", "events", "gateway_schema_migrations", "git_links",
+		"agents", "auth_scopes", "bootstrap_metadata", "channels", "enrolment_attempts", "events", "fabric_cursors", "fabric_profiles", "gateway_schema_migrations", "git_links",
 		"integration_manifest_audit", "integration_manifest_bodies", "integration_manifest_decisions", "integration_manifest_journal", "integration_manifest_project_state", "integration_manifest_revocations",
-		"kb_articles", "kb_links", "legacy_integration_state_migrations", "passports", "projects", "sync_audit", "sync_queue", "tasks", "whoami_cache",
-		"workspace_bindings", "workspace_candidates", "workspace_conflicts", "workspace_materializations", "workspace_overlay_operations", "workspace_publication_policies",
+		"kb_articles", "kb_links", "legacy_fabric_hint_recoveries", "legacy_fabric_profile_recoveries", "legacy_integration_state_migrations", "legacy_sync_history", "legacy_sync_queue_recoveries", "passports", "projects", "sync_audit", "sync_queue", "tasks", "whoami_cache",
+		"workspace_bindings", "workspace_candidates", "workspace_conflicts", "workspace_fabric_bindings", "workspace_materializations", "workspace_overlay_operations", "workspace_publication_policies",
 		"workspace_publication_policy_history", "workspace_stashes", "workspace_transition_receipts",
 	}
 	rows, err := store.DB().Query(`SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
@@ -489,7 +489,7 @@ func assertFreshClonePrivateInventory(t *testing.T, store *localstore.Store, bin
 	}
 	sort.Strings(wantTables)
 	if !reflect.DeepEqual(gotTables, wantTables) {
-		t.Fatalf("schema-v6 private table inventory = %v, want %v", gotTables, wantTables)
+		t.Fatalf("schema-v7 private table inventory = %v, want %v", gotTables, wantTables)
 	}
 	wantCounts := map[string]int{
 		"gateway_schema_migrations": 1, "workspace_bindings": 1, "workspace_candidates": 1,

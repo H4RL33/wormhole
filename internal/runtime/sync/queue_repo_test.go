@@ -4,364 +4,307 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"github.com/H4RL33/wormhole/internal/runtime/localstore"
+	"github.com/H4RL33/wormhole/internal/types"
+	projectstate "github.com/H4RL33/wormhole/internal/types/projectstate"
 )
 
-// TestQueueEnqueue tests basic enqueue operations.
-func TestQueueEnqueue(t *testing.T) {
-	repo := setupQueueRepo(t)
-	defer closeQueueRepo(t, repo)
+var _ func(*QueueRepo, context.Context, types.RemoteBindingKey, projectstate.OperationV1, int) (QueueEntry, error) = (*QueueRepo).Enqueue
+var _ func(*QueueRepo, context.Context, types.RemoteBindingKey, int) ([]QueueEntry, error) = (*QueueRepo).ListPending
+var _ func(*QueueRepo, context.Context, types.RemoteBindingKey, string) error = (*QueueRepo).MarkDelivered
 
-	ctx := context.Background()
-	payload := json.RawMessage(`{"title": "test task"}`)
-
-	entry, err := repo.Enqueue(ctx, "ns-1", "task", "task-1", "create", payload, 0)
-	if err != nil {
-		t.Fatalf("Enqueue failed: %v", err)
+func TestCompleteKeyQueueIsolation(t *testing.T) {
+	store, repo, first, second := queueRouteFixture(t)
+	defer store.Close()
+	operation := queueOperation("90000000-0000-4000-8000-000000000001")
+	if _, err := repo.Enqueue(context.Background(), first, operation, 1); err != nil {
+		t.Fatal(err)
 	}
-
-	if entry.NamespaceID != "ns-1" {
-		t.Errorf("NamespaceID mismatch: got %q, want %q", entry.NamespaceID, "ns-1")
+	if _, err := repo.Enqueue(context.Background(), second, operation, 2); err != nil {
+		t.Fatal(err)
 	}
-	if entry.EntityType != "task" {
-		t.Errorf("EntityType mismatch: got %q, want %q", entry.EntityType, "task")
-	}
-	if entry.Operation != "create" {
-		t.Errorf("Operation mismatch: got %q, want %q", entry.Operation, "create")
-	}
-	if entry.DeliveredAt != nil {
-		t.Errorf("DeliveredAt should be nil for new entry, got %v", entry.DeliveredAt)
-	}
-}
-
-// TestQueueInvalidOperation tests that invalid operations are rejected.
-func TestQueueInvalidOperation(t *testing.T) {
-	repo := setupQueueRepo(t)
-	defer closeQueueRepo(t, repo)
-
-	ctx := context.Background()
-	payload := json.RawMessage(`{}`)
-
-	_, err := repo.Enqueue(ctx, "ns-1", "task", "task-1", "invalid", payload, 0)
-	if err == nil {
-		t.Fatal("Expected error for invalid operation, got nil")
-	}
-}
-
-// TestQueueListPending tests listing undelivered entries.
-func TestQueueListPending(t *testing.T) {
-	repo := setupQueueRepo(t)
-	defer closeQueueRepo(t, repo)
-
-	ctx := context.Background()
-	payload := json.RawMessage(`{}`)
-
-	// Enqueue three entries with different priorities.
-	repo.Enqueue(ctx, "ns-1", "task", "task-1", "create", payload, 0)
-	repo.Enqueue(ctx, "ns-1", "kb", "kb-1", "create", payload, 1)
-	repo.Enqueue(ctx, "ns-1", "event", "event-1", "create", payload, 2)
-
-	entries, err := repo.ListPending(ctx, "ns-1", 10)
-	if err != nil {
-		t.Fatalf("ListPending failed: %v", err)
-	}
-
-	if len(entries) != 3 {
-		t.Errorf("Expected 3 entries, got %d", len(entries))
-	}
-
-	// Verify ordering: highest priority first.
-	if entries[0].Priority != 2 {
-		t.Errorf("First entry priority: got %d, want 2", entries[0].Priority)
-	}
-	if entries[1].Priority != 1 {
-		t.Errorf("Second entry priority: got %d, want 1", entries[1].Priority)
-	}
-	if entries[2].Priority != 0 {
-		t.Errorf("Third entry priority: got %d, want 0", entries[2].Priority)
-	}
-}
-
-func TestQueuePendingCountIsNamespaceScoped(t *testing.T) {
-	repo := setupQueueRepo(t)
-	defer closeQueueRepo(t, repo)
-	ctx := context.Background()
-	for _, namespace := range []string{"ns-1", "ns-1", "ns-2"} {
-		if _, err := repo.Enqueue(ctx, namespace, "task", namespace, "create", json.RawMessage(`{}`), 0); err != nil {
-			t.Fatalf("Enqueue %s: %v", namespace, err)
+	for key, priority := range map[types.RemoteBindingKey]int{first: 1, second: 2} {
+		entries, err := repo.ListPending(context.Background(), key, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || entries[0].Key != key || entries[0].Priority != priority {
+			t.Fatalf("ListPending(%+v)=%+v", key, entries)
 		}
 	}
-	count, err := repo.PendingCount(ctx, "ns-1")
-	if err != nil {
-		t.Fatalf("PendingCount: %v", err)
+	if err := repo.MarkDelivered(context.Background(), first, operation.ID); err != nil {
+		t.Fatal(err)
 	}
-	if count != 2 {
-		t.Fatalf("PendingCount ns-1 = %d, want 2", count)
-	}
-}
-
-// TestQueueMarkDelivered tests marking entries as delivered.
-func TestQueueMarkDelivered(t *testing.T) {
-	repo := setupQueueRepo(t)
-	defer closeQueueRepo(t, repo)
-
-	ctx := context.Background()
-	payload := json.RawMessage(`{}`)
-
-	entry, err := repo.Enqueue(ctx, "ns-1", "task", "task-1", "create", payload, 0)
-	if err != nil {
-		t.Fatalf("Enqueue failed: %v", err)
-	}
-
-	if err := repo.MarkDelivered(ctx, "ns-1", entry.ID); err != nil {
-		t.Fatalf("MarkDelivered failed: %v", err)
-	}
-
-	// Verify it no longer appears in pending list.
-	entries, err := repo.ListPending(ctx, "ns-1", 10)
-	if err != nil {
-		t.Fatalf("ListPending failed: %v", err)
-	}
-
-	if len(entries) != 0 {
-		t.Errorf("Expected 0 pending entries after marking delivered, got %d", len(entries))
-	}
-
-	// Verify we can get it by ID and it shows delivered_at.
-	retrieved, err := repo.GetEntry(ctx, "ns-1", entry.ID)
-	if err != nil {
-		t.Fatalf("GetEntry failed: %v", err)
-	}
-
-	if retrieved.DeliveredAt == nil {
-		t.Errorf("DeliveredAt should not be nil after MarkDelivered")
+	if count, err := repo.PendingCount(context.Background(), second); err != nil || count != 1 {
+		t.Fatalf("second PendingCount=(%d,%v), want (1,nil)", count, err)
 	}
 }
 
-// TestQueueCrossNamespaceIsolation tests that entries are scoped to namespace (RFC-0003 §7.2).
-func TestQueueCrossNamespaceIsolation(t *testing.T) {
-	repo := setupQueueRepo(t)
-	defer closeQueueRepo(t, repo)
-
-	ctx := context.Background()
-	payload := json.RawMessage(`{}`)
-
-	// Enqueue in two namespaces.
-	repo.Enqueue(ctx, "ns-1", "task", "task-1", "create", payload, 0)
-	repo.Enqueue(ctx, "ns-2", "task", "task-2", "create", payload, 0)
-
-	// List pending in ns-1 should only return ns-1 entry.
-	entries, err := repo.ListPending(ctx, "ns-1", 10)
-	if err != nil {
-		t.Fatalf("ListPending ns-1 failed: %v", err)
-	}
-
-	if len(entries) != 1 {
-		t.Errorf("Expected 1 entry in ns-1, got %d", len(entries))
-	}
-	if entries[0].NamespaceID != "ns-1" {
-		t.Errorf("Entry should be scoped to ns-1, got %q", entries[0].NamespaceID)
-	}
-
-	// List pending in ns-2 should only return ns-2 entry.
-	entries, err = repo.ListPending(ctx, "ns-2", 10)
-	if err != nil {
-		t.Fatalf("ListPending ns-2 failed: %v", err)
-	}
-
-	if len(entries) != 1 {
-		t.Errorf("Expected 1 entry in ns-2, got %d", len(entries))
-	}
-	if entries[0].NamespaceID != "ns-2" {
-		t.Errorf("Entry should be scoped to ns-2, got %q", entries[0].NamespaceID)
+func TestQueueEnqueueNilRepositoryReturnsError(t *testing.T) {
+	var repo *QueueRepo
+	if _, err := repo.Enqueue(context.Background(), types.RemoteBindingKey{}, projectstate.OperationV1{}, 0); err == nil {
+		t.Fatal("Enqueue() error = nil, want unavailable repository error")
 	}
 }
 
-// TestQueueGetEntry tests retrieving a single entry.
-func TestQueueGetEntry(t *testing.T) {
-	repo := setupQueueRepo(t)
-	defer closeQueueRepo(t, repo)
-
-	ctx := context.Background()
-	payload := json.RawMessage(`{"data": "test"}`)
-
-	entry, err := repo.Enqueue(ctx, "ns-1", "task", "task-1", "create", payload, 0)
+func TestQueueRejectsBindingMismatchByDirectSQL(t *testing.T) {
+	store, _, first, _ := queueRouteFixture(t)
+	defer store.Close()
+	operation := queueOperation("90000000-0000-4000-8000-000000000002")
+	canonical, err := projectstate.CanonicalOperation(operation)
 	if err != nil {
-		t.Fatalf("Enqueue failed: %v", err)
+		t.Fatal(err)
 	}
-
-	retrieved, err := repo.GetEntry(ctx, "ns-1", entry.ID)
-	if err != nil {
-		t.Fatalf("GetEntry failed: %v", err)
-	}
-
-	if retrieved.ID != entry.ID {
-		t.Errorf("ID mismatch: got %q, want %q", retrieved.ID, entry.ID)
-	}
-	if string(retrieved.Payload) != string(payload) {
-		t.Errorf("Payload mismatch: got %q, want %q", retrieved.Payload, payload)
+	first.StreamID = "49999999-9999-4999-8999-999999999999"
+	_, err = store.DB().Exec(`
+		INSERT INTO sync_queue
+		(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,id,operation_json,operation_digest)
+		VALUES (?,?,?,?,?,?,?,?)
+	`, first.ProjectID, first.WorkspaceID, first.FabricInstanceID, first.RemoteProjectID, first.StreamID,
+		operation.ID, string(canonical), operationDigest(canonical))
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "foreign key") {
+		t.Fatalf("mismatched direct queue insert error=%v, want SQLite foreign-key constraint", err)
 	}
 }
 
-// TestQueueGetEntryNotFound tests that GetEntry returns ErrQueueNotFound for missing entries.
-func TestQueueGetEntryNotFound(t *testing.T) {
-	repo := setupQueueRepo(t)
-	defer closeQueueRepo(t, repo)
-
-	ctx := context.Background()
-	_, err := repo.GetEntry(ctx, "ns-1", "nonexistent")
-	if err != ErrQueueNotFound {
-		t.Errorf("Expected ErrQueueNotFound, got %v", err)
+func TestQueueMarkDeliveredRechecksOpenConflictAtomically(t *testing.T) {
+	store, repo, key, _ := queueRouteFixture(t)
+	operation := queueOperation("90000000-0000-4000-8000-000000000003")
+	entry, err := repo.Enqueue(context.Background(), key, operation, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := readRawQueueRow(t, store.DB(), key, entry.ID)
+	insertQueueConflict(t, store.DB(), key.ProjectID, string(key.WorkspaceID), "open")
+	if err := repo.MarkDelivered(context.Background(), key, entry.ID); !errors.Is(err, localstore.ErrWorkspaceConflicted) {
+		t.Fatalf("MarkDelivered error=%v, want ErrWorkspaceConflicted", err)
+	}
+	databasePath := storePath(t, store)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := localstore.Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	after := readRawQueueRow(t, reopened.DB(), key, entry.ID)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("conflicted pending row changed:\nbefore=%+v\nafter=%+v", before, after)
 	}
 }
 
-// TestQueueDeleteEntry tests deleting an entry.
-func TestQueueDeleteEntry(t *testing.T) {
-	repo := setupQueueRepo(t)
-	defer closeQueueRepo(t, repo)
-
-	ctx := context.Background()
-	payload := json.RawMessage(`{}`)
-
-	entry, err := repo.Enqueue(ctx, "ns-1", "task", "task-1", "create", payload, 0)
-	if err != nil {
-		t.Fatalf("Enqueue failed: %v", err)
+func TestQueueMarkDeliveredConflictScopeIsolation(t *testing.T) {
+	tests := []struct {
+		name         string
+		projectDelta bool
+		workspace    int
+		state        string
+		wantConflict bool
+	}{
+		{name: "resolved exact", state: "resolved"},
+		{name: "same project different workspace", workspace: 1, state: "open"},
+		{name: "different project", projectDelta: true, state: "open"},
+		{name: "exact open", state: "open", wantConflict: true},
 	}
-
-	if err := repo.DeleteEntry(ctx, "ns-1", entry.ID); err != nil {
-		t.Fatalf("DeleteEntry failed: %v", err)
-	}
-
-	_, err = repo.GetEntry(ctx, "ns-1", entry.ID)
-	if err != ErrQueueNotFound {
-		t.Errorf("Expected ErrQueueNotFound after deletion, got %v", err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store, repo, key, other := queueRouteFixture(t)
+			defer store.Close()
+			operation := queueOperation("90000000-0000-4000-8000-000000000004")
+			if _, err := repo.Enqueue(context.Background(), key, operation, 0); err != nil {
+				t.Fatal(err)
+			}
+			projectID, workspaceID := key.ProjectID, string(key.WorkspaceID)
+			if test.workspace != 0 {
+				workspaceID = "00000000-0000-4000-8000-000000000013"
+				if _, err := store.DB().Exec(`INSERT INTO workspace_bindings
+					(project_id,workspace_id,checkout_path,checkout_device,checkout_inode,repository_identity_json,
+					 accepted_ref,accepted_commit,accepted_digest,accepted_snapshot,status)
+					VALUES (?,?, '/checkout-c',3,13,'{"provider":"github","immutable_id":"repo","canonical_remote":"https://example.test/repo"}',
+					 'refs/heads/main','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',?,x'00','clean')`,
+					projectID, workspaceID, "sha256:"+strings.Repeat("a", 64)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.projectDelta {
+				projectID, workspaceID = other.ProjectID, string(other.WorkspaceID)
+			}
+			insertQueueConflict(t, store.DB(), projectID, workspaceID, test.state)
+			err := repo.MarkDelivered(context.Background(), key, operation.ID)
+			if test.wantConflict != errors.Is(err, localstore.ErrWorkspaceConflicted) {
+				t.Fatalf("MarkDelivered error=%v, wantConflict=%v", err, test.wantConflict)
+			}
+			if !test.wantConflict && err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
-// TestAuditLogConflict tests logging a conflict to the audit trail.
-func TestAuditLogConflict(t *testing.T) {
-	qRepo, aRepo := setupAuditRepo(t)
-	defer closeAuditRepo(t, qRepo)
-
+func TestCompleteKeyQueueAndAuditLifecycle(t *testing.T) {
+	store, queue, key, _ := queueRouteFixture(t)
+	defer store.Close()
 	ctx := context.Background()
-	entry, err := aRepo.LogConflict(ctx, "ns-1", "task", "task-1", "overwrite", "server-val", "local-val", "resolved-val", "last_write_wins")
+	operation := queueOperation("90000000-0000-4000-8000-000000000006")
+
+	tx, err := store.DB().BeginTx(ctx, nil)
 	if err != nil {
-		t.Fatalf("LogConflict failed: %v", err)
+		t.Fatal(err)
 	}
-
-	if entry.NamespaceID != "ns-1" {
-		t.Errorf("NamespaceID mismatch: got %q, want %q", entry.NamespaceID, "ns-1")
+	if _, err := queue.EnqueueTx(ctx, tx, key, operation, 4); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
 	}
-	if entry.EntityType != "task" {
-		t.Errorf("EntityType mismatch: got %q, want %q", entry.EntityType, "task")
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
 	}
-	if entry.ConflictType == nil || *entry.ConflictType != "overwrite" {
-		t.Errorf("ConflictType mismatch")
-	}
-}
-
-// TestAuditListAudit tests listing audit entries.
-func TestAuditListAudit(t *testing.T) {
-	qRepo, aRepo := setupAuditRepo(t)
-	defer closeAuditRepo(t, qRepo)
-
-	ctx := context.Background()
-
-	aRepo.LogConflict(ctx, "ns-1", "task", "task-1", "overwrite", "sv1", "lv1", "rv1", "last_write_wins")
-	time.Sleep(10 * time.Millisecond) // Ensure different timestamps
-	aRepo.LogConflict(ctx, "ns-1", "kb", "kb-1", "overwrite", "sv2", "lv2", "rv2", "last_write_wins")
-
-	entries, err := aRepo.ListAudit(ctx, "ns-1", 10)
+	entry, err := queue.GetEntry(ctx, key, operation.ID)
 	if err != nil {
-		t.Fatalf("ListAudit failed: %v", err)
+		t.Fatal(err)
+	}
+	if entry.Key != key || entry.Operation.ID != operation.ID || entry.Priority != 4 || entry.DeliveredAt != nil {
+		t.Fatalf("queued entry=%+v", entry)
+	}
+	if err := queue.DeleteEntry(ctx, key, operation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := queue.GetEntry(ctx, key, operation.ID); !errors.Is(err, ErrQueueNotFound) {
+		t.Fatalf("deleted entry error=%v, want ErrQueueNotFound", err)
 	}
 
+	audit := NewAuditRepo(store.DB())
+	for _, conflict := range []json.RawMessage{json.RawMessage(`{"field":"title"}`), json.RawMessage(`{"field":"status"}`)} {
+		if _, err := audit.LogConflict(ctx, key, conflict, json.RawMessage(`{"actor":"human"}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := audit.ListAudit(ctx, key, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(entries) != 2 {
-		t.Errorf("Expected 2 audit entries, got %d", len(entries))
+		t.Fatalf("audit entries=%d, want 2", len(entries))
 	}
-
-	// Verify ordering: most recent first.
-	if entries[0].EntityType != "kb" {
-		t.Errorf("First entry should be kb, got %q", entries[0].EntityType)
-	}
-	if entries[1].EntityType != "task" {
-		t.Errorf("Second entry should be task, got %q", entries[1].EntityType)
+	for _, entry := range entries {
+		if entry.Key != key || !json.Valid(entry.ConflictJSON) || !json.Valid(entry.ActorJSON) {
+			t.Fatalf("audit entry=%+v", entry)
+		}
 	}
 }
 
-// Helper functions for tests.
-
-func setupQueueRepo(t *testing.T) *QueueRepo {
-	db, err := openTestDB()
+func queueRouteFixture(t *testing.T) (*localstore.Store, *QueueRepo, types.RemoteBindingKey, types.RemoteBindingKey) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "gateway.db")
+	store, err := localstore.Open(path)
 	if err != nil {
-		t.Fatalf("Failed to open test DB: %v", err)
+		t.Fatal(err)
 	}
-
-	// Apply schema.
-	schema := `
-	CREATE TABLE sync_queue (
-		id             TEXT PRIMARY KEY,
-		namespace_id   TEXT NOT NULL,
-		entity_type    TEXT NOT NULL,
-		entity_id      TEXT NOT NULL,
-		operation      TEXT NOT NULL,
-		payload        TEXT NOT NULL,
-		priority       INTEGER NOT NULL DEFAULT 0,
-		created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		updated_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		delivered_at   TIMESTAMP
-	);
-	`
-	if _, err := db.Exec(schema); err != nil {
-		t.Fatalf("Failed to apply schema: %v", err)
+	for index, ids := range [][5]string{
+		{"00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011", "20000000-0000-4000-8000-000000000001", "30000000-0000-4000-8000-000000000001", "40000000-0000-4000-8000-000000000001"},
+		{"00000000-0000-4000-8000-000000000002", "00000000-0000-4000-8000-000000000012", "20000000-0000-4000-8000-000000000002", "30000000-0000-4000-8000-000000000002", "40000000-0000-4000-8000-000000000002"},
+	} {
+		profileID := []string{"10000000-0000-4000-8000-000000000001", "10000000-0000-4000-8000-000000000002"}[index]
+		_, err := store.DB().Exec(`
+			INSERT INTO workspace_bindings
+			(project_id,workspace_id,checkout_path,checkout_device,checkout_inode,repository_identity_json,
+			 accepted_ref,accepted_commit,accepted_digest,accepted_snapshot,status)
+			VALUES (?,?,?,?,?,'{"provider":"github","immutable_id":"repo","canonical_remote":"https://example.test/repo"}',
+			 'refs/heads/main','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',?,x'00','clean')
+		`, ids[0], ids[1], "/checkout-"+string(rune('a'+index)), index+1, index+11,
+			"sha256:"+strings.Repeat("a", 64))
+		if err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
+		if _, err := store.DB().Exec(`INSERT INTO fabric_profiles
+			(profile_id,alias,fabric_instance_id,base_url,mode,credential_ref)
+			VALUES (?,?,?,?, 'private','keyring:test')`, profileID, "profile-"+string(rune('a'+index)),
+			ids[2], "https://fabric.example.test"); err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
+		if _, err := store.DB().Exec(`INSERT INTO workspace_fabric_bindings
+			(project_id,workspace_id,profile_id,fabric_instance_id,remote_project_id,stream_id,attachment_ref,
+			 repository_provider,repository_immutable_id,canonical_ref,writable,state)
+			VALUES (?,?,?,?,?,?,?,'github','repo','refs/heads/main',1,'active')`,
+			ids[0], ids[1], profileID, ids[2], ids[3], ids[4],
+			[]string{"50000000-0000-4000-8000-000000000001", "50000000-0000-4000-8000-000000000002"}[index]); err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
 	}
-
-	return NewQueueRepo(db)
+	first := types.RemoteBindingKey{ProjectID: "00000000-0000-4000-8000-000000000001", WorkspaceID: "00000000-0000-4000-8000-000000000011", FabricInstanceID: "20000000-0000-4000-8000-000000000001", RemoteProjectID: "30000000-0000-4000-8000-000000000001", StreamID: "40000000-0000-4000-8000-000000000001"}
+	second := types.RemoteBindingKey{ProjectID: "00000000-0000-4000-8000-000000000002", WorkspaceID: "00000000-0000-4000-8000-000000000012", FabricInstanceID: "20000000-0000-4000-8000-000000000002", RemoteProjectID: "30000000-0000-4000-8000-000000000002", StreamID: "40000000-0000-4000-8000-000000000002"}
+	return store, NewQueueRepo(store.DB()), first, second
 }
 
-func setupAuditRepo(t *testing.T) (*QueueRepo, *AuditRepo) {
-	db, err := openTestDB()
+func queueOperation(id string) projectstate.OperationV1 {
+	return projectstate.OperationV1{
+		SchemaVersion: 1, ID: id, Kind: projectstate.OperationTombstone,
+		ExpectedViewDigest: projectstate.Digest("sha256:" + strings.Repeat("a", 64)),
+		Actor: types.ActorEnvelope{ActorKind: types.ActorHuman,
+			HumanPrincipalID: "80000000-0000-4000-8000-000000000001",
+			Assurance:        types.AssuranceLocal, OccurredAt: time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)},
+		Tombstone: &projectstate.TombstoneOperationV1{
+			Key:                   projectstate.RecordKey{Kind: "task", ID: "70000000-0000-4000-8000-000000000001"},
+			ExpectedContentDigest: projectstate.Digest("sha256:" + strings.Repeat("b", 64)),
+		},
+	}
+}
+
+type rawQueueRow struct {
+	ProjectID, WorkspaceID, FabricID, RemoteProjectID, StreamID, ID string
+	OperationJSON, OperationDigest                                  string
+	Priority                                                        int
+	CreatedAt, UpdatedAt                                            time.Time
+	DeliveredAt                                                     sql.NullTime
+}
+
+func readRawQueueRow(t *testing.T, db *sql.DB, key types.RemoteBindingKey, id string) rawQueueRow {
+	t.Helper()
+	var row rawQueueRow
+	err := db.QueryRow(`SELECT project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,id,
+		operation_json,operation_digest,priority,created_at,updated_at,delivered_at FROM sync_queue
+		WHERE project_id=? AND workspace_id=? AND fabric_instance_id=? AND remote_project_id=? AND stream_id=? AND id=?`,
+		key.ProjectID, key.WorkspaceID, key.FabricInstanceID, key.RemoteProjectID, key.StreamID, id).Scan(
+		&row.ProjectID, &row.WorkspaceID, &row.FabricID, &row.RemoteProjectID, &row.StreamID, &row.ID,
+		&row.OperationJSON, &row.OperationDigest, &row.Priority, &row.CreatedAt, &row.UpdatedAt, &row.DeliveredAt)
 	if err != nil {
-		t.Fatalf("Failed to open test DB: %v", err)
+		t.Fatal(err)
 	}
-
-	schema := `
-	CREATE TABLE sync_audit (
-		id             TEXT PRIMARY KEY,
-		namespace_id   TEXT NOT NULL,
-		entity_type    TEXT NOT NULL,
-		entity_id      TEXT NOT NULL,
-		conflict_type  TEXT,
-		server_value   TEXT,
-		local_value    TEXT,
-		resolved_value TEXT,
-		resolved_by    TEXT,
-		created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-	);
-	`
-	if _, err := db.Exec(schema); err != nil {
-		t.Fatalf("Failed to apply schema: %v", err)
-	}
-
-	return NewQueueRepo(db), NewAuditRepo(db)
+	return row
 }
 
-func closeQueueRepo(t *testing.T, repo *QueueRepo) {
-	if err := repo.db.Close(); err != nil {
-		t.Logf("Error closing database: %v", err)
+func insertQueueConflict(t *testing.T, db *sql.DB, projectID, workspaceID, state string) {
+	t.Helper()
+	resolvedAt := any(nil)
+	if state == "resolved" {
+		resolvedAt = time.Date(2026, 8, 27, 13, 0, 0, 0, time.UTC)
+	}
+	_, err := db.Exec(`INSERT INTO workspace_conflicts
+		(project_id,workspace_id,occurrence_id,conflict_id,record_kind,record_id,field_path,conflict_kind,
+		 base_json,ours_json,theirs_json,state,resolved_at)
+		VALUES (?,?,?,?, 'task',?,'title','changed','{}','{}','{}',?,?)`, projectID, workspaceID,
+		"60000000-0000-4000-8000-000000000001", "61000000-0000-4000-8000-000000000001",
+		"70000000-0000-4000-8000-000000000001", state, resolvedAt)
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
-func closeAuditRepo(t *testing.T, qRepo *QueueRepo) {
-	if err := qRepo.db.Close(); err != nil {
-		t.Logf("Error closing database: %v", err)
+func storePath(t *testing.T, store *localstore.Store) string {
+	t.Helper()
+	var path string
+	if err := store.DB().QueryRow(`PRAGMA database_list`).Scan(new(int), new(string), &path); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func openTestDB() (*sql.DB, error) {
-	// Use in-memory SQLite for testing.
-	return sql.Open("sqlite", "file::memory:?cache=shared")
+	return path
 }

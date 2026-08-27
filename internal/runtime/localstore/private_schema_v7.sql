@@ -176,6 +176,111 @@ CREATE TABLE workspace_publication_policy_history (
   FOREIGN KEY(project_id,workspace_id) REFERENCES workspace_bindings(project_id,workspace_id) ON DELETE CASCADE
 );
 
+CREATE TABLE fabric_profiles (
+  profile_id TEXT NOT NULL,
+  alias TEXT NOT NULL UNIQUE,
+  fabric_instance_id TEXT NOT NULL,
+  base_url TEXT NOT NULL,
+  mode TEXT NOT NULL CHECK(mode IN ('public','private')),
+  credential_ref TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(profile_id),
+  UNIQUE(profile_id,fabric_instance_id),
+  UNIQUE(fabric_instance_id)
+);
+
+CREATE TABLE workspace_fabric_bindings (
+  project_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  fabric_instance_id TEXT NOT NULL,
+  remote_project_id TEXT NOT NULL,
+  stream_id TEXT NOT NULL,
+  attachment_ref TEXT NOT NULL,
+  repository_provider TEXT NOT NULL,
+  repository_immutable_id TEXT NOT NULL,
+  canonical_ref TEXT NOT NULL,
+  writable INTEGER NOT NULL CHECK(writable IN (0,1)),
+  state TEXT NOT NULL CHECK(state IN ('active','detached')),
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  detached_at TIMESTAMP,
+  PRIMARY KEY(project_id,workspace_id),
+  UNIQUE(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id),
+  UNIQUE(fabric_instance_id,attachment_ref),
+  FOREIGN KEY(project_id,workspace_id)
+    REFERENCES workspace_bindings(project_id,workspace_id) ON DELETE CASCADE,
+  FOREIGN KEY(profile_id,fabric_instance_id)
+    REFERENCES fabric_profiles(profile_id,fabric_instance_id) ON DELETE RESTRICT,
+  CHECK((state='active' AND detached_at IS NULL) OR
+        (state='detached' AND writable=0 AND detached_at IS NOT NULL))
+);
+
+CREATE UNIQUE INDEX workspace_one_active_writable_fabric
+  ON workspace_fabric_bindings(project_id,workspace_id)
+  WHERE writable=1 AND state='active';
+
+CREATE TABLE fabric_cursors (
+  project_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  fabric_instance_id TEXT NOT NULL,
+  remote_project_id TEXT NOT NULL,
+  stream_id TEXT NOT NULL,
+  stream_version INTEGER NOT NULL CHECK(stream_version >= 0),
+  pull_cursor TEXT NOT NULL DEFAULT '',
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id),
+  FOREIGN KEY(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id)
+    REFERENCES workspace_fabric_bindings(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id)
+    ON DELETE CASCADE
+);
+
+CREATE TABLE legacy_fabric_profile_recoveries (
+  recovery_id TEXT PRIMARY KEY,
+  source_server_url TEXT NOT NULL,
+  source_project_id TEXT NOT NULL,
+  source_credential_path_hash TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('quarantined','completed','rejected')),
+  completed_profile_id TEXT,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  completed_at TIMESTAMP,
+  FOREIGN KEY(completed_profile_id) REFERENCES fabric_profiles(profile_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE legacy_fabric_hint_recoveries (
+  recovery_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  source_hint_json TEXT NOT NULL,
+  reason TEXT NOT NULL CHECK(reason IN ('missing_fabric_instance','missing_stream','ambiguous_workspace','fork_mismatch')),
+  state TEXT NOT NULL CHECK(state IN ('quarantined','completed','rejected')),
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  completed_at TIMESTAMP,
+  PRIMARY KEY(recovery_id,project_id,workspace_id),
+  FOREIGN KEY(project_id,workspace_id) REFERENCES workspace_bindings(project_id,workspace_id) ON DELETE CASCADE
+);
+
+CREATE TABLE legacy_sync_queue_recoveries (
+  id TEXT PRIMARY KEY,
+  namespace_id TEXT NOT NULL,
+  entity_type TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  priority INTEGER NOT NULL,
+  created_at TIMESTAMP NOT NULL,
+  updated_at TIMESTAMP NOT NULL,
+  reason TEXT NOT NULL CHECK(reason='missing_immutable_binding')
+);
+
+CREATE TABLE legacy_sync_history (
+  id TEXT PRIMARY KEY,
+  namespace_id TEXT NOT NULL,
+  record_kind TEXT NOT NULL CHECK(record_kind IN ('delivered_queue','conflict_audit')),
+  record_json TEXT NOT NULL,
+  created_at TIMESTAMP NOT NULL
+);
+
 CREATE INDEX workspace_overlay_generation ON workspace_overlay_operations(project_id,workspace_id,generation);
 CREATE INDEX workspace_open_conflicts ON workspace_conflicts(project_id,workspace_id,state);
 CREATE INDEX workspace_recovery ON workspace_materializations(state,project_id,workspace_id);
@@ -183,4 +288,10 @@ CREATE UNIQUE INDEX legacy_integration_one_pending ON legacy_integration_state_m
 CREATE UNIQUE INDEX workspace_one_open_semantic_conflict ON workspace_conflicts(project_id,workspace_id,conflict_id) WHERE state='open';
 CREATE UNIQUE INDEX workspace_one_current_materialization ON workspace_materializations(project_id,workspace_id) WHERE state IN ('prepared','published','recovered_new');
 
-INSERT INTO gateway_schema_migrations(version) VALUES (6);
+CREATE INDEX sync_queue_pending
+  ON sync_queue(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,priority DESC,created_at)
+  WHERE delivered_at IS NULL;
+CREATE INDEX sync_audit_recent
+  ON sync_audit(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,created_at DESC);
+
+INSERT INTO gateway_schema_migrations(version) VALUES (7);

@@ -149,11 +149,12 @@ committed.
 
 ## Private format policy
 
-The private Gateway database is a closed-pre-alpha schema-v6 format. A missing
-or empty database is initialised; an exact current database reopens without
-schema mutation. Older, future, malformed, partial, unexpected, or
-proof-incompatible databases are preserved and refused before mutation. There
-is no automatic migration, reset, export, quarantine, rename, or deletion.
+The private Gateway database is a closed-pre-alpha schema-v7 format. A missing
+or genuinely empty database is initialised directly as v7; an exact current v7
+database reopens without schema mutation. Every other existing database,
+including former exact v6, older, future, malformed, partial, unexpected, or
+proof-incompatible state, is preserved and refused before mutation. There is no
+automatic migration, reset, export, quarantine, rename, or deletion.
 
 Before deliberate removal, stop Gateway, inspect for unpublished overlays,
 stashes, and checkpoints, and make an operator backup. This policy does not

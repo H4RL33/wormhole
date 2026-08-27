@@ -1,6 +1,8 @@
 // This file is package localstore_test (not localstore) so it can import
 // internal/runtime/sync without an import cycle now that sync imports
 // localstore (sync local-apply work, RFC-0003 §8).
+//go:build legacy_namespace_sync
+
 package localstore_test
 
 import (

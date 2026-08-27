@@ -83,9 +83,9 @@ func (s *Server) continueEnrolmentBootstrap(ctx context.Context, req EnrolmentRe
 	s.enrolmentSyncEngines[req.CredentialProfile] = engine
 	s.enrolmentBootstrapMu.Unlock()
 	s.authorizationAgents.Store(req.ProjectID, attempt.AgentID)
-	// Bootstrap and the ready checkpoint have committed before the first
-	// incremental loop can run. Engine.Stop owns cancellation at Server.Close.
-	engine.Start(context.Background())
+	// A project-only enrolment has no immutable workspace/Fabric binding key.
+	// Keep its completed bootstrap engine stopped; routed v2 sync is constructed
+	// only after an exact workspace attachment exists.
 	return enrolmentReady(req, attempt.AgentID, attempt.PassportID)
 }
 

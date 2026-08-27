@@ -35,7 +35,7 @@ type Status struct {
 // Status returns the current connection state plus the durable SQLite queue
 // depth for this engine's project namespace.
 func (e *Engine) Status(ctx context.Context) (Status, error) {
-	pending, err := e.queueRepo.PendingCount(ctx, e.namespaceID)
+	pending, err := e.queueRepo.PendingCount(ctx, e.remoteKey)
 	if err != nil {
 		return Status{}, fmt.Errorf("sync: status: %w", err)
 	}

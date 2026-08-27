@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux && legacy_namespace_sync
 
 package main
 

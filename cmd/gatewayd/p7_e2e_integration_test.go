@@ -1,6 +1,8 @@
 // p7_e2e_integration_test.go exercises the retained legacy sync engine and
 // queue mechanics against test HTTP peers. These are subsystem tests, not the
 // local-only Stage 2 Gateway process topology.
+//go:build legacy_namespace_sync
+
 package main
 
 import (

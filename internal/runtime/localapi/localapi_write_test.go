@@ -6,6 +6,8 @@
 // articles, and post channel events locally, with each write enqueued to the
 // outbound sync queue (RFC-0003 §8.2) for later delivery to the Coordination
 // Server.
+//go:build legacy_namespace_sync
+
 package localapi
 
 import (

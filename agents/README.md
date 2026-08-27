@@ -60,11 +60,15 @@ The 2026-07-28 architecture remains design authority where later approved
 Stage 2 decisions do not amend it.
 Task-5 `5F`/`5G`, the mandatory Stage 1A review, the approved R01-R05
 measured-simplification tranche, and R06 are complete. R06's closed-pre-alpha
-private-format hard cut initializes fresh Gateway state directly as schema v6,
-reopens exact v6 state without schema mutation, and preserves/refuses every other
-existing private database before mutation. Approved implementation commits are
+private-format hard cut originally initialized fresh Gateway state directly as schema v6,
+reopened exact v6 state without schema mutation, and preserved/refused every other
+existing private database before mutation. Its approved implementation commits are
 `27f5b85`, `a18b6f4`, and `e1d2df5`; independent review, `make check` (84.8%),
-release, rehearsal, and clean-clone gates passed.
+release, rehearsal, and clean-clone gates passed. The approved Stage 3 Multi-Fabric
+supersession advances the current consolidated hard-cut epoch from v6 to v7: fresh
+state initializes directly as v7, exact v7 reopens, and every other existing database
+is preserved and refused. It does not reinstate incremental migrations or accept an
+existing v6 database.
 
 After R06's review boundary, all remaining reduction work (R07-R14) is paused.
 The separately approved decomposition of `projectstate.Service` behind its existing
@@ -88,7 +92,7 @@ checkpoint and recovery continue to share one coordinator gate. See
   first-party Codex/Claude connector lifecycle, portable status/diff/import/
   checkpoint/stash operations, and stdio MCP bridge.
 - `gatewayd`: one per-user local-only supervisor, stable owner-private Unix
-  socket, schema-v6 SQLite state, durable overlays, and 17-tool MCP registry.
+  socket, schema-v7 SQLite state, durable overlays, and 17-tool MCP registry.
 - `fabric`: optional 20-tool HTTP MCP server backed by PostgreSQL; not a Stage 2
   Gateway dependency or acceptance authority.
 
@@ -230,7 +234,7 @@ outside the repository. Legacy `.wormhole/integration-state.json` must be
 migrated/ignored, never committed.
 
 The private Gateway SQLite database is a closed-pre-alpha format. The current
-binary supports only a fresh initialization or an exact schema-v6 database. It
+binary supports only a fresh initialization or an exact schema-v7 database. It
 does not migrate, export, reset, normalize, or delete an older, future, malformed,
 partial, or proof-incompatible database. An unsupported database is left in place;
 inspect unpublished overlays/checkpoints, make an operator backup, stop Gateway,

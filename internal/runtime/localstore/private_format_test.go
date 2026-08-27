@@ -13,7 +13,7 @@ import (
 	codegraphstore "github.com/H4RL33/wormhole/internal/runtime/codegraph/store"
 )
 
-func TestGatewayReopensExactV6WithCurrentCodeGraphCatalogAndRows(t *testing.T) {
+func TestGatewayReopensExactV7WithCurrentCodeGraphCatalogAndRows(t *testing.T) {
 	databasePath := freshDatabasePathWithClosedStore(t)
 	db, err := sql.Open("sqlite", sqliteDSN(databasePath))
 	if err != nil {
@@ -111,6 +111,51 @@ func TestGatewayPreflightRejectsPreR06DatabaseWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestGatewayPreflightRejectsExactFormerV6WithoutMutation(t *testing.T) {
+	databasePath := freshDatabasePathWithClosedStore(t)
+	db, err := sql.Open("sqlite", sqliteDSN(databasePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		DROP INDEX sync_queue_pending;
+		DROP INDEX sync_audit_recent;
+		DROP TABLE sync_queue;
+		DROP TABLE sync_audit;
+		DROP TABLE fabric_cursors;
+		DROP INDEX workspace_one_active_writable_fabric;
+		DROP TABLE workspace_fabric_bindings;
+		DROP TABLE legacy_fabric_hint_recoveries;
+		DROP TABLE legacy_fabric_profile_recoveries;
+		DROP TABLE fabric_profiles;
+		DROP TABLE legacy_sync_queue_recoveries;
+		DROP TABLE legacy_sync_history;
+		CREATE TABLE sync_queue (
+		  id TEXT PRIMARY KEY, namespace_id TEXT NOT NULL, entity_type TEXT NOT NULL,
+		  entity_id TEXT NOT NULL, operation TEXT NOT NULL, payload TEXT NOT NULL,
+		  priority INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, delivered_at TIMESTAMP
+		);
+		CREATE TABLE sync_audit (
+		  id TEXT PRIMARY KEY, namespace_id TEXT NOT NULL, entity_type TEXT NOT NULL,
+		  entity_id TEXT NOT NULL, conflict_type TEXT, server_value TEXT, local_value TEXT,
+		  resolved_value TEXT, resolved_by TEXT, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		UPDATE gateway_schema_migrations SET version=6 WHERE version=7;
+	`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotPrivateEvidence(t, databasePath)
+	if _, err := Open(databasePath); err == nil {
+		t.Fatal("Open accepted exact former v6 database")
+	}
+	assertPrivateEvidenceUnchanged(t, databasePath, before)
+}
+
 func TestGatewayPreflightRejectsFutureMalformedPartialLedgerWithoutMutation(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -119,7 +164,7 @@ func TestGatewayPreflightRejectsFutureMalformedPartialLedgerWithoutMutation(t *t
 		{
 			name: "future ledger",
 			setup: func(t *testing.T, db *sql.DB) {
-				execGatewayLedger(t, db, "CREATE TABLE gateway_schema_migrations (version INTEGER PRIMARY KEY, applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)", 7)
+				execGatewayLedger(t, db, "CREATE TABLE gateway_schema_migrations (version INTEGER PRIMARY KEY, applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)", 8)
 			},
 		},
 		{
@@ -167,13 +212,13 @@ func TestGatewayPreflightRejectsFutureMalformedPartialLedgerWithoutMutation(t *t
 	}
 }
 
-func TestGatewayPreflightRejectsSingletonV6WithMalformedLedgerDDL(t *testing.T) {
+func TestGatewayPreflightRejectsSingletonV7WithMalformedLedgerDDL(t *testing.T) {
 	databasePath := freshDatabasePathWithClosedStore(t)
 	db, err := sql.Open("sqlite", sqliteDSN(databasePath))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`DROP TABLE gateway_schema_migrations; CREATE TABLE gateway_schema_migrations (version TEXT); INSERT INTO gateway_schema_migrations(version) VALUES ('6')`); err != nil {
+	if _, err := db.Exec(`DROP TABLE gateway_schema_migrations; CREATE TABLE gateway_schema_migrations (version TEXT); INSERT INTO gateway_schema_migrations(version) VALUES ('7')`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -181,7 +226,7 @@ func TestGatewayPreflightRejectsSingletonV6WithMalformedLedgerDDL(t *testing.T) 
 	}
 	before := snapshotPrivateEvidence(t, databasePath)
 	if _, err := Open(databasePath); err == nil {
-		t.Fatal("Open accepted singleton v6 with malformed ledger DDL")
+		t.Fatal("Open accepted singleton v7 with malformed ledger DDL")
 	}
 	assertPrivateEvidenceUnchanged(t, databasePath, before)
 }
@@ -254,10 +299,10 @@ func TestGatewayPreflightRejectsSidecarEvidenceWithoutMainDatabase(t *testing.T)
 
 func TestGatewayFreshInitializationFailurePreservesPreimageAndSidecars(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "gateway.db")
-	validationErr := errors.New("injected v6 validation failure")
-	previous := privateSchemaV6ValidationHook
-	privateSchemaV6ValidationHook = func(*sql.Tx) error { return validationErr }
-	t.Cleanup(func() { privateSchemaV6ValidationHook = previous })
+	validationErr := errors.New("injected v7 validation failure")
+	previous := privateSchemaV7ValidationHook
+	privateSchemaV7ValidationHook = func(*sql.Tx) error { return validationErr }
+	t.Cleanup(func() { privateSchemaV7ValidationHook = previous })
 	if _, err := Open(databasePath); !errors.Is(err, validationErr) {
 		t.Fatalf("Open injected initialization error=%v, want %v", err, validationErr)
 	}
@@ -341,7 +386,7 @@ func assertPrivateEvidenceUnchanged(t *testing.T, databasePath string, before []
 	}
 }
 
-func TestGatewayFreshInitializationProducesExactV6(t *testing.T) {
+func TestGatewayFreshInitializationProducesExactV7(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "gateway.db")
 	store, err := Open(databasePath)
 	if err != nil {
@@ -353,8 +398,8 @@ func TestGatewayFreshInitializationProducesExactV6(t *testing.T) {
 	if err := store.DB().QueryRow(`SELECT max(version), count(*) FROM gateway_schema_migrations`).Scan(&version, &count); err != nil {
 		t.Fatal(err)
 	}
-	if version != 6 || count != 1 {
-		t.Fatalf("ledger=(%d,%d), want exact v6 singleton", version, count)
+	if version != 7 || count != 1 {
+		t.Fatalf("ledger=(%d,%d), want exact v7 singleton", version, count)
 	}
 	for _, table := range []string{
 		"workspace_bindings", "workspace_candidates", "workspace_overlay_operations",
@@ -367,12 +412,12 @@ func TestGatewayFreshInitializationProducesExactV6(t *testing.T) {
 			t.Fatal(err)
 		}
 		if exists != 1 {
-			t.Fatalf("required v6 table %q missing", table)
+			t.Fatalf("required v7 table %q missing", table)
 		}
 	}
 }
 
-func TestGatewayExactV6ReopensWithoutSchemaMutation(t *testing.T) {
+func TestGatewayExactV7ReopensWithoutSchemaMutation(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "gateway.db")
 	store, err := Open(databasePath)
 	if err != nil {
@@ -390,7 +435,7 @@ func TestGatewayExactV6ReopensWithoutSchemaMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := snapshotPrivateDatabase(t, databasePath); !bytes.Equal(before, got) {
-		t.Fatal("exact v6 database changed during reopen")
+		t.Fatal("exact v7 database changed during reopen")
 	}
 }
 
@@ -412,7 +457,7 @@ func TestGatewayFreshInitializationIsAtomic(t *testing.T) {
 	if err := reopened.DB().QueryRow(`SELECT max(version), count(*) FROM gateway_schema_migrations`).Scan(&version, &count); err != nil {
 		t.Fatal(err)
 	}
-	if version != 6 || count != 1 {
+	if version != 7 || count != 1 {
 		t.Fatalf("initialization left non-atomic ledger=(%d,%d)", version, count)
 	}
 }

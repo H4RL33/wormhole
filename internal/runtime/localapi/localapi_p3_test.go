@@ -85,12 +85,12 @@ func assertNoDurableRouteState(t *testing.T, store *localstore.Store, queue *syn
 	if tasks != 0 {
 		t.Fatalf("failed route left %d durable task(s)", tasks)
 	}
-	pending, err := queue.ListPending(context.Background(), projectID, 10)
-	if err != nil {
-		t.Fatalf("list route queue: %v", err)
+	var pending int
+	if err := store.DB().QueryRow(`SELECT count(*) FROM sync_queue`).Scan(&pending); err != nil {
+		t.Fatalf("count route queue: %v", err)
 	}
-	if len(pending) != 0 {
-		t.Fatalf("failed route left queue entries: %+v", pending)
+	if pending != 0 {
+		t.Fatalf("failed route left %d queue entries", pending)
 	}
 }
 
@@ -356,19 +356,12 @@ func TestRetainedTaskRouteProviderWorksWithoutCoordinationServer(t *testing.T) {
 		t.Errorf("assigned agent %s missing 'code' capability", assignedTo)
 	}
 
-	pending, err := queue.ListPending(context.Background(), "project-1", 10)
-	if err != nil {
-		t.Fatalf("list route queue: %v", err)
+	var pending int
+	if err := store.DB().QueryRow(`SELECT count(*) FROM sync_queue`).Scan(&pending); err != nil {
+		t.Fatalf("count route queue: %v", err)
 	}
-	if len(pending) != 1 || pending[0].EntityType != "task" || pending[0].Operation != "create" || pending[0].EntityID != taskID {
-		t.Fatalf("route queue = %+v, want one task/create entry for %s", pending, taskID)
-	}
-	var queued map[string]interface{}
-	if err := json.Unmarshal(pending[0].Payload, &queued); err != nil {
-		t.Fatalf("decode route queue payload: %v", err)
-	}
-	if queued["id"] != taskID || queued["owner_agent_id"] != assignedTo {
-		t.Fatalf("route queue payload = %#v, want id=%s owner=%s", queued, taskID, assignedTo)
+	if pending != 0 {
+		t.Fatalf("unbound task route entered complete-key queue: %d", pending)
 	}
 	if got := sched.TaskCount(); got != 1 {
 		t.Fatalf("scheduler task count = %d, want 1", got)
@@ -397,7 +390,7 @@ func TestTaskRouteNoMatchLeavesNoDurableState(t *testing.T) {
 	}
 }
 
-func TestTaskRouteQueueFailureRollsBackDurableState(t *testing.T) {
+func TestTaskRouteUnboundLegacyQueueTriggerDoesNotBlockLocalWrite(t *testing.T) {
 	srv, store, sched, queue, _ := newTaskRouteTestRuntime(t, "project-1")
 	if _, err := sched.RegisterAgent("route-agent", "project-1", []string{"code"}); err != nil {
 		t.Fatalf("register route agent: %v", err)
@@ -405,14 +398,17 @@ func TestTaskRouteQueueFailureRollsBackDurableState(t *testing.T) {
 	if _, err := store.DB().Exec(`CREATE TRIGGER fail_route_queue BEFORE INSERT ON sync_queue BEGIN SELECT RAISE(FAIL, 'injected route queue failure'); END`); err != nil {
 		t.Fatalf("create route queue trigger: %v", err)
 	}
-	_, err := srv.handleTaskRoute(context.Background(), json.RawMessage(`{"capability":"code","title":"queue must be atomic"}`))
-	if err == nil || !strings.Contains(err.Error(), "injected route queue failure") {
-		t.Fatalf("task.route queue failure = %v, want injected error", err)
+	if _, err := srv.handleTaskRoute(context.Background(), json.RawMessage(`{"capability":"code","title":"local write stays available"}`)); err != nil {
+		t.Fatalf("task.route local write: %v", err)
 	}
-	assertNoDurableRouteState(t, store, queue, "project-1")
-	if got := sched.TaskCount(); got != 0 {
-		t.Fatalf("queue failure left %d scheduler task(s)", got)
+	var pending int
+	if err := store.DB().QueryRow(`SELECT count(*) FROM sync_queue`).Scan(&pending); err != nil || pending != 0 {
+		t.Fatalf("unbound complete-key queue=(%d,%v), want empty", pending, err)
 	}
+	if got := sched.TaskCount(); got != 1 {
+		t.Fatalf("successful local route left %d scheduler task(s), want 1", got)
+	}
+	_ = queue
 }
 
 // TestSubscriptionDeliversEvents proves an eventbus subscription delivers

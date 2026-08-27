@@ -1442,9 +1442,7 @@ func (s *Server) handleTaskRoute(ctx context.Context, args json.RawMessage) (map
 	if err != nil {
 		return nil, fmt.Errorf("localapi: task route: marshal payload: %w", err)
 	}
-	if _, err := s.qr.EnqueueTx(ctx, tx, orgCtx.ProjectID, "task", assignedTask.ID, "create", payload, assignedTask.Priority); err != nil {
-		return nil, fmt.Errorf("localapi: task route: enqueue sync: %w", err)
-	}
+	_ = payload // Unbound legacy writes cannot enter the complete-key Fabric queue.
 	if err := s.commitLocalWrite(tx); err != nil {
 		return nil, fmt.Errorf("localapi: task route: commit: %w", err)
 	}
@@ -1559,9 +1557,7 @@ func (s *Server) handleTaskCreate(ctx context.Context, args json.RawMessage) (ma
 	if err != nil {
 		return nil, fmt.Errorf("localapi: task create: marshal payload: %w", err)
 	}
-	if _, err := s.qr.EnqueueTx(ctx, tx, orgCtx.ProjectID, "task", task.ID, "create", payload, task.Priority); err != nil {
-		return nil, fmt.Errorf("localapi: task create: enqueue sync: %w", err)
-	}
+	_ = payload // Unbound legacy writes cannot enter the complete-key Fabric queue.
 	if err := s.commitLocalWrite(tx); err != nil {
 		return nil, fmt.Errorf("localapi: task create: commit: %w", err)
 	}
@@ -1622,9 +1618,7 @@ func (s *Server) handleTaskUpdateStatus(ctx context.Context, args json.RawMessag
 	if err != nil {
 		return nil, fmt.Errorf("localapi: task update status: marshal payload: %w", err)
 	}
-	if _, err := s.qr.EnqueueTx(ctx, tx, orgCtx.ProjectID, "task", task.ID, "update", payload, task.Priority); err != nil {
-		return nil, fmt.Errorf("localapi: task update status: enqueue sync: %w", err)
-	}
+	_ = payload // Unbound legacy writes cannot enter the complete-key Fabric queue.
 	if err := s.commitLocalWrite(tx); err != nil {
 		return nil, fmt.Errorf("localapi: task update status: commit: %w", err)
 	}
@@ -1679,9 +1673,7 @@ func (s *Server) handleGitLinkCommit(ctx context.Context, args json.RawMessage) 
 	if err != nil {
 		return localGitLinkResult{}, fmt.Errorf("localapi: git link commit: marshal payload: %w", err)
 	}
-	if _, err := s.qr.EnqueueTx(ctx, tx, orgCtx.ProjectID, "git_link", link.ID, "create", payload, 0); err != nil {
-		return localGitLinkResult{}, fmt.Errorf("localapi: git link commit: enqueue sync: %w", err)
-	}
+	_ = payload // Unbound legacy writes cannot enter the complete-key Fabric queue.
 	if err := s.commitLocalWrite(tx); err != nil {
 		return localGitLinkResult{}, fmt.Errorf("localapi: git link commit: commit: %w", err)
 	}
@@ -1804,9 +1796,7 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 	// KB articles have no priority concept (internal/core/kb has no Priority
 	// field, unlike tasks) — 0 here is the correct default, not a placeholder
 	// for a value that should have been threaded through.
-	if _, err := s.qr.EnqueueTx(ctx, tx, namespaceID, "kb", article.ID, "create", payload, 0); err != nil {
-		return nil, fmt.Errorf("localapi: kb write: enqueue sync: %w", err)
-	}
+	_ = payload // Unbound legacy writes cannot enter the complete-key Fabric queue.
 	if err := s.commitLocalWrite(tx); err != nil {
 		return nil, fmt.Errorf("localapi: kb write: commit: %w", err)
 	}
@@ -1906,9 +1896,7 @@ func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (m
 	// Events have no priority concept (internal/core/events has no Priority
 	// field, unlike tasks) — 0 here is the correct default, not a placeholder
 	// for a value that should have been threaded through.
-	if _, err := s.qr.EnqueueTx(ctx, tx, namespaceID, "event", ev.ID, "create", payload, 0); err != nil {
-		return nil, fmt.Errorf("localapi: channel post: enqueue sync: %w", err)
-	}
+	_ = payload // Unbound legacy writes cannot enter the complete-key Fabric queue.
 	if err := s.commitLocalWrite(tx); err != nil {
 		return nil, fmt.Errorf("localapi: channel post: commit: %w", err)
 	}
@@ -2047,9 +2035,7 @@ func (s *Server) handleChannelCreate(ctx context.Context, args json.RawMessage) 
 	if err != nil {
 		return nil, fmt.Errorf("localapi: channel create: marshal payload: %w", err)
 	}
-	if _, err := s.qr.EnqueueTx(ctx, tx, namespaceID, "channel", channelID, "create", payload, 0); err != nil {
-		return nil, fmt.Errorf("localapi: channel create: enqueue sync: %w", err)
-	}
+	_ = payload // Unbound legacy writes cannot enter the complete-key Fabric queue.
 	if err := s.commitLocalWrite(tx); err != nil {
 		return nil, fmt.Errorf("localapi: channel create: commit: %w", err)
 	}

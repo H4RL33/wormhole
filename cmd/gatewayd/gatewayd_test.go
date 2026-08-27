@@ -25,6 +25,22 @@ import (
 	state "github.com/H4RL33/wormhole/internal/types/projectstate"
 )
 
+func TestGatewayWiresExactWorkspaceConflictGate(t *testing.T) {
+	store, err := localstore.Open(filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	repositories, err := newRoutedSyncRepositories(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate, ok := repositories.conflicts.(*localstore.WorkspaceRepo)
+	if !ok || gate == nil || gate != repositories.workspaces {
+		t.Fatalf("routed sync conflict gate=%T %p, workspace repo=%p", repositories.conflicts, gate, repositories.workspaces)
+	}
+}
+
 func TestSupervisorDependenciesConstructLocalOnlyGraph(t *testing.T) {
 	store, err := localstore.Open(filepath.Join(t.TempDir(), "gateway.db"))
 	if err != nil {
