@@ -542,15 +542,15 @@ func stage2ProcessAgentSession(t *testing.T, root, harness string) localidentity
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := len(sessions) - 1; i >= 0; i-- {
-		if sessions[i].HarnessName == harness && sessions[i].AgentID != "" {
+	for i := range sessions {
+		if sessions[i].HarnessName == harness && sessions[i].AgentID != "" && sessions[i].EndedAt == nil {
 			if sessions[i].SessionID == "" || sessions[i].AccountableHumanID == "" || sessions[i].ModelName != "process-fixture" {
 				t.Fatalf("incomplete selected agent/session provenance: %+v", sessions[i])
 			}
 			return sessions[i]
 		}
 	}
-	t.Fatalf("no %s agent session in %+v", harness, sessions)
+	t.Fatalf("no active %s agent session in %+v", harness, sessions)
 	return localidentity.ConnectionSession{}
 }
 
