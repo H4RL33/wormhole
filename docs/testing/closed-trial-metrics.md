@@ -10,6 +10,12 @@ validate or format local JSON.
 This schema is not trial evidence. Do not add example participant results or
 the dated evidence files during the tooling step.
 
+Schema version 1 retains the `code_graph_*` measurement fields,
+`code_graph_off` baseline value, and `code_graph` support value only so the
+dated July 2026 records remain decodable. The current Stage 2 trial has no
+public structural-discovery surface: use `guidance_off`, leave those legacy
+measurements `null`, and list their exact names under `metrics.omissions`.
+
 ## Export envelope
 
 Each participant first receives a preview with the `TrialParticipantExport`
@@ -74,8 +80,8 @@ The measurement names and units are fixed:
 | `kb_relevant_results` | Results judged relevant. |
 | `kb_results_considered` | Total results considered for relevance. |
 | `duplicate_or_low_value_kb_contributions` | Contributions later judged duplicate or low value. |
-| `code_graph_useful_queries` | Queries judged useful under the predeclared criterion. |
-| `code_graph_queries` | All Code Graph queries, including failed, incomplete, and useless calls. |
+| `code_graph_useful_queries` | Legacy July field; `null` plus an omission in current Stage 2 records. |
+| `code_graph_queries` | Legacy July field; `null` plus an omission in current Stage 2 records. |
 | `files_read_before_correct_edit` | File count before the first correct edit; `null` if no correct edit or unavailable. |
 | `source_bytes_read_before_correct_edit` | Byte count only, never bytes/content themselves; `null` if unavailable. |
 | `event_count` | Events observed in the trial window. |
@@ -98,7 +104,7 @@ tool attempt count = tool_success_count + tool_denial_count + tool_failure_count
 tool success rate = tool_success_count / tool attempt count
 tool denial rate = tool_denial_count / tool attempt count
 KB relevance rate = kb_relevant_results / kb_results_considered
-Code Graph useful-query rate = code_graph_useful_queries / code_graph_queries
+legacy July useful-query rate = code_graph_useful_queries / code_graph_queries
 Event noise rate = event_noise_count / event_count
 ```
 
@@ -107,9 +113,10 @@ If a denominator is zero, report the rate as missing, not zero or 100%.
 ## Controlled comparison
 
 For at least one representative Task per completed participant, choose
-`guidance_off` or `code_graph_off` as `baseline_kind`. The baseline and alpha
-arms must use the same checkout revision, permissions, success criteria, and
-measurement method; all four matching-control fields must be `true`.
+`guidance_off` as `baseline_kind`. The decoder accepts `code_graph_off` only for
+dated July compatibility; it is not a current trial procedure. The baseline and
+alpha arms must use the same checkout revision, permissions, success criteria,
+and measurement method; all four matching-control fields must be `true`.
 
 Both arms record:
 
@@ -160,8 +167,9 @@ violations. It also rejects Bearer, Basic, GitHub/GitLab PAT, and `sk-`-shaped
 credential values before typed decoding.
 
 Private query text is never exported. Optional query-category codes have a
-separate per-participant consent switch and timestamp. General trial consent,
-Passport possession, or use of Code Graph is not private-query consent.
+separate per-participant consent switch and timestamp. General trial consent or
+Passport possession is not private-query consent. The legacy graph-related
+consent wording applies only to dated July records.
 
 Input and formatted-output JSON are each limited to 1 MiB, with at most 64
 nested containers. Participants and every array are capped at 100 items, and

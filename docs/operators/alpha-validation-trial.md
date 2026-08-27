@@ -103,14 +103,39 @@ each attempted tool call in exactly one of success, denial, or failure.
 1. Give the participant the release-candidate build and its commit. Have them
    follow the [README quickstart](../../README.md#quickstart) from a supported
    Linux or WSL environment.
-2. Start `gatewayd` with the chosen trial profile, then use `wormhole connect`
-   or `wormhole join` with the minimum permissions needed by the benchmark
-   Task. Do not copy credentials into the worksheet.
-3. Record installation completion and elapsed time to the first successful
-   Gateway MCP call. Confirm the harness calls the local `wormhole mcp` bridge,
-   never Fabric directly.
-4. Ask the harness to list tools and make one read-only Gateway call. Record
-   success or denial without recording arguments that contain private text.
+2. Before handing over the checkout, have the operator provision any approved
+   Fabric project membership and credential profile through the Gateway-owned
+   enrolment control path. There is no public CLI enrolment command. Do not copy
+   credentials into the worksheet.
+3. From the participant's checkout, run the canonical resumable setup and
+   review its complete plan before approval:
+
+   ```bash
+   wormhole setup --publication private_git
+   ```
+
+   Use `local_only` for an isolated single-device trial or `public_git` only
+   when the participant has explicitly approved tracked-state publication.
+   Setup ensures the owner-only Gateway service, binds the checkout, selects
+   the local identity, imports the accepted portable Git base, records the
+   publication policy, and proposes detected connector changes.
+4. Inspect the participant's harness connector and install it explicitly if
+   setup did not already do so:
+
+   ```bash
+   wormhole connector list <codex|claude>
+   wormhole connector install --yes <codex|claude>
+   ```
+
+5. Record installation completion and elapsed time to the first successful
+   Gateway MCP call. Confirm the harness launches the local `wormhole mcp`
+   bridge and never calls Fabric directly.
+6. Run `wormhole status`. Ask the harness to list tools, compare the result with
+   the exact 27-tool Gateway inventory in
+   [`docs/testing/alpha-validation.md`](../testing/alpha-validation.md), and
+   call `wormhole.workspace.status`. Fabric's distinct server registry has
+   exactly 20 tools and no `wormhole.agent.register`; it is not a harness
+   endpoint. Record success or denial without recording private arguments.
 
 Escalate unsupported platforms, malformed enrolment, profile permission
 problems, and inability to reach the local socket. Never ask the participant to
@@ -130,21 +155,43 @@ paste a credential file or authorization header.
 Record coaching needed to understand or use the managed guidance. Operator
 coaching is evidence and must not be silently omitted.
 
-### 3. Enable Code Graph
+### 3. Exercise the portable workspace loop
 
-Code Graph is local, experimental, Go-only for alpha, and disabled by default.
-From the participant-approved checkout:
+Use the same checkout binding for both the CLI and harness. Start with
+`wormhole status` and `wormhole.workspace.status`, then perform the predeclared
+non-sensitive benchmark mutation. If the participant directly edits the
+tracked `.wormhole/state/v1/` tree, run `wormhole import` before continuing.
+Review the candidate and its semantic digest with:
 
 ```bash
-wormhole config code-graph enable --project <project-uuid> --confirm
-wormhole config code-graph status --project <project-uuid>
+wormhole diff
 ```
 
-Explain the local CPU, memory, disk, and I/O cost before the participant
-confirms. Record only query counts, usefulness decisions, selected-file counts,
-source-byte totals, and—after separate timestamped consent—one of the documented
-query-category codes. Query text and source bodies remain prohibited even with
-that consent.
+For `local_only` or `private_git`, checkpoint the reviewed candidate with
+`wormhole checkpoint`. For `public_git`, acknowledge only the exact current
+digest printed by `diff`:
+
+```bash
+wormhole checkpoint --publication-review-digest sha256:<review-digest>
+```
+
+Checkpoint may materialise `.wormhole/state/v1/` in the working tree, but
+Wormhole must not stage, commit, or push it. Record Git HEAD, remotes, and index
+before and after the operation. Only the participant may accept the candidate
+with ordinary Git commands.
+
+When the procedure deliberately tests pausing unpublished work, use a unique
+UUID and an explicit label, then confirm the result through status:
+
+```bash
+wormhole stash --request-id <uuid> --label "trial pause"
+wormhole status
+```
+
+The harness equivalents are
+`wormhole.workspace.{status,diff,import,checkpoint,stash}` and must return the
+same semantic results. Gateway resolves the workspace binding and actor; never
+put either into trial-authored MCP arguments.
 
 ### 4. Run the benchmark Task and comparison
 
@@ -152,10 +199,9 @@ Choose one representative coding Task before either arm starts. Record only
 its whitelisted task kind (`feature`, `bugfix`, `review`, `refactor`,
 `documentation`, or `other`), then freeze its
 checkout revision, permissions, success criteria, and measurement method. Use
-one of these baselines:
-
-- managed guidance off, compared with the alpha configuration; or
-- Code Graph off, compared with the alpha configuration.
+managed guidance off as the baseline and the participant-approved guidance as
+the alpha arm. The removed structural-discovery surface is not a current
+comparison arm.
 
 Use the same Task in both arms. Counterbalance arm order across participants
 when practical and record the order in the operator worksheet. Measure tool
@@ -190,9 +236,11 @@ rerun in an isolated trial project. Do not improvise destructive recovery.
 ### 6. Support and escalation
 
 Classify support using only `installation`, `enrolment`, `permissions`,
-`guidance`, `code_graph`, `sync_outage`, `task_workflow`, `measurement`, or
-`privacy`. Record failures and procedure omissions using the code lists in the
-metrics schema, without source, query, credential, or project content.
+`guidance`, `sync_outage`, `task_workflow`, `measurement`, or `privacy` for a
+current Stage 2 run. The metrics schema retains an older structural-discovery
+category solely so dated July evidence remains readable; do not select it for
+this procedure. Record failures and procedure omissions using the code lists
+in the metrics schema, without source, query, credential, or project content.
 
 Stop the affected step and escalate to the trial lead for credential exposure,
 suspected cross-project data, data-loss risk, repeated sync state, validator

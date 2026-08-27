@@ -18,7 +18,7 @@ one request over Gateway's existing same-user,
 OS-protected local MCP socket:
 
 ```text
-wormhole join/connect -> local Gateway socket -> Gateway-owned Fabric client
+operator-approved enrolment request -> local Gateway socket -> Gateway-owned Fabric client
 ```
 
 There is no CLI-to-Fabric fallback in this lifecycle. Gateway is the only

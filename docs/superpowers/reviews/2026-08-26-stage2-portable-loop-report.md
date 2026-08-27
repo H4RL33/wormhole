@@ -4,8 +4,8 @@
 **Date:** 2026-08-27
 **Base implementation:** `5a82d115897e9342cbd5e6528978bd923991d825`
 (`feat(cli): complete Gateway setup cutover`)
-**Controller remediation:** separate follow-up commit; exact SHA is recorded in
-the external Stage 2 Task 9 report after commit creation.
+**Controller remediation:** `374dad3eca934f6398b97002f8bf96ea911c5b2d`
+(`fix(api)!: close Stage 2 cutover gaps`)
 
 ## Outcome
 
@@ -73,6 +73,17 @@ and clone tests close proof gaps in already-shared production behavior: exact
 comparisons exposed workspace-bound review/journal identifiers, and normalisation
 is restricted to those non-semantic identifiers.
 
+The final documentation correction also followed RED/GREEN. A repository-wide
+active-doc regression first reported the two live alpha guides plus one enrolment
+architecture example and one data-entity example that still named removed public
+commands. A second regression failed because the alpha validation guide did not
+enumerate the current registries. After the guidance correction, the scan covers
+`README.md`, `AGENTS.md`, `agents/README.md`, all live Markdown under `docs/`
+(excluding dated plans/reviews/evidence and explicitly labelled internal
+artifacts), and the exact documented inventories are 27 Gateway tools and 20
+Fabric tools. Its command patterns use word boundaries and explicitly prove that
+`wormhole connector` is not a false positive.
+
 ## Public cutover
 
 - CLI dispatch/help and the alpha inventory no longer contain the removed
@@ -91,6 +102,11 @@ is restricted to those non-semantic identifiers.
 - README, connector guide, compatibility policy, alpha-contract guide, agent
   context, implementation rules, generated guidance, current wiki CLI guide,
   release acceptance fixture, and machine-readable contract changed together.
+- The closed-trial runbook and automated validation guide now use canonical
+  setup, connector, integration-guidance, and portable workspace flows. The
+  process guide distinguishes Gateway-owned fixture enrolment from public CLI
+  setup, enumerates the exact 27/20 Gateway/Fabric registries, and labels dated
+  July graph evidence and the preserved internal benchmark as non-live.
 
 The exact prescribed scan reports only `runConnector` and `wormhole connector`
 locations. Its `runConnect|wormhole (join|connect|init)` alternatives lack a word
@@ -140,6 +156,8 @@ The test passes in both the focused and full owning-package runs.
 | Preserved `internal/runtime/codegraph/...` packages | PASS |
 | Focused race: CLI, Gateway, local API, config, connectors | PASS |
 | Alpha CLI/Gateway contract and generated-guidance tests | PASS |
+| Active README/agent/docs stale-surface scan with connector boundary guard | PASS |
+| Documented exact Gateway 27 / Fabric 20 MCP inventories | PASS |
 | `go test ./... -count=1` | All reported non-PostgreSQL packages PASS; PostgreSQL-backed `internal/mcp` fails on `localhost:5432` connection refusal |
 | `make check` build and vet | PASS before required integration phase |
 | `make check` required integration | BLOCKED only by unavailable PostgreSQL on `localhost:5432`; tests were not skipped or weakened |

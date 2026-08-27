@@ -328,7 +328,7 @@ project operations to one class.
 ### 8.5 Project Setup
 
 `wormhole setup` is the single onboarding and project-configuration flow. It
-replaces the legacy `wormhole join` and `wormhole connect` concepts.
+replaces the legacy split onboarding and combined-connection concepts.
 
 Setup establishes the project mode, locates or initializes typed `.wormhole/`
 state, and configures optional Fabric use when selected. It does not make Fabric

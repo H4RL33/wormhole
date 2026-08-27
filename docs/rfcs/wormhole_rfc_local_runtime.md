@@ -127,8 +127,10 @@ runtime, transport, workspace, and optional-coordination assumptions:
 - `wormhole.sync.*` remains the Gateway-to-Fabric protocol when a workspace is
   Fabric-bound. It is not required for Git-native public workspaces.
 - `wormhole.workspace.*` exposes local status, diff, import, checkpoint, and
-  stash project operations, while `wormhole.code_graph.*` exposes local
-  derivative graph operations. Neither namespace is a new Core pillar.
+  stash project operations. The retained structural-discovery packages are
+  internal machine-private implementation only; Stage 2 registers no CLI, MCP,
+  setup, connector, or generated-guidance adapter for them. The workspace
+  namespace is not a new Core pillar.
 - Git-tracked Wormhole records are project content. They are not credentials,
   Passport grants, nor a substitute for server RLS.
 - Where a Fabric namespace exists, RFC-0001's server-side RLS, permissions,
@@ -150,7 +152,7 @@ one gatewayd supervisor ─── stable same-user socket
         ├── Git observer
         │        ├── tracked .wormhole/state/v1 base
         │        ├── semantic rebase and deterministic checkpoints
-        │        └── per-checkout model-free Code Graph worker
+        │        └── retained internal per-checkout model-free graph packages
         │
         └── optional, explicitly bound Fabric stream
                  └── identified public or authenticated private coordination
@@ -183,9 +185,7 @@ command is `wormhole setup`, which:
    login/profile selection for private Fabric, or remains local-only;
 6. starts or upgrades the one `gatewayd` supervisor as necessary;
 7. installs or repairs supported harness connector launchers; and
-8. asks whether to enable Code Graph and, if selected, completes its full
-   initial model-free build; and
-9. verifies local readiness without requiring Fabric for a Git-only workspace.
+8. verifies local readiness without requiring Fabric for a Git-only workspace.
 
 `join` and `connect` are replaced by this one coherent flow. Connector setup
 is transactional: failed replacement restores the prior harness configuration
@@ -205,9 +205,8 @@ Other supported harness adapters follow the same transactional lifecycle.
 
 Human CLI workspace operations have equivalent MCP operations at
 `wormhole.workspace.status|diff|import|checkpoint|stash`. Setup, private login,
-Fabric and connector administration, and Code Graph disablement remain human
-control-plane operations; ordinary project operations do not split into a
-human and an agent model.
+and Fabric and connector administration remain human control-plane operations;
+ordinary project operations do not split into a human and an agent model.
 
 ### 6.2 Gateway supervisor
 
@@ -286,34 +285,29 @@ containing only `source_activity_id` and `source_activity_digest`. Promotion
 marks/receipts that source atomically in one ProjectState-owned immediate transaction.
 Checkpoint only materialises already-portable operations and never performs promotion.
 
-### 6.4 Per-checkout Code Graph workers
+### 6.4 Retained internal per-checkout graph packages
 
-When Code Graph is enabled, its immutable workspace binding gets an isolated,
-model-free worker and derivative store. The worker receives only that
-checkout's root, Git revision, declared source limits, and binding identity. It
-may build, replace, or discard a graph without affecting another checkout or
-worktree.
+The internal runtime packages preserve an isolated, model-free worker and
+derivative-store design for an immutable workspace binding. Stage 2 deliberately
+does not wire those packages to public CLI, MCP, setup, connector, help,
+contract, or generated guidance. Internal tests may build, replace, or discard
+a graph without affecting another checkout or worktree. The worker receives
+only that checkout's root, Git revision, declared source limits, and binding
+identity.
 It never persists source bodies as Wormhole truth, calls Fabric, or accesses
 another workspace's files. It uses no model download or inference, embedding,
 vector storage/search/call, or implicit network access. Build progress and
 failures are reported in status under normal OS scheduling; there are no compute
 warnings, profiles, or Warpspeed. The checkout view is read-only.
 
-The CLI exposes `wormhole code-graph status|query|rebuild|disable`; MCP exposes
-equivalent project operations for status, query, and rebuild. Every revision
-stores a source fingerprint plus an analysis fingerprint over the source
-fingerprint, all tracked non-source inputs declared by the adapter, normalised
-build/target/configuration, graph/adapter schema version, and compiler/toolchain
-identity. Every status and query recomputes and compares the analysis
-fingerprint, including tracked dirty changes. A mismatch reports indexed and
-current analysis fingerprints, source fingerprints where different, dirty
-state, `graph_not_current`, and `rebuild_recommended`, and query fails closed
-without returning matches, edges, or source. Rebuild explicitly indexes that
-exact analysis view and publishes copy-on-write only if its fingerprint remains
-unchanged. A failed rebuild preserves the prior revision for recovery but never
-serves it as current. Restart or adapter/toolchain upgrade repeats this freshness
-check; disable removes only that workspace's derivative graph and machine-local
-enablement. No watcher or automatic rebuild is required.
+Every internal revision stores a source fingerprint plus an analysis fingerprint
+over the source fingerprint, all tracked non-source inputs declared by the
+adapter, normalised build/target/configuration, graph/adapter schema version, and
+compiler/toolchain identity. Internal reads recompute and compare that analysis
+fingerprint, including tracked dirty changes, and fail closed on a mismatch.
+Candidate builds publish copy-on-write only if the fingerprint remains
+unchanged; failure preserves the prior derivative revision for internal recovery
+but never makes it current. No watcher or automatic rebuild is required.
 
 ### 6.5 Optional Fabric
 

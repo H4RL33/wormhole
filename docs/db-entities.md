@@ -252,6 +252,7 @@ Example row:
 }
 ```
 
-When `wormhole join --role backend-engineer` is run (without explicit `--capabilities` or `--roles` flags),
-the agent inherits `default_capabilities` and `default_roles` from the template, reducing flag verbosity
-for common roles. Explicit flags always override template defaults.
+Role templates are Fabric-side policy data for approved server workflows. The
+current public CLI exposes no role-template enrolment shortcut: Gateway-owned
+enrolment sends an explicit, closed capability, role, repository, and permission
+request, and missing authority is never inferred from a CLI default.
