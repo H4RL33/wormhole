@@ -1440,4 +1440,16 @@ exact v7 reopens; every other existing database, including former exact v6, is
 preserved and refused. Complete-key Fabric routes, cursors, queue/audit records,
 credential rotation, exact-workspace conflict gates, and routed engine lifecycle
 are implemented. Focused and race suites passed; canonical `make check` passed
-with 80.0% merged statement coverage. No Task 3 implementation was included.
+with 80.0% merged statement coverage. Independent review found three Important
+issues; commits `8a2a2ff` and `b7ef0b9` fixed credential-echo leakage, restored
+all 81 displaced runtime tests plus six additional Gateway tests, removed every
+dead legacy build tag, and asserted exact SQLite foreign-key result codes.
+Canonical `make check` then passed at 81.0% (24,725/30,533 statements), and the
+original reviewer approved the amended Task 2 range with Critical 0 / Important 0 /
+Minor 0. Task 2 is complete; no Task 3 implementation was included.
+
+Stage 3 Task 3 authority and plan (2026-08-27): human approval selected the
+immutable Activity ledger/receipt plus separate lifecycle model and authorized a
+closed-pre-alpha private-format hard cut from exact v7 to exact v8. The focused
+amendment is commit `d5de7af`; the reconciled five-slice executable plan is commit
+`c49729f`. Task 3A (strict Activity routing/codecs) is the next implementation slice.
