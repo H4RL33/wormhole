@@ -160,6 +160,81 @@ func TestRun_FreshSupervisorRequiresBindingContext(t *testing.T) {
 	}
 }
 
+func TestRun_RecoversCrashLeftIdentitySessionAfterOwnerLockAndPreservesAgent(t *testing.T) {
+	home, err := os.MkdirTemp("", "gw-id-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	t.Setenv("HOME", home)
+	runtimeDir := filepath.Join(home, "run")
+	dataHome := filepath.Join(home, "data")
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	identityRoot := filepath.Join(dataHome, "wormhole", "identities")
+	identity, err := localidentity.Open(identityRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := identity.EnsureSelectedForSetup(t.Context(), "00000000-0000-4000-8000-000000000031", types.ConfirmedIdentitySelection{DisplayName: "Restart Owner"}); err != nil {
+		t.Fatal(err)
+	}
+	crashed, err := identity.OpenMCP(t.Context(), localidentity.MCPClientInfo{Name: "codex", Version: "0.150"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := identity.ResolveLocalActor(t.Context(), crashed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, "default") }()
+	socketPath := filepath.Join(runtimeDir, "wormhole", "wormholed.sock")
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		select {
+		case runErr := <-done:
+			t.Fatalf("Gateway failed before serving: %v", runErr)
+		default:
+		}
+		if _, err := os.Lstat(socketPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("Gateway did not serve after identity recovery")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	recovered, err := identity.Session(t.Context(), crashed.SessionID)
+	if err != nil || recovered.EndedAt == nil {
+		cancel()
+		t.Fatalf("Gateway startup did not terminalize crash-left session: %+v, %v", recovered, err)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Gateway shutdown: %v", err)
+	}
+
+	reopened, err := localidentity.Open(identityRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := reopened.OpenMCP(t.Context(), localidentity.MCPClientInfo{Name: "CODEX", Version: "0.151"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := reopened.ResolveLocalActor(t.Context(), next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.AgentID != before.AgentID || after.AccountableHumanID != before.AccountableHumanID || after.SessionID == before.SessionID {
+		t.Fatalf("restart actor = %+v, before %+v", after, before)
+	}
+}
+
 func TestRun_BlockedWorkspaceFailsBeforeSocketMutationAndReleasesOwnerLock(t *testing.T) {
 	home, err := os.MkdirTemp("", "gw-life-")
 	if err != nil {

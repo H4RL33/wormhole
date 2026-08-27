@@ -119,13 +119,17 @@ func TestSupervisorIsolatesMultipleWorkspacesThroughOneGateway(t *testing.T) {
 		t.Fatalf("second Listen error = %v, want ErrSupervisorAlreadyListening", err)
 	}
 	server.clock = func() time.Time { return time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC) }
+	connection, err := identity.OpenMCP(t.Context(), localidentity.MCPClientInfo{Name: "supervisor-test", Version: "1"})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	for _, want := range []types.WorkspaceBinding{first, second} {
 		raw, err := json.Marshal(map[string]any{privateRequestContextKey: map[string]string{"working_directory": want.Checkout.CanonicalPath}})
 		if err != nil {
 			t.Fatal(err)
 		}
-		ctx, _, err := server.resolvePrivateRequest(context.Background(), raw)
+		ctx, _, err := server.resolvePrivateRequest(context.Background(), raw, connection)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -134,8 +138,8 @@ func TestSupervisorIsolatesMultipleWorkspacesThroughOneGateway(t *testing.T) {
 			t.Fatalf("cwd %q resolved (%+v, %v), want %+v", want.Checkout.CanonicalPath, got, err, want)
 		}
 		actor, err := ServerOwnedActor(ctx)
-		if err != nil || actor.HumanPrincipalID != profile.HumanPrincipalID || actor.ActorKind != types.ActorHuman || actor.Assurance != types.AssuranceLocal {
-			t.Fatalf("cwd %q actor = (%+v, %v), want local human %q", want.Checkout.CanonicalPath, actor, err, profile.HumanPrincipalID)
+		if err != nil || actor.AccountableHumanID != profile.HumanPrincipalID || actor.ActorKind != types.ActorAgent || actor.Assurance != types.AssuranceLocal || actor.SessionID != connection.SessionID {
+			t.Fatalf("cwd %q actor = (%+v, %v), want accountable local agent for %q", want.Checkout.CanonicalPath, actor, err, profile.HumanPrincipalID)
 		}
 	}
 	syncStatus := privateDispatchResult(t, server, first, "wormhole.sync.status", nil, nil)

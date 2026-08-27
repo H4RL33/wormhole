@@ -212,7 +212,7 @@ func (s *Server) PrivateSetupEnsureIdentityRPC(ctx context.Context, req SetupIde
 	if selectedErr == nil && selected.DisplayName != req.Selection.DisplayName {
 		return SetupIdentityReadback{}, config.ErrConfirmedPlanDrift
 	}
-	actor, actorErr := s.actorResolver.ResolveLocalActor(ctx, ConnectionIdentity{OccurredAt: s.setupNow()})
+	actor, actorErr := s.identityStore.ResolveHumanActor(ctx, s.setupNow())
 	if actorErr != nil && !errors.Is(actorErr, localidentity.ErrNoSelectedIdentity) {
 		return SetupIdentityReadback{}, ErrPrivateSetupRequest
 	}
@@ -236,7 +236,7 @@ func (s *Server) PrivateSetupEnsureIdentityRPC(ctx context.Context, req SetupIde
 		s.afterSetupIdentityCommit()
 	}
 	if actorErr != nil {
-		actor, err = s.actorResolver.ResolveLocalActor(ctx, ConnectionIdentity{OccurredAt: s.setupNow()})
+		actor, err = s.identityStore.ResolveHumanActor(ctx, s.setupNow())
 		if err != nil || actor.ValidateLocalAction() != nil {
 			return SetupIdentityReadback{}, ErrPrivateSetupRequest
 		}
@@ -384,10 +384,10 @@ func (s *Server) resolveSetupBinding(ctx context.Context, workingDirectory strin
 	if !withActor {
 		return binding, types.ActorEnvelope{}, nil
 	}
-	if s.actorResolver == nil {
+	if s.identityStore == nil {
 		return types.WorkspaceBinding{}, types.ActorEnvelope{}, ErrPrivateSetupRequest
 	}
-	actor, err := s.actorResolver.ResolveLocalActor(ctx, ConnectionIdentity{OccurredAt: s.setupNow()})
+	actor, err := s.identityStore.ResolveHumanActor(ctx, s.setupNow())
 	if err != nil || actor.ValidateLocalAction() != nil {
 		return types.WorkspaceBinding{}, types.ActorEnvelope{}, ErrPrivateSetupRequest
 	}

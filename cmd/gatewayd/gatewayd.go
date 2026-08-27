@@ -99,6 +99,9 @@ func runLocalOnlySupervisor(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("open local identity store: %w", err)
 	}
+	if err := identity.RecoverConnectionSessions(ctx); err != nil {
+		return fmt.Errorf("recover local identity sessions: %w", err)
+	}
 	supervisor, err := newLocalSupervisorWithProjectState(store, projectState, identity)
 	if err != nil {
 		return err

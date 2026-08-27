@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/runtime/config"
+	"github.com/H4RL33/wormhole/internal/runtime/localidentity"
 )
 
 const (
@@ -580,14 +581,43 @@ type localSyncStatusResult struct {
 // the old one-shot protocol never carried: whether initialize +
 // notifications/initialized completed, and a write mutex serializing this
 // connection's writes (a tools/call response racing a
-// notifications/wormhole.event push, per design doc §2). initialized is
-// only ever read/written from handle()'s single read-loop goroutine for a
-// given connection — the subscription delivery goroutine (see
-// handleChannelSubscribeMCP) never touches it, so no extra lock guards it.
+// notifications/wormhole.event push, per design doc §2). It also binds the
+// Gateway-generated identity session established from initialize/clientInfo.
+// Lifecycle fields are only read/written from handle()'s single read-loop
+// goroutine for a given connection — the subscription delivery goroutine (see
+// handleChannelSubscribeMCP) never touches them, so no extra lock guards them.
 type mcpSession struct {
 	initializeReceived bool
 	initialized        bool
+	connectionIdentity ConnectionIdentity
 	writeMu            sync.Mutex
+}
+
+type initializeParams struct {
+	ProtocolVersion string               `json:"protocolVersion,omitempty"`
+	Capabilities    map[string]any       `json:"capabilities,omitempty"`
+	ClientInfo      initializeClientInfo `json:"clientInfo,omitempty"`
+}
+
+type initializeClientInfo struct {
+	Name         string `json:"name,omitempty"`
+	Version      string `json:"version,omitempty"`
+	ModelName    string `json:"modelName,omitempty"`
+	ModelVersion string `json:"modelVersion,omitempty"`
+}
+
+func decodeInitializeParams(raw json.RawMessage) (initializeParams, error) {
+	if len(raw) == 0 {
+		raw = json.RawMessage(`{}`)
+	}
+	if err := rejectDuplicateJSONMembers(raw); err != nil {
+		return initializeParams{}, err
+	}
+	var params initializeParams
+	if err := decodeClosedJSON(raw, &params); err != nil {
+		return initializeParams{}, err
+	}
+	return params, nil
 }
 
 // initializeResult is the "initialize" response result shape (design doc
@@ -939,7 +969,7 @@ func (s *Server) handleToolsCall(ctx context.Context, sess *mcpSession, conn net
 	if s.privateRuntimeConfigured() {
 		var publicArguments json.RawMessage
 		var err error
-		callCtx, publicArguments, err = s.resolvePrivateRequest(ctx, params.Arguments)
+		callCtx, publicArguments, err = s.resolvePrivateToolRequest(ctx, params.Name, params.Arguments, sess.connectionIdentity)
 		if err != nil {
 			return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
 		}
@@ -1109,6 +1139,34 @@ func (s *Server) dispatchMCPMessage(ctx context.Context, sess *mcpSession, conn 
 
 	switch req.Method {
 	case "initialize":
+		if sess.initializeReceived {
+			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: "initialize already received"}})
+			return
+		}
+		params, err := decodeInitializeParams(req.Params)
+		if err != nil {
+			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: "invalid initialize params"}})
+			return
+		}
+		if s.identityStore != nil {
+			info := localidentity.MCPClientInfo{Name: params.ClientInfo.Name, Version: params.ClientInfo.Version, ModelName: params.ClientInfo.ModelName, ModelVersion: params.ClientInfo.ModelVersion}
+			var connection ConnectionIdentity
+			if humanMCPClient(params.ClientInfo.Name) {
+				connection, err = s.identityStore.OpenHuman(ctx, info)
+			} else {
+				connection, err = s.identityStore.OpenMCP(ctx, info)
+			}
+			if err != nil {
+				// Setup must be able to establish the first selected human. It
+				// receives no actor authority until that durable step succeeds.
+				if !errors.Is(err, localidentity.ErrNoSelectedIdentity) {
+					writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: "initialize identity unavailable"}})
+					return
+				}
+			} else {
+				sess.connectionIdentity = connection
+			}
+		}
 		sess.initializeReceived = true
 		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: marshalResult(handleInitialize(s.version))})
 

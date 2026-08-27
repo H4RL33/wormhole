@@ -1,4 +1,5 @@
-// Package localidentity owns machine-private, owner-only local human identity.
+// Package localidentity owns machine-private, owner-only local human identity,
+// durable harness agents, and bounded connection-session accountability.
 package localidentity
 
 import (
@@ -19,10 +20,11 @@ import (
 const (
 	selectedRecordName          = "selected.json"
 	lockRecordName              = ".store.lock"
-	maxLocalIdentityRecordBytes = 16 * 1024
+	maxLocalIdentityRecordBytes = 16 * 1024 * 1024
 	// The identity root only needs a receipt, key, profile, selection, lock,
-	// and a bounded number of interrupted-publication temporary files. Refuse
-	// oversized directories before examining or changing their contents.
+	// one indexed connection record, and a bounded number of interrupted-
+	// publication temporary files. Refuse oversized directories before
+	// examining or changing their contents.
 	maxLocalIdentityStoreEntries = 64
 )
 
@@ -46,16 +48,16 @@ type PublicHumanProfile struct {
 	CreatedAt        time.Time `json:"created_at"`
 }
 
-// ConnectionIdentity supplies connection-owned action time to actor
-// resolution. It intentionally contains no caller-chosen actor or routing
-// fields; those authorities are Gateway-owned in the next stage.
+// ConnectionIdentity supplies a Gateway-generated session and action time to
+// actor resolution. It contains no caller-chosen actor or routing fields.
 type ConnectionIdentity struct {
+	SessionID  string
 	OccurredAt time.Time
 }
 
 func (c ConnectionIdentity) validate() error {
 	_, offset := c.OccurredAt.Zone()
-	if c.OccurredAt.IsZero() || offset != 0 {
+	if !types.CanonicalUUID(c.SessionID) || c.OccurredAt.IsZero() || offset != 0 {
 		return ErrInvalidConnectionIdentity
 	}
 	return nil
@@ -243,9 +245,10 @@ func (s *Store) ensureSelectedPointer(fd int, humanID string) error {
 }
 
 type identityTopology struct {
-	setup    setupRecord
-	found    bool
-	complete bool
+	setup       setupRecord
+	found       bool
+	complete    bool
+	connections *connectionRecords
 }
 
 func inspectIdentityTopology(fd int, selection types.ConfirmedIdentitySelection) (identityTopology, error) {
@@ -256,10 +259,17 @@ func inspectIdentityTopology(fd int, selection types.ConfirmedIdentitySelection)
 	receipts := map[string]setupRecord{}
 	humans := map[string]humanRecord{}
 	keys := map[string]ed25519.PrivateKey{}
+	topology := identityTopology{}
 	for _, name := range names {
 		switch {
 		case name == lockRecordName || name == selectedRecordName:
 			continue
+		case name == connectionRecordsName:
+			records, exists, readErr := readConnectionRecords(fd)
+			if readErr != nil || !exists {
+				return identityTopology{}, ErrInvalidStoreRecord
+			}
+			topology.connections = &records
 		case isLocalIdentityTemporaryName(name):
 			if _, exists, readErr := readLocalIdentityFile(fd, name); readErr != nil || !exists {
 				return identityTopology{}, ErrInvalidStoreRecord
@@ -300,7 +310,7 @@ func inspectIdentityTopology(fd int, selection types.ConfirmedIdentitySelection)
 		}
 	}
 	if len(receipts) == 0 {
-		if len(humans) != 0 || len(keys) != 0 {
+		if len(humans) != 0 || len(keys) != 0 || topology.connections != nil {
 			return identityTopology{}, ErrIdentityConflict
 		}
 		return identityTopology{}, nil
@@ -322,6 +332,18 @@ func inspectIdentityTopology(fd int, selection types.ConfirmedIdentitySelection)
 			return identityTopology{}, ErrIdentityConflict
 		}
 	}
+	if topology.connections != nil {
+		for _, agent := range topology.connections.Agents {
+			if agent.AccountableHumanID != candidate.HumanPrincipalID {
+				return identityTopology{}, ErrIdentityConflict
+			}
+		}
+		for _, session := range topology.connections.Sessions {
+			if session.AccountableHumanID != candidate.HumanPrincipalID {
+				return identityTopology{}, ErrIdentityConflict
+			}
+		}
+	}
 	human, hasHuman := humans[candidate.HumanPrincipalID]
 	key, hasKey := keys[candidate.HumanPrincipalID]
 	// The durable order is receipt, key, profile, selected pointer. A key
@@ -333,7 +355,10 @@ func inspectIdentityTopology(fd int, selection types.ConfirmedIdentitySelection)
 	if hasHuman && string(human.PublicKey) != string(key.Public().(ed25519.PublicKey)) {
 		return identityTopology{}, ErrIdentityConflict
 	}
-	return identityTopology{setup: candidate, found: true, complete: hasHuman && hasKey}, nil
+	topology.setup = candidate
+	topology.found = true
+	topology.complete = hasHuman && hasKey
+	return topology, nil
 }
 
 func parseSetupRecordName(name string) string {
@@ -458,23 +483,6 @@ func (s *Store) SelectedMatchesSetup(ctx context.Context, selection types.Confir
 	return profile, human.DisplayName == selection.DisplayName && human.Email == selection.Email, nil
 }
 
-// ResolveLocalActor derives a local human actor from the selected owner-only
-// identity. Callers cannot supply a human principal ID or assurance.
-func (s *Store) ResolveLocalActor(ctx context.Context, connection ConnectionIdentity) (types.ActorEnvelope, error) {
-	if err := connection.validate(); err != nil {
-		return types.ActorEnvelope{}, err
-	}
-	profile, err := s.Selected(ctx)
-	if err != nil {
-		return types.ActorEnvelope{}, err
-	}
-	actor := types.ActorEnvelope{ActorKind: types.ActorHuman, HumanPrincipalID: profile.HumanPrincipalID, Assurance: types.AssuranceLocal, OccurredAt: connection.OccurredAt}
-	if err := actor.ValidateLocalAction(); err != nil {
-		return types.ActorEnvelope{}, err
-	}
-	return actor, nil
-}
-
 func (s *Store) openRoot() (int, error) {
 	_, fd, err := openLocalIdentityRoot(s.root)
 	return fd, err
@@ -483,7 +491,7 @@ func (s *Store) openRoot() (int, error) {
 func (s *Store) newUUID() (string, error) {
 	bytes := make([]byte, 16)
 	if _, err := io.ReadFull(readerFromRandom(s.random), bytes); err != nil {
-		return "", fmt.Errorf("localidentity: generate human UUID: %w", err)
+		return "", fmt.Errorf("localidentity: generate authority UUID: %w", err)
 	}
 	bytes[6] = bytes[6]&0x0f | 0x40
 	bytes[8] = bytes[8]&0x3f | 0x80

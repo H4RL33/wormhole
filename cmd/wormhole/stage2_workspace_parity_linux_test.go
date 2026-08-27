@@ -146,6 +146,61 @@ func TestStage2CLIPrivateRPCStashesPendingBranchSwitch(t *testing.T) {
 	}
 }
 
+func TestStage2StdioMCPPersistsAgentProvenanceAndCLIStaysHuman(t *testing.T) {
+	fixture := newStage2ParityGitFixture(t)
+	runtime := newStage2ParityRuntime(t, fixture, "actor-attribution", false, true)
+
+	if _, err := executeStage2MCPClient(runtime, localapi.WorkspaceCommandRequest{Operation: localapi.WorkspaceOperationImport}, nil, map[string]any{
+		"name": "codex", "version": "0.150", "modelName": "gpt", "modelVersion": "5.6",
+	}); err != nil {
+		t.Fatalf("first Codex import: %v", err)
+	}
+	if _, err := executeStage2MCPClient(runtime, localapi.WorkspaceCommandRequest{Operation: localapi.WorkspaceOperationStash, RequestID: "10000000-0000-4000-8000-000000000001", Label: "actor-1"}, nil, map[string]any{
+		"name": "codex", "version": "0.150", "modelName": "gpt", "modelVersion": "5.6",
+	}); err != nil {
+		t.Fatalf("first Codex stash: %v", err)
+	}
+	stage2ReplaceTaskStatus(t, runtime.root, "done", "blocked")
+	if _, err := executeStage2MCPClient(runtime, localapi.WorkspaceCommandRequest{Operation: localapi.WorkspaceOperationImport}, nil, map[string]any{"name": "CODEX", "version": "0.151"}); err != nil {
+		t.Fatalf("second Codex import: %v", err)
+	}
+	if _, err := executeStage2MCPClient(runtime, localapi.WorkspaceCommandRequest{Operation: localapi.WorkspaceOperationStash, RequestID: "10000000-0000-4000-8000-000000000002", Label: "actor-2"}, nil, map[string]any{"name": "CODEX", "version": "0.151"}); err != nil {
+		t.Fatalf("second Codex stash: %v", err)
+	}
+	stage2ReplaceTaskStatus(t, runtime.root, "blocked", "todo")
+	if _, err := executeStage2MCPClient(runtime, localapi.WorkspaceCommandRequest{Operation: localapi.WorkspaceOperationImport}, nil, map[string]any{"name": "claude-code", "version": "2.1"}); err != nil {
+		t.Fatalf("Claude import: %v", err)
+	}
+	if _, err := executeStage2MCPClient(runtime, localapi.WorkspaceCommandRequest{Operation: localapi.WorkspaceOperationStash, RequestID: "10000000-0000-4000-8000-000000000003", Label: "actor-3"}, nil, map[string]any{"name": "claude-code", "version": "2.1"}); err != nil {
+		t.Fatalf("Claude stash: %v", err)
+	}
+	stage2ReplaceTaskStatus(t, runtime.root, "todo", "wip")
+	if _, err := executeStage2CLI(runtime, localapi.WorkspaceCommandRequest{Operation: localapi.WorkspaceOperationImport}); err != nil {
+		t.Fatalf("CLI import: %v", err)
+	}
+	if _, err := executeStage2CLI(runtime, localapi.WorkspaceCommandRequest{Operation: localapi.WorkspaceOperationStash, RequestID: "10000000-0000-4000-8000-000000000004", Label: "actor-4"}); err != nil {
+		t.Fatalf("CLI stash: %v", err)
+	}
+
+	actors := stage2PersistedStashActors(t, runtime.store)
+	if len(actors) != 4 {
+		t.Fatalf("persisted operation actors = %d, want 4: %+v", len(actors), actors)
+	}
+	first, second, third, human := actors[0], actors[1], actors[2], actors[3]
+	if first.ActorKind != types.ActorAgent || first.AgentID == "" || first.AgentID != second.AgentID || first.SessionID == second.SessionID || third.ActorKind != types.ActorAgent || third.AgentID == first.AgentID {
+		t.Fatalf("persisted harness actors = first %+v, second %+v, third %+v", first, second, third)
+	}
+	if first.HarnessName != "codex" || first.HarnessVersion != "0.150" || first.ModelName != "gpt" || first.ModelVersion != "5.6" || second.HarnessVersion != "0.151" || third.HarnessName != "claude-code" {
+		t.Fatalf("persisted harness metadata = first %+v, second %+v, third %+v", first, second, third)
+	}
+	if first.AccountableHumanID != runtime.actor.HumanPrincipalID || second.AccountableHumanID != runtime.actor.HumanPrincipalID || third.AccountableHumanID != runtime.actor.HumanPrincipalID {
+		t.Fatalf("persisted accountability = first %+v, second %+v, third %+v, owner %s", first, second, third, runtime.actor.HumanPrincipalID)
+	}
+	if human.ActorKind != types.ActorHuman || human.HumanPrincipalID != runtime.actor.HumanPrincipalID || human.AgentID != "" || human.SessionID != "" || human.HarnessName != "" || human.ModelName != "" {
+		t.Fatalf("persisted CLI actor = %+v, want selected human", human)
+	}
+}
+
 type stage2ParitySurface string
 
 const (
@@ -179,6 +234,7 @@ type stage2ParityRuntime struct {
 	root, socket string
 	store        *localstore.Store
 	service      *projectstate.Service
+	identity     *localidentity.Store
 	binding      types.WorkspaceBinding
 	actor        types.ActorEnvelope
 }
@@ -212,7 +268,7 @@ func newStage2ParityRuntime(t *testing.T, fixture stage2ParityGitFixture, name s
 	if _, err := identity.EnsureSelectedForSetup(context.Background(), "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", types.ConfirmedIdentitySelection{DisplayName: "Parity User"}); err != nil {
 		t.Fatal(err)
 	}
-	actor, err := identity.ResolveLocalActor(context.Background(), localapi.ConnectionIdentity{OccurredAt: time.Date(2026, 8, 27, 2, 0, 0, 0, time.UTC)})
+	actor, err := identity.ResolveHumanActor(context.Background(), time.Date(2026, 8, 27, 2, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +322,7 @@ func newStage2ParityRuntime(t *testing.T, fixture stage2ParityGitFixture, name s
 		<-serveDone
 		_ = store.Close()
 	})
-	return &stage2ParityRuntime{root: root, socket: socket, store: store, service: service, binding: registered.Binding, actor: actor}
+	return &stage2ParityRuntime{root: root, socket: socket, store: store, service: service, identity: identity, binding: registered.Binding, actor: actor}
 }
 
 func stage2ParityRequest(t *testing.T, runtime *stage2ParityRuntime, operation localapi.WorkspaceOperation, surface stage2ParitySurface) localapi.WorkspaceCommandRequest {
@@ -324,6 +380,10 @@ func executeStage2CLI(runtime *stage2ParityRuntime, request localapi.WorkspaceCo
 }
 
 func executeStage2MCP(runtime *stage2ParityRuntime, request localapi.WorkspaceCommandRequest, forged map[string]any) (localapi.WorkspaceCommandResult, error) {
+	return executeStage2MCPClient(runtime, request, forged, map[string]any{"name": "stage2-mcp", "version": "1"})
+}
+
+func executeStage2MCPClient(runtime *stage2ParityRuntime, request localapi.WorkspaceCommandRequest, forged map[string]any, clientInfo map[string]any) (localapi.WorkspaceCommandResult, error) {
 	oldDirectory, err := os.Getwd()
 	if err != nil {
 		return localapi.WorkspaceCommandResult{}, err
@@ -352,7 +412,11 @@ func executeStage2MCP(runtime *stage2ParityRuntime, request localapi.WorkspaceCo
 		_, err = stdinWriter.Write(append(raw, '\n'))
 		return err
 	}
-	if err := write(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "initialize", Params: json.RawMessage(`{}`)}); err != nil {
+	initializeParams, err := json.Marshal(map[string]any{"protocolVersion": "2025-11-25", "capabilities": map[string]any{}, "clientInfo": clientInfo})
+	if err != nil {
+		return localapi.WorkspaceCommandResult{}, err
+	}
+	if err := write(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "initialize", Params: initializeParams}); err != nil {
 		return localapi.WorkspaceCommandResult{}, err
 	}
 	if _, err := waitStage2BridgeResponse(stdout, "1"); err != nil {
@@ -421,6 +485,47 @@ func executeStage2MCP(runtime *stage2ParityRuntime, request localapi.WorkspaceCo
 		err = json.Unmarshal([]byte(callResult.Content[0].Text), result.Stash)
 	}
 	return result, err
+}
+
+func stage2ReplaceTaskStatus(t *testing.T, root, before, after string) {
+	t.Helper()
+	path := filepath.Join(root, ".wormhole", "state", "v1", "tasks", "22222222-2222-4222-8222-222222222222.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := strings.Replace(string(data), `"status":"`+before+`"`, `"status":"`+after+`"`, 1)
+	if updated == string(data) {
+		t.Fatalf("task status %q not found in %s", before, path)
+	}
+	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func stage2PersistedStashActors(t *testing.T, store *localstore.Store) []types.ActorEnvelope {
+	t.Helper()
+	rows, err := store.DB().Query(`SELECT actor_json FROM workspace_stashes ORDER BY label`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	actors := []types.ActorEnvelope{}
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		var actor types.ActorEnvelope
+		if err := json.Unmarshal(raw, &actor); err != nil || actor.ValidateLocalAction() != nil {
+			t.Fatalf("decode persisted stash actor: %v, %+v", err, actor)
+		}
+		actors = append(actors, actor)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return actors
 }
 
 func waitStage2BridgeResponse(stdout *syncBuffer, id string) (rpcResponse, error) {

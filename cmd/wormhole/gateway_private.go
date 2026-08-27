@@ -36,7 +36,11 @@ func callGatewayPrivateMethod(ctx context.Context, socketPath, method string, re
 		return decodeClosedGatewayJSON(bytes.TrimSpace(line), destination)
 	}
 
-	if err := write(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "initialize", Params: json.RawMessage(`{}`)}); err != nil {
+	initializeParams, err := json.Marshal(map[string]any{"protocolVersion": "2025-11-25", "capabilities": map[string]any{}, "clientInfo": map[string]any{"name": "wormhole-cli", "version": version}})
+	if err != nil {
+		return fmt.Errorf("marshal Gateway initialize request: %w", err)
+	}
+	if err := write(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "initialize", Params: initializeParams}); err != nil {
 		return fmt.Errorf("write Gateway initialize request: %w", err)
 	}
 	var initialized rpcResponse

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/types"
@@ -66,7 +67,11 @@ func workspaceToolOwnsRefresh(toolName string) bool {
 	}
 }
 
-func (s *Server) resolvePrivateRequest(ctx context.Context, raw json.RawMessage) (context.Context, json.RawMessage, error) {
+func (s *Server) resolvePrivateRequest(ctx context.Context, raw json.RawMessage, identities ...ConnectionIdentity) (context.Context, json.RawMessage, error) {
+	return s.resolvePrivateToolRequest(ctx, "", raw, identities...)
+}
+
+func (s *Server) resolvePrivateToolRequest(ctx context.Context, toolName string, raw json.RawMessage, identities ...ConnectionIdentity) (context.Context, json.RawMessage, error) {
 	if s == nil || s.projectState == nil || s.actorResolver == nil {
 		return ctx, nil, ErrPrivateRequestContext
 	}
@@ -98,7 +103,7 @@ func (s *Server) resolvePrivateRequest(ctx context.Context, raw json.RawMessage)
 	// Remove it before public handler decoding; bindResolvedProjectArguments
 	// adds the server-resolved value later.
 	delete(arguments, "project_id")
-	if field := privateAuthorityClaim(arguments); field != "" {
+	if field := privateAuthorityClaim(toolName, arguments); field != "" {
 		return ctx, nil, fmt.Errorf("%w: %s", ErrPrivateAuthorityClaim, field)
 	}
 	binding, err := s.projectState.ResolveWorkingDirectory(ctx, observed)
@@ -109,9 +114,16 @@ func (s *Server) resolvePrivateRequest(ctx context.Context, raw json.RawMessage)
 	if s.clock != nil {
 		now = s.clock().UTC()
 	}
-	actor, err := s.actorResolver.ResolveLocalActor(ctx, ConnectionIdentity{OccurredAt: now})
+	connection := ConnectionIdentity{OccurredAt: now}
+	if len(identities) > 0 {
+		connection.SessionID = identities[0].SessionID
+	}
+	actor, err := s.actorResolver.ResolveLocalActor(ctx, connection)
 	if err != nil || actor.ValidateLocalAction() != nil {
 		return ctx, nil, fmt.Errorf("%w: local actor resolution failed", ErrPrivateRequestContext)
+	}
+	if connection.SessionID != "" && actor.ActorKind != types.ActorAgent {
+		return ctx, nil, fmt.Errorf("%w: harness tool requires agent actor", ErrPrivateRequestContext)
 	}
 	public, err := json.Marshal(arguments)
 	if err != nil {
@@ -145,16 +157,31 @@ func validatePrivateProjectClaim(ctx context.Context, raw json.RawMessage) error
 	return nil
 }
 
-func privateAuthorityClaim(arguments map[string]json.RawMessage) string {
+func privateAuthorityClaim(toolName string, arguments map[string]json.RawMessage) string {
 	for _, field := range []string{
 		"workspace_id", "checkout_id", "namespace_id", "namespace", "binding",
 		"working_directory", "actor", "actor_kind", "human_principal_id",
-		"accountable_human_id", "assurance", "session_id", "fabric_instance_id",
+		"accountable_human_id", "assurance", "session_id",
+		"harness_name", "harness_version", "model_name", "model_version", "fabric_instance_id",
 		"remote_project_id", "stream_id", "credential_ref",
 	} {
 		if _, exists := arguments[field]; exists {
 			return field
 		}
 	}
+	if toolName != "wormhole.agent.register" && toolName != "wormhole.agent.presence" {
+		if _, exists := arguments["agent_id"]; exists {
+			return "agent_id"
+		}
+	}
 	return ""
+}
+
+func humanMCPClient(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "wormhole-cli", "wormhole-setup":
+		return true
+	default:
+		return false
+	}
 }

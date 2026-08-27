@@ -238,7 +238,7 @@ func (s *Server) PrivateWorkspaceRPC(ctx context.Context, request PrivateWorkspa
 	if err := validateWorkspaceCommandRequest(request.Command); err != nil {
 		return WorkspaceCommandResult{}, ErrWorkspaceCommand
 	}
-	if s == nil || s.projectState == nil || s.actorResolver == nil {
+	if s == nil || s.projectState == nil || s.identityStore == nil {
 		return WorkspaceCommandResult{}, ErrWorkspaceCommand
 	}
 	observed := types.WorkspaceContext{WorkingDirectory: request.WorkingDirectory}
@@ -249,7 +249,7 @@ func (s *Server) PrivateWorkspaceRPC(ctx context.Context, request PrivateWorkspa
 	if err != nil || binding.Validate() != nil || binding.Checkout.CanonicalPath != request.WorkingDirectory {
 		return WorkspaceCommandResult{}, ErrWorkspaceCommand
 	}
-	actor, err := s.actorResolver.ResolveLocalActor(ctx, ConnectionIdentity{OccurredAt: s.setupNow()})
+	actor, err := s.identityStore.ResolveHumanActor(ctx, s.setupNow())
 	if err != nil || actor.ValidateLocalAction() != nil {
 		return WorkspaceCommandResult{}, ErrWorkspaceCommand
 	}

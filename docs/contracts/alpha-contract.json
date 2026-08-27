@@ -713,6 +713,35 @@
       "tools/list"
     ],
     "initialize": {
+      "request_params_fields": [
+        "capabilities",
+        "clientInfo",
+        "protocolVersion"
+      ],
+      "client_info_fields": [
+        "modelName",
+        "modelVersion",
+        "name",
+        "version"
+      ],
+      "tool_provenance_fields_rejected": [
+        "accountable_human_id",
+        "actor",
+        "actor_kind",
+        "agent_id",
+        "assurance",
+        "harness_name",
+        "harness_version",
+        "human_principal_id",
+        "model_name",
+        "model_version",
+        "session_id"
+      ],
+      "human_clients": [
+        "wormhole-cli",
+        "wormhole-setup"
+      ],
+      "unknown_harness_metadata": "unknown",
       "envelope_fields": [
         "id",
         "jsonrpc",

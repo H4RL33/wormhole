@@ -426,6 +426,16 @@ func (s *Server) Serving() <-chan struct{} { return s.serveReady }
 // never needed.
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	sess := &mcpSession{}
+	defer func() {
+		if s.identityStore == nil || sess.connectionIdentity.SessionID == "" {
+			return
+		}
+		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := s.identityStore.CloseConnection(closeCtx, sess.connectionIdentity); err != nil {
+			s.logError("close local identity connection", err)
+		}
+	}()
 	reader := bufio.NewReaderSize(conn, maxFrameBytes)
 	for {
 		line, err := reader.ReadSlice('\n')

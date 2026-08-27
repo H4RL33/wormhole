@@ -62,7 +62,7 @@ func TestResolveSetupBindingRefreshesExactGitPosition(t *testing.T) {
 	}
 }
 
-func TestPrivateSetupEnsureIdentityRPCResolvesActorBeforeMutation(t *testing.T) {
+func TestPrivateSetupEnsureIdentityRPCIgnoresHarnessActorAuthority(t *testing.T) {
 	store, err := localidentity.Open(filepath.Join(t.TempDir(), "identities"))
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +70,7 @@ func TestPrivateSetupEnsureIdentityRPCResolvesActorBeforeMutation(t *testing.T) 
 	binding := privateRoutingTestBinding(t, filepath.Join(t.TempDir(), "checkout"), "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011")
 	server := setupIdentityTestServer(t, store, binding)
 	server.actorResolver = localActorResolverFunc(func(context.Context, ConnectionIdentity) (types.ActorEnvelope, error) {
-		return types.ActorEnvelope{}, errors.New("actor unavailable")
+		return types.ActorEnvelope{ActorKind: types.ActorAgent, AgentID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}, nil
 	})
 	_, err = server.PrivateSetupEnsureIdentityRPC(t.Context(), SetupIdentityRequest{
 		WorkingDirectory:    binding.Checkout.CanonicalPath,
@@ -78,11 +78,11 @@ func TestPrivateSetupEnsureIdentityRPCResolvesActorBeforeMutation(t *testing.T) 
 		Selection:           types.ConfirmedIdentitySelection{DisplayName: "Alice Example"},
 		ExpectedPriorDigest: DigestSetupIdentityUnselected(),
 	})
-	if !errors.Is(err, ErrPrivateSetupRequest) {
-		t.Fatalf("identity error = %v", err)
+	if err != nil {
+		t.Fatalf("identity setup was influenced by harness actor resolver: %v", err)
 	}
-	if _, err := store.Selected(t.Context()); !errors.Is(err, localidentity.ErrNoSelectedIdentity) {
-		t.Fatalf("identity mutated before actor resolution: %v", err)
+	if selected, err := store.Selected(t.Context()); err != nil || selected.DisplayName != "Alice Example" {
+		t.Fatalf("selected identity = (%+v, %v)", selected, err)
 	}
 }
 

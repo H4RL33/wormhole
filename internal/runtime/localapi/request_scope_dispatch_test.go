@@ -14,6 +14,7 @@ import (
 
 	runtimeconfig "github.com/H4RL33/wormhole/internal/runtime/config"
 	"github.com/H4RL33/wormhole/internal/runtime/eventbus"
+	"github.com/H4RL33/wormhole/internal/runtime/localidentity"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/runtime/scheduler"
 	syncpkg "github.com/H4RL33/wormhole/internal/runtime/sync"
@@ -386,7 +387,16 @@ func privateDispatchResultContext(t *testing.T, ctx context.Context, server *Ser
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, rpcErr := server.handleToolsCall(ctx, &mcpSession{}, conn, server.registry, params)
+	session := &mcpSession{}
+	if server.identityStore != nil {
+		identity, openErr := server.identityStore.OpenMCP(ctx, localidentity.MCPClientInfo{Name: "private-dispatch-test", Version: "1"})
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		session.connectionIdentity = identity
+		defer server.identityStore.CloseConnection(context.Background(), identity)
+	}
+	got, rpcErr := server.handleToolsCall(ctx, session, conn, server.registry, params)
 	if rpcErr != nil {
 		t.Fatalf("handleToolsCall(%s) RPC error = %+v", name, rpcErr)
 	}

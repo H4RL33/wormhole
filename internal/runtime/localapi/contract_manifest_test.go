@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,10 +82,15 @@ type alphaLocalProtocol struct {
 }
 
 type alphaInitializeContract struct {
-	EnvelopeFields []string          `json:"envelope_fields"`
-	ResultFields   []string          `json:"result_fields"`
-	Capabilities   map[string]any    `json:"capabilities"`
-	ServerInfo     map[string]string `json:"server_info"`
+	RequestParamsFields          []string          `json:"request_params_fields"`
+	ClientInfoFields             []string          `json:"client_info_fields"`
+	ToolProvenanceFieldsRejected []string          `json:"tool_provenance_fields_rejected"`
+	HumanClients                 []string          `json:"human_clients"`
+	UnknownHarnessMetadata       string            `json:"unknown_harness_metadata"`
+	EnvelopeFields               []string          `json:"envelope_fields"`
+	ResultFields                 []string          `json:"result_fields"`
+	Capabilities                 map[string]any    `json:"capabilities"`
+	ServerInfo                   map[string]string `json:"server_info"`
 }
 
 type alphaLifecycleContract struct {
@@ -243,6 +249,20 @@ func TestAlphaContractLocalProtocolLifecycle(t *testing.T) {
 	if len(protocol.Lifecycle.GatedMethods) == 0 {
 		t.Fatal("manifest has no lifecycle-gated methods")
 	}
+	if got := jsonStructFields(reflect.TypeOf(initializeParams{})); !reflect.DeepEqual(got, protocol.Initialize.RequestParamsFields) {
+		t.Fatalf("initialize request fields = %v, manifest = %v", got, protocol.Initialize.RequestParamsFields)
+	}
+	if got := jsonStructFields(reflect.TypeOf(initializeClientInfo{})); !reflect.DeepEqual(got, protocol.Initialize.ClientInfoFields) {
+		t.Fatalf("initialize clientInfo fields = %v, manifest = %v", got, protocol.Initialize.ClientInfoFields)
+	}
+	if protocol.Initialize.UnknownHarnessMetadata != "unknown" || !reflect.DeepEqual(protocol.Initialize.HumanClients, []string{"wormhole-cli", "wormhole-setup"}) {
+		t.Fatalf("initialize identity classification = unknown %q, humans %v", protocol.Initialize.UnknownHarnessMetadata, protocol.Initialize.HumanClients)
+	}
+	for _, field := range protocol.Initialize.ToolProvenanceFieldsRejected {
+		if got := privateAuthorityClaim("wormhole.workspace.status", map[string]json.RawMessage{field: json.RawMessage(`"forged"`)}); got != field {
+			t.Fatalf("manifest provenance field %q is not rejected, got %q", field, got)
+		}
+	}
 
 	srv, socketPath := newMCPTestServer(t)
 	const configuredVersion = "9.8.7-contract"
@@ -345,6 +365,18 @@ func TestAlphaContractLocalProtocolLifecycle(t *testing.T) {
 	if string(resp.ID) != strconv.Itoa(nextID) {
 		t.Fatalf("response id after unknown notification = %s, want %d", resp.ID, nextID)
 	}
+}
+
+func jsonStructFields(kind reflect.Type) []string {
+	fields := make([]string, 0, kind.NumField())
+	for index := 0; index < kind.NumField(); index++ {
+		name := strings.Split(kind.Field(index).Tag.Get("json"), ",")[0]
+		if name != "" && name != "-" {
+			fields = append(fields, name)
+		}
+	}
+	sort.Strings(fields)
+	return fields
 }
 
 func TestAlphaContractLocalEventNotifications(t *testing.T) {

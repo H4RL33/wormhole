@@ -364,7 +364,7 @@ func TestSelectedAndActorNeverExposePrivateSelectionFields(t *testing.T) {
 	if strings.Contains(string(publicBytes), testSelection().Email) || strings.Contains(string(publicBytes), "private") {
 		t.Fatal("public profile leaked private data")
 	}
-	actor, err := store.ResolveLocalActor(context.Background(), ConnectionIdentity{OccurredAt: time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)})
+	actor, err := store.ResolveHumanActor(context.Background(), time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
