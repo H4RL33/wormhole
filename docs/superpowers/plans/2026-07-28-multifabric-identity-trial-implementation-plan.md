@@ -5,8 +5,9 @@
 **Goal:** Implement Slices D, E, and F so each registered workspace can bind immutably to one Git-aware Fabric stream, public callers have key-continuity identification only, private actions derive authenticated human and accountable-agent provenance at the server, legacy alpha state migrates without authority invention, and issue #56 closes only from reviewed real four-VM evidence.
 
 **Architecture:** Slice A owns portable repository, workspace, actor, tree, snapshot,
-digest, and reducer contracts. Gateway schema version 7 adds explicit Fabric profiles and
-complete bindings after the activity migration. Fabric may cache canonical
+digest, and reducer contracts. Gateway schema version 8 is one consolidated closed-
+pre-alpha epoch containing explicit Fabric profiles, complete bindings, and the durable
+ActivityV1 policy/ledger/queue/lifecycle state. Fabric may cache canonical
 portable proposal/accepted trees for validated reconstruction, but Git observation alone
 accepts them. Separate branch/stream-scoped `ActivityV1` transport/store/queue carries
 operational collaboration under finite retention; it is never `OperationV1` or complete-
@@ -20,9 +21,9 @@ on the portable-loop branch. It does not consume the optional Code Graph branch;
 Graph remains disabled throughout the issue-56 trial and no Code Graph delivery claim is
 made.
 
-## Global constraints
+## Global Constraints
 
-- RFC-0001, RFC-0003, and `docs/superpowers/specs/2026-07-28-git-native-wormhole-architecture-design.md` are authoritative.
+- RFC-0001, RFC-0003, `docs/superpowers/specs/2026-07-28-git-native-wormhole-architecture-design.md`, and the human-authorized `docs/superpowers/specs/2026-08-27-activity-v1-retention-amendment.md` are authoritative for Task 3.
 - Consume `types.RepositoryIdentity`, `types.WorkspaceBinding`, the complete
   `types.ActorEnvelope`, and the strict `internal/types/projectstate` tree/operation/
   canonical-digest APIs; do not define parallel repository, binding, actor, snapshot,
@@ -38,6 +39,15 @@ made.
   `(created_at, activity_id)` ascending order; lifecycle evidence is excluded until
   terminal, then retained for exactly 30 days by default or a configured longer finite
   duration. Protected rows may exceed the cap. Expiry never mutates portable Git state.
+- The Gateway private database supports only a missing/empty database atomically
+  initialized as exact schema v8 or an exact existing v8 database reopened read-only
+  after classification. Every other existing format, including exact former v7, is
+  preserved byte-for-byte and refused before mutation. There is no private migration,
+  conversion, export, reset, quarantine, or compatibility path.
+- PostgreSQL migration `000020_integration_manifests` is the actual unchanged baseline.
+  Task 3 owns new pair `000021_git_aware_streams.{up,down}.sql`; migrations 1-20 remain
+  byte-for-byte unchanged and the down migration restores the complete version-20
+  integration-manifest shape. Later migration numbers are unchanged.
 - One workspace has zero or one writable Fabric binding. Profile, Fabric instance, remote project, stream, repository, and canonical ref identifiers never retarget silently.
 - `fabric_profiles.credential_ref` is the sole Gateway authority for a Fabric credential reference. Bindings, cursors, queues, logs, and tracked hints contain no credential reference or raw secret.
 - A copied upstream hint whose immutable `origin` repository identity differs from the canonical identity causes zero upstream Fabric network calls, including discovery, DNS, authentication, and detach.
@@ -186,11 +196,15 @@ issuer-specific validation.
 
 | Path | Responsibility |
 |---|---|
-| `internal/types/routing.go` | plain profile, binding, and immutable remote-key types |
-| `internal/runtime/localstore/migrations/000006_fabric_routes.sql` | one-way local v6 profile/binding/cursor/hint-recovery migration |
-| `internal/runtime/localstore/migrations/000007_sync_binding.sql` | one-way local v7 complete-key queue/audit quarantine migration |
+| `internal/types/routing.go` | plain profile, binding, remote-key, and complete Activity route types |
+| `internal/types/projectstate/activity.go` | closed Activity/policy/receipt codecs and digests; no reducer coupling |
+| `internal/runtime/localstore/private_schema_v8.sql` | one consolidated current private schema containing routes and Activity state |
 | `internal/runtime/localstore/fabric_routes.go` | profile and binding repositories; profile-only credential resolution |
 | `internal/runtime/sync/queue_repo.go` | complete-key durable queue and conflict audit |
+| `internal/runtime/localstore/activity_*.go` | Gateway Activity policy, ledger, receipt, queue, cursor, lifecycle, and pruning repositories |
+| `internal/runtime/sync/activity_v1.go` | policy-gated Activity transport; no public descriptors or portable reducer path |
+| `internal/runtime/projectstate/promotion.go` | one Gateway-local atomic Activity-to-EventV1 promotion seam |
+| `internal/core/git/activity_*.go` | Fabric Activity policy, ingress/replay, pull, lifecycle, and bounded pruning |
 | `internal/core/git/stream_codec.go` | deterministic storage container for canonical `projectstate.Tree` |
 | `internal/core/git/streams.go` | Postgres stream version/precondition store using shared reducer |
 | `internal/core/git/github_observer.go` | exact-commit GitHub repository/ref/`.wormhole/` observer |
@@ -269,8 +283,10 @@ git commit -m "feat: freeze Fabric routing contracts"
 > v7; exact v7 reopens without mutation; every existing non-v7 database, including
 > former exact v6, is preserved and refused. The numbered loader, upgrade/backfill,
 > quarantine-copy, and reverse-SQL steps below are historical plan text and are not
-> executable authority. The final v7 Fabric route/profile/cursor, complete-key queue,
-> audit, recovery, constraint, and index shapes remain binding.
+> executable authority. Task 3C now supersedes v7 as the current production epoch with
+> the authorized exact-v8 hard cut; the delivered v7 Fabric route/profile/cursor,
+> complete-key queue, audit, recovery, constraint, and index shapes are retained as
+> required v8 inputs and as the exact unsupported-format test corpus.
 
 **Files:**
 - Create: `internal/runtime/localstore/migrations/000006_fabric_routes.sql`
@@ -563,311 +579,1071 @@ git add internal/runtime/localstore internal/runtime/sync cmd/gatewayd
 git commit -m "feat: persist complete Fabric routes"
 ```
 
-### Hard gate before Task 3: Fabric activity transport and finite retention
+### Task 3 authorization gate: satisfied
 
-Task 3 is blocked until a focused approved amendment replaces its migration-21 SQL and
-interfaces with a branch/stream/workspace-scoped `ActivityV1` transport/store/queue plus
-effective-policy handshake. Keep Postgres migration number `000021`; do not renumber
-later migrations. The amendment must make operational activity separate from
-`OperationV1`, portable canonical trees, and accepted-stream authority. It must freeze:
+The human-authorized
+`docs/superpowers/specs/2026-08-27-activity-v1-retention-amendment.md` selects the
+immutable-ledger/immutable-receipt/separate-lifecycle design and authorizes the exact
+Gateway schema-v8 hard cut. It replaces the stale retained migration-21-only block that
+formerly followed this gate. The actual PostgreSQL predecessor is
+`000020_integration_manifests`; migration 20 is not publication policy and remains
+byte-for-byte unchanged.
 
-- strict attributed ActivityV1 bytes/digest and complete tenant/ref/stream/workspace keys;
-- restart-discarded presence; ordinary activity eligible when older than 30 days **or**
-  outside the newest 10,000 unprotected workspace rows, pruned deterministically by
-  `(created_at, activity_id)` ascending; lifecycle protection until terminal, followed
-  by exactly 30 days by default or a configured longer finite duration, allowing
-  protected rows to exceed the cap;
-- an effective finite-policy response that Gateway validates before sending/accepting
-  live activity, with no indefinite catch-all;
-- queue/delivery/replay/terminal/prune transactions and proof that expiry cannot change a
-  portable tree, Git acceptance, or promotion; and
-- promotion remaining Gateway-local ProjectState authority until its resulting portable
-  OperationV1 is synced as a proposal; Fabric activity never promotes itself.
+Task 3 is one programme with five independently reviewable slices. Within a slice, keep
+the small commits below; at the slice boundary generate one review package from that
+slice's starting commit, obtain an independent review, fix every Critical/Important
+finding in one bounded fix commit, and re-review before starting the next slice. Task 4
+is forbidden until all five slices and the final Task-3 verification gate pass. Do not
+add MCP descriptors, Task-4 reconstruction, Task-5 observation, Task-6 attach wiring,
+Task-8 identity, Code Graph work, R07-R14 reduction, or private-format compatibility.
 
-Required RED/GREEN covers policy absence/malformed/unbounded rejection, branch/workspace
-isolation, restart, cap/age/protected-row pruning, queue retry, replay, RLS/composite FKs,
-and portable-tree byte identity across expiry. The detailed migration-21 portable-stream
-SQL below is retained as design input for tree reconstruction only and is not executable
-until the amendment integrates the activity schema and retention transactions.
+#### Task 3A: Freeze complete Activity routing and strict wire codecs
 
-### Task 3: Add durable Git-aware Fabric streams in migration 000021
+**Files:**
+- Modify: `internal/types/routing.go`
+- Modify: `internal/types/routing_test.go`
+- Create: `internal/types/projectstate/activity.go`
+- Create: `internal/types/projectstate/activity_test.go`
+
+**Interfaces:**
+- Consumes: `types.WorkspaceID`, `types.ActorEnvelope`, `types.CanonicalUUID`, the five
+  existing typed event payloads, and `projectstate.CanonicalJSON`/`Digest`.
+- Produces: only the following shared route values and codec API. These are plain
+  internal values, have no JSON tags, and are never decoded from a public request.
+
+```go
+type ActivityRouteKey struct {
+    ProjectID        string
+    WorkspaceID      WorkspaceID
+    FabricInstanceID string
+    RemoteProjectID  string
+    StreamID         string
+    CanonicalRef     string
+}
+type ActivityOriginKey struct {
+    Route             ActivityRouteKey
+    SourceWorkspaceID WorkspaceID
+    ActivityID        string
+}
+func (k ActivityRouteKey) Validate() error
+func (k ActivityOriginKey) Validate() error
+
+type ActivityClassV1 string
+const (
+    ActivityPresenceV1  ActivityClassV1 = "presence"
+    ActivityOrdinaryV1  ActivityClassV1 = "ordinary"
+    ActivityLifecycleV1 ActivityClassV1 = "lifecycle"
+)
+
+type ActivityLifecycleKindV1 string
+const (
+    ActivityLifecycleDeliveryV1 ActivityLifecycleKindV1 = "delivery"
+    ActivityLifecycleConflictV1 ActivityLifecycleKindV1 = "conflict"
+    ActivityLifecycleRecoveryV1 ActivityLifecycleKindV1 = "recovery"
+    ActivityLifecycleReceiptV1 ActivityLifecycleKindV1 = "receipt"
+)
+
+type ActivityLifecycleProjectionV1 struct {
+    Kind        ActivityLifecycleKindV1 `json:"kind"`
+    ReferenceID string                  `json:"reference_id"`
+}
+type ActivityEventProjectionV1 struct {
+    ChannelID string          `json:"channel_id"`
+    ActorID   string          `json:"actor_id"`
+    EventType string          `json:"event_type"`
+    Payload   json.RawMessage `json:"payload"`
+    Note      *string         `json:"note"`
+    CreatedAt time.Time       `json:"created_at"`
+}
+type ActivityV1 struct {
+    SchemaVersion int                            `json:"schema_version"`
+    ID            string                         `json:"id"`
+    Class         ActivityClassV1                `json:"class"`
+    Actor         types.ActorEnvelope            `json:"actor"`
+    Event         *ActivityEventProjectionV1     `json:"event,omitempty"`
+    Lifecycle     *ActivityLifecycleProjectionV1 `json:"lifecycle,omitempty"`
+    CreatedAt     time.Time                      `json:"created_at"`
+}
+type EffectiveActivityPolicyV1 struct {
+    SchemaVersion             int   `json:"schema_version"`
+    PolicyVersion             int64 `json:"policy_version"`
+    OrdinaryMaxAgeSeconds     int64 `json:"ordinary_max_age_seconds"`
+    OrdinaryMaxRows           int64 `json:"ordinary_max_rows"`
+    TerminalDefaultAgeSeconds int64 `json:"terminal_default_age_seconds"`
+    TerminalMaximumAgeSeconds int64 `json:"terminal_maximum_age_seconds"`
+    TerminalRetentionSeconds  int64 `json:"terminal_retention_seconds"`
+}
+type ActivityReceiptV1 struct {
+    SchemaVersion  int    `json:"schema_version"`
+    ActivityID     string `json:"activity_id"`
+    ActivityDigest Digest `json:"activity_digest"`
+    Sequence       int64  `json:"sequence"`
+    PolicyVersion  int64  `json:"policy_version"`
+    PolicyDigest   Digest `json:"policy_digest"`
+    AcceptedAt     time.Time `json:"accepted_at"`
+}
+
+var ErrInvalidActivity = errors.New("projectstate: invalid activity")
+var ErrUnknownActivityVersion = errors.New("projectstate: unknown activity version")
+var ErrInvalidActivityPolicy = errors.New("projectstate: invalid activity policy")
+
+func CanonicalActivity(ActivityV1) ([]byte, error)
+func DecodeActivity([]byte) (ActivityV1, error)
+func DigestActivity(ActivityV1) (Digest, error)
+func CanonicalActivityPolicy(EffectiveActivityPolicyV1) ([]byte, error)
+func DecodeActivityPolicy([]byte) (EffectiveActivityPolicyV1, error)
+func DigestActivityPolicy(EffectiveActivityPolicyV1) (Digest, error)
+func CanonicalActivityReceipt(ActivityReceiptV1) ([]byte, error)
+func DecodeActivityReceipt([]byte) (ActivityReceiptV1, error)
+```
+
+These definitions reproduce amendment §§5–5.3 exactly. No Activity type is added to
+`Snapshot`, `Tree`, `RecordValueV1`, `OperationV1`, or a reducer.
+Policy V1 fixes ordinary age/default terminal age at `2_592_000`, ordinary rows at
+`10_000`, and maximum terminal age at `31_536_000`; policy version is
+`1..9_007_199_254_740_991`, and effective terminal retention is a whole-second value in
+`2_592_000..31_536_000`. Zero, missing, inherited, or unbounded values do not exist.
+
+- [ ] **Step 1: Write routing RED tests**
+
+Add `TestActivityRouteKeyRequiresCompleteBindingAndCanonicalRef` and
+`TestActivityOriginKeyRequiresCanonicalIDs`. Table cases reject nil/noncanonical UUIDs,
+a non-`refs/heads/` ref, `//`, trailing `/`, and `.`/`..` path components; prove the
+complete valid key and a source-workspace/activity pair pass. Reflect the two structs
+and assert that no field has a JSON tag or a credential/profile/URL/actor/policy/cursor
+field.
+
+Run:
+
+```bash
+go test ./internal/types -run 'TestActivity(Route|Origin)Key' -count=1
+```
+
+Expected RED: compile failure because `ActivityRouteKey` and `ActivityOriginKey` do not
+exist.
+
+- [ ] **Step 2: Implement keys, run GREEN, and commit**
+
+Use the package's existing `validBranchRef` predicate after requiring all six key values;
+`ActivityOriginKey.Validate` first calls `Route.Validate`, then validates its final two
+UUIDs. Do not change `RemoteBindingKey` or `FabricBinding.RemoteKey`.
+
+Run: `go test ./internal/types -run 'TestActivity(Route|Origin)Key' -count=1`
+
+Expected GREEN: PASS, including every invalid component independently.
+
+```bash
+git add internal/types/routing.go internal/types/routing_test.go
+git commit -m "feat: add complete Activity route keys"
+```
+
+- [ ] **Step 3: Write codec and policy RED tests**
+
+Add these exact tests:
+
+```go
+func TestActivityV1CanonicalRoundTripAndDigest(t *testing.T)
+func TestActivityV1RejectsUnknownNonCanonicalAndForgedAttribution(t *testing.T)
+func TestActivityV1RejectsInvalidClassLifecycleAndTypedPayloads(t *testing.T)
+func TestEffectiveActivityPolicyCanonicalRoundTripAndDigest(t *testing.T)
+func TestEffectiveActivityPolicyRejectsAbsentMalformedUnknownAndUnbounded(t *testing.T)
+func TestActivityReceiptV1CanonicalRoundTrip(t *testing.T)
+func TestActivityReceiptV1RejectsUnsafeIntegersAndInvalidEvidence(t *testing.T)
+func TestActivityV1NeverEntersPortableStateOrReducer(t *testing.T)
+```
+
+Freeze hard-coded canonical byte and SHA-256 digest goldens for one ordinary record, one
+lifecycle record, and both finite-policy boundaries. Cover unknown fields, trailing JSON,
+member reordering/whitespace, noncanonical `json.RawMessage`, non-UTC or unequal times,
+legacy/unknown assurance, actor/principal mismatch, invalid UTF-8/NUL/trim, every unknown
+class/kind/event type, all five typed payloads, equal task transition states, and JSON-safe
+integer overflow.
+
+Run:
+
+```bash
+go test ./internal/types/projectstate -run 'Test(Activity|EffectiveActivityPolicy)' -count=1
+```
+
+Expected RED: compile failure for the new records and codec functions; existing portable
+codec tests remain GREEN.
+
+- [ ] **Step 4: Implement the closed codecs**
+
+Each decoder uses `DisallowUnknownFields`, requires exactly one value then EOF, validates
+the typed record, reproduces it through `CanonicalJSON`, and requires byte equality.
+Activity/policy digests are SHA-256 of those exact canonical bytes. Validate the five
+payloads by strict-decoding the existing `types.*Payload` structs and requiring every
+documented non-empty field. Receipt structural validation does not invent store authority;
+the store later exact-matches it to retained Activity and policy evidence.
+
+Run:
+
+```bash
+go test ./internal/types/projectstate -run 'Test(Activity|EffectiveActivityPolicy)' -count=1
+go test ./internal/types/... -count=1
+```
+
+Expected GREEN: all new codec/golden tests PASS; portable snapshot/operation tests remain
+byte-identical.
+
+- [ ] **Step 5: Commit and independently review Task 3A**
+
+```bash
+git add internal/types/projectstate/activity.go internal/types/projectstate/activity_test.go
+git commit -m "feat: freeze ActivityV1 wire records"
+```
+
+Review proves complete keys, strict attribution, finite numeric bounds, secret-safe
+errors, and zero portable-state/reducer coupling.
+
+#### Task 3B: Add PostgreSQL migration 21 and Fabric Activity authority
 
 **Files:**
 - Create: `migrations/000021_git_aware_streams.up.sql`
 - Create: `migrations/000021_git_aware_streams.down.sql`
+- Create: `.github/scripts/provision-activity-roles.sql`
 - Create: `internal/core/git/private_schema_test.go`
+- Create: `internal/core/git/activity_store.go`
+- Create: `internal/core/git/activity_store_test.go`
+- Create: `internal/core/git/activity_policy.go`
+- Create: `internal/core/git/activity_policy_test.go`
+- Create: `internal/core/git/activity_lifecycle.go`
+- Create: `internal/core/git/activity_lifecycle_test.go`
+- Create: `internal/core/git/activity_pruner.go`
+- Create: `internal/core/git/activity_pruner_test.go`
+- Modify: `.github/workflows/migrations.yml`
+- Modify: `.github/workflows/ci.yml`
 - Modify: `docs/db-entities.md`
 
 **Interfaces:**
-- Consumes: existing migrations 1–20 unchanged.
-- Produces: branch-isolated repository bindings, non-authoritative portable proposal/
-  accepted-tree replicas, canonical portable operation requests, the gate-frozen separate
-  ActivityV1 store/policy/queue, public-key activations, nonces, composite tenant FKs,
-  forced RLS, and policy-governed evidence.
+- Consumes: exact migration-20 shape, Task-3A codecs, and no Gateway/runtime package.
+- Produces: non-authoritative portable stream tables for Task 4 and this separate Fabric
+  Activity store. The store never imports `internal/runtime/*` and exposes no promotion
+  method.
 
-- [ ] **Step 1: Write failing real-Postgres schema tests**
+```go
+type FabricActivityStreamKey struct {
+    ProjectID, FabricInstanceID, StreamID, CanonicalRef string
+}
+type FabricActivityOriginKey struct {
+    Stream FabricActivityStreamKey
+    SourceWorkspaceID, ActivityID string
+}
+type AcceptActivityInput struct {
+    Key           FabricActivityOriginKey
+    Activity      projectstate.ActivityV1
+    IssuedActor   types.ActorEnvelope
+    PolicyVersion int64
+    PolicyDigest  projectstate.Digest
+}
+type PullActivityInput struct {
+    Stream        FabricActivityStreamKey
+    AttachmentRef string
+    AfterSequence int64
+    Limit         int
+}
+type ActivityDelivery struct {
+    SourceWorkspaceID string
+    ActivityJSON      []byte
+    ActivityDigest    projectstate.Digest
+    Receipt           projectstate.ActivityReceiptV1
+}
+type PullActivityResult struct {
+    PolicyJSON   []byte
+    PolicyDigest projectstate.Digest
+    Deliveries   []ActivityDelivery
+    NextSequence int64
+    HasMore      bool
+}
+type ActivityLifecycleTransition struct {
+    Kind, ReferenceID, ExpectedState, NextState string
+}
 
-Add these exact integration tests:
+type ActivityStore struct { db *sql.DB }
+func NewActivityStore(*sql.DB) *ActivityStore
+func (s *ActivityStore) CurrentPolicy(context.Context, FabricActivityStreamKey) (projectstate.EffectiveActivityPolicyV1, error)
+func (s *ActivityStore) PublishPolicy(context.Context, FabricActivityStreamKey, projectstate.EffectiveActivityPolicyV1) (projectstate.EffectiveActivityPolicyV1, error)
+func (s *ActivityStore) Accept(context.Context, AcceptActivityInput) (projectstate.ActivityReceiptV1, error)
+func (s *ActivityStore) Pull(context.Context, PullActivityInput) (PullActivityResult, error)
+func (s *ActivityStore) TransitionLifecycle(context.Context, FabricActivityOriginKey, ActivityLifecycleTransition) error
+func (s *ActivityStore) Prune(context.Context, FabricActivityStreamKey, string, int) (int, error)
+```
+
+Package sentinels are `ErrActivityPolicyUnavailable`, `ErrActivityPolicyChanged`,
+`ErrActivityNotFound`, `ErrActivityReplayConflict`, `ErrActivityCursorConflict`, and
+`ErrActivityLifecycleConflict`. Wrapping preserves `errors.Is`; messages contain only a
+safe operation label and never Activity/policy bytes, actor data, or a complete route.
+
+- [ ] **Step 1: Write migration-21 RED tests against actual version 20**
+
+Add the exact portable tests retained from the old plan and the Activity tests below:
 
 ```go
 func TestMigration21StoresEveryVersionTreeAndOperationBytes(t *testing.T)
 func TestMigration21DirectSQLRejectsCrossProjectStreamFKs(t *testing.T)
 func TestMigration21DirectSQLRejectsCrossStreamWorkspaceAndRequestFKs(t *testing.T)
+func TestMigration21ActivityDirectSQLRejectsCrossProjectStreamAndWorkspaceFKs(t *testing.T)
 func TestMigration21ForcesRLSForEveryProjectTable(t *testing.T)
-func TestMigration21RejectsVersionAndRequestUpdateOutsidePolicyPruner(t *testing.T)
+func TestMigration21ActivityRolesAndPrivileges(t *testing.T)
+func TestMigration21RejectsImmutableHistoryUpdateAndDirectActivityDelete(t *testing.T)
+func TestMigration21ContainsNoActivityPromotionAuthority(t *testing.T)
 func TestMigration21DownLeavesVersion20Shape(t *testing.T)
 ```
 
-Seed two projects, two Fabric UUIDs, two streams, and two workspace UUIDs. Attempt direct inserts pairing project A with project B's repository binding, stream, workspace binding, version, public key, and nonce. Each insert must fail with SQLSTATE `23503`. Run reads and writes as the ordinary non-superuser table owner and prove cross-project rows are invisible/rejected. Direct updates fail; deletion exists only through the gate-frozen policy-owned pruning transaction after eligibility.
-`TestMigration21StoresEveryVersionTreeAndOperationBytes` also proves an operation
-transition requires `operation_id`, canonical bytes, digest, and actor together, while
-initial/accepted-ref transitions require all four to be null.
-
-- [ ] **Step 2: Run RED from an explicit version-20 database**
-
-Run:
-
-```bash
-migrate -path migrations -database "$WORMHOLE_DATABASE_URL" goto 20
-WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'TestMigration21' -count=1
-```
-
-Expected: migration version reports 20; tests FAIL because migration 21 is absent.
-
-- [ ] **Step 3: Create the complete migration-21 up SQL**
-
-`000021_git_aware_streams.up.sql` is exactly:
-
-```sql
-CREATE TABLE project_repository_bindings (
-  project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  fabric_instance_id uuid NOT NULL,
-  provider text NOT NULL CHECK(provider='github'),
-  provider_repository_id text NOT NULL CHECK(provider_repository_id ~ '^[0-9]+$'),
-  canonical_remote text NOT NULL,
-  default_ref text NOT NULL CHECK(default_ref ~ '^refs/heads/[A-Za-z0-9._/-]+$'),
-  visibility text NOT NULL CHECK(visibility IN ('public','private')),
-  observer_credential_ref text NOT NULL DEFAULT '',
-  created_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY(project_id,fabric_instance_id),
-  UNIQUE(fabric_instance_id,provider,provider_repository_id),
-  CHECK((visibility='public' AND observer_credential_ref='') OR visibility='private')
-);
-
-CREATE TABLE fabric_streams (
-  project_id uuid NOT NULL,
-  fabric_instance_id uuid NOT NULL,
-  stream_id uuid NOT NULL DEFAULT gen_random_uuid(),
-  ref_name text NOT NULL CHECK(ref_name ~ '^refs/heads/[A-Za-z0-9._/-]+$'),
-  current_version bigint NOT NULL DEFAULT 0 CHECK(current_version >= 0),
-  live_tree_digest text NOT NULL CHECK(live_tree_digest ~ '^sha256:[0-9a-f]{64}$'),
-  accepted_tree_digest text NOT NULL CHECK(accepted_tree_digest ~ '^sha256:[0-9a-f]{64}$'),
-  accepted_commit_sha text NOT NULL CHECK(accepted_commit_sha ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'),
-  created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY(project_id,fabric_instance_id,stream_id),
-  UNIQUE(project_id,fabric_instance_id,ref_name),
-  FOREIGN KEY(project_id,fabric_instance_id)
-    REFERENCES project_repository_bindings(project_id,fabric_instance_id) ON DELETE CASCADE
-);
-
-CREATE TABLE fabric_stream_versions (
-  project_id uuid NOT NULL,
-  fabric_instance_id uuid NOT NULL,
-  stream_id uuid NOT NULL,
-  version bigint NOT NULL CHECK(version >= 0),
-  transition_kind text NOT NULL CHECK(transition_kind IN ('initial','operation','accepted_ref')),
-  accepted_commit_sha text NOT NULL CHECK(accepted_commit_sha ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'),
-  canonical_live_tree bytea NOT NULL,
-  live_tree_digest text NOT NULL CHECK(live_tree_digest ~ '^sha256:[0-9a-f]{64}$'),
-  canonical_accepted_tree bytea NOT NULL,
-  accepted_tree_digest text NOT NULL CHECK(accepted_tree_digest ~ '^sha256:[0-9a-f]{64}$'),
-  operation_id uuid,
-  canonical_operation_json bytea,
-  operation_digest text CHECK(operation_digest ~ '^sha256:[0-9a-f]{64}$'),
-  actor_envelope_json bytea,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY(project_id,fabric_instance_id,stream_id,version),
-  FOREIGN KEY(project_id,fabric_instance_id,stream_id)
-    REFERENCES fabric_streams(project_id,fabric_instance_id,stream_id) ON DELETE CASCADE,
-  CHECK((transition_kind='operation') = (canonical_operation_json IS NOT NULL)),
-  CHECK((canonical_operation_json IS NULL) = (operation_id IS NULL)),
-  CHECK((canonical_operation_json IS NULL) = (operation_digest IS NULL)),
-  CHECK((transition_kind='operation') = (actor_envelope_json IS NOT NULL))
-);
-
-CREATE TABLE fabric_workspace_stream_bindings (
-  project_id uuid NOT NULL,
-  fabric_instance_id uuid NOT NULL,
-  stream_id uuid NOT NULL,
-  workspace_id uuid NOT NULL,
-  attachment_ref uuid NOT NULL,
-  repository_provider text NOT NULL CHECK(repository_provider='github'),
-  repository_immutable_id text NOT NULL CHECK(repository_immutable_id ~ '^[0-9]+$'),
-  ref_name text NOT NULL CHECK(ref_name ~ '^refs/heads/[A-Za-z0-9._/-]+$'),
-  writable boolean NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  detached_at timestamptz,
-  PRIMARY KEY(project_id,fabric_instance_id,workspace_id),
-  UNIQUE(project_id,fabric_instance_id,stream_id,workspace_id),
-  UNIQUE(fabric_instance_id,attachment_ref),
-  FOREIGN KEY(project_id,fabric_instance_id,stream_id)
-    REFERENCES fabric_streams(project_id,fabric_instance_id,stream_id) ON DELETE CASCADE,
-  FOREIGN KEY(project_id,fabric_instance_id,repository_provider,repository_immutable_id)
-    REFERENCES project_repository_bindings(project_id,fabric_instance_id,provider,provider_repository_id)
-    ON DELETE RESTRICT,
-  CHECK((detached_at IS NULL) OR (NOT writable))
-);
-
-CREATE UNIQUE INDEX fabric_workspace_one_live_writable
-  ON fabric_workspace_stream_bindings(project_id,fabric_instance_id,workspace_id)
-  WHERE writable AND detached_at IS NULL;
-
-CREATE TABLE fabric_stream_requests (
-  project_id uuid NOT NULL,
-  fabric_instance_id uuid NOT NULL,
-  stream_id uuid NOT NULL,
-  workspace_id uuid NOT NULL,
-  operation_id uuid NOT NULL,
-  canonical_operation_json bytea NOT NULL,
-  operation_digest text NOT NULL CHECK(operation_digest ~ '^sha256:[0-9a-f]{64}$'),
-  expected_stream_version bigint NOT NULL CHECK(expected_stream_version >= 0),
-  expected_tree_digest text NOT NULL CHECK(expected_tree_digest ~ '^sha256:[0-9a-f]{64}$'),
-  result text NOT NULL CHECK(result IN ('applied','conflict','rejected')),
-  result_stream_version bigint NOT NULL CHECK(result_stream_version >= 0),
-  actor_envelope_json bytea NOT NULL,
-  conflict_json jsonb,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY(project_id,fabric_instance_id,stream_id,operation_id),
-  FOREIGN KEY(project_id,fabric_instance_id,stream_id,workspace_id)
-    REFERENCES fabric_workspace_stream_bindings(project_id,fabric_instance_id,stream_id,workspace_id)
-    ON DELETE RESTRICT,
-  CHECK((result='conflict') = (conflict_json IS NOT NULL))
-);
-
-CREATE TABLE fabric_stream_conflicts (
-  project_id uuid NOT NULL,
-  fabric_instance_id uuid NOT NULL,
-  stream_id uuid NOT NULL,
-  conflict_id uuid NOT NULL DEFAULT gen_random_uuid(),
-  detected_at_version bigint NOT NULL,
-  conflict_kind text NOT NULL CHECK(conflict_kind IN ('operation_precondition','git_base_diverged')),
-  base_tree_digest text NOT NULL CHECK(base_tree_digest ~ '^sha256:[0-9a-f]{64}$'),
-  ours_tree_digest text NOT NULL CHECK(ours_tree_digest ~ '^sha256:[0-9a-f]{64}$'),
-  theirs_tree_digest text NOT NULL CHECK(theirs_tree_digest ~ '^sha256:[0-9a-f]{64}$'),
-  detail_json jsonb NOT NULL CHECK(jsonb_typeof(detail_json)='object'),
-  state text NOT NULL CHECK(state IN ('open','resolved')),
-  created_at timestamptz NOT NULL DEFAULT now(),
-  resolved_at timestamptz,
-  PRIMARY KEY(project_id,fabric_instance_id,stream_id,conflict_id),
-  FOREIGN KEY(project_id,fabric_instance_id,stream_id,detected_at_version)
-    REFERENCES fabric_stream_versions(project_id,fabric_instance_id,stream_id,version) ON DELETE RESTRICT,
-  CHECK((state='open' AND resolved_at IS NULL) OR (state='resolved' AND resolved_at IS NOT NULL))
-);
-
-CREATE TABLE fabric_public_actor_keys (
-  project_id uuid NOT NULL,
-  fabric_instance_id uuid NOT NULL,
-  stream_id uuid NOT NULL,
-  key_fingerprint text NOT NULL CHECK(key_fingerprint ~ '^sha256:[0-9a-f]{64}$'),
-  public_key bytea NOT NULL CHECK(octet_length(public_key)=32),
-  actor_kind text NOT NULL CHECK(actor_kind IN ('human','agent')),
-  human_principal_id uuid,
-  agent_id uuid,
-  accountable_human_id uuid,
-  session_id uuid NOT NULL,
-  harness_name text NOT NULL,
-  harness_version text NOT NULL,
-  model_name text NOT NULL DEFAULT '',
-  model_version text NOT NULL DEFAULT '',
-  source_version bigint NOT NULL,
-  activated_at timestamptz NOT NULL DEFAULT now(),
-  revoked_at timestamptz,
-  PRIMARY KEY(project_id,fabric_instance_id,key_fingerprint),
-  FOREIGN KEY(project_id,fabric_instance_id,stream_id,source_version)
-    REFERENCES fabric_stream_versions(project_id,fabric_instance_id,stream_id,version) ON DELETE RESTRICT,
-  CHECK((actor_kind='human' AND human_principal_id IS NOT NULL AND agent_id IS NULL AND accountable_human_id IS NULL)
-     OR (actor_kind='agent' AND human_principal_id IS NULL AND agent_id IS NOT NULL AND accountable_human_id IS NOT NULL)),
-  CHECK((model_name='') = (model_version=''))
-);
-
-CREATE TABLE public_request_nonces (
-  project_id uuid NOT NULL,
-  fabric_instance_id uuid NOT NULL,
-  key_fingerprint text NOT NULL,
-  nonce_hash text NOT NULL CHECK(nonce_hash ~ '^[0-9a-f]{64}$'),
-  expires_at timestamptz NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY(project_id,fabric_instance_id,key_fingerprint,nonce_hash),
-  FOREIGN KEY(project_id,fabric_instance_id,key_fingerprint)
-    REFERENCES fabric_public_actor_keys(project_id,fabric_instance_id,key_fingerprint) ON DELETE CASCADE
-);
-
-CREATE FUNCTION reject_fabric_immutable_history() RETURNS trigger
-LANGUAGE plpgsql AS $$ BEGIN
-  RAISE EXCEPTION 'fabric history is immutable' USING ERRCODE='55000';
-END $$;
-CREATE TRIGGER fabric_stream_versions_immutable
-  BEFORE UPDATE ON fabric_stream_versions
-  FOR EACH ROW EXECUTE FUNCTION reject_fabric_immutable_history();
-CREATE TRIGGER fabric_stream_requests_immutable
-  BEFORE UPDATE ON fabric_stream_requests
-  FOR EACH ROW EXECUTE FUNCTION reject_fabric_immutable_history();
-
-DO $$
-DECLARE n text;
-BEGIN
-  FOREACH n IN ARRAY ARRAY[
-    'project_repository_bindings','fabric_streams','fabric_stream_versions',
-    'fabric_workspace_stream_bindings','fabric_stream_requests','fabric_stream_conflicts',
-    'fabric_public_actor_keys','public_request_nonces'
-  ] LOOP
-    EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY',n);
-    EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY',n);
-    EXECUTE format(
-      'CREATE POLICY %I ON %I USING (project_id = NULLIF(current_setting(''wormhole.project_id'',true),'''')::uuid) WITH CHECK (project_id = NULLIF(current_setting(''wormhole.project_id'',true),'''')::uuid)',
-      n || '_project_isolation',n);
-  END LOOP;
-END $$;
-```
-
-The two repository-binding uniqueness constraints needed by composite references are already the primary key and `(fabric_instance_id,provider,provider_repository_id)` unique key; add `UNIQUE(project_id,fabric_instance_id,provider,provider_repository_id)` explicitly immediately after table creation so the four-column foreign key is valid.
-
-- [ ] **Step 4: Create the exact migration-21 down SQL**
-
-```sql
-DROP TRIGGER fabric_stream_requests_immutable ON fabric_stream_requests;
-DROP TRIGGER fabric_stream_versions_immutable ON fabric_stream_versions;
-DROP FUNCTION reject_fabric_immutable_history();
-DROP TABLE public_request_nonces;
-DROP TABLE fabric_public_actor_keys;
-DROP TABLE fabric_stream_conflicts;
-DROP TABLE fabric_stream_requests;
-DROP TABLE fabric_workspace_stream_bindings;
-DROP TABLE fabric_stream_versions;
-DROP TABLE fabric_streams;
-DROP TABLE project_repository_bindings;
-```
-
-- [ ] **Step 5: Apply all available migrations and run GREEN**
+The test fixture provisions the exact three non-superuser/non-`BYPASSRLS` roles from
+amendment §9.3 before applying migration 21. Migration SQL only validates them; it does
+not create, alter, or drop a cluster role. Snapshot migration-20 table/function/trigger/
+policy names before upgrade and require the identical snapshot after down, including
+both integration-manifest tables and their immutable-body function/trigger.
 
 Run:
 
 ```bash
 migrate -path migrations -database "$WORMHOLE_DATABASE_URL" goto 20
-migrate -path migrations -database "$WORMHOLE_DATABASE_URL" up
+psql "$WORMHOLE_DATABASE_URL" -v ON_ERROR_STOP=1 -f .github/scripts/provision-activity-roles.sql
+WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'TestMigration21' -count=1
+```
+
+Expected RED: the test reports version 20 and fails because migration 21 relations and
+functions are absent. Migrations 1-20 remain clean.
+
+- [ ] **Step 2: Implement the migration and role bootstrap**
+
+The up migration creates the retained portable relations
+`project_repository_bindings`, `fabric_streams`, `fabric_stream_versions`,
+`fabric_workspace_stream_bindings`, `fabric_stream_requests`,
+`fabric_stream_conflicts`, `fabric_public_actor_keys`, and `public_request_nonces`, plus
+`fabric_activity_policy_versions`, `fabric_activity_policy_current`,
+`fabric_activity_stream_sequences`, `fabric_activities`,
+`fabric_activity_ingress_receipts`, and `fabric_activity_lifecycle`. Every primary,
+unique, and composite foreign key has `project_id` first; stream and workspace identities
+include `canonical_ref`/`ref_name` exactly.
+
+Create the exact security-definer functions `fabric_accept_activity_v1`,
+`fabric_transition_activity_lifecycle_v1`, `fabric_prune_activities_v1`, and
+`fabric_publish_activity_policy_v1`. Each uses fixed `search_path`
+`pg_catalog,public`, validates complete non-null keys, takes the binding lock first, and
+follows amendment §§9.3–9.4. Activity owner/runtime/maintenance ACLs are exact; revoke
+function execution from `PUBLIC`. All migration-21 project tables use both `ENABLE` and
+`FORCE ROW LEVEL SECURITY` and this exact predicate for both `USING` and `WITH CHECK`:
+
+```sql
+project_id = NULLIF(current_setting('wormhole.project_id',true),'')::uuid
+```
+
+The pre-provisioned roles are exactly `wormhole_activity_owner` (`NOLOGIN` and owner only
+of Activity relations/functions), `wormhole_fabric_runtime` (the process login), and
+`wormhole_activity_maintenance` (`NOLOGIN`, pruner job only). Runtime receives Activity
+`SELECT` plus execute on accept, transition, and policy publication, with no direct
+mutable-table DML. Maintenance receives only pruner execution. The migration verifies
+that none is superuser or `BYPASSRLS`, transfers exact ownership/grants, and never creates,
+alters, or drops a cluster role.
+
+The down migration revokes/drops Activity functions before dependent Activity tables,
+then drops portable triggers/functions/tables in reverse dependency order. It does not
+touch a migration-20 object or cluster role. CI provisions roles before every migration
+invocation; Activity RLS/ACL tests execute as the ordinary runtime/maintenance roles.
+
+Run:
+
+```bash
+migrate -path migrations -database "$WORMHOLE_DATABASE_URL" goto 20
+migrate -path migrations -database "$WORMHOLE_DATABASE_URL" goto 21
 WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'TestMigration21' -count=1
 migrate -path migrations -database "$WORMHOLE_DATABASE_URL" goto 20
 ```
 
-Expected: upgrade reaches 21, tests PASS, downgrade reaches 20, and migrations 1–20 checksums and shapes remain unchanged.
-
-- [ ] **Step 6: Commit**
+Expected GREEN: version reaches 21, every schema/RLS/FK/ACL/immutability test passes,
+down returns to exact version-20 shape, and the three cluster roles remain.
 
 ```bash
-git add migrations/000021_* internal/core/git/private_schema_test.go docs/db-entities.md
-git commit -m "feat: add durable Git-aware streams"
+git add migrations/000021_git_aware_streams.up.sql migrations/000021_git_aware_streams.down.sql .github/scripts/provision-activity-roles.sql .github/workflows/migrations.yml .github/workflows/ci.yml internal/core/git/private_schema_test.go
+git commit -m "feat: add Activity-aware Fabric schema"
 ```
+
+- [ ] **Step 3: Write Fabric policy/ingress/pull RED tests**
+
+Add:
+
+```go
+func TestActivityStoreExactReplayReturnsReceiptAndChangedBytesReject(t *testing.T)
+func TestActivityStoreBranchAndWorkspaceIsolation(t *testing.T)
+func TestActivityStoreRejectsActorForgeryBeforeMutation(t *testing.T)
+func TestActivityStorePolicyPublicationExactReplayAndConflict(t *testing.T)
+func TestActivityStoreCurrentPolicyCASAndStaleIngressHaveZeroMutation(t *testing.T)
+func TestActivityStoreExactReplayRequiresCurrentPairButReturnsOriginalPolicy(t *testing.T)
+func TestActivityStoreSequenceIsSafeMonotonicAndIndependentOfStreamVersion(t *testing.T)
+func TestActivityStorePullAdvancesAcrossPrunedGapsToCapturedHighWatermark(t *testing.T)
+func TestActivityStorePullRejectsInvalidCursorAndLimit(t *testing.T)
+```
+
+Exact replay returns the original receipt/sequence/policy/timestamp; a changed byte or
+digest preserves all rows. A stale policy returns `ErrActivityPolicyChanged` with the
+current canonical policy through a typed error and inserts no ledger, receipt, sequence,
+lifecycle, or audit row. Pull bounds are `1..500`; empty pulls advance to the captured
+high watermark without reading portable stream version.
+
+Run: `WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'TestActivityStore' -count=1`
+
+Expected RED: compile failure because `ActivityStore` and its methods are absent.
+
+- [ ] **Step 4: Implement policy, ingress, replay, and pull**
+
+Strict-decode/canonicalize before SQL and require exact canonical equality between the
+embedded actor and issuer-derived actor. Policy bootstrap inserts version 1 from the
+closed V1 constants plus the configured finite terminal duration. Publication locks the
+current row, requires exactly `current+1`, inserts immutable canonical policy bytes and
+digest, and advances the pointer; an exact repeated version is read-only and any changed
+byte/version conflicts. Every transaction sets the project GUC locally, locks the exact
+workspace binding then current policy, and delegates mutation only to the owned security-
+definer function. An ingress duplicate-key race re-enters the exact replay path and never
+consumes a second sequence; even after policy advances, replay requires the now-current
+request pair but returns the original receipt and its retained policy evidence. Pull
+resolves the attachment outside caller data, snapshots the high watermark, and returns
+deep-owned bytes/receipts.
+
+Run:
+
+```bash
+WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'TestActivityStore' -count=1
+go test ./internal/core/git -run 'TestActivity(Store|Policy)' -count=1
+```
+
+Expected GREEN: every store test passes under forced RLS.
+
+```bash
+git add internal/core/git/activity_store.go internal/core/git/activity_store_test.go internal/core/git/activity_policy.go internal/core/git/activity_policy_test.go
+git commit -m "feat: persist Fabric Activity receipts"
+```
+
+- [ ] **Step 5: Write lifecycle/pruner RED tests**
+
+Add:
+
+```go
+func TestActivityLifecycleRowsStayProtectedUntilTerminal(t *testing.T)
+func TestActivityLifecycleStateMachinesRejectForbiddenEdges(t *testing.T)
+func TestActivityLifecycleExactReplayKeepsTerminalTime(t *testing.T)
+func TestActivityPrunerAgeOrCapUsesCreatedAtThenActivityID(t *testing.T)
+func TestActivityPrunerAgeAndRankAreORNotAND(t *testing.T)
+func TestActivityPrunerTerminalRetentionUsesExactDefaultOrFiniteLongerPolicy(t *testing.T)
+func TestActivityPrunerBoundsBatchAndKeepsSiblingRoutes(t *testing.T)
+func TestActivityPrunerRollbackLeavesLedgerReceiptAndLifecycleComplete(t *testing.T)
+```
+
+Use timestamp/UUID ties, 10,001 ordinary rows, blocked recovery, all four lifecycle kinds,
+and concurrent sibling origins. The pruner's batch is `1..1000`; it deletes children/
+receipt before ledger in one transaction and never touches a portable table.
+
+Run: `WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'TestActivity(Lifecycle|Pruner)' -count=1`
+
+Expected RED: lifecycle/pruner methods and sentinels are absent.
+
+- [ ] **Step 6: Implement lifecycle/pruner, update entity docs, and run GREEN**
+
+Implement only the state edges in amendment §7. Capture transaction time once on the
+first terminal edge and derive expiry from the lifecycle row's captured finite policy;
+never accept either timestamp from a request. The pruner locks the origin binding,
+recomputes eligibility/rank under that lock, orders candidates `(created_at,activity_id)`
+ascending, rechecks protection, and uses the maintenance-owned function.
+
+Update `docs/db-entities.md` with the migration-20 baseline, every portable and Activity
+relation, complete keys/FKs, immutable-versus-mutable ownership, exact four functions,
+forced RLS, finite pruning, and explicit absence of Fabric promotion authority.
+
+Run:
+
+```bash
+WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'Test(Migration21|Activity)' -count=1
+go test -race ./internal/core/git -run 'TestActivity(Store|Lifecycle|Pruner)' -count=1
+```
+
+Expected GREEN: PASS; concurrent sibling routes do not block or cross-delete.
+
+```bash
+git add internal/core/git/activity_lifecycle.go internal/core/git/activity_lifecycle_test.go internal/core/git/activity_pruner.go internal/core/git/activity_pruner_test.go docs/db-entities.md
+git commit -m "feat: enforce finite Fabric Activity retention"
+```
+
+- [ ] **Step 7: Independently review Task 3B**
+
+The review blocks on role creation inside migration 21, missing forced RLS/composite FK,
+mutable ledger/receipt, direct runtime DML, unbounded policy, non-atomic replay/prune,
+promotion-shaped Fabric objects, a stream-version Activity cursor, changed migrations
+1-20, or a down shape different from migration 20.
+
+#### Task 3C: Hard-cut Gateway to v8 and add durable Activity repositories
+
+**Files:**
+- Create: `internal/runtime/localstore/private_schema_v8.sql`
+- Create: `internal/runtime/localstore/testdata/private_schema_v7.sql`
+- Delete: `internal/runtime/localstore/private_schema_v7.sql`
+- Modify: `internal/runtime/localstore/migrations.go`
+- Modify: `internal/runtime/localstore/private_format.go`
+- Modify: `internal/runtime/localstore/migrations_test.go`
+- Modify: `internal/runtime/localstore/private_format_test.go`
+- Modify: `internal/runtime/localstore/r06_authority_test.go`
+- Create: `internal/runtime/localstore/activity_records.go`
+- Create: `internal/runtime/localstore/activity_policy_repo.go`
+- Create: `internal/runtime/localstore/activity_policy_repo_test.go`
+- Create: `internal/runtime/localstore/activity_queue.go`
+- Create: `internal/runtime/localstore/activity_queue_test.go`
+- Create: `internal/runtime/localstore/activity_pull.go`
+- Create: `internal/runtime/localstore/activity_pull_test.go`
+- Create: `internal/runtime/localstore/activity_lifecycle.go`
+- Create: `internal/runtime/localstore/activity_lifecycle_test.go`
+- Create: `internal/runtime/localstore/activity_pruner.go`
+- Create: `internal/runtime/localstore/activity_pruner_test.go`
+- Modify: `README.md`
+- Modify: `agents/README.md`
+- Modify: `docs/implementation-rules.md`
+- Modify: `docs/compatibility.md`
+- Modify: `docs/wiki/Security-Model.md`
+- Modify: `docs/testing/alpha-validation.md`
+
+**Interfaces:**
+- Consumes: Task-2 exact routes/conflict gate, Task-3A records, and the single-daemon
+  private DB. It never imports `internal/core/*` or `internal/mcp`.
+- Produces: the exact v8 format and this local repository API:
+
+```go
+type ActivityRecord struct {
+    Key            types.ActivityOriginKey
+    Activity       projectstate.ActivityV1
+    ActivityJSON   []byte
+    ActivityDigest projectstate.Digest
+    PolicyVersion  int64
+    PolicyDigest   projectstate.Digest
+    Sequence       *int64
+    AcceptedAt     time.Time
+}
+type ActivityPolicyRecord struct {
+    Route        types.ActivityRouteKey
+    Policy       projectstate.EffectiveActivityPolicyV1
+    PolicyJSON   []byte
+    PolicyDigest projectstate.Digest
+    ReceivedAt   time.Time
+}
+type ActivityPullDelivery struct {
+    SourceWorkspaceID types.WorkspaceID
+    ActivityJSON      []byte
+    ActivityDigest    projectstate.Digest
+    ReceiptJSON       []byte
+}
+type ActivityPullBatch struct {
+    PolicyJSON    []byte
+    ExpectedAfter int64
+    NextSequence  int64
+    HasMore       bool
+    Deliveries    []ActivityPullDelivery
+}
+type ActivityLifecycleChange struct {
+    Kind, ReferenceID, ExpectedState, NextState string
+}
+
+type ActivityRepo struct { db *sql.DB }
+func NewActivityRepo(*sql.DB) *ActivityRepo
+func (r *ActivityRepo) CurrentPolicy(context.Context, types.ActivityRouteKey) (ActivityPolicyRecord, error)
+func (r *ActivityRepo) ReplacePolicy(context.Context, types.ActivityRouteKey, int64, projectstate.Digest, projectstate.EffectiveActivityPolicyV1) (ActivityPolicyRecord, error)
+func (r *ActivityRepo) QueueOutbound(context.Context, types.ActivityRouteKey, projectstate.ActivityV1) (ActivityRecord, error)
+func (r *ActivityRepo) PendingOutbound(context.Context, types.ActivityRouteKey, int) ([]ActivityRecord, error)
+func (r *ActivityRepo) AcknowledgeOutbound(context.Context, types.ActivityOriginKey, projectstate.ActivityReceiptV1) error
+func (r *ActivityRepo) AcceptPullBatch(context.Context, types.ActivityRouteKey, ActivityPullBatch) error
+func (r *ActivityRepo) Cursor(context.Context, types.ActivityRouteKey) (int64, error)
+func (r *ActivityRepo) Retained(context.Context, types.ActivityRouteKey, int) ([]ActivityRecord, error)
+func (r *ActivityRepo) TransitionLifecycle(context.Context, types.ActivityOriginKey, ActivityLifecycleChange) error
+func (r *ActivityRepo) Prune(context.Context, types.ActivityRouteKey, types.WorkspaceID, int) (int, error)
+```
+
+All returned slices/bytes/pointers are deep-owned. Presence never reaches a repository
+method. This package defines `ErrActivityPolicyUnavailable`,
+`ErrActivityPolicyChanged`, `ErrActivityNotFound`, `ErrActivityReplayConflict`,
+`ErrActivityCursorConflict`, and `ErrActivityLifecycleConflict`; wrapping preserves
+`errors.Is`, and error text never contains the forbidden evidence listed in amendment
+§12.
+
+- [ ] **Step 1: Write v8 hard-cut RED tests**
+
+Add:
+
+```go
+func TestFreshPrivateDatabaseInitializesExactV8Atomically(t *testing.T)
+func TestExactPrivateV8ReopensWithoutSchemaWrite(t *testing.T)
+func TestExactFormerV7IsBytePreservedAndRefused(t *testing.T)
+func TestPrivateV8RejectsMalformedPartialFutureUnsafeAndSidecarEvidence(t *testing.T)
+func TestPrivateV8InjectedInitializationFailureLeavesFreshPreimage(t *testing.T)
+func TestPrivateV8ActivityCatalogAndConstraintsAreExact(t *testing.T)
+func TestPrivateV8KeepsCodeGraphCatalogOrthogonal(t *testing.T)
+func TestPrivateV8HasNoNumberedMigrationDirectory(t *testing.T)
+```
+
+The v7 SQL file under `testdata/` is an unsupported-format corpus only; production code
+must not embed, parse, export, or convert it. Hash main/WAL/SHM/journal bytes before a
+failed open and require exact equality after. Check the singleton ledger is `{8}` and the
+catalog contains exactly the eight Activity tables from amendment §8.2.
+
+Run:
+
+```bash
+go test ./internal/runtime/localstore -run 'Test(FreshPrivateDatabase|ExactPrivateV8|ExactFormerV7|PrivateV8)' -count=1
+```
+
+Expected RED: current code initializes/reopens v7 and has no Activity catalog.
+
+- [ ] **Step 2: Replace the consolidated schema and current-format authority**
+
+Copy the complete v7 snapshot into the test-only corpus, then replace the production
+snapshot with v8. Add `canonical_ref` to complete binding/cursor unique keys and add the
+exact `activity_policy_versions`, `activity_policy_current`, `activity_ledger`,
+`activity_ingress_receipts`, `activity_lifecycle`, `activity_outbound_queue`,
+`activity_cursors`, and `activity_promotion_receipts` tables from amendment §8.2. Use
+BLOB for canonical JSON, safe-integer CHECKs, complete composite FKs, and the specified
+CAS/state/timestamp constraints.
+
+Set `GatewaySchemaVersion = 8`; rename embedded variables, fingerprint caches,
+initialization hook, function/error text, required table/column inventories, and tests
+from v7 to v8. Retain classification-by-read-only-copy, sidecar preservation, atomic
+fresh initialization, and optional Code Graph validation unchanged. Do not add a
+migrations directory or v7 production branch.
+
+Update only current documentation to say v8/current Activity state and former-v7 refusal.
+Dated R06 and earlier Stage-3-v7 specs/reviews remain unchanged.
+
+Run:
+
+```bash
+go test ./internal/runtime/localstore -run 'Test(FreshPrivateDatabase|ExactPrivateV8|ExactFormerV7|PrivateV8|GatewayMigration)' -count=1
+go test ./internal/runtime/codegraph/... ./cmd/gatewayd -run 'Test.*(Schema|Private|CodeGraph)' -count=1
+```
+
+Expected GREEN: fresh/exact v8 passes; former v7 and every other format are unchanged and
+refused; Code Graph v2 composes only with exact current Gateway schema.
+
+```bash
+git add internal/runtime/localstore/private_schema_v8.sql internal/runtime/localstore/testdata/private_schema_v7.sql internal/runtime/localstore/private_schema_v7.sql internal/runtime/localstore/migrations.go internal/runtime/localstore/private_format.go internal/runtime/localstore/private_format_test.go internal/runtime/localstore/migrations_test.go internal/runtime/localstore/r06_authority_test.go README.md agents/README.md docs/implementation-rules.md docs/compatibility.md docs/wiki/Security-Model.md docs/testing/alpha-validation.md
+git commit -m "feat!: hard-cut Gateway private schema to v8"
+```
+
+- [ ] **Step 3: Write Gateway policy/queue/ack RED tests**
+
+Add:
+
+```go
+func TestActivityQueueRequiresValidatedEffectiveFinitePolicy(t *testing.T)
+func TestActivityQueueRestartPreservesOrdinaryAndDiscardsPresence(t *testing.T)
+func TestActivityQueueRetryAndReplayKeepExactBytesAndCompleteRoute(t *testing.T)
+func TestActivityQueueRejectsChangedBytesAndRemoteActorForgery(t *testing.T)
+func TestActivityQueueOutboundSourceWorkspaceEqualsLocalWorkspace(t *testing.T)
+func TestActivityPolicyCASUpdatesOnlyPendingExpectedPolicy(t *testing.T)
+func TestActivityAcknowledgeMatchesReceiptPolicyAndTerminalizesDelivery(t *testing.T)
+func TestActivityQueueRouteAndOriginIsolation(t *testing.T)
+```
+
+Test every route component independently, restart from the same SQLite file, stale-policy
+CAS, immutable created-policy fields, exact receipt replay, wrong-route receipt, and
+rollback at every write. Presence leaves all eight Activity tables unchanged.
+
+Run: `go test ./internal/runtime/localstore -run 'TestActivity(Queue|Policy|Acknowledge)' -count=1`
+
+Expected RED: `ActivityRepo` and repository records do not exist.
+
+- [ ] **Step 4: Implement policy/queue/ack and run GREEN**
+
+Every method validates its complete route and strict record before `BEGIN IMMEDIATE`.
+Queue locks/reloads the active binding and current policy, exact-replays or rejects the
+ledger, inserts required embedded plus delivery lifecycle rows and queue atomically, and
+never upgrades actor assurance. Ack locks the same full key, strict-matches one retained
+policy/receipt, inserts/replays ingress evidence, and terminalizes queue plus delivery
+lifecycle with one database-owned UTC time.
+
+Run: `go test ./internal/runtime/localstore -run 'TestActivity(Queue|Policy|Acknowledge)' -count=1`
+
+Expected GREEN: PASS with restart, fault, and route-isolation fixtures.
+
+```bash
+git add internal/runtime/localstore/activity_records.go internal/runtime/localstore/activity_policy_repo.go internal/runtime/localstore/activity_policy_repo_test.go internal/runtime/localstore/activity_queue.go internal/runtime/localstore/activity_queue_test.go
+git commit -m "feat: persist Gateway Activity delivery"
+```
+
+- [ ] **Step 5: Write Gateway pull/lifecycle/pruner/concurrency RED tests**
+
+Add:
+
+```go
+func TestActivityPullBatchIsAtomicWithCursorCAS(t *testing.T)
+func TestActivityPullDuplicateBatchIsReadOnly(t *testing.T)
+func TestActivityPullOneInvalidDeliveryRollsBackBatchAndCursor(t *testing.T)
+func TestActivityPullSequenceGapsAdvanceToHighWatermark(t *testing.T)
+func TestActivityLifecycleRowsStayProtectedUntilTerminal(t *testing.T)
+func TestActivityQueuePruningDoesNotCrossProjectWorkspaceFabricStreamOrRef(t *testing.T)
+func TestActivityPrunerAgeOrCapOrderAndProtectedOverflow(t *testing.T)
+func TestActivityPrunerTerminalExpiryAndPromotionReceiptProtection(t *testing.T)
+func TestActivityConcurrentEnqueueAckPullAndPruneKeepSiblingIsolation(t *testing.T)
+```
+
+Pull prevalidates the full policy and batch, requires ascending positive safe sequences,
+and advances only from the exact old cursor. Prune uses age OR cap, stable UUID ties,
+`1..1000` batches, all-terminal/max-expiry rules, and deletes a promotion receipt before
+its restricted source parent only after its finite terminal retention.
+
+Run:
+
+```bash
+go test ./internal/runtime/localstore -run 'TestActivity(Pull|Lifecycle|Pruner|Concurrent)' -count=1
+```
+
+Expected RED: pull/cursor/lifecycle/pruner paths are absent.
+
+- [ ] **Step 6: Implement remaining repositories and run GREEN/race**
+
+Use one `BEGIN IMMEDIATE` per batch/transition/prune; no method holds it across network
+work. Strict-read every persisted canonical blob/digest before serving or mutation.
+Task 3C creates the promotion-receipt table and constraints but no promotion repository
+or public promotion operation; Task 3E alone adds its transaction-local access seam.
+
+Run:
+
+```bash
+go test ./internal/runtime/localstore -run 'TestActivity' -count=1
+go test -race ./internal/runtime/localstore -run 'TestActivityConcurrent' -count=1
+```
+
+Expected GREEN: PASS; injected failures leave complete preimages and sibling bindings are
+byte-identical.
+
+```bash
+git add internal/runtime/localstore/activity_pull.go internal/runtime/localstore/activity_pull_test.go internal/runtime/localstore/activity_lifecycle.go internal/runtime/localstore/activity_lifecycle_test.go internal/runtime/localstore/activity_pruner.go internal/runtime/localstore/activity_pruner_test.go
+git commit -m "feat: retain and prune Gateway Activity"
+```
+
+- [ ] **Step 7: Independently review Task 3C**
+
+Review blocks on any v7 production reader, incomplete route query, noncanonical blob
+fallback, persisted presence, non-immediate multi-write mutation, retroactive policy
+change, cross-binding cursor/prune, nested ProjectState transaction, or private docs that
+still describe v7 as current.
+
+#### Task 3D: Implement policy-gated Activity transport without public descriptors
+
+**Files:**
+- Create: `internal/runtime/sync/activity_v1.go`
+- Create: `internal/runtime/sync/activity_v1_test.go`
+
+**Interfaces:**
+- Consumes: Task-2 route/profile/credential/conflict boundaries and Task-3C
+  `localstore.ActivityRepo`.
+- Produces: a separate transport service. It does not add fields or paths to the legacy
+  `Engine`, define MCP JSON descriptors, or import Core/MCP/ProjectState runtime code.
+
+```go
+type ActivityAcceptRequest struct {
+    AttachmentRef  string
+    PolicyVersion  int64
+    PolicyDigest   projectstate.Digest
+    ActivityJSON   []byte
+    ActivityDigest projectstate.Digest
+}
+type ActivityAcceptResponse struct {
+    Receipt       projectstate.ActivityReceiptV1
+    PolicyJSON    []byte
+    PolicyDigest  projectstate.Digest
+    PolicyChanged bool
+}
+type ActivityPullRequest struct {
+    AttachmentRef string
+    AfterSequence int64
+    Limit         int
+}
+type ActivityPullResponse struct {
+    PolicyJSON   []byte
+    PolicyDigest projectstate.Digest
+    Deliveries   []localstore.ActivityPullDelivery
+    NextSequence int64
+    HasMore      bool
+}
+type ActivityFabricClient interface {
+    Accept(context.Context, ActivityAcceptRequest) (ActivityAcceptResponse, error)
+    Pull(context.Context, ActivityPullRequest) (ActivityPullResponse, error)
+    SendPresence(context.Context, string, []byte, projectstate.Digest) error
+}
+type ActivityClientFactory interface {
+    Client(context.Context, types.FabricProfile, string) (ActivityFabricClient, error)
+}
+type ActivityTransport struct {
+    routes      FabricRouteSource
+    credentials CredentialSource
+    conflicts   localstore.WorkspaceConflictGate
+    activities  *localstore.ActivityRepo
+    clients     ActivityClientFactory
+}
+func NewActivityTransport(FabricRouteSource, CredentialSource, localstore.WorkspaceConflictGate, *localstore.ActivityRepo, ActivityClientFactory) (*ActivityTransport, error)
+func (s *ActivityTransport) Queue(context.Context, types.WorkspaceScope, projectstate.ActivityV1) error
+func (s *ActivityTransport) DeliverPending(context.Context, types.WorkspaceScope, int) error
+func (s *ActivityTransport) Pull(context.Context, types.WorkspaceScope, int) error
+func (s *ActivityTransport) SendPresence(context.Context, types.WorkspaceScope, projectstate.ActivityV1) error
+func (s *ActivityTransport) Retained(context.Context, types.WorkspaceScope, int) ([]localstore.ActivityRecord, error)
+```
+
+- [ ] **Step 1: Write transport RED tests**
+
+Add:
+
+```go
+func TestActivityTransportRejectsPolicyBeforeQueueSendAcceptOrExpose(t *testing.T)
+func TestActivityTransportRetryAndServerReplayAreIdempotent(t *testing.T)
+func TestActivityTransportPolicyChangeRetriesSameActivityBytes(t *testing.T)
+func TestActivityTransportPullGapsAndCursorRollback(t *testing.T)
+func TestActivityTransportPresenceHasZeroDurableRowsAndVanishesOnRestart(t *testing.T)
+func TestActivityTransportResolvesRouteCredentialAndPolicyEveryCycle(t *testing.T)
+func TestActivityTransportConflictBlocksOnlyExactBindingBeforeCredentialOrNetwork(t *testing.T)
+func TestActivityTransportNeverAppliesOperationOrAdvancesStream(t *testing.T)
+func TestActivityTransportErrorsRedactSecretsBytesActorsAndCompleteRoutes(t *testing.T)
+```
+
+Instrument route, profile, credential, client factory, network calls, Activity rows,
+cursor, portable queue, portable stream, reducer/application, and sibling bindings. A
+malformed/missing/unbounded policy stops before the relevant queue/send/accept/read;
+local presence and portable workspace operations remain usable.
+
+Run: `go test ./internal/runtime/sync -run 'TestActivityTransport' -count=1`
+
+Expected RED: compile failure because the transport service is absent.
+
+- [ ] **Step 2: Implement queue/send/pull/presence ordering**
+
+Queue resolves the current exact route and policy, requires a remote-issued public-key-
+continuity/private-authenticated actor without rewriting it, then calls the local atomic
+queue. Every send/pull/presence cycle resolves route, profile, credential, and policy
+again immediately before client construction. A policy-changed response strict-validates
+and CAS-replaces current policy, changes only pending expected-policy fields, and retries
+the same Activity ID/bytes/digest. Ack and pull delegate to Task-3C atomic methods.
+
+The exact-workspace conflict gate precedes credential resolution/client/DNS/network and
+blocks only that binding. No SQLite transaction spans a network call. Presence validates
+policy and actor but stops before every durable repository method.
+
+Run:
+
+```bash
+go test ./internal/runtime/sync -run 'TestActivityTransport' -count=1
+go test -race ./internal/runtime/sync -run 'TestActivityTransport(Retry|Pull|Resolves)' -count=1
+```
+
+Expected GREEN: PASS; retry bytes/digests remain identical, one invalid pull item leaves
+cursor and batch unchanged, and no portable stream/reducer counter changes.
+
+- [ ] **Step 3: Commit and independently review Task 3D**
+
+```bash
+git add internal/runtime/sync/activity_v1.go internal/runtime/sync/activity_v1_test.go
+git commit -m "feat: add policy-gated Activity transport"
+```
+
+Review blocks on a retained credential, caller-provided route, policy bypass, persisted
+presence, cross-binding failure, network-spanning transaction, portable operation call,
+or Task-6 descriptor/API work.
+
+#### Task 3E: Add the Gateway-only atomic promotion seam
+
+**Files:**
+- Create: `internal/runtime/projectstate/promotion.go`
+- Create: `internal/runtime/projectstate/promotion_test.go`
+- Modify: `internal/runtime/projectstate/service.go`
+- Modify: `internal/runtime/projectstate/workspace_coordinator.go`
+- Modify: `internal/runtime/projectstate/architecture_test.go`
+- Create: `internal/runtime/localstore/workspace_activity_promotion_repo.go`
+- Create: `internal/runtime/localstore/workspace_activity_promotion_repo_test.go`
+- Modify: `docs/db-entities.md`
+
+**Interfaces:**
+- Consumes: retained Task-3C source Activity/policy/receipt evidence, the existing
+  six-coordinator `projectstate.Service`, `WorkspaceMutationTx`, shared reducer, and
+  operation append methods.
+- Produces: one local facade method. `Service` remains exactly six coordinator pointers;
+  promotion delegates to `workspaceCoordinator` and never calls public `ApplyBatch` from
+  inside its transaction.
+
+```go
+var ErrActivityNotPromotable = errors.New("projectstate: activity not promotable")
+var ErrActivityPromotionConflict = errors.New("projectstate: activity promotion conflict")
+
+type PromoteActivityRequest struct {
+    Scope                types.WorkspaceScope
+    SourceActivityID     string
+    ExpectedSourceDigest state.Digest
+    ExpectedViewDigest   state.Digest
+    Promoter             types.ActorEnvelope
+}
+type PromoteActivityResult struct {
+    Event      state.EventV1
+    Operation  state.OperationV1
+    PromotedAt time.Time
+}
+func (s *Service) PromoteActivity(context.Context, PromoteActivityRequest) (PromoteActivityResult, error)
+
+type ActivityPromotionReceiptRecord struct {
+    Scope            types.WorkspaceScope
+    SourceActivityID string
+    SourceKey        types.ActivityOriginKey
+    SourceDigest     state.Digest
+    EventID          string
+    OperationID      string
+    Promoter         types.ActorEnvelope
+    PromotedAt       time.Time
+}
+func (tx *WorkspaceMutationTx) ActivityPromotionSource(context.Context, string, state.Digest) (ActivityRecord, ActivityPolicyRecord, error)
+func (tx *WorkspaceMutationTx) ActivityPromotionReceipt(context.Context, string) (*ActivityPromotionReceiptRecord, WorkspaceOperation, error)
+func (tx *WorkspaceMutationTx) InsertActivityPromotionReceipt(context.Context, ActivityPromotionReceiptRecord) error
+func (tx *WorkspaceMutationTx) ConfirmActivityPromotionLifecycle(context.Context, types.ActivityOriginKey, int64, state.Digest, int64, time.Time) error
+```
+
+The private extension data type has exactly `source_activity_id` then
+`source_activity_digest`; the Event has exactly one extension named
+`dev.wormhole.promotion`, schema version 1. Promotion-source lookup requires exactly one
+retained row with that Activity ID in the local workspace; zero is not promotable and
+more than one is a promotion conflict.
+
+- [ ] **Step 1: Write the transaction-local evidence seam RED tests**
+
+Add:
+
+```go
+func TestActivityPromotionTxLoadsOneScopedSourceAndRetainedPolicy(t *testing.T)
+func TestActivityPromotionTxReceiptReplayAndConflict(t *testing.T)
+func TestActivityPromotionTxLifecycleConfirmationIsAtomic(t *testing.T)
+func TestActivityPromotionTxMethodsDoNotOpenNestedWriter(t *testing.T)
+```
+
+Use a real v8 database and call the methods only inside `WithImmediateWorkspace`.
+Fixtures cover no source, one exact source, two same-ID sources in the local workspace,
+changed digest, wrong route/workspace, policy history after current policy advances, exact
+receipt replay, and injected failure between receipt/lifecycle writes.
+
+Run:
+
+```bash
+go test ./internal/runtime/localstore -run 'TestActivityPromotionTx' -count=1
+```
+
+Expected RED: the transaction-local records and methods do not exist.
+
+- [ ] **Step 2: Implement and commit only the local evidence seam**
+
+Add the four exact `WorkspaceMutationTx` methods above. They reuse the transaction's
+connection and immutable scope, strict-read retained canonical Activity/policy/receipt
+bytes, require exactly one source match, and never call `BEGIN`, `COMMIT`, or
+`WithImmediateWorkspace`. Lifecycle confirmation writes only `receipt/confirmed` with
+the transaction-owned time and captured finite source policy.
+
+Run: `go test ./internal/runtime/localstore -run 'TestActivityPromotionTx' -count=1`
+
+Expected GREEN: PASS, including exact replay and injected rollback.
+
+```bash
+git add internal/runtime/localstore/workspace_activity_promotion_repo.go internal/runtime/localstore/workspace_activity_promotion_repo_test.go
+git commit -m "feat: bind local Activity promotion evidence"
+```
+
+- [ ] **Step 3: Write ProjectState promotion RED tests**
+
+Add:
+
+```go
+func TestPromotionCopiesExactActivityProjectionAndUsesDistinctPromoter(t *testing.T)
+func TestPromotionAtomicallyMarksSourceAndLeavesFabricWithoutPromotionAuthority(t *testing.T)
+func TestPromotionExactRetryReturnsStoredEventAndOperation(t *testing.T)
+func TestPromotionRejectsMissingProjectionChangedDigestAndAmbiguousSource(t *testing.T)
+func TestPromotionRejectsOpenConflictAndStaleViewWithoutWrites(t *testing.T)
+func TestPromotionRollsBackAtEveryActivityReceiptAndOperationWrite(t *testing.T)
+func TestActivityExpiryLeavesPortableTreeGitAcceptanceAndPromotionBytesIdentical(t *testing.T)
+func TestProjectStateServiceStillOwnsExactlySixCoordinatorsWithPromotion(t *testing.T)
+func TestFabricHasNoCompileTimeOrRuntimeActivityPromotionSeam(t *testing.T)
+```
+
+Fixtures cover every event field, a distinct promoter, source-actor/reference validation,
+two same-ID source rows in one local workspace, policy outage after retained acceptance,
+finite promotion-receipt expiry, and injected failure at every write. Hard-code the
+promotion extension/operation canonical bytes and digest; production code must not
+generate the expected golden.
+
+Run:
+
+```bash
+go test ./internal/runtime/projectstate -run 'Test(Promotion|ActivityExpiry|ProjectStateService.*Promotion|FabricHasNo)' -count=1
+```
+
+Expected RED: the facade, request/result records, sentinels, and coordinator path are
+absent from ProjectState; the reviewed local evidence seam remains GREEN.
+
+- [ ] **Step 4: Implement one ProjectState-owned immediate transaction**
+
+Validate the request and local promoter before opening the writer. Inside the existing
+`WorkspaceRepo.WithImmediateWorkspace`, conflict-gate, strict-compose the current view,
+require `ExpectedViewDigest`, strict-read exactly one source Activity/receipt/policy by
+workspace plus ID/digest, and require a complete event projection. Generate canonical
+Event/Operation UUIDs from coordinator-owned injectable generators; deep-copy source
+channel/actor/type/payload/note/time; build the sole closed extension; use the distinct
+promoter and expected view digest in one put-record `OperationV1`.
+
+Apply with the shared reducer, append through transaction-local
+`InsertActiveOperations`, update workspace status, insert the promotion receipt, and add
+the terminal `receipt/confirmed` lifecycle row with captured finite policy before the one
+commit. Exact retry strict-reads the receipt and retained canonical operation and returns
+the same result without allocating IDs/writing. Changed/ambiguous evidence returns
+`ErrActivityPromotionConflict`; absent event projection returns
+`ErrActivityNotPromotable`. No live policy/Fabric call occurs.
+
+Run:
+
+```bash
+go test ./internal/runtime/projectstate -run 'Test(Promotion|ActivityExpiry|ProjectStateService.*Promotion|FabricHasNo)' -count=1
+go test -race ./internal/runtime/projectstate -run 'TestPromotion' -count=1
+```
+
+Expected GREEN: PASS; every fault is atomic, retry is read-only, and Activity pruning
+cannot change already-produced portable bytes or the accepted Git base.
+
+- [ ] **Step 5: Commit and independently review Task 3E**
+
+```bash
+git add internal/runtime/projectstate/promotion.go internal/runtime/projectstate/promotion_test.go internal/runtime/projectstate/service.go internal/runtime/projectstate/workspace_coordinator.go internal/runtime/projectstate/architecture_test.go docs/db-entities.md
+git commit -m "feat: promote retained Activity locally"
+```
+
+Review blocks on a seventh Service coordinator, nested `ApplyBatch`, caller-selected Event
+semantics/IDs/extensions, source mutation outside the one writer, live Fabric dependency,
+Fabric promotion symbol, or expiry changing portable/Git state.
+
+#### Task 3 final verification and stop boundary
+
+- [ ] **Step 1: Run focused cross-slice verification**
+
+```bash
+go test ./internal/types/... ./internal/runtime/localstore ./internal/runtime/sync ./internal/runtime/projectstate -run 'Test(Activity|EffectiveActivityPolicy|Promotion|PrivateV8|ExactFormerV7)' -count=1
+WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'Test(Migration21|Activity)' -count=1
+go test -race ./internal/runtime/localstore ./internal/runtime/sync ./internal/runtime/projectstate -run 'Test(Activity|Promotion)' -count=1
+```
+
+Expected: PASS with no skip under required Postgres mode.
+
+- [ ] **Step 2: Run the repository gate**
+
+```bash
+make check
+git diff --check
+```
+
+Expected: build, vet, integration, race, and coverage PASS; merged statement coverage is
+at least 80.0%; no production path is excluded by a coverage-only build tag.
+
+- [ ] **Step 3: Review the complete Task-3 range and push a clean checkpoint**
+
+Generate one final review package from the pre-3A commit through the reviewed 3E head.
+Confirm migrations 1-20 hashes are unchanged, migration 21 down is exact version 20,
+private v8 refuses former v7, all five slice reviews are clean after fixes, current docs
+say v8, dated history was not rewritten, and `git status --short` is empty. Push the
+reviewed branch before dispatching Task 4.
 
 ### Task 4: Implement exact portable-stream reconstruction and shared-reducer transactions
 
@@ -882,7 +1658,8 @@ git commit -m "feat: add durable Git-aware streams"
   `DecodeOperation`, `CanonicalOperation`, `DigestCanonicalJSON`, and
   `DigestCanonicalMarkdown`.
 - Produces: restart-safe non-authoritative portable `StreamStore` and transaction methods
-  used by MCP portable-proposal coordination. ActivityV1 uses the Task-3-gated separate
+  used by MCP portable-proposal coordination. ActivityV1 uses the reviewed Task-3B/3D
+  separate
   store/transport and never enters these methods.
 
 ```go
@@ -1142,7 +1919,7 @@ type SyncAttachV2Result struct {
     RemoteProjectID string `json:"remote_project_id"`
     StreamID string `json:"stream_id"`
     StreamVersion int64 `json:"stream_version"`
-    EffectiveActivityPolicy EffectiveActivityPolicyV1 `json:"effective_activity_policy"`
+    EffectiveActivityPolicy projectstate.EffectiveActivityPolicyV1 `json:"effective_activity_policy"`
 }
 ```
 
@@ -1153,7 +1930,7 @@ no v2 public argument schema contains `project_id`, `workspace_id`, `fabric_inst
 `remote_project_id`, `stream_id`, or an actor-routing field. Attach has no attachment
 reference and uses the exact closed `SyncAttachV2Args` above. Only after the server
 independently observes and validates that repository/ref may it allocate and return the
-exact closed result. `EffectiveActivityPolicyV1` is the prior Task-3-gate-frozen finite
+exact closed result. `projectstate.EffectiveActivityPolicyV1` is the Task-3A-frozen finite
 policy type; missing, malformed, unknown, or unbounded values reject attach before local
 binding persistence. The result's remote IDs are response data retained only in Gateway's
 private complete key and never echoed in later public arguments. Bootstrap/pull carry
@@ -1162,11 +1939,19 @@ durable conflict ID and resolution operation. A portable operation's embedded at
 is content, not routing authority, and must exact-match the freshly resolved actor scope.
 All v2 structs are closed (`additionalProperties:false`) and require `version:2`.
 
-Task 3's focused amendment adds a separate ActivityV1 protocol branch. Attach/bootstrap
+Task 3D adds the separate internal ActivityV1 transport; this Task-6 slice wires its
+closed protocol branch and no earlier Task-3 slice expands public descriptors. Attach/bootstrap
 must return its exact effective finite retention policy; Gateway validates that policy
 before it queues, sends, accepts, or exposes live activity. Missing, malformed, unknown,
 or unbounded policy disables remote activity without blocking portable/local work. The
 portable v2 OperationV1/tree branch does not carry generic channel/task activity.
+The Activity branch maps the Task-3 sentinels exactly to `invalid_activity`,
+`unknown_activity_version`, `activity_policy_required`, `activity_policy_changed`,
+`activity_not_found`, `activity_replay_conflict`, `activity_cursor_invalid`,
+`activity_lifecycle_conflict`, `activity_not_promotable`, and
+`activity_promotion_conflict`; public error bodies expose no canonical bytes, payload or
+note, actor/policy/credential evidence, attachment reference, private path, or complete
+route.
 
 - [ ] **Step 1: Freeze v1 branches and add failing v2/proof tests**
 
@@ -1193,9 +1978,15 @@ expected stream version, and expected live-tree digest while re-signing otherwis
 parameters. Each case must fail before reducer dispatch, stream mutation, audit, cursor,
 or delivery and leave the stored version/tree bytes unchanged.
 
+Add `TestActivityV1DescriptorUsesFrozenRecordsAndStableErrorCodes` and
+`TestActivityV1PublicErrorsRedactPrivateEvidence`. The first reflects every Activity
+descriptor/result branch against the Task-3A records and the ten exact codes above; the
+second injects each Task-3 sentinel with secret/evidence-bearing wrapped causes and proves
+the public response contains only the safe code and operation label.
+
 - [ ] **Step 2: Run RED**
 
-Run: `go test ./internal/mcp ./internal/runtime/sync -run 'Test(SyncV1|SyncDescriptorV1|SyncV2|PublicProof)' -count=1`
+Run: `go test ./internal/mcp ./internal/runtime/sync -run 'Test(SyncV1|SyncDescriptorV1|SyncV2|PublicProof|ActivityV1)' -count=1`
 
 Expected: v1 fixture tests PASS; new v2/proof tests FAIL.
 
@@ -1287,7 +2078,7 @@ boundary; no implementation may omit either check or claim a distributed transac
 Run:
 
 ```bash
-go test ./internal/mcp ./internal/runtime/sync -run 'Test(SyncV1|SyncDescriptorV1|SyncV2|PublicProof|Nonce|Precondition)' -count=1
+go test ./internal/mcp ./internal/runtime/sync -run 'Test(SyncV1|SyncDescriptorV1|SyncV2|PublicProof|ActivityV1|Nonce|Precondition)' -count=1
 go test -race ./internal/mcp -run 'TestPublicProofNonceReplay' -count=1
 ```
 
@@ -2359,13 +3150,14 @@ git commit -m "feat: recover legacy local Fabric state"
 
 **Interfaces:**
 - Consumes: shipped Tasks 1–14 and Slice-C setup.
-- Produces: truthful live command/schema/auth inventory plus reproducible SQLite-v7 and Postgres-21–23 migration gates.
+- Produces: truthful live command/schema/auth inventory plus reproducible exact-v8
+  private-format and Postgres-20→21→23 migration gates.
 
 - [ ] **Step 1: Add failing contract assertions**
 
 Assert exact canonical type package/API names, including `DecodeOperation`,
 `CanonicalOperation`, `DigestCanonicalJSON`, and `DigestCanonicalMarkdown`; local schema
-version 7; Postgres migrations 21–23; strict stored operation ID/bytes/digest verification;
+version 8 and former-v7 refusal; Postgres migrations 21–23; strict stored operation ID/bytes/digest verification;
 profile-only credential authority; private-credential v1 request/result/error/descriptor-
 branch compatibility plus public exclusion; ID-free v2 routes; token prefixes;
 first-owner/invitation/member/project-list/ownership/PAT/
@@ -2385,7 +3177,17 @@ Document public continuity as pseudonymous, private assurance as server-issued, 
 
 - [ ] **Step 4: Replace migration scripts with explicit version transitions**
 
-`test-alpha-upgrade.sh` creates a fresh database, runs full `up`, full `down`, then seeds fixtures at version 20 with `migrate ... goto 20`, runs `migrate ... up`, asserts version 23 and preserved IDs/audit plus revoked legacy tokens, runs 23→22 and proves old `WhoAmI` rejection, and tests 22→21 only on an empty private-identity fixture. SQLite tests construct exact schema versions 1 through 5, open through one-way `000006_fabric_routes.sql` and `000007_sync_binding.sql`, verify per-file transactional rollback and quarantine copy, and reject noncanonical migration filenames; they do not claim a reverse migration. No command uses `up 1`, assumes the current version, edits committed SQLite migrations 1–5, or edits Postgres migrations 1–20.
+`test-alpha-upgrade.sh` provisions the exact Activity roles, creates a fresh database,
+runs full `up`/`down`, then seeds fixtures at actual version 20 with
+`migrate ... goto 20`, captures the complete integration-manifest catalog, advances to
+21 and verifies Activity plus portable objects, returns to 20 and verifies the exact
+captured catalog, then runs through 23 and proves preserved IDs/audit plus revoked legacy
+tokens. It runs 23→22 and proves old `WhoAmI` rejection, and tests 22→21 only on an empty
+private-identity fixture. Private SQLite tests initialize a fresh exact v8 database,
+reopen exact v8 without schema mutation, inject initialization rollback, and prove exact
+former v7/malformed/partial/future/sidecar evidence is byte-preserved and refused. They
+do not contain a numbered private migration runner or reverse-migration claim. No command
+uses `up 1`, assumes the current version, or edits Postgres migrations 1–20.
 
 - [ ] **Step 5: Run GREEN contract/release gates**
 
@@ -2569,13 +3371,18 @@ Issue #56 may close only after review confirms the exact twelve prerequisites, s
 ```text
 Slice A/B/C canonical contracts
   -> 1 -> 2
-  -> 3 -> 4 -> 5 -> 6 -> 7
+  -> 3A -> 3B -> 3C -> 3D -> 3E -> 4 -> 5 -> 6 -> 7
   -> 8 -> 9 -> [human dependency approval 10] -> 11
   -> 12 legacy revocation -> 13 resolver/handler cutover
   -> 14 -> 15 -> 16 -> real external gate 17
 ```
 
-Tasks 2 and 3 may run in parallel after Task 1. Task 8 may run beside Tasks 3–7, but Task 9 waits for migration 22. Task 11 cannot begin before the exact Task-10 approval. Task 13 cannot run before migration 23 has revoked unbound legacy tokens. Task 17 cannot be parallelized, simulated, or satisfied by fixtures.
+Task 2 is the required private-routing base for Task 3. Task-3 slices run in the order
+3A→3B→3C→3D→3E with an independent review at every boundary; Task 4 waits for the full
+Task-3 gate. Task 8 may run beside Tasks 3–7, but Task 9 waits for migration 22. Task 11
+cannot begin before the exact Task-10 approval. Task 13 cannot run before migration 23
+has revoked unbound legacy tokens. Task 17 cannot be parallelized, simulated, or
+satisfied by fixtures.
 
 ## Final verification before participant collection
 
@@ -2588,7 +3395,15 @@ make release-test
 make release-rehearsal
 ```
 
-Expected: all PASS; Postgres 20→23, safe 23→22, empty 22→21, and fresh full up/down pass; SQLite 1→2→3→4→5→6→7, migration-6/7 transactional failure rollback, canonical filename enforcement, and quarantine copy pass without a reverse-migration claim; v1 branch compatibility, v2 preconditions, effective finite activity-retention handshake, exact-commit observation, restart reconstruction, composite-FK direct SQL rejection, actor forgery, atomic audit rollback, revocation, zero-contact fork, OIDC allowlist/SSRF/replay/rotation/throttling, secret redaction, and issue-56 schema tests pass; merged statement coverage is at least 80%.
+Expected: all PASS; Postgres 20→21→23, safe 23→22, empty 22→21, and fresh full
+up/down pass with version-20 integration-manifest shape restored by migration-21 down;
+Gateway fresh/exact schema v8 passes while exact former v7, malformed, partial, and future
+private formats are byte-preserved/refused without a reverse-migration claim; v1 branch
+compatibility, v2 preconditions, effective finite Activity retention, exact-commit
+observation, restart reconstruction, composite-FK direct SQL rejection, actor forgery,
+atomic audit rollback, revocation, zero-contact fork, OIDC allowlist/SSRF/replay/rotation/
+throttling, secret redaction, and issue-56 schema tests pass; merged statement coverage is
+at least 80%.
 
 ## Plan self-review
 
@@ -2608,6 +3423,23 @@ Expected: all PASS; Postgres 20→23, safe 23→22, empty 22→21, and fresh ful
   handler derives scope server-side; mutation and provenance share one transaction.
   ActivityV1 is a separate finite-retention store/queue with an effective-policy handshake
   and cannot enter portable tree reconstruction or advance accepted state.
+- **Activity amendment coverage:** Task 3 freezes complete route/origin keys and all three
+  closed records; exact replay/policy publication, four lifecycle state machines,
+  age-or-cap pruning, gap-safe cursors, eight Gateway v8 tables, six PostgreSQL Activity
+  relations, three pre-provisioned roles/four security-definer functions, stable semantic
+  errors, and one Gateway-only atomic promotion seam. Presence has no durable method;
+  Fabric has no promotion symbol; later Task 6 only exposes the already-frozen policy,
+  protocol records, and ten stable public codes.
+- **Task sizing and scope:** Task 3 has the amendment-mandated five ordered review slices,
+  with focused RED/GREEN commands, two or three implementation commits where a slice
+  crosses persistence/coordinator boundaries, and one bounded commit for the two-file
+  transport slice. Every slice has an explicit independent-review stop; no Task-4+,
+  identity, Code Graph, reduction, or compatibility work is hidden inside Task 3.
 - **Identity cutover:** first owner is an operator-provisioned one-use OIDC grant, later membership is invitation/admin controlled, PAT scopes are subsets, refresh/device/recovery replay defenses are fixed, and migration 23 revokes legacy authority before resolver cutover and cannot resurrect it on down.
-- **Migration ownership:** local schema v7 owns Fabric profile/binding/queue quarantine. Task 14 consumes Slice A's legacy integration-state outcome and performs no second rename, ignore, or repository-state edit.
+- **Migration ownership:** PostgreSQL 000020 remains the unchanged integration-manifest
+  baseline; 000021 owns Git-aware portable stream plus separate Activity relations and
+  down restores exact version 20. The consolidated private schema v8 owns Fabric routes,
+  durable Activity state, and the former v7 refusal boundary. Task 14 consumes Slice A's
+  legacy integration-state outcome and performs no second rename, ignore, or repository-
+  state edit.
 - **Compatibility/gates:** v1 compatibility covers request/result/error/handler and the v1 descriptor branch; WebAuthn remains absent; issue #56 uses the exact twelve prerequisite and six acceptance codes and requires real non-fabricated four-VM evidence.
