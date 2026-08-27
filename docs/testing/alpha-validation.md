@@ -147,11 +147,36 @@ wormhole.task.list
 wormhole.task.update_status
 ```
 
-Tests such as the Fabric package integration suite, the retained stdio-to-server
-integration test, and P7 queue/replica suites may require a migrated PostgreSQL
-database or a test-only embedding provider. They validate optional server and
-legacy transport components; they must remain labelled separately and cannot
-replace, weaken, or make the local-only gate conditional.
+Fabric and PostgreSQL remain mandatory repository-quality boundaries even
+though they are not part of the local-only Stage 2 process topology. The former
+combined Gateway/Fabric process tests were retired when Gateway removed remote
+tools and network wiring. Their executable replacement map is:
+
+| Retired combined assertion | Executable boundary replacements |
+|---|---|
+| stdio bridge, Unix socket, local Gateway writes, private attribution, restart, checkpoint and portable clone convergence | `TestStage2LocalOnlyRealProcessAcceptance`; `TestConfiguredPrivateRuntimeDerivesAttributionAndIsolatesChannelAndKBHandlers`; `TestStage2ConfiguredSyncStatusReportsQueueFreeLocalOnlyState` |
+| Fabric HTTP MCP enrolment and Postgres pillar persistence | `TestM3_MCPSeededStateReflectedInDashboard`; `TestEnrolAgentTool_DurableReplayAndControlledReissue`; `TestEnrolAgentToolBootstrapFailureRollsBackAndRetryIsIdempotent` |
+| Fabric bootstrap, incremental push/pull, replay safety and routed-owner fidelity | `TestBootstrapTool_ReturnsCompleteDeterministicSnapshot`; `TestAlphaAcceptanceIncrementalTaskEventAndGitPropagationIsReplaySafe`; `TestIncrementalPushTool_IdenticalReplaySucceedsWithoutDuplicateEffects`; `TestIncrementalPushTool_AppliesRoutedTaskOwner` |
+| server snapshot application and cross-runtime convergence | `TestBootstrap_AppliesServerTasksAndKBToLocalStore`; `TestPullIncremental_AppliesServerUpdatesToLocalStore`; `TestSyncLoopPullsWithEmptyQueue`; `TestP7_MultiDaemonSync` |
+| durable offline queue, restart and reconnect | `TestP7_SyncQueueDurability`; `TestEngineQueuePersistence`; `TestOfflineQueueSurvivalNetworkFailure`; `TestOfflineQueueReconnect`; `TestLocalDurableWrites_SuccessSurvivesRestartWithPendingQueue` |
+| single-Gateway multi-workspace and project isolation | `TestCrossWorkspacePrivateContextResolvesSiblingExactly`; `TestConfiguredPrivateRuntimeDerivesAttributionAndIsolatesChannelAndKBHandlers`; `TestWorkspaceScopeMismatchIsRejected`; `TestSyncQueueCrossNamespaceRejection` |
+| enrolment credential/bootstrap failure recovery and separated tool ownership | `TestEnrolmentResumesDurableAttemptAfterRestartAndReissuesOnce`; `TestEnrolmentBootstrapFailureRecoversWithoutReregistrationAndStartsIncrementalAfterCommit`; `TestStage2FinalPublicMCPInventory`; `TestAlphaContractMCPRegistry`; `TestFabricRegistryIncludesGatewayEnrolmentEndpoint` |
+| Fabric token, tenant and vector isolation | `TestMCP_MultiTenantIsolation`; `TestAgentEnrolmentsRLSHidesProjectBWhileScopedToProjectA`; `TestRestrictedRoleRLSOperationMatrix`; `TestRestrictedRoleRejectsCrossProjectForeignReferences`; `TestRestrictedRoleKBVectorQueryCannotCrossProject` |
+
+No row restores a removed Gateway tool or makes Fabric part of Stage 2. The
+repository gate runs all of these tests with the database required, so a missing
+or unmigrated Postgres instance fails instead of skipping:
+
+```bash
+export WORMHOLE_DATABASE_URL='postgres://wormhole:wormhole@127.0.0.1:5432/wormhole?sslmode=disable'
+WORMHOLE_INTEGRATION_REQUIRED=1 go test ./...
+WORMHOLE_INTEGRATION_REQUIRED=1 go test -race ./...
+make check
+```
+
+The semantic KB fixture separately asserts that vector ranking is an optional
+Fabric/Core capability. It must not advertise `kb.search` or Code Graph in the
+Stage 2 Gateway inventory.
 
 ## Historical artifacts
 

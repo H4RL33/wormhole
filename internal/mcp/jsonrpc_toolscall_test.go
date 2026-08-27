@@ -161,8 +161,9 @@ func TestHandleToolsCall_ToolHandlerErrorIsIsError(t *testing.T) {
 }
 
 // TestHandleToolsCall_ForwardsAuthResolvedProjectID is a regression test for
-// the dispatch bug diagnosed in Task 7's E2E test
-// (cmd/gatewayd/e2e_stdio_bridge_test.go's TestE2E_StdioBridgeToPostgres):
+// the dispatch bug first diagnosed by the retired combined Gateway/Fabric E2E
+// test. TestIncrementalPushTool_AppliesRoutedTaskOwner now exercises the
+// corresponding owner-fidelity invariant at the Fabric/Postgres boundary:
 // HandleToolsCall must forward scope.ProjectID (the auth-resolved project)
 // to tool.Handler, not the raw client-supplied project_id from
 // extractProjectID. The sync engine (internal/runtime/sync) never sends
