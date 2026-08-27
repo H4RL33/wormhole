@@ -39,7 +39,7 @@ func TestE2E_V1ExitCriteria(t *testing.T) {
 
 	projectID := mustCreateProject(t, "v1-exit-criteria-project")
 
-	// 1. Enrol a fresh agent identity through the Gateway-owned Fabric route.
+	// 1. Enrol a fresh identity directly through the Fabric HTTP MCP boundary.
 	status, rpcResp, err := makeMCPCall(t, srv.URL, "wormhole.agent.enrol", projectID, "", EnrolAgentInput{
 		IdempotencyKey: "218f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1",
 		RequestHash:    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",

@@ -1,6 +1,6 @@
-// p7_e2e_integration_test.go
-// E2E validation of the full local-first loop (RFC-0003 §5):
-// agent writes task while offline → reconnect → task synced to server.
+// p7_e2e_integration_test.go exercises the retained legacy sync engine and
+// queue mechanics against test HTTP peers. These are subsystem tests, not the
+// local-only Stage 2 Gateway process topology.
 package main
 
 import (
@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,189 +21,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/H4RL33/wormhole/internal/runtime/config"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/runtime/sync"
 	"github.com/H4RL33/wormhole/internal/types"
 )
 
-// testFakeCoordServer returns a fake Coordination Server that:
-// - Returns a canned whoami response
-// - Accepts incremental_push (to prove sync queue is delivered)
-// - Returns empty incremental_pull for simplicity
-func testFakeCoordServer(t *testing.T) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer test-token" {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-
-		var req struct {
-			JSONRPC string          `json:"jsonrpc"`
-			ID      json.RawMessage `json:"id,omitempty"`
-			Method  string          `json:"method"`
-			Params  json.RawMessage `json:"params,omitempty"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		var params struct {
-			Name      string          `json:"name"`
-			Arguments json.RawMessage `json:"arguments"`
-		}
-		if err := json.Unmarshal(req.Params, &params); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		var resultData interface{}
-		switch params.Name {
-		case "wormhole.agent.whoami":
-			resultData = map[string]interface{}{
-				"agent_id":     "test-agent",
-				"owner":        "harley",
-				"model":        "claude-sonnet-5",
-				"capabilities": []string{"code"},
-				"project_id":   "project-1",
-				"permissions":  []string{"task.create"},
-			}
-
-		case "wormhole.sync.incremental_push":
-			// Parse the push payload to verify items were sent.
-			var pushArgs struct {
-				NamespaceID string `json:"namespace_id"`
-				Version     int    `json:"version"`
-				Items       []struct {
-					EntityType string          `json:"entity_type"`
-					EntityID   string          `json:"entity_id"`
-					Operation  string          `json:"operation"`
-					Payload    json.RawMessage `json:"payload"`
-				} `json:"items"`
-			}
-			if err := json.Unmarshal(params.Arguments, &pushArgs); err != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			// Verify we got items in the push.
-			if len(pushArgs.Items) == 0 {
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			resultData = map[string]interface{}{
-				"items_received": len(pushArgs.Items),
-				"applied": func() []map[string]interface{} {
-					applied := make([]map[string]interface{}, 0, len(pushArgs.Items))
-					for _, item := range pushArgs.Items {
-						applied = append(applied, map[string]interface{}{"id": item.EntityID, "type": item.EntityType, "error": ""})
-					}
-					return applied
-				}(),
-				"timestamp": time.Now().UTC().Format(time.RFC3339),
-				"version":   1,
-			}
-
-		case "wormhole.sync.incremental_pull":
-			resultData = map[string]interface{}{
-				"updates":   []interface{}{},
-				"timestamp": time.Now().UTC().Format(time.RFC3339),
-				"version":   1,
-			}
-
-		case "wormhole.sync.bootstrap":
-			resultData = gatewayTestBootstrapOutput("project-1", "test-agent", "test-passport")
-
-		default:
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-
-		resultRaw, _ := json.Marshal(resultData)
-		toolResult := map[string]interface{}{
-			"content": []map[string]string{
-				{"type": "text", "text": string(resultRaw)},
-			},
-		}
-		toolResultRaw, _ := json.Marshal(toolResult)
-
-		resp := map[string]interface{}{
-			"jsonrpc": "2.0",
-			"id":      req.ID,
-			"result":  json.RawMessage(toolResultRaw),
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}))
-}
-
-// localRequest mirrors internal/runtime/localapi's request shape
-type localRequest struct {
-	Tool string          `json:"tool"`
-	Args json.RawMessage `json:"args,omitempty"`
-}
-
-// localResponse mirrors internal/runtime/localapi's response shape
-type localResponse struct {
-	Result json.RawMessage `json:"result,omitempty"`
-	Error  string          `json:"error,omitempty"`
-}
-
-// callLocalTool dials the Gateway socket, sends a request, and reads the response.
-func callLocalTool(t *testing.T, socketPath string, tool string, args interface{}) localResponse {
-	t.Helper()
-
-	conn, err := net.Dial("unix", socketPath)
-	if err != nil {
-		t.Fatalf("dial socket %s: %v", socketPath, err)
-	}
-	defer conn.Close()
-
-	var argsRaw json.RawMessage
-	if args != nil {
-		argsRaw, _ = json.Marshal(args)
-	}
-	req := localRequest{Tool: tool, Args: argsRaw}
-	reqRaw, _ := json.Marshal(req)
-
-	if _, err := conn.Write(append(reqRaw, '\n')); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
-	var resp localResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	return resp
-}
-
-// TestP7_LocalFirstLoop demonstrates the full local-first offline→reconnect→sync loop:
-// 1. Create a Gateway with a real socket and SQLite store.
-// 2. Write a task locally (will be queued for sync)
-// 3. Verify task exists in local store
-// 4. Call sync to push to server
-// 5. Verify server received the push
-func TestP7_LocalFirstLoop(t *testing.T) {
-	// Set up fake Coordination Server
-	coordSrv := testFakeCoordServer(t)
-	defer coordSrv.Close()
-
-	// Create temporary directory for socket and DB
+// TestP7_LocalQueueDeliveryLifecycle verifies only the SQLite queue state
+// transitions used by the retained sync engine. Network delivery is exercised
+// separately by sync package tests and the Fabric HTTP acceptance test.
+func TestP7_LocalQueueDeliveryLifecycle(t *testing.T) {
 	tmpDir := t.TempDir()
-	socketPath := filepath.Join(tmpDir, "wormholed.sock")
 	dbPath := filepath.Join(tmpDir, "wormhole.db")
-
-	// Create config and load it
-	cfg := config.Config{
-		SocketPath: socketPath,
-		DBPath:     dbPath,
-		Credentials: config.Credentials{
-			Server:    coordSrv.URL,
-			Token:     "test-token",
-			ProjectID: "project-1",
-		},
-	}
+	const projectID = "project-1"
 
 	// Open local store
 	store, err := localstore.Open(dbPath)
@@ -213,23 +41,13 @@ func TestP7_LocalFirstLoop(t *testing.T) {
 	}
 	defer store.Close()
 
-	// Start Gateway daemon in background.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Wire up Gateway components manually (matching its command implementation).
 	queueRepo := sync.NewQueueRepo(store.DB())
-	_ = sync.NewAuditRepo(store.DB()) // auditRepo would be used by syncEngine
-
-	// Import localapi
-	// TODO: This test currently can't import localapi due to package cycle.
-	// Solution: move this test to a separate test package or refactor localapi imports.
-	// For now, just verify the queue can accept entries.
-
-	t.Log("P7 E2E test structure set up (localapi integration pending)")
 
 	// Step 1: Verify queue is empty initially
-	queuedItems, err := queueRepo.ListPending(ctx, cfg.Credentials.ProjectID, 100)
+	queuedItems, err := queueRepo.ListPending(ctx, projectID, 100)
 	if err != nil {
 		t.Fatalf("ListPending: %v", err)
 	}
@@ -247,7 +65,7 @@ func TestP7_LocalFirstLoop(t *testing.T) {
 	}
 	taskPayloadRaw, _ := json.Marshal(taskPayload)
 
-	queued, err := queueRepo.Enqueue(ctx, cfg.Credentials.ProjectID, "task", "task-p7-001", "create", taskPayloadRaw, 1)
+	queued, err := queueRepo.Enqueue(ctx, projectID, "task", "task-p7-001", "create", taskPayloadRaw, 1)
 	if err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
@@ -256,7 +74,7 @@ func TestP7_LocalFirstLoop(t *testing.T) {
 	}
 
 	// Step 3: Verify task is queued
-	queuedItems, err = queueRepo.ListPending(ctx, cfg.Credentials.ProjectID, 100)
+	queuedItems, err = queueRepo.ListPending(ctx, projectID, 100)
 	if err != nil {
 		t.Fatalf("ListPending after enqueue: %v", err)
 	}
@@ -267,18 +85,14 @@ func TestP7_LocalFirstLoop(t *testing.T) {
 		t.Fatalf("queued task ID mismatch: got %s, want task-p7-001", queuedItems[0].EntityID)
 	}
 
-	// Step 4: Verify that the sync engine's callSyncTool can be called
-	// (simulating what pushBatch does internally)
-	// For this test, we just verify the queue state is correct.
-	// The actual sync batching and server interaction is tested in sync tests.
-
-	// Step 5: Mark item as delivered (simulating what pushBatch does after successful push)
-	if err := queueRepo.MarkDelivered(ctx, cfg.Credentials.ProjectID, queuedItems[0].ID); err != nil {
+	// Step 4: Mark item as delivered, as the sync engine does after a successful
+	// remote acknowledgement.
+	if err := queueRepo.MarkDelivered(ctx, projectID, queuedItems[0].ID); err != nil {
 		t.Fatalf("MarkDelivered: %v", err)
 	}
 
-	// Step 6: Verify item was marked delivered
-	queuedItems, err = queueRepo.ListPending(ctx, cfg.Credentials.ProjectID, 100)
+	// Step 5: Verify item was marked delivered.
+	queuedItems, err = queueRepo.ListPending(ctx, projectID, 100)
 	if err != nil {
 		t.Fatalf("ListPending after sync: %v", err)
 	}
@@ -286,7 +100,6 @@ func TestP7_LocalFirstLoop(t *testing.T) {
 		t.Fatalf("queue should be empty after marking delivered, got %d items", len(queuedItems))
 	}
 
-	t.Logf("P7 E2E validation passed: offline write → queue → sync → delivered")
 }
 
 // TestP7_LocalTaskPersistence verifies that task writes to localstore survive restarts.
@@ -387,13 +200,10 @@ func TestP7_SyncQueueDurability(t *testing.T) {
 	}
 }
 
-// statefulCoordServer is a fake Coordination Server that actually retains
-// pushed tasks in memory, so a second daemon's Bootstrap/PullIncremental can
-// observe what a first daemon pushed. testFakeCoordServer above is
-// intentionally stateless (incremental_pull always returns empty) which was
-// enough before internal/runtime/sync.Engine had a local-apply path to
-// exercise; this one is state-carrying so TestP7_MultiDaemonSync can prove
-// daemon B's own SQLite replica — not the server — ends up with the task.
+// statefulCoordServer is a fake HTTP sync peer that retains pushed tasks in
+// memory, so a second sync runtime's Bootstrap/PullIncremental can observe what
+// the first pushed. It lets TestP7_MultiRuntimeSync prove the second runtime's
+// SQLite replica — not the peer — ends up with the task.
 func statefulCoordServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	type serverTask struct {
@@ -504,22 +314,21 @@ func statefulCoordServer(t *testing.T) *httptest.Server {
 	}))
 }
 
-// TestP7_MultiDaemonSync simulates two Gateway instances against one
-// shared (fake) coordination server: daemon A writes a task locally and
-// pushes it; daemon B, which never saw the write directly, calls Bootstrap
-// and must end up with that task in its own SQLite replica. This exercises
+// TestP7_MultiRuntimeSync composes two local stores and sync engines against
+// one fake HTTP peer. Runtime A writes and pushes a task; runtime B calls
+// Bootstrap and must end up with that task in its own SQLite replica. This exercises
 // internal/runtime/sync.Engine's local-apply path (sync.go's applyTask,
 // wired through TaskRepo.UpsertTask) added to close the gap this test used
 // to be skipped for — see internal/runtime/sync/sync_apply_test.go for the
 // focused unit coverage of that path.
-func TestP7_MultiDaemonSync(t *testing.T) {
+func TestP7_MultiRuntimeSync(t *testing.T) {
 	coordSrv := statefulCoordServer(t)
 	defer coordSrv.Close()
 
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 
-	// Daemon A: writes and pushes a task.
+	// Runtime A: writes and pushes a task.
 	storeA, err := localstore.Open(filepath.Join(tmpDir, "a.db"))
 	if err != nil {
 		t.Fatalf("open store A: %v", err)
@@ -538,11 +347,11 @@ func TestP7_MultiDaemonSync(t *testing.T) {
 
 	task, err := taskRepoA.CreateTask(ctx, "project-1", "Daemon A task", "written offline", nil, 1, nil)
 	if err != nil {
-		t.Fatalf("CreateTask on daemon A: %v", err)
+		t.Fatalf("CreateTask on runtime A: %v", err)
 	}
 	payload, _ := json.Marshal(map[string]interface{}{"title": task.Title, "description": task.Description})
 	if _, err := queueA.Enqueue(ctx, "project-1", "task", task.ID, "create", payload, 0); err != nil {
-		t.Fatalf("Enqueue on daemon A: %v", err)
+		t.Fatalf("Enqueue on runtime A: %v", err)
 	}
 
 	// pushBatch is unexported (called only from Engine's own background
@@ -555,21 +364,21 @@ func TestP7_MultiDaemonSync(t *testing.T) {
 	for {
 		pending, err := queueA.ListPending(ctx, "project-1", 10)
 		if err != nil {
-			t.Fatalf("ListPending on daemon A: %v", err)
+			t.Fatalf("ListPending on runtime A: %v", err)
 		}
 		if len(pending) == 0 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("daemon A push did not drain queue within deadline")
+			t.Fatalf("runtime A push did not drain queue within deadline")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	syncCancel()
 	engineA.Stop()
 
-	// Daemon B: never saw daemon A's write locally. Bootstrap must pull it
-	// from the (shared, fake) coordination server and land it in daemon B's
+	// Runtime B never saw runtime A's write locally. Bootstrap must pull it
+	// from the shared fake peer and land it in runtime B's
 	// own SQLite replica.
 	storeB, err := localstore.Open(filepath.Join(tmpDir, "b.db"))
 	if err != nil {
@@ -589,15 +398,15 @@ func TestP7_MultiDaemonSync(t *testing.T) {
 	}
 
 	if err := engineB.Bootstrap(ctx); err != nil {
-		t.Fatalf("Bootstrap on daemon B: %v", err)
+		t.Fatalf("Bootstrap on runtime B: %v", err)
 	}
 
 	gotOnB, err := taskRepoB.GetTask(ctx, "project-1", task.ID)
 	if err != nil {
-		t.Fatalf("daemon B did not receive daemon A's task via Bootstrap: %v", err)
+		t.Fatalf("runtime B did not receive runtime A's task via Bootstrap: %v", err)
 	}
 	if gotOnB.Title != "Daemon A task" {
-		t.Errorf("daemon B task title = %q, want %q", gotOnB.Title, "Daemon A task")
+		t.Errorf("runtime B task title = %q, want %q", gotOnB.Title, "Daemon A task")
 	}
 }
 
