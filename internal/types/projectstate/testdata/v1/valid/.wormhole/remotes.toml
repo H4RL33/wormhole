@@ -1,0 +1,25 @@
+version = 1
+
+[[fabric]]
+alias = "alpha"
+url = "https://alpha.example.test"
+instance_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+remote_project_id = "project-alpha"
+mode = "public"
+
+[fabric.expected_repository]
+provider = "github"
+immutable_id = "R_kgDOExample-1"
+canonical_remote = "https://github.com/acme/wormhole"
+
+[[fabric]]
+alias = "zeta"
+url = "https://zeta.example.test"
+instance_id = "zzzzzzzz-zzzz-4zzz-8zzz-zzzzzzzzzzzz"
+remote_project_id = "project-zeta"
+mode = "private"
+
+[fabric.expected_repository]
+provider = "github"
+immutable_id = "R_kgDOExample-1"
+canonical_remote = "https://github.com/acme/wormhole"
