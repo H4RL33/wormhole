@@ -144,7 +144,7 @@ func TestPrivateSetupEnsureIdentityRPCDispatchIsNotAnMCPTool(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() {
-		server.dispatchMCPMessage(context.Background(), &mcpSession{initialized: true, humanClient: true, clientInfo: localidentity.MCPClientInfo{Name: "wormhole-setup", Version: "test"}}, gateway, server.registry, rpcRequest{
+		server.dispatchMCPMessage(context.Background(), &mcpSession{initialized: true, privateCLIClient: true, clientInfo: localidentity.MCPClientInfo{Name: "wormhole-setup", Version: "test"}}, gateway, server.registry, rpcRequest{
 			JSONRPC: "2.0", ID: json.RawMessage("1"), Method: PrivateSetupEnsureIdentityRPCMethod, Params: params,
 		})
 		close(done)

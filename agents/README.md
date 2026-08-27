@@ -197,9 +197,12 @@ capture agent, accountable human, harness/model session, and assurance at action
 time. Local MCP `clientInfo` harness/model values are self-declared provenance
 bound by Gateway to its own session; local assurance does not independently
 verify either value. Local/fork actors are self-declared, public Fabric uses key
-continuity, and private Fabric uses authenticated membership. Human CLI actions
-retain their Gateway session and `wormhole-cli` version provenance without agent,
-owner, or model fields.
+continuity, and private Fabric uses authenticated membership. CLI-attributed
+human envelopes retain their Gateway session and `wormhole-cli` version
+provenance without agent, owner, or model fields. The owner-private CLI
+capability separates compliant local protocol paths and binds accountability;
+it does not prove physical human presence or defend against hostile same-user
+processes, which remain inside the approved local trust boundary.
 
 ## Build and Test Commands
 

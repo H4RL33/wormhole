@@ -595,7 +595,7 @@ type mcpSession struct {
 	initialized        bool
 	connectionIdentity ConnectionIdentity
 	clientInfo         localidentity.MCPClientInfo
-	humanClient        bool
+	privateCLIClient   bool
 	writeMu            sync.Mutex
 }
 
@@ -1167,6 +1167,11 @@ func (s *Server) dispatchMCPMessage(ctx context.Context, sess *mcpSession, conn 
 
 	switch req.Method {
 	case "initialize":
+		// initialize is request-only. Notifications carry no response, create no
+		// durable session, and do not advance this connection's lifecycle.
+		if isNotification {
+			return
+		}
 		if sess.initializeReceived {
 			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: "initialize already received"}})
 			return
@@ -1179,22 +1184,20 @@ func (s *Server) dispatchMCPMessage(ctx context.Context, sess *mcpSession, conn 
 		if s.identityStore != nil {
 			info := localidentity.MCPClientInfo{Name: params.ClientInfo.Name, Version: params.ClientInfo.Version, ModelName: params.ClientInfo.ModelName, ModelVersion: params.ClientInfo.ModelVersion}
 			sess.clientInfo = info
-			sess.humanClient = humanMCPClient(params.ClientInfo.Name)
-			var connection ConnectionIdentity
-			if sess.humanClient {
-				connection, err = s.identityStore.OpenHuman(ctx, info)
-			} else {
-				connection, err = s.identityStore.OpenMCP(ctx, info)
-			}
-			if err != nil {
-				// Setup must be able to establish the first selected human. It
-				// receives no actor authority until that durable step succeeds.
-				if !errors.Is(err, localidentity.ErrNoSelectedIdentity) {
-					writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: "initialize identity unavailable"}})
-					return
+			sess.privateCLIClient = privateCLIClientName(params.ClientInfo.Name)
+			// A human-looking clientInfo name is self-declared metadata, not
+			// authority. Human sessions are opened lazily only after the private
+			// CLI capability has been verified on an actual private request.
+			if !sess.privateCLIClient {
+				connection, openErr := s.identityStore.OpenMCP(ctx, info)
+				if openErr != nil {
+					if !errors.Is(openErr, localidentity.ErrNoSelectedIdentity) {
+						writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: "initialize identity unavailable"}})
+						return
+					}
+				} else {
+					sess.connectionIdentity = connection
 				}
-			} else {
-				sess.connectionIdentity = connection
 			}
 		}
 		sess.initializeReceived = true
@@ -1252,6 +1255,10 @@ func (s *Server) dispatchMCPMessage(ctx context.Context, sess *mcpSession, conn 
 		}
 		if req.Method == PrivateSetupEnsureIdentityRPCMethod && sess.connectionIdentity.SessionID == "" {
 			if err := s.bindHumanConnection(ctx, sess); err != nil {
+				writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInternalError, Message: "initialize identity unavailable"}})
+				return
+			}
+			if _, err := s.resolveHumanConnection(ctx, sess); err != nil {
 				writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInternalError, Message: "initialize identity unavailable"}})
 				return
 			}
@@ -1322,7 +1329,7 @@ func isPrivateGatewayRPCMethod(method string) bool {
 }
 
 func (s *Server) authorizePrivateRPC(ctx context.Context, sess *mcpSession, method string, raw json.RawMessage) (json.RawMessage, context.Context, error) {
-	if s == nil || sess == nil || s.cliCapability == "" || !sess.humanClient || s.actorResolver == nil {
+	if s == nil || sess == nil || s.cliCapability == "" || !sess.privateCLIClient || s.actorResolver == nil || s.identityStore == nil {
 		return nil, ctx, ErrPrivateCLIAuthorization
 	}
 	if rejectDuplicateJSONMembers(raw) != nil {
@@ -1333,11 +1340,41 @@ func (s *Server) authorizePrivateRPC(ctx context.Context, sess *mcpSession, meth
 		return nil, ctx, ErrPrivateCLIAuthorization
 	}
 	if sess.connectionIdentity.SessionID == "" {
-		if method == PrivateSetupRegisterWorkspaceRPCMethod || method == PrivateSetupEnsureIdentityRPCMethod {
+		_, selectedErr := s.identityStore.Selected(ctx)
+		if selectedErr == nil {
+			if err := s.bindHumanConnection(ctx, sess); err != nil {
+				return nil, ctx, ErrPrivateCLIAuthorization
+			}
+		} else if errors.Is(selectedErr, localidentity.ErrNoSelectedIdentity) && isPreIdentityPrivateSetupMethod(method) {
 			return append(json.RawMessage(nil), envelope.Request...), ctx, nil
+		} else {
+			return nil, ctx, ErrPrivateCLIAuthorization
 		}
+	}
+	actor, err := s.resolveHumanConnection(ctx, sess)
+	if err != nil {
 		return nil, ctx, ErrPrivateCLIAuthorization
 	}
+	return append(json.RawMessage(nil), envelope.Request...), withServerOwnedActor(ctx, actor), nil
+}
+
+func isPreIdentityPrivateSetupMethod(method string) bool {
+	return method == PrivateSetupRegisterWorkspaceRPCMethod || method == PrivateSetupEnsureIdentityRPCMethod
+}
+
+func (s *Server) bindHumanConnection(ctx context.Context, sess *mcpSession) error {
+	if s == nil || s.identityStore == nil || !sess.privateCLIClient || sess.connectionIdentity.SessionID != "" {
+		return ErrPrivateCLIAuthorization
+	}
+	connection, err := s.identityStore.OpenHuman(ctx, sess.clientInfo)
+	if err != nil {
+		return err
+	}
+	sess.connectionIdentity = connection
+	return nil
+}
+
+func (s *Server) resolveHumanConnection(ctx context.Context, sess *mcpSession) (types.ActorEnvelope, error) {
 	now := time.Now().UTC()
 	if s.clock != nil {
 		now = s.clock().UTC()
@@ -1346,25 +1383,9 @@ func (s *Server) authorizePrivateRPC(ctx context.Context, sess *mcpSession, meth
 	identity.OccurredAt = now
 	actor, err := s.actorResolver.ResolveLocalActor(ctx, identity)
 	if err != nil || actor.ValidateLocalAction() != nil || actor.ActorKind != types.ActorHuman || actor.SessionID != identity.SessionID {
-		return nil, ctx, ErrPrivateCLIAuthorization
+		return types.ActorEnvelope{}, ErrPrivateCLIAuthorization
 	}
-	return append(json.RawMessage(nil), envelope.Request...), withServerOwnedActor(ctx, actor), nil
-}
-
-func (s *Server) bindHumanConnection(ctx context.Context, sess *mcpSession) error {
-	if s == nil || s.identityStore == nil || !sess.humanClient || sess.connectionIdentity.SessionID != "" {
-		return ErrPrivateCLIAuthorization
-	}
-	connection, err := s.identityStore.OpenHuman(ctx, sess.clientInfo)
-	if err != nil {
-		return err
-	}
-	sess.connectionIdentity = connection
-	actor, err := s.actorResolver.ResolveLocalActor(ctx, connection)
-	if err != nil || actor.ValidateLocalAction() != nil || actor.ActorKind != types.ActorHuman {
-		return ErrPrivateCLIAuthorization
-	}
-	return nil
+	return actor, nil
 }
 
 // marshalResult marshals v into json.RawMessage for rpcResponse.Result. A

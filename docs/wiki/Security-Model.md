@@ -20,9 +20,19 @@ Wormhole is designed for capable agents operating inside explicit boundaries.
 ### Harness to local daemon
 
 Harnesses connect to `gatewayd` over a same-user Unix socket. The socket and
-its parent directory must remain owner-only. V1 adds no second local bearer
-token, so any process running as that OS user is inside the local trust
-boundary.
+its parent directory must remain owner-only. A startup-owned, owner-readable
+capability separates compliant `wormhole` CLI control-plane traffic from the
+public harness MCP protocol: the public bridge neither reads nor forwards it,
+and Gateway strips it before handler dispatch. This prevents protocol-path
+confusion and binds CLI accountability; it is not physical user-presence or
+cryptographic human authentication.
+
+Any process running as that OS user remains inside the local trust boundary and
+can read the capability or invoke the CLI. Wormhole does not defend this local
+boundary against a hostile same-user process and must not describe a
+capability-authorized action as proof that a physical human initiated it.
+Actual human-authenticated Fabric steps still require their separate
+authenticator and cannot treat this local capability as a substitute.
 
 Gateway service setup uses owner-private directories, an owner-managed
 content-addressed executable copy, exact pre/post-action identity checks, and a

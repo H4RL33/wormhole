@@ -21,8 +21,14 @@ On that local path, MCP `clientInfo` harness/model fields are self-declared clie
 provenance. Gateway binds them to a server-generated connection session; local
 assurance proves the binding, not independent authenticity of a harness or model.
 The public stdio bridge forwards only the public MCP lifecycle and tools and
-rejects all private Gateway methods. Human CLI RPCs use a separate machine-private,
-startup-owned capability which is stripped before handler dispatch.
+rejects all private Gateway methods. Same-user CLI RPCs use a separate
+machine-private, startup-owned capability which is verified and stripped before
+handler dispatch. That capability prevents confusion between compliant public
+MCP and private CLI protocol paths and binds local accountability; it does not
+authenticate physical human presence or defend against a hostile same-user
+process, which is inside the local trust boundary. A human-attributed connection
+session is published only on the first capability-verified private call after a
+selected local identity exists, never from `clientInfo` alone.
 
 ## 2. Transport: Streamable HTTP, single `/mcp` endpoint
 

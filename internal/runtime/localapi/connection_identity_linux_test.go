@@ -6,7 +6,9 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -128,6 +130,15 @@ func TestRealSocketPrivateMethodsRequireCapabilityAndInitializedHumanSession(t *
 	if got := len(recorder.snapshot()); got != 0 {
 		t.Fatalf("agent private calls reached actor resolution %d time(s)", got)
 	}
+	beforeUnauthorized, err := identity.ConnectionSessions(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, session := range beforeUnauthorized {
+		if session.AgentID == "" || session.HumanPrincipalID != "" {
+			t.Fatalf("agent private attempt converted session = %+v", session)
+		}
+	}
 
 	for name, params := range map[string]json.RawMessage{
 		"missing":   json.RawMessage(`{"request":{}}`),
@@ -138,6 +149,10 @@ func TestRealSocketPrivateMethodsRequireCapabilityAndInitializedHumanSession(t *
 		if response.Error == nil || response.Error.Message != ErrPrivateCLIAuthorization.Error() || strings.Contains(response.Error.Message, server.cliCapability) {
 			t.Fatalf("%s capability response = %+v", name, response)
 		}
+	}
+	afterUnauthorized, err := identity.ConnectionSessions(t.Context())
+	if err != nil || len(afterUnauthorized) != len(beforeUnauthorized) {
+		t.Fatalf("unauthorized human-looking clients published sessions: before=%d after=%d error=%v", len(beforeUnauthorized), len(afterUnauthorized), err)
 	}
 
 	response := callIdentitySocketRPC(t, socket, map[string]any{"name": "wormhole-cli", "version": "test"}, PrivateWorkspaceRPCMethod, map[string]any{
@@ -150,6 +165,155 @@ func TestRealSocketPrivateMethodsRequireCapabilityAndInitializedHumanSession(t *
 	actors := recorder.snapshot()
 	if len(actors) != 1 || actors[0].ActorKind != types.ActorHuman || actors[0].SessionID == "" || actors[0].HarnessName != "wormhole-cli" || actors[0].HarnessVersion != "test" || actors[0].AgentID != "" || actors[0].AccountableHumanID != "" || actors[0].ModelName != "" {
 		t.Fatalf("authorized CLI actors = %+v", actors)
+	}
+	afterAuthorized, err := identity.ConnectionSessions(t.Context())
+	if err != nil || len(afterAuthorized) != len(beforeUnauthorized)+1 {
+		t.Fatalf("authorized CLI session count = %d, %v; want %d", len(afterAuthorized), err, len(beforeUnauthorized)+1)
+	}
+}
+
+func TestHumanLookingInitializeDefersSessionUntilCapabilityVerifiedPrivateCall(t *testing.T) {
+	identity := selectedSocketIdentity(t)
+	binding := privateRoutingTestBinding(t, filepath.Join(t.TempDir(), "checkout"), "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011")
+	server := setupIdentityTestServer(t, identity, binding)
+	server.cliCapability = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	socket := serveIdentitySocket(t, server)
+	conn, err := net.Dial("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	params := mustIdentityJSON(t, map[string]any{"protocolVersion": "2025-11-25", "capabilities": map[string]any{}, "clientInfo": map[string]any{"name": "wormhole-cli", "version": "test"}})
+	writeIdentityRPC(t, conn, rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "initialize", Params: params})
+	if response := readIdentityRPC(t, reader); response.Error != nil {
+		t.Fatalf("initialize = %+v", response)
+	}
+	if sessions, err := identity.ConnectionSessions(t.Context()); err != nil || len(sessions) != 0 {
+		t.Fatalf("initialize-only sessions = %+v, %v; want zero", sessions, err)
+	}
+	writeIdentityRPC(t, conn, rpcRequest{JSONRPC: "2.0", Method: "notifications/initialized"})
+	request := map[string]any{
+		"capability": server.cliCapability,
+		"request":    PrivateWorkspaceCommandRequest{WorkingDirectory: binding.Checkout.CanonicalPath, Command: WorkspaceCommandRequest{Operation: WorkspaceOperationStatus}},
+	}
+	writeIdentityRPC(t, conn, rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("2"), Method: PrivateWorkspaceRPCMethod, Params: mustIdentityJSON(t, request)})
+	if response := readIdentityRPC(t, reader); response.Error != nil {
+		t.Fatalf("first authorized private call = %+v", response)
+	}
+	sessions, err := identity.ConnectionSessions(t.Context())
+	if err != nil || len(sessions) != 1 || sessions[0].HumanPrincipalID == "" || sessions[0].AgentID != "" || sessions[0].HarnessName != "wormhole-cli" {
+		t.Fatalf("lazy human sessions = %+v, %v; want exactly one", sessions, err)
+	}
+	writeIdentityRPC(t, conn, rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("3"), Method: PrivateWorkspaceRPCMethod, Params: mustIdentityJSON(t, request)})
+	if response := readIdentityRPC(t, reader); response.Error != nil {
+		t.Fatalf("second authorized private call = %+v", response)
+	}
+	if sessions, err := identity.ConnectionSessions(t.Context()); err != nil || len(sessions) != 1 {
+		t.Fatalf("reused lazy human session = %+v, %v; want one", sessions, err)
+	}
+}
+
+func TestStalePreselectionConnectionMustBindHumanAfterAnotherConnectionSelects(t *testing.T) {
+	identity, err := localidentity.Open(filepath.Join(t.TempDir(), "identities"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := privateRoutingTestBinding(t, filepath.Join(t.TempDir(), "checkout"), "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011")
+	server := setupIdentityTestServer(t, identity, binding)
+	server.cliCapability = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	socket := serveIdentitySocket(t, server)
+	openSetup := func(id string) (net.Conn, *bufio.Reader) {
+		conn, dialErr := net.Dial("unix", socket)
+		if dialErr != nil {
+			t.Fatal(dialErr)
+		}
+		reader := bufio.NewReader(conn)
+		params := mustIdentityJSON(t, map[string]any{"protocolVersion": "2025-11-25", "capabilities": map[string]any{}, "clientInfo": map[string]any{"name": "wormhole-setup", "version": "test"}})
+		writeIdentityRPC(t, conn, rpcRequest{JSONRPC: "2.0", ID: json.RawMessage(id), Method: "initialize", Params: params})
+		if response := readIdentityRPC(t, reader); response.Error != nil {
+			t.Fatalf("initialize %s = %+v", id, response)
+		}
+		writeIdentityRPC(t, conn, rpcRequest{JSONRPC: "2.0", Method: "notifications/initialized"})
+		return conn, reader
+	}
+	first, firstReader := openSetup("1")
+	defer first.Close()
+	stale, staleReader := openSetup("2")
+	defer stale.Close()
+	if sessions, err := identity.ConnectionSessions(t.Context()); err != nil || len(sessions) != 0 {
+		t.Fatalf("preselection initialize sessions = %+v, %v", sessions, err)
+	}
+	ensure := SetupIdentityRequest{WorkingDirectory: binding.Checkout.CanonicalPath, JournalID: "00000000-0000-4000-8000-000000000033", Selection: types.ConfirmedIdentitySelection{DisplayName: "Alice Example"}, ExpectedPriorDigest: DigestSetupIdentityUnselected()}
+	writeIdentityRPC(t, first, rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("3"), Method: PrivateSetupEnsureIdentityRPCMethod, Params: mustIdentityJSON(t, map[string]any{"capability": server.cliCapability, "request": ensure})})
+	if response := readIdentityRPC(t, firstReader); response.Error != nil {
+		t.Fatalf("select identity = %+v", response)
+	}
+	if sessions, err := identity.ConnectionSessions(t.Context()); err != nil || len(sessions) != 1 {
+		t.Fatalf("selecting connection sessions = %+v, %v; want one", sessions, err)
+	}
+	register := SetupWorkspaceRequest{WorkingDirectory: binding.Checkout.CanonicalPath, ExpectedProjectID: binding.Scope.ProjectID, ExpectedRepository: binding.Repository, ExpectedCommit: binding.AcceptedCommitSHA}
+	writeIdentityRPC(t, stale, rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("4"), Method: PrivateSetupRegisterWorkspaceRPCMethod, Params: mustIdentityJSON(t, map[string]any{"capability": server.cliCapability, "request": register})})
+	if response := readIdentityRPC(t, staleReader); response.Error != nil {
+		t.Fatalf("stale preselection register = %+v", response)
+	}
+	sessions, err := identity.ConnectionSessions(t.Context())
+	if err != nil || len(sessions) != 2 || sessions[0].HumanPrincipalID == "" || sessions[1].HumanPrincipalID == "" {
+		t.Fatalf("post-selection sessions = %+v, %v; stale connection did not bind", sessions, err)
+	}
+}
+
+func TestInitializeNotificationsNeverRespondOrPublishSessions(t *testing.T) {
+	for _, clientName := range []string{"wormhole-cli", "codex"} {
+		t.Run(clientName, func(t *testing.T) {
+			identity := selectedSocketIdentity(t)
+			binding := privateRoutingTestBinding(t, filepath.Join(t.TempDir(), "checkout"), "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011")
+			server := setupIdentityTestServer(t, identity, binding)
+			socket := serveIdentitySocket(t, server)
+			conn, err := net.Dial("unix", socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			reader := bufio.NewReader(conn)
+			params := mustIdentityJSON(t, map[string]any{"protocolVersion": "2025-11-25", "capabilities": map[string]any{}, "clientInfo": map[string]any{"name": clientName, "version": "test"}})
+			writeIdentityRPC(t, conn, rpcRequest{JSONRPC: "2.0", Method: "initialize", Params: params})
+			assertIdentityNoResponse(t, conn, reader)
+			if sessions, err := identity.ConnectionSessions(t.Context()); err != nil || len(sessions) != 0 {
+				t.Fatalf("initialize notification sessions = %+v, %v; want zero", sessions, err)
+			}
+			writeIdentityRPC(t, conn, rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "initialize", Params: params})
+			if response := readIdentityRPC(t, reader); response.Error != nil {
+				t.Fatalf("initialize request = %+v", response)
+			}
+			beforeDuplicate, err := identity.ConnectionSessions(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeIdentityRPC(t, conn, rpcRequest{JSONRPC: "2.0", Method: "initialize", Params: params})
+			assertIdentityNoResponse(t, conn, reader)
+			afterDuplicate, err := identity.ConnectionSessions(t.Context())
+			if err != nil || len(afterDuplicate) != len(beforeDuplicate) {
+				t.Fatalf("duplicate initialize notification sessions: before=%d after=%d error=%v", len(beforeDuplicate), len(afterDuplicate), err)
+			}
+			writeIdentityRPC(t, conn, rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("2"), Method: "initialize", Params: params})
+			if response := readIdentityRPC(t, reader); response.Error == nil || response.Error.Code != rpcInvalidParams {
+				t.Fatalf("duplicate initialize request = %+v", response)
+			}
+		})
+	}
+}
+
+func assertIdentityNoResponse(t *testing.T, conn net.Conn, reader *bufio.Reader) {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(25 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.ReadBytes('\n'); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("notification response error = %v, want timeout", err)
+	}
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -184,9 +184,12 @@ optional model values self-declared in MCP `clientInfo` to a server-generated
 connection session. Local assurance proves that server-owned binding, not the
 authenticity of the declared harness or model.
 
-Human setup, workspace, and integration RPCs use a startup-owned private CLI
-capability outside the repository. The public `wormhole mcp` bridge rejects
-those methods and never forwards the capability.
+Same-user setup, workspace, and integration RPCs use a startup-owned private
+CLI capability outside the repository. It separates compliant CLI control-plane
+traffic from the public MCP protocol and binds local accountability; it does not
+authenticate physical human presence or defend against a hostile process already
+running as the same OS user. The public `wormhole mcp` bridge rejects those
+methods and never forwards the capability.
 
 The tracked portable tree is the clean-clone interchange. Workspace IDs,
 identity keys, overlays, stashes, journals, receipts, credentials, and SQLite

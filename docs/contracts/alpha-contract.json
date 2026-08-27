@@ -737,12 +737,13 @@
         "model_version",
         "session_id"
       ],
-      "human_clients": [
+      "private_cli_client_names": [
         "wormhole-cli",
         "wormhole-setup"
       ],
       "unknown_harness_metadata": "unknown",
       "client_provenance": "self-declared local client metadata bound to a Gateway-owned session; local assurance does not verify harness or model authenticity",
+      "human_session_publication": "first capability-verified private request after a selected identity exists",
       "envelope_fields": [
         "id",
         "jsonrpc",
@@ -761,6 +762,13 @@
         "version": "configured"
       }
     },
+    "private_cli_capability": {
+      "purpose": "separate compliant local CLI control-plane traffic from the public MCP protocol and bind accountability",
+      "threat_model": "the owner-private OS user and its same-user processes are trusted",
+      "authenticates_physical_human": false,
+      "prevents_protocol_path_confusion": true,
+      "pre_identity_scope": "workspace registration and selected-identity setup only while no identity is selected"
+    },
     "lifecycle": {
       "required_sequence": [
         "initialize",
@@ -772,6 +780,7 @@
       ],
       "not_initialized_error_code": -32002,
       "duplicate_initialize_error_code": -32602,
+      "initialize_notifications_ignored": true,
       "notification_response": "none"
     },
     "server_notifications": [

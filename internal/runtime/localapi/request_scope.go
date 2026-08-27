@@ -177,7 +177,7 @@ func privateAuthorityClaim(toolName string, arguments map[string]json.RawMessage
 	return ""
 }
 
-func humanMCPClient(name string) bool {
+func privateCLIClientName(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "wormhole-cli", "wormhole-setup":
 		return true

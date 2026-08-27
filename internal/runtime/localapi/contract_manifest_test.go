@@ -71,35 +71,46 @@ type alphaSchemaProperty struct {
 }
 
 type alphaLocalProtocol struct {
-	Transport           string                    `json:"transport"`
-	Framing             string                    `json:"framing"`
-	JSONRPCVersion      string                    `json:"jsonrpc_version"`
-	MCPProtocolVersion  string                    `json:"mcp_protocol_version"`
-	Methods             []string                  `json:"methods"`
-	Initialize          alphaInitializeContract   `json:"initialize"`
-	Lifecycle           alphaLifecycleContract    `json:"lifecycle"`
-	ServerNotifications []alphaServerNotification `json:"server_notifications"`
+	Transport            string                    `json:"transport"`
+	Framing              string                    `json:"framing"`
+	JSONRPCVersion       string                    `json:"jsonrpc_version"`
+	MCPProtocolVersion   string                    `json:"mcp_protocol_version"`
+	Methods              []string                  `json:"methods"`
+	Initialize           alphaInitializeContract   `json:"initialize"`
+	PrivateCLICapability alphaPrivateCLICapability `json:"private_cli_capability"`
+	Lifecycle            alphaLifecycleContract    `json:"lifecycle"`
+	ServerNotifications  []alphaServerNotification `json:"server_notifications"`
 }
 
 type alphaInitializeContract struct {
 	RequestParamsFields          []string          `json:"request_params_fields"`
 	ClientInfoFields             []string          `json:"client_info_fields"`
 	ToolProvenanceFieldsRejected []string          `json:"tool_provenance_fields_rejected"`
-	HumanClients                 []string          `json:"human_clients"`
+	PrivateCLIClientNames        []string          `json:"private_cli_client_names"`
 	UnknownHarnessMetadata       string            `json:"unknown_harness_metadata"`
 	ClientProvenance             string            `json:"client_provenance"`
+	HumanSessionPublication      string            `json:"human_session_publication"`
 	EnvelopeFields               []string          `json:"envelope_fields"`
 	ResultFields                 []string          `json:"result_fields"`
 	Capabilities                 map[string]any    `json:"capabilities"`
 	ServerInfo                   map[string]string `json:"server_info"`
 }
 
+type alphaPrivateCLICapability struct {
+	Purpose                       string `json:"purpose"`
+	ThreatModel                   string `json:"threat_model"`
+	AuthenticatesPhysicalHuman    bool   `json:"authenticates_physical_human"`
+	PreventsProtocolPathConfusion bool   `json:"prevents_protocol_path_confusion"`
+	PreIdentityScope              string `json:"pre_identity_scope"`
+}
+
 type alphaLifecycleContract struct {
-	RequiredSequence             []string `json:"required_sequence"`
-	GatedMethods                 []string `json:"gated_methods"`
-	NotInitializedErrorCode      int      `json:"not_initialized_error_code"`
-	DuplicateInitializeErrorCode int      `json:"duplicate_initialize_error_code"`
-	NotificationResponse         string   `json:"notification_response"`
+	RequiredSequence               []string `json:"required_sequence"`
+	GatedMethods                   []string `json:"gated_methods"`
+	NotInitializedErrorCode        int      `json:"not_initialized_error_code"`
+	DuplicateInitializeErrorCode   int      `json:"duplicate_initialize_error_code"`
+	InitializeNotificationsIgnored bool     `json:"initialize_notifications_ignored"`
+	NotificationResponse           string   `json:"notification_response"`
 }
 
 type alphaServerNotification struct {
@@ -254,17 +265,32 @@ func TestAlphaContractLocalProtocolLifecycle(t *testing.T) {
 	if protocol.Lifecycle.DuplicateInitializeErrorCode != rpcInvalidParams {
 		t.Fatalf("duplicate initialize error code = %d, want %d", protocol.Lifecycle.DuplicateInitializeErrorCode, rpcInvalidParams)
 	}
+	if !protocol.Lifecycle.InitializeNotificationsIgnored {
+		t.Fatal("initialize notifications must be ignored without response or session publication")
+	}
 	if got := jsonStructFields(reflect.TypeOf(initializeParams{})); !reflect.DeepEqual(got, protocol.Initialize.RequestParamsFields) {
 		t.Fatalf("initialize request fields = %v, manifest = %v", got, protocol.Initialize.RequestParamsFields)
 	}
 	if got := jsonStructFields(reflect.TypeOf(initializeClientInfo{})); !reflect.DeepEqual(got, protocol.Initialize.ClientInfoFields) {
 		t.Fatalf("initialize clientInfo fields = %v, manifest = %v", got, protocol.Initialize.ClientInfoFields)
 	}
-	if protocol.Initialize.UnknownHarnessMetadata != "unknown" || !reflect.DeepEqual(protocol.Initialize.HumanClients, []string{"wormhole-cli", "wormhole-setup"}) {
-		t.Fatalf("initialize identity classification = unknown %q, humans %v", protocol.Initialize.UnknownHarnessMetadata, protocol.Initialize.HumanClients)
+	if protocol.Initialize.UnknownHarnessMetadata != "unknown" || !reflect.DeepEqual(protocol.Initialize.PrivateCLIClientNames, []string{"wormhole-cli", "wormhole-setup"}) {
+		t.Fatalf("initialize client metadata = unknown %q, private CLI names %v", protocol.Initialize.UnknownHarnessMetadata, protocol.Initialize.PrivateCLIClientNames)
 	}
 	if protocol.Initialize.ClientProvenance != "self-declared local client metadata bound to a Gateway-owned session; local assurance does not verify harness or model authenticity" {
 		t.Fatalf("initialize client provenance = %q", protocol.Initialize.ClientProvenance)
+	}
+	if protocol.Initialize.HumanSessionPublication != "first capability-verified private request after a selected identity exists" {
+		t.Fatalf("human session publication = %q", protocol.Initialize.HumanSessionPublication)
+	}
+	wantPrivateCLI := alphaPrivateCLICapability{
+		Purpose:                    "separate compliant local CLI control-plane traffic from the public MCP protocol and bind accountability",
+		ThreatModel:                "the owner-private OS user and its same-user processes are trusted",
+		AuthenticatesPhysicalHuman: false, PreventsProtocolPathConfusion: true,
+		PreIdentityScope: "workspace registration and selected-identity setup only while no identity is selected",
+	}
+	if protocol.PrivateCLICapability != wantPrivateCLI {
+		t.Fatalf("private CLI capability contract = %+v, want %+v", protocol.PrivateCLICapability, wantPrivateCLI)
 	}
 	for _, field := range protocol.Initialize.ToolProvenanceFieldsRejected {
 		if got := privateAuthorityClaim("wormhole.workspace.status", map[string]json.RawMessage{field: json.RawMessage(`"forged"`)}); got != field {
