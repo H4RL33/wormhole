@@ -14,7 +14,7 @@ human CLI and agent MCP operations. Gateway/Fabric own finite-retention operatio
 activity; neither automatically promotes it to Git. V1 is agent-first and project/
 repository-lineage scoped.
 
-**Tech Stack:** Go 1.26.5; SQLite and Postgres; Git; MCP JSON-RPC; systemd-user where available; deterministic `go/packages` Code Graph analysis; Codex and Claude CLIs; existing dependencies plus only the separately approved OIDC modules named below.
+**Tech Stack:** Go 1.26.6; SQLite and Postgres; Git; MCP JSON-RPC; systemd-user where available; deterministic `go/packages` Code Graph analysis; Codex and Claude CLIs; existing dependencies plus only the separately approved OIDC modules named below.
 
 ## Current execution amendment — 2026-08-24
 

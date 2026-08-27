@@ -12,7 +12,7 @@ accepts them. Separate branch/stream-scoped `ActivityV1` transport/store/queue c
 operational collaboration under finite retention; it is never `OperationV1` or complete-
 tree authority.
 
-**Tech Stack:** Go 1.26.5; standard-library Ed25519, SHA-256, JSON, HTTP, SQLite, and Postgres access; existing `modernc.org/sqlite`, `github.com/BurntSushi/toml`, and `golang-migrate`; after the explicit human approval gate only, `github.com/coreos/go-oidc/v3/oidc` v3.20.0 and `golang.org/x/oauth2` v0.36.0.
+**Tech Stack:** Go 1.26.6; standard-library Ed25519, SHA-256, JSON, HTTP, SQLite, and Postgres access; existing `modernc.org/sqlite`, `github.com/BurntSushi/toml`, and `golang-migrate`; after the explicit human approval gate only, `github.com/coreos/go-oidc/v3/oidc` v3.20.0 and `golang.org/x/oauth2` v0.36.0.
 
 **Branch gate:** This plan runs only on a separate branch after the portable-loop
 whole-branch review and explicit human go/no-go. Do not implement any task from this plan

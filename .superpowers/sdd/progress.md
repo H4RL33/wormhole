@@ -1409,3 +1409,19 @@ overlapping full run was followed by three isolated passes and a clean isolated
 `make check`, with no code change. R06 is complete; no R07-R14 reduction or Service
 decomposition was included. Reduction work pauses and feature delivery resumes
 under a new explicit scope.
+
+Stage 2 integration and Stage 3 transition (2026-08-27): PR #67 merged at
+`a9ed8ed`; the approved Go 1.26.6 security update and five remaining Dependabot
+updates merged through PR #68 at `3519cc4`. Merged remote branches were removed;
+the dirty local `qa-simplification` worktree/branch was preserved. Stage 3 now runs
+on `feat/multifabric-private-identity` from `3519cc4`; Code Graph remains disabled.
+
+Stage 3 OIDC dependency approval recorded at 2026-08-27T19:11:17Z: Harley Welsh
+(`H4RL33`, `git@h4rl3y.xyz`) explicitly approved
+`github.com/coreos/go-oidc/v3/oidc` v3.20.0 and `golang.org/x/oauth2` v0.36.0 in
+this Codex thread. This satisfies Task 10's human approval gate; it adds no WebAuthn
+authority or dependency.
+
+Stage 3 Task 1: complete (commits `3519cc4..3bc47e3`, independent review clean:
+Critical 0 / Important 0 / Minor 0). Focused type tests and vet passed; the
+implementation commit's `make check` passed at 81.1% statement coverage.
