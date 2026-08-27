@@ -32,6 +32,9 @@ const activityOrdinaryGolden = `{"schema_version":1,"id":"99999999-9999-4999-899
 const activityLifecycleGolden = `{"schema_version":1,"id":"99999999-9999-4999-8999-999999999991","class":"lifecycle","actor":{"actor_kind":"agent","agent_id":"11111111-1111-4111-8111-111111111111","accountable_human_id":"22222222-2222-4222-8222-222222222222","session_id":"33333333-3333-4333-8333-333333333333","harness_name":"codex","harness_version":"1.0","model_name":"gpt","model_version":"5.6","assurance":"public-key-continuity","occurred_at":"2026-08-27T12:34:56.123456789Z"},"lifecycle":{"kind":"delivery","reference_id":"99999999-9999-4999-8999-999999999992"},"created_at":"2026-08-27T12:34:56.123456789Z"}
 `
 
+const activityPromotableLifecycleGolden = `{"schema_version":1,"id":"99999999-9999-4999-8999-999999999991","class":"lifecycle","actor":{"actor_kind":"agent","agent_id":"11111111-1111-4111-8111-111111111111","accountable_human_id":"22222222-2222-4222-8222-222222222222","session_id":"33333333-3333-4333-8333-333333333333","harness_name":"codex","harness_version":"1.0","model_name":"gpt","model_version":"5.6","assurance":"public-key-continuity","occurred_at":"2026-08-27T12:34:56.123456789Z"},"event":{"channel_id":"44444444-4444-4444-8444-444444444444","actor_id":"11111111-1111-4111-8111-111111111111","event_type":"task.status_changed","payload":{"from_status":"wip","task_id":"55555555-5555-4555-8555-555555555555","to_status":"done"},"note":"Task completed","created_at":"2026-08-27T12:34:56.123456789Z"},"lifecycle":{"kind":"delivery","reference_id":"99999999-9999-4999-8999-999999999992"},"created_at":"2026-08-27T12:34:56.123456789Z"}
+`
+
 const policyLowerGolden = `{"schema_version":1,"policy_version":1,"ordinary_max_age_seconds":2592000,"ordinary_max_rows":10000,"terminal_default_age_seconds":2592000,"terminal_maximum_age_seconds":31536000,"terminal_retention_seconds":2592000}
 `
 
@@ -132,6 +135,58 @@ func TestActivityV1CanonicalRoundTripAndDigest(t *testing.T) {
 	}
 }
 
+func TestActivityV1PromotableLifecycleCanonicalRoundTrip(t *testing.T) {
+	activity := activityTestLifecycle()
+	event := *activityTestOrdinary().Event
+	activity.Event = &event
+
+	canonical, err := CanonicalActivity(activity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(canonical) != activityPromotableLifecycleGolden {
+		t.Fatalf("CanonicalActivity differs\ngot  %q\nwant %q", canonical, activityPromotableLifecycleGolden)
+	}
+	decoded, err := DecodeActivity(canonical)
+	if err != nil || !reflect.DeepEqual(decoded, activity) {
+		t.Fatalf("DecodeActivity = (%+v, %v), want original", decoded, err)
+	}
+}
+
+func TestActivityV1WireValuesAreFrozen(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		value   ActivityClassV1
+		literal string
+	}{
+		{"presence", ActivityPresenceV1, "presence"},
+		{"ordinary", ActivityOrdinaryV1, "ordinary"},
+		{"lifecycle", ActivityLifecycleV1, "lifecycle"},
+	} {
+		t.Run("class "+test.name, func(t *testing.T) {
+			if string(test.value) != test.literal {
+				t.Errorf("Activity class = %q, want %q", test.value, test.literal)
+			}
+		})
+	}
+	for _, test := range []struct {
+		name    string
+		value   ActivityLifecycleKindV1
+		literal string
+	}{
+		{"delivery", ActivityLifecycleDeliveryV1, "delivery"},
+		{"conflict", ActivityLifecycleConflictV1, "conflict"},
+		{"recovery", ActivityLifecycleRecoveryV1, "recovery"},
+		{"receipt", ActivityLifecycleReceiptV1, "receipt"},
+	} {
+		t.Run("lifecycle "+test.name, func(t *testing.T) {
+			if string(test.value) != test.literal {
+				t.Errorf("Activity lifecycle kind = %q, want %q", test.value, test.literal)
+			}
+		})
+	}
+}
+
 func TestActivityV1RejectsUnknownNonCanonicalAndForgedAttribution(t *testing.T) {
 	valid := activityTestOrdinary()
 	canonical := []byte(activityOrdinaryGolden)
@@ -180,7 +235,6 @@ func TestActivityV1RejectsUnknownNonCanonicalAndForgedAttribution(t *testing.T) 
 		{"actor principal mismatch", func(activity *ActivityV1) { activity.Event.ActorID = activityHumanID }},
 		{"invalid UTF-8 note", func(activity *ActivityV1) { note := string([]byte{0xff}); activity.Event.Note = &note }},
 		{"NUL note", func(activity *ActivityV1) { note := "do\x00not"; activity.Event.Note = &note }},
-		{"trimmed note", func(activity *ActivityV1) { note := " padded "; activity.Event.Note = &note }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			invalid := valid
@@ -196,6 +250,52 @@ func TestActivityV1RejectsUnknownNonCanonicalAndForgedAttribution(t *testing.T) 
 	leak := bytes.Replace(canonical, []byte(`"done"`), []byte(`"LEAK-ME"`), 1)
 	if _, err := DecodeActivity(leak); err == nil || strings.Contains(err.Error(), "LEAK-ME") || strings.Contains(err.Error(), activityAgentID) {
 		t.Fatalf("DecodeActivity returned unsafe error %q", err)
+	}
+}
+
+func TestActivityV1AcceptsNonMessageNotesAndPaddedRequiredPayloads(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		eventType string
+		payload   string
+		note      *string
+	}{
+		{
+			name:      "empty optional note",
+			eventType: "review.requested",
+			payload:   `{"author":"Harley","pr_url":"https://example.test/pull/1","repo":"wormhole"}`,
+			note:      stringPointer(""),
+		},
+		{
+			name:      "whitespace optional note",
+			eventType: "build.failed",
+			payload:   `{"commit_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","error":"failed","repo":"wormhole"}`,
+			note:      stringPointer(" \t "),
+		},
+		{
+			name:      "padded required payload strings",
+			eventType: "discovery.logged",
+			payload:   `{"detail":" intentionally padded ","summary":" summary "}`,
+			note:      nil,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			activity := activityTestOrdinary()
+			event := *activity.Event
+			activity.Event = &event
+			activity.Event.EventType = test.eventType
+			activity.Event.Payload = json.RawMessage(test.payload)
+			activity.Event.Note = test.note
+
+			canonical, err := CanonicalActivity(activity)
+			if err != nil {
+				t.Fatalf("CanonicalActivity: %v", err)
+			}
+			decoded, err := DecodeActivity(canonical)
+			if err != nil || !reflect.DeepEqual(decoded, activity) {
+				t.Fatalf("DecodeActivity = (%+v, %v), want original", decoded, err)
+			}
+		})
 	}
 }
 
@@ -315,6 +415,7 @@ func TestActivityV1RejectsInvalidClassLifecycleAndTypedPayloads(t *testing.T) {
 	}{
 		{"review.requested", `{"author":"","pr_url":"https://example.test/pull/1","repo":"wormhole"}`, nil},
 		{"build.failed", `{"commit_sha":"","error":"failed","repo":"wormhole"}`, nil},
+		{"build.failed", `{"commit_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","error":"failed\u0000hard","repo":"wormhole"}`, nil},
 		{"discovery.logged", `{"detail":"","summary":"summary"}`, nil},
 		{"message.posted", `{"text":""}`, stringPointer("message")},
 	}

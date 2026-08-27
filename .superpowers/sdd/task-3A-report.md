@@ -166,3 +166,67 @@ git diff --check c8735f8..266d6df
 ## Concerns
 
 No known functional concern or blocker.
+
+## Independent-review fixes
+
+The Task 3A review found that the shared text predicate incorrectly applied the
+`message.posted` trim-stable/non-empty note rule to every optional note and every
+required payload string. Validation now has three separate authorities:
+
+- any optional note must be valid UTF-8 and NUL-free, including empty or
+  whitespace-only non-message notes;
+- every required payload string must additionally be non-empty, while preserving
+  intentional leading or trailing whitespace;
+- only a non-nil `message.posted` note must also be non-empty and trim-stable.
+
+The tests now include an exact canonical round trip for a lifecycle Activity with
+both its lifecycle projection and a complete event projection, and literal
+assertions freeze every Activity class and lifecycle-kind wire value. Existing
+negative coverage remains for unsafe notes, empty/NUL-bearing payload fields,
+message-only note constraints, missing lifecycle authority, invalid event members,
+presence with an event projection, and ordinary Activity with a lifecycle
+projection.
+
+### Review-fix RED evidence
+
+The new positive boundary test was run before the validation implementation was
+changed:
+
+```text
+go test ./internal/types/projectstate -run 'TestActivityV1(AcceptsNonMessageNotesAndPaddedRequiredPayloads|PromotableLifecycleCanonicalRoundTrip|WireValuesAreFrozen)$' -count=1
+--- FAIL: TestActivityV1AcceptsNonMessageNotesAndPaddedRequiredPayloads (0.00s)
+    --- FAIL: TestActivityV1AcceptsNonMessageNotesAndPaddedRequiredPayloads/empty_optional_note (0.00s)
+        activity_test.go:289: CanonicalActivity: projectstate: invalid activity
+    --- FAIL: TestActivityV1AcceptsNonMessageNotesAndPaddedRequiredPayloads/whitespace_optional_note (0.00s)
+        activity_test.go:289: CanonicalActivity: projectstate: invalid activity
+    --- FAIL: TestActivityV1AcceptsNonMessageNotesAndPaddedRequiredPayloads/padded_required_payload_strings (0.00s)
+        activity_test.go:289: CanonicalActivity: projectstate: invalid activity
+FAIL
+FAIL github.com/H4RL33/wormhole/internal/types/projectstate 0.004s
+FAIL
+```
+
+### Review-fix GREEN evidence
+
+The same focused regression command after splitting the validators:
+
+```text
+go test ./internal/types/projectstate -run 'TestActivityV1(AcceptsNonMessageNotesAndPaddedRequiredPayloads|PromotableLifecycleCanonicalRoundTrip|WireValuesAreFrozen)$' -count=1
+ok github.com/H4RL33/wormhole/internal/types/projectstate 0.004s
+```
+
+Fresh final verification after all review fixes:
+
+```text
+go test ./internal/types/projectstate -run 'Test(Activity|EffectiveActivityPolicy)' -count=1
+ok github.com/H4RL33/wormhole/internal/types/projectstate 0.006s
+
+go test ./internal/types/projectstate -count=1
+ok github.com/H4RL33/wormhole/internal/types/projectstate 0.063s
+
+go test -race ./internal/types/projectstate -count=1
+ok github.com/H4RL33/wormhole/internal/types/projectstate 1.311s
+
+go vet ./internal/types/projectstate
+# exit 0, no output
+```

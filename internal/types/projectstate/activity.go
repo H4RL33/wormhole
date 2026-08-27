@@ -253,7 +253,7 @@ func validateActivityEvent(actor types.ActorEnvelope, createdAt time.Time, event
 	if !types.CanonicalUUID(event.ChannelID) || !types.CanonicalUUID(event.ActorID) || event.ActorID != actor.PrincipalID() || !validUTC(event.CreatedAt) || !event.CreatedAt.Equal(createdAt) {
 		return ErrInvalidActivity
 	}
-	if event.Note != nil && !validActivityText(*event.Note) {
+	if event.Note != nil && !validActivityString(*event.Note) {
 		return ErrInvalidActivity
 	}
 
@@ -265,22 +265,22 @@ func validateActivityEvent(actor types.ActorEnvelope, createdAt time.Time, event
 		}
 	case "review.requested":
 		var payload types.ReviewRequestedPayload
-		if !decodeActivityPayload(event.Payload, &payload) || !validActivityText(payload.PRUrl) || !validActivityText(payload.Repo) || !validActivityText(payload.Author) {
+		if !decodeActivityPayload(event.Payload, &payload) || !validRequiredActivityString(payload.PRUrl) || !validRequiredActivityString(payload.Repo) || !validRequiredActivityString(payload.Author) {
 			return ErrInvalidActivity
 		}
 	case "build.failed":
 		var payload types.BuildFailedPayload
-		if !decodeActivityPayload(event.Payload, &payload) || !validActivityText(payload.Repo) || !validActivityText(payload.CommitSHA) || !validActivityText(payload.Error) {
+		if !decodeActivityPayload(event.Payload, &payload) || !validRequiredActivityString(payload.Repo) || !validRequiredActivityString(payload.CommitSHA) || !validRequiredActivityString(payload.Error) {
 			return ErrInvalidActivity
 		}
 	case "discovery.logged":
 		var payload types.DiscoveryLoggedPayload
-		if !decodeActivityPayload(event.Payload, &payload) || !validActivityText(payload.Summary) || !validActivityText(payload.Detail) {
+		if !decodeActivityPayload(event.Payload, &payload) || !validRequiredActivityString(payload.Summary) || !validRequiredActivityString(payload.Detail) {
 			return ErrInvalidActivity
 		}
 	case "message.posted":
 		var payload types.MessagePostedPayload
-		if !decodeActivityPayload(event.Payload, &payload) || !validActivityText(payload.Text) || event.Note == nil {
+		if !decodeActivityPayload(event.Payload, &payload) || !validRequiredActivityString(payload.Text) || event.Note == nil || !validMessageNote(*event.Note) {
 			return ErrInvalidActivity
 		}
 	default:
@@ -361,6 +361,14 @@ func validTaskStatus(status string) bool {
 	}
 }
 
-func validActivityText(value string) bool {
-	return value != "" && utf8.ValidString(value) && strings.TrimSpace(value) == value && !strings.ContainsRune(value, 0)
+func validActivityString(value string) bool {
+	return utf8.ValidString(value) && !strings.ContainsRune(value, 0)
+}
+
+func validRequiredActivityString(value string) bool {
+	return value != "" && validActivityString(value)
+}
+
+func validMessageNote(value string) bool {
+	return validRequiredActivityString(value) && strings.TrimSpace(value) == value
 }
