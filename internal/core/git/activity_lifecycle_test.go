@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -114,6 +115,10 @@ func TestActivityLifecycleExactReplayKeepsTerminalTime(t *testing.T) {
 	if err := fixture.store.TransitionLifecycle(context.Background(), key, transition); err != nil {
 		t.Fatalf("exact transition replay: %v", err)
 	}
+	sameState := ActivityLifecycleTransition{Kind: "delivery", ReferenceID: activityIDTwo, ExpectedState: "delivered", NextState: "delivered"}
+	if err := fixture.store.TransitionLifecycle(context.Background(), key, sameState); err != nil {
+		t.Fatalf("same-state replay: %v", err)
+	}
 	var terminalAgain, expiresAgain, updatedAgain time.Time
 	if err := fixture.store.db.QueryRow(`SELECT terminal_at,expires_at,updated_at FROM fabric_activity_lifecycle
 		WHERE project_id=$1 AND activity_id=$2`, fixture.stream.ProjectID, activity.ID).Scan(&terminalAgain, &expiresAgain, &updatedAgain); err != nil {
@@ -122,4 +127,115 @@ func TestActivityLifecycleExactReplayKeepsTerminalTime(t *testing.T) {
 	if !terminalAgain.Equal(terminalAt) || !expiresAgain.Equal(expiresAt) || !updatedAgain.Equal(updatedAt) {
 		t.Fatalf("exact replay changed timestamps: before=(%v,%v,%v) after=(%v,%v,%v)", terminalAt, expiresAt, updatedAt, terminalAgain, expiresAgain, updatedAgain)
 	}
+}
+
+func TestActivityLifecycleStoreRejectsInvalidExpectedStatesBeforeReplay(t *testing.T) {
+	fixture := newActivityStoreFixture(t, "activity-lifecycle-store-replay-validation")
+	activity := testLifecycleActivity(activityIDOne, fixture, projectstate.ActivityLifecycleDeliveryV1, activityIDTwo, fixture.actor.OccurredAt)
+	if _, err := fixture.store.Accept(context.Background(), fixture.acceptInput(activity)); err != nil {
+		t.Fatal(err)
+	}
+	key := fixture.acceptInput(activity).Key
+	initialBefore := readLifecycleRow(t, fixture, activity.ID)
+	for _, expected := range []string{"bogus", "open"} {
+		transition := ActivityLifecycleTransition{Kind: "delivery", ReferenceID: activityIDTwo, ExpectedState: expected, NextState: "pending"}
+		if err := fixture.store.TransitionLifecycle(context.Background(), key, transition); !errors.Is(err, ErrActivityLifecycleConflict) {
+			t.Errorf("initial %q -> pending error = %v, want ErrActivityLifecycleConflict", expected, err)
+		}
+	}
+	if initialAfter := readLifecycleRow(t, fixture, activity.ID); initialBefore != initialAfter {
+		t.Fatalf("invalid initial replay changed row: before=%+v after=%+v", initialBefore, initialAfter)
+	}
+	legal := ActivityLifecycleTransition{Kind: "delivery", ReferenceID: activityIDTwo, ExpectedState: "pending", NextState: "delivered"}
+	if err := fixture.store.TransitionLifecycle(context.Background(), key, legal); err != nil {
+		t.Fatal(err)
+	}
+	before := readLifecycleRow(t, fixture, activity.ID)
+	for _, expected := range []string{"bogus", "open"} {
+		transition := ActivityLifecycleTransition{Kind: "delivery", ReferenceID: activityIDTwo, ExpectedState: expected, NextState: "delivered"}
+		if err := fixture.store.TransitionLifecycle(context.Background(), key, transition); !errors.Is(err, ErrActivityLifecycleConflict) {
+			t.Errorf("terminal %q -> delivered error = %v, want ErrActivityLifecycleConflict", expected, err)
+		}
+	}
+	after := readLifecycleRow(t, fixture, activity.ID)
+	if before != after {
+		t.Fatalf("invalid terminal replay changed row: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestActivityLifecycleDefinerRejectsInvalidExpectedStatesBeforeReplay(t *testing.T) {
+	fixture := newActivityStoreFixture(t, "activity-lifecycle-definer-replay-validation")
+	activity := testLifecycleActivity(activityIDOne, fixture, projectstate.ActivityLifecycleDeliveryV1, activityIDTwo, fixture.actor.OccurredAt)
+	if _, err := fixture.store.Accept(context.Background(), fixture.acceptInput(activity)); err != nil {
+		t.Fatal(err)
+	}
+	key := fixture.acceptInput(activity).Key
+	initialBefore := readLifecycleRow(t, fixture, activity.ID)
+	for _, expected := range []string{"bogus", "open"} {
+		err := transitionLifecycleDirectly(fixture.store.db, key, ActivityLifecycleTransition{
+			Kind: "delivery", ReferenceID: activityIDTwo, ExpectedState: expected, NextState: "pending",
+		})
+		requireSQLState(t, err, "P0001")
+	}
+	if initialAfter := readLifecycleRow(t, fixture, activity.ID); initialBefore != initialAfter {
+		t.Fatalf("definer invalid initial replay changed row: before=%+v after=%+v", initialBefore, initialAfter)
+	}
+	legal := ActivityLifecycleTransition{Kind: "delivery", ReferenceID: activityIDTwo, ExpectedState: "pending", NextState: "delivered"}
+	if err := transitionLifecycleDirectly(fixture.store.db, key, legal); err != nil {
+		t.Fatal(err)
+	}
+	before := readLifecycleRow(t, fixture, activity.ID)
+	for _, expected := range []string{"bogus", "open"} {
+		err := transitionLifecycleDirectly(fixture.store.db, key, ActivityLifecycleTransition{
+			Kind: "delivery", ReferenceID: activityIDTwo, ExpectedState: expected, NextState: "delivered",
+		})
+		requireSQLState(t, err, "P0001")
+	}
+	for _, replay := range []ActivityLifecycleTransition{
+		legal,
+		{Kind: "delivery", ReferenceID: activityIDTwo, ExpectedState: "delivered", NextState: "delivered"},
+	} {
+		if err := transitionLifecycleDirectly(fixture.store.db, key, replay); err != nil {
+			t.Fatalf("valid replay %+v: %v", replay, err)
+		}
+	}
+	after := readLifecycleRow(t, fixture, activity.ID)
+	if before != after {
+		t.Fatalf("definer replay changed terminal timestamps: before=%+v after=%+v", before, after)
+	}
+}
+
+type lifecycleRow struct {
+	State                            string
+	TerminalAt, ExpiresAt, UpdatedAt sql.NullTime
+}
+
+func readLifecycleRow(t *testing.T, fixture activityStoreFixture, activityID string) lifecycleRow {
+	t.Helper()
+	var row lifecycleRow
+	if err := fixture.store.db.QueryRow(`SELECT state,terminal_at,expires_at,updated_at FROM fabric_activity_lifecycle
+		WHERE project_id=$1 AND activity_id=$2`, fixture.stream.ProjectID, activityID).
+		Scan(&row.State, &row.TerminalAt, &row.ExpiresAt, &row.UpdatedAt); err != nil {
+		t.Fatal(err)
+	}
+	return row
+}
+
+func transitionLifecycleDirectly(db *sql.DB, key FabricActivityOriginKey, transition ActivityLifecycleTransition) error {
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := setActivityProject(context.Background(), tx, key.Stream.ProjectID); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(context.Background(), `SELECT fabric_transition_activity_lifecycle_v1($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		key.Stream.ProjectID, key.Stream.FabricInstanceID, key.Stream.StreamID, key.Stream.CanonicalRef,
+		key.SourceWorkspaceID, key.ActivityID, transition.Kind, transition.ReferenceID,
+		transition.ExpectedState, transition.NextState)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }

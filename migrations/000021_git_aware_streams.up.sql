@@ -605,21 +605,29 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION 'activity lifecycle not found' USING ERRCODE = 'P0002';
     END IF;
+    v_allowed := CASE p_lifecycle_kind
+        WHEN 'delivery' THEN
+            (p_expected_state = p_next_state AND p_expected_state IN ('pending','delivered','cancelled'))
+            OR (p_expected_state = 'pending' AND p_next_state IN ('delivered','cancelled'))
+        WHEN 'conflict' THEN
+            (p_expected_state = p_next_state AND p_expected_state IN ('open','resolved','cancelled'))
+            OR (p_expected_state = 'open' AND p_next_state IN ('resolved','cancelled'))
+        WHEN 'recovery' THEN
+            (p_expected_state = p_next_state AND p_expected_state IN ('pending','blocked','recovered','cancelled'))
+            OR (p_expected_state = 'pending' AND p_next_state IN ('blocked','recovered','cancelled'))
+            OR (p_expected_state = 'blocked' AND p_next_state IN ('pending','recovered','cancelled'))
+        WHEN 'receipt' THEN
+            (p_expected_state = p_next_state AND p_expected_state IN ('pending','confirmed','rejected','cancelled'))
+            OR (p_expected_state = 'pending' AND p_next_state IN ('confirmed','rejected','cancelled'))
+        ELSE false
+    END;
+    IF NOT v_allowed THEN
+        RAISE EXCEPTION 'activity lifecycle conflict' USING ERRCODE = 'P0001';
+    END IF;
     IF v_state = p_next_state THEN
         RETURN;
     END IF;
     IF v_state IS DISTINCT FROM p_expected_state THEN
-        RAISE EXCEPTION 'activity lifecycle conflict' USING ERRCODE = 'P0001';
-    END IF;
-    v_allowed := CASE p_lifecycle_kind
-        WHEN 'delivery' THEN v_state = 'pending' AND p_next_state IN ('delivered','cancelled')
-        WHEN 'conflict' THEN v_state = 'open' AND p_next_state IN ('resolved','cancelled')
-        WHEN 'recovery' THEN (v_state = 'pending' AND p_next_state IN ('blocked','recovered','cancelled'))
-            OR (v_state = 'blocked' AND p_next_state IN ('pending','recovered','cancelled'))
-        WHEN 'receipt' THEN v_state = 'pending' AND p_next_state IN ('confirmed','rejected','cancelled')
-        ELSE false
-    END;
-    IF NOT v_allowed THEN
         RAISE EXCEPTION 'activity lifecycle conflict' USING ERRCODE = 'P0001';
     END IF;
     v_terminal := p_next_state IN ('delivered','resolved','recovered','confirmed','rejected','cancelled');

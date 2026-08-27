@@ -97,6 +97,10 @@ func (s *ActivityStore) Accept(ctx context.Context, input AcceptActivityInput) (
 	if err := input.IssuedActor.ValidateHistorical(); err != nil {
 		return projectstate.ActivityReceiptV1{}, projectstate.ErrInvalidActivity
 	}
+	if !validRemoteActivityAssurance(input.IssuedActor.Assurance) ||
+		!validRemoteActivityAssurance(input.Activity.Actor.Assurance) {
+		return projectstate.ActivityReceiptV1{}, projectstate.ErrInvalidActivity
+	}
 	embeddedActor, err := projectstate.CanonicalJSON(input.Activity.Actor)
 	if err != nil {
 		return projectstate.ActivityReceiptV1{}, projectstate.ErrInvalidActivity
@@ -268,6 +272,9 @@ func (s *ActivityStore) Pull(ctx context.Context, input PullActivityInput) (Pull
 		if err != nil || activity.ID == "" {
 			return PullActivityResult{}, fmt.Errorf("git: pull activity: invalid retained activity: %w", ErrActivityReplayConflict)
 		}
+		if !validRemoteActivityAssurance(activity.Actor.Assurance) {
+			return PullActivityResult{}, fmt.Errorf("git: pull activity: invalid retained actor: %w", ErrActivityReplayConflict)
+		}
 		computed, err := projectstate.DigestActivity(activity)
 		if err != nil || string(computed) != digest {
 			return PullActivityResult{}, fmt.Errorf("git: pull activity: invalid retained digest: %w", ErrActivityReplayConflict)
@@ -304,6 +311,10 @@ func (s *ActivityStore) Pull(ctx context.Context, input PullActivityInput) (Pull
 		NextSequence: next,
 		HasMore:      hasMore,
 	}, nil
+}
+
+func validRemoteActivityAssurance(assurance types.Assurance) bool {
+	return assurance == types.AssurancePublicKeyContinuity || assurance == types.AssurancePrivateAuthenticated
 }
 
 func activityDatabaseMessage(err error) string {

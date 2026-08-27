@@ -5743,7 +5743,7 @@
       "tag": "v0.2.4-alpha",
       "version": 12
     },
-    "current_version": 20,
+    "current_version": 21,
     "empty_version": 0,
     "entries": [
       {
@@ -5905,6 +5905,14 @@
         "up_empty": false,
         "up_file": "migrations/000020_integration_manifests.up.sql",
         "version": 20
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000021_git_aware_streams.down.sql",
+        "name": "git_aware_streams",
+        "up_empty": false,
+        "up_file": "migrations/000021_git_aware_streams.up.sql",
+        "version": 21
       }
     ],
     "verification_paths": [
@@ -5914,11 +5922,11 @@
         "from_version": 12,
         "name": "alpha_upgrade",
         "source": ".github/scripts/test-alpha-upgrade.sh",
-        "to_version": 20
+        "to_version": 21
       },
       {
         "command": "down -all",
-        "from_version": 20,
+        "from_version": 21,
         "name": "current_down",
         "source": ".github/workflows/migrations.yml",
         "to_version": 0
@@ -5928,7 +5936,7 @@
         "from_version": 0,
         "name": "empty_up",
         "source": ".github/workflows/migrations.yml",
-        "to_version": 20
+        "to_version": 21
       }
     ]
   },

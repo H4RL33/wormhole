@@ -14,8 +14,8 @@ func (s *ActivityStore) TransitionLifecycle(ctx context.Context, key FabricActiv
 	if err := key.validate(); err != nil {
 		return err
 	}
-	if !validActivityLifecycleKind(transition.Kind) || !types.CanonicalUUID(transition.ReferenceID) ||
-		transition.ExpectedState == "" || transition.NextState == "" {
+	if !types.CanonicalUUID(transition.ReferenceID) ||
+		!validActivityLifecycleTransition(transition.Kind, transition.ExpectedState, transition.NextState) {
 		return fmt.Errorf("git: transition activity lifecycle: %w", ErrActivityLifecycleConflict)
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -46,10 +46,31 @@ func (s *ActivityStore) TransitionLifecycle(ctx context.Context, key FabricActiv
 	return nil
 }
 
-func validActivityLifecycleKind(kind string) bool {
+func validActivityLifecycleTransition(kind, expectedState, nextState string) bool {
+	if expectedState == nextState {
+		switch kind {
+		case "delivery":
+			return expectedState == "pending" || expectedState == "delivered" || expectedState == "cancelled"
+		case "conflict":
+			return expectedState == "open" || expectedState == "resolved" || expectedState == "cancelled"
+		case "recovery":
+			return expectedState == "pending" || expectedState == "blocked" || expectedState == "recovered" || expectedState == "cancelled"
+		case "receipt":
+			return expectedState == "pending" || expectedState == "confirmed" || expectedState == "rejected" || expectedState == "cancelled"
+		default:
+			return false
+		}
+	}
 	switch kind {
-	case "delivery", "conflict", "recovery", "receipt":
-		return true
+	case "delivery":
+		return expectedState == "pending" && (nextState == "delivered" || nextState == "cancelled")
+	case "conflict":
+		return expectedState == "open" && (nextState == "resolved" || nextState == "cancelled")
+	case "recovery":
+		return (expectedState == "pending" && (nextState == "blocked" || nextState == "recovered" || nextState == "cancelled")) ||
+			(expectedState == "blocked" && (nextState == "pending" || nextState == "recovered" || nextState == "cancelled"))
+	case "receipt":
+		return expectedState == "pending" && (nextState == "confirmed" || nextState == "rejected" || nextState == "cancelled")
 	default:
 		return false
 	}

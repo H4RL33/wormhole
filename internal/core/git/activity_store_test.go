@@ -188,6 +188,54 @@ func TestActivityStoreRejectsActorForgeryBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestActivityStoreRejectsLocalAssuranceBeforeMutation(t *testing.T) {
+	fixture := newActivityStoreFixture(t, "activity-local-assurance")
+	localActor := fixture.actor
+	localActor.Assurance = types.AssuranceLocal
+	activity := testOrdinaryActivity(activityIDOne, localActor, "local-only")
+	input := fixture.acceptInput(activity)
+	input.IssuedActor = localActor
+
+	if _, err := fixture.store.Accept(context.Background(), input); !errors.Is(err, projectstate.ErrInvalidActivity) {
+		t.Fatalf("local-assurance Accept error = %v, want ErrInvalidActivity", err)
+	}
+	if got := countActivityRows(t, fixture, activity.ID); got != [3]int{} {
+		t.Fatalf("local-assurance Accept mutated rows: %v", got)
+	}
+	if got := activityHighWatermark(t, fixture); got != 0 {
+		t.Fatalf("local-assurance Accept consumed sequence: high_watermark=%d", got)
+	}
+	var auditRows int
+	if err := fixture.store.db.QueryRow(`SELECT count(*) FROM audit_log WHERE project_id=$1`, fixture.stream.ProjectID).Scan(&auditRows); err != nil || auditRows != 0 {
+		t.Fatalf("local-assurance Accept audit rows=%d err=%v", auditRows, err)
+	}
+}
+
+func TestActivityStorePullRejectsRetainedLocalAssurance(t *testing.T) {
+	fixture := newActivityStoreFixture(t, "activity-retained-local-assurance")
+	localActor := fixture.actor
+	localActor.Assurance = types.AssuranceLocal
+	activity := testOrdinaryActivity(activityIDOne, localActor, "retained-local-only")
+	input := fixture.acceptInput(activity)
+	input.IssuedActor = localActor
+	retainActivityDirectly(t, fixture, input)
+
+	result, err := fixture.store.Pull(context.Background(), PullActivityInput{
+		Stream: fixture.stream, AttachmentRef: fixture.attachment, AfterSequence: 0, Limit: 10,
+	})
+	if !errors.Is(err, ErrActivityReplayConflict) {
+		t.Fatalf("Pull retained local assurance error = %v, want ErrActivityReplayConflict", err)
+	}
+	if len(result.Deliveries) != 0 {
+		t.Fatalf("Pull exposed retained local assurance: %+v", result.Deliveries)
+	}
+	for _, forbidden := range []string{"retained-local-only", activityAgentID, string(types.AssuranceLocal), string(mustCanonicalActivity(t, activity))} {
+		if forbidden != "" && strings.Contains(err.Error(), forbidden) {
+			t.Fatalf("Pull error exposes retained actor evidence %q: %v", forbidden, err)
+		}
+	}
+}
+
 func TestActivityStoreCurrentPolicyCASAndStaleIngressHaveZeroMutation(t *testing.T) {
 	fixture := newActivityStoreFixture(t, "activity-policy-stale")
 	current, err := fixture.store.CurrentPolicy(context.Background(), fixture.stream)
@@ -344,6 +392,41 @@ func activityHighWatermark(t *testing.T, fixture activityStoreFixture) int64 {
 		t.Fatalf("read Activity high watermark: %v", err)
 	}
 	return highWatermark
+}
+
+func retainActivityDirectly(t *testing.T, fixture activityStoreFixture, input AcceptActivityInput) {
+	t.Helper()
+	canonical := mustCanonicalActivity(t, input.Activity)
+	digest, err := projectstate.DigestActivity(input.Activity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actorJSON, err := projectstate.CanonicalJSON(input.IssuedActor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := fixture.store.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if err := setActivityProject(context.Background(), tx, fixture.stream.ProjectID); err != nil {
+		t.Fatal(err)
+	}
+	arguments := activityAcceptArguments(input, canonical, digest, actorJSON)
+	var returnedDigest string
+	var sequence, policyVersion int64
+	var policyDigest string
+	var acceptedAt time.Time
+	if err := tx.QueryRowContext(context.Background(), `SELECT activity_digest,sequence,policy_version,policy_digest,accepted_at
+		FROM fabric_accept_activity_v1(
+		$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`, arguments...).
+		Scan(&returnedDigest, &sequence, &policyVersion, &policyDigest, &acceptedAt); err != nil {
+		t.Fatalf("directly retain Activity: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func migration21SeedWorkspaceWithAttachment(t *testing.T, db *sql.DB, projectID, instanceID, streamID, workspaceID, attachmentRef, ref string) {
