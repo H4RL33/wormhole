@@ -124,6 +124,11 @@ func TestStage2ActiveDocumentationStatesLocalOnlyAcceptanceBoundary(t *testing.T
 	t.Parallel()
 
 	requirements := map[string][]string{
+		"SECURITY.md": {
+			"local-only Stage 2 Gateway", "exactly 17 agent-facing tools", "Git is the sole acceptance authority",
+			"same-OS-user boundary", "selected human", "durable agent", "connection session",
+			"optional Fabric", "20-tool", "does not return a raw token",
+		},
 		"README.md": {
 			"17 agent-facing tools", "Git is the sole acceptance authority", "optional Fabric binary",
 			"hostile same-user processes", "operational activity", "machine-private",
@@ -195,6 +200,21 @@ func TestStage2ActiveDocumentationStatesLocalOnlyAcceptanceBoundary(t *testing.T
 	} {
 		if strings.Contains(stage2Section, forbidden) {
 			t.Errorf("Stage 2 alpha-validation section retains non-local claim %q", forbidden)
+		}
+	}
+
+	security, err := os.ReadFile("../../SECURITY.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, staleCurrentClaim := range []string{
+		"### 1. Database Row-Level Security (RLS)",
+		"Agents authenticate using bearer tokens at the MCP boundary.",
+		"Access to any project requires a `Passport`",
+		"Registration returns the caller's newly issued raw token",
+	} {
+		if strings.Contains(string(security), staleCurrentClaim) {
+			t.Errorf("SECURITY.md retains stale current-boundary claim %q", staleCurrentClaim)
 		}
 	}
 }
