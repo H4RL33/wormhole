@@ -371,65 +371,46 @@ func TestMCP_ToolsList_AllToolsWithSchemas(t *testing.T) {
 		t.Fatalf("decode tools/list result: %v", err)
 	}
 
-	wantTools := []string{
-		"wormhole.agent.whoami", "wormhole.agent.get_guidance", "wormhole.sync.status", EnrolmentToolName,
-		"wormhole.workspace.status", "wormhole.workspace.diff", "wormhole.workspace.import", "wormhole.workspace.checkpoint", "wormhole.workspace.stash",
-		"wormhole.task.list", "wormhole.task.get",
-		"wormhole.task.create", "wormhole.task.update_status", "wormhole.task.route", "wormhole.channel.list",
-		"wormhole.channel.create",
-		"wormhole.channel.events", "wormhole.channel.post", "wormhole.channel.subscribe",
-		"wormhole.kb.list", "wormhole.kb.get", "wormhole.kb.write", "wormhole.kb.search", "wormhole.git.link_commit",
-		"wormhole.agent.register", "wormhole.agent.presence", "wormhole.agent.list",
+	gotTools := make([]string, 0, len(result.Tools))
+	for _, tl := range result.Tools {
+		gotTools = append(gotTools, tl.Name)
 	}
-	if len(result.Tools) != len(wantTools) {
-		t.Fatalf("tools/list returned %d tools, want %d: %+v", len(result.Tools), len(wantTools), result.Tools)
+	if !reflect.DeepEqual(gotTools, stage2FinalGatewayToolNames) {
+		t.Fatalf("tools/list returned %v, want exact truthful 17-tool inventory %v", gotTools, stage2FinalGatewayToolNames)
 	}
 
-	byName := map[string]toolListEntry{}
-	for _, tl := range result.Tools {
-		byName[tl.Name] = tl
-	}
-	for _, name := range wantTools {
-		entry, ok := byName[name]
-		if !ok {
-			t.Fatalf("tools/list missing tool %q", name)
-		}
+	for _, entry := range result.Tools {
+		name := entry.Name
 		required, _ := entry.InputSchema["required"].([]interface{})
 		hasProjectID := slices.Contains(required, interface{}("project_id"))
-		if name == "wormhole.agent.whoami" {
-			if hasProjectID {
-				t.Errorf("%s: project_id must not be required", name)
-			}
-		} else {
-			if !hasProjectID {
-				t.Errorf("%s: project_id must be required, got required=%v", name, required)
-			}
+		if !hasProjectID {
+			t.Errorf("%s: project_id must be required, got required=%v", name, required)
 		}
 	}
 }
 
-func TestIntegrationGuidanceDescriptorIsClosedReadOnlyContract(t *testing.T) {
-	registry := newLocalRegistry(&Server{})
-	tool, ok := registry.Get("wormhole.agent.get_guidance")
-	if !ok {
-		t.Fatal("registry missing wormhole.agent.get_guidance")
+func TestConfiguredRemovedGatewayToolsReturnUnknownTool(t *testing.T) {
+	first, second := privateDispatchSiblingBindings(t)
+	server := privateDispatchTestServer(t, privateRoutingTestActor("00000000-0000-4000-8000-000000000021"), first, second)
+	removed := []string{
+		EnrolmentToolName,
+		"wormhole.agent.get_guidance",
+		"wormhole.agent.whoami",
+		"wormhole.kb.search",
+		"wormhole.task.list",
+		"wormhole.task.get",
+		"wormhole.task.create",
+		"wormhole.task.update_status",
+		"wormhole.task.route",
+		"wormhole.git.link_commit",
 	}
-	if len(tool.RequiredPermissions) != 0 {
-		t.Fatalf("get_guidance permissions = %v, want none", tool.RequiredPermissions)
-	}
-	schema := buildInputSchema(tool)
-	if additional, ok := schema["additionalProperties"].(bool); !ok || additional {
-		t.Fatalf("get_guidance additionalProperties = %#v, want false", schema["additionalProperties"])
-	}
-	if required, ok := schema["required"].([]string); !ok || !reflect.DeepEqual(required, []string{"project_id"}) {
-		t.Fatalf("get_guidance required fields = %#v", schema["required"])
-	}
-	properties, ok := schema["properties"].(map[string]any)
-	if !ok || len(properties) != 1 {
-		t.Fatalf("get_guidance properties = %#v", schema["properties"])
-	}
-	if project, ok := properties["project_id"].(map[string]any); !ok || project["type"] != "string" || project["format"] != "uuid" {
-		t.Fatalf("get_guidance project_id schema = %#v", properties["project_id"])
+	for _, name := range removed {
+		t.Run(name, func(t *testing.T) {
+			result := privateDispatchResult(t, server, first, name, privateDispatchValidBlockedArguments(name), nil)
+			if !result.IsError || len(result.Content) != 1 || !strings.Contains(result.Content[0].Text, "unknown tool: "+name) {
+				t.Fatalf("removed tool %s result = %+v, want unknown tool", name, result)
+			}
+		})
 	}
 }
 
@@ -705,16 +686,8 @@ func TestEmptyAgentListResponseMatchesNullableSliceSchema(t *testing.T) {
 	}
 }
 
-func TestLocalRegistryDescribesRoutePermissionsAndPresenceRegistration(t *testing.T) {
+func TestLocalRegistryDescribesPresenceRegistration(t *testing.T) {
 	registry := newLocalRegistry(&Server{})
-
-	route, ok := registry.Get("wormhole.task.route")
-	if !ok {
-		t.Fatal("registry missing wormhole.task.route")
-	}
-	if want := []string{"task.create", "task.assign"}; !reflect.DeepEqual(route.RequiredPermissions, want) {
-		t.Fatalf("task.route RequiredPermissions = %v, want %v", route.RequiredPermissions, want)
-	}
 
 	register, ok := registry.Get("wormhole.agent.register")
 	if !ok {

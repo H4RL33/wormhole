@@ -1,20 +1,42 @@
 package localapi
 
 import (
+	"context"
 	"reflect"
-	"sort"
 	"strings"
 	"testing"
 )
 
+var stage2FinalGatewayToolNames = []string{
+	"wormhole.sync.status",
+	"wormhole.workspace.status",
+	"wormhole.workspace.diff",
+	"wormhole.workspace.import",
+	"wormhole.workspace.checkpoint",
+	"wormhole.workspace.stash",
+	"wormhole.channel.list",
+	"wormhole.channel.create",
+	"wormhole.channel.events",
+	"wormhole.channel.post",
+	"wormhole.channel.subscribe",
+	"wormhole.kb.list",
+	"wormhole.kb.get",
+	"wormhole.kb.write",
+	"wormhole.agent.register",
+	"wormhole.agent.presence",
+	"wormhole.agent.list",
+}
+
 func TestStage2FinalPublicMCPInventory(t *testing.T) {
 	registry := newLocalRegistry(&Server{})
-	wantWorkspace := map[string]bool{
-		"wormhole.workspace.status": true, "wormhole.workspace.diff": true,
-		"wormhole.workspace.import": true, "wormhole.workspace.checkpoint": true,
-		"wormhole.workspace.stash": true,
+	gotNames := make([]string, 0, len(registry.List()))
+	for _, tool := range registry.List() {
+		gotNames = append(gotNames, tool.Name)
 	}
-	seenWorkspace := map[string]bool{}
+	if !reflect.DeepEqual(gotNames, stage2FinalGatewayToolNames) {
+		t.Fatalf("Stage 2 Gateway registry = %v, want exact truthful 17-tool inventory %v", gotNames, stage2FinalGatewayToolNames)
+	}
+
 	for _, tool := range registry.List() {
 		lower := strings.ToLower(tool.Name + " " + tool.Description)
 		for _, forbidden := range []string{"code" + "_graph", "code" + "-graph", "code" + " graph"} {
@@ -22,34 +44,19 @@ func TestStage2FinalPublicMCPInventory(t *testing.T) {
 				t.Errorf("public MCP surface retains %q in %q", forbidden, lower)
 			}
 		}
-		if wantWorkspace[tool.Name] {
-			seenWorkspace[tool.Name] = true
-		}
-	}
-	if !reflect.DeepEqual(seenWorkspace, wantWorkspace) {
-		t.Fatalf("workspace MCP tools = %v, want %v", seenWorkspace, wantWorkspace)
 	}
 
-	register, ok := registry.Get("wormhole.agent.register")
-	if !ok {
-		t.Fatal("presence registration tool is missing")
-	}
-	if got := stage2SortedMapKeys(register.ArgumentExamples); !reflect.DeepEqual(got, []string{"default"}) {
-		t.Fatalf("agent.register variants = %v, want presence-only default", got)
-	}
-	if got := stage2SortedMapKeys(register.ResultExamples); !reflect.DeepEqual(got, []string{"default"}) {
-		t.Fatalf("agent.register results = %v, want presence-only default", got)
-	}
-	if strings.Contains(strings.ToLower(register.Description), "join") || strings.Contains(strings.ToLower(register.Description), "passport") {
-		t.Fatalf("agent.register description retains removed behavior: %q", register.Description)
-	}
 }
 
-func stage2SortedMapKeys[T any](values map[string]T) []string {
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
+func TestStage2ConfiguredSyncStatusReportsQueueFreeLocalOnlyState(t *testing.T) {
+	first, second := privateDispatchSiblingBindings(t)
+	server := privateDispatchTestServer(t, privateRoutingTestActor("00000000-0000-4000-8000-000000000021"), first, second)
+
+	status := privateDispatchSuccess(t, server, first, "wormhole.sync.status", nil, nil)
+	if status["state"] != "offline" || status["pending_writes"] != float64(0) {
+		t.Fatalf("configured local-only sync status = %#v, want offline with no pending Fabric writes", status)
 	}
-	sort.Strings(keys)
-	return keys
+	if pending, err := server.qr.PendingCount(context.Background(), string(first.Scope.WorkspaceID)); err != nil || pending != 0 {
+		t.Fatalf("configured local-only sync queue = (%d, %v), want no Fabric writes", pending, err)
+	}
 }
