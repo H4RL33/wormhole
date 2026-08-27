@@ -1,153 +1,230 @@
-# Task 2 report — preserve local namespace ownership
+# Stage 3 Task 2 report — complete-key Fabric persistence
 
 ## Status
 
-Implemented and verified. The sync local-apply upserts now reject an ID already
-owned by another namespace, preserving the existing row and its namespace.
+Complete. Task 2 is implemented and verified under the human-approved R06
+hard-cut amendment. No Task 3 implementation is included.
 
-## Files changed
-
-- `internal/runtime/localstore/task_repo.go`
-- `internal/runtime/localstore/kb_repo.go`
-- `internal/runtime/localstore/cross_namespace_test.go`
-
-## Decisions
-
-- Added the package sentinel `ErrNamespaceCollision` with the required text.
-- Both upserts query the existing row's `namespace_id` inside their write
-  transaction before writing. A different namespace returns the sentinel.
-- Removed `namespace_id = excluded.namespace_id` from both conflict-update
-  clauses, making namespace ownership immutable while retaining same-namespace
-  updates.
-- Added task and KB regression cases: collision returns the sentinel, namespace
-  A remains unchanged, namespace B cannot retrieve the ID, and same-namespace
-  updates succeed.
-
-## RED
-
-The first test-only change intentionally referenced the new sentinel before it
-existed. The exact requested command therefore failed to compile, confirming
-the missing public error interface:
+Implementation commit:
 
 ```text
-go test ./internal/runtime/localstore -run 'TestUpsert(Task|Article)_CrossNamespaceIDCollisionRejected' -count=1
+312243d22d71758bfe74eae65c7151cab69755bd feat!: persist complete Fabric routes
 ```
 
-Decisive output before production changes:
+The implementation commit has both author and committer set to
+`Harley Welsh <git@h4rl3y.xyz>`.
+
+## Amendment applied
+
+- There is no `internal/runtime/localstore/migrations/` directory, numbered SQL
+  loader, upgrade SQL, downgrade SQL, or reverse migration.
+- `private_schema_v7.sql` is the one consolidated machine-private schema and its
+  singleton `gateway_schema_migrations` ledger contains only `{7}`.
+- Fresh or empty database paths initialize directly at v7 in one transaction.
+  A failed initialization restores the original absent, zero-byte, or empty
+  SQLite preimage.
+- An exact canonical v7 database reopens. Every other existing database,
+  including the former exact v6 format, is opened read-only for inspection,
+  left byte-identical, and refused.
+- Dated historical R06 records remain historical v6 records. Current README,
+  compatibility, security, validation, agent, implementation-rule, entity, and
+  Stage 3 plan text describes the current v7 hard cut.
+
+## Implemented behavior
+
+- Added durable Fabric profiles, exact workspace bindings, cursors, quarantine
+  tables, complete-key queue/audit tables, foreign keys, and pending/recent
+  indexes to canonical v7.
+- Added `FabricRouteRepo` profile, attachment, detachment, route, and cursor
+  operations. Profiles are the sole credential authority; bindings store only
+  profile identity and immutable routing coordinates.
+- Replaced namespace-only queue/audit access with the complete
+  `(project_id, workspace_id, fabric_instance_id, remote_project_id, stream_id)`
+  key. Queue operations store canonical operation JSON and its SHA-256 digest.
+- `QueueRepo.MarkDelivered` uses one dedicated connection, `BEGIN IMMEDIATE`, an
+  exact project/workspace open-conflict recheck, and an exact complete-key plus
+  operation-ID pending update. Conflict and storage failures roll back without
+  changing the pending row.
+- Added the routed sync constructor and gateway wiring with the non-nil
+  `WorkspaceRepo` conflict gate. Each network cycle resolves the current route
+  and credential through the profile's credential reference; status and errors
+  do not expose credentials.
+- Project-only legacy enrolment engines stay stopped until an exact workspace
+  route exists. Unbound legacy local writes remain local and do not enter the
+  complete-key queue.
+- Preserved exact acknowledgement validation, queue isolation, credential
+  rotation without engine replacement, conflict audit behavior, and durable
+  pending status across restart.
+
+## Files
+
+Private format and repositories:
+
+- `internal/runtime/localstore/private_schema_v7.sql`
+- `internal/runtime/localstore/private_format.go`
+- `internal/runtime/localstore/private_format_test.go`
+- `internal/runtime/localstore/localstore.go`
+- `internal/runtime/localstore/migrations.go`
+- `internal/runtime/localstore/migrations_test.go`
+- `internal/runtime/localstore/fabric_routes.go`
+- `internal/runtime/localstore/fabric_routes_test.go`
+- `internal/runtime/localstore/r06_authority_test.go`
+- `internal/runtime/localstore/sync_queue_cross_namespace_test.go`
+
+Complete-key sync and engine behavior:
+
+- `internal/runtime/sync/queue_repo.go`
+- `internal/runtime/sync/queue_repo_test.go`
+- `internal/runtime/sync/status.go`
+- `internal/runtime/sync/sync.go`
+- `internal/runtime/sync/sync_test.go`
+- Legacy namespace-only sync tests were explicitly marked with the
+  `legacy_namespace_sync` build constraint in their existing files.
+
+Gateway and local API compatibility/wiring:
+
+- `cmd/gatewayd/gatewayd.go`
+- `cmd/gatewayd/gatewayd_test.go`
+- `cmd/gatewayd/alpha_validation_e2e_test.go`
+- `cmd/gatewayd/p7_e2e_integration_test.go`
+- `internal/runtime/localapi/bootstrap.go`
+- `internal/runtime/localapi/bootstrap_test.go`
+- `internal/runtime/localapi/localapi.go`
+- Existing local API tests were updated only where the removed unbound queue
+  behavior or the v7 schema inventory changed.
+
+Current documentation and task tracking:
+
+- `.superpowers/sdd/progress.md`
+- `README.md`
+- `agents/README.md`
+- `docs/compatibility.md`
+- `docs/db-entities.md`
+- `docs/implementation-rules.md`
+- `docs/testing/alpha-validation.md`
+- `docs/wiki/Security-Model.md`
+- `docs/superpowers/plans/2026-07-28-multifabric-identity-trial-implementation-plan.md`
+
+## RED evidence
+
+The resumed worktree already contained the interrupted session's original
+interface tests and implementation, so that first compile-failure transcript
+was not available to reproduce without discarding preserved work. This
+continuation recorded the following causal RED stages.
+
+Current-format documentation authority test:
 
 ```text
-# github.com/H4RL33/wormhole/internal/runtime/localstore [github.com/H4RL33/wormhole/internal/runtime/localstore.test]
-internal/runtime/localstore/cross_namespace_test.go:35:21: undefined: ErrNamespaceCollision
-internal/runtime/localstore/cross_namespace_test.go:83:21: undefined: ErrNamespaceCollision
-FAIL	github.com/H4RL33/wormhole/internal/runtime/localstore [build failed]
-FAIL
+go test ./internal/runtime/localstore -run TestCurrentPrivateFormatDocsDescribeV7HardCut -count=1
 ```
 
-To demonstrate the original runtime defect as well, I reran that exact test
-against the pre-fix `2c79aba` task and KB repository files through a temporary
-Go overlay. The overlay provided a test-only `ErrNamespaceCollision` so the
-test could compile without adding production behavior. The decisive output
-shows both cross-namespace upserts returned `nil` instead of rejecting the
-collision:
+The new test failed first because live README, compatibility, security, alpha
+validation, agent, and implementation-rule text still described v6 or the old
+`{6}` singleton ledger. Updating only current policy text made the test green;
+dated R06 records were not rewritten.
+
+Canonical coverage gate:
 
 ```text
---- FAIL: TestUpsertTask_CrossNamespaceIDCollisionRejected (0.00s)
-    cross_namespace_test.go:38: upsert collision error = <nil>, want ErrNamespaceCollision
---- FAIL: TestUpsertArticle_CrossNamespaceIDCollisionRejected (0.00s)
-    cross_namespace_test.go:86: upsert collision error = <nil>, want ErrNamespaceCollision
-FAIL
-FAIL	github.com/H4RL33/wormhole/internal/runtime/localstore	0.009s
-FAIL
+make check
+...
+total: (statements) 79.5%
+coverage gate failed: merged statement coverage must be at least 80.0%
+make: *** [Makefile:31: coverage] Error 1
 ```
 
-## GREEN / verification
+Build, vet, integration, and race phases had passed before this failure. The
+root cause was removal of stale namespace-only engine coverage while routed
+push, pull, status, queue transaction, audit, and conflict paths lacked
+replacement behavioral tests.
 
-Focused regression command:
+Nil-receiver self-review regression:
 
 ```text
-go test ./internal/runtime/localstore -run 'TestUpsert(Task|Article)_CrossNamespaceIDCollisionRejected' -count=1
-ok  	github.com/H4RL33/wormhole/internal/runtime/localstore	0.009s
+go test ./internal/runtime/sync -run TestQueueEnqueueNilRepositoryReturnsError -count=1
+--- FAIL: TestQueueEnqueueNilRepositoryReturnsError (0.00s)
+panic: runtime error: invalid memory address or nil pointer dereference
+FAIL github.com/H4RL33/wormhole/internal/runtime/sync
 ```
 
-Required race suite:
+`QueueRepo.Enqueue` evaluated `r.db` before its existing repository validation.
+The production guard was added only after this failure was observed.
+
+## GREEN evidence
+
+Focused schema, route, queue, credential, engine, and gateway tests:
 
 ```text
-go test -race ./internal/runtime/localstore -count=1
-ok  	github.com/H4RL33/wormhole/internal/runtime/localstore	1.302s
+go test ./internal/runtime/localstore ./internal/runtime/sync ./cmd/gatewayd -run 'Test(Gateway|Fabric|Cursor|Queue|Credential|RoutedEngine|CompleteKey|CurrentPrivateFormat)' -count=1
+ok github.com/H4RL33/wormhole/internal/runtime/localstore
+ok github.com/H4RL33/wormhole/internal/runtime/sync
+ok github.com/H4RL33/wormhole/cmd/gatewayd
 ```
 
-Required dependent suites:
+Focused concurrency-sensitive regressions after the final production change:
 
 ```text
-go test ./internal/runtime/sync ./internal/runtime/localapi -count=1
-ok  	github.com/H4RL33/wormhole/internal/runtime/sync	4.006s
-ok  	github.com/H4RL33/wormhole/internal/runtime/localapi	0.401s
+go test -race ./internal/runtime/localstore ./internal/runtime/sync -run 'Test(CompleteKeyQueueIsolation|CredentialRotationKeepsOneEngine|QueueMarkDelivered|RoutedEnginePushPullStatusAndConflictLifecycle|QueueEnqueueNilRepositoryReturnsError)' -count=1
+ok github.com/H4RL33/wormhole/internal/runtime/localstore [no tests to run]
+ok github.com/H4RL33/wormhole/internal/runtime/sync 2.179s
 ```
 
-`git diff --check` also exited successfully.
+Fresh canonical verification after all implementation, test, and current-doc
+changes:
+
+```text
+make check
+```
+
+Exit status was 0. It passed all three builds, `go vet ./...`, integration-
+required `go test ./...`, integration-required `go test -race ./...`, and the
+merged coverage gate. Notable final output:
+
+```text
+ok github.com/H4RL33/wormhole/internal/runtime/projectstate 276.267s
+ok github.com/H4RL33/wormhole/internal/runtime/sync 2.719s
+total: (statements) 80.0%
+```
+
+The unrounded merged profile result was 24,429 of 30,529 statements,
+80.018998%, five covered statements above the 80% threshold.
+
+Formatting and structural verification:
+
+```text
+git diff --check
+# exit 0, no output
+
+test ! -d internal/runtime/localstore/migrations
+# exit 0
+
+find internal/runtime/localstore -maxdepth 1 -name 'private_schema_v*.sql'
+internal/runtime/localstore/private_schema_v7.sql
+```
+
+## Self-review
+
+- Audited the complete-key predicates in queue read, count, delivery, lookup,
+  delete, audit, route, and cursor paths; none falls back to namespace,
+  project-only, workspace-only, or ambient-current selection.
+- Audited `MarkDelivered`: conflict lookup is exactly project/workspace scoped;
+  queue update is the entire remote key plus ID and only pending rows qualify.
+- Audited routed network resolution: immutable Fabric identity fields come from
+  the binding, base URL and credential reference come from the profile, and the
+  credential value comes only from `CredentialSource` on each network cycle.
+- Audited the private-format inventory and refusal tests, including byte
+  preservation for former exact v6 databases and atomic restoration for failed
+  fresh initialization.
+- Audited the diff for Task 3 scope; no Task 3 implementation was added.
+- `git diff --check` was clean before the implementation commit.
+
+## Commits
+
+- Implementation: `312243d22d71758bfe74eae65c7151cab69755bd`
+- Report: the commit containing this file
 
 ## Concerns
 
-None for the requested scope. The existing `.superpowers/sdd/progress.md`
-modification was left untouched as instructed.
-
-## Review remediation (namespace scoping and complete record assertions)
-
-### Files changed
-
-- `internal/runtime/localstore/task_repo.go`
-- `internal/runtime/localstore/kb_repo.go`
-- `internal/runtime/localstore/cross_namespace_test.go`
-
-### Changes
-
-- Changed both collision probes to query only for a conflicting owner with
-  `WHERE id = ? AND namespace_id <> ?`, binding the requested namespace in
-  the existing write transaction as required by RFC-0003 §7.2/LR3.
-- Strengthened task collision coverage to preserve and compare every stored
-  field (including namespace, description, parent/owner pointers, status,
-  priority, due date, and timestamps) and to verify all same-namespace
-  mutable updates plus retained namespace.
-- Strengthened KB coverage to preserve and compare title, body, frontmatter,
-  author, namespace, and timestamps, using distinct attempted collision
-  values and complete same-namespace update assertions.
-- The due-date assertions exposed that SQLite stores `due_by` (`TEXT`) as a
-  Go time string. `scanTaskRows` now parses that value, including the
-  driver's optional monotonic-clock suffix; a regression test covers it.
-
-### Commands and results
-
-The new monotonic-clock due-date regression was RED before the parser change:
-
-```text
-go test ./internal/runtime/localstore -run TestUpsertTask_PreservesDueByWithMonotonicClock -count=1
---- FAIL: TestUpsertTask_PreservesDueByWithMonotonicClock (0.00s)
-    cross_namespace_test.go:161: UpsertTask: localstore/task: upsert: parse due_by: parsing time "... m=+...": extra text: " m=+..."
-FAIL
-FAIL	github.com/H4RL33/wormhole/internal/runtime/localstore	0.006s
-FAIL
-```
-
-Final focused collision and due-date regression coverage:
-
-```text
-go test ./internal/runtime/localstore -run 'TestUpsert(Task|Article)_CrossNamespaceIDCollisionRejected|TestUpsertTask_PreservesDueByWithMonotonicClock' -count=1
-ok  	github.com/H4RL33/wormhole/internal/runtime/localstore	0.012s
-```
-
-Required race suite:
-
-```text
-go test -race ./internal/runtime/localstore -count=1
-ok  	github.com/H4RL33/wormhole/internal/runtime/localstore	1.316s
-```
-
-Required dependent suites:
-
-```text
-go test ./internal/runtime/sync ./internal/runtime/localapi -count=1
-ok  	github.com/H4RL33/wormhole/internal/runtime/sync	3.971s
-ok  	github.com/H4RL33/wormhole/internal/runtime/localapi	0.399s
-```
-
-`git diff --check` exited successfully.
+No known functional concern or blocker. Coverage satisfies the required gate;
+its five-statement headroom is intentionally recorded so subsequent production
+changes add commensurate tests.
