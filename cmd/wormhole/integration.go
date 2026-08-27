@@ -144,7 +144,7 @@ func runIntegration(args []string, stdin io.Reader, stdout, stderr io.Writer, in
 		fmt.Fprintf(stderr, "wormhole integration %s: non-interactive mutation requires --confirm-digest\n", command)
 		return 2
 	}
-	resolvedProject, err := resolveCodeGraphProject(*project)
+	resolvedProject, err := resolveIntegrationProject(*project)
 	if err != nil {
 		fmt.Fprintf(stderr, "wormhole integration %s: %v\n", command, err)
 		return 2
@@ -210,6 +210,20 @@ func runIntegration(args []string, stdin io.Reader, stdout, stderr io.Writer, in
 	}
 	fmt.Fprintf(stdout, "integration %s committed for project %s at %s\n", command, plan.ProjectID, plan.ExpectedDigest)
 	return 0
+}
+
+func resolveIntegrationProject(explicit string) (string, error) {
+	if strings.TrimSpace(explicit) != "" {
+		return strings.TrimSpace(explicit), nil
+	}
+	configured, err := projectconfig.LoadLocal()
+	if err != nil {
+		return "", fmt.Errorf("load nearest project config: %w", err)
+	}
+	if strings.TrimSpace(configured.Project) == "" {
+		return "", errors.New("--project is required when no nearest .wormhole/config.toml project is configured")
+	}
+	return strings.TrimSpace(configured.Project), nil
 }
 
 func integrationDigestValid(value string) bool {

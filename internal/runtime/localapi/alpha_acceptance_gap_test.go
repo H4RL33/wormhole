@@ -12,10 +12,10 @@ import (
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 )
 
-func TestAlphaAcceptanceGatewayRegistryIncludesTwentyFiveBoundTools(t *testing.T) {
+func TestAlphaAcceptanceGatewayRegistryIncludesTwentySevenBoundTools(t *testing.T) {
 	registry := newLocalRegistry(&Server{})
-	if got := len(registry.List()); got != 25 {
-		t.Fatalf("Gateway tools/list count = %d, want 25", got)
+	if got := len(registry.List()); got != 27 {
+		t.Fatalf("Gateway tools/list count = %d, want 27", got)
 	}
 	for name, permission := range map[string]string{
 		"wormhole.kb.search":          "kb.search",

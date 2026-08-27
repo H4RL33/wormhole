@@ -1,5 +1,308 @@
 {
-  "mode": "alpha-inventory",
+  "artifacts": {
+    "archives": [
+      "wormhole-{version}-linux-amd64.tar.gz",
+      "wormhole-{version}-linux-arm64.tar.gz"
+    ],
+    "binaries": [
+      "fabric",
+      "gatewayd",
+      "wormhole"
+    ],
+    "checksum_manifest": "SHA256SUMS",
+    "fabric_image": "ghcr.io/h4rl33/wormhole-fabric",
+    "fabric_image_platforms": [
+      "linux/amd64",
+      "linux/arm64"
+    ],
+    "published_files": [
+      "SHA256SUMS",
+      "SHA256SUMS.pem",
+      "SHA256SUMS.sig",
+      "wormhole-amd64.spdx.json",
+      "wormhole-amd64.spdx.json.pem",
+      "wormhole-amd64.spdx.json.sig",
+      "wormhole-arm64.spdx.json",
+      "wormhole-arm64.spdx.json.pem",
+      "wormhole-arm64.spdx.json.sig",
+      "wormhole-{version}-linux-amd64.tar.gz",
+      "wormhole-{version}-linux-amd64.tar.gz.pem",
+      "wormhole-{version}-linux-amd64.tar.gz.sig",
+      "wormhole-{version}-linux-arm64.tar.gz",
+      "wormhole-{version}-linux-arm64.tar.gz.pem",
+      "wormhole-{version}-linux-arm64.tar.gz.sig"
+    ],
+    "release_platforms": [
+      "linux/amd64",
+      "linux/arm64"
+    ],
+    "signing_suffixes": [
+      ".pem",
+      ".sig"
+    ],
+    "spdx_sboms": [
+      "wormhole-amd64.spdx.json",
+      "wormhole-arm64.spdx.json"
+    ]
+  },
+  "cli": {
+    "commands": [
+      {
+        "name": "checkpoint",
+        "usage": "checkpoint [flags]",
+        "flags": [
+          "publication-review-digest"
+        ],
+        "positionals": [],
+        "help_exit": 0
+      },
+      {
+        "name": "connector install",
+        "usage": "connector install [--yes] \u003cadapter\u003e",
+        "flags": [
+          "yes"
+        ],
+        "positionals": [
+          "\u003cadapter\u003e"
+        ],
+        "help_exit": 0
+      },
+      {
+        "name": "connector list",
+        "usage": "connector list \u003cadapter\u003e",
+        "flags": [],
+        "positionals": [
+          "\u003cadapter\u003e"
+        ],
+        "help_exit": 0
+      },
+      {
+        "name": "connector remove",
+        "usage": "connector remove [--yes] \u003cadapter\u003e",
+        "flags": [
+          "yes"
+        ],
+        "positionals": [
+          "\u003cadapter\u003e"
+        ],
+        "help_exit": 0
+      },
+      {
+        "name": "diff",
+        "usage": "diff",
+        "flags": [],
+        "positionals": [],
+        "help_exit": 0
+      },
+      {
+        "name": "help",
+        "usage": "help",
+        "flags": [],
+        "positionals": [],
+        "help_exit": 0
+      },
+      {
+        "name": "import",
+        "usage": "import",
+        "flags": [],
+        "positionals": [],
+        "help_exit": 0
+      },
+      {
+        "name": "integration apply",
+        "usage": "integration apply [flags]",
+        "flags": [
+          "confirm-digest",
+          "project"
+        ],
+        "positionals": [],
+        "help_exit": 0
+      },
+      {
+        "name": "integration preview",
+        "usage": "integration preview [flags]",
+        "flags": [
+          "project"
+        ],
+        "positionals": [],
+        "help_exit": 0
+      },
+      {
+        "name": "integration remove",
+        "usage": "integration remove [flags]",
+        "flags": [
+          "confirm-digest",
+          "project"
+        ],
+        "positionals": [],
+        "help_exit": 0
+      },
+      {
+        "name": "integration rollback",
+        "usage": "integration rollback [flags]",
+        "flags": [
+          "confirm-digest",
+          "project"
+        ],
+        "positionals": [],
+        "help_exit": 0
+      },
+      {
+        "name": "integration status",
+        "usage": "integration status [flags]",
+        "flags": [
+          "json",
+          "project"
+        ],
+        "positionals": [],
+        "help_exit": 0
+      },
+      {
+        "name": "integration update",
+        "usage": "integration update [flags]",
+        "flags": [
+          "confirm-digest",
+          "project"
+        ],
+        "positionals": [],
+        "help_exit": 0
+      },
+      {
+        "name": "mcp",
+        "usage": "mcp",
+        "flags": [],
+        "positionals": [],
+        "help_exit": 1
+      },
+      {
+        "name": "profile list",
+        "usage": "profile list [flags]",
+        "flags": [],
+        "positionals": [],
+        "help_exit": 2
+      },
+      {
+        "name": "setup",
+        "usage": "setup [flags]",
+        "flags": [
+          "email",
+          "name",
+          "publication",
+          "yes"
+        ],
+        "positionals": [],
+        "help_exit": 2
+      },
+      {
+        "name": "stash",
+        "usage": "stash [flags]",
+        "flags": [
+          "label",
+          "request-id"
+        ],
+        "positionals": [],
+        "help_exit": 0
+      },
+      {
+        "name": "status",
+        "usage": "status",
+        "flags": [],
+        "positionals": [],
+        "help_exit": 0
+      },
+      {
+        "name": "trial-metrics format",
+        "usage": "trial-metrics format [flags] [FILE|-]",
+        "flags": [
+          "kind"
+        ],
+        "positionals": [
+          "[FILE|-]"
+        ],
+        "help_exit": 0
+      },
+      {
+        "name": "trial-metrics validate",
+        "usage": "trial-metrics validate [flags] [FILE|-]",
+        "flags": [
+          "kind"
+        ],
+        "positionals": [
+          "[FILE|-]"
+        ],
+        "help_exit": 0
+      },
+      {
+        "name": "viewer-key create",
+        "usage": "viewer-key create [flags]",
+        "flags": [
+          "admin-key",
+          "label",
+          "project",
+          "server"
+        ],
+        "positionals": [],
+        "help_exit": 2
+      },
+      {
+        "name": "whoami",
+        "usage": "whoami [flags]",
+        "flags": [
+          "profile"
+        ],
+        "positionals": [],
+        "help_exit": 2
+      }
+    ],
+    "config_files": {
+      "credential_fields": [
+        "agent_id",
+        "issued_at",
+        "passport_id",
+        "project_id",
+        "role",
+        "server",
+        "token"
+      ],
+      "credentials_format": "json",
+      "project_config_fields": [
+        "project",
+        "role",
+        "server"
+      ],
+      "project_config_format": "toml"
+    },
+    "configuration_precedence": [
+      {
+        "name": "config.resolve.required",
+        "commands": [],
+        "sources": [
+          "flag",
+          "project_config",
+          "global_config",
+          "environment",
+          "default",
+          "error"
+        ]
+      },
+      {
+        "name": "viewer-key.create.admin_key",
+        "commands": [
+          "viewer-key create"
+        ],
+        "sources": [
+          "flag",
+          "WORMHOLE_ADMIN_KEY",
+          "error"
+        ]
+      }
+    ],
+    "exit_behavior": {
+      "help": 0,
+      "missing_command": 2,
+      "unknown_command": 2
+    }
+  },
   "designed_interfaces": {
     "integration_manifest_v1": {
       "status": "fabric_distribution_materialization_guidance_and_gateway_cache_binding_implemented",
@@ -20,7 +323,7 @@
         ],
         "schema_version": 1,
         "source": "fabric",
-        "digest_format": "sha256:<64 lowercase hex>",
+        "digest_format": "sha256:\u003c64 lowercase hex\u003e",
         "manifest_digest_input": "RFC8785/JCS manifest object omitting manifest_digest",
         "entries_min": 1,
         "entries_max": 64,
@@ -44,8 +347,8 @@
         ],
         "targets": {
           "agents_bootstrap": "AGENTS.md",
-          "reference": ".agents/skills/wormhole-<skill-slug>/references/<reference-slug>.md",
-          "skill": ".agents/skills/wormhole-<skill-slug>/SKILL.md"
+          "reference": ".agents/skills/wormhole-\u003cskill-slug\u003e/references/\u003creference-slug\u003e.md",
+          "skill": ".agents/skills/wormhole-\u003cskill-slug\u003e/SKILL.md"
         },
         "merge_policies": {
           "agents_bootstrap": "managed_section",
@@ -57,9 +360,9 @@
         "content_max_bytes": 262144
       },
       "managed_section_markers": {
-        "begin": "<!-- wormhole:managed-begin integration-manifest/v1 -->",
-        "metadata": "<!-- wormhole:manifest id=<uuid> version=<n> digest=sha256:<hex> -->",
-        "end": "<!-- wormhole:managed-end integration-manifest/v1 -->"
+        "begin": "\u003c!-- wormhole:managed-begin integration-manifest/v1 --\u003e",
+        "metadata": "\u003c!-- wormhole:manifest id=\u003cuuid\u003e version=\u003cn\u003e digest=sha256:\u003chex\u003e --\u003e",
+        "end": "\u003c!-- wormhole:managed-end integration-manifest/v1 --\u003e"
       },
       "cli_commands": [
         {
@@ -380,6 +683,94 @@
         }
       }
     }
+  },
+  "environment": [
+    "HOME",
+    "TMPDIR",
+    "WORMHOLE_ADMIN_KEY",
+    "WORMHOLE_COHERE_API_KEY",
+    "WORMHOLE_DATABASE_URL",
+    "WORMHOLE_KB_DEDUP_THRESHOLD",
+    "WORMHOLE_KB_MAX_BODY_LENGTH",
+    "WORMHOLE_KB_MIN_LINKS_DECISION",
+    "WORMHOLE_KB_MIN_LINKS_POLICY",
+    "WORMHOLE_KB_MIN_LINKS_PROCEDURE",
+    "WORMHOLE_LISTEN_ADDR",
+    "WORMHOLE_MODEL",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_RUNTIME_DIR"
+  ],
+  "local_protocol": {
+    "transport": "unix-domain-socket",
+    "framing": "newline-delimited-json",
+    "jsonrpc_version": "2.0",
+    "mcp_protocol_version": "2025-11-25",
+    "methods": [
+      "initialize",
+      "notifications/initialized",
+      "tools/call",
+      "tools/list"
+    ],
+    "initialize": {
+      "envelope_fields": [
+        "id",
+        "jsonrpc",
+        "result"
+      ],
+      "result_fields": [
+        "capabilities",
+        "protocolVersion",
+        "serverInfo"
+      ],
+      "capabilities": {
+        "tools": {}
+      },
+      "server_info": {
+        "name": "gatewayd",
+        "version": "configured"
+      }
+    },
+    "lifecycle": {
+      "required_sequence": [
+        "initialize",
+        "notifications/initialized"
+      ],
+      "gated_methods": [
+        "tools/call",
+        "tools/list"
+      ],
+      "not_initialized_error_code": -32002,
+      "notification_response": "none"
+    },
+    "server_notifications": [
+      {
+        "method": "notifications/wormhole.event",
+        "envelope_fields": [
+          "jsonrpc",
+          "method",
+          "params"
+        ],
+        "params_variants": [
+          {
+            "name": "agent_registered",
+            "fields": [
+              "agent",
+              "capabilities",
+              "namespace",
+              "status"
+            ]
+          },
+          {
+            "name": "presence_updated",
+            "fields": [
+              "agent",
+              "status"
+            ]
+          }
+        ]
+      }
+    ]
   },
   "mcp_tools": {
     "fabric": [
@@ -4712,101 +5103,7 @@
         "required_permissions": [],
         "request_schemas": [
           {
-            "variant": "join",
-            "schema": {
-              "type": "object",
-              "properties": [
-                {
-                  "name": "capabilities",
-                  "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  }
-                },
-                {
-                  "name": "model",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "name",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "owner",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "permissions",
-                  "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  }
-                },
-                {
-                  "name": "project_id",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "repositories",
-                  "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  }
-                },
-                {
-                  "name": "role",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "roles",
-                  "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  }
-                }
-              ],
-              "required": [
-                "capabilities",
-                "model",
-                "permissions",
-                "project_id",
-                "repositories",
-                "roles"
-              ],
-              "anyOf": [
-                {
-                  "required": [
-                    "owner"
-                  ]
-                },
-                {
-                  "required": [
-                    "name"
-                  ]
-                }
-              ]
-            }
-          },
-          {
-            "variant": "presence",
+            "variant": "default",
             "schema": {
               "type": "object",
               "properties": [
@@ -4841,86 +5138,7 @@
         ],
         "response_schemas": [
           {
-            "variant": "join",
-            "schema": {
-              "type": "object",
-              "properties": [
-                {
-                  "name": "agent_id",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "issued_at",
-                  "schema": {
-                    "type": "string",
-                    "format": "date-time"
-                  }
-                },
-                {
-                  "name": "passport_id",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "repositories",
-                  "schema": {
-                    "anyOf": [
-                      {
-                        "type": "array",
-                        "items": {
-                          "type": "string"
-                        }
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  }
-                },
-                {
-                  "name": "role",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "roles",
-                  "schema": {
-                    "anyOf": [
-                      {
-                        "type": "array",
-                        "items": {
-                          "type": "string"
-                        }
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  }
-                },
-                {
-                  "name": "token",
-                  "schema": {
-                    "type": "string"
-                  }
-                }
-              ],
-              "required": [
-                "agent_id",
-                "issued_at",
-                "passport_id",
-                "repositories",
-                "roles",
-                "token"
-              ]
-            }
-          },
-          {
-            "variant": "presence",
+            "variant": "default",
             "schema": {
               "type": "object",
               "properties": [
@@ -5468,793 +5686,6 @@
               "required": [
                 "namespace",
                 "subscription_id"
-              ]
-            }
-          }
-        ]
-      },
-      {
-        "name": "wormhole.code_graph.query",
-        "required_permissions": [
-          "code_graph.query"
-        ],
-        "request_schemas": [
-          {
-            "variant": "default",
-            "schema": {
-              "type": "object",
-              "properties": [
-                {
-                  "name": "entry_symbols",
-                  "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  }
-                },
-                {
-                  "name": "include_edges",
-                  "schema": {
-                    "type": "array",
-                    "items": {
-                      "type": "string",
-                      "enum": [
-                        "calls",
-                        "references",
-                        "uses_type"
-                      ]
-                    }
-                  }
-                },
-                {
-                  "name": "intent",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "max_depth",
-                  "schema": {
-                    "type": "integer"
-                  }
-                },
-                {
-                  "name": "minimum_confidence",
-                  "schema": {
-                    "type": "number"
-                  }
-                },
-                {
-                  "name": "project_id",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "requested_source_bytes",
-                  "schema": {
-                    "type": "integer"
-                  }
-                }
-              ],
-              "required": [
-                "project_id"
-              ],
-              "anyOf": [
-                {
-                  "required": [
-                    "intent"
-                  ]
-                },
-                {
-                  "required": [
-                    "entry_symbols"
-                  ]
-                }
-              ],
-              "additional_properties": false
-            }
-          }
-        ],
-        "response_schemas": [
-          {
-            "variant": "default",
-            "schema": {
-              "type": "object",
-              "properties": [
-                {
-                  "name": "completeness",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "current_git_commit",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "edges",
-                  "schema": {
-                    "anyOf": [
-                      {
-                        "type": "array",
-                        "items": {
-                          "type": "object",
-                          "properties": [
-                            {
-                              "name": "authoritative",
-                              "schema": {
-                                "type": "boolean"
-                              }
-                            },
-                            {
-                              "name": "confidence",
-                              "schema": {
-                                "type": "number"
-                              }
-                            },
-                            {
-                              "name": "id",
-                              "schema": {
-                                "type": "string"
-                              }
-                            },
-                            {
-                              "name": "provenance",
-                              "schema": {
-                                "type": "string"
-                              }
-                            },
-                            {
-                              "name": "relationship",
-                              "schema": {
-                                "type": "string"
-                              }
-                            },
-                            {
-                              "name": "source_node_id",
-                              "schema": {
-                                "type": "string"
-                              }
-                            },
-                            {
-                              "name": "target_node_id",
-                              "schema": {
-                                "type": "string"
-                              }
-                            }
-                          ],
-                          "required": [
-                            "authoritative",
-                            "confidence",
-                            "id",
-                            "provenance",
-                            "relationship",
-                            "source_node_id",
-                            "target_node_id"
-                          ]
-                        }
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  }
-                },
-                {
-                  "name": "effective_source_budget",
-                  "schema": {
-                    "type": "integer"
-                  }
-                },
-                {
-                  "name": "graph_not_current",
-                  "schema": {
-                    "type": "boolean"
-                  }
-                },
-                {
-                  "name": "graph_revision",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "matches",
-                  "schema": {
-                    "anyOf": [
-                      {
-                        "type": "array",
-                        "items": {
-                          "type": "object",
-                          "properties": [
-                            {
-                              "name": "file_path",
-                              "schema": {
-                                "type": "string"
-                              }
-                            },
-                            {
-                              "name": "qualified_name",
-                              "schema": {
-                                "type": "string"
-                              }
-                            },
-                            {
-                              "name": "rank",
-                              "schema": {
-                                "type": "integer"
-                              }
-                            },
-                            {
-                              "name": "reason",
-                              "schema": {
-                                "type": "string"
-                              }
-                            },
-                            {
-                              "name": "symbol_id",
-                              "schema": {
-                                "type": "string"
-                              }
-                            }
-                          ],
-                          "required": [
-                            "file_path",
-                            "qualified_name",
-                            "rank",
-                            "reason",
-                            "symbol_id"
-                          ]
-                        }
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  }
-                },
-                {
-                  "name": "nodes",
-                  "schema": {
-                    "anyOf": [
-                      {
-                        "type": "array",
-                        "items": {
-                          "type": "object",
-                          "properties": [
-                            {
-                              "name": "distance",
-                              "schema": {
-                                "type": "integer"
-                              }
-                            },
-                            {
-                              "name": "id",
-                              "schema": {
-                                "type": "string"
-                              }
-                            },
-                            {
-                              "name": "kind",
-                              "schema": {
-                                "type": "string"
-                              }
-                            },
-                            {
-                              "name": "name",
-                              "schema": {
-                                "type": "string"
-                              }
-                            },
-                            {
-                              "name": "path",
-                              "schema": {
-                                "type": "string"
-                              }
-                            }
-                          ],
-                          "required": [
-                            "distance",
-                            "id",
-                            "kind",
-                            "name",
-                            "path"
-                          ]
-                        }
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  }
-                },
-                {
-                  "name": "omission_reason",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "omitted_edge_count",
-                  "schema": {
-                    "type": "integer"
-                  }
-                },
-                {
-                  "name": "omitted_node_count",
-                  "schema": {
-                    "type": "integer"
-                  }
-                },
-                {
-                  "name": "rebuild_recommended",
-                  "schema": {
-                    "type": "boolean"
-                  }
-                },
-                {
-                  "name": "refresh_recommended",
-                  "schema": {
-                    "type": "boolean"
-                  }
-                },
-                {
-                  "name": "source_bytes",
-                  "schema": {
-                    "type": "integer"
-                  }
-                },
-                {
-                  "name": "sources",
-                  "schema": {
-                    "anyOf": [
-                      {
-                        "type": "array",
-                        "items": {
-                          "type": "object",
-                          "properties": [
-                            {
-                              "name": "end_byte",
-                              "schema": {
-                                "type": "integer"
-                              }
-                            },
-                            {
-                              "name": "end_line",
-                              "schema": {
-                                "type": "integer"
-                              }
-                            },
-                            {
-                              "name": "file_path",
-                              "schema": {
-                                "type": "string"
-                              }
-                            },
-                            {
-                              "name": "qualified_name",
-                              "schema": {
-                                "type": "string"
-                              }
-                            },
-                            {
-                              "name": "refresh_recommended",
-                              "schema": {
-                                "type": "boolean"
-                              }
-                            },
-                            {
-                              "name": "required_permission",
-                              "schema": {
-                                "type": "string"
-                              }
-                            },
-                            {
-                              "name": "returned_bytes",
-                              "schema": {
-                                "type": "integer"
-                              }
-                            },
-                            {
-                              "name": "source",
-                              "schema": {
-                                "type": "string"
-                              }
-                            },
-                            {
-                              "name": "source_included",
-                              "schema": {
-                                "type": "boolean"
-                              }
-                            },
-                            {
-                              "name": "source_omission_reason",
-                              "schema": {
-                                "type": "string"
-                              }
-                            },
-                            {
-                              "name": "start_byte",
-                              "schema": {
-                                "type": "integer"
-                              }
-                            },
-                            {
-                              "name": "start_line",
-                              "schema": {
-                                "type": "integer"
-                              }
-                            },
-                            {
-                              "name": "symbol_id",
-                              "schema": {
-                                "type": "string"
-                              }
-                            }
-                          ],
-                          "required": [
-                            "end_byte",
-                            "end_line",
-                            "file_path",
-                            "qualified_name",
-                            "returned_bytes",
-                            "source_included",
-                            "start_byte",
-                            "start_line",
-                            "symbol_id"
-                          ]
-                        }
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  }
-                },
-                {
-                  "name": "structural_paths",
-                  "schema": {
-                    "anyOf": [
-                      {
-                        "type": "array",
-                        "items": {
-                          "type": "object",
-                          "properties": [
-                            {
-                              "name": "depth",
-                              "schema": {
-                                "type": "integer"
-                              }
-                            },
-                            {
-                              "name": "edge_id",
-                              "schema": {
-                                "type": "string"
-                              }
-                            },
-                            {
-                              "name": "from_node_id",
-                              "schema": {
-                                "type": "string"
-                              }
-                            },
-                            {
-                              "name": "to_node_id",
-                              "schema": {
-                                "type": "string"
-                              }
-                            }
-                          ],
-                          "required": [
-                            "depth",
-                            "edge_id",
-                            "from_node_id",
-                            "to_node_id"
-                          ]
-                        }
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  }
-                },
-                {
-                  "name": "suggested_follow_up_symbols",
-                  "schema": {
-                    "anyOf": [
-                      {
-                        "type": "array",
-                        "items": {
-                          "type": "string"
-                        }
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  }
-                },
-                {
-                  "name": "working_tree_status",
-                  "schema": {
-                    "type": "string",
-                    "enum": [
-                      "clean",
-                      "dirty"
-                    ]
-                  }
-                }
-              ],
-              "required": [
-                "completeness",
-                "current_git_commit",
-                "edges",
-                "effective_source_budget",
-                "graph_not_current",
-                "graph_revision",
-                "matches",
-                "nodes",
-                "omitted_edge_count",
-                "omitted_node_count",
-                "rebuild_recommended",
-                "refresh_recommended",
-                "source_bytes",
-                "sources",
-                "structural_paths",
-                "suggested_follow_up_symbols",
-                "working_tree_status"
-              ]
-            }
-          }
-        ]
-      },
-      {
-        "name": "wormhole.code_graph.rebuild",
-        "required_permissions": [
-          "code_graph.rebuild"
-        ],
-        "request_schemas": [
-          {
-            "variant": "default",
-            "schema": {
-              "type": "object",
-              "properties": [
-                {
-                  "name": "project_id",
-                  "schema": {
-                    "type": "string"
-                  }
-                }
-              ],
-              "required": [
-                "project_id"
-              ],
-              "additional_properties": false
-            }
-          }
-        ],
-        "response_schemas": [
-          {
-            "variant": "default",
-            "schema": {
-              "type": "object",
-              "properties": [
-                {
-                  "name": "graph_revision",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "indexed_commit",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "state",
-                  "schema": {
-                    "type": "string"
-                  }
-                }
-              ],
-              "required": [
-                "graph_revision",
-                "indexed_commit",
-                "state"
-              ]
-            }
-          }
-        ]
-      },
-      {
-        "name": "wormhole.code_graph.status",
-        "required_permissions": [
-          "code_graph.status"
-        ],
-        "request_schemas": [
-          {
-            "variant": "default",
-            "schema": {
-              "type": "object",
-              "properties": [
-                {
-                  "name": "project_id",
-                  "schema": {
-                    "type": "string"
-                  }
-                }
-              ],
-              "required": [
-                "project_id"
-              ],
-              "additional_properties": false
-            }
-          }
-        ],
-        "response_schemas": [
-          {
-            "variant": "default",
-            "schema": {
-              "type": "object",
-              "properties": [
-                {
-                  "name": "active_checkout",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "active_revision",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "canonical_remote",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "database_size",
-                  "schema": {
-                    "type": "integer"
-                  }
-                },
-                {
-                  "name": "dirty_tracked_file_count",
-                  "schema": {
-                    "type": "integer"
-                  }
-                },
-                {
-                  "name": "edge_count",
-                  "schema": {
-                    "type": "integer"
-                  }
-                },
-                {
-                  "name": "indexed_commit",
-                  "schema": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "name": "last_successful_build",
-                  "schema": {
-                    "anyOf": [
-                      {
-                        "type": "string",
-                        "format": "date-time"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  }
-                },
-                {
-                  "name": "latest_diagnostics",
-                  "schema": {
-                    "anyOf": [
-                      {
-                        "type": "array",
-                        "items": {
-                          "type": "object",
-                          "properties": [
-                            {
-                              "name": "code",
-                              "schema": {
-                                "type": "string"
-                              }
-                            },
-                            {
-                              "name": "created_at",
-                              "schema": {
-                                "type": "string",
-                                "format": "date-time"
-                              }
-                            },
-                            {
-                              "name": "id",
-                              "schema": {
-                                "type": "string"
-                              }
-                            },
-                            {
-                              "name": "message",
-                              "schema": {
-                                "type": "string"
-                              }
-                            },
-                            {
-                              "name": "severity",
-                              "schema": {
-                                "type": "string"
-                              }
-                            }
-                          ],
-                          "required": [
-                            "code",
-                            "created_at",
-                            "id",
-                            "message",
-                            "severity"
-                          ]
-                        }
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  }
-                },
-                {
-                  "name": "state",
-                  "schema": {
-                    "type": "string",
-                    "enum": [
-                      "degraded",
-                      "disabled",
-                      "error",
-                      "initializing",
-                      "ready",
-                      "stale"
-                    ]
-                  }
-                },
-                {
-                  "name": "symbol_count",
-                  "schema": {
-                    "type": "integer"
-                  }
-                },
-                {
-                  "name": "tracked_go_file_count",
-                  "schema": {
-                    "type": "integer"
-                  }
-                }
-              ],
-              "required": [
-                "active_checkout",
-                "active_revision",
-                "canonical_remote",
-                "database_size",
-                "dirty_tracked_file_count",
-                "edge_count",
-                "indexed_commit",
-                "last_successful_build",
-                "latest_diagnostics",
-                "state",
-                "symbol_count",
-                "tracked_go_file_count"
               ]
             }
           }
@@ -7646,320 +7077,1097 @@
             }
           }
         ]
+      },
+      {
+        "name": "wormhole.workspace.checkpoint",
+        "required_permissions": [],
+        "request_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "project_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "publication_review_digest",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "project_id"
+              ],
+              "additional_properties": false
+            }
+          }
+        ],
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "candidate_digest",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "journal_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "materialized_through_generation",
+                  "schema": {
+                    "type": "integer"
+                  }
+                }
+              ],
+              "required": [
+                "candidate_digest",
+                "journal_id",
+                "materialized_through_generation"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.workspace.diff",
+        "required_permissions": [],
+        "request_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "project_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "project_id"
+              ],
+              "additional_properties": false
+            }
+          }
+        ],
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "base_digest",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "candidate_digest",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "changes",
+                  "schema": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "Actor",
+                              "schema": {
+                                "anyOf": [
+                                  {
+                                    "type": "object",
+                                    "properties": [
+                                      {
+                                        "name": "accountable_human_id",
+                                        "schema": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      {
+                                        "name": "actor_kind",
+                                        "schema": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      {
+                                        "name": "agent_id",
+                                        "schema": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      {
+                                        "name": "assurance",
+                                        "schema": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      {
+                                        "name": "harness_name",
+                                        "schema": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      {
+                                        "name": "harness_version",
+                                        "schema": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      {
+                                        "name": "human_principal_id",
+                                        "schema": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      {
+                                        "name": "model_name",
+                                        "schema": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      {
+                                        "name": "model_version",
+                                        "schema": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      {
+                                        "name": "occurred_at",
+                                        "schema": {
+                                          "type": "string",
+                                          "format": "date-time"
+                                        }
+                                      },
+                                      {
+                                        "name": "session_id",
+                                        "schema": {
+                                          "type": "string"
+                                        }
+                                      }
+                                    ],
+                                    "required": [
+                                      "actor_kind",
+                                      "assurance",
+                                      "occurred_at"
+                                    ]
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "name": "AfterBodyDigest",
+                              "schema": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "name": "AfterDigest",
+                              "schema": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "name": "BeforeBodyDigest",
+                              "schema": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "name": "BeforeDigest",
+                              "schema": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "name": "Fields",
+                              "schema": {
+                                "anyOf": [
+                                  {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "object",
+                                      "properties": [
+                                        {
+                                          "name": "Actor",
+                                          "schema": {
+                                            "anyOf": [
+                                              {
+                                                "type": "object",
+                                                "properties": [
+                                                  {
+                                                    "name": "accountable_human_id",
+                                                    "schema": {
+                                                      "type": "string"
+                                                    }
+                                                  },
+                                                  {
+                                                    "name": "actor_kind",
+                                                    "schema": {
+                                                      "type": "string"
+                                                    }
+                                                  },
+                                                  {
+                                                    "name": "agent_id",
+                                                    "schema": {
+                                                      "type": "string"
+                                                    }
+                                                  },
+                                                  {
+                                                    "name": "assurance",
+                                                    "schema": {
+                                                      "type": "string"
+                                                    }
+                                                  },
+                                                  {
+                                                    "name": "harness_name",
+                                                    "schema": {
+                                                      "type": "string"
+                                                    }
+                                                  },
+                                                  {
+                                                    "name": "harness_version",
+                                                    "schema": {
+                                                      "type": "string"
+                                                    }
+                                                  },
+                                                  {
+                                                    "name": "human_principal_id",
+                                                    "schema": {
+                                                      "type": "string"
+                                                    }
+                                                  },
+                                                  {
+                                                    "name": "model_name",
+                                                    "schema": {
+                                                      "type": "string"
+                                                    }
+                                                  },
+                                                  {
+                                                    "name": "model_version",
+                                                    "schema": {
+                                                      "type": "string"
+                                                    }
+                                                  },
+                                                  {
+                                                    "name": "occurred_at",
+                                                    "schema": {
+                                                      "type": "string",
+                                                      "format": "date-time"
+                                                    }
+                                                  },
+                                                  {
+                                                    "name": "session_id",
+                                                    "schema": {
+                                                      "type": "string"
+                                                    }
+                                                  }
+                                                ],
+                                                "required": [
+                                                  "actor_kind",
+                                                  "assurance",
+                                                  "occurred_at"
+                                                ]
+                                              },
+                                              {
+                                                "type": "null"
+                                              }
+                                            ]
+                                          }
+                                        },
+                                        {
+                                          "name": "After",
+                                          "schema": {
+                                            "type": "object",
+                                            "properties": [
+                                              {
+                                                "name": "present",
+                                                "schema": {
+                                                  "type": "boolean"
+                                                }
+                                              },
+                                              {
+                                                "name": "value",
+                                                "schema": {}
+                                              }
+                                            ],
+                                            "required": [
+                                              "present"
+                                            ]
+                                          }
+                                        },
+                                        {
+                                          "name": "Before",
+                                          "schema": {
+                                            "type": "object",
+                                            "properties": [
+                                              {
+                                                "name": "present",
+                                                "schema": {
+                                                  "type": "boolean"
+                                                }
+                                              },
+                                              {
+                                                "name": "value",
+                                                "schema": {}
+                                              }
+                                            ],
+                                            "required": [
+                                              "present"
+                                            ]
+                                          }
+                                        },
+                                        {
+                                          "name": "Path",
+                                          "schema": {
+                                            "type": "string"
+                                          }
+                                        }
+                                      ],
+                                      "required": [
+                                        "Actor",
+                                        "After",
+                                        "Before",
+                                        "Path"
+                                      ]
+                                    }
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "name": "Key",
+                              "schema": {
+                                "type": "object",
+                                "properties": [
+                                  {
+                                    "name": "ID",
+                                    "schema": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  {
+                                    "name": "Kind",
+                                    "schema": {
+                                      "type": "string"
+                                    }
+                                  }
+                                ],
+                                "required": [
+                                  "ID",
+                                  "Kind"
+                                ]
+                              }
+                            },
+                            {
+                              "name": "Kind",
+                              "schema": {
+                                "type": "string"
+                              }
+                            }
+                          ],
+                          "required": [
+                            "Actor",
+                            "AfterBodyDigest",
+                            "AfterDigest",
+                            "BeforeBodyDigest",
+                            "BeforeDigest",
+                            "Fields",
+                            "Key",
+                            "Kind"
+                          ]
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "name": "overlay_generation",
+                  "schema": {
+                    "type": "integer"
+                  }
+                },
+                {
+                  "name": "publication_classification",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "publication_review_digest",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "view_digest",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "base_digest",
+                "candidate_digest",
+                "changes",
+                "overlay_generation",
+                "publication_classification",
+                "publication_review_digest",
+                "view_digest"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.workspace.import",
+        "required_permissions": [],
+        "request_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "project_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "project_id"
+              ],
+              "additional_properties": false
+            }
+          }
+        ],
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "composed_view_digest",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "conflicts",
+                  "schema": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": [
+                            {
+                              "name": "Base",
+                              "schema": {
+                                "type": "object",
+                                "properties": [
+                                  {
+                                    "name": "present",
+                                    "schema": {
+                                      "type": "boolean"
+                                    }
+                                  },
+                                  {
+                                    "name": "value",
+                                    "schema": {}
+                                  }
+                                ],
+                                "required": [
+                                  "present"
+                                ]
+                              }
+                            },
+                            {
+                              "name": "FieldPath",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "ID",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "Key",
+                              "schema": {
+                                "type": "object",
+                                "properties": [
+                                  {
+                                    "name": "ID",
+                                    "schema": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  {
+                                    "name": "Kind",
+                                    "schema": {
+                                      "type": "string"
+                                    }
+                                  }
+                                ],
+                                "required": [
+                                  "ID",
+                                  "Kind"
+                                ]
+                              }
+                            },
+                            {
+                              "name": "Kind",
+                              "schema": {
+                                "type": "string"
+                              }
+                            },
+                            {
+                              "name": "Ours",
+                              "schema": {
+                                "type": "object",
+                                "properties": [
+                                  {
+                                    "name": "present",
+                                    "schema": {
+                                      "type": "boolean"
+                                    }
+                                  },
+                                  {
+                                    "name": "value",
+                                    "schema": {}
+                                  }
+                                ],
+                                "required": [
+                                  "present"
+                                ]
+                              }
+                            },
+                            {
+                              "name": "Theirs",
+                              "schema": {
+                                "type": "object",
+                                "properties": [
+                                  {
+                                    "name": "present",
+                                    "schema": {
+                                      "type": "boolean"
+                                    }
+                                  },
+                                  {
+                                    "name": "value",
+                                    "schema": {}
+                                  }
+                                ],
+                                "required": [
+                                  "present"
+                                ]
+                              }
+                            }
+                          ],
+                          "required": [
+                            "Base",
+                            "FieldPath",
+                            "ID",
+                            "Key",
+                            "Kind",
+                            "Ours",
+                            "Theirs"
+                          ]
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "name": "imported_candidate_digest",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "imported_change_count",
+                  "schema": {
+                    "type": "integer"
+                  }
+                },
+                {
+                  "name": "previous_candidate_digest",
+                  "schema": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "name": "rebased_through_generation",
+                  "schema": {
+                    "type": "integer"
+                  }
+                }
+              ],
+              "required": [
+                "composed_view_digest",
+                "conflicts",
+                "imported_candidate_digest",
+                "imported_change_count",
+                "previous_candidate_digest",
+                "rebased_through_generation"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.workspace.stash",
+        "required_permissions": [],
+        "request_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "label",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "project_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "request_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "label",
+                "project_id",
+                "request_id"
+              ],
+              "additional_properties": false
+            }
+          }
+        ],
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "candidate_digest",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "operation_count",
+                  "schema": {
+                    "type": "integer"
+                  }
+                },
+                {
+                  "name": "source_digest",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "stash_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "candidate_digest",
+                "operation_count",
+                "source_digest",
+                "stash_id"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "wormhole.workspace.status",
+        "required_permissions": [],
+        "request_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "project_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "project_id"
+              ],
+              "additional_properties": false
+            }
+          }
+        ],
+        "response_schemas": [
+          {
+            "variant": "default",
+            "schema": {
+              "type": "object",
+              "properties": [
+                {
+                  "name": "accepted_commit_sha",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "accepted_tree_digest",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "candidate_digest",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "candidate_present",
+                  "schema": {
+                    "type": "boolean"
+                  }
+                },
+                {
+                  "name": "overlay_generation",
+                  "schema": {
+                    "type": "integer"
+                  }
+                },
+                {
+                  "name": "project_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "publication_classification",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "publication_review_digest",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "state",
+                  "schema": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "name": "workspace_id",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "required": [
+                "accepted_commit_sha",
+                "accepted_tree_digest",
+                "candidate_digest",
+                "candidate_present",
+                "overlay_generation",
+                "project_id",
+                "publication_classification",
+                "publication_review_digest",
+                "state",
+                "workspace_id"
+              ]
+            }
+          }
+        ]
       }
     ]
   },
-  "cli": {
-    "commands": [
-      {
-        "name": "connector install",
-        "usage": "connector install [--yes] <adapter>",
-        "flags": [
-          "yes"
-        ],
-        "positionals": [
-          "<adapter>"
-        ],
-        "help_exit": 0
-      },
-      {
-        "name": "connector list",
-        "usage": "connector list <adapter>",
-        "flags": [],
-        "positionals": [
-          "<adapter>"
-        ],
-        "help_exit": 0
-      },
-      {
-        "name": "connector remove",
-        "usage": "connector remove [--yes] <adapter>",
-        "flags": [
-          "yes"
-        ],
-        "positionals": [
-          "<adapter>"
-        ],
-        "help_exit": 0
-      },
-      {
-        "name": "config code-graph checkout set",
-        "usage": "config code-graph checkout set [flags] <path>",
-        "flags": [
-          "confirm",
-          "project"
-        ],
-        "positionals": [
-          "<path>"
-        ],
-        "help_exit": 0
-      },
-      {
-        "name": "config code-graph checkout show",
-        "usage": "config code-graph checkout show [flags]",
-        "flags": [
-          "project"
-        ],
-        "positionals": [],
-        "help_exit": 0
-      },
-      {
-        "name": "config code-graph disable",
-        "usage": "config code-graph disable [flags]",
-        "flags": [
-          "confirm",
-          "project"
-        ],
-        "positionals": [],
-        "help_exit": 0
-      },
-      {
-        "name": "config code-graph enable",
-        "usage": "config code-graph enable [flags]",
-        "flags": [
-          "confirm",
-          "project"
-        ],
-        "positionals": [],
-        "help_exit": 0
-      },
-      {
-        "name": "config code-graph rebuild",
-        "usage": "config code-graph rebuild [flags]",
-        "flags": [
-          "confirm",
-          "project"
-        ],
-        "positionals": [],
-        "help_exit": 0
-      },
-      {
-        "name": "config code-graph status",
-        "usage": "config code-graph status [flags]",
-        "flags": [
-          "project"
-        ],
-        "positionals": [],
-        "help_exit": 0
-      },
-      {
-        "name": "help",
-        "usage": "help",
-        "flags": [],
-        "positionals": [],
-        "help_exit": 0
-      },
-      {
-        "name": "init",
-        "usage": "init",
-        "flags": [],
-        "positionals": [],
-        "help_exit": 2
-      },
-      {
-        "name": "integration apply",
-        "usage": "integration apply [flags]",
-        "flags": [
-          "confirm-digest",
-          "project"
-        ],
-        "positionals": [],
-        "help_exit": 0
-      },
-      {
-        "name": "integration preview",
-        "usage": "integration preview [flags]",
-        "flags": [
-          "project"
-        ],
-        "positionals": [],
-        "help_exit": 0
-      },
-      {
-        "name": "integration remove",
-        "usage": "integration remove [flags]",
-        "flags": [
-          "confirm-digest",
-          "project"
-        ],
-        "positionals": [],
-        "help_exit": 0
-      },
-      {
-        "name": "integration rollback",
-        "usage": "integration rollback [flags]",
-        "flags": [
-          "confirm-digest",
-          "project"
-        ],
-        "positionals": [],
-        "help_exit": 0
-      },
-      {
-        "name": "integration status",
-        "usage": "integration status [flags]",
-        "flags": [
-          "json",
-          "project"
-        ],
-        "positionals": [],
-        "help_exit": 0
-      },
-      {
-        "name": "integration update",
-        "usage": "integration update [flags]",
-        "flags": [
-          "confirm-digest",
-          "project"
-        ],
-        "positionals": [],
-        "help_exit": 0
-      },
-      {
-        "name": "mcp",
-        "usage": "mcp",
-        "flags": [],
-        "positionals": [],
-        "help_exit": 1
-      },
-      {
-        "name": "profile list",
-        "usage": "profile list [flags]",
-        "flags": [],
-        "positionals": [],
-        "help_exit": 2
-      },
-      {
-        "name": "setup",
-        "usage": "setup [flags]",
-        "flags": [
-          "email",
-          "name",
-          "publication",
-          "yes"
-        ],
-        "positionals": [],
-        "help_exit": 2
-      },
-      {
-        "name": "status",
-        "usage": "status [flags]",
-        "flags": [
-          "profile"
-        ],
-        "positionals": [],
-        "help_exit": 2
-      },
-      {
-        "name": "trial-metrics format",
-        "usage": "trial-metrics format [flags] [FILE|-]",
-        "flags": [
-          "kind"
-        ],
-        "positionals": [
-          "[FILE|-]"
-        ],
-        "help_exit": 0
-      },
-      {
-        "name": "trial-metrics validate",
-        "usage": "trial-metrics validate [flags] [FILE|-]",
-        "flags": [
-          "kind"
-        ],
-        "positionals": [
-          "[FILE|-]"
-        ],
-        "help_exit": 0
-      },
-      {
-        "name": "viewer-key create",
-        "usage": "viewer-key create [flags]",
-        "flags": [
-          "admin-key",
-          "label",
-          "project",
-          "server"
-        ],
-        "positionals": [],
-        "help_exit": 2
-      },
-      {
-        "name": "whoami",
-        "usage": "whoami [flags]",
-        "flags": [
-          "profile"
-        ],
-        "positionals": [],
-        "help_exit": 2
-      }
-    ],
-    "config_files": {
-      "credential_fields": [
-        "agent_id",
-        "issued_at",
-        "passport_id",
-        "project_id",
-        "role",
-        "server",
-        "token"
-      ],
-      "credentials_format": "json",
-      "project_config_fields": [
-        "project",
-        "role",
-        "server"
-      ],
-      "project_config_format": "toml"
+  "migrations": {
+    "baseline": {
+      "tag": "v0.2.4-alpha",
+      "version": 12
     },
-    "configuration_precedence": [
+    "current_version": 20,
+    "empty_version": 0,
+    "entries": [
       {
-        "name": "config.resolve.required",
-        "commands": [],
-        "sources": [
-          "flag",
-          "project_config",
-          "global_config",
-          "environment",
-          "default",
-          "error"
-        ]
+        "down_empty": false,
+        "down_file": "migrations/000001_init_schema.down.sql",
+        "name": "init_schema",
+        "up_empty": false,
+        "up_file": "migrations/000001_init_schema.up.sql",
+        "version": 1
       },
       {
-        "name": "viewer-key.create.admin_key",
-        "commands": [
-          "viewer-key create"
-        ],
-        "sources": [
-          "flag",
-          "WORMHOLE_ADMIN_KEY",
-          "error"
-        ]
+        "down_empty": false,
+        "down_file": "migrations/000002_agent_tokens.down.sql",
+        "name": "agent_tokens",
+        "up_empty": false,
+        "up_file": "migrations/000002_agent_tokens.up.sql",
+        "version": 2
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000003_audit_trail.down.sql",
+        "name": "audit_trail",
+        "up_empty": false,
+        "up_file": "migrations/000003_audit_trail.up.sql",
+        "version": 3
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000004_audit_log_seq.down.sql",
+        "name": "audit_log_seq",
+        "up_empty": false,
+        "up_file": "migrations/000004_audit_log_seq.up.sql",
+        "version": 4
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000005_agent_tokens_expiry.down.sql",
+        "name": "agent_tokens_expiry",
+        "up_empty": false,
+        "up_file": "migrations/000005_agent_tokens_expiry.up.sql",
+        "version": 5
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000006_task_graph.down.sql",
+        "name": "task_graph",
+        "up_empty": false,
+        "up_file": "migrations/000006_task_graph.up.sql",
+        "version": 6
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000007_event_channels.down.sql",
+        "name": "event_channels",
+        "up_empty": false,
+        "up_file": "migrations/000007_event_channels.up.sql",
+        "version": 7
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000008_git_links.down.sql",
+        "name": "git_links",
+        "up_empty": false,
+        "up_file": "migrations/000008_git_links.up.sql",
+        "version": 8
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000009_kb_articles.down.sql",
+        "name": "kb_articles",
+        "up_empty": false,
+        "up_file": "migrations/000009_kb_articles.up.sql",
+        "version": 9
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000010_role_templates.down.sql",
+        "name": "role_templates",
+        "up_empty": false,
+        "up_file": "migrations/000010_role_templates.up.sql",
+        "version": 10
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000011_viewer_keys.down.sql",
+        "name": "viewer_keys",
+        "up_empty": false,
+        "up_file": "migrations/000011_viewer_keys.up.sql",
+        "version": 11
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000012_sync_conflict_event_type.down.sql",
+        "name": "sync_conflict_event_type",
+        "up_empty": false,
+        "up_file": "migrations/000012_sync_conflict_event_type.up.sql",
+        "version": 12
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000013_role_templates_defaults.down.sql",
+        "name": "role_templates_defaults",
+        "up_empty": false,
+        "up_file": "migrations/000013_role_templates_defaults.up.sql",
+        "version": 13
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000014_role_templates_fine_grained.down.sql",
+        "name": "role_templates_fine_grained",
+        "up_empty": false,
+        "up_file": "migrations/000014_role_templates_fine_grained.up.sql",
+        "version": 14
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000015_bootstrap_idempotency.down.sql",
+        "name": "bootstrap_idempotency",
+        "up_empty": false,
+        "up_file": "migrations/000015_bootstrap_idempotency.up.sql",
+        "version": 15
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000016_project_reference_isolation.down.sql",
+        "name": "project_reference_isolation",
+        "up_empty": false,
+        "up_file": "migrations/000016_project_reference_isolation.up.sql",
+        "version": 16
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000017_audit_log_force_rls.down.sql",
+        "name": "audit_log_force_rls",
+        "up_empty": false,
+        "up_file": "migrations/000017_audit_log_force_rls.up.sql",
+        "version": 17
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000018_agent_enrolments.down.sql",
+        "name": "agent_enrolments",
+        "up_empty": false,
+        "up_file": "migrations/000018_agent_enrolments.up.sql",
+        "version": 18
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000019_kb_semantic_embeddings.down.sql",
+        "name": "kb_semantic_embeddings",
+        "up_empty": false,
+        "up_file": "migrations/000019_kb_semantic_embeddings.up.sql",
+        "version": 19
+      },
+      {
+        "down_empty": false,
+        "down_file": "migrations/000020_integration_manifests.down.sql",
+        "name": "integration_manifests",
+        "up_empty": false,
+        "up_file": "migrations/000020_integration_manifests.up.sql",
+        "version": 20
       }
     ],
-    "exit_behavior": {
-      "help": 0,
-      "missing_command": 2,
-      "unknown_command": 2
-    }
+    "verification_paths": [
+      {
+        "command": "up",
+        "from_tag": "v0.2.4-alpha",
+        "from_version": 12,
+        "name": "alpha_upgrade",
+        "source": ".github/scripts/test-alpha-upgrade.sh",
+        "to_version": 20
+      },
+      {
+        "command": "down -all",
+        "from_version": 20,
+        "name": "current_down",
+        "source": ".github/workflows/migrations.yml",
+        "to_version": 0
+      },
+      {
+        "command": "up",
+        "from_version": 0,
+        "name": "empty_up",
+        "source": ".github/workflows/migrations.yml",
+        "to_version": 20
+      }
+    ]
   },
-  "environment": [
-    "HOME",
-    "TMPDIR",
-    "WORMHOLE_ADMIN_KEY",
-    "WORMHOLE_COHERE_API_KEY",
-    "WORMHOLE_DATABASE_URL",
-    "WORMHOLE_KB_DEDUP_THRESHOLD",
-    "WORMHOLE_KB_MAX_BODY_LENGTH",
-    "WORMHOLE_KB_MIN_LINKS_DECISION",
-    "WORMHOLE_KB_MIN_LINKS_POLICY",
-    "WORMHOLE_KB_MIN_LINKS_PROCEDURE",
-    "WORMHOLE_LISTEN_ADDR",
-    "WORMHOLE_MODEL",
-    "XDG_CONFIG_HOME",
-    "XDG_DATA_HOME",
-    "XDG_RUNTIME_DIR"
-  ],
+  "mode": "alpha-inventory",
   "paths": {
     "credentials": "~/.wormhole/credentials/*.json",
     "global_config": "$XDG_CONFIG_HOME/wormhole/config.toml",
@@ -7969,77 +8177,6 @@
     "runtime_database_fallback": "~/.local/share/wormhole/wormholed.db",
     "runtime_socket": "$XDG_RUNTIME_DIR/wormhole/wormholed.sock",
     "runtime_socket_fallback": "$TMPDIR/wormhole-runtime/wormhole/wormholed.sock"
-  },
-  "local_protocol": {
-    "transport": "unix-domain-socket",
-    "framing": "newline-delimited-json",
-    "jsonrpc_version": "2.0",
-    "mcp_protocol_version": "2025-11-25",
-    "methods": [
-      "initialize",
-      "notifications/initialized",
-      "tools/call",
-      "tools/list"
-    ],
-    "initialize": {
-      "envelope_fields": [
-        "id",
-        "jsonrpc",
-        "result"
-      ],
-      "result_fields": [
-        "capabilities",
-        "protocolVersion",
-        "serverInfo"
-      ],
-      "capabilities": {
-        "tools": {}
-      },
-      "server_info": {
-        "name": "gatewayd",
-        "version": "configured"
-      }
-    },
-    "lifecycle": {
-      "required_sequence": [
-        "initialize",
-        "notifications/initialized"
-      ],
-      "gated_methods": [
-        "tools/call",
-        "tools/list"
-      ],
-      "not_initialized_error_code": -32002,
-      "notification_response": "none"
-    },
-    "server_notifications": [
-      {
-        "method": "notifications/wormhole.event",
-        "envelope_fields": [
-          "jsonrpc",
-          "method",
-          "params"
-        ],
-        "params_variants": [
-          {
-            "name": "agent_registered",
-            "fields": [
-              "agent",
-              "capabilities",
-              "namespace",
-              "status"
-            ]
-          },
-          {
-            "name": "presence_updated",
-            "fields": [
-              "agent",
-              "status"
-            ]
-          }
-        ]
-      }
-    ]
   },
   "sync_protocol": {
     "version": 1,
@@ -8315,246 +8452,6 @@
           "updated_at"
         ]
       }
-    ]
-  },
-  "migrations": {
-    "baseline": {
-      "tag": "v0.2.4-alpha",
-      "version": 12
-    },
-    "current_version": 20,
-    "empty_version": 0,
-    "entries": [
-      {
-        "down_empty": false,
-        "down_file": "migrations/000001_init_schema.down.sql",
-        "name": "init_schema",
-        "up_empty": false,
-        "up_file": "migrations/000001_init_schema.up.sql",
-        "version": 1
-      },
-      {
-        "down_empty": false,
-        "down_file": "migrations/000002_agent_tokens.down.sql",
-        "name": "agent_tokens",
-        "up_empty": false,
-        "up_file": "migrations/000002_agent_tokens.up.sql",
-        "version": 2
-      },
-      {
-        "down_empty": false,
-        "down_file": "migrations/000003_audit_trail.down.sql",
-        "name": "audit_trail",
-        "up_empty": false,
-        "up_file": "migrations/000003_audit_trail.up.sql",
-        "version": 3
-      },
-      {
-        "down_empty": false,
-        "down_file": "migrations/000004_audit_log_seq.down.sql",
-        "name": "audit_log_seq",
-        "up_empty": false,
-        "up_file": "migrations/000004_audit_log_seq.up.sql",
-        "version": 4
-      },
-      {
-        "down_empty": false,
-        "down_file": "migrations/000005_agent_tokens_expiry.down.sql",
-        "name": "agent_tokens_expiry",
-        "up_empty": false,
-        "up_file": "migrations/000005_agent_tokens_expiry.up.sql",
-        "version": 5
-      },
-      {
-        "down_empty": false,
-        "down_file": "migrations/000006_task_graph.down.sql",
-        "name": "task_graph",
-        "up_empty": false,
-        "up_file": "migrations/000006_task_graph.up.sql",
-        "version": 6
-      },
-      {
-        "down_empty": false,
-        "down_file": "migrations/000007_event_channels.down.sql",
-        "name": "event_channels",
-        "up_empty": false,
-        "up_file": "migrations/000007_event_channels.up.sql",
-        "version": 7
-      },
-      {
-        "down_empty": false,
-        "down_file": "migrations/000008_git_links.down.sql",
-        "name": "git_links",
-        "up_empty": false,
-        "up_file": "migrations/000008_git_links.up.sql",
-        "version": 8
-      },
-      {
-        "down_empty": false,
-        "down_file": "migrations/000009_kb_articles.down.sql",
-        "name": "kb_articles",
-        "up_empty": false,
-        "up_file": "migrations/000009_kb_articles.up.sql",
-        "version": 9
-      },
-      {
-        "down_empty": false,
-        "down_file": "migrations/000010_role_templates.down.sql",
-        "name": "role_templates",
-        "up_empty": false,
-        "up_file": "migrations/000010_role_templates.up.sql",
-        "version": 10
-      },
-      {
-        "down_empty": false,
-        "down_file": "migrations/000011_viewer_keys.down.sql",
-        "name": "viewer_keys",
-        "up_empty": false,
-        "up_file": "migrations/000011_viewer_keys.up.sql",
-        "version": 11
-      },
-      {
-        "down_empty": false,
-        "down_file": "migrations/000012_sync_conflict_event_type.down.sql",
-        "name": "sync_conflict_event_type",
-        "up_empty": false,
-        "up_file": "migrations/000012_sync_conflict_event_type.up.sql",
-        "version": 12
-      },
-      {
-        "down_empty": false,
-        "down_file": "migrations/000013_role_templates_defaults.down.sql",
-        "name": "role_templates_defaults",
-        "up_empty": false,
-        "up_file": "migrations/000013_role_templates_defaults.up.sql",
-        "version": 13
-      },
-      {
-        "down_empty": false,
-        "down_file": "migrations/000014_role_templates_fine_grained.down.sql",
-        "name": "role_templates_fine_grained",
-        "up_empty": false,
-        "up_file": "migrations/000014_role_templates_fine_grained.up.sql",
-        "version": 14
-      },
-      {
-        "down_empty": false,
-        "down_file": "migrations/000015_bootstrap_idempotency.down.sql",
-        "name": "bootstrap_idempotency",
-        "up_empty": false,
-        "up_file": "migrations/000015_bootstrap_idempotency.up.sql",
-        "version": 15
-      },
-      {
-        "down_empty": false,
-        "down_file": "migrations/000016_project_reference_isolation.down.sql",
-        "name": "project_reference_isolation",
-        "up_empty": false,
-        "up_file": "migrations/000016_project_reference_isolation.up.sql",
-        "version": 16
-      },
-      {
-        "down_empty": false,
-        "down_file": "migrations/000017_audit_log_force_rls.down.sql",
-        "name": "audit_log_force_rls",
-        "up_empty": false,
-        "up_file": "migrations/000017_audit_log_force_rls.up.sql",
-        "version": 17
-      },
-      {
-        "down_empty": false,
-        "down_file": "migrations/000018_agent_enrolments.down.sql",
-        "name": "agent_enrolments",
-        "up_empty": false,
-        "up_file": "migrations/000018_agent_enrolments.up.sql",
-        "version": 18
-      },
-      {
-        "down_empty": false,
-        "down_file": "migrations/000019_kb_semantic_embeddings.down.sql",
-        "name": "kb_semantic_embeddings",
-        "up_empty": false,
-        "up_file": "migrations/000019_kb_semantic_embeddings.up.sql",
-        "version": 19
-      },
-      {
-        "down_empty": false,
-        "down_file": "migrations/000020_integration_manifests.down.sql",
-        "name": "integration_manifests",
-        "up_empty": false,
-        "up_file": "migrations/000020_integration_manifests.up.sql",
-        "version": 20
-      }
-    ],
-    "verification_paths": [
-      {
-        "command": "up",
-        "from_tag": "v0.2.4-alpha",
-        "from_version": 12,
-        "name": "alpha_upgrade",
-        "source": ".github/scripts/test-alpha-upgrade.sh",
-        "to_version": 20
-      },
-      {
-        "command": "down -all",
-        "from_version": 20,
-        "name": "current_down",
-        "source": ".github/workflows/migrations.yml",
-        "to_version": 0
-      },
-      {
-        "command": "up",
-        "from_version": 0,
-        "name": "empty_up",
-        "source": ".github/workflows/migrations.yml",
-        "to_version": 20
-      }
-    ]
-  },
-  "artifacts": {
-    "archives": [
-      "wormhole-{version}-linux-amd64.tar.gz",
-      "wormhole-{version}-linux-arm64.tar.gz"
-    ],
-    "binaries": [
-      "fabric",
-      "gatewayd",
-      "wormhole"
-    ],
-    "checksum_manifest": "SHA256SUMS",
-    "fabric_image": "ghcr.io/h4rl33/wormhole-fabric",
-    "fabric_image_platforms": [
-      "linux/amd64",
-      "linux/arm64"
-    ],
-    "published_files": [
-      "SHA256SUMS",
-      "SHA256SUMS.pem",
-      "SHA256SUMS.sig",
-      "wormhole-amd64.spdx.json",
-      "wormhole-amd64.spdx.json.pem",
-      "wormhole-amd64.spdx.json.sig",
-      "wormhole-arm64.spdx.json",
-      "wormhole-arm64.spdx.json.pem",
-      "wormhole-arm64.spdx.json.sig",
-      "wormhole-{version}-linux-amd64.tar.gz",
-      "wormhole-{version}-linux-amd64.tar.gz.pem",
-      "wormhole-{version}-linux-amd64.tar.gz.sig",
-      "wormhole-{version}-linux-arm64.tar.gz",
-      "wormhole-{version}-linux-arm64.tar.gz.pem",
-      "wormhole-{version}-linux-arm64.tar.gz.sig"
-    ],
-    "release_platforms": [
-      "linux/amd64",
-      "linux/arm64"
-    ],
-    "signing_suffixes": [
-      ".pem",
-      ".sig"
-    ],
-    "spdx_sboms": [
-      "wormhole-amd64.spdx.json",
-      "wormhole-arm64.spdx.json"
     ]
   }
 }

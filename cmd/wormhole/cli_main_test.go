@@ -61,30 +61,6 @@ func TestRun_UnknownCommand(t *testing.T) {
 	}
 }
 
-func TestRunJoin_MissingRequiredFlags(t *testing.T) {
-	isolateConfig(t)
-	var stdout, stderr bytes.Buffer
-	code := runLegacyCLIForTest([]string{"join"}, &stdout, &stderr)
-	if code != 2 {
-		t.Fatalf("exit code: got %d, want 2", code)
-	}
-	if !strings.Contains(stderr.String(), "wormhole join: server:") {
-		t.Fatalf("stderr missing unresolved-server text: %q", stderr.String())
-	}
-}
-
-func TestRunJoin_MissingProjectOnly(t *testing.T) {
-	isolateConfig(t)
-	var stdout, stderr bytes.Buffer
-	code := runLegacyCLIForTest([]string{"join", "--server", "http://localhost:8080"}, &stdout, &stderr)
-	if code != 2 {
-		t.Fatalf("exit code: got %d, want 2", code)
-	}
-	if !strings.Contains(stderr.String(), "wormhole join: project:") {
-		t.Fatalf("stderr missing unresolved-project text: %q", stderr.String())
-	}
-}
-
 func TestRun_WhoamiCommand_NoProfiles_PrintsError(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	var stdout, stderr bytes.Buffer

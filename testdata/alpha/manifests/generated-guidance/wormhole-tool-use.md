@@ -7,11 +7,9 @@ description: Use when choosing or calling a live Wormhole Gateway tool and check
 
 Call only tools in this live Gateway inventory. Each request still requires its live schema and permissions.
 
-## Shared KB and Code Graph
+## Shared KB
 
 Use shared KB semantic search for organisational decisions, procedures, and discoveries before broad repository reconstruction when that context could answer the question.
-
-Use Code Graph only for project-local source structure and bounded code discovery when it is enabled and current; it is separate from the shared KB and does not replace Git or verification.
 
 If the semantic provider or active index is unavailable, there is no lexical fallback; do not label degraded retrieval as semantic ranking.
 
@@ -77,18 +75,18 @@ If the semantic provider or active index is unavailable, there is no lexical fal
 
 ## `wormhole.agent.register`
 
-- Purpose: Create a Passport-backed agent or register an existing agent's local presence.
-- Use when: When joining an agent or making a known agent available to local routing.
+- Purpose: Register an existing agent's local presence and declared capabilities.
+- Use when: When making a known agent available to local routing.
 - Do not use when: Do not use it for a routine presence heartbeat.
 - Mutates state: true
 - Required permissions: none
-- Prerequisites: Use the join or local-presence request shape, and obtain any required Fabric authorization for joins.
-- Freshness implications: Join state may require sync before other Gateways observe it.
+- Prerequisites: A server-resolved workspace and an existing agent identifier.
+- Freshness implications: Presence registration is Gateway-local scheduler state.
 - Source-access implications: This tool does not read or return repository source.
 - Recommended follow-up: Set presence after local registration, then verify with agent.list.
-- Minimal request example: `{"capabilities":[],"model":"example","owner":"example","permissions":[],"project_id":"example","repositories":[],"roles":[]}`
-- Live request schema: `{"anyOf":[{"anyOf":[{"required":["owner"]},{"required":["name"]}],"properties":{"capabilities":{"items":{"type":"string"},"type":"array"},"model":{"type":"string"},"name":{"type":"string"},"owner":{"type":"string"},"permissions":{"items":{"type":"string"},"type":"array"},"project_id":{"type":"string"},"repositories":{"items":{"type":"string"},"type":"array"},"role":{"type":"string"},"roles":{"items":{"type":"string"},"type":"array"}},"required":["permissions","model","capabilities","repositories","roles","project_id"],"type":"object"},{"properties":{"agent_id":{"type":"string"},"capabilities":{"items":{"type":"string"},"type":"array"},"project_id":{"type":"string"}},"required":["agent_id","project_id"],"type":"object"}]}`
-- Misuse warning: Do not mix join and presence fields; request shape selects the operation.
+- Minimal request example: `{"agent_id":"example","project_id":"example"}`
+- Live request schema: `{"properties":{"agent_id":{"type":"string"},"capabilities":{"items":{"type":"string"},"type":"array"},"project_id":{"type":"string"}},"required":["agent_id","project_id"],"type":"object"}`
+- Misuse warning: Do not infer shared identity creation or new permissions from local presence registration.
 
 ## `wormhole.agent.whoami`
 
@@ -179,51 +177,6 @@ If the semantic provider or active index is unavailable, there is no lexical fal
 - Minimal request example: `{"project_id":"example"}`
 - Live request schema: `{"properties":{"project_id":{"type":"string"}},"required":["project_id"],"type":"object"}`
 - Misuse warning: Do not assume a subscription survives reconnects or provides a complete audit stream.
-
-## `wormhole.code_graph.query`
-
-- Purpose: Narrow Go source discovery through a bounded local Code Graph query.
-- Use when: When an enabled, sufficiently current graph can locate symbols, callers, references, or a code path before broad search.
-- Do not use when: Do not use it for known files, non-code assets, untracked or ignored files, or when strict current source is required from a stale graph.
-- Mutates state: false
-- Required permissions: code_graph.query
-- Prerequisites: An enabled project graph and code_graph.query permission; source slices also require code_graph.source.read.
-- Freshness implications: Check code_graph.status and independently verify Git HEAD and the working-tree state before relying on graph results; the graph narrows discovery and does not replace Git, direct inspection, builds, or tests.
-- Source-access implications: Returned source is bounded by the request's source budget and is metadata-only without code_graph.source.read; never treat a slice as complete file context.
-- Recommended follow-up: Inspect the returned paths and symbols, then verify the live working tree with targeted reads and Git commands.
-- Minimal request example: `{"intent":"example","project_id":"example"}`
-- Live request schema: `{"additionalProperties":false,"anyOf":[{"required":["intent"]},{"required":["entry_symbols"]}],"properties":{"entry_symbols":{"items":{"type":"string"},"type":"array"},"include_edges":{"items":{"enum":["calls","references","uses_type"],"type":"string"},"type":"array"},"intent":{"type":"string"},"max_depth":{"type":"integer"},"minimum_confidence":{"type":"number"},"project_id":{"type":"string"},"requested_source_bytes":{"type":"integer"}},"required":["project_id"],"type":"object"}`
-- Misuse warning: Edges are heuristic discovery aids, not proof of complete call, reference, or type-use coverage.
-
-## `wormhole.code_graph.rebuild`
-
-- Purpose: Request one normal balanced copy-on-write rebuild from persisted approved Code Graph configuration.
-- Use when: When status recommends a rebuild and a human-approved graph configuration already exists.
-- Do not use when: Do not use it to change graph configuration, force an unsafe rebuild, or compensate for unverified Git changes.
-- Mutates state: true
-- Required permissions: code_graph.rebuild
-- Prerequisites: A bound project, code_graph.rebuild permission, enabled graph, and persisted approved configuration.
-- Freshness implications: The rebuild snapshots the approved checkout; verify Git HEAD and working-tree state before and after using the rebuilt graph for current-source decisions.
-- Source-access implications: Rebuild does not grant source access or bypass query source budgets and code_graph.source.read.
-- Recommended follow-up: Recheck code_graph.status, then query with bounded source access if needed.
-- Minimal request example: `{"project_id":"example"}`
-- Live request schema: `{"additionalProperties":false,"properties":{"project_id":{"type":"string"}},"required":["project_id"],"type":"object"}`
-- Misuse warning: Do not expect exact semantic completeness: graph edges remain heuristic, while the rebuild preserves the active graph on failure.
-
-## `wormhole.code_graph.status`
-
-- Purpose: Inspect local Code Graph health, revision, and freshness without changing it.
-- Use when: Before a Code Graph query or when deciding whether graph output is current enough for a task.
-- Do not use when: Do not use it as proof that Git or the working tree is unchanged.
-- Mutates state: false
-- Required permissions: code_graph.status
-- Prerequisites: A bound project and code_graph.status permission.
-- Freshness implications: It reports graph freshness against tracked Go inventory and approved remote state; verify current Git HEAD and working-tree state directly for task-critical conclusions.
-- Source-access implications: This tool does not read or return repository source.
-- Recommended follow-up: Query with a bounded source budget only when status is usable, or use ordinary repository inspection.
-- Minimal request example: `{"project_id":"example"}`
-- Live request schema: `{"additionalProperties":false,"properties":{"project_id":{"type":"string"}},"required":["project_id"],"type":"object"}`
-- Misuse warning: Do not call status as a rebuild request or mistake degraded health for current source.
 
 ## `wormhole.git.link_commit`
 
@@ -389,3 +342,78 @@ If the semantic provider or active index is unavailable, there is no lexical fal
 - Minimal request example: `{"channel_id":"example","new_status":"todo","project_id":"example","task_id":"example"}`
 - Live request schema: `{"properties":{"channel_id":{"type":"string"},"new_status":{"enum":["todo","wip","blocked","done"],"type":"string"},"project_id":{"type":"string"},"task_id":{"type":"string"}},"required":["task_id","new_status","channel_id","project_id"],"type":"object"}`
 - Misuse warning: Do not report remote completion while the durable update is still pending synchronization.
+
+## `wormhole.workspace.checkpoint`
+
+- Purpose: Materialize the current portable candidate without performing Git publication.
+- Use when: After reviewing the semantic diff and any required public-Git acknowledgement.
+- Do not use when: Do not use it as a substitute for Git staging, commit, or push.
+- Mutates state: true
+- Required permissions: none
+- Prerequisites: A registered workspace; public Git requires the exact current publication review digest.
+- Freshness implications: The supplied acknowledgement is rejected if the candidate changed after review.
+- Source-access implications: This tool does not read or return repository source.
+- Recommended follow-up: Review the unstaged tracked tree, then accept it with ordinary Git commands.
+- Minimal request example: `{"project_id":"example"}`
+- Live request schema: `{"additionalProperties":false,"properties":{"project_id":{"type":"string"},"publication_review_digest":{"type":"string"}},"required":["project_id"],"type":"object"}`
+- Misuse warning: Checkpoint never stages, commits, or pushes Git.
+
+## `wormhole.workspace.diff`
+
+- Purpose: Return the attributed semantic portable-state diff and exact publication review digest.
+- Use when: Before checkpointing or reviewing tracked portable-state changes.
+- Do not use when: Do not use it to inspect arbitrary source-code changes.
+- Mutates state: false
+- Required permissions: none
+- Prerequisites: A registered workspace with accepted portable state.
+- Freshness implications: Compares the current composed candidate against the accepted portable snapshot.
+- Source-access implications: This tool does not read or return repository source.
+- Recommended follow-up: Review changes and pass the exact digest to checkpoint when public publication requires acknowledgement.
+- Minimal request example: `{"project_id":"example"}`
+- Live request schema: `{"additionalProperties":false,"properties":{"project_id":{"type":"string"}},"required":["project_id"],"type":"object"}`
+- Misuse warning: A review digest is bound to the exact candidate and becomes stale after any mutation.
+
+## `wormhole.workspace.import`
+
+- Purpose: Import direct tracked portable-state edits into the attributed workspace candidate.
+- Use when: After editing .wormhole/state/v1 through ordinary repository tools.
+- Do not use when: Do not use it to import private databases, credentials, or operational journals.
+- Mutates state: true
+- Required permissions: none
+- Prerequisites: A registered workspace and a valid portable working tree.
+- Freshness implications: Reads the exact current portable tree and rebases the private overlay through its imported generation.
+- Source-access implications: This tool does not read or return repository source.
+- Recommended follow-up: Inspect workspace.diff before checkpointing.
+- Minimal request example: `{"project_id":"example"}`
+- Live request schema: `{"additionalProperties":false,"properties":{"project_id":{"type":"string"}},"required":["project_id"],"type":"object"}`
+- Misuse warning: Import does not stage, commit, or push Git.
+
+## `wormhole.workspace.stash`
+
+- Purpose: Durably stash the current private overlay under an explicit request ID and label.
+- Use when: When pausing attributed work without changing accepted portable state.
+- Do not use when: Do not use it as Git stash or as a publication action.
+- Mutates state: true
+- Required permissions: none
+- Prerequisites: A registered workspace, unique request ID, and non-empty label.
+- Freshness implications: Captures the exact current overlay and candidate digest in private state.
+- Source-access implications: This tool does not read or return repository source.
+- Recommended follow-up: Confirm workspace.status and resume through the supported workspace lifecycle.
+- Minimal request example: `{"label":"example","project_id":"example","request_id":"example"}`
+- Live request schema: `{"additionalProperties":false,"properties":{"label":{"type":"string"},"project_id":{"type":"string"},"request_id":{"type":"string"}},"required":["request_id","label","project_id"],"type":"object"}`
+- Misuse warning: Private stash rows are not portable and never enter tracked Git state.
+
+## `wormhole.workspace.status`
+
+- Purpose: Inspect the bound workspace candidate, overlay generation, and publication review state.
+- Use when: Before importing, checkpointing, or deciding whether a public-Git acknowledgement is required.
+- Do not use when: Do not use it as a Git status replacement or to mutate portable state.
+- Mutates state: false
+- Required permissions: none
+- Prerequisites: A registered workspace resolved by Gateway.
+- Freshness implications: Reports current private workspace bookkeeping and the accepted tracked snapshot without changing either.
+- Source-access implications: This tool does not read or return repository source.
+- Recommended follow-up: Use workspace.diff to inspect exact portable changes.
+- Minimal request example: `{"project_id":"example"}`
+- Live request schema: `{"additionalProperties":false,"properties":{"project_id":{"type":"string"}},"required":["project_id"],"type":"object"}`
+- Misuse warning: Do not treat candidate presence as Git acceptance.

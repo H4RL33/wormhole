@@ -20,7 +20,7 @@ func TestTrialMetricsMarshalProducesStrictStructuredExport(t *testing.T) {
 		`"tool_success_count"`, `"tool_denial_count"`, `"tool_failure_count"`, `"context_retrieved_at_session_start"`,
 		`"human_coaching_interventions"`, `"model_handoff_succeeded"`, `"sync_recovery_succeeded"`,
 		`"kb_relevant_results"`, `"kb_results_considered"`, `"duplicate_or_low_value_kb_contributions"`,
-		`"code_graph_useful_queries"`, `"code_graph_queries"`, `"files_read_before_correct_edit"`,
+		`"structural_discovery_useful_queries"`, `"structural_discovery_queries"`, `"files_read_before_correct_edit"`,
 		`"source_bytes_read_before_correct_edit"`, `"event_count"`, `"event_noise_count"`,
 		`"task_state_accurate"`, `"context_reconstructions_avoided"`, `"tokens_before_productive_work"`,
 	} {

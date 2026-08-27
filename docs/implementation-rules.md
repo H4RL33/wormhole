@@ -29,14 +29,15 @@ do not improvise.
 Approved programme and slice-plan execution amendments control task scope and sequencing.
 They cannot weaken an RFC requirement, but they can defer an otherwise described task or
 private implementation choice. Task-5, the review-only Stage 1A gate, and R01-R05 are
-complete. The current amendment authorized R06 only: a closed-pre-alpha private Gateway
-format hard cut to schema v6. R06 is complete in approved implementation commits
+complete. R06 authorized a closed-pre-alpha private Gateway format hard cut to schema v6
+and is complete in approved implementation commits
 `27f5b85`, `a18b6f4`, and `e1d2df5`; independent review, `make check` (84.8%),
 release-test, release-rehearsal, and clean detached-clone gates passed. R07-R14 and
 all other reduction work are now paused. The separately approved decomposition of
-`projectstate.Service` behind its existing facade is complete. Subsequent work returns
-to feature delivery toward the Git-native branch goal. Tasks 6, 6A, 7, 8, Stage 2,
-R07-R14 reduction, and unrelated preparation require a later explicit go/no-go.
+`projectstate.Service` behind its existing facade is complete. Git-native Tasks 1-8 and
+the Stage 2 public cutover are implemented; the canonical setup and five workspace
+operations are now the live interfaces. R07-R14 reduction and unrelated preparation
+still require a later explicit go/no-go.
 
 The approved projectstate decomposition is now implemented behind the unchanged
 public facade. `projectstate.Service` contains exactly six coordinator pointers;
@@ -251,7 +252,7 @@ architectural decision or claim an unimplemented target as shipped.
 | Package | Owns | May import |
 |---|---|---|
 | `cmd/fabric` | Process wiring: config, HTTP server, registry construction | `internal/core/*`, `internal/mcp`, `internal/storage`, `internal/types`, `internal/webui` |
-| `cmd/wormhole` | Human-first CLI entrypoint (`setup`, identity/auth, project/Fabric/connector lifecycle, checkpoint, MCP bridge) | `internal/config`, client-side code, stdlib |
+| `cmd/wormhole` | Human-first CLI entrypoint (`setup`, identity/auth, project/Fabric/connector lifecycle, status/diff/import/checkpoint/stash, MCP bridge) | `internal/config`, client-side code, stdlib |
 | `internal/config` | CLI global/project TOML configuration | stdlib, BurntSushi TOML |
 | `internal/mcp` | MCP tool descriptors, registry, request/response schemas, auth middleware | `internal/core/*`, `internal/types` |
 | `internal/core/identity` | Human and agent principals, authenticators, memberships, ownership, sessions, Passports/tokens, whoami, audit trail | `internal/types`, stdlib |
@@ -460,10 +461,9 @@ the same layering pattern and isolation discipline.
   Outside such a slice, do not invent or silently drift a tool contract.
 - M2: Naming grammar is `wormhole.<namespace-noun>.<verb>`. Core pillar namespaces
   are `agent`, `channel`, `task`, `kb`, and `git`; RFC-0003 additionally ratifies
-  `sync` for Gateway-to-Fabric operations, `workspace` for Gateway-local status,
-  diff, import, checkpoint, and stash operations, and `code_graph` for
-  Gateway-local derivative status, query, and rebuild operations. `workspace`
-  and `code_graph` are not Core pillars. Their contract-inventory changes ship
+  `sync` for Gateway-to-Fabric operations and `workspace` for Gateway-local status,
+  diff, import, checkpoint, and stash operations. `workspace` is not a Core pillar.
+  Its contract-inventory changes ship
   atomically with the approved migration slice. No other namespace prefix may be
   added without an RFC change; `wormhole.governance.*` is governed by optional
   RFC-0002 and remains out of Core.

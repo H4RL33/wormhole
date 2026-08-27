@@ -45,13 +45,12 @@ func (s *Server) privateRuntimeConfigured() bool {
 func authorizePrivateToolProvider(toolName string, public json.RawMessage) error {
 	switch toolName {
 	case "wormhole.sync.status", "wormhole.agent.presence", "wormhole.agent.list",
+		"wormhole.workspace.status", "wormhole.workspace.diff", "wormhole.workspace.import", "wormhole.workspace.checkpoint", "wormhole.workspace.stash",
 		"wormhole.channel.list", "wormhole.channel.create", "wormhole.channel.events", "wormhole.channel.post", "wormhole.channel.subscribe",
 		"wormhole.kb.list", "wormhole.kb.get", "wormhole.kb.write":
 		return nil
 	case "wormhole.agent.register":
-		if !isJoinRegisterArgs(public) {
-			return nil
-		}
+		return nil
 	}
 	return fmt.Errorf("%w: %s", ErrBindingAwareProviderUnavailable, toolName)
 }

@@ -757,38 +757,6 @@ func exerciseCredentialPathResolver(t *testing.T) []string {
 	return []string{"token_file_flag", "profile_flag", "derived_default", "error"}
 }
 
-func exerciseOpenCodeConfigResolver(t *testing.T) []string {
-	t.Helper()
-	if got, err := resolveOpenCodeConfigPath("/contract/opencode.json", t.TempDir()); err != nil || got != "/contract/opencode.json" {
-		t.Fatalf("OpenCode explicit path = %q, %v", got, err)
-	}
-	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	projectFile := filepath.Join(root, "opencode.jsonc")
-	if err := os.WriteFile(projectFile, []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	nested := filepath.Join(root, "nested")
-	if err := os.Mkdir(nested, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := resolveOpenCodeConfigPath("", nested); err != nil || got != projectFile {
-		t.Fatalf("OpenCode project path = %q, %v; want %q", got, err, projectFile)
-	}
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	if got, err := resolveOpenCodeConfigPath("", t.TempDir()); err != nil || got != filepath.Join(home, ".config", "opencode", "opencode.json") {
-		t.Fatalf("OpenCode global default = %q, %v", got, err)
-	}
-	t.Setenv("HOME", "")
-	if _, err := resolveOpenCodeConfigPath("", t.TempDir()); err == nil {
-		t.Fatal("OpenCode config without HOME returned no error")
-	}
-	return []string{"flag", "project_file", "global_default", "error"}
-}
-
 func exerciseAdminKeyResolver(t *testing.T) []string {
 	t.Helper()
 	t.Setenv("WORMHOLE_ADMIN_KEY", "environment")

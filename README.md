@@ -82,7 +82,7 @@ Wormhole builds three binaries:
 
 | Binary | Role |
 |---|---|
-| `wormhole` | Setup, profiles, harness connection, and MCP stdio bridge |
+| `wormhole` | Setup, portable workspace operations, connector management, and MCP stdio bridge |
 | `gatewayd` | Gateway: per-user local runtime, SQLite replica, local MCP API, and sync queue |
 | `fabric` | Fabric: Coordination Server backed by PostgreSQL and pgvector |
 
@@ -95,11 +95,8 @@ Wormhole is alpha software under active development.
 - Other MCP-capable harnesses can use `wormhole mcp` or community connectors.
 - Fabric uses the approved Cohere `embed-v4.0` semantic embedder; the
   deterministic stub is test-only.
-- First-time enrollment requires a reachable Coordination Server. After its
-  ready checkpoint commits, `gatewayd` can restart and serve its SQLite replica
-  while the Coordination Server is unavailable.
-- True serverless initialization remains tracked in
-  [issue #37](https://github.com/H4RL33/wormhole/issues/37).
+- Canonical setup is Git-native and reconstructs a workspace from tracked
+  `.wormhole/state/v1/` without requiring a Coordination Server.
 
 Interfaces may change before a stable release. Do not expose an alpha
 Coordination Server directly to the public internet without reviewing the
@@ -124,10 +121,6 @@ then remove the private database only as an explicit manual action before rerunn
 setup. The current binary provides no reset or export command. This rule concerns
 machine-private Gateway state only; the tracked portable project state in
 `.wormhole/state/v1/` remains the supported Git interchange and clean-clone format.
-An exact v6 database may also contain the optional current Code Graph catalog
-(schema v2, ledger rows 1 and 2); its rows are preserved across Gateway restart.
-Graph v1-only or drifted catalogs are refused with the private database rather
-than upgraded in place.
 
 ## Get started
 
@@ -140,16 +133,11 @@ Wormhole project. Once enrolled and bootstrapped, harness calls go through
 `gatewayd`, local state lives in SQLite, and local writes enter a
 restart-surviving queue.
 
-> **Current limitation:** first-time enrollment still requires a reachable
-> Coordination Server. A fresh, permanently serverless namespace cannot be
-> created yet. Issue
-> [#37](https://github.com/H4RL33/wormhole/issues/37) tracks that gap.
-
 Prerequisites:
 
 - Go 1.24 or newer
 - Linux, or Windows through WSL
-- a reachable Coordination Server and an existing project UUID
+- a Git repository containing `.wormhole/config.toml` and `.wormhole/state/v1/`
 
 Build the CLI and daemon:
 
@@ -159,49 +147,43 @@ cd wormhole
 make build
 ```
 
-Start the local runtime in pre-credential mode:
+Run the resumable setup workflow from the repository root. It validates the
+portable tree, ensures the owner-only Gateway service, registers this checkout,
+selects the local human identity, records publication policy, imports the Git
+base, and installs detected first-party connectors:
 
 ```bash
-./dist/gatewayd demo
+./dist/wormhole setup --publication local_only
 ```
 
-In another terminal, enrol and bootstrap the profile through Gateway:
+Use `--yes` only after reviewing the printed plan. For a repository whose
+portable state is intended for public Git, select `public_git`; checkpoint then
+requires the exact digest returned by `diff`:
 
 ```bash
-./dist/wormhole join \
-  --server https://your-coordination-server.example \
-  --project YOUR_PROJECT_UUID \
-  --owner "${USER:-local-user}" \
-  --model your-model \
-  --permissions task.list,task.create,kb.search,kb.get,kb.write,channel.list,channel.subscribe,channel.post \
-  --profile demo
-./dist/wormhole whoami --profile demo
+./dist/wormhole setup --publication public_git --yes
+./dist/wormhole status
+./dist/wormhole diff
+./dist/wormhole checkpoint --publication-review-digest sha256:<review-digest>
 ```
 
-Connect an MCP harness to the local bridge. For Claude Code:
+Checkpoint materialises portable state in the working tree. Wormhole never
+stages, commits, or pushes it; review and accept it with ordinary Git commands.
+
+Setup installs detected Codex and Claude connectors. You can also inspect or
+change one explicitly:
 
 ```bash
-./dist/wormhole connect \
-  --server https://your-coordination-server.example \
-  --project YOUR_PROJECT_UUID \
-  --owner "${USER:-local-user}" \
-  --model your-model \
-  --permissions task.list,task.create,task.update_status,kb.search,kb.get,kb.write,channel.list,channel.subscribe,channel.post \
-  --profile demo \
-  --target claude \
-  --stdio-bin "$(pwd)/dist/wormhole"
+./dist/wormhole connector list claude
+./dist/wormhole connector install --yes claude
 ```
 
-Use `--target opencode` for OpenCode. The harness launches `wormhole mcp`,
-which bridges stdio to the daemon socket; it does not call the Coordination
-Server directly.
+The harness launches `wormhole mcp`, which bridges stdio to the daemon socket;
+it does not call a Coordination Server directly.
 
-After enrollment bootstrap commits, the SQLite replica and durable queue are
-the local source for work. Network interruptions do not make queued data
-disappear, and daemon restarts do not require Fabric. Supported task, KB,
-Channel, and durable-event reads and writes remain local; enrollment and other
-central-authority operations reject explicitly while offline. Inspect the
-local state with `./dist/wormhole status --profile demo`.
+The tracked portable tree is the clean-clone interchange. Workspace IDs,
+identity keys, overlays, stashes, journals, receipts, credentials, and SQLite
+rows remain machine-private.
 
 Local paths:
 
@@ -299,30 +281,16 @@ Harness A -> Gateway A --\
 Harness B -> Gateway B --/
 ```
 
-#### 4. Enroll and connect each machine
+#### 4. Set up each clone
 
-On each device, while the Coordination Server is reachable:
-
-```bash
-./dist/wormhole connect \
-  --server http://localhost:8080 \
-  --project "$WORMHOLE_PROJECT_ID" \
-  --owner "${USER:-demo-user}" \
-  --model local-agent \
-  --permissions task.list,task.create,task.assign,task.update_status,kb.search,kb.get,kb.get_links,kb.write,channel.list,channel.subscribe,channel.create,channel.post,git.link_commit,git.request_review \
-  --profile demo \
-  --target claude \
-  --stdio-bin "$(pwd)/dist/wormhole"
-```
-
-Then start that device's daemon:
+On each device, clone the repository and run the same Git-native setup:
 
 ```bash
-./dist/gatewayd demo
+./dist/wormhole setup --publication private_git
 ```
 
-Repeat with a distinct owner/model/profile on each machine as appropriate.
-Use `--target opencode` for OpenCode.
+Each clone gets fresh private Gateway and identity state while importing the
+same accepted portable Git snapshot.
 
 #### 5. Verify the path
 
@@ -347,11 +315,14 @@ Run:
 
 | Command | Purpose |
 |---|---|
-| `wormhole init` | Create project configuration interactively |
-| `wormhole join` | Register an agent and write a credential profile |
-| `wormhole connect` | Register, save credentials, and wire a harness |
+| `wormhole setup` | Confirm and resume canonical Git-native setup |
+| `wormhole connector list/install/remove` | Inspect or transactionally manage native connectors |
 | `wormhole whoami` | Inspect the identity associated with a profile |
-| `wormhole status` | Inspect local sync state and pending writes for a profile |
+| `wormhole status` | Inspect the bound workspace and publication review state |
+| `wormhole diff` | Inspect the semantic portable-state diff and review digest |
+| `wormhole import` | Import direct tracked portable-state edits |
+| `wormhole checkpoint` | Materialise the candidate without Git staging, commit, or push |
+| `wormhole stash` | Durably stash the private overlay under an explicit request ID |
 | `wormhole profile list` | List stored credential profiles |
 | `wormhole viewer-key create` | Issue a project-scoped dashboard viewer key |
 | `wormhole mcp` | Run the harness stdio-to-daemon bridge |

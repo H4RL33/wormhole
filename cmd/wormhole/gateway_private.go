@@ -12,8 +12,6 @@ import (
 	"time"
 )
 
-const codeGraphLifecycleRPCMethod = "wormhole/code-graph/lifecycle"
-
 func callGatewayPrivateMethod(ctx context.Context, socketPath, method string, request, response any) error {
 	dialer := net.Dialer{Timeout: 2 * time.Second}
 	conn, err := dialer.DialContext(ctx, "unix", socketPath)

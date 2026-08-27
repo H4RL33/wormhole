@@ -70,13 +70,12 @@ release, rehearsal, and clean-clone gates passed.
 
 After R06's review boundary, all remaining reduction work (R07-R14) is paused.
 The separately approved decomposition of `projectstate.Service` behind its existing
-facade is complete. Subsequent work returns to feature delivery toward the Git-native
-branch goal. Tasks 6, 6A, 7, 8, Stage 2, and unrelated preparation remain
-non-executable unless the next explicit decision expands scope.
-Current code still contains legacy `join`/`connect`, single-profile bootstrap,
-Passport-only attribution, and pre-snapshot assumptions. Implementation plans
-must migrate those paths in tested slices. Do not document a target command or
-schema as shipped until its implementation and contract checks pass.
+facade is complete. Git-native Tasks 1-8 and the Stage 2 final cutover are
+implemented. Canonical setup is `wormhole setup`; the five portable workspace
+operations are available through both top-level CLI and Gateway MCP. The former
+initialisation, join, combined connection, join-shaped registration, and public
+structural-discovery surfaces were removed without compatibility aliases. Do not
+reintroduce them as migration helpers.
 
 The `projectstate.Service` decomposition tranche is complete: the public Service
 is a nil-safe facade over exactly six package-private coordinators (registration,
@@ -88,8 +87,8 @@ checkpoint and recovery continue to share one coordinator gate. See
 ## Binaries
 
 - `wormhole`: setup, identity/auth, project/Fabric/connector administration,
-  first-party Codex/Claude connector lifecycle, checkpointing, and stdio MCP
-  bridge.
+  first-party Codex/Claude connector lifecycle, portable status/diff/import/
+  checkpoint/stash operations, and stdio MCP bridge.
 - `gatewayd`: one per-user passive supervisor, stable Unix socket API, SQLite
   control/read model, durable overlays and queues, and worker lifecycle.
 - `fabric`: optional public/private coordination service, HTTP MCP boundary,
@@ -174,10 +173,8 @@ MCP is the stateless agent-facing project-operation contract. Core names use
 `wormhole.<pillar>.<verb>` for agent, channel, task, KB, and git operations.
 `wormhole.sync.*` is Gateway-to-Fabric sync;
 `wormhole.workspace.{status,diff,import,checkpoint,stash}` provides equivalent
-local project-state operations for agents; and
-`wormhole.code_graph.{status,query,rebuild}` is the RFC-0003 Gateway-local
-derivative namespace. The latter two are not Core pillars. Harnesses use local
-Gateway; do not add a direct remote harness path. Human CLI project operations
+local project-state operations for agents. This namespace is not a Core pillar.
+Harnesses use local Gateway; do not add a direct remote harness path. Human CLI project operations
 must share the same Gateway domain semantics. Private remote auth and
 permission enforcement remain at the Fabric boundary; local/public assurance
 is explicit in the actor envelope.

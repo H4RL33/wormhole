@@ -49,11 +49,11 @@ func TestConfiguredPrivateRuntimeKeepsTargetAgentOperationsUsableAndWorkspaceSco
 		t.Fatalf("cross-workspace presence changed first agent: %#v", firstList["agents"])
 	}
 
-	join := privateDispatchResult(t, server, first, "wormhole.agent.register", map[string]any{
+	removedRegistration := privateDispatchResult(t, server, first, "wormhole.agent.register", map[string]any{
 		"owner": "agent-owner", "model": "test", "permissions": []string{}, "capabilities": []string{}, "repositories": []string{}, "roles": []string{},
 	}, nil)
-	if !join.IsError || !strings.Contains(join.Content[0].Text, "binding-aware provider unavailable") {
-		t.Fatalf("join registration reached legacy provider: %+v", join)
+	if !removedRegistration.IsError {
+		t.Fatalf("removed registration shape was accepted: %+v", removedRegistration)
 	}
 }
 
@@ -240,7 +240,8 @@ func TestConfiguredPrivateRuntimeFailsEveryUnscopedRealHandlerClosedRegistryWide
 	first, second := privateDispatchSiblingBindings(t)
 	server := privateDispatchTestServer(t, privateRoutingTestActor("00000000-0000-4000-8000-000000000021"), first, second)
 	allowed := map[string]bool{
-		"wormhole.sync.status":    true,
+		"wormhole.sync.status":      true,
+		"wormhole.workspace.status": true, "wormhole.workspace.diff": true, "wormhole.workspace.import": true, "wormhole.workspace.checkpoint": true, "wormhole.workspace.stash": true,
 		"wormhole.agent.register": true, "wormhole.agent.presence": true, "wormhole.agent.list": true,
 		"wormhole.channel.list": true, "wormhole.channel.create": true, "wormhole.channel.events": true, "wormhole.channel.post": true, "wormhole.channel.subscribe": true,
 		"wormhole.kb.list": true, "wormhole.kb.get": true, "wormhole.kb.write": true,
@@ -262,8 +263,6 @@ func TestConfiguredPrivateRuntimeFailsEveryUnscopedRealHandlerClosedRegistryWide
 
 func privateDispatchValidBlockedArguments(name string) map[string]any {
 	switch name {
-	case "wormhole.code_graph.query":
-		return map[string]any{"intent": "callers"}
 	case "wormhole.task.get":
 		return map[string]any{"task_id": "00000000-0000-4000-8000-000000000041"}
 	case "wormhole.task.create":
@@ -311,7 +310,7 @@ func privateDispatchTestServer(t *testing.T, actor types.ActorEnvelope, bindings
 	server.registry = newLocalRegistry(server)
 	if err := store.CacheWhoAmI(context.Background(), localstore.WhoAmICache{
 		AgentID: "cached-agent", ProjectID: bindings[0].Scope.ProjectID,
-		Permissions: []string{"task.create", "task.assign", "task.update_status", "channel.create", "channel.post", "kb.write", "kb.search", "git.link_commit", "code_graph.query", "code_graph.status", "code_graph.rebuild"}, CachedAt: time.Now().UTC(),
+		Permissions: []string{"task.create", "task.assign", "task.update_status", "channel.create", "channel.post", "kb.write", "kb.search", "git.link_commit"}, CachedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
 	}

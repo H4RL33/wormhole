@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"errors"
 	"io"
@@ -21,7 +20,6 @@ func TestRunDispatchesSupportedCommands(t *testing.T) {
 		code int
 		want string
 	}{
-		{name: "init", args: []string{"init", "unexpected"}, code: 2, want: "takes no arguments"},
 		{name: "whoami", args: []string{"whoami", "--unknown"}, code: 2, want: "flag provided but not defined"},
 		{name: "profile", args: []string{"profile", "unknown"}, code: 2, want: "wormhole profile list"},
 		{name: "viewer key", args: []string{"viewer-key", "unknown"}, code: 2, want: "only \"create\" is supported"},
@@ -103,7 +101,6 @@ func TestToolWrappersRejectMalformedPayloads(t *testing.T) {
 		call func() error
 		want string
 	}{
-		{name: "register", call: func() error { _, err := doRegister(server.Client(), server.URL, "p", registerAgentInput{}); return err }, want: "decode register result"},
 		{name: "search", call: func() error { _, err := doSearch(server.Client(), server.URL, "p", "t", "query", 1); return err }, want: "decode search result"},
 		{name: "channels", call: func() error { _, err := doListChannels(server.Client(), server.URL, "p", "t"); return err }, want: "decode list channels result"},
 		{name: "post event", call: func() error {
@@ -143,57 +140,6 @@ func TestCallToolReportsRequestConstructionAndTransportErrors(t *testing.T) {
 	}
 }
 
-func TestRunConnectOpenCodeReportsConfigWriteFailure(t *testing.T) {
-	blocker := filepath.Join(t.TempDir(), "not-a-directory")
-	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
-		t.Fatalf("write blocker: %v", err)
-	}
-	var stdout, stderr bytes.Buffer
-	code := runConnectOpenCode(filepath.Join(blocker, "opencode.json"), "wormhole", "wormhole", &stdout, &stderr)
-	if code != 1 || !strings.Contains(stderr.String(), "read") {
-		t.Fatalf("runConnectOpenCode code=%d stderr=%q, want read failure", code, stderr.String())
-	}
-}
-
-func TestHarnessWiringReportsMissingAndFailingBinaries(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	if err := wireClaudeMCP("claude", "", ""); err == nil || !strings.Contains(err.Error(), "wormhole binary not found") {
-		t.Fatalf("wireClaudeMCP missing wormhole error = %v", err)
-	}
-	if err := wireOpenCodeMCP(filepath.Join(t.TempDir(), "opencode.json"), "", ""); err == nil || !strings.Contains(err.Error(), "wormhole binary not found") {
-		t.Fatalf("wireOpenCodeMCP missing wormhole error = %v", err)
-	}
-
-	binDir := t.TempDir()
-	wormholePath := filepath.Join(binDir, "wormhole")
-	if err := os.WriteFile(wormholePath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("write wormhole executable: %v", err)
-	}
-	t.Setenv("PATH", binDir)
-	if err := wireClaudeMCP("/bin/false", "", ""); err == nil || !strings.Contains(err.Error(), "claude mcp add failed") {
-		t.Fatalf("wireClaudeMCP failed command error = %v", err)
-	}
-}
-
-func TestFilesystemFailuresAreReported(t *testing.T) {
-	dir := t.TempDir()
-	if err := writeCredentials(dir, credentials{}); err == nil || !strings.Contains(err.Error(), "write credentials file") {
-		t.Fatalf("writeCredentials directory target error = %v", err)
-	}
-
-	blocker := filepath.Join(t.TempDir(), "not-a-directory")
-	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
-		t.Fatalf("write blocker: %v", err)
-	}
-	var stdout, stderr bytes.Buffer
-	if code := initWizard(strings.NewReader("\n\n\n"), &stdout, &stderr, filepath.Join(blocker, "config.toml")); code != 1 {
-		t.Fatalf("initWizard code = %d, want 1 (stderr=%q)", code, stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "save config") {
-		t.Fatalf("initWizard stderr = %q, want save failure", stderr.String())
-	}
-}
-
 func TestHomeAndProfileResolutionFailuresAreReported(t *testing.T) {
 	t.Run("home unavailable", func(t *testing.T) {
 		t.Setenv("HOME", "")
@@ -203,10 +149,6 @@ func TestHomeAndProfileResolutionFailuresAreReported(t *testing.T) {
 		if _, err := resolveCredentialsPath("", "", "p", ""); err == nil {
 			t.Fatal("resolveCredentialsPath error = nil, want home resolution failure")
 		}
-		if _, err := resolveOpenCodeConfigPath("", t.TempDir()); err == nil || !strings.Contains(err.Error(), "resolve opencode config path") {
-			t.Fatalf("resolveOpenCodeConfigPath error = %v", err)
-		}
-
 		var stdout, stderr bytes.Buffer
 		if code := runWhoami(nil, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "resolve home directory") {
 			t.Fatalf("runWhoami code=%d stderr=%q", code, stderr.String())
@@ -248,42 +190,6 @@ func TestFlagParsersRejectUnknownFlags(t *testing.T) {
 	stderr.Reset()
 	if code := runViewerKeyCreate([]string{"--unknown"}, &stdout, &stderr); code != 2 {
 		t.Fatalf("runViewerKeyCreate code = %d, want 2", code)
-	}
-}
-
-func TestSocketHelpersCoverFallbackAndReadFailures(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", "")
-	if got := gatewaySocketPath(); !strings.HasSuffix(got, filepath.Join("wormhole-runtime", "wormhole", "wormholed.sock")) {
-		t.Fatalf("fallback socket path = %q", got)
-	}
-
-	path := filepath.Join(t.TempDir(), "wormholed.sock")
-	listener, err := net.Listen("unix", path)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-	go func() {
-		conn, acceptErr := listener.Accept()
-		if acceptErr != nil {
-			return
-		}
-		reader := bufio.NewReader(conn)
-		_, _ = reader.ReadBytes('\n')
-		_ = conn.Close()
-	}()
-	_, reachable, err := doRegisterViaSocket(path, "p", registerAgentInput{})
-	if !reachable || err == nil || !strings.Contains(err.Error(), "read initialize response") {
-		t.Fatalf("doRegisterViaSocket reachable=%v error=%v, want reachable read error", reachable, err)
-	}
-
-	malformedPath := registerFailureSocket(t,
-		`{"jsonrpc":"2.0","id":1,"result":{}}`,
-		`{"jsonrpc":"2.0","id":2,"result":"not-a-tool-result"}`,
-	)
-	_, reachable, err = doRegisterViaSocket(malformedPath, "p", registerAgentInput{})
-	if !reachable || err == nil || !strings.Contains(err.Error(), "decode tools/call result") {
-		t.Fatalf("malformed tool result reachable=%v error=%v", reachable, err)
 	}
 }
 

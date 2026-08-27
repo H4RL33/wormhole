@@ -23,12 +23,6 @@ mutation. Every other existing private database—including an older/future,
 malformed, partial, unexpected, or proof-incompatible database—is classified
 read-only and refused before mutation.
 
-An exact v6 database may omit Code Graph or contain the complete optional current
-Code Graph catalog at schema version 2 with ledger rows 1 and 2. A Code Graph
-v1-only, partial, malformed, future, or extra catalog is not a compatibility case
-and is refused before mutation. Existing current Code Graph rows remain intact
-across Gateway close and reopen; preflight does not rebuild or discard them.
-
 Wormhole does not migrate, normalize, export, reset, quarantine, rename, or delete
 an unsupported private database. The refusal leaves the database and its evidence
 under operator control. Before any deliberate manual removal, stop Gateway, inspect
@@ -41,6 +35,21 @@ This private-format rule does not apply to the portable tracked project state un
 clean-clone reconstruction format. The dormant W11
 `legacy_integration_state_migrations`/`LegacyIntegrationBackupRoot` seam is retained
 but is not a private-format compatibility mechanism and is not implemented by R06.
+
+## CLI and local MCP cutover
+
+The canonical public setup command is `wormhole setup`. The former project
+initialisation, enrol-and-join, and combined harness-connection commands were
+removed as a hard alpha cut and have no aliases or argument-shape compatibility.
+Agent registration is presence-only; Gateway derives binding and action
+attribution from trusted machine-private setup state rather than accepting the
+former ownership, model, role, permission, repository, Passport, or credential
+payload.
+
+The top-level `status`, `diff`, `import`, `checkpoint`, and `stash` commands and
+their `wormhole.workspace.*` MCP counterparts share one Gateway operation layer.
+For `public_git`, checkpoint requires the exact current publication-review digest.
+Wormhole writes the portable candidate but never stages, commits, or pushes it.
 
 ## Future beta activation
 

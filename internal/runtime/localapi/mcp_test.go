@@ -13,8 +13,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -22,8 +20,6 @@ import (
 	"testing"
 	"time"
 
-	codegraphconfig "github.com/H4RL33/wormhole/internal/runtime/codegraph/config"
-	codegraphindex "github.com/H4RL33/wormhole/internal/runtime/codegraph/index"
 	"github.com/H4RL33/wormhole/internal/runtime/eventbus"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/runtime/scheduler"
@@ -376,8 +372,9 @@ func TestMCP_ToolsList_AllToolsWithSchemas(t *testing.T) {
 	}
 
 	wantTools := []string{
-		"wormhole.agent.whoami", "wormhole.agent.get_guidance", "wormhole.sync.status", EnrolmentToolName, "wormhole.task.list", "wormhole.task.get",
-		"wormhole.code_graph.query", "wormhole.code_graph.status", "wormhole.code_graph.rebuild",
+		"wormhole.agent.whoami", "wormhole.agent.get_guidance", "wormhole.sync.status", EnrolmentToolName,
+		"wormhole.workspace.status", "wormhole.workspace.diff", "wormhole.workspace.import", "wormhole.workspace.checkpoint", "wormhole.workspace.stash",
+		"wormhole.task.list", "wormhole.task.get",
 		"wormhole.task.create", "wormhole.task.update_status", "wormhole.task.route", "wormhole.channel.list",
 		"wormhole.channel.create",
 		"wormhole.channel.events", "wormhole.channel.post", "wormhole.channel.subscribe",
@@ -397,23 +394,6 @@ func TestMCP_ToolsList_AllToolsWithSchemas(t *testing.T) {
 		if !ok {
 			t.Fatalf("tools/list missing tool %q", name)
 		}
-		if name == "wormhole.agent.register" {
-			variants, ok := entry.InputSchema["anyOf"].([]interface{})
-			if !ok || len(variants) != 2 {
-				t.Fatalf("%s: inputSchema = %#v, want two anyOf variants", name, entry.InputSchema)
-			}
-			for i, rawVariant := range variants {
-				variant, ok := rawVariant.(map[string]interface{})
-				if !ok {
-					t.Fatalf("%s: oneOf[%d] = %T", name, i, rawVariant)
-				}
-				required, _ := variant["required"].([]interface{})
-				if !slices.Contains(required, interface{}("project_id")) {
-					t.Errorf("%s: oneOf[%d] required=%v, want project_id", name, i, required)
-				}
-			}
-			continue
-		}
 		required, _ := entry.InputSchema["required"].([]interface{})
 		hasProjectID := slices.Contains(required, interface{}("project_id"))
 		if name == "wormhole.agent.whoami" {
@@ -425,44 +405,6 @@ func TestMCP_ToolsList_AllToolsWithSchemas(t *testing.T) {
 				t.Errorf("%s: project_id must be required, got required=%v", name, required)
 			}
 		}
-	}
-}
-
-func TestCodeGraphRuntimeRejectsMiswiredProject(t *testing.T) {
-	srv, _ := newMCPTestServer(t)
-	runtime, err := NewCodeGraphRuntime(context.Background(), srv.store.DB(), "project-a")
-	if err != nil {
-		t.Fatalf("NewCodeGraphRuntime: %v", err)
-	}
-	srv.SetCodeGraphRuntime("project-b", runtime)
-	if _, err := srv.resolveCodeGraphRuntime("project-b"); err == nil {
-		t.Fatal("miswired project runtime resolved")
-	}
-}
-
-func TestCodeGraphSchemasAreClosedAndBounded(t *testing.T) {
-	registry := newLocalRegistry(&Server{})
-	for _, name := range []string{"wormhole.code_graph.query", "wormhole.code_graph.status", "wormhole.code_graph.rebuild"} {
-		tool, ok := registry.Get(name)
-		if !ok {
-			t.Fatalf("registry missing %s", name)
-		}
-		schema := buildInputSchema(tool)
-		if additional, ok := schema["additionalProperties"].(bool); !ok || additional {
-			t.Fatalf("%s additionalProperties = %#v, want false", name, schema["additionalProperties"])
-		}
-	}
-	query, _ := registry.Get("wormhole.code_graph.query")
-	querySchema := buildInputSchema(query)
-	if required := querySchema["required"].([]string); slices.Contains(required, "intent") || !slices.Contains(required, "project_id") {
-		t.Fatalf("query required fields = %v, want project_id but optional intent", required)
-	}
-	if got := querySchema["anyOf"]; !reflect.DeepEqual(got, []map[string]any{{"required": []string{"intent"}}, {"required": []string{"entry_symbols"}}}) {
-		t.Fatalf("query anyOf = %#v", got)
-	}
-	items := querySchema["properties"].(map[string]any)["include_edges"].(map[string]any)["items"].(map[string]any)
-	if got := items["enum"]; !reflect.DeepEqual(got, []any{"calls", "references", "uses_type"}) {
-		t.Fatalf("include_edges enum = %#v", got)
 	}
 }
 
@@ -489,143 +431,6 @@ func TestIntegrationGuidanceDescriptorIsClosedReadOnlyContract(t *testing.T) {
 	if project, ok := properties["project_id"].(map[string]any); !ok || project["type"] != "string" || project["format"] != "uuid" {
 		t.Fatalf("get_guidance project_id schema = %#v", properties["project_id"])
 	}
-}
-
-func TestCodeGraphRequestsRejectCallerControlledAndTrailingFields(t *testing.T) {
-	for _, raw := range []string{
-		`{"intent":"find","project_id":"project-1","source_authorized":true}`,
-		`{"intent":"find","project_id":"project-1","max_nodes":999}`,
-		`{"intent":"find","project_id":"project-1","direction":"outbound"}`,
-		`{"intent":"find","project_id":"project-1"} {}`,
-	} {
-		var args codeGraphQueryArgs
-		if err := decodeCodeGraphArgs(json.RawMessage(raw), &args); err == nil {
-			t.Fatalf("query accepted %s", raw)
-		}
-	}
-	for _, field := range []string{"enabled", "disabled", "checkout", "canonical_remote", "source_byte_ceiling", "global_source_byte_ceiling", "warpspeed", "in_place", "project_config", "limits"} {
-		var args codeGraphProjectArgs
-		raw := json.RawMessage(`{"project_id":"project-1","` + field + `":true}`)
-		if err := decodeCodeGraphArgs(raw, &args); err == nil {
-			t.Fatalf("rebuild accepted %s", field)
-		}
-	}
-}
-
-func TestMCPCodeGraphQuerySourcePermissionDegradesOnlySource(t *testing.T) {
-	srv, socketPath := newMCPTestServer(t)
-	checkout := t.TempDir()
-	for _, args := range [][]string{{"init"}, {"config", "user.email", "test@example.invalid"}, {"config", "user.name", "test"}, {"remote", "add", "origin", "https://example.invalid/project.git"}} {
-		if output, err := exec.Command("git", append([]string{"-C", checkout}, args...)...).CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v: %s", args, err, output)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(checkout, "go.mod"), []byte("module example.invalid/project\n\ngo 1.26\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	sourceBytes := []byte("package fixture\n\nfunc Target() string { return \"exact slice\" }\n")
-	if err := os.WriteFile(filepath.Join(checkout, "target.go"), sourceBytes, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for _, args := range [][]string{{"add", "go.mod", "target.go"}, {"commit", "-m", "fixture"}} {
-		if output, err := exec.Command("git", append([]string{"-C", checkout}, args...)...).CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v: %s", args, err, output)
-		}
-	}
-	runtime, err := NewCodeGraphRuntime(context.Background(), srv.store.DB(), "project-1")
-	if err != nil {
-		t.Fatalf("NewCodeGraphRuntime: %v", err)
-	}
-	if err := runtime.Store.PutProjectConfig(context.Background(), codegraphconfig.Project{ProjectID: "project-1", Enabled: true, CanonicalRemote: "https://example.invalid/project.git", ActiveCheckout: checkout, ProjectSourceByteCeiling: codegraphconfig.DefaultProjectSourceByteCeiling}); err != nil {
-		t.Fatal(err)
-	}
-	if err := runtime.Index.Build(context.Background(), codegraphindex.BuildRequest{ProjectID: "project-1", RevisionID: "fixture"}); err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-	indexedCommit := runCodeGraphGit(t, checkout, "rev-parse", "HEAD")
-	if err := os.WriteFile(filepath.Join(checkout, "later.go"), []byte("package fixture\nconst Later = true\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	runCodeGraphGit(t, checkout, "add", "later.go")
-	runCodeGraphGit(t, checkout, "commit", "-m", "later clean commit")
-	currentCommit := runCodeGraphGit(t, checkout, "rev-parse", "HEAD")
-	srv.SetCodeGraphRuntime("project-1", runtime)
-	srv.SetAuthorizationAgent("project-1", "agent-1")
-	cache := func(permissions []string) {
-		if err := srv.store.CacheWhoAmI(context.Background(), localstore.WhoAmICache{AgentID: "agent-1", ProjectID: "project-1", Permissions: permissions, CachedAt: time.Now().UTC()}); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	conn := dialLocalSocket(t, socketPath)
-	defer conn.Close()
-	reader := bufio.NewReader(conn)
-	mcpInitialize(t, conn, reader)
-	args := map[string]interface{}{"project_id": "project-1", "intent": "Target", "entry_symbols": []string{"fixture.Target"}, "requested_source_bytes": 1024}
-	cache([]string{"code_graph.query", "code_graph.source.read"})
-	allowed := mcpCallTool(t, conn, reader, 41, "wormhole.code_graph.query", args)
-	if allowed.Error != "" {
-		t.Fatalf("query with source permission: %s", allowed.Error)
-	}
-	var withSource codeGraphQueryResult
-	if err := json.Unmarshal(allowed.Result, &withSource); err != nil {
-		t.Fatal(err)
-	}
-	var freshness map[string]any
-	if err := json.Unmarshal(allowed.Result, &freshness); err != nil {
-		t.Fatal(err)
-	}
-	if withSource.CurrentGitCommit != currentCommit || withSource.WorkingTreeStatus != "clean" {
-		t.Fatalf("query checkout freshness commit/status = %q/%q, want %q/clean (indexed %q)", withSource.CurrentGitCommit, withSource.WorkingTreeStatus, currentCommit, indexedCommit)
-	}
-	if freshness["graph_not_current"] != true || freshness["rebuild_recommended"] != true {
-		t.Fatalf("query freshness flags = graph_not_current:%v rebuild_recommended:%v", freshness["graph_not_current"], freshness["rebuild_recommended"])
-	}
-	if withSource.OmissionReason != "" {
-		t.Fatalf("freshness changed query omission reason to %q", withSource.OmissionReason)
-	}
-	if len(withSource.Sources) == 0 || !withSource.Sources[0].SourceIncluded || !strings.Contains(withSource.Sources[0].Source, "exact slice") {
-		t.Fatalf("source result = %+v", withSource.Sources)
-	}
-
-	cache([]string{"code_graph.query"})
-	metadata := mcpCallTool(t, conn, reader, 42, "wormhole.code_graph.query", args)
-	if metadata.Error != "" {
-		t.Fatalf("query without source permission: %s", metadata.Error)
-	}
-	var withoutSource codeGraphQueryResult
-	if err := json.Unmarshal(metadata.Result, &withoutSource); err != nil {
-		t.Fatal(err)
-	}
-	if len(withoutSource.Matches) == 0 || len(withoutSource.Sources) == 0 {
-		t.Fatalf("metadata result lacks graph information: %+v", withoutSource)
-	}
-	for _, outcome := range withoutSource.Sources {
-		if outcome.SourceIncluded || outcome.SourceOmissionReason != "missing_permission" || outcome.RequiredPermission != "code_graph.source.read" {
-			t.Fatalf("metadata-only source outcome = %+v", outcome)
-		}
-	}
-	cache([]string{"code_graph.source.read"})
-	if denied := mcpCallTool(t, conn, reader, 43, "wormhole.code_graph.query", args); denied.Error == "" || !strings.Contains(denied.Error, "code_graph.query") {
-		t.Fatalf("source-only query error = %q", denied.Error)
-	}
-	cache(nil)
-	if denied := mcpCallTool(t, conn, reader, 44, "wormhole.code_graph.query", args); denied.Error == "" || !strings.Contains(denied.Error, "code_graph.query") {
-		t.Fatalf("unscoped query error = %q", denied.Error)
-	}
-	srv.SetAuthorizationAgent("project-1", "replacement-agent")
-	if denied := mcpCallTool(t, conn, reader, 45, "wormhole.code_graph.query", args); denied.Error == "" || !strings.Contains(denied.Error, "no authenticated scope") {
-		t.Fatalf("missing exact scope query error = %q", denied.Error)
-	}
-}
-
-func runCodeGraphGit(t *testing.T, checkout string, args ...string) string {
-	t.Helper()
-	output, err := exec.Command("git", append([]string{"-C", checkout}, args...)...).CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v: %v: %s", args, err, output)
-	}
-	return strings.TrimSpace(string(output))
 }
 
 // TestMCP_ToolsCall_WrapsHandlerError proves a tool handler's own error
@@ -900,7 +705,7 @@ func TestEmptyAgentListResponseMatchesNullableSliceSchema(t *testing.T) {
 	}
 }
 
-func TestLocalRegistryDescribesRoutePermissionsAndRegisterRequestVariants(t *testing.T) {
+func TestLocalRegistryDescribesRoutePermissionsAndPresenceRegistration(t *testing.T) {
 	registry := newLocalRegistry(&Server{})
 
 	route, ok := registry.Get("wormhole.task.route")
@@ -915,36 +720,12 @@ func TestLocalRegistryDescribesRoutePermissionsAndRegisterRequestVariants(t *tes
 	if !ok {
 		t.Fatal("registry missing wormhole.agent.register")
 	}
-	if got := sortedKeys(register.ArgumentExamples); !reflect.DeepEqual(got, []string{"join", "presence"}) {
-		t.Fatalf("agent.register argument variants = %v, want [join presence]", got)
+	if got := sortedKeys(register.ArgumentExamples); !reflect.DeepEqual(got, []string{"default"}) {
+		t.Fatalf("agent.register argument variants = %v, want [default]", got)
 	}
 
 	schemas := buildInputSchemas(register)
-	join := schemas["join"]
-	joinProperties := join["properties"].(map[string]any)
-	if _, ok := joinProperties["name"]; !ok {
-		t.Fatalf("join request schema omits Fabric-accepted name alias: %#v", joinProperties)
-	}
-	joinRequired := join["required"].([]string)
-	for _, name := range []string{"capabilities", "model", "permissions", "project_id", "repositories", "roles"} {
-		if !slices.Contains(joinRequired, name) {
-			t.Errorf("join required = %v, want %q", joinRequired, name)
-		}
-	}
-	for _, name := range []string{"name", "owner", "role"} {
-		if slices.Contains(joinRequired, name) {
-			t.Errorf("join required = %v, want %q optional", joinRequired, name)
-		}
-	}
-	wantOwnerAlias := []map[string]any{
-		{"required": []string{"owner"}},
-		{"required": []string{"name"}},
-	}
-	if got := join["anyOf"]; !reflect.DeepEqual(got, wantOwnerAlias) {
-		t.Errorf("join owner/name constraint = %#v, want %#v", got, wantOwnerAlias)
-	}
-
-	presence := schemas["presence"]
+	presence := schemas["default"]
 	presenceRequired := presence["required"].([]string)
 	if want := []string{"agent_id", "project_id"}; !reflect.DeepEqual(presenceRequired, want) {
 		t.Fatalf("presence required = %v, want %v", presenceRequired, want)
@@ -955,36 +736,11 @@ func TestLocalRegistryDescribesRoutePermissionsAndRegisterRequestVariants(t *tes
 	}
 
 	advertised := buildInputSchema(register)
-	if variants, ok := advertised["anyOf"].([]map[string]any); !ok || len(variants) != 2 {
-		t.Fatalf("agent.register tools/list schema = %#v, want two anyOf variants", advertised)
+	if _, variant := advertised["anyOf"]; variant {
+		t.Fatalf("agent.register tools/list schema = %#v, want one closed presence shape", advertised)
 	}
 	if _, ambiguous := advertised["oneOf"]; ambiguous {
 		t.Fatalf("agent.register tools/list schema = %#v, hybrid inputs must remain valid", advertised)
-	}
-}
-
-func TestLocalRegistryDescribesCodeGraphToolsAndPermissions(t *testing.T) {
-	registry := newLocalRegistry(&Server{})
-	want := map[string][]string{
-		"wormhole.code_graph.query":   {"code_graph.query"},
-		"wormhole.code_graph.status":  {"code_graph.status"},
-		"wormhole.code_graph.rebuild": {"code_graph.rebuild"},
-	}
-	for name, permissions := range want {
-		tool, ok := registry.Get(name)
-		if !ok {
-			t.Fatalf("registry missing %s", name)
-		}
-		if !reflect.DeepEqual(tool.RequiredPermissions, permissions) {
-			t.Fatalf("%s RequiredPermissions = %v, want %v", name, tool.RequiredPermissions, permissions)
-		}
-	}
-	for _, tool := range registry.List() {
-		if strings.HasPrefix(tool.Name, "wormhole.code_graph.") {
-			if _, ok := want[tool.Name]; !ok {
-				t.Fatalf("unexpected Code Graph tool %s", tool.Name)
-			}
-		}
 	}
 }
 

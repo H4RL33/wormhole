@@ -17,14 +17,14 @@
     "model": "deterministic-simulated-agent",
     "capabilities": ["code"],
     "roles": ["contributor"],
-    "permissions": ["task.list", "task.create", "task.update_status", "kb.search", "kb.get", "kb.write", "channel.list", "channel.post", "git.link_commit", "code_graph.status", "code_graph.query", "code_graph.source.read"]
+    "permissions": ["task.list", "task.create", "task.update_status", "kb.search", "kb.get", "kb.write", "channel.list", "channel.post", "git.link_commit"]
   },
   "reviewer": {
     "owner": "alpha-agent-b",
     "model": "deterministic-simulated-agent",
     "capabilities": ["code_review"],
     "roles": ["reviewer"],
-    "permissions": ["task.list", "kb.search", "kb.get", "kb.write", "channel.list", "channel.post", "git.link_commit", "git.request_review", "code_graph.status", "code_graph.query"]
+    "permissions": ["task.list", "kb.search", "kb.get", "kb.write", "channel.list", "channel.post", "git.link_commit", "git.request_review"]
   },
   "task": {
     "id": "7a1f3654-cb45-4f27-bd34-8aef89b0ab21",
@@ -60,10 +60,8 @@
     "version": 1,
     "digest": "sha256:54996a31dacc73535be4fa2c9012bae090c4ed90e10b6c407739c7d1af0bcf97"
   },
-  "code_graph": {
-    "entry_symbol": "wireCodeGraphRuntimes",
-    "expected_path": "cmd/gatewayd/gatewayd.go",
-    "requested_source_bytes": 4096
+  "repository_context": {
+    "expected_path": "cmd/gatewayd/gatewayd.go"
   },
   "meaningful_update": {
     "event_type": "message.posted",

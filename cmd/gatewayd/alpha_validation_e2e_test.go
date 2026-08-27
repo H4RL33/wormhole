@@ -54,11 +54,9 @@ type alphaValidationFixture struct {
 		Path, ID, Digest string
 		Version          int64
 	} `json:"manifest"`
-	CodeGraph struct {
-		EntrySymbol          string `json:"entry_symbol"`
-		ExpectedPath         string `json:"expected_path"`
-		RequestedSourceBytes int    `json:"requested_source_bytes"`
-	} `json:"code_graph"`
+	RepositoryContext struct {
+		ExpectedPath string `json:"expected_path"`
+	} `json:"repository_context"`
 	MeaningfulUpdate struct {
 		EventType string `json:"event_type"`
 		Note      string `json:"note"`
@@ -86,26 +84,6 @@ type alphaCredential struct {
 	AgentID    string `json:"agent_id"`
 	PassportID string `json:"passport_id"`
 	Token      string `json:"token"`
-}
-
-type alphaCodeGraphQuery struct {
-	GraphRevision      string `json:"graph_revision"`
-	CurrentGitCommit   string `json:"current_git_commit"`
-	GraphNotCurrent    bool   `json:"graph_not_current"`
-	RebuildRecommended bool   `json:"rebuild_recommended"`
-	SourceBytes        int64  `json:"source_bytes"`
-	Matches            []struct {
-		QualifiedName string `json:"qualified_name"`
-		FilePath      string `json:"file_path"`
-	} `json:"matches"`
-	Sources []struct {
-		FilePath             string `json:"file_path"`
-		SourceIncluded       bool   `json:"source_included"`
-		Source               string `json:"source"`
-		ReturnedBytes        int64  `json:"returned_bytes"`
-		SourceOmissionReason string `json:"source_omission_reason"`
-		RequiredPermission   string `json:"required_permission"`
-	} `json:"sources"`
 }
 
 // TestAlphaValidation_FullAutomatedAcceptanceLoop is the alpha release gate.
@@ -147,9 +125,6 @@ func TestAlphaValidation_FullAutomatedAcceptanceLoop(t *testing.T) {
 
 	applyAlphaManifest(t, wormholeBin, a, fixture.Manifest.Digest)
 	applyAlphaManifest(t, wormholeBin, b, fixture.Manifest.Digest)
-	enableAlphaCodeGraph(t, wormholeBin, a)
-	enableAlphaCodeGraph(t, wormholeBin, b)
-	// Code Graph runtimes are process-wired from persisted configuration.
 	a.restart(t, gatewayBin)
 	b.restart(t, gatewayBin)
 	defer a.closeClient()
@@ -160,13 +135,14 @@ func TestAlphaValidation_FullAutomatedAcceptanceLoop(t *testing.T) {
 		want := []string{
 			"wormhole.agent.enrol", "wormhole.agent.get_guidance", "wormhole.agent.list", "wormhole.agent.presence", "wormhole.agent.register", "wormhole.agent.whoami",
 			"wormhole.channel.create", "wormhole.channel.events", "wormhole.channel.list", "wormhole.channel.post", "wormhole.channel.subscribe",
-			"wormhole.code_graph.query", "wormhole.code_graph.rebuild", "wormhole.code_graph.status", "wormhole.git.link_commit",
+			"wormhole.git.link_commit",
 			"wormhole.kb.get", "wormhole.kb.list", "wormhole.kb.search", "wormhole.kb.write", "wormhole.sync.status",
 			"wormhole.task.create", "wormhole.task.get", "wormhole.task.list", "wormhole.task.route", "wormhole.task.update_status",
+			"wormhole.workspace.checkpoint", "wormhole.workspace.diff", "wormhole.workspace.import", "wormhole.workspace.stash", "wormhole.workspace.status",
 		}
 		sort.Strings(want)
 		if !equalAlphaStrings(got, want) {
-			t.Fatalf("Gateway tools = %q, want exact 25 %q", got, want)
+			t.Fatalf("Gateway tools = %q, want exact 27 %q", got, want)
 		}
 	})
 
@@ -198,17 +174,6 @@ func TestAlphaValidation_FullAutomatedAcceptanceLoop(t *testing.T) {
 		eventsRaw := alphaMustGatewayCall(t, a.client, "wormhole.channel.events", map[string]interface{}{"project_id": fixture.Project.ID})
 		if !alphaJSONArrayHas(t, eventsRaw, "events", "id", fixture.SeedEvent.ID) {
 			t.Fatalf("Agent A event inspection lacks seed event: %s", eventsRaw)
-		}
-
-		statusRaw := alphaMustGatewayCall(t, a.client, "wormhole.code_graph.status", map[string]interface{}{"project_id": fixture.Project.ID})
-		alphaJSONFieldEquals(t, statusRaw, "state", "ready")
-		queryRaw := alphaMustGatewayCall(t, a.client, "wormhole.code_graph.query", map[string]interface{}{
-			"project_id": fixture.Project.ID, "entry_symbols": []string{fixture.CodeGraph.EntrySymbol},
-			"requested_source_bytes": fixture.CodeGraph.RequestedSourceBytes,
-		})
-		query := decodeAlphaQuery(t, queryRaw)
-		if query.GraphRevision == "" || query.CurrentGitCommit != commitSHA || query.SourceBytes <= 0 || query.SourceBytes > int64(fixture.CodeGraph.RequestedSourceBytes) || !alphaQueryHasIncludedPath(query, fixture.CodeGraph.ExpectedPath) {
-			t.Fatalf("bounded Code Graph query did not return current expected source: %+v", query)
 		}
 
 		meaningfulEventID = alphaJSONID(t, alphaMustGatewayCall(t, a.client, "wormhole.channel.post", map[string]interface{}{
@@ -246,7 +211,7 @@ func TestAlphaValidation_FullAutomatedAcceptanceLoop(t *testing.T) {
 		"project_id": fixture.Project.ID, "channel_id": fixture.Channel.ID, "agent_id": a.credential.AgentID,
 		"event_type": "discovery.logged", "payload": map[string]interface{}{
 			"summary": fixture.Discovery.Body, "kb_article_id": offlineKBID, "agent_id": a.credential.AgentID,
-			"task_id": fixture.Task.ID, "commit_sha": commitSHA, "code_path": fixture.CodeGraph.ExpectedPath,
+			"task_id": fixture.Task.ID, "commit_sha": commitSHA, "code_path": fixture.RepositoryContext.ExpectedPath,
 		},
 	})
 	offlineEventID := alphaJSONID(t, offlineEvent)
@@ -283,41 +248,14 @@ func TestAlphaValidation_FullAutomatedAcceptanceLoop(t *testing.T) {
 			t.Fatalf("reviewer lacks completed task intent: %s", tasksRaw)
 		}
 		kbRaw := alphaMustGatewayCall(t, b.client, "wormhole.kb.list", map[string]interface{}{"project_id": fixture.Project.ID})
-		if !bytes.Contains(kbRaw, []byte(reviewerGit.CommitSHA)) || !bytes.Contains(kbRaw, []byte(fixture.CodeGraph.ExpectedPath)) {
+		if !bytes.Contains(kbRaw, []byte(reviewerGit.CommitSHA)) || !bytes.Contains(kbRaw, []byte(fixture.RepositoryContext.ExpectedPath)) {
 			t.Fatalf("reviewer KB lacks Git pointer or discovery path: %s", kbRaw)
 		}
 		eventsRaw := alphaMustGatewayCall(t, b.client, "wormhole.channel.events", map[string]interface{}{"project_id": fixture.Project.ID})
 		if !alphaJSONArrayHas(t, eventsRaw, "events", "id", offlineEventID) || !bytes.Contains(eventsRaw, []byte(reviewerGit.CommitSHA)) {
 			t.Fatalf("reviewer events lack durable discovery/Git handoff: %s", eventsRaw)
 		}
-		queryRaw := alphaMustGatewayCall(t, b.client, "wormhole.code_graph.query", map[string]interface{}{
-			"project_id": fixture.Project.ID, "entry_symbols": []string{fixture.CodeGraph.EntrySymbol},
-			"requested_source_bytes": fixture.CodeGraph.RequestedSourceBytes,
-		})
-		query := decodeAlphaQuery(t, queryRaw)
-		if query.GraphRevision == "" || !alphaQueryHasPath(query, fixture.CodeGraph.ExpectedPath) {
-			t.Fatalf("reviewer Code Graph lacks relevant path: %+v", query)
-		}
-		if len(query.Sources) == 0 {
-			t.Fatalf("reviewer query returned no source metadata for permission degradation: %+v", query)
-		}
-		for _, source := range query.Sources {
-			if source.SourceIncluded || source.Source != "" || source.ReturnedBytes != 0 || source.RequiredPermission != "code_graph.source.read" || source.SourceOmissionReason == "" {
-				t.Fatalf("reviewer missing-source-permission contract violated: %+v", source)
-			}
-		}
 	})
-
-	// A tracked-Go edit makes the already published graph explicitly stale.
-	alphaAppendTrackedChange(t, filepath.Join(checkoutA, fixture.CodeGraph.ExpectedPath))
-	staleRaw := alphaMustGatewayCall(t, a.client, "wormhole.code_graph.status", map[string]interface{}{"project_id": fixture.Project.ID})
-	alphaJSONFieldEquals(t, staleRaw, "state", "stale")
-	staleQuery := decodeAlphaQuery(t, alphaMustGatewayCall(t, a.client, "wormhole.code_graph.query", map[string]interface{}{
-		"project_id": fixture.Project.ID, "entry_symbols": []string{fixture.CodeGraph.EntrySymbol}, "requested_source_bytes": 0,
-	}))
-	if !staleQuery.GraphNotCurrent || !staleQuery.RebuildRecommended {
-		t.Fatalf("stale query lacks explicit degradation: %+v", staleQuery)
-	}
 
 	// A valid newer Fabric offer remains pending and cannot replace approved
 	// guidance until a human explicitly approves it.
@@ -541,14 +479,6 @@ func applyAlphaManifest(t *testing.T, wormholeBin string, gateway *alphaGateway,
 	}
 }
 
-func enableAlphaCodeGraph(t *testing.T, wormholeBin string, gateway *alphaGateway) {
-	t.Helper()
-	output := runAlphaCLI(t, wormholeBin, gateway.env, gateway.checkout, "config", "code-graph", "enable", "--project", gateway.credential.ProjectID, "--confirm")
-	if !bytes.Contains(output, []byte("enabled=true")) || !bytes.Contains(output, []byte("revision=")) {
-		t.Fatalf("Code Graph enable did not publish a revision: %q", output)
-	}
-}
-
 func runAlphaCLI(t *testing.T, binary string, env []string, directory string, args ...string) []byte {
 	t.Helper()
 	command := exec.Command(binary, args...)
@@ -680,38 +610,6 @@ func assertAlphaGuidance(t *testing.T, client *gateBMCPClient, projectID, digest
 	if guidance.ManifestDigest == nil || *guidance.ManifestDigest != digest || guidance.ResolvedRole == nil || *guidance.ResolvedRole != role || guidance.ApprovalState != "approved" || guidance.MaterializationState != "applied" || len(guidance.Guidance) == 0 {
 		t.Fatalf("approved cached %s guidance = %+v", role, guidance)
 	}
-}
-
-func decodeAlphaQuery(t *testing.T, raw json.RawMessage) alphaCodeGraphQuery {
-	t.Helper()
-	var query alphaCodeGraphQuery
-	if err := json.Unmarshal(raw, &query); err != nil {
-		t.Fatal(err)
-	}
-	return query
-}
-
-func alphaQueryHasIncludedPath(query alphaCodeGraphQuery, path string) bool {
-	for _, source := range query.Sources {
-		if source.FilePath == path && source.SourceIncluded && source.Source != "" && source.ReturnedBytes > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-func alphaQueryHasPath(query alphaCodeGraphQuery, path string) bool {
-	for _, match := range query.Matches {
-		if match.FilePath == path {
-			return true
-		}
-	}
-	for _, source := range query.Sources {
-		if source.FilePath == path {
-			return true
-		}
-	}
-	return false
 }
 
 func alphaJSONFieldEquals(t *testing.T, raw json.RawMessage, field, want string) {
@@ -950,21 +848,6 @@ func alphaAssertIndependentFiles(t *testing.T, left, right string) {
 	}
 	if os.SameFile(leftInfo, rightInfo) {
 		t.Fatal("Gateway replicas resolve to the same SQLite file")
-	}
-}
-
-func alphaAppendTrackedChange(t *testing.T, path string) {
-	t.Helper()
-	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := file.WriteString("\n// alpha validation stale graph marker\n"); err != nil {
-		_ = file.Close()
-		t.Fatal(err)
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
 	}
 }
 

@@ -11,10 +11,7 @@ import (
 	"strings"
 )
 
-const (
-	sharedKBSemanticGuidance    = "Use shared KB semantic search for organisational decisions, procedures, and discoveries before broad repository reconstruction when that context could answer the question."
-	codeGraphSeparationGuidance = "Use Code Graph only for project-local source structure and bounded code discovery when it is enabled and current; it is separate from the shared KB and does not replace Git or verification."
-)
+const sharedKBSemanticGuidance = "Use shared KB semantic search for organisational decisions, procedures, and discoveries before broad repository reconstruction when that context could answer the question."
 
 type generatedGuidanceFile struct {
 	Slug        string
@@ -104,7 +101,6 @@ func renderGatewayGuidance(registry *localRegistry, records []toolGuidance) (gen
 	specs := []generatedSkillSpec{
 		{"wormhole-orientation", ".agents/skills/wormhole-orientation/SKILL.md", "starting work in a project connected to Wormhole or reconstructing shared project context.", []string{}, renderOrientationSkill},
 		{"wormhole-tool-use", ".agents/skills/wormhole-tool-use/SKILL.md", "choosing or calling a live Wormhole Gateway tool and checking its permissions, schema, freshness, or side effects.", []string{}, renderToolUseSkill},
-		{"wormhole-code-graph", ".agents/skills/wormhole-code-graph/SKILL.md", "a code task may benefit from bounded local structural discovery through the Wormhole Code Graph.", []string{}, renderCodeGraphSkill},
 		{"wormhole-operating-loop", ".agents/skills/wormhole-operating-loop/SKILL.md", "carrying work from session orientation through implementation, durable reporting, verification, and handoff.", []string{}, renderOperatingLoopSkill},
 		{"wormhole-contributor", ".agents/skills/wormhole-contributor/SKILL.md", "acting as the contributor assigned to implement a scoped Wormhole Task.", []string{"contributor"}, renderContributorSkill},
 		{"wormhole-reviewer", ".agents/skills/wormhole-reviewer/SKILL.md", "reviewing another agent's Wormhole Task, implementation, evidence, or handoff.", []string{"reviewer"}, renderReviewerSkill},
@@ -200,7 +196,7 @@ code conclusion against Git and current source.`, nil
 func renderToolUseSkill(tools []localTool, guidance map[string]toolGuidance) (string, error) {
 	var out strings.Builder
 	out.WriteString("# Wormhole Gateway tool use\n\nCall only tools in this live Gateway inventory. Each request still requires its live schema and permissions.\n\n")
-	out.WriteString("## Shared KB and Code Graph\n\n" + sharedKBSemanticGuidance + "\n\n" + codeGraphSeparationGuidance + "\n\n")
+	out.WriteString("## Shared KB\n\n" + sharedKBSemanticGuidance + "\n\n")
 	out.WriteString("If the semantic provider or active index is unavailable, there is no lexical fallback; do not label degraded retrieval as semantic ranking.\n")
 	for _, tool := range tools {
 		record := guidance[tool.Name]
@@ -226,53 +222,12 @@ func renderToolUseSkill(tools []localTool, guidance map[string]toolGuidance) (st
 	return out.String(), nil
 }
 
-func renderCodeGraphSkill(_ []localTool, _ map[string]toolGuidance) (string, error) {
-	return `# Wormhole Code Graph
-
-` + codeGraphSeparationGuidance + `
-
-## Use Code Graph when
-
-- beginning a code task in an unfamiliar area;
-- tracing an implementation path, callers, references, types, or an error;
-- narrowing files required for review;
-- a Wormhole object references a symbol or source location.
-
-## Do not use Code Graph when
-
-- reading an already-known file or inspecting non-code prose or assets;
-- querying untracked or ignored files, or code outside the approved checkout;
-- status is disabled or error;
-- strict current source is required while the graph is stale;
-- direct filesystem inspection is inherently simpler.
-
-## Sequence
-
-1. Inspect wormhole.code_graph.status first.
-2. Verify Git HEAD and working tree state directly.
-3. When enabled and sufficiently current, call wormhole.code_graph.query with a bounded source budget.
-4. Source slices require the separate code_graph.source.read permission.
-5. Inspect returned paths and slices, then request targeted follow-up symbols.
-6. Use ordinary filesystem tools only for unresolved context.
-
-Heuristic edges are discovery hypotheses, not proof of complete relationships.
-Code Graph narrows source discovery. It does not replace Git, the working tree,
-direct verification, builds, or tests.`, nil
-}
-
 func renderOperatingLoopSkill(_ []localTool, _ map[string]toolGuidance) (string, error) {
 	return `# Wormhole operating loop
 
 ` + sharedKBSemanticGuidance + `
 
-` + codeGraphSeparationGuidance + `
-
 If the semantic provider or active index is unavailable, there is no lexical fallback; do not label degraded retrieval as semantic ranking.
-
-if Code Graph is ready:
-    query it before broad code discovery
-else:
-    continue with normal filesystem and repository tools
 
 ## session start:
 
@@ -280,16 +235,14 @@ else:
 2. inspect assigned and relevant Tasks
 3. retrieve relevant KB context
 4. inspect recent relevant Events
-5. inspect Code Graph status for code tasks
-6. confirm intended work before broad exploration
+5. confirm intended work before broad exploration
 
 ## before changing code:
 
 1. retrieve the Task and links
 2. check decisions and constraints
-3. use Code Graph when ready and useful
-4. report work begun when supported
-5. preserve Git as authority
+3. report work begun when supported
+4. preserve Git as authority
 
 ## during work:
 
@@ -324,10 +277,9 @@ func renderReviewerSkill(_ []localTool, _ map[string]toolGuidance) (string, erro
 	return `# Wormhole reviewer
 
 1. Retrieve the Task intent, decisions, constraints, and supported Git pointer.
-2. Use Code Graph when ready to narrow changed paths, callers, and affected types.
-3. Verify every graph finding against Git, the working tree, and current source.
-4. Treat heuristic edges as hypotheses, not proof.
-5. Record actionable findings with evidence and severity; avoid silent redesign.
+2. Inspect changed paths, callers, and affected types in current source.
+3. Verify findings against Git, the working tree, and current source.
+4. Record actionable findings with evidence and severity; avoid silent redesign.
 6. Link conclusions to the Task or Git pointer and leave enough context for the contributor.`, nil
 }
 

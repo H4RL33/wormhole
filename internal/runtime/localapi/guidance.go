@@ -276,12 +276,12 @@ func gatewayGuidanceConcept(toolName string) string {
 	switch {
 	case toolName == "wormhole.sync.status":
 		return "local status and synchronisation"
+	case hasToolPrefix(toolName, "wormhole.workspace."):
+		return "portable workspace"
 	case toolName == "wormhole.agent.get_guidance":
 		return "integration guidance"
 	case toolName == "wormhole.agent.enrol" || hasToolPrefix(toolName, "wormhole.agent."):
 		return "identity"
-	case hasToolPrefix(toolName, "wormhole.code_graph."):
-		return "Code Graph"
 	case hasToolPrefix(toolName, "wormhole.task."):
 		return "tasks"
 	case hasToolPrefix(toolName, "wormhole.channel."):
@@ -327,15 +327,15 @@ func gatewayGuidanceText() map[string]guidanceText {
 			MisuseWarning:            "Empty guidance can mean no approved cache, revocation, or incompatibility; never infer approval or trigger a mutation from this read.",
 		},
 		"wormhole.agent.register": {
-			Purpose:                  "Create a Passport-backed agent or register an existing agent's local presence.",
-			UseWhen:                  "When joining an agent or making a known agent available to local routing.",
+			Purpose:                  "Register an existing agent's local presence and declared capabilities.",
+			UseWhen:                  "When making a known agent available to local routing.",
 			DoNotUseWhen:             "Do not use it for a routine presence heartbeat.",
 			MutatesState:             true,
-			Prerequisites:            "Use the join or local-presence request shape, and obtain any required Fabric authorization for joins.",
-			FreshnessImplications:    "Join state may require sync before other Gateways observe it.",
+			Prerequisites:            "A server-resolved workspace and an existing agent identifier.",
+			FreshnessImplications:    "Presence registration is Gateway-local scheduler state.",
 			SourceAccessImplications: noSource,
 			RecommendedFollowUp:      "Set presence after local registration, then verify with agent.list.",
-			MisuseWarning:            "Do not mix join and presence fields; request shape selects the operation.",
+			MisuseWarning:            "Do not infer shared identity creation or new permissions from local presence registration.",
 		},
 		"wormhole.agent.presence": {
 			Purpose:                  "Update an existing locally registered agent's availability.",
@@ -383,40 +383,60 @@ func gatewayGuidanceText() map[string]guidanceText {
 			RecommendedFollowUp:      "Inspect sync.status and follow the returned lifecycle code before retrying.",
 			MisuseWarning:            "Do not expose credential material or reuse an attempt key for a different enrollment.",
 		},
-
-		// Code Graph.
-		"wormhole.code_graph.query": {
-			Purpose:                  "Narrow Go source discovery through a bounded local Code Graph query.",
-			UseWhen:                  "When an enabled, sufficiently current graph can locate symbols, callers, references, or a code path before broad search.",
-			DoNotUseWhen:             "Do not use it for known files, non-code assets, untracked or ignored files, or when strict current source is required from a stale graph.",
+		"wormhole.workspace.status": {
+			Purpose:                  "Inspect the bound workspace candidate, overlay generation, and publication review state.",
+			UseWhen:                  "Before importing, checkpointing, or deciding whether a public-Git acknowledgement is required.",
+			DoNotUseWhen:             "Do not use it as a Git status replacement or to mutate portable state.",
 			MutatesState:             false,
-			Prerequisites:            "An enabled project graph and code_graph.query permission; source slices also require code_graph.source.read.",
-			FreshnessImplications:    "Check code_graph.status and independently verify Git HEAD and the working-tree state before relying on graph results; the graph narrows discovery and does not replace Git, direct inspection, builds, or tests.",
-			SourceAccessImplications: "Returned source is bounded by the request's source budget and is metadata-only without code_graph.source.read; never treat a slice as complete file context.",
-			RecommendedFollowUp:      "Inspect the returned paths and symbols, then verify the live working tree with targeted reads and Git commands.",
-			MisuseWarning:            "Edges are heuristic discovery aids, not proof of complete call, reference, or type-use coverage.",
-		},
-		"wormhole.code_graph.status": {
-			Purpose:                  "Inspect local Code Graph health, revision, and freshness without changing it.",
-			UseWhen:                  "Before a Code Graph query or when deciding whether graph output is current enough for a task.",
-			DoNotUseWhen:             "Do not use it as proof that Git or the working tree is unchanged.",
-			MutatesState:             false,
-			Prerequisites:            "A bound project and code_graph.status permission.",
-			FreshnessImplications:    "It reports graph freshness against tracked Go inventory and approved remote state; verify current Git HEAD and working-tree state directly for task-critical conclusions.",
+			Prerequisites:            "A registered workspace resolved by Gateway.",
+			FreshnessImplications:    "Reports current private workspace bookkeeping and the accepted tracked snapshot without changing either.",
 			SourceAccessImplications: noSource,
-			RecommendedFollowUp:      "Query with a bounded source budget only when status is usable, or use ordinary repository inspection.",
-			MisuseWarning:            "Do not call status as a rebuild request or mistake degraded health for current source.",
+			RecommendedFollowUp:      "Use workspace.diff to inspect exact portable changes.",
+			MisuseWarning:            "Do not treat candidate presence as Git acceptance.",
 		},
-		"wormhole.code_graph.rebuild": {
-			Purpose:                  "Request one normal balanced copy-on-write rebuild from persisted approved Code Graph configuration.",
-			UseWhen:                  "When status recommends a rebuild and a human-approved graph configuration already exists.",
-			DoNotUseWhen:             "Do not use it to change graph configuration, force an unsafe rebuild, or compensate for unverified Git changes.",
+		"wormhole.workspace.diff": {
+			Purpose:                  "Return the attributed semantic portable-state diff and exact publication review digest.",
+			UseWhen:                  "Before checkpointing or reviewing tracked portable-state changes.",
+			DoNotUseWhen:             "Do not use it to inspect arbitrary source-code changes.",
+			MutatesState:             false,
+			Prerequisites:            "A registered workspace with accepted portable state.",
+			FreshnessImplications:    "Compares the current composed candidate against the accepted portable snapshot.",
+			SourceAccessImplications: noSource,
+			RecommendedFollowUp:      "Review changes and pass the exact digest to checkpoint when public publication requires acknowledgement.",
+			MisuseWarning:            "A review digest is bound to the exact candidate and becomes stale after any mutation.",
+		},
+		"wormhole.workspace.import": {
+			Purpose:                  "Import direct tracked portable-state edits into the attributed workspace candidate.",
+			UseWhen:                  "After editing .wormhole/state/v1 through ordinary repository tools.",
+			DoNotUseWhen:             "Do not use it to import private databases, credentials, or operational journals.",
 			MutatesState:             true,
-			Prerequisites:            "A bound project, code_graph.rebuild permission, enabled graph, and persisted approved configuration.",
-			FreshnessImplications:    "The rebuild snapshots the approved checkout; verify Git HEAD and working-tree state before and after using the rebuilt graph for current-source decisions.",
-			SourceAccessImplications: "Rebuild does not grant source access or bypass query source budgets and code_graph.source.read.",
-			RecommendedFollowUp:      "Recheck code_graph.status, then query with bounded source access if needed.",
-			MisuseWarning:            "Do not expect exact semantic completeness: graph edges remain heuristic, while the rebuild preserves the active graph on failure.",
+			Prerequisites:            "A registered workspace and a valid portable working tree.",
+			FreshnessImplications:    "Reads the exact current portable tree and rebases the private overlay through its imported generation.",
+			SourceAccessImplications: noSource,
+			RecommendedFollowUp:      "Inspect workspace.diff before checkpointing.",
+			MisuseWarning:            "Import does not stage, commit, or push Git.",
+		},
+		"wormhole.workspace.checkpoint": {
+			Purpose:                  "Materialize the current portable candidate without performing Git publication.",
+			UseWhen:                  "After reviewing the semantic diff and any required public-Git acknowledgement.",
+			DoNotUseWhen:             "Do not use it as a substitute for Git staging, commit, or push.",
+			MutatesState:             true,
+			Prerequisites:            "A registered workspace; public Git requires the exact current publication review digest.",
+			FreshnessImplications:    "The supplied acknowledgement is rejected if the candidate changed after review.",
+			SourceAccessImplications: noSource,
+			RecommendedFollowUp:      "Review the unstaged tracked tree, then accept it with ordinary Git commands.",
+			MisuseWarning:            "Checkpoint never stages, commits, or pushes Git.",
+		},
+		"wormhole.workspace.stash": {
+			Purpose:                  "Durably stash the current private overlay under an explicit request ID and label.",
+			UseWhen:                  "When pausing attributed work without changing accepted portable state.",
+			DoNotUseWhen:             "Do not use it as Git stash or as a publication action.",
+			MutatesState:             true,
+			Prerequisites:            "A registered workspace, unique request ID, and non-empty label.",
+			FreshnessImplications:    "Captures the exact current overlay and candidate digest in private state.",
+			SourceAccessImplications: noSource,
+			RecommendedFollowUp:      "Confirm workspace.status and resume through the supported workspace lifecycle.",
+			MisuseWarning:            "Private stash rows are not portable and never enter tracked Git state.",
 		},
 
 		// Tasks.

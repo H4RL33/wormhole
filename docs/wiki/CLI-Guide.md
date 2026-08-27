@@ -7,141 +7,97 @@ This guide covers the current user-facing commands. The implementation and
 
 | Binary | Purpose |
 |---|---|
-| `wormhole` | Setup, profiles, harness connection, and MCP stdio bridge |
+| `wormhole` | Setup, portable workspace operations, connector management, profiles, and MCP bridge |
 | `gatewayd` | Gateway: local SQLite-backed runtime and sync queue |
-| `fabric` | Fabric: PostgreSQL-backed Coordination Server |
+| `fabric` | Optional PostgreSQL-backed coordination service |
 
-Build all three:
-
-```bash
-make build
-```
+Build all three with `make build`.
 
 ## Commands
 
 ```text
-wormhole init
-wormhole join
-wormhole connect
-wormhole whoami
-wormhole status --profile PROFILE
-wormhole config code-graph enable
-wormhole config code-graph disable
-wormhole config code-graph status
-wormhole config code-graph rebuild
-wormhole config code-graph checkout set PATH
-wormhole config code-graph checkout show
-wormhole profile list
-wormhole viewer-key create
+wormhole setup [flags]
+wormhole status
+wormhole diff
+wormhole import
+wormhole checkpoint [flags]
+wormhole stash [flags]
+wormhole connector list <codex|claude>
+wormhole connector install [--yes] <codex|claude>
+wormhole connector remove [--yes] <codex|claude>
+wormhole whoami [flags]
+wormhole profile list [flags]
+wormhole viewer-key create [flags]
 wormhole mcp
 wormhole help
 ```
 
 Run `./dist/wormhole <command> --help` for command flags.
 
-### `wormhole init`
+### Canonical setup
 
-Creates `.wormhole/config.toml` interactively in the current project.
-
-### `wormhole join`
-
-Asks the running Gateway to register an agent, persist its credential profile,
-transactionally bootstrap SQLite, and start incremental sync. The CLI does not
-call the Coordination Server directly. It currently requires a reachable
-Coordination Server and a pre-credential `gatewayd` process.
+From the root of a Git repository containing `.wormhole/config.toml` and the
+portable `.wormhole/state/v1/` tree:
 
 ```bash
-./dist/wormhole join \
-  --server https://wormhole.example \
-  --project PROJECT_UUID \
-  --owner "$USER" \
-  --model your-model \
-  --permissions task.list,kb.search \
-  --profile demo
+./dist/wormhole setup --publication local_only
 ```
 
-### `wormhole connect`
+Setup is resumable. It validates the repository and portable base, ensures the
+owner-only Gateway service, registers the checkout, selects a local human
+identity, records publication policy, imports the Git base, and proposes
+detected first-party connector changes. It prints the complete plan before
+mutation; `--yes` accepts it non-interactively.
 
-Registers an agent, stores credentials, and wires Claude Code or OpenCode to
-the local `wormhole mcp` bridge.
+Supported publication policies are `local_only`, `private_git`, and
+`public_git`. A public policy requires explicit review acknowledgement at
+checkpoint time.
+
+### Portable workspace loop
 
 ```bash
-./dist/wormhole connect \
-  --server https://wormhole.example \
-  --project PROJECT_UUID \
-  --owner "$USER" \
-  --model your-model \
-  --permissions task.list,task.create,kb.search,kb.write \
-  --profile demo \
-  --target claude \
-  --stdio-bin "$(pwd)/dist/wormhole"
+./dist/wormhole status
+./dist/wormhole diff
+./dist/wormhole import
+./dist/wormhole checkpoint
+./dist/wormhole stash --request-id REQUEST_ID
 ```
 
-Use `--target opencode` for OpenCode.
+The five top-level commands use the same Gateway domain operations as
+`wormhole.workspace.{status,diff,import,checkpoint,stash}` over MCP. Gateway
+derives checkout binding and actor attribution; clients do not supply them.
 
-### `gatewayd <profile>`
-
-Starts the local daemon for one named profile. If that profile does not yet
-exist, the daemon serves the protected local enrolment endpoint so `wormhole
-join` or `wormhole connect` can complete it:
+For `public_git`, `diff` returns the review digest that checkpoint must
+acknowledge exactly:
 
 ```bash
-./dist/gatewayd demo
+./dist/wormhole checkpoint --publication-review-digest sha256:<review-digest>
 ```
 
-After enrollment has committed its ready checkpoint, startup validates the
-credential identity against SQLite, serves the local socket, and starts
-push-then-pull synchronization in the background. Fabric availability does not
-gate restart. Supported local reads and writes continue against SQLite and the
-durable queue; enrollment and other central-authority operations reject while
-offline.
+Checkpoint writes an uncommitted portable working-tree candidate. Wormhole does
+not stage, commit, or push Git changes.
 
-### `wormhole mcp`
+### Connector lifecycle
 
-Bridges MCP between harness stdio and the local daemon socket. Harness
-configuration normally launches it automatically.
+```bash
+./dist/wormhole connector list claude
+./dist/wormhole connector install --yes claude
+./dist/wormhole connector remove --yes claude
+```
+
+Use `codex` for Codex. Install and removal inspect native client state, apply a
+transaction, verify it, and roll back on failure. Harnesses launch `wormhole mcp`
+and reach the local Gateway socket; they do not call Fabric directly.
 
 ### Profiles and identity
 
 ```bash
 ./dist/wormhole profile list
-./dist/wormhole whoami --profile demo
-./dist/wormhole status --profile demo
+./dist/wormhole whoami --profile PROFILE
 ```
 
-`status` returns exactly one of `online`, `offline`, `synchronizing`, or
-`attention_required`, plus the project-scoped durable pending-write count.
-
-### Local Code Graph lifecycle
-
-Code Graph is local, experimental, and disabled by default. Enablement validates
-the canonical Git root and origin against the ready bootstrapped Passport
-repository scope, explains CPU, memory, disk, and I/O costs, builds a candidate,
-and atomically publishes the candidate with its approved checkout configuration.
-The exact ready credential/agent/Passport repository binding is revalidated in
-the publication transaction, so authority rotated during a build cannot publish.
-Checkout switches and rebuilds use the same copy-on-write publication rule, so a
-failed build keeps the prior checkout and active revision. Checkout changes also
-preserve the configured source-byte ceiling; there is no lifecycle limit knob.
-
-```bash
-./dist/wormhole config code-graph enable
-./dist/wormhole config code-graph status
-./dist/wormhole config code-graph rebuild
-./dist/wormhole config code-graph checkout set /path/to/repository
-./dist/wormhole config code-graph checkout show
-./dist/wormhole config code-graph disable
-```
-
-Project scope comes from `--project` or the nearest `.wormhole/config.toml`.
-Mutations prompt on an interactive terminal; scripts must pass `--confirm`.
-Disablement is destructive for every completed or candidate local graph
-revision, node, file, symbol, edge, diagnostic, and project Code Graph
-configuration row. It does not modify Git,
-HEAD, the index, or working-tree bytes. Status and checkout show are read-only
-human commands and do not use agent MCP permissions. The model-facing MCP
-surface remains exactly query, status, and balanced rebuild; enable, disable,
-checkout selection, Warpspeed, pause/resume, and in-place rebuild are absent.
+Credential profiles are optional Fabric routing material. They are private and
+must never be committed.
 
 ### Dashboard viewer keys
 
@@ -153,55 +109,38 @@ checkout selection, Warpspeed, pause/resume, and in-place rebuild are absent.
   --admin-key "$WORMHOLE_ADMIN_KEY"
 ```
 
-`--admin-key` defaults to `WORMHOLE_ADMIN_KEY`, so the final flag can be
-omitted when that environment variable is set. Viewer-key issuance uses the
+`--admin-key` defaults to `WORMHOLE_ADMIN_KEY`. Viewer-key issuance uses the
 operator boundary described in the canonical security documentation.
 
-## Configuration
-
-Configuration precedence:
-
-```text
-explicit flag > project config > global config > environment or Git > default > error
-```
-
-Paths:
+## Paths and private state
 
 - Project config: nearest `.wormhole/config.toml`
+- Portable tracked state: `.wormhole/state/v1/`
 - Global config: `$XDG_CONFIG_HOME/wormhole/config.toml`, or
   `~/.config/wormhole/config.toml`
 - Credentials: `~/.wormhole/credentials/<profile>.json`
-- Local SQLite database: `$XDG_DATA_HOME/wormhole/wormholed.db`, or
+- Local SQLite: `$XDG_DATA_HOME/wormhole/wormholed.db`, or
   `~/.local/share/wormhole/wormholed.db`
-- Daemon socket: `$XDG_RUNTIME_DIR/wormhole/wormholed.sock`, or the
+- Socket: `$XDG_RUNTIME_DIR/wormhole/wormholed.sock`, or the documented
   `$TMPDIR/wormhole-runtime/` fallback
 
-The retained `wormholed.db` and `wormholed.sock` filenames are paths for local
-Gateway state. They are not executable aliases; use `gatewayd` for the daemon.
+Workspace IDs, identities, overlays, stashes, journals, receipts, credentials,
+connector backups, and operational rows remain machine-private. The retained
+`wormholed.db` and `wormholed.sock` names are paths, not executable aliases.
 
-### Private Gateway database format
-
-This closed-pre-alpha build supports only a fresh private database or an exact
-schema-v6 database. Fresh initialization is atomic; exact v6 reopen performs no
-schema mutation. An older, future, malformed, partial, unexpected, or
-proof-incompatible database is preserved and refused during read-only preflight.
-
-There is no private-database migration, exporter, reset command, normalization,
-quarantine, or automatic deletion. When refusal occurs, stop `gatewayd`, inspect
-for unpublished overlays, stashes, and pending checkpoints, and back up the
-database before any deliberate manual removal. Remove it only outside Wormhole,
-then rerun setup. This does not change the supported tracked Git format under
-`.wormhole/state/v1/`.
+The private Gateway database is a closed pre-alpha format: this binary accepts
+only a fresh database or an exact schema-v6 database. It does not migrate,
+export, reset, normalize, or delete an unsupported database. Inspect and back up
+private unpublished work before deliberate manual removal. This rule does not
+change the supported portable Git format.
 
 ## Connection patterns
-
-Single machine:
 
 ```text
 Harness -> wormhole mcp -> Gateway -> SQLite
 ```
 
-Coordinated machines:
+With optional coordination:
 
 ```text
 Harness A -> Gateway A --\
@@ -209,5 +148,5 @@ Harness A -> Gateway A --\
 Harness B -> Gateway B --/
 ```
 
-See the [README](https://github.com/H4RL33/wormhole#readme) for complete
-quickstarts.
+See the [README](https://github.com/H4RL33/wormhole#readme) for the complete
+quickstart.

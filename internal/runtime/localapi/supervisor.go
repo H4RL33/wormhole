@@ -27,7 +27,6 @@ type SupervisorDependencies struct {
 	ProjectState *projectstate.Service
 	Identity     *localidentity.Store
 	Fabric       FabricRouter
-	CodeGraph    CodeGraphProvider
 }
 
 // Supervisor owns the one local API server and its listener. Its injected
@@ -48,8 +47,7 @@ type Supervisor struct {
 }
 
 func NewSupervisor(dependencies SupervisorDependencies) (*Supervisor, error) {
-	if dependencies.Store == nil || dependencies.ProjectState == nil || dependencies.Identity == nil ||
-		interfaceNil(dependencies.Fabric) || interfaceNil(dependencies.CodeGraph) {
+	if dependencies.Store == nil || dependencies.ProjectState == nil || dependencies.Identity == nil || interfaceNil(dependencies.Fabric) {
 		return nil, ErrIncompleteSupervisorDependencies
 	}
 	if dependencies.Store.DB() == nil || dependencies.Store.DB().PingContext(context.Background()) != nil {
@@ -100,24 +98,23 @@ func (s *Supervisor) Listen(socketPath string) (*Server, error) {
 		return nil, fmt.Errorf("localapi: listen on %s: %w", socketPath, err)
 	}
 	server := &Server{
-		listener:          listener,
-		socketPath:        socketPath,
-		httpClient:        &http.Client{},
-		projectState:      s.dependencies.ProjectState,
-		actorResolver:     s.dependencies.Identity,
-		identityStore:     s.dependencies.Identity,
-		fabricRouter:      s.dependencies.Fabric,
-		codeGraphProvider: s.dependencies.CodeGraph,
-		store:             s.dependencies.Store,
-		tr:                s.tasks,
-		er:                s.events,
-		kb:                s.articles,
-		gr:                s.gitLinks,
-		qr:                s.queue,
-		eventbus:          s.eventBus,
-		scheduler:         s.scheduler,
-		handlers:          make(chan struct{}, maxActiveConnections),
-		serveReady:        make(chan struct{}),
+		listener:      listener,
+		socketPath:    socketPath,
+		httpClient:    &http.Client{},
+		projectState:  s.dependencies.ProjectState,
+		actorResolver: s.dependencies.Identity,
+		identityStore: s.dependencies.Identity,
+		fabricRouter:  s.dependencies.Fabric,
+		store:         s.dependencies.Store,
+		tr:            s.tasks,
+		er:            s.events,
+		kb:            s.articles,
+		gr:            s.gitLinks,
+		qr:            s.queue,
+		eventbus:      s.eventBus,
+		scheduler:     s.scheduler,
+		handlers:      make(chan struct{}, maxActiveConnections),
+		serveReady:    make(chan struct{}),
 	}
 	server.registry = newLocalRegistry(server)
 	s.server = server

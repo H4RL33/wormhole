@@ -14,7 +14,6 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -122,69 +121,6 @@ func TestAlphaContractGatewayMCPRegistry(t *testing.T) {
 
 func TestAlphaContractGatewayMCPGuidanceInventory(t *testing.T) {
 	assertGatewayToolGuidance(t, newLocalRegistry(&Server{}))
-}
-
-func TestAlphaContractCodeGraphSurface(t *testing.T) {
-	manifest := readAlphaLocalContract(t)
-	wantPermissions := map[string][]string{
-		"wormhole.code_graph.query":   {"code_graph.query"},
-		"wormhole.code_graph.rebuild": {"code_graph.rebuild"},
-		"wormhole.code_graph.status":  {"code_graph.status"},
-	}
-	seen := map[string]bool{}
-	for _, tool := range manifest.MCPTools.Gateway {
-		permissions, ok := wantPermissions[tool.Name]
-		if !ok {
-			if strings.HasPrefix(tool.Name, "wormhole.code_graph.") {
-				t.Fatalf("unexpected Code Graph contract tool %q", tool.Name)
-			}
-			continue
-		}
-		seen[tool.Name] = true
-		if !reflect.DeepEqual(tool.RequiredPermissions, permissions) || len(tool.RequestSchemas) != 1 || len(tool.ResponseSchemas) != 1 {
-			t.Fatalf("%s contract permissions/shapes = %v/%d/%d", tool.Name, tool.RequiredPermissions, len(tool.RequestSchemas), len(tool.ResponseSchemas))
-		}
-		request := tool.RequestSchemas[0].Schema
-		if request.AdditionalProperties == nil || *request.AdditionalProperties || !reflect.DeepEqual(request.Required, []string{"project_id"}) {
-			t.Fatalf("%s request is not closed/project-required: %+v", tool.Name, request)
-		}
-		responseProperties := contractProperties(tool.ResponseSchemas[0].Schema)
-		switch tool.Name {
-		case "wormhole.code_graph.status":
-			if !reflect.DeepEqual(responseProperties["state"].Enum, []string{"degraded", "disabled", "error", "initializing", "ready", "stale"}) {
-				t.Fatalf("status state enum = %v", responseProperties["state"].Enum)
-			}
-		case "wormhole.code_graph.query":
-			if !reflect.DeepEqual(request.AnyOf, []alphaSchema{{Required: []string{"intent"}}, {Required: []string{"entry_symbols"}}}) {
-				t.Fatalf("query anyOf = %+v", request.AnyOf)
-			}
-			for _, field := range []string{"current_git_commit", "working_tree_status", "graph_revision", "graph_not_current", "rebuild_recommended", "sources"} {
-				if _, ok := responseProperties[field]; !ok {
-					t.Errorf("query response missing %s", field)
-				}
-			}
-			if !reflect.DeepEqual(responseProperties["working_tree_status"].Enum, []string{"clean", "dirty"}) {
-				t.Fatalf("working_tree_status enum = %v", responseProperties["working_tree_status"].Enum)
-			}
-		}
-	}
-	if len(seen) != len(wantPermissions) {
-		t.Fatalf("Code Graph contract tools = %v, want %v", seen, wantPermissions)
-	}
-	readme, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "contracts", "README.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, phrase := range []string{"code_graph.source.read", "metadata-only", "project-local", "graph_not_current", "rebuild_recommended", "balanced copy-on-write", "does not call the working tree `stale`"} {
-		if !bytes.Contains(readme, []byte(phrase)) {
-			t.Errorf("contract README missing %q", phrase)
-		}
-	}
-	for _, errorCase := range []string{"invalid or unknown input", "missing primary permission", "missing or ambiguous project scope", "disabled rebuild", "concurrent rebuild", "preserves the active graph", "status becomes `degraded` or `error`"} {
-		if !bytes.Contains(readme, []byte(errorCase)) {
-			t.Errorf("contract README missing Code Graph error case %q", errorCase)
-		}
-	}
 }
 
 func contractProperties(schema alphaSchema) map[string]alphaSchema {

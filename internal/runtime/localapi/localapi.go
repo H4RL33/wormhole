@@ -35,10 +35,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	codegraphconfig "github.com/H4RL33/wormhole/internal/runtime/codegraph/config"
-	codegraphindex "github.com/H4RL33/wormhole/internal/runtime/codegraph/index"
-	codegraphquery "github.com/H4RL33/wormhole/internal/runtime/codegraph/query"
-	codegraphstore "github.com/H4RL33/wormhole/internal/runtime/codegraph/store"
 	"github.com/H4RL33/wormhole/internal/runtime/config"
 	"github.com/H4RL33/wormhole/internal/runtime/eventbus"
 	"github.com/H4RL33/wormhole/internal/runtime/localidentity"
@@ -132,7 +128,6 @@ type Server struct {
 	actorResolver                LocalActorResolver
 	identityStore                *localidentity.Store
 	fabricRouter                 FabricRouter
-	codeGraphProvider            CodeGraphProvider
 	clock                        func() time.Time
 	beforeSetupImportTransaction func(context.Context) error
 
@@ -178,8 +173,6 @@ type Server struct {
 	// authorizationAgents binds each project to the agent id in the active
 	// credential profile, preventing stale cache rows from authorizing it.
 	authorizationAgents sync.Map // map[projectID]agentID
-	codeGraphSetupMu    sync.Mutex
-	codeGraphs          sync.Map // map[projectID]CodeGraphRuntime
 
 	// testBeforeHandlerStart is a deterministic test barrier between admission
 	// and handler execution. Production servers leave it nil.
@@ -187,10 +180,6 @@ type Server struct {
 	// testBeforeLocalWriteCommit injects a pre-commit abort for atomic-write
 	// rollback tests. It does not claim to simulate a storage-engine commit failure.
 	testBeforeLocalWriteCommit func(*sql.Tx) error
-	// testCodeGraphLifecycle preserves historical handler tests without
-	// compiling an ambient credential/runtime path into production dispatch.
-	testCodeGraphLifecycle func(context.Context, CodeGraphLifecycleRequest) (CodeGraphLifecycleStatus, error)
-
 	// registry is the local MCP tool registry (mcp.go), built once at
 	// construction time from the Server that will service every
 	// connection's tools/call dispatch (design doc §5 subtask 2).
@@ -211,90 +200,6 @@ type Server struct {
 	enrolmentSyncEngines      map[string]*syncpkg.Engine
 }
 
-// CodeGraphRuntime is one explicitly project-bound local Code Graph. Gateway
-// construction owns it; callers cannot select a checkout, limits, or store.
-type CodeGraphRuntime struct {
-	projectID   string
-	Store       *codegraphstore.Store
-	Query       *codegraphquery.Service
-	Index       *codegraphindex.Index
-	Lifecycle   *CodeGraphLifecycle
-	lifecycleMu *sync.Mutex
-}
-
-// NewCodeGraphRuntime opens one project-bound store over Gateway's SQLite
-// handle. The source ceiling is intentionally fixed until a human-controlled
-// configuration surface exists.
-func NewCodeGraphRuntime(ctx context.Context, db *sql.DB, projectID string) (CodeGraphRuntime, error) {
-	graphStore, err := codegraphstore.OpenRecovering(ctx, db, projectID)
-	if err != nil {
-		return CodeGraphRuntime{}, err
-	}
-	index := codegraphindex.New(graphStore)
-	lifecycleMu := &sync.Mutex{}
-	return CodeGraphRuntime{
-		projectID: projectID,
-		Store:     graphStore,
-		Query:     codegraphquery.New(graphStore, codegraphconfig.DefaultProjectSourceByteCeiling),
-		Index:     index,
-		Lifecycle: &CodeGraphLifecycle{
-			db: db, store: graphStore, index: index, project: projectID, mu: lifecycleMu,
-		},
-		lifecycleMu: lifecycleMu,
-	}, nil
-}
-
-// SetCodeGraphRuntime binds a runtime to precisely one project. A nil or
-// incomplete runtime is ignored so unavailable graph state fails closed.
-func (s *Server) SetCodeGraphRuntime(projectID string, runtime CodeGraphRuntime) {
-	s.codeGraphSetupMu.Lock()
-	defer s.codeGraphSetupMu.Unlock()
-	if validCodeGraphRuntime(projectID, runtime) {
-		if _, exists := s.codeGraphs.Load(projectID); exists {
-			return
-		}
-		s.codeGraphs.Store(projectID, runtime)
-	}
-}
-
-// EnsureCodeGraphRuntime opens and atomically publishes one complete
-// project-bound runtime. It is safe for eager Gateway wiring and concurrent
-// pre-credential lifecycle access.
-func (s *Server) EnsureCodeGraphRuntime(ctx context.Context, projectID string) error {
-	_, err := s.ensureCodeGraphRuntime(ctx, projectID)
-	return err
-}
-
-func (s *Server) ensureCodeGraphRuntime(ctx context.Context, projectID string) (CodeGraphRuntime, error) {
-	if projectID == "" || s.store == nil {
-		return CodeGraphRuntime{}, errors.New("code graph: project runtime unavailable")
-	}
-	s.codeGraphSetupMu.Lock()
-	defer s.codeGraphSetupMu.Unlock()
-	if raw, ok := s.codeGraphs.Load(projectID); ok {
-		runtime, ok := raw.(CodeGraphRuntime)
-		if !ok || !validCodeGraphRuntime(projectID, runtime) {
-			return CodeGraphRuntime{}, errors.New("code graph: project runtime unavailable")
-		}
-		return runtime, nil
-	}
-	runtime, err := NewCodeGraphRuntime(ctx, s.store.DB(), projectID)
-	if err != nil {
-		return CodeGraphRuntime{}, err
-	}
-	s.codeGraphs.Store(projectID, runtime)
-	return runtime, nil
-}
-
-func validCodeGraphRuntime(projectID string, runtime CodeGraphRuntime) bool {
-	return projectID != "" && runtime.projectID == projectID && runtime.Store != nil && runtime.Query != nil && runtime.Index != nil &&
-		runtime.Lifecycle != nil && runtime.lifecycleMu != nil && runtime.Lifecycle.db != nil &&
-		runtime.Lifecycle.store == runtime.Store && runtime.Lifecycle.index == runtime.Index &&
-		runtime.Lifecycle.project == projectID && runtime.Lifecycle.mu == runtime.lifecycleMu
-}
-
-// SetVersion sets the linker-injected Gateway version reported by MCP
-// initialize responses. Empty versions retain the development default.
 func (s *Server) SetVersion(version string) {
 	s.version = version
 }
@@ -543,94 +448,6 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 			}
 		}
 	}
-}
-
-// isJoinRegisterArgs reports whether a wormhole.agent.register call's args
-// are the join/passport-creation shape (RFC-0001 §9, cmd/wormhole's
-// registerAgentInput: owner/model/capabilities/roles/permissions, no
-// agent_id) rather than P3's local presence-registration shape (agent_id +
-// capabilities). See the switch case in handle for why this dispatches on
-// shape instead of a second tool name.
-func isJoinRegisterArgs(args json.RawMessage) bool {
-	var argMap map[string]interface{}
-	if len(args) == 0 {
-		return false
-	}
-	if err := json.Unmarshal(args, &argMap); err != nil {
-		return false
-	}
-	_, hasAgentID := argMap["agent_id"]
-	return !hasAgentID
-}
-
-// proxyRegister forwards a join-shaped wormhole.agent.register call to the
-// Coordination Server, unauthenticated (matching cmd/wormhole's
-// doRegister, which sends no bearer token for this call — a Passport
-// doesn't exist yet). project_id is expected to already be present in args
-// (cmd/wormhole's callTool folds it in before sending), so this simply
-// forwards the args as given; no local caching, matching this call's write
-// (not cacheable read) semantics.
-func (s *Server) proxyRegister(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
-	var argMap map[string]interface{}
-	if len(args) > 0 {
-		if err := json.Unmarshal(args, &argMap); err != nil {
-			return nil, fmt.Errorf("localapi: agent register: invalid args: %w", err)
-		}
-	}
-	projectID, _ := argMap["project_id"].(string)
-
-	orgCtx, err := s.resolveOrgContext(projectID)
-	if err != nil {
-		return nil, err
-	}
-	if s.statusProvider != nil {
-		status, statusErr := s.statusProvider.Status(ctx, orgCtx.ProjectID)
-		if statusErr == nil && status.State == syncpkg.StateOffline {
-			return nil, errors.New("localapi: central authority required: wormhole.agent.register is unavailable while Fabric is offline")
-		}
-	}
-
-	paramsRaw, err := json.Marshal(toolsCallParams{Name: "wormhole.agent.register", Arguments: args})
-	if err != nil {
-		return nil, fmt.Errorf("localapi: marshal params: %w", err)
-	}
-	reqBody, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "tools/call", Params: paramsRaw})
-	if err != nil {
-		return nil, fmt.Errorf("localapi: marshal request: %w", err)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(orgCtx.Creds.Server, "/")+"/mcp", bytes.NewReader(reqBody))
-	if err != nil {
-		return nil, fmt.Errorf("localapi: build request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := s.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("localapi: call coordination server: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var rpcResp rpcResponse
-	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
-		return nil, fmt.Errorf("localapi: decode coordination server response: %w", err)
-	}
-	if rpcResp.Error != nil {
-		return nil, errors.New(rpcResp.Error.Message)
-	}
-
-	var result toolCallResult
-	if err := json.Unmarshal(rpcResp.Result, &result); err != nil {
-		return nil, fmt.Errorf("localapi: decode tools/call result: %w", err)
-	}
-	if len(result.Content) == 0 {
-		return nil, errors.New("localapi: empty register result from coordination server")
-	}
-	if result.IsError {
-		return nil, errors.New(result.Content[0].Text)
-	}
-
-	return json.RawMessage(result.Content[0].Text), nil
 }
 
 // proxyAuthenticatedTool forwards a central-authority tool through the

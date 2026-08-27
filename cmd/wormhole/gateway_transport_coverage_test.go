@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/H4RL33/wormhole/internal/runtime/localapi"
 )
 
 func gatewayTransportSocket(t *testing.T, initializeResponse, callResponse string) string {
@@ -62,55 +60,6 @@ func toolRPCResponse(t *testing.T, content string, isError bool) string {
 		t.Fatal(err)
 	}
 	return string(response)
-}
-
-func TestDoEnrolViaSocketValidatesEveryGatewayResponseBoundary(t *testing.T) {
-	okInit := `{"jsonrpc":"2.0","id":1,"result":{}}`
-	valid := localapi.EnrolmentResult{
-		Version: localapi.EnrolmentProtocolVersion, Code: localapi.EnrolmentSuccess,
-		State: localapi.EnrolmentReady, IdempotencyKey: "018f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1",
-	}
-	validJSON, err := json.Marshal(valid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tests := []struct {
-		name string
-		init string
-		call string
-		want string
-	}{
-		{"initialize read", "", "", "read Gateway initialize response"},
-		{"initialize malformed", "not-json", "", "decode Gateway initialize response"},
-		{"initialize rpc error", `{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"not ready"}}`, "", "Gateway initialize: not ready"},
-		{"call read", okInit, "close-after-call", "read enrolment response"},
-		{"call malformed", okInit, "not-json", "decode enrolment response"},
-		{"call rpc error", okInit, `{"jsonrpc":"2.0","id":2,"error":{"code":-1,"message":"denied"}}`, "denied"},
-		{"tool result malformed", okInit, `{"jsonrpc":"2.0","id":2,"result":"bad"}`, "decode enrolment tool result"},
-		{"tool result empty", okInit, `{"jsonrpc":"2.0","id":2,"result":{"content":[]}}`, "empty enrolment result"},
-		{"tool result error", okInit, toolRPCResponse(t, "policy denied", true), "policy denied"},
-		{"payload malformed", okInit, toolRPCResponse(t, "not-json", false), "decode Gateway enrolment result"},
-		{"payload invalid contract", okInit, toolRPCResponse(t, `{}`, false), "invalid enrolment result"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			path := gatewayTransportSocket(t, tt.init, tt.call)
-			_, err := doEnrolViaSocket(path, localapi.EnrolmentRequest{})
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("doEnrolViaSocket error = %v, want containing %q", err, tt.want)
-			}
-		})
-	}
-
-	path := gatewayTransportSocket(t, okInit, toolRPCResponse(t, string(validJSON), false))
-	got, err := doEnrolViaSocket(path, localapi.EnrolmentRequest{})
-	if err != nil || got.Code != localapi.EnrolmentSuccess {
-		t.Fatalf("successful enrolment = %+v, err=%v", got, err)
-	}
-
-	if _, err := doEnrolViaSocket(filepath.Join(t.TempDir(), "missing.sock"), localapi.EnrolmentRequest{}); err == nil || !strings.Contains(err.Error(), "gatewayd not running") {
-		t.Fatalf("unreachable Gateway error = %v", err)
-	}
 }
 
 func TestCallGatewayToolValidatesEveryGatewayResponseBoundary(t *testing.T) {

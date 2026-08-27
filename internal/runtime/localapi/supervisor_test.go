@@ -1,8 +1,6 @@
 package localapi
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,11 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
-	codegraphquery "github.com/H4RL33/wormhole/internal/runtime/codegraph/query"
 	"github.com/H4RL33/wormhole/internal/runtime/localidentity"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/runtime/projectstate"
@@ -33,9 +29,7 @@ func TestNewSupervisorRejectsIncompleteDependencies(t *testing.T) {
 		{name: "project state", mutate: func(d *SupervisorDependencies) { d.ProjectState = nil }},
 		{name: "identity", mutate: func(d *SupervisorDependencies) { d.Identity = nil }},
 		{name: "Fabric", mutate: func(d *SupervisorDependencies) { d.Fabric = nil }},
-		{name: "Code Graph", mutate: func(d *SupervisorDependencies) { d.CodeGraph = nil }},
 		{name: "typed nil Fabric", mutate: func(d *SupervisorDependencies) { var value *nilFabricRouter; d.Fabric = value }},
-		{name: "typed nil Code Graph", mutate: func(d *SupervisorDependencies) { var value *nilCodeGraphProvider; d.CodeGraph = value }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -56,7 +50,7 @@ func TestNewSupervisorRejectsIncompleteDependencies(t *testing.T) {
 	}
 }
 
-func TestLocalOnlyFabricAndDisabledCodeGraphAreBindingScopedAndUnavailable(t *testing.T) {
+func TestLocalOnlyFabricIsBindingScopedAndUnavailable(t *testing.T) {
 	binding := privateRoutingTestBinding(t, t.TempDir(), "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011")
 	fabric := NewLocalOnlyFabricRouter()
 	if _, err := fabric.Status(context.Background(), binding); !errors.Is(err, ErrFabricUnavailable) {
@@ -65,20 +59,9 @@ func TestLocalOnlyFabricAndDisabledCodeGraphAreBindingScopedAndUnavailable(t *te
 	if _, err := fabric.Call(context.Background(), binding, "wormhole.sync.status", nil); !errors.Is(err, ErrFabricUnavailable) {
 		t.Fatalf("Fabric Call error = %v, want ErrFabricUnavailable", err)
 	}
-	graph := NewDisabledCodeGraphProvider()
-	if _, err := graph.Status(context.Background(), binding); !errors.Is(err, ErrCodeGraphUnavailable) {
-		t.Fatalf("Code Graph Status error = %v, want ErrCodeGraphUnavailable", err)
-	}
-	if _, err := graph.Query(context.Background(), binding, codegraphquery.Request{}); !errors.Is(err, ErrCodeGraphUnavailable) {
-		t.Fatalf("Code Graph Query error = %v, want ErrCodeGraphUnavailable", err)
-	}
-	if _, err := graph.Rebuild(context.Background(), binding); !errors.Is(err, ErrCodeGraphUnavailable) {
-		t.Fatalf("Code Graph Rebuild error = %v, want ErrCodeGraphUnavailable", err)
-	}
-
 	// The unavailable implementations carry no client, command, worker, or
 	// mutable lifecycle state: calling them cannot start network or process work.
-	for name, provider := range map[string]any{"Fabric": fabric, "Code Graph": graph} {
+	for name, provider := range map[string]any{"Fabric": fabric} {
 		kind := reflect.TypeOf(provider)
 		if kind.Kind() == reflect.Pointer {
 			kind = kind.Elem()
@@ -119,9 +102,8 @@ func TestSupervisorIsolatesMultipleWorkspacesThroughOneGateway(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	provider := &recordingCodeGraphProvider{err: ErrCodeGraphUnavailable}
 	fabric := &recordingFabricRouter{err: ErrFabricUnavailable}
-	supervisor, err := NewSupervisor(SupervisorDependencies{Store: store, ProjectState: service, Identity: identity, Fabric: fabric, CodeGraph: provider})
+	supervisor, err := NewSupervisor(SupervisorDependencies{Store: store, ProjectState: service, Identity: identity, Fabric: fabric})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +112,7 @@ func TestSupervisorIsolatesMultipleWorkspacesThroughOneGateway(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = supervisor.Close() })
-	if server.projectState != service || server.identityStore != identity || server.fabricRouter == nil || server.codeGraphProvider == nil {
+	if server.projectState != service || server.identityStore != identity || server.fabricRouter == nil {
 		t.Fatal("supervisor server did not retain the complete dependency graph")
 	}
 	if _, err := supervisor.Listen(filepath.Join(root, "second.sock")); !errors.Is(err, ErrSupervisorAlreadyListening) {
@@ -156,15 +138,6 @@ func TestSupervisorIsolatesMultipleWorkspacesThroughOneGateway(t *testing.T) {
 			t.Fatalf("cwd %q actor = (%+v, %v), want local human %q", want.Checkout.CanonicalPath, actor, err, profile.HumanPrincipalID)
 		}
 	}
-	if _, err := server.executePrivateCodeGraphLifecycle(WithResolvedBinding(context.Background(), first), CodeGraphLifecycleRequest{Operation: CodeGraphStatus, ProjectID: first.Scope.ProjectID}); !errors.Is(err, ErrCodeGraphUnavailable) {
-		t.Fatalf("configured lifecycle error = %v, want ErrCodeGraphUnavailable", err)
-	}
-	if provider.calls != 1 || provider.binding != first {
-		t.Fatalf("configured lifecycle provider calls=%d binding=%+v, want one exact %+v", provider.calls, provider.binding, first)
-	}
-	if _, loaded := server.codeGraphs.Load(first.Scope.ProjectID); loaded {
-		t.Fatal("configured lifecycle started a legacy Code Graph runtime")
-	}
 	syncStatus := privateDispatchResult(t, server, first, "wormhole.sync.status", nil, nil)
 	if !syncStatus.IsError || len(syncStatus.Content) != 1 || syncStatus.Content[0].Text != ErrFabricUnavailable.Error() {
 		t.Fatalf("configured sync status = %+v, want exact local-only Fabric sentinel", syncStatus)
@@ -176,123 +149,6 @@ func TestSupervisorIsolatesMultipleWorkspacesThroughOneGateway(t *testing.T) {
 	if !whoami.IsError || len(whoami.Content) != 1 || whoami.Content[0].Text != "localapi: binding-aware provider unavailable: wormhole.agent.whoami" {
 		t.Fatalf("configured whoami = %+v, want exact fail-closed provider error", whoami)
 	}
-}
-
-func TestPrivateProviderRPCValidatesExplicitProjectClaimAgainstResolvedBinding(t *testing.T) {
-	const (
-		boundProject  = "00000000-0000-4000-8000-000000000001"
-		forgedProject = "00000000-0000-4000-8000-000000000002"
-		workspaceID   = "00000000-0000-4000-8000-000000000011"
-	)
-	tests := []struct {
-		name      string
-		projectID *string
-		mismatch  bool
-	}{
-		{name: "absent"},
-		{name: "exact match", projectID: pointerTo(boundProject)},
-		{name: "mismatch", projectID: pointerTo(forgedProject), mismatch: true},
-	}
-	for _, route := range []string{"Code Graph lifecycle", "Fabric sync status"} {
-		for _, tt := range tests {
-			t.Run(route+"/"+tt.name, func(t *testing.T) {
-				checkout := filepath.Join(t.TempDir(), "checkout")
-				binding := privateRoutingTestBinding(t, checkout, boundProject, workspaceID)
-				_, binding.AcceptedTreeDigest = privateRoutingWorkspaceTree(t, boundProject, binding.Repository)
-				server := privateRoutingTestServer(t, privateRoutingTestActor("00000000-0000-4000-8000-000000000021"), binding)
-				codeGraph := &recordingCodeGraphProvider{err: ErrCodeGraphUnavailable}
-				fabric := &recordingFabricRouter{err: ErrFabricUnavailable}
-				server.codeGraphProvider = codeGraph
-				server.fabricRouter = fabric
-				server.registry = newLocalRegistry(server)
-
-				arguments := map[string]any{
-					privateRequestContextKey: map[string]string{"working_directory": binding.Checkout.CanonicalPath},
-				}
-				if tt.projectID != nil {
-					arguments["project_id"] = *tt.projectID
-				}
-				argumentsRaw, err := json.Marshal(arguments)
-				if err != nil {
-					t.Fatal(err)
-				}
-
-				var response rpcResponse
-				switch route {
-				case "Code Graph lifecycle":
-					arguments["operation"] = CodeGraphStatus
-					argumentsRaw, err = json.Marshal(arguments)
-					if err != nil {
-						t.Fatal(err)
-					}
-					response = dispatchPrivateRPCForTest(t, server, rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("7"), Method: codeGraphLifecycleRPCMethod, Params: argumentsRaw})
-				case "Fabric sync status":
-					params, marshalErr := json.Marshal(toolsCallParams{Name: "wormhole.sync.status", Arguments: argumentsRaw})
-					if marshalErr != nil {
-						t.Fatal(marshalErr)
-					}
-					response = dispatchPrivateRPCForTest(t, server, rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("7"), Method: "tools/call", Params: params})
-				}
-
-				providerCalls := codeGraph.calls + fabric.calls
-				if tt.mismatch {
-					if providerCalls != 0 {
-						t.Fatalf("mismatched project invoked provider %d times", providerCalls)
-					}
-					if got := privateRPCErrorText(t, response); !strings.Contains(got, "resolved project mismatch") {
-						t.Fatalf("mismatched project error = %q, want resolved project mismatch", got)
-					}
-					return
-				}
-				if providerCalls != 1 {
-					t.Fatalf("valid project invoked provider %d times, want one", providerCalls)
-				}
-				if codeGraph.calls == 1 && codeGraph.binding != binding {
-					t.Fatalf("Code Graph binding = %+v, want exact %+v", codeGraph.binding, binding)
-				}
-				if fabric.calls == 1 && fabric.binding != binding {
-					t.Fatalf("Fabric binding = %+v, want exact %+v", fabric.binding, binding)
-				}
-			})
-		}
-	}
-}
-
-func dispatchPrivateRPCForTest(t *testing.T, server *Server, request rpcRequest) rpcResponse {
-	t.Helper()
-	gateway, client := net.Pipe()
-	defer client.Close()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		defer gateway.Close()
-		server.dispatchMCPMessage(context.Background(), &mcpSession{initialized: true}, gateway, server.registry, request)
-	}()
-	line, err := bufio.NewReader(client).ReadBytes('\n')
-	if err != nil {
-		t.Fatal(err)
-	}
-	<-done
-	var response rpcResponse
-	if err := json.Unmarshal(bytes.TrimSpace(line), &response); err != nil {
-		t.Fatal(err)
-	}
-	return response
-}
-
-func privateRPCErrorText(t *testing.T, response rpcResponse) string {
-	t.Helper()
-	if response.Error != nil {
-		return response.Error.Message
-	}
-	var result toolCallResult
-	if err := json.Unmarshal(response.Result, &result); err != nil {
-		t.Fatalf("decode tool response: %v", err)
-	}
-	if !result.IsError || len(result.Content) != 1 {
-		t.Fatalf("response = %+v, want one error result", response)
-	}
-	return result.Content[0].Text
 }
 
 func pointerTo(value string) *string { return &value }
@@ -318,7 +174,7 @@ func TestSupervisorSchemaV6ReopensExactlyAndRefusesChangedLedger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewSupervisor(SupervisorDependencies{Store: reopened, ProjectState: service, Identity: identity, Fabric: NewLocalOnlyFabricRouter(), CodeGraph: NewDisabledCodeGraphProvider()}); err != nil {
+	if _, err := NewSupervisor(SupervisorDependencies{Store: reopened, ProjectState: service, Identity: identity, Fabric: NewLocalOnlyFabricRouter()}); err != nil {
 		t.Fatalf("construct over exact schema v6: %v", err)
 	}
 	if _, err := reopened.DB().Exec(`UPDATE gateway_schema_migrations SET version=5`); err != nil {
@@ -496,7 +352,7 @@ func supervisorTestDependencies(t *testing.T) SupervisorDependencies {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return SupervisorDependencies{Store: store, ProjectState: service, Identity: identity, Fabric: NewLocalOnlyFabricRouter(), CodeGraph: NewDisabledCodeGraphProvider()}
+	return SupervisorDependencies{Store: store, ProjectState: service, Identity: identity, Fabric: NewLocalOnlyFabricRouter()}
 }
 
 type nilFabricRouter struct{}
@@ -506,24 +362,6 @@ func (*nilFabricRouter) Status(context.Context, types.WorkspaceBinding) (syncpkg
 }
 func (*nilFabricRouter) Call(context.Context, types.WorkspaceBinding, string, json.RawMessage) (json.RawMessage, error) {
 	return nil, nil
-}
-
-type nilCodeGraphProvider struct{}
-
-func (*nilCodeGraphProvider) Status(context.Context, types.WorkspaceBinding) (CodeGraphLifecycleStatus, error) {
-	return CodeGraphLifecycleStatus{}, nil
-}
-func (*nilCodeGraphProvider) Query(context.Context, types.WorkspaceBinding, codegraphquery.Request) (codegraphquery.Result, error) {
-	return codegraphquery.Result{}, nil
-}
-func (*nilCodeGraphProvider) Rebuild(context.Context, types.WorkspaceBinding) (CodeGraphLifecycleStatus, error) {
-	return CodeGraphLifecycleStatus{}, nil
-}
-
-type recordingCodeGraphProvider struct {
-	calls   int
-	binding types.WorkspaceBinding
-	err     error
 }
 
 type recordingFabricRouter struct {
@@ -539,16 +377,4 @@ func (p *recordingFabricRouter) Status(_ context.Context, binding types.Workspac
 }
 func (*recordingFabricRouter) Call(context.Context, types.WorkspaceBinding, string, json.RawMessage) (json.RawMessage, error) {
 	return nil, nil
-}
-
-func (p *recordingCodeGraphProvider) Status(_ context.Context, binding types.WorkspaceBinding) (CodeGraphLifecycleStatus, error) {
-	p.calls++
-	p.binding = binding
-	return CodeGraphLifecycleStatus{}, p.err
-}
-func (*recordingCodeGraphProvider) Query(context.Context, types.WorkspaceBinding, codegraphquery.Request) (codegraphquery.Result, error) {
-	return codegraphquery.Result{}, nil
-}
-func (*recordingCodeGraphProvider) Rebuild(context.Context, types.WorkspaceBinding) (CodeGraphLifecycleStatus, error) {
-	return CodeGraphLifecycleStatus{}, nil
 }

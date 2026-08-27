@@ -258,8 +258,8 @@ func assertGatewayToolGuidance(t *testing.T, registry *localRegistry) {
 	t.Helper()
 	tools := registry.List()
 	guidance := registry.Guidance()
-	if len(tools) != 25 {
-		t.Fatalf("live Gateway tool count = %d, want 25", len(tools))
+	if len(tools) != 27 {
+		t.Fatalf("live Gateway tool count = %d, want 27", len(tools))
 	}
 	if len(guidance) != len(tools) {
 		t.Fatalf("guidance count = %d, live tool count = %d", len(guidance), len(tools))
@@ -295,13 +295,6 @@ func assertGatewayToolGuidance(t *testing.T, registry *localRegistry) {
 		validateGuidanceExample(t, buildInputSchema(tool), record.MinimalExample)
 	}
 
-	for _, name := range []string{"wormhole.code_graph.query", "wormhole.code_graph.status", "wormhole.code_graph.rebuild"} {
-		record := byTool[name]
-		if record.FreshnessImplications == "" || record.SourceAccessImplications == "" {
-			t.Fatalf("%s must describe freshness and source-access implications", name)
-		}
-	}
-	assertCodeGraphGuidanceSemantics(t, byTool)
 	assertGuidanceMutationSet(t, byTool)
 	guidanceRecord, exists := byTool["wormhole.agent.get_guidance"]
 	if !exists || guidanceRecord.MutatesState || len(guidanceRecord.RequiredPermissions) != 0 {
@@ -311,32 +304,16 @@ func assertGatewayToolGuidance(t *testing.T, registry *localRegistry) {
 
 var allowedGuidanceConcepts = map[string]bool{
 	"identity": true, "tasks": true, "channels and events": true, "knowledge": true,
-	"local status and synchronisation": true, "Code Graph": true, "integration guidance": true,
+	"local status and synchronisation": true, "portable workspace": true, "integration guidance": true,
 	"Git pointers": true,
-}
-
-func assertCodeGraphGuidanceSemantics(t *testing.T, byTool map[string]toolGuidance) {
-	t.Helper()
-	for _, name := range []string{"wormhole.code_graph.query", "wormhole.code_graph.status", "wormhole.code_graph.rebuild"} {
-		if !strings.Contains(byTool[name].FreshnessImplications, "Git HEAD") || !strings.Contains(byTool[name].FreshnessImplications, "working-tree") {
-			t.Fatalf("%s must require Git HEAD and working-tree verification", name)
-		}
-	}
-	query := byTool["wormhole.code_graph.query"]
-	if !strings.Contains(query.SourceAccessImplications, "code_graph.source.read") || !strings.Contains(query.SourceAccessImplications, "source budget") || !strings.Contains(query.MisuseWarning, "heuristic") {
-		t.Fatal("Code Graph query guidance must explain source permission, bounded budget, and heuristic edges")
-	}
-	rebuild := byTool["wormhole.code_graph.rebuild"]
-	if !strings.Contains(rebuild.Purpose, "balanced copy-on-write") || !strings.Contains(rebuild.SourceAccessImplications, "code_graph.source.read") || !strings.Contains(rebuild.MisuseWarning, "heuristic") {
-		t.Fatal("Code Graph rebuild guidance must explain balanced rebuild, source access, and heuristic edges")
-	}
 }
 
 func assertGuidanceMutationSet(t *testing.T, byTool map[string]toolGuidance) {
 	t.Helper()
 	mutating := map[string]bool{
 		"wormhole.agent.enrol": true, "wormhole.agent.register": true, "wormhole.agent.presence": true,
-		"wormhole.code_graph.rebuild": true, "wormhole.task.create": true, "wormhole.task.route": true,
+		"wormhole.workspace.import": true, "wormhole.workspace.checkpoint": true, "wormhole.workspace.stash": true,
+		"wormhole.task.create": true, "wormhole.task.route": true,
 		"wormhole.channel.create": true, "wormhole.channel.post": true, "wormhole.channel.subscribe": true,
 		"wormhole.kb.write": true, "wormhole.task.update_status": true, "wormhole.git.link_commit": true,
 	}
@@ -505,7 +482,7 @@ func TestMinimalInputExampleUsesFirstSchemaAlternativeDeterministically(t *testi
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	if !reflect.DeepEqual(keys, []string{"capabilities", "model", "owner", "permissions", "project_id", "repositories", "roles"}) {
+	if !reflect.DeepEqual(keys, []string{"agent_id", "project_id"}) {
 		t.Fatalf("agent.register generated example fields = %v", keys)
 	}
 }
@@ -513,10 +490,10 @@ func TestMinimalInputExampleUsesFirstSchemaAlternativeDeterministically(t *testi
 func TestGuidanceExampleErrorRejectsLiveSchemaViolations(t *testing.T) {
 	registry := newLocalRegistry(&Server{})
 
-	t.Run("closed Code Graph schema with extra property", func(t *testing.T) {
-		tool, ok := registry.Get("wormhole.code_graph.query")
+	t.Run("closed workspace schema with extra property", func(t *testing.T) {
+		tool, ok := registry.Get("wormhole.workspace.checkpoint")
 		if !ok {
-			t.Fatal("code_graph.query is not registered")
+			t.Fatal("workspace checkpoint is not registered")
 		}
 		example := minimalInputExample(tool)
 		example["unexpected"] = true
@@ -525,29 +502,15 @@ func TestGuidanceExampleErrorRejectsLiveSchemaViolations(t *testing.T) {
 		}
 	})
 
-	t.Run("Code Graph query without intent or entry symbols", func(t *testing.T) {
-		tool, ok := registry.Get("wormhole.code_graph.query")
-		if !ok {
-			t.Fatal("code_graph.query is not registered")
-		}
-		example := minimalInputExample(tool)
-		delete(example, "intent")
-		delete(example, "entry_symbols")
-		if err := guidanceExampleError(buildInputSchema(tool), example); err == nil {
-			t.Fatalf("query schema accepted neither intent nor entry_symbols: %#v", example)
-		}
-	})
-
-	t.Run("agent register join without owner or name", func(t *testing.T) {
+	t.Run("agent register without agent id", func(t *testing.T) {
 		tool, ok := registry.Get("wormhole.agent.register")
 		if !ok {
 			t.Fatal("agent.register is not registered")
 		}
 		example := minimalInputExample(tool)
-		delete(example, "owner")
-		delete(example, "name")
+		delete(example, "agent_id")
 		if err := guidanceExampleError(buildInputSchema(tool), example); err == nil {
-			t.Fatalf("join schema accepted neither owner nor name: %#v", example)
+			t.Fatalf("presence schema accepted no agent_id: %#v", example)
 		}
 	})
 }

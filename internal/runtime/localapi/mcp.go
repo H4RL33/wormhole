@@ -29,9 +29,8 @@ import (
 )
 
 const (
-	integrationPlanRPCMethod    = "wormhole/integration/plan"
-	integrationCommitRPCMethod  = "wormhole/integration/commit"
-	codeGraphLifecycleRPCMethod = "wormhole/code-graph/lifecycle"
+	integrationPlanRPCMethod   = "wormhole/integration/plan"
+	integrationCommitRPCMethod = "wormhole/integration/commit"
 )
 
 // Local JSON-RPC 2.0 error codes (docs/mcp-protocol.md §3.1's table,
@@ -119,15 +118,60 @@ func newLocalRegistry(s *Server) *localRegistry {
 	reg("wormhole.sync.status", "Return this project's Gateway-to-Fabric connection state and durable pending-write count.", syncStatusArgs{}, "", singleResult(localSyncStatusResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localSyncStatus(ctx, args)
 	})
-
-	registerVariants("wormhole.code_graph.query", "Query this project's bounded local Go Code Graph; source slices are included only when separately authorised.", map[string]localArgumentVariant{"default": {Example: codeGraphQueryArgs{}, AnyRequired: [][]string{{"intent"}, {"entry_symbols"}}}}, []string{"code_graph.query"}, singleResult(codeGraphQueryResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
-		return s.handleCodeGraphQuery(ctx, args)
+	reg("wormhole.workspace.status", "Inspect the accepted base, portable candidate, and publication review for this workspace.", workspaceStatusArgs{}, "", singleResult(WorkspaceStatusReadback{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+		var input workspaceStatusArgs
+		if err := decodeWorkspaceToolArguments(args, &input); err != nil {
+			return nil, err
+		}
+		result, err := s.executeWorkspaceCommand(ctx, WorkspaceCommandRequest{Operation: WorkspaceOperationStatus})
+		if err != nil {
+			return nil, err
+		}
+		return workspaceToolResult(result)
 	})
-	reg("wormhole.code_graph.status", "Inspect this project's local Code Graph health and freshness without modifying it.", codeGraphProjectArgs{}, "code_graph.status", singleResult(codeGraphStatusResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
-		return s.handleCodeGraphStatus(ctx, args)
+	reg("wormhole.workspace.diff", "Return the attributed semantic portable-state diff and exact publication-review digest for this workspace.", workspaceDiffArgs{}, "", singleResult(WorkspaceDiffReadback{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+		var input workspaceDiffArgs
+		if err := decodeWorkspaceToolArguments(args, &input); err != nil {
+			return nil, err
+		}
+		result, err := s.executeWorkspaceCommand(ctx, WorkspaceCommandRequest{Operation: WorkspaceOperationDiff})
+		if err != nil {
+			return nil, err
+		}
+		return workspaceToolResult(result)
 	})
-	reg("wormhole.code_graph.rebuild", "Request one normal balanced copy-on-write rebuild using persisted approved Code Graph configuration.", codeGraphProjectArgs{}, "code_graph.rebuild", singleResult(codeGraphRebuildResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
-		return s.handleCodeGraphRebuild(ctx, args)
+	reg("wormhole.workspace.import", "Import direct tracked portable-state edits into this workspace as an attributed candidate.", workspaceImportArgs{}, "", singleResult(WorkspaceImportReadback{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+		var input workspaceImportArgs
+		if err := decodeWorkspaceToolArguments(args, &input); err != nil {
+			return nil, err
+		}
+		result, err := s.executeWorkspaceCommand(ctx, WorkspaceCommandRequest{Operation: WorkspaceOperationImport})
+		if err != nil {
+			return nil, err
+		}
+		return workspaceToolResult(result)
+	})
+	reg("wormhole.workspace.checkpoint", "Materialize the current portable candidate without staging, committing, or pushing Git; public publication requires the exact review digest.", workspaceCheckpointArgs{}, "", singleResult(WorkspaceCheckpointReadback{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+		var input workspaceCheckpointArgs
+		if err := decodeWorkspaceToolArguments(args, &input); err != nil {
+			return nil, err
+		}
+		result, err := s.executeWorkspaceCommand(ctx, WorkspaceCommandRequest{Operation: WorkspaceOperationCheckpoint, PublicationReviewDigest: input.PublicationReviewDigest})
+		if err != nil {
+			return nil, err
+		}
+		return workspaceToolResult(result)
+	})
+	reg("wormhole.workspace.stash", "Durably stash the current portable proposal under an explicit idempotency key and label.", workspaceStashArgs{}, "", singleResult(WorkspaceStashReadback{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+		var input workspaceStashArgs
+		if err := decodeWorkspaceToolArguments(args, &input); err != nil {
+			return nil, err
+		}
+		result, err := s.executeWorkspaceCommand(ctx, WorkspaceCommandRequest{Operation: WorkspaceOperationStash, RequestID: input.RequestID, Label: input.Label})
+		if err != nil {
+			return nil, err
+		}
+		return workspaceToolResult(result)
 	})
 
 	reg(EnrolmentToolName, "Request Gateway-owned project enrolment before a Passport credential exists.", EnrolmentRequest{}, "", enrolmentResultExamples(), func(ctx context.Context, args json.RawMessage) (any, error) {
@@ -196,24 +240,7 @@ func newLocalRegistry(s *Server) *localRegistry {
 		return s.handleGitLinkCommit(ctx, args)
 	})
 
-	// wormhole.agent.register is dual-shape (RFC-0001 §9): join/passport
-	// args (owner/model/etc., no agent_id) proxy to the Coordination
-	// Server; presence-registration args (agent_id + capabilities) go to
-	// the local scheduler. Dispatch by shape, same as the old switch case
-	// (isJoinRegisterArgs, localapi.go).
-	registerVariants("wormhole.agent.register", "Register an agent: join/passport creation (proxied to the Coordination Server) or local presence registration, dispatched by argument shape.", map[string]localArgumentVariant{
-		"join": {
-			Example:     agentJoinRegisterArgs{},
-			AnyRequired: [][]string{{"owner"}, {"name"}},
-		},
-		"presence": {Example: agentLocalRegisterArgs{}},
-	}, nil, map[string]any{
-		"join":     localJoinResult{},
-		"presence": localAgentResult{},
-	}, func(ctx context.Context, args json.RawMessage) (any, error) {
-		if isJoinRegisterArgs(args) {
-			return s.proxyRegister(ctx, args)
-		}
+	registerVariants("wormhole.agent.register", "Register local agent presence and declared capabilities in the bound workspace.", singleArgument(agentLocalRegisterArgs{}), nil, singleResult(localAgentResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleAgentRegister(ctx, args)
 	})
 
@@ -273,6 +300,19 @@ func (r *localRegistry) Guidance() []toolGuidance {
 type whoAmIArgs struct{}
 
 type syncStatusArgs struct{}
+
+type workspaceStatusArgs struct{}
+type workspaceDiffArgs struct{}
+type workspaceImportArgs struct{}
+
+type workspaceCheckpointArgs struct {
+	PublicationReviewDigest string `json:"publication_review_digest,omitempty"`
+}
+
+type workspaceStashArgs struct {
+	RequestID string `json:"request_id"`
+	Label     string `json:"label"`
+}
 
 type listTasksArgs struct {
 	Status string `json:"status,omitempty"`
@@ -341,19 +381,6 @@ type gitLinkCommitArgs struct {
 	Repo      string `json:"repo"`
 	CommitSHA string `json:"commit_sha"`
 	Summary   string `json:"summary"`
-}
-
-// agentJoinRegisterArgs mirrors Fabric's accepted registration input,
-// including name as the backward-compatible alias for owner.
-type agentJoinRegisterArgs struct {
-	Name         string   `json:"name,omitempty"`
-	Permissions  []string `json:"permissions"`
-	Owner        string   `json:"owner,omitempty"`
-	Model        string   `json:"model"`
-	Capabilities []string `json:"capabilities"`
-	Repositories []string `json:"repositories"`
-	Roles        []string `json:"roles"`
-	Role         string   `json:"role,omitempty"`
 }
 
 // agentLocalRegisterArgs is the local scheduler-presence registration shape.
@@ -549,16 +576,6 @@ type localSyncStatusResult struct {
 	PendingWrites int    `json:"pending_writes"`
 }
 
-type localJoinResult struct {
-	AgentID      string    `json:"agent_id"`
-	PassportID   string    `json:"passport_id"`
-	Token        string    `json:"token"`
-	Repositories []string  `json:"repositories"`
-	Roles        []string  `json:"roles"`
-	IssuedAt     time.Time `json:"issued_at"`
-	Role         string    `json:"role,omitempty"`
-}
-
 // mcpSession is per-connection state a persistent MCP session requires that
 // the old one-shot protocol never carried: whether initialize +
 // notifications/initialized completed, and a write mutex serializing this
@@ -676,11 +693,8 @@ func buildInputSchemas(t localTool) map[string]map[string]any {
 			"properties": properties,
 			"required":   required,
 		}
-		if t.Name == EnrolmentToolName || t.Name == "wormhole.agent.get_guidance" || strings.HasPrefix(t.Name, "wormhole.code_graph.") {
+		if t.Name == EnrolmentToolName || t.Name == "wormhole.agent.get_guidance" || strings.HasPrefix(t.Name, "wormhole.workspace.") {
 			schema["additionalProperties"] = false
-		}
-		if t.Name == "wormhole.code_graph.query" {
-			properties["include_edges"].(map[string]any)["items"] = map[string]any{"type": "string", "enum": []any{"calls", "references", "uses_type"}}
 		}
 		if t.Name == EnrolmentToolName {
 			properties["credential_profile"].(map[string]any)["minLength"] = 1
@@ -1146,49 +1160,18 @@ func (s *Server) dispatchMCPMessage(ctx context.Context, sess *mcpSession, conn 
 		}
 		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: marshalResult(result)})
 
-	case codeGraphLifecycleRPCMethod:
-		// Private same-user human CLI method. It is deliberately not a tool,
-		// so models cannot discover or invoke lifecycle mutation through MCP.
+	case PrivateWorkspaceRPCMethod:
+		// Same-user human workspace control. The CLI and public MCP tools share
+		// executeWorkspaceCommand; this private method supplies only the
+		// checkout needed for server-owned binding and actor resolution.
 		if isNotification {
 			return
 		}
 		if !sess.initialized {
-			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcServerNotInitialized, Message: "server not initialized: send initialize and notifications/initialized before Code Graph lifecycle"}})
+			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcServerNotInitialized, Message: "server not initialized: send initialize and notifications/initialized before private workspace commands"}})
 			return
 		}
-		var command CodeGraphLifecycleRequest
-		callCtx := ctx
-		if s.privateRuntimeConfigured() {
-			var public json.RawMessage
-			var resolveErr error
-			callCtx, public, resolveErr = s.resolvePrivateRequest(ctx, req.Params)
-			if resolveErr != nil {
-				writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: resolveErr.Error()}})
-				return
-			}
-			if err := validatePrivateProjectClaim(callCtx, req.Params); err != nil {
-				writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: err.Error()}})
-				return
-			}
-			if err := decodeClosedJSON(public, &command); err != nil {
-				writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: "invalid Code Graph lifecycle request"}})
-				return
-			}
-		} else {
-			if err := decodeClosedJSON(req.Params, &command); err != nil {
-				writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: "invalid Code Graph lifecycle request"}})
-				return
-			}
-		}
-		var result CodeGraphLifecycleStatus
-		var err error
-		if s.privateRuntimeConfigured() {
-			result, err = s.executePrivateCodeGraphLifecycle(callCtx, command)
-		} else if s.testCodeGraphLifecycle != nil {
-			result, err = s.testCodeGraphLifecycle(ctx, command)
-		} else {
-			err = ErrCodeGraphUnavailable
-		}
+		result, err := s.dispatchPrivateWorkspaceRPC(ctx, req.Params)
 		if err != nil {
 			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: err.Error()}})
 			return

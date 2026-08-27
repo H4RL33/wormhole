@@ -241,25 +241,7 @@ func TestLocalAPIAuthorizationFailsClosedForStaleIdentityAndMalformedArguments(t
 	}
 }
 
-func TestLocalAPIHelpersClassifyJoinAndSubscriptionFailures(t *testing.T) {
-	for _, tt := range []struct {
-		name string
-		args json.RawMessage
-		want bool
-	}{
-		{"empty", nil, false},
-		{"malformed", json.RawMessage(`{`), false},
-		{"presence", json.RawMessage(`{"agent_id":"agent-1"}`), false},
-		{"hybrid dispatches as presence", json.RawMessage(`{"agent_id":"agent-1","owner":"owner"}`), false},
-		{"join", json.RawMessage(`{"owner":"owner"}`), true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := isJoinRegisterArgs(tt.args); got != tt.want {
-				t.Fatalf("isJoinRegisterArgs(%s) = %v, want %v", tt.args, got, tt.want)
-			}
-		})
-	}
-
+func TestLocalAPIHelpersClassifySubscriptionFailures(t *testing.T) {
 	srv, _ := newMCPTestServer(t)
 	if _, err := srv.handleChannelSubscribeMCP(context.Background(), &mcpSession{}, nil, json.RawMessage(`{}`)); err == nil || !strings.Contains(err.Error(), "eventbus not available") {
 		t.Fatalf("subscription without eventbus error = %v, want unavailable eventbus", err)

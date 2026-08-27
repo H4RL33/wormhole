@@ -31,10 +31,12 @@ different externally observable surfaces. Fabric descriptors include their
 authentication and permission requirements; Gateway descriptors include every
 local permission gate, while same-user socket access remains part of the local
 protocol boundary. Request and successful-response schemas are derived from
-named examples on the canonical registry descriptors. In particular, Gateway's
-dual-shape `wormhole.agent.register` requests and responses, and
-`wormhole.kb.get` responses, are inventoried as explicit variants rather than
-flattened into synthetic shapes.
+named examples on the canonical registry descriptors. Gateway's
+`wormhole.agent.register` contract is presence-only: its closed request accepts
+only the local presence identity and optional capability declaration, never
+ownership, model, role, permission, repository, Passport, or credential fields.
+Its response reports the trusted local presence record. Variant responses such as `wormhole.kb.get`
+remain inventoried explicitly rather than flattened into synthetic shapes.
 
 Gateway's `wormhole.agent.enrol` entry is the version-1 pre-credential local
 contract. Its closed request records the explicit project binding, requested
@@ -53,7 +55,7 @@ only `state` and `pending_writes`.
 
 ## Gateway tool-guidance inventory
 
-The live Gateway registry currently has 25 agent-facing tools and every one
+The live Gateway registry currently has 27 agent-facing tools and every one
 has exactly one structured guidance record. A record carries purpose, use and
 misuse boundaries, mutation behaviour, descriptor-derived permissions and
 minimal request example, prerequisites, freshness and source-access
@@ -73,41 +75,13 @@ to return compatible, non-revoked approved guidance; revoked or incompatible
 guidance is withheld. The call performs no refresh, approval, rendering,
 materialisation, filesystem, audit, or persistence mutation.
 
-The Code Graph records require agents to check graph freshness, then verify
-Git HEAD and working-tree state directly. Bounded source slices require
-`code_graph.source.read` in addition to the primary query permission, and
-heuristic graph edges are discovery aids rather than authoritative proof.
-Rebuild guidance describes the normal balanced copy-on-write rebuild and does
-not treat it as a source-access bypass.
-
-Gateway's experimental Code Graph entries are project-scoped and closed:
-`wormhole.code_graph.query` requires `code_graph.query`,
-`wormhole.code_graph.status` requires `code_graph.status`, and
-`wormhole.code_graph.rebuild` requires `code_graph.rebuild`. Query source
-assembly additionally checks `code_graph.source.read` from the same cached
-credential scope; its absence returns metadata-only source outcomes rather
-than denying graph metadata. Query reports current HEAD and tracked
-working-tree state separately from graph freshness. The project-local result
-keeps `working_tree_status` to `clean` or `dirty`;
-it does not call the working tree `stale`. `graph_not_current` and
-`rebuild_recommended` report only an exact
-tracked-Go inventory or approved-remote mismatch. A non-Go-only commit or
-non-Go dirtiness therefore does not make a matching graph stale. Inspection errors are health
-payloads (`error` without an active graph, `degraded` with one), and never
-mutate graph state. Rebuild accepts only `project_id` and uses persisted,
-approved configuration for a balanced copy-on-write build.
-
-Code Graph tool errors are fail-closed:
-
-- `invalid or unknown input` is rejected by the strict closed decoder;
-- `missing primary permission` denies the tool call, while only missing source
-  permission degrades a successful query to metadata-only results;
-- `missing or ambiguous project scope` and an unavailable runtime are rejected
-  before graph access;
-- a `disabled rebuild` and a `concurrent rebuild` are rejected; and
-- a failed balanced copy-on-write build preserves the active graph and bounded
-  diagnostics, so status becomes `degraded` or `error` according to whether an
-  active graph remains.
+The five `wormhole.workspace.{status,diff,import,checkpoint,stash}` tools expose
+the same Gateway project-operation layer as the five top-level CLI commands.
+Gateway resolves workspace binding and actor attribution; public clients cannot
+supply either. Diff returns the deterministic semantic review digest. A
+`public_git` checkpoint must acknowledge that exact digest and rechecks it before
+materialisation. All results are operation readbacks, and checkpoint never
+stages, commits, or pushes Git state.
 
 Fabric's version-1 `wormhole.sync.bootstrap` response has a fixed six-field
 outer shape and a strict nested `org_config` snapshot. The nested snapshot
