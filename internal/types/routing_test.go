@@ -60,6 +60,7 @@ func TestFabricBindingRequiresCanonicalWorkspaceAndMatchingInstance(t *testing.T
 		{"project ID", func(b *FabricBinding, _ *FabricProfile) { b.Workspace.Scope.ProjectID = "not-a-uuid" }},
 		{"workspace ID", func(b *FabricBinding, _ *FabricProfile) { b.Workspace.Scope.WorkspaceID = "not-a-uuid" }},
 		{"profile ID", func(b *FabricBinding, _ *FabricProfile) { b.ProfileID = "not-a-uuid" }},
+		{"profile ID equality", func(_ *FabricBinding, p *FabricProfile) { p.ProfileID = testAttachmentRef }},
 		{"Fabric instance ID", func(b *FabricBinding, _ *FabricProfile) { b.FabricInstanceID = "not-a-uuid" }},
 		{"remote project ID", func(b *FabricBinding, _ *FabricProfile) { b.RemoteProjectID = "not-a-uuid" }},
 		{"stream ID", func(b *FabricBinding, _ *FabricProfile) { b.StreamID = "not-a-uuid" }},
@@ -76,6 +77,14 @@ func TestFabricBindingRequiresCanonicalWorkspaceAndMatchingInstance(t *testing.T
 				t.Fatalf("ValidateWithProfile() error = %v, want ErrInvalidFabricRoute", err)
 			}
 		})
+	}
+}
+
+func TestFabricProfileRequiresCanonicalProfileID(t *testing.T) {
+	profile := testFabricProfile()
+	profile.ProfileID = "not-a-uuid"
+	if err := profile.Validate(); !errors.Is(err, ErrInvalidFabricRoute) {
+		t.Fatalf("Validate() error = %v, want ErrInvalidFabricRoute", err)
 	}
 }
 
