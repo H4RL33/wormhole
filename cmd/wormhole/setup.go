@@ -885,7 +885,11 @@ func (gateway *unixSetupGateway) call(ctx context.Context, method string, parame
 	if err := writeSetupRPC(connection, map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized"}); err != nil {
 		return runtimeconfig.ErrServiceNotReady
 	}
-	if err := writeSetupRPC(connection, map[string]any{"jsonrpc": "2.0", "id": 2, "method": method, "params": parameters}); err != nil {
+	privateParams, err := marshalGatewayPrivateEnvelope(ctx, parameters)
+	if err != nil {
+		return runtimeconfig.ErrServiceNotReady
+	}
+	if err := writeSetupRPC(connection, map[string]any{"jsonrpc": "2.0", "id": 2, "method": method, "params": privateParams}); err != nil {
 		return runtimeconfig.ErrServiceNotReady
 	}
 	response, err = readSetupRPC(connection, 2)

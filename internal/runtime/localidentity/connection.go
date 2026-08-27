@@ -30,9 +30,9 @@ var (
 	ErrConnectionSessionExhausted = errors.New("localidentity: connection session capacity exhausted")
 )
 
-// MCPClientInfo is the bounded, non-secret harness metadata accepted from an
-// MCP initialize request. Identity, ownership, session, and assurance are not
-// representable here and remain Gateway-owned.
+// MCPClientInfo is bounded, non-secret, self-declared harness/model metadata
+// accepted from an MCP initialize request. Gateway binds it to a server-owned
+// session; identity, ownership, and assurance are not representable here.
 type MCPClientInfo struct {
 	Name         string
 	Version      string
@@ -80,8 +80,8 @@ func (s *Store) OpenMCP(ctx context.Context, info MCPClientInfo) (ConnectionIden
 }
 
 // OpenHuman establishes a bounded connection record for a same-user private
-// CLI/setup caller. Its actor envelope intentionally carries no session or
-// harness provenance because human actions are attributed directly.
+// CLI/setup caller. Session and harness provenance remain server-owned while
+// the actor is attributed directly to the selected human.
 func (s *Store) OpenHuman(ctx context.Context, info MCPClientInfo) (ConnectionIdentity, error) {
 	return s.openConnection(ctx, info, true)
 }
@@ -104,18 +104,9 @@ func (s *Store) openConnection(ctx context.Context, supplied MCPClientInfo, huma
 		return ConnectionIdentity{}, err
 	}
 	defer unlock()
-	selected, exists, err := readSelectedRecord(fd)
+	selected, err := selectedProfileLocked(fd)
 	if err != nil {
 		return ConnectionIdentity{}, err
-	}
-	if !exists {
-		return ConnectionIdentity{}, ErrNoSelectedIdentity
-	}
-	if _, exists, err := readHumanRecord(fd, selected.HumanPrincipalID); err != nil || !exists {
-		if err != nil {
-			return ConnectionIdentity{}, err
-		}
-		return ConnectionIdentity{}, ErrInvalidStoreRecord
 	}
 	records, exists, err := readConnectionRecords(fd)
 	if err != nil {
@@ -168,6 +159,13 @@ func (s *Store) openConnection(ctx context.Context, supplied MCPClientInfo, huma
 	sort.Slice(records.Sessions, func(left, right int) bool {
 		return records.Sessions[left].SessionID < records.Sessions[right].SessionID
 	})
+	if s.beforeConnectionPublication != nil {
+		s.beforeConnectionPublication()
+	}
+	verified, err := selectedProfileLocked(fd)
+	if err != nil || verified.HumanPrincipalID != selected.HumanPrincipalID || string(verified.PublicKey) != string(selected.PublicKey) {
+		return ConnectionIdentity{}, ErrInvalidStoreRecord
+	}
 	if err := writeConnectionRecords(s, fd, records); err != nil {
 		return ConnectionIdentity{}, err
 	}
@@ -198,12 +196,37 @@ func (s *Store) ResolveLocalActor(ctx context.Context, connection ConnectionIden
 			OccurredAt: connection.OccurredAt,
 		}
 	} else {
-		actor = types.ActorEnvelope{ActorKind: types.ActorHuman, HumanPrincipalID: session.HumanPrincipalID, Assurance: types.AssuranceLocal, OccurredAt: connection.OccurredAt}
+		actor = types.ActorEnvelope{ActorKind: types.ActorHuman, HumanPrincipalID: session.HumanPrincipalID,
+			SessionID: session.SessionID, HarnessName: session.HarnessName, HarnessVersion: session.HarnessVersion,
+			Assurance: types.AssuranceLocal, OccurredAt: connection.OccurredAt}
 	}
 	if err := actor.ValidateLocalAction(); err != nil {
 		return types.ActorEnvelope{}, err
 	}
 	return actor, nil
+}
+
+// ConnectionSessions returns the bounded canonical session inventory for
+// lifecycle verification and diagnostics. It contains no capability or key.
+func (s *Store) ConnectionSessions(ctx context.Context) ([]ConnectionSession, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	fd, err := s.openRoot()
+	if err != nil {
+		return nil, err
+	}
+	defer closeLocalIdentityFD(fd)
+	unlock, err := lockLocalIdentityStore(ctx, fd)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	records, exists, err := readConnectionRecords(fd)
+	if err != nil || !exists {
+		return []ConnectionSession{}, err
+	}
+	return append([]ConnectionSession(nil), records.Sessions...), nil
 }
 
 // ResolveHumanActor is the explicit authority used by same-user private CLI

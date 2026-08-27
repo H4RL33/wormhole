@@ -212,7 +212,7 @@ func (s *Server) PrivateSetupEnsureIdentityRPC(ctx context.Context, req SetupIde
 	if selectedErr == nil && selected.DisplayName != req.Selection.DisplayName {
 		return SetupIdentityReadback{}, config.ErrConfirmedPlanDrift
 	}
-	actor, actorErr := s.identityStore.ResolveHumanActor(ctx, s.setupNow())
+	actor, actorErr := s.resolvePrivateHumanActor(ctx)
 	if actorErr != nil && !errors.Is(actorErr, localidentity.ErrNoSelectedIdentity) {
 		return SetupIdentityReadback{}, ErrPrivateSetupRequest
 	}
@@ -236,7 +236,7 @@ func (s *Server) PrivateSetupEnsureIdentityRPC(ctx context.Context, req SetupIde
 		s.afterSetupIdentityCommit()
 	}
 	if actorErr != nil {
-		actor, err = s.identityStore.ResolveHumanActor(ctx, s.setupNow())
+		actor, err = s.resolvePrivateHumanActor(ctx)
 		if err != nil || actor.ValidateLocalAction() != nil {
 			return SetupIdentityReadback{}, ErrPrivateSetupRequest
 		}
@@ -387,11 +387,24 @@ func (s *Server) resolveSetupBinding(ctx context.Context, workingDirectory strin
 	if s.identityStore == nil {
 		return types.WorkspaceBinding{}, types.ActorEnvelope{}, ErrPrivateSetupRequest
 	}
-	actor, err := s.identityStore.ResolveHumanActor(ctx, s.setupNow())
+	actor, err := s.resolvePrivateHumanActor(ctx)
 	if err != nil || actor.ValidateLocalAction() != nil {
 		return types.WorkspaceBinding{}, types.ActorEnvelope{}, ErrPrivateSetupRequest
 	}
 	return binding, actor, nil
+}
+
+func (s *Server) resolvePrivateHumanActor(ctx context.Context) (types.ActorEnvelope, error) {
+	if actor, err := ServerOwnedActor(ctx); err == nil {
+		if actor.ActorKind != types.ActorHuman || actor.ValidateLocalAction() != nil {
+			return types.ActorEnvelope{}, ErrPrivateSetupRequest
+		}
+		return actor, nil
+	}
+	if s == nil || s.identityStore == nil {
+		return types.ActorEnvelope{}, ErrPrivateSetupRequest
+	}
+	return s.identityStore.ResolveHumanActor(ctx, s.setupNow())
 }
 
 func (s *Server) setupNow() time.Time {
@@ -475,6 +488,16 @@ func OpenProductionIdentityStore() (*localidentity.Store, error) {
 		return nil, ErrIdentityRootInsideRepository
 	}
 	return localidentity.Open(root)
+}
+
+// ReadProductionCLICapability reads startup-published private CLI authority
+// from Gateway's machine-private identity root. It never creates authority.
+func ReadProductionCLICapability(ctx context.Context) (string, error) {
+	store, err := OpenProductionIdentityStore()
+	if err != nil {
+		return "", err
+	}
+	return store.CLICapability(ctx)
 }
 
 func pathInsideRepository(candidate string) (bool, error) {

@@ -742,6 +742,7 @@
         "wormhole-setup"
       ],
       "unknown_harness_metadata": "unknown",
+      "client_provenance": "self-declared local client metadata bound to a Gateway-owned session; local assurance does not verify harness or model authenticity",
       "envelope_fields": [
         "id",
         "jsonrpc",
@@ -770,6 +771,7 @@
         "tools/list"
       ],
       "not_initialized_error_code": -32002,
+      "duplicate_initialize_error_code": -32602,
       "notification_response": "none"
     },
     "server_notifications": [

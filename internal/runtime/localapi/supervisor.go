@@ -93,6 +93,10 @@ func (s *Supervisor) Listen(socketPath string) (*Server, error) {
 	if s.server != nil {
 		return nil, ErrSupervisorAlreadyListening
 	}
+	capability, err := s.dependencies.Identity.EnsureCLICapability(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("localapi: establish private CLI authority: %w", err)
+	}
 	listener, err := listenLocalSocket(socketPath)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: listen on %s: %w", socketPath, err)
@@ -100,6 +104,7 @@ func (s *Supervisor) Listen(socketPath string) (*Server, error) {
 	server := &Server{
 		listener:      listener,
 		socketPath:    socketPath,
+		cliCapability: capability,
 		httpClient:    &http.Client{},
 		projectState:  s.dependencies.ProjectState,
 		actorResolver: s.dependencies.Identity,

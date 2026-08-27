@@ -124,6 +124,7 @@ type Server struct {
 	socketPath                   string
 	httpClient                   *http.Client
 	version                      string
+	cliCapability                string
 	projectState                 *projectstate.Service
 	actorResolver                LocalActorResolver
 	identityStore                *localidentity.Store

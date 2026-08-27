@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -99,6 +100,106 @@ func TestRealSocketRejectsForgedInitializeAndToolProvenanceBeforeActorResolution
 	if got := len(recorder.snapshot()); got != 0 {
 		t.Fatalf("forged provenance reached actor resolution %d time(s)", got)
 	}
+}
+
+func TestRealSocketPrivateMethodsRequireCapabilityAndInitializedHumanSession(t *testing.T) {
+	identity := selectedSocketIdentity(t)
+	binding := privateRoutingTestBinding(t, filepath.Join(t.TempDir(), "checkout"), "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011")
+	server := setupIdentityTestServer(t, identity, binding)
+	recorder := &recordingLocalActorResolver{store: identity}
+	server.actorResolver = recorder
+	server.cliCapability = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	socket := serveIdentitySocket(t, server)
+
+	privateMethods := []string{
+		PrivateSetupRegisterWorkspaceRPCMethod, PrivateSetupEnsureIdentityRPCMethod,
+		PrivateSetupPublicationRPCMethod, PrivateSetupImportRPCMethod, PrivateSetupVerifyRPCMethod,
+		PrivateWorkspaceRPCMethod, integrationPlanRPCMethod, integrationCommitRPCMethod,
+		"wormhole.private.future",
+	}
+	for _, method := range privateMethods {
+		response := callIdentitySocketRPC(t, socket, map[string]any{"name": "codex", "version": "1"}, method, map[string]any{
+			"capability": server.cliCapability, "request": map[string]any{},
+		})
+		if response.Error == nil || response.Error.Code != rpcInvalidParams || response.Error.Message != ErrPrivateCLIAuthorization.Error() {
+			t.Fatalf("agent %s response = %+v", method, response)
+		}
+	}
+	if got := len(recorder.snapshot()); got != 0 {
+		t.Fatalf("agent private calls reached actor resolution %d time(s)", got)
+	}
+
+	for name, params := range map[string]json.RawMessage{
+		"missing":   json.RawMessage(`{"request":{}}`),
+		"wrong":     json.RawMessage(`{"capability":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","request":{}}`),
+		"duplicate": json.RawMessage(`{"capability":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","capability":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","request":{}}`),
+	} {
+		response := callIdentitySocketRawRPC(t, socket, map[string]any{"name": "wormhole-cli", "version": "test"}, PrivateWorkspaceRPCMethod, params)
+		if response.Error == nil || response.Error.Message != ErrPrivateCLIAuthorization.Error() || strings.Contains(response.Error.Message, server.cliCapability) {
+			t.Fatalf("%s capability response = %+v", name, response)
+		}
+	}
+
+	response := callIdentitySocketRPC(t, socket, map[string]any{"name": "wormhole-cli", "version": "test"}, PrivateWorkspaceRPCMethod, map[string]any{
+		"capability": server.cliCapability,
+		"request":    PrivateWorkspaceCommandRequest{WorkingDirectory: binding.Checkout.CanonicalPath, Command: WorkspaceCommandRequest{Operation: WorkspaceOperationStatus}},
+	})
+	if response.Error != nil {
+		t.Fatalf("authorized CLI response = %+v", response)
+	}
+	actors := recorder.snapshot()
+	if len(actors) != 1 || actors[0].ActorKind != types.ActorHuman || actors[0].SessionID == "" || actors[0].HarnessName != "wormhole-cli" || actors[0].HarnessVersion != "test" || actors[0].AgentID != "" || actors[0].AccountableHumanID != "" || actors[0].ModelName != "" {
+		t.Fatalf("authorized CLI actors = %+v", actors)
+	}
+}
+
+func TestRealSocketRejectsDuplicateInitializeWithExactlyOneSession(t *testing.T) {
+	identity := selectedSocketIdentity(t)
+	binding := privateRoutingTestBinding(t, filepath.Join(t.TempDir(), "checkout"), "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011")
+	server := setupIdentityTestServer(t, identity, binding)
+	socket := serveIdentitySocket(t, server)
+	conn, err := net.Dial("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	params := mustIdentityJSON(t, map[string]any{"protocolVersion": "2025-11-25", "capabilities": map[string]any{}, "clientInfo": map[string]any{"name": "codex", "version": "1"}})
+	writeIdentityRPC(t, conn, rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "initialize", Params: params})
+	if response := readIdentityRPC(t, reader); response.Error != nil {
+		t.Fatalf("first initialize = %+v", response)
+	}
+	writeIdentityRPC(t, conn, rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("2"), Method: "initialize", Params: params})
+	if response := readIdentityRPC(t, reader); response.Error == nil || response.Error.Code != rpcInvalidParams {
+		t.Fatalf("duplicate initialize = %+v", response)
+	}
+	sessions, err := identity.ConnectionSessions(t.Context())
+	if err != nil || len(sessions) != 1 {
+		t.Fatalf("sessions after duplicate initialize = %+v, %v; want exactly one", sessions, err)
+	}
+}
+
+func callIdentitySocketRPC(t *testing.T, socket string, clientInfo map[string]any, method string, params any) rpcResponse {
+	t.Helper()
+	return callIdentitySocketRawRPC(t, socket, clientInfo, method, mustIdentityJSON(t, params))
+}
+
+func callIdentitySocketRawRPC(t *testing.T, socket string, clientInfo map[string]any, method string, params json.RawMessage) rpcResponse {
+	t.Helper()
+	conn, err := net.Dial("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	initialize := mustIdentityJSON(t, map[string]any{"protocolVersion": "2025-11-25", "capabilities": map[string]any{}, "clientInfo": clientInfo})
+	writeIdentityRPC(t, conn, rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "initialize", Params: initialize})
+	if response := readIdentityRPC(t, reader); response.Error != nil {
+		t.Fatalf("initialize = %+v", response)
+	}
+	writeIdentityRPC(t, conn, rpcRequest{JSONRPC: "2.0", Method: "notifications/initialized"})
+	writeIdentityRPC(t, conn, rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("2"), Method: method, Params: params})
+	return readIdentityRPC(t, reader)
 }
 
 type recordingLocalActorResolver struct {

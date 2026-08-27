@@ -194,8 +194,12 @@ identity; project memberships authorise private Fabric access; ownership records
 make a human accountable for an agent. Passports are project-scoped Fabric
 capability grants, not the human identity or the agent itself. Agent actions
 capture agent, accountable human, harness/model session, and assurance at action
-time. Local/fork actors are self-declared, public Fabric uses key continuity,
-and private Fabric uses authenticated membership.
+time. Local MCP `clientInfo` harness/model values are self-declared provenance
+bound by Gateway to its own session; local assurance does not independently
+verify either value. Local/fork actors are self-declared, public Fabric uses key
+continuity, and private Fabric uses authenticated membership. Human CLI actions
+retain their Gateway session and `wormhole-cli` version provenance without agent,
+owner, or model fields.
 
 ## Build and Test Commands
 

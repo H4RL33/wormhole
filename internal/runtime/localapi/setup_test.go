@@ -128,18 +128,23 @@ func TestPrivateSetupEnsureIdentityRPCDispatchIsNotAnMCPTool(t *testing.T) {
 	}
 	binding := privateRoutingTestBinding(t, filepath.Join(t.TempDir(), "checkout"), "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011")
 	server := setupIdentityTestServer(t, store, binding)
+	server.cliCapability = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	server.registry = newLocalRegistry(server)
 	client, gateway := net.Pipe()
 	defer client.Close()
 	defer gateway.Close()
 	req := SetupIdentityRequest{WorkingDirectory: binding.Checkout.CanonicalPath, JournalID: "00000000-0000-4000-8000-000000000033", Selection: types.ConfirmedIdentitySelection{DisplayName: "Alice Example"}, ExpectedPriorDigest: DigestSetupIdentityUnselected()}
-	params, err := json.Marshal(req)
+	requestJSON, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	params, err := json.Marshal(privateRPCEnvelope{Capability: server.cliCapability, Request: requestJSON})
 	if err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan struct{})
 	go func() {
-		server.dispatchMCPMessage(context.Background(), &mcpSession{initialized: true}, gateway, server.registry, rpcRequest{
+		server.dispatchMCPMessage(context.Background(), &mcpSession{initialized: true, humanClient: true, clientInfo: localidentity.MCPClientInfo{Name: "wormhole-setup", Version: "test"}}, gateway, server.registry, rpcRequest{
 			JSONRPC: "2.0", ID: json.RawMessage("1"), Method: PrivateSetupEnsureIdentityRPCMethod, Params: params,
 		})
 		close(done)

@@ -2,9 +2,12 @@ package localidentity
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -119,7 +122,7 @@ func TestOpenMCPIsConcurrentAndExactlyIdempotentForDurableAgent(t *testing.T) {
 	}
 }
 
-func TestHumanConnectionAndDirectHumanActorCarryNoAgentProvenance(t *testing.T) {
+func TestHumanConnectionCarriesServerOwnedCLISessionProvenance(t *testing.T) {
 	store := selectedIdentityStore(t, filepath.Join(t.TempDir(), "identities"))
 	now := time.Date(2026, 8, 27, 11, 0, 0, 0, time.UTC)
 	store.clock = func() time.Time { return now }
@@ -135,7 +138,7 @@ func TestHumanConnectionAndDirectHumanActorCarryNoAgentProvenance(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := types.ActorEnvelope{ActorKind: types.ActorHuman, HumanPrincipalID: selected.HumanPrincipalID, Assurance: types.AssuranceLocal, OccurredAt: now}
+	want := types.ActorEnvelope{ActorKind: types.ActorHuman, HumanPrincipalID: selected.HumanPrincipalID, SessionID: connection.SessionID, HarnessName: "wormhole-cli", HarnessVersion: "dev", Assurance: types.AssuranceLocal, OccurredAt: now}
 	if actor != want {
 		t.Fatalf("human connection actor = %+v, want %+v", actor, want)
 	}
@@ -145,6 +148,151 @@ func TestHumanConnectionAndDirectHumanActorCarryNoAgentProvenance(t *testing.T) 
 	}
 	if direct.ActorKind != types.ActorHuman || direct.HumanPrincipalID != selected.HumanPrincipalID || direct.AgentID != "" || direct.SessionID != "" || direct.HarnessName != "" || direct.ModelName != "" {
 		t.Fatalf("direct human actor = %+v", direct)
+	}
+}
+
+func TestCLICapabilityIsCanonicalOwnerPrivateAndStable(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "identities")
+	store, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capability, err := store.EnsureCLICapability(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(capability) != 64 || strings.Trim(capability, "0123456789abcdef") != "" {
+		t.Fatalf("capability is not 32 canonical random bytes: length=%d", len(capability))
+	}
+	info, err := os.Lstat(filepath.Join(root, cliCapabilityRecordName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 || !info.Mode().IsRegular() {
+		t.Fatalf("capability mode = %v, want regular 0600", info.Mode())
+	}
+	reopened, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := reopened.CLICapability(t.Context())
+	if err != nil || got != capability {
+		t.Fatalf("reopened capability = %q, %v; want stable value", got, err)
+	}
+}
+
+func TestConnectionPublicationRequiresSelectedPrivateKeyIntegrity(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, string, string)
+	}{
+		{name: "missing", mutate: func(t *testing.T, root, humanID string) {
+			t.Helper()
+			if err := os.Remove(filepath.Join(root, privateKeyRecordName(humanID))); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "mismatched", mutate: func(t *testing.T, root, humanID string) {
+			t.Helper()
+			_, other, err := ed25519.GenerateKey(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, privateKeyRecordName(humanID)), other, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "replaced", mutate: func(t *testing.T, root, humanID string) {
+			t.Helper()
+			replaceSelectedPrivateKey(t, root, humanID)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "identities")
+			store := selectedIdentityStore(t, root)
+			seed, err := store.OpenMCP(t.Context(), MCPClientInfo{Name: "seed", Version: "test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.CloseConnection(t.Context(), seed); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(filepath.Join(root, connectionRecordsName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			selected, err := store.Selected(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(t, root, selected.HumanPrincipalID)
+			for _, open := range []func(context.Context, MCPClientInfo) (ConnectionIdentity, error){store.OpenMCP, store.OpenHuman} {
+				if _, err := open(t.Context(), MCPClientInfo{Name: "wormhole-cli", Version: "test"}); !errors.Is(err, ErrInvalidStoreRecord) {
+					t.Fatalf("open error = %v, want ErrInvalidStoreRecord", err)
+				}
+			}
+			after, err := os.ReadFile(filepath.Join(root, connectionRecordsName))
+			if err != nil || string(after) != string(before) {
+				t.Fatalf("failed publication mutated connection records: error %v", err)
+			}
+		})
+	}
+}
+
+func TestConnectionPublicationRevalidatesKeyImmediatelyBeforeCommit(t *testing.T) {
+	for name, openConnection := range map[string]func(*Store, context.Context) (ConnectionIdentity, error){
+		"agent": func(store *Store, ctx context.Context) (ConnectionIdentity, error) {
+			return store.OpenMCP(ctx, MCPClientInfo{Name: "codex", Version: "test"})
+		},
+		"human": func(store *Store, ctx context.Context) (ConnectionIdentity, error) {
+			return store.OpenHuman(ctx, MCPClientInfo{Name: "wormhole-cli", Version: "test"})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "identities")
+			store := selectedIdentityStore(t, root)
+			seed, err := store.OpenMCP(t.Context(), MCPClientInfo{Name: "seed", Version: "test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.CloseConnection(t.Context(), seed); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(filepath.Join(root, connectionRecordsName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			selected, err := store.Selected(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			store.beforeConnectionPublication = func() {
+				store.beforeConnectionPublication = nil
+				replaceSelectedPrivateKey(t, root, selected.HumanPrincipalID)
+			}
+			if _, err := openConnection(store, t.Context()); !errors.Is(err, ErrInvalidStoreRecord) {
+				t.Fatalf("open connection error = %v, want ErrInvalidStoreRecord", err)
+			}
+			after, err := os.ReadFile(filepath.Join(root, connectionRecordsName))
+			if err != nil || string(after) != string(before) {
+				t.Fatalf("raced publication mutated connection records: error %v", err)
+			}
+		})
+	}
+}
+
+func replaceSelectedPrivateKey(t *testing.T, root, humanID string) {
+	t.Helper()
+	_, other, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(root, "replacement-key")
+	if err := os.WriteFile(replacement, other, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, filepath.Join(root, privateKeyRecordName(humanID))); err != nil {
+		t.Fatal(err)
 	}
 }
 

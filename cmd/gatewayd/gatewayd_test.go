@@ -92,7 +92,7 @@ func TestSetupPrivateRPCStaysOutsideToolsOnLocalOnlyDisabledCodeGraphSupervisor(
 	if err := json.Unmarshal(bytes.TrimSpace(line), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response.Error == nil || response.Error.Message != localapi.ErrPrivateSetupRequest.Error() {
+	if response.Error == nil || response.Error.Message != localapi.ErrPrivateCLIAuthorization.Error() {
 		t.Fatalf("private setup dispatch = %+v", response)
 	}
 

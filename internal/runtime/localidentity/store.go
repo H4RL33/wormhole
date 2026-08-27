@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,10 +20,11 @@ import (
 
 const (
 	selectedRecordName          = "selected.json"
+	cliCapabilityRecordName     = "cli-capability"
 	lockRecordName              = ".store.lock"
 	maxLocalIdentityRecordBytes = 16 * 1024 * 1024
 	// The identity root only needs a receipt, key, profile, selection, lock,
-	// one indexed connection record, and a bounded number of interrupted-
+	// one CLI capability, one indexed connection record, and a bounded number of interrupted-
 	// publication temporary files. Refuse oversized directories before
 	// examining or changing their contents.
 	maxLocalIdentityStoreEntries = 64
@@ -89,6 +91,10 @@ type Store struct {
 	clock       func() time.Time
 	random      func([]byte) (int, error)
 	atomicWrite func(int, string, []byte, fs.FileMode, bool) error
+
+	// Package-test-only barrier used to prove selected-key replacement cannot
+	// publish a connection record. Production leaves it nil.
+	beforeConnectionPublication func()
 }
 
 // Open creates (when absent) and validates an owner-only local identity root.
@@ -264,6 +270,12 @@ func inspectIdentityTopology(fd int, selection types.ConfirmedIdentitySelection)
 		switch {
 		case name == lockRecordName || name == selectedRecordName:
 			continue
+		case name == cliCapabilityRecordName:
+			data, exists, readErr := readLocalIdentityFile(fd, name)
+			if readErr != nil || !exists || validateCLICapability(data) != nil {
+				return identityTopology{}, ErrInvalidStoreRecord
+			}
+			continue
 		case name == connectionRecordsName:
 			records, exists, readErr := readConnectionRecords(fd)
 			if readErr != nil || !exists {
@@ -427,6 +439,15 @@ func (s *Store) Selected(ctx context.Context) (PublicHumanProfile, error) {
 		return PublicHumanProfile{}, err
 	}
 	defer closeLocalIdentityFD(fd)
+	unlock, err := lockLocalIdentityStore(ctx, fd)
+	if err != nil {
+		return PublicHumanProfile{}, err
+	}
+	defer unlock()
+	return selectedProfileLocked(fd)
+}
+
+func selectedProfileLocked(fd int) (PublicHumanProfile, error) {
 	selected, exists, err := readSelectedRecord(fd)
 	if err != nil {
 		return PublicHumanProfile{}, err
@@ -456,6 +477,88 @@ func (s *Store) Selected(ctx context.Context) (PublicHumanProfile, error) {
 		return PublicHumanProfile{}, fmt.Errorf("%w: selected human key is missing or mismatched", ErrInvalidStoreRecord)
 	}
 	return publicProfile(human), nil
+}
+
+// EnsureCLICapability creates the Gateway-owned CLI authorization capability
+// once under the owner-private identity store lock. The random secret is
+// bounded, canonical, no-follow, and never returned in an error.
+func (s *Store) EnsureCLICapability(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	fd, err := s.openRoot()
+	if err != nil {
+		return "", err
+	}
+	defer closeLocalIdentityFD(fd)
+	unlock, err := lockLocalIdentityStore(ctx, fd)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	if capability, exists, readErr := readCLICapability(fd); readErr != nil || exists {
+		return capability, readErr
+	}
+	random := make([]byte, 32)
+	if _, err := io.ReadFull(readerFromRandom(s.random), random); err != nil {
+		return "", fmt.Errorf("localidentity: generate CLI capability: %w", err)
+	}
+	encoded := []byte(hex.EncodeToString(random))
+	if err := s.atomicWrite(fd, cliCapabilityRecordName, encoded, 0o600, false); err != nil {
+		if capability, exists, readErr := readCLICapability(fd); readErr == nil && exists {
+			return capability, nil
+		}
+		return "", fmt.Errorf("localidentity: publish CLI capability: %w", err)
+	}
+	return string(encoded), nil
+}
+
+// CLICapability reads the already-published Gateway CLI capability. It never
+// creates or repairs authority; startup is the sole creation owner.
+func (s *Store) CLICapability(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	fd, err := s.openRoot()
+	if err != nil {
+		return "", err
+	}
+	defer closeLocalIdentityFD(fd)
+	unlock, err := lockLocalIdentityStore(ctx, fd)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	capability, exists, err := readCLICapability(fd)
+	if err != nil {
+		return "", err
+	}
+	if !exists {
+		return "", ErrInvalidStoreRecord
+	}
+	return capability, nil
+}
+
+func readCLICapability(fd int) (string, bool, error) {
+	data, exists, err := readLocalIdentityFile(fd, cliCapabilityRecordName)
+	if err != nil || !exists {
+		return "", exists, err
+	}
+	if err := validateCLICapability(data); err != nil {
+		return "", false, err
+	}
+	return string(data), true, nil
+}
+
+func validateCLICapability(data []byte) error {
+	if len(data) != 64 {
+		return ErrInvalidStoreRecord
+	}
+	decoded := make([]byte, 32)
+	if _, err := hex.Decode(decoded, data); err != nil || string([]byte(hex.EncodeToString(decoded))) != string(data) {
+		return ErrInvalidStoreRecord
+	}
+	return nil
 }
 
 // SelectedMatchesSetup compares setup's private confirmed fields inside the

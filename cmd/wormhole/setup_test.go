@@ -721,6 +721,11 @@ func TestSetupAndConnectorCommandsAreCanonicalCLIEntrypoints(t *testing.T) {
 }
 
 func TestSetupGatewayClientUsesPrivateHandshakeAndBoundedReadback(t *testing.T) {
+	previousCapability := readGatewayCLICapability
+	readGatewayCLICapability = func(context.Context) (string, error) {
+		return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", nil
+	}
+	defer func() { readGatewayCLICapability = previousCapability }()
 	socket := filepath.Join(t.TempDir(), "gateway.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
@@ -755,6 +760,14 @@ func TestSetupGatewayClientUsesPrivateHandshakeAndBoundedReadback(t *testing.T) 
 		_ = json.Unmarshal(bytes.TrimSpace(line), &request)
 		if notification.Method != "notifications/initialized" || request.Method != localapi.PrivateSetupRegisterWorkspaceRPCMethod {
 			serverDone <- errors.New("private setup handshake mismatch")
+			return
+		}
+		var envelope struct {
+			Capability string          `json:"capability"`
+			Request    json.RawMessage `json:"request"`
+		}
+		if json.Unmarshal(request.Params, &envelope) != nil || envelope.Capability != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" || len(envelope.Request) == 0 {
+			serverDone <- errors.New("private setup envelope mismatch")
 			return
 		}
 		_, _ = connection.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"project_id":"00000000-0000-4000-8000-000000000001","workspace_id":"00000000-0000-4000-8000-000000000002","accepted_commit_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","accepted_tree_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","state":"registered"}}` + "\n"))

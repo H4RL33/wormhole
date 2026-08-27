@@ -87,6 +87,7 @@ type alphaInitializeContract struct {
 	ToolProvenanceFieldsRejected []string          `json:"tool_provenance_fields_rejected"`
 	HumanClients                 []string          `json:"human_clients"`
 	UnknownHarnessMetadata       string            `json:"unknown_harness_metadata"`
+	ClientProvenance             string            `json:"client_provenance"`
 	EnvelopeFields               []string          `json:"envelope_fields"`
 	ResultFields                 []string          `json:"result_fields"`
 	Capabilities                 map[string]any    `json:"capabilities"`
@@ -94,10 +95,11 @@ type alphaInitializeContract struct {
 }
 
 type alphaLifecycleContract struct {
-	RequiredSequence        []string `json:"required_sequence"`
-	GatedMethods            []string `json:"gated_methods"`
-	NotInitializedErrorCode int      `json:"not_initialized_error_code"`
-	NotificationResponse    string   `json:"notification_response"`
+	RequiredSequence             []string `json:"required_sequence"`
+	GatedMethods                 []string `json:"gated_methods"`
+	NotInitializedErrorCode      int      `json:"not_initialized_error_code"`
+	DuplicateInitializeErrorCode int      `json:"duplicate_initialize_error_code"`
+	NotificationResponse         string   `json:"notification_response"`
 }
 
 type alphaServerNotification struct {
@@ -249,6 +251,9 @@ func TestAlphaContractLocalProtocolLifecycle(t *testing.T) {
 	if len(protocol.Lifecycle.GatedMethods) == 0 {
 		t.Fatal("manifest has no lifecycle-gated methods")
 	}
+	if protocol.Lifecycle.DuplicateInitializeErrorCode != rpcInvalidParams {
+		t.Fatalf("duplicate initialize error code = %d, want %d", protocol.Lifecycle.DuplicateInitializeErrorCode, rpcInvalidParams)
+	}
 	if got := jsonStructFields(reflect.TypeOf(initializeParams{})); !reflect.DeepEqual(got, protocol.Initialize.RequestParamsFields) {
 		t.Fatalf("initialize request fields = %v, manifest = %v", got, protocol.Initialize.RequestParamsFields)
 	}
@@ -257,6 +262,9 @@ func TestAlphaContractLocalProtocolLifecycle(t *testing.T) {
 	}
 	if protocol.Initialize.UnknownHarnessMetadata != "unknown" || !reflect.DeepEqual(protocol.Initialize.HumanClients, []string{"wormhole-cli", "wormhole-setup"}) {
 		t.Fatalf("initialize identity classification = unknown %q, humans %v", protocol.Initialize.UnknownHarnessMetadata, protocol.Initialize.HumanClients)
+	}
+	if protocol.Initialize.ClientProvenance != "self-declared local client metadata bound to a Gateway-owned session; local assurance does not verify harness or model authenticity" {
+		t.Fatalf("initialize client provenance = %q", protocol.Initialize.ClientProvenance)
 	}
 	for _, field := range protocol.Initialize.ToolProvenanceFieldsRejected {
 		if got := privateAuthorityClaim("wormhole.workspace.status", map[string]json.RawMessage{field: json.RawMessage(`"forged"`)}); got != field {

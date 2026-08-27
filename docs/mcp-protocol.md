@@ -17,6 +17,13 @@ Harnesses normally use `gatewayd` (Gateway) through the local Unix socket and
 `wormholed.sock` and `wormholed.db` names are local-state paths, not executable
 aliases for Gateway.
 
+On that local path, MCP `clientInfo` harness/model fields are self-declared client
+provenance. Gateway binds them to a server-generated connection session; local
+assurance proves the binding, not independent authenticity of a harness or model.
+The public stdio bridge forwards only the public MCP lifecycle and tools and
+rejects all private Gateway methods. Human CLI RPCs use a separate machine-private,
+startup-owned capability which is stripped before handler dispatch.
+
 ## 2. Transport: Streamable HTTP, single `/mcp` endpoint
 
 - One HTTP route, `/mcp`, replacing both `/mcp/tools` and `/mcp/tools/call`.

@@ -10,7 +10,11 @@ import (
 	"io"
 	"net"
 	"time"
+
+	"github.com/H4RL33/wormhole/internal/runtime/localapi"
 )
+
+var readGatewayCLICapability = localapi.ReadProductionCLICapability
 
 func callGatewayPrivateMethod(ctx context.Context, socketPath, method string, request, response any) error {
 	dialer := net.Dialer{Timeout: 2 * time.Second}
@@ -53,7 +57,7 @@ func callGatewayPrivateMethod(ctx context.Context, socketPath, method string, re
 	if err := write(rpcRequest{JSONRPC: "2.0", Method: "notifications/initialized"}); err != nil {
 		return fmt.Errorf("write Gateway initialized notification: %w", err)
 	}
-	params, err := json.Marshal(request)
+	params, err := marshalGatewayPrivateEnvelope(ctx, request)
 	if err != nil {
 		return fmt.Errorf("marshal Gateway private request: %w", err)
 	}
@@ -71,6 +75,21 @@ func callGatewayPrivateMethod(ctx context.Context, socketPath, method string, re
 		return fmt.Errorf("decode Gateway private response: %w", err)
 	}
 	return nil
+}
+
+func marshalGatewayPrivateEnvelope(ctx context.Context, request any) (json.RawMessage, error) {
+	capability, err := readGatewayCLICapability(ctx)
+	if err != nil {
+		return nil, errors.New("Gateway private CLI authority is unavailable")
+	}
+	requestJSON, err := json.Marshal(request)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(struct {
+		Capability string          `json:"capability"`
+		Request    json.RawMessage `json:"request"`
+	}{Capability: capability, Request: requestJSON})
 }
 
 func decodeClosedGatewayJSON(raw []byte, destination any) error {

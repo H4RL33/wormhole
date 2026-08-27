@@ -14,6 +14,7 @@ package localapi
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,12 +28,15 @@ import (
 
 	"github.com/H4RL33/wormhole/internal/runtime/config"
 	"github.com/H4RL33/wormhole/internal/runtime/localidentity"
+	"github.com/H4RL33/wormhole/internal/types"
 )
 
 const (
 	integrationPlanRPCMethod   = "wormhole/integration/plan"
 	integrationCommitRPCMethod = "wormhole/integration/commit"
 )
+
+var ErrPrivateCLIAuthorization = errors.New("private CLI authorization failed")
 
 // Local JSON-RPC 2.0 error codes (docs/mcp-protocol.md §3.1's table,
 // duplicated per the module-boundary reason above). rpcServerNotInitialized
@@ -590,7 +594,14 @@ type mcpSession struct {
 	initializeReceived bool
 	initialized        bool
 	connectionIdentity ConnectionIdentity
+	clientInfo         localidentity.MCPClientInfo
+	humanClient        bool
 	writeMu            sync.Mutex
+}
+
+type privateRPCEnvelope struct {
+	Capability string          `json:"capability"`
+	Request    json.RawMessage `json:"request"`
 }
 
 type initializeParams struct {
@@ -1136,6 +1147,23 @@ func (s *Server) dispatchMCPMessage(ctx context.Context, sess *mcpSession, conn 
 		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidRequest, Message: "invalid request"}})
 		return
 	}
+	if isPrivateGatewayRPCMethod(req.Method) {
+		if !sess.initialized {
+			if !isNotification {
+				writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcServerNotInitialized, Message: "server not initialized: complete initialize before private CLI methods"}})
+			}
+			return
+		}
+		request, privateCtx, err := s.authorizePrivateRPC(ctx, sess, req.Method, req.Params)
+		if err != nil {
+			if !isNotification {
+				writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: ErrPrivateCLIAuthorization.Error()}})
+			}
+			return
+		}
+		req.Params = request
+		ctx = privateCtx
+	}
 
 	switch req.Method {
 	case "initialize":
@@ -1150,8 +1178,10 @@ func (s *Server) dispatchMCPMessage(ctx context.Context, sess *mcpSession, conn 
 		}
 		if s.identityStore != nil {
 			info := localidentity.MCPClientInfo{Name: params.ClientInfo.Name, Version: params.ClientInfo.Version, ModelName: params.ClientInfo.ModelName, ModelVersion: params.ClientInfo.ModelVersion}
+			sess.clientInfo = info
+			sess.humanClient = humanMCPClient(params.ClientInfo.Name)
 			var connection ConnectionIdentity
-			if humanMCPClient(params.ClientInfo.Name) {
+			if sess.humanClient {
 				connection, err = s.identityStore.OpenHuman(ctx, info)
 			} else {
 				connection, err = s.identityStore.OpenMCP(ctx, info)
@@ -1220,6 +1250,12 @@ func (s *Server) dispatchMCPMessage(ctx context.Context, sess *mcpSession, conn 
 			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: message}})
 			return
 		}
+		if req.Method == PrivateSetupEnsureIdentityRPCMethod && sess.connectionIdentity.SessionID == "" {
+			if err := s.bindHumanConnection(ctx, sess); err != nil {
+				writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInternalError, Message: "initialize identity unavailable"}})
+				return
+			}
+		}
 		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: marshalResult(result)})
 
 	case PrivateWorkspaceRPCMethod:
@@ -1279,6 +1315,56 @@ func (s *Server) dispatchMCPMessage(ctx context.Context, sess *mcpSession, conn 
 		}
 		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcMethodNotFound, Message: "method not found: " + req.Method}})
 	}
+}
+
+func isPrivateGatewayRPCMethod(method string) bool {
+	return strings.HasPrefix(method, "wormhole.private.") || method == integrationPlanRPCMethod || method == integrationCommitRPCMethod
+}
+
+func (s *Server) authorizePrivateRPC(ctx context.Context, sess *mcpSession, method string, raw json.RawMessage) (json.RawMessage, context.Context, error) {
+	if s == nil || sess == nil || s.cliCapability == "" || !sess.humanClient || s.actorResolver == nil {
+		return nil, ctx, ErrPrivateCLIAuthorization
+	}
+	if rejectDuplicateJSONMembers(raw) != nil {
+		return nil, ctx, ErrPrivateCLIAuthorization
+	}
+	var envelope privateRPCEnvelope
+	if decodeClosedJSON(raw, &envelope) != nil || len(envelope.Request) == 0 || subtle.ConstantTimeCompare([]byte(envelope.Capability), []byte(s.cliCapability)) != 1 {
+		return nil, ctx, ErrPrivateCLIAuthorization
+	}
+	if sess.connectionIdentity.SessionID == "" {
+		if method == PrivateSetupRegisterWorkspaceRPCMethod || method == PrivateSetupEnsureIdentityRPCMethod {
+			return append(json.RawMessage(nil), envelope.Request...), ctx, nil
+		}
+		return nil, ctx, ErrPrivateCLIAuthorization
+	}
+	now := time.Now().UTC()
+	if s.clock != nil {
+		now = s.clock().UTC()
+	}
+	identity := sess.connectionIdentity
+	identity.OccurredAt = now
+	actor, err := s.actorResolver.ResolveLocalActor(ctx, identity)
+	if err != nil || actor.ValidateLocalAction() != nil || actor.ActorKind != types.ActorHuman || actor.SessionID != identity.SessionID {
+		return nil, ctx, ErrPrivateCLIAuthorization
+	}
+	return append(json.RawMessage(nil), envelope.Request...), withServerOwnedActor(ctx, actor), nil
+}
+
+func (s *Server) bindHumanConnection(ctx context.Context, sess *mcpSession) error {
+	if s == nil || s.identityStore == nil || !sess.humanClient || sess.connectionIdentity.SessionID != "" {
+		return ErrPrivateCLIAuthorization
+	}
+	connection, err := s.identityStore.OpenHuman(ctx, sess.clientInfo)
+	if err != nil {
+		return err
+	}
+	sess.connectionIdentity = connection
+	actor, err := s.actorResolver.ResolveLocalActor(ctx, connection)
+	if err != nil || actor.ValidateLocalAction() != nil || actor.ActorKind != types.ActorHuman {
+		return ErrPrivateCLIAuthorization
+	}
+	return nil
 }
 
 // marshalResult marshals v into json.RawMessage for rpcResponse.Result. A

@@ -109,9 +109,12 @@ func TestStage2BridgeRejectsForgedAuthorityAndPrivateRPCRejectsForgedBinding(t *
 	}
 	var ignored localapi.WorkspaceCommandResult
 	forgedRoot := filepath.Join(runtime.root, "forged")
+	previousCapability := readGatewayCLICapability
+	readGatewayCLICapability = func(context.Context) (string, error) { return runtime.capability, nil }
 	err := callGatewayPrivateMethod(context.Background(), runtime.socket, localapi.PrivateWorkspaceRPCMethod, localapi.PrivateWorkspaceCommandRequest{
 		WorkingDirectory: forgedRoot, Command: localapi.WorkspaceCommandRequest{Operation: localapi.WorkspaceOperationStatus},
 	}, &ignored)
+	readGatewayCLICapability = previousCapability
 	if err == nil {
 		t.Fatal("forged private binding succeeded")
 	}
@@ -196,8 +199,8 @@ func TestStage2StdioMCPPersistsAgentProvenanceAndCLIStaysHuman(t *testing.T) {
 	if first.AccountableHumanID != runtime.actor.HumanPrincipalID || second.AccountableHumanID != runtime.actor.HumanPrincipalID || third.AccountableHumanID != runtime.actor.HumanPrincipalID {
 		t.Fatalf("persisted accountability = first %+v, second %+v, third %+v, owner %s", first, second, third, runtime.actor.HumanPrincipalID)
 	}
-	if human.ActorKind != types.ActorHuman || human.HumanPrincipalID != runtime.actor.HumanPrincipalID || human.AgentID != "" || human.SessionID != "" || human.HarnessName != "" || human.ModelName != "" {
-		t.Fatalf("persisted CLI actor = %+v, want selected human", human)
+	if human.ActorKind != types.ActorHuman || human.HumanPrincipalID != runtime.actor.HumanPrincipalID || human.AgentID != "" || human.SessionID == "" || human.HarnessName != "wormhole-cli" || human.HarnessVersion != version || human.AccountableHumanID != "" || human.ModelName != "" {
+		t.Fatalf("persisted CLI actor = %+v, want selected human with CLI session provenance", human)
 	}
 }
 
@@ -232,6 +235,7 @@ func newStage2ParityGitFixture(t *testing.T) stage2ParityGitFixture {
 
 type stage2ParityRuntime struct {
 	root, socket string
+	capability   string
 	store        *localstore.Store
 	service      *projectstate.Service
 	identity     *localidentity.Store
@@ -313,6 +317,10 @@ func newStage2ParityRuntime(t *testing.T, fixture stage2ParityGitFixture, name s
 	if err != nil {
 		t.Fatal(err)
 	}
+	capability, err := identity.CLICapability(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(ctx) }()
@@ -322,7 +330,7 @@ func newStage2ParityRuntime(t *testing.T, fixture stage2ParityGitFixture, name s
 		<-serveDone
 		_ = store.Close()
 	})
-	return &stage2ParityRuntime{root: root, socket: socket, store: store, service: service, identity: identity, binding: registered.Binding, actor: actor}
+	return &stage2ParityRuntime{root: root, socket: socket, capability: capability, store: store, service: service, identity: identity, binding: registered.Binding, actor: actor}
 }
 
 func stage2ParityRequest(t *testing.T, runtime *stage2ParityRuntime, operation localapi.WorkspaceOperation, surface stage2ParitySurface) localapi.WorkspaceCommandRequest {
@@ -361,6 +369,9 @@ func executeStage2CLI(runtime *stage2ParityRuntime, request localapi.WorkspaceCo
 		return &gatewayWorkspaceBackend{socketPath: runtime.socket, workingDirectory: runtime.root}, nil
 	}
 	defer func() { workspaceBackendFactory = previous }()
+	previousCapability := readGatewayCLICapability
+	readGatewayCLICapability = func(context.Context) (string, error) { return runtime.capability, nil }
+	defer func() { readGatewayCLICapability = previousCapability }()
 	args := []string{}
 	if request.Operation == localapi.WorkspaceOperationCheckpoint && request.PublicationReviewDigest != "" {
 		args = append(args, "--publication-review-digest", request.PublicationReviewDigest)

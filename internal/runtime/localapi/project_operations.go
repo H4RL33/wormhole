@@ -249,7 +249,7 @@ func (s *Server) PrivateWorkspaceRPC(ctx context.Context, request PrivateWorkspa
 	if err != nil || binding.Validate() != nil || binding.Checkout.CanonicalPath != request.WorkingDirectory {
 		return WorkspaceCommandResult{}, ErrWorkspaceCommand
 	}
-	actor, err := s.identityStore.ResolveHumanActor(ctx, s.setupNow())
+	actor, err := s.resolvePrivateHumanActor(ctx)
 	if err != nil || actor.ValidateLocalAction() != nil {
 		return WorkspaceCommandResult{}, ErrWorkspaceCommand
 	}

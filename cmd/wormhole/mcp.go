@@ -18,6 +18,7 @@ import (
 )
 
 var errDuplicateMCPJSONMember = errors.New("duplicate MCP JSON member")
+var errPrivateMCPMethod = errors.New("public MCP bridge rejects private Gateway methods")
 
 // runMCP implements the MCP stdio↔socket bridge subcommand.
 // It dials Gateway's local socket and relays newline-delimited JSON-RPC
@@ -116,6 +117,9 @@ func stdinToSocket(r io.Reader, conn net.Conn) error {
 			if errors.Is(inspectErr, errDuplicateMCPJSONMember) {
 				return inspectErr
 			}
+			if inspectErr == nil && isPrivateBridgeMethod(method) {
+				return errPrivateMCPMethod
+			}
 			forwarded := append(json.RawMessage(nil), raw...)
 			if inspectErr == nil && method == "tools/call" {
 				cwd, cwdErr := os.Getwd()
@@ -136,6 +140,10 @@ func stdinToSocket(r io.Reader, conn net.Conn) error {
 			return err
 		}
 	}
+}
+
+func isPrivateBridgeMethod(method string) bool {
+	return strings.HasPrefix(method, "wormhole.private.") || method == "wormhole/integration/plan" || method == "wormhole/integration/commit"
 }
 
 // attachPrivateRequestContext overwrites any harness-supplied private cwd on

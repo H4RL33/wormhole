@@ -179,7 +179,14 @@ change one explicitly:
 ```
 
 The harness launches `wormhole mcp`, which bridges stdio to the daemon socket;
-it does not call a Coordination Server directly.
+it does not call a Coordination Server directly. Gateway binds the harness and
+optional model values self-declared in MCP `clientInfo` to a server-generated
+connection session. Local assurance proves that server-owned binding, not the
+authenticity of the declared harness or model.
+
+Human setup, workspace, and integration RPCs use a startup-owned private CLI
+capability outside the repository. The public `wormhole mcp` bridge rejects
+those methods and never forwards the capability.
 
 The tracked portable tree is the clean-clone interchange. Workspace IDs,
 identity keys, overlays, stashes, journals, receipts, credentials, and SQLite
