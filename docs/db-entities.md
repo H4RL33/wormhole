@@ -1,11 +1,14 @@
 # Optional Fabric DB Entity Sketch
 
-**Status:** retained PostgreSQL/server model, not the live Stage 2 Gateway
-surface. Stage 2 portable state is `.wormhole/state/v1/`; Gateway operational
-and machine-private state is schema-v7 SQLite. The local-only Gateway does not
-enrol with, bootstrap from, search, mutate Tasks through, or sync to Fabric.
+**Status:** PostgreSQL migrations 1–20 are the retained server baseline.
+Migration 21 adds non-authoritative Git-aware stream replicas and a separate
+finite-retention Activity authority. Stage 2 portable state remains
+`.wormhole/state/v1/`; the Gateway private database remains exact schema v7
+until the separately scoped Stage 3 private-format task lands.
 
-No SQL yet — entities and relations only, per RFC-0001 §7.1 (indicative storage shape), §8 (pillars), §13 (multi-tenancy).
+Git remains the sole acceptance authority for portable project state. Fabric
+stores replica/proposal evidence and operational Activity; neither can advance
+an accepted Git ref by itself.
 
 All tenant tables use row-level project scoping (RFC §13). Child tables carry
 `project_id`; the `projects` root scopes on `id`. `agents` is
@@ -233,6 +236,107 @@ declarative offers; it is not the approval or repository-application authority.
 The manifest body and publication metadata are immutable after insertion. A
 revocation may be recorded once; immutable version history is retained. Both
 manifest tables are project-scoped with RLS.
+
+## Migration 21: Git-aware portable replicas
+
+The portable relations are deliberately non-authoritative. Their keys are
+project-first and include the complete Fabric, stream, ref, and workspace
+identity needed by each relationship:
+
+- `project_repository_bindings` binds
+  `(project_id, fabric_instance_id)` to an immutable provider repository ID,
+  canonical remote, default branch, visibility, and optional private observer
+  credential reference.
+- `fabric_streams` is keyed by
+  `(project_id, fabric_instance_id, stream_id, canonical_ref)` and requires
+  `canonical_ref == ref_name`. It stores the current replica version and exact
+  live/accepted tree and Git-commit digests.
+- `fabric_stream_versions` retains every canonical live tree, canonical
+  accepted tree, digest, commit, and transition. Operation transitions alone
+  contain an operation UUID, canonical operation bytes/digest, and exact actor
+  envelope. Initial and accepted-ref transitions contain none of those four
+  operation fields. Version history is immutable.
+- `fabric_workspace_stream_bindings` binds an authenticated attachment and
+  repository identity to the complete stream/workspace/ref identity. Both
+  `(project_id, fabric_instance_id, stream_id, workspace_id, ref_name)` and its
+  canonical-ref equivalent are unique and are the parents of requests and
+  Activity origins.
+- `fabric_stream_requests` stores immutable canonical operation requests and
+  their applied/conflict/rejected result under the complete workspace/ref key.
+- `fabric_stream_conflicts` binds conflict evidence to an exact retained stream
+  version.
+- `fabric_public_actor_keys` binds key continuity to an exact stream version;
+  `public_request_nonces` binds nonce replay evidence to that complete actor-key
+  identity.
+
+Every composite foreign key carries `project_id` first. Cross-project,
+cross-Fabric, cross-stream, cross-ref, and cross-workspace combinations therefore
+fail as foreign-key violations rather than being inferred or normalized.
+
+## Migration 21: Fabric Activity
+
+Activity is operational evidence, not portable state. Presence is memory-only
+and cannot enter any PostgreSQL relation. Durable `ordinary` and `lifecycle`
+records use these relations:
+
+- `fabric_activity_policy_versions` retains immutable canonical policy bytes,
+  digest, the fixed V1 ordinary/default/maximum values, and one effective finite
+  terminal-retention value. `fabric_activity_policy_current` points to one exact
+  version for a complete stream/ref key.
+- `fabric_activity_stream_sequences` owns a positive, monotonically increasing,
+  JSON-safe Activity high watermark per complete stream/ref. It is independent
+  of `fabric_streams.current_version`.
+- `fabric_activities` is the immutable ledger. Its complete origin key is
+  `(project_id, fabric_instance_id, stream_id, canonical_ref,
+  source_workspace_id, activity_id)`. It retains canonical Activity and actor
+  bytes, digest, exact optional event/lifecycle projections, Activity time,
+  server acceptance time, and a unique stream Activity sequence.
+- `fabric_activity_ingress_receipts` is an immutable replay companion. Its
+  digest, sequence, policy pair, and acceptance time composite-reference the
+  exact ledger and policy evidence.
+- `fabric_activity_lifecycle` is the sole mutable Activity relation. Multiple
+  delivery/conflict/recovery/receipt claims may protect one ledger record. Each
+  row captures its ingress policy pair and finite terminal retention; the first
+  terminal transition captures database transaction time and derives expiry.
+
+The exact state machines are `delivery: pending -> delivered|cancelled`,
+`conflict: open -> resolved|cancelled`, `recovery: pending ->
+blocked|recovered|cancelled; blocked -> pending|recovered|cancelled`, and
+`receipt: pending -> confirmed|rejected|cancelled`. Exact replays are read-only.
+
+Ordinary Activity with no lifecycle row is eligible when it is at least 30 days
+old **or** outside the newest 10,000 unprotected rows for its source workspace.
+Ranking is `(created_at DESC, activity_id DESC)` and bounded deletion is oldest
+first by `(created_at, activity_id)`. Activity with lifecycle rows is eligible
+only after every claim is terminal and the greatest captured expiry has passed.
+Pruning is limited to 1–1,000 rows and deletes lifecycle/receipt children before
+the ledger in one transaction. Protected rows may exceed the cap.
+
+Only these four fixed-search-path, security-definer functions mutate Activity:
+
+- `fabric_accept_activity_v1`
+- `fabric_transition_activity_lifecycle_v1`
+- `fabric_prune_activities_v1`
+- `fabric_publish_activity_policy_v1`
+
+Deployment pre-provisions `wormhole_activity_owner` (NOLOGIN),
+`wormhole_fabric_runtime` (the process login), and
+`wormhole_activity_maintenance` (NOLOGIN). Migration 21 validates but never
+creates, alters, or drops those cluster roles. The owner owns only Activity
+relations/functions and has the minimum parent-table privileges needed to take
+portable binding locks. Runtime receives Activity `SELECT` and execution of
+accept/transition/policy publication, with no direct mutable-table DML.
+Maintenance receives pruner execution only.
+
+Every migration-21 project table has enabled and forced RLS. Both `USING` and
+`WITH CHECK` use exactly
+`project_id = NULLIF(current_setting('wormhole.project_id',true),'')::uuid`, and
+each store transaction sets that GUC locally before reading or writing.
+
+There is no Fabric promotion table, column, function, trigger, or method. Activity
+expiry cannot create an Event/Operation, mutate a portable tree, advance a Git
+ref, or mark a proposal accepted. Any later promotion is a separate Gateway-local
+ProjectState transaction and remains subject to ordinary Git review.
 
 ## role_templates
 

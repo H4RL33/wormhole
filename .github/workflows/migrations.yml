@@ -46,6 +46,27 @@ jobs:
         run: go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.18.3
       - name: Provision Activity database roles
         run: psql "$WORMHOLE_DATABASE_URL" -v ON_ERROR_STOP=1 -f .github/scripts/provision-activity-roles.sql
+      - name: Verify migration 21 and exact version-20 down shape
+        run: |
+          catalog_snapshot() {
+            psql "$WORMHOLE_DATABASE_URL" -At -v ON_ERROR_STOP=1 <<'SQL'
+          SELECT 'table:' || tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public'
+          UNION ALL SELECT 'function:' || p.proname || ':' || pg_catalog.pg_get_function_identity_arguments(p.oid)
+            FROM pg_catalog.pg_proc p WHERE p.pronamespace = 'public'::regnamespace
+          UNION ALL SELECT 'trigger:' || t.tgname || ':' || t.tgrelid::regclass::text
+            FROM pg_catalog.pg_trigger t WHERE NOT t.tgisinternal AND t.tgrelid::regclass::text !~ '^pg_'
+          UNION ALL SELECT 'policy:' || polname || ':' || polrelid::regclass::text FROM pg_catalog.pg_policy
+          ORDER BY 1;
+          SQL
+          }
+          migrate -path migrations -database "$WORMHOLE_DATABASE_URL" goto 20
+          catalog_snapshot > /tmp/wormhole-v20-before.txt
+          migrate -path migrations -database "$WORMHOLE_DATABASE_URL" goto 21
+          WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'TestMigration21' -count=1
+          migrate -path migrations -database "$WORMHOLE_DATABASE_URL" goto 20
+          catalog_snapshot > /tmp/wormhole-v20-after.txt
+          cmp /tmp/wormhole-v20-before.txt /tmp/wormhole-v20-after.txt
+          WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'TestMigration21DownLeavesVersion20Shape' -count=1
       - name: Verify empty-database migrations
         run: |
           migrate -path migrations -database "$WORMHOLE_DATABASE_URL" up

@@ -9,10 +9,12 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	_ "github.com/lib/pq"
 
 	"github.com/H4RL33/wormhole/internal/types"
+	"github.com/H4RL33/wormhole/internal/types/projectstate"
 )
 
 var migration21Tables = []string{
@@ -245,6 +247,76 @@ func TestMigration21ActivityRolesAndPrivileges(t *testing.T) {
 			t.Errorf("function %s owner=%s runtime=%v maintenance=%v public=%v", name, owner, runtime, maintenance, public)
 		}
 	}
+
+	projectID := migration21CreateProject(t, db, "migration21-role-execution")
+	otherProjectID := migration21CreateProject(t, db, "migration21-role-isolation")
+	instanceID := "11111111-1111-4111-8111-111111111119"
+	streamID := "22222222-2222-4222-8222-222222222229"
+	workspaceID := "33333333-3333-4333-8333-333333333339"
+	migration21SeedStream(t, db, projectID, instanceID, streamID, "refs/heads/main")
+	migration21SeedWorkspaceWithAttachment(t, db, projectID, instanceID, streamID, workspaceID,
+		"44444444-4444-4444-8444-444444444449", "refs/heads/main")
+	stream := FabricActivityStreamKey{ProjectID: projectID, FabricInstanceID: instanceID, StreamID: streamID, CanonicalRef: "refs/heads/main"}
+	policy := testActivityPolicy(1, 2_592_000)
+	if _, err := NewActivityStore(db).PublishPolicy(context.Background(), stream, policy); err != nil {
+		t.Fatalf("bootstrap role-test policy: %v", err)
+	}
+
+	runtimeTx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtimeTx.Rollback()
+	if _, err := runtimeTx.Exec(`SET LOCAL ROLE wormhole_fabric_runtime`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtimeTx.Exec(`SELECT set_config('wormhole.project_id',$1,true)`, projectID); err != nil {
+		t.Fatal(err)
+	}
+	var visible int
+	if err := runtimeTx.QueryRow(`SELECT count(*) FROM fabric_activity_policy_current`).Scan(&visible); err != nil || visible != 1 {
+		t.Fatalf("runtime same-project policy rows=%d err=%v", visible, err)
+	}
+	if _, err := runtimeTx.Exec(`SELECT set_config('wormhole.project_id',$1,true)`, otherProjectID); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtimeTx.QueryRow(`SELECT count(*) FROM fabric_activity_policy_current`).Scan(&visible); err != nil || visible != 0 {
+		t.Fatalf("runtime cross-project policy rows=%d err=%v", visible, err)
+	}
+	if err := runtimeTx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+
+	directMutationTx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := directMutationTx.Exec(`SET LOCAL ROLE wormhole_fabric_runtime`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := directMutationTx.Exec(`SELECT set_config('wormhole.project_id',$1,true)`, projectID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = directMutationTx.Exec(`UPDATE fabric_activity_policy_current SET policy_version=policy_version WHERE project_id=$1`, projectID)
+	requireSQLState(t, err, "42501")
+	_ = directMutationTx.Rollback()
+
+	maintenanceTx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer maintenanceTx.Rollback()
+	if _, err := maintenanceTx.Exec(`SET LOCAL ROLE wormhole_activity_maintenance`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := maintenanceTx.Exec(`SELECT set_config('wormhole.project_id',$1,true)`, projectID); err != nil {
+		t.Fatal(err)
+	}
+	var pruned int
+	if err := maintenanceTx.QueryRow(`SELECT fabric_prune_activities_v1($1,$2,$3,$4,$5,1)`,
+		projectID, instanceID, streamID, "refs/heads/main", workspaceID).Scan(&pruned); err != nil || pruned != 0 {
+		t.Fatalf("maintenance pruner=(%d,%v), want 0,nil", pruned, err)
+	}
 }
 
 func TestMigration21RejectsImmutableHistoryUpdateAndDirectActivityDelete(t *testing.T) {
@@ -268,6 +340,52 @@ func TestMigration21RejectsImmutableHistoryUpdateAndDirectActivityDelete(t *test
 			t.Errorf("runtime can directly delete from %s", table)
 		}
 	}
+
+	projectID := migration21CreateProject(t, db, "migration21-immutable-activity")
+	instanceID := "11111111-1111-4111-8111-111111111118"
+	streamID := "22222222-2222-4222-8222-222222222228"
+	workspaceID := "33333333-3333-4333-8333-333333333338"
+	migration21SeedStream(t, db, projectID, instanceID, streamID, "refs/heads/main")
+	migration21SeedWorkspaceWithAttachment(t, db, projectID, instanceID, streamID, workspaceID,
+		"44444444-4444-4444-8444-444444444448", "refs/heads/main")
+	stream := FabricActivityStreamKey{ProjectID: projectID, FabricInstanceID: instanceID, StreamID: streamID, CanonicalRef: "refs/heads/main"}
+	store := NewActivityStore(db)
+	policy := testActivityPolicy(1, 2_592_000)
+	if _, err := store.PublishPolicy(context.Background(), stream, policy); err != nil {
+		t.Fatal(err)
+	}
+	actor := testActivityActor(time.Date(2026, 8, 27, 13, 0, 0, 0, time.UTC))
+	activity := testOrdinaryActivity("55555555-5555-4555-8555-555555555558", actor, "immutable")
+	policyDigest, _ := projectstate.DigestActivityPolicy(policy)
+	_, err := store.Accept(context.Background(), AcceptActivityInput{
+		Key:      FabricActivityOriginKey{Stream: stream, SourceWorkspaceID: workspaceID, ActivityID: activity.ID},
+		Activity: activity, IssuedActor: actor, PolicyVersion: 1, PolicyDigest: policyDigest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`UPDATE fabric_activity_policy_versions SET canonical_policy_json=canonical_policy_json WHERE project_id=$1`,
+		`UPDATE fabric_activities SET canonical_activity_json=canonical_activity_json WHERE project_id=$1`,
+		`UPDATE fabric_activity_ingress_receipts SET activity_digest=activity_digest WHERE project_id=$1`,
+	} {
+		_, err := db.Exec(statement, projectID)
+		requireSQLState(t, err, "55000")
+	}
+
+	runtimeTx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtimeTx.Exec(`SET LOCAL ROLE wormhole_fabric_runtime`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtimeTx.Exec(`SELECT set_config('wormhole.project_id',$1,true)`, projectID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = runtimeTx.Exec(`DELETE FROM fabric_activities WHERE project_id=$1`, projectID)
+	requireSQLState(t, err, "42501")
+	_ = runtimeTx.Rollback()
 }
 
 func TestMigration21ContainsNoActivityPromotionAuthority(t *testing.T) {
