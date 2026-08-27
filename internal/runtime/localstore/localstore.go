@@ -1,7 +1,7 @@
 // Package localstore is Gateway's durable local state (RFC-0003 §6.3,
 // §7.2). It follows the Store-struct/sentinel-error/wrapped-error shape
 // established by internal/core/identity (docs/implementation-rules.md §5),
-// adapted for SQLite. Private Gateway state is a strict v7 format epoch;
+// adapted for SQLite. Private Gateway state is a strict v8 format epoch;
 // tracked portable state remains governed by its own Git format.
 package localstore
 
@@ -298,7 +298,7 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("localstore: open %s: %w", path, err)
 	}
 	if format == privateFormatFresh {
-		if err := initializePrivateSchemaV7(context.Background(), db); err != nil {
+		if err := initializePrivateSchemaV8(context.Background(), db); err != nil {
 			_ = db.Close()
 			if restoreErr := restoreFreshPrivatePreimage(path, preimage); restoreErr != nil {
 				return nil, fmt.Errorf("%w; restore fresh private preimage: %v", err, restoreErr)

@@ -17,7 +17,8 @@ private-persistence reduction after its approved written-spec review gate;
 and the approved
 `docs/superpowers/specs/2026-08-24-r06-private-format-hard-cut-design.md`
 governing the closed-pre-alpha private Gateway hard cut, with the approved Stage 3
-Multi-Fabric amendment advancing its consolidated current snapshot to schema v7;
+Multi-Fabric amendment advancing its consolidated snapshot to schema v7, and the
+approved ActivityV1 retention amendment advancing the current snapshot to schema v8;
 `docs/implementation-rules.md`;
 existing code.
 This document derives from the RFCs and current code; if it conflicts with an RFC, the RFC
@@ -34,7 +35,8 @@ complete. R06 authorized a closed-pre-alpha private Gateway format hard cut,
 originally at schema v6. It completed in approved implementation commits
 `27f5b85`, `a18b6f4`, and `e1d2df5`; independent review, `make check` (84.8%),
 release-test, release-rehearsal, and clean detached-clone gates passed. The approved
-Stage 3 Multi-Fabric amendment advances the same consolidated epoch to schema v7.
+Stage 3 Multi-Fabric amendment advanced the same consolidated epoch to schema v7;
+the approved ActivityV1 retention amendment advances the current epoch to schema v8.
 R07-R14 and all other reduction work are now paused. The separately approved decomposition of
 `projectstate.Service` behind its existing facade is complete. Git-native Tasks 1-8 and
 the Stage 2 public cutover are implemented; the canonical setup and five workspace
@@ -398,10 +400,10 @@ the same layering pattern and isolation discipline.
   (`NNNNNN_name.up.sql` + `.down.sql`, zero-padded sequential). Down migration must
   actually revert. Never edit an already-committed migration; add a new one. The
   private Gateway SQLite database is separate: its closed-pre-alpha format is one
-  consolidated schema-v7 epoch initialized atomically from
-  `internal/runtime/localstore/private_schema_v7.sql`. It has no v1-v6 upgrade
+  consolidated schema-v8 epoch initialized atomically from
+  `internal/runtime/localstore/private_schema_v8.sql`. It has no v1-v7 upgrade
   runner, exporter, reset command, or compatibility reader. Only a missing/empty
-  database may initialize, and only an exact current v7 database may reopen;
+  database may initialize, and only an exact current v8 database may reopen;
   every other existing database is classified read-only and refused before mutation.
 - D2: Entity shapes come from `docs/db-entities.md`. Deviating from it means updating
   that file in the same change, with the reason.
@@ -737,12 +739,12 @@ the same layering pattern and isolation discipline.
   `TransitionOperations`; generation-range updates remain forbidden.
   All and only rows attributed by `stashed_by_stash_id` must match those arrays byte for
   byte. Portable transitions remain represented by the tracked Git v1 state. The private
-  Gateway database is now one consolidated schema-v7 epoch, initialized from
-  `internal/runtime/localstore/private_schema_v7.sql` in one transaction and recorded by
-  the exact singleton ledger identity `{7}`. The old private v1-v5 migration files,
+  Gateway database is now one consolidated schema-v8 epoch, initialized from
+  `internal/runtime/localstore/private_schema_v8.sql` in one transaction and recorded by
+  the exact singleton ledger identity `{8}`. The old private v1-v7 formats and v1-v5 migration files,
   upgrade runner, cache/channel backfills, and legacy proof readers are not part of the
   supported runtime. Existing databases are classified through a read-only SQLite
-  preflight: only an absent/empty path is fresh and only the exact current v7 object,
+  preflight: only an absent/empty path is fresh and only the exact current v8 object,
   column, ledger, and current-proof floor is reopenable. Future, malformed, partial,
   unexpected, or proof-incompatible evidence is preserved and refused before mutation.
   The dormant `legacy_integration_state_migrations` table and

@@ -132,12 +132,21 @@ func (r *FabricRouteRepo) AttachWorkspace(ctx context.Context, binding types.Fab
 		}
 		_, err = tx.conn.ExecContext(ctx, `
 			INSERT INTO fabric_cursors
-			(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,stream_version,pull_cursor)
-			VALUES (?,?,?,?,?,0,'')
+			(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,canonical_ref,stream_version,pull_cursor)
+			VALUES (?,?,?,?,?,?,0,'')
 		`, binding.RemoteKey().ProjectID, binding.RemoteKey().WorkspaceID, binding.RemoteKey().FabricInstanceID,
-			binding.RemoteKey().RemoteProjectID, binding.RemoteKey().StreamID)
+			binding.RemoteKey().RemoteProjectID, binding.RemoteKey().StreamID, binding.CanonicalRef)
 		if err != nil {
 			return fmt.Errorf("localstore: initialize Fabric cursor: %w", err)
+		}
+		_, err = tx.conn.ExecContext(ctx, `
+			INSERT INTO activity_cursors
+			(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,canonical_ref,after_sequence,updated_at)
+			VALUES (?,?,?,?,?,?,0,CURRENT_TIMESTAMP)
+		`, binding.Workspace.Scope.ProjectID, binding.Workspace.Scope.WorkspaceID, binding.FabricInstanceID,
+			binding.RemoteProjectID, binding.StreamID, binding.CanonicalRef)
+		if err != nil {
+			return fmt.Errorf("localstore: initialize Activity cursor: %w", err)
 		}
 		return nil
 	})

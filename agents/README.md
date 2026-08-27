@@ -68,7 +68,11 @@ release, rehearsal, and clean-clone gates passed. The approved Stage 3 Multi-Fab
 supersession advances the current consolidated hard-cut epoch from v6 to v7: fresh
 state initializes directly as v7, exact v7 reopens, and every other existing database
 is preserved and refused. It does not reinstate incremental migrations or accept an
-existing v6 database.
+existing v6 database. The approved ActivityV1 retention amendment advances the current
+epoch once more to schema v8: fresh state initializes directly as v8, exact v8 reopens,
+and exact former v7 is preserved and refused. Its eight Activity tables remain private,
+finite-policy-bound operational state and are not portable ProjectState or Code Graph
+catalog objects.
 
 After R06's review boundary, all remaining reduction work (R07-R14) is paused.
 The separately approved decomposition of `projectstate.Service` behind its existing
@@ -92,7 +96,7 @@ checkpoint and recovery continue to share one coordinator gate. See
   first-party Codex/Claude connector lifecycle, portable status/diff/import/
   checkpoint/stash operations, and stdio MCP bridge.
 - `gatewayd`: one per-user local-only supervisor, stable owner-private Unix
-  socket, schema-v7 SQLite state, durable overlays, and 17-tool MCP registry.
+  socket, schema-v8 SQLite state, durable overlays, and 17-tool MCP registry.
 - `fabric`: optional 20-tool HTTP MCP server backed by PostgreSQL; not a Stage 2
   Gateway dependency or acceptance authority.
 
@@ -234,7 +238,7 @@ outside the repository. Legacy `.wormhole/integration-state.json` must be
 migrated/ignored, never committed.
 
 The private Gateway SQLite database is a closed-pre-alpha format. The current
-binary supports only a fresh initialization or an exact schema-v7 database. It
+binary supports only a fresh initialization or an exact schema-v8 database. It
 does not migrate, export, reset, normalize, or delete an older, future, malformed,
 partial, or proof-incompatible database. An unsupported database is left in place;
 inspect unpublished overlays/checkpoints, make an operator backup, stop Gateway,

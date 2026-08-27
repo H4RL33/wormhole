@@ -35,8 +35,8 @@ const (
 )
 
 var (
-	//go:embed private_schema_v7.sql
-	privateSchemaV7 string
+	//go:embed private_schema_v8.sql
+	privateSchemaV8 string
 
 	privateSchemaFingerprintOnce         sync.Once
 	privateSchemaFingerprintValue        string
@@ -45,9 +45,9 @@ var (
 	privateWithCodeGraphFingerprintValue string
 	privateWithCodeGraphFingerprintErr   error
 
-	// privateSchemaV7ValidationHook is a failure-injection seam for proving
+	// privateSchemaV8ValidationHook is a failure-injection seam for proving
 	// fresh initialization rollback. It is nil in normal Gateway operation.
-	privateSchemaV7ValidationHook func(*sql.Tx) error
+	privateSchemaV8ValidationHook func(*sql.Tx) error
 )
 
 type privateSchemaQueryer interface {
@@ -68,6 +68,9 @@ var requiredPrivateTables = map[string]struct{}{
 	"workspace_transition_receipts": {}, "workspace_publication_policies": {},
 	"workspace_publication_policy_history": {},
 	"fabric_profiles":                      {}, "workspace_fabric_bindings": {}, "fabric_cursors": {},
+	"activity_policy_versions": {}, "activity_policy_current": {}, "activity_ledger": {},
+	"activity_ingress_receipts": {}, "activity_lifecycle": {}, "activity_outbound_queue": {},
+	"activity_cursors": {}, "activity_promotion_receipts": {},
 	"legacy_fabric_profile_recoveries": {}, "legacy_fabric_hint_recoveries": {},
 	"legacy_sync_queue_recoveries": {}, "legacy_sync_history": {},
 }
@@ -79,6 +82,16 @@ var requiredPrivateColumns = map[string][]string{
 	"workspace_conflicts":          {"occurrence_id"},
 	"workspace_overlay_operations": {"stashed_by_stash_id"},
 	"workspace_materializations":   {"included_operations_json", "publication_review_json", "prior_candidate_json", "publication_review_proof_version"},
+	"workspace_fabric_bindings":    {"canonical_ref"},
+	"fabric_cursors":               {"canonical_ref"},
+	"activity_policy_versions":     {"canonical_ref", "canonical_policy_json", "policy_digest", "terminal_retention_seconds"},
+	"activity_policy_current":      {"canonical_ref", "policy_version", "policy_digest"},
+	"activity_ledger":              {"canonical_ref", "source_workspace_id", "canonical_activity_json", "activity_digest", "source_actor_json"},
+	"activity_ingress_receipts":    {"canonical_ref", "source_workspace_id", "activity_digest", "sequence", "policy_version", "policy_digest"},
+	"activity_lifecycle":           {"canonical_ref", "source_workspace_id", "lifecycle_kind", "reference_id", "terminal_retention_seconds"},
+	"activity_outbound_queue":      {"canonical_ref", "source_workspace_id", "expected_policy_version", "created_policy_version"},
+	"activity_cursors":             {"canonical_ref", "after_sequence"},
+	"activity_promotion_receipts":  {"source_canonical_ref", "source_activity_digest", "canonical_promoter_json"},
 }
 
 func classifyPrivateDatabase(path string) (privateFormatClass, error) {
@@ -162,13 +175,13 @@ func validateCurrentPrivateSchema(db privateSchemaQueryer) error {
 	}
 	expectedFingerprint, err := canonicalPrivateSchemaFingerprint()
 	if err != nil {
-		return fmt.Errorf("private schema object definitions are not exact v7")
+		return fmt.Errorf("private schema object definitions are not exact v8")
 	}
 	graphCatalogPresent := false
 	if actualFingerprint != expectedFingerprint {
 		withCodeGraph, graphErr := canonicalPrivateSchemaWithCodeGraphFingerprint()
 		if graphErr != nil || actualFingerprint != withCodeGraph {
-			return fmt.Errorf("private schema object definitions are not exact v7")
+			return fmt.Errorf("private schema object definitions are not exact v8")
 		}
 		graphCatalogPresent = true
 	}
@@ -189,11 +202,11 @@ func validateCurrentPrivateSchema(db privateSchemaQueryer) error {
 		return fmt.Errorf("private schema ledger is unreadable")
 	}
 	if version != GatewaySchemaVersion || count != 1 {
-		return fmt.Errorf("private schema ledger is not exact v7")
+		return fmt.Errorf("private schema ledger is not exact v8")
 	}
 	var ledgerVersion int
 	if err := db.QueryRow(`SELECT version FROM gateway_schema_migrations`).Scan(&ledgerVersion); err != nil || ledgerVersion != GatewaySchemaVersion {
-		return fmt.Errorf("private schema ledger is not exact v7")
+		return fmt.Errorf("private schema ledger is not exact v8")
 	}
 
 	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'codegraph_%'`)
@@ -335,7 +348,7 @@ func canonicalPrivateSchemaFingerprint() (string, error) {
 			privateSchemaFingerprintErr = err
 			return
 		}
-		if _, err := db.Exec(privateSchemaV7); err != nil {
+		if _, err := db.Exec(privateSchemaV8); err != nil {
 			privateSchemaFingerprintErr = err
 			return
 		}
@@ -356,7 +369,7 @@ func canonicalPrivateSchemaWithCodeGraphFingerprint() (string, error) {
 			privateWithCodeGraphFingerprintErr = err
 			return
 		}
-		if _, err := db.Exec(privateSchemaV7); err != nil {
+		if _, err := db.Exec(privateSchemaV8); err != nil {
 			privateWithCodeGraphFingerprintErr = err
 			return
 		}
@@ -397,28 +410,28 @@ func sqliteReadOnlyDSN(path string) string {
 	return u.String()
 }
 
-func initializePrivateSchemaV7(ctx context.Context, db *sql.DB) error {
+func initializePrivateSchemaV8(ctx context.Context, db *sql.DB) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("localstore: begin private v7 initialization: %w", err)
+		return fmt.Errorf("localstore: begin private v8 initialization: %w", err)
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("localstore: initialize base private schema: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, privateSchemaV7); err != nil {
-		return fmt.Errorf("localstore: initialize private schema v7: %w", err)
+	if _, err := tx.ExecContext(ctx, privateSchemaV8); err != nil {
+		return fmt.Errorf("localstore: initialize private schema v8: %w", err)
 	}
-	if privateSchemaV7ValidationHook != nil {
-		if err := privateSchemaV7ValidationHook(tx); err != nil {
+	if privateSchemaV8ValidationHook != nil {
+		if err := privateSchemaV8ValidationHook(tx); err != nil {
 			return err
 		}
 	}
 	if err := validateCurrentPrivateSchema(tx); err != nil {
-		return fmt.Errorf("localstore: validate private schema v7: %w", err)
+		return fmt.Errorf("localstore: validate private schema v8: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("localstore: commit private schema v7: %w", err)
+		return fmt.Errorf("localstore: commit private schema v8: %w", err)
 	}
 	return nil
 }

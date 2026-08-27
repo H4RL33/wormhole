@@ -72,7 +72,7 @@ Machine-private state includes:
 - workspace IDs, checkout identity, accepted-base bookkeeping, overlays,
   candidates, publication policy, stashes, conflicts, journals, receipts, and
   materialisation proofs;
-- schema-v7 SQLite rows and owner lock; and
+- schema-v8 SQLite rows and owner lock; and
 - connector backups and any optional Fabric credentials.
 
 It remains outside the repository and is intentionally different between two
@@ -80,11 +80,17 @@ clones. Private state may survive a daemon restart on the same machine; it must
 not appear in checkpoint output or a fresh clone.
 
 The private database is closed pre-alpha. Only a missing/genuinely empty
-database or an exact current schema-v7 database is accepted. Every other
-existing database, including former exact v6, older, future, malformed,
+database or an exact current schema-v8 database is accepted. Every other
+existing database, including former exact v7, older, future, malformed,
 partial, unexpected, or proof-incompatible state, is preserved and refused
 before mutation. Operators must stop Gateway, inspect and back up unpublished
 state, then make any deletion decision manually.
+
+Durable Activity is scoped by the complete workspace/Fabric/project/stream/ref
+route and a source-workspace origin. It is accepted only under a strict finite
+effective policy. Presence never enters SQLite, while immutable ordinary and
+lifecycle records are removed only by the bounded policy-owned pruner after their
+exact protection conditions expire.
 
 ## Identity and action attribution
 

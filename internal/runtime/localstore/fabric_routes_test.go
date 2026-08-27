@@ -98,9 +98,9 @@ func TestCursorRejectsBindingMismatchByDirectSQL(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := store.DB().Exec(`INSERT INTO fabric_cursors
-		(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,stream_version)
-		VALUES (?,?,?,?,?,0)`, binding.Scope.ProjectID, binding.Scope.WorkspaceID,
-		profile.FabricInstanceID, fabricBinding.RemoteProjectID, "40000000-0000-4000-8000-000000000099")
+		(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,canonical_ref,stream_version)
+		VALUES (?,?,?,?,?,?,0)`, binding.Scope.ProjectID, binding.Scope.WorkspaceID,
+		profile.FabricInstanceID, fabricBinding.RemoteProjectID, "40000000-0000-4000-8000-000000000099", fabricBinding.CanonicalRef)
 	var sqliteErr *sqlite.Error
 	if !errors.As(err, &sqliteErr) || sqliteErr.Code() != sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY {
 		t.Fatalf("mismatched direct cursor insert error=%v code=%v, want SQLITE_CONSTRAINT_FOREIGNKEY",

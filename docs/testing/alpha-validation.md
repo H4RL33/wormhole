@@ -13,7 +13,7 @@ real `wormhole mcp` stdio bridge
       |
 owner-private Unix socket
       |
-real gatewayd process ---- schema-v7 SQLite + identity store
+real gatewayd process ---- schema-v8 SQLite + identity store
       |
 clone A tracked candidate ---- ordinary Git commit/push ---- fresh clone B
 ```

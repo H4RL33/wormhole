@@ -16,12 +16,17 @@ backward-compatibility promise between format epochs.
 
 ## Private Gateway database format
 
-The current private Gateway format is schema-v7. This is a complete format epoch,
+The current private Gateway format is schema-v8. This is a complete format epoch,
 not an upgrade path from any earlier private schema. A missing or genuinely empty
-private database is initialized atomically as v7. An exact current v7 database
+private database is initialized atomically as v8. An exact current v8 database
 reopens without schema mutation. Every other existing private database—including
-former exact v6, older, future, malformed, partial, unexpected, or
+former exact v7, older, future, malformed, partial, unexpected, or
 proof-incompatible state—is classified read-only and refused before mutation.
+
+Schema v8 adds only complete-route, finite-policy Activity ledger, receipt, queue,
+cursor, lifecycle, and future promotion-receipt evidence to the consolidated private
+snapshot. Presence remains memory-only. Activity state is neither a compatibility
+reader for v7 nor portable tracked ProjectState.
 
 Wormhole does not migrate, normalize, export, reset, quarantine, rename, or delete
 an unsupported private database. The refusal leaves the database and its evidence
