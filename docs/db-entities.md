@@ -3,8 +3,8 @@
 **Status:** PostgreSQL migrations 1–20 are the retained server baseline.
 Migration 21 adds non-authoritative Git-aware stream replicas and a separate
 finite-retention Activity authority. Stage 2 portable state remains
-`.wormhole/state/v1/`; the Gateway private database remains exact schema v7
-until the separately scoped Stage 3 private-format task lands.
+`.wormhole/state/v1/`; the Gateway private database is the exact consolidated
+schema-v8 epoch and has no compatibility reader for former schema v7.
 
 Git remains the sole acceptance authority for portable project state. Fabric
 stores replica/proposal evidence and operational Activity; neither can advance
@@ -236,6 +236,23 @@ declarative offers; it is not the approval or repository-application authority.
 The manifest body and publication metadata are immutable after insertion. A
 revocation may be recorded once; immutable version history is retained. Both
 manifest tables are project-scoped with RLS.
+
+## Gateway private schema v8 Activity
+
+Gateway keeps operational Activity under the complete local
+project/workspace/Fabric/remote-project/stream/canonical-ref route. The
+`activity_policy_versions` and `activity_policy_current` pair retain strict
+finite policies; `activity_ledger` retains canonical durable Activity and exact
+projection evidence; `activity_ingress_receipts`, `activity_outbound_queue`, and
+`activity_cursors` own replay, retry, and high-watermark state;
+`activity_lifecycle` owns the four closed lifecycle machines; and
+`activity_promotion_receipts` is restricted future promotion evidence only.
+
+Presence has no row shape. Policy versions, ledger rows, and ingress receipts
+are immutable. Every child relation uses complete composite foreign keys, every
+multi-write repository operation uses one SQLite `BEGIN IMMEDIATE`, and the
+bounded pruner alone deletes eligible evidence in child-before-parent order.
+This catalog is neither portable ProjectState nor Code Graph state.
 
 ## Migration 21: Git-aware portable replicas
 

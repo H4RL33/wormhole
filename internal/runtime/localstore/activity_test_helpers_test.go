@@ -135,6 +135,40 @@ func localReceipt(t *testing.T, record ActivityRecord, sequence int64, acceptedA
 	return receipt
 }
 
+func localPullDelivery(t *testing.T, activity projectstate.ActivityV1, source types.WorkspaceID, sequence int64, policy projectstate.EffectiveActivityPolicyV1) ActivityPullDelivery {
+	t.Helper()
+	activityJSON, err := projectstate.CanonicalActivity(activity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activityDigest, err := projectstate.DigestActivity(activity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policyDigest, err := projectstate.DigestActivityPolicy(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := projectstate.ActivityReceiptV1{
+		SchemaVersion: 1, ActivityID: activity.ID, ActivityDigest: activityDigest, Sequence: sequence,
+		PolicyVersion: policy.PolicyVersion, PolicyDigest: policyDigest, AcceptedAt: testUTCNow().Add(time.Duration(sequence) * time.Second),
+	}
+	receiptJSON, err := projectstate.CanonicalActivityReceipt(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ActivityPullDelivery{SourceWorkspaceID: source, ActivityJSON: activityJSON, ActivityDigest: activityDigest, ReceiptJSON: receiptJSON}
+}
+
+func localPullBatch(t *testing.T, policy projectstate.EffectiveActivityPolicyV1, expected, next int64, hasMore bool, deliveries ...ActivityPullDelivery) ActivityPullBatch {
+	t.Helper()
+	policyJSON, err := projectstate.CanonicalActivityPolicy(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ActivityPullBatch{PolicyJSON: policyJSON, ExpectedAfter: expected, NextSequence: next, HasMore: hasMore, Deliveries: deliveries}
+}
+
 func activityTableCounts(t *testing.T, store *Store) map[string]int {
 	t.Helper()
 	counts := make(map[string]int)

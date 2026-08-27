@@ -197,7 +197,7 @@ func (r *ActivityRepo) AcknowledgeOutbound(ctx context.Context, key types.Activi
 		if err := requireActiveActivityRoute(ctx, conn, key.Route); err != nil {
 			return err
 		}
-		policy, err := activityPolicyVersion(ctx, conn, key.Route, receipt.PolicyVersion, receipt.PolicyDigest)
+		_, err := activityPolicyVersion(ctx, conn, key.Route, receipt.PolicyVersion, receipt.PolicyDigest)
 		if err != nil {
 			return err
 		}
@@ -207,6 +207,18 @@ func (r *ActivityRepo) AcknowledgeOutbound(ctx context.Context, key types.Activi
 		}
 		if receipt.ActivityDigest != record.ActivityDigest {
 			return fmt.Errorf("localstore: acknowledge Activity: %w", ErrActivityReplayConflict)
+		}
+		var deliveryState string
+		var deliveryRetention int64
+		deliveryArguments := activityOriginArgs(key)
+		deliveryArguments = append(deliveryArguments, key.ActivityID)
+		if err := conn.QueryRowContext(ctx, `SELECT state,terminal_retention_seconds FROM activity_lifecycle
+			WHERE project_id=? AND workspace_id=? AND fabric_instance_id=? AND remote_project_id=?
+			AND stream_id=? AND canonical_ref=? AND source_workspace_id=? AND activity_id=?
+			AND lifecycle_kind='delivery' AND reference_id=?`, deliveryArguments...).Scan(&deliveryState, &deliveryRetention); errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("localstore: acknowledge Activity lifecycle: %w", ErrActivityNotFound)
+		} else if err != nil {
+			return fmt.Errorf("localstore: acknowledge Activity lifecycle: %w", err)
 		}
 		var storedSequence, storedVersion int64
 		var storedDigest, storedPolicyDigest string
@@ -266,7 +278,10 @@ func (r *ActivityRepo) AcknowledgeOutbound(ctx context.Context, key types.Activi
 		if rows, rowsErr := result.RowsAffected(); rowsErr != nil || rows != 1 {
 			return fmt.Errorf("localstore: acknowledge Activity queue: %w", ErrActivityNotFound)
 		}
-		expiresAt := now.Add(time.Duration(policy.Policy.TerminalRetentionSeconds) * time.Second)
+		if deliveryState != "pending" {
+			return fmt.Errorf("localstore: acknowledge Activity lifecycle: %w", ErrActivityLifecycleConflict)
+		}
+		expiresAt := now.Add(time.Duration(deliveryRetention) * time.Second)
 		arguments = []any{now, expiresAt, now}
 		arguments = append(arguments, activityOriginArgs(key)...)
 		result, err = conn.ExecContext(ctx, `UPDATE activity_lifecycle
