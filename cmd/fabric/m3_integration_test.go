@@ -135,11 +135,11 @@ func m3CallTool(t *testing.T, srvURL, tool, projectID, token string, args any) j
 	if err := json.Unmarshal(resultRaw, &result); err != nil {
 		t.Fatalf("decode %s tool call result: %v", tool, err)
 	}
-	if result.IsError {
-		t.Fatalf("%s tool error: %s", tool, result.Content[0].Text)
-	}
 	if len(result.Content) == 0 {
 		t.Fatalf("%s: empty tool result content", tool)
+	}
+	if result.IsError {
+		t.Fatalf("%s tool error: %s", tool, result.Content[0].Text)
 	}
 	return json.RawMessage(result.Content[0].Text)
 }

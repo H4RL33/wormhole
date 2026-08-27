@@ -148,7 +148,8 @@ func TestP7_LocalTaskPersistence(t *testing.T) {
 	}
 }
 
-// TestP7_SyncQueueDurability verifies that sync queue entries survive server restarts.
+// TestP7_SyncQueueDurability verifies that sync queue entries survive closing
+// and reopening the local SQLite store.
 func TestP7_SyncQueueDurability(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "wormhole.db")
@@ -201,9 +202,9 @@ func TestP7_SyncQueueDurability(t *testing.T) {
 }
 
 // statefulCoordServer is a fake HTTP sync peer that retains pushed tasks in
-// memory, so a second sync runtime's Bootstrap/PullIncremental can observe what
-// the first pushed. It lets TestP7_MultiRuntimeSync prove the second runtime's
-// SQLite replica — not the peer — ends up with the task.
+// memory, so a second sync runtime's Bootstrap can observe what the first
+// pushed. It lets TestP7_MultiRuntimeSync prove the second runtime's SQLite
+// replica — not the peer — ends up with the task.
 func statefulCoordServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	type serverTask struct {
@@ -345,7 +346,7 @@ func TestP7_MultiRuntimeSync(t *testing.T) {
 		t.Fatalf("New engine A: %v", err)
 	}
 
-	task, err := taskRepoA.CreateTask(ctx, "project-1", "Daemon A task", "written offline", nil, 1, nil)
+	task, err := taskRepoA.CreateTask(ctx, "project-1", "Runtime A task", "written offline", nil, 1, nil)
 	if err != nil {
 		t.Fatalf("CreateTask on runtime A: %v", err)
 	}
@@ -405,8 +406,8 @@ func TestP7_MultiRuntimeSync(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runtime B did not receive runtime A's task via Bootstrap: %v", err)
 	}
-	if gotOnB.Title != "Daemon A task" {
-		t.Errorf("runtime B task title = %q, want %q", gotOnB.Title, "Daemon A task")
+	if gotOnB.Title != "Runtime A task" {
+		t.Errorf("runtime B task title = %q, want %q", gotOnB.Title, "Runtime A task")
 	}
 }
 
