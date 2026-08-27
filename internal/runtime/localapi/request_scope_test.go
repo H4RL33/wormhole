@@ -83,7 +83,7 @@ func TestPrivateContextConfiguresExactProjectStateAndIdentityOnce(t *testing.T) 
 	if err := server.ConfigurePrivateRuntime(service, identity); err != nil {
 		t.Fatal(err)
 	}
-	if server.projectState != service || server.identityStore != identity || server.actorResolver != identity {
+	if server.projectState != service || server.workspaceDomain == nil || server.identityStore != identity || server.actorResolver != identity {
 		t.Fatal("private runtime did not retain the exact supplied authorities")
 	}
 	if err := server.ConfigurePrivateRuntime(service, identity); !errors.Is(err, ErrPrivateRuntimeAlreadyConfigured) {
@@ -191,8 +191,13 @@ func privateRoutingTestServer(t *testing.T, actor types.ActorEnvelope, bindings 
 	if err != nil {
 		t.Fatal(err)
 	}
+	domain, err := NewWorkspaceDomain(service)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return &Server{
-		projectState: service,
+		projectState:    service,
+		workspaceDomain: domain,
 		actorResolver: localActorResolverFunc(func(_ context.Context, connection ConnectionIdentity) (types.ActorEnvelope, error) {
 			actor.OccurredAt = connection.OccurredAt
 			return actor, nil
@@ -207,7 +212,12 @@ func privateRoutingWorkspaceTree(t *testing.T, projectID string, repository type
 	snapshot := state.Snapshot{
 		Config:  state.ConfigV1{SnapshotVersion: 1, ProjectID: projectID, Handle: types.ProjectHandle{Namespace: "acme", Name: "wormhole"}, Repository: repository},
 		Project: state.ProjectV1{SchemaVersion: 1, Kind: "project", ID: projectID, Name: "Wormhole", Aliases: []string{}, CreatedAt: now, UpdatedAt: now, Extensions: state.ExtensionsV1{}},
-		Actors:  map[string]state.Record[state.ActorV1]{}, Tasks: map[string]state.Record[state.TaskV1]{},
+		Actors: map[string]state.Record[state.ActorV1]{
+			"00000000-0000-4000-8000-000000000021": {Value: &state.ActorV1{
+				SchemaVersion: 1, Kind: "actor", ID: "00000000-0000-4000-8000-000000000021",
+				ActorKind: types.ActorHuman, DisplayName: "Portable Local Owner", PublicKeys: []state.PublicKeyV1{}, Extensions: state.ExtensionsV1{},
+			}},
+		}, Tasks: map[string]state.Record[state.TaskV1]{},
 		TaskLinks: map[string]state.Record[state.TaskLinkV1]{}, Articles: map[string]state.KBRecord{},
 		Channels: map[string]state.Record[state.ChannelV1]{}, Events: map[string]state.EventV1{},
 		GitLinks: map[string]state.Record[state.GitLinkV1]{},

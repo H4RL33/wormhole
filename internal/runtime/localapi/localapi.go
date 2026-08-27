@@ -126,6 +126,7 @@ type Server struct {
 	version                      string
 	cliCapability                string
 	projectState                 *projectstate.Service
+	workspaceDomain              *WorkspaceDomain
 	actorResolver                LocalActorResolver
 	identityStore                *localidentity.Store
 	fabricRouter                 FabricRouter
@@ -722,6 +723,15 @@ func (s *Server) authorizeLocalPermission(ctx context.Context, requiredPermissio
 	if requiredPermission == "" {
 		return nil
 	}
+	if s.privateRuntimeConfigured() {
+		if _, err := ResolvedBinding(ctx); err != nil {
+			return err
+		}
+		if _, err := ServerOwnedActor(ctx); err != nil {
+			return err
+		}
+		return nil
+	}
 	projectID := s.projectID
 	var argMap map[string]interface{}
 	if len(args) > 0 {
@@ -857,9 +867,30 @@ func (s *Server) localGetTask(ctx context.Context, args json.RawMessage) (map[st
 	}, nil
 }
 
-// localListChannels serves wormhole.channel.list from the local SQLite replica.
-// Args: {"project_id": "xxx" (optional in single-org, required in multi-org)}.
+// localListChannels serves configured Gateway requests from composed portable
+// project state. Legacy test-only servers retain the SQLite fallback below.
 func (s *Server) localListChannels(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if s.workspaceDomain != nil {
+		if len(args) > 0 {
+			var arguments map[string]json.RawMessage
+			if err := json.Unmarshal(args, &arguments); err != nil || arguments == nil {
+				return nil, fmt.Errorf("localapi: list channels: invalid args")
+			}
+		}
+		binding, err := ResolvedBinding(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("localapi: list channels: resolved workspace: %w", err)
+		}
+		channels, err := s.workspaceDomain.ListChannels(ctx, binding)
+		if err != nil {
+			return nil, fmt.Errorf("localapi: list channels: %w", err)
+		}
+		out := make([]interface{}, len(channels))
+		for index, channel := range channels {
+			out[index] = map[string]interface{}{"id": channel.ID, "name": channel.Name}
+		}
+		return map[string]interface{}{"channels": out}, nil
+	}
 	var argMap map[string]interface{}
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &argMap); err != nil {
@@ -897,9 +928,26 @@ func (s *Server) localListChannels(ctx context.Context, args json.RawMessage) (m
 	return map[string]interface{}{"channels": out}, nil
 }
 
-// localListChannelEvents serves wormhole.channel.events from the local SQLite replica.
-// Args: {"project_id": "xxx" (optional in single-org, required in multi-org)}.
+// localListChannelEvents serves clone-local operational activity scoped by the
+// resolved workspace. It never treats legacy channel definitions as authority.
 func (s *Server) localListChannelEvents(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if s.workspaceDomain != nil {
+		if len(args) > 0 {
+			var arguments map[string]json.RawMessage
+			if err := json.Unmarshal(args, &arguments); err != nil || arguments == nil {
+				return nil, fmt.Errorf("localapi: list channel events: invalid args")
+			}
+		}
+		binding, err := ResolvedBinding(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("localapi: list channel events: resolved workspace: %w", err)
+		}
+		events, err := s.er.ListEventsByNamespace(ctx, string(binding.Scope.WorkspaceID), 50, 0)
+		if err != nil {
+			return nil, fmt.Errorf("localapi: list channel events: %w", err)
+		}
+		return map[string]interface{}{"events": localEventResults(events)}, nil
+	}
 	var argMap map[string]interface{}
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &argMap); err != nil {
@@ -927,24 +975,45 @@ func (s *Server) localListChannelEvents(ctx context.Context, args json.RawMessag
 		return nil, fmt.Errorf("localapi: list channel events: %w", err)
 	}
 
-	out := make([]interface{}, len(events))
-	for i, ev := range events {
-		out[i] = map[string]interface{}{
-			"id":         ev.ID,
-			"channel_id": ev.ChannelID,
-			"agent_id":   ev.AgentID,
-			"event_type": ev.EventType,
-			"payload":    json.RawMessage(ev.Payload),
-			"note":       ev.Note,
-			"created_at": ev.CreatedAt,
-		}
-	}
-	return map[string]interface{}{"events": out}, nil
+	return map[string]interface{}{"events": localEventResults(events)}, nil
 }
 
-// localListArticles serves wormhole.kb.list from the local SQLite replica.
-// Args: {"project_id": "xxx" (optional in single-org, required in multi-org)}.
+func localEventResults(events []localstore.DurableEvent) []interface{} {
+	out := make([]interface{}, len(events))
+	for i, event := range events {
+		out[i] = map[string]interface{}{
+			"id": event.ID, "channel_id": event.ChannelID, "agent_id": event.AgentID,
+			"event_type": event.EventType, "payload": json.RawMessage(event.Payload),
+			"note": event.Note, "created_at": event.CreatedAt,
+		}
+	}
+	return out
+}
+
+// localListArticles serves configured Gateway requests from composed portable
+// project state. Legacy test-only servers retain the SQLite fallback below.
 func (s *Server) localListArticles(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if s.workspaceDomain != nil {
+		if len(args) > 0 {
+			var arguments map[string]json.RawMessage
+			if err := json.Unmarshal(args, &arguments); err != nil || arguments == nil {
+				return nil, fmt.Errorf("localapi: list articles: invalid args")
+			}
+		}
+		binding, err := ResolvedBinding(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("localapi: list articles: resolved workspace: %w", err)
+		}
+		articles, err := s.workspaceDomain.ListArticles(ctx, binding)
+		if err != nil {
+			return nil, fmt.Errorf("localapi: list articles: %w", err)
+		}
+		out := make([]interface{}, len(articles))
+		for index, article := range articles {
+			out[index] = portableArticleResult(article)
+		}
+		return map[string]interface{}{"articles": out}, nil
+	}
 	var argMap map[string]interface{}
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &argMap); err != nil {
@@ -987,10 +1056,38 @@ func (s *Server) localListArticles(ctx context.Context, args json.RawMessage) (m
 	return map[string]interface{}{"articles": out}, nil
 }
 
-// localGetArticle serves wormhole.kb.get from the local SQLite replica.
-// Args: {"article_id": "xxx" (optional), "project_id": "yyy" (optional in single-org, required in multi-org)}.
-// If article_id omitted returns all articles.
+// localGetArticle serves a live portable KB article from composed project
+// state, or lists all live articles when article_id is omitted.
 func (s *Server) localGetArticle(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if s.workspaceDomain != nil {
+		var arguments map[string]json.RawMessage
+		if len(args) > 0 {
+			if err := json.Unmarshal(args, &arguments); err != nil || arguments == nil {
+				return nil, fmt.Errorf("localapi: get article: invalid args")
+			}
+		}
+		var articleID string
+		if raw := arguments["article_id"]; len(raw) > 0 {
+			if err := json.Unmarshal(raw, &articleID); err != nil {
+				return nil, fmt.Errorf("localapi: get article: invalid article_id")
+			}
+		}
+		if articleID == "" {
+			return s.localListArticles(ctx, args)
+		}
+		binding, err := ResolvedBinding(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("localapi: get article: resolved workspace: %w", err)
+		}
+		article, err := s.workspaceDomain.GetArticle(ctx, binding, articleID)
+		if errors.Is(err, ErrPortableArticleNotFound) {
+			return nil, fmt.Errorf("localapi: article not found")
+		}
+		if err != nil {
+			return nil, fmt.Errorf("localapi: get article: %w", err)
+		}
+		return portableArticleResult(article), nil
+	}
 	var argMap map[string]interface{}
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &argMap); err != nil {
@@ -1036,6 +1133,31 @@ func (s *Server) localGetArticle(ctx context.Context, args json.RawMessage) (map
 		"created_at":      a.CreatedAt,
 		"updated_at":      a.UpdatedAt,
 	}, nil
+}
+
+func portableArticleResult(article WorkspaceArticle) map[string]interface{} {
+	return map[string]interface{}{
+		"id":                  article.ID,
+		"title":               article.Title,
+		"body":                article.Body,
+		"frontmatter":         json.RawMessage(article.Frontmatter),
+		"author_actor_id":     article.AuthorActorID,
+		"related_article_ids": append([]string(nil), article.RelatedArticleIDs...),
+		"created_at":          article.CreatedAt,
+		"updated_at":          article.UpdatedAt,
+	}
+}
+
+func decodePortableStringArgument(arguments map[string]json.RawMessage, name string) (string, error) {
+	raw := arguments[name]
+	if len(raw) == 0 {
+		return "", nil
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", fmt.Errorf("%s must be a string", name)
+	}
+	return value, nil
 }
 
 // =============================================================================
@@ -1573,8 +1695,9 @@ func (s *Server) handleGitLinkCommit(ctx context.Context, args json.RawMessage) 
 	return out, nil
 }
 
-// handleKBWrite serves wormhole.kb.write: writes a KB article locally and
-// enqueues it for sync.
+// handleKBWrite writes a portable KB operation through WorkspaceDomain on the
+// configured path. The legacy SQLite/queue body is retained for test-only
+// constructors until their separate removal tranche.
 // Args: {"title": "z", "body": "...",
 //
 //	"project_id": "xxx" (optional in single-org, required in multi-org),
@@ -1583,6 +1706,38 @@ func (s *Server) handleGitLinkCommit(ctx context.Context, args json.RawMessage) 
 // namespace_id is never accepted from the request. The configured path uses
 // the resolved workspace.
 func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if s.workspaceDomain != nil {
+		if err := rejectDuplicateJSONMembers(args); err != nil {
+			return nil, fmt.Errorf("localapi: kb write: invalid args: %w", err)
+		}
+		var arguments map[string]json.RawMessage
+		if err := json.Unmarshal(args, &arguments); err != nil || arguments == nil {
+			return nil, fmt.Errorf("localapi: kb write: invalid args")
+		}
+		title, titleErr := decodePortableStringArgument(arguments, "title")
+		body, bodyErr := decodePortableStringArgument(arguments, "body")
+		if titleErr != nil || bodyErr != nil {
+			return nil, fmt.Errorf("localapi: kb write: invalid args")
+		}
+		if title == "" {
+			return nil, fmt.Errorf("localapi: kb write: missing title")
+		}
+		binding, err := ResolvedBinding(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("localapi: kb write: resolved workspace: %w", err)
+		}
+		actor, err := ServerOwnedActor(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("localapi: kb write: server actor: %w", err)
+		}
+		article, err := s.workspaceDomain.WriteArticle(ctx, binding, actor, title, body, arguments["frontmatter"])
+		if err != nil {
+			return nil, fmt.Errorf("localapi: kb write: %w", err)
+		}
+		out := portableArticleResult(article)
+		out["workspace_id"] = string(binding.Scope.WorkspaceID)
+		return out, nil
+	}
 	if s.qr == nil {
 		return nil, fmt.Errorf("localapi: kb write: sync queue not available")
 	}
@@ -1666,8 +1821,8 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 	return out, nil
 }
 
-// handleChannelPost serves wormhole.channel.post: publishes a durable event
-// to a channel locally and enqueues it for sync.
+// handleChannelPost publishes clone-local operational activity after validating
+// the channel against composed portable project state on the configured path.
 // Args: {"channel_id": "y",
 //
 //	"event_type": "discovery.logged",
@@ -1677,6 +1832,9 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 // namespace_id is never accepted from the request. The configured path uses
 // the resolved workspace.
 func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if s.workspaceDomain != nil {
+		return s.handlePortableChannelPost(ctx, args)
+	}
 	if s.qr == nil {
 		return nil, fmt.Errorf("localapi: channel post: sync queue not available")
 	}
@@ -1765,9 +1923,100 @@ func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (m
 	return out, nil
 }
 
-// handleChannelCreate creates a durable local channel and queues it for
-// server synchronization in the same SQLite transaction.
+func (s *Server) handlePortableChannelPost(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if s.er == nil || s.store == nil {
+		return nil, fmt.Errorf("localapi: channel post: operational event store not available")
+	}
+	if err := rejectDuplicateJSONMembers(args); err != nil {
+		return nil, fmt.Errorf("localapi: channel post: invalid args: %w", err)
+	}
+	var arguments map[string]json.RawMessage
+	if err := json.Unmarshal(args, &arguments); err != nil || arguments == nil {
+		return nil, fmt.Errorf("localapi: channel post: invalid args")
+	}
+	channelID, channelErr := decodePortableStringArgument(arguments, "channel_id")
+	eventType, eventErr := decodePortableStringArgument(arguments, "event_type")
+	noteValue, noteErr := decodePortableStringArgument(arguments, "note")
+	if channelErr != nil || eventErr != nil || noteErr != nil {
+		return nil, fmt.Errorf("localapi: channel post: invalid args")
+	}
+	if channelID == "" || eventType == "" {
+		return nil, fmt.Errorf("localapi: channel post: missing channel_id or event_type")
+	}
+	binding, err := ResolvedBinding(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: channel post: resolved workspace: %w", err)
+	}
+	if _, err := s.workspaceDomain.Channel(ctx, binding, channelID); err != nil {
+		return nil, fmt.Errorf("localapi: channel post: %w", err)
+	}
+	actor, err := ServerOwnedActor(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: channel post: server actor: %w", err)
+	}
+	var note *string
+	if noteValue != "" {
+		note = &noteValue
+	}
+	tx, err := s.beginLocalWrite(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: channel post: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+	namespaceID := string(binding.Scope.WorkspaceID)
+	event, err := s.er.PublishOperationalEventTx(ctx, tx, namespaceID, channelID, actor.PrincipalID(), eventType, arguments["payload"], note)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: channel post: %w", err)
+	}
+	out := map[string]interface{}{
+		"id": event.ID, "workspace_id": namespaceID, "channel_id": event.ChannelID,
+		"agent_id": event.AgentID, "event_type": event.EventType,
+		"payload": json.RawMessage(event.Payload), "note": event.Note, "created_at": event.CreatedAt,
+	}
+	busPayload, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: channel post: marshal eventbus payload: %w", err)
+	}
+	if err := s.commitLocalWrite(tx); err != nil {
+		return nil, fmt.Errorf("localapi: channel post: commit: %w", err)
+	}
+	if s.eventbus != nil {
+		s.eventbus.Publish(ctx, namespaceID, event.EventType, "", event.AgentID, busPayload)
+	}
+	return out, nil
+}
+
+// handleChannelCreate creates a portable ChannelV1 operation through
+// WorkspaceDomain on the configured path. The legacy fallback is test-only.
 func (s *Server) handleChannelCreate(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if s.workspaceDomain != nil {
+		var arguments map[string]json.RawMessage
+		if err := json.Unmarshal(args, &arguments); err != nil || arguments == nil {
+			return nil, fmt.Errorf("localapi: channel create: invalid args")
+		}
+		name, nameErr := decodePortableStringArgument(arguments, "name")
+		if nameErr != nil {
+			return nil, fmt.Errorf("localapi: channel create: invalid args")
+		}
+		if name == "" {
+			return nil, fmt.Errorf("localapi: channel create: missing name")
+		}
+		binding, err := ResolvedBinding(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("localapi: channel create: resolved workspace: %w", err)
+		}
+		actor, err := ServerOwnedActor(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("localapi: channel create: server actor: %w", err)
+		}
+		channel, err := s.workspaceDomain.CreateChannel(ctx, binding, actor, name)
+		if err != nil {
+			return nil, fmt.Errorf("localapi: channel create: %w", err)
+		}
+		return map[string]interface{}{
+			"id": channel.ID, "workspace_id": string(binding.Scope.WorkspaceID), "name": channel.Name, "created_at": channel.CreatedAt,
+		}, nil
+	}
 	if s.qr == nil {
 		return nil, fmt.Errorf("localapi: channel create: sync queue not available")
 	}

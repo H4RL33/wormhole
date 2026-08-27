@@ -143,8 +143,8 @@ func TestConfiguredPrivateRuntimeDerivesAttributionAndIsolatesChannelAndKBHandle
 
 	createdChannel := privateDispatchSuccess(t, server, first, "wormhole.channel.create", map[string]any{"name": "first-only"}, nil)
 	channelID := createdChannel["id"].(string)
-	if createdChannel["namespace_id"] != string(first.Scope.WorkspaceID) {
-		t.Fatalf("channel namespace = %v, want workspace %s", createdChannel["namespace_id"], first.Scope.WorkspaceID)
+	if createdChannel["workspace_id"] != string(first.Scope.WorkspaceID) {
+		t.Fatalf("channel workspace = %v, want workspace %s", createdChannel["workspace_id"], first.Scope.WorkspaceID)
 	}
 	secondChannels := privateDispatchSuccess(t, server, second, "wormhole.channel.list", nil, nil)
 	if channels := secondChannels["channels"].([]any); len(channels) != 0 {
@@ -154,9 +154,22 @@ func TestConfiguredPrivateRuntimeDerivesAttributionAndIsolatesChannelAndKBHandle
 	if !crossPost.IsError {
 		t.Fatalf("second workspace posted to first channel: %+v", crossPost)
 	}
+	subscription, err := server.eventbus.Subscribe(string(first.Scope.WorkspaceID), "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.eventbus.Unsubscribe(subscription)
 	posted := privateDispatchSuccess(t, server, first, "wormhole.channel.post", map[string]any{"channel_id": channelID, "event_type": "review.ready"}, nil)
 	if posted["agent_id"] != actor.PrincipalID() {
 		t.Fatalf("channel attribution = %v, want server actor %s", posted["agent_id"], actor.PrincipalID())
+	}
+	select {
+	case notification := <-subscription.Events():
+		if !strings.Contains(string(notification), channelID) || !strings.Contains(string(notification), "review.ready") {
+			t.Fatalf("channel notification = %s", notification)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("portable channel post did not wake workspace subscription")
 	}
 	forgedPost := privateDispatchResult(t, server, first, "wormhole.channel.post", map[string]any{"channel_id": channelID, "event_type": "review.ready", "agent_id": "forged"}, nil)
 	if !forgedPost.IsError || !strings.Contains(forgedPost.Content[0].Text, "agent_id") {
@@ -170,8 +183,8 @@ func TestConfiguredPrivateRuntimeDerivesAttributionAndIsolatesChannelAndKBHandle
 
 	written := privateDispatchSuccess(t, server, first, "wormhole.kb.write", map[string]any{"title": "first-only", "body": "private sibling draft"}, nil)
 	articleID := written["id"].(string)
-	if written["author_agent_id"] != actor.PrincipalID() {
-		t.Fatalf("KB attribution = %v, want server actor %s", written["author_agent_id"], actor.PrincipalID())
+	if written["author_actor_id"] != actor.PrincipalID() {
+		t.Fatalf("KB attribution = %v, want server actor %s", written["author_actor_id"], actor.PrincipalID())
 	}
 	firstGet := privateDispatchSuccess(t, server, first, "wormhole.kb.get", map[string]any{"article_id": articleID}, nil)
 	if firstGet["id"] != articleID {
@@ -188,6 +201,20 @@ func TestConfiguredPrivateRuntimeDerivesAttributionAndIsolatesChannelAndKBHandle
 	forgedKB := privateDispatchResult(t, server, first, "wormhole.kb.write", map[string]any{"title": "forged", "agent_id": "forged"}, nil)
 	if !forgedKB.IsError || !strings.Contains(forgedKB.Content[0].Text, "agent_id") {
 		t.Fatalf("forged KB attribution accepted: %+v", forgedKB)
+	}
+	view, err := server.workspaceDomain.View(context.Background(), first)
+	if err != nil || view.Channels[channelID].Value == nil || view.Articles[articleID].Value == nil {
+		t.Fatalf("composed portable state = (%+v, %v)", view, err)
+	}
+	for _, table := range []string{"channels", "kb_articles", "sync_queue"} {
+		var count int
+		if err := server.store.DB().QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("legacy %s rows = %d, err=%v; want zero", table, count, err)
+		}
+	}
+	var cachedScopes int
+	if err := server.store.DB().QueryRow(`SELECT count(*) FROM whoami_cache`).Scan(&cachedScopes); err != nil || cachedScopes != 0 {
+		t.Fatalf("Fabric identity cache rows = %d, err=%v; want zero", cachedScopes, err)
 	}
 }
 
@@ -344,12 +371,6 @@ func privateDispatchTestServer(t *testing.T, actor types.ActorEnvelope, bindings
 	server.coordServer = "http://unavailable.invalid"
 	server.projectID = bindings[0].Scope.ProjectID
 	server.registry = newLocalRegistry(server)
-	if err := store.CacheWhoAmI(context.Background(), localstore.WhoAmICache{
-		AgentID: "cached-agent", ProjectID: bindings[0].Scope.ProjectID,
-		Permissions: []string{"task.create", "task.assign", "task.update_status", "channel.create", "channel.post", "kb.write", "kb.search", "git.link_commit"}, CachedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatal(err)
-	}
 	return server
 }
 

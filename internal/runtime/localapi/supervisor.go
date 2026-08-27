@@ -34,8 +34,8 @@ type SupervisorDependencies struct {
 type Supervisor struct {
 	dependencies SupervisorDependencies
 	events       *localstore.EventRepo
+	workspace    *WorkspaceDomain
 	tasks        *localstore.TaskRepo
-	articles     *localstore.KBRepo
 	gitLinks     *localstore.GitRepo
 	queue        *syncpkg.QueueRepo
 	eventBus     *eventbus.EventBus
@@ -54,11 +54,15 @@ func NewSupervisor(dependencies SupervisorDependencies) (*Supervisor, error) {
 		return nil, fmt.Errorf("%w: local store is unavailable", ErrIncompleteSupervisorDependencies)
 	}
 	events := localstore.NewEventRepo(dependencies.Store.DB())
+	workspace, err := NewWorkspaceDomain(dependencies.ProjectState)
+	if err != nil {
+		return nil, fmt.Errorf("%w: workspace domain is unavailable", ErrIncompleteSupervisorDependencies)
+	}
 	return &Supervisor{
 		dependencies: dependencies,
 		events:       events,
+		workspace:    workspace,
 		tasks:        localstore.NewTaskRepo(dependencies.Store.DB(), events),
-		articles:     localstore.NewKBRepo(dependencies.Store.DB()),
 		gitLinks:     localstore.NewGitRepo(dependencies.Store.DB()),
 		queue:        syncpkg.NewQueueRepo(dependencies.Store.DB()),
 		eventBus:     eventbus.NewEventBus(),
@@ -102,24 +106,24 @@ func (s *Supervisor) Listen(socketPath string) (*Server, error) {
 		return nil, fmt.Errorf("localapi: listen on %s: %w", socketPath, err)
 	}
 	server := &Server{
-		listener:      listener,
-		socketPath:    socketPath,
-		cliCapability: capability,
-		httpClient:    &http.Client{},
-		projectState:  s.dependencies.ProjectState,
-		actorResolver: s.dependencies.Identity,
-		identityStore: s.dependencies.Identity,
-		fabricRouter:  s.dependencies.Fabric,
-		store:         s.dependencies.Store,
-		tr:            s.tasks,
-		er:            s.events,
-		kb:            s.articles,
-		gr:            s.gitLinks,
-		qr:            s.queue,
-		eventbus:      s.eventBus,
-		scheduler:     s.scheduler,
-		handlers:      make(chan struct{}, maxActiveConnections),
-		serveReady:    make(chan struct{}),
+		listener:        listener,
+		socketPath:      socketPath,
+		cliCapability:   capability,
+		httpClient:      &http.Client{},
+		projectState:    s.dependencies.ProjectState,
+		workspaceDomain: s.workspace,
+		actorResolver:   s.dependencies.Identity,
+		identityStore:   s.dependencies.Identity,
+		fabricRouter:    s.dependencies.Fabric,
+		store:           s.dependencies.Store,
+		tr:              s.tasks,
+		er:              s.events,
+		gr:              s.gitLinks,
+		qr:              s.queue,
+		eventbus:        s.eventBus,
+		scheduler:       s.scheduler,
+		handlers:        make(chan struct{}, maxActiveConnections),
+		serveReady:      make(chan struct{}),
 	}
 	server.registry = newLocalRegistry(server)
 	s.server = server

@@ -112,8 +112,11 @@ func TestSupervisorIsolatesMultipleWorkspacesThroughOneGateway(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = supervisor.Close() })
-	if server.projectState != service || server.identityStore != identity || server.fabricRouter == nil {
+	if server.projectState != service || server.workspaceDomain == nil || server.identityStore != identity || server.fabricRouter == nil {
 		t.Fatal("supervisor server did not retain the complete dependency graph")
+	}
+	if server.kb != nil {
+		t.Fatal("production supervisor retained legacy KB authority")
 	}
 	if _, err := supervisor.Listen(filepath.Join(root, "second.sock")); !errors.Is(err, ErrSupervisorAlreadyListening) {
 		t.Fatalf("second Listen error = %v, want ErrSupervisorAlreadyListening", err)

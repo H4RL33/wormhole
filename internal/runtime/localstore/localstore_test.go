@@ -294,6 +294,35 @@ func TestEventRepoGetChannelRespectsNamespace(t *testing.T) {
 	}
 }
 
+func TestOperationalEventDoesNotRequireLegacyChannelDefinition(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "operational-event.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	repo := NewEventRepo(store.DB())
+	event, err := repo.PublishOperationalEvent(ctx, "workspace-a", "11111111-1111-4111-8111-111111111111", "actor-a", "review.ready", json.RawMessage(`{"ready":true}`), nil)
+	if err != nil {
+		t.Fatalf("PublishOperationalEvent: %v", err)
+	}
+	if event.NamespaceID != "workspace-a" || event.ChannelID != "11111111-1111-4111-8111-111111111111" || event.AgentID != "actor-a" {
+		t.Fatalf("operational event = %+v", event)
+	}
+
+	var channels, events int
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM channels`).Scan(&channels); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM events WHERE namespace_id=? AND channel_id=?`, event.NamespaceID, event.ChannelID).Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if channels != 0 || events != 1 {
+		t.Fatalf("legacy channels=%d operational events=%d, want 0/1", channels, events)
+	}
+}
+
 func TestTaskRepoAssignPersistsOnlyInItsNamespace(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "wormholed.db"))
 	if err != nil {

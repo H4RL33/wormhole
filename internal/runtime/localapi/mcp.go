@@ -202,10 +202,10 @@ func newLocalRegistry(s *Server) *localRegistry {
 		return s.handleTaskRoute(ctx, args)
 	})
 
-	reg("wormhole.channel.list", "List channels in the local event bus replica.", channelListArgs{}, "", singleResult(localChannelListResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.channel.list", "List live channels from this workspace's composed portable project state.", channelListArgs{}, "", singleResult(localChannelListResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localListChannels(ctx, args)
 	})
-	reg("wormhole.channel.create", "Create a channel locally and enqueue it for sync.", channelCreateArgs{}, "channel.create", singleResult(localChannelWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.channel.create", "Create a portable channel in this workspace's private candidate overlay.", channelCreateArgs{}, "channel.create", singleResult(localChannelWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleChannelCreate(ctx, args)
 	})
 
@@ -213,7 +213,7 @@ func newLocalRegistry(s *Server) *localRegistry {
 		return s.localListChannelEvents(ctx, args)
 	})
 
-	reg("wormhole.channel.post", "Publish a durable event to a channel locally and enqueue it for sync.", channelPostArgs{}, "channel.post", singleResult(localEventWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.channel.post", "Publish clone-local operational activity after validating its portable channel.", channelPostArgs{}, "channel.post", singleResult(localEventWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleChannelPost(ctx, args)
 	})
 
@@ -223,7 +223,7 @@ func newLocalRegistry(s *Server) *localRegistry {
 	// single (result, error) return (design doc §1 tools/call, §5).
 	reg("wormhole.channel.subscribe", "Subscribe this connection to all future events in its resolved local workspace; events are delivered as notifications/wormhole.event messages until the subscription ends.", channelSubscribeArgs{}, "", singleResult(localSubscriptionResult{}), nil)
 
-	reg("wormhole.kb.list", "List KB articles in the local knowledge base replica.", kbListArgs{}, "", singleResult(localArticleListResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.kb.list", "List live KB articles from this workspace's composed portable project state.", kbListArgs{}, "", singleResult(localArticleListResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localListArticles(ctx, args)
 	})
 
@@ -234,7 +234,7 @@ func newLocalRegistry(s *Server) *localRegistry {
 		return s.localGetArticle(ctx, args)
 	})
 
-	reg("wormhole.kb.write", "Write a KB article locally and enqueue it for sync.", kbWriteArgs{}, "kb.write", singleResult(localArticleWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.kb.write", "Write a portable KB article into this workspace's private candidate overlay.", kbWriteArgs{}, "kb.write", singleResult(localArticleWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleKBWrite(ctx, args)
 	})
 	reg("wormhole.kb.search", "Search the shared Fabric knowledge base semantically through the project-bound Gateway connection.", kbSearchArgs{}, "kb.search", singleResult(localKBSearchResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
@@ -500,9 +500,10 @@ type localChannelListResult struct {
 }
 
 type localChannelWriteResult struct {
-	ID          string `json:"id"`
-	NamespaceID string `json:"namespace_id"`
-	Name        string `json:"name"`
+	ID          string    `json:"id"`
+	WorkspaceID string    `json:"workspace_id"`
+	Name        string    `json:"name"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type localEventResult struct {
@@ -521,7 +522,7 @@ type localEventListResult struct {
 
 type localEventWriteResult struct {
 	ID          string          `json:"id"`
-	NamespaceID string          `json:"namespace_id"`
+	WorkspaceID string          `json:"workspace_id"`
 	ChannelID   string          `json:"channel_id"`
 	AgentID     string          `json:"agent_id"`
 	EventType   string          `json:"event_type"`
@@ -536,13 +537,14 @@ type localSubscriptionResult struct {
 }
 
 type localArticleResult struct {
-	ID            string          `json:"id"`
-	Title         string          `json:"title"`
-	Body          string          `json:"body"`
-	Frontmatter   json.RawMessage `json:"frontmatter"`
-	AuthorAgentID string          `json:"author_agent_id"`
-	CreatedAt     time.Time       `json:"created_at"`
-	UpdatedAt     time.Time       `json:"updated_at"`
+	ID                string          `json:"id"`
+	Title             string          `json:"title"`
+	Body              string          `json:"body"`
+	Frontmatter       json.RawMessage `json:"frontmatter"`
+	AuthorActorID     string          `json:"author_actor_id"`
+	RelatedArticleIDs []string        `json:"related_article_ids"`
+	CreatedAt         time.Time       `json:"created_at"`
+	UpdatedAt         time.Time       `json:"updated_at"`
 }
 
 type localArticleListResult struct {
@@ -550,14 +552,15 @@ type localArticleListResult struct {
 }
 
 type localArticleWriteResult struct {
-	ID            string          `json:"id"`
-	NamespaceID   string          `json:"namespace_id"`
-	Title         string          `json:"title"`
-	Body          string          `json:"body"`
-	Frontmatter   json.RawMessage `json:"frontmatter"`
-	AuthorAgentID string          `json:"author_agent_id"`
-	CreatedAt     time.Time       `json:"created_at"`
-	UpdatedAt     time.Time       `json:"updated_at"`
+	ID                string          `json:"id"`
+	WorkspaceID       string          `json:"workspace_id"`
+	Title             string          `json:"title"`
+	Body              string          `json:"body"`
+	Frontmatter       json.RawMessage `json:"frontmatter"`
+	AuthorActorID     string          `json:"author_actor_id"`
+	RelatedArticleIDs []string        `json:"related_article_ids"`
+	CreatedAt         time.Time       `json:"created_at"`
+	UpdatedAt         time.Time       `json:"updated_at"`
 }
 
 type localAgentResult struct {

@@ -155,7 +155,12 @@ func (s *Server) ConfigurePrivateRuntime(projectState *projectstate.Service, ide
 	if s.projectState != nil || s.actorResolver != nil || s.identityStore != nil {
 		return ErrPrivateRuntimeAlreadyConfigured
 	}
+	domain, err := NewWorkspaceDomain(projectState)
+	if err != nil {
+		return err
+	}
 	s.projectState = projectState
+	s.workspaceDomain = domain
 	s.actorResolver = identity
 	s.identityStore = identity
 	return nil
