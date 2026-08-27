@@ -33,6 +33,25 @@ type RemoteBindingKey struct {
 	StreamID         string
 }
 
+// ActivityRouteKey is the complete immutable routing authority for ActivityV1.
+// It is an internal value and deliberately has no wire-format tags.
+type ActivityRouteKey struct {
+	ProjectID        string
+	WorkspaceID      WorkspaceID
+	FabricInstanceID string
+	RemoteProjectID  string
+	StreamID         string
+	CanonicalRef     string
+}
+
+// ActivityOriginKey adds the origin identity needed for Activity idempotency.
+// It is an internal value and deliberately has no wire-format tags.
+type ActivityOriginKey struct {
+	Route             ActivityRouteKey
+	SourceWorkspaceID WorkspaceID
+	ActivityID        string
+}
+
 type FabricBinding struct {
 	Workspace        WorkspaceBinding
 	ProfileID        string
@@ -59,6 +78,38 @@ func (p FabricProfile) Validate() error {
 func (k RemoteBindingKey) Validate() error {
 	if !CanonicalUUID(k.ProjectID) || !CanonicalUUID(string(k.WorkspaceID)) || !CanonicalUUID(k.FabricInstanceID) || !CanonicalUUID(k.RemoteProjectID) || !CanonicalUUID(k.StreamID) {
 		return fmt.Errorf("%w: incomplete remote binding key", ErrInvalidFabricRoute)
+	}
+	return nil
+}
+
+func (k ActivityRouteKey) Validate() error {
+	if !CanonicalUUID(k.ProjectID) || !CanonicalUUID(string(k.WorkspaceID)) || !CanonicalUUID(k.FabricInstanceID) || !CanonicalUUID(k.RemoteProjectID) || !CanonicalUUID(k.StreamID) || k.CanonicalRef == "" {
+		return fmt.Errorf("%w: incomplete activity route key", ErrInvalidFabricRoute)
+	}
+	if !validBranchRef(k.CanonicalRef) {
+		return fmt.Errorf("%w: invalid activity canonical ref", ErrInvalidFabricRoute)
+	}
+	name := strings.TrimPrefix(k.CanonicalRef, "refs/heads/")
+	for index := 0; index < len(name); index++ {
+		character := name[index]
+		if !((character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || strings.ContainsRune("._/-", rune(character))) {
+			return fmt.Errorf("%w: invalid activity canonical ref", ErrInvalidFabricRoute)
+		}
+	}
+	for _, component := range strings.Split(name, "/") {
+		if component == "." || component == ".." {
+			return fmt.Errorf("%w: invalid activity canonical ref", ErrInvalidFabricRoute)
+		}
+	}
+	return nil
+}
+
+func (k ActivityOriginKey) Validate() error {
+	if err := k.Route.Validate(); err != nil {
+		return err
+	}
+	if !CanonicalUUID(string(k.SourceWorkspaceID)) || !CanonicalUUID(k.ActivityID) {
+		return fmt.Errorf("%w: invalid activity origin key", ErrInvalidFabricRoute)
 	}
 	return nil
 }

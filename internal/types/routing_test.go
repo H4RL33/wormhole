@@ -8,13 +8,15 @@ import (
 )
 
 const (
-	testProjectID        = "33333333-3333-4333-8333-333333333333"
-	testWorkspaceID      = "44444444-4444-4444-8444-444444444444"
-	testProfileID        = "55555555-5555-4555-8555-555555555555"
-	testFabricInstanceID = "66666666-6666-4666-8666-666666666666"
-	testRemoteProjectID  = "77777777-7777-4777-8777-777777777777"
-	testStreamID         = "88888888-8888-4888-8888-888888888888"
-	testAttachmentRef    = "99999999-9999-4999-8999-999999999999"
+	testProjectID         = "33333333-3333-4333-8333-333333333333"
+	testWorkspaceID       = "44444444-4444-4444-8444-444444444444"
+	testProfileID         = "55555555-5555-4555-8555-555555555555"
+	testFabricInstanceID  = "66666666-6666-4666-8666-666666666666"
+	testRemoteProjectID   = "77777777-7777-4777-8777-777777777777"
+	testStreamID          = "88888888-8888-4888-8888-888888888888"
+	testAttachmentRef     = "99999999-9999-4999-8999-999999999999"
+	testSourceWorkspaceID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	testActivityID        = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 )
 
 func testFabricProfile() FabricProfile {
@@ -128,6 +130,101 @@ func TestRemoteBindingKeyRejectsEveryPartialCombination(t *testing.T) {
 			partial := valid
 			tc.mutate(&partial)
 			if err := partial.Validate(); !errors.Is(err, ErrInvalidFabricRoute) {
+				t.Fatalf("Validate() error = %v, want ErrInvalidFabricRoute", err)
+			}
+		})
+	}
+}
+
+func TestActivityRouteKeyRequiresCompleteBindingAndCanonicalRef(t *testing.T) {
+	valid := ActivityRouteKey{
+		ProjectID:        testProjectID,
+		WorkspaceID:      WorkspaceID(testWorkspaceID),
+		FabricInstanceID: testFabricInstanceID,
+		RemoteProjectID:  testRemoteProjectID,
+		StreamID:         testStreamID,
+		CanonicalRef:     "refs/heads/main",
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("Validate(valid): %v", err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*ActivityRouteKey)
+	}{
+		{"nil project ID", func(key *ActivityRouteKey) { key.ProjectID = "00000000-0000-0000-0000-000000000000" }},
+		{"noncanonical project ID", func(key *ActivityRouteKey) { key.ProjectID = "33333333-3333-4333-8333-33333333333A" }},
+		{"workspace ID", func(key *ActivityRouteKey) { key.WorkspaceID = "" }},
+		{"Fabric instance ID", func(key *ActivityRouteKey) { key.FabricInstanceID = "not-a-uuid" }},
+		{"remote project ID", func(key *ActivityRouteKey) { key.RemoteProjectID = "" }},
+		{"stream ID", func(key *ActivityRouteKey) { key.StreamID = "not-a-uuid" }},
+		{"empty ref", func(key *ActivityRouteKey) { key.CanonicalRef = "" }},
+		{"non-branch ref", func(key *ActivityRouteKey) { key.CanonicalRef = "refs/tags/v1" }},
+		{"double slash", func(key *ActivityRouteKey) { key.CanonicalRef = "refs/heads/topic//child" }},
+		{"trailing slash", func(key *ActivityRouteKey) { key.CanonicalRef = "refs/heads/topic/" }},
+		{"dot component", func(key *ActivityRouteKey) { key.CanonicalRef = "refs/heads/topic/./child" }},
+		{"dot-dot component", func(key *ActivityRouteKey) { key.CanonicalRef = "refs/heads/topic/../child" }},
+		{"non-ASCII", func(key *ActivityRouteKey) { key.CanonicalRef = "refs/heads/tópico" }},
+		{"outside exact alphabet", func(key *ActivityRouteKey) { key.CanonicalRef = "refs/heads/topic/{child}" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			invalid := valid
+			tc.mutate(&invalid)
+			if err := invalid.Validate(); !errors.Is(err, ErrInvalidFabricRoute) {
+				t.Fatalf("Validate() error = %v, want ErrInvalidFabricRoute", err)
+			}
+		})
+	}
+
+	for _, value := range []any{ActivityRouteKey{}, ActivityOriginKey{}} {
+		typeOfValue := reflect.TypeOf(value)
+		for index := 0; index < typeOfValue.NumField(); index++ {
+			field := typeOfValue.Field(index)
+			if _, ok := field.Tag.Lookup("json"); ok {
+				t.Fatalf("%s.%s has a JSON tag", typeOfValue.Name(), field.Name)
+			}
+			lowerName := strings.ToLower(field.Name)
+			for _, forbidden := range []string{"credential", "profile", "url", "actor", "policy", "cursor", "token", "secret"} {
+				if strings.Contains(lowerName, forbidden) {
+					t.Fatalf("%s.%s contains forbidden %s authority", typeOfValue.Name(), field.Name, forbidden)
+				}
+			}
+		}
+	}
+}
+
+func TestActivityOriginKeyRequiresCanonicalIDs(t *testing.T) {
+	valid := ActivityOriginKey{
+		Route: ActivityRouteKey{
+			ProjectID:        testProjectID,
+			WorkspaceID:      WorkspaceID(testWorkspaceID),
+			FabricInstanceID: testFabricInstanceID,
+			RemoteProjectID:  testRemoteProjectID,
+			StreamID:         testStreamID,
+			CanonicalRef:     "refs/heads/main",
+		},
+		SourceWorkspaceID: WorkspaceID(testSourceWorkspaceID),
+		ActivityID:        testActivityID,
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("Validate(valid): %v", err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*ActivityOriginKey)
+	}{
+		{"route", func(key *ActivityOriginKey) { key.Route.StreamID = "" }},
+		{"nil source workspace", func(key *ActivityOriginKey) { key.SourceWorkspaceID = "00000000-0000-0000-0000-000000000000" }},
+		{"noncanonical source workspace", func(key *ActivityOriginKey) { key.SourceWorkspaceID = "not-a-uuid" }},
+		{"nil activity", func(key *ActivityOriginKey) { key.ActivityID = "00000000-0000-0000-0000-000000000000" }},
+		{"noncanonical activity", func(key *ActivityOriginKey) { key.ActivityID = "not-a-uuid" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			invalid := valid
+			tc.mutate(&invalid)
+			if err := invalid.Validate(); !errors.Is(err, ErrInvalidFabricRoute) {
 				t.Fatalf("Validate() error = %v, want ErrInvalidFabricRoute", err)
 			}
 		})
