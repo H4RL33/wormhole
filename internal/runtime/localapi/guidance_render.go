@@ -11,11 +11,6 @@ import (
 	"strings"
 )
 
-const (
-	sharedKBSemanticGuidance    = "Use shared KB semantic search for organisational decisions, procedures, and discoveries before broad repository reconstruction when that context could answer the question."
-	codeGraphSeparationGuidance = "Use Code Graph only for project-local source structure and bounded code discovery when it is enabled and current; it is separate from the shared KB and does not replace Git or verification."
-)
-
 type generatedGuidanceFile struct {
 	Slug        string
 	Target      string
@@ -104,7 +99,6 @@ func renderGatewayGuidance(registry *localRegistry, records []toolGuidance) (gen
 	specs := []generatedSkillSpec{
 		{"wormhole-orientation", ".agents/skills/wormhole-orientation/SKILL.md", "starting work in a project connected to Wormhole or reconstructing shared project context.", []string{}, renderOrientationSkill},
 		{"wormhole-tool-use", ".agents/skills/wormhole-tool-use/SKILL.md", "choosing or calling a live Wormhole Gateway tool and checking its permissions, schema, freshness, or side effects.", []string{}, renderToolUseSkill},
-		{"wormhole-code-graph", ".agents/skills/wormhole-code-graph/SKILL.md", "a code task may benefit from bounded local structural discovery through the Wormhole Code Graph.", []string{}, renderCodeGraphSkill},
 		{"wormhole-operating-loop", ".agents/skills/wormhole-operating-loop/SKILL.md", "carrying work from session orientation through implementation, durable reporting, verification, and handoff.", []string{}, renderOperatingLoopSkill},
 		{"wormhole-contributor", ".agents/skills/wormhole-contributor/SKILL.md", "acting as the contributor assigned to implement a scoped Wormhole Task.", []string{"contributor"}, renderContributorSkill},
 		{"wormhole-reviewer", ".agents/skills/wormhole-reviewer/SKILL.md", "reviewing another agent's Wormhole Task, implementation, evidence, or handoff.", []string{"reviewer"}, renderReviewerSkill},
@@ -185,23 +179,21 @@ func renderOrientationSkill(_ []localTool, _ map[string]toolGuidance) (string, e
 Wormhole stores shared organisational context, not source code. Git and the
 current working tree remain authoritative for source.
 
-- Gateway is the local MCP endpoint for every agent-facing call.
-- Fabric coordinates shared state between Gateways.
-- Tasks represent intended work and its state.
-- KB articles preserve durable facts, decisions, discoveries, and procedures.
-- Prefer typed Events to chatter; do not narrate every command.
-- Identity and permissions are explicit. Inspect both before acting.
+- Gateway is the local MCP endpoint for every live agent-facing call.
+- This Stage 2 inventory is local-only and does not contact optional Fabric.
+- Portable channels and KB articles live in tracked project state after ordinary Git acceptance.
+- Channel activity, agent registration, and presence remain clone-private operational state.
+- Workspace tools inspect, import, diff, checkpoint, and stash portable candidates.
 
-Consult Wormhole for Tasks, KB context, and recent relevant Events before
-reconstructing project context from broad repository exploration. Verify every
-code conclusion against Git and current source.`, nil
+Consult live KB and channel context before broad repository exploration when
+that context could answer the question. Verify every code conclusion against
+Git and current source.`, nil
 }
 
 func renderToolUseSkill(tools []localTool, guidance map[string]toolGuidance) (string, error) {
 	var out strings.Builder
 	out.WriteString("# Wormhole Gateway tool use\n\nCall only tools in this live Gateway inventory. Each request still requires its live schema and permissions.\n\n")
-	out.WriteString("## Shared KB and Code Graph\n\n" + sharedKBSemanticGuidance + "\n\n" + codeGraphSeparationGuidance + "\n\n")
-	out.WriteString("If the semantic provider or active index is unavailable, there is no lexical fallback; do not label degraded retrieval as semantic ranking.\n")
+	out.WriteString("## Portable local context\n\nUse kb.list and kb.get for deterministic portable KB reads; semantic Fabric search is not in this live Gateway inventory.\n")
 	for _, tool := range tools {
 		record := guidance[tool.Name]
 		schema, err := compactJSON(buildInputSchema(tool))
@@ -226,109 +218,62 @@ func renderToolUseSkill(tools []localTool, guidance map[string]toolGuidance) (st
 	return out.String(), nil
 }
 
-func renderCodeGraphSkill(_ []localTool, _ map[string]toolGuidance) (string, error) {
-	return `# Wormhole Code Graph
-
-` + codeGraphSeparationGuidance + `
-
-## Use Code Graph when
-
-- beginning a code task in an unfamiliar area;
-- tracing an implementation path, callers, references, types, or an error;
-- narrowing files required for review;
-- a Wormhole object references a symbol or source location.
-
-## Do not use Code Graph when
-
-- reading an already-known file or inspecting non-code prose or assets;
-- querying untracked or ignored files, or code outside the approved checkout;
-- status is disabled or error;
-- strict current source is required while the graph is stale;
-- direct filesystem inspection is inherently simpler.
-
-## Sequence
-
-1. Inspect wormhole.code_graph.status first.
-2. Verify Git HEAD and working tree state directly.
-3. When enabled and sufficiently current, call wormhole.code_graph.query with a bounded source budget.
-4. Source slices require the separate code_graph.source.read permission.
-5. Inspect returned paths and slices, then request targeted follow-up symbols.
-6. Use ordinary filesystem tools only for unresolved context.
-
-Heuristic edges are discovery hypotheses, not proof of complete relationships.
-Code Graph narrows source discovery. It does not replace Git, the working tree,
-direct verification, builds, or tests.`, nil
-}
-
 func renderOperatingLoopSkill(_ []localTool, _ map[string]toolGuidance) (string, error) {
 	return `# Wormhole operating loop
 
-` + sharedKBSemanticGuidance + `
-
-` + codeGraphSeparationGuidance + `
-
-If the semantic provider or active index is unavailable, there is no lexical fallback; do not label degraded retrieval as semantic ranking.
-
-if Code Graph is ready:
-    query it before broad code discovery
-else:
-    continue with normal filesystem and repository tools
+Use only the live local-only Gateway inventory. Portable KB and channel
+definitions become shared through checkpoint plus ordinary Git acceptance;
+operational activity and presence remain clone-private.
 
 ## session start:
 
-1. inspect identity and permissions
-2. inspect assigned and relevant Tasks
-3. retrieve relevant KB context
-4. inspect recent relevant Events
-5. inspect Code Graph status for code tasks
-6. confirm intended work before broad exploration
+1. inspect workspace.status
+2. retrieve relevant KB context with kb.list or kb.get
+3. inspect recent clone-local channel.events when relevant
+4. confirm intended work before broad exploration
 
 ## before changing code:
 
-1. retrieve the Task and links
-2. check decisions and constraints
-3. use Code Graph when ready and useful
-4. report work begun when supported
-5. preserve Git as authority
+1. check portable decisions and constraints
+2. preserve Git as source and acceptance authority
+3. inspect workspace.diff before checkpointing
 
 ## during work:
 
-1. record meaningful blockers
-2. publish only durable discoveries
+1. record durable discoveries in KB only when appropriate
+2. use channel.post only for clone-local operational activity
 3. do not narrate every command
-4. prefer typed Events
-5. check for duplicate Tasks and KB articles before creating them
+4. check for duplicate channels and KB articles before creating them
 
 ## completion:
 
 1. run required verification
-2. update Task state
-3. link the commit or pull request where supported
-4. record durable knowledge
-5. publish one concise completion Event
-6. leave sufficient context for another Agent`, nil
+2. inspect the exact workspace.diff and publication review digest
+3. checkpoint without staging, committing, or pushing Git
+4. accept portable state through ordinary Git when appropriate
+5. leave sufficient context for another agent`, nil
 }
 
 func renderContributorSkill(_ []localTool, _ map[string]toolGuidance) (string, error) {
 	return `# Wormhole contributor
 
-1. Begin with explicit task pickup: retrieve intent, links, decisions, and constraints.
-2. Keep a scoped implementation; do not silently expand or redesign the Task.
-3. Report meaningful progress and every blocker through the supported typed Event and Task state.
-4. Run the required verification against current Git and source before completion.
-5. Capture only durable discovery in the KB, checking for duplicates first.
-6. Leave a concise handoff linking the Task and supported Git pointer.`, nil
+1. Begin with explicit work intent, decisions, constraints, and the current workspace status.
+2. Keep a scoped implementation; do not silently expand or redesign the work.
+3. Use channel activity only for concise clone-local operational context.
+4. Run required verification against current Git and source before completion.
+5. Capture only durable discoveries in portable KB, checking for duplicates first.
+6. Review workspace.diff before checkpointing portable state.`, nil
 }
 
 func renderReviewerSkill(_ []localTool, _ map[string]toolGuidance) (string, error) {
 	return `# Wormhole reviewer
 
-1. Retrieve the Task intent, decisions, constraints, and supported Git pointer.
-2. Use Code Graph when ready to narrow changed paths, callers, and affected types.
-3. Verify every graph finding against Git, the working tree, and current source.
-4. Treat heuristic edges as hypotheses, not proof.
-5. Record actionable findings with evidence and severity; avoid silent redesign.
-6. Link conclusions to the Task or Git pointer and leave enough context for the contributor.`, nil
+1. Retrieve the work intent, portable decisions, constraints, and workspace.diff.
+2. Inspect changed paths, callers, and affected types in current source.
+3. Verify findings against Git, the working tree, and current source.
+4. Record actionable findings with evidence and severity; avoid silent redesign.
+5. Check that checkpoint did not stage, commit, or push Git.
+6. Leave enough context for the contributor.`, nil
 }
 
 func compactJSON(value any) (string, error) {

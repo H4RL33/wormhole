@@ -127,82 +127,6 @@ func assertReplicaCallsFail(t *testing.T, calls []func() error) {
 	}
 }
 
-func TestSchemaMigrationsRejectUnavailableAndMalformedLegacyDatabases(t *testing.T) {
-	t.Run("closed database", func(t *testing.T) {
-		db, err := sql.Open("sqlite", sqliteDSN(filepath.Join(t.TempDir(), "closed.db")))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := db.Close(); err != nil {
-			t.Fatal(err)
-		}
-		if err := migrateChannelCreatedAt(db); err == nil {
-			t.Fatal("channel migration succeeded on a closed database")
-		}
-		if err := migrateWhoAmICacheProjectKey(db); err == nil {
-			t.Fatal("whoami migration succeeded on a closed database")
-		}
-	})
-
-	t.Run("channel view cannot be altered", func(t *testing.T) {
-		db := openRawCoverageDatabase(t)
-		if _, err := db.Exec(`CREATE VIEW channels AS SELECT 'channel-1' AS id`); err != nil {
-			t.Fatal(err)
-		}
-		if err := migrateChannelCreatedAt(db); err == nil {
-			t.Fatal("channel migration altered a view")
-		}
-	})
-
-	t.Run("channel backfill failure", func(t *testing.T) {
-		db := openRawCoverageDatabase(t)
-		for _, statement := range []string{
-			`CREATE TABLE channels (id TEXT PRIMARY KEY)`,
-			`INSERT INTO channels (id) VALUES ('channel-1')`,
-			`CREATE TRIGGER reject_channel_update BEFORE UPDATE ON channels BEGIN SELECT RAISE(ABORT, 'backfill rejected'); END`,
-		} {
-			if _, err := db.Exec(statement); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if err := migrateChannelCreatedAt(db); err == nil {
-			t.Fatal("channel migration ignored a failed timestamp backfill")
-		}
-	})
-
-	t.Run("legacy cache rename collision", func(t *testing.T) {
-		db := openRawCoverageDatabase(t)
-		for _, statement := range []string{
-			`CREATE TABLE whoami_cache (agent_id TEXT PRIMARY KEY)`,
-			`CREATE TABLE whoami_cache_legacy (agent_id TEXT PRIMARY KEY)`,
-		} {
-			if _, err := db.Exec(statement); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if err := migrateWhoAmICacheProjectKey(db); err == nil {
-			t.Fatal("whoami migration ignored a legacy-table collision")
-		}
-	})
-
-	t.Run("legacy cache lacks required columns", func(t *testing.T) {
-		db := openRawCoverageDatabase(t)
-		if _, err := db.Exec(`CREATE TABLE whoami_cache (agent_id TEXT PRIMARY KEY)`); err != nil {
-			t.Fatal(err)
-		}
-		if err := migrateWhoAmICacheProjectKey(db); err == nil {
-			t.Fatal("whoami migration accepted a malformed legacy table")
-		}
-	})
-
-	t.Run("database path is a directory", func(t *testing.T) {
-		if store, err := Open(t.TempDir()); err == nil {
-			_ = store.Close()
-			t.Fatal("Open accepted a directory as a SQLite database")
-		}
-	})
-}
-
 func openRawCoverageDatabase(t *testing.T) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", sqliteDSN(filepath.Join(t.TempDir(), "raw.db")))
@@ -211,4 +135,22 @@ func openRawCoverageDatabase(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return db
+}
+
+func TestOpenRejectsCorruptGatewayMigrationLedger(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "corrupt-gateway.db")
+	db, err := sql.Open("sqlite", sqliteDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE gateway_schema_migrations (version TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if store, err := Open(path); err == nil {
+		_ = store.Close()
+		t.Fatal("Open succeeded with malformed gateway migration ledger")
+	}
 }

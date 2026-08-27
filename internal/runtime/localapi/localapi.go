@@ -35,13 +35,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	codegraphconfig "github.com/H4RL33/wormhole/internal/runtime/codegraph/config"
-	codegraphindex "github.com/H4RL33/wormhole/internal/runtime/codegraph/index"
-	codegraphquery "github.com/H4RL33/wormhole/internal/runtime/codegraph/query"
-	codegraphstore "github.com/H4RL33/wormhole/internal/runtime/codegraph/store"
 	"github.com/H4RL33/wormhole/internal/runtime/config"
 	"github.com/H4RL33/wormhole/internal/runtime/eventbus"
+	"github.com/H4RL33/wormhole/internal/runtime/localidentity"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
+	"github.com/H4RL33/wormhole/internal/runtime/projectstate"
 	"github.com/H4RL33/wormhole/internal/runtime/scheduler"
 	syncpkg "github.com/H4RL33/wormhole/internal/runtime/sync"
 )
@@ -55,9 +53,6 @@ const (
 	// local daemon, and eight persistent harness sessions cover normal local
 	// concurrency while bounding handler and frame-buffer resources.
 	maxActiveConnections = 8
-	// handlerShutdownTimeout bounds graceful shutdown if a handler does not
-	// observe cancellation after its connection is closed.
-	handlerShutdownTimeout = time.Second
 )
 
 type rpcRequest struct {
@@ -116,8 +111,6 @@ type connectionState struct {
 }
 
 // SyncStatusProvider supplies one project's runtime-owned connection state.
-// syncGroup implements it in gatewayd; the interface keeps localapi unaware
-// of process wiring details.
 type SyncStatusProvider interface {
 	Status(context.Context, string) (syncpkg.Status, error)
 }
@@ -127,10 +120,19 @@ type SyncStatusProvider interface {
 // P3 adds eventbus, scheduler, and subscription support.
 // P5 adds multi-org support (RFC-0003 §7.1, §8.1).
 type Server struct {
-	listener   net.Listener
-	socketPath string
-	httpClient *http.Client
-	version    string
+	listener                     net.Listener
+	socketPath                   string
+	httpClient                   *http.Client
+	version                      string
+	cliCapability                string
+	projectState                 *projectstate.Service
+	workspaceDomain              *WorkspaceDomain
+	actorResolver                LocalActorResolver
+	identityStore                *localidentity.Store
+	fabricRouter                 FabricRouter
+	clock                        func() time.Time
+	beforeSetupImportTransaction func(context.Context) error
+	afterSetupIdentityCommit     func()
 
 	// Single-org mode (P1-P4 backward compatibility)
 	coordServer string
@@ -174,7 +176,6 @@ type Server struct {
 	// authorizationAgents binds each project to the agent id in the active
 	// credential profile, preventing stale cache rows from authorizing it.
 	authorizationAgents sync.Map // map[projectID]agentID
-	codeGraphs          sync.Map // map[projectID]CodeGraphRuntime
 
 	// testBeforeHandlerStart is a deterministic test barrier between admission
 	// and handler execution. Production servers leave it nil.
@@ -182,7 +183,6 @@ type Server struct {
 	// testBeforeLocalWriteCommit injects a pre-commit abort for atomic-write
 	// rollback tests. It does not claim to simulate a storage-engine commit failure.
 	testBeforeLocalWriteCommit func(*sql.Tx) error
-
 	// registry is the local MCP tool registry (mcp.go), built once at
 	// construction time from the Server that will service every
 	// connection's tools/call dispatch (design doc §5 subtask 2).
@@ -203,45 +203,14 @@ type Server struct {
 	enrolmentSyncEngines      map[string]*syncpkg.Engine
 }
 
-// CodeGraphRuntime is one explicitly project-bound local Code Graph. Gateway
-// construction owns it; callers cannot select a checkout, limits, or store.
-type CodeGraphRuntime struct {
-	projectID string
-	Store     *codegraphstore.Store
-	Query     *codegraphquery.Service
-	Index     *codegraphindex.Index
-	rebuildMu *sync.Mutex
-}
-
-// NewCodeGraphRuntime opens one project-bound store over Gateway's SQLite
-// handle. The source ceiling is intentionally fixed until a human-controlled
-// configuration surface exists.
-func NewCodeGraphRuntime(ctx context.Context, db *sql.DB, projectID string) (CodeGraphRuntime, error) {
-	graphStore, err := codegraphstore.OpenRecovering(ctx, db, projectID)
-	if err != nil {
-		return CodeGraphRuntime{}, err
-	}
-	return CodeGraphRuntime{
-		projectID: projectID,
-		Store:     graphStore,
-		Query:     codegraphquery.New(graphStore, codegraphconfig.DefaultProjectSourceByteCeiling),
-		Index:     codegraphindex.New(graphStore),
-		rebuildMu: &sync.Mutex{},
-	}, nil
-}
-
-// SetCodeGraphRuntime binds a runtime to precisely one project. A nil or
-// incomplete runtime is ignored so unavailable graph state fails closed.
-func (s *Server) SetCodeGraphRuntime(projectID string, runtime CodeGraphRuntime) {
-	if projectID != "" && runtime.projectID == projectID && runtime.Store != nil && runtime.Query != nil && runtime.Index != nil && runtime.rebuildMu != nil {
-		s.codeGraphs.Store(projectID, runtime)
-	}
-}
-
-// SetVersion sets the linker-injected Gateway version reported by MCP
-// initialize responses. Empty versions retain the development default.
 func (s *Server) SetVersion(version string) {
 	s.version = version
+}
+
+// SetBeforeHandlerStartForTesting installs a deterministic admission barrier.
+// Tests must call it before Serve; production servers leave the hook nil.
+func (s *Server) SetBeforeHandlerStartForTesting(hook func()) {
+	s.testBeforeHandlerStart = hook
 }
 
 // SetSyncStatusProvider enables the read-only wormhole.sync.status tool.
@@ -291,101 +260,6 @@ func (s *Server) SetEnrolmentRuntime(source EnrolmentPolicySource, credentialsDi
 	s.enrolmentPolicy = source
 	s.credentialsDir = credentialsDir
 	s.writeCredentialProfile = config.WriteCredentialProfile
-}
-
-// New binds the Unix domain socket at socketPath. Callers must call Serve
-// to start accepting connections, and Close to release the socket.
-// Single-org mode (P1-P4).
-func New(socketPath, coordServerURL, token, projectID string, store *localstore.Store, tr *localstore.TaskRepo, er *localstore.EventRepo, kb *localstore.KBRepo, qr *syncpkg.QueueRepo) (*Server, error) {
-	ln, err := listenLocalSocket(socketPath)
-	if err != nil {
-		return nil, fmt.Errorf("localapi: listen on %s: %w", socketPath, err)
-	}
-	srv := &Server{
-		listener:    ln,
-		socketPath:  socketPath,
-		httpClient:  &http.Client{Timeout: 10 * time.Second},
-		coordServer: coordServerURL,
-		token:       token,
-		projectID:   projectID,
-		isMultiOrg:  false,
-		store:       store,
-		tr:          tr,
-		er:          er,
-		kb:          kb,
-		gr:          localstore.NewGitRepo(store.DB()),
-		qr:          qr,
-		handlers:    make(chan struct{}, maxActiveConnections),
-		serveReady:  make(chan struct{}),
-	}
-	srv.registry = newLocalRegistry(srv)
-	return srv, nil
-}
-
-// NewWithRuntime binds the Unix domain socket at socketPath and wires eventbus
-// + scheduler (P3). Callers must call Serve to start accepting connections,
-// and Close to release the socket.
-// The socket is restricted to the owning user immediately after listen.
-func NewWithRuntime(socketPath, coordServerURL, token, projectID string, store *localstore.Store, tr *localstore.TaskRepo, er *localstore.EventRepo, kb *localstore.KBRepo, eb *eventbus.EventBus, sched *scheduler.Scheduler, qr *syncpkg.QueueRepo) (*Server, error) {
-	ln, err := listenLocalSocket(socketPath)
-	if err != nil {
-		return nil, fmt.Errorf("localapi: listen on %s: %w", socketPath, err)
-	}
-	srv := &Server{
-		listener:    ln,
-		socketPath:  socketPath,
-		httpClient:  &http.Client{Timeout: 10 * time.Second},
-		coordServer: coordServerURL,
-		token:       token,
-		projectID:   projectID,
-		isMultiOrg:  false,
-		store:       store,
-		tr:          tr,
-		er:          er,
-		kb:          kb,
-		gr:          localstore.NewGitRepo(store.DB()),
-		qr:          qr,
-		eventbus:    eb,
-		scheduler:   sched,
-		handlers:    make(chan struct{}, maxActiveConnections),
-		serveReady:  make(chan struct{}),
-	}
-	srv.registry = newLocalRegistry(srv)
-	return srv, nil
-}
-
-// NewMultiOrg binds the Unix domain socket and configures multi-org support (P5+, RFC-0003 §7.1).
-// Orgs is a map of org_name → Org credentials. Bindings map project contexts to org names.
-// Callers must call Serve to start accepting connections, and Close to release the socket.
-// The socket is restricted to the owning user immediately after listen.
-func NewMultiOrg(socketPath string, orgs map[string]config.Org, bindings []config.ProjectBinding, store *localstore.Store, tr *localstore.TaskRepo, er *localstore.EventRepo, kb *localstore.KBRepo, eb *eventbus.EventBus, sched *scheduler.Scheduler, qr *syncpkg.QueueRepo) (*Server, error) {
-	if len(orgs) == 0 {
-		return nil, fmt.Errorf("localapi: NewMultiOrg: no orgs provided")
-	}
-	ln, err := listenLocalSocket(socketPath)
-	if err != nil {
-		return nil, fmt.Errorf("localapi: listen on %s: %w", socketPath, err)
-	}
-	srv := &Server{
-		listener:   ln,
-		socketPath: socketPath,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
-		orgs:       orgs,
-		bindings:   bindings,
-		isMultiOrg: true,
-		store:      store,
-		tr:         tr,
-		er:         er,
-		kb:         kb,
-		gr:         localstore.NewGitRepo(store.DB()),
-		qr:         qr,
-		eventbus:   eb,
-		scheduler:  sched,
-		handlers:   make(chan struct{}, maxActiveConnections),
-		serveReady: make(chan struct{}),
-	}
-	srv.registry = newLocalRegistry(srv)
-	return srv, nil
 }
 
 func listenLocalSocket(socketPath string) (net.Listener, error) {
@@ -472,7 +346,6 @@ func (s *Server) Close() error {
 		s.admissionMu.Lock()
 		s.shutdown.Store(true)
 		s.closeErr = s.listener.Close()
-		s.stopEnrolmentSyncEngines()
 
 		// Force-close all tracked open connections to prevent handle goroutines
 		// from leaking on shutdown. Iterate conns and close each one (issue #20).
@@ -485,16 +358,8 @@ func (s *Server) Close() error {
 		})
 		s.admissionMu.Unlock()
 
-		handlersDone := make(chan struct{})
-		go func() {
-			s.handlerWG.Wait()
-			close(handlersDone)
-		}()
-		select {
-		case <-handlersDone:
-		case <-time.After(handlerShutdownTimeout):
-			s.closeErr = errors.Join(s.closeErr, fmt.Errorf("localapi: timed out waiting for handlers to stop"))
-		}
+		s.handlerWG.Wait()
+		s.stopEnrolmentSyncEngines()
 	})
 	return s.closeErr
 }
@@ -569,6 +434,16 @@ func (s *Server) Serving() <-chan struct{} { return s.serveReady }
 // never needed.
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	sess := &mcpSession{}
+	defer func() {
+		if s.identityStore == nil || sess.connectionIdentity.SessionID == "" {
+			return
+		}
+		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := s.identityStore.CloseConnection(closeCtx, sess.connectionIdentity); err != nil {
+			s.logError("close local identity connection", err)
+		}
+	}()
 	reader := bufio.NewReaderSize(conn, maxFrameBytes)
 	for {
 		line, err := reader.ReadSlice('\n')
@@ -592,94 +467,6 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 			}
 		}
 	}
-}
-
-// isJoinRegisterArgs reports whether a wormhole.agent.register call's args
-// are the join/passport-creation shape (RFC-0001 §9, cmd/wormhole's
-// registerAgentInput: owner/model/capabilities/roles/permissions, no
-// agent_id) rather than P3's local presence-registration shape (agent_id +
-// capabilities). See the switch case in handle for why this dispatches on
-// shape instead of a second tool name.
-func isJoinRegisterArgs(args json.RawMessage) bool {
-	var argMap map[string]interface{}
-	if len(args) == 0 {
-		return false
-	}
-	if err := json.Unmarshal(args, &argMap); err != nil {
-		return false
-	}
-	_, hasAgentID := argMap["agent_id"]
-	return !hasAgentID
-}
-
-// proxyRegister forwards a join-shaped wormhole.agent.register call to the
-// Coordination Server, unauthenticated (matching cmd/wormhole's
-// doRegister, which sends no bearer token for this call — a Passport
-// doesn't exist yet). project_id is expected to already be present in args
-// (cmd/wormhole's callTool folds it in before sending), so this simply
-// forwards the args as given; no local caching, matching this call's write
-// (not cacheable read) semantics.
-func (s *Server) proxyRegister(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
-	var argMap map[string]interface{}
-	if len(args) > 0 {
-		if err := json.Unmarshal(args, &argMap); err != nil {
-			return nil, fmt.Errorf("localapi: agent register: invalid args: %w", err)
-		}
-	}
-	projectID, _ := argMap["project_id"].(string)
-
-	orgCtx, err := s.resolveOrgContext(projectID)
-	if err != nil {
-		return nil, err
-	}
-	if s.statusProvider != nil {
-		status, statusErr := s.statusProvider.Status(ctx, orgCtx.ProjectID)
-		if statusErr == nil && status.State == syncpkg.StateOffline {
-			return nil, errors.New("localapi: central authority required: wormhole.agent.register is unavailable while Fabric is offline")
-		}
-	}
-
-	paramsRaw, err := json.Marshal(toolsCallParams{Name: "wormhole.agent.register", Arguments: args})
-	if err != nil {
-		return nil, fmt.Errorf("localapi: marshal params: %w", err)
-	}
-	reqBody, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "tools/call", Params: paramsRaw})
-	if err != nil {
-		return nil, fmt.Errorf("localapi: marshal request: %w", err)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(orgCtx.Creds.Server, "/")+"/mcp", bytes.NewReader(reqBody))
-	if err != nil {
-		return nil, fmt.Errorf("localapi: build request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := s.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("localapi: call coordination server: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var rpcResp rpcResponse
-	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
-		return nil, fmt.Errorf("localapi: decode coordination server response: %w", err)
-	}
-	if rpcResp.Error != nil {
-		return nil, errors.New(rpcResp.Error.Message)
-	}
-
-	var result toolCallResult
-	if err := json.Unmarshal(rpcResp.Result, &result); err != nil {
-		return nil, fmt.Errorf("localapi: decode tools/call result: %w", err)
-	}
-	if len(result.Content) == 0 {
-		return nil, errors.New("localapi: empty register result from coordination server")
-	}
-	if result.IsError {
-		return nil, errors.New(result.Content[0].Text)
-	}
-
-	return json.RawMessage(result.Content[0].Text), nil
 }
 
 // proxyAuthenticatedTool forwards a central-authority tool through the
@@ -761,9 +548,16 @@ func (s *Server) proxyAuthenticatedTool(ctx context.Context, toolName string, ar
 // locally on success (RFC-0003 G4: local durability, best-effort here —
 // a cache-write failure does not fail the caller's request).
 func (s *Server) proxyWhoAmI(ctx context.Context) (whoAmIOutput, error) {
-	orgCtx, err := s.resolveOrgContext(s.projectID)
+	return s.proxyWhoAmIForProject(ctx, s.projectID)
+}
+
+func (s *Server) proxyWhoAmIForProject(ctx context.Context, projectID string) (whoAmIOutput, error) {
+	orgCtx, err := s.resolveOrgContext(projectID)
 	if err != nil {
 		return whoAmIOutput{}, err
+	}
+	if orgCtx.ProjectID != projectID {
+		return whoAmIOutput{}, errors.New("localapi: resolved project is not configured for this Gateway")
 	}
 	out, remoteErr := s.fetchAndCacheWhoAmI(ctx, orgCtx)
 	if remoteErr == nil {
@@ -790,6 +584,12 @@ func (s *Server) cachedWhoAmIForCredential(ctx context.Context, projectID string
 }
 
 func (s *Server) localSyncStatus(ctx context.Context, args json.RawMessage) (syncpkg.Status, error) {
+	if s.privateRuntimeConfigured() {
+		if _, err := ResolvedBinding(ctx); err != nil {
+			return syncpkg.Status{}, err
+		}
+		return syncpkg.Status{State: syncpkg.StateOffline, PendingWrites: 0}, nil
+	}
 	var input struct {
 		ProjectID string `json:"project_id"`
 	}
@@ -923,6 +723,15 @@ func (s *Server) authorizeLocalTool(ctx context.Context, tool localTool, args js
 // agent-and-project scope selected by the request.
 func (s *Server) authorizeLocalPermission(ctx context.Context, requiredPermission string, args json.RawMessage) error {
 	if requiredPermission == "" {
+		return nil
+	}
+	if s.privateRuntimeConfigured() {
+		if _, err := ResolvedBinding(ctx); err != nil {
+			return err
+		}
+		if _, err := ServerOwnedActor(ctx); err != nil {
+			return err
+		}
 		return nil
 	}
 	projectID := s.projectID
@@ -1060,9 +869,30 @@ func (s *Server) localGetTask(ctx context.Context, args json.RawMessage) (map[st
 	}, nil
 }
 
-// localListChannels serves wormhole.channel.list from the local SQLite replica.
-// Args: {"project_id": "xxx" (optional in single-org, required in multi-org)}.
+// localListChannels serves configured Gateway requests from composed portable
+// project state. Legacy test-only servers retain the SQLite fallback below.
 func (s *Server) localListChannels(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if s.workspaceDomain != nil {
+		if len(args) > 0 {
+			var arguments map[string]json.RawMessage
+			if err := json.Unmarshal(args, &arguments); err != nil || arguments == nil {
+				return nil, fmt.Errorf("localapi: list channels: invalid args")
+			}
+		}
+		binding, err := ResolvedBinding(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("localapi: list channels: resolved workspace: %w", err)
+		}
+		channels, err := s.workspaceDomain.ListChannels(ctx, binding)
+		if err != nil {
+			return nil, fmt.Errorf("localapi: list channels: %w", err)
+		}
+		out := make([]interface{}, len(channels))
+		for index, channel := range channels {
+			out[index] = map[string]interface{}{"id": channel.ID, "name": channel.Name}
+		}
+		return map[string]interface{}{"channels": out}, nil
+	}
 	var argMap map[string]interface{}
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &argMap); err != nil {
@@ -1080,8 +910,12 @@ func (s *Server) localListChannels(ctx context.Context, args json.RawMessage) (m
 	if err != nil {
 		return nil, err
 	}
+	namespaceID, err := s.resolvedLocalNamespace(ctx, orgCtx.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: list channels: resolved workspace: %w", err)
+	}
 
-	channels, err := s.er.ListChannels(ctx, orgCtx.ProjectID)
+	channels, err := s.er.ListChannels(ctx, namespaceID)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: list channels: %w", err)
 	}
@@ -1096,9 +930,26 @@ func (s *Server) localListChannels(ctx context.Context, args json.RawMessage) (m
 	return map[string]interface{}{"channels": out}, nil
 }
 
-// localListChannelEvents serves wormhole.channel.events from the local SQLite replica.
-// Args: {"project_id": "xxx" (optional in single-org, required in multi-org)}.
+// localListChannelEvents serves clone-local operational activity scoped by the
+// resolved workspace. It never treats legacy channel definitions as authority.
 func (s *Server) localListChannelEvents(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if s.workspaceDomain != nil {
+		if len(args) > 0 {
+			var arguments map[string]json.RawMessage
+			if err := json.Unmarshal(args, &arguments); err != nil || arguments == nil {
+				return nil, fmt.Errorf("localapi: list channel events: invalid args")
+			}
+		}
+		binding, err := ResolvedBinding(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("localapi: list channel events: resolved workspace: %w", err)
+		}
+		events, err := s.er.ListEventsByNamespace(ctx, string(binding.Scope.WorkspaceID), 50, 0)
+		if err != nil {
+			return nil, fmt.Errorf("localapi: list channel events: %w", err)
+		}
+		return map[string]interface{}{"events": localEventResults(events)}, nil
+	}
 	var argMap map[string]interface{}
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &argMap); err != nil {
@@ -1116,30 +967,55 @@ func (s *Server) localListChannelEvents(ctx context.Context, args json.RawMessag
 	if err != nil {
 		return nil, err
 	}
+	namespaceID, err := s.resolvedLocalNamespace(ctx, orgCtx.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: list channel events: resolved workspace: %w", err)
+	}
 
-	events, err := s.er.ListEventsByNamespace(ctx, orgCtx.ProjectID, 50, 0)
+	events, err := s.er.ListEventsByNamespace(ctx, namespaceID, 50, 0)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: list channel events: %w", err)
 	}
 
-	out := make([]interface{}, len(events))
-	for i, ev := range events {
-		out[i] = map[string]interface{}{
-			"id":         ev.ID,
-			"channel_id": ev.ChannelID,
-			"agent_id":   ev.AgentID,
-			"event_type": ev.EventType,
-			"payload":    json.RawMessage(ev.Payload),
-			"note":       ev.Note,
-			"created_at": ev.CreatedAt,
-		}
-	}
-	return map[string]interface{}{"events": out}, nil
+	return map[string]interface{}{"events": localEventResults(events)}, nil
 }
 
-// localListArticles serves wormhole.kb.list from the local SQLite replica.
-// Args: {"project_id": "xxx" (optional in single-org, required in multi-org)}.
+func localEventResults(events []localstore.DurableEvent) []interface{} {
+	out := make([]interface{}, len(events))
+	for i, event := range events {
+		out[i] = map[string]interface{}{
+			"id": event.ID, "channel_id": event.ChannelID, "agent_id": event.AgentID,
+			"event_type": event.EventType, "payload": json.RawMessage(event.Payload),
+			"note": event.Note, "created_at": event.CreatedAt,
+		}
+	}
+	return out
+}
+
+// localListArticles serves configured Gateway requests from composed portable
+// project state. Legacy test-only servers retain the SQLite fallback below.
 func (s *Server) localListArticles(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if s.workspaceDomain != nil {
+		if len(args) > 0 {
+			var arguments map[string]json.RawMessage
+			if err := json.Unmarshal(args, &arguments); err != nil || arguments == nil {
+				return nil, fmt.Errorf("localapi: list articles: invalid args")
+			}
+		}
+		binding, err := ResolvedBinding(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("localapi: list articles: resolved workspace: %w", err)
+		}
+		articles, err := s.workspaceDomain.ListArticles(ctx, binding)
+		if err != nil {
+			return nil, fmt.Errorf("localapi: list articles: %w", err)
+		}
+		out := make([]interface{}, len(articles))
+		for index, article := range articles {
+			out[index] = portableArticleResult(article)
+		}
+		return map[string]interface{}{"articles": out}, nil
+	}
 	var argMap map[string]interface{}
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &argMap); err != nil {
@@ -1157,8 +1033,12 @@ func (s *Server) localListArticles(ctx context.Context, args json.RawMessage) (m
 	if err != nil {
 		return nil, err
 	}
+	namespaceID, err := s.resolvedLocalNamespace(ctx, orgCtx.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: list articles: resolved workspace: %w", err)
+	}
 
-	articles, err := s.kb.ListArticles(ctx, orgCtx.ProjectID)
+	articles, err := s.kb.ListArticles(ctx, namespaceID)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: list articles: %w", err)
 	}
@@ -1178,10 +1058,38 @@ func (s *Server) localListArticles(ctx context.Context, args json.RawMessage) (m
 	return map[string]interface{}{"articles": out}, nil
 }
 
-// localGetArticle serves wormhole.kb.get from the local SQLite replica.
-// Args: {"article_id": "xxx" (optional), "project_id": "yyy" (optional in single-org, required in multi-org)}.
-// If article_id omitted returns all articles.
+// localGetArticle serves a live portable KB article from composed project
+// state, or lists all live articles when article_id is omitted.
 func (s *Server) localGetArticle(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if s.workspaceDomain != nil {
+		var arguments map[string]json.RawMessage
+		if len(args) > 0 {
+			if err := json.Unmarshal(args, &arguments); err != nil || arguments == nil {
+				return nil, fmt.Errorf("localapi: get article: invalid args")
+			}
+		}
+		var articleID string
+		if raw := arguments["article_id"]; len(raw) > 0 {
+			if err := json.Unmarshal(raw, &articleID); err != nil {
+				return nil, fmt.Errorf("localapi: get article: invalid article_id")
+			}
+		}
+		if articleID == "" {
+			return s.localListArticles(ctx, args)
+		}
+		binding, err := ResolvedBinding(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("localapi: get article: resolved workspace: %w", err)
+		}
+		article, err := s.workspaceDomain.GetArticle(ctx, binding, articleID)
+		if errors.Is(err, ErrPortableArticleNotFound) {
+			return nil, fmt.Errorf("localapi: article not found")
+		}
+		if err != nil {
+			return nil, fmt.Errorf("localapi: get article: %w", err)
+		}
+		return portableArticleResult(article), nil
+	}
 	var argMap map[string]interface{}
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &argMap); err != nil {
@@ -1199,6 +1107,10 @@ func (s *Server) localGetArticle(ctx context.Context, args json.RawMessage) (map
 	if err != nil {
 		return nil, err
 	}
+	namespaceID, err := s.resolvedLocalNamespace(ctx, orgCtx.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: get article: resolved workspace: %w", err)
+	}
 
 	articleID, _ := argMap["article_id"].(string)
 	if articleID == "" {
@@ -1206,7 +1118,7 @@ func (s *Server) localGetArticle(ctx context.Context, args json.RawMessage) (map
 		return s.localListArticles(ctx, args)
 	}
 
-	a, err := s.kb.GetArticle(ctx, orgCtx.ProjectID, articleID)
+	a, err := s.kb.GetArticle(ctx, namespaceID, articleID)
 	if errors.Is(err, localstore.ErrArticleNotFound) {
 		return nil, fmt.Errorf("localapi: article not found")
 	}
@@ -1223,6 +1135,31 @@ func (s *Server) localGetArticle(ctx context.Context, args json.RawMessage) (map
 		"created_at":      a.CreatedAt,
 		"updated_at":      a.UpdatedAt,
 	}, nil
+}
+
+func portableArticleResult(article WorkspaceArticle) map[string]interface{} {
+	return map[string]interface{}{
+		"id":                  article.ID,
+		"title":               article.Title,
+		"body":                article.Body,
+		"frontmatter":         json.RawMessage(article.Frontmatter),
+		"author_actor_id":     article.AuthorActorID,
+		"related_article_ids": append([]string(nil), article.RelatedArticleIDs...),
+		"created_at":          article.CreatedAt,
+		"updated_at":          article.UpdatedAt,
+	}
+}
+
+func decodePortableStringArgument(arguments map[string]json.RawMessage, name string) (string, error) {
+	raw := arguments[name]
+	if len(raw) == 0 {
+		return "", nil
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", fmt.Errorf("%s must be a string", name)
+	}
+	return value, nil
 }
 
 // =============================================================================
@@ -1245,48 +1182,45 @@ func (s *Server) commitLocalWrite(tx *sql.Tx) error {
 	return tx.Commit()
 }
 
-// handleAgentRegister registers an agent with the scheduler and eventbus.
-// Args: {"agent_id": "x", "capabilities": ["code", "review"], "project_id": "xxx" (optional in single-org, required in multi-org)}
+type localAgentRegisterRequest struct {
+	AgentID      string   `json:"agent_id"`
+	Capabilities []string `json:"capabilities,omitempty"`
+	ProjectID    string   `json:"project_id"`
+}
+
+// handleAgentRegister registers presence with the scheduler and eventbus.
 func (s *Server) handleAgentRegister(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
 	if s.scheduler == nil {
 		return nil, fmt.Errorf("localapi: agent register: scheduler not available")
 	}
-
-	var argMap map[string]interface{}
-	if len(args) > 0 {
-		if err := json.Unmarshal(args, &argMap); err != nil {
-			return nil, fmt.Errorf("localapi: agent register: invalid args: %w", err)
-		}
-	}
-
-	agentID, _ := argMap["agent_id"].(string)
-	if agentID == "" {
+	if len(bytes.TrimSpace(args)) == 0 {
 		return nil, fmt.Errorf("localapi: agent register: missing agent_id")
 	}
 
-	// Extract project_id and resolve org context (multi-org aware)
+	var request localAgentRegisterRequest
+	if rejectDuplicateJSONMembers(args) != nil {
+		return nil, fmt.Errorf("localapi: agent register: invalid args")
+	}
+	if err := decodeClosedJSON(args, &request); err != nil {
+		return nil, fmt.Errorf("localapi: agent register: invalid args")
+	}
+	if request.AgentID == "" {
+		return nil, fmt.Errorf("localapi: agent register: missing agent_id")
+	}
+
+	// Configured Gateway calls derive scope from their resolved binding. The
+	// project field remains only for unconfigured legacy test servers.
 	projectID := s.projectID // fallback to configured project in single-org mode
-	if projectIDVal, ok := argMap["project_id"].(string); ok && projectIDVal != "" {
-		projectID = projectIDVal
+	if request.ProjectID != "" {
+		projectID = request.ProjectID
 	}
 
-	orgCtx, err := s.resolveOrgContext(projectID)
+	namespaceID, err := s.resolvedAgentNamespace(ctx, projectID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("localapi: agent register: resolved workspace: %w", err)
 	}
 
-	caps := []string{}
-	if rawCaps, ok := argMap["capabilities"]; ok {
-		if capsList, ok := rawCaps.([]interface{}); ok {
-			for _, c := range capsList {
-				if cs, ok := c.(string); ok {
-					caps = append(caps, cs)
-				}
-			}
-		}
-	}
-
-	agent, err := s.scheduler.RegisterAgent(agentID, orgCtx.ProjectID, caps)
+	agent, err := s.scheduler.RegisterAgent(request.AgentID, namespaceID, request.Capabilities)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: agent register: %w", err)
 	}
@@ -1297,11 +1231,11 @@ func (s *Server) handleAgentRegister(ctx context.Context, args json.RawMessage) 
 	payload, _ := json.Marshal(map[string]interface{}{
 		"agent":        agent.AgentID,
 		"status":       string(scheduler.StatusOnline),
-		"namespace":    orgCtx.ProjectID,
+		"namespace":    namespaceID,
 		"capabilities": agent.Capabilities,
 	})
 	if s.eventbus != nil {
-		s.eventbus.Publish(ctx, orgCtx.ProjectID, "presence.online", "", agent.AgentID, payload)
+		s.eventbus.Publish(ctx, namespaceID, "presence.online", "", agent.AgentID, payload)
 	}
 
 	return map[string]interface{}{
@@ -1332,15 +1266,23 @@ func (s *Server) handleAgentPresence(ctx context.Context, args json.RawMessage) 
 		return nil, fmt.Errorf("localapi: agent presence: missing agent_id or status")
 	}
 
-	// Extract project_id and resolve org context (multi-org aware)
+	// Configured Gateway calls derive scope from their resolved binding. The
+	// project field remains only for unconfigured legacy test servers.
 	projectID := s.projectID // fallback to configured project in single-org mode
 	if projectIDVal, ok := argMap["project_id"].(string); ok && projectIDVal != "" {
 		projectID = projectIDVal
 	}
 
-	orgCtx, err := s.resolveOrgContext(projectID)
+	namespaceID, err := s.resolvedAgentNamespace(ctx, projectID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("localapi: agent presence: resolved workspace: %w", err)
+	}
+	agent, err := s.scheduler.Agent(agentID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: agent presence: %w", err)
+	}
+	if agent.NamespaceID != namespaceID {
+		return nil, fmt.Errorf("localapi: agent presence: target agent is outside resolved workspace")
 	}
 
 	err = s.scheduler.UpdatePresence(agentID, scheduler.AgentStatus(statusStr))
@@ -1353,7 +1295,7 @@ func (s *Server) handleAgentPresence(ctx context.Context, args json.RawMessage) 
 		"status": statusStr,
 	})
 	if s.eventbus != nil {
-		s.eventbus.Publish(ctx, orgCtx.ProjectID, "presence."+statusStr, "", agentID, payload)
+		s.eventbus.Publish(ctx, namespaceID, "presence."+statusStr, "", agentID, payload)
 	}
 
 	return map[string]interface{}{
@@ -1376,22 +1318,23 @@ func (s *Server) handleAgentList(ctx context.Context, args json.RawMessage) (map
 		}
 	}
 
-	// Extract project_id and resolve org context (multi-org aware)
+	// Configured Gateway calls derive scope from their resolved binding. The
+	// project field remains only for unconfigured legacy test servers.
 	projectID := s.projectID // fallback to configured project in single-org mode
 	if projectIDVal, ok := argMap["project_id"].(string); ok && projectIDVal != "" {
 		projectID = projectIDVal
 	}
 
-	orgCtx, err := s.resolveOrgContext(projectID)
+	namespaceID, err := s.resolvedAgentNamespace(ctx, projectID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("localapi: agent list: resolved workspace: %w", err)
 	}
 
 	agents := s.scheduler.ListAgents()
 	// Filter agents to this project only
 	var filtered []interface{}
 	for _, a := range agents {
-		if a.NamespaceID == orgCtx.ProjectID {
+		if a.NamespaceID == namespaceID {
 			filtered = append(filtered, map[string]interface{}{
 				"agent_id":     a.AgentID,
 				"namespace_id": a.NamespaceID,
@@ -1526,17 +1469,10 @@ func (s *Server) handleTaskRoute(ctx context.Context, args json.RawMessage) (map
 
 // =============================================================================
 // Local write tools — task.create, kb.write, channel.post. Each writes the
-// entity to the local SQLite replica, then enqueues it on the outbound sync
-// queue (RFC-0003 §8.2) so the sync engine pushes it to the Coordination
-// Server on its next cycle. Namespace is resolved from s.projectID — the
-// value fixed at socket-construction time — same as every other handler in
-// this file (see localGetTask, localListChannelEvents, localGetArticle,
-// handleTaskRoute, handleAgentRegister). A client-supplied namespace_id in
-// the request args is never trusted for authorization: honoring it would let
-// any caller dialing a socket bound to one org/project write into another
-// org/project's namespace. If the request also supplies namespace_id, it is
-// ignored in favor of the resolved value (consistent with how the rest of
-// this file silently uses s.projectID regardless of request args).
+// entity to the local SQLite replica, then records durable outbound intent.
+// The configured private runtime derives the exact local namespace from
+// ResolvedBinding; caller namespace claims are rejected before these handlers
+// run.
 // =============================================================================
 
 // handleTaskCreate serves wormhole.task.create: creates a task locally and
@@ -1752,16 +1688,49 @@ func (s *Server) handleGitLinkCommit(ctx context.Context, args json.RawMessage) 
 	return out, nil
 }
 
-// handleKBWrite serves wormhole.kb.write: writes a KB article locally and
-// enqueues it for sync.
-// Args: {"agent_id": "y", "title": "z", "body": "...",
+// handleKBWrite writes a portable KB operation through WorkspaceDomain on the
+// configured path. The legacy SQLite/queue body is retained for test-only
+// constructors until their separate removal tranche.
+// Args: {"title": "z", "body": "...",
 //
 //	"project_id": "xxx" (optional in single-org, required in multi-org),
 //	"frontmatter": {...} (optional)}
 //
-// namespace_id, if present in args, is ignored — namespace is always resolved
-// from project_id (with multi-org bindings in P5+), never from the request.
+// namespace_id is never accepted from the request. The configured path uses
+// the resolved workspace.
 func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if s.workspaceDomain != nil {
+		if err := rejectDuplicateJSONMembers(args); err != nil {
+			return nil, fmt.Errorf("localapi: kb write: invalid args: %w", err)
+		}
+		var arguments map[string]json.RawMessage
+		if err := json.Unmarshal(args, &arguments); err != nil || arguments == nil {
+			return nil, fmt.Errorf("localapi: kb write: invalid args")
+		}
+		title, titleErr := decodePortableStringArgument(arguments, "title")
+		body, bodyErr := decodePortableStringArgument(arguments, "body")
+		if titleErr != nil || bodyErr != nil {
+			return nil, fmt.Errorf("localapi: kb write: invalid args")
+		}
+		if title == "" {
+			return nil, fmt.Errorf("localapi: kb write: missing title")
+		}
+		binding, err := ResolvedBinding(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("localapi: kb write: resolved workspace: %w", err)
+		}
+		actor, err := ServerOwnedActor(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("localapi: kb write: server actor: %w", err)
+		}
+		article, err := s.workspaceDomain.WriteArticle(ctx, binding, actor, title, body, arguments["frontmatter"])
+		if err != nil {
+			return nil, fmt.Errorf("localapi: kb write: %w", err)
+		}
+		out := portableArticleResult(article)
+		out["workspace_id"] = string(binding.Scope.WorkspaceID)
+		return out, nil
+	}
 	if s.qr == nil {
 		return nil, fmt.Errorf("localapi: kb write: sync queue not available")
 	}
@@ -1773,9 +1742,9 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 		}
 	}
 
-	agentID, _ := argMap["agent_id"].(string)
 	title, _ := argMap["title"].(string)
 	body, _ := argMap["body"].(string)
+	legacyAgentID, _ := argMap["agent_id"].(string)
 	if title == "" {
 		return nil, fmt.Errorf("localapi: kb write: missing title")
 	}
@@ -1789,6 +1758,14 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 	orgCtx, err := s.resolveOrgContext(projectID)
 	if err != nil {
 		return nil, err
+	}
+	namespaceID, err := s.resolvedLocalNamespace(ctx, orgCtx.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: kb write: resolved workspace: %w", err)
+	}
+	agentID, err := s.resolvedActionPrincipal(ctx, legacyAgentID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: kb write: server actor: %w", err)
 	}
 
 	var frontmatter json.RawMessage
@@ -1804,7 +1781,7 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 	}
 	defer tx.Rollback()
 
-	article, err := s.kb.WriteArticleTx(ctx, tx, orgCtx.ProjectID, agentID, title, body, frontmatter)
+	article, err := s.kb.WriteArticleTx(ctx, tx, namespaceID, agentID, title, body, frontmatter)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: kb write: %w", err)
 	}
@@ -1827,7 +1804,7 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 	// KB articles have no priority concept (internal/core/kb has no Priority
 	// field, unlike tasks) — 0 here is the correct default, not a placeholder
 	// for a value that should have been threaded through.
-	if _, err := s.qr.EnqueueTx(ctx, tx, orgCtx.ProjectID, "kb", article.ID, "create", payload, 0); err != nil {
+	if _, err := s.qr.EnqueueTx(ctx, tx, namespaceID, "kb", article.ID, "create", payload, 0); err != nil {
 		return nil, fmt.Errorf("localapi: kb write: enqueue sync: %w", err)
 	}
 	if err := s.commitLocalWrite(tx); err != nil {
@@ -1837,17 +1814,20 @@ func (s *Server) handleKBWrite(ctx context.Context, args json.RawMessage) (map[s
 	return out, nil
 }
 
-// handleChannelPost serves wormhole.channel.post: publishes a durable event
-// to a channel locally and enqueues it for sync.
-// Args: {"channel_id": "y", "agent_id": "z",
+// handleChannelPost publishes clone-local operational activity after validating
+// the channel against composed portable project state on the configured path.
+// Args: {"channel_id": "y",
 //
 //	"event_type": "discovery.logged",
 //	"project_id": "xxx" (optional in single-org, required in multi-org),
 //	"payload": {...} (optional), "note": "..." (optional)}
 //
-// namespace_id, if present in args, is ignored — namespace is always resolved
-// from project_id (with multi-org bindings in P5+), never from the request.
+// namespace_id is never accepted from the request. The configured path uses
+// the resolved workspace.
 func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if s.workspaceDomain != nil {
+		return s.handlePortableChannelPost(ctx, args)
+	}
 	if s.qr == nil {
 		return nil, fmt.Errorf("localapi: channel post: sync queue not available")
 	}
@@ -1860,8 +1840,8 @@ func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (m
 	}
 
 	channelID, _ := argMap["channel_id"].(string)
-	agentID, _ := argMap["agent_id"].(string)
 	eventType, _ := argMap["event_type"].(string)
+	legacyAgentID, _ := argMap["agent_id"].(string)
 	if channelID == "" || eventType == "" {
 		return nil, fmt.Errorf("localapi: channel post: missing channel_id or event_type")
 	}
@@ -1875,6 +1855,14 @@ func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (m
 	orgCtx, err := s.resolveOrgContext(projectID)
 	if err != nil {
 		return nil, err
+	}
+	namespaceID, err := s.resolvedLocalNamespace(ctx, orgCtx.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: channel post: resolved workspace: %w", err)
+	}
+	agentID, err := s.resolvedActionPrincipal(ctx, legacyAgentID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: channel post: server actor: %w", err)
 	}
 
 	var eventPayload json.RawMessage
@@ -1895,7 +1883,7 @@ func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (m
 	}
 	defer tx.Rollback()
 
-	ev, err := s.er.PublishEventTx(ctx, tx, orgCtx.ProjectID, channelID, agentID, eventType, eventPayload, note)
+	ev, err := s.er.PublishEventTx(ctx, tx, namespaceID, channelID, agentID, eventType, eventPayload, note)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: channel post: %w", err)
 	}
@@ -1918,7 +1906,7 @@ func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (m
 	// Events have no priority concept (internal/core/events has no Priority
 	// field, unlike tasks) — 0 here is the correct default, not a placeholder
 	// for a value that should have been threaded through.
-	if _, err := s.qr.EnqueueTx(ctx, tx, orgCtx.ProjectID, "event", ev.ID, "create", payload, 0); err != nil {
+	if _, err := s.qr.EnqueueTx(ctx, tx, namespaceID, "event", ev.ID, "create", payload, 0); err != nil {
 		return nil, fmt.Errorf("localapi: channel post: enqueue sync: %w", err)
 	}
 	if err := s.commitLocalWrite(tx); err != nil {
@@ -1928,9 +1916,100 @@ func (s *Server) handleChannelPost(ctx context.Context, args json.RawMessage) (m
 	return out, nil
 }
 
-// handleChannelCreate creates a durable local channel and queues it for
-// server synchronization in the same SQLite transaction.
+func (s *Server) handlePortableChannelPost(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if s.er == nil || s.store == nil {
+		return nil, fmt.Errorf("localapi: channel post: operational event store not available")
+	}
+	if err := rejectDuplicateJSONMembers(args); err != nil {
+		return nil, fmt.Errorf("localapi: channel post: invalid args: %w", err)
+	}
+	var arguments map[string]json.RawMessage
+	if err := json.Unmarshal(args, &arguments); err != nil || arguments == nil {
+		return nil, fmt.Errorf("localapi: channel post: invalid args")
+	}
+	channelID, channelErr := decodePortableStringArgument(arguments, "channel_id")
+	eventType, eventErr := decodePortableStringArgument(arguments, "event_type")
+	noteValue, noteErr := decodePortableStringArgument(arguments, "note")
+	if channelErr != nil || eventErr != nil || noteErr != nil {
+		return nil, fmt.Errorf("localapi: channel post: invalid args")
+	}
+	if channelID == "" || eventType == "" {
+		return nil, fmt.Errorf("localapi: channel post: missing channel_id or event_type")
+	}
+	binding, err := ResolvedBinding(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: channel post: resolved workspace: %w", err)
+	}
+	if _, err := s.workspaceDomain.Channel(ctx, binding, channelID); err != nil {
+		return nil, fmt.Errorf("localapi: channel post: %w", err)
+	}
+	actor, err := ServerOwnedActor(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: channel post: server actor: %w", err)
+	}
+	var note *string
+	if noteValue != "" {
+		note = &noteValue
+	}
+	tx, err := s.beginLocalWrite(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: channel post: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+	namespaceID := string(binding.Scope.WorkspaceID)
+	event, err := s.er.PublishOperationalEventTx(ctx, tx, namespaceID, channelID, actor.PrincipalID(), eventType, arguments["payload"], note)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: channel post: %w", err)
+	}
+	out := map[string]interface{}{
+		"id": event.ID, "workspace_id": namespaceID, "channel_id": event.ChannelID,
+		"agent_id": event.AgentID, "event_type": event.EventType,
+		"payload": json.RawMessage(event.Payload), "note": event.Note, "created_at": event.CreatedAt,
+	}
+	busPayload, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: channel post: marshal eventbus payload: %w", err)
+	}
+	if err := s.commitLocalWrite(tx); err != nil {
+		return nil, fmt.Errorf("localapi: channel post: commit: %w", err)
+	}
+	if s.eventbus != nil {
+		s.eventbus.Publish(ctx, namespaceID, event.EventType, "", event.AgentID, busPayload)
+	}
+	return out, nil
+}
+
+// handleChannelCreate creates a portable ChannelV1 operation through
+// WorkspaceDomain on the configured path. The legacy fallback is test-only.
 func (s *Server) handleChannelCreate(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
+	if s.workspaceDomain != nil {
+		var arguments map[string]json.RawMessage
+		if err := json.Unmarshal(args, &arguments); err != nil || arguments == nil {
+			return nil, fmt.Errorf("localapi: channel create: invalid args")
+		}
+		name, nameErr := decodePortableStringArgument(arguments, "name")
+		if nameErr != nil {
+			return nil, fmt.Errorf("localapi: channel create: invalid args")
+		}
+		if name == "" {
+			return nil, fmt.Errorf("localapi: channel create: missing name")
+		}
+		binding, err := ResolvedBinding(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("localapi: channel create: resolved workspace: %w", err)
+		}
+		actor, err := ServerOwnedActor(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("localapi: channel create: server actor: %w", err)
+		}
+		channel, err := s.workspaceDomain.CreateChannel(ctx, binding, actor, name)
+		if err != nil {
+			return nil, fmt.Errorf("localapi: channel create: %w", err)
+		}
+		return map[string]interface{}{
+			"id": channel.ID, "workspace_id": string(binding.Scope.WorkspaceID), "name": channel.Name, "created_at": channel.CreatedAt,
+		}, nil
+	}
 	if s.qr == nil {
 		return nil, fmt.Errorf("localapi: channel create: sync queue not available")
 	}
@@ -1950,21 +2029,25 @@ func (s *Server) handleChannelCreate(ctx context.Context, args json.RawMessage) 
 	if err != nil {
 		return nil, err
 	}
+	namespaceID, err := s.resolvedLocalNamespace(ctx, orgCtx.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("localapi: channel create: resolved workspace: %w", err)
+	}
 	tx, err := s.beginLocalWrite(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: channel create: begin transaction: %w", err)
 	}
 	defer tx.Rollback()
-	channelID, err := s.er.CreateChannelTx(ctx, tx, orgCtx.ProjectID, name)
+	channelID, err := s.er.CreateChannelTx(ctx, tx, namespaceID, name)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: channel create: %w", err)
 	}
-	out := map[string]interface{}{"id": channelID, "namespace_id": orgCtx.ProjectID, "name": name}
+	out := map[string]interface{}{"id": channelID, "namespace_id": namespaceID, "name": name}
 	payload, err := json.Marshal(out)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: channel create: marshal payload: %w", err)
 	}
-	if _, err := s.qr.EnqueueTx(ctx, tx, orgCtx.ProjectID, "channel", channelID, "create", payload, 0); err != nil {
+	if _, err := s.qr.EnqueueTx(ctx, tx, namespaceID, "channel", channelID, "create", payload, 0); err != nil {
 		return nil, fmt.Errorf("localapi: channel create: enqueue sync: %w", err)
 	}
 	if err := s.commitLocalWrite(tx); err != nil {

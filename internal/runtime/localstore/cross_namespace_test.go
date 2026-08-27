@@ -324,6 +324,38 @@ func TestEventCrossNamespaceRejection(t *testing.T) {
 	}
 }
 
+func TestOperationalEventsRemainNamespaceScopedWithoutLegacyChannels(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "operational-cross-namespace.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	repo := NewEventRepo(store.DB())
+	channelID := "11111111-1111-4111-8111-111111111111"
+	first, err := repo.PublishOperationalEvent(ctx, "workspace-a", channelID, "actor-a", "review.ready", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := repo.PublishOperationalEvent(ctx, "workspace-b", channelID, "actor-b", "review.ready", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for namespace, wantID := range map[string]string{"workspace-a": first.ID, "workspace-b": second.ID} {
+		events, err := repo.ListEventsByNamespace(ctx, namespace, 10, 0)
+		if err != nil || len(events) != 1 || events[0].ID != wantID {
+			t.Fatalf("ListEventsByNamespace(%s) = %+v, %v; want %s", namespace, events, err, wantID)
+		}
+	}
+	if _, err := repo.GetEvent(ctx, "workspace-b", first.ID); !errors.Is(err, ErrEventNotFound) {
+		t.Fatalf("workspace B read workspace A operational event: %v", err)
+	}
+	var channels int
+	if err := store.DB().QueryRow(`SELECT count(*) FROM channels`).Scan(&channels); err != nil || channels != 0 {
+		t.Fatalf("legacy channel rows = %d, err=%v; want zero", channels, err)
+	}
+}
+
 // TestKBCrossNamespaceRejection verifies that KB articles are isolated by namespace.
 func TestKBCrossNamespaceRejection(t *testing.T) {
 	dir := t.TempDir()

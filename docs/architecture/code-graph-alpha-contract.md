@@ -1,5 +1,8 @@
 # Code Graph Alpha Storage and Revision Contract
 
+**Status:** retained internal component contract; not a live Stage 2 CLI, MCP,
+setup, connector, help, generated-guidance, or release-trial surface.
+
 ## Status and scope
 
 This contract freezes Tasks 7 through 11 of the Code Graph alpha slice. It defines

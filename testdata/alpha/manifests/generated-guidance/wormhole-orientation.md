@@ -8,13 +8,12 @@ description: Use when starting work in a project connected to Wormhole or recons
 Wormhole stores shared organisational context, not source code. Git and the
 current working tree remain authoritative for source.
 
-- Gateway is the local MCP endpoint for every agent-facing call.
-- Fabric coordinates shared state between Gateways.
-- Tasks represent intended work and its state.
-- KB articles preserve durable facts, decisions, discoveries, and procedures.
-- Prefer typed Events to chatter; do not narrate every command.
-- Identity and permissions are explicit. Inspect both before acting.
+- Gateway is the local MCP endpoint for every live agent-facing call.
+- This Stage 2 inventory is local-only and does not contact optional Fabric.
+- Portable channels and KB articles live in tracked project state after ordinary Git acceptance.
+- Channel activity, agent registration, and presence remain clone-private operational state.
+- Workspace tools inspect, import, diff, checkpoint, and stash portable candidates.
 
-Consult Wormhole for Tasks, KB context, and recent relevant Events before
-reconstructing project context from broad repository exploration. Verify every
-code conclusion against Git and current source.
+Consult live KB and channel context before broad repository exploration when
+that context could answer the question. Verify every code conclusion against
+Git and current source.

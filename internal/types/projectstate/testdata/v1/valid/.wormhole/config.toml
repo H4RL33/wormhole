@@ -1,0 +1,11 @@
+snapshot_version = 1
+project_id = "00000000-0000-4000-8000-000000000001"
+
+[handle]
+namespace = "acme"
+name = "wormhole"
+
+[repository]
+provider = "github"
+immutable_id = "R_kgDOExample-1"
+canonical_remote = "https://github.com/acme/wormhole"

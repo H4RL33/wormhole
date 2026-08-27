@@ -253,9 +253,9 @@ func TestTwoAgentsPresenceWithoutCoordinationServer(t *testing.T) {
 	}
 }
 
-// TestTaskRoutedWithoutCoordinationServer proves a task can be created and routed
-// to a locally-registered agent without any Coordination Server call.
-func TestTaskRoutedWithoutCoordinationServer(t *testing.T) {
+// TestRetainedTaskRouteProviderWorksWithoutCoordinationServer proves the
+// pre-cut provider boundary remains independently testable without advertising it.
+func TestRetainedTaskRouteProviderWorksWithoutCoordinationServer(t *testing.T) {
 	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -294,17 +294,10 @@ func TestTaskRoutedWithoutCoordinationServer(t *testing.T) {
 	})
 
 	// Route a task requiring "code" capability.
-	resp := sendRequest(t, socketPath, "wormhole.task.route", map[string]interface{}{
-		"capability":  "code",
-		"title":       "implement feature x",
-		"description": "do the thing",
-	})
-	if resp.Error != "" {
-		t.Fatalf("task route: %s", resp.Error)
+	taskResult, err := srv.handleTaskRoute(context.Background(), json.RawMessage(`{"capability":"code","title":"implement feature x","description":"do the thing"}`))
+	if err != nil {
+		t.Fatalf("retained task route provider: %v", err)
 	}
-
-	var taskResult map[string]interface{}
-	json.Unmarshal(resp.Result, &taskResult)
 
 	taskID, _ := taskResult["task_id"].(string)
 	if taskID == "" {
@@ -335,15 +328,12 @@ func TestTaskRoutedWithoutCoordinationServer(t *testing.T) {
 
 	// Verify the task is retrievable via wormhole.task.get using the same ID
 	// (Finding 1: the response task_id must be the localstore-generated ID).
-	respGet := sendRequest(t, socketPath, "wormhole.task.get", map[string]interface{}{
-		"task_id": taskID,
-	})
-	if respGet.Error != "" {
-		t.Fatalf("task get: %s", respGet.Error)
+	getResult, err := srv.localGetTask(context.Background(), json.RawMessage(`{"task_id":"`+taskID+`"}`))
+	if err != nil {
+		t.Fatalf("retained task get provider: %v", err)
 	}
-	var getResult map[string]interface{}
-	json.Unmarshal(respGet.Result, &getResult)
-	if getResult["owner_agent_id"] != assignedTo {
+	owner, _ := getResult["owner_agent_id"].(*string)
+	if owner == nil || *owner != assignedTo {
 		t.Errorf("task.get owner_agent_id = %v, want %s", getResult["owner_agent_id"], assignedTo)
 	}
 
@@ -386,9 +376,8 @@ func TestTaskRoutedWithoutCoordinationServer(t *testing.T) {
 }
 
 func TestTaskRouteRegistrationFailureLeavesNoDurableState(t *testing.T) {
-	_, store, sched, queue, socketPath := newTaskRouteTestRuntime(t, "")
-	resp := sendRequest(t, socketPath, "wormhole.task.route", map[string]interface{}{"capability": "code", "title": "must roll back"})
-	if resp.Error == "" {
+	srv, store, sched, queue, _ := newTaskRouteTestRuntime(t, "")
+	if _, err := srv.handleTaskRoute(context.Background(), json.RawMessage(`{"capability":"code","title":"must roll back"}`)); err == nil {
 		t.Fatal("task.route registration failure returned success")
 	}
 	assertNoDurableRouteState(t, store, queue, "")
@@ -398,9 +387,8 @@ func TestTaskRouteRegistrationFailureLeavesNoDurableState(t *testing.T) {
 }
 
 func TestTaskRouteNoMatchLeavesNoDurableState(t *testing.T) {
-	_, store, sched, queue, socketPath := newTaskRouteTestRuntime(t, "project-1")
-	resp := sendRequest(t, socketPath, "wormhole.task.route", map[string]interface{}{"capability": "code", "title": "no eligible agent"})
-	if resp.Error == "" {
+	srv, store, sched, queue, _ := newTaskRouteTestRuntime(t, "project-1")
+	if _, err := srv.handleTaskRoute(context.Background(), json.RawMessage(`{"capability":"code","title":"no eligible agent"}`)); err == nil {
 		t.Fatal("task.route assignment failure returned success")
 	}
 	assertNoDurableRouteState(t, store, queue, "project-1")
@@ -409,59 +397,17 @@ func TestTaskRouteNoMatchLeavesNoDurableState(t *testing.T) {
 	}
 }
 
-func TestTaskRouteRequiresEveryDeclaredPermission(t *testing.T) {
-	for _, tt := range []struct {
-		name        string
-		permissions string
-		wantDenied  string
-	}{
-		{name: "task create", permissions: `["task.assign"]`, wantDenied: "task.create"},
-		{name: "task assign", permissions: `["task.create"]`, wantDenied: "task.assign"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			srv, store, sched, queue, socketPath := newTaskRouteTestRuntime(t, "project-1")
-			srv.SetAuthorizationAgent("project-1", "route-agent")
-			if _, err := store.DB().Exec(
-				`UPDATE whoami_cache SET permissions = ? WHERE agent_id = 'route-agent' AND project_id = 'project-1'`,
-				tt.permissions,
-			); err != nil {
-				t.Fatalf("restrict route permissions: %v", err)
-			}
-			if err := store.CacheWhoAmI(context.Background(), localstore.WhoAmICache{
-				AgentID: "stale-route-admin", ProjectID: "project-1",
-				Permissions: []string{"task.create", "task.assign"},
-				CachedAt:    time.Now().UTC().Add(time.Hour),
-			}); err != nil {
-				t.Fatalf("cache stale route admin: %v", err)
-			}
-			if _, err := sched.RegisterAgent("route-agent", "project-1", []string{"code"}); err != nil {
-				t.Fatalf("register route agent: %v", err)
-			}
-
-			resp := sendRequest(t, socketPath, "wormhole.task.route", map[string]interface{}{"capability": "code", "title": "route denied"})
-			want := "permission denied: requires " + tt.wantDenied
-			if resp.Error == "" || !strings.Contains(resp.Error, want) {
-				t.Fatalf("task.route error = %q, want %q", resp.Error, want)
-			}
-			assertNoDurableRouteState(t, store, queue, "project-1")
-			if got := sched.TaskCount(); got != 0 {
-				t.Fatalf("permission denial left %d scheduler task(s)", got)
-			}
-		})
-	}
-}
-
 func TestTaskRouteQueueFailureRollsBackDurableState(t *testing.T) {
-	_, store, sched, queue, socketPath := newTaskRouteTestRuntime(t, "project-1")
+	srv, store, sched, queue, _ := newTaskRouteTestRuntime(t, "project-1")
 	if _, err := sched.RegisterAgent("route-agent", "project-1", []string{"code"}); err != nil {
 		t.Fatalf("register route agent: %v", err)
 	}
 	if _, err := store.DB().Exec(`CREATE TRIGGER fail_route_queue BEFORE INSERT ON sync_queue BEGIN SELECT RAISE(FAIL, 'injected route queue failure'); END`); err != nil {
 		t.Fatalf("create route queue trigger: %v", err)
 	}
-	resp := sendRequest(t, socketPath, "wormhole.task.route", map[string]interface{}{"capability": "code", "title": "queue must be atomic"})
-	if resp.Error == "" || !strings.Contains(resp.Error, "injected route queue failure") {
-		t.Fatalf("task.route queue failure = %q, want injected error", resp.Error)
+	_, err := srv.handleTaskRoute(context.Background(), json.RawMessage(`{"capability":"code","title":"queue must be atomic"}`))
+	if err == nil || !strings.Contains(err.Error(), "injected route queue failure") {
+		t.Fatalf("task.route queue failure = %v, want injected error", err)
 	}
 	assertNoDurableRouteState(t, store, queue, "project-1")
 	if got := sched.TaskCount(); got != 0 {

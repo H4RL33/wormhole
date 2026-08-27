@@ -18,9 +18,10 @@ import (
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/runtime/codegraph/config"
+	codeschema "github.com/H4RL33/wormhole/internal/runtime/codegraph/schema"
 )
 
-const CurrentSchemaVersion = 2
+const CurrentSchemaVersion = codeschema.CurrentVersion
 
 var ErrSchemaTooNew = errors.New("codegraph store: schema is newer than this binary")
 
@@ -172,108 +173,6 @@ type PublicationReader interface {
 
 type PublicationGuard func(context.Context, PublicationReader) error
 
-const schemaVersionOne = `
-CREATE TABLE codegraph_config (
-    project_id                  TEXT PRIMARY KEY,
-    enabled                     INTEGER NOT NULL CHECK (enabled IN (0, 1)),
-    canonical_remote            TEXT NOT NULL,
-    active_checkout             TEXT NOT NULL,
-    project_source_byte_ceiling INTEGER NOT NULL CHECK (project_source_byte_ceiling > 0),
-    last_successful_build       TIMESTAMP,
-    active_revision_id          TEXT
-);
-
-CREATE TABLE codegraph_revisions (
-    project_id       TEXT NOT NULL,
-    revision_id      TEXT NOT NULL,
-    state            TEXT NOT NULL CHECK (state IN ('candidate', 'active', 'retired', 'failed')),
-    indexed_commit   TEXT NOT NULL,
-    created_at       TIMESTAMP NOT NULL,
-    completed_at     TIMESTAMP,
-    PRIMARY KEY (project_id, revision_id)
-);
-
-CREATE UNIQUE INDEX codegraph_one_active_revision
-    ON codegraph_revisions(project_id) WHERE state = 'active';
-
-CREATE TABLE codegraph_nodes (
-    project_id  TEXT NOT NULL,
-    revision_id TEXT NOT NULL,
-    node_id     TEXT NOT NULL,
-    kind        TEXT NOT NULL CHECK (kind IN ('repository', 'package', 'file', 'symbol')),
-    name        TEXT NOT NULL,
-    path        TEXT NOT NULL DEFAULT '',
-    PRIMARY KEY (project_id, revision_id, node_id)
-);
-
-CREATE TABLE codegraph_files (
-    project_id   TEXT NOT NULL,
-    revision_id  TEXT NOT NULL,
-    file_id      TEXT NOT NULL,
-    path         TEXT NOT NULL,
-    indexed_hash TEXT NOT NULL,
-    byte_size    INTEGER NOT NULL CHECK (byte_size >= 0),
-    PRIMARY KEY (project_id, revision_id, file_id),
-    UNIQUE (project_id, revision_id, path)
-);
-
-CREATE TABLE codegraph_symbols (
-    project_id     TEXT NOT NULL,
-    revision_id    TEXT NOT NULL,
-    symbol_id      TEXT NOT NULL,
-    file_id        TEXT NOT NULL,
-    qualified_name TEXT NOT NULL,
-    signature      TEXT NOT NULL,
-    start_byte     INTEGER NOT NULL,
-    end_byte       INTEGER NOT NULL,
-    start_line     INTEGER NOT NULL,
-    end_line       INTEGER NOT NULL,
-    PRIMARY KEY (project_id, revision_id, symbol_id)
-);
-
-CREATE TABLE codegraph_edges (
-    project_id       TEXT NOT NULL,
-    revision_id      TEXT NOT NULL,
-    edge_id          TEXT NOT NULL,
-    source_node_id   TEXT NOT NULL,
-    target_node_id   TEXT NOT NULL,
-    relationship     TEXT NOT NULL CHECK (relationship IN ('contains', 'defines', 'imports', 'calls', 'references', 'uses_type')),
-    confidence       REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
-    provenance       TEXT NOT NULL CHECK (provenance IN ('go_packages', 'go_types', 'go_ast', 'parser', 'heuristic')),
-    PRIMARY KEY (project_id, revision_id, edge_id)
-);
-
-CREATE INDEX codegraph_edges_source_traversal
-    ON codegraph_edges(project_id, revision_id, source_node_id, relationship, confidence);
-CREATE INDEX codegraph_edges_target_traversal
-    ON codegraph_edges(project_id, revision_id, target_node_id, relationship, confidence);
-CREATE INDEX codegraph_symbols_qualified_lookup
-    ON codegraph_symbols(project_id, revision_id, qualified_name);
-
-CREATE TABLE codegraph_diagnostics (
-    project_id    TEXT NOT NULL,
-    revision_id   TEXT NOT NULL,
-    diagnostic_id TEXT NOT NULL,
-    severity      TEXT NOT NULL CHECK (severity IN ('info', 'warning', 'error')),
-    code          TEXT NOT NULL,
-    message       TEXT NOT NULL,
-    created_at    TIMESTAMP NOT NULL,
-    PRIMARY KEY (project_id, revision_id, diagnostic_id)
-);
-`
-
-const schemaVersionTwo = `
-CREATE TABLE codegraph_lifecycle (
-	project_id  TEXT PRIMARY KEY,
-	state       TEXT NOT NULL CHECK (state IN ('building', 'disabling')),
-	build_token TEXT,
-	owner_pid   INTEGER NOT NULL,
-	owner_start TEXT NOT NULL,
-	build_owner_pid   INTEGER,
-	build_owner_start TEXT
-);
-`
-
 // Store uses the Gateway-owned SQLite handle but owns only codegraph_* tables.
 // The caller retains ownership of db and closes it after all runtime packages.
 type Store struct {
@@ -290,6 +189,12 @@ func Open(ctx context.Context, db *sql.DB, projectID string) (*Store, error) {
 	}
 	if projectID == "" {
 		return nil, fmt.Errorf("%w: project id is required", ErrProjectScope)
+	}
+	if err := codeschema.Validate(db); err != nil {
+		if errors.Is(err, codeschema.ErrFuture) {
+			return nil, fmt.Errorf("%w: database is newer than this binary", ErrSchemaTooNew)
+		}
+		return nil, err
 	}
 	if err := requireWAL(ctx, db); err != nil {
 		return nil, err
@@ -340,12 +245,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			_, _ = connection.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
-	if _, err := connection.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS codegraph_schema_migrations (
-			version INTEGER PRIMARY KEY,
-			applied_at TIMESTAMP NOT NULL
-		)
-	`); err != nil {
+	if _, err := connection.ExecContext(ctx, codeschema.LedgerSQL()); err != nil {
 		return fmt.Errorf("codegraph store: create migration ledger: %w", err)
 	}
 	var version int
@@ -356,7 +256,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("%w: database=%d binary=%d", ErrSchemaTooNew, version, CurrentSchemaVersion)
 	}
 	if version < 1 {
-		if _, err := connection.ExecContext(ctx, schemaVersionOne); err != nil {
+		if _, err := connection.ExecContext(ctx, codeschema.VersionOneSQL()); err != nil {
 			return fmt.Errorf("codegraph store: apply schema version 1: %w", err)
 		}
 		if _, err := connection.ExecContext(ctx, `INSERT INTO codegraph_schema_migrations (version, applied_at) VALUES (?, ?)`, 1, time.Now().UTC()); err != nil {
@@ -364,7 +264,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	if version < 2 {
-		if _, err := connection.ExecContext(ctx, schemaVersionTwo); err != nil {
+		if _, err := connection.ExecContext(ctx, codeschema.VersionTwoSQL()); err != nil {
 			return fmt.Errorf("codegraph store: apply schema version 2: %w", err)
 		}
 		if _, err := connection.ExecContext(ctx, `INSERT INTO codegraph_schema_migrations (version, applied_at) VALUES (?, ?)`, 2, time.Now().UTC()); err != nil {

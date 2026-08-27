@@ -25,7 +25,6 @@ var generatedSkillContracts = []struct {
 }{
 	{"wormhole-orientation", []string{}, "wormhole-orientation.md", ".agents/skills/wormhole-orientation/SKILL.md"},
 	{"wormhole-tool-use", []string{}, "wormhole-tool-use.md", ".agents/skills/wormhole-tool-use/SKILL.md"},
-	{"wormhole-code-graph", []string{}, "wormhole-code-graph.md", ".agents/skills/wormhole-code-graph/SKILL.md"},
 	{"wormhole-operating-loop", []string{}, "wormhole-operating-loop.md", ".agents/skills/wormhole-operating-loop/SKILL.md"},
 	{"wormhole-contributor", []string{"contributor"}, "wormhole-contributor.md", ".agents/skills/wormhole-contributor/SKILL.md"},
 	{"wormhole-reviewer", []string{"reviewer"}, "wormhole-reviewer.md", ".agents/skills/wormhole-reviewer/SKILL.md"},
@@ -63,8 +62,6 @@ func TestRenderGatewayGuidanceGoldenContract(t *testing.T) {
 	assertToolUseSkill(t, registry, bySlug["wormhole-tool-use"].Content)
 	assertOrientationSkill(t, bySlug["wormhole-orientation"].Content)
 	assertOperatingLoopSkill(t, bySlug["wormhole-operating-loop"].Content)
-	assertTask18Guidance(t, bySlug)
-	assertCodeGraphSkill(t, bySlug["wormhole-code-graph"].Content)
 	assertRoleSkills(t, bySlug)
 	assertNoUnsupportedTools(t, registry, rendered.Files)
 	assertGeneratedManifest(t, rendered)
@@ -75,9 +72,9 @@ func assertOrientationSkill(t *testing.T, content string) {
 	content = strings.Join(strings.Fields(content), " ")
 	for _, required := range []string{
 		"organisational context", "not source code", "Git", "authoritative for source",
-		"Gateway", "local MCP endpoint", "Fabric", "shared state", "Tasks", "intended work",
-		"KB articles", "facts, decisions, discoveries, and procedures", "typed Events", "chatter",
-		"Identity and permissions", "before reconstructing project context",
+		"Gateway", "local MCP endpoint", "local-only", "optional Fabric",
+		"Portable channels and KB articles", "tracked project state", "clone-private operational state",
+		"Workspace tools", "before broad repository exploration",
 	} {
 		if !strings.Contains(content, required) {
 			t.Errorf("orientation skill lacks %q", required)
@@ -92,12 +89,12 @@ func TestRenderGatewayGuidanceTracksSchemaAndRejectsGuidanceDrift(t *testing.T) 
 		t.Fatal(err)
 	}
 	mutated := newLocalRegistry(&Server{})
-	tool, ok := mutated.Get("wormhole.task.get")
+	tool, ok := mutated.Get("wormhole.kb.get")
 	if !ok {
-		t.Fatal("task.get missing")
+		t.Fatal("kb.get missing")
 	}
 	tool.ArgumentExamples = singleArgument(struct {
-		TaskID     string `json:"task_id"`
+		ArticleID  string `json:"article_id"`
 		RevisionID string `json:"revision_id"`
 	}{})
 	mutated.tools[tool.Name] = tool
@@ -140,8 +137,8 @@ func assertGeneratedSkillShape(t *testing.T, file generatedGuidanceFile) {
 
 func assertToolUseSkill(t *testing.T, registry *localRegistry, content string) {
 	t.Helper()
-	if len(registry.List()) != 25 {
-		t.Fatalf("live tool count = %d, want 25", len(registry.List()))
+	if len(registry.List()) != 17 {
+		t.Fatalf("live tool count = %d, want 17", len(registry.List()))
 	}
 	guidance := map[string]toolGuidance{}
 	for _, record := range registry.Guidance() {
@@ -191,11 +188,10 @@ func assertToolUseSkill(t *testing.T, registry *localRegistry, content string) {
 func assertOperatingLoopSkill(t *testing.T, content string) {
 	t.Helper()
 	for _, line := range []string{
-		"session start:", "inspect identity and permissions", "inspect assigned and relevant Tasks", "retrieve relevant KB context", "inspect recent relevant Events", "inspect Code Graph status for code tasks", "confirm intended work before broad exploration",
-		"before changing code:", "retrieve the Task and links", "check decisions and constraints", "use Code Graph when ready and useful", "report work begun when supported", "preserve Git as authority",
-		"during work:", "record meaningful blockers", "publish only durable discoveries", "do not narrate every command", "prefer typed Events", "check for duplicate Tasks and KB articles before creating them",
-		"completion:", "run required verification", "update Task state", "link the commit or pull request where supported", "record durable knowledge", "publish one concise completion Event", "leave sufficient context for another Agent",
-		"if Code Graph is ready:", "query it before broad code discovery", "else:", "continue with normal filesystem and repository tools",
+		"session start:", "inspect workspace.status", "retrieve relevant KB context with kb.list or kb.get", "inspect recent clone-local channel.events", "confirm intended work before broad exploration",
+		"before changing code:", "check portable decisions and constraints", "preserve Git as source and acceptance authority", "inspect workspace.diff before checkpointing",
+		"during work:", "record durable discoveries in KB", "use channel.post only for clone-local operational activity", "do not narrate every command", "check for duplicate channels and KB articles",
+		"completion:", "run required verification", "publication review digest", "checkpoint without staging, committing, or pushing Git", "accept portable state through ordinary Git", "leave sufficient context for another agent",
 	} {
 		if !strings.Contains(content, line) {
 			t.Errorf("operating-loop skill lacks %q", line)
@@ -203,45 +199,14 @@ func assertOperatingLoopSkill(t *testing.T, content string) {
 	}
 }
 
-func assertTask18Guidance(t *testing.T, files map[string]generatedGuidanceFile) {
-	t.Helper()
-	data, err := os.ReadFile("../../../testdata/alpha/kb/semantic-low-overlap.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var fixture struct {
-		Requirements map[string]string `json:"generated_guidance_requirements"`
-	}
-	if err := json.Unmarshal(data, &fixture); err != nil {
-		t.Fatal(err)
-	}
-	for _, slug := range []string{"wormhole-tool-use", "wormhole-operating-loop"} {
-		for name, statement := range fixture.Requirements {
-			if !strings.Contains(files[slug].Content, statement) {
-				t.Errorf("%s lacks Task18 %s statement", slug, name)
-			}
-		}
-	}
-}
-
-func assertCodeGraphSkill(t *testing.T, content string) {
-	t.Helper()
-	lower := strings.ToLower(content)
-	for _, required := range []string{"status", "bounded source budget", "code_graph.source.read", "heuristic", "Git HEAD", "working tree", "known file", "non-code", "approved checkout", "does not replace Git", "direct verification", "builds", "tests"} {
-		if !strings.Contains(lower, strings.ToLower(required)) {
-			t.Errorf("Code Graph skill lacks %q", required)
-		}
-	}
-}
-
 func assertRoleSkills(t *testing.T, files map[string]generatedGuidanceFile) {
 	t.Helper()
-	for _, required := range []string{"task pickup", "scoped implementation", "blocker", "verification", "durable discovery"} {
+	for _, required := range []string{"work intent", "scoped implementation", "clone-local operational context", "verification", "durable discoveries", "workspace.diff"} {
 		if !strings.Contains(files["wormhole-contributor"].Content, required) {
 			t.Errorf("contributor skill lacks %q", required)
 		}
 	}
-	for _, required := range []string{"Task intent", "Code Graph", "Git", "current source", "actionable findings", "silent redesign", "Git pointer", "hypotheses", "not proof"} {
+	for _, required := range []string{"work intent", "workspace.diff", "changed paths", "Git", "current source", "actionable findings", "silent redesign", "checkpoint"} {
 		if !strings.Contains(files["wormhole-reviewer"].Content, required) {
 			t.Errorf("reviewer skill lacks %q", required)
 		}
@@ -271,8 +236,8 @@ func assertGeneratedManifest(t *testing.T, rendered generatedGuidance) {
 		t.Fatal(err)
 	}
 	assertGoldenBytes(t, "manifest.json", data)
-	if len(rendered.Manifest.Entries) != 6 {
-		t.Fatalf("manifest entries = %d, want 6", len(rendered.Manifest.Entries))
+	if len(rendered.Manifest.Entries) != 5 {
+		t.Fatalf("manifest entries = %d, want 5", len(rendered.Manifest.Entries))
 	}
 	targets := make([]string, 0, len(rendered.Manifest.Entries))
 	contentByTarget := map[string]string{}

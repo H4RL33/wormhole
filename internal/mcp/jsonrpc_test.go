@@ -53,13 +53,12 @@ func TestHandleToolsList_AllToolsPresent(t *testing.T) {
 		t.Fatalf("tools field is %T, want []toolListEntry", m["tools"])
 	}
 
-	if len(entries) != 21 {
-		t.Fatalf("got %d tools, want 21", len(entries))
+	if len(entries) != 20 {
+		t.Fatalf("got %d tools, want 20", len(entries))
 	}
 
 	wantNames := []string{
 		"wormhole.agent.enrol",
-		"wormhole.agent.register",
 		"wormhole.agent.whoami",
 		"wormhole.task.create",
 		"wormhole.task.assign",
@@ -89,6 +88,9 @@ func TestHandleToolsList_AllToolsPresent(t *testing.T) {
 		if !got[name] {
 			t.Errorf("missing tool %q in tools/list result", name)
 		}
+	}
+	if got["wormhole.agent.register"] {
+		t.Fatal("Fabric tools/list retains removed wormhole.agent.register")
 	}
 }
 

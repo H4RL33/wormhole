@@ -30,8 +30,8 @@ import (
 const EnrolmentProtocolVersion = 1
 
 // EnrolmentToolName is the pre-credential local Gateway endpoint. It is
-// intentionally not a Fabric endpoint: the CLI sends this request over the
-// same-user local MCP socket and Gateway owns all remote follow-on work.
+// exposed to same-user local MCP clients; Gateway owns all remote follow-on
+// work and harnesses never contact Fabric directly.
 const EnrolmentToolName = "wormhole.agent.enrol"
 
 var (

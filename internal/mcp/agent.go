@@ -4,14 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/core/events"
 	"github.com/H4RL33/wormhole/internal/core/identity"
 	"github.com/H4RL33/wormhole/internal/core/kb"
-	"github.com/H4RL33/wormhole/internal/core/roles"
 )
 
 // defaultChannelNames are bootstrapped into every project the first time an
@@ -65,33 +63,6 @@ func PrepareOnboardingArticleEmbedding(ctx context.Context, kbStore *kb.Store) e
 		return fmt.Errorf("prepare onboarding article embedding: %w", err)
 	}
 	return kbStore.SetPreparedBootstrapEmbedding(onboardingArticleBootstrapKey, embedding)
-}
-
-// RegisterAgentInput is the wormhole.agent.register argument shape.
-// Schema is indicative per architecture.md M1 — frozen here at
-// implementation time, not finalized by any RFC text.
-type RegisterAgentInput struct {
-	Name         string   `json:"name,omitempty"`
-	Permissions  []string `json:"permissions"`
-	Owner        string   `json:"owner"`
-	Model        string   `json:"model"`
-	Capabilities []string `json:"capabilities"`
-	Repositories []string `json:"repositories"`
-	Roles        []string `json:"roles"`
-	Role         string   `json:"role,omitempty"`
-}
-
-// RegisterAgentOutput is the wormhole.agent.register result shape. Token
-// is the raw bearer token, returned exactly once (identity.Store.Register
-// never persists or re-derives it).
-type RegisterAgentOutput struct {
-	AgentID      string    `json:"agent_id"`
-	PassportID   string    `json:"passport_id"`
-	Token        string    `json:"token"`
-	Repositories []string  `json:"repositories"`
-	Roles        []string  `json:"roles"`
-	IssuedAt     time.Time `json:"issued_at"`
-	Role         string    `json:"role,omitempty"`
 }
 
 // EnrolAgentInput is Gateway's Fabric-facing registration contract. The
@@ -168,102 +139,6 @@ func EnrolAgentTool(store *identity.Store, eventsStore *events.Store, kbStore *k
 				AgentID: registration.Agent.ID, PassportID: registration.Passport.ID,
 				Token: registration.RawToken, IssuedAt: registration.Passport.IssuedAt,
 				Replay: registration.Replay, Reissued: registration.Reissued,
-			}, nil
-		},
-	}
-}
-
-// unionAppend returns a new slice containing base's elements followed by
-// any of extra's elements not already present in base, preserving base's
-// original order and appending new elements in extra's order. Used to
-// merge caller-supplied permissions with a resolved role template's
-// permission bundle (and to add a resolved role name into the roles tag
-// slice) deterministically.
-func unionAppend(base, extra []string) []string {
-	seen := make(map[string]bool, len(base))
-	out := make([]string, 0, len(base)+len(extra))
-	for _, v := range base {
-		if !seen[v] {
-			seen[v] = true
-			out = append(out, v)
-		}
-	}
-	for _, v := range extra {
-		if !seen[v] {
-			seen[v] = true
-			out = append(out, v)
-		}
-	}
-	return out
-}
-
-// RegisterAgentTool wires wormhole.agent.register: no auth required, since
-// registration is how an identity first comes into existence (RFC-0001
-// §8.5 joining flow, step 1).
-func RegisterAgentTool(store *identity.Store, eventsStore *events.Store, rolesStore *roles.Store, kbStore *kb.Store) Tool {
-	return Tool{
-		Name:             "wormhole.agent.register",
-		Description:      "Registers a new agent identity, issues its passport and a project-scoped bearer token.",
-		RequiresAuth:     false,
-		ArgumentsExample: RegisterAgentInput{},
-		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
-			var in RegisterAgentInput
-			if err := json.Unmarshal(arguments, &in); err != nil {
-				return nil, fmt.Errorf("mcp: decode wormhole.agent.register arguments: %w", err)
-			}
-			if in.Owner == "" && in.Name != "" {
-				in.Owner = in.Name
-			}
-			if in.Role != "" {
-				template, err := rolesStore.GetTemplate(ctx, in.Role)
-				if errors.Is(err, roles.ErrTemplateNotFound) {
-					return nil, fmt.Errorf("mcp: wormhole.agent.register: unknown role template %q: %w", in.Role, err)
-				}
-				if err != nil {
-					return nil, fmt.Errorf("mcp: wormhole.agent.register: %w", err)
-				}
-				in.Permissions = unionAppend(in.Permissions, template.PermissionBundle)
-				in.Roles = unionAppend(in.Roles, []string{in.Role})
-
-				// Merge default capabilities and roles from template
-				if len(in.Capabilities) == 0 && len(template.DefaultCapabilities) > 0 {
-					in.Capabilities = template.DefaultCapabilities
-				}
-				if len(in.Roles) == 1 && len(template.DefaultRoles) > 0 {
-					in.Roles = unionAppend(in.Roles, template.DefaultRoles)
-				}
-			}
-			tx, err := store.BeginProjectTx(ctx, projectID)
-			if err != nil {
-				return nil, fmt.Errorf("mcp: wormhole.agent.register: %w", err)
-			}
-			defer tx.Rollback()
-
-			agent, passport, token, err := store.RegisterInTx(ctx, tx, projectID, in.Permissions, in.Owner, in.Model, in.Capabilities, in.Repositories, in.Roles)
-			if err != nil {
-				return nil, fmt.Errorf("mcp: wormhole.agent.register: %w", err)
-			}
-			onboardingEmbedding, err := kbStore.PreparedBootstrapEmbedding(onboardingArticleBootstrapKey)
-			if err != nil {
-				return nil, fmt.Errorf("mcp: wormhole.agent.register: onboarding article embedding: %w", err)
-			}
-			if err := ensureDefaultChannelsInTx(ctx, tx, eventsStore, projectID); err != nil {
-				return nil, fmt.Errorf("mcp: wormhole.agent.register: default channel bootstrap: %w", err)
-			}
-			if err := ensureOnboardingArticleInTx(ctx, tx, kbStore, projectID, agent.ID, onboardingEmbedding); err != nil {
-				return nil, fmt.Errorf("mcp: wormhole.agent.register: onboarding article bootstrap: %w", err)
-			}
-			if err := tx.Commit(); err != nil {
-				return nil, fmt.Errorf("mcp: wormhole.agent.register: commit bootstrap transaction: %w", err)
-			}
-			return RegisterAgentOutput{
-				AgentID:      agent.ID,
-				PassportID:   passport.ID,
-				Token:        token,
-				Repositories: passport.Repositories,
-				Roles:        passport.Roles,
-				IssuedAt:     passport.IssuedAt,
-				Role:         in.Role,
 			}, nil
 		},
 	}

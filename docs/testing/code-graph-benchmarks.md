@@ -1,5 +1,8 @@
 # Code Graph benchmark corpus
 
+**Status:** preserved internal-package benchmark and historical Gate B method;
+not a current public command, MCP tool, setup step, or release-trial procedure.
+
 This is the Task 12 / Gate B measurement procedure for the Wormhole Code Graph
 alpha. It records observations; it defines no latency, byte, recall, or release
 threshold.

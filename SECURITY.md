@@ -33,37 +33,63 @@ Manual dispatch is a rehearsal and never publishes. See
 
 ---
 
-## Security Model & Boundary Isolation
+## Current Stage 2 security boundary
 
-Wormhole relies on a multi-layered security model to enforce strict isolation between projects and guarantee identity unforgeability.
+The supported release is a local-only Stage 2 Gateway, not a hosted
+multi-tenant service. It exposes exactly 17 agent-facing tools through
+`wormhole mcp` and does not contact Fabric.
 
-### 1. Database Row-Level Security (RLS)
-To enforce multi-tenancy guarantees (RFC-0001 §13), every project-scoped table in the Postgres database must have Row Level Security enabled. 
+- Git is the sole acceptance authority for portable Wormhole project state.
+  Gateway can materialise a candidate in the working tree, but cannot stage,
+  commit, push, or make it accepted. Tracked `.wormhole/` records are visible
+  to every Git reader and must never contain credentials or other
+  machine-private authority.
+- `gatewayd` uses an owner-private Unix socket, SQLite database, identity
+  store, and private CLI capability. This is a same-OS-user boundary. It
+  prevents routine access by other OS users; it does not protect against a
+  hostile same-user process, administrator/root access, a compromised user
+  session, or host compromise.
+- Setup selects a human. Gateway derives a durable agent accountable to that
+  selected human and creates a fresh connection session for each MCP
+  connection. Harness and model metadata is bounded self-declared provenance,
+  not independently authenticated identity or authority. Public tool calls
+  cannot select or override the human, agent, session, workspace, or private
+  paths.
+- The current local `wormhole.agent.register` establishes local agent/presence
+  state only and does not return a raw token. There is no local bearer-token
+  authentication boundary for the Stage 2 socket; protecting the socket and
+  its parent directory remains essential.
 
-- **Policy Pattern**: The project scopes access using the following Postgres RLS policy:
-  ```sql
-  USING (project_id = current_setting('wormhole.project_id', true)::uuid)
-  ```
-- **Session Context**: Before executing any project-scoped queries, the application server configures the project context for the database connection (using a local session setting). This ensures that even if application logic fails to filter a query by project, Postgres will block any access or modification to rows belonging to other projects.
-- **Exceptions**: Only the `projects` table (which defines project existence) and the `agents` table (since agent identities are project-agnostic and span projects) are exempt from project-scoped RLS.
+Portable Channel and KB records can be checkpointed into a Git candidate.
+Operational posts, subscriptions, presence, and local registration are
+clone-local. Workspace bindings, overlays, selected identities, sessions,
+capabilities, credentials, journals, and SQLite rows are machine-private and
+must remain outside the repository.
 
-### 2. Token Authentication & Side-Channel Protection
-Agents authenticate using bearer tokens at the MCP boundary. 
-- **Hash at Rest**: To prevent credential theft via database leaks, raw tokens are never stored at rest. Only a SHA-256 hex hash of the token is saved in the database (`agent_tokens.token_hash`).
-- **Timing and Enumeration Prevention**: Authentication failures collapse into a single generic sentinel error `ErrInvalidToken`. Whether a token is unrecognized, forged, expired, or assigned to a different project, the exact same error is returned. Callers cannot distinguish failure modes, neutralizing token enumeration and side-channel timing attacks.
-- **Decoupled Boundary**: Tokens and passports are resolved to an `AuthenticatedScope` at the MCP transport/middleware layer. Core business packages receive the pre-resolved scope and never parse or validate raw tokens directly (Architecture Guardrails §5, M4).
+### Local credential and socket handling
 
-### 3. Per-Namespace Rate Limiting (Sync Surface Protection)
-- **Limiter Implementation**: The `internal/mcp.syncRateLimiter` implements a fixed-window rate limiter capped at 30 calls per minute per namespace, checked in all four `wormhole.sync.*` MCP tool handlers (`BootstrapTool`, `IncrementalPullTool`, `IncrementalPushTool`, `ConflictReportTool`).
-- **Enforcement Point**: Rate limit validation occurs immediately after namespace and version validation, before any database or coordination work begins.
-- **Purpose**: Bounds abuse and runaway-client load against the Coordination Server's sync surface, preventing resource exhaustion from excessive or malicious clients.
+Credential profiles, including any optional Fabric credentials, are private
+files. Newly created credential directories request mode `0o700`; files
+request mode `0o600`. Existing paths are not automatically tightened, so an
+operator must inspect and restrict them before relying on those modes.
 
-### 4. Identity Unforgeability & Permissions
-- **Project-Agnostic Identity**: Agent identities are represented by an entry in the `agents` table and are independent of any specific project.
-- **Passports**: Access to any project requires a `Passport` representing the join-time credential. Passports scope an agent identity to a specific project and specify roles, repository permissions, and capabilities.
-- **Immutable Audit Trail**: Every action is recorded in an append-only audit trail (`audit_log`) handled entirely by the server. Agents cannot edit or delete audit logs, ensuring a reliable audit history.
-- **Human-in-the-Loop Safeguards**: Destructive actions—such as deleting a project, revoking root access, or modifying security permissions—are human-only operations by default. Agent tokens are restricted from performing these actions to prevent compromised or misconfigured agents from escalating their own privileges.
+The Linux `gatewayd` local API uses a Unix socket restricted to mode `0o600`.
+Stale-socket recovery uses a liveness probe and inode-stable quarantine check;
+live listeners and replacement paths are preserved. Non-Linux builds refuse to
+start until equivalent recovery support exists. These filesystem controls are
+part of the same-OS-user boundary, not a substitute for an authenticated remote
+service boundary.
 
-### 5. Local Credential Storage & Socket Permissions
-- **Filesystem Storage**: The `cmd/wormhole` command writes credentials to `~/.wormhole/credentials/<profile>.json` via `writeCredentials`. Newly created directories request mode `0o700` (owner-only), and newly created files request mode `0o600` (owner-only read/write). Existing directories and files are not automatically tightened, so users must verify and restrict an existing profile path before relying on those modes.
-- **Local API Socket**: The Linux-only `gatewayd` local API uses `net.Listen("unix", ...)`, immediately restricts the socket to mode `0o600`, and retains RFC-0003 OQ4's same-user trust model without an additional local bearer token. Startup removes a stale socket only after a liveness probe and inode-stable quarantine check; live listeners and replacement paths are preserved. Non-Linux builds refuse to start because equivalent stale-socket recovery is not yet supported. Registration returns the caller's newly issued raw token once over this socket, so users must also keep its parent directory owner-only.
+## Optional Fabric is not Stage 2
+
+The optional Fabric server has a separate 20-tool PostgreSQL-backed HTTP MCP
+inventory. Its PostgreSQL RLS, bearer-token and Passport authentication,
+credential hashing, server audit, and sync rate-limiting assumptions belong to
+that optional future deployment. They are not protections supplied by the live
+local-only Stage 2 Gateway, and Fabric is not a direct Stage 2 harness endpoint
+or acceptance authority.
+
+Any Fabric deployment requires its own authenticated HTTPS, secret handling,
+database-isolation, network-exposure, and operational review. See the
+[Stage 2 security model](docs/wiki/Security-Model.md) for the detailed local
+boundary and its relationship to optional Fabric.
