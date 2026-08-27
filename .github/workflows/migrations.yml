@@ -44,6 +44,8 @@ jobs:
           go-version-file: go.mod
       - name: Install golang-migrate
         run: go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.18.3
+      - name: Provision Activity database roles
+        run: psql "$WORMHOLE_DATABASE_URL" -v ON_ERROR_STOP=1 -f .github/scripts/provision-activity-roles.sql
       - name: Verify empty-database migrations
         run: |
           migrate -path migrations -database "$WORMHOLE_DATABASE_URL" up
