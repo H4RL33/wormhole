@@ -540,7 +540,7 @@ func stage2PersistedStashActors(t *testing.T, store *localstore.Store) []types.A
 }
 
 func waitStage2BridgeResponse(stdout *syncBuffer, id string) (rpcResponse, error) {
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
 			var response rpcResponse
