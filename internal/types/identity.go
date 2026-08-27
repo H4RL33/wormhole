@@ -99,6 +99,46 @@ type ActorEnvelope struct {
 	OccurredAt         time.Time `json:"occurred_at"`
 }
 
+// ActorScope carries a structurally valid actor and its issuer-derived scope.
+// It does not establish issuer authority; issuers derive fresh scopes from their
+// own private records before dispatching an action.
+type ActorScope struct {
+	Actor        ActorEnvelope
+	ProjectID    string
+	MembershipID string
+	PassportID   string
+	CredentialID string
+	Roles        []string
+	Permissions  []string
+}
+
+func (s ActorScope) Validate() error {
+	if err := s.Actor.Validate(); err != nil {
+		return err
+	}
+	if !CanonicalUUID(s.ProjectID) {
+		return fmt.Errorf("%w: invalid scope project ID", ErrInvalidActorEnvelope)
+	}
+	for _, value := range []string{s.MembershipID, s.PassportID, s.CredentialID} {
+		if value != "" && !CanonicalUUID(value) {
+			return fmt.Errorf("%w: invalid scope identifier", ErrInvalidActorEnvelope)
+		}
+	}
+	return nil
+}
+
+func (s ActorScope) HasPermission(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, permission := range s.Permissions {
+		if permission == name {
+			return true
+		}
+	}
+	return false
+}
+
 func (e ActorEnvelope) PrincipalID() string {
 	switch e.ActorKind {
 	case ActorHuman:

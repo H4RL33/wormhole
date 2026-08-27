@@ -120,6 +120,50 @@ func TestActorEnvelopeHistoricalNeverUpgrades(t *testing.T) {
 	}
 }
 
+func TestActorScopeValidateDoesNotUpgradeAssurance(t *testing.T) {
+	base := ActorScope{
+		Actor: ActorEnvelope{
+			ActorKind: ActorAgent, AgentID: testAgentID, AccountableHumanID: testHumanID,
+			SessionID: "session-1", HarnessName: "codex", HarnessVersion: "1.0",
+			Assurance: AssuranceLocal, OccurredAt: testActorTime(),
+		},
+		ProjectID:    testProjectID,
+		MembershipID: testWorkspaceID,
+		PassportID:   testProfileID,
+		CredentialID: testFabricInstanceID,
+		Roles:        []string{"editor"},
+		Permissions:  []string{"kb.write"},
+	}
+	if err := base.Actor.ValidateLocalAction(); err != nil {
+		t.Fatalf("ValidateLocalAction(new local): %v", err)
+	}
+	if err := base.Validate(); err != nil {
+		t.Fatalf("Validate(local scope): %v", err)
+	}
+
+	for _, assurance := range []Assurance{AssuranceLegacy, AssuranceUnknown, AssurancePublicKeyContinuity, AssurancePrivateAuthenticated} {
+		t.Run(string(assurance), func(t *testing.T) {
+			historical := base
+			historical.Actor.Assurance = assurance
+			if assurance == AssuranceLegacy || assurance == AssuranceUnknown {
+				historical.Actor.AccountableHumanID = ""
+				historical.Actor.SessionID = ""
+				historical.Actor.HarnessName = ""
+				historical.Actor.HarnessVersion = ""
+			}
+			if err := historical.Actor.ValidateLocalAction(); !errors.Is(err, ErrInvalidActorEnvelope) {
+				t.Fatalf("ValidateLocalAction(%q) error = %v, want ErrInvalidActorEnvelope", assurance, err)
+			}
+			if err := historical.Validate(); err != nil {
+				t.Fatalf("Validate(%q): %v", assurance, err)
+			}
+			if historical.Actor.Assurance != assurance {
+				t.Fatalf("Validate(%q) upgraded assurance to %q", assurance, historical.Actor.Assurance)
+			}
+		})
+	}
+}
+
 func TestActorEnvelopeRejectsUnknownKindAssuranceAndNonUTC(t *testing.T) {
 	valid := ActorEnvelope{ActorKind: ActorHuman, HumanPrincipalID: testHumanID, Assurance: AssuranceLocal, OccurredAt: testActorTime()}
 	if err := valid.ValidateLocalAction(); err != nil {
