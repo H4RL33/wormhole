@@ -1453,3 +1453,10 @@ immutable Activity ledger/receipt plus separate lifecycle model and authorized a
 closed-pre-alpha private-format hard cut from exact v7 to exact v8. The focused
 amendment is commit `d5de7af`; the reconciled five-slice executable plan is commit
 `c49729f`. Task 3A (strict Activity routing/codecs) is the next implementation slice.
+
+Stage 3 Task 3A: complete (commits `0d58bb0`, `266d6df`, `883aa96`, review fix
+`84b337c`). Complete Activity route/origin keys and strict canonical ActivityV1,
+finite-policy, and receipt codecs are implemented with no portable-state/reducer
+coupling. Focused/full shared-type tests, race, vet, and diff checks passed.
+Independent review approved after one fix round with Critical 0 / Important 0 /
+Minor 0. Task 3B (PostgreSQL 000021 and Fabric Activity authority) is next.
