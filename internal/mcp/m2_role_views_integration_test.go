@@ -6,8 +6,7 @@ import (
 	"testing"
 )
 
-// TestM2_ThreeRolesDistinctPermissionsAndViews verifies that registering
-// three agents under
+// TestM2_ThreeRolesDistinctPermissionsAndViews verifies three agents under
 // distinct role templates (manager/backend/frontend) in one project,
 // confirm each passport carries a distinct permission bundle,
 // and confirm wormhole.task.list's default view differs per role
@@ -16,10 +15,8 @@ import (
 func TestM2_ThreeRolesDistinctPermissionsAndViews(t *testing.T) {
 	identityStore := testIdentityStore(t)
 	tasksStore := testTasksStore(t)
-	eventsStore := testEventsStore(t)
 	rolesStore := testRolesStore(t)
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(identityStore, eventsStore, rolesStore, testKBStore(t)))
 	registry.Register(WhoAmITool())
 	registry.Register(CreateTaskTool(tasksStore))
 	registry.Register(AssignTaskTool(tasksStore))
@@ -29,7 +26,7 @@ func TestM2_ThreeRolesDistinctPermissionsAndViews(t *testing.T) {
 
 	projectID := mustCreateProject(t, "m2-three-roles")
 
-	register := func(role string) RegisterAgentOutput {
+	register := func(role string) testRegistration {
 		t.Helper()
 		// Role bundles (migration 000010) grant coarse "task.write"/"task.read"
 		// strings; wormhole.task.create/list gate on the fine-grained
@@ -38,10 +35,7 @@ func TestM2_ThreeRolesDistinctPermissionsAndViews(t *testing.T) {
 		// so every agent here can exercise create/list regardless of role —
 		// task.assign stays role-bundle-only so the distinctness assertion
 		// below still means what it says.
-		args, _ := json.Marshal(RegisterAgentInput{Owner: "harley", Model: "claude", Role: role, Permissions: []string{"task.create", "task.list"}})
-		raw := mustToolResult(t, srv, "", "wormhole.agent.register", projectID, args)
-		var out RegisterAgentOutput
-		json.Unmarshal(raw, &out)
+		out := mustRegisterRoleTestAgent(t, identityStore, rolesStore, projectID, role, []string{"task.create", "task.list"})
 		if out.Token == "" {
 			t.Fatalf("register role=%s: empty token, out=%+v", role, out)
 		}
@@ -60,8 +54,7 @@ func TestM2_ThreeRolesDistinctPermissionsAndViews(t *testing.T) {
 
 	// Distinct permission bundles: project-manager's bundle includes
 	// task.assign; backend/frontend's does not (migration 000010 seeds).
-	// RegisterAgentOutput carries no Permissions field, so read the
-	// resolved scope back through wormhole.agent.whoami instead.
+	// Read each resolved permission scope through wormhole.agent.whoami.
 	assertHasPermission := func(name, token, perm string, want bool) {
 		t.Helper()
 		raw := mustToolResult(t, srv, token, "wormhole.agent.whoami", projectID, json.RawMessage(`{}`))

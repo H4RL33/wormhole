@@ -12,8 +12,7 @@ import (
 
 type semanticFixture struct {
 	GeneratedGuidanceRequirements struct {
-		KBSearch  string `json:"kb_search"`
-		CodeGraph string `json:"code_graph"`
+		FabricSemanticSearch string `json:"fabric_semantic_search"`
 	} `json:"generated_guidance_requirements"`
 	Cases []struct {
 		Name         string                       `json:"name"`
@@ -105,8 +104,8 @@ func TestLowLexicalOverlapSemanticRankingBeatsLexicalDecoys(t *testing.T) {
 	projectID := createProject(t, s, "meaning-bearing-ranking")
 	agentID := createAgent(t, s)
 	createPassport(t, s, agentID, projectID)
-	if !strings.Contains(fixture.GeneratedGuidanceRequirements.KBSearch, "shared KB semantic search") ||
-		!strings.Contains(fixture.GeneratedGuidanceRequirements.CodeGraph, "separate from the shared KB") {
+	const expectedGuidance = "Use optional Fabric semantic search for organisational decisions, procedures, and discoveries when low lexical overlap could hide relevant context; this capability is separate from deterministic Gateway kb.list/kb.get and is not in the Stage 2 Gateway inventory."
+	if fixture.GeneratedGuidanceRequirements.FabricSemanticSearch != expectedGuidance {
 		t.Fatalf("generated-guidance requirements = %+v", fixture.GeneratedGuidanceRequirements)
 	}
 

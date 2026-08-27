@@ -30,6 +30,10 @@ type RegisteredAgent struct {
 // ErrAgentUnknown is returned when an operation references an unregistered agent.
 var ErrAgentUnknown = fmt.Errorf("scheduler: agent unknown")
 
+// ErrAgentNamespaceMismatch prevents a target agent identifier already bound
+// to one exact local namespace from being reused to mutate another.
+var ErrAgentNamespaceMismatch = fmt.Errorf("scheduler: target agent is outside resolved workspace")
+
 // Scheduler manages agent registration, presence tracking, capability matching,
 // and local task routing (RFC-0003 §6.1). It is safe for concurrent use.
 //
@@ -73,6 +77,9 @@ func (s *Scheduler) RegisterAgent(agentID, namespaceID string, capabilities []st
 		copy(agent.Capabilities, capabilities)
 		s.agents[agentID] = agent
 		return agent, nil
+	}
+	if existing.NamespaceID != namespaceID {
+		return nil, ErrAgentNamespaceMismatch
 	}
 
 	// Merge capabilities: existing gets the union.

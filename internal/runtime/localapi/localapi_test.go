@@ -15,12 +15,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/runtime/config"
 	"github.com/H4RL33/wormhole/internal/runtime/eventbus"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
+	syncpkg "github.com/H4RL33/wormhole/internal/runtime/sync"
 )
 
 const (
@@ -255,12 +257,12 @@ func TestServer_LogsNeverContainBearerToken(t *testing.T) {
 	if _, err := reader.ReadBytes('\n'); err != nil {
 		t.Fatalf("read malformed response: %v", err)
 	}
-	mcpInitialize(t, conn, reader)
-	resp := mcpCallTool(t, conn, reader, 2, "wormhole.agent.whoami", nil)
 	_ = conn.Close()
-	if resp.Error == "" {
+	_, proxyErr := srv.proxyWhoAmI(context.Background())
+	if proxyErr == nil {
 		t.Fatal("coordination server failure unexpectedly succeeded")
 	}
+	srv.logError("retained whoami provider", proxyErr)
 	gotLogs := logs.String()
 	if gotLogs == "" {
 		t.Fatal("malformed frame and tool failure produced no diagnostic logs")
@@ -428,6 +430,187 @@ func TestServer_CloseCancelsActiveRequestWithoutContextCancel(t *testing.T) {
 	waitForTrackedConnectionCount(t, srv, 0)
 }
 
+func TestServerCloseWaitsForNonCooperativeTrackedHandler(t *testing.T) {
+	requestStarted := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseHandler) }) }
+
+	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
+	if err != nil {
+		t.Fatalf("localstore.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	er := localstore.NewEventRepo(store.DB())
+	socketPath := filepath.Join(t.TempDir(), "wormholed.sock")
+	srv, err := New(socketPath, "", "test-token", "project-1", store, localstore.NewTaskRepo(store.DB(), er), er, localstore.NewKBRepo(store.DB()), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	const blockingTool = "wormhole.test.non-cooperative"
+	srv.registry.tools[blockingTool] = localTool{
+		Name: blockingTool,
+		Handler: func(context.Context, json.RawMessage) (any, error) {
+			close(requestStarted)
+			<-releaseHandler
+			return map[string]bool{"released": true}, nil
+		},
+	}
+
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- srv.Serve(context.Background()) }()
+	serveReturned := false
+	t.Cleanup(func() {
+		release()
+		_ = srv.Close()
+		if !serveReturned {
+			select {
+			case <-serveDone:
+			case <-time.After(time.Second):
+			}
+		}
+	})
+	conn := dialLocalSocket(t, socketPath)
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	mcpInitialize(t, conn, reader)
+	params, _ := json.Marshal(toolsCallParams{Name: blockingTool, Arguments: json.RawMessage(`{}`)})
+	call, _ := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("2"), Method: "tools/call", Params: params})
+	if _, err := conn.Write(append(call, '\n')); err != nil {
+		t.Fatalf("write blocking request: %v", err)
+	}
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("non-cooperative handler did not start")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- srv.Close() }()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close returned before non-cooperative handler exited: %v", err)
+	case <-time.After(1250 * time.Millisecond):
+	}
+
+	release()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close after handler release: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return after non-cooperative handler exited")
+	}
+	select {
+	case err := <-serveDone:
+		serveReturned = true
+		if err != nil {
+			t.Fatalf("Serve after handler release: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not return after non-cooperative handler exited")
+	}
+	if got := trackedConnectionCount(srv); got != 0 {
+		t.Fatalf("tracked connection count after Close = %d, want 0", got)
+	}
+}
+
+func TestServerCloseStopsWorkerPublishedByAdmittedHandler(t *testing.T) {
+	requestStarted := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseHandler) }) }
+	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
+	if err != nil {
+		t.Fatalf("localstore.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	er := localstore.NewEventRepo(store.DB())
+	socketPath := filepath.Join(t.TempDir(), "wormholed.sock")
+	srv, err := New(socketPath, "", "test-token", "project-1", store, localstore.NewTaskRepo(store.DB(), er), er, localstore.NewKBRepo(store.DB()), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv.enrolmentSyncEngines = make(map[string]*syncpkg.Engine)
+	const blockingTool = "wormhole.test.publish-worker"
+	srv.registry.tools[blockingTool] = localTool{
+		Name: blockingTool,
+		Handler: func(context.Context, json.RawMessage) (any, error) {
+			close(requestStarted)
+			<-releaseHandler
+			srv.enrolmentBootstrapMu.Lock()
+			srv.enrolmentSyncEngines["late"] = &syncpkg.Engine{}
+			srv.enrolmentBootstrapMu.Unlock()
+			return map[string]bool{"published": true}, nil
+		},
+	}
+
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- srv.Serve(context.Background()) }()
+	serveReturned := false
+	t.Cleanup(func() {
+		release()
+		_ = srv.Close()
+		if !serveReturned {
+			select {
+			case <-serveDone:
+			case <-time.After(time.Second):
+			}
+		}
+	})
+	conn := dialLocalSocket(t, socketPath)
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	mcpInitialize(t, conn, reader)
+	params, _ := json.Marshal(toolsCallParams{Name: blockingTool, Arguments: json.RawMessage(`{}`)})
+	call, _ := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("2"), Method: "tools/call", Params: params})
+	if _, err := conn.Write(append(call, '\n')); err != nil {
+		t.Fatalf("write worker-publishing request: %v", err)
+	}
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("worker-publishing handler did not start")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- srv.Close() }()
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	if _, err := conn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("tracked connection remained open during shutdown")
+	} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		t.Fatal("shutdown did not close the tracked connection")
+	}
+	release()
+
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close after worker publication: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return after worker-publishing handler exited")
+	}
+	srv.enrolmentBootstrapMu.Lock()
+	remainingWorkers := len(srv.enrolmentSyncEngines)
+	srv.enrolmentBootstrapMu.Unlock()
+	if remainingWorkers != 0 {
+		t.Fatalf("enrolment sync workers after Close = %d, want 0", remainingWorkers)
+	}
+	select {
+	case err := <-serveDone:
+		serveReturned = true
+		if err != nil {
+			t.Fatalf("Serve after worker publication: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not return after worker-publishing handler exited")
+	}
+}
+
 func TestServer_ShutdownAfterAdmissionBeforeHandlerStart(t *testing.T) {
 	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
 	if err != nil {
@@ -587,7 +770,7 @@ func fakeCoordServer(t *testing.T) *httptest.Server {
 	}))
 }
 
-func TestServer_ProxiesWhoAmI(t *testing.T) {
+func TestRetainedWhoAmIProviderCachesFabricResult(t *testing.T) {
 	coord := fakeCoordServer(t)
 	defer coord.Close()
 
@@ -609,13 +792,9 @@ func TestServer_ProxiesWhoAmI(t *testing.T) {
 	go srv.Serve(ctx)
 	defer srv.Close()
 
-	resp := sendRequest(t, socketPath, "wormhole.agent.whoami", nil)
-	if resp.Error != "" {
-		t.Fatalf("got error response: %s", resp.Error)
-	}
-	var out whoAmIOutput
-	if err := json.Unmarshal(resp.Result, &out); err != nil {
-		t.Fatalf("decode result: %v", err)
+	out, err := srv.proxyWhoAmI(context.Background())
+	if err != nil {
+		t.Fatalf("retained whoami provider: %v", err)
 	}
 	if out.AgentID != "agent-1" || out.Owner != "harley" {
 		t.Fatalf("got %+v", out)
@@ -777,18 +956,14 @@ func TestServer_UnknownTool(t *testing.T) {
 	go srv.Serve(ctx)
 	defer srv.Close()
 
-	// This server was constructed with qr=nil, so wormhole.task.create's
-	// handler itself errors ("sync queue not available") — still exercises
-	// the "tools/call wraps a handler error into isError:true" path this
-	// test originally proved for an unrecognized tool name.
-	resp := sendRequest(t, socketPath, "wormhole.task.create", nil)
-	if resp.Error == "" {
-		t.Fatalf("want error response, got none")
+	resp := sendRequest(t, socketPath, "wormhole.nonexistent", nil)
+	if resp.Error != "unknown tool: wormhole.nonexistent" {
+		t.Fatalf("unknown tool error = %q", resp.Error)
 	}
 }
 
-// TestServer_LocalTaskList verifies wormhole.task.list through socket.
-func TestServer_LocalTaskList(t *testing.T) {
+// TestRetainedLocalTaskListProvider verifies the pre-cut provider directly.
+func TestRetainedLocalTaskListProvider(t *testing.T) {
 	coord := fakeCoordServer(t)
 	defer coord.Close()
 	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
@@ -815,14 +990,9 @@ func TestServer_LocalTaskList(t *testing.T) {
 	go srv.Serve(ctx)
 	defer srv.Close()
 
-	resp := sendRequest(t, socketPath, "wormhole.task.list", nil)
-	if resp.Error != "" {
-		t.Fatalf("got error response: %s", resp.Error)
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(resp.Result, &result); err != nil {
-		t.Fatalf("decode result: %v", err)
+	result, err := srv.localListTasks(context.Background(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("retained task list provider: %v", err)
 	}
 	tasks, ok := result["tasks"].([]interface{})
 	if !ok {
@@ -833,8 +1003,8 @@ func TestServer_LocalTaskList(t *testing.T) {
 	}
 }
 
-// TestServer_LocalTaskGet verifies wormhole.task.get through socket.
-func TestServer_LocalTaskGet(t *testing.T) {
+// TestRetainedLocalTaskGetProvider verifies the pre-cut provider directly.
+func TestRetainedLocalTaskGetProvider(t *testing.T) {
 	coord := fakeCoordServer(t)
 	defer coord.Close()
 	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
@@ -862,22 +1032,17 @@ func TestServer_LocalTaskGet(t *testing.T) {
 	go srv.Serve(ctx)
 	defer srv.Close()
 
-	resp := sendRequest(t, socketPath, "wormhole.task.get", map[string]interface{}{"task_id": task.ID})
-	if resp.Error != "" {
-		t.Fatalf("got error response: %s", resp.Error)
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(resp.Result, &result); err != nil {
-		t.Fatalf("decode result: %v", err)
+	result, err := srv.localGetTask(context.Background(), json.RawMessage(`{"task_id":"`+task.ID+`"}`))
+	if err != nil {
+		t.Fatalf("retained task get provider: %v", err)
 	}
 	if result["title"] != "Test Task" {
 		t.Errorf("title = %q, want Test Task", result["title"])
 	}
 }
 
-// TestServer_LocalTaskGetMissingTaskID verifies wormhole.task.get rejects missing task_id.
-func TestServer_LocalTaskGetMissingTaskID(t *testing.T) {
+// TestRetainedLocalTaskGetProviderRejectsMissingTaskID verifies the provider boundary.
+func TestRetainedLocalTaskGetProviderRejectsMissingTaskID(t *testing.T) {
 	coord := fakeCoordServer(t)
 	defer coord.Close()
 	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
@@ -899,9 +1064,7 @@ func TestServer_LocalTaskGetMissingTaskID(t *testing.T) {
 	go srv.Serve(ctx)
 	defer srv.Close()
 
-	// Send request with empty args (no task_id).
-	resp := sendRequest(t, socketPath, "wormhole.task.get", map[string]interface{}{})
-	if resp.Error == "" {
+	if _, err := srv.localGetTask(context.Background(), json.RawMessage(`{}`)); err == nil {
 		t.Fatalf("want error for missing task_id, got none")
 	}
 }

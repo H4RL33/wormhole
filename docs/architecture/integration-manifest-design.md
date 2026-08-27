@@ -1,23 +1,24 @@
 # Gateway integration manifest version 1
 
-**Status:** designed, not implemented; awaiting human approval under issue #50.
+**Status:** retained optional-Fabric design with implemented cache/materialisation
+primitives; its planned guidance-read tool is not in the Stage 2 Gateway inventory.
 
-This document closes the RFC-0003 integration-manifest open question for
-declarative Markdown guidance. It is an implementation contract for later
-milestones, not authority to expose a new CLI or MCP surface. Wormhole's own
-repository instructions remain repository-owned. This design applies only to
-usage guidance offered by Fabric and approved locally through Gateway.
+This document preserves the RFC-0003 integration-manifest contract for
+declarative Markdown guidance. Parts of its optional Fabric distribution,
+Gateway cache, private CLI, and materialisation machinery are implemented, but
+it is not authority to add a model-facing tool to the closed 17-tool Stage 2
+Gateway. Wormhole's own repository instructions remain repository-owned.
 
 ## Status and scope
 
-Version 1 distributes opaque Markdown. Gateway may verify and cache an offer
+In the optional Fabric design, version 1 distributes opaque Markdown. Gateway may verify and cache an offer
 automatically, but it never approves or applies repository guidance
 automatically. Authenticated revocation is the sole automatic repository
 mutation: it deactivates model guidance and safely removes only unchanged
 Gateway-owned bytes. The only materialised destinations are one managed section
 in `AGENTS.md` and managed Markdown files in Wormhole's reserved skill
-namespace. No runtime, Fabric storage, CLI command, or MCP tool is implemented
-by this design change.
+namespace. Implemented retained primitives remain separate from the planned
+read-only MCP contract below. That contract is not live in Stage 2.
 
 The words MUST, MUST NOT, SHOULD, and MAY are normative. Validation is fail
 closed: a violation rejects the whole manifest; entries are never partially
@@ -146,7 +147,7 @@ for structured values.
    complete validated manifest object with only the `manifest_digest` member
    omitted. Entry order therefore participates in the digest.
 3. `tool_contract_digest` is SHA-256 of the RFC 8785/JCS UTF-8 encoding of the
-   live Gateway descriptor array represented by `mcp_tools.gateway` in
+   exact 17-descriptor Gateway array represented by `mcp_tools.gateway` in
    `docs/contracts/alpha-contract.json`. Descriptors are sorted by `name` before
    canonicalization. Planned `designed_interfaces` and Fabric descriptors are
    not inputs. Variant and enum arrays retain their inventoried order.
@@ -357,10 +358,11 @@ While offline:
 * rollback to the cached prior approved digest is allowed;
 * remove is allowed.
 
-A valid authenticated Fabric revocation first atomically marks the digest
-`revoked` in SQLite and empties its model-readable guidance cache. Every later
-`wormhole.agent.get_guidance` read therefore returns no revoked content,
-including during a crash recovery. The same durable journal operation then:
+In the planned optional-Fabric lifecycle, a valid authenticated revocation would
+first atomically mark the digest `revoked` in SQLite and empty its model-readable
+guidance cache. A future `wormhole.agent.get_guidance` read would then return no
+revoked content, including during crash recovery. That proposed durable journal
+operation would then:
 
 1. removes the exact tracked `AGENTS.md` managed span and its recorded insertion
    separator only when markers, file identity, and rendered digest are intact;

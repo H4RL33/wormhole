@@ -1,84 +1,120 @@
 # Security Model
 
-This page is an approachable deployment guide. The canonical vulnerability
-reporting policy and detailed security contract live in
-[SECURITY.md](https://github.com/H4RL33/wormhole/blob/main/SECURITY.md).
-
-## Human control
-
-Wormhole is designed for capable agents operating inside explicit boundaries.
-
-- Humans control deployment, credentials, destructive actions, and policy.
-- Agent access is granted through project-scoped Passports and exact tool
-  permissions.
-- Governance, when adopted, remains opt-in and human-authorized.
-- Git remains the source of truth for code; Wormhole cannot silently replace
-  repository contents.
+Wormhole Stage 2 is a local-only, same-user Gateway with Git-native portable
+state. Its controls separate repository-visible data from operational and
+machine-private authority; they do not turn a multi-user host into a hardened
+security boundary.
 
 ## Trust boundaries
 
-### Harness to local daemon
+- Git is source truth and the Git acceptance authority for portable Wormhole
+  state. Gateway may materialise a reviewed candidate but cannot stage, commit,
+  push, or make it accepted.
+- `gatewayd` is one user-level daemon. Its Unix socket, SQLite database,
+  identity store, and private CLI capability are owner-only.
+- `wormhole mcp` is a public-agent stdio bridge. It adds the canonical private
+  working directory to `tools/call`, rejects private RPC methods, and never
+  forwards the CLI capability.
+- Setup and top-level workspace commands are same-user private RPCs. They bind
+  the printed confirmed plan to exact repository, identity, publication, and
+  import predicates before committing it.
+- The Stage 2 Gateway does not contact Fabric. The separately buildable Fabric
+  server and PostgreSQL tests are optional non-Stage-2 surfaces.
 
-Harnesses connect to `gatewayd` over a same-user Unix socket. The socket and
-its parent directory must remain owner-only. V1 adds no second local bearer
-token, so any process running as that OS user is inside the local trust
-boundary.
+Owner-only permissions prevent other OS users from routinely opening these
+files and sockets. They do not defend against a hostile same-user process,
+administrator/root access, kernel compromise, debugger access, stolen user
+credentials, or a compromised session. The private CLI capability proves
+possession by the same OS user, not physical human presence.
 
-### Local daemon to Coordination Server
+## Portable project state
 
-Each organization profile carries a project-scoped bearer token. Use HTTPS for
-every non-loopback Coordination Server. Plain HTTP sends the bearer token
-unencrypted and is suitable only for loopback development.
+Portable project state is the canonical typed tree under `.wormhole/`:
 
-### Coordination Server to PostgreSQL
+- `config.toml` and optional `remotes.toml`;
+- project and actor records;
+- Tasks and Task links;
+- channel definitions;
+- KB records and Markdown bodies;
+- explicitly portable Event and Git-link records; and
+- tombstones and namespaced extensions.
 
-Project-scoped PostgreSQL tables use row-level security. Store operations set
-the transaction-local `wormhole.project_id`; policy predicates prevent one
-project from reading or writing another project's rows.
+Every Git reader can see this state. Portable records must contain no tokens,
+private keys, passwords, private identity details, private worktree paths, or
+operational database rows. Secret-shape checks reject known unsafe structures
+but are not DLP and cannot decide whether arbitrary prose is confidential.
 
-Production database credentials must not be superusers or hold `BYPASSRLS`.
-The broader pre-beta role and RLS audit is tracked in
-[#36](https://github.com/H4RL33/wormhole/issues/36).
+Tracked actor and Fabric-hint records are statements, not credentials,
+membership, permission, or execution authority. A clean clone reconstructs
+the same accepted portable digest and records after ordinary Git transfer.
 
-## Credentials
+## Operational state
 
-- Raw Passport bearer tokens are shown once and stored only in local credential
-  profiles.
-- The Coordination Server stores token hashes, not raw bearer tokens.
-- Newly created credential directories request mode `0700`; files request
-  `0600`.
-- Existing path permissions are not automatically tightened. Verify them
-  before use.
-- Never commit `~/.wormhole/credentials/` or the local SQLite replica.
+Operational state supports a single clone/session and is not portable:
 
-## Offline state
+- `channel.post` activity and `channel.events` history;
+- local scheduler registration and presence;
+- live subscriptions; and
+- disabled/offline sync status.
 
-Local writes are persisted to SQLite before sync and outbound work remains in
-a restart-surviving queue. First-time enrollment and current daemon startup
-still require a reachable Coordination Server; true serverless initialization
-and offline startup are tracked in
-[#37](https://github.com/H4RL33/wormhole/issues/37).
+Operational events validate their target against the composed portable channel
+view but are written only to the private local event store. Checkpoint excludes
+them, Git never receives them, and a fresh clone begins with none of them.
 
-## Reporting vulnerabilities
+## Machine-private state
 
-Do not open a public issue.
+Machine-private state includes:
 
-- Use GitHub Private Vulnerability Reporting from the repository Security tab.
-- Email `security@wormhole.systems`.
+- selected human profile, private key, and setup receipt;
+- durable harness-agent identity and accountable human binding;
+- server-generated connection sessions and harness/model provenance;
+- private CLI capability;
+- workspace IDs, checkout identity, accepted-base bookkeeping, overlays,
+  candidates, publication policy, stashes, conflicts, journals, receipts, and
+  materialisation proofs;
+- schema-v6 SQLite rows and owner lock; and
+- connector backups and any optional Fabric credentials.
 
-See [SECURITY.md](https://github.com/H4RL33/wormhole/blob/main/SECURITY.md) for
-the current response policy.
+It remains outside the repository and is intentionally different between two
+clones. Private state may survive a daemon restart on the same machine; it must
+not appear in checkpoint output or a fresh clone.
 
-## Delivery controls
+The private database is closed pre-alpha. Only a missing/empty database or an
+exact current schema-v6 database is accepted. Older, future, malformed,
+partial, unexpected, or proof-incompatible databases are preserved and
+refused before mutation. Operators must stop Gateway, inspect and back up
+unpublished state, then make any deletion decision manually.
 
-The intended CI contexts are `Contract Inventory`, `Static`, `Build`,
-`Integration`, `Race`, `Coverage`, `Migrations`, `Vulnerability`, `Secret Scan`,
-and `Action Pins`; `Dependency Review` is pull-request-only. An emergency owner
-bypass requires a follow-up issue recording reason, impact, verification debt,
-and corrective action. Workflow files do not by themselves prove hosted branch
-protection or the protected `release` environment is active; that requires an
-API read-back audit.
+## Identity and action attribution
 
-Manual release dispatch is rehearsal-only. Annotated tags may publish only after
-release-environment approval and the exact-lowercase `WORMHOLE_RELEASE_ENABLED=true`
-gate. See the canonical [release policy](https://github.com/H4RL33/wormhole/blob/main/docs/releasing.md).
+Setup selects one local human through an explicit confirmed plan. Gateway
+derives one durable agent for the selected human plus normalised harness name,
+then creates a fresh connection session for each MCP connection. The action
+actor, accountable human, session, and local assurance are server-owned.
+
+MCP `clientInfo` harness, version, model, and model version are bounded
+self-declarations retained for provenance. Local assurance proves that Gateway
+bound those values into its own session; it does not authenticate the vendor,
+model, or person typing at the terminal. Public tool arguments cannot supply or
+override workspace, actor, human, owner, assurance, session, or private paths.
+
+## Publication review
+
+`public_git` warns that portable candidate bytes may become repository-visible
+and requires the exact current publication-review digest at checkpoint. The
+digest binds accepted tree, candidate tree, semantic diff, repository identity,
+origin observation, classification, actor attribution, and selected overlay
+operations. Any intervening change makes the acknowledgement stale.
+
+`local_only` does not require the public-visibility acknowledgement, but
+checkpoint still changes only the working tree. Git review and ordinary Git
+commands remain the only acceptance and transport mechanism.
+
+## Optional Fabric boundary
+
+The optional Fabric binary has a separate authenticated 20-tool HTTP MCP
+inventory backed by PostgreSQL. Its tokens, RLS, semantic embedding provider,
+remote sync, enrolment, and permission model are server concerns. None is a
+claim about the live Stage 2 Gateway. Do not expose Fabric on a non-loopback
+network without authenticated HTTPS, secret handling, database isolation, and
+an explicit deployment review.

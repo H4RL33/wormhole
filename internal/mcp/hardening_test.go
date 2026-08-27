@@ -96,9 +96,7 @@ func decodeToolResult(rpcResp RPCResponse) (toolCallResult, error) {
 func TestMCP_AuthEdgeCases(t *testing.T) {
 	db := testDB(t)
 	identityStore := identity.NewStore(db)
-	eventsStore := events.NewStore(db)
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(identityStore, eventsStore, testRolesStore(t), testKBStore(t)))
 	registry.Register(WhoAmITool())
 
 	srv := httptest.NewServer(NewMCPHandler(registry, identityStore))
@@ -170,7 +168,6 @@ func TestMCP_MultiTenantIsolation(t *testing.T) {
 	prepareOnboardingEmbeddingForTest(t, kbStore)
 
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(identityStore, eventsStore, testRolesStore(t), kbStore))
 	registry.Register(ListTasksTool(tasksStore, testRolesStore(t)))
 	registry.Register(CreateTaskTool(tasksStore))
 	registry.Register(WriteArticleTool(kbStore))
@@ -399,7 +396,6 @@ func TestMCP_LoadSmokeTest(t *testing.T) {
 	prepareOnboardingEmbeddingForTest(t, kbStore)
 
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(identityStore, eventsStore, testRolesStore(t), kbStore))
 	registry.Register(WhoAmITool())
 	registry.Register(ListChannelsTool(eventsStore))
 	registry.Register(PostEventTool(eventsStore))
@@ -412,6 +408,10 @@ func TestMCP_LoadSmokeTest(t *testing.T) {
 	defer srv.Close()
 
 	projectID := mustCreateProject(t, "load-smoke-project")
+	introChannel, err := eventsStore.CreateChannel(context.Background(), projectID, "introductions")
+	if err != nil {
+		t.Fatalf("create introductions channel: %v", err)
+	}
 
 	const concurrencyLimit = 10
 	var wg sync.WaitGroup
@@ -424,34 +424,17 @@ func TestMCP_LoadSmokeTest(t *testing.T) {
 			owner := fmt.Sprintf("agent-owner-%d", agentIndex)
 			model := "gpt-4"
 
-			// 1. Register agent
-			status, rpcResp, err := makeMCPCall(t, srv.URL, "wormhole.agent.register", projectID, "", RegisterAgentInput{
-				Permissions:  []string{"event.publish", "task.create", "task.list", "kb.write", "kb.search", "channel.list", "channel.post"},
-				Owner:        owner,
-				Model:        model,
-				Capabilities: []string{"testing"},
-			})
+			// 1. Create an identity fixture below the public MCP boundary.
+			_, _, token, err := identityStore.Register(context.Background(), projectID,
+				[]string{"event.publish", "task.create", "task.list", "kb.write", "kb.search", "channel.list", "channel.post"},
+				owner, model, []string{"testing"}, nil, nil)
 			if err != nil {
-				t.Errorf("[Agent %d] Registration makeMCPCall failed: %v", agentIndex, err)
-				return
-			}
-			if status != http.StatusOK || rpcResp.Error != nil {
-				t.Errorf("[Agent %d] Registration failed: status=%d rpcErr=%+v", agentIndex, status, rpcResp.Error)
-				return
-			}
-			regResult, err := decodeToolResult(rpcResp)
-			if err != nil || regResult.IsError {
-				t.Errorf("[Agent %d] Registration tool error: err=%v result=%+v", agentIndex, err, regResult)
-				return
-			}
-			var regOut RegisterAgentOutput
-			if err := json.Unmarshal([]byte(regResult.Content[0].Text), &regOut); err != nil {
-				t.Errorf("[Agent %d] Unmarshal regOut failed: %v", agentIndex, err)
+				t.Errorf("[Agent %d] identity fixture: %v", agentIndex, err)
 				return
 			}
 
 			// 2. WhoAmI Check
-			status, rpcResp, err = makeMCPCall(t, srv.URL, "wormhole.agent.whoami", projectID, regOut.Token, struct{}{})
+			status, rpcResp, err := makeMCPCall(t, srv.URL, "wormhole.agent.whoami", projectID, token, struct{}{})
 			if err != nil {
 				t.Errorf("[Agent %d] WhoAmI makeMCPCall failed: %v", agentIndex, err)
 				return
@@ -462,7 +445,7 @@ func TestMCP_LoadSmokeTest(t *testing.T) {
 			}
 
 			// 3. List Channels (Step 3 Join Flow Simulation)
-			status, rpcResp, err = makeMCPCall(t, srv.URL, "wormhole.channel.list", projectID, regOut.Token, struct{}{})
+			status, rpcResp, err = makeMCPCall(t, srv.URL, "wormhole.channel.list", projectID, token, struct{}{})
 			if err != nil {
 				t.Errorf("[Agent %d] List channels makeMCPCall failed: %v", agentIndex, err)
 				return
@@ -482,15 +465,8 @@ func TestMCP_LoadSmokeTest(t *testing.T) {
 				return
 			}
 
-			var introChanID string
-			for _, c := range listChans.Channels {
-				if c.Name == "introductions" {
-					introChanID = c.ChannelID
-					break
-				}
-			}
-			if introChanID == "" {
-				t.Errorf("[Agent %d] Introductions channel not found", agentIndex)
+			if len(listChans.Channels) != 1 || listChans.Channels[0].ChannelID != introChannel.ID {
+				t.Errorf("[Agent %d] channel inventory = %+v", agentIndex, listChans.Channels)
 				return
 			}
 
@@ -500,8 +476,8 @@ func TestMCP_LoadSmokeTest(t *testing.T) {
 				t.Errorf("[Agent %d] Marshal payload failed: %v", agentIndex, err)
 				return
 			}
-			status, rpcResp, err = makeMCPCall(t, srv.URL, "wormhole.channel.post", projectID, regOut.Token, PostEventInput{
-				ChannelID: introChanID,
+			status, rpcResp, err = makeMCPCall(t, srv.URL, "wormhole.channel.post", projectID, token, PostEventInput{
+				ChannelID: introChannel.ID,
 				EventType: "message.posted",
 				Payload:   payloadBytes,
 			})
@@ -515,7 +491,7 @@ func TestMCP_LoadSmokeTest(t *testing.T) {
 			}
 
 			// 5. Create Task (Step 4 Join Flow Task count verification)
-			status, rpcResp, err = makeMCPCall(t, srv.URL, "wormhole.task.create", projectID, regOut.Token, CreateTaskInput{
+			status, rpcResp, err = makeMCPCall(t, srv.URL, "wormhole.task.create", projectID, token, CreateTaskInput{
 				Title:       fmt.Sprintf("Task from Agent %d", agentIndex),
 				Description: "Load testing task",
 			})
@@ -529,7 +505,7 @@ func TestMCP_LoadSmokeTest(t *testing.T) {
 			}
 
 			// 6. Write KB Article
-			status, rpcResp, err = makeMCPCall(t, srv.URL, "wormhole.kb.write", projectID, regOut.Token, WriteArticleInput{
+			status, rpcResp, err = makeMCPCall(t, srv.URL, "wormhole.kb.write", projectID, token, WriteArticleInput{
 				Title: fmt.Sprintf("KB Article from Agent %d", agentIndex),
 				Body:  fmt.Sprintf("This is body text for load test from agent %d.", agentIndex),
 				Links: []string{},
@@ -544,7 +520,7 @@ func TestMCP_LoadSmokeTest(t *testing.T) {
 			}
 
 			// 7. KB Search
-			status, rpcResp, err = makeMCPCall(t, srv.URL, "wormhole.kb.search", projectID, regOut.Token, SearchArticlesInput{
+			status, rpcResp, err = makeMCPCall(t, srv.URL, "wormhole.kb.search", projectID, token, SearchArticlesInput{
 				Query: "load test",
 			})
 			if err != nil {

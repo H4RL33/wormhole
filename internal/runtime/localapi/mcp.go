@@ -14,6 +14,7 @@ package localapi
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,12 +25,18 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/H4RL33/wormhole/internal/runtime/config"
+	"github.com/H4RL33/wormhole/internal/runtime/localidentity"
+	"github.com/H4RL33/wormhole/internal/types"
 )
 
 const (
 	integrationPlanRPCMethod   = "wormhole/integration/plan"
 	integrationCommitRPCMethod = "wormhole/integration/commit"
 )
+
+var ErrPrivateCLIAuthorization = errors.New("private CLI authorization failed")
 
 // Local JSON-RPC 2.0 error codes (docs/mcp-protocol.md §3.1's table,
 // duplicated per the module-boundary reason above). rpcServerNotInitialized
@@ -74,11 +81,9 @@ type localRegistry struct {
 	order []string
 }
 
-// newLocalRegistry constructs and registers the local MCP tools formerly
-// switch-based handle() dispatched by name, each wrapping the corresponding
-// existing method (s.proxyWhoAmI, s.localListTasks, etc.) with a thin
-// adapter closure. None of the wrapped methods change internally — only how
-// they're invoked changes (design doc §5 subtask 2).
+// newLocalRegistry constructs Gateway's complete live local-only MCP inventory.
+// Optional Fabric tools and retained pre-cut implementations are intentionally
+// absent: an unavailable provider is not an advertised capability.
 func newLocalRegistry(s *Server) *localRegistry {
 	r := &localRegistry{tools: map[string]localTool{}}
 	registerVariants := func(name, description string, examples map[string]localArgumentVariant, permissions []string, results map[string]any, handler localToolHandler) {
@@ -103,54 +108,69 @@ func newLocalRegistry(s *Server) *localRegistry {
 		registerVariants(name, description, singleArgument(example), permissions, results, handler)
 	}
 
-	reg("wormhole.agent.whoami", "Return the calling agent's identity, capabilities, and permissions.", whoAmIArgs{}, "", singleResult(whoAmIOutput{}), func(ctx context.Context, _ json.RawMessage) (any, error) {
-		return s.proxyWhoAmI(ctx)
-	})
-	reg("wormhole.agent.get_guidance", "Read this project's approved role-applicable integration guidance and lifecycle state from Gateway's local cache without mutation.", integrationGuidanceArgs{}, "", singleResult(integrationGuidanceResult{Guidance: []integrationGuidanceItem{}}), func(ctx context.Context, args json.RawMessage) (any, error) {
-		return s.handleIntegrationGuidance(ctx, args)
-	})
-
-	reg("wormhole.sync.status", "Return this project's Gateway-to-Fabric connection state and durable pending-write count.", syncStatusArgs{}, "", singleResult(localSyncStatusResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.sync.status", "Report this local-only Gateway as offline with zero pending Fabric writes without contacting Fabric.", syncStatusArgs{}, "", singleResult(localSyncStatusResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localSyncStatus(ctx, args)
 	})
+	reg("wormhole.workspace.status", "Inspect the accepted base, portable candidate, and publication review for this workspace.", workspaceStatusArgs{}, "", singleResult(WorkspaceStatusReadback{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+		var input workspaceStatusArgs
+		if err := decodeWorkspaceToolArguments(args, &input); err != nil {
+			return nil, err
+		}
+		result, err := s.executeWorkspaceCommand(ctx, WorkspaceCommandRequest{Operation: WorkspaceOperationStatus})
+		if err != nil {
+			return nil, err
+		}
+		return workspaceToolResult(result)
+	})
+	reg("wormhole.workspace.diff", "Return the attributed semantic portable-state diff and exact publication-review digest for this workspace.", workspaceDiffArgs{}, "", singleResult(WorkspaceDiffReadback{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+		var input workspaceDiffArgs
+		if err := decodeWorkspaceToolArguments(args, &input); err != nil {
+			return nil, err
+		}
+		result, err := s.executeWorkspaceCommand(ctx, WorkspaceCommandRequest{Operation: WorkspaceOperationDiff})
+		if err != nil {
+			return nil, err
+		}
+		return workspaceToolResult(result)
+	})
+	reg("wormhole.workspace.import", "Import direct tracked portable-state edits into this workspace as an attributed candidate.", workspaceImportArgs{}, "", singleResult(WorkspaceImportReadback{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+		var input workspaceImportArgs
+		if err := decodeWorkspaceToolArguments(args, &input); err != nil {
+			return nil, err
+		}
+		result, err := s.executeWorkspaceCommand(ctx, WorkspaceCommandRequest{Operation: WorkspaceOperationImport})
+		if err != nil {
+			return nil, err
+		}
+		return workspaceToolResult(result)
+	})
+	reg("wormhole.workspace.checkpoint", "Materialize the current portable candidate without staging, committing, or pushing Git; public publication requires the exact review digest.", workspaceCheckpointArgs{}, "", singleResult(WorkspaceCheckpointReadback{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+		var input workspaceCheckpointArgs
+		if err := decodeWorkspaceToolArguments(args, &input); err != nil {
+			return nil, err
+		}
+		result, err := s.executeWorkspaceCommand(ctx, WorkspaceCommandRequest{Operation: WorkspaceOperationCheckpoint, PublicationReviewDigest: input.PublicationReviewDigest})
+		if err != nil {
+			return nil, err
+		}
+		return workspaceToolResult(result)
+	})
+	reg("wormhole.workspace.stash", "Durably stash the current portable proposal under an explicit idempotency key and label.", workspaceStashArgs{}, "", singleResult(WorkspaceStashReadback{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+		var input workspaceStashArgs
+		if err := decodeWorkspaceToolArguments(args, &input); err != nil {
+			return nil, err
+		}
+		result, err := s.executeWorkspaceCommand(ctx, WorkspaceCommandRequest{Operation: WorkspaceOperationStash, RequestID: input.RequestID, Label: input.Label})
+		if err != nil {
+			return nil, err
+		}
+		return workspaceToolResult(result)
+	})
 
-	registerVariants("wormhole.code_graph.query", "Query this project's bounded local Go Code Graph; source slices are included only when separately authorised.", map[string]localArgumentVariant{"default": {Example: codeGraphQueryArgs{}, AnyRequired: [][]string{{"intent"}, {"entry_symbols"}}}}, []string{"code_graph.query"}, singleResult(codeGraphQueryResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
-		return s.handleCodeGraphQuery(ctx, args)
-	})
-	reg("wormhole.code_graph.status", "Inspect this project's local Code Graph health and freshness without modifying it.", codeGraphProjectArgs{}, "code_graph.status", singleResult(codeGraphStatusResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
-		return s.handleCodeGraphStatus(ctx, args)
-	})
-	reg("wormhole.code_graph.rebuild", "Request one normal balanced copy-on-write rebuild using persisted approved Code Graph configuration.", codeGraphProjectArgs{}, "code_graph.rebuild", singleResult(codeGraphRebuildResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
-		return s.handleCodeGraphRebuild(ctx, args)
-	})
-
-	reg(EnrolmentToolName, "Request Gateway-owned project enrolment before a Passport credential exists.", EnrolmentRequest{}, "", enrolmentResultExamples(), func(ctx context.Context, args json.RawMessage) (any, error) {
-		return s.handleEnrolmentContract(ctx, args)
-	})
-
-	reg("wormhole.task.list", "List tasks in the local task graph replica, optionally filtered by status.", listTasksArgs{}, "", singleResult(localTaskListResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
-		return s.localListTasks(ctx, args)
-	})
-
-	reg("wormhole.task.get", "Get a single task by ID from the local task graph replica.", getTaskArgs{}, "", singleResult(localTaskResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
-		return s.localGetTask(ctx, args)
-	})
-
-	reg("wormhole.task.create", "Create a task locally and enqueue it for sync to the Coordination Server.", createTaskArgs{}, "task.create", singleResult(localTaskWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
-		return s.handleTaskCreate(ctx, args)
-	})
-	reg("wormhole.task.update_status", "Transition a local task through the validated workflow and enqueue the durable update for Fabric synchronization.", taskUpdateStatusArgs{}, "task.update_status", singleResult(localTaskStatusResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
-		return s.handleTaskUpdateStatus(ctx, args)
-	})
-
-	registerVariants("wormhole.task.route", "Create a task and route it to a locally-registered agent by capability match.", singleArgument(taskRouteArgs{}), []string{"task.create", "task.assign"}, singleResult(localTaskRouteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
-		return s.handleTaskRoute(ctx, args)
-	})
-
-	reg("wormhole.channel.list", "List channels in the local event bus replica.", channelListArgs{}, "", singleResult(localChannelListResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.channel.list", "List live channels from this workspace's composed portable project state.", channelListArgs{}, "", singleResult(localChannelListResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localListChannels(ctx, args)
 	})
-	reg("wormhole.channel.create", "Create a channel locally and enqueue it for sync.", channelCreateArgs{}, "channel.create", singleResult(localChannelWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.channel.create", "Create a portable channel in this workspace's private candidate overlay.", channelCreateArgs{}, "channel.create", singleResult(localChannelWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleChannelCreate(ctx, args)
 	})
 
@@ -158,7 +178,7 @@ func newLocalRegistry(s *Server) *localRegistry {
 		return s.localListChannelEvents(ctx, args)
 	})
 
-	reg("wormhole.channel.post", "Publish a durable event to a channel locally and enqueue it for sync.", channelPostArgs{}, "channel.post", singleResult(localEventWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.channel.post", "Publish clone-local operational activity after validating its portable channel.", channelPostArgs{}, "channel.post", singleResult(localEventWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleChannelPost(ctx, args)
 	})
 
@@ -166,9 +186,9 @@ func newLocalRegistry(s *Server) *localRegistry {
 	// special-cased in handleToolsCall because event delivery happens as
 	// server-initiated MCP notifications after the initial ack, not a
 	// single (result, error) return (design doc §1 tools/call, §5).
-	reg("wormhole.channel.subscribe", "Subscribe to events on this connection; matching events are delivered as notifications/wormhole.event messages until the subscription ends.", channelSubscribeArgs{}, "", singleResult(localSubscriptionResult{}), nil)
+	reg("wormhole.channel.subscribe", "Subscribe this connection to all future events in its resolved local workspace; events are delivered as notifications/wormhole.event messages until the subscription ends.", channelSubscribeArgs{}, "", singleResult(localSubscriptionResult{}), nil)
 
-	reg("wormhole.kb.list", "List KB articles in the local knowledge base replica.", kbListArgs{}, "", singleResult(localArticleListResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.kb.list", "List live KB articles from this workspace's composed portable project state.", kbListArgs{}, "", singleResult(localArticleListResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localListArticles(ctx, args)
 	})
 
@@ -179,35 +199,10 @@ func newLocalRegistry(s *Server) *localRegistry {
 		return s.localGetArticle(ctx, args)
 	})
 
-	reg("wormhole.kb.write", "Write a KB article locally and enqueue it for sync.", kbWriteArgs{}, "kb.write", singleResult(localArticleWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.kb.write", "Write a portable KB article into this workspace's private candidate overlay.", kbWriteArgs{}, "kb.write", singleResult(localArticleWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleKBWrite(ctx, args)
 	})
-	reg("wormhole.kb.search", "Search the shared Fabric knowledge base semantically through the project-bound Gateway connection.", kbSearchArgs{}, "kb.search", singleResult(localKBSearchResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
-		return s.proxyAuthenticatedTool(ctx, "wormhole.kb.search", args)
-	})
-
-	reg("wormhole.git.link_commit", "Record a manual task-to-commit pointer locally and enqueue it for Fabric synchronization; Wormhole stores no code.", gitLinkCommitArgs{}, "git.link_commit", singleResult(localGitLinkResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
-		return s.handleGitLinkCommit(ctx, args)
-	})
-
-	// wormhole.agent.register is dual-shape (RFC-0001 §9): join/passport
-	// args (owner/model/etc., no agent_id) proxy to the Coordination
-	// Server; presence-registration args (agent_id + capabilities) go to
-	// the local scheduler. Dispatch by shape, same as the old switch case
-	// (isJoinRegisterArgs, localapi.go).
-	registerVariants("wormhole.agent.register", "Register an agent: join/passport creation (proxied to the Coordination Server) or local presence registration, dispatched by argument shape.", map[string]localArgumentVariant{
-		"join": {
-			Example:     agentJoinRegisterArgs{},
-			AnyRequired: [][]string{{"owner"}, {"name"}},
-		},
-		"presence": {Example: agentLocalRegisterArgs{}},
-	}, nil, map[string]any{
-		"join":     localJoinResult{},
-		"presence": localAgentResult{},
-	}, func(ctx context.Context, args json.RawMessage) (any, error) {
-		if isJoinRegisterArgs(args) {
-			return s.proxyRegister(ctx, args)
-		}
+	registerVariants("wormhole.agent.register", "Register local agent presence and declared capabilities in the bound workspace.", singleArgument(agentLocalRegisterArgs{}), nil, singleResult(localAgentResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleAgentRegister(ctx, args)
 	})
 
@@ -228,15 +223,6 @@ func singleArgument(example any) map[string]localArgumentVariant {
 
 func singleResult(example any) map[string]any {
 	return map[string]any{"default": example}
-}
-
-func enrolmentResultExamples() map[string]any {
-	examples := make(map[string]any, len(EnrolmentResultCodes()))
-	for _, code := range EnrolmentResultCodes() {
-		state, retryable, _ := EnrolmentResultContract(code)
-		examples[string(code)] = EnrolmentResult{Code: code, State: state, Retryable: retryable}
-	}
-	return examples
 }
 
 // List returns every registered tool in registration order.
@@ -262,42 +248,26 @@ func (r *localRegistry) Guidance() []toolGuidance {
 // Argument-example structs for tools/list schema reflection. These exist
 // purely to drive buildInputSchema/reflectStructSchema — the actual
 // handlers still read from a map[string]interface{} (unchanged internally,
-// design doc §5). project_id is deliberately NOT a field on any of these:
-// buildInputSchema injects it uniformly except for whoAmIArgs (§1).
-type whoAmIArgs struct{}
+// design doc §5). project_id is deliberately NOT a field on any of these;
+// buildInputSchema injects it uniformly.
 
 type syncStatusArgs struct{}
 
-type listTasksArgs struct {
-	Status string `json:"status,omitempty"`
+type workspaceStatusArgs struct{}
+type workspaceDiffArgs struct{}
+type workspaceImportArgs struct{}
+
+type workspaceCheckpointArgs struct {
+	PublicationReviewDigest string `json:"publication_review_digest,omitempty"`
 }
 
-type getTaskArgs struct {
-	TaskID string `json:"task_id"`
-}
-
-type createTaskArgs struct {
-	Title        string `json:"title"`
-	Description  string `json:"description,omitempty"`
-	Priority     int    `json:"priority,omitempty"`
-	ParentTaskID string `json:"parent_task_id,omitempty"`
-	DueBy        string `json:"due_by,omitempty"`
-}
-
-type taskUpdateStatusArgs struct {
-	TaskID    string `json:"task_id"`
-	NewStatus string `json:"new_status" enum:"todo,wip,blocked,done"`
-	ChannelID string `json:"channel_id"`
+type workspaceStashArgs struct {
+	RequestID string `json:"request_id"`
+	Label     string `json:"label"`
 }
 
 type channelCreateArgs struct {
 	Name string `json:"name"`
-}
-
-type taskRouteArgs struct {
-	Capability  string `json:"capability"`
-	Title       string `json:"title,omitempty"`
-	Description string `json:"description,omitempty"`
 }
 
 type channelListArgs struct{}
@@ -306,18 +276,12 @@ type channelEventsArgs struct{}
 
 type channelPostArgs struct {
 	ChannelID string          `json:"channel_id"`
-	AgentID   string          `json:"agent_id,omitempty"`
 	EventType string          `json:"event_type"`
 	Payload   json.RawMessage `json:"payload,omitempty"`
 	Note      string          `json:"note,omitempty"`
 }
 
-type channelSubscribeArgs struct {
-	Namespace  string `json:"namespace,omitempty"`
-	EventType  string `json:"event_type,omitempty"`
-	Capability string `json:"capability,omitempty"`
-	AgentID    string `json:"agent_id,omitempty"`
-}
+type channelSubscribeArgs struct{}
 
 type kbListArgs struct{}
 
@@ -326,35 +290,9 @@ type kbGetArgs struct {
 }
 
 type kbWriteArgs struct {
-	AgentID     string          `json:"agent_id,omitempty"`
 	Title       string          `json:"title"`
 	Body        string          `json:"body,omitempty"`
 	Frontmatter json.RawMessage `json:"frontmatter,omitempty"`
-}
-
-type kbSearchArgs struct {
-	Query string `json:"query"`
-	Limit int    `json:"limit,omitempty"`
-}
-
-type gitLinkCommitArgs struct {
-	TaskID    string `json:"task_id"`
-	Repo      string `json:"repo"`
-	CommitSHA string `json:"commit_sha"`
-	Summary   string `json:"summary"`
-}
-
-// agentJoinRegisterArgs mirrors Fabric's accepted registration input,
-// including name as the backward-compatible alias for owner.
-type agentJoinRegisterArgs struct {
-	Name         string   `json:"name,omitempty"`
-	Permissions  []string `json:"permissions"`
-	Owner        string   `json:"owner,omitempty"`
-	Model        string   `json:"model"`
-	Capabilities []string `json:"capabilities"`
-	Repositories []string `json:"repositories"`
-	Roles        []string `json:"roles"`
-	Role         string   `json:"role,omitempty"`
 }
 
 // agentLocalRegisterArgs is the local scheduler-presence registration shape.
@@ -376,68 +314,6 @@ type agentListArgs struct{}
 // localRegistry. Handlers predate the descriptor registry and return equivalent
 // maps; keeping the examples beside the registrations avoids a second
 // hand-maintained tool inventory while preserving those handler APIs.
-type localTaskResult struct {
-	ID           string     `json:"id"`
-	Title        string     `json:"title"`
-	Description  string     `json:"description"`
-	Status       string     `json:"status"`
-	Priority     int        `json:"priority"`
-	OwnerAgentID *string    `json:"owner_agent_id"`
-	ParentTaskID *string    `json:"parent_task_id"`
-	DueBy        *time.Time `json:"due_by"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
-}
-
-type localTaskListResult struct {
-	Tasks []localTaskResult `json:"tasks"`
-}
-
-type localTaskWriteResult struct {
-	ID           string     `json:"id"`
-	NamespaceID  string     `json:"namespace_id"`
-	Title        string     `json:"title"`
-	Description  string     `json:"description"`
-	Status       string     `json:"status"`
-	Priority     int        `json:"priority"`
-	OwnerAgentID *string    `json:"owner_agent_id"`
-	ParentTaskID *string    `json:"parent_task_id"`
-	DueBy        *time.Time `json:"due_by"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
-}
-
-type localTaskStatusResult struct {
-	TaskID string `json:"task_id"`
-	Status string `json:"status"`
-}
-
-type localKBSearchResult struct {
-	Articles []localKBArticleSummary `json:"articles"`
-	Ranking  localKBRankingMetadata  `json:"ranking"`
-}
-
-type localKBArticleSummary struct {
-	ArticleID     string          `json:"article_id"`
-	ProjectID     string          `json:"project_id"`
-	Title         string          `json:"title"`
-	Body          string          `json:"body"`
-	Frontmatter   json.RawMessage `json:"frontmatter,omitempty"`
-	AuthorAgentID string          `json:"author_agent_id"`
-	CreatedAt     time.Time       `json:"created_at"`
-	UpdatedAt     time.Time       `json:"updated_at"`
-}
-
-type localKBRankingMetadata struct {
-	SemanticApplied bool   `json:"semantic_applied"`
-	GenerationID    string `json:"generation_id,omitempty"`
-	Provider        string `json:"provider,omitempty"`
-	Model           string `json:"model,omitempty"`
-	Version         string `json:"version,omitempty"`
-	Dimension       int    `json:"dimension,omitempty"`
-	DistanceMetric  string `json:"distance_metric,omitempty"`
-}
-
 type localGitLinkResult struct {
 	GitLinkID string    `json:"git_link_id"`
 	ProjectID string    `json:"project_id"`
@@ -446,17 +322,6 @@ type localGitLinkResult struct {
 	CommitSHA string    `json:"commit_sha"`
 	Summary   string    `json:"summary"`
 	CreatedAt time.Time `json:"created_at"`
-}
-
-type localTaskRouteResult struct {
-	TaskID      string `json:"task_id"`
-	NamespaceID string `json:"namespace_id"`
-	Capability  string `json:"capability"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Status      string `json:"status"`
-	AssignedTo  string `json:"assigned_to"`
-	AgentStatus string `json:"agent_status"`
 }
 
 type localChannelResult struct {
@@ -469,9 +334,10 @@ type localChannelListResult struct {
 }
 
 type localChannelWriteResult struct {
-	ID          string `json:"id"`
-	NamespaceID string `json:"namespace_id"`
-	Name        string `json:"name"`
+	ID          string    `json:"id"`
+	WorkspaceID string    `json:"workspace_id"`
+	Name        string    `json:"name"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type localEventResult struct {
@@ -490,7 +356,7 @@ type localEventListResult struct {
 
 type localEventWriteResult struct {
 	ID          string          `json:"id"`
-	NamespaceID string          `json:"namespace_id"`
+	WorkspaceID string          `json:"workspace_id"`
 	ChannelID   string          `json:"channel_id"`
 	AgentID     string          `json:"agent_id"`
 	EventType   string          `json:"event_type"`
@@ -502,19 +368,17 @@ type localEventWriteResult struct {
 type localSubscriptionResult struct {
 	SubscriptionID string `json:"subscription_id"`
 	Namespace      string `json:"namespace"`
-	EventType      string `json:"event_type"`
-	Capability     string `json:"capability"`
-	AgentID        string `json:"agent_id"`
 }
 
 type localArticleResult struct {
-	ID            string          `json:"id"`
-	Title         string          `json:"title"`
-	Body          string          `json:"body"`
-	Frontmatter   json.RawMessage `json:"frontmatter"`
-	AuthorAgentID string          `json:"author_agent_id"`
-	CreatedAt     time.Time       `json:"created_at"`
-	UpdatedAt     time.Time       `json:"updated_at"`
+	ID                string          `json:"id"`
+	Title             string          `json:"title"`
+	Body              string          `json:"body"`
+	Frontmatter       json.RawMessage `json:"frontmatter"`
+	AuthorActorID     string          `json:"author_actor_id"`
+	RelatedArticleIDs []string        `json:"related_article_ids"`
+	CreatedAt         time.Time       `json:"created_at"`
+	UpdatedAt         time.Time       `json:"updated_at"`
 }
 
 type localArticleListResult struct {
@@ -522,14 +386,15 @@ type localArticleListResult struct {
 }
 
 type localArticleWriteResult struct {
-	ID            string          `json:"id"`
-	NamespaceID   string          `json:"namespace_id"`
-	Title         string          `json:"title"`
-	Body          string          `json:"body"`
-	Frontmatter   json.RawMessage `json:"frontmatter"`
-	AuthorAgentID string          `json:"author_agent_id"`
-	CreatedAt     time.Time       `json:"created_at"`
-	UpdatedAt     time.Time       `json:"updated_at"`
+	ID                string          `json:"id"`
+	WorkspaceID       string          `json:"workspace_id"`
+	Title             string          `json:"title"`
+	Body              string          `json:"body"`
+	Frontmatter       json.RawMessage `json:"frontmatter"`
+	AuthorActorID     string          `json:"author_actor_id"`
+	RelatedArticleIDs []string        `json:"related_article_ids"`
+	CreatedAt         time.Time       `json:"created_at"`
+	UpdatedAt         time.Time       `json:"updated_at"`
 }
 
 type localAgentResult struct {
@@ -553,27 +418,54 @@ type localSyncStatusResult struct {
 	PendingWrites int    `json:"pending_writes"`
 }
 
-type localJoinResult struct {
-	AgentID      string    `json:"agent_id"`
-	PassportID   string    `json:"passport_id"`
-	Token        string    `json:"token"`
-	Repositories []string  `json:"repositories"`
-	Roles        []string  `json:"roles"`
-	IssuedAt     time.Time `json:"issued_at"`
-	Role         string    `json:"role,omitempty"`
-}
-
 // mcpSession is per-connection state a persistent MCP session requires that
 // the old one-shot protocol never carried: whether initialize +
 // notifications/initialized completed, and a write mutex serializing this
 // connection's writes (a tools/call response racing a
-// notifications/wormhole.event push, per design doc §2). initialized is
-// only ever read/written from handle()'s single read-loop goroutine for a
-// given connection — the subscription delivery goroutine (see
-// handleChannelSubscribeMCP) never touches it, so no extra lock guards it.
+// notifications/wormhole.event push, per design doc §2). It also binds the
+// Gateway-generated identity session established from initialize/clientInfo.
+// Lifecycle fields are only read/written from handle()'s single read-loop
+// goroutine for a given connection — the subscription delivery goroutine (see
+// handleChannelSubscribeMCP) never touches them, so no extra lock guards them.
 type mcpSession struct {
-	initialized bool
-	writeMu     sync.Mutex
+	initializeReceived bool
+	initialized        bool
+	connectionIdentity ConnectionIdentity
+	clientInfo         localidentity.MCPClientInfo
+	privateCLIClient   bool
+	writeMu            sync.Mutex
+}
+
+type privateRPCEnvelope struct {
+	Capability string          `json:"capability"`
+	Request    json.RawMessage `json:"request"`
+}
+
+type initializeParams struct {
+	ProtocolVersion string               `json:"protocolVersion,omitempty"`
+	Capabilities    map[string]any       `json:"capabilities,omitempty"`
+	ClientInfo      initializeClientInfo `json:"clientInfo,omitempty"`
+}
+
+type initializeClientInfo struct {
+	Name         string `json:"name,omitempty"`
+	Version      string `json:"version,omitempty"`
+	ModelName    string `json:"modelName,omitempty"`
+	ModelVersion string `json:"modelVersion,omitempty"`
+}
+
+func decodeInitializeParams(raw json.RawMessage) (initializeParams, error) {
+	if len(raw) == 0 {
+		raw = json.RawMessage(`{}`)
+	}
+	if err := rejectDuplicateJSONMembers(raw); err != nil {
+		return initializeParams{}, err
+	}
+	var params initializeParams
+	if err := decodeClosedJSON(raw, &params); err != nil {
+		return initializeParams{}, err
+	}
+	return params, nil
 }
 
 // initializeResult is the "initialize" response result shape (design doc
@@ -626,12 +518,8 @@ func (s *Server) handleVisibleToolsList(reg *localRegistry) any {
 	if !s.recoveryOnlyInventory.Load() {
 		return handleToolsList(reg)
 	}
-	entries := make([]toolListEntry, 0, 2)
-	for _, name := range []string{"wormhole.sync.status", EnrolmentToolName} {
-		tool, ok := reg.Get(name)
-		if !ok {
-			continue
-		}
+	entries := make([]toolListEntry, 0, 1)
+	if tool, ok := reg.Get("wormhole.sync.status"); ok {
 		entries = append(entries, toolListEntry{Name: tool.Name, Description: tool.Description, InputSchema: buildInputSchema(tool)})
 	}
 	return map[string]any{"tools": entries}
@@ -657,8 +545,7 @@ func buildInputSchema(t localTool) map[string]any {
 }
 
 // buildInputSchemas reflects each named argument example into an exact JSON
-// Schema object, then injects project_id as a required string property unless
-// the tool is project-agnostic (wormhole.agent.whoami — design doc §1).
+// Schema object, then injects project_id as a required string property.
 func buildInputSchemas(t localTool) map[string]map[string]any {
 	schemas := make(map[string]map[string]any, len(t.ArgumentExamples))
 	for variant, argument := range t.ArgumentExamples {
@@ -669,7 +556,7 @@ func buildInputSchemas(t localTool) map[string]map[string]any {
 			properties, required = reflectStructSchema(reflect.TypeOf(argument.Example))
 		}
 
-		if _, hasProjectID := properties["project_id"]; t.Name != "wormhole.agent.whoami" && !hasProjectID {
+		if _, hasProjectID := properties["project_id"]; !hasProjectID {
 			properties["project_id"] = map[string]any{"type": "string"}
 			required = append(required, "project_id")
 		}
@@ -679,14 +566,8 @@ func buildInputSchemas(t localTool) map[string]map[string]any {
 			"properties": properties,
 			"required":   required,
 		}
-		if t.Name == EnrolmentToolName || t.Name == "wormhole.agent.get_guidance" || strings.HasPrefix(t.Name, "wormhole.code_graph.") {
+		if t.Name == "wormhole.agent.register" || strings.HasPrefix(t.Name, "wormhole.workspace.") {
 			schema["additionalProperties"] = false
-		}
-		if t.Name == "wormhole.code_graph.query" {
-			properties["include_edges"].(map[string]any)["items"] = map[string]any{"type": "string", "enum": []any{"calls", "references", "uses_type"}}
-		}
-		if t.Name == EnrolmentToolName {
-			properties["credential_profile"].(map[string]any)["minLength"] = 1
 		}
 		if len(argument.AnyRequired) > 0 {
 			alternatives := make([]map[string]any, 0, len(argument.AnyRequired))
@@ -921,15 +802,44 @@ func (s *Server) handleToolsCall(ctx context.Context, sess *mcpSession, conn net
 	if !ok {
 		return nil, &rpcError{Code: rpcInvalidParams, Message: "unknown tool: " + params.Name}
 	}
-	if err := s.authorizeRecoverySurface(params.Name, params.Arguments); err != nil {
+	callCtx := ctx
+	callArguments := params.Arguments
+	// A configured Stage-2 runtime has no unscoped fallback: every tool call must carry the
+	// bridge-only cwd and receives only Gateway-owned scope/actor authority.
+	if s.privateRuntimeConfigured() {
+		var publicArguments json.RawMessage
+		var err error
+		callCtx, publicArguments, err = s.resolvePrivateToolRequest(ctx, params.Name, params.Arguments, sess.connectionIdentity)
+		if err != nil {
+			return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
+		}
+		callCtx, err = s.refreshScopedToolBinding(callCtx, params.Name)
+		if err != nil {
+			return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
+		}
+		if err := validatePrivateProjectClaim(callCtx, params.Arguments); err != nil {
+			return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
+		}
+		if err := validatePrivateAgentSemantics(params.Name, publicArguments); err != nil {
+			return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
+		}
+		if err := authorizePrivateToolProvider(tool, publicArguments); err != nil {
+			return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
+		}
+		callArguments, err = bindResolvedProjectArguments(callCtx, publicArguments)
+		if err != nil {
+			return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
+		}
+	}
+	if err := s.authorizeRecoverySurface(params.Name, callArguments); err != nil {
 		return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
 	}
-	if err := s.authorizeLocalTool(ctx, tool, params.Arguments); err != nil {
+	if err := s.authorizeLocalTool(callCtx, tool, callArguments); err != nil {
 		return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
 	}
 
 	if params.Name == "wormhole.channel.subscribe" {
-		ack, err := s.handleChannelSubscribeMCP(ctx, sess, conn, params.Arguments)
+		ack, err := s.handleChannelSubscribeMCP(callCtx, sess, conn, callArguments)
 		if err != nil {
 			s.logError("tool "+params.Name, err)
 			return toolCallResult{
@@ -941,7 +851,7 @@ func (s *Server) handleToolsCall(ctx context.Context, sess *mcpSession, conn net
 		return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: string(ackJSON)}}}, nil
 	}
 
-	result, err := tool.Handler(ctx, params.Arguments)
+	result, err := tool.Handler(callCtx, callArguments)
 	if err != nil {
 		s.logError("tool "+params.Name, err)
 		return toolCallResult{
@@ -958,7 +868,7 @@ func (s *Server) handleToolsCall(ctx context.Context, sess *mcpSession, conn net
 }
 
 func (s *Server) authorizeRecoverySurface(toolName string, args json.RawMessage) error {
-	if toolName == EnrolmentToolName || toolName == "wormhole.sync.status" {
+	if toolName == "wormhole.sync.status" {
 		return nil
 	}
 	var input struct {
@@ -967,7 +877,7 @@ func (s *Server) authorizeRecoverySurface(toolName string, args json.RawMessage)
 	_ = json.Unmarshal(args, &input)
 	_, projectRecoveryOnly := s.recoveryOnlyProjects.Load(input.ProjectID)
 	if s.recoveryOnlyInventory.Load() || projectRecoveryOnly {
-		return errors.New("localapi: project recovery required: only wormhole.agent.enrol and wormhole.sync.status are available")
+		return errors.New("localapi: project recovery required: only wormhole.sync.status is available")
 	}
 	return nil
 }
@@ -975,7 +885,7 @@ func (s *Server) authorizeRecoverySurface(toolName string, args json.RawMessage)
 // handleChannelSubscribeMCP creates an eventbus subscription for the
 // caller's connection, returns an ack synchronously (mirroring the old
 // handleChannelSubscribe's first write), then spawns a goroutine that
-// delivers matching events as notifications/wormhole.event messages until
+// delivers subscribed events as notifications/wormhole.event messages until
 // the subscription ends, ctx is cancelled (server shutdown), or a write to
 // conn fails (client disconnected — unsubscribe to release the eventbus's
 // subscriber-map entry rather than leak the goroutine). This is the "option
@@ -996,6 +906,19 @@ func (s *Server) handleChannelSubscribeMCP(ctx context.Context, sess *mcpSession
 	et, _ := argMap["event_type"].(string)
 	capability, _ := argMap["capability"].(string)
 	agentID, _ := argMap["agent_id"].(string)
+	if s.privateRuntimeConfigured() {
+		binding, err := ResolvedBinding(ctx)
+		if err != nil {
+			return nil, err
+		}
+		// The legacy eventbus combines dimensions with OR semantics. Until a
+		// binding-aware filtered provider exists, namespace-only subscription is
+		// the one form that cannot observe a sibling through another matching key.
+		if et != "" || capability != "" || agentID != "" {
+			return nil, fmt.Errorf("%w: filtered channel subscription", ErrBindingAwareProviderUnavailable)
+		}
+		ns = string(binding.Scope.WorkspaceID)
+	}
 
 	sub, err := s.eventbus.Subscribe(ns, et, capability, agentID)
 	if err != nil {
@@ -1025,9 +948,6 @@ func (s *Server) handleChannelSubscribeMCP(ctx context.Context, sess *mcpSession
 	return map[string]string{
 		"subscription_id": sub.ID,
 		"namespace":       ns,
-		"event_type":      et,
-		"capability":      capability,
-		"agent_id":        agentID,
 	}, nil
 }
 
@@ -1054,14 +974,67 @@ func (s *Server) dispatchMCPMessage(ctx context.Context, sess *mcpSession, conn 
 		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidRequest, Message: "invalid request"}})
 		return
 	}
+	if isPrivateGatewayRPCMethod(req.Method) {
+		if !sess.initialized {
+			if !isNotification {
+				writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcServerNotInitialized, Message: "server not initialized: complete initialize before private CLI methods"}})
+			}
+			return
+		}
+		request, privateCtx, err := s.authorizePrivateRPC(ctx, sess, req.Method, req.Params)
+		if err != nil {
+			if !isNotification {
+				writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: ErrPrivateCLIAuthorization.Error()}})
+			}
+			return
+		}
+		req.Params = request
+		ctx = privateCtx
+	}
 
 	switch req.Method {
 	case "initialize":
+		// initialize is request-only. Notifications carry no response, create no
+		// durable session, and do not advance this connection's lifecycle.
+		if isNotification {
+			return
+		}
+		if sess.initializeReceived {
+			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: "initialize already received"}})
+			return
+		}
+		params, err := decodeInitializeParams(req.Params)
+		if err != nil {
+			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: "invalid initialize params"}})
+			return
+		}
+		if s.identityStore != nil {
+			info := localidentity.MCPClientInfo{Name: params.ClientInfo.Name, Version: params.ClientInfo.Version, ModelName: params.ClientInfo.ModelName, ModelVersion: params.ClientInfo.ModelVersion}
+			sess.clientInfo = info
+			sess.privateCLIClient = privateCLIClientName(params.ClientInfo.Name)
+			// A human-looking clientInfo name is self-declared metadata, not
+			// authority. Human sessions are opened lazily only after the private
+			// CLI capability has been verified on an actual private request.
+			if !sess.privateCLIClient {
+				connection, openErr := s.identityStore.OpenMCP(ctx, info)
+				if openErr != nil {
+					if !errors.Is(openErr, localidentity.ErrNoSelectedIdentity) {
+						writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: "initialize identity unavailable"}})
+						return
+					}
+				} else {
+					sess.connectionIdentity = connection
+				}
+			}
+		}
+		sess.initializeReceived = true
 		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: marshalResult(handleInitialize(s.version))})
 
 	case "notifications/initialized":
 		// No response is ever produced for a notification.
-		sess.initialized = true
+		if sess.initializeReceived {
+			sess.initialized = true
+		}
 
 	case "tools/list":
 		if isNotification {
@@ -1084,6 +1057,55 @@ func (s *Server) dispatchMCPMessage(ctx context.Context, sess *mcpSession, conn 
 		result, rpcErr := s.handleToolsCall(ctx, sess, conn, reg, req.Params)
 		if rpcErr != nil {
 			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: rpcErr})
+			return
+		}
+		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: marshalResult(result)})
+
+	case PrivateSetupRegisterWorkspaceRPCMethod, PrivateSetupEnsureIdentityRPCMethod, PrivateSetupPublicationRPCMethod, PrivateSetupImportRPCMethod, PrivateSetupVerifyRPCMethod:
+		// Same-user human setup control. It is deliberately absent from the
+		// public MCP tool inventory and returns only the bounded public profile.
+		if isNotification {
+			return
+		}
+		if !sess.initialized {
+			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcServerNotInitialized, Message: "server not initialized: send initialize and notifications/initialized before private setup"}})
+			return
+		}
+		result, err := s.dispatchPrivateSetupRPC(ctx, req.Method, req.Params)
+		if err != nil {
+			message := ErrPrivateSetupRequest.Error()
+			if errors.Is(err, config.ErrConfirmedPlanDrift) {
+				message = config.ErrConfirmedPlanDrift.Error()
+			}
+			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: message}})
+			return
+		}
+		if req.Method == PrivateSetupEnsureIdentityRPCMethod && sess.connectionIdentity.SessionID == "" {
+			if err := s.bindHumanConnection(ctx, sess); err != nil {
+				writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInternalError, Message: "initialize identity unavailable"}})
+				return
+			}
+			if _, err := s.resolveHumanConnection(ctx, sess); err != nil {
+				writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInternalError, Message: "initialize identity unavailable"}})
+				return
+			}
+		}
+		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: marshalResult(result)})
+
+	case PrivateWorkspaceRPCMethod:
+		// Same-user human workspace control. The CLI and public MCP tools share
+		// executeWorkspaceCommand; this private method supplies only the
+		// checkout needed for server-owned binding and actor resolution.
+		if isNotification {
+			return
+		}
+		if !sess.initialized {
+			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcServerNotInitialized, Message: "server not initialized: send initialize and notifications/initialized before private workspace commands"}})
+			return
+		}
+		result, err := s.dispatchPrivateWorkspaceRPC(ctx, req.Params)
+		if err != nil {
+			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: err.Error()}})
 			return
 		}
 		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: marshalResult(result)})
@@ -1127,6 +1149,70 @@ func (s *Server) dispatchMCPMessage(ctx context.Context, sess *mcpSession, conn 
 		}
 		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcMethodNotFound, Message: "method not found: " + req.Method}})
 	}
+}
+
+func isPrivateGatewayRPCMethod(method string) bool {
+	return strings.HasPrefix(method, "wormhole.private.") || method == integrationPlanRPCMethod || method == integrationCommitRPCMethod
+}
+
+func (s *Server) authorizePrivateRPC(ctx context.Context, sess *mcpSession, method string, raw json.RawMessage) (json.RawMessage, context.Context, error) {
+	if s == nil || sess == nil || s.cliCapability == "" || !sess.privateCLIClient || s.actorResolver == nil || s.identityStore == nil {
+		return nil, ctx, ErrPrivateCLIAuthorization
+	}
+	if rejectDuplicateJSONMembers(raw) != nil {
+		return nil, ctx, ErrPrivateCLIAuthorization
+	}
+	var envelope privateRPCEnvelope
+	if decodeClosedJSON(raw, &envelope) != nil || len(envelope.Request) == 0 || subtle.ConstantTimeCompare([]byte(envelope.Capability), []byte(s.cliCapability)) != 1 {
+		return nil, ctx, ErrPrivateCLIAuthorization
+	}
+	if sess.connectionIdentity.SessionID == "" {
+		_, selectedErr := s.identityStore.Selected(ctx)
+		if selectedErr == nil {
+			if err := s.bindHumanConnection(ctx, sess); err != nil {
+				return nil, ctx, ErrPrivateCLIAuthorization
+			}
+		} else if errors.Is(selectedErr, localidentity.ErrNoSelectedIdentity) && isPreIdentityPrivateSetupMethod(method) {
+			return append(json.RawMessage(nil), envelope.Request...), ctx, nil
+		} else {
+			return nil, ctx, ErrPrivateCLIAuthorization
+		}
+	}
+	actor, err := s.resolveHumanConnection(ctx, sess)
+	if err != nil {
+		return nil, ctx, ErrPrivateCLIAuthorization
+	}
+	return append(json.RawMessage(nil), envelope.Request...), withServerOwnedActor(ctx, actor), nil
+}
+
+func isPreIdentityPrivateSetupMethod(method string) bool {
+	return method == PrivateSetupRegisterWorkspaceRPCMethod || method == PrivateSetupEnsureIdentityRPCMethod
+}
+
+func (s *Server) bindHumanConnection(ctx context.Context, sess *mcpSession) error {
+	if s == nil || s.identityStore == nil || !sess.privateCLIClient || sess.connectionIdentity.SessionID != "" {
+		return ErrPrivateCLIAuthorization
+	}
+	connection, err := s.identityStore.OpenHuman(ctx, sess.clientInfo)
+	if err != nil {
+		return err
+	}
+	sess.connectionIdentity = connection
+	return nil
+}
+
+func (s *Server) resolveHumanConnection(ctx context.Context, sess *mcpSession) (types.ActorEnvelope, error) {
+	now := time.Now().UTC()
+	if s.clock != nil {
+		now = s.clock().UTC()
+	}
+	identity := sess.connectionIdentity
+	identity.OccurredAt = now
+	actor, err := s.actorResolver.ResolveLocalActor(ctx, identity)
+	if err != nil || actor.ValidateLocalAction() != nil || actor.ActorKind != types.ActorHuman || actor.SessionID != identity.SessionID {
+		return types.ActorEnvelope{}, ErrPrivateCLIAuthorization
+	}
+	return actor, nil
 }
 
 // marshalResult marshals v into json.RawMessage for rpcResponse.Result. A

@@ -66,8 +66,8 @@ func TestMCPProtocolRejectsBadEnvelopesAndIgnoresNotifications(t *testing.T) {
 	mcpInitialize(t, conn, reader)
 
 	writeMCPRequest(t, conn, rpcRequest{JSONRPC: "2.0", Method: "tools/list"})
-	writeMCPRequest(t, conn, rpcRequest{JSONRPC: "2.0", Method: "tools/call", Params: json.RawMessage(`{"name":"wormhole.task.list","arguments":{}}`)})
-	response := mcpCallTool(t, conn, reader, 3, "wormhole.task.list", nil)
+	writeMCPRequest(t, conn, rpcRequest{JSONRPC: "2.0", Method: "tools/call", Params: json.RawMessage(`{"name":"wormhole.kb.list","arguments":{}}`)})
+	response := mcpCallTool(t, conn, reader, 3, "wormhole.kb.list", nil)
 	if response.Error != "" {
 		t.Fatalf("notification left unexpected protocol response or ended session: %q", response.Error)
 	}
@@ -241,25 +241,7 @@ func TestLocalAPIAuthorizationFailsClosedForStaleIdentityAndMalformedArguments(t
 	}
 }
 
-func TestLocalAPIHelpersClassifyJoinAndSubscriptionFailures(t *testing.T) {
-	for _, tt := range []struct {
-		name string
-		args json.RawMessage
-		want bool
-	}{
-		{"empty", nil, false},
-		{"malformed", json.RawMessage(`{`), false},
-		{"presence", json.RawMessage(`{"agent_id":"agent-1"}`), false},
-		{"hybrid dispatches as presence", json.RawMessage(`{"agent_id":"agent-1","owner":"owner"}`), false},
-		{"join", json.RawMessage(`{"owner":"owner"}`), true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := isJoinRegisterArgs(tt.args); got != tt.want {
-				t.Fatalf("isJoinRegisterArgs(%s) = %v, want %v", tt.args, got, tt.want)
-			}
-		})
-	}
-
+func TestLocalAPIHelpersClassifySubscriptionFailures(t *testing.T) {
 	srv, _ := newMCPTestServer(t)
 	if _, err := srv.handleChannelSubscribeMCP(context.Background(), &mcpSession{}, nil, json.RawMessage(`{}`)); err == nil || !strings.Contains(err.Error(), "eventbus not available") {
 		t.Fatalf("subscription without eventbus error = %v, want unavailable eventbus", err)
