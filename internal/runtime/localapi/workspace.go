@@ -371,6 +371,24 @@ func (s *Server) resolvedLocalNamespace(ctx context.Context, projectID string) (
 	return string(binding.Scope.WorkspaceID), nil
 }
 
+// resolvedAgentNamespace keeps retained scheduler-presence tools on the
+// Gateway-owned workspace binding. Legacy test-only servers continue to use
+// their configured project route.
+func (s *Server) resolvedAgentNamespace(ctx context.Context, legacyProjectID string) (string, error) {
+	if s.privateRuntimeConfigured() {
+		binding, err := ResolvedBinding(ctx)
+		if err != nil {
+			return "", err
+		}
+		return string(binding.Scope.WorkspaceID), nil
+	}
+	orgCtx, err := s.resolveOrgContext(legacyProjectID)
+	if err != nil {
+		return "", err
+	}
+	return s.resolvedLocalNamespace(ctx, orgCtx.ProjectID)
+}
+
 func (s *Server) resolvedActionPrincipal(ctx context.Context, legacy string) (string, error) {
 	if !s.privateRuntimeConfigured() {
 		return legacy, nil

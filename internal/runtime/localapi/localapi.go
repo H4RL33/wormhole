@@ -1208,17 +1208,14 @@ func (s *Server) handleAgentRegister(ctx context.Context, args json.RawMessage) 
 		return nil, fmt.Errorf("localapi: agent register: missing agent_id")
 	}
 
-	// Extract project_id and resolve org context (multi-org aware)
+	// Configured Gateway calls derive scope from their resolved binding. The
+	// project field remains only for unconfigured legacy test servers.
 	projectID := s.projectID // fallback to configured project in single-org mode
 	if request.ProjectID != "" {
 		projectID = request.ProjectID
 	}
 
-	orgCtx, err := s.resolveOrgContext(projectID)
-	if err != nil {
-		return nil, err
-	}
-	namespaceID, err := s.resolvedLocalNamespace(ctx, orgCtx.ProjectID)
+	namespaceID, err := s.resolvedAgentNamespace(ctx, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: agent register: resolved workspace: %w", err)
 	}
@@ -1269,17 +1266,14 @@ func (s *Server) handleAgentPresence(ctx context.Context, args json.RawMessage) 
 		return nil, fmt.Errorf("localapi: agent presence: missing agent_id or status")
 	}
 
-	// Extract project_id and resolve org context (multi-org aware)
+	// Configured Gateway calls derive scope from their resolved binding. The
+	// project field remains only for unconfigured legacy test servers.
 	projectID := s.projectID // fallback to configured project in single-org mode
 	if projectIDVal, ok := argMap["project_id"].(string); ok && projectIDVal != "" {
 		projectID = projectIDVal
 	}
 
-	orgCtx, err := s.resolveOrgContext(projectID)
-	if err != nil {
-		return nil, err
-	}
-	namespaceID, err := s.resolvedLocalNamespace(ctx, orgCtx.ProjectID)
+	namespaceID, err := s.resolvedAgentNamespace(ctx, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: agent presence: resolved workspace: %w", err)
 	}
@@ -1324,17 +1318,14 @@ func (s *Server) handleAgentList(ctx context.Context, args json.RawMessage) (map
 		}
 	}
 
-	// Extract project_id and resolve org context (multi-org aware)
+	// Configured Gateway calls derive scope from their resolved binding. The
+	// project field remains only for unconfigured legacy test servers.
 	projectID := s.projectID // fallback to configured project in single-org mode
 	if projectIDVal, ok := argMap["project_id"].(string); ok && projectIDVal != "" {
 		projectID = projectIDVal
 	}
 
-	orgCtx, err := s.resolveOrgContext(projectID)
-	if err != nil {
-		return nil, err
-	}
-	namespaceID, err := s.resolvedLocalNamespace(ctx, orgCtx.ProjectID)
+	namespaceID, err := s.resolvedAgentNamespace(ctx, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: agent list: resolved workspace: %w", err)
 	}

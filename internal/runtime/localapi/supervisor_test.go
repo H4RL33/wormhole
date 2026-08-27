@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -169,6 +170,72 @@ func TestSupervisorIsolatesMultipleWorkspacesThroughOneGateway(t *testing.T) {
 	}
 	if fabric.calls != 0 {
 		t.Fatalf("configured local-only sync status made %d Fabric calls, want zero", fabric.calls)
+	}
+}
+
+func TestSupervisorRetainedAgentToolsUseResolvedBindingWithoutLegacyProjectFallback(t *testing.T) {
+	root := t.TempDir()
+	dependencies := supervisorTestDependencies(t)
+	repo := localstore.NewWorkspaceRepo(dependencies.Store.DB())
+	projectA := "00000000-0000-4000-8000-000000000001"
+	projectB := "00000000-0000-4000-8000-000000000002"
+	first := privateRoutingTestBinding(t, filepath.Join(root, "first"), projectA, "00000000-0000-4000-8000-000000000011")
+	second := privateRoutingTestBinding(t, filepath.Join(root, "second"), projectA, "00000000-0000-4000-8000-000000000012")
+	third := privateRoutingTestBinding(t, filepath.Join(root, "third"), projectB, "00000000-0000-4000-8000-000000000013")
+	for _, binding := range []*types.WorkspaceBinding{&first, &second, &third} {
+		tree, digest := privateRoutingWorkspaceTree(t, binding.Scope.ProjectID, binding.Repository)
+		binding.AcceptedTreeDigest = digest
+		if _, _, err := repo.RegisterWorkspace(context.Background(), *binding, tree); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := dependencies.Identity.EnsureSelectedForSetup(context.Background(), "00000000-0000-4000-8000-000000000031", types.ConfirmedIdentitySelection{DisplayName: "Local Owner"}); err != nil {
+		t.Fatal(err)
+	}
+	supervisor, err := NewSupervisor(dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := supervisor.Listen(filepath.Join(root, "gateway.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = supervisor.Close() })
+	if server.projectID != "" {
+		t.Fatalf("production Supervisor legacy project = %q, want empty", server.projectID)
+	}
+
+	agentA := "00000000-0000-4000-8000-000000000041"
+	agentB := "00000000-0000-4000-8000-000000000042"
+	agentC := "00000000-0000-4000-8000-000000000043"
+	privateDispatchSuccess(t, server, first, "wormhole.agent.register", map[string]any{"agent_id": agentA, "capabilities": []string{"review"}}, nil)
+	privateDispatchSuccess(t, server, second, "wormhole.agent.register", map[string]any{"agent_id": agentB, "capabilities": []string{"code"}}, nil)
+	privateDispatchSuccess(t, server, third, "wormhole.agent.register", map[string]any{"agent_id": agentC, "capabilities": []string{"docs"}}, nil)
+	privateDispatchSuccess(t, server, first, "wormhole.agent.presence", map[string]any{"agent_id": agentA, "status": "busy"}, nil)
+
+	for _, test := range []struct {
+		binding types.WorkspaceBinding
+		agentID string
+	}{
+		{binding: first, agentID: agentA},
+		{binding: second, agentID: agentB},
+		{binding: third, agentID: agentC},
+	} {
+		listed := privateDispatchSuccess(t, server, test.binding, "wormhole.agent.list", nil, nil)
+		agents, ok := listed["agents"].([]any)
+		if !ok || len(agents) != 1 || agents[0].(map[string]any)["agent_id"] != test.agentID {
+			t.Fatalf("workspace %s listed %#v, want only %s", test.binding.Scope.WorkspaceID, listed["agents"], test.agentID)
+		}
+	}
+	crossWorkspace := privateDispatchResult(t, server, second, "wormhole.agent.presence", map[string]any{"agent_id": agentA, "status": "idle"}, nil)
+	if !crossWorkspace.IsError || !strings.Contains(crossWorkspace.Content[0].Text, "outside resolved workspace") {
+		t.Fatalf("cross-workspace presence = %+v, want rejection", crossWorkspace)
+	}
+	forgedProject := privateDispatchResult(t, server, first, "wormhole.agent.register", map[string]any{
+		"agent_id": "00000000-0000-4000-8000-000000000044", "project_id": projectB,
+	}, nil)
+	if !forgedProject.IsError || !strings.Contains(forgedProject.Content[0].Text, "resolved project mismatch") {
+		t.Fatalf("forged project registration = %+v, want rejection", forgedProject)
 	}
 }
 

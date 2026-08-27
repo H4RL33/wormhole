@@ -817,10 +817,8 @@ func (s *Server) handleToolsCall(ctx context.Context, sess *mcpSession, conn net
 		if err != nil {
 			return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
 		}
-		if params.Name == "wormhole.sync.status" {
-			if err := validatePrivateProjectClaim(callCtx, params.Arguments); err != nil {
-				return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
-			}
+		if err := validatePrivateProjectClaim(callCtx, params.Arguments); err != nil {
+			return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
 		}
 		if err := validatePrivateAgentSemantics(params.Name, publicArguments); err != nil {
 			return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
