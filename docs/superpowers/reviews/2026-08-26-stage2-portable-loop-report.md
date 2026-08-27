@@ -2,7 +2,10 @@
 
 **Scope:** Stage 2 Task 9 final public cutover and portable-loop acceptance
 **Date:** 2026-08-27
-**Candidate commit:** `feat(cli): complete Gateway setup cutover`
+**Base implementation:** `5a82d115897e9342cbd5e6528978bd923991d825`
+(`feat(cli): complete Gateway setup cutover`)
+**Controller remediation:** separate follow-up commit; exact SHA is recorded in
+the external Stage 2 Task 9 report after commit creation.
 
 ## Outcome
 
@@ -14,7 +17,8 @@ binding and actor attribution. A `public_git` checkpoint accepts only the exact
 current publication-review digest.
 
 The previous `init`, `join`, and combined connection commands were deleted, not
-aliased. Public registration now has one presence-only shape. All public
+aliased. Fabric has no public `wormhole.agent.register`; Gateway retains only a
+closed, presence-only shape. All public
 structural-discovery CLI, MCP, guidance, setup, help, and alpha-contract entries
 were removed. The independent `internal/runtime/codegraph/...` packages and
 their tests remain intact and pass.
@@ -52,16 +56,35 @@ ok  github.com/H4RL33/wormhole/cmd/gatewayd            1.228s
 ok  github.com/H4RL33/wormhole/internal/runtime/localapi 4.236s
 ```
 
+The controller-fix RED test was the configured Gateway dispatch boundary:
+
+```text
+go test ./internal/runtime/localapi \
+  -run 'TestConfiguredPrivateRuntimeRejectsFormerJoinAndUnknownRegistrationFields|TestAlphaContractGatewayMCPRegistry' \
+  -count=1
+```
+
+It first failed because a former join field was ignored and the published
+Gateway registration schema was open. The GREEN suite additionally exercises
+each former field, an unknown field, and a duplicate key through actual dispatch.
+Fabric inventory assertions first detected the still-public join-shaped handler;
+the final registry contains 20 tools and no registration descriptor. The parity
+and clone tests close proof gaps in already-shared production behavior: exact
+comparisons exposed workspace-bound review/journal identifiers, and normalisation
+is restricted to those non-semantic identifiers.
+
 ## Public cutover
 
 - CLI dispatch/help and the alpha inventory no longer contain the removed
   commands or public graph commands.
-- The registration descriptor has one default request/result variant. Its only
-  public inputs are the local presence identity and optional capabilities; it
-  cannot accept ownership, model, roles, permissions, repositories, Passport,
-  or credential material.
-- The Gateway registry has exactly 27 tools: the previous 25 minus three public
-  graph entries plus five workspace operations.
+- Fabric exposes no registration descriptor or handler. Gateway registration
+  has one default request/result variant. Its closed decoder accepts only local
+  presence identity and optional capabilities; it rejects duplicate keys,
+  unknown keys, ownership, model, roles, permissions, repositories, Passport,
+  and credential material.
+- The Fabric registry has exactly 20 tools and the Gateway registry exactly 27.
+  Generated guidance and integration-manifest tool-contract digests bind the
+  corrected Gateway schema.
 - The old CLI and local API graph adapters, graph-specific public tests, and
   generated graph guidance were removed. `internal/runtime/codegraph/...` was
   not changed or deleted.
@@ -93,9 +116,13 @@ files, not an in-memory repository fake:
 8. create clone B with `git clone --no-local` and another fresh private DB;
 9. register/import and prove clone B's accepted portable digest equals clone A's
    candidate digest and both commits contain the same portable subtree object;
-10. prove clone B has zero overlay, materialisation, stash, conflict, transition,
-    legacy migration, Task, Channel, Event, agent, Passport, sync-queue, sync-audit,
-    or enrolment rows, and no tracked private/operational path.
+10. enumerate all 32 non-SQLite schema-v6 tables; prove clone B has exactly one
+    schema-version, binding, candidate, publication-policy, and publication-history
+    bootstrap row, with exact scope/path/status/commit/actor/policy values, and zero
+    rows in every other operational, projection, cache, integration, migration,
+    overlay, materialisation, stash, conflict, Task, Channel, Event, agent,
+    Passport, queue, or audit table;
+11. prove no tracked path contains private or operational state.
 
 The test passes in both the focused and full owning-package runs.
 
@@ -104,6 +131,11 @@ The test passes in both the focused and full owning-package runs.
 | Gate | Result |
 |---|---|
 | Focused Stage 2 cutover/portable loop | PASS |
+| Real Unix-socket/stdio CLI/MCP parity for all five workspace operations | PASS |
+| CLI/MCP missing, stale, and mismatched `public_git` acknowledgement pre-mutation matrix | PASS |
+| Production actor/binding forgery rejection | PASS |
+| Closed Gateway registration dispatch/schema and absent Fabric registration | PASS |
+| Exact 32-table fresh-clone schema-v6 inventory | PASS |
 | Full CLI/Gateway/local API packages | PASS |
 | Preserved `internal/runtime/codegraph/...` packages | PASS |
 | Focused race: CLI, Gateway, local API, config, connectors | PASS |
@@ -121,7 +153,8 @@ No integration-required flag, assertion, coverage threshold, or test was relaxed
 
 ## Review boundary and concerns
 
-The controller must perform the broad whole-branch review and detached
+The controller review findings are remediated. The controller must perform the
+follow-up whole-branch review and detached
 `git clone --no-local` verification against the exact candidate commit before
 push. No push was performed by this task.
 

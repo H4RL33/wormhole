@@ -1046,29 +1046,36 @@ func (s *Server) commitLocalWrite(tx *sql.Tx) error {
 	return tx.Commit()
 }
 
-// handleAgentRegister registers an agent with the scheduler and eventbus.
-// Args: {"agent_id": "x", "capabilities": ["code", "review"], "project_id": "xxx" (optional in single-org, required in multi-org)}
+type localAgentRegisterRequest struct {
+	AgentID      string   `json:"agent_id"`
+	Capabilities []string `json:"capabilities,omitempty"`
+	ProjectID    string   `json:"project_id"`
+}
+
+// handleAgentRegister registers presence with the scheduler and eventbus.
 func (s *Server) handleAgentRegister(ctx context.Context, args json.RawMessage) (map[string]interface{}, error) {
 	if s.scheduler == nil {
 		return nil, fmt.Errorf("localapi: agent register: scheduler not available")
 	}
-
-	var argMap map[string]interface{}
-	if len(args) > 0 {
-		if err := json.Unmarshal(args, &argMap); err != nil {
-			return nil, fmt.Errorf("localapi: agent register: invalid args: %w", err)
-		}
+	if len(bytes.TrimSpace(args)) == 0 {
+		return nil, fmt.Errorf("localapi: agent register: missing agent_id")
 	}
 
-	agentID, _ := argMap["agent_id"].(string)
-	if agentID == "" {
+	var request localAgentRegisterRequest
+	if rejectDuplicateJSONMembers(args) != nil {
+		return nil, fmt.Errorf("localapi: agent register: invalid args")
+	}
+	if err := decodeClosedJSON(args, &request); err != nil {
+		return nil, fmt.Errorf("localapi: agent register: invalid args")
+	}
+	if request.AgentID == "" {
 		return nil, fmt.Errorf("localapi: agent register: missing agent_id")
 	}
 
 	// Extract project_id and resolve org context (multi-org aware)
 	projectID := s.projectID // fallback to configured project in single-org mode
-	if projectIDVal, ok := argMap["project_id"].(string); ok && projectIDVal != "" {
-		projectID = projectIDVal
+	if request.ProjectID != "" {
+		projectID = request.ProjectID
 	}
 
 	orgCtx, err := s.resolveOrgContext(projectID)
@@ -1080,18 +1087,7 @@ func (s *Server) handleAgentRegister(ctx context.Context, args json.RawMessage) 
 		return nil, fmt.Errorf("localapi: agent register: resolved workspace: %w", err)
 	}
 
-	caps := []string{}
-	if rawCaps, ok := argMap["capabilities"]; ok {
-		if capsList, ok := rawCaps.([]interface{}); ok {
-			for _, c := range capsList {
-				if cs, ok := c.(string); ok {
-					caps = append(caps, cs)
-				}
-			}
-		}
-	}
-
-	agent, err := s.scheduler.RegisterAgent(agentID, namespaceID, caps)
+	agent, err := s.scheduler.RegisterAgent(request.AgentID, namespaceID, request.Capabilities)
 	if err != nil {
 		return nil, fmt.Errorf("localapi: agent register: %w", err)
 	}

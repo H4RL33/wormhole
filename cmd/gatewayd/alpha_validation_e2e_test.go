@@ -23,6 +23,7 @@ import (
 	"github.com/H4RL33/wormhole/internal/core/kb"
 	"github.com/H4RL33/wormhole/internal/core/tasks"
 	"github.com/H4RL33/wormhole/internal/mcp"
+	"github.com/H4RL33/wormhole/internal/runtime/localapi"
 	"github.com/H4RL33/wormhole/internal/types"
 )
 
@@ -116,8 +117,8 @@ func TestAlphaValidation_FullAutomatedAcceptanceLoop(t *testing.T) {
 	commitSHA := alphaGitOutput(t, checkoutA, "rev-parse", "HEAD")
 	remote := alphaGitOutput(t, checkoutA, "remote", "get-url", "origin")
 
-	a := startAlphaGateway(t, gatewayBin, wormholeBin, fabricURL, fixture.Project.ID, remote, "alpha-a", checkoutA, fixture.Contributor)
-	b := startAlphaGateway(t, gatewayBin, wormholeBin, fabricURL, fixture.Project.ID, remote, "alpha-b", checkoutB, fixture.Reviewer)
+	a := startAlphaGateway(t, gatewayBin, fabricURL, fixture.Project.ID, remote, "alpha-a", checkoutA, fixture.Contributor)
+	b := startAlphaGateway(t, gatewayBin, fabricURL, fixture.Project.ID, remote, "alpha-b", checkoutB, fixture.Reviewer)
 	if a.dbPath == b.dbPath {
 		t.Fatalf("Gateways share SQLite path %q", a.dbPath)
 	}
@@ -385,7 +386,7 @@ type alphaGateway struct {
 	client                                                           *gateBMCPClient
 }
 
-func startAlphaGateway(t *testing.T, gatewayBin, wormholeBin, fabricURL, projectID, remote, profile, checkout string, actor alphaFixtureActor) *alphaGateway {
+func startAlphaGateway(t *testing.T, gatewayBin, fabricURL, projectID, remote, profile, checkout string, actor alphaFixtureActor) *alphaGateway {
 	t.Helper()
 	home := t.TempDir()
 	runtimeDir := filepath.Join(home, "run")
@@ -411,17 +412,27 @@ func startAlphaGateway(t *testing.T, gatewayBin, wormholeBin, fabricURL, project
 		dbPath: filepath.Join(dataDir, "wormhole", "wormholed.db"), socketPath: filepath.Join(runtimeDir, "wormhole", "wormholed.sock"), env: env,
 	}
 	gateway.daemon = startTask4ProcessDaemon(t, gatewayBin, profile, env, gateway.socketPath)
-	args := []string{"join", "--server", fabricURL, "--project", projectID, "--owner", actor.Owner, "--model", actor.Model,
-		"--capabilities", strings.Join(actor.Capabilities, ","), "--repositories", remote, "--roles", strings.Join(actor.Roles, ","),
-		"--permissions", strings.Join(actor.Permissions, ","), "--profile", profile}
-	command := exec.Command(wormholeBin, args...)
-	command.Env, command.Dir = env, checkout
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("wormhole %s: %v: %s; gateway stderr=%q", strings.Join(args, " "), err, output, gateway.daemon.stderr.String())
+	idempotencyKey := "018f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1"
+	if profile == "alpha-b" {
+		idempotencyKey = "028f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1"
 	}
-	if !bytes.Contains(output, []byte("Passport created.")) {
-		t.Fatalf("join %s did not complete: %q", profile, output)
+	client := gateBDialMCPClient(t, gateway.socketPath)
+	response, err := client.call(localapi.EnrolmentToolName, map[string]interface{}{
+		"version": localapi.EnrolmentProtocolVersion, "project_id": projectID,
+		"owner": actor.Owner, "model": actor.Model, "capabilities": actor.Capabilities,
+		"repositories": []string{remote}, "roles": actor.Roles, "requested_permissions": actor.Permissions,
+		"fabric_address": fabricURL, "idempotency_key": idempotencyKey, "credential_profile": profile,
+	})
+	client.Close()
+	if err != nil || response.Error != "" {
+		t.Fatalf("Gateway enrolment %s: error=%v response=%q; gateway stderr=%q", profile, err, response.Error, gateway.daemon.stderr.String())
+	}
+	var result localapi.EnrolmentResult
+	if err := json.Unmarshal(response.Result, &result); err != nil {
+		t.Fatalf("decode Gateway enrolment %s: %v", profile, err)
+	}
+	if result.Code != localapi.EnrolmentSuccess || result.State != localapi.EnrolmentReady || result.PassportID == "" {
+		t.Fatalf("Gateway enrolment %s did not become ready: %+v", profile, result)
 	}
 	credentialData, err := os.ReadFile(filepath.Join(home, ".wormhole", "credentials", profile+".json"))
 	if err != nil {

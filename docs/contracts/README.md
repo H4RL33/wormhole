@@ -37,6 +37,10 @@ only the local presence identity and optional capability declaration, never
 ownership, model, role, permission, repository, Passport, or credential fields.
 Its response reports the trusted local presence record. Variant responses such as `wormhole.kb.get`
 remain inventoried explicitly rather than flattened into synthetic shapes.
+Fabric exposes exactly 20 descriptors and no `wormhole.agent.register` entry;
+its only pre-credential identity creation route is Gateway-owned
+`wormhole.agent.enrol`. There is no compatibility alias for the removed
+join-shaped registration contract.
 
 Gateway's `wormhole.agent.enrol` entry is the version-1 pre-credential local
 contract. Its closed request records the explicit project binding, requested

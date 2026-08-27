@@ -263,7 +263,7 @@ func defaultProfileName(project, role string) string {
 	return sanitizeComponent(project) + "__" + sanitizeComponent(role)
 }
 
-// resolveCredentialsPath picks where join/connect writes credentials
+// resolveCredentialsPath resolves the selected local credential profile path
 func resolveCredentialsPath(tokenFile, profile, project, role string) (string, error) {
 	if tokenFile != "" {
 		return tokenFile, nil

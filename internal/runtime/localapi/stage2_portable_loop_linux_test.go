@@ -4,10 +4,13 @@ package localapi
 
 import (
 	"context"
+	"database/sql"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -24,9 +27,11 @@ func TestStage2PortableLoopAcrossTwoRealClones(t *testing.T) {
 	ctx := context.Background()
 	fixture := newPortableLoopGitFixture(t)
 	cloneOne := fixture.clone(t, "clone-one")
+	cloneOneGit := capturePortableGitInvariant(t, fixture, cloneOne)
 	privateOne := filepath.Join(t.TempDir(), "clone-one-private.db")
 	storeOne, serviceOne, bindingOne := openPortableLoopWorkspace(t, cloneOne, privateOne)
 	defer storeOne.Close()
+	assertPortableGitInvariant(t, fixture, cloneOne, cloneOneGit, "workspace registration")
 
 	actor := types.ActorEnvelope{
 		ActorKind: types.ActorHuman, HumanPrincipalID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -39,10 +44,12 @@ func TestStage2PortableLoopAcrossTwoRealClones(t *testing.T) {
 	if err != nil || imported.Import == nil || imported.Import.ImportedCandidateDigest == "" {
 		t.Fatalf("workspace import = (%+v, %v)", imported, err)
 	}
+	assertPortableGitInvariant(t, fixture, cloneOne, cloneOneGit, "workspace import")
 	statusBefore, err := serviceOne.Status(ctx, bindingOne.Scope)
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertPortableGitInvariant(t, fixture, cloneOne, cloneOneGit, "workspace status")
 	task := *statusBefore.AcceptedSnapshot.Tasks["22222222-2222-4222-8222-222222222222"].Value
 	task.Status = "done"
 	task.Description = "Portable state verified through the attributed two-clone loop."
@@ -55,6 +62,7 @@ func TestStage2PortableLoopAcrossTwoRealClones(t *testing.T) {
 	if _, err := serviceOne.Apply(ctx, bindingOne.Scope, operation); err != nil {
 		t.Fatalf("apply attributed mutation: %v", err)
 	}
+	assertPortableGitInvariant(t, fixture, cloneOne, cloneOneGit, "attributed operation")
 	var storedOperation string
 	if err := storeOne.DB().QueryRowContext(ctx, `SELECT operation_json FROM workspace_overlay_operations WHERE project_id=? AND workspace_id=?`, bindingOne.Scope.ProjectID, bindingOne.Scope.WorkspaceID).Scan(&storedOperation); err != nil {
 		t.Fatalf("read attributed operation: %v", err)
@@ -67,6 +75,7 @@ func TestStage2PortableLoopAcrossTwoRealClones(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertPortableGitInvariant(t, fixture, cloneOne, cloneOneGit, "publication configuration read")
 	bindingDigest, err := projectstate.DigestPublicationBindingConstraint(bindingOne.Repository, currentPublication.ObservedOriginDigest)
 	if err != nil {
 		t.Fatal(err)
@@ -77,28 +86,41 @@ func TestStage2PortableLoopAcrossTwoRealClones(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("configure publication: %v", err)
 	}
+	assertPortableGitInvariant(t, fixture, cloneOne, cloneOneGit, "publication configuration")
 	diffResult, err := serverOne.executeWorkspaceCommand(callContext, WorkspaceCommandRequest{Operation: WorkspaceOperationDiff})
 	if err != nil || diffResult.Diff == nil || diffResult.Diff.PublicationReviewDigest == "" || diffResult.Diff.CandidateDigest == statusBefore.AcceptedSnapshot.Digest {
 		t.Fatalf("workspace diff/review = (%+v, %v)", diffResult, err)
 	}
+	assertPortableGitInvariant(t, fixture, cloneOne, cloneOneGit, "publication review")
 
-	headBefore := gitOutput(t, cloneOne, "rev-parse", "HEAD")
-	remoteBefore := fixture.remoteHead(t)
+	for _, rejection := range []struct {
+		name   string
+		digest string
+	}{
+		{name: "missing", digest: ""},
+		{name: "stale", digest: "sha256:" + strings.Repeat("0", 64)},
+		{name: "mismatched candidate digest", digest: string(diffResult.Diff.CandidateDigest)},
+	} {
+		t.Run("reject "+rejection.name+" acknowledgement", func(t *testing.T) {
+			before := workspaceMutationCounts(t, storeOne)
+			if _, err := serverOne.executeWorkspaceCommand(callContext, WorkspaceCommandRequest{
+				Operation: WorkspaceOperationCheckpoint, PublicationReviewDigest: rejection.digest,
+			}); err == nil {
+				t.Fatal("checkpoint acknowledgement error = nil")
+			}
+			if after := workspaceMutationCounts(t, storeOne); after != before {
+				t.Fatalf("failed acknowledgement mutated journal/operations: before=%+v after=%+v", before, after)
+			}
+			assertPortableGitInvariant(t, fixture, cloneOne, cloneOneGit, "failed "+rejection.name+" acknowledgement")
+		})
+	}
 	checkpointResult, err := serverOne.executeWorkspaceCommand(callContext, WorkspaceCommandRequest{
 		Operation: WorkspaceOperationCheckpoint, PublicationReviewDigest: string(diffResult.Diff.PublicationReviewDigest),
 	})
 	if err != nil || checkpointResult.Checkpoint == nil || checkpointResult.Checkpoint.JournalID == "" {
 		t.Fatalf("workspace checkpoint = (%+v, %v)", checkpointResult, err)
 	}
-	if got := gitOutput(t, cloneOne, "rev-parse", "HEAD"); got != headBefore {
-		t.Fatalf("Wormhole advanced HEAD: got %s, want %s", got, headBefore)
-	}
-	if got := fixture.remoteHead(t); got != remoteBefore {
-		t.Fatalf("Wormhole pushed the remote: got %s, want %s", got, remoteBefore)
-	}
-	if err := exec.Command("git", "-C", cloneOne, "diff", "--cached", "--quiet").Run(); err != nil {
-		t.Fatal("Wormhole staged checkpoint files")
-	}
+	assertPortableGitInvariant(t, fixture, cloneOne, cloneOneGit, "successful checkpoint")
 	porcelain := gitOutput(t, cloneOne, "status", "--porcelain")
 	if porcelain == "" || strings.Contains(porcelain, ".db") || strings.Contains(porcelain, "identities") || strings.Contains(porcelain, "checkpoints") {
 		t.Fatalf("checkpoint working tree = %q, want only portable unstaged state", porcelain)
@@ -111,19 +133,22 @@ func TestStage2PortableLoopAcrossTwoRealClones(t *testing.T) {
 	gitRun(t, cloneOne, "commit", "-m", "test: accept portable state")
 	gitRun(t, cloneOne, "push", "origin", "HEAD:main")
 	acceptedCommit := gitOutput(t, cloneOne, "rev-parse", "HEAD")
-	if acceptedCommit == headBefore || fixture.remoteHead(t) != acceptedCommit {
+	if acceptedCommit == cloneOneGit.head || fixture.remoteHead(t) != acceptedCommit {
 		t.Fatalf("fixture Git publication did not advance exact remote commit")
 	}
 
 	cloneTwo := fixture.clone(t, "clone-two")
+	cloneTwoGit := capturePortableGitInvariant(t, fixture, cloneTwo)
 	privateTwo := filepath.Join(t.TempDir(), "clone-two-private.db")
 	storeTwo, serviceTwo, bindingTwo := openPortableLoopWorkspace(t, cloneTwo, privateTwo)
 	defer storeTwo.Close()
+	assertPortableGitInvariant(t, fixture, cloneTwo, cloneTwoGit, "second workspace registration")
 	serverTwo := &Server{projectState: serviceTwo}
 	cloneTwoContext := withServerOwnedActor(WithResolvedBinding(ctx, bindingTwo), actor)
 	if _, err := serverTwo.executeWorkspaceCommand(cloneTwoContext, WorkspaceCommandRequest{Operation: WorkspaceOperationImport}); err != nil {
 		t.Fatalf("second clone import: %v", err)
 	}
+	assertPortableGitInvariant(t, fixture, cloneTwo, cloneTwoGit, "second workspace import")
 	statusTwo, err := serviceTwo.Status(ctx, bindingTwo.Scope)
 	if err != nil {
 		t.Fatal(err)
@@ -131,10 +156,11 @@ func TestStage2PortableLoopAcrossTwoRealClones(t *testing.T) {
 	if statusTwo.AcceptedSnapshot.Digest != diffResult.Diff.CandidateDigest {
 		t.Fatalf("second clone accepted digest = %s, want first clone candidate %s", statusTwo.AcceptedSnapshot.Digest, diffResult.Diff.CandidateDigest)
 	}
+	assertPortableGitInvariant(t, fixture, cloneTwo, cloneTwoGit, "second workspace status")
 	if firstTree, secondTree := gitOutput(t, cloneOne, "rev-parse", "HEAD:.wormhole/state/v1"), gitOutput(t, cloneTwo, "rev-parse", "HEAD:.wormhole/state/v1"); firstTree != secondTree {
 		t.Fatalf("tracked portable tree differs: first=%s second=%s", firstTree, secondTree)
 	}
-	assertFreshCloneHasNoOperationalRows(t, storeTwo)
+	assertFreshClonePrivateInventory(t, storeTwo, bindingTwo, cloneTwo)
 	assertTrackedTreeHasNoPrivateState(t, cloneTwo)
 }
 
@@ -209,19 +235,116 @@ func openPortableLoopWorkspace(t *testing.T, root, databasePath string) (*locals
 	return store, service, registered.Binding
 }
 
-func assertFreshCloneHasNoOperationalRows(t *testing.T, store *localstore.Store) {
+type portableGitInvariant struct {
+	head       string
+	remoteHead string
+	remotes    string
+	index      string
+}
+
+func capturePortableGitInvariant(t *testing.T, fixture portableLoopGitFixture, root string) portableGitInvariant {
 	t.Helper()
-	for _, table := range []string{"workspace_overlay_operations", "workspace_materializations", "workspace_stashes", "workspace_conflicts", "workspace_transition_receipts", "legacy_integration_state_migrations"} {
-		var count int
-		if err := store.DB().QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil || count != 0 {
-			t.Errorf("fresh clone %s rows = %d, error=%v; want zero", table, count, err)
+	return portableGitInvariant{
+		head: gitOutput(t, root, "rev-parse", "HEAD"), remoteHead: fixture.remoteHead(t),
+		remotes: gitOutput(t, root, "remote", "-v"), index: gitOutput(t, root, "ls-files", "--stage"),
+	}
+}
+
+func assertPortableGitInvariant(t *testing.T, fixture portableLoopGitFixture, root string, want portableGitInvariant, phase string) {
+	t.Helper()
+	got := capturePortableGitInvariant(t, fixture, root)
+	if got != want {
+		t.Fatalf("Wormhole mutated Git during %s: got=%+v want=%+v", phase, got, want)
+	}
+	if err := exec.Command("git", "-C", root, "diff", "--cached", "--quiet").Run(); err != nil {
+		t.Fatalf("Wormhole staged files during %s", phase)
+	}
+}
+
+type portableMutationCounts struct{ operations, materializations, stashes, receipts int }
+
+func workspaceMutationCounts(t *testing.T, store *localstore.Store) portableMutationCounts {
+	t.Helper()
+	var got portableMutationCounts
+	for query, destination := range map[string]*int{
+		"SELECT count(*) FROM workspace_overlay_operations":  &got.operations,
+		"SELECT count(*) FROM workspace_materializations":    &got.materializations,
+		"SELECT count(*) FROM workspace_stashes":             &got.stashes,
+		"SELECT count(*) FROM workspace_transition_receipts": &got.receipts,
+	} {
+		if err := store.DB().QueryRow(query).Scan(destination); err != nil {
+			t.Fatal(err)
 		}
 	}
-	for _, legacy := range []string{"tasks", "channels", "events", "agents", "passports", "sync_queue", "sync_audit", "enrolment_attempts"} {
-		var count int
-		if err := store.DB().QueryRow("SELECT COUNT(*) FROM " + legacy).Scan(&count); err != nil || count != 0 {
-			t.Errorf("fresh clone legacy table %s rows = %d, error=%v; want zero", legacy, count, err)
+	return got
+}
+
+func assertFreshClonePrivateInventory(t *testing.T, store *localstore.Store, binding types.WorkspaceBinding, root string) {
+	t.Helper()
+	wantTables := []string{
+		"agents", "auth_scopes", "bootstrap_metadata", "channels", "enrolment_attempts", "events", "gateway_schema_migrations", "git_links",
+		"integration_manifest_audit", "integration_manifest_bodies", "integration_manifest_decisions", "integration_manifest_journal", "integration_manifest_project_state", "integration_manifest_revocations",
+		"kb_articles", "kb_links", "legacy_integration_state_migrations", "passports", "projects", "sync_audit", "sync_queue", "tasks", "whoami_cache",
+		"workspace_bindings", "workspace_candidates", "workspace_conflicts", "workspace_materializations", "workspace_overlay_operations", "workspace_publication_policies",
+		"workspace_publication_policy_history", "workspace_stashes", "workspace_transition_receipts",
+	}
+	rows, err := store.DB().Query(`SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var gotTables []string
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			t.Fatal(err)
 		}
+		gotTables = append(gotTables, table)
+	}
+	sort.Strings(wantTables)
+	if !reflect.DeepEqual(gotTables, wantTables) {
+		t.Fatalf("schema-v6 private table inventory = %v, want %v", gotTables, wantTables)
+	}
+	wantCounts := map[string]int{
+		"gateway_schema_migrations": 1, "workspace_bindings": 1, "workspace_candidates": 1,
+		"workspace_publication_policies": 1, "workspace_publication_policy_history": 1,
+	}
+	for _, table := range wantTables {
+		var count int
+		if err := store.DB().QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil || count != wantCounts[table] {
+			t.Errorf("fresh clone %s rows = %d, error=%v; want %d", table, count, err, wantCounts[table])
+		}
+	}
+	var version int
+	if err := store.DB().QueryRow(`SELECT version FROM gateway_schema_migrations`).Scan(&version); err != nil || version != localstore.GatewaySchemaVersion {
+		t.Fatalf("schema bootstrap row = %d, err=%v", version, err)
+	}
+	var projectID, workspaceID, checkoutPath, status, acceptedCommit string
+	if err := store.DB().QueryRow(`SELECT project_id,workspace_id,checkout_path,status,accepted_commit FROM workspace_bindings`).Scan(&projectID, &workspaceID, &checkoutPath, &status, &acceptedCommit); err != nil {
+		t.Fatal(err)
+	}
+	if projectID != binding.Scope.ProjectID || workspaceID != string(binding.Scope.WorkspaceID) || checkoutPath != root || status != "pending" || acceptedCommit != gitOutput(t, root, "rev-parse", "HEAD") {
+		t.Fatalf("binding row = project %q workspace %q checkout %q status %q commit %q", projectID, workspaceID, checkoutPath, status, acceptedCommit)
+	}
+	var candidateProject, candidateWorkspace, acceptedBase, workingTree, importedBy string
+	if err := store.DB().QueryRow(`SELECT project_id,workspace_id,accepted_base_digest,working_tree_digest,imported_by FROM workspace_candidates`).Scan(&candidateProject, &candidateWorkspace, &acceptedBase, &workingTree, &importedBy); err != nil {
+		t.Fatal(err)
+	}
+	if candidateProject != projectID || candidateWorkspace != workspaceID || acceptedBase == "" || workingTree == "" || importedBy != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
+		t.Fatalf("candidate row = project %q workspace %q base %q tree %q imported_by %q", candidateProject, candidateWorkspace, acceptedBase, workingTree, importedBy)
+	}
+	var policyProject, policyWorkspace, classification, transition string
+	var revision int
+	var origin sql.NullString
+	if err := store.DB().QueryRow(`SELECT project_id,workspace_id,classification,policy_revision,transition_kind,origin_digest FROM workspace_publication_policies`).Scan(&policyProject, &policyWorkspace, &classification, &revision, &transition, &origin); err != nil {
+		t.Fatal(err)
+	}
+	if policyProject != projectID || policyWorkspace != workspaceID || classification != "unclassified" || revision != 1 || transition != "bootstrap" || origin.Valid {
+		t.Fatalf("publication bootstrap row = project %q workspace %q classification %q revision %d transition %q origin=%v", policyProject, policyWorkspace, classification, revision, transition, origin)
+	}
+	var historyCount int
+	if err := store.DB().QueryRow(`SELECT count(*) FROM workspace_publication_policy_history WHERE project_id=? AND workspace_id=? AND policy_revision=1 AND classification='unclassified' AND transition_kind='bootstrap' AND origin_digest IS NULL`, projectID, workspaceID).Scan(&historyCount); err != nil || historyCount != 1 {
+		t.Fatalf("publication bootstrap history rows=%d err=%v", historyCount, err)
 	}
 }
 

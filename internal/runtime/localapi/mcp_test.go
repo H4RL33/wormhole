@@ -734,13 +734,16 @@ func TestLocalRegistryDescribesRoutePermissionsAndPresenceRegistration(t *testin
 	if got := sortedKeys(presenceProperties); !reflect.DeepEqual(got, []string{"agent_id", "capabilities", "project_id"}) {
 		t.Fatalf("presence properties = %v, want exact presence shape", got)
 	}
+	if closed, ok := presence["additionalProperties"].(bool); !ok || closed {
+		t.Fatalf("presence additionalProperties = %#v, want false", presence["additionalProperties"])
+	}
 
 	advertised := buildInputSchema(register)
 	if _, variant := advertised["anyOf"]; variant {
 		t.Fatalf("agent.register tools/list schema = %#v, want one closed presence shape", advertised)
 	}
 	if _, ambiguous := advertised["oneOf"]; ambiguous {
-		t.Fatalf("agent.register tools/list schema = %#v, hybrid inputs must remain valid", advertised)
+		t.Fatalf("agent.register tools/list schema = %#v, want one strict shape", advertised)
 	}
 }
 

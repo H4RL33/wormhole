@@ -66,9 +66,9 @@ func (s *Server) resolvePrivateRequest(ctx context.Context, raw json.RawMessage)
 		return ctx, nil, fmt.Errorf("%w: invalid working directory", ErrPrivateRequestContext)
 	}
 	delete(arguments, privateRequestContextKey)
-	// project_id remains in the pre-cutover public schema as a compatibility
-	// claim, but it never selects a route. Remove it before public handler
-	// decoding; bindResolvedProjectArguments adds the resolved value later.
+	// project_id is untrusted comparison evidence and never selects a route.
+	// Remove it before public handler decoding; bindResolvedProjectArguments
+	// adds the server-resolved value later.
 	delete(arguments, "project_id")
 	if field := privateAuthorityClaim(arguments); field != "" {
 		return ctx, nil, fmt.Errorf("%w: %s", ErrPrivateAuthorityClaim, field)

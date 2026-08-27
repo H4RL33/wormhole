@@ -57,7 +57,7 @@ harness can use Wormhole directly or through a community connector.
 ## Architecture
 
 ```text
-Claude Code, OpenCode, or another MCP harness
+Codex, Claude Code, or another MCP harness
                      |
               wormhole mcp
            stdio-to-socket bridge
@@ -91,7 +91,7 @@ Wormhole builds three binaries:
 Wormhole is alpha software under active development.
 
 - `gatewayd` is currently supported on Linux. Windows users should use WSL.
-- Claude Code and OpenCode have first-party connection flows.
+- Codex and Claude Code have first-party connection flows.
 - Other MCP-capable harnesses can use `wormhole mcp` or community connectors.
 - Fabric uses the approved Cohere `embed-v4.0` semantic embedder; the
   deterministic stub is test-only.
@@ -322,7 +322,7 @@ Run:
 | `wormhole diff` | Inspect the semantic portable-state diff and review digest |
 | `wormhole import` | Import direct tracked portable-state edits |
 | `wormhole checkpoint` | Materialise the candidate without Git staging, commit, or push |
-| `wormhole stash` | Durably stash the private overlay under an explicit request ID |
+| `wormhole stash` | Durably stash the private overlay under an explicit request ID and label |
 | `wormhole profile list` | List stored credential profiles |
 | `wormhole viewer-key create` | Issue a project-scoped dashboard viewer key |
 | `wormhole mcp` | Run the harness stdio-to-daemon bridge |

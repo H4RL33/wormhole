@@ -9,10 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/H4RL33/wormhole/internal/runtime/config"
-	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/runtime/scheduler"
 	syncpkg "github.com/H4RL33/wormhole/internal/runtime/sync"
 )
@@ -41,39 +39,15 @@ func TestLocalSyncStatusRejectsMalformedUnboundAndUnavailableRequests(t *testing
 	}
 }
 
-func TestLocalPermissionChecksCoverScopeCacheAndStorageBoundaries(t *testing.T) {
+func TestActiveLocalPermissionCheckCoversStorageBoundary(t *testing.T) {
 	ctx := context.Background()
 	srv, _ := newMCPTestServer(t)
 	if err := srv.authorizeLocalPermission(ctx, "", nil); err != nil {
 		t.Fatalf("empty permission: %v", err)
 	}
-	if _, err := srv.localPermissionGranted(ctx, "task.create", "other-project"); err == nil {
-		t.Fatal("localPermissionGranted accepted a mismatched single-org project")
-	}
-	if _, err := srv.localPermissionGranted(ctx, "task.create", "project-1"); err == nil {
-		t.Fatal("localPermissionGranted accepted a missing cached scope")
-	}
-	if err := srv.store.CacheWhoAmI(ctx, localstore.WhoAmICache{
-		AgentID: "agent", ProjectID: "project-1", Permissions: []string{"task.create"}, CachedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if granted, err := srv.localPermissionGranted(ctx, "task.create", "project-1"); err != nil || !granted {
-		t.Fatalf("localPermissionGranted = %t, err=%v", granted, err)
-	}
-
-	srv.isMultiOrg = true
-	if _, err := srv.localPermissionGranted(ctx, "task.create", "unbound"); err == nil {
-		t.Fatal("localPermissionGranted accepted an unbound multi-org project")
-	}
-	srv.isMultiOrg = false
-
 	unavailable, _ := newMCPTestServer(t)
 	if err := unavailable.store.Close(); err != nil {
 		t.Fatal(err)
-	}
-	if _, err := unavailable.localPermissionGranted(ctx, "task.create", "project-1"); err == nil || !strings.Contains(err.Error(), "authorize") {
-		t.Fatalf("unavailable permission store error = %v", err)
 	}
 	if err := unavailable.authorizeLocalPermission(ctx, "task.create", json.RawMessage(`{"project_id":"project-1"}`)); err == nil || !strings.Contains(err.Error(), "authorize") {
 		t.Fatalf("unavailable authorization store error = %v", err)

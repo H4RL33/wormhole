@@ -29,6 +29,7 @@ import (
 
 	"github.com/H4RL33/wormhole/internal/mcp"
 	"github.com/H4RL33/wormhole/internal/runtime/config"
+	"github.com/H4RL33/wormhole/internal/runtime/localapi"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/runtime/sync"
 	"github.com/H4RL33/wormhole/internal/types"
@@ -765,10 +766,12 @@ func TestRun_TwoProjectBindingsPersistWithTokenAndNamespaceIsolation(t *testing.
 	db := e2eTestDB(t)
 	coordURL, projectA, agentA, passportA, tokenA := e2eStartCoordServer(t, db)
 	projectB := e2eMustCreateProject(t, db, "two-binding-project-b")
-	registerBRaw := e2eCallTool(t, coordURL, "wormhole.agent.register", projectB, "", mcp.RegisterAgentInput{
-		Permissions: []string{"task.create", "task.list"}, Owner: "org-b", Model: "test",
+	registerBRaw := e2eCallTool(t, coordURL, "wormhole.agent.enrol", projectB, "", mcp.EnrolAgentInput{
+		IdempotencyKey: "418f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1",
+		RequestHash:    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		Permissions:    []string{"task.create", "task.list"}, Owner: "org-b", Model: "test",
 	})
-	var registerB mcp.RegisterAgentOutput
+	var registerB mcp.EnrolAgentOutput
 	if err := json.Unmarshal(registerBRaw, &registerB); err != nil {
 		t.Fatalf("decode project B registration: %v", err)
 	}
@@ -1138,17 +1141,6 @@ func seedTask4ProcessFixture(t *testing.T, db *sql.DB, fixture task4ProcessFixtu
 	return projectID
 }
 
-func task4PassportFromCLIOutput(t *testing.T, output []byte) string {
-	t.Helper()
-	for _, field := range strings.Fields(string(output)) {
-		if strings.HasPrefix(field, "passport_id=") {
-			return strings.TrimPrefix(field, "passport_id=")
-		}
-	}
-	t.Fatalf("CLI output has no passport_id: %q", output)
-	return ""
-}
-
 func assertTask4JSONEqual(t *testing.T, label string, got, want []byte) {
 	t.Helper()
 	var gotValue, wantValue any
@@ -1349,17 +1341,13 @@ func TestTask4FabricToolPolicyRejectsDirectFollowOnsAndUnexpectedTools(t *testin
 }
 
 // TestP7_EnrolmentBootstrapProcess exercises the Task 4 ownership boundary
-// through actual wormhole and gatewayd processes. Fabric uses the production
+// through the actual Gateway MCP process. Fabric uses the production
 // registry and stores against real Postgres; Gateway uses its normal SQLite
 // database and credential root. The recovery case fails the first snapshot
-// after credential commit and retries through a fresh CLI process.
+// after credential commit and retries through a fresh MCP connection.
 func TestP7_EnrolmentBootstrapProcess(t *testing.T) {
 	db := e2eTestDB(t)
 	fixture := loadTask4ProcessFixture(t)
-	wormholeBin := e2eBuildStdioBridgeBinary(t)
-	if stdioBridgeBinErr != nil {
-		t.Fatalf("build wormhole CLI: %v", stdioBridgeBinErr)
-	}
 	gatewayBin := task4BuildGatewayBinary(t)
 	if task4GatewayBinErr != nil {
 		t.Fatalf("build gatewayd: %v", task4GatewayBinErr)
@@ -1485,18 +1473,35 @@ func TestP7_EnrolmentBootstrapProcess(t *testing.T) {
 			)
 			socketPath := filepath.Join(runDir, "wormhole", "wormholed.sock")
 			daemon := startTask4ProcessDaemon(t, gatewayBin, "task4", env, socketPath)
-			cliArgs := []string{"join", "--server", proxy.URL, "--project", projectID, "--owner", enrolOwner,
-				"--model", fixture.Agent.Model, "--capabilities", strings.Join(fixture.Agent.Capabilities, ","), "--roles", "contributor",
-				"--permissions", "task.create,kb.write,channel.create,channel.post,task.list", "--profile", "task4"}
-			runCLI := func() ([]byte, error) {
-				command := exec.Command(wormholeBin, cliArgs...)
-				command.Env = env
-				return command.CombinedOutput()
+			enrolmentArguments := map[string]interface{}{
+				"version": localapi.EnrolmentProtocolVersion, "project_id": projectID,
+				"owner": enrolOwner, "model": fixture.Agent.Model,
+				"capabilities": fixture.Agent.Capabilities, "repositories": []string{},
+				"roles":                 []string{"contributor"},
+				"requested_permissions": []string{"task.create", "kb.write", "channel.create", "channel.post", "task.list"},
+				"fabric_address":        proxy.URL, "idempotency_key": "018f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1",
+				"credential_profile": "task4",
+			}
+			runEnrolment := func() (localapi.EnrolmentResult, error) {
+				client := gateBDialMCPClient(t, socketPath)
+				defer client.Close()
+				response, err := client.call(localapi.EnrolmentToolName, enrolmentArguments)
+				if err != nil {
+					return localapi.EnrolmentResult{}, err
+				}
+				if response.Error != "" {
+					return localapi.EnrolmentResult{}, errors.New(response.Error)
+				}
+				var result localapi.EnrolmentResult
+				if err := json.Unmarshal(response.Result, &result); err != nil {
+					return localapi.EnrolmentResult{}, err
+				}
+				return result, nil
 			}
 			if test.failFirstBootstrap {
-				output, err := runCLI()
-				if err == nil || !bytes.Contains(output, []byte("bootstrap_failed_after_enrolment")) {
-					t.Fatalf("first CLI run error=%v output=%q, want recovery_required bootstrap failure", err, output)
+				result, err := runEnrolment()
+				if err != nil || result.Code != localapi.EnrolmentBootstrapFailedAfterEnrolment || result.State != localapi.EnrolmentRecoveryRequired {
+					t.Fatalf("first enrolment result=%+v error=%v, want recovery_required bootstrap failure", result, err)
 				}
 				store, err := localstore.Open(dbPath)
 				if err != nil {
@@ -1511,16 +1516,16 @@ func TestP7_EnrolmentBootstrapProcess(t *testing.T) {
 				}
 				_ = store.Close()
 			}
-			output, err := runCLI()
-			if err != nil || !bytes.Contains(output, []byte("Passport created.")) {
-				t.Fatalf("successful CLI run error=%v output=%q", err, output)
+			result, err := runEnrolment()
+			if err != nil || result.Code != localapi.EnrolmentSuccess || result.State != localapi.EnrolmentReady || result.PassportID == "" {
+				t.Fatalf("successful enrolment result=%+v error=%v", result, err)
 			}
-			firstPassportID := task4PassportFromCLIOutput(t, output)
-			replayOutput, replayErr := runCLI()
-			if replayErr != nil || !bytes.Contains(replayOutput, []byte("Passport created.")) {
-				t.Fatalf("completed enrolment replay error=%v output=%q", replayErr, replayOutput)
+			firstPassportID := result.PassportID
+			replayResult, replayErr := runEnrolment()
+			if replayErr != nil || replayResult.Code != localapi.EnrolmentSuccess || replayResult.State != localapi.EnrolmentReady {
+				t.Fatalf("completed enrolment replay result=%+v error=%v", replayResult, replayErr)
 			}
-			if replayPassportID := task4PassportFromCLIOutput(t, replayOutput); replayPassportID != firstPassportID {
+			if replayPassportID := replayResult.PassportID; replayPassportID != firstPassportID {
 				t.Fatalf("replay passport_id=%q, want %q", replayPassportID, firstPassportID)
 			}
 			var passports int
@@ -1539,7 +1544,7 @@ func TestP7_EnrolmentBootstrapProcess(t *testing.T) {
 				t.Fatalf("decode Gateway credential: %v", err)
 			}
 			if credentials.PassportID != firstPassportID {
-				t.Fatalf("credential passport_id=%q, CLI=%q", credentials.PassportID, firstPassportID)
+				t.Fatalf("credential passport_id=%q, enrolment=%q", credentials.PassportID, firstPassportID)
 			}
 			snapshotRaw := e2eCallTool(t, fabricURL, "wormhole.sync.bootstrap", projectID, credentials.Token, mcp.BootstrapInput{NamespaceID: projectID, Version: mcp.SyncProtocolVersion})
 			var snapshot mcp.BootstrapOutput
@@ -1581,11 +1586,11 @@ func TestP7_EnrolmentBootstrapProcess(t *testing.T) {
 				"wormhole.agent.register", "wormhole.agent.whoami",
 			} {
 				if calls[name] != 0 {
-					t.Errorf("direct CLI follow-on %s calls=%d, want 0", name, calls[name])
+					t.Errorf("direct enrollment follow-on %s calls=%d, want 0", name, calls[name])
 				}
 			}
 			if len(direct) != 0 {
-				t.Errorf("direct CLI pillar follow-ons reached Fabric proxy: %v", direct)
+				t.Errorf("direct enrollment pillar follow-ons reached Fabric proxy: %v", direct)
 			}
 			if len(unexpected) != 0 {
 				t.Errorf("unapproved tool names reached Fabric proxy: %v", unexpected)

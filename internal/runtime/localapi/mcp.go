@@ -693,7 +693,7 @@ func buildInputSchemas(t localTool) map[string]map[string]any {
 			"properties": properties,
 			"required":   required,
 		}
-		if t.Name == EnrolmentToolName || t.Name == "wormhole.agent.get_guidance" || strings.HasPrefix(t.Name, "wormhole.workspace.") {
+		if t.Name == EnrolmentToolName || t.Name == "wormhole.agent.get_guidance" || t.Name == "wormhole.agent.register" || strings.HasPrefix(t.Name, "wormhole.workspace.") {
 			schema["additionalProperties"] = false
 		}
 		if t.Name == EnrolmentToolName {

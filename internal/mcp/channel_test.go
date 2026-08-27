@@ -55,6 +55,36 @@ func mustRegisterAgentWithPerms(t *testing.T, projectID string, perms []string) 
 	return agent.ID, tok
 }
 
+type testRegistration struct {
+	AgentID    string
+	PassportID string
+	Token      string
+}
+
+func mustRegisterTestAgent(t *testing.T, store *identity.Store, projectID string, perms []string) testRegistration {
+	t.Helper()
+	agent, passport, token, err := store.Register(context.Background(), projectID, perms, "harley", "claude", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("register test agent: %v", err)
+	}
+	return testRegistration{AgentID: agent.ID, PassportID: passport.ID, Token: token}
+}
+
+func mustRegisterRoleTestAgent(t *testing.T, store *identity.Store, roleStore *roles.Store, projectID, role string, explicit []string) testRegistration {
+	t.Helper()
+	template, err := roleStore.GetTemplate(context.Background(), role)
+	if err != nil {
+		t.Fatalf("get role template %q: %v", role, err)
+	}
+	permissions := append(append([]string(nil), explicit...), template.PermissionBundle...)
+	roleNames := append([]string{role}, template.DefaultRoles...)
+	agent, passport, token, err := store.Register(context.Background(), projectID, permissions, "harley", "claude", template.DefaultCapabilities, nil, roleNames)
+	if err != nil {
+		t.Fatalf("register role test agent: %v", err)
+	}
+	return testRegistration{AgentID: agent.ID, PassportID: passport.ID, Token: token}
+}
+
 // mustBuildScope constructs a minimal AuthenticatedScope for handler tests that
 // need scope.Agent.ID (e.g. PostEventTool) without a full HTTP round-trip.
 func mustBuildScope(agentID, projectID string) *identity.AuthenticatedScope {

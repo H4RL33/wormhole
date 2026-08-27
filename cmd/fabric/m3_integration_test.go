@@ -198,14 +198,16 @@ func TestM3_MCPSeededStateReflectedInDashboard(t *testing.T) {
 
 	projectID := m3MustCreateProject(t, "m3-integration-project")
 
-	// Step 1: register an agent via /mcp. No auth required for this tool.
-	registerResultRaw := m3CallTool(t, srv.URL, "wormhole.agent.register", projectID, "", mcp.RegisterAgentInput{
-		Permissions:  []string{"task.create", "event.publish", "kb.write", "channel.create", "channel.post"},
-		Owner:        "harley",
-		Model:        "claude",
-		Capabilities: []string{"code_review"},
+	// Step 1: enrol an agent via Gateway's Fabric route.
+	registerResultRaw := m3CallTool(t, srv.URL, "wormhole.agent.enrol", projectID, "", mcp.EnrolAgentInput{
+		IdempotencyKey: "218f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1",
+		RequestHash:    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Permissions:    []string{"task.create", "event.publish", "kb.write", "channel.create", "channel.post"},
+		Owner:          "harley",
+		Model:          "claude",
+		Capabilities:   []string{"code_review"},
 	})
-	var registerOut mcp.RegisterAgentOutput
+	var registerOut mcp.EnrolAgentOutput
 	if err := json.Unmarshal(registerResultRaw, &registerOut); err != nil {
 		t.Fatalf("decode register result: %v", err)
 	}
@@ -316,7 +318,7 @@ func TestM3_MCPSeededStateReflectedInDashboard(t *testing.T) {
 	t.Run("kb route reflects MCP-written article", func(t *testing.T) {
 		var got []kb.Article
 		getJSON(fmt.Sprintf("/dashboard/api/projects/%s/kb", projectID), &got)
-		// Registration seeds an onboarding article (mcp.RegisterAgentTool), so
+		// Enrolment seeds an onboarding article, so
 		// the written article isn't the only one — just confirm it's present.
 		found := false
 		for _, a := range got {

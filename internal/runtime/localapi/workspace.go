@@ -59,6 +59,12 @@ func authorizePrivateToolProvider(toolName string, public json.RawMessage) error
 // target of an operation or subscription filter. Action attribution is never
 // caller-owned on the configured path.
 func validatePrivateAgentSemantics(toolName string, public json.RawMessage) error {
+	if toolName == "wormhole.agent.register" {
+		var request agentLocalRegisterArgs
+		if rejectDuplicateJSONMembers(public) != nil || decodeClosedJSON(public, &request) != nil {
+			return fmt.Errorf("localapi: agent register: invalid public arguments")
+		}
+	}
 	var arguments map[string]json.RawMessage
 	if len(public) == 0 {
 		return nil

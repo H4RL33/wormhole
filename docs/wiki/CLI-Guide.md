@@ -25,6 +25,14 @@ wormhole stash [flags]
 wormhole connector list <codex|claude>
 wormhole connector install [--yes] <codex|claude>
 wormhole connector remove [--yes] <codex|claude>
+wormhole integration preview [flags]
+wormhole integration apply [flags]
+wormhole integration status [flags]
+wormhole integration update [flags]
+wormhole integration remove [flags]
+wormhole integration rollback [flags]
+wormhole trial-metrics validate [flags] [FILE|-]
+wormhole trial-metrics format [flags] [FILE|-]
 wormhole whoami [flags]
 wormhole profile list [flags]
 wormhole viewer-key create [flags]
@@ -60,7 +68,7 @@ checkpoint time.
 ./dist/wormhole diff
 ./dist/wormhole import
 ./dist/wormhole checkpoint
-./dist/wormhole stash --request-id REQUEST_ID
+./dist/wormhole stash --request-id REQUEST_ID --label "pause work"
 ```
 
 The five top-level commands use the same Gateway domain operations as
@@ -76,6 +84,14 @@ acknowledge exactly:
 
 Checkpoint writes an uncommitted portable working-tree candidate. Wormhole does
 not stage, commit, or push Git changes.
+
+### Integration manifests and trial metrics
+
+`integration preview/apply/status/update/remove/rollback` manages reviewed
+repository materialisation. Mutating forms require the exact confirmed digest;
+see each command's `--help` output. `trial-metrics validate` and
+`trial-metrics format` are local-only file/stdin utilities and never contact
+Gateway or Fabric.
 
 ### Connector lifecycle
 

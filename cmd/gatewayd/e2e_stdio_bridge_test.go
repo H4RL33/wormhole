@@ -226,13 +226,15 @@ func e2eStartCoordServer(t *testing.T, db *sql.DB) (srvURL, projectID, agentID, 
 
 	projectID = e2eMustCreateProject(t, db, "e2e-stdio-bridge-project")
 
-	registerResultRaw := e2eCallTool(t, srv.URL, "wormhole.agent.register", projectID, "", mcp.RegisterAgentInput{
-		Permissions:  []string{"task.create", "task.assign", "task.list", "kb.write", "channel.create", "channel.post"},
-		Owner:        "harley",
-		Model:        "claude",
-		Capabilities: []string{"code_review"},
+	registerResultRaw := e2eCallTool(t, srv.URL, "wormhole.agent.enrol", projectID, "", mcp.EnrolAgentInput{
+		IdempotencyKey: "218f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1",
+		RequestHash:    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Permissions:    []string{"task.create", "task.assign", "task.list", "kb.write", "channel.create", "channel.post"},
+		Owner:          "harley",
+		Model:          "claude",
+		Capabilities:   []string{"code_review"},
 	})
-	var registerOut mcp.RegisterAgentOutput
+	var registerOut mcp.EnrolAgentOutput
 	if err := json.Unmarshal(registerResultRaw, &registerOut); err != nil {
 		t.Fatalf("decode register result: %v", err)
 	}
@@ -528,11 +530,13 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 	fabricProcess, coordURL := startTask4FabricProcess(t, fabricBin, databaseURL)
 	defer fabricProcess.Stop(t)
 	projectID := e2eMustCreateProject(t, db, "e2e-stdio-bridge-project")
-	registerRaw := e2eCallTool(t, coordURL, "wormhole.agent.register", projectID, "", mcp.RegisterAgentInput{
-		Permissions: []string{"task.create", "task.assign", "task.list", "kb.write", "channel.create", "channel.post"},
-		Owner:       "harley", Model: "claude", Capabilities: []string{"code_review"},
+	registerRaw := e2eCallTool(t, coordURL, "wormhole.agent.enrol", projectID, "", mcp.EnrolAgentInput{
+		IdempotencyKey: "318f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1",
+		RequestHash:    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		Permissions:    []string{"task.create", "task.assign", "task.list", "kb.write", "channel.create", "channel.post"},
+		Owner:          "harley", Model: "claude", Capabilities: []string{"code_review"},
 	})
-	var registered mcp.RegisterAgentOutput
+	var registered mcp.EnrolAgentOutput
 	if err := json.Unmarshal(registerRaw, &registered); err != nil {
 		t.Fatalf("decode register result: %v", err)
 	}
@@ -803,8 +807,8 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 	if _, authorityErr := reconnectedClient.callTool(t, "wormhole.agent.register", map[string]interface{}{
 		"owner": "offline", "model": "test", "permissions": []string{}, "capabilities": []string{},
 		"repositories": []string{}, "roles": []string{},
-	}); !strings.Contains(authorityErr, "central authority required") {
-		t.Fatalf("offline authority operation error=%q, want explicit central authority denial", authorityErr)
+	}); !strings.Contains(authorityErr, "invalid") {
+		t.Fatalf("former join-shaped registration error=%q, want closed-schema rejection", authorityErr)
 	}
 
 	restartedFabricProcess := startTask4FabricProcessAtURL(t, fabricBin, databaseURL, coordURL)

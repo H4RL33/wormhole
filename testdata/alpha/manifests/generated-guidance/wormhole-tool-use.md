@@ -85,7 +85,7 @@ If the semantic provider or active index is unavailable, there is no lexical fal
 - Source-access implications: This tool does not read or return repository source.
 - Recommended follow-up: Set presence after local registration, then verify with agent.list.
 - Minimal request example: `{"agent_id":"example","project_id":"example"}`
-- Live request schema: `{"properties":{"agent_id":{"type":"string"},"capabilities":{"items":{"type":"string"},"type":"array"},"project_id":{"type":"string"}},"required":["agent_id","project_id"],"type":"object"}`
+- Live request schema: `{"additionalProperties":false,"properties":{"agent_id":{"type":"string"},"capabilities":{"items":{"type":"string"},"type":"array"},"project_id":{"type":"string"}},"required":["agent_id","project_id"],"type":"object"}`
 - Misuse warning: Do not infer shared identity creation or new permissions from local presence registration.
 
 ## `wormhole.agent.whoami`

@@ -57,6 +57,41 @@ func TestConfiguredPrivateRuntimeKeepsTargetAgentOperationsUsableAndWorkspaceSco
 	}
 }
 
+func TestConfiguredPrivateRuntimeRejectsFormerJoinAndUnknownRegistrationFields(t *testing.T) {
+	first, second := privateDispatchSiblingBindings(t)
+	server := privateDispatchTestServer(t, privateRoutingTestActor("00000000-0000-4000-8000-000000000021"), first, second)
+	former := map[string]any{
+		"name": "legacy", "permissions": []string{"task.create"}, "owner": "legacy-owner",
+		"model": "legacy-model", "repositories": []string{"https://example.test/repo"},
+		"roles": []string{"reviewer"}, "role": "reviewer", "unknown": true,
+	}
+	for field, value := range former {
+		t.Run(field, func(t *testing.T) {
+			result := privateDispatchResult(t, server, first, "wormhole.agent.register", map[string]any{
+				"agent_id": "00000000-0000-4000-8000-000000000041", "capabilities": []string{"review"}, field: value,
+			}, nil)
+			if !result.IsError || len(result.Content) != 1 || !strings.Contains(result.Content[0].Text, "invalid") {
+				t.Fatalf("registration with %s = %+v, want strict rejection", field, result)
+			}
+		})
+	}
+
+	private := fmt.Sprintf(`{"working_directory":%q}`, first.Checkout.CanonicalPath)
+	arguments := json.RawMessage(`{"agent_id":"00000000-0000-4000-8000-000000000042","agent_id":"00000000-0000-4000-8000-000000000043","capabilities":[],"` + privateRequestContextKey + `":` + private + `}`)
+	params, err := json.Marshal(toolsCallParams{Name: "wormhole.agent.register", Arguments: arguments})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, rpcErr := server.handleToolsCall(context.Background(), &mcpSession{}, nil, server.registry, params)
+	if rpcErr != nil {
+		t.Fatalf("duplicate registration RPC error = %+v", rpcErr)
+	}
+	result, ok := got.(toolCallResult)
+	if !ok || !result.IsError || len(result.Content) != 1 || !strings.Contains(result.Content[0].Text, "invalid") {
+		t.Fatalf("duplicate registration = %#v, want strict rejection", got)
+	}
+}
+
 func TestConfiguredPublicSchemasExposeOnlySupportedAgentTargetsAndNamespaceOnlySubscription(t *testing.T) {
 	registry := newLocalRegistry(&Server{})
 	for _, name := range []string{"wormhole.channel.post", "wormhole.kb.write"} {
