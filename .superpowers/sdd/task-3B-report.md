@@ -217,3 +217,86 @@ orchestrator-level branch gate rather than a Task 3B brief requirement; this
 implementation ran the brief's exact focused/race commands, the full affected
 package, real migration up/down/catalog comparison, vet, actionlint, and required
 workflow tests.
+
+## Independent-review fixes
+
+The independent Task 3B review reported three Important findings. The fix range
+addresses only those findings:
+
+- the alpha inventory and real upgrade script now truthfully terminate at
+  PostgreSQL version 21, inventory `000021_git_aware_streams`, and provision the
+  approved Activity roles before the first migration-21 upgrade;
+- Fabric `Accept` rejects any issuer or embedded actor assurance other than
+  `public-key-continuity` or `private-authenticated` before opening a transaction,
+  while `Pull` fail-closes on any retained non-remote assurance without returning
+  a delivery; and
+- both the Go store and the migration-21 definer validate the complete
+  kind-specific `(expected_state,next_state)` request before replay. Only a valid
+  same-state request or a legal edge whose next state is already current can
+  replay; new legal transitions retain the expected-state CAS.
+
+### Review-fix RED evidence
+
+The existing contract test causally exposed the stale v20 inventory:
+
+```text
+go test ./cmd/wormhole -run '^TestAlphaContractMigrationsAndArtifacts$' -count=1
+--- FAIL: TestAlphaContractMigrationsAndArtifacts (0.00s)
+    contract_manifest_test.go:313: upgrade script current version = 20, migration files = 21
+FAIL github.com/H4RL33/wormhole/cmd/wormhole
+```
+
+The remote-assurance and lifecycle regressions were then written and run against
+the unchanged implementation and applied migration 21:
+
+```text
+--- FAIL: TestActivityStoreRejectsLocalAssuranceBeforeMutation
+    local-assurance Accept error = <nil>, want ErrInvalidActivity
+--- FAIL: TestActivityStorePullRejectsRetainedLocalAssurance
+    Pull retained local assurance error = <nil>, want ErrActivityReplayConflict
+--- FAIL: TestActivityLifecycleStoreRejectsInvalidExpectedStatesBeforeReplay
+    initial "bogus" -> pending error = <nil>, want ErrActivityLifecycleConflict
+    initial "open" -> pending error = <nil>, want ErrActivityLifecycleConflict
+    terminal "bogus" -> delivered error = <nil>, want ErrActivityLifecycleConflict
+    terminal "open" -> delivered error = <nil>, want ErrActivityLifecycleConflict
+--- FAIL: TestActivityLifecycleDefinerRejectsInvalidExpectedStatesBeforeReplay
+    SQL unexpectedly succeeded; want SQLSTATE P0001
+FAIL github.com/H4RL33/wormhole/internal/core/git
+```
+
+The regressions assert zero ledger, ingress-receipt, lifecycle, sequence, and audit
+mutation for matching local envelopes; retained local evidence is injected only
+through the direct definer test seam to prove `Pull` never exposes it. Store and
+direct-definer lifecycle tests cover bogus and wrong-kind expected states at both
+initial and terminal rows, legal edge replay, same-state replay, and exact timestamp
+preservation.
+
+### Review-fix GREEN evidence
+
+Fresh contract, focused migration/Activity, race, and full affected-package runs:
+
+```text
+go test ./cmd/wormhole -run '^TestAlphaContractMigrationsAndArtifacts$' -count=1
+ok github.com/H4RL33/wormhole/cmd/wormhole 0.011s
+
+WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'Test(Migration21|Activity)' -count=1
+ok github.com/H4RL33/wormhole/internal/core/git 12.327s
+
+WORMHOLE_INTEGRATION_REQUIRED=1 go test -race ./internal/core/git -run 'TestActivity(Store|Lifecycle|Pruner)' -count=1
+ok github.com/H4RL33/wormhole/internal/core/git 13.645s
+
+WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -count=1
+ok github.com/H4RL33/wormhole/internal/core/git 13.209s
+```
+
+The real `.github/scripts/test-alpha-upgrade.sh` ran from an empty database, applied
+the tagged v12 baseline, upgraded through 18 with preserved legacy semantic data,
+provisioned Activity roles, reached `21:f`, exercised `21 -> 18 -> 21`, and ended
+at `21:f`. The separate exact-catalog exercise ran `21 -> 20 -> 21 -> 20 -> 21`,
+all `TestMigration21` tests passed, the before/after v20 catalog files compared
+byte-identically, and `TestMigration21DownLeavesVersion20Shape` passed.
+
+`go vet ./...`, `git diff --check`, and the explicit migrations 1–20 range check
+all exited 0. The review fix changes only the migration-21 up body; the down
+operation still drops that definer before its tables, so the exact v20 catalog and
+migrations 1–20 remain unchanged. No Task 3C+ or future migration version was added.
