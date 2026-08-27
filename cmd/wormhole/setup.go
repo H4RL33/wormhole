@@ -579,9 +579,15 @@ func (driver *productionSetupDriver) reconcileConnectors(ctx context.Context, se
 		if adapter == nil {
 			return fail(runtimeconfig.ErrConfirmedPlanDrift)
 		}
-		availability, err := adapter.Discover(ctx)
-		if err != nil || !availability.Available {
-			return fail(connector.ErrConnectorUnavailable)
+		if driver.connectors.store == nil {
+			store, openErr := connector.OpenStore()
+			if openErr != nil {
+				return fail(openErr)
+			}
+			driver.connectors.store = store
+		}
+		if err := connector.RecoverTransactions(ctx, adapter, "wormhole", driver.connectors.store, driver.connectors.store, driver.connectors.store); err != nil {
+			return fail(err)
 		}
 		prior, err := adapter.Inspect(ctx)
 		if err != nil {
@@ -605,36 +611,9 @@ func (driver *productionSetupDriver) reconcileConnectors(ctx context.Context, se
 		if change.DesiredDigest != desiredDigest {
 			return fail(runtimeconfig.ErrConfirmedPlanDrift)
 		}
-		if observedDigest != change.PriorDigest && observedDigest != change.DesiredDigest {
-			if driver.connectors.store == nil {
-				store, openErr := connector.OpenStore()
-				if openErr != nil {
-					return fail(openErr)
-				}
-				driver.connectors.store = store
-			}
-			if err := connector.RecoverTransactions(ctx, adapter, "wormhole", driver.connectors.store, driver.connectors.store, driver.connectors.store); err != nil {
-				return fail(err)
-			}
-			prior, err = adapter.Inspect(ctx)
-			if err != nil {
-				return fail(err)
-			}
-			observedDigest, err = connector.DigestConnectorEntry(prior)
-			if err != nil {
-				return fail(err)
-			}
-		}
 		if observedDigest == change.DesiredDigest {
 			if err := adapter.Verify(ctx, driver.connectors.desired); err != nil {
 				return fail(err)
-			}
-			if driver.connectors.store == nil {
-				store, openErr := connector.OpenStore()
-				if openErr != nil {
-					return fail(openErr)
-				}
-				driver.connectors.store = store
 			}
 			record, found, completedErr := driver.connectors.store.CompletedTransition(ctx, name, "wormhole", connector.OperationInstall, change.PriorDigest, change.DesiredDigest, owner)
 			if completedErr != nil || !found {
@@ -650,13 +629,6 @@ func (driver *productionSetupDriver) reconcileConnectors(ctx context.Context, se
 		}
 		if observedDigest != change.PriorDigest {
 			return fail(runtimeconfig.ErrConfirmedPlanDrift)
-		}
-		if driver.connectors.store == nil {
-			store, openErr := connector.OpenStore()
-			if openErr != nil {
-				return fail(openErr)
-			}
-			driver.connectors.store = store
 		}
 		completed, found, completedErr := driver.connectors.store.CompletedTransition(ctx, name, "wormhole", connector.OperationInstall, change.PriorDigest, change.DesiredDigest, owner)
 		if completedErr != nil {

@@ -393,6 +393,237 @@ func TestProductionSetupConnectorRecoveryOutcomeDoesNotCollideWithSuccessor(t *t
 	}
 }
 
+func TestProductionSetupRecoversActiveDesiredBeforeClassification(t *testing.T) {
+	for _, test := range []struct {
+		stage          connector.OperationStage
+		wantRecovered  connector.OperationStage
+		wantApplyCalls int
+	}{
+		{stage: connector.StagePrepared, wantRecovered: connector.StageRestored, wantApplyCalls: 1},
+		{stage: connector.StageApplied, wantRecovered: connector.StageRestored, wantApplyCalls: 1},
+		{stage: connector.StageVerified, wantRecovered: connector.StageComplete, wantApplyCalls: 0},
+	} {
+		t.Run(string(test.stage), func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "connectors")
+			store, err := connector.OpenStoreAt(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			desired := connector.ConnectorEntry{State: connector.EntryPresent, Scope: connector.ScopeUser, Transport: connector.TransportStdio, Command: "/usr/bin/wormhole", Args: []string{"mcp"}, Env: []connector.EnvironmentVariable{}}
+			prior := connector.ConnectorEntry{State: connector.EntryAbsent}
+			adapter := &setupStateAdapter{name: connector.AdapterCodex, current: desired, version: "0.149.0"}
+			selection := runtimeconfig.SetupSelection{ConnectorAdapters: []string{"codex"}, PlanDigest: runtimeconfig.SHA256StateDigest([]byte("active-desired-" + string(test.stage)))}
+			owner := setupConnectorOwner("00000000-0000-4000-8000-000000000067", selection.PlanDigest)
+			priorDigest, _ := connector.DigestConnectorEntry(prior)
+			desiredDigest, _ := connector.DigestConnectorEntry(desired)
+			selection.Changes = []runtimeconfig.ConfirmedChange{{Stage: runtimeconfig.StageConnectorsApplied, Subject: "connector:codex", Action: "install", PriorDigest: priorDigest, DesiredDigest: desiredDigest}}
+			plan, err := adapter.Plan(t.Context(), prior, desired)
+			if err != nil {
+				t.Fatal(err)
+			}
+			change := connector.ConfirmedConnectorChange{Adapter: connector.AdapterCodex, Name: "wormhole", Action: connector.OperationInstall, PlanDigest: plan.Digest, ExpectedPriorDigest: priorDigest, DesiredDigest: desiredDigest}
+			reference, err := store.Put(t.Context(), connector.ConnectorBackup{SchemaVersion: 1, Adapter: connector.AdapterCodex, Name: "wormhole", Prior: prior, Desired: desired, PlanDigest: plan.Digest})
+			if err != nil {
+				t.Fatal(err)
+			}
+			record, err := store.Prepare(t.Context(), connector.PrepareOperation{Change: change, BackupReference: reference, OwnerDigest: owner})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.stage == connector.StageApplied || test.stage == connector.StageVerified {
+				if err := store.Advance(t.Context(), record.OperationID, connector.StageApplied); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.stage == connector.StageVerified {
+				if err := store.Advance(t.Context(), record.OperationID, connector.StageVerified); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			freshStore, err := connector.OpenStoreAt(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			driver := &productionSetupDriver{connectors: &productionConnectorCommands{store: freshStore, desired: desired, adapters: map[connector.AdapterName]connector.Adapter{connector.AdapterCodex: adapter}}}
+			if _, err := driver.reconcileConnectors(t.Context(), selection, owner); err != nil {
+				t.Fatalf("active desired resume: %v", err)
+			}
+			if adapter.applyCalls != test.wantApplyCalls || !connector.EqualConnectorEntry(adapter.current, desired) {
+				t.Fatalf("resume current=%+v applies=%d want=%d", adapter.current, adapter.applyCalls, test.wantApplyCalls)
+			}
+			persisted := readSetupConnectorOperation(t, root, record.OperationID)
+			if persisted.Stage != test.wantRecovered {
+				t.Fatalf("recovered predecessor stage=%s want=%s", persisted.Stage, test.wantRecovered)
+			}
+			if _, active, err := freshStore.Active(t.Context(), connector.AdapterCodex, "wormhole"); err != nil || active {
+				t.Fatalf("active after resume=%v err=%v", active, err)
+			}
+			if _, found, err := freshStore.CompletedTransition(t.Context(), connector.AdapterCodex, "wormhole", connector.OperationInstall, priorDigest, desiredDigest, owner); err != nil || !found {
+				t.Fatalf("desired completion found=%v err=%v", found, err)
+			}
+
+			retryStore, err := connector.OpenStoreAt(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			driver.connectors.store = retryStore
+			if _, err := driver.reconcileConnectors(t.Context(), selection, owner); err != nil {
+				t.Fatalf("fresh retry: %v", err)
+			}
+			if adapter.applyCalls != test.wantApplyCalls {
+				t.Fatalf("fresh retry reapplied connector: calls=%d want=%d", adapter.applyCalls, test.wantApplyCalls)
+			}
+			if _, active, err := retryStore.Active(t.Context(), connector.AdapterCodex, "wormhole"); err != nil || active {
+				t.Fatalf("active after fresh retry=%v err=%v", active, err)
+			}
+		})
+	}
+}
+
+func TestProductionSetupActiveDesiredSuccessorCompensatesLaterFailure(t *testing.T) {
+	for _, stage := range []connector.OperationStage{connector.StagePrepared, connector.StageApplied} {
+		t.Run(string(stage), func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "connectors")
+			store, err := connector.OpenStoreAt(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			desired := connector.ConnectorEntry{State: connector.EntryPresent, Scope: connector.ScopeUser, Transport: connector.TransportStdio, Command: "/usr/bin/wormhole", Args: []string{"mcp"}, Env: []connector.EnvironmentVariable{}}
+			prior := connector.ConnectorEntry{State: connector.EntryAbsent}
+			codex := &setupStateAdapter{name: connector.AdapterCodex, current: desired, version: "0.149.0"}
+			claude := &setupStateAdapter{name: connector.AdapterClaude, current: prior, version: "2.1.220", applyErr: errors.New("later adapter failed")}
+			selection := runtimeconfig.SetupSelection{ConnectorAdapters: []string{"codex", "claude"}, PlanDigest: runtimeconfig.SHA256StateDigest([]byte("active-desired-compensation-" + string(stage)))}
+			owner := setupConnectorOwner("00000000-0000-4000-8000-000000000068", selection.PlanDigest)
+			priorDigest, _ := connector.DigestConnectorEntry(prior)
+			desiredDigest, _ := connector.DigestConnectorEntry(desired)
+			for _, name := range []string{"codex", "claude"} {
+				selection.Changes = append(selection.Changes, runtimeconfig.ConfirmedChange{Stage: runtimeconfig.StageConnectorsApplied, Subject: "connector:" + name, Action: "install", PriorDigest: priorDigest, DesiredDigest: desiredDigest})
+			}
+			plan, err := codex.Plan(t.Context(), prior, desired)
+			if err != nil {
+				t.Fatal(err)
+			}
+			change := connector.ConfirmedConnectorChange{Adapter: connector.AdapterCodex, Name: "wormhole", Action: connector.OperationInstall, PlanDigest: plan.Digest, ExpectedPriorDigest: priorDigest, DesiredDigest: desiredDigest}
+			reference, err := store.Put(t.Context(), connector.ConnectorBackup{SchemaVersion: 1, Adapter: connector.AdapterCodex, Name: "wormhole", Prior: prior, Desired: desired, PlanDigest: plan.Digest})
+			if err != nil {
+				t.Fatal(err)
+			}
+			record, err := store.Prepare(t.Context(), connector.PrepareOperation{Change: change, BackupReference: reference, OwnerDigest: owner})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stage == connector.StageApplied {
+				if err := store.Advance(t.Context(), record.OperationID, connector.StageApplied); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			freshStore, err := connector.OpenStoreAt(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			driver := &productionSetupDriver{connectors: &productionConnectorCommands{store: freshStore, desired: desired, adapters: map[connector.AdapterName]connector.Adapter{connector.AdapterCodex: codex, connector.AdapterClaude: claude}}}
+			if _, err := driver.reconcileConnectors(t.Context(), selection, owner); err == nil {
+				t.Fatal("later adapter failure unexpectedly succeeded")
+			}
+			if !connector.EqualConnectorEntry(codex.current, prior) || !connector.EqualConnectorEntry(claude.current, prior) || codex.applyCalls != 1 {
+				t.Fatalf("compensation current codex=%+v claude=%+v applies=%d", codex.current, claude.current, codex.applyCalls)
+			}
+			if persisted := readSetupConnectorOperation(t, root, record.OperationID); persisted.Stage != connector.StageRestored {
+				t.Fatalf("recovered predecessor stage=%s want=%s", persisted.Stage, connector.StageRestored)
+			}
+			for _, name := range []connector.AdapterName{connector.AdapterCodex, connector.AdapterClaude} {
+				if _, active, err := freshStore.Active(t.Context(), name, "wormhole"); err != nil || active {
+					t.Fatalf("%s active after compensation=%v err=%v", name, active, err)
+				}
+			}
+
+			claude.applyErr = nil
+			retryStore, err := connector.OpenStoreAt(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			driver.connectors.store = retryStore
+			if _, err := driver.reconcileConnectors(t.Context(), selection, owner); err != nil {
+				t.Fatalf("fresh retry: %v", err)
+			}
+			if !connector.EqualConnectorEntry(codex.current, desired) || !connector.EqualConnectorEntry(claude.current, desired) || codex.applyCalls != 2 {
+				t.Fatalf("fresh retry current codex=%+v claude=%+v applies=%d", codex.current, claude.current, codex.applyCalls)
+			}
+			for _, name := range []connector.AdapterName{connector.AdapterCodex, connector.AdapterClaude} {
+				if _, active, err := retryStore.Active(t.Context(), name, "wormhole"); err != nil || active {
+					t.Fatalf("%s active after fresh retry=%v err=%v", name, active, err)
+				}
+			}
+		})
+	}
+}
+
+func TestProductionSetupConnectorThirdStateRecoveryIsNoWrite(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "connectors")
+	store, err := connector.OpenStoreAt(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := connector.ConnectorEntry{State: connector.EntryPresent, Scope: connector.ScopeUser, Transport: connector.TransportStdio, Command: "/usr/bin/wormhole", Args: []string{"mcp"}, Env: []connector.EnvironmentVariable{}}
+	prior := connector.ConnectorEntry{State: connector.EntryAbsent}
+	third := desired
+	third.Command = "/usr/bin/competitor"
+	adapter := &setupStateAdapter{name: connector.AdapterCodex, current: third, version: "0.149.0"}
+	selection := runtimeconfig.SetupSelection{ConnectorAdapters: []string{"codex"}, PlanDigest: runtimeconfig.SHA256StateDigest([]byte("active-third"))}
+	owner := setupConnectorOwner("00000000-0000-4000-8000-000000000069", selection.PlanDigest)
+	priorDigest, _ := connector.DigestConnectorEntry(prior)
+	desiredDigest, _ := connector.DigestConnectorEntry(desired)
+	selection.Changes = []runtimeconfig.ConfirmedChange{{Stage: runtimeconfig.StageConnectorsApplied, Subject: "connector:codex", Action: "install", PriorDigest: priorDigest, DesiredDigest: desiredDigest}}
+	plan, err := adapter.Plan(t.Context(), prior, desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	change := connector.ConfirmedConnectorChange{Adapter: connector.AdapterCodex, Name: "wormhole", Action: connector.OperationInstall, PlanDigest: plan.Digest, ExpectedPriorDigest: priorDigest, DesiredDigest: desiredDigest}
+	reference, err := store.Put(t.Context(), connector.ConnectorBackup{SchemaVersion: 1, Adapter: connector.AdapterCodex, Name: "wormhole", Prior: prior, Desired: desired, PlanDigest: plan.Digest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Prepare(t.Context(), connector.PrepareOperation{Change: change, BackupReference: reference, OwnerDigest: owner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	journalPath := filepath.Join(root, "operation-"+record.OperationID+".json")
+	before, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshStore, err := connector.OpenStoreAt(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	driver := &productionSetupDriver{connectors: &productionConnectorCommands{store: freshStore, desired: desired, adapters: map[connector.AdapterName]connector.Adapter{connector.AdapterCodex: adapter}}}
+	if _, err := driver.reconcileConnectors(t.Context(), selection, owner); !errors.Is(err, connector.ErrConnectorStateDrift) {
+		t.Fatalf("third-state error=%v", err)
+	}
+	after, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) || !connector.EqualConnectorEntry(adapter.current, third) || adapter.applyCalls != 0 {
+		t.Fatalf("third state mutated: journal_equal=%v current=%+v applies=%d", bytes.Equal(before, after), adapter.current, adapter.applyCalls)
+	}
+}
+
+func readSetupConnectorOperation(t *testing.T, root, operationID string) connector.OperationRecord {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(root, "operation-"+operationID+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record connector.OperationRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatal(err)
+	}
+	return record
+}
+
 type compensationAdvanceFailure struct {
 	*connector.Store
 }
