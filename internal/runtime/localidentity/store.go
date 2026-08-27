@@ -433,6 +433,31 @@ func (s *Store) Selected(ctx context.Context) (PublicHumanProfile, error) {
 	return publicProfile(human), nil
 }
 
+// SelectedMatchesSetup compares setup's private confirmed fields inside the
+// owner-private identity boundary and returns only the bounded public profile.
+func (s *Store) SelectedMatchesSetup(ctx context.Context, selection types.ConfirmedIdentitySelection) (PublicHumanProfile, bool, error) {
+	if err := selection.Validate(); err != nil {
+		return PublicHumanProfile{}, false, err
+	}
+	profile, err := s.Selected(ctx)
+	if err != nil {
+		return PublicHumanProfile{}, false, err
+	}
+	fd, err := s.openRoot()
+	if err != nil {
+		return PublicHumanProfile{}, false, err
+	}
+	defer closeLocalIdentityFD(fd)
+	human, exists, err := readHumanRecord(fd, profile.HumanPrincipalID)
+	if err != nil || !exists {
+		if err != nil {
+			return PublicHumanProfile{}, false, err
+		}
+		return PublicHumanProfile{}, false, ErrInvalidStoreRecord
+	}
+	return profile, human.DisplayName == selection.DisplayName && human.Email == selection.Email, nil
+}
+
 // ResolveLocalActor derives a local human actor from the selected owner-only
 // identity. Callers cannot supply a human principal ID or assurance.
 func (s *Store) ResolveLocalActor(ctx context.Context, connection ConnectionIdentity) (types.ActorEnvelope, error) {

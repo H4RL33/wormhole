@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -29,7 +30,8 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	// Dispatch table: join, connect, whoami, config, profile, viewer-key, mcp
+	// Public dispatch is the canonical Git-native command surface. Legacy
+	// join/connect implementations remain migration inputs, never aliases.
 	if len(args) == 0 {
 		usage(stderr)
 		return 2
@@ -37,12 +39,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	cmd := args[0]
 	switch cmd {
+	case "setup":
+		return runSetup(context.Background(), args[1:], os.Stdin, stdout, stderr, setupDependencies{})
+	case "connector":
+		return runConnector(context.Background(), args[1:], os.Stdin, stdout, stderr, nil)
 	case "init":
 		return runInit(args[1:], stdout, stderr)
-	case "join":
-		return runJoin(args[1:], stdout, stderr)
-	case "connect":
-		return runConnect(args[1:], stdout, stderr)
 	case "whoami":
 		return runWhoami(args[1:], stdout, stderr)
 	case "status":
@@ -77,9 +79,11 @@ version: %s
 usage: wormhole <command> [flags]
 
 commands:
+  wormhole setup [flags]                 confirm and resume canonical local setup
+  wormhole connector list <adapter>      inspect a native harness connector
+  wormhole connector install <adapter>   transactionally install a connector
+  wormhole connector remove <adapter>    transactionally remove a connector
   wormhole init                          interactive setup wizard
-  wormhole join [flags]                  register this agent at a project
-  wormhole connect [flags]               wire harnesses to credentials
   wormhole whoami [flags]                show this agent's identity
   wormhole status [flags]                show local Gateway sync status (--profile required)
   wormhole config code-graph enable [flags]                 enable and build the local Code Graph

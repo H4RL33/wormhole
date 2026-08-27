@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/H4RL33/wormhole/internal/runtime/config"
 )
 
 const (
@@ -1123,7 +1125,7 @@ func (s *Server) dispatchMCPMessage(ctx context.Context, sess *mcpSession, conn 
 		}
 		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: marshalResult(result)})
 
-	case PrivateSetupEnsureIdentityRPCMethod:
+	case PrivateSetupRegisterWorkspaceRPCMethod, PrivateSetupEnsureIdentityRPCMethod, PrivateSetupPublicationRPCMethod, PrivateSetupImportRPCMethod, PrivateSetupVerifyRPCMethod:
 		// Same-user human setup control. It is deliberately absent from the
 		// public MCP tool inventory and returns only the bounded public profile.
 		if isNotification {
@@ -1133,17 +1135,16 @@ func (s *Server) dispatchMCPMessage(ctx context.Context, sess *mcpSession, conn 
 			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcServerNotInitialized, Message: "server not initialized: send initialize and notifications/initialized before private setup"}})
 			return
 		}
-		var setupRequest SetupIdentityRequest
-		if err := decodeClosedJSON(req.Params, &setupRequest); err != nil {
-			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: "invalid private setup identity request"}})
-			return
-		}
-		profile, err := s.PrivateSetupEnsureIdentityRPC(ctx, setupRequest)
+		result, err := s.dispatchPrivateSetupRPC(ctx, req.Method, req.Params)
 		if err != nil {
-			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: err.Error()}})
+			message := ErrPrivateSetupRequest.Error()
+			if errors.Is(err, config.ErrConfirmedPlanDrift) {
+				message = config.ErrConfirmedPlanDrift.Error()
+			}
+			writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidParams, Message: message}})
 			return
 		}
-		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: marshalResult(profile)})
+		writeMCPResponse(conn, sess, rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: marshalResult(result)})
 
 	case codeGraphLifecycleRPCMethod:
 		// Private same-user human CLI method. It is deliberately not a tool,

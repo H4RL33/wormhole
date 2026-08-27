@@ -111,6 +111,66 @@ func (service *systemdGatewayService) confirmChange(ctx context.Context, executa
 	return ConfirmedServiceChange{Executable: executable, ExecutableDigest: executableDigest, ExpectedPrior: prior, DesiredUnitDigest: serviceUnitDigest(unit)}, nil
 }
 
+func (service *systemdGatewayService) recoverConfirmedChange(ctx context.Context, executable string, desiredDigest ServiceUnitDigest) (ConfirmedServiceChange, bool, error) {
+	if err := service.managerAvailable(ctx); err != nil {
+		return ConfirmedServiceChange{}, false, err
+	}
+	executableFD, err := openSecureExecutable(executable, uint32(os.Geteuid()), true)
+	if err != nil {
+		return ConfirmedServiceChange{}, false, err
+	}
+	defer unix.Close(executableFD)
+	executableDigest, err := digestExecutableFD(executableFD)
+	if err != nil {
+		return ConfirmedServiceChange{}, false, err
+	}
+	paths, err := service.resolvePaths()
+	if err != nil {
+		return ConfirmedServiceChange{}, false, err
+	}
+	desired, err := renderGatewayUnit(managedExecutablePath(paths, executableDigest), paths.runtimeRoot)
+	if err != nil || !validServiceUnitDigest(desiredDigest, false) || serviceUnitDigest(desired) != desiredDigest {
+		return ConfirmedServiceChange{}, false, ErrServiceChangeDrift
+	}
+	directoryFD, err := openSecureDirectory(filepath.Dir(paths.unitPath), false, true)
+	if errors.Is(err, os.ErrNotExist) {
+		return ConfirmedServiceChange{}, false, nil
+	}
+	if err != nil {
+		return ConfirmedServiceChange{}, false, err
+	}
+	defer unix.Close(directoryFD)
+	unlock, err := lockServiceDirectory(ctx, directoryFD)
+	if err != nil {
+		return ConfirmedServiceChange{}, false, err
+	}
+	defer unlock()
+	if err := verifyPinnedDirectory(filepath.Dir(paths.unitPath), directoryFD); err != nil {
+		return ConfirmedServiceChange{}, false, err
+	}
+	record, exists, err := readInstallRecord(directoryFD)
+	if err != nil {
+		return ConfirmedServiceChange{}, false, err
+	}
+	if !exists {
+		return ConfirmedServiceChange{}, false, nil
+	}
+	if record.DesiredDigest != desiredDigest {
+		return ConfirmedServiceChange{}, false, ErrServiceChangeDrift
+	}
+	current, err := service.inspectPinned(ctx, paths, directoryFD)
+	if err != nil {
+		return ConfirmedServiceChange{}, false, err
+	}
+	if !permittedInstallPhaseState(record, current, paths.unitPath) {
+		return ConfirmedServiceChange{}, false, ErrServiceChangeDrift
+	}
+	return ConfirmedServiceChange{
+		Executable: executable, ExecutableDigest: executableDigest,
+		ExpectedPrior: serviceStateFromMutation(record.Prior), DesiredUnitDigest: record.DesiredDigest,
+	}, true, nil
+}
+
 func (service *systemdGatewayService) Install(ctx context.Context, change ConfirmedServiceChange) error {
 	if err := service.managerAvailable(ctx); err != nil {
 		return err
@@ -898,6 +958,14 @@ type serviceMutationState struct {
 
 func serviceMutationStateFrom(state ServiceState) serviceMutationState {
 	return serviceMutationState{
+		Installed: state.Installed, Enabled: state.Enabled, Active: state.Active,
+		UnitDigest: state.UnitDigest, Loaded: state.Loaded, ReloadNeeded: state.ReloadNeeded,
+		ManagerFragmentPath: state.ManagerFragmentPath,
+	}
+}
+
+func serviceStateFromMutation(state serviceMutationState) ServiceState {
+	return ServiceState{
 		Installed: state.Installed, Enabled: state.Enabled, Active: state.Active,
 		UnitDigest: state.UnitDigest, Loaded: state.Loaded, ReloadNeeded: state.ReloadNeeded,
 		ManagerFragmentPath: state.ManagerFragmentPath,

@@ -73,6 +73,10 @@ type gatewayServiceChangePlanner interface {
 	confirmChange(context.Context, string, ServiceState) (ConfirmedServiceChange, error)
 }
 
+type gatewayServiceChangeRecovery interface {
+	recoverConfirmedChange(context.Context, string, ServiceUnitDigest) (ConfirmedServiceChange, bool, error)
+}
+
 // ConfirmGatewayServiceChange binds one executable to the exact inspected
 // prior unit/manager state and the exact desired unit digest without mutation.
 func ConfirmGatewayServiceChange(ctx context.Context, service GatewayService, executable string) (ConfirmedServiceChange, error) {
@@ -85,6 +89,31 @@ func ConfirmGatewayServiceChange(ctx context.Context, service GatewayService, ex
 		return ConfirmedServiceChange{}, ErrServiceManagerUnavailable
 	}
 	return planner.confirmChange(ctx, executable, prior)
+}
+
+// ResumeGatewayServiceChange reconstructs an interrupted confirmed change only
+// from the service subsystem's active owner-private journal. Callers provide the
+// desired executable and frozen desired digest, never the raw manager prior.
+func ResumeGatewayServiceChange(ctx context.Context, service GatewayService, executable string, desired ServiceUnitDigest) (ConfirmedServiceChange, error) {
+	change, active, err := RecoverGatewayServiceChange(ctx, service, executable, desired)
+	if err != nil {
+		return ConfirmedServiceChange{}, err
+	}
+	if !active {
+		return ConfirmedServiceChange{}, ErrServiceChangeDrift
+	}
+	return change, nil
+}
+
+// RecoverGatewayServiceChange reports absence separately while treating any
+// conflicting service journal as drift. Task8 uses this to finalize an active
+// Task4 change even when its unit already reached the desired state.
+func RecoverGatewayServiceChange(ctx context.Context, service GatewayService, executable string, desired ServiceUnitDigest) (ConfirmedServiceChange, bool, error) {
+	recovery, ok := service.(gatewayServiceChangeRecovery)
+	if !ok {
+		return ConfirmedServiceChange{}, false, ErrServiceManagerUnavailable
+	}
+	return recovery.recoverConfirmedChange(ctx, executable, desired)
 }
 
 type unavailableGatewayService struct {

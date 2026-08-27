@@ -45,6 +45,65 @@ func TestSupervisorDependenciesConstructLocalOnlyGraph(t *testing.T) {
 	}
 }
 
+func TestSetupPrivateRPCStaysOutsideToolsOnLocalOnlyDisabledCodeGraphSupervisor(t *testing.T) {
+	store, err := localstore.Open(filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	identity, err := localidentity.Open(filepath.Join(t.TempDir(), "identities"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisor, err := newLocalSupervisor(store, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer supervisor.Close()
+	socket := filepath.Join(t.TempDir(), "gateway.sock")
+	server, err := supervisor.Listen(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- server.Serve(t.Context()) }()
+	connection, err := net.Dial("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	reader := bufio.NewReader(connection)
+	mcpInitialize(t, connection, reader)
+
+	request, _ := json.Marshal(mcpRpcRequest{JSONRPC: "2.0", ID: json.RawMessage("2"), Method: localapi.PrivateSetupEnsureIdentityRPCMethod, Params: json.RawMessage(`{}`)})
+	if _, err := connection.Write(append(request, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	line, err := reader.ReadBytes('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response mcpRpcResponse
+	if err := json.Unmarshal(bytes.TrimSpace(line), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Error == nil || response.Error.Message != localapi.ErrPrivateSetupRequest.Error() {
+		t.Fatalf("private setup dispatch = %+v", response)
+	}
+
+	listRequest, _ := json.Marshal(mcpRpcRequest{JSONRPC: "2.0", ID: json.RawMessage("3"), Method: "tools/list", Params: json.RawMessage(`{}`)})
+	if _, err := connection.Write(append(listRequest, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	line, err = reader.ReadBytes('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(line, []byte(localapi.PrivateSetupEnsureIdentityRPCMethod)) {
+		t.Fatalf("private setup method leaked into tools/list: %s", line)
+	}
+}
+
 func TestRun_FreshSupervisorRequiresBindingContext(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

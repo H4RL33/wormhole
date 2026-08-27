@@ -172,6 +172,62 @@ func (s *Store) Active(ctx context.Context, adapter AdapterName, name string) (O
 	return found, exists, err
 }
 
+// Completed returns the unique durable completion for the exact confirmed
+// transition. Callers cannot use it to recover a merely similar operation.
+func (s *Store) Completed(ctx context.Context, change ConfirmedConnectorChange) (OperationRecord, bool, error) {
+	if ValidateConfirmedConnectorChange(change) != nil {
+		return OperationRecord{}, false, config.ErrConfirmedPlanDrift
+	}
+	var found OperationRecord
+	var exists bool
+	err := s.withStoreLock(ctx, func(_ int, state connectorStoreState) error {
+		for _, record := range state.operations {
+			if record.Stage != StageComplete || record.Adapter != change.Adapter || record.Name != change.Name ||
+				record.Action != change.Action || record.PlanDigest != change.PlanDigest ||
+				record.ExpectedPriorDigest != change.ExpectedPriorDigest || record.DesiredDigest != change.DesiredDigest {
+				continue
+			}
+			if exists {
+				return ErrAmbiguousConnectorOperation
+			}
+			found, exists = record, true
+		}
+		return nil
+	})
+	return found, exists, err
+}
+
+// CompletedTransition finds the unique completed operation matching the
+// coordinator's exact high-level prior and desired predicates.
+func (s *Store) CompletedTransition(ctx context.Context, adapter AdapterName, name string, action OperationAction, prior, desired config.StateDigest) (OperationRecord, bool, error) {
+	if !validAdapter(adapter) || !validConnectorName(name) || (action != OperationInstall && action != OperationRemove) ||
+		prior == desired {
+		return OperationRecord{}, false, config.ErrConfirmedPlanDrift
+	}
+	if _, err := config.ParseStateDigest(string(prior)); err != nil {
+		return OperationRecord{}, false, config.ErrConfirmedPlanDrift
+	}
+	if _, err := config.ParseStateDigest(string(desired)); err != nil {
+		return OperationRecord{}, false, config.ErrConfirmedPlanDrift
+	}
+	var found OperationRecord
+	var exists bool
+	err := s.withStoreLock(ctx, func(_ int, state connectorStoreState) error {
+		for _, record := range state.operations {
+			if record.Stage != StageComplete || record.Adapter != adapter || record.Name != name || record.Action != action ||
+				record.ExpectedPriorDigest != prior || record.DesiredDigest != desired {
+				continue
+			}
+			if exists {
+				return ErrAmbiguousConnectorOperation
+			}
+			found, exists = record, true
+		}
+		return nil
+	})
+	return found, exists, err
+}
+
 func (s *Store) Advance(ctx context.Context, operationID string, stage OperationStage) error {
 	if !types.CanonicalUUID(operationID) {
 		return ErrConnectorOperationNotFound

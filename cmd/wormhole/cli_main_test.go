@@ -64,7 +64,7 @@ func TestRun_UnknownCommand(t *testing.T) {
 func TestRunJoin_MissingRequiredFlags(t *testing.T) {
 	isolateConfig(t)
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"join"}, &stdout, &stderr)
+	code := runLegacyCLIForTest([]string{"join"}, &stdout, &stderr)
 	if code != 2 {
 		t.Fatalf("exit code: got %d, want 2", code)
 	}
@@ -76,7 +76,7 @@ func TestRunJoin_MissingRequiredFlags(t *testing.T) {
 func TestRunJoin_MissingProjectOnly(t *testing.T) {
 	isolateConfig(t)
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"join", "--server", "http://localhost:8080"}, &stdout, &stderr)
+	code := runLegacyCLIForTest([]string{"join", "--server", "http://localhost:8080"}, &stdout, &stderr)
 	if code != 2 {
 		t.Fatalf("exit code: got %d, want 2", code)
 	}

@@ -22,8 +22,6 @@ func TestRunDispatchesSupportedCommands(t *testing.T) {
 		want string
 	}{
 		{name: "init", args: []string{"init", "unexpected"}, code: 2, want: "takes no arguments"},
-		{name: "join", args: []string{"join", "--unknown"}, code: 2, want: "flag provided but not defined"},
-		{name: "connect", args: []string{"connect", "--unknown"}, code: 2, want: "flag provided but not defined"},
 		{name: "whoami", args: []string{"whoami", "--unknown"}, code: 2, want: "flag provided but not defined"},
 		{name: "profile", args: []string{"profile", "unknown"}, code: 2, want: "wormhole profile list"},
 		{name: "viewer key", args: []string{"viewer-key", "unknown"}, code: 2, want: "only \"create\" is supported"},

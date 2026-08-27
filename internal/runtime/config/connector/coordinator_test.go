@@ -39,6 +39,14 @@ type memoryJournal struct {
 	activeCalls int
 }
 
+func (j *memoryJournal) Completed(_ context.Context, change ConfirmedConnectorChange) (OperationRecord, bool, error) {
+	if j.active || j.record.Stage != StageComplete || j.record.Adapter != change.Adapter || j.record.Name != change.Name ||
+		j.record.PlanDigest != change.PlanDigest || j.record.ExpectedPriorDigest != change.ExpectedPriorDigest || j.record.DesiredDigest != change.DesiredDigest {
+		return OperationRecord{}, false, nil
+	}
+	return j.record, true, nil
+}
+
 func (j *memoryJournal) Prepare(_ context.Context, operation PrepareOperation) (OperationRecord, error) {
 	j.record = OperationRecord{SchemaVersion: 1, OperationID: "22222222-2222-4222-8222-222222222222", Adapter: operation.Change.Adapter, Name: operation.Change.Name, Action: operation.Change.Action, PlanDigest: operation.Change.PlanDigest, ExpectedPriorDigest: operation.Change.ExpectedPriorDigest, DesiredDigest: operation.Change.DesiredDigest, BackupReference: operation.BackupReference, Stage: StagePrepared}
 	j.active = true
@@ -152,6 +160,28 @@ func (a *stateAdapter) Rollback(_ context.Context, plan ChangePlan) error {
 	}
 	a.current = cloneConnectorEntry(plan.Prior)
 	return nil
+}
+
+func TestRollbackCompletedTransactionalRestoresExactPriorUnderCoordinator(t *testing.T) {
+	prior := ConnectorEntry{State: EntryAbsent}
+	desired := ConnectorEntry{State: EntryPresent, Scope: ScopeUser, Transport: TransportStdio, Command: "/usr/bin/wormhole", Args: []string{"mcp", "serve"}, Env: []EnvironmentVariable{}}
+	plan, err := BuildChangePlan(AdapterCodex, "wormhole", OperationInstall, prior, desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priorDigest, _ := DigestConnectorEntry(prior)
+	desiredDigest, _ := DigestConnectorEntry(desired)
+	change := ConfirmedConnectorChange{Adapter: AdapterCodex, Name: "wormhole", Action: OperationInstall, PlanDigest: plan.Digest, ExpectedPriorDigest: priorDigest, DesiredDigest: desiredDigest}
+	coordinator := &memoryCoordinator{}
+	adapter := &stateAdapter{name: AdapterCodex, connectorName: "wormhole", current: desired, discover: Availability{Available: true, Version: "0.149.0"}, lock: coordinator}
+	backups := &memoryBackupStore{backup: ConnectorBackup{SchemaVersion: 1, Adapter: AdapterCodex, Name: "wormhole", Prior: prior, Desired: desired, PlanDigest: plan.Digest}, reference: "connector-backup:v1:codex:11111111-1111-4111-8111-111111111111"}
+	journal := &memoryJournal{record: OperationRecord{SchemaVersion: 1, OperationID: "22222222-2222-4222-8222-222222222222", Adapter: AdapterCodex, Name: "wormhole", Action: OperationInstall, PlanDigest: plan.Digest, ExpectedPriorDigest: priorDigest, DesiredDigest: desiredDigest, BackupReference: backups.reference, Stage: StageComplete}}
+	if err := RollbackCompletedTransactional(t.Context(), adapter, change, backups, journal, coordinator); err != nil {
+		t.Fatal(err)
+	}
+	if !EqualConnectorEntry(adapter.current, prior) || !adapter.discoverLocked {
+		t.Fatalf("connector = %+v, discovery locked = %v", adapter.current, adapter.discoverLocked)
+	}
 }
 func (a *stateAdapter) Remove(_ context.Context, prior ConnectorEntry) error {
 	a.mutationCalls++

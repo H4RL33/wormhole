@@ -107,47 +107,11 @@ type alphaMigrationPath struct {
 
 func TestAlphaContractCLIConfigurationPrecedence(t *testing.T) {
 	manifest := readAlphaCLIContract(t)
-	ownerSources, repositorySources := exerciseGitResolvers(t)
 	actual := []alphaConfigPrecedence{
 		{
 			Name:     "config.resolve.required",
 			Commands: []string{},
 			Sources:  exerciseGenericResolver(t),
-		},
-		{
-			Name:     "connect.opencode_config",
-			Commands: []string{"connect"},
-			Sources:  exerciseOpenCodeConfigResolver(t),
-		},
-		{
-			Name:     "join_connect.credential_path",
-			Commands: []string{"connect", "join"},
-			Sources:  exerciseCredentialPathResolver(t),
-		},
-		{
-			Name:     "join_connect.model",
-			Commands: []string{"connect", "join"},
-			Sources:  exerciseModelResolver(t),
-		},
-		{
-			Name:     "join_connect.owner",
-			Commands: []string{"connect", "join"},
-			Sources:  ownerSources,
-		},
-		{
-			Name:     "join_connect.project",
-			Commands: []string{"connect", "join"},
-			Sources:  exerciseProjectResolver(t),
-		},
-		{
-			Name:     "join_connect.repositories",
-			Commands: []string{"connect", "join"},
-			Sources:  repositorySources,
-		},
-		{
-			Name:     "join_connect.server",
-			Commands: []string{"connect", "join"},
-			Sources:  exerciseServerResolver(t),
 		},
 		{
 			Name:     "viewer-key.create.admin_key",

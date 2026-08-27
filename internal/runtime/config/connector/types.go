@@ -171,6 +171,10 @@ type OperationJournal interface {
 	Advance(context.Context, string, OperationStage) error
 }
 
+type CompletedOperationJournal interface {
+	Completed(context.Context, ConfirmedConnectorChange) (OperationRecord, bool, error)
+}
+
 type OperationCoordinator interface {
 	WithOperationLock(context.Context, AdapterName, string, func(context.Context) error) error
 }

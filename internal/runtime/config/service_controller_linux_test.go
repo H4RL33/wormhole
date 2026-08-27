@@ -97,6 +97,54 @@ func TestSystemdInstallResumesReloadAfterPublishedUnit(t *testing.T) {
 	}
 }
 
+func TestSystemdGatewayServiceFreshProcessResumesFromOwnedJournal(t *testing.T) {
+	fixture := newSystemdFixture(t)
+	change := confirmedServiceChange(t, fixture.service, fixture.executable)
+	fixture.runner.failDaemonReload = 1
+	if err := fixture.service.Install(t.Context(), change); err == nil {
+		t.Fatal("Install succeeded despite injected reload failure")
+	}
+
+	fresh := NewGatewayService(fixture.runner)
+	recovered, err := ResumeGatewayServiceChange(t.Context(), fresh, fixture.executable, change.DesiredUnitDigest)
+	if err != nil {
+		t.Fatalf("recover confirmed change: %v", err)
+	}
+	if recovered.ExpectedPrior != change.ExpectedPrior || recovered.DesiredUnitDigest != change.DesiredUnitDigest || recovered.ExecutableDigest != change.ExecutableDigest {
+		t.Fatalf("recovered change = %+v, want exact prior/desired from %+v", recovered, change)
+	}
+	if err := fresh.Install(t.Context(), recovered); err != nil {
+		t.Fatalf("fresh-process resume: %v", err)
+	}
+}
+
+func TestSystemdGatewayServiceRecoveryRequiresMatchingOwnedJournal(t *testing.T) {
+	fixture := newSystemdFixture(t)
+	change := confirmedServiceChange(t, fixture.service, fixture.executable)
+	if _, err := ResumeGatewayServiceChange(t.Context(), NewGatewayService(fixture.runner), fixture.executable, change.DesiredUnitDigest); !errors.Is(err, ErrServiceChangeDrift) {
+		t.Fatalf("recovery without journal = %v, want drift", err)
+	}
+
+	fixture.runner.failDaemonReload = 1
+	if err := fixture.service.Install(t.Context(), change); err == nil {
+		t.Fatal("Install succeeded despite injected reload failure")
+	}
+	conflicting := ServiceUnitDigest("sha256:" + strings.Repeat("f", 64))
+	if conflicting == change.DesiredUnitDigest {
+		conflicting = ServiceUnitDigest("sha256:" + strings.Repeat("e", 64))
+	}
+	if _, err := ResumeGatewayServiceChange(t.Context(), NewGatewayService(fixture.runner), fixture.executable, conflicting); !errors.Is(err, ErrServiceChangeDrift) {
+		t.Fatalf("conflicting desired recovery = %v, want drift", err)
+	}
+	otherExecutable := filepath.Join(t.TempDir(), "gatewayd")
+	if err := os.WriteFile(otherExecutable, []byte("different gateway"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResumeGatewayServiceChange(t.Context(), NewGatewayService(fixture.runner), otherExecutable, change.DesiredUnitDigest); !errors.Is(err, ErrServiceChangeDrift) {
+		t.Fatalf("conflicting executable recovery = %v, want drift", err)
+	}
+}
+
 func TestSystemdInstallResumesAfterPublishedUnitDirectorySyncFailure(t *testing.T) {
 	fixture := newSystemdFixture(t)
 	service := fixture.service.(*systemdGatewayService)

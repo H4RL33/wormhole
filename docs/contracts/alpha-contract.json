@@ -7652,26 +7652,30 @@
   "cli": {
     "commands": [
       {
-        "name": "connect",
-        "usage": "connect [flags]",
-        "flags": [
-          "capabilities",
-          "claude-bin",
-          "connector-name",
-          "model",
-          "opencode-config",
-          "owner",
-          "permissions",
-          "profile",
-          "project",
-          "repositories",
-          "roles",
-          "server",
-          "stdio-bin",
-          "target",
-          "token-file"
+        "name": "connector install",
+        "usage": "connector install <adapter>",
+        "flags": [],
+        "positionals": [
+          "<adapter>"
         ],
-        "positionals": [],
+        "help_exit": 2
+      },
+      {
+        "name": "connector list",
+        "usage": "connector list <adapter>",
+        "flags": [],
+        "positionals": [
+          "<adapter>"
+        ],
+        "help_exit": 2
+      },
+      {
+        "name": "connector remove",
+        "usage": "connector remove <adapter>",
+        "flags": [],
+        "positionals": [
+          "<adapter>"
+        ],
         "help_exit": 2
       },
       {
@@ -7808,27 +7812,6 @@
         "help_exit": 0
       },
       {
-        "name": "join",
-        "usage": "join [flags]",
-        "flags": [
-          "capabilities",
-          "context",
-          "kb-limit",
-          "model",
-          "owner",
-          "permissions",
-          "profile",
-          "project",
-          "repositories",
-          "role",
-          "roles",
-          "server",
-          "token-file"
-        ],
-        "positionals": [],
-        "help_exit": 2
-      },
-      {
         "name": "mcp",
         "usage": "mcp",
         "flags": [],
@@ -7839,6 +7822,18 @@
         "name": "profile list",
         "usage": "profile list [flags]",
         "flags": [],
+        "positionals": [],
+        "help_exit": 2
+      },
+      {
+        "name": "setup",
+        "usage": "setup [flags]",
+        "flags": [
+          "email",
+          "name",
+          "publication",
+          "yes"
+        ],
         "positionals": [],
         "help_exit": 2
       },
@@ -7923,93 +7918,6 @@
           "global_config",
           "environment",
           "default",
-          "error"
-        ]
-      },
-      {
-        "name": "connect.opencode_config",
-        "commands": [
-          "connect"
-        ],
-        "sources": [
-          "flag",
-          "project_file",
-          "global_default",
-          "error"
-        ]
-      },
-      {
-        "name": "join_connect.credential_path",
-        "commands": [
-          "connect",
-          "join"
-        ],
-        "sources": [
-          "token_file_flag",
-          "profile_flag",
-          "derived_default",
-          "error"
-        ]
-      },
-      {
-        "name": "join_connect.model",
-        "commands": [
-          "connect",
-          "join"
-        ],
-        "sources": [
-          "flag",
-          "WORMHOLE_MODEL",
-          "empty_default"
-        ]
-      },
-      {
-        "name": "join_connect.owner",
-        "commands": [
-          "connect",
-          "join"
-        ],
-        "sources": [
-          "flag",
-          "git_user_name",
-          "os_user",
-          "error"
-        ]
-      },
-      {
-        "name": "join_connect.project",
-        "commands": [
-          "connect",
-          "join"
-        ],
-        "sources": [
-          "flag",
-          "project_config",
-          "error"
-        ]
-      },
-      {
-        "name": "join_connect.repositories",
-        "commands": [
-          "connect",
-          "join"
-        ],
-        "sources": [
-          "flag",
-          "git_origin",
-          "empty_default"
-        ]
-      },
-      {
-        "name": "join_connect.server",
-        "commands": [
-          "connect",
-          "join"
-        ],
-        "sources": [
-          "flag",
-          "project_config",
-          "global_config",
           "error"
         ]
       },

@@ -132,6 +132,55 @@ func RecoverTransactions(ctx context.Context, adapter Adapter, name string, back
 	})
 }
 
+// RollbackCompletedTransactional compensates an exact completed install using
+// only the raw prior retained by the connector subsystem's durable journal.
+func RollbackCompletedTransactional(ctx context.Context, adapter Adapter, change ConfirmedConnectorChange, backups BackupStore, completed CompletedOperationJournal, coordinator OperationCoordinator) error {
+	if adapter == nil || backups == nil || completed == nil || coordinator == nil || ValidateConfirmedConnectorChange(change) != nil ||
+		change.Action != OperationInstall || adapter.AdapterName() != change.Adapter {
+		return config.ErrConfirmedPlanDrift
+	}
+	return coordinator.WithOperationLock(ctx, change.Adapter, change.Name, func(locked context.Context) error {
+		if err := requireExactAdapterDiscovery(locked, adapter); err != nil {
+			return err
+		}
+		record, exists, err := completed.Completed(locked, change)
+		if err != nil {
+			return sanitizeConnectorError(err)
+		}
+		if !exists {
+			return config.ErrConfirmedPlanDrift
+		}
+		backup, err := backups.Get(locked, record.BackupReference)
+		if err != nil {
+			return sanitizeConnectorError(err)
+		}
+		plan, err := adapter.Plan(locked, backup.Prior, backup.Desired)
+		if err != nil || backup.SchemaVersion != connectorSchemaVersion || backup.Adapter != change.Adapter || backup.Name != change.Name ||
+			backup.PlanDigest != change.PlanDigest || plan.Digest != change.PlanDigest || plan.Action != change.Action {
+			return ErrInvalidConnectorStore
+		}
+		priorDigest, priorErr := DigestConnectorEntry(backup.Prior)
+		desiredDigest, desiredErr := DigestConnectorEntry(backup.Desired)
+		if priorErr != nil || desiredErr != nil || priorDigest != change.ExpectedPriorDigest || desiredDigest != change.DesiredDigest {
+			return ErrInvalidConnectorStore
+		}
+		current, err := adapter.Inspect(locked)
+		if err != nil {
+			return sanitizeConnectorError(err)
+		}
+		if EqualConnectorEntry(current, backup.Prior) {
+			return sanitizeConnectorError(adapter.Verify(locked, backup.Prior))
+		}
+		if !EqualConnectorEntry(current, backup.Desired) {
+			return config.ErrConfirmedPlanDrift
+		}
+		if err := adapter.Rollback(locked, plan); err != nil {
+			return sanitizeConnectorError(err)
+		}
+		return sanitizeConnectorError(adapter.Verify(locked, backup.Prior))
+	})
+}
+
 func requireExactAdapterDiscovery(ctx context.Context, adapter Adapter) error {
 	availability, err := adapter.Discover(ctx)
 	if err != nil {

@@ -18,7 +18,7 @@ func TestRunConnect_OpenCodeTarget_CreatesFreshConfig(t *testing.T) {
 	fakeEnrolmentGateway(t, persistedEnrolmentResult())
 	configPath := filepath.Join(t.TempDir(), "nested", "opencode.json")
 	var stdout, stderr bytes.Buffer
-	code := run([]string{
+	code := runLegacyCLIForTest([]string{
 		"connect",
 		"--server", "https://fabric.example",
 		"--project", "proj-1",
@@ -107,7 +107,7 @@ func TestRunConnect_OpenCodeTarget_MergesExistingConfig(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{
+	code := runLegacyCLIForTest([]string{
 		"connect",
 		"--server", "https://fabric.example",
 		"--project", "proj-1",
@@ -163,7 +163,7 @@ func TestRunConnect_OpenCodeTarget_CustomConnectorName(t *testing.T) {
 
 	configPath := filepath.Join(t.TempDir(), "opencode.json")
 	var stdout, stderr bytes.Buffer
-	code := run([]string{
+	code := runLegacyCLIForTest([]string{
 		"connect",
 		"--server", "https://fabric.example",
 		"--project", "proj-1",
@@ -204,7 +204,7 @@ func TestRunConnect_OpenCodeTarget_ProtectsConfigFilePermissions(t *testing.T) {
 
 	configPath := filepath.Join(t.TempDir(), "nested", "opencode.json")
 	var stdout, stderr bytes.Buffer
-	code := run([]string{
+	code := runLegacyCLIForTest([]string{
 		"connect",
 		"--server", "https://fabric.example",
 		"--project", "proj-1",
@@ -242,7 +242,7 @@ func TestRunConnect_OpenCodeTarget_ProtectsConfigFilePermissions(t *testing.T) {
 // rejected before any network call.
 func TestRunConnect_UnknownTarget_Errors(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := run([]string{
+	code := runLegacyCLIForTest([]string{
 		"connect",
 		"--server", "http://localhost:9999",
 		"--project", "proj-1",

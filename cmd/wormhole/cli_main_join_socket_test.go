@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,22 @@ import (
 
 	"github.com/H4RL33/wormhole/internal/runtime/localapi"
 )
+
+// runLegacyCLIForTest preserves unit coverage for migration-era helpers after
+// join/connect were deliberately removed from the public dispatcher.
+func runLegacyCLIForTest(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		return 2
+	}
+	switch args[0] {
+	case "join":
+		return runJoin(args[1:], stdout, stderr)
+	case "connect":
+		return runConnect(args[1:], stdout, stderr)
+	default:
+		return 2
+	}
+}
 
 func fakeEnrolmentGateway(t *testing.T, out localapi.EnrolmentResult) <-chan localapi.EnrolmentRequest {
 	t.Helper()
@@ -96,7 +113,7 @@ func TestRunJoinAcceptsGatewayResumedAttemptKey(t *testing.T) {
 	result.IdempotencyKey = "318f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1"
 	fakeEnrolmentGateway(t, result)
 	var stdout, stderr bytes.Buffer
-	code := run([]string{
+	code := runLegacyCLIForTest([]string{
 		"join", "--server", "https://fabric.example", "--project", "project-1", "--owner", "harley", "--profile", "project-1__contributor",
 	}, &stdout, &stderr)
 	if code != 0 {
@@ -118,7 +135,7 @@ func TestRunJoinDelegatesOnlyToGateway(t *testing.T) {
 	defer fabric.Close()
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{
+	code := runLegacyCLIForTest([]string{
 		"join", "--server", fabric.URL, "--project", "project-1", "--owner", "harley", "--model", "gpt-5",
 		"--capabilities", "code", "--roles", "contributor", "--permissions", "task.create", "--profile", "project-1__contributor",
 	}, &stdout, &stderr)
@@ -151,7 +168,7 @@ func TestRunJoinDoesNotFallbackToFabricWhenGatewayIsUnavailable(t *testing.T) {
 	fabric := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { fabricCalls.Add(1) }))
 	defer fabric.Close()
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"join", "--server", fabric.URL, "--project", "project-1", "--owner", "harley", "--profile", "profile"}, &stdout, &stderr)
+	code := runLegacyCLIForTest([]string{"join", "--server", fabric.URL, "--project", "project-1", "--owner", "harley", "--profile", "profile"}, &stdout, &stderr)
 	if code != 1 || !strings.Contains(stderr.String(), "gatewayd not running") {
 		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
 	}
@@ -163,7 +180,7 @@ func TestRunJoinDoesNotFallbackToFabricWhenGatewayIsUnavailable(t *testing.T) {
 func TestRunJoinRejectsLegacyTokenFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "credential.json")
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"join", "--server", "https://fabric.example", "--project", "project-1", "--owner", "harley", "--token-file", path}, &stdout, &stderr)
+	code := runLegacyCLIForTest([]string{"join", "--server", "https://fabric.example", "--project", "project-1", "--owner", "harley", "--token-file", path}, &stdout, &stderr)
 	if code != 2 || !strings.Contains(stderr.String(), "--token-file is no longer supported") {
 		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
 	}
@@ -182,7 +199,7 @@ func TestRunConnectDelegatesOnlyToGatewayThenWiresHarness(t *testing.T) {
 	openCodeConfig := filepath.Join(t.TempDir(), "opencode.json")
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{
+	code := runLegacyCLIForTest([]string{
 		"connect", "--server", fabric.URL, "--project", "project-1", "--owner", "harley",
 		"--roles", "contributor", "--permissions", "task.create", "--profile", "project-1__contributor",
 		"--target", "opencode", "--opencode-config", openCodeConfig, "--stdio-bin", os.Args[0],
@@ -208,7 +225,7 @@ func TestRunConnectDelegatesOnlyToGatewayThenWiresHarness(t *testing.T) {
 func TestRunConnectRejectsLegacyTokenFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "credential.json")
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"connect", "--server", "https://fabric.example", "--project", "project-1", "--owner", "harley", "--token-file", path}, &stdout, &stderr)
+	code := runLegacyCLIForTest([]string{"connect", "--server", "https://fabric.example", "--project", "project-1", "--owner", "harley", "--token-file", path}, &stdout, &stderr)
 	if code != 2 || !strings.Contains(stderr.String(), "--token-file is no longer supported") {
 		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
 	}

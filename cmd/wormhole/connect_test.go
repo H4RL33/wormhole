@@ -293,7 +293,7 @@ func TestRunConnect_AutoDetectsHarnesses(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	// Call connect without --target (should auto-detect)
-	code := run([]string{
+	code := runLegacyCLIForTest([]string{
 		"connect",
 		"--server", "https://fabric.example",
 		"--project", "proj-1",
@@ -319,7 +319,7 @@ func TestRunConnect_TargetFlagDeprecated(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	// Call connect with --target claude (should still work)
-	code := run([]string{
+	code := runLegacyCLIForTest([]string{
 		"connect",
 		"--server", "https://fabric.example",
 		"--project", "proj-1",
@@ -353,7 +353,7 @@ func TestRunConnect_NoHarnesses(t *testing.T) {
 	defer os.Chdir(oldCwd)
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{
+	code := runLegacyCLIForTest([]string{
 		"connect",
 		"--server", "https://fabric.example",
 		"--project", "proj-1",

@@ -235,6 +235,43 @@ func TestConnectorStoreEnforcesDurableRecordLimit(t *testing.T) {
 	}
 }
 
+func TestConnectorStoreFindsOnlyExactCompletedOperation(t *testing.T) {
+	store, err := OpenStoreAt(filepath.Join(t.TempDir(), "connectors"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior := ConnectorEntry{State: EntryAbsent}
+	desired := ConnectorEntry{State: EntryPresent, Scope: ScopeUser, Transport: TransportStdio, Command: "/usr/bin/wormhole", Args: []string{"mcp", "serve"}, Env: []EnvironmentVariable{}}
+	plan, err := BuildChangePlan(AdapterCodex, "wormhole", OperationInstall, prior, desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priorDigest, _ := DigestConnectorEntry(prior)
+	desiredDigest, _ := DigestConnectorEntry(desired)
+	change := ConfirmedConnectorChange{Adapter: AdapterCodex, Name: "wormhole", Action: OperationInstall, PlanDigest: plan.Digest, ExpectedPriorDigest: priorDigest, DesiredDigest: desiredDigest}
+	reference, err := store.Put(t.Context(), ConnectorBackup{SchemaVersion: 1, Adapter: AdapterCodex, Name: "wormhole", Prior: prior, Desired: desired, PlanDigest: plan.Digest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Prepare(t.Context(), PrepareOperation{Change: change, BackupReference: reference})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stage := range []OperationStage{StageApplied, StageVerified, StageComplete} {
+		if err := store.Advance(t.Context(), record.OperationID, stage); err != nil {
+			t.Fatal(err)
+		}
+	}
+	completed, ok, err := store.Completed(t.Context(), change)
+	if err != nil || !ok || completed.BackupReference != reference {
+		t.Fatalf("completed = %+v, ok = %v, err = %v", completed, ok, err)
+	}
+	change.DesiredDigest = config.SHA256StateDigest([]byte("conflict"))
+	if _, ok, err := store.Completed(t.Context(), change); err != nil || ok {
+		t.Fatalf("conflicting completion ok = %v, err = %v", ok, err)
+	}
+}
+
 var _ BackupStore = (*Store)(nil)
 var _ OperationJournal = (*Store)(nil)
 var _ OperationCoordinator = (*Store)(nil)
