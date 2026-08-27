@@ -38,6 +38,34 @@ func ResolvedBinding(ctx context.Context) (types.WorkspaceBinding, error) {
 	return binding, nil
 }
 
+// refreshScopedToolBinding refreshes every project-scoped MCP operation at
+// its exact server-resolved binding. Workspace tools perform the same preflight
+// in executeWorkspaceCommand so the stash-only branch-switch exception remains
+// operation-local.
+func (s *Server) refreshScopedToolBinding(ctx context.Context, toolName string) (context.Context, error) {
+	if workspaceToolOwnsRefresh(toolName) {
+		return ctx, nil
+	}
+	binding, err := ResolvedBinding(ctx)
+	if err != nil {
+		return ctx, err
+	}
+	refreshed, err := s.projectState.RefreshWorkspace(ctx, binding)
+	if err != nil {
+		return ctx, err
+	}
+	return WithResolvedBinding(ctx, refreshed), nil
+}
+
+func workspaceToolOwnsRefresh(toolName string) bool {
+	switch toolName {
+	case "wormhole.workspace.status", "wormhole.workspace.diff", "wormhole.workspace.import", "wormhole.workspace.checkpoint", "wormhole.workspace.stash":
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Server) resolvePrivateRequest(ctx context.Context, raw json.RawMessage) (context.Context, json.RawMessage, error) {
 	if s == nil || s.projectState == nil || s.actorResolver == nil {
 		return ctx, nil, ErrPrivateRequestContext

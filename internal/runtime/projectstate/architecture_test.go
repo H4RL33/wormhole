@@ -328,7 +328,7 @@ func TestProjectstateServiceIsCoordinatorFacade(t *testing.T) {
 			t.Fatalf("Service retains lifecycle dependency %q", forbidden)
 		}
 	}
-	for _, method := range []string{"PublicationConfiguration", "ReconfigurePublication", "RegisterWorkspace", "ResolveWorkingDirectory", "RegisteredWorkspaces", "ObserveGitBase", "RefreshWorkspace", "Status", "Diff", "Apply", "ApplyBatch", "Checkpoint", "Recover", "Import", "Stash", "RestoreStash"} {
+	for _, method := range []string{"PublicationConfiguration", "ReconfigurePublication", "RegisterWorkspace", "ResolveWorkingDirectory", "RegisteredWorkspaces", "PrepareRegisteredWorkspaces", "ObserveGitBase", "RefreshWorkspace", "Status", "Diff", "Apply", "ApplyBatch", "Checkpoint", "Recover", "Import", "Stash", "RestoreStash"} {
 		body := architectureMethodBody(service, "func (s *Service) "+method)
 		if body == "" {
 			t.Fatalf("Service missing public facade method %s", method)
@@ -336,6 +336,22 @@ func TestProjectstateServiceIsCoordinatorFacade(t *testing.T) {
 		if strings.Contains(body, ".repo.") || strings.Contains(body, "WithImmediateWorkspace") || strings.Contains(body, "observePublication") || strings.Contains(body, "readWorkingTree(") || strings.Contains(body, "newStashID(") {
 			t.Fatalf("Service method %s retains direct lifecycle authority", method)
 		}
+	}
+}
+
+func TestPrepareRegisteredWorkspacesUsesExactFacadeOrdering(t *testing.T) {
+	root := filepath.Join("..", "..", "..")
+	service := architectureProductionGoSources(t, root)["internal/runtime/projectstate/service.go"]
+	body := architectureMethodBody(service, "func (s *Service) PrepareRegisteredWorkspaces")
+	registered := strings.Index(body, "s.RegisteredWorkspaces(")
+	recoverWorkspace := strings.Index(body, "s.Recover(")
+	refreshWorkspace := strings.Index(body, "s.RefreshWorkspace(")
+	if registered < 0 || recoverWorkspace <= registered || refreshWorkspace <= recoverWorkspace {
+		t.Fatalf("startup lifecycle must enumerate, recover, then refresh through Service facade:\n%s", body)
+	}
+	if strings.Count(body, "s.RegisteredWorkspaces(") != 1 || strings.Count(body, "s.Recover(") != 1 || strings.Count(body, "s.RefreshWorkspace(") != 1 ||
+		strings.Contains(body, "s.registration.") || strings.Contains(body, "s.checkpoint.") || strings.Contains(body, "s.gitBase.") || strings.Contains(body, "go func") {
+		t.Fatalf("startup lifecycle exposes or duplicates coordinator authority:\n%s", body)
 	}
 }
 

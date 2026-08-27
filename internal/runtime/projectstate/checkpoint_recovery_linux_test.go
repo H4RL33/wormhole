@@ -1101,6 +1101,39 @@ func TestRecoverPublishedTopologyConvergesNew(t *testing.T) {
 	}
 }
 
+func TestPrepareRegisteredWorkspacesRestartConvergesBeforeGitRefresh(t *testing.T) {
+	for _, driverState := range []string{"prepared", "published"} {
+		t.Run(driverState, func(t *testing.T) {
+			fixture := newCheckpointRecoveryLinuxFixture(t, driverState)
+			if driverState == "prepared" {
+				// The shared fault-injection fixture forces clean before checkpoint
+				// so lower-level topology cases can isolate filesystem behavior.
+				// Production proposals are pending while a prepared journal exists.
+				setServiceWorkspaceState(t, fixture.store, fixture.request.Scope, "pending")
+			}
+			checkpointRecoveryRestartService(t, fixture.checkpointCoordinatorFixture)
+			if err := fixture.service.PrepareRegisteredWorkspaces(context.Background()); err != nil {
+				t.Fatalf("PrepareRegisteredWorkspaces(%s): %v", driverState, err)
+			}
+			wantState := "recovered_old"
+			if driverState == "published" {
+				wantState = "recovered_new"
+			}
+			var journalState string
+			if err := fixture.store.DB().QueryRow(`SELECT state FROM workspace_materializations WHERE journal_id=?`, fixture.journal.JournalID).Scan(&journalState); err != nil {
+				t.Fatal(err)
+			}
+			if journalState != wantState {
+				t.Fatalf("%s restart journal state = %q, want %q", driverState, journalState, wantState)
+			}
+			status, err := fixture.service.Status(context.Background(), fixture.request.Scope)
+			if err != nil || status.Binding.AcceptedCommitSHA != fixture.binding.AcceptedCommitSHA {
+				t.Fatalf("%s restart status = (%+v, %v)", driverState, status, err)
+			}
+		})
+	}
+}
+
 func TestRecoverPreservesLaterLiveEditAfterPublication(t *testing.T) {
 	fixture := newCheckpointRecoveryLinuxFixture(t, "prepared")
 	if err := os.Rename(fixture.livePath(), fixture.journal.BackupPath); err != nil {

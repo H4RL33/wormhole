@@ -88,11 +88,25 @@ func TestProcessSupervisorOwnerHelper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, file := range tree {
+		path := filepath.Join(checkout, ".wormhole", filepath.FromSlash(file.Path))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, file.Data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gatewayGit(t, checkout, "init", "-b", "main")
+	gatewayGit(t, checkout, "config", "user.name", "Gateway Owner Fixture")
+	gatewayGit(t, checkout, "config", "user.email", "fixture@example.test")
+	gatewayGit(t, checkout, "add", ".wormhole")
+	gatewayGit(t, checkout, "commit", "-m", "test: seed owner fixture")
 	decoded, err := state.DecodeTree(tree)
 	if err != nil {
 		t.Fatal(err)
 	}
-	binding := types.WorkspaceBinding{Scope: types.WorkspaceScope{ProjectID: projectID, WorkspaceID: "00000000-0000-4000-8000-000000000011"}, Checkout: types.CheckoutIdentity{CanonicalPath: checkout, Device: uint64(stat.Dev), Inode: uint64(stat.Ino)}, AcceptedCommitSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", AcceptedTreeDigest: string(decoded.Digest)}
+	binding := types.WorkspaceBinding{Scope: types.WorkspaceScope{ProjectID: projectID, WorkspaceID: "00000000-0000-4000-8000-000000000011"}, Checkout: types.CheckoutIdentity{CanonicalPath: checkout, Device: uint64(stat.Dev), Inode: uint64(stat.Ino)}, AcceptedRef: "refs/heads/main", AcceptedCommitSHA: gatewayGitOutput(t, checkout, "rev-parse", "HEAD"), AcceptedTreeDigest: string(decoded.Digest)}
 	repo := localstore.NewWorkspaceRepo(store.DB())
 	if _, _, err := repo.RegisterWorkspace(ctx, binding, tree); err != nil {
 		t.Fatal(err)

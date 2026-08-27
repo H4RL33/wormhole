@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -233,16 +235,51 @@ func privateRoutingTestActor(id string) types.ActorEnvelope {
 
 func privateRoutingTestBinding(t *testing.T, root, projectID, workspaceID string) types.WorkspaceBinding {
 	t.Helper()
-	_ = os.MkdirAll(root, 0o700)
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tree, digest := privateRoutingWorkspaceTree(t, projectID, types.RepositoryIdentity{})
+	for _, file := range tree {
+		path := filepath.Join(root, ".wormhole", filepath.FromSlash(file.Path))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, file.Data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	privateRoutingGit(t, root, "init", "-b", "main")
+	privateRoutingGit(t, root, "config", "user.name", "Private Routing Fixture")
+	privateRoutingGit(t, root, "config", "user.email", "fixture@example.test")
+	privateRoutingGit(t, root, "add", ".wormhole")
+	privateRoutingGit(t, root, "commit", "-m", "test: seed private routing workspace")
 	info, _ := os.Stat(root)
 	stat := info.Sys().(*syscall.Stat_t)
-	_, digest := privateRoutingWorkspaceTree(t, projectID, types.RepositoryIdentity{})
 	return types.WorkspaceBinding{
 		Scope:              types.WorkspaceScope{ProjectID: projectID, WorkspaceID: types.WorkspaceID(workspaceID)},
 		Checkout:           types.CheckoutIdentity{CanonicalPath: root, Device: uint64(stat.Dev), Inode: uint64(stat.Ino)},
-		AcceptedCommitSHA:  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		AcceptedRef:        "refs/heads/main",
+		AcceptedCommitSHA:  privateRoutingGitOutput(t, root, "rev-parse", "HEAD"),
 		AcceptedTreeDigest: digest,
 	}
+}
+
+func privateRoutingGit(t *testing.T, root string, args ...string) {
+	t.Helper()
+	command := exec.Command("git", append([]string{"-C", root}, args...)...)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, output)
+	}
+}
+
+func privateRoutingGitOutput(t *testing.T, root string, args ...string) string {
+	t.Helper()
+	command := exec.Command("git", append([]string{"-C", root}, args...)...)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, output)
+	}
+	return strings.TrimSpace(string(output))
 }
 
 var _ LocalActorResolver = (*localidentity.Store)(nil)

@@ -5,6 +5,7 @@ package localapi
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -131,8 +132,25 @@ func TestStage2PortableLoopAcrossTwoRealClones(t *testing.T) {
 	gitRun(t, cloneOne, "config", "user.email", "fixture@example.test")
 	gitRun(t, cloneOne, "add", ".wormhole/state/v1")
 	gitRun(t, cloneOne, "commit", "-m", "test: accept portable state")
-	gitRun(t, cloneOne, "push", "origin", "HEAD:main")
 	acceptedCommit := gitOutput(t, cloneOne, "rev-parse", "HEAD")
+	accepted, err := serverOne.executeWorkspaceCommand(callContext, WorkspaceCommandRequest{Operation: WorkspaceOperationStatus})
+	if err != nil || accepted.Status == nil || accepted.Status.AcceptedCommitSHA != acceptedCommit || accepted.Status.CandidatePresent {
+		t.Fatalf("ordinary Git acceptance status = (%+v, %v), want commit %s and no candidate", accepted, err, acceptedCommit)
+	}
+	var acceptedJournalState string
+	if err := storeOne.DB().QueryRow(`SELECT state FROM workspace_materializations WHERE journal_id=?`, checkpointResult.Checkpoint.JournalID).Scan(&acceptedJournalState); err != nil || acceptedJournalState != "accepted" {
+		t.Fatalf("ordinary Git acceptance journal state = %q, err=%v; want accepted", acceptedJournalState, err)
+	}
+	refreshedBinding, err := serviceOne.ResolveWorkingDirectory(ctx, types.WorkspaceContext{WorkingDirectory: cloneOne})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshedContext := withServerOwnedActor(WithResolvedBinding(ctx, refreshedBinding), actor)
+	acceptedDiff, err := serverOne.executeWorkspaceCommand(refreshedContext, WorkspaceCommandRequest{Operation: WorkspaceOperationDiff})
+	if err != nil || acceptedDiff.Diff == nil || acceptedDiff.Diff.BaseDigest != acceptedDiff.Diff.ViewDigest || len(acceptedDiff.Diff.Changes) != 0 {
+		t.Fatalf("ordinary Git acceptance diff = (%+v, %v), want clean", acceptedDiff, err)
+	}
+	gitRun(t, cloneOne, "push", "origin", "HEAD:main")
 	if acceptedCommit == cloneOneGit.head || fixture.remoteHead(t) != acceptedCommit {
 		t.Fatalf("fixture Git publication did not advance exact remote commit")
 	}
@@ -162,6 +180,137 @@ func TestStage2PortableLoopAcrossTwoRealClones(t *testing.T) {
 	}
 	assertFreshClonePrivateInventory(t, storeTwo, bindingTwo, cloneTwo)
 	assertTrackedTreeHasNoPrivateState(t, cloneTwo)
+}
+
+func TestWorkspaceOperationsRefreshSameRefCommitAndRebasePendingOverlay(t *testing.T) {
+	fixture := newPortableLoopGitFixture(t)
+	root := fixture.clone(t, "same-ref-rebase")
+	store, service, binding := openPortableLoopWorkspace(t, root, filepath.Join(t.TempDir(), "private.db"))
+	defer store.Close()
+	actor := portableLoopActor()
+	applied := applyPortableLoopTaskMutation(t, service, binding, actor,
+		"aaaaaaaa-0000-4000-8000-000000000001", "pending overlay survives an ordinary commit")
+
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("ordinary developer commit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, root, "config", "user.name", "Portable Loop Fixture")
+	gitRun(t, root, "config", "user.email", "fixture@example.test")
+	gitRun(t, root, "add", "README.md")
+	gitRun(t, root, "commit", "-m", "test: ordinary same-ref advance")
+	wantCommit := gitOutput(t, root, "rev-parse", "HEAD")
+
+	server := &Server{projectState: service}
+	callContext := withServerOwnedActor(WithResolvedBinding(context.Background(), binding), actor)
+	got, err := server.executeWorkspaceCommand(callContext, WorkspaceCommandRequest{Operation: WorkspaceOperationStatus})
+	if err != nil || got.Status == nil || got.Status.AcceptedCommitSHA != wantCommit ||
+		!got.Status.CandidatePresent || got.Status.CandidateDigest != applied.CandidateDigest ||
+		got.Status.OverlayGeneration != applied.OverlayGeneration {
+		t.Fatalf("same-ref refreshed status = (%+v, %v), want commit %s and rebased proposal", got, err, wantCommit)
+	}
+	resolved, err := service.ResolveWorkingDirectory(context.Background(), types.WorkspaceContext{WorkingDirectory: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	diff, err := server.executeWorkspaceCommand(
+		withServerOwnedActor(WithResolvedBinding(context.Background(), resolved), actor),
+		WorkspaceCommandRequest{Operation: WorkspaceOperationDiff},
+	)
+	if err != nil || diff.Diff == nil || len(diff.Diff.Changes) == 0 || diff.Diff.CandidateDigest != applied.CandidateDigest {
+		t.Fatalf("same-ref refreshed diff = (%+v, %v), want pending semantic change", diff, err)
+	}
+}
+
+func TestWorkspaceOperationsBlockBranchSwitchExceptStashThenRefreshRecover(t *testing.T) {
+	fixture := newPortableLoopGitFixture(t)
+	root := fixture.clone(t, "branch-switch-stash")
+	store, service, binding := openPortableLoopWorkspace(t, root, filepath.Join(t.TempDir(), "private.db"))
+	defer store.Close()
+	actor := portableLoopActor()
+	applyPortableLoopTaskMutation(t, service, binding, actor,
+		"aaaaaaaa-0000-4000-8000-000000000002", "stash before accepting the new branch")
+	gitRun(t, root, "switch", "-c", "next")
+
+	server := &Server{projectState: service}
+	callContext := withServerOwnedActor(WithResolvedBinding(context.Background(), binding), actor)
+	before := workspaceMutationCounts(t, store)
+	if got, err := server.executeWorkspaceCommand(callContext, WorkspaceCommandRequest{Operation: WorkspaceOperationStatus}); !errors.Is(err, projectstate.ErrBranchSwitchPending) || got != (WorkspaceCommandResult{}) {
+		t.Fatalf("branch-switch status = (%+v, %v), want ErrBranchSwitchPending", got, err)
+	}
+	if after := workspaceMutationCounts(t, store); after != before {
+		t.Fatalf("blocked branch switch mutated workspace: before=%+v after=%+v", before, after)
+	}
+
+	stashed, err := server.executeWorkspaceCommand(callContext, WorkspaceCommandRequest{
+		Operation: WorkspaceOperationStash, RequestID: "aaaaaaaa-0000-4000-8000-000000000003", Label: "switch to next",
+	})
+	if err != nil || stashed.Stash == nil || stashed.Stash.OperationCount != 1 {
+		t.Fatalf("branch-switch stash = (%+v, %v)", stashed, err)
+	}
+	resolved, err := service.ResolveWorkingDirectory(context.Background(), types.WorkspaceContext{WorkingDirectory: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.AcceptedRef != "refs/heads/next" || resolved.AcceptedCommitSHA != gitOutput(t, root, "rev-parse", "HEAD") {
+		t.Fatalf("post-stash binding = %+v, want accepted next branch", resolved)
+	}
+	status, err := service.Status(context.Background(), resolved.Scope)
+	if err != nil || status.State != "clean" || status.CandidatePresent || status.OverlayGeneration != 0 {
+		t.Fatalf("post-stash recovered status = (%+v, %v), want clean", status, err)
+	}
+}
+
+func TestScopedPillarOperationRefreshesResolvedBindingBeforeDispatch(t *testing.T) {
+	fixture := newPortableLoopGitFixture(t)
+	root := fixture.clone(t, "pillar-refresh")
+	store, service, binding := openPortableLoopWorkspace(t, root, filepath.Join(t.TempDir(), "private.db"))
+	defer store.Close()
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("pillar refresh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, root, "config", "user.name", "Portable Loop Fixture")
+	gitRun(t, root, "config", "user.email", "fixture@example.test")
+	gitRun(t, root, "add", "README.md")
+	gitRun(t, root, "commit", "-m", "test: advance before pillar call")
+	wantCommit := gitOutput(t, root, "rev-parse", "HEAD")
+
+	server := &Server{projectState: service}
+	ctx := WithResolvedBinding(context.Background(), binding)
+	refreshedContext, err := server.refreshScopedToolBinding(ctx, "wormhole.channel.list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ResolvedBinding(refreshedContext)
+	if err != nil || got.AcceptedCommitSHA != wantCommit {
+		t.Fatalf("pillar binding = (%+v, %v), want commit %s", got, err, wantCommit)
+	}
+}
+
+func portableLoopActor() types.ActorEnvelope {
+	return types.ActorEnvelope{
+		ActorKind: types.ActorHuman, HumanPrincipalID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		Assurance: types.AssuranceLocal, OccurredAt: time.Date(2026, 8, 27, 2, 0, 0, 0, time.UTC),
+	}
+}
+
+func applyPortableLoopTaskMutation(t *testing.T, service *projectstate.Service, binding types.WorkspaceBinding, actor types.ActorEnvelope, operationID, description string) projectstate.WorkspaceStatus {
+	t.Helper()
+	status, err := service.Status(context.Background(), binding.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := *status.AcceptedSnapshot.Tasks["22222222-2222-4222-8222-222222222222"].Value
+	task.Description = description
+	task.UpdatedAt = actor.OccurredAt
+	got, err := service.Apply(context.Background(), binding.Scope, state.OperationV1{
+		SchemaVersion: 1, ID: operationID, Kind: state.OperationPutRecord,
+		ExpectedViewDigest: status.CandidateDigest, Actor: actor,
+		PutRecord: &state.PutRecordV1{Record: state.RecordValueV1{Task: &task}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
 }
 
 type portableLoopGitFixture struct {

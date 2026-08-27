@@ -84,6 +84,13 @@ func runLocalOnlySupervisor(ctx context.Context) error {
 		return fmt.Errorf("open local store: %w", err)
 	}
 	defer store.Close()
+	projectState, err := newProjectStateService(store)
+	if err != nil {
+		return err
+	}
+	if err := projectState.PrepareRegisteredWorkspaces(ctx); err != nil {
+		return fmt.Errorf("prepare registered workspaces: %w", err)
+	}
 	manifestService, err := localapi.NewIntegrationManifestService(store)
 	if err != nil {
 		return fmt.Errorf("open integration manifest service: %w", err)
@@ -92,7 +99,7 @@ func runLocalOnlySupervisor(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("open local identity store: %w", err)
 	}
-	supervisor, err := newLocalSupervisor(store, identity)
+	supervisor, err := newLocalSupervisorWithProjectState(store, projectState, identity)
 	if err != nil {
 		return err
 	}
@@ -116,9 +123,27 @@ func newLocalSupervisor(store *localstore.Store, identity *localidentity.Store) 
 	if store == nil || identity == nil {
 		return nil, fmt.Errorf("construct Gateway supervisor: incomplete local dependencies")
 	}
+	service, err := newProjectStateService(store)
+	if err != nil {
+		return nil, err
+	}
+	return newLocalSupervisorWithProjectState(store, service, identity)
+}
+
+func newProjectStateService(store *localstore.Store) (*projectstate.Service, error) {
+	if store == nil {
+		return nil, fmt.Errorf("construct project state service: local store is required")
+	}
 	service, err := projectstate.NewService(localstore.NewWorkspaceRepo(store.DB()), projectstate.ServiceConfig{})
 	if err != nil {
 		return nil, fmt.Errorf("construct project state service: %w", err)
+	}
+	return service, nil
+}
+
+func newLocalSupervisorWithProjectState(store *localstore.Store, service *projectstate.Service, identity *localidentity.Store) (*localapi.Supervisor, error) {
+	if store == nil || service == nil || identity == nil {
+		return nil, fmt.Errorf("construct Gateway supervisor: incomplete local dependencies")
 	}
 	supervisor, err := localapi.NewSupervisor(localapi.SupervisorDependencies{
 		Store: store, ProjectState: service, Identity: identity,

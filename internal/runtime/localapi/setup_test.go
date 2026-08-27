@@ -47,6 +47,21 @@ func TestPrivateSetupEnsureIdentityRPCUsesServerOwnedStore(t *testing.T) {
 	}
 }
 
+func TestResolveSetupBindingRefreshesExactGitPosition(t *testing.T) {
+	identity, err := localidentity.Open(filepath.Join(t.TempDir(), "identities"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := privateRoutingTestBinding(t, filepath.Join(t.TempDir(), "checkout"), "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011")
+	server := setupIdentityTestServer(t, identity, binding)
+	privateRoutingGit(t, binding.Checkout.CanonicalPath, "commit", "--allow-empty", "-m", "test: advance before setup operation")
+	wantCommit := privateRoutingGitOutput(t, binding.Checkout.CanonicalPath, "rev-parse", "HEAD")
+	got, _, err := server.resolveSetupBinding(context.Background(), binding.Checkout.CanonicalPath, false)
+	if err != nil || got.AcceptedCommitSHA != wantCommit {
+		t.Fatalf("setup binding = (%+v, %v), want commit %s", got, err, wantCommit)
+	}
+}
+
 func TestPrivateSetupEnsureIdentityRPCResolvesActorBeforeMutation(t *testing.T) {
 	store, err := localidentity.Open(filepath.Join(t.TempDir(), "identities"))
 	if err != nil {

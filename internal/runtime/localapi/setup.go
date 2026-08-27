@@ -182,6 +182,11 @@ func (s *Server) PrivateSetupRegisterWorkspaceRPC(ctx context.Context, req Setup
 			return SetupWorkspaceReadback{}, ErrPrivateSetupRequest
 		}
 		binding = registered.Binding
+	} else {
+		binding, err = s.projectState.RefreshWorkspace(ctx, binding)
+		if err != nil {
+			return SetupWorkspaceReadback{}, config.ErrConfirmedPlanDrift
+		}
 	}
 	if binding.Validate() != nil || binding.Checkout.CanonicalPath != req.WorkingDirectory || binding.Scope.ProjectID != req.ExpectedProjectID ||
 		binding.Repository != req.ExpectedRepository || binding.AcceptedCommitSHA != req.ExpectedCommit {
@@ -368,6 +373,10 @@ func (s *Server) resolveSetupBinding(ctx context.Context, workingDirectory strin
 	binding, err := s.projectState.ResolveWorkingDirectory(ctx, types.WorkspaceContext{WorkingDirectory: workingDirectory})
 	if err != nil || binding.Validate() != nil || binding.Checkout.CanonicalPath != workingDirectory {
 		return types.WorkspaceBinding{}, types.ActorEnvelope{}, ErrPrivateSetupRequest
+	}
+	binding, err = s.projectState.RefreshWorkspace(ctx, binding)
+	if err != nil {
+		return types.WorkspaceBinding{}, types.ActorEnvelope{}, config.ErrConfirmedPlanDrift
 	}
 	if !withActor {
 		return binding, types.ActorEnvelope{}, nil

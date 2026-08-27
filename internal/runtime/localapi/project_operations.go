@@ -95,15 +95,23 @@ func (s *Server) executeWorkspaceCommand(ctx context.Context, request WorkspaceC
 	if s == nil || s.projectState == nil {
 		return WorkspaceCommandResult{}, ErrWorkspaceCommand
 	}
+	if err := validateWorkspaceCommandRequest(request); err != nil {
+		return WorkspaceCommandResult{}, err
+	}
 	binding, err := ResolvedBinding(ctx)
 	if err != nil {
 		return WorkspaceCommandResult{}, err
 	}
+	refreshed, err := s.projectState.RefreshWorkspace(ctx, binding)
+	if err != nil {
+		if request.Operation != WorkspaceOperationStash || !errors.Is(err, projectstate.ErrBranchSwitchPending) {
+			return WorkspaceCommandResult{}, err
+		}
+		return s.executeBranchSwitchStash(ctx, binding, request)
+	}
+	binding = refreshed
 	switch request.Operation {
 	case WorkspaceOperationStatus:
-		if request.PublicationReviewDigest != "" || request.RequestID != "" || request.Label != "" {
-			return WorkspaceCommandResult{}, ErrWorkspaceCommand
-		}
 		status, err := s.projectState.Status(ctx, binding.Scope)
 		if err != nil {
 			return WorkspaceCommandResult{}, err
@@ -111,9 +119,6 @@ func (s *Server) executeWorkspaceCommand(ctx context.Context, request WorkspaceC
 		readback := workspaceStatusReadback(status)
 		return WorkspaceCommandResult{Operation: request.Operation, Status: &readback}, nil
 	case WorkspaceOperationDiff:
-		if request.PublicationReviewDigest != "" || request.RequestID != "" || request.Label != "" {
-			return WorkspaceCommandResult{}, ErrWorkspaceCommand
-		}
 		diff, err := s.projectState.Diff(ctx, binding.Scope)
 		if err != nil {
 			return WorkspaceCommandResult{}, err
@@ -121,9 +126,6 @@ func (s *Server) executeWorkspaceCommand(ctx context.Context, request WorkspaceC
 		readback := workspaceDiffReadback(diff)
 		return WorkspaceCommandResult{Operation: request.Operation, Diff: &readback}, nil
 	case WorkspaceOperationImport:
-		if request.PublicationReviewDigest != "" || request.RequestID != "" || request.Label != "" {
-			return WorkspaceCommandResult{}, ErrWorkspaceCommand
-		}
 		actor, err := ServerOwnedActor(ctx)
 		if err != nil {
 			return WorkspaceCommandResult{}, err
@@ -145,9 +147,6 @@ func (s *Server) executeWorkspaceCommand(ctx context.Context, request WorkspaceC
 		readback := workspaceImportReadback(result)
 		return WorkspaceCommandResult{Operation: request.Operation, Import: &readback}, nil
 	case WorkspaceOperationCheckpoint:
-		if request.RequestID != "" || request.Label != "" {
-			return WorkspaceCommandResult{}, ErrWorkspaceCommand
-		}
 		actor, err := ServerOwnedActor(ctx)
 		if err != nil {
 			return WorkspaceCommandResult{}, err
@@ -175,9 +174,6 @@ func (s *Server) executeWorkspaceCommand(ctx context.Context, request WorkspaceC
 		readback := WorkspaceCheckpointReadback{CandidateDigest: result.CandidateDigest, MaterializedThroughGeneration: result.MaterializedThroughGeneration, JournalID: result.JournalID}
 		return WorkspaceCommandResult{Operation: request.Operation, Checkpoint: &readback}, nil
 	case WorkspaceOperationStash:
-		if request.PublicationReviewDigest != "" {
-			return WorkspaceCommandResult{}, ErrWorkspaceCommand
-		}
 		actor, err := ServerOwnedActor(ctx)
 		if err != nil {
 			return WorkspaceCommandResult{}, err
@@ -186,11 +182,56 @@ func (s *Server) executeWorkspaceCommand(ctx context.Context, request WorkspaceC
 		if err != nil {
 			return WorkspaceCommandResult{}, err
 		}
+		if _, err := s.projectState.Recover(ctx, binding.Scope); err != nil {
+			return WorkspaceCommandResult{}, err
+		}
 		readback := WorkspaceStashReadback{StashID: result.StashID, SourceDigest: result.SourceDigest, CandidateDigest: result.CandidateDigest, OperationCount: result.OperationCount}
 		return WorkspaceCommandResult{Operation: request.Operation, Stash: &readback}, nil
 	default:
 		return WorkspaceCommandResult{}, ErrWorkspaceCommand
 	}
+}
+
+func validateWorkspaceCommandRequest(request WorkspaceCommandRequest) error {
+	switch request.Operation {
+	case WorkspaceOperationStatus, WorkspaceOperationDiff, WorkspaceOperationImport:
+		if request.PublicationReviewDigest != "" || request.RequestID != "" || request.Label != "" {
+			return ErrWorkspaceCommand
+		}
+	case WorkspaceOperationCheckpoint:
+		if request.RequestID != "" || request.Label != "" {
+			return ErrWorkspaceCommand
+		}
+	case WorkspaceOperationStash:
+		if request.PublicationReviewDigest != "" {
+			return ErrWorkspaceCommand
+		}
+	default:
+		return ErrWorkspaceCommand
+	}
+	return nil
+}
+
+func (s *Server) executeBranchSwitchStash(ctx context.Context, binding types.WorkspaceBinding, request WorkspaceCommandRequest) (WorkspaceCommandResult, error) {
+	actor, err := ServerOwnedActor(ctx)
+	if err != nil {
+		return WorkspaceCommandResult{}, err
+	}
+	result, err := s.projectState.Stash(ctx, projectstate.StashRequest{
+		Scope: binding.Scope, RequestID: request.RequestID, Actor: actor, Label: request.Label,
+	})
+	if err != nil {
+		return WorkspaceCommandResult{}, err
+	}
+	refreshed, err := s.projectState.RefreshWorkspace(ctx, binding)
+	if err != nil {
+		return WorkspaceCommandResult{}, err
+	}
+	if _, err := s.projectState.Recover(ctx, refreshed.Scope); err != nil {
+		return WorkspaceCommandResult{}, err
+	}
+	readback := WorkspaceStashReadback{StashID: result.StashID, SourceDigest: result.SourceDigest, CandidateDigest: result.CandidateDigest, OperationCount: result.OperationCount}
+	return WorkspaceCommandResult{Operation: request.Operation, Stash: &readback}, nil
 }
 
 func (s *Server) PrivateWorkspaceRPC(ctx context.Context, request PrivateWorkspaceCommandRequest) (WorkspaceCommandResult, error) {

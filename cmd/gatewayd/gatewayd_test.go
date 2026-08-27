@@ -6,8 +6,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	stdsync "sync"
@@ -18,6 +20,9 @@ import (
 	"github.com/H4RL33/wormhole/internal/runtime/localapi"
 	"github.com/H4RL33/wormhole/internal/runtime/localidentity"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
+	"github.com/H4RL33/wormhole/internal/runtime/projectstate"
+	"github.com/H4RL33/wormhole/internal/types"
+	state "github.com/H4RL33/wormhole/internal/types/projectstate"
 )
 
 func TestSupervisorDependenciesConstructLocalOnlyGraph(t *testing.T) {
@@ -153,6 +158,247 @@ func TestRun_FreshSupervisorRequiresBindingContext(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("fresh Gateway did not shut down")
 	}
+}
+
+func TestRun_BlockedWorkspaceFailsBeforeSocketMutationAndReleasesOwnerLock(t *testing.T) {
+	home, err := os.MkdirTemp("", "gw-life-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	t.Setenv("HOME", home)
+	runtimeDir := filepath.Join(home, "run")
+	dataHome := filepath.Join(home, "data")
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	databasePath := filepath.Join(dataHome, "wormhole", "wormholed.db")
+	prepareBlockedGatewayWorkspace(t, databasePath)
+
+	socketPath := filepath.Join(runtimeDir, "wormhole", "wormholed.sock")
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unixListener, ok := stale.(*net.UnixListener); ok {
+		unixListener.SetUnlinkOnClose(false)
+	}
+	if err := stale.Close(); err != nil {
+		t.Fatal(err)
+	}
+	socketBefore, err := os.Lstat(socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	err = Run(ctx, "default")
+	if !errors.Is(err, projectstate.ErrBranchSwitchPending) {
+		t.Fatalf("blocked startup error = %v, want ErrBranchSwitchPending", err)
+	}
+	socketAfter, statErr := os.Lstat(socketPath)
+	if statErr != nil || !os.SameFile(socketBefore, socketAfter) {
+		t.Fatalf("blocked startup mutated socket before lifecycle acceptance: stat=%v same=%t", statErr, statErr == nil && os.SameFile(socketBefore, socketAfter))
+	}
+	owner, err := acquireDatabaseOwnerLock(databasePath)
+	if err != nil {
+		t.Fatalf("blocked startup retained database owner lock: %v", err)
+	}
+	if err := owner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(databasePath), "identities")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("blocked startup touched identity authority before project lifecycle: %v", err)
+	}
+}
+
+func TestRun_RefreshesExternalGitAdvanceBeforeMCPStatusAndDiff(t *testing.T) {
+	home, err := os.MkdirTemp("", "gw-refresh-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	t.Setenv("HOME", home)
+	runtimeDir := filepath.Join(home, "run")
+	dataHome := filepath.Join(home, "data")
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	databasePath := filepath.Join(dataHome, "wormhole", "wormholed.db")
+	root, _ := prepareRegisteredGatewayWorkspace(t, databasePath)
+	identity, err := localidentity.Open(filepath.Join(filepath.Dir(databasePath), "identities"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := identity.EnsureSelectedForSetup(context.Background(), "aaaaaaaa-0000-4000-8000-000000000005", types.ConfirmedIdentitySelection{DisplayName: "Gateway Lifecycle"}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- Run(ctx, "default") }()
+	socketPath := filepath.Join(runtimeDir, "wormhole", "wormholed.sock")
+	var connection net.Conn
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		connection, err = net.Dial("unix", socketPath)
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		cancel()
+		t.Fatalf("dial production Gateway: %v", err)
+	}
+	defer connection.Close()
+	reader := bufio.NewReader(connection)
+	mcpInitialize(t, connection, reader)
+
+	gatewayGit(t, root, "commit", "--allow-empty", "-m", "test: external advance after Gateway listen")
+	wantCommit := gatewayGitOutput(t, root, "rev-parse", "HEAD")
+	arguments := map[string]interface{}{"_wormhole_workspace": map[string]string{"working_directory": root}}
+	statusResponse := mcpCallTool(t, connection, reader, 2, "wormhole.workspace.status", arguments)
+	if statusResponse.Error != "" {
+		t.Fatalf("production status error: %s", statusResponse.Error)
+	}
+	var status localapi.WorkspaceStatusReadback
+	if err := json.Unmarshal(statusResponse.Result, &status); err != nil || status.AcceptedCommitSHA != wantCommit {
+		t.Fatalf("production status = (%+v, %v), want commit %s", status, err, wantCommit)
+	}
+	diffResponse := mcpCallTool(t, connection, reader, 3, "wormhole.workspace.diff", arguments)
+	if diffResponse.Error != "" {
+		t.Fatalf("production diff error: %s", diffResponse.Error)
+	}
+	var diff localapi.WorkspaceDiffReadback
+	if err := json.Unmarshal(diffResponse.Result, &diff); err != nil || diff.BaseDigest != diff.ViewDigest || len(diff.Changes) != 0 {
+		t.Fatalf("production diff = (%+v, %v), want clean", diff, err)
+	}
+	if err := connection.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("production Gateway shutdown: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("production Gateway did not shut down")
+	}
+}
+
+func prepareBlockedGatewayWorkspace(t *testing.T, databasePath string) string {
+	t.Helper()
+	root, binding := prepareRegisteredGatewayWorkspace(t, databasePath)
+	store, err := localstore.Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := projectstate.NewService(localstore.NewWorkspaceRepo(store.DB()), projectstate.ServiceConfig{})
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	status, err := service.Status(context.Background(), binding.Scope)
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	actor := types.ActorEnvelope{ActorKind: types.ActorHuman, HumanPrincipalID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", Assurance: types.AssuranceLocal, OccurredAt: time.Date(2026, 8, 27, 3, 0, 0, 0, time.UTC)}
+	task := *status.AcceptedSnapshot.Tasks["22222222-2222-4222-8222-222222222222"].Value
+	task.Description = "pending workspace state blocks startup on a branch switch"
+	task.UpdatedAt = actor.OccurredAt
+	if _, err := service.Apply(context.Background(), binding.Scope, state.OperationV1{
+		SchemaVersion: 1, ID: "aaaaaaaa-0000-4000-8000-000000000004", Kind: state.OperationPutRecord,
+		ExpectedViewDigest: status.CandidateDigest, Actor: actor,
+		PutRecord: &state.PutRecordV1{Record: state.RecordValueV1{Task: &task}},
+	}); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	gatewayGit(t, root, "switch", "-c", "next")
+	return root
+}
+
+func prepareRegisteredGatewayWorkspace(t *testing.T, databasePath string) (string, types.WorkspaceBinding) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(databasePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "checkout")
+	source := filepath.Join("..", "..", "internal", "types", "projectstate", "testdata", "v1", "valid", ".wormhole")
+	if err := filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(root, ".wormhole", relative)
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0o644)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gatewayGit(t, root, "init", "-b", "main")
+	gatewayGit(t, root, "config", "user.name", "Gateway Lifecycle Fixture")
+	gatewayGit(t, root, "config", "user.email", "fixture@example.test")
+	gatewayGit(t, root, "add", ".wormhole")
+	gatewayGit(t, root, "commit", "-m", "test: seed lifecycle fixture")
+
+	store, err := localstore.Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := projectstate.NewService(localstore.NewWorkspaceRepo(store.DB()), projectstate.ServiceConfig{})
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	commit := gatewayGitOutput(t, root, "rev-parse", "HEAD")
+	registered, err := service.RegisterWorkspace(context.Background(), projectstate.RegisterWorkspaceRequest{
+		Root: root, ExpectedProjectID: "00000000-0000-4000-8000-000000000001",
+		ExpectedRepository: types.RepositoryIdentity{Provider: "github", ImmutableID: "R_kgDOExample-1", CanonicalRemote: "https://github.com/acme/wormhole"},
+		ExpectedCommit:     commit,
+	})
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return root, registered.Binding
+}
+
+func gatewayGit(t *testing.T, root string, args ...string) {
+	t.Helper()
+	command := exec.Command("git", append([]string{"-C", root}, args...)...)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, output)
+	}
+}
+
+func gatewayGitOutput(t *testing.T, root string, args ...string) string {
+	t.Helper()
+	command := exec.Command("git", append([]string{"-C", root}, args...)...)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, output)
+	}
+	return strings.TrimSpace(string(output))
 }
 
 // Local MCP types (duplicated from internal/runtime/localapi for test use).

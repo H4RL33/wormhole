@@ -169,6 +169,26 @@ func (s *Service) RegisteredWorkspaces(ctx context.Context) ([]types.WorkspaceBi
 	return s.registration.registeredWorkspaces(ctx)
 }
 
+// PrepareRegisteredWorkspaces is the production lifecycle authority invoked
+// before Gateway begins serving. Stable registration order is preserved, and
+// each workspace's interrupted checkpoint/filesystem state is converged before
+// its current Git position is observed.
+func (s *Service) PrepareRegisteredWorkspaces(ctx context.Context) error {
+	bindings, err := s.RegisteredWorkspaces(ctx)
+	if err != nil {
+		return fmt.Errorf("projectstate: enumerate registered workspaces: %w", err)
+	}
+	for _, binding := range bindings {
+		if _, err := s.Recover(ctx, binding.Scope); err != nil {
+			return fmt.Errorf("projectstate: recover workspace %s/%s: %w", binding.Scope.ProjectID, binding.Scope.WorkspaceID, err)
+		}
+		if _, err := s.RefreshWorkspace(ctx, binding); err != nil {
+			return fmt.Errorf("projectstate: refresh workspace %s/%s: %w", binding.Scope.ProjectID, binding.Scope.WorkspaceID, err)
+		}
+	}
+	return nil
+}
+
 func (s *Service) ObserveGitBase(ctx context.Context, req ObserveGitBaseRequest) (ObserveGitBaseResult, error) {
 	if s == nil || s.gitBase == nil {
 		return ObserveGitBaseResult{}, localstore.ErrNotFound
