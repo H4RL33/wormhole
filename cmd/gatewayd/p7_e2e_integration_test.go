@@ -608,7 +608,7 @@ func TestP7_MultiDaemonSync(t *testing.T) {
 	}
 }
 
-func legacyTestRun_BootstrapAndConverges(t *testing.T) {
+func TestRun_BootstrapAndConverges(t *testing.T) {
 	db := e2eTestDB(t)
 	coordURL, projectID, agentID, passportID, token := e2eStartCoordServer(t, db)
 	var restartBootstrapCalls atomic.Int32
@@ -762,7 +762,7 @@ func seedEnrolledGatewayCheckpoint(t *testing.T, dbPath, fabricURL, projectID, a
 	}
 }
 
-func legacyTestRun_TwoProjectBindingsPersistWithTokenAndNamespaceIsolation(t *testing.T) {
+func TestRun_TwoProjectBindingsPersistWithTokenAndNamespaceIsolation(t *testing.T) {
 	db := e2eTestDB(t)
 	coordURL, projectA, agentA, passportA, tokenA := e2eStartCoordServer(t, db)
 	projectB := e2eMustCreateProject(t, db, "two-binding-project-b")
@@ -1345,7 +1345,7 @@ func TestTask4FabricToolPolicyRejectsDirectFollowOnsAndUnexpectedTools(t *testin
 // registry and stores against real Postgres; Gateway uses its normal SQLite
 // database and credential root. The recovery case fails the first snapshot
 // after credential commit and retries through a fresh MCP connection.
-func legacyTestP7_EnrolmentBootstrapProcess(t *testing.T) {
+func TestP7_EnrolmentBootstrapProcess(t *testing.T) {
 	db := e2eTestDB(t)
 	fixture := loadTask4ProcessFixture(t)
 	gatewayBin := task4BuildGatewayBinary(t)
