@@ -109,7 +109,7 @@ func TestSetupPrivateRPCStaysOutsideToolsOnLocalOnlyDisabledCodeGraphSupervisor(
 	}
 }
 
-func TestRun_FreshSupervisorRequiresBindingContext(t *testing.T) {
+func TestRun_FreshSupervisorTruthfulInventory(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	runDir := filepath.Join(home, "run")
@@ -143,10 +143,15 @@ func TestRun_FreshSupervisorRequiresBindingContext(t *testing.T) {
 	defer conn.Close()
 	reader := bufio.NewReader(conn)
 	mcpInitialize(t, conn, reader)
-	resp := mcpCallTool(t, conn, reader, 2, localapi.EnrolmentToolName, map[string]interface{}{})
+	removed := mcpCallTool(t, conn, reader, 2, localapi.EnrolmentToolName, map[string]interface{}{})
+	if want := "unknown tool: " + localapi.EnrolmentToolName; removed.Error != want {
+		cancel()
+		t.Fatalf("fresh Gateway removed enrolment error = %q, want %q", removed.Error, want)
+	}
+	resp := mcpCallTool(t, conn, reader, 3, "wormhole.sync.status", map[string]interface{}{})
 	if !strings.Contains(resp.Error, "invalid private request context") {
 		cancel()
-		t.Fatalf("fresh Gateway enrolment endpoint error = %q, want binding-aware fail-closed error", resp.Error)
+		t.Fatalf("fresh Gateway retained sync.status error = %q, want binding-aware fail-closed error", resp.Error)
 	}
 
 	cancel()

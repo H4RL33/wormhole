@@ -150,84 +150,6 @@ func contractProperties(schema alphaSchema) map[string]alphaSchema {
 	return properties
 }
 
-func TestAlphaContractGatewayEnrolmentIsPreCredentialAndVersioned(t *testing.T) {
-	manifest := readAlphaLocalContract(t)
-	var enrolment *alphaGatewayMCPTool
-	for i := range manifest.MCPTools.Gateway {
-		if manifest.MCPTools.Gateway[i].Name == EnrolmentToolName {
-			enrolment = &manifest.MCPTools.Gateway[i]
-			break
-		}
-	}
-	if enrolment == nil {
-		for _, actual := range gatewayMCPContract(t) {
-			if actual.Name == EnrolmentToolName {
-				encoded, _ := json.MarshalIndent(actual, "", "  ")
-				t.Fatalf("manifest is missing %s; registry contract:\n%s", EnrolmentToolName, encoded)
-			}
-		}
-		t.Fatalf("manifest and registry are missing %s", EnrolmentToolName)
-	}
-	if len(enrolment.RequiredPermissions) != 0 {
-		t.Fatalf("pre-credential enrolment permissions = %v, want none", enrolment.RequiredPermissions)
-	}
-	if len(enrolment.RequestSchemas) != 1 {
-		t.Fatalf("request schemas = %d, want 1", len(enrolment.RequestSchemas))
-	}
-	wantRequired := []string{
-		"capabilities", "credential_profile", "fabric_address", "idempotency_key", "model", "owner",
-		"project_id", "repositories", "requested_permissions", "roles", "version",
-	}
-	if !reflect.DeepEqual(enrolment.RequestSchemas[0].Schema.Required, wantRequired) {
-		t.Fatalf("required request fields = %v, want %v", enrolment.RequestSchemas[0].Schema.Required, wantRequired)
-	}
-	if enrolment.RequestSchemas[0].Schema.AdditionalProperties == nil || *enrolment.RequestSchemas[0].Schema.AdditionalProperties {
-		t.Fatal("enrolment request schema must disallow additional properties")
-	}
-	var profileSchema *alphaSchema
-	for i := range enrolment.RequestSchemas[0].Schema.Properties {
-		if enrolment.RequestSchemas[0].Schema.Properties[i].Name == "credential_profile" {
-			profileSchema = &enrolment.RequestSchemas[0].Schema.Properties[i].Schema
-		}
-	}
-	if profileSchema == nil || profileSchema.MinLength != 1 {
-		t.Fatalf("credential_profile schema = %+v, want min length 1", profileSchema)
-	}
-
-	wantContracts := map[string]struct {
-		state     string
-		retryable bool
-	}{
-		"fabric_unreachable": {"failed", true}, "invalid_project": {"failed", false},
-		"permissions_rejected": {"failed", false}, "duplicate_identity": {"failed", false},
-		"repository_mismatch": {"failed", false}, "credential_persistence_failed": {"recovery_required", true},
-		"bootstrap_failed_after_enrolment": {"recovery_required", true}, "checkpoint_persistence_failed": {"attention_required", false},
-		"credentials_persisted": {"credentials_persisted", true},
-		"success":               {"ready", false},
-	}
-	if len(enrolment.ResponseSchemas) != len(wantContracts) {
-		t.Fatalf("result variants = %d, want %d", len(enrolment.ResponseSchemas), len(wantContracts))
-	}
-	for _, response := range enrolment.ResponseSchemas {
-		want, ok := wantContracts[response.Variant]
-		if !ok {
-			t.Fatalf("unexpected result variant %q", response.Variant)
-		}
-		if response.Schema.AdditionalProperties == nil || *response.Schema.AdditionalProperties {
-			t.Fatalf("%s allows additional properties", response.Variant)
-		}
-		properties := map[string]alphaSchema{}
-		for _, property := range response.Schema.Properties {
-			properties[property.Name] = property.Schema
-		}
-		if !reflect.DeepEqual(properties["code"].Enum, []string{response.Variant}) ||
-			!reflect.DeepEqual(properties["state"].Enum, []string{want.state}) ||
-			!reflect.DeepEqual(properties["retryable"].BooleanEnum, []bool{want.retryable}) {
-			t.Fatalf("%s discriminants code=%v state=%v retryable=%v", response.Variant, properties["code"].Enum, properties["state"].Enum, properties["retryable"].BooleanEnum)
-		}
-	}
-}
-
 func gatewayMCPContract(t *testing.T) []alphaGatewayMCPTool {
 	t.Helper()
 	registry := newLocalRegistry(&Server{})
@@ -527,7 +449,7 @@ func localContractCall(t *testing.T, conn net.Conn, reader *bufio.Reader, id int
 	}
 	if method == "tools/call" {
 		params, err := json.Marshal(toolsCallParams{
-			Name:      "wormhole.task.list",
+			Name:      "wormhole.kb.list",
 			Arguments: json.RawMessage(`{"project_id":"project-1"}`),
 		})
 		if err != nil {

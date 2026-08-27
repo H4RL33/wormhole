@@ -145,16 +145,12 @@ func TestSupervisorIsolatesMultipleWorkspacesThroughOneGateway(t *testing.T) {
 			t.Fatalf("cwd %q actor = (%+v, %v), want accountable local agent for %q", want.Checkout.CanonicalPath, actor, err, profile.HumanPrincipalID)
 		}
 	}
-	syncStatus := privateDispatchResult(t, server, first, "wormhole.sync.status", nil, nil)
-	if !syncStatus.IsError || len(syncStatus.Content) != 1 || syncStatus.Content[0].Text != ErrFabricUnavailable.Error() {
-		t.Fatalf("configured sync status = %+v, want exact local-only Fabric sentinel", syncStatus)
+	syncStatus := privateDispatchSuccess(t, server, first, "wormhole.sync.status", nil, nil)
+	if syncStatus["state"] != "offline" || syncStatus["pending_writes"] != float64(0) {
+		t.Fatalf("configured sync status = %#v, want offline with zero pending Fabric writes", syncStatus)
 	}
-	if fabric.calls != 1 || fabric.binding != first {
-		t.Fatalf("configured Fabric calls=%d binding=%+v, want one exact %+v", fabric.calls, fabric.binding, first)
-	}
-	whoami := privateDispatchResult(t, server, first, "wormhole.agent.whoami", nil, nil)
-	if !whoami.IsError || len(whoami.Content) != 1 || whoami.Content[0].Text != "localapi: binding-aware provider unavailable: wormhole.agent.whoami" {
-		t.Fatalf("configured whoami = %+v, want exact fail-closed provider error", whoami)
+	if fabric.calls != 0 {
+		t.Fatalf("configured local-only sync status made %d Fabric calls, want zero", fabric.calls)
 	}
 }
 

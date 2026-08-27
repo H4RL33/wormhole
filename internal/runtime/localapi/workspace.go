@@ -316,20 +316,14 @@ func (s *Server) privateRuntimeConfigured() bool {
 	return s != nil && (s.projectState != nil || s.actorResolver != nil || s.identityStore != nil)
 }
 
-// authorizePrivateToolProvider makes the configured Stage-2 path an explicit
-// allowlist. Existing project-only providers cannot silently consume a
-// workspace-bound request.
-func authorizePrivateToolProvider(toolName string, public json.RawMessage) error {
-	switch toolName {
-	case "wormhole.sync.status", "wormhole.agent.presence", "wormhole.agent.list",
-		"wormhole.workspace.status", "wormhole.workspace.diff", "wormhole.workspace.import", "wormhole.workspace.checkpoint", "wormhole.workspace.stash",
-		"wormhole.channel.list", "wormhole.channel.create", "wormhole.channel.events", "wormhole.channel.post", "wormhole.channel.subscribe",
-		"wormhole.kb.list", "wormhole.kb.get", "wormhole.kb.write":
-		return nil
-	case "wormhole.agent.register":
-		return nil
+// authorizePrivateToolProvider is a defensive descriptor/provider consistency
+// check. The registry is the sole live inventory; this check must not maintain
+// a second name allowlist.
+func authorizePrivateToolProvider(tool localTool, _ json.RawMessage) error {
+	if tool.Handler == nil && tool.Name != "wormhole.channel.subscribe" {
+		return fmt.Errorf("%w: %s", ErrBindingAwareProviderUnavailable, tool.Name)
 	}
-	return fmt.Errorf("%w: %s", ErrBindingAwareProviderUnavailable, toolName)
+	return nil
 }
 
 // validatePrivateAgentSemantics permits agent_id only when it identifies the

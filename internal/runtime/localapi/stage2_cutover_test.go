@@ -38,6 +38,9 @@ func TestStage2FinalPublicMCPInventory(t *testing.T) {
 	}
 
 	for _, tool := range registry.List() {
+		if err := authorizePrivateToolProvider(tool, nil); err != nil {
+			t.Errorf("registered configured tool %q rejected by provider selection: %v", tool.Name, err)
+		}
 		lower := strings.ToLower(tool.Name + " " + tool.Description)
 		for _, forbidden := range []string{"code" + "_graph", "code" + "-graph", "code" + " graph"} {
 			if strings.Contains(lower, forbidden) {

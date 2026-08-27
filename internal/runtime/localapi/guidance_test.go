@@ -258,8 +258,8 @@ func assertGatewayToolGuidance(t *testing.T, registry *localRegistry) {
 	t.Helper()
 	tools := registry.List()
 	guidance := registry.Guidance()
-	if len(tools) != 27 {
-		t.Fatalf("live Gateway tool count = %d, want 27", len(tools))
+	if len(tools) != 17 {
+		t.Fatalf("live Gateway tool count = %d, want 17", len(tools))
 	}
 	if len(guidance) != len(tools) {
 		t.Fatalf("guidance count = %d, live tool count = %d", len(guidance), len(tools))
@@ -296,26 +296,20 @@ func assertGatewayToolGuidance(t *testing.T, registry *localRegistry) {
 	}
 
 	assertGuidanceMutationSet(t, byTool)
-	guidanceRecord, exists := byTool["wormhole.agent.get_guidance"]
-	if !exists || guidanceRecord.MutatesState || len(guidanceRecord.RequiredPermissions) != 0 {
-		t.Fatalf("live integration guidance record = %+v", guidanceRecord)
-	}
 }
 
 var allowedGuidanceConcepts = map[string]bool{
-	"identity": true, "tasks": true, "channels and events": true, "knowledge": true,
-	"local status and synchronisation": true, "portable workspace": true, "integration guidance": true,
-	"Git pointers": true,
+	"identity": true, "channels and events": true, "knowledge": true,
+	"local status and synchronisation": true, "portable workspace": true,
 }
 
 func assertGuidanceMutationSet(t *testing.T, byTool map[string]toolGuidance) {
 	t.Helper()
 	mutating := map[string]bool{
-		"wormhole.agent.enrol": true, "wormhole.agent.register": true, "wormhole.agent.presence": true,
+		"wormhole.agent.register": true, "wormhole.agent.presence": true,
 		"wormhole.workspace.import": true, "wormhole.workspace.checkpoint": true, "wormhole.workspace.stash": true,
-		"wormhole.task.create": true, "wormhole.task.route": true,
 		"wormhole.channel.create": true, "wormhole.channel.post": true, "wormhole.channel.subscribe": true,
-		"wormhole.kb.write": true, "wormhole.task.update_status": true, "wormhole.git.link_commit": true,
+		"wormhole.kb.write": true,
 	}
 	for toolName, record := range byTool {
 		if record.MutatesState != mutating[toolName] {

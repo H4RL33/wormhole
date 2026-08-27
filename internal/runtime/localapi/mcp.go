@@ -81,11 +81,9 @@ type localRegistry struct {
 	order []string
 }
 
-// newLocalRegistry constructs and registers the local MCP tools formerly
-// switch-based handle() dispatched by name, each wrapping the corresponding
-// existing method (s.proxyWhoAmI, s.localListTasks, etc.) with a thin
-// adapter closure. None of the wrapped methods change internally — only how
-// they're invoked changes (design doc §5 subtask 2).
+// newLocalRegistry constructs Gateway's complete live local-only MCP inventory.
+// Optional Fabric tools and retained pre-cut implementations are intentionally
+// absent: an unavailable provider is not an advertised capability.
 func newLocalRegistry(s *Server) *localRegistry {
 	r := &localRegistry{tools: map[string]localTool{}}
 	registerVariants := func(name, description string, examples map[string]localArgumentVariant, permissions []string, results map[string]any, handler localToolHandler) {
@@ -110,17 +108,7 @@ func newLocalRegistry(s *Server) *localRegistry {
 		registerVariants(name, description, singleArgument(example), permissions, results, handler)
 	}
 
-	reg("wormhole.agent.whoami", "Return the calling agent's identity, capabilities, and permissions.", whoAmIArgs{}, "", singleResult(whoAmIOutput{}), func(ctx context.Context, _ json.RawMessage) (any, error) {
-		if binding, err := ResolvedBinding(ctx); err == nil {
-			return s.proxyWhoAmIForProject(ctx, binding.Scope.ProjectID)
-		}
-		return s.proxyWhoAmI(ctx)
-	})
-	reg("wormhole.agent.get_guidance", "Read this project's approved role-applicable integration guidance and lifecycle state from Gateway's local cache without mutation.", integrationGuidanceArgs{}, "", singleResult(integrationGuidanceResult{Guidance: []integrationGuidanceItem{}}), func(ctx context.Context, args json.RawMessage) (any, error) {
-		return s.handleIntegrationGuidance(ctx, args)
-	})
-
-	reg("wormhole.sync.status", "Return this project's Gateway-to-Fabric connection state and durable pending-write count.", syncStatusArgs{}, "", singleResult(localSyncStatusResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
+	reg("wormhole.sync.status", "Report this local-only Gateway as offline with zero pending Fabric writes without contacting Fabric.", syncStatusArgs{}, "", singleResult(localSyncStatusResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localSyncStatus(ctx, args)
 	})
 	reg("wormhole.workspace.status", "Inspect the accepted base, portable candidate, and publication review for this workspace.", workspaceStatusArgs{}, "", singleResult(WorkspaceStatusReadback{}), func(ctx context.Context, args json.RawMessage) (any, error) {
@@ -179,29 +167,6 @@ func newLocalRegistry(s *Server) *localRegistry {
 		return workspaceToolResult(result)
 	})
 
-	reg(EnrolmentToolName, "Request Gateway-owned project enrolment before a Passport credential exists.", EnrolmentRequest{}, "", enrolmentResultExamples(), func(ctx context.Context, args json.RawMessage) (any, error) {
-		return s.handleEnrolmentContract(ctx, args)
-	})
-
-	reg("wormhole.task.list", "List tasks in the local task graph replica, optionally filtered by status.", listTasksArgs{}, "", singleResult(localTaskListResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
-		return s.localListTasks(ctx, args)
-	})
-
-	reg("wormhole.task.get", "Get a single task by ID from the local task graph replica.", getTaskArgs{}, "", singleResult(localTaskResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
-		return s.localGetTask(ctx, args)
-	})
-
-	reg("wormhole.task.create", "Create a task locally and enqueue it for sync to the Coordination Server.", createTaskArgs{}, "task.create", singleResult(localTaskWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
-		return s.handleTaskCreate(ctx, args)
-	})
-	reg("wormhole.task.update_status", "Transition a local task through the validated workflow and enqueue the durable update for Fabric synchronization.", taskUpdateStatusArgs{}, "task.update_status", singleResult(localTaskStatusResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
-		return s.handleTaskUpdateStatus(ctx, args)
-	})
-
-	registerVariants("wormhole.task.route", "Create a task and route it to a locally-registered agent by capability match.", singleArgument(taskRouteArgs{}), []string{"task.create", "task.assign"}, singleResult(localTaskRouteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
-		return s.handleTaskRoute(ctx, args)
-	})
-
 	reg("wormhole.channel.list", "List live channels from this workspace's composed portable project state.", channelListArgs{}, "", singleResult(localChannelListResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.localListChannels(ctx, args)
 	})
@@ -237,14 +202,6 @@ func newLocalRegistry(s *Server) *localRegistry {
 	reg("wormhole.kb.write", "Write a portable KB article into this workspace's private candidate overlay.", kbWriteArgs{}, "kb.write", singleResult(localArticleWriteResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleKBWrite(ctx, args)
 	})
-	reg("wormhole.kb.search", "Search the shared Fabric knowledge base semantically through the project-bound Gateway connection.", kbSearchArgs{}, "kb.search", singleResult(localKBSearchResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
-		return s.proxyAuthenticatedTool(ctx, "wormhole.kb.search", args)
-	})
-
-	reg("wormhole.git.link_commit", "Record a manual task-to-commit pointer locally and enqueue it for Fabric synchronization; Wormhole stores no code.", gitLinkCommitArgs{}, "git.link_commit", singleResult(localGitLinkResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
-		return s.handleGitLinkCommit(ctx, args)
-	})
-
 	registerVariants("wormhole.agent.register", "Register local agent presence and declared capabilities in the bound workspace.", singleArgument(agentLocalRegisterArgs{}), nil, singleResult(localAgentResult{}), func(ctx context.Context, args json.RawMessage) (any, error) {
 		return s.handleAgentRegister(ctx, args)
 	})
@@ -266,15 +223,6 @@ func singleArgument(example any) map[string]localArgumentVariant {
 
 func singleResult(example any) map[string]any {
 	return map[string]any{"default": example}
-}
-
-func enrolmentResultExamples() map[string]any {
-	examples := make(map[string]any, len(EnrolmentResultCodes()))
-	for _, code := range EnrolmentResultCodes() {
-		state, retryable, _ := EnrolmentResultContract(code)
-		examples[string(code)] = EnrolmentResult{Code: code, State: state, Retryable: retryable}
-	}
-	return examples
 }
 
 // List returns every registered tool in registration order.
@@ -300,9 +248,8 @@ func (r *localRegistry) Guidance() []toolGuidance {
 // Argument-example structs for tools/list schema reflection. These exist
 // purely to drive buildInputSchema/reflectStructSchema — the actual
 // handlers still read from a map[string]interface{} (unchanged internally,
-// design doc §5). project_id is deliberately NOT a field on any of these:
-// buildInputSchema injects it uniformly except for whoAmIArgs (§1).
-type whoAmIArgs struct{}
+// design doc §5). project_id is deliberately NOT a field on any of these;
+// buildInputSchema injects it uniformly.
 
 type syncStatusArgs struct{}
 
@@ -319,36 +266,8 @@ type workspaceStashArgs struct {
 	Label     string `json:"label"`
 }
 
-type listTasksArgs struct {
-	Status string `json:"status,omitempty"`
-}
-
-type getTaskArgs struct {
-	TaskID string `json:"task_id"`
-}
-
-type createTaskArgs struct {
-	Title        string `json:"title"`
-	Description  string `json:"description,omitempty"`
-	Priority     int    `json:"priority,omitempty"`
-	ParentTaskID string `json:"parent_task_id,omitempty"`
-	DueBy        string `json:"due_by,omitempty"`
-}
-
-type taskUpdateStatusArgs struct {
-	TaskID    string `json:"task_id"`
-	NewStatus string `json:"new_status" enum:"todo,wip,blocked,done"`
-	ChannelID string `json:"channel_id"`
-}
-
 type channelCreateArgs struct {
 	Name string `json:"name"`
-}
-
-type taskRouteArgs struct {
-	Capability  string `json:"capability"`
-	Title       string `json:"title,omitempty"`
-	Description string `json:"description,omitempty"`
 }
 
 type channelListArgs struct{}
@@ -376,18 +295,6 @@ type kbWriteArgs struct {
 	Frontmatter json.RawMessage `json:"frontmatter,omitempty"`
 }
 
-type kbSearchArgs struct {
-	Query string `json:"query"`
-	Limit int    `json:"limit,omitempty"`
-}
-
-type gitLinkCommitArgs struct {
-	TaskID    string `json:"task_id"`
-	Repo      string `json:"repo"`
-	CommitSHA string `json:"commit_sha"`
-	Summary   string `json:"summary"`
-}
-
 // agentLocalRegisterArgs is the local scheduler-presence registration shape.
 // Capabilities are optional because handleAgentRegister accepts an omitted
 // list and registers the agent with no declared capabilities.
@@ -407,68 +314,6 @@ type agentListArgs struct{}
 // localRegistry. Handlers predate the descriptor registry and return equivalent
 // maps; keeping the examples beside the registrations avoids a second
 // hand-maintained tool inventory while preserving those handler APIs.
-type localTaskResult struct {
-	ID           string     `json:"id"`
-	Title        string     `json:"title"`
-	Description  string     `json:"description"`
-	Status       string     `json:"status"`
-	Priority     int        `json:"priority"`
-	OwnerAgentID *string    `json:"owner_agent_id"`
-	ParentTaskID *string    `json:"parent_task_id"`
-	DueBy        *time.Time `json:"due_by"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
-}
-
-type localTaskListResult struct {
-	Tasks []localTaskResult `json:"tasks"`
-}
-
-type localTaskWriteResult struct {
-	ID           string     `json:"id"`
-	NamespaceID  string     `json:"namespace_id"`
-	Title        string     `json:"title"`
-	Description  string     `json:"description"`
-	Status       string     `json:"status"`
-	Priority     int        `json:"priority"`
-	OwnerAgentID *string    `json:"owner_agent_id"`
-	ParentTaskID *string    `json:"parent_task_id"`
-	DueBy        *time.Time `json:"due_by"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
-}
-
-type localTaskStatusResult struct {
-	TaskID string `json:"task_id"`
-	Status string `json:"status"`
-}
-
-type localKBSearchResult struct {
-	Articles []localKBArticleSummary `json:"articles"`
-	Ranking  localKBRankingMetadata  `json:"ranking"`
-}
-
-type localKBArticleSummary struct {
-	ArticleID     string          `json:"article_id"`
-	ProjectID     string          `json:"project_id"`
-	Title         string          `json:"title"`
-	Body          string          `json:"body"`
-	Frontmatter   json.RawMessage `json:"frontmatter,omitempty"`
-	AuthorAgentID string          `json:"author_agent_id"`
-	CreatedAt     time.Time       `json:"created_at"`
-	UpdatedAt     time.Time       `json:"updated_at"`
-}
-
-type localKBRankingMetadata struct {
-	SemanticApplied bool   `json:"semantic_applied"`
-	GenerationID    string `json:"generation_id,omitempty"`
-	Provider        string `json:"provider,omitempty"`
-	Model           string `json:"model,omitempty"`
-	Version         string `json:"version,omitempty"`
-	Dimension       int    `json:"dimension,omitempty"`
-	DistanceMetric  string `json:"distance_metric,omitempty"`
-}
-
 type localGitLinkResult struct {
 	GitLinkID string    `json:"git_link_id"`
 	ProjectID string    `json:"project_id"`
@@ -477,17 +322,6 @@ type localGitLinkResult struct {
 	CommitSHA string    `json:"commit_sha"`
 	Summary   string    `json:"summary"`
 	CreatedAt time.Time `json:"created_at"`
-}
-
-type localTaskRouteResult struct {
-	TaskID      string `json:"task_id"`
-	NamespaceID string `json:"namespace_id"`
-	Capability  string `json:"capability"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Status      string `json:"status"`
-	AssignedTo  string `json:"assigned_to"`
-	AgentStatus string `json:"agent_status"`
 }
 
 type localChannelResult struct {
@@ -684,12 +518,8 @@ func (s *Server) handleVisibleToolsList(reg *localRegistry) any {
 	if !s.recoveryOnlyInventory.Load() {
 		return handleToolsList(reg)
 	}
-	entries := make([]toolListEntry, 0, 2)
-	for _, name := range []string{"wormhole.sync.status", EnrolmentToolName} {
-		tool, ok := reg.Get(name)
-		if !ok {
-			continue
-		}
+	entries := make([]toolListEntry, 0, 1)
+	if tool, ok := reg.Get("wormhole.sync.status"); ok {
 		entries = append(entries, toolListEntry{Name: tool.Name, Description: tool.Description, InputSchema: buildInputSchema(tool)})
 	}
 	return map[string]any{"tools": entries}
@@ -715,8 +545,7 @@ func buildInputSchema(t localTool) map[string]any {
 }
 
 // buildInputSchemas reflects each named argument example into an exact JSON
-// Schema object, then injects project_id as a required string property unless
-// the tool is project-agnostic (wormhole.agent.whoami — design doc §1).
+// Schema object, then injects project_id as a required string property.
 func buildInputSchemas(t localTool) map[string]map[string]any {
 	schemas := make(map[string]map[string]any, len(t.ArgumentExamples))
 	for variant, argument := range t.ArgumentExamples {
@@ -727,7 +556,7 @@ func buildInputSchemas(t localTool) map[string]map[string]any {
 			properties, required = reflectStructSchema(reflect.TypeOf(argument.Example))
 		}
 
-		if _, hasProjectID := properties["project_id"]; t.Name != "wormhole.agent.whoami" && !hasProjectID {
+		if _, hasProjectID := properties["project_id"]; !hasProjectID {
 			properties["project_id"] = map[string]any{"type": "string"}
 			required = append(required, "project_id")
 		}
@@ -737,11 +566,8 @@ func buildInputSchemas(t localTool) map[string]map[string]any {
 			"properties": properties,
 			"required":   required,
 		}
-		if t.Name == EnrolmentToolName || t.Name == "wormhole.agent.get_guidance" || t.Name == "wormhole.agent.register" || strings.HasPrefix(t.Name, "wormhole.workspace.") {
+		if t.Name == "wormhole.agent.register" || strings.HasPrefix(t.Name, "wormhole.workspace.") {
 			schema["additionalProperties"] = false
-		}
-		if t.Name == EnrolmentToolName {
-			properties["credential_profile"].(map[string]any)["minLength"] = 1
 		}
 		if len(argument.AnyRequired) > 0 {
 			alternatives := make([]map[string]any, 0, len(argument.AnyRequired))
@@ -999,7 +825,7 @@ func (s *Server) handleToolsCall(ctx context.Context, sess *mcpSession, conn net
 		if err := validatePrivateAgentSemantics(params.Name, publicArguments); err != nil {
 			return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
 		}
-		if err := authorizePrivateToolProvider(params.Name, publicArguments); err != nil {
+		if err := authorizePrivateToolProvider(tool, publicArguments); err != nil {
 			return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: err.Error()}}, IsError: true}, nil
 		}
 		callArguments, err = bindResolvedProjectArguments(callCtx, publicArguments)
@@ -1044,7 +870,7 @@ func (s *Server) handleToolsCall(ctx context.Context, sess *mcpSession, conn net
 }
 
 func (s *Server) authorizeRecoverySurface(toolName string, args json.RawMessage) error {
-	if toolName == EnrolmentToolName || toolName == "wormhole.sync.status" {
+	if toolName == "wormhole.sync.status" {
 		return nil
 	}
 	var input struct {
@@ -1053,7 +879,7 @@ func (s *Server) authorizeRecoverySurface(toolName string, args json.RawMessage)
 	_ = json.Unmarshal(args, &input)
 	_, projectRecoveryOnly := s.recoveryOnlyProjects.Load(input.ProjectID)
 	if s.recoveryOnlyInventory.Load() || projectRecoveryOnly {
-		return errors.New("localapi: project recovery required: only wormhole.agent.enrol and wormhole.sync.status are available")
+		return errors.New("localapi: project recovery required: only wormhole.sync.status is available")
 	}
 	return nil
 }

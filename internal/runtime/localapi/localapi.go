@@ -579,14 +579,10 @@ func (s *Server) cachedWhoAmIForCredential(ctx context.Context, projectID string
 
 func (s *Server) localSyncStatus(ctx context.Context, args json.RawMessage) (syncpkg.Status, error) {
 	if s.privateRuntimeConfigured() {
-		binding, err := ResolvedBinding(ctx)
-		if err != nil {
+		if _, err := ResolvedBinding(ctx); err != nil {
 			return syncpkg.Status{}, err
 		}
-		if s.fabricRouter == nil {
-			return syncpkg.Status{}, ErrFabricUnavailable
-		}
-		return s.fabricRouter.Status(ctx, binding)
+		return syncpkg.Status{State: syncpkg.StateOffline, PendingWrites: 0}, nil
 	}
 	var input struct {
 		ProjectID string `json:"project_id"`

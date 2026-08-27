@@ -334,8 +334,7 @@ func TestMCP_ToolsListBeforeInitializeRejected(t *testing.T) {
 }
 
 // TestMCP_ToolsList_AllToolsWithSchemas proves tools/list dynamically
-// enumerates all tools with project_id required in every schema except
-// wormhole.agent.whoami (design doc §1).
+// enumerates all tools with project_id required in every schema.
 func TestMCP_ToolsList_AllToolsWithSchemas(t *testing.T) {
 	_, socketPath := newMCPTestServer(t)
 
@@ -698,6 +697,9 @@ func TestLocalRegistryDescribesPresenceRegistration(t *testing.T) {
 	}
 	if got := sortedKeys(register.ArgumentExamples); !reflect.DeepEqual(got, []string{"default"}) {
 		t.Fatalf("agent.register argument variants = %v, want [default]", got)
+	}
+	if got := sortedKeys(register.ResultExamples); !reflect.DeepEqual(got, []string{"default"}) {
+		t.Fatalf("agent.register result variants = %v, want [default]", got)
 	}
 	if description := strings.ToLower(register.Description); strings.Contains(description, "join") || strings.Contains(description, "passport") {
 		t.Fatalf("agent.register description retains removed control-plane behavior: %q", register.Description)

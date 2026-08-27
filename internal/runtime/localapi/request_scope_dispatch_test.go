@@ -287,59 +287,16 @@ func TestConfiguredWhoAmIFailsClosedWithoutTransportOrCredentialAttribution(t *t
 		t.Fatal(err)
 	}
 
-	result := privateDispatchResult(t, server, binding, "wormhole.agent.whoami", nil, nil)
-	if !result.IsError || !strings.Contains(result.Content[0].Text, "binding-aware provider unavailable") {
-		t.Errorf("configured whoami = %+v, want binding-aware provider unavailable", result)
+	params, err := json.Marshal(toolsCallParams{Name: "wormhole.agent.whoami", Arguments: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, rpcErr := server.handleToolsCall(context.Background(), &mcpSession{}, nil, server.registry, params)
+	if rpcErr == nil || rpcErr.Code != rpcInvalidParams || rpcErr.Message != "unknown tool: wormhole.agent.whoami" {
+		t.Errorf("configured whoami error = %+v, want unknown tool", rpcErr)
 	}
 	if transport.calls != 0 {
 		t.Errorf("configured whoami made %d transport calls, want zero", transport.calls)
-	}
-	if strings.Contains(result.Content[0].Text, "resolved-agent") || strings.Contains(result.Content[0].Text, actorID) {
-		t.Errorf("configured whoami attributed an identity through incompatible contract: %+v", result)
-	}
-}
-
-func TestConfiguredPrivateRuntimeFailsEveryUnscopedRealHandlerClosedRegistryWide(t *testing.T) {
-	first, second := privateDispatchSiblingBindings(t)
-	server := privateDispatchTestServer(t, privateRoutingTestActor("00000000-0000-4000-8000-000000000021"), first, second)
-	allowed := map[string]bool{
-		"wormhole.sync.status":      true,
-		"wormhole.workspace.status": true, "wormhole.workspace.diff": true, "wormhole.workspace.import": true, "wormhole.workspace.checkpoint": true, "wormhole.workspace.stash": true,
-		"wormhole.agent.register": true, "wormhole.agent.presence": true, "wormhole.agent.list": true,
-		"wormhole.channel.list": true, "wormhole.channel.create": true, "wormhole.channel.events": true, "wormhole.channel.post": true, "wormhole.channel.subscribe": true,
-		"wormhole.kb.list": true, "wormhole.kb.get": true, "wormhole.kb.write": true,
-	}
-	for _, tool := range server.registry.List() {
-		if allowed[tool.Name] {
-			continue
-		}
-		for _, binding := range []types.WorkspaceBinding{first, second} {
-			t.Run(tool.Name+"/"+string(binding.Scope.WorkspaceID), func(t *testing.T) {
-				result := privateDispatchResult(t, server, binding, tool.Name, privateDispatchValidBlockedArguments(tool.Name), nil)
-				if !result.IsError || !strings.Contains(result.Content[0].Text, "binding-aware provider unavailable") {
-					t.Fatalf("configured unscoped handler result = %+v", result)
-				}
-			})
-		}
-	}
-}
-
-func privateDispatchValidBlockedArguments(name string) map[string]any {
-	switch name {
-	case "wormhole.task.get":
-		return map[string]any{"task_id": "00000000-0000-4000-8000-000000000041"}
-	case "wormhole.task.create":
-		return map[string]any{"title": "must not persist"}
-	case "wormhole.task.update_status":
-		return map[string]any{"task_id": "00000000-0000-4000-8000-000000000041", "new_status": "wip", "channel_id": "00000000-0000-4000-8000-000000000042"}
-	case "wormhole.task.route":
-		return map[string]any{"capability": "review", "title": "must not persist"}
-	case "wormhole.kb.search":
-		return map[string]any{"query": "must not escape"}
-	case "wormhole.git.link_commit":
-		return map[string]any{"task_id": "00000000-0000-4000-8000-000000000041", "repo": "acme/repo", "commit_sha": strings.Repeat("a", 40), "summary": "must not persist"}
-	default:
-		return nil
 	}
 }
 

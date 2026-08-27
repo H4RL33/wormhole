@@ -22,7 +22,6 @@ import (
 	"github.com/H4RL33/wormhole/internal/runtime/localidentity"
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/runtime/projectstate"
-	syncpkg "github.com/H4RL33/wormhole/internal/runtime/sync"
 	"github.com/H4RL33/wormhole/internal/types"
 	state "github.com/H4RL33/wormhole/internal/types/projectstate"
 	"golang.org/x/sys/unix"
@@ -35,26 +34,6 @@ const (
 	supervisorOwnerHelperStarted = "GATEWAYD_SUPERVISOR_OWNER_STARTED"
 	supervisorOwnerHelperRelease = "GATEWAYD_SUPERVISOR_OWNER_RELEASE"
 )
-
-type blockingLocalFabric struct{ started, release string }
-
-func (provider blockingLocalFabric) Status(context.Context, types.WorkspaceBinding) (syncpkg.Status, error) {
-	if err := os.WriteFile(provider.started, []byte("started"), 0o600); err != nil {
-		return syncpkg.Status{}, err
-	}
-	for {
-		if _, err := os.Stat(provider.release); err == nil {
-			return syncpkg.Status{}, localapi.ErrFabricUnavailable
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return syncpkg.Status{}, err
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
-func (blockingLocalFabric) Call(context.Context, types.WorkspaceBinding, string, json.RawMessage) (json.RawMessage, error) {
-	return nil, localapi.ErrFabricUnavailable
-}
 
 func TestProcessSupervisorOwnerHelper(t *testing.T) {
 	if os.Getenv(supervisorOwnerHelperMode) != "1" {
@@ -122,7 +101,7 @@ func TestProcessSupervisorOwnerHelper(t *testing.T) {
 	if _, err := identity.EnsureSelectedForSetup(ctx, "00000000-0000-4000-8000-000000000031", types.ConfirmedIdentitySelection{DisplayName: "Owner"}); err != nil {
 		t.Fatal(err)
 	}
-	supervisor, err := localapi.NewSupervisor(localapi.SupervisorDependencies{Store: store, ProjectState: service, Identity: identity, Fabric: blockingLocalFabric{started: os.Getenv(supervisorOwnerHelperStarted), release: os.Getenv(supervisorOwnerHelperRelease)}})
+	supervisor, err := localapi.NewSupervisor(localapi.SupervisorDependencies{Store: store, ProjectState: service, Identity: identity, Fabric: localapi.NewLocalOnlyFabricRouter()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,13 +120,35 @@ func TestProcessSupervisorOwnerHelper(t *testing.T) {
 	defer connection.Close()
 	reader := bufio.NewReader(connection)
 	mcpInitialize(t, connection, reader)
-	arguments, _ := json.Marshal(map[string]any{"project_id": projectID, "_wormhole_workspace": map[string]string{"working_directory": checkout}})
-	params, _ := json.Marshal(mcpToolsCallParams{Name: "wormhole.sync.status", Arguments: arguments})
-	request, _ := json.Marshal(mcpRpcRequest{JSONRPC: "2.0", ID: json.RawMessage("2"), Method: "tools/call", Params: params})
-	if _, err := connection.Write(append(request, '\n')); err != nil {
+	response := mcpCallTool(t, connection, reader, 2, "wormhole.sync.status", map[string]any{
+		"project_id":          projectID,
+		"_wormhole_workspace": map[string]string{"working_directory": checkout},
+	})
+	if response.Error != "" {
+		t.Fatalf("local-only sync.status: %s", response.Error)
+	}
+	var status struct {
+		State         string `json:"state"`
+		PendingWrites int    `json:"pending_writes"`
+	}
+	if err := json.Unmarshal(response.Result, &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.State != "offline" || status.PendingWrites != 0 {
+		t.Fatalf("local-only sync.status = %+v, want offline with zero pending writes", status)
+	}
+	if err := os.WriteFile(os.Getenv(supervisorOwnerHelperStarted), []byte("started"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	<-ctx.Done()
+	for {
+		if _, err := os.Stat(os.Getenv(supervisorOwnerHelperRelease)); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	if err := supervisor.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +157,7 @@ func TestProcessSupervisorOwnerHelper(t *testing.T) {
 	}
 }
 
-func TestSupervisorOwnerLockHeldUntilHandlerAndStoreQuiesce(t *testing.T) {
+func TestSupervisorOwnerLockHeldUntilLocalRuntimeQuiesces(t *testing.T) {
 	process, databasePath, release, output := startSupervisorOwnerHelper(t)
 	if err := process.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
@@ -167,7 +168,7 @@ func TestSupervisorOwnerLockHeldUntilHandlerAndStoreQuiesce(t *testing.T) {
 		_ = contender.Close()
 	}
 	if contender != nil || !errors.Is(contentionErr, errGatewayAlreadyRunning) {
-		t.Fatalf("owner lock released before handler/store quiescence: lock=%v err=%v\n%s", contender, contentionErr, output.String())
+		t.Fatalf("owner lock released before local runtime quiescence: lock=%v err=%v\n%s", contender, contentionErr, output.String())
 	}
 	if err := os.WriteFile(release, []byte("release"), 0o600); err != nil {
 		t.Fatal(err)

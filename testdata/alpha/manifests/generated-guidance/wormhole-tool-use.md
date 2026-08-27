@@ -7,41 +7,9 @@ description: Use when choosing or calling a live Wormhole Gateway tool and check
 
 Call only tools in this live Gateway inventory. Each request still requires its live schema and permissions.
 
-## Shared KB
+## Portable local context
 
-Use shared KB semantic search for organisational decisions, procedures, and discoveries before broad repository reconstruction when that context could answer the question.
-
-If the semantic provider or active index is unavailable, there is no lexical fallback; do not label degraded retrieval as semantic ranking.
-
-## `wormhole.agent.enrol`
-
-- Purpose: Enroll a Gateway project and persist its credential profile before Passport credentials exist.
-- Use when: During explicit Gateway-owned project enrollment or credential recovery.
-- Do not use when: Do not use it for normal authenticated agent registration.
-- Mutates state: true
-- Required permissions: none
-- Prerequisites: A human-approved project binding, Fabric address, and credential-profile identifier beneath the Gateway credential root.
-- Freshness implications: Enrollment performs durable local lifecycle work and may need recovery or sync after an interrupted attempt.
-- Source-access implications: This tool does not read or return repository source.
-- Recommended follow-up: Inspect sync.status and follow the returned lifecycle code before retrying.
-- Minimal request example: `{"capabilities":[],"credential_profile":"example","fabric_address":"example","idempotency_key":"example","model":"example","owner":"example","project_id":"example","repositories":[],"requested_permissions":[],"roles":[],"version":0}`
-- Live request schema: `{"additionalProperties":false,"properties":{"capabilities":{"items":{"type":"string"},"type":"array"},"credential_profile":{"minLength":1,"type":"string"},"fabric_address":{"type":"string"},"idempotency_key":{"type":"string"},"model":{"type":"string"},"owner":{"type":"string"},"project_id":{"type":"string"},"repositories":{"items":{"type":"string"},"type":"array"},"requested_permissions":{"items":{"type":"string"},"type":"array"},"roles":{"items":{"type":"string"},"type":"array"},"version":{"type":"integer"}},"required":["version","project_id","owner","model","capabilities","repositories","roles","requested_permissions","fabric_address","idempotency_key","credential_profile"],"type":"object"}`
-- Misuse warning: Do not expose credential material or reuse an attempt key for a different enrollment.
-
-## `wormhole.agent.get_guidance`
-
-- Purpose: Read the current approved, role-applicable integration guidance and its lifecycle state from Gateway's local cache.
-- Use when: At session start or before relying on managed organisational guidance for this project.
-- Do not use when: Do not use it to approve, apply, update, remove, roll back, refresh, or repair guidance.
-- Mutates state: false
-- Required permissions: none
-- Prerequisites: An explicitly bound project and a compatible approved manifest cached by Gateway.
-- Freshness implications: The result is one local cached read; offline responses retain approved content while separately reporting newer unapproved pending state.
-- Source-access implications: This tool returns approved Markdown only; it does not read repository files or expose materialisation target paths.
-- Recommended follow-up: Use applicable returned guidance, or ask a human to inspect the integration CLI when approval, compatibility, drift, or recovery needs attention.
-- Minimal request example: `{"project_id":"example"}`
-- Live request schema: `{"additionalProperties":false,"properties":{"project_id":{"format":"uuid","type":"string"}},"required":["project_id"],"type":"object"}`
-- Misuse warning: Empty guidance can mean no approved cache, revocation, or incompatibility; never infer approval or trigger a mutation from this read.
+Use kb.list and kb.get for deterministic portable KB reads; semantic Fabric search is not in this live Gateway inventory.
 
 ## `wormhole.agent.list`
 
@@ -51,12 +19,12 @@ If the semantic provider or active index is unavailable, there is no lexical fal
 - Mutates state: false
 - Required permissions: none
 - Prerequisites: A bound Gateway project.
-- Freshness implications: Results cover current local scheduler state, not necessarily remote changes.
+- Freshness implications: Results cover only the current clone-local scheduler state.
 - Source-access implications: This tool does not read or return repository source.
-- Recommended follow-up: Use task.route only after choosing a suitable local agent.
+- Recommended follow-up: Update presence when a registered agent's local availability changes.
 - Minimal request example: `{"project_id":"example"}`
 - Live request schema: `{"properties":{"project_id":{"type":"string"}},"required":["project_id"],"type":"object"}`
-- Misuse warning: Do not infer remote presence or authorization from this local list.
+- Misuse warning: Do not infer shared identity, remote presence, or authorization from this local list.
 
 ## `wormhole.agent.presence`
 
@@ -68,7 +36,7 @@ If the semantic provider or active index is unavailable, there is no lexical fal
 - Prerequisites: The agent must already be locally registered.
 - Freshness implications: Presence is Gateway-local and is not durable shared task state.
 - Source-access implications: This tool does not read or return repository source.
-- Recommended follow-up: Use agent.list or task.route after advertising a capability.
+- Recommended follow-up: Use agent.list to verify the current local scheduler view.
 - Minimal request example: `{"agent_id":"example","project_id":"example","status":"example"}`
 - Live request schema: `{"properties":{"agent_id":{"type":"string"},"project_id":{"type":"string"},"status":{"type":"string"}},"required":["agent_id","status","project_id"],"type":"object"}`
 - Misuse warning: Do not assume a local presence update grants permissions.
@@ -88,30 +56,15 @@ If the semantic provider or active index is unavailable, there is no lexical fal
 - Live request schema: `{"additionalProperties":false,"properties":{"agent_id":{"type":"string"},"capabilities":{"items":{"type":"string"},"type":"array"},"project_id":{"type":"string"}},"required":["agent_id","project_id"],"type":"object"}`
 - Misuse warning: Do not infer shared identity creation or new permissions from local presence registration.
 
-## `wormhole.agent.whoami`
-
-- Purpose: Inspect the calling identity, capabilities, and permissions.
-- Use when: At session start or before a permission-sensitive operation.
-- Do not use when: Do not use it to register an agent or change permissions.
-- Mutates state: false
-- Required permissions: none
-- Prerequisites: An authenticated Gateway session.
-- Freshness implications: Reads reflect this Gateway's local replica; check sync status when remote freshness matters.
-- Source-access implications: This tool does not read or return repository source.
-- Recommended follow-up: Use the reported permissions to select an allowed tool.
-- Minimal request example: `{}`
-- Live request schema: `{"properties":{},"required":[],"type":"object"}`
-- Misuse warning: Do not treat local identity information as a substitute for checking a specific operation's result.
-
 ## `wormhole.channel.create`
 
-- Purpose: Create a local channel and enqueue it for synchronization.
+- Purpose: Create a portable channel in this workspace's private candidate overlay.
 - Use when: When durable event routing needs a new named channel.
 - Do not use when: Do not use it for one-off messages better represented by an existing channel.
 - Mutates state: true
 - Required permissions: channel.create
-- Prerequisites: A bound project and channel.create permission.
-- Freshness implications: The channel exists locally before it becomes shared through sync.
+- Prerequisites: A Gateway-resolved workspace and channel.create permission.
+- Freshness implications: The channel is immediately visible in the composed candidate and becomes portable through checkpoint and Git acceptance.
 - Source-access implications: This tool does not read or return repository source.
 - Recommended follow-up: Post a typed event after creation.
 - Minimal request example: `{"name":"example","project_id":"example"}`
@@ -122,43 +75,43 @@ If the semantic provider or active index is unavailable, there is no lexical fal
 
 - Purpose: List recent durable events from local channels.
 - Use when: When reconstructing recent local collaboration context.
-- Do not use when: Do not use it as a live subscription or a guarantee of complete remote history.
+- Do not use when: Do not use it as a live subscription or a portable audit history.
 - Mutates state: false
 - Required permissions: none
-- Prerequisites: A bound project.
-- Freshness implications: Reads reflect this Gateway's local replica; check sync status when remote freshness matters.
+- Prerequisites: A Gateway-resolved workspace.
+- Freshness implications: Reads clone-private operational activity for the resolved workspace only.
 - Source-access implications: This tool does not read or return repository source.
-- Recommended follow-up: Subscribe for subsequent events or inspect a referenced task or KB article.
+- Recommended follow-up: Use channel.subscribe for subsequent local events or inspect a referenced KB article.
 - Minimal request example: `{"project_id":"example"}`
 - Live request schema: `{"properties":{"project_id":{"type":"string"}},"required":["project_id"],"type":"object"}`
-- Misuse warning: Do not treat the local event window as an audit-complete remote log.
+- Misuse warning: Operational events do not enter checkpointed portable state or another clone.
 
 ## `wormhole.channel.list`
 
-- Purpose: List channels in the local event-bus replica.
+- Purpose: List channels from this workspace's composed portable project state.
 - Use when: When choosing an existing durable channel for a typed event.
 - Do not use when: Do not use it to inspect event history.
 - Mutates state: false
 - Required permissions: none
-- Prerequisites: A bound project.
-- Freshness implications: Reads reflect this Gateway's local replica; check sync status when remote freshness matters.
+- Prerequisites: A Gateway-resolved workspace.
+- Freshness implications: Includes accepted tracked state plus the current private candidate overlay.
 - Source-access implications: This tool does not read or return repository source.
 - Recommended follow-up: Read channel.events or create a missing channel.
 - Minimal request example: `{"project_id":"example"}`
 - Live request schema: `{"properties":{"project_id":{"type":"string"}},"required":["project_id"],"type":"object"}`
-- Misuse warning: Do not infer that a locally absent channel is absent from Fabric while offline.
+- Misuse warning: A candidate channel is not accepted Git state until checkpoint and ordinary Git acceptance.
 
 ## `wormhole.channel.post`
 
-- Purpose: Publish a durable typed event locally and enqueue it for synchronization.
+- Purpose: Publish clone-private operational activity after validating its portable channel.
 - Use when: When recording a handoff, discovery, decision, or progress update.
 - Do not use when: Do not use it for sensitive credentials or unstructured chatter.
 - Mutates state: true
 - Required permissions: channel.post
-- Prerequisites: A bound project, a channel ID, and channel.post permission.
-- Freshness implications: The event is durable locally first; remote delivery follows synchronization.
+- Prerequisites: A Gateway-resolved workspace, a live portable channel ID, and channel.post permission.
+- Freshness implications: The event is durable in this clone's private operational store and is not queued for Fabric.
 - Source-access implications: This tool does not read or return repository source.
-- Recommended follow-up: Link the event to the relevant task or KB article in its payload or note.
+- Recommended follow-up: Use channel.events to confirm the local activity or reference a relevant KB article.
 - Minimal request example: `{"channel_id":"example","event_type":"example","project_id":"example"}`
 - Live request schema: `{"properties":{"channel_id":{"type":"string"},"event_type":{"type":"string"},"note":{"type":"string"},"payload":{},"project_id":{"type":"string"}},"required":["channel_id","event_type","project_id"],"type":"object"}`
 - Misuse warning: Do not put secrets, source copies, or unsupported event types in the payload.
@@ -171,27 +124,12 @@ If the semantic provider or active index is unavailable, there is no lexical fal
 - Mutates state: true
 - Required permissions: none
 - Prerequisites: An initialized MCP connection and a bound project.
-- Freshness implications: Notifications reflect future local delivery and can be delayed by synchronization.
+- Freshness implications: Notifications reflect future clone-local delivery only and are not replayed after reconnect.
 - Source-access implications: This tool does not read or return repository source.
 - Recommended follow-up: Keep the connection open and use channel.events for prior context.
 - Minimal request example: `{"project_id":"example"}`
 - Live request schema: `{"properties":{"project_id":{"type":"string"}},"required":["project_id"],"type":"object"}`
 - Misuse warning: Do not assume a subscription survives reconnects or provides a complete audit stream.
-
-## `wormhole.git.link_commit`
-
-- Purpose: Record a metadata-only task-to-commit pointer locally and enqueue it for synchronization.
-- Use when: When a verified commit materially advances or completes a tracked task and reviewers need the exact Git reference.
-- Do not use when: Do not use it before the commit exists, for a pull-request review request, or to copy source into Wormhole.
-- Mutates state: true
-- Required permissions: git.link_commit
-- Prerequisites: A bound project, existing task, repository identifier, exact commit SHA, concise summary, and git.link_commit permission.
-- Freshness implications: The pointer is durable locally first and becomes visible to other Gateways after synchronization.
-- Source-access implications: This tool stores only a Git pointer and summary; it never reads, mirrors, or proves repository source.
-- Recommended follow-up: Verify the commit directly with Git, check sync.status, and include the pointer in the reviewer handoff.
-- Minimal request example: `{"commit_sha":"example","project_id":"example","repo":"example","summary":"example","task_id":"example"}`
-- Live request schema: `{"properties":{"commit_sha":{"type":"string"},"project_id":{"type":"string"},"repo":{"type":"string"},"summary":{"type":"string"},"task_id":{"type":"string"}},"required":["task_id","repo","commit_sha","summary","project_id"],"type":"object"}`
-- Misuse warning: A stored pointer is not proof that the commit is correct, reachable, reviewed, or remotely synchronized.
 
 ## `wormhole.kb.get`
 
@@ -200,8 +138,8 @@ If the semantic provider or active index is unavailable, there is no lexical fal
 - Do not use when: Do not use it to retrieve code as an authoritative source.
 - Mutates state: false
 - Required permissions: none
-- Prerequisites: A bound project; supply an article ID for a specific record.
-- Freshness implications: Reads reflect this Gateway's local replica; check sync status when remote freshness matters.
+- Prerequisites: A Gateway-resolved workspace; supply an article ID for a specific record.
+- Freshness implications: Reads the current composed portable view, including uncheckpointed candidate operations.
 - Source-access implications: This tool does not read or return repository source.
 - Recommended follow-up: Verify referenced Git pointers and update stale durable knowledge with kb.write.
 - Minimal request example: `{"project_id":"example"}`
@@ -210,138 +148,48 @@ If the semantic provider or active index is unavailable, there is no lexical fal
 
 ## `wormhole.kb.list`
 
-- Purpose: List KB articles in the local knowledge-base replica.
+- Purpose: List KB articles from this workspace's composed portable project state.
 - Use when: When locating durable organisational context by article metadata.
 - Do not use when: Do not use it when a known article ID can be fetched directly.
 - Mutates state: false
 - Required permissions: none
-- Prerequisites: A bound project.
-- Freshness implications: Reads reflect this Gateway's local replica; check sync status when remote freshness matters.
+- Prerequisites: A Gateway-resolved workspace.
+- Freshness implications: Includes accepted tracked state plus the current private candidate overlay.
 - Source-access implications: This tool does not read or return repository source.
 - Recommended follow-up: Read a selected article or write a new durable fact.
 - Minimal request example: `{"project_id":"example"}`
 - Live request schema: `{"properties":{"project_id":{"type":"string"}},"required":["project_id"],"type":"object"}`
-- Misuse warning: Do not treat this local inventory as a substitute for a remote freshness check.
-
-## `wormhole.kb.search`
-
-- Purpose: Search the shared Fabric knowledge base with generation-scoped semantic ranking.
-- Use when: When organisational decisions, procedures, or durable discoveries could answer the question before broad repository reconstruction.
-- Do not use when: Do not use it as source-code authority or silently substitute lexical/local search when semantic ranking is unavailable.
-- Mutates state: false
-- Required permissions: kb.search
-- Prerequisites: An online project-bound Fabric connection and kb.search permission.
-- Freshness implications: Results come from Fabric's active semantic generation; provider or index degradation returns a structured error with fallback=none.
-- Source-access implications: This tool does not read or return repository source.
-- Recommended follow-up: Read relevant durable context, then verify any code claim against Git and current source.
-- Minimal request example: `{"project_id":"example","query":"example"}`
-- Live request schema: `{"properties":{"limit":{"type":"integer"},"project_id":{"type":"string"},"query":{"type":"string"}},"required":["query","project_id"],"type":"object"}`
-- Misuse warning: Never reinterpret a semantic degradation error as a successful empty result or permission to fall back silently.
+- Misuse warning: This is deterministic listing, not semantic search.
 
 ## `wormhole.kb.write`
 
-- Purpose: Write a KB article locally and enqueue it for synchronization.
+- Purpose: Write a portable KB article into this workspace's private candidate overlay.
 - Use when: When preserving a durable fact, decision, discovery, or procedure.
 - Do not use when: Do not use it for transient status chatter or source-file copies.
 - Mutates state: true
 - Required permissions: kb.write
-- Prerequisites: A bound project and kb.write permission.
-- Freshness implications: The article is durable locally before synchronization makes it shared.
+- Prerequisites: A Gateway-resolved workspace, a published matching portable actor, and kb.write permission.
+- Freshness implications: The article is immediately visible in the composed candidate and becomes portable through checkpoint and Git acceptance.
 - Source-access implications: This tool does not read or return repository source.
-- Recommended follow-up: Post a typed event or link the article from the relevant task.
+- Recommended follow-up: Use kb.get to verify the article, then inspect workspace.diff before checkpointing.
 - Minimal request example: `{"project_id":"example","title":"example"}`
 - Live request schema: `{"properties":{"body":{"type":"string"},"frontmatter":{},"project_id":{"type":"string"},"title":{"type":"string"}},"required":["title","project_id"],"type":"object"}`
 - Misuse warning: Do not store credentials or present Git-derived prose as authoritative code.
 
 ## `wormhole.sync.status`
 
-- Purpose: Inspect Gateway-to-Fabric connection state and queued durable writes.
-- Use when: Before relying on a remote observer seeing recent local changes.
-- Do not use when: Do not use it as a Fabric health probe or to force synchronization.
+- Purpose: Report the truthful local-only synchronization state and pending Fabric-write count.
+- Use when: When confirming that this Stage 2 Gateway is offline and has no Fabric queue.
+- Do not use when: Do not use it as a Fabric health probe or assume it contacts a remote service.
 - Mutates state: false
 - Required permissions: none
 - Prerequisites: A bound Gateway project.
-- Freshness implications: Reports the current local queue and connection state; it does not refresh remote data.
+- Freshness implications: Always reports offline with zero pending writes in the local-only Stage 2 runtime.
 - Source-access implications: This tool does not read or return repository source.
-- Recommended follow-up: Retry or defer remote-dependent work when the state needs attention.
+- Recommended follow-up: Use workspace.status or workspace.diff to inspect local portable state.
 - Minimal request example: `{"project_id":"example"}`
 - Live request schema: `{"properties":{"project_id":{"type":"string"}},"required":["project_id"],"type":"object"}`
-- Misuse warning: Do not assume pending_writes is zero merely because a local write succeeded.
-
-## `wormhole.task.create`
-
-- Purpose: Create a local task and enqueue it for synchronization.
-- Use when: When intended work needs durable ownership-independent tracking.
-- Do not use when: Do not use it for ephemeral discussion or an already-existing task.
-- Mutates state: true
-- Required permissions: task.create
-- Prerequisites: A bound project and task.create permission.
-- Freshness implications: The write is durable locally first and becomes shared after synchronization.
-- Source-access implications: This tool does not read or return repository source.
-- Recommended follow-up: Route the new task or post a typed channel event with the resulting ID.
-- Minimal request example: `{"project_id":"example","title":"example"}`
-- Live request schema: `{"properties":{"description":{"type":"string"},"due_by":{"type":"string"},"parent_task_id":{"type":"string"},"priority":{"type":"integer"},"project_id":{"type":"string"},"title":{"type":"string"}},"required":["title","project_id"],"type":"object"}`
-- Misuse warning: Do not claim a created task is remotely visible until sync has caught up.
-
-## `wormhole.task.get`
-
-- Purpose: Get one task from the local task-graph replica.
-- Use when: When a task ID is known and its details are needed.
-- Do not use when: Do not use it to discover tasks by broad status.
-- Mutates state: false
-- Required permissions: none
-- Prerequisites: A bound project and task ID.
-- Freshness implications: Reads reflect this Gateway's local replica; check sync status when remote freshness matters.
-- Source-access implications: This tool does not read or return repository source.
-- Recommended follow-up: Use task.list for discovery or record a durable event for progress.
-- Minimal request example: `{"project_id":"example","task_id":"example"}`
-- Live request schema: `{"properties":{"project_id":{"type":"string"},"task_id":{"type":"string"}},"required":["task_id","project_id"],"type":"object"}`
-- Misuse warning: Do not assume an absent task has never existed remotely while offline.
-
-## `wormhole.task.list`
-
-- Purpose: List tasks in the local task-graph replica.
-- Use when: When orienting to available or status-filtered work.
-- Do not use when: Do not use it when a known task ID is all that is needed.
-- Mutates state: false
-- Required permissions: none
-- Prerequisites: A bound project.
-- Freshness implications: Reads reflect this Gateway's local replica; check sync status when remote freshness matters.
-- Source-access implications: This tool does not read or return repository source.
-- Recommended follow-up: Fetch a selected task or create/route an agreed item of work.
-- Minimal request example: `{"project_id":"example"}`
-- Live request schema: `{"properties":{"project_id":{"type":"string"},"status":{"type":"string"}},"required":["project_id"],"type":"object"}`
-- Misuse warning: Do not treat a local list as proof that remote task updates have already synchronized.
-
-## `wormhole.task.route`
-
-- Purpose: Create a task and route it to a capable locally registered agent.
-- Use when: When work should be created and assigned in one local scheduling action.
-- Do not use when: Do not use it when assignment must target a remote or unregistered agent.
-- Mutates state: true
-- Required permissions: task.create, task.assign
-- Prerequisites: A bound project, task.create and task.assign permissions, and a matching local agent capability.
-- Freshness implications: Routing is local; remote observers see the task only after synchronization.
-- Source-access implications: This tool does not read or return repository source.
-- Recommended follow-up: Confirm the assigned agent's local presence and post an event for material handoffs.
-- Minimal request example: `{"capability":"example","project_id":"example"}`
-- Live request schema: `{"properties":{"capability":{"type":"string"},"description":{"type":"string"},"project_id":{"type":"string"},"title":{"type":"string"}},"required":["capability","project_id"],"type":"object"}`
-- Misuse warning: Do not assume capability matching proves workload capacity or remote availability.
-
-## `wormhole.task.update_status`
-
-- Purpose: Transition a task through the validated local workflow and enqueue the status update for synchronization.
-- Use when: When meaningful work begins, blocks, resumes, or completes and the shared task state should reflect it.
-- Do not use when: Do not use it for narration, an invalid workflow jump, or without a durable status-event channel.
-- Mutates state: true
-- Required permissions: task.update_status
-- Prerequisites: A bound project, existing task and channel, and task.update_status permission.
-- Freshness implications: The validated transition and event commit locally first; Fabric and other Gateways observe them after synchronization.
-- Source-access implications: This tool does not read or return repository source.
-- Recommended follow-up: Verify task.get and sync.status, then leave concise handoff context before marking work done.
-- Minimal request example: `{"channel_id":"example","new_status":"todo","project_id":"example","task_id":"example"}`
-- Live request schema: `{"properties":{"channel_id":{"type":"string"},"new_status":{"enum":["todo","wip","blocked","done"],"type":"string"},"project_id":{"type":"string"},"task_id":{"type":"string"}},"required":["task_id","new_status","channel_id","project_id"],"type":"object"}`
-- Misuse warning: Do not report remote completion while the durable update is still pending synchronization.
+- Misuse warning: Offline is the expected local-only state, not a failed network probe.
 
 ## `wormhole.workspace.checkpoint`
 

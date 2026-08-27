@@ -257,12 +257,12 @@ func TestServer_LogsNeverContainBearerToken(t *testing.T) {
 	if _, err := reader.ReadBytes('\n'); err != nil {
 		t.Fatalf("read malformed response: %v", err)
 	}
-	mcpInitialize(t, conn, reader)
-	resp := mcpCallTool(t, conn, reader, 2, "wormhole.agent.whoami", nil)
 	_ = conn.Close()
-	if resp.Error == "" {
+	_, proxyErr := srv.proxyWhoAmI(context.Background())
+	if proxyErr == nil {
 		t.Fatal("coordination server failure unexpectedly succeeded")
 	}
+	srv.logError("retained whoami provider", proxyErr)
 	gotLogs := logs.String()
 	if gotLogs == "" {
 		t.Fatal("malformed frame and tool failure produced no diagnostic logs")
@@ -770,7 +770,7 @@ func fakeCoordServer(t *testing.T) *httptest.Server {
 	}))
 }
 
-func TestServer_ProxiesWhoAmI(t *testing.T) {
+func TestRetainedWhoAmIProviderCachesFabricResult(t *testing.T) {
 	coord := fakeCoordServer(t)
 	defer coord.Close()
 
@@ -792,13 +792,9 @@ func TestServer_ProxiesWhoAmI(t *testing.T) {
 	go srv.Serve(ctx)
 	defer srv.Close()
 
-	resp := sendRequest(t, socketPath, "wormhole.agent.whoami", nil)
-	if resp.Error != "" {
-		t.Fatalf("got error response: %s", resp.Error)
-	}
-	var out whoAmIOutput
-	if err := json.Unmarshal(resp.Result, &out); err != nil {
-		t.Fatalf("decode result: %v", err)
+	out, err := srv.proxyWhoAmI(context.Background())
+	if err != nil {
+		t.Fatalf("retained whoami provider: %v", err)
 	}
 	if out.AgentID != "agent-1" || out.Owner != "harley" {
 		t.Fatalf("got %+v", out)
@@ -960,18 +956,14 @@ func TestServer_UnknownTool(t *testing.T) {
 	go srv.Serve(ctx)
 	defer srv.Close()
 
-	// This server was constructed with qr=nil, so wormhole.task.create's
-	// handler itself errors ("sync queue not available") — still exercises
-	// the "tools/call wraps a handler error into isError:true" path this
-	// test originally proved for an unrecognized tool name.
-	resp := sendRequest(t, socketPath, "wormhole.task.create", nil)
-	if resp.Error == "" {
-		t.Fatalf("want error response, got none")
+	resp := sendRequest(t, socketPath, "wormhole.nonexistent", nil)
+	if resp.Error != "unknown tool: wormhole.nonexistent" {
+		t.Fatalf("unknown tool error = %q", resp.Error)
 	}
 }
 
-// TestServer_LocalTaskList verifies wormhole.task.list through socket.
-func TestServer_LocalTaskList(t *testing.T) {
+// TestRetainedLocalTaskListProvider verifies the pre-cut provider directly.
+func TestRetainedLocalTaskListProvider(t *testing.T) {
 	coord := fakeCoordServer(t)
 	defer coord.Close()
 	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
@@ -998,14 +990,9 @@ func TestServer_LocalTaskList(t *testing.T) {
 	go srv.Serve(ctx)
 	defer srv.Close()
 
-	resp := sendRequest(t, socketPath, "wormhole.task.list", nil)
-	if resp.Error != "" {
-		t.Fatalf("got error response: %s", resp.Error)
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(resp.Result, &result); err != nil {
-		t.Fatalf("decode result: %v", err)
+	result, err := srv.localListTasks(context.Background(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("retained task list provider: %v", err)
 	}
 	tasks, ok := result["tasks"].([]interface{})
 	if !ok {
@@ -1016,8 +1003,8 @@ func TestServer_LocalTaskList(t *testing.T) {
 	}
 }
 
-// TestServer_LocalTaskGet verifies wormhole.task.get through socket.
-func TestServer_LocalTaskGet(t *testing.T) {
+// TestRetainedLocalTaskGetProvider verifies the pre-cut provider directly.
+func TestRetainedLocalTaskGetProvider(t *testing.T) {
 	coord := fakeCoordServer(t)
 	defer coord.Close()
 	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
@@ -1045,22 +1032,17 @@ func TestServer_LocalTaskGet(t *testing.T) {
 	go srv.Serve(ctx)
 	defer srv.Close()
 
-	resp := sendRequest(t, socketPath, "wormhole.task.get", map[string]interface{}{"task_id": task.ID})
-	if resp.Error != "" {
-		t.Fatalf("got error response: %s", resp.Error)
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(resp.Result, &result); err != nil {
-		t.Fatalf("decode result: %v", err)
+	result, err := srv.localGetTask(context.Background(), json.RawMessage(`{"task_id":"`+task.ID+`"}`))
+	if err != nil {
+		t.Fatalf("retained task get provider: %v", err)
 	}
 	if result["title"] != "Test Task" {
 		t.Errorf("title = %q, want Test Task", result["title"])
 	}
 }
 
-// TestServer_LocalTaskGetMissingTaskID verifies wormhole.task.get rejects missing task_id.
-func TestServer_LocalTaskGetMissingTaskID(t *testing.T) {
+// TestRetainedLocalTaskGetProviderRejectsMissingTaskID verifies the provider boundary.
+func TestRetainedLocalTaskGetProviderRejectsMissingTaskID(t *testing.T) {
 	coord := fakeCoordServer(t)
 	defer coord.Close()
 	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
@@ -1082,9 +1064,7 @@ func TestServer_LocalTaskGetMissingTaskID(t *testing.T) {
 	go srv.Serve(ctx)
 	defer srv.Close()
 
-	// Send request with empty args (no task_id).
-	resp := sendRequest(t, socketPath, "wormhole.task.get", map[string]interface{}{})
-	if resp.Error == "" {
+	if _, err := srv.localGetTask(context.Background(), json.RawMessage(`{}`)); err == nil {
 		t.Fatalf("want error for missing task_id, got none")
 	}
 }
