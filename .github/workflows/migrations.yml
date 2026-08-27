@@ -67,6 +67,7 @@ jobs:
           catalog_snapshot > /tmp/wormhole-v20-after.txt
           cmp /tmp/wormhole-v20-before.txt /tmp/wormhole-v20-after.txt
           WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'TestMigration21DownLeavesVersion20Shape' -count=1
+          migrate -path migrations -database "$WORMHOLE_DATABASE_URL" down -all
       - name: Verify empty-database migrations
         run: |
           migrate -path migrations -database "$WORMHOLE_DATABASE_URL" up

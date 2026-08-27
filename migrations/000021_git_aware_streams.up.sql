@@ -761,6 +761,9 @@ GRANT UPDATE (detached_at) ON TABLE fabric_workspace_stream_bindings TO wormhole
 REVOKE ALL ON TABLE fabric_activity_policy_versions, fabric_activity_policy_current,
     fabric_activity_stream_sequences, fabric_activities, fabric_activity_ingress_receipts,
     fabric_activity_lifecycle FROM PUBLIC;
+REVOKE ALL ON TABLE fabric_activity_policy_versions, fabric_activity_policy_current,
+    fabric_activity_stream_sequences, fabric_activities, fabric_activity_ingress_receipts,
+    fabric_activity_lifecycle FROM wormhole_fabric_runtime, wormhole_activity_maintenance;
 GRANT SELECT ON TABLE fabric_activity_policy_versions, fabric_activity_policy_current,
     fabric_activity_stream_sequences, fabric_activities, fabric_activity_ingress_receipts,
     fabric_activity_lifecycle TO wormhole_fabric_runtime;
@@ -769,6 +772,10 @@ REVOKE ALL ON FUNCTION fabric_publish_activity_policy_v1 FROM PUBLIC;
 REVOKE ALL ON FUNCTION fabric_accept_activity_v1 FROM PUBLIC;
 REVOKE ALL ON FUNCTION fabric_transition_activity_lifecycle_v1 FROM PUBLIC;
 REVOKE ALL ON FUNCTION fabric_prune_activities_v1 FROM PUBLIC;
+REVOKE ALL ON FUNCTION fabric_publish_activity_policy_v1 FROM wormhole_fabric_runtime, wormhole_activity_maintenance;
+REVOKE ALL ON FUNCTION fabric_accept_activity_v1 FROM wormhole_fabric_runtime, wormhole_activity_maintenance;
+REVOKE ALL ON FUNCTION fabric_transition_activity_lifecycle_v1 FROM wormhole_fabric_runtime, wormhole_activity_maintenance;
+REVOKE ALL ON FUNCTION fabric_prune_activities_v1 FROM wormhole_fabric_runtime, wormhole_activity_maintenance;
 GRANT EXECUTE ON FUNCTION fabric_publish_activity_policy_v1 TO wormhole_fabric_runtime;
 GRANT EXECUTE ON FUNCTION fabric_accept_activity_v1 TO wormhole_fabric_runtime;
 GRANT EXECUTE ON FUNCTION fabric_transition_activity_lifecycle_v1 TO wormhole_fabric_runtime;

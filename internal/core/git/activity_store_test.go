@@ -152,6 +152,9 @@ func TestActivityStoreExactReplayReturnsReceiptAndChangedBytesReject(t *testing.
 	if got := countActivityRows(t, fixture, activity.ID); got != [3]int{1, 1, 0} {
 		t.Fatalf("row counts after changed replay = %v, want [1 1 0]", got)
 	}
+	if got := activityHighWatermark(t, fixture); got != 1 {
+		t.Fatalf("changed replay consumed sequence: high_watermark=%d", got)
+	}
 }
 
 func TestActivityStoreBranchAndWorkspaceIsolation(t *testing.T) {
@@ -207,6 +210,13 @@ func TestActivityStoreCurrentPolicyCASAndStaleIngressHaveZeroMutation(t *testing
 	}
 	if got := countActivityRows(t, fixture, activity.ID); got != [3]int{} {
 		t.Fatalf("stale ingress mutated rows: %v", got)
+	}
+	if got := activityHighWatermark(t, fixture); got != 0 {
+		t.Fatalf("stale ingress consumed sequence: high_watermark=%d", got)
+	}
+	var auditRows int
+	if err := fixture.store.db.QueryRow(`SELECT count(*) FROM audit_log WHERE project_id=$1`, fixture.stream.ProjectID).Scan(&auditRows); err != nil || auditRows != 0 {
+		t.Fatalf("stale ingress audit rows=%d err=%v", auditRows, err)
 	}
 }
 
@@ -280,6 +290,13 @@ func TestActivityStorePullAdvancesAcrossPrunedGapsToCapturedHighWatermark(t *tes
 	if err != nil || len(empty.Deliveries) != 1 || empty.NextSequence != 3 || empty.HasMore {
 		t.Fatalf("post-gap pull = (%+v,%v)", empty, err)
 	}
+	if _, err := fixture.store.db.Exec(`DELETE FROM fabric_activities WHERE project_id=$1`, fixture.stream.ProjectID); err != nil {
+		t.Fatal(err)
+	}
+	empty, err = fixture.store.Pull(context.Background(), PullActivityInput{Stream: fixture.stream, AttachmentRef: fixture.attachment, AfterSequence: 0, Limit: 10})
+	if err != nil || len(empty.Deliveries) != 0 || empty.NextSequence != 3 || empty.HasMore {
+		t.Fatalf("fully pruned gap pull = (%+v,%v), want empty next=3", empty, err)
+	}
 }
 
 func TestActivityStorePullRejectsInvalidCursorAndLimit(t *testing.T) {
@@ -316,6 +333,17 @@ func countActivityRows(t *testing.T, fixture activityStoreFixture, activityID st
 		}
 	}
 	return counts
+}
+
+func activityHighWatermark(t *testing.T, fixture activityStoreFixture) int64 {
+	t.Helper()
+	var highWatermark int64
+	if err := fixture.store.db.QueryRow(`SELECT high_watermark FROM fabric_activity_stream_sequences
+		WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3 AND canonical_ref=$4`,
+		fixture.stream.ProjectID, fixture.stream.FabricInstanceID, fixture.stream.StreamID, fixture.stream.CanonicalRef).Scan(&highWatermark); err != nil {
+		t.Fatalf("read Activity high watermark: %v", err)
+	}
+	return highWatermark
 }
 
 func migration21SeedWorkspaceWithAttachment(t *testing.T, db *sql.DB, projectID, instanceID, streamID, workspaceID, attachmentRef, ref string) {

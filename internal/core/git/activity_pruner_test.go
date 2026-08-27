@@ -32,6 +32,9 @@ func TestActivityPrunerAgeOrCapUsesCreatedAtThenActivityID(t *testing.T) {
 
 func TestActivityPrunerAgeAndRankAreORNotAND(t *testing.T) {
 	fixture := newActivityStoreFixture(t, "activity-pruner-or")
+	if _, err := fixture.store.db.Exec(`UPDATE fabric_streams SET current_version=77 WHERE project_id=$1`, fixture.stream.ProjectID); err != nil {
+		t.Fatal(err)
+	}
 	actor := fixture.actor
 	actor.OccurredAt = time.Now().UTC().Add(-31 * 24 * time.Hour).Truncate(time.Microsecond)
 	activity := testOrdinaryActivity(activityIDOne, actor, "old within cap")
@@ -40,6 +43,10 @@ func TestActivityPrunerAgeAndRankAreORNotAND(t *testing.T) {
 	}
 	if count, err := fixture.store.Prune(context.Background(), fixture.stream, fixture.workspace, 10); err != nil || count != 1 {
 		t.Fatalf("Prune(old within cap) = (%d,%v), want 1,nil", count, err)
+	}
+	var portableVersion int64
+	if err := fixture.store.db.QueryRow(`SELECT current_version FROM fabric_streams WHERE project_id=$1`, fixture.stream.ProjectID).Scan(&portableVersion); err != nil || portableVersion != 77 {
+		t.Fatalf("prune changed portable stream version=%d err=%v", portableVersion, err)
 	}
 }
 

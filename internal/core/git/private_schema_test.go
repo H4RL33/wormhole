@@ -173,6 +173,14 @@ func TestMigration21ActivityDirectSQLRejectsCrossProjectStreamAndWorkspaceFKs(t 
 		b, instanceID, streamID, workspaceID, "44444444-4444-4444-8444-444444444445", []byte("{}\n"), testDigest("1"), []byte("{}\n"),
 		"66666666-6666-4666-8666-666666666666", "77777777-7777-4777-8777-777777777777", []byte("{}"))
 	requireSQLState(t, err, "23503")
+	_, err = db.Exec(`INSERT INTO fabric_activities
+		(project_id,fabric_instance_id,stream_id,canonical_ref,source_workspace_id,activity_id,sequence,activity_class,
+		 canonical_activity_json,activity_digest,source_actor_json,event_channel_id,event_actor_id,event_type,
+		 event_payload_json,event_created_at,created_at)
+		VALUES ($1,$2,$3,'refs/heads/main',$4,$5,1,'ordinary',$6,$7,$8,$9,$10,'message.posted',$11,now(),now())`,
+		a, instanceID, streamID, "33333333-3333-4333-8333-333333333336", "44444444-4444-4444-8444-444444444446", []byte("{}\n"), testDigest("1"), []byte("{}\n"),
+		"66666666-6666-4666-8666-666666666666", "77777777-7777-4777-8777-777777777777", []byte("{}"))
+	requireSQLState(t, err, "23503")
 }
 
 func TestMigration21ForcesRLSForEveryProjectTable(t *testing.T) {
@@ -227,6 +235,13 @@ func TestMigration21ActivityRolesAndPrivileges(t *testing.T) {
 			t.Errorf("%s privileges runtime_select=%v runtime_insert=%v maintenance_delete=%v", table, runtimeSelect, runtimeInsert, maintenanceDelete)
 		}
 	}
+	var unexpectedOwnedTables int
+	if err := db.QueryRow(`SELECT count(*) FROM pg_class
+		WHERE relowner='wormhole_activity_owner'::regrole AND relkind IN ('r','p')
+		AND relname NOT IN ('fabric_activity_policy_versions','fabric_activity_policy_current',
+		'fabric_activity_stream_sequences','fabric_activities','fabric_activity_ingress_receipts','fabric_activity_lifecycle')`).Scan(&unexpectedOwnedTables); err != nil || unexpectedOwnedTables != 0 {
+		t.Errorf("Activity owner unexpected tables=%d err=%v", unexpectedOwnedTables, err)
+	}
 	wanted := map[string][2]bool{
 		"fabric_accept_activity_v1":               {true, false},
 		"fabric_transition_activity_lifecycle_v1": {true, false},
@@ -246,6 +261,12 @@ func TestMigration21ActivityRolesAndPrivileges(t *testing.T) {
 		if owner != "wormhole_activity_owner" || runtime != grants[0] || maintenance != grants[1] || public {
 			t.Errorf("function %s owner=%s runtime=%v maintenance=%v public=%v", name, owner, runtime, maintenance, public)
 		}
+	}
+	var unexpectedOwnedFunctions int
+	if err := db.QueryRow(`SELECT count(*) FROM pg_proc WHERE proowner='wormhole_activity_owner'::regrole
+		AND proname NOT IN ('fabric_accept_activity_v1','fabric_transition_activity_lifecycle_v1',
+		'fabric_prune_activities_v1','fabric_publish_activity_policy_v1')`).Scan(&unexpectedOwnedFunctions); err != nil || unexpectedOwnedFunctions != 0 {
+		t.Errorf("Activity owner unexpected functions=%d err=%v", unexpectedOwnedFunctions, err)
 	}
 
 	projectID := migration21CreateProject(t, db, "migration21-role-execution")
