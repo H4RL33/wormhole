@@ -9,12 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
-	codegraphquery "github.com/H4RL33/wormhole/internal/runtime/codegraph/query"
-	codegraphstore "github.com/H4RL33/wormhole/internal/runtime/codegraph/store"
 	"github.com/H4RL33/wormhole/internal/runtime/config"
-	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/runtime/scheduler"
 	syncpkg "github.com/H4RL33/wormhole/internal/runtime/sync"
 )
@@ -43,85 +39,18 @@ func TestLocalSyncStatusRejectsMalformedUnboundAndUnavailableRequests(t *testing
 	}
 }
 
-func TestLocalPermissionChecksCoverScopeCacheAndStorageBoundaries(t *testing.T) {
+func TestActiveLocalPermissionCheckCoversStorageBoundary(t *testing.T) {
 	ctx := context.Background()
 	srv, _ := newMCPTestServer(t)
 	if err := srv.authorizeLocalPermission(ctx, "", nil); err != nil {
 		t.Fatalf("empty permission: %v", err)
 	}
-	if _, err := srv.localPermissionGranted(ctx, "task.create", "other-project"); err == nil {
-		t.Fatal("localPermissionGranted accepted a mismatched single-org project")
-	}
-	if _, err := srv.localPermissionGranted(ctx, "task.create", "project-1"); err == nil {
-		t.Fatal("localPermissionGranted accepted a missing cached scope")
-	}
-	if err := srv.store.CacheWhoAmI(ctx, localstore.WhoAmICache{
-		AgentID: "agent", ProjectID: "project-1", Permissions: []string{"task.create"}, CachedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if granted, err := srv.localPermissionGranted(ctx, "task.create", "project-1"); err != nil || !granted {
-		t.Fatalf("localPermissionGranted = %t, err=%v", granted, err)
-	}
-
-	srv.isMultiOrg = true
-	if _, err := srv.localPermissionGranted(ctx, "task.create", "unbound"); err == nil {
-		t.Fatal("localPermissionGranted accepted an unbound multi-org project")
-	}
-	srv.isMultiOrg = false
-
 	unavailable, _ := newMCPTestServer(t)
 	if err := unavailable.store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := unavailable.localPermissionGranted(ctx, "task.create", "project-1"); err == nil || !strings.Contains(err.Error(), "authorize") {
-		t.Fatalf("unavailable permission store error = %v", err)
-	}
 	if err := unavailable.authorizeLocalPermission(ctx, "task.create", json.RawMessage(`{"project_id":"project-1"}`)); err == nil || !strings.Contains(err.Error(), "authorize") {
 		t.Fatalf("unavailable authorization store error = %v", err)
-	}
-}
-
-func TestCodeGraphHandlersRejectEveryPreExecutionBoundary(t *testing.T) {
-	ctx := context.Background()
-	srv, _ := newMCPTestServer(t)
-	for _, projectID := range []string{"", "project-1"} {
-		if _, err := srv.resolveCodeGraphRuntime(projectID); err == nil {
-			t.Fatalf("resolveCodeGraphRuntime(%q) succeeded without runtime", projectID)
-		}
-	}
-	if _, err := srv.handleCodeGraphQuery(ctx, json.RawMessage(`{`)); err == nil {
-		t.Fatal("code graph query accepted malformed arguments")
-	}
-	if _, err := srv.handleCodeGraphQuery(ctx, json.RawMessage(`{"project_id":"project-1","intent":"find"}`)); err == nil {
-		t.Fatal("code graph query accepted a missing runtime")
-	}
-	if _, err := srv.handleCodeGraphStatus(ctx, json.RawMessage(`{`)); err == nil {
-		t.Fatal("code graph status accepted malformed arguments")
-	}
-	if _, err := srv.handleCodeGraphStatus(ctx, json.RawMessage(`{"project_id":"project-1"}`)); err == nil {
-		t.Fatal("code graph status accepted a missing runtime")
-	}
-
-	srv.isMultiOrg = true
-	if _, err := srv.resolveCodeGraphRuntime("unbound"); err == nil {
-		t.Fatal("code graph runtime resolved an unbound multi-org project")
-	}
-	srv.isMultiOrg = false
-
-	graphServer, _, _ := newCodeGraphStatusFixture(t)
-	query := json.RawMessage(`{"project_id":"project-1","intent":"find"}`)
-	if _, err := graphServer.handleCodeGraphQuery(ctx, query); err == nil || !strings.Contains(err.Error(), "permission denied") {
-		t.Fatalf("query without cached permission error = %v", err)
-	}
-	if err := graphServer.store.CacheWhoAmI(ctx, localstore.WhoAmICache{
-		AgentID: "agent", ProjectID: "project-1", Permissions: []string{codeGraphSourcePermission}, CachedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	invalidEdge := json.RawMessage(`{"project_id":"project-1","intent":"find","include_edges":["invalid"]}`)
-	if _, err := graphServer.handleCodeGraphQuery(ctx, invalidEdge); err == nil || !strings.Contains(err.Error(), "invalid include_edges") {
-		t.Fatalf("invalid include_edges error = %v", err)
 	}
 }
 
@@ -221,28 +150,5 @@ func TestWhoAmIFetchAndFallbackCoverRequestTransportDecodeAndCacheFailures(t *te
 	}
 	if _, err := unavailable.proxyWhoAmI(ctx); err == nil || !strings.Contains(err.Error(), "read cached whoami") {
 		t.Fatalf("unavailable whoami cache error = %v", err)
-	}
-}
-
-func TestCodeGraphResultAndStatusCoverCollectionAndCorruptActiveSnapshotBranches(t *testing.T) {
-	result := queryResultForMCP(codegraphquery.Result{
-		Edges:           []codegraphquery.Edge{{ID: "edge", Relationship: codegraphstore.RelationshipCalls}},
-		StructuralPaths: []codegraphquery.StructuralPath{{FromNodeID: "from", EdgeID: "edge", ToNodeID: "to", Depth: 1}},
-	}, 0)
-	if len(result.Edges) != 1 || len(result.StructuralPaths) != 1 {
-		t.Fatalf("queryResultForMCP = %+v", result)
-	}
-
-	for _, table := range []string{"codegraph_nodes", "codegraph_revisions"} {
-		t.Run(table, func(t *testing.T) {
-			srv, runtime, _ := newCodeGraphStatusFixture(t)
-			buildCodeGraphFixture(t, runtime, "active")
-			if _, err := srv.store.DB().Exec(`DROP TABLE ` + table); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := srv.handleCodeGraphStatus(context.Background(), json.RawMessage(`{"project_id":"project-1"}`)); err == nil {
-				t.Fatalf("status ignored missing %s", table)
-			}
-		})
 	}
 }

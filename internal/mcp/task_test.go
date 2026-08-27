@@ -179,14 +179,13 @@ func TestUpdateTaskStatusTool_Handler(t *testing.T) {
 }
 
 // TestE2E_CreateAssignUpdateStatus drives the task graph's MCP boundary
-// end-to-end (RFC-0001 §8.2): register an agent, create a task, assign it,
+// end-to-end (RFC-0001 §8.2): create a task, assign it,
 // transition todo -> wip -> done, then confirm via list.
 func TestE2E_CreateAssignUpdateStatus(t *testing.T) {
 	identityStore := testIdentityStore(t)
 	tasksStore := testTasksStore(t)
 	eventsStore := testEventsStore(t)
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(identityStore, eventsStore, testRolesStore(t), testKBStore(t)))
 	registry.Register(CreateTaskTool(tasksStore))
 	registry.Register(AssignTaskTool(tasksStore))
 	registry.Register(UpdateTaskStatusTool(tasksStore))
@@ -201,18 +200,12 @@ func TestE2E_CreateAssignUpdateStatus(t *testing.T) {
 		t.Fatalf("create channel: %v", err)
 	}
 
-	registerArgs, _ := json.Marshal(RegisterAgentInput{Permissions: []string{"event.publish", "task.create", "task.assign", "task.update_status", "task.list"}, Owner: "harley", Model: "claude"})
-	registerResult := mustToolResult(t, srv, "", "wormhole.agent.register", projectID, registerArgs)
-	var registerOut RegisterAgentOutput
-	json.Unmarshal(registerResult, &registerOut)
-	if registerOut.Token == "" {
-		t.Fatalf("register output missing token: %+v", registerOut)
-	}
+	registered := mustRegisterTestAgent(t, identityStore, projectID, []string{"event.publish", "task.create", "task.assign", "task.update_status", "task.list"})
 
 	callTool := func(tool string, args any) json.RawMessage {
 		t.Helper()
 		argBytes, _ := json.Marshal(args)
-		return mustToolResult(t, srv, registerOut.Token, tool, projectID, argBytes)
+		return mustToolResult(t, srv, registered.Token, tool, projectID, argBytes)
 	}
 
 	createRaw := callTool("wormhole.task.create", CreateTaskInput{Title: "Ship it", Description: "e2e task", Priority: 1})
@@ -222,10 +215,10 @@ func TestE2E_CreateAssignUpdateStatus(t *testing.T) {
 		t.Fatalf("create output: %+v", createOut)
 	}
 
-	assignRaw := callTool("wormhole.task.assign", AssignTaskInput{TaskID: createOut.TaskID, OwnerAgentID: registerOut.AgentID})
+	assignRaw := callTool("wormhole.task.assign", AssignTaskInput{TaskID: createOut.TaskID, OwnerAgentID: registered.AgentID})
 	var assignOut AssignTaskOutput
 	json.Unmarshal(assignRaw, &assignOut)
-	if assignOut.OwnerAgentID != registerOut.AgentID {
+	if assignOut.OwnerAgentID != registered.AgentID {
 		t.Fatalf("assign output: %+v", assignOut)
 	}
 
@@ -262,10 +255,8 @@ func TestE2E_CreateAssignUpdateStatus(t *testing.T) {
 func TestListTasksTool_DefaultsToCallerRoleView(t *testing.T) {
 	identityStore := testIdentityStore(t)
 	tasksStore := testTasksStore(t)
-	eventsStore := testEventsStore(t)
 	rolesStore := testRolesStore(t)
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(identityStore, eventsStore, rolesStore, testKBStore(t)))
 	registry.Register(CreateTaskTool(tasksStore))
 	registry.Register(AssignTaskTool(tasksStore))
 	registry.Register(ListTasksTool(tasksStore, rolesStore))
@@ -274,20 +265,12 @@ func TestListTasksTool_DefaultsToCallerRoleView(t *testing.T) {
 
 	projectID := mustCreateProject(t, "list-tasks-role-view")
 
-	registerArgs, _ := json.Marshal(RegisterAgentInput{
-		Permissions: []string{"task.read", "task.write", "task.create", "task.assign", "task.list"},
-		Owner:       "harley",
-		Model:       "claude",
-		Role:        "backend-engineer",
-	})
-	registerResult := mustToolResult(t, srv, "", "wormhole.agent.register", projectID, registerArgs)
-	var registerOut RegisterAgentOutput
-	json.Unmarshal(registerResult, &registerOut)
+	registered := mustRegisterRoleTestAgent(t, identityStore, rolesStore, projectID, "backend-engineer", []string{"task.read", "task.write", "task.create", "task.assign", "task.list"})
 
 	callTool := func(tool string, args any) json.RawMessage {
 		t.Helper()
 		argBytes, _ := json.Marshal(args)
-		return mustToolResult(t, srv, registerOut.Token, tool, projectID, argBytes)
+		return mustToolResult(t, srv, registered.Token, tool, projectID, argBytes)
 	}
 
 	// Task owned by this agent, status "todo" -> included in
@@ -300,22 +283,15 @@ func TestListTasksTool_DefaultsToCallerRoleView(t *testing.T) {
 	ownRaw := callTool("wormhole.task.create", CreateTaskInput{Title: "own todo task", Priority: 1})
 	var ownOut CreateTaskOutput
 	json.Unmarshal(ownRaw, &ownOut)
-	callTool("wormhole.task.assign", AssignTaskInput{TaskID: ownOut.TaskID, OwnerAgentID: registerOut.AgentID})
+	callTool("wormhole.task.assign", AssignTaskInput{TaskID: ownOut.TaskID, OwnerAgentID: registered.AgentID})
 
 	// Second agent's task, unowned by the first agent -> excluded by
 	// "assignee": "self".
-	registerArgs2, _ := json.Marshal(RegisterAgentInput{
-		Permissions: []string{"task.read", "task.write", "task.create", "task.assign"},
-		Owner:       "harley",
-		Model:       "claude",
-	})
-	registerResult2 := mustToolResult(t, srv, "", "wormhole.agent.register", projectID, registerArgs2)
-	var registerOut2 RegisterAgentOutput
-	json.Unmarshal(registerResult2, &registerOut2)
+	registered2 := mustRegisterTestAgent(t, identityStore, projectID, []string{"task.read", "task.write", "task.create", "task.assign"})
 	otherRaw := callTool("wormhole.task.create", CreateTaskInput{Title: "other agent task", Priority: 1})
 	var otherOut CreateTaskOutput
 	json.Unmarshal(otherRaw, &otherOut)
-	callTool("wormhole.task.assign", AssignTaskInput{TaskID: otherOut.TaskID, OwnerAgentID: registerOut2.AgentID})
+	callTool("wormhole.task.assign", AssignTaskInput{TaskID: otherOut.TaskID, OwnerAgentID: registered2.AgentID})
 
 	listRaw := callTool("wormhole.task.list", ListTasksInput{})
 	var listOut ListTasksOutput
@@ -334,10 +310,8 @@ func TestListTasksTool_DefaultsToCallerRoleView(t *testing.T) {
 func TestListTasksTool_ExplicitRoleOverridesCallerRole(t *testing.T) {
 	identityStore := testIdentityStore(t)
 	tasksStore := testTasksStore(t)
-	eventsStore := testEventsStore(t)
 	rolesStore := testRolesStore(t)
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(identityStore, eventsStore, rolesStore, testKBStore(t)))
 	registry.Register(CreateTaskTool(tasksStore))
 	registry.Register(ListTasksTool(tasksStore, rolesStore))
 	srv := httptest.NewServer(NewMCPHandler(registry, identityStore))
@@ -345,20 +319,12 @@ func TestListTasksTool_ExplicitRoleOverridesCallerRole(t *testing.T) {
 
 	projectID := mustCreateProject(t, "list-tasks-explicit-role")
 
-	registerArgs, _ := json.Marshal(RegisterAgentInput{
-		Permissions: []string{"task.read", "task.write", "task.create", "task.list"},
-		Owner:       "harley",
-		Model:       "claude",
-		Role:        "backend-engineer",
-	})
-	registerResult := mustToolResult(t, srv, "", "wormhole.agent.register", projectID, registerArgs)
-	var registerOut RegisterAgentOutput
-	json.Unmarshal(registerResult, &registerOut)
+	registered := mustRegisterRoleTestAgent(t, identityStore, rolesStore, projectID, "backend-engineer", []string{"task.read", "task.write", "task.create", "task.list"})
 
 	callTool := func(tool string, args any) json.RawMessage {
 		t.Helper()
 		argBytes, _ := json.Marshal(args)
-		return mustToolResult(t, srv, registerOut.Token, tool, projectID, argBytes)
+		return mustToolResult(t, srv, registered.Token, tool, projectID, argBytes)
 	}
 
 	callTool("wormhole.task.create", CreateTaskInput{Title: "unassigned task", Priority: 1})
@@ -384,19 +350,14 @@ func TestListTasksTool_UnknownRoleRejected(t *testing.T) {
 	identityStore := testIdentityStore(t)
 	tasksStore := testTasksStore(t)
 	rolesStore := testRolesStore(t)
-	eventsStore := testEventsStore(t)
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(identityStore, eventsStore, rolesStore, testKBStore(t)))
 	registry.Register(ListTasksTool(tasksStore, rolesStore))
 	srv := httptest.NewServer(NewMCPHandler(registry, identityStore))
 	defer srv.Close()
 
 	projectID := mustCreateProject(t, "list-tasks-unknown-role")
 
-	registerArgs, _ := json.Marshal(RegisterAgentInput{Permissions: []string{"task.read", "task.list"}, Owner: "harley", Model: "claude"})
-	registerResult := mustToolResult(t, srv, "", "wormhole.agent.register", projectID, registerArgs)
-	var registerOut RegisterAgentOutput
-	json.Unmarshal(registerResult, &registerOut)
+	registered := mustRegisterTestAgent(t, identityStore, projectID, []string{"task.read", "task.list"})
 
 	// This codebase's documented tools/call convention (internal/mcp/jsonrpc.go,
 	// HandleToolsCall's doc comment) is that a tool handler's own error is
@@ -407,7 +368,7 @@ func TestListTasksTool_UnknownRoleRejected(t *testing.T) {
 	// against jsonrpc.go and toolsCallRPC's own doc comment.
 	role := "nonexistent-role"
 	argBytes, _ := json.Marshal(ListTasksInput{Role: &role})
-	status, rpcResp := toolsCallRPC(t, srv, registerOut.Token, "wormhole.task.list", projectID, argBytes)
+	status, rpcResp := toolsCallRPC(t, srv, registered.Token, "wormhole.task.list", projectID, argBytes)
 	if status != http.StatusOK {
 		t.Fatalf("wormhole.task.list with unknown role: HTTP status got %d, want 200", status)
 	}

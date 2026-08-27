@@ -1,281 +1,149 @@
 # Closed alpha validation trial
 
-This runbook is for the controlled external trial that follows Gate C. It
-prepares and operates the trial; it is not evidence that the trial happened.
-Do not create the dated result files until real participants have completed the
-procedure against the release candidate containing this tooling.
+This runbook applies the local-only Stage 2 acceptance boundary to a controlled
+external trial. It prepares a trial; it is not evidence that one happened. Do
+not create dated results until participants complete the procedure against one
+recorded release-candidate commit.
 
 ## Entry gate and roles
 
-Begin only after the Gate C automated and manual loops in
-[`docs/testing/alpha-validation.md`](../testing/alpha-validation.md) pass and a
-releasable alpha build is identified. Record its Git commit as the
-`release_candidate` in every submitted export. Do not collect trial evidence
-against an earlier build.
+Begin only after the automated and manual gates in
+[`docs/testing/alpha-validation.md`](../testing/alpha-validation.md) pass. The
+hermetic process gate must have exercised real `gatewayd` and `wormhole mcp`
+processes, the exact 17-tool Gateway surface, restart, ordinary Git acceptance,
+and a second fresh clone with fresh private state.
 
-Recruit at least three technically capable external participants who already
-use coding agents. Prefer people who use multiple models or harnesses, work in
-non-trivial repositories, or regularly reconstruct context across sessions.
-Invitations and incomplete attempts do not satisfy the cohort requirement:
-three external participants must complete the trial and one controlled
-comparison each.
+Recruit at least three external participants who use coding agents. Each must
+complete the same predeclared local workflow and comparison. Record a
+lowercase trial-local slug such as `participant-a`; never use a repository,
+project, agent, account, employer, or UUID-shaped identifier.
 
-Assign these roles:
-
-- the participant installs and operates Wormhole, decides what to submit, and
-  may withdraw at any time;
-- the operator observes the procedure, records timing and count measurements,
-  provides support, and performs redaction; and
-- a second operator reviews redaction and the Gate D report before it enters
-  the repository.
-
-Use a lowercase trial-local slug such as `participant-a`. Never use a Wormhole
-project, agent, Passport, account, repository, or employer identifier as the
-participant ID, and do not use a UUID-shaped value for either the participant
-ID or export label.
+The participant operates Wormhole and decides what to submit. One operator
+records observations and performs redaction; a second operator reviews the
+redacted Gate D evidence.
 
 ## Consent and data handling
 
-Obtain recorded consent before installation or observation. Use consent
-version `closed-alpha-v1`, explain the following in plain language, and record
-the version and timestamp:
+Obtain recorded consent using `closed-alpha-v1` before installation or
+observation. Explain that participation is voluntary, metrics are local and
+explicitly submitted, omitted values remain omitted, and withdrawal removes
+participant-level material within seven calendar days.
 
-- participation is voluntary and may stop without penalty;
-- the measurements are the fields in
-  [`docs/testing/closed-trial-metrics.md`](../testing/closed-trial-metrics.md),
-  plus environment categories, support interventions, failures, and
-  omissions;
-- the export is produced locally, is shown to the participant, and is sent
-  only after the participant explicitly submits it;
-- Wormhole does not upload trial metrics automatically and the operator must
-  not add phone-home collection;
-- private-query categorisation is off by default and requires a separate
-  affirmative consent and timestamp; declining it does not prevent
-  participation, and query text itself never enters the structured export;
-- source bodies, bearer tokens or authorization headers, unrelated repository
-  content, and cross-project identifiers are never collected;
-- the participant may skip a measurement; it remains `null` and its exact
-  whitelisted measurement name is recorded under `omissions` rather than
-  guessed; and
-- withdrawal causes the participant-level raw export and working copies to be
-  deleted within seven calendar days, followed by written confirmation.
+Wormhole must not upload trial metrics automatically. Raw exports stay in an
+access-restricted encrypted operator workspace, never Git, Gateway SQLite,
+issue trackers, chat, or support logs, and are deleted no later than 30 days
+after the Gate D decision. Before submission and repository publication remove:
 
-Generate an export only after its recorded consent events. If a participant
-withdraws, record withdrawal before deletion and generate the unlinked receipt
-only after deletion completes; the validator rejects timestamps outside that
-order. Record each environment or observation category once rather than
-duplicating a code to imply frequency.
+- source bodies, generated code, source excerpts, repository names, remotes,
+  paths, and issue text;
+- credentials, authorization headers, environment dumps, and credential paths;
+- query text and durable project, human, agent, session, Channel, KB, activity,
+  workspace, or receipt identifiers; and
+- any arbitrary observation text outside the documented schema.
 
-The participant keeps the first export in a path they choose. After explicit
-submission, store the raw export only in an access-restricted, encrypted trial
-workspace available to the named operators. Do not store raw exports in Git,
-Gateway SQLite, Fabric, issue trackers, chat, or shared support logs. Delete raw
-exports and operator working copies no later than 30 calendar days after the
-Gate D decision. The repository may retain only the reviewed, redacted result
-and report described by the implementation plan.
-
-Before submission and again before repository publication, remove:
-
-- source or generated-code bodies and source excerpts;
-- bearer credentials, authorization headers, credential paths, or environment
-  dumps;
-- all query text; separate consent permits only a query-category code;
-- repository names, remotes, file paths, issue text, and unrelated repository
-  material; and
-- Wormhole project, agent, Passport, Task, KB, Channel, Event, and other
-  durable identifiers when they are not essential to aggregate analysis.
-
-Counts and byte totals are permitted; the content counted is not. The JSON
-contains only documented environment, support, failure, omission, comparison,
-query-category, and Gate D evidence codes. It has no arbitrary observation or
-task-label fields. Run the privacy-schema validator after redaction. Treat a
-rejected export as a redaction failure, not a reason to weaken the validator.
+Counts and byte totals are permitted; the content counted is not. A separate
+affirmative consent may permit a query-category code, never query text. Validate
+the redacted export with the trial-metrics privacy schema; do not weaken the
+validator to admit a rejected export.
 
 ## Participant procedure
 
-Run each participant separately. Keep a timestamped operator worksheet outside
-the repository and preserve successful calls, permission/policy denials,
-non-denial tool failures, false leads, support, and missing measurements. Count
-each attempted tool call in exactly one of success, denial, or failure.
+Run each participant separately and keep the operator worksheet outside the
+repository. Count each attempted tool call in exactly one of success, policy
+denial, or non-denial failure.
 
-### 1. Install and enrol
+### 1. Install and set up the local runtime
 
-1. Give the participant the release-candidate build and its commit. Have them
-   follow the [README quickstart](../../README.md#quickstart) from a supported
-   Linux or WSL environment.
-2. Start `gatewayd` with the chosen trial profile, then use `wormhole connect`
-   or `wormhole join` with the minimum permissions needed by the benchmark
-   Task. Do not copy credentials into the worksheet.
-3. Record installation completion and elapsed time to the first successful
-   Gateway MCP call. Confirm the harness calls the local `wormhole mcp` bridge,
-   never Fabric directly.
-4. Ask the harness to list tools and make one read-only Gateway call. Record
-   success or denial without recording arguments that contain private text.
+1. Give the participant the release-candidate binaries and commit. Use a
+   supported Linux or WSL environment and an isolated Git repository.
+2. Run `wormhole setup --publication local_only`. Review the complete confirmed
+   plan before approval. Setup must register the workspace, select the local
+   human, import the Git base, and configure the owner-private service without
+   a test-only bypass.
+3. Install one first-party connector if needed with
+   `wormhole connector install --yes <codex|claude>`.
+4. Confirm the harness launches the real `wormhole mcp` stdio bridge and reaches
+   the Gateway Unix socket. List tools and compare them with the exact 17-tool
+   Gateway inventory in the automated validation guide.
 
-Escalate unsupported platforms, malformed enrolment, profile permission
-problems, and inability to reach the local socket. Never ask the participant to
-paste a credential file or authorization header.
+This Stage 2 trial does not exercise Fabric or PostgreSQL. It does not provision
+profiles, enrol remote identities, approve managed guidance, simulate a sync
+outage, or claim live Task, semantic search, Git-link, or guidance tools. The
+optional Fabric server's exact 20-tool registry is tested separately and is not
+a participant harness endpoint.
 
-### 2. Review and approve managed guidance
+### 2. Exercise portable records and private operations
 
-1. Run `wormhole integration preview --project <project-uuid>` and let the
-   participant inspect the complete proposed diff and expected digest.
-2. Let the participant approve, postpone, or reject. If approved, run
-   `wormhole integration apply --project <project-uuid>` interactively, or use
-   `--confirm-digest <full-digest>` only after the participant has verified it.
-3. Run `wormhole integration status --project <project-uuid>` and record only
-   the corresponding documented procedure/failure code. Do not copy repository
-   guidance bodies into trial data.
+From both CLI and MCP, check workspace status. Use the Gateway tools to register
+or observe the selected agent/session, create one portable Channel, post one
+portable KB record, and add operational Channel activity. Record only outcome
+codes and timings, not content or identifiers.
 
-Record coaching needed to understand or use the managed guidance. Operator
-coaching is evidence and must not be silently omitted.
+Restart `gatewayd` and `wormhole mcp`. The selected private identity, candidate,
+portable records, and operational activity must still be available in that
+checkout. Presence may be ephemeral; it is never portable evidence.
 
-### 3. Enable Code Graph
+### 3. Review, checkpoint, and accept through Git
 
-Code Graph is local, experimental, Go-only for alpha, and disabled by default.
-From the participant-approved checkout:
+Perform one predeclared non-sensitive mutation. If the tracked portable tree was
+edited directly, run `wormhole import`, then inspect `wormhole diff`. Run
+`wormhole checkpoint` and prove that Git HEAD, index, and remote did not change.
+The checkpoint only materialises an uncommitted `.wormhole/state/v1/`
+candidate.
 
-```bash
-wormhole config code-graph enable --project <project-uuid> --confirm
-wormhole config code-graph status --project <project-uuid>
-```
+The participant reviews and accepts with ordinary Git add/commit/push. Git is
+the sole acceptance authority; no SQLite flag, receipt, operational event, or
+Fabric response accepts portable state.
 
-Explain the local CPU, memory, disk, and I/O cost before the participant
-confirms. Record only query counts, usefulness decisions, selected-file counts,
-source-byte totals, and—after separate timestamped consent—one of the documented
-query-category codes. Query text and source bodies remain prohibited even with
-that consent.
+### 4. Verify the second clone boundary
 
-### 4. Run the benchmark Task and comparison
+Create a second fresh clone of the accepted commit with a new HOME/XDG data
+root, socket, SQLite database, setup-selected human, agent/session, and workspace
+binding. Run setup and the real stdio bridge again.
 
-Choose one representative coding Task before either arm starts. Record only
-its whitelisted task kind (`feature`, `bugfix`, `review`, `refactor`,
-`documentation`, or `other`), then freeze its
-checkout revision, permissions, success criteria, and measurement method. Use
-one of these baselines:
+The accepted portable digest, Channel, KB record, and portable actor record must
+match Git. The first clone's activity, presence, overlays, stashes, receipts,
+workspace identity, selected private identity, credentials, legacy rows, and
+sync rows must be absent. The clone must not contact Fabric.
 
-- managed guidance off, compared with the alpha configuration; or
-- Code Graph off, compared with the alpha configuration.
+### 5. Controlled comparison
 
-Use the same Task in both arms. Counterbalance arm order across participants
-when practical and record the order in the operator worksheet. Measure tool
-selection, operating-loop adherence, useful shared-state writes, human
-correction, Task quality, unnecessary tool volume, source-discovery breadth,
-and review quality. Capture successes, denials, and non-denial failures as
-separate counts so the tool-success denominator includes all attempts. Also
-capture incomplete or useless queries, false leads, and missing values. Do not
-restart or discard an arm to improve the outcome.
+Choose one representative coding task before either arm starts. Freeze its
+checkout revision, permissions, success criteria, and measurement method. Use a
+normal single-session baseline and a Stage 2 arm that uses the portable
+Channel/KB context. Do not invent Task records or managed guidance as trial
+features.
 
-During the alpha arm, observe context retrieval at session start, time from
-enrolment to productive work, KB relevance, low-value KB writes, Event noise,
-Task-state accuracy, model handoff, context reconstruction avoided, and token
-use before productive work. Use tool or harness counters where available;
-otherwise record the measurement as missing with the method limitation.
-
-### 5. Exercise interruption and recovery
-
-1. Confirm the local replica is current and record the pending-write count.
-2. Stop or isolate Fabric using the trial environment's approved outage
-   mechanism. Do not change Gateway credentials or corrupt local files.
-3. Perform the preselected local read/write step, restart `gatewayd` once while
-   offline, and record local availability and queued state.
-4. Restore Fabric, wait for normal synchronization, and verify that the pending
-   count drains without duplicate durable state.
-5. Record sync recovery, model handoff after interruption, support required,
-   every failure, and every omitted check.
-
-If the exercise risks real repository work or shared production data, stop and
-rerun in an isolated trial project. Do not improvise destructive recovery.
+Counterbalance arm order when practical. Measure context-reconstruction time,
+useful state writes, human correction, output quality, unnecessary tool volume,
+false leads, restart recovery, and missing values. Do not restart or discard an
+arm to improve the result.
 
 ### 6. Support and escalation
 
-Classify support using only `installation`, `enrolment`, `permissions`,
-`guidance`, `code_graph`, `sync_outage`, `task_workflow`, `measurement`, or
-`privacy`. Record failures and procedure omissions using the code lists in the
-metrics schema, without source, query, credential, or project content.
+Use only documented support categories: `installation`, `service`, `socket`,
+`workspace`, `publication`, `git_acceptance`, `restart`, `clone_boundary`,
+`measurement`, or `privacy`. Record unsupported platforms, setup-plan failures,
+owner-permission failures, socket failures, inventory drift, unexpected private
+state portability, and any accidental network dependency as failures. Never ask
+the participant to paste a credential or private database.
 
-Stop the affected step and escalate to the trial lead for credential exposure,
-suspected cross-project data, data-loss risk, repeated sync state, validator
-failure, or a participant withdrawal. Product defects remain failures in the
-record; do not coach around them and report the run as unassisted.
+## Withdrawal
 
-### 7. Export, review, and submission
+On withdrawal, delete the raw export, redacted draft, backups, derived rows, and
+support attachments; remove the participant from aggregates; and send written
+confirmation within seven calendar days. Retain at most an unlinked aggregate
+withdrawal count. A withdrawal is not one of the three completed participants.
 
-Populate `localapi.TrialParticipantExport` from this participant's worksheet
-with `consent.participant_submission: false`. Use
-`localapi.MarshalTrialParticipantPreview` to validate and generate the
-pre-submission preview. For an operator-runnable path, prepare the same strict
-JSON shape locally and run:
+## Gate D report
 
-```bash
-umask 077
-wormhole trial-metrics format --kind participant-preview draft.json > participant-preview.json
-wormhole trial-metrics validate --kind participant-preview participant-preview.json
-```
+After at least three qualifying completions, publish only reviewed, redacted
+aggregate evidence. Include supporting, contrary, negative, incomplete, and
+missing results for setup, exact tool discovery, portable-state usefulness,
+Git acceptance, restart, fresh-clone equivalence, privacy, learnability,
+failures, and support cost.
 
-The API and CLI perform no network I/O. The individual preview contains no
-other participants and no Gate D decision. `validate` prints only `valid` on
-success, and `format` writes no participant JSON when validation fails.
-
-The participant must inspect the entire export, confirm the consent version,
-timestamps, and flags, and
-choose whether to submit it. Submission must be an affirmative action through
-the agreed restricted channel. Silence, continued product use, or an existing
-Wormhole Passport is not trial consent. Only after that affirmative choice, set
-`consent.participant_submission: true`, then format and validate the exact file
-as a submitted export:
-
-```bash
-wormhole trial-metrics format --kind participant participant-approved.json > participant-submitted.json
-wormhole trial-metrics validate --kind participant participant-submitted.json
-```
-
-The receiving operator runs `wormhole trial-metrics validate --kind
-participant` over the exact submitted bytes, redacts them, and validates the
-redacted bytes again. After the real cohort completes, combine only the
-reviewed participant records into `localapi.TrialMetricsExport`, add the
-evidence-based Gate D choice, and run:
-
-```bash
-wormhole trial-metrics format --kind aggregate aggregate-draft.json > aggregate.json
-wormhole trial-metrics validate --kind aggregate aggregate.json
-```
-
-Do not copy raw exports into the repository. Real redacted evidence is created
-only in the later trial-evidence step.
-
-## Withdrawal and deletion
-
-On withdrawal, stop collection immediately, acknowledge the request, and:
-
-1. delete the participant's local operator worksheet, submitted export,
-   backups, derived rows, and support attachments from the operator workspace;
-2. ask the participant whether they want help deleting their local copy;
-3. remove participant-level material from any draft aggregate and recompute it;
-4. record deletion completion outside the deleted dataset and send written
-   confirmation within seven calendar days; and
-5. retain no link between the trial-local pseudonym and the person.
-
-A withdrawal cannot be counted as one of the three completed external
-participants. A retained withdrawal receipt must omit the participant ID,
-external flag, environment, metrics, comparisons, support, failures, omissions,
-and query categories. It may contain only status plus versioned collection
-consent, the unchanged participant-submission flag, and consent, withdrawal,
-and deletion timestamps. The flag may remain `false` when withdrawal occurs
-before submission. The validator rejects a linked or full withdrawal record as
-a privacy violation. Otherwise retain only an unlinked aggregate withdrawal
-count.
-
-## Gate D report checklist
-
-After at least three qualifying completions and comparisons, the redacted
-report must include supporting, contrary, negative, incomplete, and missing
-evidence. The JSON records only Gate D criterion codes; the separately reviewed
-Markdown report carries redacted analysis. Evaluate manual context relay, repeated reconstruction, cross-model
-continuation, interruption recovery, managed-guidance learnability, source
-discovery, maintenance cost, Event noise, and incorrect confidence.
-
-Record exactly one of:
+Record exactly one decision:
 
 ```text
 continue towards beta planning
@@ -284,6 +152,5 @@ repeat alpha after corrective work
 stop the current direction
 ```
 
-If evidence supports only one component, choose narrowed scope rather than
-preserving the complete platform by assumption. A continuation decision does
-not itself authorise beta planning or create a compatibility promise.
+A continuation decision does not authorise beta scope or create a compatibility
+promise.

@@ -1,40 +1,43 @@
 # Wormhole Wiki
 
-Wormhole is shared, durable organisational context for every agent, harness,
-model, and human on your team.
-
-Its mission is total interoperability: agentic harnesses and models from any
-provider should be able to work as one. Wormhole also bridges humans and agents
-while preserving human authority, and provides a foundation for innovative,
-experimental multi-agent systems.
+Wormhole's local-only Stage 2 release gives coding agents and humans one
+Git-portable project-state format with a private local runtime. The release is
+deliberately smaller than the broader architecture described by the RFCs.
 
 ## Start here
 
-- [Project README](https://github.com/H4RL33/wormhole#readme) — overview,
-  architecture, status, and quickstarts
-- [CLI Guide](CLI-Guide) — commands, profiles, paths, and connection patterns
-- [Security Model](Security-Model) — deployment boundaries and human control
+- [Project README](https://github.com/H4RL33/wormhole#readme) — current scope,
+  architecture, status, and quickstart
+- [CLI Guide](CLI-Guide) — commands, local paths, and connection pattern
+- [Security Model](Security-Model) — deployment boundary and human control
+- [Alpha validation](https://github.com/H4RL33/wormhole/blob/main/docs/testing/alpha-validation.md)
 - [Release policy](https://github.com/H4RL33/wormhole/blob/main/docs/releasing.md)
 - [Compatibility policy](https://github.com/H4RL33/wormhole/blob/main/docs/compatibility.md)
-- [Contributing](https://github.com/H4RL33/wormhole/blob/main/CONTRIBUTING.md)
-- [RFCs](https://github.com/H4RL33/wormhole/tree/main/docs/rfcs)
 
-## The system in one minute
+## The Stage 2 system in one minute
 
 ```text
-MCP harness -> wormhole mcp -> Gateway -> Fabric
-                                  |         |
-                               SQLite   PostgreSQL
+MCP harness -> wormhole mcp -> gatewayd -> private SQLite
+                                      |
+Git checkout <- reviewed checkpoint --+
 ```
 
-Every machine runs one local `gatewayd` daemon. Harnesses call the Gateway
-through `wormhole mcp`; they never call Fabric directly.
-Local writes become durable in SQLite before synchronization. Fabric supplies
-authenticated, project-scoped authority across people,
-machines, and runtimes.
+Every supported machine runs an owner-private `gatewayd`. Harnesses use the
+real `wormhole mcp` stdio bridge and its exact 17-tool Gateway inventory. The
+portable `.wormhole/state/v1/` tree carries selected project records between
+clones. A checkpoint only materialises a reviewed candidate; ordinary Git
+add/commit/push accepts and transports it. Git is the sole acceptance authority.
 
-Git remains the source of truth for code. Wormhole stores tasks, events,
-knowledge, identities, permissions, and pointers to commits and pull requests.
+Operational activity, presence, overlays, stashes, receipts, workspace
+bindings, selected human/agent/session identity, and credentials stay in
+machine-private state. They do not become portable merely because a portable
+Channel, KB record, or actor record refers to the same subject.
+
+Fabric is optional. Its PostgreSQL-backed 20-tool server surface is retained
+for separate non-Stage 2 testing; Gateway setup, normal local work, acceptance,
+restart, and clone equivalence do not require or contact it. Live Gateway tools
+do not expose Task, Git-link, semantic KB search, enrolment, or managed-guidance
+operations.
 
 ## Documentation authority
 
@@ -45,8 +48,5 @@ This Wiki is a user-facing navigation layer. Repository files are canonical:
 - [Implementation rules](https://github.com/H4RL33/wormhole/blob/main/docs/implementation-rules.md)
 - [MCP protocol](https://github.com/H4RL33/wormhole/blob/main/docs/mcp-protocol.md)
 
-When Wiki text and a repository file disagree, follow the repository.
-
-The current interface policy is `alpha-inventory`, not a beta promise. Hosted
-release-environment and branch-protection configuration must be verified through
-repository API read-back before it is described as active.
+When Wiki text and a repository file disagree, follow the repository. The
+current interface policy is `alpha-inventory`, not a beta promise.
