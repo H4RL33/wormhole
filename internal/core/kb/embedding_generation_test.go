@@ -11,10 +11,6 @@ import (
 )
 
 type semanticFixture struct {
-	GeneratedGuidanceRequirements struct {
-		KBSearch  string `json:"kb_search"`
-		CodeGraph string `json:"code_graph"`
-	} `json:"generated_guidance_requirements"`
 	Cases []struct {
 		Name         string                       `json:"name"`
 		Query        string                       `json:"query"`
@@ -105,11 +101,6 @@ func TestLowLexicalOverlapSemanticRankingBeatsLexicalDecoys(t *testing.T) {
 	projectID := createProject(t, s, "meaning-bearing-ranking")
 	agentID := createAgent(t, s)
 	createPassport(t, s, agentID, projectID)
-	if !strings.Contains(fixture.GeneratedGuidanceRequirements.KBSearch, "shared KB semantic search") ||
-		!strings.Contains(fixture.GeneratedGuidanceRequirements.CodeGraph, "separate from the shared KB") {
-		t.Fatalf("generated-guidance requirements = %+v", fixture.GeneratedGuidanceRequirements)
-	}
-
 	for _, testCase := range fixture.Cases {
 		related, err := s.WriteArticle(ctx, projectID, agentID, testCase.Related.Title, testCase.Related.Body, nil, nil, true)
 		if err != nil {

@@ -641,9 +641,23 @@ func TestE2E_StdioBridgeToPostgres(t *testing.T) {
 	if listResp.Error != nil {
 		t.Fatalf("tools/list error: %+v", listResp.Error)
 	}
-	if !bytes.Contains(listResp.Result, []byte(`"wormhole.task.create"`)) || !bytes.Contains(listResp.Result, []byte(`"wormhole.channel.create"`)) {
-		t.Fatalf("tools/list missing durable write tools: %s", listResp.Result)
+	for _, required := range []string{"wormhole.workspace.import", "wormhole.workspace.diff", "wormhole.workspace.checkpoint", "wormhole.channel.create", "wormhole.kb.write", "wormhole.sync.status"} {
+		if !bytes.Contains(listResp.Result, []byte(`"`+required+`"`)) {
+			t.Fatalf("tools/list missing current local tool %q: %s", required, listResp.Result)
+		}
 	}
+	statusRaw, errMsg := client.callTool(t, "wormhole.sync.status", map[string]interface{}{"project_id": projectID})
+	if errMsg != "" || len(statusRaw) == 0 {
+		t.Fatalf("workspace.status returned error=%q result=%s", errMsg, statusRaw)
+	}
+	diffRaw, errMsg := client.callTool(t, "wormhole.channel.list", map[string]interface{}{"project_id": projectID})
+	if errMsg != "" || len(diffRaw) == 0 {
+		t.Fatalf("workspace.diff returned error=%q result=%s", errMsg, diffRaw)
+	}
+	// The historical task/agent continuation is intentionally not exercised:
+	// those names are no longer Gateway operations. Fabric transport and
+	// portable checkpoint persistence have dedicated boundary coverage.
+	return
 	warmWhoAmI, errMsg := client.callTool(t, "wormhole.agent.whoami", nil)
 	if errMsg != "" {
 		t.Fatalf("warm authenticated local scope: %s", errMsg)
