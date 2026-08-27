@@ -95,17 +95,19 @@ func TestLocalTaskCreate_EnqueuesForSync(t *testing.T) {
 	srv, tr, _, _, qr, cleanup := newTestServerWithQueue(t)
 	defer cleanup()
 
-	resp := dialAndCall(t, srv, "wormhole.task.create", map[string]interface{}{
+	args, err := json.Marshal(map[string]interface{}{
 		"namespace_id": "ns-1",
 		"title":        "write the alpha",
 		"description":  "close the gaps",
 		"priority":     2,
 	})
-	if resp.Error != nil {
-		t.Fatalf("unexpected error: %v", resp.Error)
+	if err != nil {
+		t.Fatal(err)
 	}
-	var out map[string]interface{}
-	json.Unmarshal(resp.Result, &out)
+	out, err := srv.handleTaskCreate(context.Background(), args)
+	if err != nil {
+		t.Fatalf("retained task create provider: %v", err)
+	}
 	taskID, _ := out["id"].(string)
 	if taskID == "" {
 		t.Fatal("expected non-empty task id in response")
@@ -405,7 +407,6 @@ func TestLocalDurableWrites_RequireSameProjectActionPermission(t *testing.T) {
 		{name: "kb", tool: "wormhole.kb.write", args: map[string]interface{}{"title": "denied", "agent_id": "agent-1"}},
 		{name: "channel create", tool: "wormhole.channel.create", args: map[string]interface{}{"name": "denied-new"}},
 		{name: "event", tool: "wormhole.channel.post", args: map[string]interface{}{"channel_id": channelID, "agent_id": "agent-1", "event_type": "denied", "payload": map[string]interface{}{"x": true}}},
-		{name: "task route", tool: "wormhole.task.route", args: map[string]interface{}{"capability": "code", "title": "denied route"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			resp := dialAndCall(t, srv, tt.tool, tt.args)
@@ -542,9 +543,6 @@ type durableWriteCase struct {
 
 func durableWriteCases() []durableWriteCase {
 	return []durableWriteCase{
-		{name: "task", tool: "wormhole.task.create", table: "tasks", entityType: "task", args: func(_ *testing.T, _ *localstore.EventRepo) map[string]interface{} {
-			return map[string]interface{}{"title": "commit-failure-task"}
-		}, whereSQL: "title = ?", whereArgs: []interface{}{"commit-failure-task"}},
 		{name: "kb", tool: "wormhole.kb.write", table: "kb_articles", entityType: "kb", args: func(_ *testing.T, _ *localstore.EventRepo) map[string]interface{} {
 			return map[string]interface{}{"agent_id": "agent-1", "title": "commit-failure-kb", "body": "body"}
 		}, whereSQL: "title = ?", whereArgs: []interface{}{"commit-failure-kb"}},
@@ -600,16 +598,18 @@ func TestLocalWrites_IgnoreClientSuppliedNamespaceID(t *testing.T) {
 	const evilNS = "ns-EVIL"
 
 	t.Run("task.create", func(t *testing.T) {
-		resp := dialAndCall(t, srv, "wormhole.task.create", map[string]interface{}{
+		raw, err := json.Marshal(map[string]interface{}{
 			"namespace_id": evilNS,
 			"title":        "cross-namespace task",
 			"description":  "should land in ns-1, not ns-EVIL",
 		})
-		if resp.Error != nil {
-			t.Fatalf("unexpected error: %v", resp.Error)
+		if err != nil {
+			t.Fatal(err)
 		}
-		var out map[string]interface{}
-		json.Unmarshal(resp.Result, &out)
+		out, err := srv.handleTaskCreate(context.Background(), raw)
+		if err != nil {
+			t.Fatalf("retained task create provider: %v", err)
+		}
 		taskID, _ := out["id"].(string)
 		if taskID == "" {
 			t.Fatal("expected non-empty task id in response")

@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/H4RL33/wormhole/internal/core/events"
 	"github.com/H4RL33/wormhole/internal/core/git"
 	"github.com/H4RL33/wormhole/internal/core/identity"
@@ -133,26 +135,25 @@ func m3CallTool(t *testing.T, srvURL, tool, projectID, token string, args any) j
 	if err := json.Unmarshal(resultRaw, &result); err != nil {
 		t.Fatalf("decode %s tool call result: %v", tool, err)
 	}
-	if result.IsError {
-		t.Fatalf("%s tool error: %s", tool, result.Content[0].Text)
-	}
 	if len(result.Content) == 0 {
 		t.Fatalf("%s: empty tool result content", tool)
+	}
+	if result.IsError {
+		t.Fatalf("%s tool error: %s", tool, result.Content[0].Text)
 	}
 	return json.RawMessage(result.Content[0].Text)
 }
 
 // TestM3_MCPSeededStateReflectedInDashboard proves state written through
-// real MCP JSON-RPC tool calls (the same protocol a real Claude Code
-// session would use against /mcp) is correctly visible through the
+// real Fabric HTTP MCP JSON-RPC tool calls is correctly visible through the
 // read-only dashboard API (/dashboard/api/projects/{id}/{tasks,events,kb}).
 //
 // This closes the gap internal/webui/api_test.go's TestDashboardAPI leaves
 // open: that test seeds state by calling core store methods directly
 // (tasksStore.Create, etc.) — it never proves the MCP write path and the
 // dashboard read path agree. This test builds the exact production
-// topology (the 16 non-sync registry.Register(mcp.*Tool(...)) calls from
-// cmd/fabric/main.go, plus /mcp and /dashboard/ mounted on one
+// topology (the complete NewFabricRegistry tool surface, plus /mcp and
+// /dashboard/ mounted on one
 // mux/httptest.Server) and asserts each dashboard route reflects exactly
 // the row created through the corresponding MCP tool call, matched by id.
 func TestM3_MCPSeededStateReflectedInDashboard(t *testing.T) {
@@ -198,14 +199,16 @@ func TestM3_MCPSeededStateReflectedInDashboard(t *testing.T) {
 
 	projectID := m3MustCreateProject(t, "m3-integration-project")
 
-	// Step 1: register an agent via /mcp. No auth required for this tool.
-	registerResultRaw := m3CallTool(t, srv.URL, "wormhole.agent.register", projectID, "", mcp.RegisterAgentInput{
-		Permissions:  []string{"task.create", "event.publish", "kb.write", "channel.create", "channel.post"},
-		Owner:        "harley",
-		Model:        "claude",
-		Capabilities: []string{"code_review"},
+	// Step 1: enrol an agent through Fabric's HTTP MCP endpoint.
+	registerResultRaw := m3CallTool(t, srv.URL, "wormhole.agent.enrol", projectID, "", mcp.EnrolAgentInput{
+		IdempotencyKey: "218f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1",
+		RequestHash:    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Permissions:    []string{"task.create", "event.publish", "kb.write", "channel.create", "channel.post"},
+		Owner:          "harley",
+		Model:          "claude",
+		Capabilities:   []string{"code_review"},
 	})
-	var registerOut mcp.RegisterAgentOutput
+	var registerOut mcp.EnrolAgentOutput
 	if err := json.Unmarshal(registerResultRaw, &registerOut); err != nil {
 		t.Fatalf("decode register result: %v", err)
 	}
@@ -316,7 +319,7 @@ func TestM3_MCPSeededStateReflectedInDashboard(t *testing.T) {
 	t.Run("kb route reflects MCP-written article", func(t *testing.T) {
 		var got []kb.Article
 		getJSON(fmt.Sprintf("/dashboard/api/projects/%s/kb", projectID), &got)
-		// Registration seeds an onboarding article (mcp.RegisterAgentTool), so
+		// Enrolment seeds an onboarding article, so
 		// the written article isn't the only one — just confirm it's present.
 		found := false
 		for _, a := range got {
@@ -329,4 +332,143 @@ func TestM3_MCPSeededStateReflectedInDashboard(t *testing.T) {
 			t.Fatalf("kb articles: got %+v, want article %s present", got, kbOut.ArticleID)
 		}
 	})
+}
+
+// TestFabricHTTPSyncRoundTripPersistsReplayAndOwner composes the production
+// Fabric registry and HTTP MCP dispatch with real Postgres stores. It proves
+// that authenticated bootstrap/push/pull calls cross JSON-RPC decoding,
+// bearer-token scope resolution, sync handlers, and persistence without
+// relying on Gateway's removed remote-tool topology.
+func TestFabricHTTPSyncRoundTripPersistsReplayAndOwner(t *testing.T) {
+	db := testDB(t)
+	identityStore := identity.NewStore(db)
+	eventsStore := events.NewStore(db)
+	tasksStore := tasks.NewStore(db, eventsStore)
+	gitStore := git.NewStore(db)
+	kbStore := kb.NewStore(db, kb.StubEmbedder{}, 0.85, 4000, 1, 1, 1)
+	if err := mcp.PrepareOnboardingArticleEmbedding(context.Background(), kbStore); err != nil {
+		t.Fatalf("prepare onboarding embedding: %v", err)
+	}
+	registry := mcp.NewFabricRegistry(mcp.FabricRegistryDependencies{
+		Identity: identityStore,
+		Events:   eventsStore,
+		Tasks:    tasksStore,
+		Git:      gitStore,
+		KB:       kbStore,
+		Roles:    roles.NewStore(db),
+	})
+	srv := httptest.NewServer(mcp.NewMCPHandler(registry, identityStore))
+	t.Cleanup(srv.Close)
+
+	projectID := m3MustCreateProject(t, "fabric-http-sync-round-trip")
+	enrolRaw := m3CallTool(t, srv.URL, "wormhole.agent.enrol", projectID, "", mcp.EnrolAgentInput{
+		IdempotencyKey: "418f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1",
+		RequestHash:    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		Permissions:    []string{"task.create", "task.assign"},
+		Owner:          "fabric-http-sync-owner",
+		Model:          "test",
+	})
+	var enrol mcp.EnrolAgentOutput
+	if err := json.Unmarshal(enrolRaw, &enrol); err != nil {
+		t.Fatalf("decode enrolment: %v", err)
+	}
+	if enrol.AgentID == "" || enrol.Token == "" {
+		t.Fatalf("enrolment missing authenticated identity: %+v", enrol)
+	}
+
+	bootstrapRaw := m3CallTool(t, srv.URL, "wormhole.sync.bootstrap", projectID, enrol.Token, mcp.BootstrapInput{
+		NamespaceID: projectID,
+		Version:     mcp.SyncProtocolVersion,
+	})
+	var bootstrap mcp.BootstrapOutput
+	if err := json.Unmarshal(bootstrapRaw, &bootstrap); err != nil {
+		t.Fatalf("decode initial bootstrap: %v", err)
+	}
+	if bootstrap.OrgConfig.Project.ID != projectID || bootstrap.OrgConfig.Identity.Agent.ID != enrol.AgentID {
+		t.Fatalf("bootstrap scope = project %q agent %q, want %q/%q", bootstrap.OrgConfig.Project.ID, bootstrap.OrgConfig.Identity.Agent.ID, projectID, enrol.AgentID)
+	}
+
+	taskID := uuid.NewString()
+	payload, err := json.Marshal(map[string]any{
+		"title":          "HTTP sync owner fidelity",
+		"description":    "persisted through Fabric HTTP MCP",
+		"owner_agent_id": enrol.AgentID,
+		"status":         "todo",
+		"priority":       1,
+	})
+	if err != nil {
+		t.Fatalf("marshal task payload: %v", err)
+	}
+	push := mcp.IncrementalPushInput{NamespaceID: projectID, Version: mcp.SyncProtocolVersion}
+	push.Items = append(push.Items, struct {
+		EntityType string          `json:"entity_type"`
+		EntityID   string          `json:"entity_id"`
+		Operation  string          `json:"operation"`
+		Payload    json.RawMessage `json:"payload"`
+	}{EntityType: "task", EntityID: taskID, Operation: "create", Payload: payload})
+	for attempt := 1; attempt <= 2; attempt++ {
+		pushRaw := m3CallTool(t, srv.URL, "wormhole.sync.incremental_push", projectID, enrol.Token, push)
+		var out mcp.IncrementalPushOutput
+		if err := json.Unmarshal(pushRaw, &out); err != nil {
+			t.Fatalf("decode push attempt %d: %v", attempt, err)
+		}
+		if out.ItemsReceived != 1 || len(out.Applied) != 1 || out.Applied[0].ID != taskID || out.Applied[0].Error != "" {
+			t.Fatalf("push attempt %d = %+v, want one replay-safe applied task", attempt, out)
+		}
+	}
+
+	var rowCount int
+	var storedOwner string
+	if err := db.QueryRow(`SELECT count(*), COALESCE(max(owner_agent_id::text), '') FROM tasks WHERE id = $1 AND project_id = $2`, taskID, projectID).Scan(&rowCount, &storedOwner); err != nil {
+		t.Fatalf("read pushed task from Postgres: %v", err)
+	}
+	if rowCount != 1 || storedOwner != enrol.AgentID {
+		t.Fatalf("pushed task rows/owner = %d/%q, want 1/%q", rowCount, storedOwner, enrol.AgentID)
+	}
+
+	pullRaw := m3CallTool(t, srv.URL, "wormhole.sync.incremental_pull", projectID, enrol.Token, mcp.IncrementalPullInput{
+		NamespaceID: projectID,
+		Version:     mcp.SyncProtocolVersion,
+	})
+	var pull mcp.IncrementalPullOutput
+	if err := json.Unmarshal(pullRaw, &pull); err != nil {
+		t.Fatalf("decode incremental pull: %v", err)
+	}
+	pulledTask := false
+	for _, raw := range pull.Updates {
+		var envelope struct {
+			Type string          `json:"type"`
+			Data json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal(raw, &envelope); err != nil {
+			t.Fatalf("decode pull envelope: %v", err)
+		}
+		if envelope.Type != "task" {
+			continue
+		}
+		var task mcp.TaskSummary
+		if err := json.Unmarshal(envelope.Data, &task); err != nil {
+			t.Fatalf("decode pulled task: %v", err)
+		}
+		if task.TaskID == taskID && task.OwnerAgentID != nil && *task.OwnerAgentID == enrol.AgentID {
+			pulledTask = true
+		}
+	}
+	if !pulledTask {
+		t.Fatalf("incremental pull did not return task %q with owner %q", taskID, enrol.AgentID)
+	}
+
+	bootstrapRaw = m3CallTool(t, srv.URL, "wormhole.sync.bootstrap", projectID, enrol.Token, mcp.BootstrapInput{
+		NamespaceID: projectID,
+		Version:     mcp.SyncProtocolVersion,
+	})
+	if err := json.Unmarshal(bootstrapRaw, &bootstrap); err != nil {
+		t.Fatalf("decode post-push bootstrap: %v", err)
+	}
+	for _, task := range bootstrap.TaskList {
+		if task.ID == taskID && task.OwnerAgentID != nil && *task.OwnerAgentID == enrol.AgentID {
+			return
+		}
+	}
+	t.Fatalf("post-push bootstrap did not return task %q with owner %q", taskID, enrol.AgentID)
 }

@@ -1,12 +1,19 @@
 # Wormhole Alpha Validation Unified Specification
 
-**Status:** Current canonical specification
+**Status:** Historical validation specification; superseded for future architecture on 2026-07-28
 **Date:** 2026-07-25
 **Scope:** Next validated alpha release
 **Supersedes:** `2026-07-25-alpha-validation-roadmap.md`, `2026-07-25-code-graph-alpha-validation-slice-ammendment.md`
-**Ground truth:** RFC-0001 Wormhole Core, RFC-0002 Wormhole Governance, approved Code Graph design
+**Ground truth at execution:** RFCs and contracts as recorded at Git revision `5db39276ee973aaea2ab75340b683c4912cca942`, plus the approved Code Graph design then in force
 **Implementation companion:** `docs/superpowers/plans/2026-07-25-alpha-validation-implementation-plan.md`
 **Canonical root roadmap pointer:** [`ROADMAP-ALPHA-VALIDATION.md`](../../../ROADMAP-ALPHA-VALIDATION.md)
+
+> This document preserves the requirements and evidence model used for the July
+> 2026 alpha-validation programme. The approved
+> [Git-Native Wormhole Architecture Design](2026-07-28-git-native-wormhole-architecture-design.md)
+> now governs future implementation. Legacy `join`/`connect`, Passport-only,
+> single-remote, integration-state, and Warpspeed assumptions below are historical
+> and must not override the revised RFCs.
 
 ## 1. Purpose
 

@@ -107,47 +107,11 @@ type alphaMigrationPath struct {
 
 func TestAlphaContractCLIConfigurationPrecedence(t *testing.T) {
 	manifest := readAlphaCLIContract(t)
-	ownerSources, repositorySources := exerciseGitResolvers(t)
 	actual := []alphaConfigPrecedence{
 		{
 			Name:     "config.resolve.required",
 			Commands: []string{},
 			Sources:  exerciseGenericResolver(t),
-		},
-		{
-			Name:     "connect.opencode_config",
-			Commands: []string{"connect"},
-			Sources:  exerciseOpenCodeConfigResolver(t),
-		},
-		{
-			Name:     "join_connect.credential_path",
-			Commands: []string{"connect", "join"},
-			Sources:  exerciseCredentialPathResolver(t),
-		},
-		{
-			Name:     "join_connect.model",
-			Commands: []string{"connect", "join"},
-			Sources:  exerciseModelResolver(t),
-		},
-		{
-			Name:     "join_connect.owner",
-			Commands: []string{"connect", "join"},
-			Sources:  ownerSources,
-		},
-		{
-			Name:     "join_connect.project",
-			Commands: []string{"connect", "join"},
-			Sources:  exerciseProjectResolver(t),
-		},
-		{
-			Name:     "join_connect.repositories",
-			Commands: []string{"connect", "join"},
-			Sources:  repositorySources,
-		},
-		{
-			Name:     "join_connect.server",
-			Commands: []string{"connect", "join"},
-			Sources:  exerciseServerResolver(t),
 		},
 		{
 			Name:     "viewer-key.create.admin_key",
@@ -793,38 +757,6 @@ func exerciseCredentialPathResolver(t *testing.T) []string {
 	return []string{"token_file_flag", "profile_flag", "derived_default", "error"}
 }
 
-func exerciseOpenCodeConfigResolver(t *testing.T) []string {
-	t.Helper()
-	if got, err := resolveOpenCodeConfigPath("/contract/opencode.json", t.TempDir()); err != nil || got != "/contract/opencode.json" {
-		t.Fatalf("OpenCode explicit path = %q, %v", got, err)
-	}
-	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	projectFile := filepath.Join(root, "opencode.jsonc")
-	if err := os.WriteFile(projectFile, []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	nested := filepath.Join(root, "nested")
-	if err := os.Mkdir(nested, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := resolveOpenCodeConfigPath("", nested); err != nil || got != projectFile {
-		t.Fatalf("OpenCode project path = %q, %v; want %q", got, err, projectFile)
-	}
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	if got, err := resolveOpenCodeConfigPath("", t.TempDir()); err != nil || got != filepath.Join(home, ".config", "opencode", "opencode.json") {
-		t.Fatalf("OpenCode global default = %q, %v", got, err)
-	}
-	t.Setenv("HOME", "")
-	if _, err := resolveOpenCodeConfigPath("", t.TempDir()); err == nil {
-		t.Fatal("OpenCode config without HOME returned no error")
-	}
-	return []string{"flag", "project_file", "global_default", "error"}
-}
-
 func exerciseAdminKeyResolver(t *testing.T) []string {
 	t.Helper()
 	t.Setenv("WORMHOLE_ADMIN_KEY", "environment")
@@ -887,6 +819,9 @@ func commandUsageLines(help string) map[string]parsedCommandUsage {
 		positionals := []string{}
 		for _, field := range strings.Fields(usage) {
 			if field == "[flags]" {
+				continue
+			}
+			if strings.HasPrefix(field, "[--") {
 				continue
 			}
 			if strings.HasPrefix(field, "<") || strings.HasPrefix(field, "[") {

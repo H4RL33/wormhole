@@ -11,7 +11,6 @@ import (
 func TestToolHandlersRejectMalformedArgumentsAtContractBoundary(t *testing.T) {
 	tools := []Tool{
 		EnrolAgentTool(nil, nil, nil),
-		RegisterAgentTool(nil, nil, nil, nil),
 		CreateTaskTool(nil),
 		AssignTaskTool(nil),
 		ListTasksTool(nil, nil),

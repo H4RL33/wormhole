@@ -36,7 +36,6 @@ func NewFabricRegistry(deps FabricRegistryDependencies) *Registry {
 		tool.ResultExamples = map[string]any{"default": resultExample}
 		registry.Register(tool)
 	}
-	register(RegisterAgentTool(deps.Identity, deps.Events, deps.Roles, deps.KB), RegisterAgentOutput{})
 	register(EnrolAgentTool(deps.Identity, deps.Events, deps.KB), EnrolAgentOutput{})
 	register(WhoAmITool(), WhoAmIOutput{})
 	register(CreateTaskTool(deps.Tasks), CreateTaskOutput{})

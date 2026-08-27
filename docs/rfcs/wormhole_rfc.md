@@ -1,26 +1,47 @@
 # RFC-0001: Wormhole Core
 
-**The shortest path between an AI agent and organisational context.**
+**The shortest path between a person or agent and organisational context.**
 
 | | |
 |---|---|
-| Status | Draft |
+| Status | Revised Draft |
 | Author | Harley |
 | Date | 2026-07-07 |
+| Revised | 2026-08-01 |
 | Supersedes | `slack_for_agents.md`, `slack_for_agents_revised.md`, `AIOS_V3_Proposal.md` |
-| Related | [RFC-0002: Wormhole Governance](wormhole_rfc_governance.md) (Constitution & Congress — separate, independently shippable spec) |
+| Related | [RFC-0002: Wormhole Governance](wormhole_rfc_governance.md), [RFC-0003: Wormhole Local Runtime](wormhole_rfc_local_runtime.md), [Git-Native Architecture Design](../superpowers/specs/2026-07-28-git-native-wormhole-architecture-design.md) |
+
+> **Revision status (2026-08-01):** This draft has been reconciled around a
+> Git-native project model. Humans and agents have parity for project
+> operations; agents are durable, accountable principals; `wormhole setup`
+> replaces the legacy join/connect flow; and Fabric is an optional live
+> collaboration accelerator rather than the authority for project state.
 
 ---
 
 ## 1. Abstract
 
-Coding agents have crossed a threshold: single-shot code generation is now good enough that the bottleneck has moved from "can the model write correct code" to "can the model behave like a competent, well-informed member of an engineering organisation." That requires two things most current tooling doesn't provide: a persistent, shared record of *what the team is doing and why*, and a way for agents built on different vendors, models, and harnesses to participate in that record without re-deriving it from scratch every session.
+Coding agents have crossed a threshold: single-shot code generation is now
+good enough that the bottleneck has moved from "can the model write correct
+code" to "can every participant behave like a competent, well-informed member
+of an engineering organisation?" Humans and agents need the same durable record
+of what a project is doing and why, without re-deriving it from scratch in each
+tool, session, machine, or fork.
 
-Wormhole is persistent organisational infrastructure built for AI agents first and humans second. It combines a structured event bus (communication), a task graph (coordination), and a linked knowledge graph (organisational memory), all exposed through MCP so any compliant agent — Claude, Codex, Gemini, or otherwise — can read and write to the same shared context. Git remains the source of truth for code; Wormhole is the substrate for everything *around* the code that today gets lost between sessions, machines, and models.
+Wormhole is shared organisational infrastructure for humans and AI agents. Its
+Core has four pillars: a structured Event Bus, a Task Graph, a linked Knowledge
+Base, and Identity & Permissions. Project state is typed, Git-native data under
+`.wormhole/`. The CLI is the human-first interface; a stateless MCP connector
+gives coding harnesses the same project operations without becoming a second
+stateful authority.
 
-**Code is versioned by Git. Organisations are versioned by Wormhole.** Git remembers the software — commits, branches, diffs. Wormhole remembers the organisation — decisions, knowledge, tasks, identities, procedures, governance. Both are needed; neither substitutes for the other.
+Git remains the sole source of truth for code and accepts explicitly curated portable
+project-state changes through normal Git workflows. An optional Fabric can make public or private
+projects feel live across participants, but it does not replace Git authority.
 
-This document consolidates three earlier drafts into a single RFC: the original pitch, its refined revision, and the AIOS V3 governance proposal. It resolves the overlaps between them and proposes a phased path from a small MVP to the fuller organisational-OS vision. Governance (Constitution, Congress) is split out into its own spec, **RFC-0002**, since it is a genuinely standalone, independently shippable product on top of this core rather than a mere extension of it — see §10.
+**Code and curated accepted project state are versioned by Git. Wormhole gives that
+project state typed collaboration semantics.** Governance (Constitution and Congress) remains
+a separate, independently shippable layer in RFC-0002; see §10.
 
 ---
 
@@ -30,37 +51,58 @@ This document consolidates three earlier drafts into a single RFC: the original 
 
 Three failure modes recur across agentic coding workflows:
 
-1. **Context fragmentation across models.** Switching from Claude Code to Codex (or back) loses accumulated project understanding. Each tool maintains its own memory format, if it maintains one at all. Re-establishing context burns hundreds of thousands of tokens in warm-up before any real work starts.
+1. **Context fragmentation across tools and models.** Switching harnesses loses
+   accumulated project understanding. Re-establishing context consumes time and
+   tokens before useful work starts.
+2. **Context fragmentation across machines and forks.** Memory tied to one
+   workstation or unshared tool-specific file is unavailable to another person,
+   agent, machine, or fork.
+3. **Context fragmentation across participants.** Humans manually relay task
+   status, discoveries, and decisions because people and their agents lack one
+   shared, typed project record.
 
-2. **Context fragmentation across machines.** Memory tied to a single workstation (local `CLAUDE.md`, local vector stores, shell history) evaporates on reinstall, machine replacement, or when a second developer picks up the same repo on their own machine.
-
-3. **Context fragmentation across people.** When a human and their agent work alongside a colleague and *their* agent, the meta-information — what's being changed, what's blocked, what was discovered — is exchanged manually, by humans, in Slack, because the agents have no shared channel of their own. This is the one piece of "team communication" that hasn't been automated yet, even though it's the most mechanical part.
-
-None of these are model problems. They are *infrastructure* problems: there is no shared, durable, model-agnostic place for agents to store and retrieve organisational context. AGENT.md / CLAUDE.md files are a stopgap — static, unstructured, single-repo, and manually maintained.
+These are infrastructure problems. Static instruction files are useful inputs,
+but they are not a typed task graph, event history, identity model, or linked
+knowledge base. A remote service alone is also insufficient: project context
+must remain usable and reviewable through Git without requiring a service to be
+available.
 
 ### 2.2 Why now
 
-- Agents can now stay on-task for long, largely autonomous stretches (see Anthropic's guidance on [effective harnesses for long-running agents](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents)).
-- MCP has become the de facto integration standard, meaning a single server can expose the same tools to Claude, Codex, and any other MCP-compliant client without bespoke integrations per vendor.
-- Multi-agent setups (one human directing several agents, or several agents working unattended) are moving from novelty to default. The coordination problem that Slack/Trello/Confluence solved for human teams is now recurring, unsolved, for agent teams.
+- Agents can stay on-task for long, autonomous stretches, so their decisions and
+  hand-offs need durable attribution.
+- MCP provides a common harness connector, while Git already provides a common
+  acceptance, review, and distribution mechanism.
+- Mixed human-agent teams increasingly need the same operations and project
+  context rather than separate human and agent systems.
 
 ### 2.3 What "solved" looks like
 
-- An agent starting a fresh session can retrieve the state of a project — decisions made, work in flight, known gotchas — through semantic search over a shared KB, not by re-reading a sprawling static file or asking the human to re-explain.
-- A human running two different coding agents on the same project sees them coordinate through a shared task board and channel, without manually relaying status between them.
-- Losing a laptop, or switching from Claude to a competing model, does not cost the project its accumulated knowledge.
+- A person or agent can inspect typed project state from the repository and
+  understand decisions, work in flight, ownership, and known constraints.
+- A human and an agent can perform the same authorised project operations using
+  the interface appropriate to each: CLI for humans, MCP for harnesses.
+- A project works locally or from a fork without Fabric, while projects that use
+  Fabric gain faster live collaboration.
+- Moving between tools or machines does not discard organisational context that
+  has been accepted into Git.
 
 ---
 
 ## 3. Prior Art and Inspiration
 
-Wormhole borrows shapes from tools built for humans, then strips out what doesn't serve an agent-only user base:
+Wormhole borrows established shapes without copying their delivery assumptions:
 
-- **Slack / Discord / Matrix** — channel-based real-time communication. Wormhole keeps channels and events, drops rich media, drops presence/typing indicators, drops anything designed to hold human attention.
-- **Trello / GitHub Projects / Asana** — task and status tracking. Wormhole keeps the task graph (owner, status, priority, due date) but treats it as an API-first object model rather than a UI-first board.
-- **Wiki.js / DokuWiki** — wikis as living documentation. Wormhole's KB borrows the "linked articles" model but replaces free-text wiki discipline with automated compliance checks (dedup, conciseness, link density) since there's no human editor enforcing house style.
-- **Moltbook** — the direct interaction-model inspiration: a social/professional feed built for agents rather than humans, self-owned identities, autonomous posting. Wormhole's communication layer follows this shape but narrows scope to engineering-team concerns rather than open social interaction.
-- **agents.md / AGENT.md convention** — the current de facto standard for giving an agent static instructions. Wormhole treats this as the floor, not the ceiling: a single static file per repo doesn't scale across projects, doesn't update itself, and can't be queried.
+- **Slack / Discord / Matrix** — named streams and event-oriented coordination.
+- **Trello / GitHub Projects / Asana** — typed task ownership, status, priority,
+  and dependencies.
+- **Wiki.js / DokuWiki** — linked organisational knowledge.
+- **Git** — distributed change proposal, review, acceptance, history, forks, and
+  public or private assurance boundaries.
+- **MCP** — a vendor-neutral connector between coding harnesses and Wormhole
+  project operations.
+- **agents.md / AGENT.md conventions** — repository-local instructions that
+  demonstrate the value of context travelling with a project.
 
 ---
 
@@ -68,266 +110,352 @@ Wormhole borrows shapes from tools built for humans, then strips out what doesn'
 
 ### 4.1 Goals
 
-- G1: Provide agents a durable, model-agnostic memory that survives switching models, machines, and sessions.
-- G2: Let multiple agents (same or different vendor) coordinate work asynchronously through a shared task graph.
-- G3: Replace ad hoc human relaying of "what's my agent doing" with agents self-reporting into shared channels.
-- G4: Keep git as the sole source of truth for code — Wormhole stores context *about* code, never the code itself.
-- G5: Make the whole surface reachable through MCP so integration cost for any given agent/harness is near zero.
-- G6: Be self-hostable from day one; a managed cloud offering is a monetisation layer on top, not a requirement to use the system.
+- G1: Provide durable, model-agnostic organisational context for both humans and
+  agents.
+- G2: Let authorised humans and agents perform the same project operations.
+- G3: Keep typed project state Git-native under `.wormhole/` so it works across
+  local clones, forks, and canonical repositories.
+- G4: Keep Git as the sole source of truth for code; Wormhole stores context
+  about code, never a competing copy of it.
+- G5: Offer a human-first CLI and a stateless MCP connector over the same project
+  operation semantics.
+- G6: Support local/fork, canonical-public, and private assurance modes without
+  requiring Fabric.
+- G7: Make Fabric available as an optional live collaboration accelerator for
+  both public and private projects.
+- G8: Keep the product agent-first while giving humans equivalent authorised
+  project operations and strong setup/review/control surfaces.
 
-### 4.2 Non-goals (at least for V1)
+### 4.2 Non-goals
 
-- NG1: Replacing human project-management tools. Humans supervise through a read/observe surface, not a full competing PM UI.
-- NG2: Being a general-purpose chat platform. No human-to-human messaging, no rich media, no social feed beyond what agents need.
-- NG3: Replacing git hosting. No code review UI competing with GitHub/GitLab; Wormhole references commits/PRs, it doesn't host them.
-- NG4: Full autonomous governance (Constitution, Congress) is out of scope for this RFC entirely — it's specified separately in **RFC-0002**, not a phase of this document. See §10.
+- NG1: Replacing Git or Git hosting. Wormhole does not host source code or
+  create a competing acceptance history.
+- NG2: Making Fabric mandatory for project operation or project-state authority.
+- NG3: Giving humans and agents different project operation models merely
+  because they use different interfaces.
+- NG4: Treating identity, authentication, and authorization as one object.
+- NG5: Being a general-purpose chat or rich-media platform.
+- NG6: Full autonomous governance. Constitution and Congress are specified in
+  RFC-0002, not as a phase of this RFC.
+- NG7: An implicit organisation-wide or cross-repository graph, KB merge,
+  inherited policy, or cross-project authority. V1 is repository-lineage scoped.
 
 ---
 
 ## 5. Core Principles
 
-1. **Agents are the primary users; humans supervise rather than micromanage.** UI/UX decisions default to what's efficient for a model to read and write, not what's pleasant for a human to scroll through.
-2. **Git remains the source of truth for code.** Wormhole never becomes a second, competing repository. It stores decisions, discoveries, and status — pointers to commits, not copies of them.
-3. **Structured events over natural-language chatter.** Agents exchange typed objects (task update, review request, build failure, discovery) first; free-text is a secondary, optional channel for nuance a schema can't capture.
-4. **Shared knowledge is persistent, searchable, and model-agnostic.** No knowledge should live only in one vendor's context window or one machine's disk.
-5. **Everything is accessible through MCP.** If a capability isn't exposed as an MCP tool, it doesn't count as part of the platform surface — this is the integration contract that keeps the system vendor-neutral.
+1. **Humans and agents have operational parity.** A permission applies to a
+   project principal and operation, not to whether the caller is human or AI.
+   CLI and MCP may be shaped for different clients, but neither defines a
+   lesser class of participant. Parity does not change Wormhole's agent-first
+   priority: typed schemas, progressive retrieval, autonomous durability,
+   attribution, and handoff are optimised for agents.
+2. **Git is authoritative.** Git is the sole code truth and the acceptance path
+   for typed `.wormhole/` project state. Wormhole stores pointers and context
+   about code, not source copies.
+3. **Portable project state is typed and Git-native.** Curated events, task
+   definitions and portable task state, curated knowledge,
+   self-declared actor attribution claims, and Git pointers have reviewable
+   project-state representations under `.wormhole/`. Tracked actor claims never
+   grant membership, ownership, a Passport, or an effective permission; those
+   remain private local/Fabric authority records.
+4. **Structured events precede chatter.** Typed events carry project facts;
+   natural language adds nuance where a schema cannot.
+5. **Identity, authentication, and authorization are separate.** A durable
+   principal is not a credential, and a valid credential does not itself grant
+   an operation.
+6. **Fabric accelerates; it does not replace Git.** Projects can operate without
+   Fabric. Gateway/Fabric own operational collaboration under finite retention;
+   Git accepts only explicitly curated portable context.
+7. **Interfaces are fit for their callers.** The CLI is human-first. MCP is a
+   stateless harness connector to the same Core operations.
 
 ---
 
-## 6. Vision: From Chat Tool to Agent Operating Layer
+## 6. Vision: A Shared Project Operating Layer
 
-The original pitch ("Slack for agents") undersold the ceiling. The refined draft reframed it as a *collaboration layer*. The AIOS proposal went further still, describing a layered operating system for autonomous engineering organisations:
+Wormhole is the practical collaboration core beneath higher-order organisational
+systems:
 
 ```
-Mission -> Constitution -> Skills -> Agents
+Mission -> Policy -> Project State -> Principals
 ```
 
-Wormhole is the practical, buildable core of that stack. The mapping:
-
-| AIOS layer | Wormhole equivalent | Status |
+| Layer | Wormhole equivalent | Status |
 |---|---|---|
-| Mission | Project metadata + KB root articles | MVP |
-| Constitution | Permission/identity policy (static, human-authored) | MVP (static); self-amending/enforced version — RFC-0002 |
-| Skills | V1 records skill execution rather than managing skill definitions — agents keep using their own skill systems, outcomes logged as KB/events. Door stays open for Wormhole to own *organisational* (not model-specific) skill definitions later, once every ecosystem re-inventing the same procedures becomes the visible pain point | MVP (logging only); ownership — post-MVP |
-| Agents | Agent identities, channels, tasks | MVP |
+| Mission | Project metadata + KB root articles | Core |
+| Policy | Project permissions; optional governance in RFC-0002 | Core + optional layer |
+| Project state | Selected events, portable task state, curated knowledge, and Git pointers in `.wormhole/` | Core |
+| Principals | Durable human and agent identities with accountable ownership | Core |
 
-"Constitution as self-amending organisational policy" and "continuous improvement via agent proposals + human approval" are real, valuable directions — specified fully in RFC-0002, not this document. They depend on this RFC's event bus, task graph, and KB existing and being trusted first; see §10.
+Organisational skills may be referenced by project state, but management of
+model- or harness-specific skill definitions is outside this RFC. Constitution,
+self-amendment, and Congress remain optional RFC-0002 concerns. They depend on
+Core; Core does not depend on them.
 
 ---
 
 ## 7. Architecture Overview
 
 ```
-        Models (Claude, Codex, GPT, Gemini, ...)
-                        │
-                        ▼
-                 MCP Interface
-                        │
-                        ▼
-          Agent Collaboration Layer
-            ├── Event Bus
-            ├── Task Graph
-            ├── Knowledge Graph
-            ├── Identity & Permissions
-            └── Git Integrations
-                        │
-                        ▼
-           GitHub / GitLab / local git
+Humans                              Agent harnesses
+   │ human-first CLI                       │ stateless MCP connector
+   └───────────────────┬───────────────────┘
+                       ▼
+             Wormhole project operations
+                       │
+          ┌────────────┴────────────┐
+          ▼                         ▼
+ typed .wormhole/ state       optional Fabric
+          │                   live collaboration
+          └────────────┬────────────┘
+                       ▼
+            Git acceptance and history
+                       │
+                       ▼
+          GitHub / GitLab / local Git
 ```
 
-The Collaboration Layer is a single backend service (API + storage), with the MCP Interface as its only client-facing contract. There is deliberately no separate "human UI" as a first-class citizen in the architecture — a human-facing web view is a read-mostly client of the same API, built later, not a parallel system.
+The operation model is shared. Interface choice does not decide authority or
+permission: project context, actor assurance, and—where a remote requires
+it—authentication and project authorization do.
 
-### 7.1 Storage shape (indicative, not final schema)
+`.wormhole/` contains typed project state, not source-code copies. Git accepts
+changes to that state through the same local, fork, review, and merge mechanisms
+available to the repository. Fabric may provide a faster shared view and live
+coordination path, but no Fabric-only record silently becomes accepted project
+state.
 
-- **Relational store** (Postgres) for identities, channels, tasks, permissions, project metadata — anything with clear structure and referential integrity needs.
-- **Event log** (append-only Postgres table, polled by `wormholed`) for durable
-  Coordination Server change discovery — channel messages, task-state
-  transitions, discoveries. Harnesses do not poll Postgres or the Coordination
-  Server directly; they consume namespace-scoped SQLite/runtime state from
-  their local `wormholed` over MCP IPC.
-- **Vector store** (pgvector to start, to avoid an extra moving part) for the KB, enabling semantic retrieval over atomic knowledge articles.
-- **Git remotes** are referenced by URL/commit SHA, never mirrored.
+### 7.1 Assurance modes
 
-Single-binary/self-hosted deployment should be achievable with Postgres + pgvector alone; no mandatory external dependencies for the MVP.
+Wormhole supports three project modes:
+
+- **Local/fork mode.** A participant works from a local clone or fork. Fabric is
+  not required; project-state changes travel through Git when the participant
+  chooses to share them.
+- **Canonical-public mode.** The canonical public repository carries the typed
+  `.wormhole/` state. Public Git history is the acceptance and distribution
+  boundary. A public-project Fabric is optional and uses self-issued key
+  continuity for identification rather than account authentication.
+- **Private assurance mode.** The typed project state remains within private Git
+  controls. A private-project Fabric is optional and does not weaken or replace
+  that Git boundary.
+
+These modes change where project state is shared and assured, not the four Core
+pillars or the parity between authorised humans and agents.
+
+### 7.2 State shape
+
+The `.wormhole/` tree is the Git-native home for explicitly portable typed project
+state. It records selected audit-significant events, task definitions and portable
+task state, curated knowledge, self-declared attribution, and references to
+code, including commit SHAs and change-request URLs, but never stores a second
+copy of repository source or any membership, authenticator, credential,
+ownership grant, Passport, or effective permission. Concrete filenames, schemas,
+migrations, and merge behavior are versioned contract details.
+
+Gateway/Fabric maintain operational task-transition chatter, progress, generic
+channel activity, presence, runtime attribution, subscriptions, queues, telemetry,
+conflicts/receipts, and discoveries awaiting curation. Promotion into portable
+state is explicit, typed, attributed, and reviewable; checkpoint never promotes it.
+Operational facilities do not create an independent accepted project truth.
 
 ---
 
-## 8. Pillars
+## 8. Core Pillars
 
-### 8.1 Communication (Event Bus)
+### 8.1 Event Bus
 
-Channels carry **typed events** as the primary payload, with natural language as an optional `note` field, not the default medium. Example event shapes:
+Channels carry typed events as their primary payload, with natural language as
+an optional note. Representative categories include task transitions, review
+requests, build failures, discoveries, and free-text messages.
 
-- `task.status_changed` — `{task_id, from, to, agent_id}`
-- `review.requested` — `{pr_url, repo, summary, agent_id}`
-- `build.failed` — `{ci_run_url, repo, commit_sha, error_summary}`
-- `discovery.logged` — `{summary, kb_article_id?, agent_id}`
-- `message.posted` — `{channel_id, agent_id, text}` (the escape hatch for anything not yet modeled as a type)
+Events identify their acting principal, regardless of whether that principal is a
+human or an agent. Generic posts, progress, status chatter, presence, and runtime
+notifications are operational and do not automatically create portable records. An
+`EventV1` represents explicitly promoted audit-significant evidence whose source
+activity ID/digest and attribution are reviewable. Git-native promoted events remain
+available without Fabric; Fabric accelerates live publication and subscription.
 
-Durable delivery across process and machine lifetimes comes from `wormholed`
-polling the Postgres-backed Coordination Server and persisting relevant state
-and pending sync work in its local SQLite runtime. Harnesses consume that local
-state. Local notifications and the in-memory runtime event bus are permitted
-for ephemeral wake-ups, presence, and heartbeats; they are not a second durable
-coordination datastore and do not replace the persisted event log or sync queue.
+### 8.2 Task Graph
 
-Rationale for typed-first, not a novel compressed language: a bespoke "token-efficient AI language" (as floated in the original draft) adds a translation layer every agent has to learn and every debugging human has to decode. Typed JSON objects are already compact, already parseable by every model, and don't require an invented grammar. Efficiency comes from *not sending prose*, not from inventing shorthand.
+Entities are **Project → Task → Subtask**, with an owner that may be a human or
+agent principal, status, priority, due date, dependencies, and links to related
+events, KB articles, commits, and change requests.
 
-### 8.2 Coordination (Task Graph)
+Task definitions, owner, and portable task status are reviewable project state;
+Git acceptance makes that state accepted. Transition notifications/history and
+progress chatter are operational unless explicitly promoted as audit evidence. The
+task graph is a shared project model, not an agent-only queue or a human-only board.
 
-Entities: **Project → Task → Subtask**, each with owner (agent or human), status (`todo`/`wip`/`blocked`/`done`), priority, due date, and links to related events/KB articles/commits. This is intentionally closer to an event-annotated dependency graph than a kanban board — the board view is a projection for humans, not the source model.
+### 8.3 Knowledge Base
 
-Key property distinguishing this from GitHub Projects: task state transitions themselves emit events on the bus, so "task moved to done" is simultaneously a coordination update and a communication event, with no separate sync step.
+The Knowledge Base is linked, typed organisational memory. Its constraints are:
 
-### 8.3 Knowledge Base (Knowledge Graph)
+- **Atomic articles.** One article represents one fact, decision, or procedure.
+- **Explicit linking.** Articles link to related project records by stable
+  identity.
+- **Compliance checks on write.** Contributions may be checked for duplication,
+  conciseness, and required links, with structured rewrite guidance.
+- **Meaningful retrieval.** Semantic retrieval may supplement typed traversal
+  without weakening project scope.
+- **Model-agnostic content.** Knowledge is usable from the CLI, MCP-connected
+  harnesses, and ordinary Git tooling.
 
-This is the pillar both prior drafts converge on as "the heart of the platform," and it remains the highest-leverage, hardest-to-get-right piece.
-
-Design constraints:
-
-- **Atomic articles.** One article = one fact/decision/procedure. No sprawling wiki pages.
-- **Explicit linking.** Articles link to related articles by ID (mirrors this repo's own memory-file convention of `[[name]]` links) — the KB is a graph, not a folder tree.
-- **Compliance checks on write.** Every contribution is checked for duplication (semantic similarity against existing articles above a threshold), conciseness (length ceiling), and required outbound links where applicable. Failures use soft rejection with structured rewrite suggestions; thresholds remain tunable configuration.
-- **Semantic search as the retrieval path.** Agents query by meaning, not by filename or folder guess — this is what actually collapses onboarding/warm-up cost, versus a flat file an agent has to read in full.
-- **Model-agnostic write format.** Plain structured text (markdown + frontmatter), not vendor-specific memory formats.
-
-Knowledge is a graph, not documentation. Wormhole is not another wiki with a search box bolted on — articles exist to be traversed and retrieved by machines, and the graph structure (not prose quality) is what makes that possible.
-
-This deliberately mirrors — and is meant to eventually *replace* — the pattern of scattered `AGENT.md`/`CLAUDE.md` memory files and per-tool memory systems: one shared graph, one compliance bar, reachable by any agent regardless of which harness it runs in.
+Knowledge accepted into `.wormhole/` survives any one tool, model, machine, or
+Fabric deployment.
 
 ### 8.4 Identity & Permissions
 
-Identity is not just an auth token — it's the object every other pillar attaches to (attribution in the event bus, ownership in the task graph, authorship in the KB, actor in governance). It deserves more shape than "agent registers, gets a token":
+This pillar contains three related but separate concerns:
 
-```
-Agent Identity
-  Owner            — human or org account responsible for this agent
-  Model            — vendor/model backing the agent (Claude, Codex, ...)
-  Capabilities     — declared tool/skill surface the agent can invoke
-  Repositories     — git remotes this identity is scoped to
-  Roles            — project-level roles (contributor, reviewer, maintainer, ...)
-  Sessions         — active/past runtime sessions tied to this identity
-  Permissions      — resolved action grants (post, create task, write KB, ...)
-  Passport         — portable identity record an agent presents when joining a new project
-  Audit Trail      — append-only log of actions taken under this identity
-```
+- **Identity:** a durable principal to which ownership, attribution, and audit
+  records attach. Humans and agents are distinct principals. An agent is not a
+  human's session or alias; every agent has accountable human ownership.
+- **Authentication:** evidence that a caller controls or represents a principal.
+  A credential or Passport may provide that evidence, but it is not the
+  identity itself.
+- **Authorization:** the project-scoped decision that a principal may perform a
+  requested operation. Private remote authorization follows authentication;
+  local and public Git contribution do not acquire authority from a credential.
 
-- Agents are first-class identities: self-owned, self-registering, capable of operating with zero human oversight once provisioned.
-- Permissions are scoped by project and by action type (can post to channel X, can create tasks, can write KB articles, can modify permissions — the last reserved for humans or explicitly elevated agents).
-- Humans hold an oversight role: can observe all channels/tasks/KB activity for projects they own, and hold exclusive rights over destructive or policy-level actions (deleting projects, granting agent identities elevated permissions) unless a deployment adopts RFC-0002 governance on top.
-- The **Passport** is what makes §8.6 (Joining) possible: it's the portable credential + capability declaration an agent brings when it joins a project it hasn't worked in before, so the project can grant scoped permissions without a human manually configuring access per agent.
+Agents remain durable across harness processes and model sessions. Their human
+ownership establishes accountability without collapsing the agent into the
+owner's identity or requiring approval for every authorised action. Humans and
+agents may hold project roles and permissions; Core does not reserve ordinary
+project operations to one class.
 
-This RFC does not yet define the structured human identity or authentication
-behind the Owner and oversight concepts; that implementation boundary is
-tracked in [GitHub issue #22](https://github.com/H4RL33/wormhole/issues/22).
+### 8.5 Project Setup
 
-### 8.5 Joining
+`wormhole setup` is the single onboarding and project-configuration flow. It
+replaces the legacy split onboarding and combined-connection concepts.
 
-Onboarding a new agent (or an existing agent onto a new project) is a first-class flow, not an implied side effect of registration — it's the fastest way to demonstrate the platform's whole thesis in one pass. Indicative CLI shape:
+Setup establishes the project mode, locates or initializes typed `.wormhole/`
+state, and configures optional Fabric use when selected. It does not make Fabric
+a prerequisite for a valid project, and it does not conflate creation of a
+principal with authentication or authorization.
 
-```bash
-$ wormhole join --project acme/backend
-```
-
-```
-Passport created.
-Loading project Constitution and permissions...
-Synchronising knowledge graph (247 articles, 89 relevant)...
-Introducing agent to #general...
-Ready. 3 open tasks assigned to your role, 1 blocked build to review.
-```
-
-The output is deliberately terse and structured — this is what "reduce warm-up cost" looks like in practice: an agent goes from zero to working context in one command instead of re-reading a static file or asking a human to catch it up. This flow is the primary demo target for the MVP (see §14, V1 exit criteria).
+The CLI presents setup for humans. Harnesses use the configured project through
+the stateless MCP connector; they do not acquire authority by opening a durable
+MCP session.
 
 ### 8.6 Git Integration
 
-Wormhole never stores code. It stores *pointers and commentary*: commit SHAs, PR URLs, diff summaries, review requests. Agents push discoveries, architectural decisions, and implementation summaries as work progresses, each tagged to the relevant commit/PR so a human or another agent can jump from "why was this changed" straight to the commit.
+Git is a cross-cutting integration, not a fifth Core pillar. Wormhole stores
+pointers and commentary—commit SHAs, change-request URLs, summaries, review
+requests, and their relationships to tasks, events, and knowledge. It never
+stores source bodies as an alternative repository.
+
+Project-state changes are proposed and accepted through Git. Fabric can reduce
+the latency of seeing and coordinating those changes, but acceptance remains a
+Git operation.
 
 ---
 
-## 9. MCP Interface (indicative tool surface)
+## 9. Interface Surfaces
 
-Grouped by pillar, not exhaustive — a real spec would formalize request/response schemas:
+### 9.1 Human-first CLI
 
-**Identity**
-- `wormhole.agent.register(name, capabilities)`
-- `wormhole.agent.whoami()`
+The `wormhole` CLI is the primary human interface for setup and project
+operations. It presents the same Core concepts stored under `.wormhole/` and,
+when configured, accelerated by Fabric.
 
-**Communication**
-- `wormhole.channel.create(project_id, name)`
-- `wormhole.channel.post(channel_id, event_type, payload)`
-- `wormhole.channel.subscribe(channel_id)` (harnesses consume local runtime
-  state; `wormholed` performs durable Postgres-backed change discovery)
+### 9.2 Stateless MCP connector
 
-**Coordination**
-- `wormhole.task.create(project_id, title, description, due_by?, priority?)`
-- `wormhole.task.assign(task_id, agent_id)`
-- `wormhole.task.update_status(task_id, status)`
-- `wormhole.task.list(project_id, filter?)`
+MCP is the vendor-neutral harness connector. Its tools expose Event Bus, Task
+Graph, Knowledge Base, Identity & Permissions, and Git-reference operations to
+coding agents.
 
-**Knowledge Base**
-- `wormhole.kb.search(query, project_id?)` — semantic search, returns ranked articles
-- `wormhole.kb.write(title, body, links[])` — subject to compliance checks; may return a rejection with a rewrite suggestion
-- `wormhole.kb.get(article_id)`
+Stateless means the connector is not a principal, does not become a source of
+project truth, and does not rely on a durable harness session to establish
+identity or authorization. Each operation is evaluated in project context with
+an attributed principal and explicit assurance; private remote operations also
+require authentication and authorization. Exact tool names and request/response
+schemas are separate interface contracts.
 
-**Git**
-- `wormhole.git.link_commit(task_id, repo, commit_sha, summary)`
-- `wormhole.git.request_review(repo, pr_url, summary)`
-
-All of the above are the *same* tools regardless of whether the calling client
-is Claude Code, Codex, or a third-party MCP client — this uniformity is the
-entire point of G5. Per RFC-0003, harness-facing calls use local `wormholed` MCP
-IPC; the uniform contract does not create a direct remote harness path.
+CLI and MCP are not required to have identical syntax. They are required to
+offer equivalent authorised project operations so that humans and agents can
+collaborate on one model.
 
 ---
 
 ## 10. Governance (Out of Scope — see RFC-0002)
 
-The AIOS V3 proposal's most ambitious ideas — an immutable Constitution, skills as executable organisational procedure, continuous improvement via agent proposal + human approval, and a turn-based "Congress" for agent/human debate — are valuable enough to warrant their own spec rather than a deferred phase bolted onto this one. They're pulled out into **[RFC-0002: Wormhole Governance](wormhole_rfc_governance.md)**.
+Constitution, continuous policy improvement, and Congress are specified in
+**[RFC-0002: Wormhole Governance](wormhole_rfc_governance.md)**. Governance is
+an optional product decision independent of whether a project uses Core or
+Fabric.
 
-The split matters for reasons beyond tidiness: governance is a standalone product decision (do you want a policy/debate layer at all?) independent of whether you're running Wormhole Core, and treating it as its own RFC lets it be adopted, rejected, or resequenced without touching Core's contract. RFC-0002 depends on Core's event bus, task graph, and KB existing first (Core ships without it); Core does not depend on RFC-0002 at all.
-
----
-
-## 11. Deployment Model
-
-- **Open-source core**, self-hostable by individuals or small teams. Postgres
-  (+pgvector) is the single Coordination Server datastore for the MVP
-  (docker-compose, one service + one DB). RFC-0003's per-user `wormholed`
-  runtime maintains its required local SQLite replica and sync queue; ephemeral
-  local notifications or an in-memory event bus do not add another durable
-  coordination datastore.
-- **Managed cloud** offering for teams that don't want to run infrastructure, priced as a recurring fee, operated by the project. Managed and self-hosted run identical code — no feature gating between them at this stage, monetisation is:
-- convenience
-- hosting
-- uptime guarantee
-- support
-not capability.
-- No mandated telemetry or phone-home from self-hosted instances.
+RFC-0002 depends on Core's pillars existing first. Core does not depend on
+RFC-0002, and governance does not alter Git's authority without an explicit
+future decision.
 
 ---
 
-## 12. MVP Scope
+## 11. Deployment and Operation
 
-Everything else is a plugin. The MVP is deliberately narrow:
+- **Git-only operation** is valid in local/fork, canonical-public, and private
+  assurance modes.
+- **Fabric is optional** for both public and private projects. It accelerates
+  live collaboration, discovery, and shared projections.
+- **Self-hosted or managed Fabric** may be offered without changing the Core
+  authority model.
+- **No mandatory Fabric telemetry or phone-home** is required for Git-only or
+  self-hosted operation.
 
-- Agent identities (register, authenticate, passport, permissions scoped per project)
-- Joining flow (`wormhole join`: passport creation, permission grant, KB sync, self-introduction to project channel)
-- Channels (create, post typed events, subscribe/poll local runtime state)
-- Tasks (create, assign, status transitions, basic project grouping)
-- KB (write with compliance checks, semantic search, linking)
-- MCP interface exposing all of the above
-
-Explicitly **not** in MVP: git integration beyond a manual link field, governance (see RFC-0002, out of scope for this document entirely), human-facing web UI beyond a minimal read-only dashboard, plugin system itself (plugins come after there's a stable core to plug into).
+The presence or absence of Fabric changes collaboration latency and
+availability characteristics, not which project operations exist.
 
 ---
 
-## 13. Security & Multi-Tenancy Considerations
+## 12. Core Scope
 
-- Agent identities must be unforgeable within a project's scope — token-based auth per agent identity, scoped to project + permission set, not a single shared platform credential.
-- KB compliance checks (dedup, conciseness) run server-side, not client-trusted, since a misbehaving or compromised agent could otherwise pollute shared memory for every other agent on the project.
-- Multi-tenant managed-cloud deployments require hard project-level data isolation (row-level security or per-tenant schema) — knowledge and tasks from one customer's project must never be retrievable, even via semantic search, by another tenant's agents.
-- Destructive actions (deleting a project, revoking all agent access) are human-only by default in Core; RFC-0002 covers how/if that changes under governance.
+The initial Core scope is deliberately narrow:
+
+- Typed `.wormhole/` project records for curated events, task definitions/portable
+  task state, curated knowledge, attribution, and code pointers; operational and
+  authority records remain private or Fabric-side
+- Durable human and agent principals with accountable human ownership for agents
+- Separate authentication and project authorization
+- `wormhole setup` for project initialization and configuration
+- Human-first CLI project operations
+- Stateless MCP access to equivalent project operations
+- Git pointers without code copies
+- Optional Fabric integration for public and private projects
+
+Explicitly outside Core are autonomous governance (RFC-0002), rich-media chat,
+replacement Git hosting, and mandatory hosted infrastructure.
+
+---
+
+## 13. Security and Assurance Considerations
+
+- Authentication proves control of a principal; it does not by itself authorize
+  a project operation.
+- Authorization is project-scoped and applies to human and agent principals by
+  role and operation, not by a blanket caller-class hierarchy.
+- Every agent has accountable human ownership while retaining its own durable
+  identity and audit attribution.
+- Public projects intentionally expose accepted `.wormhole/` state through
+  public Git. Structural secret-shape validation does not prove confidentiality;
+  trusted machine-private `public_git` classification—whether canonical or fork—warns
+  accordingly and checkpoint requires a matching
+  attributed publication-review digest acknowledgement from either CLI or MCP.
+  This is intent/CAS, not authorization or DLP, and direct Git edits remain possible.
+  Private assurance mode keeps state within the project's private Git boundary.
+- Publication visibility is explicit user policy bound to the workspace/repository, not
+  continuous Git-host visibility detection. Repository-identity changes invalidate it;
+  same-identity host visibility changes require explicit reconfiguration and are always
+  the operator's responsibility.
+- Fabric must respect the selected public or private project boundary. Because
+  Fabric is optional, loss of Fabric availability does not erase Git-accepted
+  project state.
+- Wormhole never stores source code outside Git as a competing truth.
+- Operational retention is finite: presence is restart-discardable; ordinary activity
+  expires by age or by falling outside the newest 10,000 unprotected workspace rows,
+  with deterministic oldest-first pruning; pending lifecycle evidence is protected until
+  terminal, then defaults to exactly 30 days (or an advertised finite longer duration).
+  Expiry cannot mutate portable Git state.
 
 ---
 
@@ -335,14 +463,18 @@ Explicitly **not** in MVP: git integration beyond a manual link field, governanc
 
 | Phase | Scope | Depends on |
 |---|---|---|
-| V1 — MVP | §12 scope: identities, channels, tasks, KB, MCP interface | — |
-| V1.1 | Git integration (commit/PR linking, discovery auto-posting from CI hooks) | V1 |
-| V2 | Human-facing read dashboard; agent-proposed procedure changes (task-graph-based, human-approved) | V1 |
-| V2.1 | Plugin system for pillar extensions (e.g., custom event types, external PM sync) | V1, V2 |
+| Core | Four pillars, typed `.wormhole/` state, setup, CLI, stateless MCP | Git |
+| Fabric | Optional live collaboration for public and private projects | Core |
+| Extensions | Additional integrations and projections | Core; Fabric only where needed |
 
-Governance (Constitution, Congress) is **not** a phase of this roadmap — it's RFC-0002, versioned and shipped independently, adopted whenever a deployment wants it.
+Governance is not a phase of this roadmap. RFC-0002 is versioned and adopted
+independently.
 
-**V1 exit criteria:** a fresh agent identity runs `wormhole join` against an existing project, receives a scoped passport and a synced slice of the KB, announces itself in the project channel, picks up an assigned task, and — on completion — posts a discovery back to the KB. If that loop works end to end, the MVP has validated its core thesis (§2.3) and every later phase is additive, not load-bearing.
+**Core exit criterion:** after `wormhole setup`, an authorised human and an
+authorised agent can inspect and change the same typed project state through CLI
+and MCP, respectively; Git can accept those changes; and the project remains
+usable without Fabric. When Fabric is configured, both can observe accelerated
+live collaboration without changing the Git authority boundary.
 
 ---
 
@@ -350,51 +482,91 @@ Governance (Constitution, Congress) is **not** a phase of this roadmap — it's 
 
 ### Decided
 
-- **Event delivery:** V1 durable Coordination Server change discovery uses
-  Postgres-backed polling by `wormholed` during its configured sync cycle.
-  Harnesses consume local `wormholed` SQLite/runtime state at turn start or
-  when invoking tools. Ephemeral local notifications and in-memory event-bus
-  delivery are permitted, but are not a second durable coordination datastore.
-  Wormhole does not add NATS, Redis, or another event-stream datastore.
+- **Core pillars:** Event Bus, Task Graph, Knowledge Base, and Identity &
+  Permissions remain the four Core pillars. Git integration is cross-cutting.
+- **Operational parity:** Humans and agents can perform the same authorised
+  project operations; Wormhole remains agent-first in schemas, retrieval, durability,
+  attribution, and handoff.
+- **Identity model:** Identity, authentication, and authorization are separate.
+  Agents are distinct durable principals with accountable human ownership.
+- **Project authority:** Explicitly curated portable project state is Git-native under
+  `.wormhole/`. Git is the sole source of truth for code and accepts those changes.
+- **Assurance modes:** Core supports local/fork, canonical-public, and private
+  assurance modes.
+- **Onboarding:** `wormhole setup` replaces legacy join/connect onboarding.
+- **Interfaces:** The CLI is human-first; MCP is a stateless harness connector.
+- **Fabric:** Fabric is optional for both public and private projects and
+  accelerates live collaboration without replacing Git authority.
+- **Authority boundary:** Git accepts explicitly curated portable project context;
+  Gateway/Fabric own operational activity under finite retention. `EventV1` is selected
+  audit evidence, never the automatic representation of every channel or task event.
+- **V1 scope:** Authority is project/repository-lineage scoped. Organisation-wide and
+  cross-repository graphs, merged KBs, inherited policy, and cross-project authority
+  require a separate RFC.
+- **Durable event discovery:** Each Fabric uses its Postgres change records,
+  polled by bound Gateways during sync. Ephemeral Gateway notifications may
+  wake local consumers but are not a second durable coordination store.
 - **KB compliance:** Compliance failures use soft rejection with structured
   rewrite suggestions. Thresholds remain tunable configuration rather than
   architecture.
-- **Cross-project KB visibility:** KB reads are strictly project-scoped. A
-  runtime serving several projects keeps separate namespaces and never
-  constructs an implicit merged KB.
-- **Identity scope:** Credentials and resolved permissions belong to explicit
-  project Passport bindings. Harnesses may reuse descriptive persona metadata,
-  but Wormhole does not federate credentials or permissions across projects.
-- **MCP hosting boundary:** Wormhole exposes its own MCP surface. It does not
-  host arbitrary unrelated MCP servers for agents; approved integration
-  manifests are a separate RFC-0003 bootstrap concern.
+- **KB isolation:** KB reads are strictly project-scoped. A Gateway serving
+  several projects keeps separate namespaces and never constructs an implicit
+  merged KB.
+- **MCP hosting boundary:** Wormhole exposes its own project-operation MCP
+  surface. It does not host arbitrary unrelated MCP servers; harness connector
+  installation and approved project skill bootstrap do not change that boundary.
+- **Fabric tenancy:** Project-scoped Fabric data remains isolated by Postgres
+  RLS in addition to application checks.
 
-### Open
+### Contract details
 
-None.
+The approved [Git-Native Wormhole Architecture Design](../superpowers/specs/2026-07-28-git-native-wormhole-architecture-design.md)
+defines the version-one snapshot layout, base/overlay/checkpoint semantics,
+Fabric routing, assurance modes, setup lifecycle, and delivery slices. Public
+wire schemas remain versioned implementation contracts and may not weaken the
+decisions above.
 
 ---
 
 ## 16. Example User Stories
 
-- *Model-switch continuity:* "When switching between Claude and Codex, all my project's memory and context would be lost and fragmented, leading to several turns of pure warm-up and burning hundreds of thousands of tokens. Wormhole lets my two different agents work off one shared KB and task graph, functioning like one team regardless of which model is driving."
-- *Machine-loss continuity:* "I got a new computer and Claude Code's local memory was gone. My agents had already written their discoveries to Wormhole's KB, so the next session picked up exactly where we left off."
-- *Cross-human coordination:* "I work across the hall from a colleague, and we used to interrupt each other constantly just to relay what our agents were doing. Now our agents post status to a shared channel automatically as they work — a whole category of manual status-relaying is just gone."
-- *Onboarding:* "A new engineer's agent queries the KB on day one and retrieves the same architectural context it took the rest of the team months to accumulate, instead of reading a stale onboarding doc."
+- *Model-switch continuity:* "I switched agent harnesses, and the new agent read
+  the same accepted project state from Git instead of reconstructing it from a
+  vendor-specific memory."
+- *Human-agent parity:* "I updated a task through the CLI, while my coding agent
+  updated the same task model through MCP; permissions and attribution were
+  evaluated per principal, not per interface."
+- *Fork workflow:* "My fork carried its Wormhole project state without requiring
+  a live service, and I proposed the relevant changes upstream through Git."
+- *Public collaboration:* "Our public repository exposed its accepted project
+  context, and optional Fabric made active coordination faster."
+- *Private assurance:* "Our project state stayed inside private Git controls,
+  while our private Fabric accelerated collaboration without becoming the
+  authority."
 
 ---
 
 ## 17. Glossary
 
-- **Agent** — an autonomous or semi-autonomous AI system (any vendor/model) acting as a Wormhole identity.
-- **Event** — a typed, timestamped record posted to a channel.
-- **Channel** — a named stream of events scoped to a project or topic.
-- **Task graph** — the set of tasks/subtasks with ownership, status, and dependency links.
+- **Principal** — a durable human or agent identity to which ownership,
+  attribution, roles, and audit records attach.
+- **Agent** — an autonomous or semi-autonomous AI system acting as its own
+  durable principal, with accountable human ownership.
+- **Authentication** — verification that a caller controls or represents a
+  principal.
+- **Authorization** — a project-scoped decision allowing a principal to perform
+  an operation.
+- **Event** — a typed, timestamped project record.
+- **Task graph** — tasks and subtasks with ownership, status, and dependency
+  links.
 - **KB article** — an atomic, linked unit of organisational knowledge.
-- **Passport** — a portable identity record an agent presents when joining a project, carrying its declared capabilities and resolved permissions.
-- **Joining** — the onboarding flow (`wormhole join`) that provisions a passport, syncs relevant KB, and introduces an agent to a project.
-- **Constitution** (RFC-0002) — versioned, enforced organisational policy governing agent permissions and procedure.
-- **Congress** (RFC-0002) — turn-based debate surface where agents and humans state positions on proposed Constitution changes.
+- **`.wormhole/`** — the repository-local home of typed Wormhole project state.
+- **Fabric** — an optional service that accelerates live collaboration for
+  public or private projects without replacing Git authority.
+- **MCP connector** — the stateless harness-facing adapter to Wormhole project
+  operations.
+- **Assurance mode** — the selected local/fork, canonical-public, or private
+  boundary for sharing and accepting project state.
 
 ---
 
@@ -403,4 +575,7 @@ None.
 - Anthropic, [Effective harnesses for long-running agents](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents)
 - [Model Context Protocol](https://modelcontextprotocol.io/)
 - [agents.md](https://agents.md/)
+- [RFC-0002: Wormhole Governance](wormhole_rfc_governance.md)
+- [RFC-0003: Wormhole Local Runtime](wormhole_rfc_local_runtime.md)
+- [Git-Native Wormhole Architecture Design](../superpowers/specs/2026-07-28-git-native-wormhole-architecture-design.md)
 - Prior internal drafts: `slack_for_agents.md`, `slack_for_agents_revised.md`, `AIOS_V3_Proposal.md`

@@ -1,9 +1,8 @@
 {
   "schema_version": 1,
-  "generated_guidance_requirements": {
-    "kb_search": "Use shared KB semantic search for organisational decisions, procedures, and discoveries before broad repository reconstruction when that context could answer the question.",
-    "code_graph": "Use Code Graph only for project-local source structure and bounded code discovery when it is enabled and current; it is separate from the shared KB and does not replace Git or verification."
-  },
+	"generated_guidance_requirements": {
+		"fabric_semantic_search": "Use optional Fabric semantic search for organisational decisions, procedures, and discoveries when low lexical overlap could hide relevant context; this capability is separate from deterministic Gateway kb.list/kb.get and is not in the Stage 2 Gateway inventory."
+	},
   "cases": [
     {
       "name": "credential-rotation",
