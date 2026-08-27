@@ -21,7 +21,7 @@ func TestE2E_V1ExitCriteria(t *testing.T) {
 	prepareOnboardingEmbeddingForTest(t, kbStore)
 
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(identityStore, eventsStore, testRolesStore(t), kbStore))
+	registry.Register(EnrolAgentTool(identityStore, eventsStore, kbStore))
 	registry.Register(WhoAmITool())
 	registry.Register(CreateChannelTool(eventsStore))
 	registry.Register(PostEventTool(eventsStore))
@@ -39,26 +39,28 @@ func TestE2E_V1ExitCriteria(t *testing.T) {
 
 	projectID := mustCreateProject(t, "v1-exit-criteria-project")
 
-	// 1. Register a fresh agent identity
-	status, rpcResp, err := makeMCPCall(t, srv.URL, "wormhole.agent.register", projectID, "", RegisterAgentInput{
-		Permissions:  []string{"event.publish", "task.create", "task.assign", "task.update_status", "kb.write", "kb.search", "channel.list", "channel.post"},
-		Owner:        "exit-agent",
-		Model:        "gpt-4",
-		Capabilities: []string{"exit_validation"},
+	// 1. Enrol a fresh identity directly through the Fabric HTTP MCP boundary.
+	status, rpcResp, err := makeMCPCall(t, srv.URL, "wormhole.agent.enrol", projectID, "", EnrolAgentInput{
+		IdempotencyKey: "218f47a2-7b1d-7e42-8d4b-1c99c6a8f2b1",
+		RequestHash:    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Permissions:    []string{"event.publish", "task.create", "task.assign", "task.update_status", "kb.write", "kb.search", "channel.list", "channel.post"},
+		Owner:          "exit-agent",
+		Model:          "gpt-4",
+		Capabilities:   []string{"exit_validation"},
 	})
 	if err != nil {
-		t.Fatalf("register failed: %v", err)
+		t.Fatalf("enrol failed: %v", err)
 	}
 	if status != http.StatusOK || rpcResp.Error != nil {
-		t.Fatalf("register status: got %d, rpcErr: %+v", status, rpcResp.Error)
+		t.Fatalf("enrol status: got %d, rpcErr: %+v", status, rpcResp.Error)
 	}
 	registerResult, err := decodeToolResult(rpcResp)
 	if err != nil || registerResult.IsError {
-		t.Fatalf("register tool error: err=%v result=%+v", err, registerResult)
+		t.Fatalf("enrol tool error: err=%v result=%+v", err, registerResult)
 	}
-	var regOut RegisterAgentOutput
+	var regOut EnrolAgentOutput
 	if err := json.Unmarshal([]byte(registerResult.Content[0].Text), &regOut); err != nil {
-		t.Fatalf("decode register output: %v", err)
+		t.Fatalf("decode enrol output: %v", err)
 	}
 
 	token := regOut.Token
@@ -103,7 +105,7 @@ func TestE2E_V1ExitCriteria(t *testing.T) {
 	}
 
 	// 4. Post self-introduction to Introductions channel
-	payloadBytes, err := json.Marshal(map[string]string{"text": "exit-agent (gpt-4) joined the project."})
+	payloadBytes, err := json.Marshal(map[string]string{"text": "exit-agent (gpt-4) enrolled in the project."})
 	if err != nil {
 		t.Fatalf("failed to marshal intro payload: %v", err)
 	}
@@ -182,7 +184,7 @@ func TestE2E_V1ExitCriteria(t *testing.T) {
 	// 9. Write discovery back to KB
 	status, rpcResp, err = makeMCPCall(t, srv.URL, "wormhole.kb.write", projectID, token, WriteArticleInput{
 		Title: "Discovery from Exit Validation",
-		Body:  "We have proven that the agent identity, join, channel, task, and KB sync work end-to-end.",
+		Body:  "We have proven that agent identity, enrolment, channel, task, and KB sync work end-to-end.",
 		Links: []string{},
 	})
 	if err != nil {

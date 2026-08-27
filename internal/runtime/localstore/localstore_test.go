@@ -2,7 +2,6 @@ package localstore
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -262,37 +261,6 @@ func TestWhoAmICache_SameAgentKeepsIndependentProjectScopes(t *testing.T) {
 	}
 }
 
-func TestOpen_MigratesLegacyAgentOnlyWhoAmICacheKey(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "legacy.db")
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatalf("open legacy db: %v", err)
-	}
-	if _, err := db.Exec(`CREATE TABLE whoami_cache (agent_id TEXT PRIMARY KEY, owner TEXT NOT NULL, model TEXT NOT NULL, capabilities TEXT NOT NULL DEFAULT '[]', project_id TEXT NOT NULL, permissions TEXT NOT NULL DEFAULT '[]', cached_at TIMESTAMP NOT NULL)`); err != nil {
-		t.Fatalf("create legacy cache: %v", err)
-	}
-	if _, err := db.Exec(`INSERT INTO whoami_cache VALUES ('shared-agent','','','[]','project-a','["task.create"]',CURRENT_TIMESTAMP)`); err != nil {
-		t.Fatalf("seed legacy cache: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close legacy db: %v", err)
-	}
-
-	store, err := Open(path)
-	if err != nil {
-		t.Fatalf("Open migrated db: %v", err)
-	}
-	defer store.Close()
-	if err := store.CacheWhoAmI(context.Background(), WhoAmICache{AgentID: "shared-agent", ProjectID: "project-b", Permissions: []string{"kb.write"}, CachedAt: time.Now().UTC()}); err != nil {
-		t.Fatalf("cache second project: %v", err)
-	}
-	for _, projectID := range []string{"project-a", "project-b"} {
-		if _, err := store.GetCachedWhoAmIForProject(context.Background(), projectID); err != nil {
-			t.Fatalf("project %s missing after migration: %v", projectID, err)
-		}
-	}
-}
-
 func TestEventRepoGetChannelRespectsNamespace(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "wormholed.db"))
 	if err != nil {
@@ -323,6 +291,35 @@ func TestEventRepoGetChannelRespectsNamespace(t *testing.T) {
 		if _, err := events.GetChannel(ctx, namespaceID, id); !errors.Is(err, ErrEventNotFound) {
 			t.Fatalf("GetChannel(%q, %q) error = %v, want ErrEventNotFound", namespaceID, id, err)
 		}
+	}
+}
+
+func TestOperationalEventDoesNotRequireLegacyChannelDefinition(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "operational-event.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	repo := NewEventRepo(store.DB())
+	event, err := repo.PublishOperationalEvent(ctx, "workspace-a", "11111111-1111-4111-8111-111111111111", "actor-a", "review.ready", json.RawMessage(`{"ready":true}`), nil)
+	if err != nil {
+		t.Fatalf("PublishOperationalEvent: %v", err)
+	}
+	if event.NamespaceID != "workspace-a" || event.ChannelID != "11111111-1111-4111-8111-111111111111" || event.AgentID != "actor-a" {
+		t.Fatalf("operational event = %+v", event)
+	}
+
+	var channels, events int
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM channels`).Scan(&channels); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM events WHERE namespace_id=? AND channel_id=?`, event.NamespaceID, event.ChannelID).Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if channels != 0 || events != 1 {
+		t.Fatalf("legacy channels=%d operational events=%d, want 0/1", channels, events)
 	}
 }
 

@@ -133,12 +133,13 @@ The paid-provider acceptance test is disabled by default. Set
 `TestCohereLiveLowOverlapRankingOptIn`; default CI and local test runs never
 contact Cohere. The test emits neither the key nor article/query text.
 
-Task 14/#52 has not yet produced the generated-guidance renderer or golden
-outputs. Until it does, `generated_guidance_requirements` in
-`testdata/alpha/kb/semantic-low-overlap.json` is the canonical Task 18 contract.
-The Task 14 renderer must consume those statements into
-`wormhole-tool-use.md` and `wormhole-operating-loop.md`; Task 18 deliberately
-does not hand-create either generated file.
+`generated_guidance_requirements.fabric_semantic_search` in
+`testdata/alpha/kb/semantic-low-overlap.json` is the canonical semantic-ranking
+fixture contract. It describes an optional Fabric/Core capability and is
+asserted by the real-Postgres ranking test. Stage 2 Gateway instead exposes
+deterministic `kb.list` and `kb.get`; it neither advertises semantic KB search
+nor Code Graph. Generated live Gateway guidance is validated separately from
+the Stage 2 contract inventory.
 
 ## Compliance Checks on Write
 

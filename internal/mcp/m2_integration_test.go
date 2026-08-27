@@ -20,7 +20,6 @@ func TestM2_TaskLifecycleEventsOnChannel(t *testing.T) {
 	tasksStore := testTasksStore(t)
 	eventsStore := testEventsStore(t)
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(identityStore, eventsStore, testRolesStore(t), testKBStore(t)))
 	registry.Register(CreateChannelTool(eventsStore))
 	registry.Register(CreateTaskTool(tasksStore))
 	registry.Register(AssignTaskTool(tasksStore))
@@ -31,18 +30,12 @@ func TestM2_TaskLifecycleEventsOnChannel(t *testing.T) {
 
 	projectID := mustCreateProject(t, "m2-task-lifecycle-events")
 
-	registerArgs, _ := json.Marshal(RegisterAgentInput{Permissions: []string{"event.publish", "channel.create", "channel.subscribe", "task.create", "task.assign", "task.update_status"}, Owner: "harley", Model: "claude"})
-	registerResult := mustToolResult(t, srv, "", "wormhole.agent.register", projectID, registerArgs)
-	var registerOut RegisterAgentOutput
-	json.Unmarshal(registerResult, &registerOut)
-	if registerOut.Token == "" {
-		t.Fatalf("register output missing token: %+v", registerOut)
-	}
+	registered := mustRegisterTestAgent(t, identityStore, projectID, []string{"event.publish", "channel.create", "channel.subscribe", "task.create", "task.assign", "task.update_status"})
 
 	callTool := func(tool string, args any) json.RawMessage {
 		t.Helper()
 		argBytes, _ := json.Marshal(args)
-		return mustToolResult(t, srv, registerOut.Token, tool, projectID, argBytes)
+		return mustToolResult(t, srv, registered.Token, tool, projectID, argBytes)
 	}
 
 	channelRaw := callTool("wormhole.channel.create", CreateChannelInput{Name: "task-status"})
@@ -59,10 +52,10 @@ func TestM2_TaskLifecycleEventsOnChannel(t *testing.T) {
 		t.Fatalf("create output: %+v", createOut)
 	}
 
-	assignRaw := callTool("wormhole.task.assign", AssignTaskInput{TaskID: createOut.TaskID, OwnerAgentID: registerOut.AgentID})
+	assignRaw := callTool("wormhole.task.assign", AssignTaskInput{TaskID: createOut.TaskID, OwnerAgentID: registered.AgentID})
 	var assignOut AssignTaskOutput
 	json.Unmarshal(assignRaw, &assignOut)
-	if assignOut.OwnerAgentID != registerOut.AgentID {
+	if assignOut.OwnerAgentID != registered.AgentID {
 		t.Fatalf("assign output: %+v", assignOut)
 	}
 

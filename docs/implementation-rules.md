@@ -2,14 +2,49 @@
 
 **Audience:** implementation agents (any model tier) making changes to this repo.
 Authority order: RFC-0001, with RFC-0003 overriding it only where RFC-0003
-explicitly amends local-runtime or transport assumptions; RFC-0002 governs optional
-Governance; `docs/implementation-rules.md`; existing code.
+explicitly amends local-runtime, transport, workspace, or optional-coordination
+assumptions; RFC-0002 governs optional Governance; the approved
+`docs/superpowers/specs/2026-07-28-git-native-wormhole-architecture-design.md`
+defines their version-one contract details, with
+`docs/superpowers/specs/2026-08-01-publication-classification-review-cas-amendment.md`
+governing publication policy, origin, review CAS, its durable proof, and its then-current
+successor migration numbering, and
+`docs/superpowers/specs/2026-08-11-task5-fallback-checkpoint-recovery-simplification-design.md`
+narrowly governing the Task-5 V1 publisher/recovery mechanism and platform boundary, and
+`docs/superpowers/specs/2026-08-17-stage1a-r01-r05-foundation-reduction-design.md`
+recording the Stage 1A human decision and narrowly governing the selected R01-R05
+private-persistence reduction after its approved written-spec review gate;
+and the approved
+`docs/superpowers/specs/2026-08-24-r06-private-format-hard-cut-design.md`
+governing the closed-pre-alpha private Gateway schema-v6 hard cut;
+`docs/implementation-rules.md`;
+existing code.
 This document derives from the RFCs and current code; if it conflicts with an RFC, the RFC
 wins and this file has a bug — flag it, don't silently pick one.
 
 This is a *constraint document*, not a tutorial. Every section states rules. If a task
 requires breaking a rule here, stop and escalate to the orchestrating agent or human;
 do not improvise.
+
+Approved programme and slice-plan execution amendments control task scope and sequencing.
+They cannot weaken an RFC requirement, but they can defer an otherwise described task or
+private implementation choice. Task-5, the review-only Stage 1A gate, and R01-R05 are
+complete. R06 authorized a closed-pre-alpha private Gateway format hard cut to schema v6
+and is complete in approved implementation commits
+`27f5b85`, `a18b6f4`, and `e1d2df5`; independent review, `make check` (84.8%),
+release-test, release-rehearsal, and clean detached-clone gates passed. R07-R14 and
+all other reduction work are now paused. The separately approved decomposition of
+`projectstate.Service` behind its existing facade is complete. Git-native Tasks 1-8 and
+the Stage 2 public cutover are implemented; the canonical setup and five workspace
+operations are now the live interfaces. R07-R14 reduction and unrelated preparation
+still require a later explicit go/no-go.
+
+The approved projectstate decomposition is now implemented behind the unchanged
+public facade. `projectstate.Service` contains exactly six coordinator pointers;
+all persistence, filesystem, Git, publication, clock, and fault-injection seams
+belong to their owning coordinator. Checkpoint and recovery retain a shared gate.
+Measured scope and verification evidence are recorded in
+`docs/superpowers/reviews/2026-08-25-projectstate-service-decomposition-report.md`.
 
 ---
 
@@ -65,6 +100,7 @@ doing each thing, and it is written down. Before editing, read:
 | Any core package | `internal/core/identity/identity.go` (the canonical pattern) + the package you're editing |
 | DB schema | `docs/db-entities.md` + the latest migration pair in `migrations/` |
 | MCP tools | `internal/mcp/registry.go` + RFC-0001 §9 |
+| Git-native workspace, setup, identity, Fabric routing, or Code Graph | `docs/superpowers/specs/2026-07-28-git-native-wormhole-architecture-design.md` + RFC-0003 |
 | Tests | `internal/core/identity/identity_test.go` |
 | Anything at all | The RFC section the task cites; §1–2 of this document |
 
@@ -91,17 +127,18 @@ defined before a second implementation exists.
 Ambiguity is normal; guessing is the failure. Resolve in this exact order, stopping at the
 first rung that answers the question:
 
-1. **RFC text.** Does RFC-0001 state it, does RFC-0002 state it for optional
-   Governance, or does RFC-0003 explicitly amend a local-runtime or transport
-   assumption? Then it is decided; follow that authority. RFC-0003 does not
-   otherwise supersede RFC-0001.
-2. **`docs/db-entities.md`** for anything entity-shaped.
-3. **Existing code.** Does the repo already embody an answer? Match it.
-4. **This document's rules.** Do §4–§7 constrain it to one option?
-5. **RFC Decision Registers (§15 Core / §9 Governance / §9 Local Runtime).** If the
-   entry is decided, follow it. If it is listed under **Open**, do not resolve it:
-   pick the most conservative behavior consistent with the settled decisions,
-   state what you did and why, and flag it.
+1. **RFC text and Decision Registers.** Does RFC-0001 state it, does RFC-0002
+   state it for optional Governance, or does RFC-0003 explicitly amend a
+   local-runtime, transport, workspace, or optional-coordination assumption?
+   A decided entry binds. An entry listed as open remains open and may not be
+   resolved as a side effect. RFC-0003 does not otherwise supersede RFC-0001.
+2. **Approved architecture contract.** For the 2026-07-28 migration, does the
+   Git-native architecture design specify the version-one detail? Follow it.
+3. **`docs/db-entities.md`** for anything entity-shaped.
+4. **Existing code.** Does the repo already embody a compatible answer? Match it.
+   Legacy code that the architecture explicitly supersedes is migration input,
+   not precedent.
+5. **This document's rules.** Do §4–§7 constrain it to one option?
 6. **None of the above** → stop and escalate with a concrete question and your
    recommended answer. "Should `task.assign` accept a human owner? RFC §8.2 says owner
    is 'agent or human' but the agents table has no human rows — I recommend X because Y"
@@ -144,7 +181,20 @@ commands in T4, you read the output, and the output says pass. Paste the decisiv
 verification (missing DB, sandbox limits), the status is **not** "done" — it is "written,
 unverified, because ___", stated exactly that way.
 
-### 2.8 Rationalisations to catch yourself making
+### 2.8 Invariant proportionality review gate
+
+Every new or strengthened invariant must name, in its task brief and review evidence:
+
+1. its owning requirement;
+2. the concrete failure or threat it prevents;
+3. V1 likelihood evidence, or an explicit assumption when evidence is unavailable; and
+4. why fail-closed handling, manual repair, recovery to the last known complete state, or
+   another simpler recovery path is insufficient.
+
+Absent all four, review blocks the change. A plausible hypothetical is not enough to add
+durable state, a compatibility commitment, a new mutation boundary, or redundant proof.
+
+### 2.9 Rationalisations to catch yourself making
 
 | The thought | The reality |
 |---|---|
@@ -162,38 +212,38 @@ unverified, because ___", stated exactly that way.
 
 ## 3. System in One Paragraph
 
-Wormhole is a two-layer system (RFC-0003): a per-user Gateway (`gatewayd`) with a
-SQLite replica plus Fabric (`fabric`) with a Postgres database. Coding harnesses talk only to
-Gateway over local IPC (MCP tools); Gateway syncs incrementally with Fabric. The platform
-exposes four pillars — Event Bus,
-Task Graph, Knowledge Base, Identity & Permissions — exclusively through MCP. Git stays
-the sole source of truth for code; Wormhole stores pointers (commit SHAs, PR URLs) and
-commentary only. There is no message broker or second coordination datastore. The current
-read-only human dashboard is the narrow RFC-0001 §14 V2 exception to MCP-only product
-capabilities; no broader human application is in scope. Governance (Constitution, Congress;
-RFC-0002) is optional and must not leak into Core code.
+The shipped Stage 2 topology has three live layers: stateless harness MCP
+connectors, the human-first `wormhole` CLI, and one user-level local-only Gateway
+supervisor. A repository's typed `.wormhole/state/v1/` tree at an observed commit
+is the accepted Git base; Gateway stores a durable private overlay per checkout
+and materialises an uncommitted candidate through deterministic compare-and-swap
+checkpoints. Checkpoint alone never advances the base. Ordinary Git review and
+commit are the sole acceptance authority for portable state. The exact 17-tool
+Gateway serves agent, Channel, KB, sync-status, and workspace operations without
+Fabric or PostgreSQL. Operational activity and selected human/agent/session state
+remain private to the local Gateway.
 
+The repository also retains an optional 20-tool Fabric server and broader Core,
+sync, Code Graph, and integration-manifest packages. Those packages have their
+own rules below, but their presence does not make their tools or network paths a
+live Stage 2 Gateway feature. Governance is optional and must not leak into Core.
+
+```text
+Human CLI                         Harness MCP bridges
+    \                                 /
+     +---- one gatewayd supervisor --+
+           | private SQLite: bases, overlays, activity, identity
+           | explicit workspace routes
+           +---- reviewed portable checkpoint candidate
+
+Git checkout: .wormhole/state/v1/ <-> checkpoint/review/merge
+
+Separate non-Stage 2 server path: fabric -> Postgres + pgvector
 ```
-Coding harnesses (Claude Code, OpenCode, Goose, ...)
-        │  MCP tools, local IPC only
-        ▼
-Gateway (gatewayd, per-user daemon, RFC-0003 §5)
-        │  internal/runtime/* packages: local API, SQLite store, sync engine, scheduler
-        │
-        ├─► localapi (MCP tool registry + org routing)
-        ├─► localstore (SQLite tasks, events, KB, namespace-scoped)
-        ├─► sync (outbound queue, bootstrap/incremental pull/push)
-        ├─► scheduler (agent presence, task routing)
-        └─► eventbus (ephemeral pub/sub)
-        │
-        ▼  wormhole.sync.* tools over HTTP
-        │
-Fabric (cmd/fabric)
-        │  internal/mcp (tool registry + auth boundary)
-        │  internal/core/* (identity, tasks, events, kb, permissions)
-        ▼
-Postgres + pgvector (single Coordination Server datastore)
-```
+
+The local-only Stage 2 slice of the 2026-07-28 design is implemented. Match its
+approved slice plan and tests; do not mistake retained optional or future code
+for a shipped Gateway surface.
 
 ---
 
@@ -202,21 +252,22 @@ Postgres + pgvector (single Coordination Server datastore)
 | Package | Owns | May import |
 |---|---|---|
 | `cmd/fabric` | Process wiring: config, HTTP server, registry construction | `internal/core/*`, `internal/mcp`, `internal/storage`, `internal/types`, `internal/webui` |
-| `cmd/wormhole` | CLI entrypoint (`wormhole join` etc.) | `internal/config`, client-side code, stdlib |
+| `cmd/wormhole` | Human-first CLI entrypoint (setup, connector lifecycle, status/diff/import/checkpoint/stash, MCP bridge, plus separately tested optional-server administration) | `internal/config`, client-side code, stdlib |
 | `internal/config` | CLI global/project TOML configuration | stdlib, BurntSushi TOML |
 | `internal/mcp` | MCP tool descriptors, registry, request/response schemas, auth middleware | `internal/core/*`, `internal/types` |
-| `internal/core/identity` | Agents, tokens, passports, whoami, audit trail | `internal/types`, stdlib |
+| `internal/core/identity` | Human and agent principals, authenticators, memberships, ownership, sessions, Passports/tokens, whoami, audit trail | `internal/types`, stdlib |
 | `internal/core/tasks` | Task graph: CRUD, status machine, task links | `internal/types`, `internal/core/events` (to emit transition events) |
 | `internal/core/events` | Channels, append-only event log, typed event payloads | `internal/types`, stdlib |
 | `internal/core/kb` | KB articles, links, embeddings, compliance checks, semantic search | `internal/types`, stdlib |
 | `internal/core/permissions` | Permission resolution/enforcement helpers | `internal/types`, stdlib |
-| `internal/core/git` | Git integration pointers: commit links, review requests (manual-link only, RFC-0001 §8.6) | `internal/types`, stdlib |
+| `internal/core/git` | Source-code pointers only: commit links and review requests; never repository source | `internal/types`, stdlib |
 | `internal/core/roles` | Immutable role templates and default task views | stdlib |
 | `internal/storage` | DB connection only (`Open`) | `internal/types`, `lib/pq` |
-| `internal/types` | Config, shared plain types | stdlib only |
-| `internal/webui` | Read-only dashboard and viewer/admin-key HTTP boundary | `internal/core/*`, stdlib |
+| `internal/types` | Config and shared plain cross-layer types | stdlib only |
+| `internal/types/projectstate` | Canonical snapshot schemas, strict tree/operation codecs, canonical JSON/Markdown digests, validator, and typed reducer | `internal/types`, stdlib, BurntSushi TOML |
+| `internal/webui` | Human read projection and approved private-auth browser callbacks/session boundary | `internal/core/*`, stdlib |
 
-### 4.1 Local Runtime Module Map (RFC-0003 §6.3)
+### 4.1 Local Runtime Module Map
 
 The local-first Gateway (`gatewayd`) uses `internal/runtime/*` packages, separate from and
 parallel to `internal/core/*` (which stays Fabric-only). Local packages follow
@@ -224,28 +275,61 @@ the same layering pattern and isolation discipline.
 
 | Package | Owns | May import |
 |---|---|---|
-| `cmd/gatewayd` | Process wiring: config load, localstore, localapi, sync engine, graceful shutdown | `internal/runtime/*`, `internal/types` |
-| `internal/runtime/config` | XDG-compliant local paths, org connection config, project bindings (RFC-0003 §7.1, §8.1) | `internal/types`, stdlib |
-| `internal/runtime/localstore` | SQLite-backed repositories for tasks, events, KB, namespaced per project (RFC-0003 §7.2) | `internal/types`, stdlib, modernc SQLite driver |
-| `internal/runtime/localapi` | Local IPC server (Unix domain socket), tool registry, request routing, org context resolution (RFC-0003 §6.1) | All sibling `internal/runtime/*` packages, `internal/types`, stdlib |
-| `internal/runtime/eventbus` | In-memory pub/sub for ephemeral events (presence, heartbeats); never persists (RFC-0003 §8.2) | `internal/types`, stdlib |
-| `internal/runtime/scheduler` | Agent registration, presence tracking, capability matching, local task routing (RFC-0003 §6.3) | `internal/types`, stdlib |
-| `internal/runtime/sync` | Outbound queue (durable, SQLite-backed), bootstrap/incremental pull/push clients, conflict audit logging (RFC-0003 §8.2, §8.3) | `internal/runtime/localstore`, `internal/types`, stdlib |
-| `internal/runtime/codegraph/config` | Disabled-by-default, project-scoped local Code Graph configuration | stdlib |
+| `cmd/gatewayd` | Process wiring: config load, localstore, exact 17-tool localapi, owner-private socket, graceful shutdown | `internal/runtime/*`, `internal/types` |
+| `internal/runtime/config` | XDG-compliant paths, immutable workspace bindings, identity refs, and retained optional-Fabric profile types | `internal/types`, stdlib |
+| `internal/runtime/localstore` | SQLite-backed bases, overlays, domain records, operational activity, checkpoints, private identity, and retained optional queues/conflicts, all scoped by project and workspace | `internal/types`, `internal/runtime/codegraph/schema` (pure catalog authority only), stdlib, modernc SQLite driver |
+| `internal/runtime/localapi` | Stable local IPC, project-operation registry, cwd/workspace routing, and actor-envelope resolution | All sibling `internal/runtime/*` packages, `internal/types`, stdlib |
+| `internal/runtime/eventbus` | In-memory pub/sub for ephemeral events (presence, heartbeats); never persists | `internal/types`, stdlib |
+| `internal/runtime/scheduler` | Agent registration, presence tracking, capability matching, and retained scheduling primitives; no Stage 2 Task MCP surface | `internal/types`, stdlib |
+| `internal/runtime/sync` | Retained optional-Fabric clients, durable queues, bootstrap/incremental streams, Git-base preconditions, and conflict audit; not instantiated by the Stage 2 local-only supervisor | `internal/runtime/localstore`, `internal/types`, stdlib |
+| `internal/runtime/codegraph/config` | Disabled-by-default, workspace-scoped local Code Graph configuration | stdlib |
+| `internal/runtime/codegraph/golang` | Read-only Go compiler analysis into the language-neutral graph model | `golang.org/x/tools/go/packages`, stdlib |
+| `internal/runtime/codegraph/schema` | Pure canonical Code Graph SQLite catalog SQL, version, fingerprint, and read-only validation authority | stdlib |
 | `internal/runtime/codegraph/store` | Component-local SQLite schema, revision payloads, snapshot reads, and atomic publication | `internal/runtime/codegraph/config`, stdlib |
-| `internal/runtime/codegraph/index` | Candidate invariant validation and publication orchestration | `internal/runtime/codegraph/store`, stdlib |
+| `internal/runtime/codegraph/index` | Canonical source inventory, compiler-backed candidate construction, invariant validation, and publication | `internal/runtime/codegraph/config`, `internal/runtime/codegraph/golang`, `internal/runtime/codegraph/store`, stdlib |
+| `internal/runtime/codegraph/query` | Deterministic lexical and structural retrieval with freshness-gated source access | `internal/runtime/codegraph/config`, `internal/runtime/codegraph/source`, `internal/runtime/codegraph/store`, stdlib |
+| `internal/runtime/codegraph/source` | Bounded, hash-validated transient source assembly | stdlib |
 
-**Local runtime hard dependency rules (RFC-0003 §6.3):**
+**Local runtime hard dependency rules:**
 
 - LR1: `internal/runtime/*` packages never import `internal/core/*` or `internal/mcp`. Local storage and coordination are strictly separated.
 - LR2: `internal/runtime/localapi` may import all other `internal/runtime/*` packages (it wires them together). Other runtime packages may not import `localapi`.
-- LR3: `internal/runtime/localstore` repository methods enforce namespace isolation by construction: every query is namespace-scoped via mandatory parameters, never inferred from ambient state (RFC-0003 §7.2 — accepted RLS-gap risk with process discipline).
-- LR4: Ephemeral events (presence, heartbeats) are eventbus-only; durable events (task/KB changes) go through localstore. Never persist ephemeral state.
-- LR5: Sync queue is SQLite-backed and restart-surviving (RFC-0003 G4). Local writes become durable before sync is attempted; sync never blocks local writes.
-- LR6: Code Graph is Gateway-local derivative state. Its dependencies flow
-  `index` → `store` → Code Graph `config`; none imports `localapi`, `sync`, Core,
-  or MCP. Stores bind one explicit Gate A project at `Open`, every payload SQL
-  remains project- and revision-scoped, and no Code Graph state enters Fabric.
+- LR2a: `internal/runtime/localstore` may import only the pure
+  `internal/runtime/codegraph/schema` catalog authority for private-format
+  fingerprinting and validation. It must never import Code Graph `store`, `index`,
+  `query`, or other runtime behavior; schema owns no Gateway or Code Graph runtime
+  state and performs no writes during validation.
+- LR3: `internal/runtime/localstore` repository methods enforce project and workspace isolation by construction: every query is scoped through mandatory parameters, never inferred from ambient state. Every change ships cross-project and cross-workspace rejection tests.
+- LR4: Ephemeral presence/heartbeats are eventbus-only. Task-transition notifications,
+  progress, generic channel activity, runtime attribution, subscriptions, telemetry, and
+  uncurated discoveries use the operational activity store, never automatic `EventV1`
+  operations. Task definition/owner/portable candidate status may use `OperationV1`.
+  Explicit promotion alone strict-binds a source activity ID/digest into portable
+  audit evidence.
+- LR5: Retained optional-Fabric sync queues, when separately exercised, are
+  SQLite-backed, restart-surviving, and keyed by explicit Fabric
+  instance/project/stream binding. The Stage 2 local-only runtime does not instantiate
+  a Fabric client or create live sync/legacy queue rows. In the optional path, local
+  writes become durable before sync; one Fabric failure never blocks local work or
+  another binding. Nonterminal queues, conflicts, recovery state, and receipts are
+  excluded from age/rank pruning. After terminal the exact default retention is 30
+  days; a configured longer value must remain finite.
+  Ordinary activity is eligible when it is older than 30 days **or** falls outside the
+  newest 10,000 unprotected workspace rows, and is pruned deterministically in
+  `(created_at, activity_id)` ascending order. Protected rows may exceed the cap.
+- LR6: Code Graph is Gateway-local derivative state. Dependencies are `store` →
+  `config`, `index` → `config`/`golang`/`store`, and `query` →
+  `config`/`source`/`store`; none imports `localapi`, `sync`, Core, or MCP.
+  Stores bind one explicit workspace at `Open`, every payload SQL remains project-,
+  workspace-, and revision-scoped, and no Code Graph state enters Fabric or
+  `.wormhole/`. Before serving status or query, the runtime compares the active
+  analysis fingerprint with a recomputed fingerprint over tracked source and
+  adapter-declared non-source inputs plus normalised build/target/configuration,
+  graph/adapter schema version, and compiler/toolchain identity. A mismatch
+  reports stale state and query fails closed until an explicit successful rebuild.
+  Source bytes remain separately hash-validated. Code Graph uses no model,
+  embedding, vector query, compute profile, Warpspeed path, or implicit network
+  access.
 
 **Hard dependency rules (Coordination Server):**
 
@@ -253,19 +337,26 @@ the same layering pattern and isolation discipline.
 - R2: `internal/core/*` packages never import each other, with one sanctioned exception:
   `tasks` → `events`, because task status transitions emit events (RFC-0001 §8.2).
   Need another cross-core import? Escalate; do not add it.
-- R3: `internal/types` imports nothing outside stdlib. It is the bottom of the graph.
+- R3: Parent-package `internal/types` imports nothing outside stdlib and remains the
+  bottom of the graph. Its `internal/types/projectstate` subpackage is the one exact
+  exception: it may import `internal/types`, stdlib, and BurntSushi TOML. Runtime and
+  Fabric code must consume `internal/types/projectstate` rather than duplicate the
+  canonical snapshot schemas, strict `DecodeOperation`/`CanonicalOperation` byte
+  authority, codec, validator,
+  `DigestCanonicalJSON`/`DigestCanonicalMarkdown`, or reducer. `Digest` lives in
+  `internal/types/projectstate`, not the parent `internal/types` package.
 - R4: No new top-level packages or external Go dependencies without explicit human
   sign-off. Source code directly imports `github.com/BurntSushi/toml`,
   `github.com/lib/pq`, and `modernc.org/sqlite`; the complete locked module graph is
   recorded in `go.mod`/`go.sum`. `golang-migrate` remains external schema tooling rather
   than a linked Go module.
-- R5: The Coordination Server has one datastore: Postgres + pgvector. RFC-0003 separately
-  requires Gateway's local SQLite replica and durable sync queue; that SQLite database
-  is not a Fabric datastore. Do not add Redis, NATS, another datastore, or
-  another storage service without explicit human approval. RFC-0001 §15 decides that
-  durable Fabric change discovery is "Postgres table, polled by Gateway". Harnesses consume
-  local SQLite/runtime state; ephemeral local
-  notifications and the in-memory eventbus remain permitted under LR4.
+- R5: Each optional Fabric instance has one datastore: Postgres + pgvector. RFC-0003's
+  durable Gateway sync queue and Postgres polling rules constrain that separately
+  tested optional path; they are not requirements of the live Stage 2 local-only
+  process. Gateway SQLite is never a Fabric datastore. Do not add Redis, NATS, another
+  datastore, or another storage service without explicit human approval. Harnesses
+  consume local SQLite/runtime state; ephemeral local notifications and the in-memory
+  eventbus remain permitted under LR4.
 
 ---
 
@@ -282,8 +373,8 @@ the same layering pattern and isolation discipline.
    return a bare driver error; never swallow one.
 4. **Security-relevant lookups collapse to one error.** Forged, unknown, and
    wrong-project tokens all return `ErrInvalidToken` — callers must not be able to
-   distinguish failure modes (RFC-0001 §13). Apply the same principle to any future
-   auth-adjacent lookup.
+   distinguish failure modes. This is a retained identity security contract; apply
+   the same principle to any future auth-adjacent lookup.
 5. **Multi-statement writes use a transaction** with `defer tx.Rollback()` then explicit
    `tx.Commit()`. Single inserts don't need a tx.
 6. **Secrets are hashed at rest.** Raw tokens returned exactly once; only SHA-256 hex
@@ -301,33 +392,50 @@ the same layering pattern and isolation discipline.
 
 ## 6. Database Rules
 
-- D1: Schema changes only via golang-migrate pairs in `migrations/`
+- D1: Fabric/Postgres schema changes only via golang-migrate pairs in `migrations/`
   (`NNNNNN_name.up.sql` + `.down.sql`, zero-padded sequential). Down migration must
-  actually revert. Never edit an already-committed migration; add a new one.
+  actually revert. Never edit an already-committed migration; add a new one. The
+  private Gateway SQLite database is separate: its closed-pre-alpha format is one
+  consolidated schema-v6 epoch initialized atomically from
+  `internal/runtime/localstore/private_schema_v6.sql`. It has no v1-v5 upgrade
+  runner, exporter, reset command, or compatibility reader. Only a missing/empty
+  database may initialize, and only an exact current v6 database may reopen;
+  every other existing database is classified read-only and refused before mutation.
 - D2: Entity shapes come from `docs/db-entities.md`. Deviating from it means updating
   that file in the same change, with the reason.
-- D3: Every project-scoped table gets RLS. The only global application tables
-  are project-agnostic `agents` and registration configuration `role_templates`.
+- D3: Every project-scoped table gets RLS. Global application tables are limited
+  to project-agnostic principals/authenticators, agents, and registration
+  configuration such as `role_templates`; memberships, ownership grants,
+  credentials, and actor actions are project-scoped unless the approved schema
+  explicitly records a project-agnostic relationship.
   The `projects` root scopes on its `id`; child tables get a
   `project_id uuid NOT NULL REFERENCES projects(id)` column and an index on it.
   Every scoped table gets `ENABLE ROW LEVEL SECURITY` and a policy comparing
   its scope column (`projects.id` or child `project_id`) to
   `current_setting('wormhole.project_id', true)::uuid`.
-  This is the multi-tenancy guarantee (RFC-0001 §13); it is not optional per table.
+  This is the Fabric-tenancy guarantee in RFC-0001 §15; it is not optional per table.
 - D4: Conventions already in force: `uuid` PKs via `gen_random_uuid()` (pgcrypto),
   `timestamptz NOT NULL DEFAULT now()` timestamps, `text` not `varchar`, `jsonb` with
   `DEFAULT '[]'` for list-shaped columns, snake_case names, header comment citing the
   RFC section.
-- D5: Append-only tables (`events`, `audit_log`, future Constitution versions): no
-  UPDATE or DELETE statements against them anywhere in application code. Corrections
-  are new rows.
+- D5: Append-only means no semantic update or in-place correction. Portable accepted
+  history remains in Git. Operational activity may be deleted only by the policy-owned
+  pruning transaction after eligibility: ephemeral presence is not persisted; ordinary
+  activity becomes eligible when older than 30 days **or** outside the newest 10,000
+  unprotected workspace rows and is pruned by `(created_at, activity_id)` ascending;
+  lifecycle rows are excluded until terminal, then retained for exactly 30 days by
+  default or a configured longer finite duration. Protected rows may make the cap
+  exceed. No caller or generic CRUD path may update/delete append-only evidence.
 - D6: KB embeddings live in Fabric's Postgres pgvector datastore, in the
   project-scoped `kb_article_embeddings` generation table; an approved remote
   provider may compute vectors but is never the vector datastore. The legacy
   nullable `kb_articles.embedding` column is compatibility-only and must not be
   used for production ranking or new writes.
-- D7: D1 governs Fabric's Postgres schema. Gateway Code Graph tables use their
-  own `codegraph_schema_migrations` SQLite ledger, fail closed on a schema newer
+- D7: D1 governs Fabric's Postgres schema. The canonical Code Graph component
+  catalog is owned by `internal/runtime/codegraph/schema`, not by the Code Graph
+  store runtime. Its optional objects live in the Gateway private SQLite database,
+  use their own
+  `codegraph_schema_migrations` SQLite ledger, fail closed on a schema newer
   than the binary, and never enter the Fabric migration sequence. They may store
   paths, indexed hashes, signatures, ranges, edges, and diagnostics, but never
   complete source files, function bodies, or returned context packages. Schema
@@ -337,86 +445,510 @@ the same layering pattern and isolation discipline.
   writer barrier across lifecycle inspection and cleanup; ordinary build
   admission may reclaim only an exactly matched, positively dead owner, while
   uncertain liveness fails closed. Completed disablement removes its project row
-  together with all derivative graph/configuration rows.
+  together with all derivative graph/configuration rows. The target migration
+  must key store identity and lifecycle by workspace/checkout before claiming
+  worker isolation. Code Graph lexical
+  retrieval may index identifiers, signatures, paths, and documentation terms,
+  but it never downloads or invokes a model, stores vectors, or treats enabling
+  the graph as network consent. KB embeddings under D6 are a separate Fabric
+  capability.
 
 ---
 
 ## 7. MCP Surface Rules
 
-- M1: The MCP tool list in RFC-0001 §9 is **indicative, not finalised**. Tool *names*
-  (`wormhole.agent.register`, `wormhole.task.create`, `wormhole.kb.search`, ...) are
-  fixed; exact request/response schemas get designed at implementation time and frozen
-  in `internal/mcp`. When a schema decision isn't obvious, propose it in the PR/task
-  notes rather than inventing silently.
-- M2: Naming grammar is `wormhole.<pillar-noun>.<verb>`. Core pillars are `agent`,
-  `channel`, `task`, `kb`, and `git`; RFC-0003 also ratifies `sync` for runtime-to-server
-  operations. No other pillar prefixes; `wormhole.governance.*` is RFC-0002 and out of
-  scope.
-- M3: Every capability ships as an MCP tool or it doesn't exist (RFC-0001 §5.5).
-  No REST-only endpoints for platform write capabilities. `/healthz` and similar
-  operational endpoints are exceptions, as is the current read-only human dashboard
-  projection ratified by RFC-0001 §14 V2. Do not extend that exception into a parallel
-  write API.
-- M4: Auth happens at the MCP boundary (`internal/mcp` middleware resolves bearer token
-  via `identity.Store.WhoAmI`, yielding `AuthenticatedScope`), then core packages
-  receive the already-resolved scope. Core packages never re-parse tokens.
+- M1: MCP tool names and schemas are governed by the checked-in alpha contract
+  inventory. The 2026-07-28 migration may intentionally revise that inventory in
+  its approved slice, with compatibility tests and documentation changed together.
+  Outside such a slice, do not invent or silently drift a tool contract.
+- M2: Naming grammar is `wormhole.<namespace-noun>.<verb>`. The exact 17-tool Gateway
+  inventory uses only `agent`, `channel`, `kb`, `sync.status`, and the Gateway-local
+  `workspace` status/diff/import/checkpoint/stash operations. The optional 20-tool
+  Fabric registry separately uses agent, channel, task, kb, git, and sync namespaces.
+  A namespace present in retained code is not automatically live in either registry.
+  No other prefix may be added without an RFC change; `wormhole.governance.*` is
+  governed by optional RFC-0002 and remains out of Core.
+- M3: Every ordinary project operation available through the human CLI has an
+  equivalent agent MCP operation over the same Gateway domain semantics. Human
+  authentication/recovery, ownership transfer, membership/policy administration,
+  service installation, and connector configuration are control-plane exceptions,
+  not a second project-write model. Do not add an unrelated REST-only project API.
+- M4: Fabric authentication is resolved at its boundary: private requests resolve
+  the human/agent credential, membership, ownership, and assurance into an actor
+  scope before Core executes; public requests resolve key continuity and label it
+  identification-only. Core packages never re-parse raw credentials. Local Gateway
+  operations carry a typed actor envelope and do not fabricate private assurance.
 - M5: Every authenticated capability-gated tool declares `Tool.RequiredPermission`.
   Current values match the tool name without the `wormhole.` prefix (for example,
   `task.create`, `channel.post`, and `kb.write`). Deliberate auth-only exceptions declare
   an empty permission. When adding a tool, update the registry invariant, role-template
   migration, and permission documentation together.
-- M6: Destructive or policy actions such as deleting a project, revoking all access, or
-  changing permissions are human-only by default (RFC-0001 §13). Never wire a code path
-  that lets an agent identity perform them.
+- M6: Authentication recovery, ownership transfer, membership changes, deleting a
+  project, revoking all access, and changing policy are human control-plane actions
+  by default. This must not be used to deny agents ordinary project operations or
+  Git-proposable `.wormhole/` changes.
 
 ---
 
 ## 8. Pillar-Specific Constraints
 
 ### Events / Channels
-- Typed events first: `event_type` from the RFC vocabulary
+- Operational activity is typed first: `event_type` from the RFC vocabulary
   (`task.status_changed`, `review.requested`, `build.failed`, `discovery.logged`,
   `message.posted`), typed `payload` jsonb per type, optional free-text `note`.
   `message.posted` is the escape hatch; do not add prose-first event types.
 - New event types are an escalation, not a local decision.
-- Durable Fabric change discovery uses Postgres-backed polling by Gateway
-  (RFC-0001 §15). Harnesses consume local SQLite/runtime state over
-  MCP IPC. Ephemeral local notifications and the in-memory eventbus are
-  permitted for wake-ups, presence, and heartbeats, but never as a second
-  durable coordination datastore. Do not add server-side push/streaming
-  infrastructure or another durable delivery service.
+- Generic channel posts/status, progress, and task transition notifications are
+  `ActivityV1`, not portable `EventV1`. Explicit promotion creates the latter with exact
+  extension key `dev.wormhole.promotion` and schema-version-1 data containing only
+  `source_activity_id` and `source_activity_digest`.
+- Promotion accepts only a complete promotable-event projection. `EventV1` channel,
+  source actor, type, payload, note, and creation time are exact deep-owned source copies;
+  `OperationV1.Actor` is the distinct promoter. Caller-selected semantics, attribution,
+  or extra extensions reject the operation.
+- In separately tested optional-Fabric mode, durable change discovery uses
+  Postgres-backed polling by Gateway (RFC-0001 §15). The Stage 2 local-only process
+  does not instantiate this path. Harnesses consume local SQLite/runtime state over
+  MCP IPC. Ephemeral local notifications and the in-memory eventbus are permitted for
+  wake-ups, presence, and heartbeats, but never as a second durable datastore.
 
 ### Tasks
 - Hierarchy is Project → Task → Subtask via `parent_task_id`. Status enum exactly
   `todo / wip / blocked / done`. Transitions go through a validated state machine and
-  emit `task.status_changed` on the bus in the same operation — never a separate sync.
+  atomically update portable task state and append operational `task.status_changed`
+  activity through the Task-7-gated seam. They never automatically create `EventV1`.
 - Links to KB articles / commits / PRs / events go through `task_links`, not ad hoc
   columns.
 
 ### Knowledge Base
 - Atomic articles: one fact/decision/procedure each. Markdown body + jsonb frontmatter.
-- Compliance checks run **server-side** on write (RFC-0001 §13): semantic dedup against
-  existing embeddings, length ceiling, required links where applicable. Rejection style
-  is soft-reject-with-rewrite-suggestion, not hard block (decided by RFC-0001 §15;
-  exact thresholds are tunable config, not hardcoded constants).
+- Compliance uses soft rejection with structured rewrite guidance under
+  RFC-0001 §15. Fabric revalidates remote writes rather than trusting a client;
+  local Git-only operation must not depend on Fabric availability or remote
+  embeddings. Deterministic local checks and any pending remote-only semantic
+  advice must remain distinguishable. Thresholds are tunable configuration,
+  not hardcoded architecture.
 - Linking via `kb_links` rows (graph), never folder/path hierarchy.
-- Search is semantic (pgvector similarity) and strictly project-scoped (decided
-  by RFC-0001 §15). A multi-project runtime keeps separate namespaces and never
-  constructs an implicit merged KB.
+- The current Fabric KB contract supports semantic pgvector search, distinct
+  from model-free Code Graph retrieval. KB reads are strictly project-scoped
+  under RFC-0001 §15; a multi-project runtime never constructs an implicit
+  merged KB. Changing semantic-search requirements needs a focused contract.
 
 ### Identity
-- Agent identity is project-agnostic; project access flows through passports +
-  scoped tokens. Do not add `project_id` to `agents`.
-- Passport = the join-time credential carrying repositories, roles, resolved
-  permissions (RFC-0001 §8.4). One passport per (agent, project), enforced by the
-  existing UNIQUE constraint.
-- Every action attributable: audit log rows are append-only and written by the server,
-  not the client.
+- Human and agent principals are distinct and durable. Authenticators, project
+  memberships, agent ownership/sponsorship, sessions, Passports, and credentials
+  are separate records; do not collapse them into one token row.
+- Agent identity remains project-agnostic; do not add `project_id` to `agents`.
+  Local/fork operations require no Fabric grant, canonical-public participation
+  uses identification-only key continuity, and private Fabric access uses project
+  membership plus accountable ownership-bound grants.
+- Passport is a project-scoped Fabric capability grant to an agent, not a human
+  identity, local actor record, or Git credential. Legacy uniqueness constraints
+  may be migrated only through an approved plan preserving history.
+- Every action is attributable through a typed actor envelope. Agent actions record
+  agent, accountable human at action time, harness/model session, and assurance.
+  Audit rows are append-only and server/Gateway generated, not client-trusted.
 
 ### Git integration
-- Alpha scope is a manual link field only (`git_links`, `wormhole.git.link_commit`).
-  No webhooks, no CI hooks, no repo cloning, no diff storage — Wormhole never stores
-  or mirrors code, only `repo` + `commit_sha`/`pr_url` + `summary`.
+- Optional-server source integration remains pointers only (`git_links`, commit SHA,
+  PR URL, summary); Wormhole never stores or mirrors code bodies. These Fabric Git
+  tools are not live Gateway tools. Typed project records live under
+  `.wormhole/state/v1/` and use a private Gateway overlay plus deterministic
+  checkpoint. Ordinary Git is the only Stage 2 acceptance path. A fork/mismatch
+  leaves any upstream hint inactive, makes no optional-Fabric contact, and remains
+  local. Worktree isolation is mandatory.
+- Checkpoint publication must compare-and-swap the expected live `.wormhole/`
+  digest so direct edits cannot be overwritten. It records materialised-pending-
+  commit state privately. Before staging, one existing prepared/published/recovered-new
+  journal returns `ErrCheckpointPendingAcceptance`; mixed/multiple state fails closed.
+  Resolve an owner-only Git-private checkpoint directory outside the portable worktree
+  through hardened `git rev-parse --git-path wormhole/checkpoints` and require it to be on
+  the live tree's device. Allocate fresh no-replace stage/backup names but create only stage
+  before the CAS. Any pre-journal stage is unowned, never worktree-visible, ignored by
+  Recover, and never reused; cleanup is deferred.
+- Every new prepared checkpoint carries proof version 1 plus non-null strict canonical
+  publication-review and prior-candidate JSON. The latter contains complete inline direct
+  and optional rebased candidate trees; it never aliases journal `prior_tree`. Migration
+  version 4 enforces the joint version-0/null/null or version-1/non-null/non-null shape.
+  Each direct or rebased inline prior-candidate tree is independently limited to at most
+  `10_000` files, at most `4 << 10` UTF-8 bytes per path, at most `16 << 20` bytes per file
+  body, and at most `64 << 20` total bytes, counted as the sum of every path byte plus every
+  file-data byte. There is no combined direct-plus-rebased aggregate limit and no raw-JSON
+  byte limit in v1. Filesystem-only directory-count and depth limits do not apply to the
+  serialized proof; canonical `DecodeTree` still rejects unknown or unsafe project-state
+  paths.
+  After prepared commit, checkpoint opens a second `BEGIN IMMEDIATE`, rechecks the exact
+  live digest, expected workspace revision, journal-bound publication/prior-candidate
+  proofs, current candidate and owned operation workset, review, and conflict gate, and
+  holds it across publication, ordered parent fsyncs, and journal/candidate/row update.
+  Task-5 V1 no-replace renames live to absent backup, fsyncs the private destination before
+  the checkout source, reclassifies, then renames stage to absent live and fsyncs the
+  checkout destination before the private source. It writes no database postimage before
+  durable publication. Exchange and Darwin Task-5 support are deferred.
+- Checkpoint and Recover never advance the accepted binding and expose no base-advanced
+  result flag. Same-symbolic-ref Reject/Refresh alone accepts a checkpoint materialization;
+  Task-4 proposal-free ref switch and applicable Discard may separately advance the base.
+  Task-5 indeterminate database writes use the R04 compact scope/revision/target
+  prior-next-third confirmation without replay; attempted prepare treats exact target
+  absence plus no current owner as prior and retains every unconfirmed unjournaled stage.
+- Recover reads one strict current-workset projection in one `BEGIN IMMEDIATE` snapshot
+  before Git/path I/O. No current journal, or one current `recovered_new` journal, composes
+  and returns DB status from that snapshot with no Git/path I/O. Exactly one current
+  `prepared` or `published` journal may drive recovery; malformed current authority or
+  partial ownership fails first. Prepared requires the exact prior candidate plus its
+  recorded active/rebased operations and zero owned materialized rows; published and
+  recovered-new require the exact publication postimage and every current claim
+  materialized. Accepted and recovered-old history is not loaded on this path; the explicit
+  history-audit entrypoint owns strict validation of retained terminal evidence.
+- For a recovery driver, retain that writer transaction while observing position -> full
+  tree at SHA -> origin -> final position once, re-prove the disposition, classify or
+  mutate journal-bound paths, write and reread the selected database outcome, and commit.
+  Stored base exact or same-ref different-commit exact candidate may converge, without an
+  ancestry assumption. Any malformed/racing/drifted/other base fails with the recovery
+  precondition sentinel before origin invalidation. Recover-old restores the exact inline
+  candidate/operation preimage; recover-new retains the exact publication postimage.
+- Before stage/backup evidence I/O, re-resolve and no-follow open the owner-only same-device
+  Git-private root. Stored absolute paths must be distinct direct children named
+  `<journal_id>.stage`/`<journal_id>.backup`; inspect them descriptor-relatively without
+  following links and revalidate stable identity before mutation. Root/path containment,
+  naming, device, or rebind failure is a recovery precondition error; contained
+  symlink/type/existence/digest/identity mismatch is recovery-blocked. Mutate no path.
+- Snapshot deletion is canonical: single-file records become tombstones at their
+  stable path; a KB tombstone replaces `record.json` and requires `body.md` to be
+  absent. Missing targets are broken, while only schema-declared historical
+  references may resolve to tombstones. Tombstone/edit and tombstone/KB-body
+  changes conflict; resurrection must explicitly name the tombstone digest. Merge
+  lifecycle equality is byte-exact. From an old tombstone, exact endpoints coalesce
+  and one unchanged endpoint yields to the other; only divergent non-base endpoints
+  conflict. From an old live mutable record, exact dual tombstones coalesce and unequal
+  dual tombstones conflict. KB root and `/body` evidence are independent.
+- Portable Events and Git links are both live-only, immutable, and add-only. An
+  exact canonical same-ID replay coalesces; any unequal same-ID value uses the
+  generic immutable-record error, conflict, and direct-delta sentinel. Neither kind
+  may be tombstoned or resurrected. `ErrImmutableEvent` and a Git-link-specific name
+  may remain compatibility aliases to `ErrImmutableRecord`, but they are not distinct
+  normative behaviours. An old-live immutable record is clean only when both endpoints
+  still equal the old record. Valid disappearance produces immutable-record evidence;
+  a side made reference-invalid by disappearance returns its typed validation error.
+  After old-base validation, raw mutable disappearance is preflighted in new-base then
+  candidate order before either side validates and is invalid unless its stable path
+  contains the valid typed tombstone.
+- For an existing live mutable record, `created_at` is immutable on ordinary update
+  through the reducer, direct import, and rebase. An explicit digest-proven
+  resurrection may carry a fresh valid `created_at` because tombstones retain content
+  digests, not prior record bytes. Exact lifecycle endpoint comparisons include
+  `updated_at`. For old-live/live-live semantic resolution, take the only semantic
+  editor's timestamp, the later UTC timestamp when both sides merge cleanly, or the
+  old-base timestamp when neither side changed semantics. For an old-live tombstone
+  racing a live endpoint, a timestamp-only live difference is not a semantic edit, so
+  the tombstone wins without timestamp selection. A timestamp never selects or
+  suppresses a semantic change.
+- Snapshot version, project ID, and repository identity are immutable binding
+  invariants on every accepted/candidate/composed/rebased snapshot. `Config.Handle`
+  and `Remotes` are Git-base-owned: operations and semantic diff exclude them; rebase
+  requires the candidate values to equal the old base and takes the new base values.
+  Candidate loading after a Git advance validates the binding invariants but must not
+  reject retained old-base handle/remotes merely because the accepted base is newer.
+- Candidate `ImportedBy` validation is the exact union canonical UUID or
+  `system:git-observation-rebase-v1`; `ImportedAt` is a valid UTC timestamp. Candidate,
+  stash, and retry reads apply the same union. A trusted zero-actor same-ref Git rebase
+  preserves both fields exactly when a candidate exists. Without one, it uses only the
+  fixed token and the single UTC transaction observation time captured after
+  in-transaction Git reobservation and before the first write. It never borrows an
+  operation actor or fabricates an ActorEnvelope or UUID.
+  Apply this predicate to candidate read/write validation in
+  `localstore/workspace_repo.go`, retry loading in
+  `localstore/workspace_restore_retry_repo.go`, and ProjectState validation/projection in
+  `restore_plan.go`, `restore_retry.go`, and `stash_plan.go:validateStashCandidate`.
+  Retain the UUID retry golden and add a separate literal system-token retry preimage with
+  a hard-coded digest; production code must not generate either expected digest.
+- Direct-delta validation compares only the prior direct surface, the next direct tree,
+  and a bound materialisation exception. It accepts a correct new tombstone, rejects a
+  changed prior tombstone, and never inspects an overlay. `ThreeWayRebase` alone owns
+  the overlay-versus-direct tombstone/edit conflict and its persisted evidence.
+
+### Portable state replay, diff, and merge
+
+- Task 7/domain projection is hard-blocked until a focused approved plan assigns its
+  replacement migration number and freezes strict `ActivityV1`, finite effective-policy
+  storage, atomic terminal/pruning rules, and the promotion receipt seam. Promotion must use one
+  ProjectState-owned immediate transaction to strict-read an exact source activity ID and
+  digest, append an attributed `EventV1` `OperationV1` with extension key
+  `dev.wormhole.promotion` and schema-version-1 data containing only
+  `source_activity_id` and `source_activity_digest`, and atomically mark/receipt that
+  source. It must not nest `ApplyBatch`.
+- Trusted machine-private setup/workspace state classifies publication as exactly
+  `unclassified`, `local_only`, `public_git`, or `private_git`, independently of
+  canonical/fork routing and Fabric mode. A public fork is `public_git`. A caller, actor
+  assurance, or copied remote hint never selects classification. Unclassified workspaces
+  permit status/diff but not checkpoint.
+  Status/diff bind exact workspace, repository, credential-free semantic origin,
+  classification plus monotonic policy revision, candidate tree, canonical semantic diff,
+  and independently observed Git/base inputs into the publication-review digest. `public_git`
+  checkpoint accepts that exact digest (not a boolean), rechecks it before staging, and
+  persists the exact acknowledging actor/digest in the prepared journal/receipt. CLI and
+  MCP are equivalent.
+- Classification is explicit user policy, not continuous host-visibility evidence. Bind
+  it to the exact workspace/repository/semantic-origin identity. After first configuration,
+  a stable observed identity/origin change atomically and stickily transitions the current
+  row plus append-only history to `unclassified` at revision+1; returning to the old origin
+  never revives the old digest. Surface the effective class on status/diff and require an
+  explicit human `ValidateLocalAction` reconfiguration for a same-identity visibility
+  change; never add an implicit network visibility probe. The exact schema, origin codec,
+  diff/review goldens, checkpoint/recovery CAS, and zero-domain-mutation rules are frozen in
+  `docs/superpowers/specs/2026-08-01-publication-classification-review-cas-amendment.md`.
+  Unknown COMMIT confirmation for both configured and sticky policy transitions uses the
+  R04 compact target containing exact workspace revision, transition kind, policy revision,
+  and canonical logical policy digest. Exact prior returns the original unknown result,
+  exact next returns the transition result, and any other state blocks. Ordinary policy
+  operations never load append-only policy history; the explicit history audit owns it.
+
+- Persisted operation JSON is untrusted. Decode it only with the shared strict
+  `projectstate.DecodeOperation`, reject non-canonical bytes, trailing JSON, unknown
+  fields, malformed envelopes/payloads, invalid IDs/digests, and any row-ID/operation-ID
+  mismatch, require byte equality with `projectstate.CanonicalOperation`, then replay
+  with the shared reducer. Any recorded operation digest must equal
+  `projectstate.DigestCanonicalJSON(decoded)` before serving or replay. Persisted trees
+  likewise require the strict file-list decoder, `DecodeTree`, canonical re-encoding,
+  recorded-digest checks, and the complete binding predicate. There is no legacy-table
+  or malformed-row fallback.
+- Composition receives an explicit strict-decoded start snapshot, an explicit initial
+  through-generation, and strictly increasing active stored operations whose generation
+  is greater than that boundary. Rebased, stashed, materialized, and discarded rows do
+  not replay.
+  Status exposes the exact composed `CandidateDigest` and final `OverlayGeneration`
+  while retaining the accepted snapshot separately. `WorkspaceStatus.State` remains a
+  string until an approved plan introduces another type.
+- Stash serialisation keeps `source_tree`/`source_base_digest` as the semantic pre-stash
+  rebase base. The existing `operations_json` column is a strict canonical
+  `StashReplayV1` containing schema version, selected-start tree/digest, initial boundary,
+  a non-nil absorbed-rebased prefix array, and a separate non-nil active suffix array.
+  Inside the same immediate transaction, Stash reads one non-nil strict current-workset
+  projection containing the exact ownerless rebased rows at/below the selected boundary and
+  ownerless active rows above it in stable increasing-generation order. Each record embeds
+  its exact `WorkspaceOperation` and retains `CreatedAt` only where `RestoreRetryState`
+  needs it. The reader validates positive generation, unique canonical operation ID and
+  bytes, current state, owner metadata, and semantic timestamp. Active rows at/below the
+  boundary and rebased rows above it are corruption. Materialized, stashed, and discarded
+  terminal rows are not loaded by Stash; the explicit history audit owns them. Only the two
+  exact cloned current memberships returned by the planner may be passed to
+  `TransitionOperations`; generation-range updates remain forbidden.
+  All and only rows attributed by `stashed_by_stash_id` must match those arrays byte for
+  byte. Portable transitions remain represented by the tracked Git v1 state. The private
+  Gateway database is now one consolidated schema-v6 epoch, initialized from
+  `internal/runtime/localstore/private_schema_v6.sql` in one transaction and recorded by
+  the exact singleton ledger identity `{6}`. The old private v1-v5 migration files,
+  upgrade runner, cache/channel backfills, and legacy proof readers are not part of the
+  supported runtime. Existing databases are classified through a read-only SQLite
+  preflight: only an absent/empty path is fresh and only the exact current v6 object,
+  column, ledger, and current-proof floor is reopenable. Future, malformed, partial,
+  unexpected, or proof-incompatible evidence is preserved and refused before mutation.
+  The dormant `legacy_integration_state_migrations` table and
+  `LegacyIntegrationBackupRoot` seam remain present for the separately authorized W11
+  work; R06 does not implement W11. Restore must
+  prove `Compose(selectedStart,boundary,operations)` equals the
+  recorded composed tree, then call `ThreeWayRebase(sourceBase,current,stashComposed)`.
+  Already-rebased rows at/below the boundary and later active rows move to terminal
+  owner-attributed stashed state in their respective envelope arrays. Stash rejects any open
+  exact-workspace conflict with `localstore.ErrWorkspaceConflicted` and zero mutation;
+  successful stash sets status `clean`.
+- Only a clean stash restore may persist a candidate, transition absorbed current-active
+  operation rows, delete the stash, and set status `pending`; original stash rows remain
+  terminal stashed. A conflicted restore leaves
+  the candidate, every operation row, and full stash byte-identical; it persists only
+  deterministic conflict evidence and status `conflicted`. Before writing those allowed
+  fields it captures the expected workspace revision and the exact semantic preimage needed
+  by this restore: accepted snapshot, current candidate, selected operation memberships,
+  named stash, workspace status, and open conflicts. The transaction applies one revision
+  CAS and then rereads only the targeted semantic postimage. That postimage must preserve
+  the accepted snapshot, candidate, operations, and stash while containing exactly the
+  conflicted status and deterministic evidence. The receipt stores the committed workspace
+  revision and a canonical retry digest over the explicit restore/conflicted action,
+  outcome, scope, request ID/digest, stash ID, and that semantic postimage. Exact repeat
+  strict-composes the named current/stash rows, recomputes the evidence and digest, and
+  returns the same public result with zero writes only when the recorded revision and digest
+  still match. Raw SQLite timestamps, storage classes, and byte-preserving BLOB echoes are
+  not retry or concurrency authority. The retained stash remains resolution/audit evidence,
+  not a blind replay instruction.
+- Stash, restore, and discard require canonical UUID request IDs and immutable canonical
+  transition receipts. Each request digest is canonical JSON of a dedicated tagged v1
+  projection binding schema/action/scope, the complete strict canonical actor envelope,
+  and label or stash ID; discard additionally binds a dedicated tagged projection of the
+  complete private adapter-supplied resolved expected binding, canonical root, and expected commit. Golden
+  tests freeze all three preimages and digests. Stash, restore, and discard use explicit
+  action-specific private tagged v1 codecs: `stashResultV1`/`stashReceiptV1`,
+  `restoreStashResultV1`/`restoreStashReceiptV1`, and
+  `discardResultV1`/`discardReceiptV1`. Each receipt contains schema version, action,
+  outcome, and result; restore alone additionally carries a
+  retry digest that is nil exactly for clean and non-nil exactly for conflicted.
+  Action/outcome must equal the receipt row. A transition receipt's logical key is the
+  exact textual project/workspace/request triple. Readers use that exact indexed key and
+  require zero or one semantically valid record; another returned scope/key or impossible
+  multiplicity is corruption. `InsertTransitionReceipt` relies on the schema's exact unique
+  key inside its caller-owned `BEGIN IMMEDIATE`. BLOB/TEXT aliases and raw storage classes
+  are outside the supported private-DB threat model. Localstore treats
+  `result_json` as
+  action-opaque: it requires exactly one valid compact JSON value followed by exactly one
+  LF, preserves those bytes and object-member order, and never schema-decodes or
+  generic-map re-encodes the value. The action-specific ProjectState codec owns schema,
+  tags, member order, exact re-encoding, and semantic canonicality and rejects any
+  noncanonical bytes. Conflict arrays are always non-nil (`[]`, never `null`), optional
+  pointers are emitted as explicit `null`, and no digest-bearing field uses `omitempty`.
+  Fixed golden bytes and hard-coded canonical-JSON digests cover stash, clean/conflicted
+  restore, and discard result/receipt encodings. They use the existing TEXT column and
+  require no schema version or migration change. Same ID and digest is a retry; a
+  different digest returns `ErrIdempotencyConflict`. Clean retries use receipts read-only,
+  while conflicted restore recomputes current/stash/evidence and retry digest before
+  matching. An unknown clean
+  commit may be proved by an exact receipt; an unknown conflicted commit must pass the same
+  retry-state verification or remain `ErrCommitOutcomeUnknown`. Retry uses the same
+  request or operation ID and reads back the receipt before attempting an insert.
+  BranchSwitchDiscard performs a receipt preflight after pure validation/digest computation
+  and before filesystem, Git, or mutable workspace work. An exact receipt returns read-only
+  with zero Git calls/writes; another action/digest is `ErrIdempotencyConflict`; malformed
+  evidence fails closed. Its immediate transaction rechecks that receipt before mutation,
+  then reads the expected workspace revision and targeted current workset. A concurrent
+  exact receipt wins read-only, and only absence permits the semantic transition. Exact SQL
+  read order, table-only lookup shape, raw keys, and storage classes are not architecture
+  authority. Stash and RestoreStash retain the same semantic idempotency contract.
+- Persisted conflicts have UUIDv4 occurrence IDs separate from recomputed deterministic
+  semantic conflict IDs. One open semantic ID per exact workspace is enforced; repeated
+  evidence reuses its occurrence, absent evidence resolves it, and reopening allocates a
+  new occurrence. Strict reads validate canonical envelopes, typed roots, recomputed IDs,
+  ordering, and row metadata before serving or mutation.
+- Import performs a canonical no-follow capture before `BEGIN IMMEDIATE`, then an exact
+  second read under the writer barrier immediately before its first database mutation;
+  every retained filesystem/localstore reader result is deep-cloned immediately. After
+  second-capture byte/digest equality it revalidates canonical root and checkout identity
+  immediately before conflict replacement, its first write, so a byte-identical checkout
+  replacement still fails on changed device/inode. Before replacement it requires exact
+  consistency between pre-existing open-conflict evidence and workspace `conflicted`
+  status; either mismatch fails closed.
+  Raw path deletion is classified in canonical kind/UUID order before next-tree decode.
+  `ValidateDirectDelta(prior,next)` accepts no proof; only a repository-owned exact
+  published or recovered-new materialization match may bypass it. The matcher receives
+  current-owner proof, eligible journal, binding, canonical prior tree, captured candidate
+  tree, and captured digest; no semantic input is inferred or omitted.
+- Import, ObserveGitBase, and Discard read one same-transaction current-workset projection
+  before an eligible match. One published or recovered-new journal may own current
+  materialized rows; prepared is rejected by acceptance and drives Recover. Current claims
+  are unique by generation and operation ID and form an exact byte/state/owner bijection
+  with that journal's rows. The current journal also rejects an unclaimed active/rebased row
+  at or below its boundary; stashed/discarded gaps and later active rows are allowed.
+  Accepted/recovered-old journals, unrelated terminal operation rows, resolved conflicts,
+  policy history, and unrelated receipts are not loaded; the explicit history audit owns
+  their validation. Historical prepublication state still comes from the current
+  checkpoint transition and durable envelope. Recovery-specific proof admits one prepared
+  only when the current candidate equals the prior-candidate preimage, every listed row
+  remains in its recorded active/rebased state, and no owned materialized row exists; one
+  published requires the publication postimage and all current claims materialized. Import
+  uses the current active/rebased operation projection as its replay/transition inventory:
+  active at/below the selected boundary or rebased above it is corruption; every valid
+  current row is composed and then passed as exact preloaded membership to
+  `TransitionOperations`. Generation-range updates remain forbidden for this mutation.
+  Import has no request ID or receipt: indeterminate COMMIT always returns
+  `ImportResult{}` plus `ErrCommitOutcomeUnknown`, and retry recomputes from fresh capture
+  and transaction state rather than inferring an original result from database readback.
+  Its `ImportedChangeCount` is exactly
+  `len(SemanticDiff(priorSurface, liveSnapshot, nil).Changes)`: overlay changes, merge
+  results, and materialization-exception status never alter that direct semantic count.
+- ObserveGitBase supports Reject and Discard only. Reject and the Discard no-receipt path
+  perform a full outside observation. Inside one immediate transaction, continued
+  Discard absence or Reject requires the exact current binding to equal the valid private
+  adapter-supplied `ExpectedBinding`, with equal scope and matching root; preloads the
+  current candidate, active/rebased operations, open conflicts, accepted snapshot, current
+  journal and its owned rows; and reobserves checkout identity, symbolic ref, and HEAD
+  before the first write. This is the linearization boundary; a same-SHA symbolic-ref change
+  counts. Before applicability, strict-prove and classify only that current workset.
+  Prepared, malformed current ownership, and incomplete current proof fail first as
+  recovery/corruption blockers. Accepted/recovered-old and other terminal history is
+  nonblocking and is not loaded.
+- Discard is applicable only to an actual symbolic-ref change plus at least one candidate,
+  exact active/rebased proposal row, or open conflict occurrence. Otherwise it returns
+  `ObserveGitBaseResult{}` plus `ErrBranchSwitchDiscardNotApplicable`, with no mutation or
+  receipt; an exact receipt retry still wins first. Reject may advance a ref switch with no
+  proposal normally. Same-ref changes use normal acceptance/rebase under Reject. Only
+  stashed rows, only discarded rows, only accepted-journal historical materialized rows,
+  or only resolved conflict history is terminal history and is not proposal state.
+  Under Reject, any symbolic-ref change with proposal always returns
+  `ErrBranchSwitchPending` and cannot accept a materialization. Discard instead proceeds
+  through its proved applicability and materialization-match rules.
+  Applicable Discard keeps the frozen write order and exact affected-count checks: mark
+  preloaded active/rebased rows discarded, preserve stashed and accepted-journal
+  materialized rows, delete candidate, resolve open conflicts, insert the receipt, and
+  advance the base. Any failure rolls back all of them.
+- Only same-symbolic-ref Reject/Refresh may accept an exact proved `published` or
+  `recovered_new`
+  materialization match. Discard never accepts it: exact match returns
+  `ObserveGitBaseResult{}` plus `ErrBranchSwitchDiscardNotApplicable`, with no receipt or
+  mutation and byte-identical journal, candidate, materialized rows, conflicts,
+  operations, and binding. A nonmatching proved acceptance-eligible row blocks same-ref
+  Reject rebase and applicable Discard with `ErrGitMaterializationPrecondition`, retaining
+  those bytes. Prepared still requires Recover; historical accepted/recovered-old rows do
+  not block. Do not add a journal state or migration. The clean-discard codec remains
+  candidate-not-accepted with nil journal, no rebase, and no conflicts.
+- Unknown applicable-Discard COMMIT confirmation reads a fresh exact receipt without Git
+  and succeeds only when its strict action, digest, and complete result equal the attempted
+  transition. Otherwise it returns `ObserveGitBaseResult{}` plus the original error
+  wrapping `ErrCommitOutcomeUnknown`; mismatch is not `ErrIdempotencyConflict`.
+  Non-discard ObserveGitBase returns the same zero result and sentinel on unknown COMMIT,
+  with no receipt or state inference. RefreshWorkspace injects its validated resolved
+  binding as `ExpectedBinding`, but returns `types.WorkspaceBinding{}` on that error;
+  private adapters do the same, and no CLI/MCP client supplies binding or routing context.
+- At most one prepared, published, or recovered-new checkpoint exists per workspace.
+  Checkpoint checks inside its first immediate transaction and returns
+  `ErrCheckpointPendingAcceptance` with zero artifact allocation or mutation while one
+  remains; a prepared row must be converged through Recover. Mixed/multiple pending rows
+  are corruption. Later active generations remain overlay until recovery/acceptance;
+  checkpoints are never silently superseded.
+- All append/rebase mutations use one caller-owned dedicated SQLite connection and one
+  `BEGIN IMMEDIATE`: read exact binding revision/candidate/current rows, decode and compose,
+  apply the shared reducer, write all rows/candidate/conflict state and the binding status,
+  advance the revision once, then commit or roll back together. Both
+  `WithImmediateWorkspace` and `WithImmediateWorkspaceTransition` instantiate and finalize
+  the same lazy dirty/revision-CAS tracker; registration alone creates revision `1` directly.
+  Helpers must not open nested transactions. A standalone append API that bypasses
+  composition, status, generation, revision, or candidate validation is forbidden.
+- `localstore.WorkspaceConflictGate` has exactly
+  `HasOpenConflicts(context.Context, types.WorkspaceScope) (bool, error)`;
+  `WorkspaceRepo.HasOpenConflicts` uses that signature and
+  `WorkspaceMutationTx.HasOpenConflicts(context.Context) (bool, error)` is restricted to
+  its callback's bound scope. Both query exact project/workspace plus `state='open'`;
+  resolved or other-workspace rows do not block. The sole sentinel is
+  `localstore.ErrWorkspaceConflicted`; no runtime alias or alternate declaration is
+  permitted.
+- Diff and conflict paths use RFC 6901 escaping, `""` for a record root, and `/body`
+  for KB Markdown. `FieldValue` has `Present bool` tagged `json:"present"` and
+  `Value json.RawMessage` tagged `json:"value,omitempty"`: false requires nil Value;
+  true requires exactly one canonical JSON value, including literal `null`. Complete
+  root values use the concrete typed record's canonical schema field order. Generic
+  sorted-map JSON exists only transiently while recursively merging object members;
+  roots are rehydrated through their strict concrete type before assignment, evidence
+  comparison, or exposure. Persisted conflict reads must perform the same rehydration
+  because canonical encoding of a `json.RawMessage` may normalize root member order.
+  Arrays are atomic. Diff attribution comes from the last applied active operation
+  affecting the record key. Conflict IDs are the shared canonical `sha256:<lowerhex>`
+  digest of a versioned key/path/kind/base/ours/theirs tuple, and conflicts sort by
+  entity kind, record ID, field path, conflict kind, then ID.
+- Markdown merge canonicalizes LF, computes deterministic minimum-edit old-base LCS
+  hunks, prefers the base/deletion-side step for equal-cost choices, and orders hunks
+  by base start, base end, and inserted bytes. Non-overlapping hunks merge; identical
+  same-anchor insertions coalesce; unequal same-anchor insertions and overlapping
+  replacement/deletion hunks conflict. Never put conflict markers in a candidate.
+- A conflicted three-way rebase returns the complete validated prior composed candidate
+  byte-identically, never a partial merge. Evidence orientation is always
+  `Base=oldBase`, `Ours=candidate`, and `Theirs=newBase`. The importer atomically persists
+  that `ours` surface with the complete new direct `theirs` tree, both-side evidence,
+  absorbed generation/row states, and conflicted status. Restart reproduces it.
+  Checkpoint returns zero `CheckpointResult` plus
+  `localstore.ErrWorkspaceConflicted`; callers use
+  Status separately to prove preserved candidate digest/generation. Writable v2 Fabric
+  push checks the same exact-scope gate before credential resolution, client/DNS/signing,
+  or network. Delivery marking rechecks inside one local `BEGIN IMMEDIATE` immediately
+  before the complete-key queue update. No transaction spans the network: an in-flight
+  conflict may follow remote acceptance, in which case the byte-identical row stays
+  pending and retries the same operation after resolution. Checkpoint and writable Fabric
+  delivery remain blocked until explicit resolution.
 
 ---
 
@@ -428,9 +960,43 @@ the same layering pattern and isolation discipline.
   error, and the security property the package guards (isolation, forgery,
   scope preservation — whatever applies).
 - T3: RLS and project isolation get explicit cross-project rejection tests whenever a
-  new project-scoped table or query lands.
-- T4: Do not claim done without `go build ./...`, `go vet ./...`, and `go test ./...`
-  passing, run and output observed.
+  new project-scoped table or query lands. Gateway workspace changes also require
+  cross-workspace, cross-Fabric, and fork/upstream rejection tests as applicable.
+- T4: Run focused tests first. Do not claim an implementation slice done without
+  `make check` passing and its output observed. Before a milestone handoff or
+  release claim, also run the repository's release test and rehearsal gates.
+- T5: Merged statement coverage must remain at or above 80%.
+- T6: Observer changes freeze semantic receipt-first idempotency before Git or mutation,
+  concurrent receipt/revision recheck, current-workset proof before applicability, the
+  terminal-only not-applicable matrix, same-ref-only Reject acceptance,
+  Discard-not-applicable exact materialization, negative materialization, and preserved
+  importer provenance through stash/retry, including the hard-coded system-token and UUID
+  goldens. Retain restart/per-write rollback, exact discard unknown-COMMIT confirmation, and
+  zero-result non-discard/Refresh unknown-COMMIT paths. Negative cases assert zero writes and
+  semantically unchanged retained state. Tests do not freeze first SQL read, table-only
+  query shape, raw storage class, or a complete-history projection.
+- T7: Task-5 tests retain v4's three columns and joint proof CHECK; strict inline
+  prior-candidate goldens/cross-proofs; the prepared/published/recovered-new checkpoint
+  blocker; owner-only same-device Git-private staging with backup absent pre-journal; and
+  the split pre-journal ignored-stage versus journal-backed convergence fault matrix.
+  Recovery tests prove exact current-owner cardinality/candidate/operation ownership before
+  I/O, no-current-journal status with no Git/path I/O, and one `BEGIN IMMEDIATE` held across
+  one stable position/tree-at-SHA/origin/position bundle, filesystem outcome, exact database
+  convergence, and status reread. Linux no-replace rename, compensation, ordered
+  destination/source parent-fsync faults, and root/path escape, wrong-name,
+  symlink/type/identity/rebind negatives retain evidence with zero unsafe path mutation.
+  Same-ref different-commit exact candidate has no ancestry query. Unknown-COMMIT tests use
+  the compact scope/revision/target prior-next-third matrix, including prepared-journal
+  absence, read failure, partial/corrupt/third state, semantic evidence retention, and zero
+  writer or rename replay. Exact Candidate is preservable old-side live/backup evidence only
+  while the exact Candidate stage remains; a prepared, stage-absent Candidate backup stays
+  blocked. Checkpoint-only recursive capture proves the frozen mount and non-mount-root
+  property for root/directories/files in both passes. One persistent-root proof runs at
+  classifier entry/tail and immediately before every rename; recovery maps typed root drift
+  to precondition and contained evidence to blocked. Pure recovery proof admits current
+  prepared `clean|pending` and published/recovered-new exact `pending` only, before I/O.
+  Post-journal CAS wrappers retain syscall causes. Exchange and Darwin runtime fault tests
+  are deferred.
 
 Release and compatibility policy live in `docs/releasing.md` and
 `docs/compatibility.md`. Those documents describe repository workflow behavior;
@@ -442,15 +1008,18 @@ do not infer that external GitHub controls are active without an API read-back.
 
 - Storing, diffing, or mirroring code contents.
 - Any RFC-0002 concept in Core code paths (Constitution, Congress, proposals, stances).
-- A new Coordination Server datastore, message broker, or background worker process beyond
-  RFC-0003's existing local runtime and sync loop.
-- A human-facing UI beyond a minimal read-only surface.
+- A new Fabric datastore or message broker. RFC-0003's approved isolated
+  per-workspace Code Graph workers are allowed; any other worker class needs design.
+- A human-facing product UI beyond the current read projection and explicitly
+  approved authentication callbacks/session flows.
 - Human-to-human messaging, rich media, presence.
 - Resolving an RFC Decision Register entry listed under **Open** as a side
   effect of an implementation choice.
 - New vocabulary: event types, permission actions, statuses, or glossary terms not in
   the RFCs or `docs/db-entities.md`.
-- Agent-invocable destructive or policy-level actions.
+- Agent-invocable human authentication, credential recovery, ownership transfer,
+  membership administration, or policy-level actions. Do not misclassify ordinary
+  project edits or Git proposals as policy administration.
 
 Escalation cost is one message; an embedded wrong assumption costs days. When in doubt,
 the RFCs' "indicative, not final" markers mean *design is open*, not *pick anything*.
@@ -492,12 +1061,11 @@ The task doesn't say what similarity threshold blocks a write.
 **Wrong reasoning:** "0.9 cosine similarity is a common cutoff." Hardcode `0.9`, done.
 Two guesses smuggled in as facts: the number, and hard-blocking as the behaviour.
 
-**Ladder walk (§2.4):** RFC §8.3 mandates the check exists, server-side, but no number —
-rung 1 gives behaviour, not threshold. Not entity-shaped (rung 2). No precedent in code
-(rung 3). §8 KB rules (rung 4) answer more than expected: *soft-reject-with-rewrite-
-suggestion, not hard block*, and *thresholds are tunable config, not hardcoded constants*.
-Remaining ambiguity, the default value, is a genuine free variable → pick conservatively,
-flag it.
+**Ladder walk (§2.4):** RFC §8.3 permits compliance checks, and the RFC §15
+decision requires soft rejection with a tunable threshold. The Git-native design
+also forbids making local operation depend on Fabric. Existing Fabric code supplies
+the remote semantic-check precedent. The numeric default is still a genuine free
+variable: choose it conservatively, label it tunable, and flag the choice.
 
 **Right shape:** threshold in `types.Config` with a documented default; over-threshold
 write returns a structured soft rejection carrying the closest existing article and a

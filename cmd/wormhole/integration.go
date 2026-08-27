@@ -2,19 +2,16 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	projectconfig "github.com/H4RL33/wormhole/internal/config"
 	"github.com/H4RL33/wormhole/internal/runtime/localapi"
@@ -57,7 +54,7 @@ func newGatewayIntegrationBackend() (integrationCommandBackend, error) {
 		return nil, errors.New("integration commands require a nearest .wormhole/config.toml project binding")
 	}
 	return &gatewayIntegrationBackend{socketPath: gatewaySocketPath(), repositoryRoot: root,
-		projectID: strings.TrimSpace(configured.Project), call: callGatewayIntegrationMethod}, nil
+		projectID: strings.TrimSpace(configured.Project), call: callGatewayPrivateMethod}, nil
 }
 
 func (backend *gatewayIntegrationBackend) Plan(ctx context.Context, operation, projectID string) (integrationCommandPlan, error) {
@@ -94,66 +91,6 @@ func integrationRepositoryRoot() (string, error) {
 		return filepath.Dir(filepath.Dir(configPath)), nil
 	}
 	return "", errors.New("integration commands require a nearest .wormhole/config.toml repository root")
-}
-
-func callGatewayIntegrationMethod(ctx context.Context, socketPath, method string, request, response any) error {
-	dialer := net.Dialer{Timeout: 2 * time.Second}
-	conn, err := dialer.DialContext(ctx, "unix", socketPath)
-	if err != nil {
-		return fmt.Errorf("gatewayd not running (dial %s: %w)", socketPath, err)
-	}
-	defer conn.Close()
-	reader := bufio.NewReader(conn)
-	write := func(value any) error {
-		raw, err := json.Marshal(value)
-		if err != nil {
-			return err
-		}
-		_, err = conn.Write(append(raw, '\n'))
-		return err
-	}
-	read := func(destination any) error {
-		line, err := reader.ReadBytes('\n')
-		if err != nil {
-			return err
-		}
-		decoder := json.NewDecoder(bytes.NewReader(bytes.TrimSpace(line)))
-		decoder.DisallowUnknownFields()
-		return decoder.Decode(destination)
-	}
-	if err := write(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "initialize", Params: json.RawMessage(`{}`)}); err != nil {
-		return fmt.Errorf("write Gateway initialize request: %w", err)
-	}
-	var initialized rpcResponse
-	if err := read(&initialized); err != nil {
-		return fmt.Errorf("read Gateway initialize response: %w", err)
-	}
-	if initialized.Error != nil {
-		return errors.New(initialized.Error.Message)
-	}
-	if err := write(rpcRequest{JSONRPC: "2.0", Method: "notifications/initialized"}); err != nil {
-		return fmt.Errorf("write Gateway initialized notification: %w", err)
-	}
-	params, err := json.Marshal(request)
-	if err != nil {
-		return fmt.Errorf("marshal integration command: %w", err)
-	}
-	if err := write(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("2"), Method: method, Params: params}); err != nil {
-		return fmt.Errorf("write integration command: %w", err)
-	}
-	var commandResponse rpcResponse
-	if err := read(&commandResponse); err != nil {
-		return fmt.Errorf("read integration command response: %w", err)
-	}
-	if commandResponse.Error != nil {
-		return errors.New(commandResponse.Error.Message)
-	}
-	decoder := json.NewDecoder(bytes.NewReader(commandResponse.Result))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(response); err != nil {
-		return fmt.Errorf("decode integration command response: %w", err)
-	}
-	return nil
 }
 
 func runIntegrationCommand(args []string, stdout, stderr io.Writer) int {
@@ -207,7 +144,7 @@ func runIntegration(args []string, stdin io.Reader, stdout, stderr io.Writer, in
 		fmt.Fprintf(stderr, "wormhole integration %s: non-interactive mutation requires --confirm-digest\n", command)
 		return 2
 	}
-	resolvedProject, err := resolveCodeGraphProject(*project)
+	resolvedProject, err := resolveIntegrationProject(*project)
 	if err != nil {
 		fmt.Fprintf(stderr, "wormhole integration %s: %v\n", command, err)
 		return 2
@@ -273,6 +210,20 @@ func runIntegration(args []string, stdin io.Reader, stdout, stderr io.Writer, in
 	}
 	fmt.Fprintf(stdout, "integration %s committed for project %s at %s\n", command, plan.ProjectID, plan.ExpectedDigest)
 	return 0
+}
+
+func resolveIntegrationProject(explicit string) (string, error) {
+	if strings.TrimSpace(explicit) != "" {
+		return strings.TrimSpace(explicit), nil
+	}
+	configured, err := projectconfig.LoadLocal()
+	if err != nil {
+		return "", fmt.Errorf("load nearest project config: %w", err)
+	}
+	if strings.TrimSpace(configured.Project) == "" {
+		return "", errors.New("--project is required when no nearest .wormhole/config.toml project is configured")
+	}
+	return strings.TrimSpace(configured.Project), nil
 }
 
 func integrationDigestValid(value string) bool {

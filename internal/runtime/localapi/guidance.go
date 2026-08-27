@@ -276,20 +276,14 @@ func gatewayGuidanceConcept(toolName string) string {
 	switch {
 	case toolName == "wormhole.sync.status":
 		return "local status and synchronisation"
-	case toolName == "wormhole.agent.get_guidance":
-		return "integration guidance"
-	case toolName == "wormhole.agent.enrol" || hasToolPrefix(toolName, "wormhole.agent."):
+	case hasToolPrefix(toolName, "wormhole.workspace."):
+		return "portable workspace"
+	case hasToolPrefix(toolName, "wormhole.agent."):
 		return "identity"
-	case hasToolPrefix(toolName, "wormhole.code_graph."):
-		return "Code Graph"
-	case hasToolPrefix(toolName, "wormhole.task."):
-		return "tasks"
 	case hasToolPrefix(toolName, "wormhole.channel."):
 		return "channels and events"
 	case hasToolPrefix(toolName, "wormhole.kb."):
 		return "knowledge"
-	case hasToolPrefix(toolName, "wormhole.git."):
-		return "Git pointers"
 	default:
 		return ""
 	}
@@ -300,42 +294,19 @@ func hasToolPrefix(toolName, prefix string) bool {
 }
 
 func gatewayGuidanceText() map[string]guidanceText {
-	const localReplica = "Reads reflect this Gateway's local replica; check sync status when remote freshness matters."
 	const noSource = "This tool does not read or return repository source."
 	return map[string]guidanceText{
 		// Identity.
-		"wormhole.agent.whoami": {
-			Purpose:                  "Inspect the calling identity, capabilities, and permissions.",
-			UseWhen:                  "At session start or before a permission-sensitive operation.",
-			DoNotUseWhen:             "Do not use it to register an agent or change permissions.",
-			MutatesState:             false,
-			Prerequisites:            "An authenticated Gateway session.",
-			FreshnessImplications:    localReplica,
-			SourceAccessImplications: noSource,
-			RecommendedFollowUp:      "Use the reported permissions to select an allowed tool.",
-			MisuseWarning:            "Do not treat local identity information as a substitute for checking a specific operation's result.",
-		},
-		"wormhole.agent.get_guidance": {
-			Purpose:                  "Read the current approved, role-applicable integration guidance and its lifecycle state from Gateway's local cache.",
-			UseWhen:                  "At session start or before relying on managed organisational guidance for this project.",
-			DoNotUseWhen:             "Do not use it to approve, apply, update, remove, roll back, refresh, or repair guidance.",
-			MutatesState:             false,
-			Prerequisites:            "An explicitly bound project and a compatible approved manifest cached by Gateway.",
-			FreshnessImplications:    "The result is one local cached read; offline responses retain approved content while separately reporting newer unapproved pending state.",
-			SourceAccessImplications: "This tool returns approved Markdown only; it does not read repository files or expose materialisation target paths.",
-			RecommendedFollowUp:      "Use applicable returned guidance, or ask a human to inspect the integration CLI when approval, compatibility, drift, or recovery needs attention.",
-			MisuseWarning:            "Empty guidance can mean no approved cache, revocation, or incompatibility; never infer approval or trigger a mutation from this read.",
-		},
 		"wormhole.agent.register": {
-			Purpose:                  "Create a Passport-backed agent or register an existing agent's local presence.",
-			UseWhen:                  "When joining an agent or making a known agent available to local routing.",
+			Purpose:                  "Register an existing agent's local presence and declared capabilities.",
+			UseWhen:                  "When making a known agent available to local routing.",
 			DoNotUseWhen:             "Do not use it for a routine presence heartbeat.",
 			MutatesState:             true,
-			Prerequisites:            "Use the join or local-presence request shape, and obtain any required Fabric authorization for joins.",
-			FreshnessImplications:    "Join state may require sync before other Gateways observe it.",
+			Prerequisites:            "A server-resolved workspace and an existing agent identifier.",
+			FreshnessImplications:    "Presence registration is Gateway-local scheduler state.",
 			SourceAccessImplications: noSource,
 			RecommendedFollowUp:      "Set presence after local registration, then verify with agent.list.",
-			MisuseWarning:            "Do not mix join and presence fields; request shape selects the operation.",
+			MisuseWarning:            "Do not infer shared identity creation or new permissions from local presence registration.",
 		},
 		"wormhole.agent.presence": {
 			Purpose:                  "Update an existing locally registered agent's availability.",
@@ -345,7 +316,7 @@ func gatewayGuidanceText() map[string]guidanceText {
 			Prerequisites:            "The agent must already be locally registered.",
 			FreshnessImplications:    "Presence is Gateway-local and is not durable shared task state.",
 			SourceAccessImplications: noSource,
-			RecommendedFollowUp:      "Use agent.list or task.route after advertising a capability.",
+			RecommendedFollowUp:      "Use agent.list to verify the current local scheduler view.",
 			MisuseWarning:            "Do not assume a local presence update grants permissions.",
 		},
 		"wormhole.agent.list": {
@@ -354,147 +325,99 @@ func gatewayGuidanceText() map[string]guidanceText {
 			DoNotUseWhen:             "Do not use it as a complete organisation-wide identity directory.",
 			MutatesState:             false,
 			Prerequisites:            "A bound Gateway project.",
-			FreshnessImplications:    "Results cover current local scheduler state, not necessarily remote changes.",
+			FreshnessImplications:    "Results cover only the current clone-local scheduler state.",
 			SourceAccessImplications: noSource,
-			RecommendedFollowUp:      "Use task.route only after choosing a suitable local agent.",
-			MisuseWarning:            "Do not infer remote presence or authorization from this local list.",
+			RecommendedFollowUp:      "Update presence when a registered agent's local availability changes.",
+			MisuseWarning:            "Do not infer shared identity, remote presence, or authorization from this local list.",
 		},
 
 		// Local status and synchronisation.
 		"wormhole.sync.status": {
-			Purpose:                  "Inspect Gateway-to-Fabric connection state and queued durable writes.",
-			UseWhen:                  "Before relying on a remote observer seeing recent local changes.",
-			DoNotUseWhen:             "Do not use it as a Fabric health probe or to force synchronization.",
+			Purpose:                  "Report the truthful local-only synchronization state and pending Fabric-write count.",
+			UseWhen:                  "When confirming that this Stage 2 Gateway is offline and has no Fabric queue.",
+			DoNotUseWhen:             "Do not use it as a Fabric health probe or assume it contacts a remote service.",
 			MutatesState:             false,
 			Prerequisites:            "A bound Gateway project.",
-			FreshnessImplications:    "Reports the current local queue and connection state; it does not refresh remote data.",
+			FreshnessImplications:    "Always reports offline with zero pending writes in the local-only Stage 2 runtime.",
 			SourceAccessImplications: noSource,
-			RecommendedFollowUp:      "Retry or defer remote-dependent work when the state needs attention.",
-			MisuseWarning:            "Do not assume pending_writes is zero merely because a local write succeeded.",
+			RecommendedFollowUp:      "Use workspace.status or workspace.diff to inspect local portable state.",
+			MisuseWarning:            "Offline is the expected local-only state, not a failed network probe.",
 		},
-		"wormhole.agent.enrol": {
-			Purpose:                  "Enroll a Gateway project and persist its credential profile before Passport credentials exist.",
-			UseWhen:                  "During explicit Gateway-owned project enrollment or credential recovery.",
-			DoNotUseWhen:             "Do not use it for normal authenticated agent registration.",
-			MutatesState:             true,
-			Prerequisites:            "A human-approved project binding, Fabric address, and credential-profile identifier beneath the Gateway credential root.",
-			FreshnessImplications:    "Enrollment performs durable local lifecycle work and may need recovery or sync after an interrupted attempt.",
-			SourceAccessImplications: noSource,
-			RecommendedFollowUp:      "Inspect sync.status and follow the returned lifecycle code before retrying.",
-			MisuseWarning:            "Do not expose credential material or reuse an attempt key for a different enrollment.",
-		},
-
-		// Code Graph.
-		"wormhole.code_graph.query": {
-			Purpose:                  "Narrow Go source discovery through a bounded local Code Graph query.",
-			UseWhen:                  "When an enabled, sufficiently current graph can locate symbols, callers, references, or a code path before broad search.",
-			DoNotUseWhen:             "Do not use it for known files, non-code assets, untracked or ignored files, or when strict current source is required from a stale graph.",
+		"wormhole.workspace.status": {
+			Purpose:                  "Inspect the bound workspace candidate, overlay generation, and publication review state.",
+			UseWhen:                  "Before importing, checkpointing, or deciding whether a public-Git acknowledgement is required.",
+			DoNotUseWhen:             "Do not use it as a Git status replacement or to mutate portable state.",
 			MutatesState:             false,
-			Prerequisites:            "An enabled project graph and code_graph.query permission; source slices also require code_graph.source.read.",
-			FreshnessImplications:    "Check code_graph.status and independently verify Git HEAD and the working-tree state before relying on graph results; the graph narrows discovery and does not replace Git, direct inspection, builds, or tests.",
-			SourceAccessImplications: "Returned source is bounded by the request's source budget and is metadata-only without code_graph.source.read; never treat a slice as complete file context.",
-			RecommendedFollowUp:      "Inspect the returned paths and symbols, then verify the live working tree with targeted reads and Git commands.",
-			MisuseWarning:            "Edges are heuristic discovery aids, not proof of complete call, reference, or type-use coverage.",
+			Prerequisites:            "A registered workspace resolved by Gateway.",
+			FreshnessImplications:    "Reports current private workspace bookkeeping and the accepted tracked snapshot without changing either.",
+			SourceAccessImplications: noSource,
+			RecommendedFollowUp:      "Use workspace.diff to inspect exact portable changes.",
+			MisuseWarning:            "Do not treat candidate presence as Git acceptance.",
 		},
-		"wormhole.code_graph.status": {
-			Purpose:                  "Inspect local Code Graph health, revision, and freshness without changing it.",
-			UseWhen:                  "Before a Code Graph query or when deciding whether graph output is current enough for a task.",
-			DoNotUseWhen:             "Do not use it as proof that Git or the working tree is unchanged.",
+		"wormhole.workspace.diff": {
+			Purpose:                  "Return the attributed semantic portable-state diff and exact publication review digest.",
+			UseWhen:                  "Before checkpointing or reviewing tracked portable-state changes.",
+			DoNotUseWhen:             "Do not use it to inspect arbitrary source-code changes.",
 			MutatesState:             false,
-			Prerequisites:            "A bound project and code_graph.status permission.",
-			FreshnessImplications:    "It reports graph freshness against tracked Go inventory and approved remote state; verify current Git HEAD and working-tree state directly for task-critical conclusions.",
+			Prerequisites:            "A registered workspace with accepted portable state.",
+			FreshnessImplications:    "Compares the current composed candidate against the accepted portable snapshot.",
 			SourceAccessImplications: noSource,
-			RecommendedFollowUp:      "Query with a bounded source budget only when status is usable, or use ordinary repository inspection.",
-			MisuseWarning:            "Do not call status as a rebuild request or mistake degraded health for current source.",
+			RecommendedFollowUp:      "Review changes and pass the exact digest to checkpoint when public publication requires acknowledgement.",
+			MisuseWarning:            "A review digest is bound to the exact candidate and becomes stale after any mutation.",
 		},
-		"wormhole.code_graph.rebuild": {
-			Purpose:                  "Request one normal balanced copy-on-write rebuild from persisted approved Code Graph configuration.",
-			UseWhen:                  "When status recommends a rebuild and a human-approved graph configuration already exists.",
-			DoNotUseWhen:             "Do not use it to change graph configuration, force an unsafe rebuild, or compensate for unverified Git changes.",
+		"wormhole.workspace.import": {
+			Purpose:                  "Import direct tracked portable-state edits into the attributed workspace candidate.",
+			UseWhen:                  "After editing .wormhole/state/v1 through ordinary repository tools.",
+			DoNotUseWhen:             "Do not use it to import private databases, credentials, or operational journals.",
 			MutatesState:             true,
-			Prerequisites:            "A bound project, code_graph.rebuild permission, enabled graph, and persisted approved configuration.",
-			FreshnessImplications:    "The rebuild snapshots the approved checkout; verify Git HEAD and working-tree state before and after using the rebuilt graph for current-source decisions.",
-			SourceAccessImplications: "Rebuild does not grant source access or bypass query source budgets and code_graph.source.read.",
-			RecommendedFollowUp:      "Recheck code_graph.status, then query with bounded source access if needed.",
-			MisuseWarning:            "Do not expect exact semantic completeness: graph edges remain heuristic, while the rebuild preserves the active graph on failure.",
-		},
-
-		// Tasks.
-		"wormhole.task.list": {
-			Purpose:                  "List tasks in the local task-graph replica.",
-			UseWhen:                  "When orienting to available or status-filtered work.",
-			DoNotUseWhen:             "Do not use it when a known task ID is all that is needed.",
-			MutatesState:             false,
-			Prerequisites:            "A bound project.",
-			FreshnessImplications:    localReplica,
+			Prerequisites:            "A registered workspace and a valid portable working tree.",
+			FreshnessImplications:    "Reads the exact current portable tree and rebases the private overlay through its imported generation.",
 			SourceAccessImplications: noSource,
-			RecommendedFollowUp:      "Fetch a selected task or create/route an agreed item of work.",
-			MisuseWarning:            "Do not treat a local list as proof that remote task updates have already synchronized.",
+			RecommendedFollowUp:      "Inspect workspace.diff before checkpointing.",
+			MisuseWarning:            "Import does not stage, commit, or push Git.",
 		},
-		"wormhole.task.get": {
-			Purpose:                  "Get one task from the local task-graph replica.",
-			UseWhen:                  "When a task ID is known and its details are needed.",
-			DoNotUseWhen:             "Do not use it to discover tasks by broad status.",
-			MutatesState:             false,
-			Prerequisites:            "A bound project and task ID.",
-			FreshnessImplications:    localReplica,
-			SourceAccessImplications: noSource,
-			RecommendedFollowUp:      "Use task.list for discovery or record a durable event for progress.",
-			MisuseWarning:            "Do not assume an absent task has never existed remotely while offline.",
-		},
-		"wormhole.task.create": {
-			Purpose:                  "Create a local task and enqueue it for synchronization.",
-			UseWhen:                  "When intended work needs durable ownership-independent tracking.",
-			DoNotUseWhen:             "Do not use it for ephemeral discussion or an already-existing task.",
+		"wormhole.workspace.checkpoint": {
+			Purpose:                  "Materialize the current portable candidate without performing Git publication.",
+			UseWhen:                  "After reviewing the semantic diff and any required public-Git acknowledgement.",
+			DoNotUseWhen:             "Do not use it as a substitute for Git staging, commit, or push.",
 			MutatesState:             true,
-			Prerequisites:            "A bound project and task.create permission.",
-			FreshnessImplications:    "The write is durable locally first and becomes shared after synchronization.",
+			Prerequisites:            "A registered workspace; public Git requires the exact current publication review digest.",
+			FreshnessImplications:    "The supplied acknowledgement is rejected if the candidate changed after review.",
 			SourceAccessImplications: noSource,
-			RecommendedFollowUp:      "Route the new task or post a typed channel event with the resulting ID.",
-			MisuseWarning:            "Do not claim a created task is remotely visible until sync has caught up.",
+			RecommendedFollowUp:      "Review the unstaged tracked tree, then accept it with ordinary Git commands.",
+			MisuseWarning:            "Checkpoint never stages, commits, or pushes Git.",
 		},
-		"wormhole.task.update_status": {
-			Purpose:                  "Transition a task through the validated local workflow and enqueue the status update for synchronization.",
-			UseWhen:                  "When meaningful work begins, blocks, resumes, or completes and the shared task state should reflect it.",
-			DoNotUseWhen:             "Do not use it for narration, an invalid workflow jump, or without a durable status-event channel.",
+		"wormhole.workspace.stash": {
+			Purpose:                  "Durably stash the current private overlay under an explicit request ID and label.",
+			UseWhen:                  "When pausing attributed work without changing accepted portable state.",
+			DoNotUseWhen:             "Do not use it as Git stash or as a publication action.",
 			MutatesState:             true,
-			Prerequisites:            "A bound project, existing task and channel, and task.update_status permission.",
-			FreshnessImplications:    "The validated transition and event commit locally first; Fabric and other Gateways observe them after synchronization.",
+			Prerequisites:            "A registered workspace, unique request ID, and non-empty label.",
+			FreshnessImplications:    "Captures the exact current overlay and candidate digest in private state.",
 			SourceAccessImplications: noSource,
-			RecommendedFollowUp:      "Verify task.get and sync.status, then leave concise handoff context before marking work done.",
-			MisuseWarning:            "Do not report remote completion while the durable update is still pending synchronization.",
-		},
-		"wormhole.task.route": {
-			Purpose:                  "Create a task and route it to a capable locally registered agent.",
-			UseWhen:                  "When work should be created and assigned in one local scheduling action.",
-			DoNotUseWhen:             "Do not use it when assignment must target a remote or unregistered agent.",
-			MutatesState:             true,
-			Prerequisites:            "A bound project, task.create and task.assign permissions, and a matching local agent capability.",
-			FreshnessImplications:    "Routing is local; remote observers see the task only after synchronization.",
-			SourceAccessImplications: noSource,
-			RecommendedFollowUp:      "Confirm the assigned agent's local presence and post an event for material handoffs.",
-			MisuseWarning:            "Do not assume capability matching proves workload capacity or remote availability.",
+			RecommendedFollowUp:      "Confirm workspace.status and resume through the supported workspace lifecycle.",
+			MisuseWarning:            "Private stash rows are not portable and never enter tracked Git state.",
 		},
 
 		// Channels and events.
 		"wormhole.channel.list": {
-			Purpose:                  "List channels in the local event-bus replica.",
+			Purpose:                  "List channels from this workspace's composed portable project state.",
 			UseWhen:                  "When choosing an existing durable channel for a typed event.",
 			DoNotUseWhen:             "Do not use it to inspect event history.",
 			MutatesState:             false,
-			Prerequisites:            "A bound project.",
-			FreshnessImplications:    localReplica,
+			Prerequisites:            "A Gateway-resolved workspace.",
+			FreshnessImplications:    "Includes accepted tracked state plus the current private candidate overlay.",
 			SourceAccessImplications: noSource,
 			RecommendedFollowUp:      "Read channel.events or create a missing channel.",
-			MisuseWarning:            "Do not infer that a locally absent channel is absent from Fabric while offline.",
+			MisuseWarning:            "A candidate channel is not accepted Git state until checkpoint and ordinary Git acceptance.",
 		},
 		"wormhole.channel.create": {
-			Purpose:                  "Create a local channel and enqueue it for synchronization.",
+			Purpose:                  "Create a portable channel in this workspace's private candidate overlay.",
 			UseWhen:                  "When durable event routing needs a new named channel.",
 			DoNotUseWhen:             "Do not use it for one-off messages better represented by an existing channel.",
 			MutatesState:             true,
-			Prerequisites:            "A bound project and channel.create permission.",
-			FreshnessImplications:    "The channel exists locally before it becomes shared through sync.",
+			Prerequisites:            "A Gateway-resolved workspace and channel.create permission.",
+			FreshnessImplications:    "The channel is immediately visible in the composed candidate and becomes portable through checkpoint and Git acceptance.",
 			SourceAccessImplications: noSource,
 			RecommendedFollowUp:      "Post a typed event after creation.",
 			MisuseWarning:            "Do not create duplicate channels to represent the same ongoing topic.",
@@ -502,32 +425,32 @@ func gatewayGuidanceText() map[string]guidanceText {
 		"wormhole.channel.events": {
 			Purpose:                  "List recent durable events from local channels.",
 			UseWhen:                  "When reconstructing recent local collaboration context.",
-			DoNotUseWhen:             "Do not use it as a live subscription or a guarantee of complete remote history.",
+			DoNotUseWhen:             "Do not use it as a live subscription or a portable audit history.",
 			MutatesState:             false,
-			Prerequisites:            "A bound project.",
-			FreshnessImplications:    localReplica,
+			Prerequisites:            "A Gateway-resolved workspace.",
+			FreshnessImplications:    "Reads clone-private operational activity for the resolved workspace only.",
 			SourceAccessImplications: noSource,
-			RecommendedFollowUp:      "Subscribe for subsequent events or inspect a referenced task or KB article.",
-			MisuseWarning:            "Do not treat the local event window as an audit-complete remote log.",
+			RecommendedFollowUp:      "Use channel.subscribe for subsequent local events or inspect a referenced KB article.",
+			MisuseWarning:            "Operational events do not enter checkpointed portable state or another clone.",
 		},
 		"wormhole.channel.post": {
-			Purpose:                  "Publish a durable typed event locally and enqueue it for synchronization.",
+			Purpose:                  "Publish clone-private operational activity after validating its portable channel.",
 			UseWhen:                  "When recording a handoff, discovery, decision, or progress update.",
 			DoNotUseWhen:             "Do not use it for sensitive credentials or unstructured chatter.",
 			MutatesState:             true,
-			Prerequisites:            "A bound project, a channel ID, and channel.post permission.",
-			FreshnessImplications:    "The event is durable locally first; remote delivery follows synchronization.",
+			Prerequisites:            "A Gateway-resolved workspace, a live portable channel ID, and channel.post permission.",
+			FreshnessImplications:    "The event is durable in this clone's private operational store and is not queued for Fabric.",
 			SourceAccessImplications: noSource,
-			RecommendedFollowUp:      "Link the event to the relevant task or KB article in its payload or note.",
+			RecommendedFollowUp:      "Use channel.events to confirm the local activity or reference a relevant KB article.",
 			MisuseWarning:            "Do not put secrets, source copies, or unsupported event types in the payload.",
 		},
 		"wormhole.channel.subscribe": {
-			Purpose:                  "Subscribe this MCP connection to matching event notifications.",
-			UseWhen:                  "When subsequent local events are needed during the active session.",
+			Purpose:                  "Subscribe this MCP connection to all future event notifications in its resolved workspace.",
+			UseWhen:                  "When subsequent events from the exact local workspace are needed during the active session.",
 			DoNotUseWhen:             "Do not use it to recover historical events or create durable shared state.",
 			MutatesState:             true,
 			Prerequisites:            "An initialized MCP connection and a bound project.",
-			FreshnessImplications:    "Notifications reflect future local delivery and can be delayed by synchronization.",
+			FreshnessImplications:    "Notifications reflect future clone-local delivery only and are not replayed after reconnect.",
 			SourceAccessImplications: noSource,
 			RecommendedFollowUp:      "Keep the connection open and use channel.events for prior context.",
 			MisuseWarning:            "Do not assume a subscription survives reconnects or provides a complete audit stream.",
@@ -535,61 +458,37 @@ func gatewayGuidanceText() map[string]guidanceText {
 
 		// Knowledge.
 		"wormhole.kb.list": {
-			Purpose:                  "List KB articles in the local knowledge-base replica.",
+			Purpose:                  "List KB articles from this workspace's composed portable project state.",
 			UseWhen:                  "When locating durable organisational context by article metadata.",
 			DoNotUseWhen:             "Do not use it when a known article ID can be fetched directly.",
 			MutatesState:             false,
-			Prerequisites:            "A bound project.",
-			FreshnessImplications:    localReplica,
+			Prerequisites:            "A Gateway-resolved workspace.",
+			FreshnessImplications:    "Includes accepted tracked state plus the current private candidate overlay.",
 			SourceAccessImplications: noSource,
 			RecommendedFollowUp:      "Read a selected article or write a new durable fact.",
-			MisuseWarning:            "Do not treat this local inventory as a substitute for a remote freshness check.",
+			MisuseWarning:            "This is deterministic listing, not semantic search.",
 		},
 		"wormhole.kb.get": {
 			Purpose:                  "Get a named KB article or list articles when no ID is supplied.",
 			UseWhen:                  "When reading a known durable procedure, decision, or discovery.",
 			DoNotUseWhen:             "Do not use it to retrieve code as an authoritative source.",
 			MutatesState:             false,
-			Prerequisites:            "A bound project; supply an article ID for a specific record.",
-			FreshnessImplications:    localReplica,
+			Prerequisites:            "A Gateway-resolved workspace; supply an article ID for a specific record.",
+			FreshnessImplications:    "Reads the current composed portable view, including uncheckpointed candidate operations.",
 			SourceAccessImplications: noSource,
 			RecommendedFollowUp:      "Verify referenced Git pointers and update stale durable knowledge with kb.write.",
 			MisuseWarning:            "Git remains code truth; do not rely on KB prose instead of current source verification.",
 		},
 		"wormhole.kb.write": {
-			Purpose:                  "Write a KB article locally and enqueue it for synchronization.",
+			Purpose:                  "Write a portable KB article into this workspace's private candidate overlay.",
 			UseWhen:                  "When preserving a durable fact, decision, discovery, or procedure.",
 			DoNotUseWhen:             "Do not use it for transient status chatter or source-file copies.",
 			MutatesState:             true,
-			Prerequisites:            "A bound project and kb.write permission.",
-			FreshnessImplications:    "The article is durable locally before synchronization makes it shared.",
+			Prerequisites:            "A Gateway-resolved workspace, a published matching portable actor, and kb.write permission.",
+			FreshnessImplications:    "The article is immediately visible in the composed candidate and becomes portable through checkpoint and Git acceptance.",
 			SourceAccessImplications: noSource,
-			RecommendedFollowUp:      "Post a typed event or link the article from the relevant task.",
+			RecommendedFollowUp:      "Use kb.get to verify the article, then inspect workspace.diff before checkpointing.",
 			MisuseWarning:            "Do not store credentials or present Git-derived prose as authoritative code.",
-		},
-		"wormhole.kb.search": {
-			Purpose:                  "Search the shared Fabric knowledge base with generation-scoped semantic ranking.",
-			UseWhen:                  "When organisational decisions, procedures, or durable discoveries could answer the question before broad repository reconstruction.",
-			DoNotUseWhen:             "Do not use it as source-code authority or silently substitute lexical/local search when semantic ranking is unavailable.",
-			MutatesState:             false,
-			Prerequisites:            "An online project-bound Fabric connection and kb.search permission.",
-			FreshnessImplications:    "Results come from Fabric's active semantic generation; provider or index degradation returns a structured error with fallback=none.",
-			SourceAccessImplications: noSource,
-			RecommendedFollowUp:      "Read relevant durable context, then verify any code claim against Git and current source.",
-			MisuseWarning:            "Never reinterpret a semantic degradation error as a successful empty result or permission to fall back silently.",
-		},
-
-		// Git pointers.
-		"wormhole.git.link_commit": {
-			Purpose:                  "Record a metadata-only task-to-commit pointer locally and enqueue it for synchronization.",
-			UseWhen:                  "When a verified commit materially advances or completes a tracked task and reviewers need the exact Git reference.",
-			DoNotUseWhen:             "Do not use it before the commit exists, for a pull-request review request, or to copy source into Wormhole.",
-			MutatesState:             true,
-			Prerequisites:            "A bound project, existing task, repository identifier, exact commit SHA, concise summary, and git.link_commit permission.",
-			FreshnessImplications:    "The pointer is durable locally first and becomes visible to other Gateways after synchronization.",
-			SourceAccessImplications: "This tool stores only a Git pointer and summary; it never reads, mirrors, or proves repository source.",
-			RecommendedFollowUp:      "Verify the commit directly with Git, check sync.status, and include the pointer in the reviewer handoff.",
-			MisuseWarning:            "A stored pointer is not proof that the commit is correct, reachable, reviewed, or remotely synchronized.",
 		},
 	}
 }

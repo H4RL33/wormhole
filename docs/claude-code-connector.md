@@ -1,111 +1,86 @@
 # Claude Code Connector Setup
 
-Claude Code connects to the local Wormhole runtime, not directly to the Coordination
-Server:
+Claude Code reaches the local Gateway through the stdio bridge:
 
 ```text
-Claude Code -> wormhole mcp -> Gateway Unix socket -> Gateway -> Fabric
+Claude Code -> wormhole mcp -> Gateway Unix socket
 ```
 
-The `wormhole mcp` command is a stdio bridge. It relays MCP JSON-RPC messages between
-Claude Code and the local daemon without interpreting the requests.
+The bridge relays MCP JSON-RPC without embedding Fabric credentials or a remote
+server address in Claude configuration.
 
-## 1. Start the Coordination Server
+## 1. Install the binaries
 
-Set up Postgres and migrations as described in the [quickstart](../README.md#quickstart),
-then start the Coordination Server:
-
-```bash
-go run ./cmd/fabric
-```
-
-Install the CLI and Gateway binaries if `wormhole` and `gatewayd` are not already on
-your `PATH`:
-
-`gatewayd` currently requires Linux. Windows users must perform the Gateway and
-connector steps inside WSL; native macOS and Windows daemon execution is not
+`gatewayd` currently requires Linux. Windows users must run Gateway and the
+connector workflow inside WSL; native macOS and Windows daemon execution is not
 supported.
 
 ```bash
 go install ./cmd/wormhole ./cmd/gatewayd
 ```
 
-## 2. Create a credential profile
+## 2. Set up the checkout
 
-Create a Passport with `wormhole join`. With the daemon not yet running, `join` registers
-through Fabric and writes the profile that `gatewayd` will read:
-
-```bash
-wormhole join \
-  --server http://localhost:8080 \
-  --project <project-id> \
-  --owner <your-name> \
-  --model claude-code \
-  --permissions task.list,kb.search,channel.list,channel.post \
-  --profile claude-code
-```
-
-The profile is `~/.wormhole/credentials/claude-code.json`. Newly created credential
-directories request mode `0700`, and newly created profile files request mode `0600`.
-Writing an existing directory or file does not automatically tighten its mode; verify and
-restrict the existing profile path before use. The file contains the raw bearer token needed
-by `gatewayd`. Do not commit or share it.
-
-`wormhole connect` is an alternative for a new setup: it issues a Passport, writes a
-credential profile, and wires a detected Claude Code installation in one command. Use it
-instead of the `join` command above when you want that combined setup:
+From the Git repository root, run the canonical resumable workflow:
 
 ```bash
-wormhole connect \
-  --server http://localhost:8080 \
-  --project <project-id> \
-  --permissions task.list,kb.search,channel.list,channel.post \
-  --profile claude-code \
-  --target claude
+wormhole setup --publication local_only
 ```
 
-## 3. Start the local daemon
+Setup validates `.wormhole/state/v1/`, ensures the owner-only Gateway service,
+binds this checkout, selects the local human identity, imports the accepted Git
+base, and proposes detected first-party connector changes. Review the plan
+before confirming it; `--yes` accepts the whole plan non-interactively.
 
-Run `gatewayd` in a separate terminal after its credential profile exists:
+For a tracked public repository use `--publication public_git`. That policy
+requires the exact digest printed by `wormhole diff` before checkpoint:
 
 ```bash
-gatewayd claude-code
+wormhole diff
+wormhole checkpoint --publication-review-digest sha256:<review-digest>
 ```
 
-The positional profile name must match `claude-code` in
-`~/.wormhole/credentials/claude-code.json`. `gatewayd` then listens on
-`$XDG_RUNTIME_DIR/wormhole/wormholed.sock`, or
-`$TMPDIR/wormhole-runtime/wormhole/wormholed.sock` when `XDG_RUNTIME_DIR` is unset.
-The `wormholed.sock` basename is retained runtime-state compatibility, not an
-executable alias: start `gatewayd` and configure Claude Code with `wormhole mcp`.
+Wormhole materialises only a working-tree candidate. It never stages, commits,
+or pushes Git changes.
 
-## 4. Register Claude Code
+## 3. Install or inspect the connector
 
-If you used `wormhole connect`, it registers the Claude connector for you. To register it
-manually, run the exact local stdio command:
+Setup installs a detected Claude connector when the plan is accepted. The
+explicit lifecycle commands use the same transactional inspect/apply/verify and
+rollback behavior:
+
+```bash
+wormhole connector list claude
+wormhole connector install --yes claude
+```
+
+The resulting Claude command is equivalent to:
 
 ```bash
 claude mcp add wormhole -- wormhole mcp
 ```
 
-This command starts the stdio bridge when Claude Code opens the connector; it does not
-embed a server URL or bearer token in Claude Code configuration.
+To remove only the managed connector entry:
 
-## 5. Verify
+```bash
+wormhole connector remove --yes claude
+```
 
-- Run `wormhole profile list` and confirm the expected profile is present.
+## 4. Verify
+
+- Run `wormhole status` and confirm the expected workspace and publication
+  policy.
 - Run `claude mcp list` and confirm `wormhole` is listed.
-- In Claude Code, ask it to list Wormhole tools, then call `wormhole.task.list` for the
-  configured project. The request should reach `gatewayd` and return local runtime data.
+- In Claude Code, list Wormhole tools and call `wormhole.workspace.status`.
 
 ## Troubleshooting
 
-- **`wormhole mcp: dial gatewayd socket ...`:** start `gatewayd` and confirm it uses the
-  same `XDG_RUNTIME_DIR` as Claude Code.
-- **`gatewayd` cannot find credentials:** create or inspect the profile with `wormhole join`
-  and `wormhole profile list`; the daemon reads `~/.wormhole/credentials/<profile>.json`.
-- **`claude mcp list` does not show `wormhole`:** rerun `wormhole connect` with
-  `--target claude`, or register the exact `claude mcp add wormhole -- wormhole mcp` command
-  above. Confirm both `claude` and `wormhole` are on `PATH`.
-- **Tool calls do not reflect server state:** confirm the Coordination Server is running and
-  that `gatewayd` can reach Fabric recorded in its credential profile.
+- **`wormhole mcp: dial gatewayd socket ...`:** rerun `wormhole setup` and
+  confirm Claude Code uses the same `XDG_RUNTIME_DIR` as the Gateway service.
+- **Claude does not list Wormhole:** run `wormhole connector list claude`, then
+  repeat `wormhole connector install --yes claude`. Confirm both `claude` and
+  `wormhole` are on `PATH`.
+- **The workspace is not bound:** run setup from the repository root rather than
+  from an unrelated directory, then inspect `wormhole status`.
+- **A public checkpoint is refused:** rerun `wormhole diff` and acknowledge its
+  current digest exactly; any semantic change invalidates an older digest.

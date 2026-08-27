@@ -1,4 +1,9 @@
-# DB Entity Sketch
+# Optional Fabric DB Entity Sketch
+
+**Status:** retained PostgreSQL/server model, not the live Stage 2 Gateway
+surface. Stage 2 portable state is `.wormhole/state/v1/`; Gateway operational
+and machine-private state is schema-v6 SQLite. The local-only Gateway does not
+enrol with, bootstrap from, search, mutate Tasks through, or sync to Fabric.
 
 No SQL yet — entities and relations only, per RFC-0001 §7.1 (indicative storage shape), §8 (pillars), §13 (multi-tenancy).
 
@@ -48,7 +53,7 @@ lock serialize retries. A matching digest replays the same identity references;
 a different digest conflicts. This table has project RLS with both `USING` and
 `WITH CHECK`. Raw Passport tokens are never stored here.
 
-Gateway separately stores a local SQLite `enrolment_attempts` checkpoint keyed
+The historical/future optional-Fabric Gateway design separately stores a local SQLite `enrolment_attempts` checkpoint keyed
 by `(project_id, idempotency_key)`, with one active row per credential profile.
 It contains the canonical request hash, lifecycle state, profile identifier,
 and optional agent/Passport references only. This local row is committed before
@@ -121,7 +126,8 @@ Append-only.
 
 Status transitions emit `task.status_changed` events (RFC §8.2 key property — no separate sync step).
 
-Valid status state-machine transitions (which statuses can transition to which) are deferred to Day 8's `wormhole.task.update_status` implementation, not decided yet.
+These server Task rows and transitions belong to the optional Fabric inventory;
+they do not imply a live Gateway Task tool.
 
 ## task_links
 - `id`
@@ -252,6 +258,7 @@ Example row:
 }
 ```
 
-When `wormhole join --role backend-engineer` is run (without explicit `--capabilities` or `--roles` flags),
-the agent inherits `default_capabilities` and `default_roles` from the template, reducing flag verbosity
-for common roles. Explicit flags always override template defaults.
+Role templates are optional Fabric-side policy data for server workflows. The
+current public CLI and Stage 2 Gateway expose no role-template enrolment
+shortcut or live enrolment route. Missing authority is never inferred from a
+CLI default.

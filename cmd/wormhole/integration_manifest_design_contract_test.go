@@ -133,7 +133,7 @@ func TestAlphaContractIntegrationManifestDesignCompleteness(t *testing.T) {
 	}
 }
 
-func TestAlphaContractIntegrationManifestV1MaterializationAndGuidanceToolAreLive(t *testing.T) {
+func TestAlphaContractIntegrationManifestV1IsRetainedOutsideStage2GatewayInventory(t *testing.T) {
 	data, err := os.ReadFile("../../docs/contracts/alpha-contract.json")
 	if err != nil {
 		t.Fatal(err)
@@ -143,7 +143,7 @@ func TestAlphaContractIntegrationManifestV1MaterializationAndGuidanceToolAreLive
 		t.Fatal(err)
 	}
 	planned := inventory.DesignedInterfaces.IntegrationManifestV1
-	if planned.Status != "fabric_distribution_materialization_guidance_and_gateway_cache_binding_implemented" || planned.DesignDocument != "docs/architecture/integration-manifest-design.md" {
+	if planned.Status != "fabric_distribution_materialization_and_cache_implemented_guidance_tool_not_in_stage2_gateway_inventory" || planned.DesignDocument != "docs/architecture/integration-manifest-design.md" {
 		t.Fatalf("planned integration manifest status/document = %q/%q", planned.Status, planned.DesignDocument)
 	}
 	wantManifestFields := []string{
@@ -211,12 +211,10 @@ func TestAlphaContractIntegrationManifestV1MaterializationAndGuidanceToolAreLive
 			t.Errorf("implemented CLI command %q is missing from the live inventory", command.Name)
 		}
 	}
-	foundGateway := false
 	for _, tool := range inventory.MCPTools.Gateway {
-		foundGateway = foundGateway || tool.Name == planned.MCPTool.Name
-	}
-	if !foundGateway {
-		t.Errorf("implemented MCP tool %q is missing from the live Gateway inventory", planned.MCPTool.Name)
+		if tool.Name == planned.MCPTool.Name {
+			t.Errorf("retained designed MCP tool %q appears in the Stage 2 live Gateway inventory", planned.MCPTool.Name)
+		}
 	}
 	for _, tool := range inventory.MCPTools.Fabric {
 		if tool.Name == planned.MCPTool.Name {

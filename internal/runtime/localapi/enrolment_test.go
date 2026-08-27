@@ -50,7 +50,7 @@ func fabricEnrolmentResponse(t *testing.T, w http.ResponseWriter, id json.RawMes
 	}
 }
 
-func TestMCPEnrolmentExecutesFabricAndPersistsTokenFreeResult(t *testing.T) {
+func TestRetainedEnrolmentBoundaryExecutesFabricAndPersistsTokenFreeResult(t *testing.T) {
 	const rawToken = "fabric-one-time-secret-token"
 	var calls int
 	fabric := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -80,28 +80,35 @@ func TestMCPEnrolmentExecutesFabricAndPersistsTokenFreeResult(t *testing.T) {
 	}))
 	defer fabric.Close()
 
-	srv, socketPath := newMCPTestServer(t)
+	srv, _ := newMCPTestServer(t)
 	credentialsDir := filepath.Join(t.TempDir(), "credentials")
 	srv.SetEnrolmentRuntime(staticEnrolmentPolicySource{envelope: validEnrolmentEnvelope()}, credentialsDir)
 	req := validEnrolmentRequest()
 	req.FabricAddress = fabric.URL
-	arguments := enrolmentArgumentsForRequest(t, req)
-	resp := sendRequest(t, socketPath, EnrolmentToolName, arguments)
-	if resp.Error != "" {
-		t.Fatalf("enrolment response error: %s", resp.Error)
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := srv.handleEnrolmentContract(context.Background(), raw)
+	if err != nil {
+		t.Fatalf("enrolment response error: %v", err)
 	}
 	if calls != 1 {
 		t.Fatalf("Fabric calls = %d, want 1", calls)
 	}
-	if strings.Contains(string(resp.Result), rawToken) || strings.Contains(resp.Error, rawToken) {
-		t.Fatalf("local response exposed raw token: result=%s error=%q", resp.Result, resp.Error)
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
 	}
-	var result EnrolmentResult
-	if err := json.Unmarshal(resp.Result, &result); err != nil {
-		t.Fatalf("decode local enrolment result: %v", err)
+	if strings.Contains(string(encoded), rawToken) {
+		t.Fatalf("local response exposed raw token: result=%s", encoded)
 	}
-	if result.Code != EnrolmentCredentialsPersistedResult || result.State != EnrolmentCredentialsPersisted || result.AgentID != "agent-1" || result.PassportID != "passport-1" {
-		t.Fatalf("local enrolment result = %+v", result)
+	var got EnrolmentResult
+	if err := json.Unmarshal(encoded, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Code != EnrolmentCredentialsPersistedResult || got.State != EnrolmentCredentialsPersisted || got.AgentID != "agent-1" || got.PassportID != "passport-1" {
+		t.Fatalf("local enrolment result = %+v", got)
 	}
 	credentialPath := filepath.Join(credentialsDir, req.CredentialProfile+".json")
 	data, err := os.ReadFile(credentialPath)
@@ -122,7 +129,7 @@ func TestMCPEnrolmentExecutesFabricAndPersistsTokenFreeResult(t *testing.T) {
 	}
 }
 
-func TestMCPEnrolmentCredentialFailureIsRecoverableAndRedacted(t *testing.T) {
+func TestRetainedEnrolmentBoundaryCredentialFailureIsRecoverableAndRedacted(t *testing.T) {
 	const rawToken = "credential-write-secret"
 	fabric := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var rpcReq rpcRequest
@@ -135,26 +142,34 @@ func TestMCPEnrolmentCredentialFailureIsRecoverableAndRedacted(t *testing.T) {
 	}))
 	defer fabric.Close()
 
-	srv, socketPath := newMCPTestServer(t)
+	srv, _ := newMCPTestServer(t)
 	srv.SetEnrolmentRuntime(staticEnrolmentPolicySource{envelope: validEnrolmentEnvelope()}, filepath.Join(t.TempDir(), "credentials"))
 	srv.writeCredentialProfile = func(string, string, runtimeconfig.Credentials) (string, error) {
 		return "", errors.New("forced credential failure mentioning " + rawToken)
 	}
 	req := validEnrolmentRequest()
 	req.FabricAddress = fabric.URL
-	resp := sendRequest(t, socketPath, EnrolmentToolName, enrolmentArgumentsForRequest(t, req))
-	if resp.Error != "" {
-		t.Fatalf("credential failure became model-facing tool error: %q", resp.Error)
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(string(resp.Result), rawToken) || strings.Contains(resp.Error, rawToken) {
-		t.Fatalf("credential failure exposed raw token: result=%s error=%q", resp.Result, resp.Error)
+	result, err := srv.handleEnrolmentContract(context.Background(), raw)
+	if err != nil {
+		t.Fatalf("credential failure became boundary error: %v", err)
 	}
-	var result EnrolmentResult
-	if err := json.Unmarshal(resp.Result, &result); err != nil {
-		t.Fatalf("decode result: %v", err)
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if result.Code != EnrolmentCredentialPersistenceFailed || result.State != EnrolmentRecoveryRequired || !result.Retryable || result.AgentID != "agent-failed" || result.PassportID != "passport-failed" {
-		t.Fatalf("credential failure result = %+v", result)
+	if strings.Contains(string(encoded), rawToken) {
+		t.Fatalf("credential failure exposed raw token: result=%s", encoded)
+	}
+	var got EnrolmentResult
+	if err := json.Unmarshal(encoded, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Code != EnrolmentCredentialPersistenceFailed || got.State != EnrolmentRecoveryRequired || !got.Retryable || got.AgentID != "agent-failed" || got.PassportID != "passport-failed" {
+		t.Fatalf("credential failure result = %+v", got)
 	}
 }
 
@@ -591,7 +606,7 @@ func enrolmentArguments(t *testing.T) map[string]interface{} {
 	return arguments
 }
 
-func TestMCPEnrolmentPolicyIsEnforcedAtDispatch(t *testing.T) {
+func TestRetainedEnrolmentBoundaryEnforcesPolicy(t *testing.T) {
 	tests := []struct {
 		name      string
 		policy    EnrolmentPolicySource
@@ -603,24 +618,32 @@ func TestMCPEnrolmentPolicyIsEnforcedAtDispatch(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv, socketPath := newMCPTestServer(t)
+			srv, _ := newMCPTestServer(t)
 			srv.SetEnrolmentPolicySource(tt.policy)
-			resp := sendRequest(t, socketPath, EnrolmentToolName, enrolmentArguments(t))
-			if !strings.Contains(resp.Error, tt.wantError) {
-				t.Fatalf("error = %q, want %q", resp.Error, tt.wantError)
+			raw, err := json.Marshal(validEnrolmentRequest())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = srv.handleEnrolmentContract(context.Background(), raw)
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("error = %v, want %q", err, tt.wantError)
 			}
 		})
 	}
 }
 
-func TestMCPEnrolmentRejectsUnknownCredentialPathField(t *testing.T) {
-	srv, socketPath := newMCPTestServer(t)
+func TestRetainedEnrolmentBoundaryRejectsUnknownCredentialPathField(t *testing.T) {
+	srv, _ := newMCPTestServer(t)
 	srv.SetEnrolmentPolicySource(staticEnrolmentPolicySource{envelope: validEnrolmentEnvelope()})
 	arguments := enrolmentArguments(t)
 	arguments["credential_path"] = "/tmp/outside.json"
-	resp := sendRequest(t, socketPath, EnrolmentToolName, arguments)
-	if !strings.Contains(resp.Error, "unknown field") {
-		t.Fatalf("error = %q, want strict unknown-field rejection", resp.Error)
+	raw, err := json.Marshal(arguments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = srv.handleEnrolmentContract(context.Background(), raw)
+	if err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("error = %v, want strict unknown-field rejection", err)
 	}
 }
 

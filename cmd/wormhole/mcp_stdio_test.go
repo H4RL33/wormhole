@@ -3,9 +3,11 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -174,6 +176,33 @@ func TestBridge_PartialLineOnStdinEOF(t *testing.T) {
 		_ = err
 	case <-time.After(2 * time.Second):
 		t.Fatal("bridge hung on partial line / stdin EOF")
+	}
+}
+
+func TestBridgeRejectsEveryPrivateGatewayMethodWithoutForwarding(t *testing.T) {
+	methods := []string{
+		"wormhole.private.setup.register_workspace", "wormhole.private.setup.ensure_identity",
+		"wormhole.private.setup.publication", "wormhole.private.setup.import", "wormhole.private.setup.verify",
+		"wormhole.private.workspace", "wormhole.private.future", "wormhole/integration/plan", "wormhole/integration/commit",
+	}
+	for _, method := range methods {
+		t.Run(strings.ReplaceAll(method, "/", "_"), func(t *testing.T) {
+			client, server := net.Pipe()
+			defer server.Close()
+			request := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":%q,"params":{}}`, method) + "\n"
+			done := make(chan error, 1)
+			go func() { done <- stdinToSocket(strings.NewReader(request), client) }()
+			if err := <-done; !errors.Is(err, errPrivateMCPMethod) {
+				t.Fatalf("stdinToSocket(%s) error = %v, want private-method rejection", method, err)
+			}
+			if err := server.SetReadDeadline(time.Now().Add(25 * time.Millisecond)); err != nil {
+				t.Fatal(err)
+			}
+			buffer := make([]byte, 1)
+			if count, err := server.Read(buffer); count != 0 || !errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Fatalf("private method forwarded %d bytes, error %v", count, err)
+			}
+		})
 	}
 }
 

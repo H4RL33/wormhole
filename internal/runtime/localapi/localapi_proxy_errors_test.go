@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
-	syncpkg "github.com/H4RL33/wormhole/internal/runtime/sync"
 )
 
 func newProxyTestServer(t *testing.T, handler http.HandlerFunc) *Server {
@@ -59,9 +58,6 @@ func TestLocalAPIRemoteProxyFailuresRemainActionable(t *testing.T) {
 			if _, err := srv.proxyWhoAmI(context.Background()); err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("proxyWhoAmI error = %v, want %q", err, tt.want)
 			}
-			if _, err := srv.proxyRegister(context.Background(), json.RawMessage(`{"owner":"owner","project_id":"project-1"}`)); err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("proxyRegister error = %v, want %q", err, tt.want)
-			}
 		})
 	}
 }
@@ -91,21 +87,5 @@ func TestProxyWhoAmIFallsBackToExactCachedCredentialIdentityOffline(t *testing.T
 	if out.AgentID != want.AgentID || out.Owner != want.Owner || out.Model != want.Model ||
 		out.ProjectID != want.ProjectID || !reflect.DeepEqual(out.Capabilities, want.Capabilities) || !reflect.DeepEqual(out.Permissions, want.Permissions) {
 		t.Fatalf("offline whoami = %+v, want exact credential cache %+v", out, want)
-	}
-}
-
-func TestProxyRegisterRejectsExplicitlyWhenCentralAuthorityIsOffline(t *testing.T) {
-	called := false
-	srv := newProxyTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
-		called = true
-		http.Error(w, "unexpected", http.StatusInternalServerError)
-	})
-	srv.SetSyncStatusProvider(&fixedSyncStatusProvider{status: syncpkg.Status{State: syncpkg.StateOffline}})
-	_, err := srv.proxyRegister(context.Background(), json.RawMessage(`{"owner":"owner","project_id":"project-1"}`))
-	if err == nil || !strings.Contains(err.Error(), "central authority required") {
-		t.Fatalf("proxyRegister error = %v, want explicit central authority rejection", err)
-	}
-	if called {
-		t.Fatal("proxyRegister contacted Fabric after offline state was known")
 	}
 }
