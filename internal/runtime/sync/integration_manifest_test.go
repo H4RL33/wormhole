@@ -1,5 +1,3 @@
-//go:build legacy_namespace_sync
-
 package sync
 
 import (
@@ -45,15 +43,14 @@ func TestBootstrapRoutesManifestThroughAuthenticatedReceiverBeforeReadyCommit(t 
 	}
 	defer store.Close()
 	qRepo, aRepo := setupTestRepos(t)
-	defer qRepo.db.Close()
 	engine := mustNewEngine(t, "http://unused.invalid", qRepo, aRepo, nil, nil, DefaultConfig())
 	if err := engine.ConfigureBootstrap(store, "agent-1", "passport-1", nil); err != nil {
 		t.Fatal(err)
 	}
 	receiver := &recordingIntegrationManifestReceiver{}
 	engine.ConfigureIntegrationManifestReceiver(receiver)
-	offer := json.RawMessage(`{"operation":"offered","project_id":"ns-1"}`)
-	bootstrap := validBootstrapWire()
+	offer := json.RawMessage(`{"operation":"offered","project_id":"` + routedTestProjectID + `"}`)
+	bootstrap := bootstrapForProject(routedTestProjectID)
 	bootstrap.OrgConfig.Identity.Passport.Roles = []string{"contributor"}
 	bootstrap.OrgConfig.IntegrationManifestMetadata = offer
 	engine.testCallSyncToolWithResultFn = func(context.Context, string, map[string]interface{}) (interface{}, error) {
@@ -62,11 +59,11 @@ func TestBootstrapRoutesManifestThroughAuthenticatedReceiverBeforeReadyCommit(t 
 	if err := engine.Bootstrap(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if receiver.projectID != "ns-1" || receiver.passportID != "passport-1" || !reflect.DeepEqual(receiver.roles, []string{"contributor"}) || !jsonEqual(receiver.raw, offer) {
+	if receiver.projectID != routedTestProjectID || receiver.passportID != "passport-1" || !reflect.DeepEqual(receiver.roles, []string{"contributor"}) || !jsonEqual(receiver.raw, offer) {
 		t.Fatalf("receiver binding/raw = %q %q %#v %s", receiver.projectID, receiver.passportID, receiver.roles, receiver.raw)
 	}
 	var snapshots int
-	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM bootstrap_metadata WHERE namespace_id = 'ns-1'`).Scan(&snapshots); err != nil {
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM bootstrap_metadata WHERE namespace_id = ?`, routedTestProjectID).Scan(&snapshots); err != nil {
 		t.Fatal(err)
 	}
 	if snapshots != 1 {
@@ -82,13 +79,12 @@ func TestBootstrapReceiverFailurePreventsReadyCommit(t *testing.T) {
 	}
 	defer store.Close()
 	qRepo, aRepo := setupTestRepos(t)
-	defer qRepo.db.Close()
 	engine := mustNewEngine(t, "http://unused.invalid", qRepo, aRepo, nil, nil, DefaultConfig())
 	if err := engine.ConfigureBootstrap(store, "agent-1", "passport-1", nil); err != nil {
 		t.Fatal(err)
 	}
 	engine.ConfigureIntegrationManifestReceiver(&recordingIntegrationManifestReceiver{err: errors.New("malformed manifest")})
-	bootstrap := validBootstrapWire()
+	bootstrap := bootstrapForProject(routedTestProjectID)
 	bootstrap.OrgConfig.Identity.Passport.Roles = []string{"contributor"}
 	bootstrap.OrgConfig.IntegrationManifestMetadata = json.RawMessage(`{"operation":"offered"}`)
 	engine.testCallSyncToolWithResultFn = func(context.Context, string, map[string]interface{}) (interface{}, error) {
@@ -98,7 +94,7 @@ func TestBootstrapReceiverFailurePreventsReadyCommit(t *testing.T) {
 		t.Fatal("Bootstrap accepted a rejected manifest")
 	}
 	var projects int
-	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM projects WHERE namespace_id = 'ns-1'`).Scan(&projects); err != nil {
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM projects WHERE namespace_id = ?`, routedTestProjectID).Scan(&projects); err != nil {
 		t.Fatal(err)
 	}
 	if projects != 0 {
@@ -117,14 +113,13 @@ func TestBootstrapSnapshotFailureRollsBackReceivedManifestCandidate(t *testing.T
 		t.Fatal(err)
 	}
 	qRepo, aRepo := setupTestRepos(t)
-	defer qRepo.db.Close()
 	engine := mustNewEngine(t, "http://unused.invalid", qRepo, aRepo, nil, nil, DefaultConfig())
 	if err := engine.ConfigureBootstrap(store, "agent-1", "passport-1", nil); err != nil {
 		t.Fatal(err)
 	}
 	receiver := &recordingIntegrationManifestReceiver{}
 	engine.ConfigureIntegrationManifestReceiver(receiver)
-	bootstrap := validBootstrapWire()
+	bootstrap := bootstrapForProject(routedTestProjectID)
 	bootstrap.OrgConfig.Identity.Passport.Roles = []string{"contributor"}
 	bootstrap.OrgConfig.IntegrationManifestMetadata = json.RawMessage(`{"operation":"offered"}`)
 	engine.testCallSyncToolWithResultFn = func(context.Context, string, map[string]interface{}) (interface{}, error) { return bootstrap, nil }
@@ -145,13 +140,12 @@ func TestIncrementalManifestReceiverFailureDoesNotAdvanceCursor(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer store.Close()
-			bootstrap := validBootstrapWire()
+			bootstrap := bootstrapForProject(routedTestProjectID)
 			bootstrap.OrgConfig.Identity.Passport.Roles = []string{"contributor"}
-			if err := store.ApplyBootstrap(ctx, "ns-1", bootstrap.OrgConfig, time.Now().UTC(), nil); err != nil {
+			if err := store.ApplyBootstrap(ctx, routedTestProjectID, bootstrap.OrgConfig, time.Now().UTC(), nil); err != nil {
 				t.Fatal(err)
 			}
 			qRepo, aRepo := setupTestRepos(t)
-			defer qRepo.db.Close()
 			engine := mustNewEngine(t, "http://unused.invalid", qRepo, aRepo, nil, nil, DefaultConfig())
 			if err := engine.ConfigureBootstrap(store, "agent-1", "passport-1", nil); err != nil {
 				t.Fatal(err)
@@ -169,7 +163,7 @@ func TestIncrementalManifestReceiverFailureDoesNotAdvanceCursor(t *testing.T) {
 			if engine.lastSyncCursor != "2026-07-26T10:00:00Z" {
 				t.Fatalf("cursor advanced to %q", engine.lastSyncCursor)
 			}
-			if receiver.projectID != "ns-1" || receiver.passportID != "passport-1" || !reflect.DeepEqual(receiver.roles, []string{"contributor"}) || !jsonEqual(receiver.raw, raw) {
+			if receiver.projectID != routedTestProjectID || receiver.passportID != "passport-1" || !reflect.DeepEqual(receiver.roles, []string{"contributor"}) || !jsonEqual(receiver.raw, raw) {
 				t.Fatalf("receiver binding/raw = %q %q %#v %s", receiver.projectID, receiver.passportID, receiver.roles, receiver.raw)
 			}
 		})

@@ -1,5 +1,3 @@
-//go:build legacy_namespace_sync
-
 package sync
 
 import (
@@ -52,13 +50,14 @@ func TestAlphaContractSyncProtocol(t *testing.T) {
 		calls[name] = append(calls[name], args)
 		switch name {
 		case "wormhole.sync.bootstrap":
-			return validBootstrapWire(), nil
+			return bootstrapForProject(routedTestProjectID), nil
 		case "wormhole.sync.incremental_pull":
 			return map[string]interface{}{"updates": []interface{}{}, "timestamp": "2026-07-23T00:00:00Z", "version": manifest.SyncProtocol.Version}, nil
 		case "wormhole.sync.incremental_push":
+			operation := retainedOperation(44)
 			return map[string]interface{}{
 				"items_received": 1,
-				"applied":        []map[string]interface{}{{"id": "task-contract", "type": "task"}},
+				"applied":        []map[string]interface{}{acknowledge(operation, "")},
 				"timestamp":      "2026-07-23T00:00:00Z",
 				"version":        manifest.SyncProtocol.Version,
 			}, nil
@@ -71,6 +70,7 @@ func TestAlphaContractSyncProtocol(t *testing.T) {
 	}
 
 	ctx := context.Background()
+	operation := retainedOperation(44)
 	if err := engine.Bootstrap(ctx); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestAlphaContractSyncProtocol(t *testing.T) {
 	if err := engine.PullIncremental(ctx); err != nil {
 		t.Fatalf("PullIncremental with cursor: %v", err)
 	}
-	if _, err := queueRepo.Enqueue(ctx, "ns-1", "task", "task-contract", "create", json.RawMessage(`{"title":"contract"}`), 0); err != nil {
+	if _, err := queueRepo.Enqueue(ctx, testRemoteKey(t, queueRepo), operation, 0); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	if err := engine.pushBatch(ctx); err != nil {

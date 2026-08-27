@@ -3,11 +3,9 @@
 // Tests for the local write tools (wormhole.task.create, wormhole.kb.write,
 // wormhole.channel.post) added to close the "local write path" functional-alpha
 // gap: agents connected to Gateway must be able to create tasks, write KB
-// articles, and post channel events locally, with each write enqueued to the
-// outbound sync queue (RFC-0003 §8.2) for later delivery to the Coordination
-// Server.
-//go:build legacy_namespace_sync
-
+// articles, and post channel events locally. Unbound legacy writes remain
+// durable and local; only a complete routed operation can enter the Fabric
+// queue.
 package localapi
 
 import (
@@ -93,8 +91,8 @@ func dialAndCall(t *testing.T, srv *Server, tool string, args map[string]interfa
 	return callResponse{Result: resp.Result}
 }
 
-func TestLocalTaskCreate_EnqueuesForSync(t *testing.T) {
-	srv, tr, _, _, qr, cleanup := newTestServerWithQueue(t)
+func TestLocalTaskCreatePersistsWithoutUnboundQueue(t *testing.T) {
+	srv, tr, _, _, _, cleanup := newTestServerWithQueue(t)
 	defer cleanup()
 
 	args, err := json.Marshal(map[string]interface{}{
@@ -121,23 +119,11 @@ func TestLocalTaskCreate_EnqueuesForSync(t *testing.T) {
 		t.Fatalf("task not persisted: got=%+v err=%v", got, err)
 	}
 
-	// verify it was enqueued for sync
-	pending, err := qr.ListPending(context.Background(), "ns-1", 10)
-	if err != nil || len(pending) != 1 || pending[0].EntityID != taskID || pending[0].Operation != "create" {
-		t.Fatalf("expected task enqueued for sync, got pending=%+v err=%v", pending, err)
-	}
-
-	// GH-19 regression: the task's priority must be threaded through to the
-	// queue entry, not hardcoded to 0 — otherwise the sync engine's
-	// latency-sensitive bypass (HighPriorityThreshold, checkLatencySensitive)
-	// can never trigger from a real request path.
-	if pending[0].Priority != 2 {
-		t.Fatalf("expected enqueued priority 2 (matching task priority), got %d", pending[0].Priority)
-	}
+	assertSyncQueueRows(t, srv.store.DB(), 0)
 }
 
-func TestLocalKBWrite_EnqueuesForSync(t *testing.T) {
-	srv, _, _, kb, qr, cleanup := newTestServerWithQueue(t)
+func TestLocalKBWritePersistsWithoutUnboundQueue(t *testing.T) {
+	srv, _, _, kb, _, cleanup := newTestServerWithQueue(t)
 	defer cleanup()
 
 	resp := dialAndCall(t, srv, "wormhole.kb.write", map[string]interface{}{
@@ -162,17 +148,7 @@ func TestLocalKBWrite_EnqueuesForSync(t *testing.T) {
 		t.Fatalf("article not persisted: got=%+v err=%v", got, err)
 	}
 
-	pending, err := qr.ListPending(context.Background(), "ns-1", 10)
-	if err != nil || len(pending) != 1 || pending[0].EntityID != articleID || pending[0].Operation != "create" || pending[0].EntityType != "kb" {
-		t.Fatalf("expected article enqueued for sync with entity_type=kb, got pending=%+v err=%v", pending, err)
-	}
-	var queued map[string]interface{}
-	if err := json.Unmarshal(pending[0].Payload, &queued); err != nil {
-		t.Fatalf("decode queued KB payload: %v", err)
-	}
-	if _, ok := queued["frontmatter"].(map[string]interface{}); !ok {
-		t.Fatalf("queued frontmatter type = %T, want JSON object: %#v", queued["frontmatter"], queued["frontmatter"])
-	}
+	assertSyncQueueRows(t, srv.store.DB(), 0)
 }
 
 func TestLocalKBGetReadsOnlyTheResolvedProject(t *testing.T) {
@@ -288,7 +264,7 @@ func TestLocalReadHandlersReturnDurableReplicaState(t *testing.T) {
 }
 
 func TestLocalWriteHandlersRejectInvalidInputBeforePersistence(t *testing.T) {
-	srv, _, _, _, queue, cleanup := newTestServerWithQueue(t)
+	srv, _, _, _, _, cleanup := newTestServerWithQueue(t)
 	defer cleanup()
 	ctx := context.Background()
 
@@ -343,14 +319,11 @@ func TestLocalWriteHandlersRejectInvalidInputBeforePersistence(t *testing.T) {
 		})
 	}
 
-	pending, err := queue.ListPending(ctx, "ns-1", 10)
-	if err != nil || len(pending) != 0 {
-		t.Fatalf("invalid requests reached the queue: pending=%+v err=%v", pending, err)
-	}
+	assertSyncQueueRows(t, srv.store.DB(), 0)
 }
 
-func TestLocalChannelPost_EnqueuesForSync(t *testing.T) {
-	srv, _, er, _, qr, cleanup := newTestServerWithQueue(t)
+func TestLocalChannelPostPersistsWithoutUnboundQueue(t *testing.T) {
+	srv, _, er, _, _, cleanup := newTestServerWithQueue(t)
 	defer cleanup()
 
 	channelID, err := er.CreateChannel(context.Background(), "ns-1", "general")
@@ -375,21 +348,15 @@ func TestLocalChannelPost_EnqueuesForSync(t *testing.T) {
 		t.Fatal("expected non-empty event id in response")
 	}
 
-	pending, err := qr.ListPending(context.Background(), "ns-1", 10)
-	if err != nil || len(pending) != 1 || pending[0].EntityID != eventID || pending[0].Operation != "create" {
-		t.Fatalf("expected event enqueued for sync, got pending=%+v err=%v", pending, err)
+	var persisted int
+	if err := srv.store.DB().QueryRow(`SELECT count(*) FROM events WHERE namespace_id=? AND id=?`, "ns-1", eventID).Scan(&persisted); err != nil || persisted != 1 {
+		t.Fatalf("persisted event=(%d,%v)", persisted, err)
 	}
-	var queued map[string]interface{}
-	if err := json.Unmarshal(pending[0].Payload, &queued); err != nil {
-		t.Fatalf("decode queued event payload: %v", err)
-	}
-	if _, ok := queued["payload"].(map[string]interface{}); !ok {
-		t.Fatalf("queued event payload type = %T, want JSON object: %#v", queued["payload"], queued["payload"])
-	}
+	assertSyncQueueRows(t, srv.store.DB(), 0)
 }
 
 func TestLocalDurableWrites_RequireSameProjectActionPermission(t *testing.T) {
-	srv, _, er, _, qr, cleanup := newTestServerWithQueue(t)
+	srv, _, er, _, _, cleanup := newTestServerWithQueue(t)
 	defer cleanup()
 	if _, err := srv.store.DB().Exec(`UPDATE whoami_cache SET permissions = '[]' WHERE project_id = 'ns-1'`); err != nil {
 		t.Fatalf("restrict cached permissions: %v", err)
@@ -417,13 +384,10 @@ func TestLocalDurableWrites_RequireSameProjectActionPermission(t *testing.T) {
 			}
 		})
 	}
-	pending, err := qr.ListPending(context.Background(), "ns-1", 10)
-	if err != nil || len(pending) != 0 {
-		t.Fatalf("denied same-project actions reached queue: pending=%+v err=%v", pending, err)
-	}
+	assertSyncQueueRows(t, srv.store.DB(), 0)
 }
 
-func TestLocalDurableWrites_RollBackWhenQueueInsertFails(t *testing.T) {
+func TestLocalDurableWritesIgnoreUnboundQueueInsertFailure(t *testing.T) {
 	for _, tt := range durableWriteCases() {
 		t.Run(tt.name, func(t *testing.T) {
 			srv, _, er, _, _, cleanup := newTestServerWithQueue(t)
@@ -438,11 +402,8 @@ func TestLocalDurableWrites_RollBackWhenQueueInsertFails(t *testing.T) {
 			}
 
 			resp := dialAndCall(t, srv, tt.tool, tt.args(t, er))
-			if resp.Error == nil {
-				t.Fatal("write succeeded despite injected queue failure")
-			}
-			if !strings.Contains(resp.Error.Error(), "injected queue failure") {
-				t.Fatalf("write failed before queue injection: %v", resp.Error)
+			if resp.Error != nil {
+				t.Fatalf("unbound local write depended on Fabric queue: %v", resp.Error)
 			}
 
 			var count int
@@ -450,9 +411,10 @@ func TestLocalDurableWrites_RollBackWhenQueueInsertFails(t *testing.T) {
 			if err := srv.store.DB().QueryRow(query, tt.whereArgs...).Scan(&count); err != nil {
 				t.Fatalf("count durable rows: %v", err)
 			}
-			if count != 0 {
-				t.Fatalf("failed response left %d silently unsyncable %s row(s)", count, tt.name)
+			if count != 1 {
+				t.Fatalf("local write count=%d, want 1 %s row", count, tt.name)
 			}
+			assertSyncQueueRows(t, srv.store.DB(), 0)
 		})
 	}
 }
@@ -461,7 +423,7 @@ func TestLocalDurableWrites_RollBackWhenAbortedBeforeCommit(t *testing.T) {
 	tests := durableWriteCases()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv, _, er, _, qr, cleanup := newTestServerWithQueue(t)
+			srv, _, er, _, _, cleanup := newTestServerWithQueue(t)
 			defer cleanup()
 			srv.testBeforeLocalWriteCommit = func(*sql.Tx) error { return errors.New("injected pre-commit abort") }
 
@@ -477,15 +439,12 @@ func TestLocalDurableWrites_RollBackWhenAbortedBeforeCommit(t *testing.T) {
 			if count != 0 {
 				t.Fatalf("failed commit left %d %s row(s)", count, tt.name)
 			}
-			pending, err := qr.ListPending(context.Background(), "ns-1", 10)
-			if err != nil || len(pending) != 0 {
-				t.Fatalf("failed commit left queue entries: pending=%+v err=%v", pending, err)
-			}
+			assertSyncQueueRows(t, srv.store.DB(), 0)
 		})
 	}
 }
 
-func TestLocalDurableWrites_SuccessSurvivesRestartWithPendingQueue(t *testing.T) {
+func TestLocalDurableWritesSurviveRestartWithoutUnboundQueue(t *testing.T) {
 	for _, tt := range durableWriteCases() {
 		t.Run(tt.name, func(t *testing.T) {
 			dbPath := filepath.Join(t.TempDir(), "wormholed.db")
@@ -516,42 +475,29 @@ func TestLocalDurableWrites_SuccessSurvivesRestartWithPendingQueue(t *testing.T)
 			if count != 1 {
 				t.Fatalf("durable row count after restart = %d, want 1", count)
 			}
-			pending, err := sync.NewQueueRepo(store.DB()).ListPending(context.Background(), "ns-1", 10)
-			if err != nil {
-				t.Fatalf("list queue after restart: %v", err)
-			}
-			found := false
-			for _, item := range pending {
-				if item.EntityID == entityID && item.EntityType == tt.entityType {
-					found = true
-				}
-			}
-			if !found {
-				t.Fatalf("pending queue after restart missing %s %s: %+v", tt.entityType, entityID, pending)
-			}
+			assertSyncQueueRows(t, store.DB(), 0)
 		})
 	}
 }
 
 type durableWriteCase struct {
-	name       string
-	tool       string
-	table      string
-	entityType string
-	args       func(t *testing.T, er *localstore.EventRepo) map[string]interface{}
-	whereSQL   string
-	whereArgs  []interface{}
+	name      string
+	tool      string
+	table     string
+	args      func(t *testing.T, er *localstore.EventRepo) map[string]interface{}
+	whereSQL  string
+	whereArgs []interface{}
 }
 
 func durableWriteCases() []durableWriteCase {
 	return []durableWriteCase{
-		{name: "kb", tool: "wormhole.kb.write", table: "kb_articles", entityType: "kb", args: func(_ *testing.T, _ *localstore.EventRepo) map[string]interface{} {
+		{name: "kb", tool: "wormhole.kb.write", table: "kb_articles", args: func(_ *testing.T, _ *localstore.EventRepo) map[string]interface{} {
 			return map[string]interface{}{"agent_id": "agent-1", "title": "commit-failure-kb", "body": "body"}
 		}, whereSQL: "title = ?", whereArgs: []interface{}{"commit-failure-kb"}},
-		{name: "channel", tool: "wormhole.channel.create", table: "channels", entityType: "channel", args: func(_ *testing.T, _ *localstore.EventRepo) map[string]interface{} {
+		{name: "channel", tool: "wormhole.channel.create", table: "channels", args: func(_ *testing.T, _ *localstore.EventRepo) map[string]interface{} {
 			return map[string]interface{}{"name": "commit-failure-channel"}
 		}, whereSQL: "name = ?", whereArgs: []interface{}{"commit-failure-channel"}},
-		{name: "event", tool: "wormhole.channel.post", table: "events", entityType: "event", args: func(t *testing.T, er *localstore.EventRepo) map[string]interface{} {
+		{name: "event", tool: "wormhole.channel.post", table: "events", args: func(t *testing.T, er *localstore.EventRepo) map[string]interface{} {
 			channelID, err := er.CreateChannel(context.Background(), "ns-1", "commit-failure-event-channel")
 			if err != nil {
 				t.Fatalf("CreateChannel: %v", err)
@@ -587,14 +533,25 @@ func newTestServerAtPath(t *testing.T, dbPath string) (*Server, *localstore.Even
 	}
 }
 
+func assertSyncQueueRows(t *testing.T, db *sql.DB, want int) {
+	t.Helper()
+	var got int
+	if err := db.QueryRow(`SELECT count(*) FROM sync_queue`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("sync_queue rows=%d, want %d", got, want)
+	}
+}
+
 // TestLocalWrites_IgnoreClientSuppliedNamespaceID proves the cross-namespace
 // write vulnerability is closed: a socket bound to "ns-1" (see
 // newTestServerWithQueue) must not honor a client-supplied namespace_id of
 // "ns-EVIL" — every write must land in the socket's bound namespace ("ns-1")
 // regardless of what the request body claims, and nothing must be written to
-// or enqueued for the mismatched namespace.
+// for the mismatched namespace.
 func TestLocalWrites_IgnoreClientSuppliedNamespaceID(t *testing.T) {
-	srv, tr, er, kb, qr, cleanup := newTestServerWithQueue(t)
+	srv, tr, er, kb, _, cleanup := newTestServerWithQueue(t)
 	defer cleanup()
 
 	const evilNS = "ns-EVIL"
@@ -627,13 +584,6 @@ func TestLocalWrites_IgnoreClientSuppliedNamespaceID(t *testing.T) {
 			t.Fatalf("task leaked into client-supplied namespace %q", evilNS)
 		}
 
-		pendingEvil, err := qr.ListPending(context.Background(), evilNS, 10)
-		if err != nil {
-			t.Fatalf("ListPending(evilNS): %v", err)
-		}
-		if len(pendingEvil) != 0 {
-			t.Fatalf("expected nothing enqueued under client-supplied namespace %q, got %+v", evilNS, pendingEvil)
-		}
 	})
 
 	t.Run("kb.write", func(t *testing.T) {
@@ -663,13 +613,6 @@ func TestLocalWrites_IgnoreClientSuppliedNamespaceID(t *testing.T) {
 			t.Fatalf("article leaked into client-supplied namespace %q", evilNS)
 		}
 
-		pendingEvil, err := qr.ListPending(context.Background(), evilNS, 10)
-		if err != nil {
-			t.Fatalf("ListPending(evilNS): %v", err)
-		}
-		if len(pendingEvil) != 0 {
-			t.Fatalf("expected nothing enqueued under client-supplied namespace %q, got %+v", evilNS, pendingEvil)
-		}
 	})
 
 	t.Run("channel.post", func(t *testing.T) {
@@ -698,26 +641,9 @@ func TestLocalWrites_IgnoreClientSuppliedNamespaceID(t *testing.T) {
 			t.Fatalf("expected event written to bound namespace ns-1, response reports namespace_id=%q", ns)
 		}
 
-		pendingBound, err := qr.ListPending(context.Background(), "ns-1", 10)
-		if err != nil {
-			t.Fatalf("ListPending(ns-1): %v", err)
-		}
-		found := false
-		for _, p := range pendingBound {
-			if p.EntityID == eventID {
-				found = true
-			}
-		}
-		if !found {
-			t.Fatalf("expected event enqueued under bound namespace ns-1, got %+v", pendingBound)
-		}
-
-		pendingEvil, err := qr.ListPending(context.Background(), evilNS, 10)
-		if err != nil {
-			t.Fatalf("ListPending(evilNS): %v", err)
-		}
-		if len(pendingEvil) != 0 {
-			t.Fatalf("expected nothing enqueued under client-supplied namespace %q, got %+v", evilNS, pendingEvil)
+		if _, err := er.GetEvent(context.Background(), "ns-1", eventID); err != nil {
+			t.Fatalf("event not persisted in bound namespace: %v", err)
 		}
 	})
+	assertSyncQueueRows(t, srv.store.DB(), 0)
 }

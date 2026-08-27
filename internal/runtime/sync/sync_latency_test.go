@@ -1,5 +1,3 @@
-//go:build legacy_namespace_sync
-
 package sync
 
 import (
@@ -19,7 +17,7 @@ import (
 // P4 roadmap gap).
 func TestCheckLatencySensitive_HighPriorityPushesImmediately(t *testing.T) {
 	qRepo, aRepo := setupTestRepos(t)
-	defer qRepo.db.Close()
+	operation := retainedOperation(42)
 
 	var pushCalls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -27,7 +25,7 @@ func TestCheckLatencySensitive_HighPriorityPushesImmediately(t *testing.T) {
 		resultData := map[string]interface{}{
 			"items_received": 1,
 			"applied": []map[string]interface{}{
-				{"id": "task-1", "type": "task", "error": ""},
+				acknowledge(operation, ""),
 			},
 			"timestamp": time.Now().UTC().Format(time.RFC3339),
 			"version":   1,
@@ -40,8 +38,7 @@ func TestCheckLatencySensitive_HighPriorityPushesImmediately(t *testing.T) {
 	engine := mustNewEngine(t, srv.URL, qRepo, aRepo, nil, nil, cfg)
 
 	ctx := context.Background()
-	payload := json.RawMessage(`{"title":"urgent"}`)
-	if _, err := qRepo.Enqueue(ctx, "ns-1", "task", "task-1", "create", payload, cfg.HighPriorityThreshold); err != nil {
+	if _, err := qRepo.Enqueue(ctx, testRemoteKey(t, qRepo), operation, cfg.HighPriorityThreshold); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 
@@ -53,7 +50,7 @@ func TestCheckLatencySensitive_HighPriorityPushesImmediately(t *testing.T) {
 		t.Fatalf("push calls: got %d, want 1", got)
 	}
 
-	entries, err := qRepo.ListPending(ctx, "ns-1", 10)
+	entries, err := qRepo.ListPending(ctx, testRemoteKey(t, qRepo), 10)
 	if err != nil {
 		t.Fatalf("ListPending: %v", err)
 	}
@@ -67,7 +64,7 @@ func TestCheckLatencySensitive_HighPriorityPushesImmediately(t *testing.T) {
 // of being pushed immediately.
 func TestCheckLatencySensitive_LowPriorityDoesNotPush(t *testing.T) {
 	qRepo, aRepo := setupTestRepos(t)
-	defer qRepo.db.Close()
+	operation := retainedOperation(43)
 
 	var pushCalls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -75,7 +72,7 @@ func TestCheckLatencySensitive_LowPriorityDoesNotPush(t *testing.T) {
 		writeFakeToolResult(w, map[string]interface{}{
 			"items_received": 1,
 			"applied": []map[string]interface{}{
-				{"id": "task-1", "type": "task", "error": ""},
+				acknowledge(operation, ""),
 			},
 			"timestamp": time.Now().UTC().Format(time.RFC3339), "version": 1,
 		})
@@ -86,8 +83,7 @@ func TestCheckLatencySensitive_LowPriorityDoesNotPush(t *testing.T) {
 	engine := mustNewEngine(t, srv.URL, qRepo, aRepo, nil, nil, cfg)
 
 	ctx := context.Background()
-	payload := json.RawMessage(`{"title":"routine"}`)
-	if _, err := qRepo.Enqueue(ctx, "ns-1", "task", "task-1", "create", payload, cfg.HighPriorityThreshold-1); err != nil {
+	if _, err := qRepo.Enqueue(ctx, testRemoteKey(t, qRepo), operation, cfg.HighPriorityThreshold-1); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 

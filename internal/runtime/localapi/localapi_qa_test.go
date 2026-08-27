@@ -1,5 +1,3 @@
-//go:build legacy_namespace_sync
-
 package localapi
 
 import (
@@ -306,7 +304,7 @@ func TestLocalAPISubscriptionCleansUpOnCancellationAndBrokenClient(t *testing.T)
 }
 
 func TestLocalAPIWriteToolsKeepOptionalDurableFields(t *testing.T) {
-	srv, tasks, events, _, queue, cleanup := newTestServerWithQueue(t)
+	srv, tasks, events, _, _, cleanup := newTestServerWithQueue(t)
 	defer cleanup()
 	ctx := context.Background()
 	parent, err := tasks.CreateTask(ctx, "ns-1", "parent", "", nil, 0, nil)
@@ -339,10 +337,7 @@ func TestLocalAPIWriteToolsKeepOptionalDurableFields(t *testing.T) {
 	if !ok || returnedNote == nil || *returnedNote != "keep optional data" || string(event["payload"].(json.RawMessage)) != `{"kind":"coverage"}` {
 		t.Fatalf("event optional fields = %#v", event)
 	}
-	pending, err := queue.ListPending(ctx, "ns-1", 10)
-	if err != nil || len(pending) != 2 {
-		t.Fatalf("pending durable writes = %#v err=%v, want task and event", pending, err)
-	}
+	assertSyncQueueRows(t, srv.store.DB(), 0)
 }
 
 func TestMultiOrgWriteToolsRejectUnboundProjectBeforeMutation(t *testing.T) {

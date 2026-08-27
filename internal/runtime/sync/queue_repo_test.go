@@ -14,6 +14,8 @@ import (
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/types"
 	projectstate "github.com/H4RL33/wormhole/internal/types/projectstate"
+	sqlite "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 var _ func(*QueueRepo, context.Context, types.RemoteBindingKey, projectstate.OperationV1, int) (QueueEntry, error) = (*QueueRepo).Enqueue
@@ -69,8 +71,13 @@ func TestQueueRejectsBindingMismatchByDirectSQL(t *testing.T) {
 		VALUES (?,?,?,?,?,?,?,?)
 	`, first.ProjectID, first.WorkspaceID, first.FabricInstanceID, first.RemoteProjectID, first.StreamID,
 		operation.ID, string(canonical), operationDigest(canonical))
-	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "foreign key") {
-		t.Fatalf("mismatched direct queue insert error=%v, want SQLite foreign-key constraint", err)
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) || sqliteErr.Code() != sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY {
+		var code any
+		if sqliteErr != nil {
+			code = sqliteErr.Code()
+		}
+		t.Fatalf("mismatched direct queue insert error=%v code=%v, want SQLITE_CONSTRAINT_FOREIGNKEY", err, code)
 	}
 }
 

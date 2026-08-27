@@ -1,11 +1,14 @@
 package sync
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -153,6 +156,70 @@ func TestWorkspaceConflictIsAttentionRequiredAndCredentialErrorsAreRedacted(t *t
 	_, err = engine.callSyncToolWithResult(context.Background(), "wormhole.sync.status", nil)
 	if err == nil || errors.Is(err, ErrFabricUnavailable) || fmt.Sprint(err) != "sync: resolve Fabric credential" {
 		t.Fatalf("credential error=%v", err)
+	}
+}
+
+func TestRoutedResponseErrorsNeverExposeActiveCredential(t *testing.T) {
+	const token = "credential-exact-token-should-never-escape"
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "rpc error",
+			body: `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"received credential-exact-token-should-never-escape"}}`,
+			want: "Fabric RPC rejected request",
+		},
+		{
+			name: "tool error",
+			body: `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"rejected credential-exact-token-should-never-escape"}],"isError":true}}`,
+			want: "Fabric tool rejected request",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+					t.Fatalf("Authorization=%q", got)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprint(w, test.body)
+			}))
+			defer server.Close()
+
+			store, queue, key, _ := queueRouteFixture(t)
+			defer store.Close()
+			routes := routeSourceForKey(key, server.URL, "keyring:active")
+			engine, err := NewRouted(context.Background(), routes.binding.Workspace.Scope, routes,
+				&recordingCredentials{values: map[string]string{"keyring:active": token}},
+				&fixedConflictGate{}, queue, NewAuditRepo(store.DB()), nil, nil, DefaultConfig())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var reported bytes.Buffer
+			previousLogOutput := log.Writer()
+			log.SetOutput(&reported)
+			t.Cleanup(func() { log.SetOutput(previousLogOutput) })
+			_, err = engine.callSyncToolWithResult(context.Background(), "wormhole.sync.status", nil)
+			if err == nil {
+				t.Fatal("response error=nil")
+			}
+			if strings.Contains(err.Error(), token) {
+				t.Fatalf("returned error exposed credential: %q", err)
+			}
+			if !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("returned error=%q, want fixed classification %q", err, test.want)
+			}
+			engine.reportSyncError(context.Background(), err)
+			report := reported.String()
+			if strings.Contains(report, token) {
+				t.Fatalf("reporter exposed credential: %q", report)
+			}
+			if !strings.Contains(report, test.want) {
+				t.Fatalf("reporter output=%q, want fixed classification %q", report, test.want)
+			}
+		})
 	}
 }
 

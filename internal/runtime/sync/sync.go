@@ -1406,6 +1406,9 @@ func (e *Engine) callSyncToolWithResult(ctx context.Context, toolName string, ar
 
 	// Check for RPC error.
 	if errVal, ok := rpcResp["error"]; ok && errVal != nil {
+		if e.routeRepo != nil {
+			return nil, fmt.Errorf("%w: Fabric RPC rejected request", ErrAttentionRequired)
+		}
 		return nil, fmt.Errorf("sync: server error: %v", errVal)
 	}
 
@@ -1430,6 +1433,9 @@ func (e *Engine) callSyncToolWithResult(ctx context.Context, toolName string, ar
 	}
 
 	if toolResult.IsError && len(toolResult.Content) > 0 {
+		if e.routeRepo != nil {
+			return nil, fmt.Errorf("%w: Fabric tool rejected request", ErrAttentionRequired)
+		}
 		return nil, fmt.Errorf("sync: tool error: %s", toolResult.Content[0].Text)
 	}
 

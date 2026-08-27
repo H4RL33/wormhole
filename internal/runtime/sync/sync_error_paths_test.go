@@ -1,5 +1,3 @@
-//go:build legacy_namespace_sync
-
 package sync
 
 import (
@@ -16,7 +14,6 @@ import (
 
 func TestPushBatchEmptyReturnsWithoutCallingServer(t *testing.T) {
 	qRepo, aRepo := setupTestRepos(t)
-	defer qRepo.db.Close()
 
 	engine := mustNewEngine(t, "http://unused.invalid", qRepo, aRepo, nil, nil, DefaultConfig())
 	engine.testCallSyncToolWithResultFn = func(context.Context, string, map[string]interface{}) (interface{}, error) {
@@ -31,32 +28,23 @@ func TestPushBatchEmptyReturnsWithoutCallingServer(t *testing.T) {
 func TestPushBatchErrorPathsLeaveEntryPending(t *testing.T) {
 	tests := []struct {
 		name       string
-		payload    json.RawMessage
 		toolResult interface{}
 		toolErr    error
 		want       string
 	}{
-		{name: "coordination error", payload: json.RawMessage(`{}`), toolErr: errors.New("offline"), want: "call server"},
-		{name: "undecodable acknowledgement", payload: json.RawMessage(`{}`), toolResult: map[string]interface{}{"items_received": "one"}, want: "decode result"},
-		{name: "non-JSON payload is transmitted as text", payload: json.RawMessage(`not-json`), toolResult: pushResult(1, []map[string]interface{}{{"id": "task-1", "type": "task"}})},
+		{name: "coordination error", toolErr: errors.New("offline"), want: "call server"},
+		{name: "undecodable acknowledgement", toolResult: map[string]interface{}{"items_received": "one"}, want: "decode result"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			qRepo, aRepo := setupTestRepos(t)
-			defer qRepo.db.Close()
-			if _, err := qRepo.Enqueue(context.Background(), "ns-1", "task", "task-1", "create", tt.payload, 0); err != nil {
+			if _, err := qRepo.Enqueue(context.Background(), testRemoteKey(t, qRepo), retainedOperation(45), 0); err != nil {
 				t.Fatalf("Enqueue: %v", err)
 			}
 
 			engine := mustNewEngine(t, "http://unused.invalid", qRepo, aRepo, nil, nil, DefaultConfig())
 			engine.testCallSyncToolWithResultFn = func(_ context.Context, _ string, args map[string]interface{}) (interface{}, error) {
-				if tt.name == "non-JSON payload is transmitted as text" {
-					items := args["items"].([]map[string]interface{})
-					if got := items[0]["payload"]; got != "not-json" {
-						t.Fatalf("payload = %#v, want raw text", got)
-					}
-				}
 				return tt.toolResult, tt.toolErr
 			}
 
@@ -70,7 +58,7 @@ func TestPushBatchErrorPathsLeaveEntryPending(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("pushBatch error = %v, want containing %q", err, tt.want)
 			}
-			pending, listErr := qRepo.ListPending(context.Background(), "ns-1", 10)
+			pending, listErr := qRepo.ListPending(context.Background(), testRemoteKey(t, qRepo), 10)
 			if listErr != nil {
 				t.Fatalf("ListPending: %v", listErr)
 			}
@@ -115,7 +103,6 @@ func TestPullIncrementalRejectsInvalidServerUpdates(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			qRepo, aRepo := setupTestRepos(t)
-			defer qRepo.db.Close()
 			engine := mustNewEngine(t, "http://unused.invalid", qRepo, aRepo, nil, nil, DefaultConfig())
 			engine.testCallSyncToolWithResultFn = func(context.Context, string, map[string]interface{}) (interface{}, error) {
 				return tt.result, nil
@@ -139,13 +126,12 @@ func TestBootstrapErrorPaths(t *testing.T) {
 	}{
 		{name: "coordination error", err: errors.New("offline"), want: "call server"},
 		{name: "invalid result", result: map[string]interface{}{"task_list": "not-a-list"}, want: "decode result"},
-		{name: "missing local store", result: validBootstrapWire(), want: "no local store"},
+		{name: "missing local store", result: bootstrapForProject(routedTestProjectID), want: "no local store"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			qRepo, aRepo := setupTestRepos(t)
-			defer qRepo.db.Close()
 			engine := mustNewEngine(t, "http://unused.invalid", qRepo, aRepo, nil, nil, DefaultConfig())
 			engine.expectedAgentID = "agent-1"
 			engine.expectedPassportID = "passport-1"
@@ -184,7 +170,7 @@ func TestCallSyncToolWithResultHTTPContractAndErrors(t *testing.T) {
 		want     string
 	}{
 		{name: "invalid JSON", response: `{`, want: "decode coordination server response"},
-		{name: "RPC error", response: `{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"denied"}}`, want: "server error"},
+		{name: "RPC error", response: `{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"denied"}}`, want: "Fabric RPC rejected request"},
 		{name: "missing result", response: `{"jsonrpc":"2.0","id":1}`, want: "no result"},
 		{name: "invalid result wrapper", response: `{"jsonrpc":"2.0","id":1,"result":"text"}`, want: "decode tools/call result"},
 		{name: "empty content", response: `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`, want: "empty result"},
@@ -205,7 +191,6 @@ func TestCallSyncToolWithResultHTTPContractAndErrors(t *testing.T) {
 			defer srv.Close()
 
 			qRepo, aRepo := setupTestRepos(t)
-			defer qRepo.db.Close()
 			engine := mustNewEngine(t, srv.URL+"/", qRepo, aRepo, nil, nil, DefaultConfig())
 			if _, err := engine.callSyncToolWithResult(context.Background(), "wormhole.sync.bootstrap", map[string]interface{}{}); err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("callSyncToolWithResult error = %v, want containing %q", err, tt.want)
@@ -216,7 +201,6 @@ func TestCallSyncToolWithResultHTTPContractAndErrors(t *testing.T) {
 
 func TestCallSyncToolWithResultTransportAndReadErrors(t *testing.T) {
 	qRepo, aRepo := setupTestRepos(t)
-	defer qRepo.db.Close()
 	engine := mustNewEngine(t, "http://coordination.invalid", qRepo, aRepo, nil, nil, DefaultConfig())
 
 	transportErr := errors.New("transport failed")

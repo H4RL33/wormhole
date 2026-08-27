@@ -2,8 +2,6 @@
 // PullIncremental must not just fetch the server's task/KB payload, they
 // must write it into localstore.TaskRepo/KBRepo so a fresh Gateway
 // daemon's SQLite replica actually ends up populated (RFC-0003 §8).
-//go:build legacy_namespace_sync
-
 package sync
 
 import (
@@ -34,7 +32,9 @@ func newApplyTestRepos(t *testing.T) (*localstore.Store, *QueueRepo, *AuditRepo,
 
 	db := store.DB()
 	er := localstore.NewEventRepo(db)
-	return store, NewQueueRepo(db), NewAuditRepo(db), localstore.NewTaskRepo(db, er), localstore.NewKBRepo(db)
+	queue := NewQueueRepo(db)
+	bindRoutedTestQueue(t, store, queue)
+	return store, queue, NewAuditRepo(db), localstore.NewTaskRepo(db, er), localstore.NewKBRepo(db)
 }
 
 // fakeBootstrapServer serves wormhole.sync.bootstrap / incremental_pull
@@ -72,7 +72,7 @@ func fakeBootstrapServer(t *testing.T) *httptest.Server {
 		}
 		article := articleSummaryWire{
 			ArticleID:     "kb-1",
-			ProjectID:     "ns-1",
+			ProjectID:     routedTestProjectID,
 			Title:         "Server article",
 			Body:          "server body",
 			Frontmatter:   json.RawMessage(`{}`),
@@ -84,7 +84,7 @@ func fakeBootstrapServer(t *testing.T) *httptest.Server {
 		var resultData interface{}
 		switch params.Name {
 		case "wormhole.sync.bootstrap":
-			bootstrap := validBootstrapWire()
+			bootstrap := bootstrapForProject(routedTestProjectID)
 			bootstrap.OrgConfig.Tasks = bootstrap.OrgConfig.Tasks[:1]
 			bootstrap.OrgConfig.Tasks[0].ID = "task-1"
 			bootstrap.OrgConfig.Tasks[0].Title = "Server task"
@@ -140,7 +140,7 @@ func TestBootstrap_AppliesServerTasksAndKBToLocalStore(t *testing.T) {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 
-	gotTask, err := taskRepo.GetTask(ctx, "ns-1", "task-1")
+	gotTask, err := taskRepo.GetTask(ctx, routedTestProjectID, "task-1")
 	if err != nil {
 		t.Fatalf("GetTask after Bootstrap: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestBootstrap_AppliesServerTasksAndKBToLocalStore(t *testing.T) {
 		t.Errorf("task title = %q, want %q", gotTask.Title, "Server task")
 	}
 
-	gotArticle, err := kbRepo.GetArticle(ctx, "ns-1", "kb-1")
+	gotArticle, err := kbRepo.GetArticle(ctx, routedTestProjectID, "kb-1")
 	if err != nil {
 		t.Fatalf("GetArticle after Bootstrap: %v", err)
 	}
@@ -172,10 +172,10 @@ func TestPullIncremental_AppliesServerUpdatesToLocalStore(t *testing.T) {
 		t.Fatalf("PullIncremental: %v", err)
 	}
 
-	if _, err := taskRepo.GetTask(ctx, "ns-1", "task-1"); err != nil {
+	if _, err := taskRepo.GetTask(ctx, routedTestProjectID, "task-1"); err != nil {
 		t.Fatalf("GetTask after PullIncremental: %v", err)
 	}
-	if _, err := kbRepo.GetArticle(ctx, "ns-1", "kb-1"); err != nil {
+	if _, err := kbRepo.GetArticle(ctx, routedTestProjectID, "kb-1"); err != nil {
 		t.Fatalf("GetArticle after PullIncremental: %v", err)
 	}
 }
@@ -183,7 +183,7 @@ func TestPullIncremental_AppliesServerUpdatesToLocalStore(t *testing.T) {
 func TestPullIncrementalAppliesAuthoritativeTaskTimestamps(t *testing.T) {
 	store, qRepo, aRepo, taskRepo, kbRepo := newApplyTestRepos(t)
 	ctx := context.Background()
-	if _, err := taskRepo.UpsertTask(ctx, "ns-1", "task-1", "local", "local", nil, nil, "todo", 1, nil); err != nil {
+	if _, err := taskRepo.UpsertTask(ctx, routedTestProjectID, "task-1", "local", "local", nil, nil, "todo", 1, nil); err != nil {
 		t.Fatal(err)
 	}
 	localCreated := time.Date(2025, 1, 2, 3, 4, 5, 111111000, time.UTC)
@@ -205,7 +205,7 @@ func TestPullIncrementalAppliesAuthoritativeTaskTimestamps(t *testing.T) {
 	if err := engine.PullIncremental(ctx); err != nil {
 		t.Fatal(err)
 	}
-	got, err := taskRepo.GetTask(ctx, "ns-1", "task-1")
+	got, err := taskRepo.GetTask(ctx, routedTestProjectID, "task-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func TestPullIncrementalAppliesAuthoritativeTaskTimestamps(t *testing.T) {
 func TestPullIncrementalDoesNotClobberPendingTaskTimestamps(t *testing.T) {
 	store, qRepo, aRepo, taskRepo, kbRepo := newApplyTestRepos(t)
 	ctx := context.Background()
-	if _, err := taskRepo.UpsertTask(ctx, "ns-1", "task-1", "pending local", "local", nil, nil, "todo", 1, nil); err != nil {
+	if _, err := taskRepo.UpsertTask(ctx, routedTestProjectID, "task-1", "pending local", "local", nil, nil, "todo", 1, nil); err != nil {
 		t.Fatal(err)
 	}
 	localCreated := time.Date(2026, 7, 26, 1, 2, 3, 111111000, time.UTC)
@@ -225,7 +225,7 @@ func TestPullIncrementalDoesNotClobberPendingTaskTimestamps(t *testing.T) {
 	if _, err := store.DB().ExecContext(ctx, `UPDATE tasks SET created_at = ?, updated_at = ? WHERE id = ?`, localCreated, localUpdated, "task-1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := qRepo.Enqueue(ctx, "ns-1", "task", "task-1", "create", json.RawMessage(`{"title":"pending local"}`), 1); err != nil {
+	if _, err := qRepo.Enqueue(ctx, testRemoteKey(t, qRepo), retainedOperation(41), 1); err != nil {
 		t.Fatal(err)
 	}
 	engine := mustNewEngine(t, "http://unused", qRepo, aRepo, taskRepo, kbRepo, DefaultConfig())
@@ -236,7 +236,7 @@ func TestPullIncrementalDoesNotClobberPendingTaskTimestamps(t *testing.T) {
 	if err := engine.PullIncremental(ctx); err != nil {
 		t.Fatal(err)
 	}
-	got, err := taskRepo.GetTask(ctx, "ns-1", "task-1")
+	got, err := taskRepo.GetTask(ctx, routedTestProjectID, "task-1")
 	if err != nil {
 		t.Fatal(err)
 	}

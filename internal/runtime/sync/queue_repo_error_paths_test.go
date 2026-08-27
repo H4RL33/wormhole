@@ -1,5 +1,3 @@
-//go:build legacy_namespace_sync
-
 package sync
 
 import (
@@ -11,179 +9,166 @@ import (
 )
 
 func TestQueueEnqueueTxUsesCallerTransaction(t *testing.T) {
-	repo := setupQueueRepo(t)
-	defer closeQueueRepo(t, repo)
-
+	store, repo, key, _ := queueRouteFixture(t)
+	defer store.Close()
 	tx, err := repo.db.BeginTx(context.Background(), nil)
 	if err != nil {
-		t.Fatalf("BeginTx: %v", err)
+		t.Fatal(err)
 	}
-	entry, err := repo.EnqueueTx(context.Background(), tx, "ns-1", "task", "task-1", "create", json.RawMessage(`{}`), 1)
-	if err != nil {
-		t.Fatalf("EnqueueTx: %v", err)
+	operation := retainedOperation(50)
+	if _, err := repo.EnqueueTx(context.Background(), tx, key, operation, 1); err != nil {
+		t.Fatal(err)
 	}
 	if err := tx.Rollback(); err != nil {
-		t.Fatalf("Rollback: %v", err)
+		t.Fatal(err)
 	}
-	if _, err := repo.GetEntry(context.Background(), "ns-1", entry.ID); !errors.Is(err, ErrQueueNotFound) {
-		t.Fatalf("GetEntry after rollback = %v, want ErrQueueNotFound", err)
+	if _, err := repo.GetEntry(context.Background(), key, operation.ID); !errors.Is(err, ErrQueueNotFound) {
+		t.Fatalf("GetEntry after rollback=%v", err)
 	}
 }
 
 func TestQueueWriteMethodsSurfaceDatabaseErrors(t *testing.T) {
-	repo := setupQueueRepo(t)
-	if err := repo.db.Close(); err != nil {
-		t.Fatalf("close DB: %v", err)
+	store, repo, key, _ := queueRouteFixture(t)
+	operation := retainedOperation(51)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
 	}
-
-	if _, err := repo.Enqueue(context.Background(), "ns-1", "task", "task-1", "create", json.RawMessage(`{}`), 0); err == nil || !strings.Contains(err.Error(), "enqueue") {
-		t.Fatalf("Enqueue error = %v, want database error", err)
+	if _, err := repo.Enqueue(context.Background(), key, operation, 0); err == nil || !strings.Contains(err.Error(), "enqueue") {
+		t.Fatalf("Enqueue=%v", err)
 	}
-	if err := repo.MarkDelivered(context.Background(), "ns-1", "entry-1"); err == nil || !strings.Contains(err.Error(), "mark delivered") {
-		t.Fatalf("MarkDelivered error = %v, want database error", err)
+	if err := repo.MarkDelivered(context.Background(), key, operation.ID); err == nil || !strings.Contains(err.Error(), "acquire delivery") {
+		t.Fatalf("MarkDelivered=%v", err)
 	}
-	if err := repo.DeleteEntry(context.Background(), "ns-1", "entry-1"); err == nil || !strings.Contains(err.Error(), "delete entry") {
-		t.Fatalf("DeleteEntry error = %v, want database error", err)
+	if err := repo.DeleteEntry(context.Background(), key, operation.ID); err == nil || !strings.Contains(err.Error(), "delete entry") {
+		t.Fatalf("DeleteEntry=%v", err)
 	}
 }
 
 func TestQueueReadMethodsSurfaceDatabaseErrors(t *testing.T) {
-	repo := setupQueueRepo(t)
-	if err := repo.db.Close(); err != nil {
-		t.Fatalf("close DB: %v", err)
+	store, repo, key, _ := queueRouteFixture(t)
+	operation := retainedOperation(52)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
 	}
-
-	if _, err := repo.ListPending(context.Background(), "ns-1", 10); err == nil || !strings.Contains(err.Error(), "list pending") {
-		t.Fatalf("ListPending error = %v, want database error", err)
+	if _, err := repo.ListPending(context.Background(), key, 10); err == nil || !strings.Contains(err.Error(), "list pending") {
+		t.Fatalf("ListPending=%v", err)
 	}
-	if _, err := repo.GetEntry(context.Background(), "ns-1", "entry-1"); err == nil || !strings.Contains(err.Error(), "get entry") {
-		t.Fatalf("GetEntry error = %v, want database error", err)
+	if _, err := repo.GetEntry(context.Background(), key, operation.ID); err == nil || !strings.Contains(err.Error(), "get entry") {
+		t.Fatalf("GetEntry=%v", err)
 	}
 }
 
 func TestQueueAndAuditMethodsPreserveCancellation(t *testing.T) {
-	t.Run("queue", func(t *testing.T) {
-		repo := setupQueueRepo(t)
-		defer closeQueueRepo(t, repo)
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-
-		if _, err := repo.Enqueue(ctx, "ns-1", "task", "task-1", "create", json.RawMessage(`{}`), 0); !errors.Is(err, context.Canceled) {
-			t.Fatalf("Enqueue error = %v, want context.Canceled", err)
-		}
-		if _, err := repo.ListPending(ctx, "ns-1", 10); !errors.Is(err, context.Canceled) {
-			t.Fatalf("ListPending error = %v, want context.Canceled", err)
-		}
-		if err := repo.MarkDelivered(ctx, "ns-1", "entry-1"); !errors.Is(err, context.Canceled) {
-			t.Fatalf("MarkDelivered error = %v, want context.Canceled", err)
-		}
-		if _, err := repo.GetEntry(ctx, "ns-1", "entry-1"); !errors.Is(err, context.Canceled) {
-			t.Fatalf("GetEntry error = %v, want context.Canceled", err)
-		}
-		if err := repo.DeleteEntry(ctx, "ns-1", "entry-1"); !errors.Is(err, context.Canceled) {
-			t.Fatalf("DeleteEntry error = %v, want context.Canceled", err)
-		}
-	})
-
-	t.Run("audit", func(t *testing.T) {
-		qRepo, aRepo := setupAuditRepo(t)
-		defer closeAuditRepo(t, qRepo)
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-
-		if _, err := aRepo.LogConflict(ctx, "ns-1", "task", "task-1", "overwrite", "server", "local", "server", "last_write_wins"); !errors.Is(err, context.Canceled) {
-			t.Fatalf("LogConflict error = %v, want context.Canceled", err)
-		}
-		if _, err := aRepo.ListAudit(ctx, "ns-1", 10); !errors.Is(err, context.Canceled) {
-			t.Fatalf("ListAudit error = %v, want context.Canceled", err)
-		}
-	})
+	store, repo, key, _ := queueRouteFixture(t)
+	defer store.Close()
+	audit := NewAuditRepo(store.DB())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	operation := retainedOperation(53)
+	if _, err := repo.Enqueue(ctx, key, operation, 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Enqueue=%v", err)
+	}
+	if _, err := repo.ListPending(ctx, key, 10); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ListPending=%v", err)
+	}
+	if err := repo.MarkDelivered(ctx, key, operation.ID); !errors.Is(err, context.Canceled) {
+		t.Fatalf("MarkDelivered=%v", err)
+	}
+	if _, err := repo.GetEntry(ctx, key, operation.ID); !errors.Is(err, context.Canceled) {
+		t.Fatalf("GetEntry=%v", err)
+	}
+	if err := repo.DeleteEntry(ctx, key, operation.ID); !errors.Is(err, context.Canceled) {
+		t.Fatalf("DeleteEntry=%v", err)
+	}
+	if _, err := audit.LogConflict(ctx, key, json.RawMessage(`{"kind":"changed"}`), json.RawMessage(`{"actor":"human"}`)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("LogConflict=%v", err)
+	}
+	if _, err := audit.ListAudit(ctx, key, 10); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ListAudit=%v", err)
+	}
 }
 
 func TestQueueListPendingSurfacesScanError(t *testing.T) {
-	repo := setupQueueRepo(t)
-	defer closeQueueRepo(t, repo)
-	if _, err := repo.db.Exec(`
-		INSERT INTO sync_queue (id, namespace_id, entity_type, entity_id, operation, payload, priority, created_at, updated_at)
-		VALUES ('bad-time', 'ns-1', 'task', 'task-1', 'create', '{}', 0, 'not-a-time', 'not-a-time')
-	`); err != nil {
-		t.Fatalf("insert malformed row: %v", err)
+	store, repo, key, _ := queueRouteFixture(t)
+	defer store.Close()
+	operation := retainedOperation(54)
+	if _, err := repo.Enqueue(context.Background(), key, operation, 0); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := repo.ListPending(context.Background(), "ns-1", 10); err == nil || !strings.Contains(err.Error(), "list pending scan") {
-		t.Fatalf("ListPending error = %v, want scan error", err)
+	if _, err := store.DB().Exec(`UPDATE sync_queue SET created_at='not-a-time' WHERE
+		project_id=? AND workspace_id=? AND fabric_instance_id=? AND remote_project_id=? AND stream_id=? AND id=?`,
+		key.ProjectID, key.WorkspaceID, key.FabricInstanceID, key.RemoteProjectID, key.StreamID, operation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.ListPending(context.Background(), key, 10); err == nil || !strings.Contains(err.Error(), "list pending scan") {
+		t.Fatalf("ListPending=%v", err)
 	}
 }
 
 func TestQueueMutationNotFoundIsNamespaceScoped(t *testing.T) {
-	repo := setupQueueRepo(t)
-	defer closeQueueRepo(t, repo)
-	entry, err := repo.Enqueue(context.Background(), "ns-1", "task", "task-1", "create", json.RawMessage(`{}`), 0)
-	if err != nil {
-		t.Fatalf("Enqueue: %v", err)
+	store, repo, key, other := queueRouteFixture(t)
+	defer store.Close()
+	operation := retainedOperation(55)
+	if _, err := repo.Enqueue(context.Background(), key, operation, 0); err != nil {
+		t.Fatal(err)
 	}
-
-	if err := repo.MarkDelivered(context.Background(), "ns-2", entry.ID); !errors.Is(err, ErrQueueNotFound) {
-		t.Fatalf("MarkDelivered cross-namespace = %v, want ErrQueueNotFound", err)
+	if err := repo.MarkDelivered(context.Background(), other, operation.ID); !errors.Is(err, ErrQueueNotFound) {
+		t.Fatalf("cross-route MarkDelivered=%v", err)
 	}
-	if err := repo.DeleteEntry(context.Background(), "ns-2", entry.ID); !errors.Is(err, ErrQueueNotFound) {
-		t.Fatalf("DeleteEntry cross-namespace = %v, want ErrQueueNotFound", err)
+	if err := repo.DeleteEntry(context.Background(), other, operation.ID); !errors.Is(err, ErrQueueNotFound) {
+		t.Fatalf("cross-route DeleteEntry=%v", err)
 	}
-	if err := repo.DeleteEntry(context.Background(), "ns-1", entry.ID); err != nil {
-		t.Fatalf("DeleteEntry owner namespace: %v", err)
+	if err := repo.DeleteEntry(context.Background(), key, operation.ID); err != nil {
+		t.Fatal(err)
 	}
-	if err := repo.DeleteEntry(context.Background(), "ns-1", entry.ID); !errors.Is(err, ErrQueueNotFound) {
-		t.Fatalf("DeleteEntry missing = %v, want ErrQueueNotFound", err)
+	if err := repo.DeleteEntry(context.Background(), key, operation.ID); !errors.Is(err, ErrQueueNotFound) {
+		t.Fatalf("missing DeleteEntry=%v", err)
 	}
 }
 
 func TestAuditMethodsSurfaceDatabaseErrors(t *testing.T) {
-	qRepo, aRepo := setupAuditRepo(t)
-	if err := qRepo.db.Close(); err != nil {
-		t.Fatalf("close DB: %v", err)
+	store, _, key, _ := queueRouteFixture(t)
+	audit := NewAuditRepo(store.DB())
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
 	}
-
-	if _, err := aRepo.LogConflict(context.Background(), "ns-1", "task", "task-1", "overwrite", "server", "local", "server", "last_write_wins"); err == nil || !strings.Contains(err.Error(), "log conflict") {
-		t.Fatalf("LogConflict error = %v, want database error", err)
+	if _, err := audit.LogConflict(context.Background(), key, json.RawMessage(`{}`), json.RawMessage(`{}`)); err == nil || !strings.Contains(err.Error(), "log conflict") {
+		t.Fatalf("LogConflict=%v", err)
 	}
-	if _, err := aRepo.ListAudit(context.Background(), "ns-1", 10); err == nil || !strings.Contains(err.Error(), "list") {
-		t.Fatalf("ListAudit error = %v, want database error", err)
+	if _, err := audit.ListAudit(context.Background(), key, 10); err == nil || !strings.Contains(err.Error(), "list") {
+		t.Fatalf("ListAudit=%v", err)
 	}
 }
 
 func TestAuditListSurfacesScanErrorAndHandlesNullableValues(t *testing.T) {
 	t.Run("scan error", func(t *testing.T) {
-		qRepo, aRepo := setupAuditRepo(t)
-		defer closeAuditRepo(t, qRepo)
-		if _, err := qRepo.db.Exec(`
-			INSERT INTO sync_audit (id, namespace_id, entity_type, entity_id, created_at)
-			VALUES ('bad-time', 'ns-1', 'task', 'task-1', 'not-a-time')
-		`); err != nil {
-			t.Fatalf("insert malformed row: %v", err)
+		store, _, key, _ := queueRouteFixture(t)
+		defer store.Close()
+		audit := NewAuditRepo(store.DB())
+		entry, err := audit.LogConflict(context.Background(), key, json.RawMessage(`{"kind":"changed"}`), json.RawMessage(`{"actor":"human"}`))
+		if err != nil {
+			t.Fatal(err)
 		}
-		if _, err := aRepo.ListAudit(context.Background(), "ns-1", 10); err == nil || !strings.Contains(err.Error(), "list scan") {
-			t.Fatalf("ListAudit error = %v, want scan error", err)
+		if _, err := store.DB().Exec(`UPDATE sync_audit SET created_at='not-a-time' WHERE
+			project_id=? AND workspace_id=? AND fabric_instance_id=? AND remote_project_id=? AND stream_id=? AND id=?`,
+			key.ProjectID, key.WorkspaceID, key.FabricInstanceID, key.RemoteProjectID, key.StreamID, entry.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := audit.ListAudit(context.Background(), key, 10); err == nil || !strings.Contains(err.Error(), "list scan") {
+			t.Fatalf("ListAudit=%v", err)
 		}
 	})
-
-	t.Run("nullable fields", func(t *testing.T) {
-		qRepo, aRepo := setupAuditRepo(t)
-		defer closeAuditRepo(t, qRepo)
-		if _, err := qRepo.db.Exec(`
-			INSERT INTO sync_audit (id, namespace_id, entity_type, entity_id, created_at)
-			VALUES ('nullable', 'ns-1', 'task', 'task-1', CURRENT_TIMESTAMP)
-		`); err != nil {
-			t.Fatalf("insert nullable row: %v", err)
+	t.Run("canonical JSON fields", func(t *testing.T) {
+		store, _, key, _ := queueRouteFixture(t)
+		defer store.Close()
+		audit := NewAuditRepo(store.DB())
+		conflict, actor := json.RawMessage(`{"kind":"changed"}`), json.RawMessage(`{"actor":"human"}`)
+		if _, err := audit.LogConflict(context.Background(), key, conflict, actor); err != nil {
+			t.Fatal(err)
 		}
-		entries, err := aRepo.ListAudit(context.Background(), "ns-1", 10)
-		if err != nil {
-			t.Fatalf("ListAudit: %v", err)
-		}
-		if len(entries) != 1 {
-			t.Fatalf("entries = %d, want 1", len(entries))
-		}
-		entry := entries[0]
-		if entry.ConflictType != nil || entry.ServerValue != nil || entry.LocalValue != nil || entry.ResolvedValue != nil || entry.ResolvedBy != nil {
-			t.Fatalf("nullable audit fields = %#v, want nil", entry)
+		entries, err := audit.ListAudit(context.Background(), key, 10)
+		if err != nil || len(entries) != 1 || string(entries[0].ConflictJSON) != string(conflict) || string(entries[0].ActorJSON) != string(actor) {
+			t.Fatalf("entries=(%+v,%v)", entries, err)
 		}
 	})
 }

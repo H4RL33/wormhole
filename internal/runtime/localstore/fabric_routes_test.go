@@ -2,10 +2,12 @@ package localstore
 
 import (
 	"context"
-	"strings"
+	"errors"
 	"testing"
 
 	"github.com/H4RL33/wormhole/internal/types"
+	sqlite "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 func TestFabricProfileIsSoleCredentialAuthority(t *testing.T) {
@@ -70,8 +72,10 @@ func TestFabricBindingRejectsWorkspaceMismatchByDirectSQL(t *testing.T) {
 		binding.Scope.ProjectID, "00000000-0000-4000-8000-000000000099", profile.ProfileID,
 		profile.FabricInstanceID, "30000000-0000-4000-8000-000000000001",
 		"40000000-0000-4000-8000-000000000001", "50000000-0000-4000-8000-000000000001")
-	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "foreign key") {
-		t.Fatalf("mismatched direct binding insert error=%v, want SQLite foreign-key constraint", err)
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) || sqliteErr.Code() != sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY {
+		t.Fatalf("mismatched direct binding insert error=%v code=%v, want SQLITE_CONSTRAINT_FOREIGNKEY",
+			err, sqliteErrorCode(sqliteErr))
 	}
 }
 
@@ -97,8 +101,10 @@ func TestCursorRejectsBindingMismatchByDirectSQL(t *testing.T) {
 		(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,stream_version)
 		VALUES (?,?,?,?,?,0)`, binding.Scope.ProjectID, binding.Scope.WorkspaceID,
 		profile.FabricInstanceID, fabricBinding.RemoteProjectID, "40000000-0000-4000-8000-000000000099")
-	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "foreign key") {
-		t.Fatalf("mismatched direct cursor insert error=%v, want SQLite foreign-key constraint", err)
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) || sqliteErr.Code() != sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY {
+		t.Fatalf("mismatched direct cursor insert error=%v code=%v, want SQLITE_CONSTRAINT_FOREIGNKEY",
+			err, sqliteErrorCode(sqliteErr))
 	}
 	if err := routes.UpdateCursor(context.Background(), fabricBinding.RemoteKey(), 12, "cursor-12"); err != nil {
 		t.Fatal(err)
@@ -115,4 +121,11 @@ func TestCursorRejectsBindingMismatchByDirectSQL(t *testing.T) {
 	if version != 12 || cursor != "cursor-12" {
 		t.Fatalf("cursor=(%d,%q), want (12,cursor-12)", version, cursor)
 	}
+}
+
+func sqliteErrorCode(err *sqlite.Error) any {
+	if err == nil {
+		return nil
+	}
+	return err.Code()
 }

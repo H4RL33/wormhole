@@ -1,107 +1,86 @@
-// This file is package localstore_test (not localstore) so it can import
-// internal/runtime/sync without an import cycle now that sync imports
-// localstore (sync local-apply work, RFC-0003 §8).
-//go:build legacy_namespace_sync
-
+// This external-package test proves complete Fabric-route isolation without
+// creating an import cycle between localstore and sync.
 package localstore_test
 
 import (
 	"context"
-	"database/sql"
-	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
-	"github.com/H4RL33/wormhole/internal/runtime/sync"
-	_ "modernc.org/sqlite"
+	"github.com/H4RL33/wormhole/internal/runtime/localstore"
+	syncpkg "github.com/H4RL33/wormhole/internal/runtime/sync"
+	"github.com/H4RL33/wormhole/internal/types"
+	projectstate "github.com/H4RL33/wormhole/internal/types/projectstate"
 )
 
-// TestSyncQueueCrossNamespaceRejection verifies that sync queue items are isolated by namespace.
-// RFC-0003 §7.2 — mandatory cross-namespace rejection test.
 func TestSyncQueueCrossNamespaceRejection(t *testing.T) {
-	dir := t.TempDir()
-	db, err := sql.Open("sqlite", filepath.Join(dir, "wormholed.db"))
+	store, err := localstore.Open(filepath.Join(t.TempDir(), "gateway.db"))
 	if err != nil {
-		t.Fatalf("Open: %v", err)
+		t.Fatal(err)
 	}
-	defer db.Close()
-
-	// Apply schema.
-	schema := `
-	CREATE TABLE sync_queue (
-		id             TEXT PRIMARY KEY,
-		namespace_id   TEXT NOT NULL,
-		entity_type    TEXT NOT NULL,
-		entity_id      TEXT NOT NULL,
-		operation      TEXT NOT NULL,
-		payload        TEXT NOT NULL,
-		priority       INTEGER NOT NULL DEFAULT 0,
-		created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		updated_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		delivered_at   TIMESTAMP
-	);
-	`
-	if _, err := db.Exec(schema); err != nil {
-		t.Fatalf("Apply schema: %v", err)
+	defer store.Close()
+	keys := []types.RemoteBindingKey{
+		{ProjectID: "00000000-0000-4000-8000-000000000001", WorkspaceID: "00000000-0000-4000-8000-000000000011", FabricInstanceID: "20000000-0000-4000-8000-000000000001", RemoteProjectID: "30000000-0000-4000-8000-000000000001", StreamID: "40000000-0000-4000-8000-000000000001"},
+		{ProjectID: "00000000-0000-4000-8000-000000000002", WorkspaceID: "00000000-0000-4000-8000-000000000012", FabricInstanceID: "20000000-0000-4000-8000-000000000002", RemoteProjectID: "30000000-0000-4000-8000-000000000002", StreamID: "40000000-0000-4000-8000-000000000002"},
 	}
-
-	ctx := context.Background()
-	queueRepo := sync.NewQueueRepo(db)
-	nsA := "namespace-a"
-	nsB := "namespace-b"
-
-	// Enqueue item in namespace A.
-	payload := json.RawMessage(`{"task_id":"t-1"}`)
-	entryA, err := queueRepo.Enqueue(ctx, nsA, "task", "task-1", "create", payload, 0)
-	if err != nil {
-		t.Fatalf("Enqueue(nsA): %v", err)
-	}
-
-	// Verify it appears in namespace A's pending queue.
-	pendingA, err := queueRepo.ListPending(ctx, nsA, 10)
-	if err != nil {
-		t.Fatalf("ListPending(nsA): %v", err)
-	}
-	found := false
-	for _, e := range pendingA {
-		if e.ID == entryA.ID {
-			found = true
-			break
+	for index, key := range keys {
+		profileID := []string{"10000000-0000-4000-8000-000000000001", "10000000-0000-4000-8000-000000000002"}[index]
+		if _, err := store.DB().Exec(`INSERT INTO workspace_bindings
+			(project_id,workspace_id,checkout_path,checkout_device,checkout_inode,repository_identity_json,
+			 accepted_ref,accepted_commit,accepted_digest,accepted_snapshot,status)
+			VALUES (?,?,?,?,?,'{"provider":"github","immutable_id":"repo","canonical_remote":"https://example.test/repo"}',
+			 'refs/heads/main','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',?,x'00','clean')`,
+			key.ProjectID, key.WorkspaceID, "/checkout-"+string(rune('a'+index)), index+1, index+11,
+			"sha256:"+strings.Repeat("a", 64)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.DB().Exec(`INSERT INTO fabric_profiles
+			(profile_id,alias,fabric_instance_id,base_url,mode,credential_ref)
+			VALUES (?,?,?,?, 'private','keyring:test')`, profileID, "profile-"+string(rune('a'+index)),
+			key.FabricInstanceID, "https://fabric.example.test"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.DB().Exec(`INSERT INTO workspace_fabric_bindings
+			(project_id,workspace_id,profile_id,fabric_instance_id,remote_project_id,stream_id,attachment_ref,
+			 repository_provider,repository_immutable_id,canonical_ref,writable,state)
+			VALUES (?,?,?,?,?,?,?,'github','repo','refs/heads/main',1,'active')`,
+			key.ProjectID, key.WorkspaceID, profileID, key.FabricInstanceID, key.RemoteProjectID, key.StreamID,
+			[]string{"50000000-0000-4000-8000-000000000001", "50000000-0000-4000-8000-000000000002"}[index]); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if !found {
-		t.Errorf("Enqueued item not found in namespace A's pending queue")
+	operation := projectstate.OperationV1{
+		SchemaVersion: 1, ID: "90000000-0000-4000-8000-000000000060", Kind: projectstate.OperationTombstone,
+		ExpectedViewDigest: projectstate.Digest("sha256:" + strings.Repeat("a", 64)),
+		Actor: types.ActorEnvelope{ActorKind: types.ActorHuman,
+			HumanPrincipalID: "80000000-0000-4000-8000-000000000001",
+			Assurance:        types.AssuranceLocal, OccurredAt: time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)},
+		Tombstone: &projectstate.TombstoneOperationV1{
+			Key:                   projectstate.RecordKey{Kind: "task", ID: "70000000-0000-4000-8000-000000000001"},
+			ExpectedContentDigest: projectstate.Digest("sha256:" + strings.Repeat("b", 64)),
+		},
 	}
-
-	// Verify it does NOT appear in namespace B's pending queue.
-	pendingB, err := queueRepo.ListPending(ctx, nsB, 10)
+	queue := syncpkg.NewQueueRepo(store.DB())
+	entry, err := queue.Enqueue(context.Background(), keys[0], operation, 0)
 	if err != nil {
-		t.Fatalf("ListPending(nsB): %v", err)
+		t.Fatal(err)
 	}
-	for _, e := range pendingB {
-		if e.ID == entryA.ID {
-			t.Errorf("ListPending(nsB) leaked item from namespace A: %s", e.ID)
-		}
+	if pending, err := queue.ListPending(context.Background(), keys[0], 10); err != nil || len(pending) != 1 {
+		t.Fatalf("owner pending=(%+v,%v)", pending, err)
 	}
-
-	// Verify MarkDelivered(nsB, entryA.ID) fails (namespace filter).
-	err = queueRepo.MarkDelivered(ctx, nsB, entryA.ID)
-	if !errors.Is(err, sync.ErrQueueNotFound) {
-		t.Fatalf("MarkDelivered(nsB): got %v, want sync.ErrQueueNotFound", err)
+	if pending, err := queue.ListPending(context.Background(), keys[1], 10); err != nil || len(pending) != 0 {
+		t.Fatalf("sibling pending=(%+v,%v)", pending, err)
 	}
-
-	// Verify MarkDelivered(nsA, entryA.ID) succeeds.
-	if err := queueRepo.MarkDelivered(ctx, nsA, entryA.ID); err != nil {
-		t.Fatalf("MarkDelivered(nsA): %v", err)
+	if err := queue.MarkDelivered(context.Background(), keys[1], entry.ID); !errors.Is(err, syncpkg.ErrQueueNotFound) {
+		t.Fatalf("cross-route MarkDelivered=%v", err)
 	}
-
-	// Verify item no longer appears in pending queue for nsA.
-	pendingA2, err := queueRepo.ListPending(ctx, nsA, 10)
-	if err != nil {
-		t.Fatalf("ListPending(nsA) after deliver: %v", err)
+	if err := queue.MarkDelivered(context.Background(), keys[0], entry.ID); err != nil {
+		t.Fatal(err)
 	}
-	if len(pendingA2) != 0 {
-		t.Errorf("After delivery, expected 0 pending in nsA, got %d", len(pendingA2))
+	if pending, err := queue.ListPending(context.Background(), keys[0], 10); err != nil || len(pending) != 0 {
+		t.Fatalf("delivered pending=(%+v,%v)", pending, err)
 	}
 }
