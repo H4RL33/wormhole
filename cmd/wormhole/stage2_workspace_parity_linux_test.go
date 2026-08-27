@@ -120,6 +120,32 @@ func TestStage2BridgeRejectsForgedAuthorityAndPrivateRPCRejectsForgedBinding(t *
 	}
 }
 
+func TestStage2CLIPrivateRPCStashesPendingBranchSwitch(t *testing.T) {
+	fixture := newStage2ParityGitFixture(t)
+	runtime := newStage2ParityRuntime(t, fixture, "cli-branch-switch", false, true)
+	if _, err := executeStage2CLI(runtime, localapi.WorkspaceCommandRequest{Operation: localapi.WorkspaceOperationImport}); err != nil {
+		t.Fatalf("prepare CLI proposal: %v", err)
+	}
+	stage2Git(t, runtime.root, "switch", "-c", "next")
+
+	result, err := executeStage2CLI(runtime, localapi.WorkspaceCommandRequest{
+		Operation: localapi.WorkspaceOperationStash,
+		RequestID: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+		Label:     "switch through private RPC",
+	})
+	if err != nil || result.Stash == nil || result.Stash.StashID == "" || result.Stash.CandidateDigest == "" {
+		t.Fatalf("CLI branch-switch stash = (%+v, %v)", result, err)
+	}
+	binding, err := runtime.service.ResolveWorkingDirectory(t.Context(), types.WorkspaceContext{WorkingDirectory: runtime.root})
+	if err != nil || binding.AcceptedRef != "refs/heads/next" {
+		t.Fatalf("CLI post-stash binding = (%+v, %v), want next branch", binding, err)
+	}
+	status, err := runtime.service.Status(t.Context(), binding.Scope)
+	if err != nil || status.State != "clean" || status.CandidatePresent || status.OverlayGeneration != 0 {
+		t.Fatalf("CLI post-stash status = (%+v, %v), want clean", status, err)
+	}
+}
+
 type stage2ParitySurface string
 
 const (

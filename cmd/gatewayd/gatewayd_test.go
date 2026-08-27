@@ -289,6 +289,185 @@ func TestRun_RefreshesExternalGitAdvanceBeforeMCPStatusAndDiff(t *testing.T) {
 	}
 }
 
+func TestRun_RecoversInterruptedCheckpointBeforeIdentitySocketAndServing(t *testing.T) {
+	for _, test := range []struct {
+		driverState string
+		wantState   string
+	}{
+		{driverState: "prepared", wantState: "recovered_old"},
+		{driverState: "published", wantState: "recovered_new"},
+	} {
+		t.Run(test.driverState, func(t *testing.T) {
+			home, err := os.MkdirTemp("", "gw-recover-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(home) })
+			t.Setenv("HOME", home)
+			runtimeDir := filepath.Join(home, "run")
+			dataHome := filepath.Join(home, "data")
+			t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+			t.Setenv("XDG_DATA_HOME", dataHome)
+			databasePath := filepath.Join(dataHome, "wormhole", "wormholed.db")
+			journalID := prepareInterruptedGatewayCheckpoint(t, databasePath, test.driverState)
+			identityPath := filepath.Join(filepath.Dir(databasePath), "identities")
+			socketPath := filepath.Join(runtimeDir, "wormhole", "wormholed.sock")
+			if _, err := os.Stat(identityPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("%s fixture created identity authority: %v", test.driverState, err)
+			}
+			if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("%s fixture created socket: %v", test.driverState, err)
+			}
+			if err := os.WriteFile(identityPath, []byte("block identity creation\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			startupErr := Run(t.Context(), "default")
+			if startupErr == nil || !strings.Contains(startupErr.Error(), "open local identity store") {
+				t.Fatalf("%s blocked identity startup error = %v", test.driverState, startupErr)
+			}
+			verification, err := localstore.Open(databasePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var journalState string
+			err = verification.DB().QueryRow(`SELECT state FROM workspace_materializations WHERE journal_id=?`, journalID).Scan(&journalState)
+			if closeErr := verification.Close(); err == nil {
+				err = closeErr
+			}
+			if err != nil || journalState != test.wantState {
+				t.Fatalf("%s journal before identity creation = (%q, %v), want %q", test.driverState, journalState, err, test.wantState)
+			}
+			if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("%s identity-blocked startup created socket: %v", test.driverState, err)
+			}
+			if err := os.Remove(identityPath); err != nil {
+				t.Fatal(err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			errCh := make(chan error, 1)
+			go func() { errCh <- Run(ctx, "default") }()
+			var connection net.Conn
+			for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+				connection, err = net.Dial("unix", socketPath)
+				if err == nil {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if err != nil {
+				cancel()
+				t.Fatalf("dial %s recovered Gateway: %v", test.driverState, err)
+			}
+			reader := bufio.NewReader(connection)
+			mcpInitialize(t, connection, reader)
+			if info, err := os.Stat(identityPath); err != nil || !info.IsDir() {
+				connection.Close()
+				cancel()
+				t.Fatalf("%s identity authority after recovery = (%v, %v)", test.driverState, info, err)
+			}
+			if err := connection.Close(); err != nil {
+				t.Fatal(err)
+			}
+			cancel()
+			select {
+			case err := <-errCh:
+				if err != nil {
+					t.Fatalf("%s recovered Gateway shutdown: %v", test.driverState, err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("%s recovered Gateway did not shut down", test.driverState)
+			}
+		})
+	}
+}
+
+func prepareInterruptedGatewayCheckpoint(t *testing.T, databasePath, driverState string) string {
+	t.Helper()
+	root, binding := prepareRegisteredGatewayWorkspace(t, databasePath)
+	store, err := localstore.Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	service, err := projectstate.NewService(localstore.NewWorkspaceRepo(store.DB()), projectstate.ServiceConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := types.ActorEnvelope{
+		ActorKind: types.ActorHuman, HumanPrincipalID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		Assurance: types.AssuranceLocal, OccurredAt: time.Date(2026, 8, 27, 3, 30, 0, 0, time.UTC),
+	}
+	publication, err := service.PublicationConfiguration(t.Context(), binding.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	constraint, err := projectstate.DigestPublicationBindingConstraint(binding.Repository, publication.ObservedOriginDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ReconfigurePublication(t.Context(), projectstate.ReconfigurePublicationRequest{
+		Scope: binding.Scope, ExpectedBinding: binding, ExpectedPublicationBindingDigest: constraint,
+		Expected: publication, Classification: types.PublicationLocalOnly, Actor: actor,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status, err := service.Status(t.Context(), binding.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := *status.AcceptedSnapshot.Tasks["22222222-2222-4222-8222-222222222222"].Value
+	task.Description = "restart recovery " + driverState
+	task.UpdatedAt = actor.OccurredAt
+	if _, err := service.Apply(t.Context(), binding.Scope, state.OperationV1{
+		SchemaVersion: 1, ID: "bbbbbbbb-0000-4000-8000-000000000001", Kind: state.OperationPutRecord,
+		ExpectedViewDigest: status.CandidateDigest, Actor: actor,
+		PutRecord: &state.PutRecordV1{Record: state.RecordValueV1{Task: &task}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	live, err := projectstate.ReadWorkingTreeNoFollow(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveDigest, err := state.DigestTree(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if driverState == "prepared" {
+		if err := os.Chmod(root, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := os.Chmod(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}()
+	}
+	result, checkpointErr := service.Checkpoint(t.Context(), projectstate.CheckpointRequest{
+		Scope: binding.Scope, Root: root, ExpectedWorkingTreeDigest: liveDigest, Actor: actor,
+	})
+	if driverState == "prepared" {
+		if checkpointErr == nil || result != (projectstate.CheckpointResult{}) {
+			t.Fatalf("prepared checkpoint interruption = (%+v, %v)", result, checkpointErr)
+		}
+	} else if driverState == "published" {
+		if checkpointErr != nil || result.JournalID == "" {
+			t.Fatalf("published checkpoint = (%+v, %v)", result, checkpointErr)
+		}
+	} else {
+		t.Fatalf("unknown checkpoint driver state %q", driverState)
+	}
+	var journalID, stateValue string
+	if err := store.DB().QueryRow(`SELECT journal_id, state FROM workspace_materializations`).Scan(&journalID, &stateValue); err != nil {
+		t.Fatal(err)
+	}
+	if stateValue != driverState {
+		t.Fatalf("checkpoint fixture state = %q, want %q", stateValue, driverState)
+	}
+	return journalID
+}
+
 func prepareBlockedGatewayWorkspace(t *testing.T, databasePath string) string {
 	t.Helper()
 	root, binding := prepareRegisteredGatewayWorkspace(t, databasePath)

@@ -232,10 +232,13 @@ func (s *Server) PrivateSetupEnsureIdentityRPC(ctx context.Context, req SetupIde
 		}
 		return SetupIdentityReadback{}, err
 	}
+	if s.afterSetupIdentityCommit != nil {
+		s.afterSetupIdentityCommit()
+	}
 	if actorErr != nil {
-		_, actor, err = s.resolveSetupBinding(ctx, req.WorkingDirectory, true)
-		if err != nil {
-			return SetupIdentityReadback{}, err
+		actor, err = s.actorResolver.ResolveLocalActor(ctx, ConnectionIdentity{OccurredAt: s.setupNow()})
+		if err != nil || actor.ValidateLocalAction() != nil {
+			return SetupIdentityReadback{}, ErrPrivateSetupRequest
 		}
 	}
 	if actor.ActorKind != types.ActorHuman || actor.HumanPrincipalID != profile.HumanPrincipalID {

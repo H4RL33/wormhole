@@ -235,8 +235,22 @@ func (s *Server) executeBranchSwitchStash(ctx context.Context, binding types.Wor
 }
 
 func (s *Server) PrivateWorkspaceRPC(ctx context.Context, request PrivateWorkspaceCommandRequest) (WorkspaceCommandResult, error) {
-	binding, actor, err := s.resolveSetupBinding(ctx, request.WorkingDirectory, true)
-	if err != nil {
+	if err := validateWorkspaceCommandRequest(request.Command); err != nil {
+		return WorkspaceCommandResult{}, ErrWorkspaceCommand
+	}
+	if s == nil || s.projectState == nil || s.actorResolver == nil {
+		return WorkspaceCommandResult{}, ErrWorkspaceCommand
+	}
+	observed := types.WorkspaceContext{WorkingDirectory: request.WorkingDirectory}
+	if observed.Validate() != nil {
+		return WorkspaceCommandResult{}, ErrWorkspaceCommand
+	}
+	binding, err := s.projectState.ResolveWorkingDirectory(ctx, observed)
+	if err != nil || binding.Validate() != nil || binding.Checkout.CanonicalPath != request.WorkingDirectory {
+		return WorkspaceCommandResult{}, ErrWorkspaceCommand
+	}
+	actor, err := s.actorResolver.ResolveLocalActor(ctx, ConnectionIdentity{OccurredAt: s.setupNow()})
+	if err != nil || actor.ValidateLocalAction() != nil {
 		return WorkspaceCommandResult{}, ErrWorkspaceCommand
 	}
 	ctx = WithResolvedBinding(ctx, binding)

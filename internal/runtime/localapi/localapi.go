@@ -130,6 +130,7 @@ type Server struct {
 	fabricRouter                 FabricRouter
 	clock                        func() time.Time
 	beforeSetupImportTransaction func(context.Context) error
+	afterSetupIdentityCommit     func()
 
 	// Single-org mode (P1-P4 backward compatibility)
 	coordServer string

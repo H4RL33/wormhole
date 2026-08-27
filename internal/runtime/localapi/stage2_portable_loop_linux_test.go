@@ -260,6 +260,43 @@ func TestWorkspaceOperationsBlockBranchSwitchExceptStashThenRefreshRecover(t *te
 	}
 }
 
+func TestPrivateWorkspaceRPCRejectsInvalidCommandBeforeGitRefresh(t *testing.T) {
+	fixture := newPortableLoopGitFixture(t)
+	root := fixture.clone(t, "private-invalid-command")
+	store, service, binding := openPortableLoopWorkspace(t, root, filepath.Join(t.TempDir(), "private.db"))
+	defer store.Close()
+	gitRun(t, root, "config", "user.name", "Portable Loop Fixture")
+	gitRun(t, root, "config", "user.email", "fixture@example.test")
+	gitRun(t, root, "commit", "--allow-empty", "-m", "test: advance before invalid private command")
+	advancedCommit := gitOutput(t, root, "rev-parse", "HEAD")
+	actorCalls := 0
+	server := &Server{
+		projectState: service,
+		actorResolver: localActorResolverFunc(func(context.Context, ConnectionIdentity) (types.ActorEnvelope, error) {
+			actorCalls++
+			return portableLoopActor(), nil
+		}),
+	}
+
+	result, err := server.PrivateWorkspaceRPC(t.Context(), PrivateWorkspaceCommandRequest{
+		WorkingDirectory: root,
+		Command:          WorkspaceCommandRequest{Operation: WorkspaceOperation("invalid")},
+	})
+	if result != (WorkspaceCommandResult{}) || !errors.Is(err, ErrWorkspaceCommand) {
+		t.Fatalf("invalid private command = (%+v, %v), want ErrWorkspaceCommand", result, err)
+	}
+	if actorCalls != 0 {
+		t.Fatalf("invalid private command resolved actor %d times, want zero", actorCalls)
+	}
+	persisted, err := service.ResolveWorkingDirectory(t.Context(), types.WorkspaceContext{WorkingDirectory: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.AcceptedCommitSHA != binding.AcceptedCommitSHA || persisted.AcceptedCommitSHA == advancedCommit {
+		t.Fatalf("invalid private command refreshed binding from %s to %s", binding.AcceptedCommitSHA, persisted.AcceptedCommitSHA)
+	}
+}
+
 func TestScopedPillarOperationRefreshesResolvedBindingBeforeDispatch(t *testing.T) {
 	fixture := newPortableLoopGitFixture(t)
 	root := fixture.clone(t, "pillar-refresh")

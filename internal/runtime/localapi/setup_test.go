@@ -86,6 +86,41 @@ func TestPrivateSetupEnsureIdentityRPCResolvesActorBeforeMutation(t *testing.T) 
 	}
 }
 
+func TestPrivateSetupEnsureIdentityRPCDoesNotReResolveWorkspaceAfterIdentityCommit(t *testing.T) {
+	store, err := localidentity.Open(filepath.Join(t.TempDir(), "identities"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := privateRoutingTestBinding(t, filepath.Join(t.TempDir(), "checkout"), "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000011")
+	server := setupIdentityTestServer(t, store, binding)
+	gitPath := filepath.Join(binding.Checkout.CanonicalPath, ".git")
+	movedGitPath := filepath.Join(binding.Checkout.CanonicalPath, ".git-after-identity")
+	server.afterSetupIdentityCommit = func() {
+		if err := os.Rename(gitPath, movedGitPath); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer func() {
+		if err := os.Rename(movedGitPath, gitPath); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	readback, err := server.PrivateSetupEnsureIdentityRPC(t.Context(), SetupIdentityRequest{
+		WorkingDirectory:    binding.Checkout.CanonicalPath,
+		JournalID:           "00000000-0000-4000-8000-000000000035",
+		Selection:           types.ConfirmedIdentitySelection{DisplayName: "Alice Example"},
+		ExpectedPriorDigest: DigestSetupIdentityUnselected(),
+	})
+	if err != nil {
+		t.Fatalf("identity step returned after its durable commit: %v", err)
+	}
+	selected, err := store.Selected(t.Context())
+	if err != nil || readback.HumanPrincipalID != selected.HumanPrincipalID {
+		t.Fatalf("identity readback = (%+v, %v), selected %+v", readback, err, selected)
+	}
+}
+
 func TestPrivateSetupEnsureIdentityRPCDispatchIsNotAnMCPTool(t *testing.T) {
 	store, err := localidentity.Open(filepath.Join(t.TempDir(), "identities"))
 	if err != nil {
