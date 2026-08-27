@@ -210,7 +210,7 @@ func TestMCP_InitializeLifecycle(t *testing.T) {
 	// tools/call after the handshake completes must succeed. newMCPTestServer
 	// builds a New() (no scheduler) server, so use a tool that doesn't need
 	// one.
-	resp := mcpCallTool(t, conn, reader, 2, "wormhole.task.list", nil)
+	resp := mcpCallTool(t, conn, reader, 2, "wormhole.kb.list", nil)
 	if resp.Error != "" {
 		t.Fatalf("tools/call after initialize handshake: got error %q", resp.Error)
 	}
@@ -236,7 +236,7 @@ func TestMCP_SyncStatusReturnsExactProjectScopedState(t *testing.T) {
 	}
 }
 
-func TestMCP_RecoveryOnlyProjectExposesOnlyEnrolmentAndStatus(t *testing.T) {
+func TestMCP_RecoveryOnlyProjectExposesOnlySyncStatus(t *testing.T) {
 	srv, socketPath := newMCPTestServer(t)
 	srv.SetSyncStatusProvider(&fixedSyncStatusProvider{status: syncpkg.Status{State: syncpkg.StateAttentionRequired}})
 	srv.SetRecoveryOnlyProjects([]string{"project-1"}, true)
@@ -268,7 +268,7 @@ func TestMCP_RecoveryOnlyProjectExposesOnlyEnrolmentAndStatus(t *testing.T) {
 		gotNames = append(gotNames, tool.Name)
 	}
 	slices.Sort(gotNames)
-	if want := []string{EnrolmentToolName, "wormhole.sync.status"}; !reflect.DeepEqual(gotNames, want) {
+	if want := []string{"wormhole.sync.status"}; !reflect.DeepEqual(gotNames, want) {
 		t.Fatalf("recovery tools/list = %v, want %v", gotNames, want)
 	}
 
@@ -276,17 +276,14 @@ func TestMCP_RecoveryOnlyProjectExposesOnlyEnrolmentAndStatus(t *testing.T) {
 	if status.Error != "" {
 		t.Fatalf("recovery sync.status error = %q", status.Error)
 	}
-	for id, call := range []struct {
-		tool string
-		args map[string]interface{}
-	}{
-		{tool: "wormhole.task.list", args: map[string]interface{}{"project_id": "project-1"}},
-		{tool: "wormhole.task.create", args: map[string]interface{}{"project_id": "project-1", "title": "blocked"}},
-		{tool: "wormhole.agent.whoami", args: map[string]interface{}{}},
-	} {
-		resp := mcpCallTool(t, conn, reader, id+4, call.tool, call.args)
-		if !strings.Contains(resp.Error, "recovery required") {
-			t.Fatalf("%s recovery error = %q, want explicit recovery required", call.tool, resp.Error)
+	retained := mcpCallTool(t, conn, reader, 4, "wormhole.kb.list", map[string]interface{}{"project_id": "project-1"})
+	if !strings.Contains(retained.Error, "recovery required") {
+		t.Fatalf("wormhole.kb.list recovery error = %q, want explicit recovery required", retained.Error)
+	}
+	for id, name := range []string{EnrolmentToolName, "wormhole.task.list", "wormhole.task.create", "wormhole.agent.whoami"} {
+		resp := mcpCallTool(t, conn, reader, id+5, name, map[string]interface{}{"project_id": "project-1"})
+		if want := "unknown tool: " + name; resp.Error != want {
+			t.Fatalf("removed %s recovery error = %q, want %q", name, resp.Error, want)
 		}
 	}
 }
@@ -406,9 +403,13 @@ func TestConfiguredRemovedGatewayToolsReturnUnknownTool(t *testing.T) {
 	}
 	for _, name := range removed {
 		t.Run(name, func(t *testing.T) {
-			result := privateDispatchResult(t, server, first, name, privateDispatchValidBlockedArguments(name), nil)
-			if !result.IsError || len(result.Content) != 1 || !strings.Contains(result.Content[0].Text, "unknown tool: "+name) {
-				t.Fatalf("removed tool %s result = %+v, want unknown tool", name, result)
+			params, err := json.Marshal(toolsCallParams{Name: name, Arguments: json.RawMessage(`{}`)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, rpcErr := server.handleToolsCall(context.Background(), &mcpSession{}, nil, server.registry, params)
+			if rpcErr == nil || rpcErr.Code != rpcInvalidParams || rpcErr.Message != "unknown tool: "+name {
+				t.Fatalf("removed tool %s RPC error = %+v, want invalid params unknown-tool error", name, rpcErr)
 			}
 		})
 	}
@@ -418,17 +419,19 @@ func TestConfiguredRemovedGatewayToolsReturnUnknownTool(t *testing.T) {
 // becomes isError:true inside a successful RPC result, not a JSON-RPC-level
 // error (design doc §1 tools/call, matching docs/mcp-protocol.md §3).
 func TestMCP_ToolsCall_WrapsHandlerError(t *testing.T) {
-	_, socketPath := newMCPTestServer(t)
+	srv, _ := newMCPTestServer(t)
+	params, err := json.Marshal(toolsCallParams{Name: "wormhole.kb.list", Arguments: json.RawMessage(`[]`)})
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	conn := dialLocalSocket(t, socketPath)
-	defer conn.Close()
-	reader := bufio.NewReader(conn)
-	mcpInitialize(t, conn, reader)
-
-	// wormhole.task.get with no task_id is a handler-level error.
-	resp := mcpCallTool(t, conn, reader, 2, "wormhole.task.get", map[string]interface{}{})
-	if resp.Error == "" {
-		t.Fatal("want handler error for missing task_id, got none")
+	got, rpcErr := srv.handleToolsCall(context.Background(), &mcpSession{}, nil, srv.registry, params)
+	if rpcErr != nil {
+		t.Fatalf("wormhole.kb.list RPC error = %+v, want handler result", rpcErr)
+	}
+	result, ok := got.(toolCallResult)
+	if !ok || !result.IsError || len(result.Content) != 1 || !strings.Contains(result.Content[0].Text, "list articles: invalid args") {
+		t.Fatalf("wormhole.kb.list handler result = %+v, want isError invalid-arguments envelope", got)
 	}
 }
 
@@ -695,6 +698,9 @@ func TestLocalRegistryDescribesPresenceRegistration(t *testing.T) {
 	}
 	if got := sortedKeys(register.ArgumentExamples); !reflect.DeepEqual(got, []string{"default"}) {
 		t.Fatalf("agent.register argument variants = %v, want [default]", got)
+	}
+	if description := strings.ToLower(register.Description); strings.Contains(description, "join") || strings.Contains(description, "passport") {
+		t.Fatalf("agent.register description retains removed control-plane behavior: %q", register.Description)
 	}
 
 	schemas := buildInputSchemas(register)
