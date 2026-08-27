@@ -28,7 +28,7 @@ const (
 	TrialParticipantWithdrawn  = "withdrawn"
 
 	TrialBaselineGuidanceOff  = "guidance_off"
-	TrialBaselineCodeGraphOff = "code_graph_off"
+	TrialBaselineCodeGraphOff = "structural_discovery_off"
 
 	GateDContinueTowardsBetaPlanning    = "continue towards beta planning"
 	GateDContinueWithNarrowedScope      = "continue with narrowed scope"
@@ -80,7 +80,7 @@ const (
 	TrialSupportEnrolment    TrialSupportCode = "enrolment"
 	TrialSupportPermissions  TrialSupportCode = "permissions"
 	TrialSupportGuidance     TrialSupportCode = "guidance"
-	TrialSupportCodeGraph    TrialSupportCode = "code_graph"
+	TrialSupportCodeGraph    TrialSupportCode = "structural_discovery"
 	TrialSupportSyncOutage   TrialSupportCode = "sync_outage"
 	TrialSupportTaskWorkflow TrialSupportCode = "task_workflow"
 	TrialSupportMeasurement  TrialSupportCode = "measurement"
@@ -91,7 +91,7 @@ const (
 	TrialFailureGatewayCall  TrialFailureCode = "gateway_call"
 	TrialFailurePermission   TrialFailureCode = "permission"
 	TrialFailureGuidance     TrialFailureCode = "guidance"
-	TrialFailureCodeGraph    TrialFailureCode = "code_graph"
+	TrialFailureCodeGraph    TrialFailureCode = "structural_discovery"
 	TrialFailureSync         TrialFailureCode = "sync"
 	TrialFailureHandoff      TrialFailureCode = "handoff"
 	TrialFailureTask         TrialFailureCode = "task"
@@ -99,7 +99,7 @@ const (
 	TrialFailureOther        TrialFailureCode = "other"
 
 	TrialProcedureOmissionManifest  TrialProcedureOmissionCode = "manifest_approval"
-	TrialProcedureOmissionCodeGraph TrialProcedureOmissionCode = "code_graph_enablement"
+	TrialProcedureOmissionCodeGraph TrialProcedureOmissionCode = "structural_discovery_enablement"
 	TrialProcedureOmissionBenchmark TrialProcedureOmissionCode = "benchmark_arm"
 	TrialProcedureOmissionOutage    TrialProcedureOmissionCode = "outage_exercise"
 	TrialProcedureOmissionSupport   TrialProcedureOmissionCode = "support_record"
@@ -148,8 +148,8 @@ const (
 	TrialOmissionKBRelevantResults             TrialOmissionCode = "kb_relevant_results"
 	TrialOmissionKBResultsConsidered           TrialOmissionCode = "kb_results_considered"
 	TrialOmissionLowValueKBContributions       TrialOmissionCode = "duplicate_or_low_value_kb_contributions"
-	TrialOmissionCodeGraphUsefulQueries        TrialOmissionCode = "code_graph_useful_queries"
-	TrialOmissionCodeGraphQueries              TrialOmissionCode = "code_graph_queries"
+	TrialOmissionCodeGraphUsefulQueries        TrialOmissionCode = "structural_discovery_useful_queries"
+	TrialOmissionCodeGraphQueries              TrialOmissionCode = "structural_discovery_queries"
 	TrialOmissionFilesBeforeCorrectEdit        TrialOmissionCode = "files_read_before_correct_edit"
 	TrialOmissionSourceBytesBeforeCorrectEdit  TrialOmissionCode = "source_bytes_read_before_correct_edit"
 	TrialOmissionEventCount                    TrialOmissionCode = "event_count"
@@ -243,8 +243,8 @@ type TrialParticipantMetrics struct {
 	KBRelevantResults                  *int                `json:"kb_relevant_results"`
 	KBResultsConsidered                *int                `json:"kb_results_considered"`
 	DuplicateOrLowValueKBContributions *int                `json:"duplicate_or_low_value_kb_contributions"`
-	CodeGraphUsefulQueries             *int                `json:"code_graph_useful_queries"`
-	CodeGraphQueries                   *int                `json:"code_graph_queries"`
+	CodeGraphUsefulQueries             *int                `json:"structural_discovery_useful_queries"`
+	CodeGraphQueries                   *int                `json:"structural_discovery_queries"`
 	FilesReadBeforeCorrectEdit         *int                `json:"files_read_before_correct_edit"`
 	SourceBytesReadBeforeCorrectEdit   *int64              `json:"source_bytes_read_before_correct_edit"`
 	EventCount                         *int                `json:"event_count"`

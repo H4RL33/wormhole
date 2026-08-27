@@ -71,28 +71,46 @@ type alphaSchemaProperty struct {
 }
 
 type alphaLocalProtocol struct {
-	Transport           string                    `json:"transport"`
-	Framing             string                    `json:"framing"`
-	JSONRPCVersion      string                    `json:"jsonrpc_version"`
-	MCPProtocolVersion  string                    `json:"mcp_protocol_version"`
-	Methods             []string                  `json:"methods"`
-	Initialize          alphaInitializeContract   `json:"initialize"`
-	Lifecycle           alphaLifecycleContract    `json:"lifecycle"`
-	ServerNotifications []alphaServerNotification `json:"server_notifications"`
+	Transport            string                    `json:"transport"`
+	Framing              string                    `json:"framing"`
+	JSONRPCVersion       string                    `json:"jsonrpc_version"`
+	MCPProtocolVersion   string                    `json:"mcp_protocol_version"`
+	Methods              []string                  `json:"methods"`
+	Initialize           alphaInitializeContract   `json:"initialize"`
+	PrivateCLICapability alphaPrivateCLICapability `json:"private_cli_capability"`
+	Lifecycle            alphaLifecycleContract    `json:"lifecycle"`
+	ServerNotifications  []alphaServerNotification `json:"server_notifications"`
 }
 
 type alphaInitializeContract struct {
-	EnvelopeFields []string          `json:"envelope_fields"`
-	ResultFields   []string          `json:"result_fields"`
-	Capabilities   map[string]any    `json:"capabilities"`
-	ServerInfo     map[string]string `json:"server_info"`
+	RequestParamsFields          []string          `json:"request_params_fields"`
+	ClientInfoFields             []string          `json:"client_info_fields"`
+	ToolProvenanceFieldsRejected []string          `json:"tool_provenance_fields_rejected"`
+	PrivateCLIClientNames        []string          `json:"private_cli_client_names"`
+	UnknownHarnessMetadata       string            `json:"unknown_harness_metadata"`
+	ClientProvenance             string            `json:"client_provenance"`
+	HumanSessionPublication      string            `json:"human_session_publication"`
+	EnvelopeFields               []string          `json:"envelope_fields"`
+	ResultFields                 []string          `json:"result_fields"`
+	Capabilities                 map[string]any    `json:"capabilities"`
+	ServerInfo                   map[string]string `json:"server_info"`
+}
+
+type alphaPrivateCLICapability struct {
+	Purpose                       string `json:"purpose"`
+	ThreatModel                   string `json:"threat_model"`
+	AuthenticatesPhysicalHuman    bool   `json:"authenticates_physical_human"`
+	PreventsProtocolPathConfusion bool   `json:"prevents_protocol_path_confusion"`
+	PreIdentityScope              string `json:"pre_identity_scope"`
 }
 
 type alphaLifecycleContract struct {
-	RequiredSequence        []string `json:"required_sequence"`
-	GatedMethods            []string `json:"gated_methods"`
-	NotInitializedErrorCode int      `json:"not_initialized_error_code"`
-	NotificationResponse    string   `json:"notification_response"`
+	RequiredSequence               []string `json:"required_sequence"`
+	GatedMethods                   []string `json:"gated_methods"`
+	NotInitializedErrorCode        int      `json:"not_initialized_error_code"`
+	DuplicateInitializeErrorCode   int      `json:"duplicate_initialize_error_code"`
+	InitializeNotificationsIgnored bool     `json:"initialize_notifications_ignored"`
+	NotificationResponse           string   `json:"notification_response"`
 }
 
 type alphaServerNotification struct {
@@ -124,153 +142,12 @@ func TestAlphaContractGatewayMCPGuidanceInventory(t *testing.T) {
 	assertGatewayToolGuidance(t, newLocalRegistry(&Server{}))
 }
 
-func TestAlphaContractCodeGraphSurface(t *testing.T) {
-	manifest := readAlphaLocalContract(t)
-	wantPermissions := map[string][]string{
-		"wormhole.code_graph.query":   {"code_graph.query"},
-		"wormhole.code_graph.rebuild": {"code_graph.rebuild"},
-		"wormhole.code_graph.status":  {"code_graph.status"},
-	}
-	seen := map[string]bool{}
-	for _, tool := range manifest.MCPTools.Gateway {
-		permissions, ok := wantPermissions[tool.Name]
-		if !ok {
-			if strings.HasPrefix(tool.Name, "wormhole.code_graph.") {
-				t.Fatalf("unexpected Code Graph contract tool %q", tool.Name)
-			}
-			continue
-		}
-		seen[tool.Name] = true
-		if !reflect.DeepEqual(tool.RequiredPermissions, permissions) || len(tool.RequestSchemas) != 1 || len(tool.ResponseSchemas) != 1 {
-			t.Fatalf("%s contract permissions/shapes = %v/%d/%d", tool.Name, tool.RequiredPermissions, len(tool.RequestSchemas), len(tool.ResponseSchemas))
-		}
-		request := tool.RequestSchemas[0].Schema
-		if request.AdditionalProperties == nil || *request.AdditionalProperties || !reflect.DeepEqual(request.Required, []string{"project_id"}) {
-			t.Fatalf("%s request is not closed/project-required: %+v", tool.Name, request)
-		}
-		responseProperties := contractProperties(tool.ResponseSchemas[0].Schema)
-		switch tool.Name {
-		case "wormhole.code_graph.status":
-			if !reflect.DeepEqual(responseProperties["state"].Enum, []string{"degraded", "disabled", "error", "initializing", "ready", "stale"}) {
-				t.Fatalf("status state enum = %v", responseProperties["state"].Enum)
-			}
-		case "wormhole.code_graph.query":
-			if !reflect.DeepEqual(request.AnyOf, []alphaSchema{{Required: []string{"intent"}}, {Required: []string{"entry_symbols"}}}) {
-				t.Fatalf("query anyOf = %+v", request.AnyOf)
-			}
-			for _, field := range []string{"current_git_commit", "working_tree_status", "graph_revision", "graph_not_current", "rebuild_recommended", "sources"} {
-				if _, ok := responseProperties[field]; !ok {
-					t.Errorf("query response missing %s", field)
-				}
-			}
-			if !reflect.DeepEqual(responseProperties["working_tree_status"].Enum, []string{"clean", "dirty"}) {
-				t.Fatalf("working_tree_status enum = %v", responseProperties["working_tree_status"].Enum)
-			}
-		}
-	}
-	if len(seen) != len(wantPermissions) {
-		t.Fatalf("Code Graph contract tools = %v, want %v", seen, wantPermissions)
-	}
-	readme, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "contracts", "README.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, phrase := range []string{"code_graph.source.read", "metadata-only", "project-local", "graph_not_current", "rebuild_recommended", "balanced copy-on-write", "does not call the working tree `stale`"} {
-		if !bytes.Contains(readme, []byte(phrase)) {
-			t.Errorf("contract README missing %q", phrase)
-		}
-	}
-	for _, errorCase := range []string{"invalid or unknown input", "missing primary permission", "missing or ambiguous project scope", "disabled rebuild", "concurrent rebuild", "preserves the active graph", "status becomes `degraded` or `error`"} {
-		if !bytes.Contains(readme, []byte(errorCase)) {
-			t.Errorf("contract README missing Code Graph error case %q", errorCase)
-		}
-	}
-}
-
 func contractProperties(schema alphaSchema) map[string]alphaSchema {
 	properties := make(map[string]alphaSchema, len(schema.Properties))
 	for _, property := range schema.Properties {
 		properties[property.Name] = property.Schema
 	}
 	return properties
-}
-
-func TestAlphaContractGatewayEnrolmentIsPreCredentialAndVersioned(t *testing.T) {
-	manifest := readAlphaLocalContract(t)
-	var enrolment *alphaGatewayMCPTool
-	for i := range manifest.MCPTools.Gateway {
-		if manifest.MCPTools.Gateway[i].Name == EnrolmentToolName {
-			enrolment = &manifest.MCPTools.Gateway[i]
-			break
-		}
-	}
-	if enrolment == nil {
-		for _, actual := range gatewayMCPContract(t) {
-			if actual.Name == EnrolmentToolName {
-				encoded, _ := json.MarshalIndent(actual, "", "  ")
-				t.Fatalf("manifest is missing %s; registry contract:\n%s", EnrolmentToolName, encoded)
-			}
-		}
-		t.Fatalf("manifest and registry are missing %s", EnrolmentToolName)
-	}
-	if len(enrolment.RequiredPermissions) != 0 {
-		t.Fatalf("pre-credential enrolment permissions = %v, want none", enrolment.RequiredPermissions)
-	}
-	if len(enrolment.RequestSchemas) != 1 {
-		t.Fatalf("request schemas = %d, want 1", len(enrolment.RequestSchemas))
-	}
-	wantRequired := []string{
-		"capabilities", "credential_profile", "fabric_address", "idempotency_key", "model", "owner",
-		"project_id", "repositories", "requested_permissions", "roles", "version",
-	}
-	if !reflect.DeepEqual(enrolment.RequestSchemas[0].Schema.Required, wantRequired) {
-		t.Fatalf("required request fields = %v, want %v", enrolment.RequestSchemas[0].Schema.Required, wantRequired)
-	}
-	if enrolment.RequestSchemas[0].Schema.AdditionalProperties == nil || *enrolment.RequestSchemas[0].Schema.AdditionalProperties {
-		t.Fatal("enrolment request schema must disallow additional properties")
-	}
-	var profileSchema *alphaSchema
-	for i := range enrolment.RequestSchemas[0].Schema.Properties {
-		if enrolment.RequestSchemas[0].Schema.Properties[i].Name == "credential_profile" {
-			profileSchema = &enrolment.RequestSchemas[0].Schema.Properties[i].Schema
-		}
-	}
-	if profileSchema == nil || profileSchema.MinLength != 1 {
-		t.Fatalf("credential_profile schema = %+v, want min length 1", profileSchema)
-	}
-
-	wantContracts := map[string]struct {
-		state     string
-		retryable bool
-	}{
-		"fabric_unreachable": {"failed", true}, "invalid_project": {"failed", false},
-		"permissions_rejected": {"failed", false}, "duplicate_identity": {"failed", false},
-		"repository_mismatch": {"failed", false}, "credential_persistence_failed": {"recovery_required", true},
-		"bootstrap_failed_after_enrolment": {"recovery_required", true}, "checkpoint_persistence_failed": {"attention_required", false},
-		"credentials_persisted": {"credentials_persisted", true},
-		"success":               {"ready", false},
-	}
-	if len(enrolment.ResponseSchemas) != len(wantContracts) {
-		t.Fatalf("result variants = %d, want %d", len(enrolment.ResponseSchemas), len(wantContracts))
-	}
-	for _, response := range enrolment.ResponseSchemas {
-		want, ok := wantContracts[response.Variant]
-		if !ok {
-			t.Fatalf("unexpected result variant %q", response.Variant)
-		}
-		if response.Schema.AdditionalProperties == nil || *response.Schema.AdditionalProperties {
-			t.Fatalf("%s allows additional properties", response.Variant)
-		}
-		properties := map[string]alphaSchema{}
-		for _, property := range response.Schema.Properties {
-			properties[property.Name] = property.Schema
-		}
-		if !reflect.DeepEqual(properties["code"].Enum, []string{response.Variant}) ||
-			!reflect.DeepEqual(properties["state"].Enum, []string{want.state}) ||
-			!reflect.DeepEqual(properties["retryable"].BooleanEnum, []bool{want.retryable}) {
-			t.Fatalf("%s discriminants code=%v state=%v retryable=%v", response.Variant, properties["code"].Enum, properties["state"].Enum, properties["retryable"].BooleanEnum)
-		}
-	}
 }
 
 func gatewayMCPContract(t *testing.T) []alphaGatewayMCPTool {
@@ -306,6 +183,41 @@ func TestAlphaContractLocalProtocolLifecycle(t *testing.T) {
 	}
 	if len(protocol.Lifecycle.GatedMethods) == 0 {
 		t.Fatal("manifest has no lifecycle-gated methods")
+	}
+	if protocol.Lifecycle.DuplicateInitializeErrorCode != rpcInvalidParams {
+		t.Fatalf("duplicate initialize error code = %d, want %d", protocol.Lifecycle.DuplicateInitializeErrorCode, rpcInvalidParams)
+	}
+	if !protocol.Lifecycle.InitializeNotificationsIgnored {
+		t.Fatal("initialize notifications must be ignored without response or session publication")
+	}
+	if got := jsonStructFields(reflect.TypeOf(initializeParams{})); !reflect.DeepEqual(got, protocol.Initialize.RequestParamsFields) {
+		t.Fatalf("initialize request fields = %v, manifest = %v", got, protocol.Initialize.RequestParamsFields)
+	}
+	if got := jsonStructFields(reflect.TypeOf(initializeClientInfo{})); !reflect.DeepEqual(got, protocol.Initialize.ClientInfoFields) {
+		t.Fatalf("initialize clientInfo fields = %v, manifest = %v", got, protocol.Initialize.ClientInfoFields)
+	}
+	if protocol.Initialize.UnknownHarnessMetadata != "unknown" || !reflect.DeepEqual(protocol.Initialize.PrivateCLIClientNames, []string{"wormhole-cli", "wormhole-setup"}) {
+		t.Fatalf("initialize client metadata = unknown %q, private CLI names %v", protocol.Initialize.UnknownHarnessMetadata, protocol.Initialize.PrivateCLIClientNames)
+	}
+	if protocol.Initialize.ClientProvenance != "self-declared local client metadata bound to a Gateway-owned session; local assurance does not verify harness or model authenticity" {
+		t.Fatalf("initialize client provenance = %q", protocol.Initialize.ClientProvenance)
+	}
+	if protocol.Initialize.HumanSessionPublication != "first capability-verified private request after a selected identity exists" {
+		t.Fatalf("human session publication = %q", protocol.Initialize.HumanSessionPublication)
+	}
+	wantPrivateCLI := alphaPrivateCLICapability{
+		Purpose:                    "separate compliant local CLI control-plane traffic from the public MCP protocol and bind accountability",
+		ThreatModel:                "the owner-private OS user and its same-user processes are trusted",
+		AuthenticatesPhysicalHuman: false, PreventsProtocolPathConfusion: true,
+		PreIdentityScope: "workspace registration and selected-identity setup only while no identity is selected",
+	}
+	if protocol.PrivateCLICapability != wantPrivateCLI {
+		t.Fatalf("private CLI capability contract = %+v, want %+v", protocol.PrivateCLICapability, wantPrivateCLI)
+	}
+	for _, field := range protocol.Initialize.ToolProvenanceFieldsRejected {
+		if got := privateAuthorityClaim("wormhole.workspace.status", map[string]json.RawMessage{field: json.RawMessage(`"forged"`)}); got != field {
+			t.Fatalf("manifest provenance field %q is not rejected, got %q", field, got)
+		}
 	}
 
 	srv, socketPath := newMCPTestServer(t)
@@ -409,6 +321,18 @@ func TestAlphaContractLocalProtocolLifecycle(t *testing.T) {
 	if string(resp.ID) != strconv.Itoa(nextID) {
 		t.Fatalf("response id after unknown notification = %s, want %d", resp.ID, nextID)
 	}
+}
+
+func jsonStructFields(kind reflect.Type) []string {
+	fields := make([]string, 0, kind.NumField())
+	for index := 0; index < kind.NumField(); index++ {
+		name := strings.Split(kind.Field(index).Tag.Get("json"), ",")[0]
+		if name != "" && name != "-" {
+			fields = append(fields, name)
+		}
+	}
+	sort.Strings(fields)
+	return fields
 }
 
 func TestAlphaContractLocalEventNotifications(t *testing.T) {
@@ -525,7 +449,7 @@ func localContractCall(t *testing.T, conn net.Conn, reader *bufio.Reader, id int
 	}
 	if method == "tools/call" {
 		params, err := json.Marshal(toolsCallParams{
-			Name:      "wormhole.task.list",
+			Name:      "wormhole.kb.list",
 			Arguments: json.RawMessage(`{"project_id":"project-1"}`),
 		})
 		if err != nil {

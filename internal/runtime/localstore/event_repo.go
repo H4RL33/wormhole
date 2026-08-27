@@ -175,6 +175,45 @@ func (r *EventRepo) PublishEvent(ctx context.Context, namespaceID, channelID, ag
 	return event, nil
 }
 
+// PublishOperationalEvent persists clone-local activity for a portable channel
+// that the caller has already validated against composed project state. It
+// deliberately does not consult or populate the legacy channels table.
+func (r *EventRepo) PublishOperationalEvent(ctx context.Context, namespaceID, channelID, agentID, eventType string, payload json.RawMessage, note *string) (DurableEvent, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return DurableEvent{}, fmt.Errorf("localstore/event: publish operational: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+	event, err := r.PublishOperationalEventTx(ctx, tx, namespaceID, channelID, agentID, eventType, payload, note)
+	if err != nil {
+		return DurableEvent{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return DurableEvent{}, fmt.Errorf("localstore/event: publish operational: commit: %w", err)
+	}
+	return event, nil
+}
+
+// PublishOperationalEventTx is the transactional form of
+// PublishOperationalEvent. Portable channel validation belongs to the
+// binding-aware local API domain, before this operational insert begins.
+func (r *EventRepo) PublishOperationalEventTx(ctx context.Context, tx *sql.Tx, namespaceID, channelID, agentID, eventType string, payload json.RawMessage, note *string) (DurableEvent, error) {
+	if len(payload) == 0 {
+		payload = json.RawMessage(`{}`)
+	}
+	row := tx.QueryRowContext(ctx,
+		`INSERT INTO events (id, namespace_id, channel_id, agent_id, event_type, payload, note)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 RETURNING id, namespace_id, channel_id, agent_id, event_type, payload, note, created_at`,
+		uuid.New().String(), namespaceID, channelID, agentID, eventType, string(payload), note,
+	)
+	event, err := scanEvent(row)
+	if err != nil {
+		return DurableEvent{}, fmt.Errorf("localstore/event: publish operational in tx: %w", err)
+	}
+	return event, nil
+}
+
 // PublishEventTx inserts a durable event using tx so publication and enqueue
 // commit atomically.
 func (r *EventRepo) PublishEventTx(ctx context.Context, tx *sql.Tx, namespaceID, channelID, agentID, eventType string, payload json.RawMessage, note *string) (DurableEvent, error) {

@@ -18,10 +18,6 @@ func TestRemoteToolWrappersPropagateRPCFailuresAndReturnDecodedResults(t *testin
 
 	failedCalls := []func() error{
 		func() error {
-			_, err := doRegister(errorServer.Client(), errorServer.URL, "project", registerAgentInput{})
-			return err
-		},
-		func() error {
 			_, err := doSearch(errorServer.Client(), errorServer.URL, "project", "token", "query", 1)
 			return err
 		},
@@ -50,10 +46,6 @@ func TestRemoteToolWrappersPropagateRPCFailuresAndReturnDecodedResults(t *testin
 	}))
 	t.Cleanup(successServer.Close)
 	successCalls := []func() error{
-		func() error {
-			_, err := doRegister(successServer.Client(), successServer.URL, "project", registerAgentInput{})
-			return err
-		},
 		func() error {
 			_, err := doSearch(successServer.Client(), successServer.URL, "project", "token", "query", 1)
 			return err

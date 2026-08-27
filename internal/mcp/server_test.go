@@ -116,7 +116,7 @@ func TestCallHandler_NoAuthRequiredDispatchesDirectly(t *testing.T) {
 	registry := NewRegistry()
 	called := false
 	registry.Register(Tool{
-		Name:         "wormhole.agent.register",
+		Name:         "wormhole.agent.enrol",
 		RequiresAuth: false,
 		Handler: func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error) {
 			called = true
@@ -133,7 +133,7 @@ func TestCallHandler_NoAuthRequiredDispatchesDirectly(t *testing.T) {
 	srv := httptest.NewServer(NewMCPHandler(registry, store))
 	defer srv.Close()
 
-	mustToolResult(t, srv, "", "wormhole.agent.register", "proj-1", json.RawMessage(`{}`))
+	mustToolResult(t, srv, "", "wormhole.agent.enrol", "proj-1", json.RawMessage(`{}`))
 	if !called {
 		t.Fatalf("handler was not called")
 	}

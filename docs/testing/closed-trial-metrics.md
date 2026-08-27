@@ -10,6 +10,13 @@ validate or format local JSON.
 This schema is not trial evidence. Do not add example participant results or
 the dated evidence files during the tooling step.
 
+Schema version 1 retains names from the pre-cut trial so dated July 2026 records
+remain decodable. These are compatibility-only schema labels, not the current
+Gateway inventory. In the current local-only Stage 2 trial, `guidance_off`
+labels the no-portable-context comparison arm; it does not imply a live
+managed-guidance feature. Leave `code_graph_*`, Fabric-sync, and Task-state
+measurements `null` and list their exact names under `metrics.omissions`.
+
 ## Export envelope
 
 Each participant first receives a preview with the `TrialParticipantExport`
@@ -63,24 +70,24 @@ The measurement names and units are fixed:
 |---|---|
 | `installation_completed` | Boolean installation outcome. |
 | `time_to_first_gateway_mcp_call_ms` | Milliseconds from installation start; `null` if not observed. |
-| `time_to_productive_work_ms` | Milliseconds from enrolment to productive work; `null` if not reached or observed. |
+| `time_to_productive_work_ms` | Milliseconds from setup start to productive work; `null` if not reached or observed. The field name is retained for schema compatibility. |
 | `tool_success_count` | Successful tool calls. |
 | `tool_denial_count` | Permission/policy denials; never filter expected denials. |
 | `tool_failure_count` | Unsuccessful non-denial tool calls, including tool/runtime errors and invalid results. |
 | `context_retrieved_at_session_start` | Whether useful Wormhole context was retrieved; `null` if not observed. |
 | `human_coaching_interventions` | Count of operator explanations or corrections. |
 | `model_handoff_succeeded` | Whether the planned handoff met its success criteria; `null` if not attempted. |
-| `sync_recovery_succeeded` | Whether the outage/restart exercise recovered; `null` if not attempted. |
+| `sync_recovery_succeeded` | Legacy optional-Fabric outage field; `null` plus an omission in the current local-only trial. Gateway restart is reported separately in the reviewed operator worksheet. |
 | `kb_relevant_results` | Results judged relevant. |
 | `kb_results_considered` | Total results considered for relevance. |
 | `duplicate_or_low_value_kb_contributions` | Contributions later judged duplicate or low value. |
-| `code_graph_useful_queries` | Queries judged useful under the predeclared criterion. |
-| `code_graph_queries` | All Code Graph queries, including failed, incomplete, and useless calls. |
+| `code_graph_useful_queries` | Legacy July field; `null` plus an omission in current Stage 2 records. |
+| `code_graph_queries` | Legacy July field; `null` plus an omission in current Stage 2 records. |
 | `files_read_before_correct_edit` | File count before the first correct edit; `null` if no correct edit or unavailable. |
 | `source_bytes_read_before_correct_edit` | Byte count only, never bytes/content themselves; `null` if unavailable. |
-| `event_count` | Events observed in the trial window. |
-| `event_noise_count` | Events judged redundant, irrelevant, or excessive. |
-| `task_state_accurate` | Whether recorded Task state matched observed work; `null` if not assessed. |
+| `event_count` | Operational activity rows observed in the trial window; not a claim of a live portable Event MCP tool. |
+| `event_noise_count` | Operational activity rows judged redundant, irrelevant, or excessive. |
+| `task_state_accurate` | Legacy optional-Fabric Task field; `null` plus an omission because there is no live Task MCP feature in Stage 2. |
 | `context_reconstructions_avoided` | Explicit instances where retained context avoided repeated reconstruction. |
 | `tokens_before_productive_work` | Harness-reported tokens before productive work; `null` when unavailable. |
 
@@ -98,7 +105,7 @@ tool attempt count = tool_success_count + tool_denial_count + tool_failure_count
 tool success rate = tool_success_count / tool attempt count
 tool denial rate = tool_denial_count / tool attempt count
 KB relevance rate = kb_relevant_results / kb_results_considered
-Code Graph useful-query rate = code_graph_useful_queries / code_graph_queries
+legacy July useful-query rate = code_graph_useful_queries / code_graph_queries
 Event noise rate = event_noise_count / event_count
 ```
 
@@ -106,10 +113,13 @@ If a denominator is zero, report the rate as missing, not zero or 100%.
 
 ## Controlled comparison
 
-For at least one representative Task per completed participant, choose
-`guidance_off` or `code_graph_off` as `baseline_kind`. The baseline and alpha
-arms must use the same checkout revision, permissions, success criteria, and
-measurement method; all four matching-control fields must be `true`.
+For at least one representative coding task per completed participant, choose
+`guidance_off` as the compatibility label for `baseline_kind`. It means the arm
+does not receive the Stage 2 portable Channel/KB context; no guidance tool is
+called. The decoder accepts `code_graph_off` only for dated July compatibility.
+The baseline and alpha arms must use the same checkout revision, permissions,
+success criteria, and measurement method; all four matching-control fields must
+be `true`.
 
 Both arms record:
 
@@ -117,15 +127,16 @@ Both arms record:
 - operating-loop adherence;
 - useful shared-state write count;
 - human-correction count;
-- Task quality;
+- coding-task output quality;
 - unnecessary tool-call count;
 - source files and byte counts; and
 - review quality.
 
 `task_kind` is one of `feature`, `bugfix`, `review`, `refactor`,
-`documentation`, or `other`; there is no task-label field. Tool selection,
-operating-loop adherence, Task quality, and review quality are closed enums,
-not prose. Do not change the predeclared rubric after seeing the first arm.
+`documentation`, or `other`; this describes the benchmark, not a Wormhole Task
+record. Tool selection, operating-loop adherence, output quality, and review
+quality are closed enums, not prose. Do not change the predeclared rubric after
+seeing the first arm.
 
 ## Gate D decision
 
@@ -142,8 +153,11 @@ stop the current direction
 The evaluation records `supports`, `contrary`, or `missing` for each Gate D
 criterion: manual context relay, repeated project reconstruction, cross-model
 continuation, interruption recovery, managed-guidance learnability, source
-discovery narrowing, proportionate maintenance, proportionate Event noise, and
-appropriate confidence. Both `supporting_evidence` and `contrary_evidence`
+discovery narrowing, proportionate maintenance, proportionate activity noise,
+and appropriate confidence. These fixed version-one codes are compatibility
+fields. The current trial rates managed-guidance learnability `missing` because
+there is no live managed-guidance feature; interruption evidence is local
+Gateway/bridge restart, not Fabric recovery. Both `supporting_evidence` and `contrary_evidence`
 must be non-empty arrays of those criterion codes, and each code must match its
 `supports` or `contrary` rating. The JSON contains no evidence prose.
 
@@ -160,8 +174,9 @@ violations. It also rejects Bearer, Basic, GitHub/GitLab PAT, and `sk-`-shaped
 credential values before typed decoding.
 
 Private query text is never exported. Optional query-category codes have a
-separate per-participant consent switch and timestamp. General trial consent,
-Passport possession, or use of Code Graph is not private-query consent.
+separate per-participant consent switch and timestamp. General trial consent or
+Passport possession is not private-query consent. The legacy graph-related
+consent wording applies only to dated July records.
 
 Input and formatted-output JSON are each limited to 1 MiB, with at most 64
 nested containers. Participants and every array are capped at 100 items, and

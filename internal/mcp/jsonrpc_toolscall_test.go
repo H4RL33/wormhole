@@ -161,8 +161,9 @@ func TestHandleToolsCall_ToolHandlerErrorIsIsError(t *testing.T) {
 }
 
 // TestHandleToolsCall_ForwardsAuthResolvedProjectID is a regression test for
-// the dispatch bug diagnosed in Task 7's E2E test
-// (cmd/gatewayd/e2e_stdio_bridge_test.go's TestE2E_StdioBridgeToPostgres):
+// the dispatch bug first diagnosed by the retired combined Gateway/Fabric E2E
+// test. TestIncrementalPushTool_AppliesRoutedTaskOwner now exercises the
+// corresponding owner-fidelity invariant at the Fabric/Postgres boundary:
 // HandleToolsCall must forward scope.ProjectID (the auth-resolved project)
 // to tool.Handler, not the raw client-supplied project_id from
 // extractProjectID. The sync engine (internal/runtime/sync) never sends
@@ -172,31 +173,10 @@ func TestHandleToolsCall_ToolHandlerErrorIsIsError(t *testing.T) {
 // entirely.
 func TestHandleToolsCall_ForwardsAuthResolvedProjectID(t *testing.T) {
 	identityStore := testIdentityStore(t)
-	eventsStore := testEventsStore(t)
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(identityStore, eventsStore, testRolesStore(t), testKBStore(t)))
 
 	projectID := mustCreateProject(t, "toolscall-project-id-forward")
-
-	registerArgs, _ := json.Marshal(RegisterAgentInput{
-		Permissions: []string{"event.publish"},
-		Owner:       "harley",
-		Model:       "claude",
-	})
-	registerParams, _ := json.Marshal(toolsCallParams{Name: "wormhole.agent.register", Arguments: registerArgs})
-
-	registerResult, rpcErr := HandleToolsCall(context.Background(), registry, identityStore, "", withProjectID(t, registerParams, projectID))
-	if rpcErr != nil {
-		t.Fatalf("register rpcErr: got %+v, want nil", rpcErr)
-	}
-	registerRes, ok := registerResult.(toolCallResult)
-	if !ok || registerRes.IsError {
-		t.Fatalf("register result: got %+v", registerResult)
-	}
-	var registerOut RegisterAgentOutput
-	if err := json.Unmarshal([]byte(registerRes.Content[0].Text), &registerOut); err != nil {
-		t.Fatalf("unmarshal register output: %v", err)
-	}
+	registered := mustRegisterTestAgent(t, identityStore, projectID, []string{"event.publish"})
 
 	var receivedProjectID string
 	var receivedScope *identity.AuthenticatedScope
@@ -215,7 +195,7 @@ func TestHandleToolsCall_ForwardsAuthResolvedProjectID(t *testing.T) {
 	// namespace_id) — auth resolves the project from the bearer token alone.
 	callParams, _ := json.Marshal(toolsCallParams{Name: "test.needs.auth.projectid", Arguments: json.RawMessage(`{}`)})
 
-	result, rpcErr := HandleToolsCall(context.Background(), registry, identityStore, "Bearer "+registerOut.Token, callParams)
+	result, rpcErr := HandleToolsCall(context.Background(), registry, identityStore, "Bearer "+registered.Token, callParams)
 	if rpcErr != nil {
 		t.Fatalf("rpcErr: got %+v, want nil", rpcErr)
 	}
@@ -235,70 +215,18 @@ func TestHandleToolsCall_ForwardsAuthResolvedProjectID(t *testing.T) {
 	}
 }
 
-// withProjectID merges project_id into an existing tools/call params blob's
-// arguments field (RegisterAgentTool's own auth-free registration call still
-// needs project_id supplied explicitly, per its handler contract).
-func withProjectID(t *testing.T, rawParams json.RawMessage, projectID string) json.RawMessage {
-	t.Helper()
-	var params toolsCallParams
-	if err := json.Unmarshal(rawParams, &params); err != nil {
-		t.Fatalf("withProjectID: decode params: %v", err)
-	}
-	merged := mergeProjectID(t, params.Arguments, projectID)
-	params.Arguments = merged
-	out, err := json.Marshal(params)
-	if err != nil {
-		t.Fatalf("withProjectID: encode params: %v", err)
-	}
-	return out
-}
-
 func TestHandleToolsCall_RealToolEndToEnd(t *testing.T) {
 	store := testIdentityStore(t)
-	eventsStore := testEventsStore(t)
 	registry := NewRegistry()
-	registry.Register(RegisterAgentTool(store, eventsStore, testRolesStore(t), testKBStore(t)))
 	registry.Register(WhoAmITool())
 
 	projectID := mustCreateProject(t, "toolscall-e2e")
-
-	registerArgs, _ := json.Marshal(struct {
-		ProjectID   string   `json:"project_id"`
-		Permissions []string `json:"permissions"`
-		Owner       string   `json:"owner"`
-		Model       string   `json:"model"`
-	}{
-		ProjectID:   projectID,
-		Permissions: []string{"event.publish", "kb.write"},
-		Owner:       "harley",
-		Model:       "claude",
-	})
-	registerParams, _ := json.Marshal(toolsCallParams{Name: "wormhole.agent.register", Arguments: registerArgs})
-
-	result, rpcErr := HandleToolsCall(context.Background(), registry, store, "", registerParams)
-	if rpcErr != nil {
-		t.Fatalf("register rpcErr: got %+v, want nil", rpcErr)
-	}
-	res, ok := result.(toolCallResult)
-	if !ok {
-		t.Fatalf("register result type: got %T, want toolCallResult", result)
-	}
-	if res.IsError {
-		t.Fatalf("register IsError: got true, content %+v", res.Content)
-	}
-
-	var registerOut RegisterAgentOutput
-	if err := json.Unmarshal([]byte(res.Content[0].Text), &registerOut); err != nil {
-		t.Fatalf("unmarshal register output: %v", err)
-	}
-	if registerOut.Token == "" {
-		t.Fatalf("register output missing Token: %+v", registerOut)
-	}
+	registered := mustRegisterTestAgent(t, store, projectID, []string{"event.publish", "kb.write"})
 
 	whoamiArgs, _ := json.Marshal(map[string]string{"project_id": projectID})
 	whoamiParams, _ := json.Marshal(toolsCallParams{Name: "wormhole.agent.whoami", Arguments: whoamiArgs})
 
-	whoamiResult, whoamiRPCErr := HandleToolsCall(context.Background(), registry, store, "Bearer "+registerOut.Token, whoamiParams)
+	whoamiResult, whoamiRPCErr := HandleToolsCall(context.Background(), registry, store, "Bearer "+registered.Token, whoamiParams)
 	if whoamiRPCErr != nil {
 		t.Fatalf("whoami rpcErr: got %+v, want nil", whoamiRPCErr)
 	}
@@ -314,7 +242,7 @@ func TestHandleToolsCall_RealToolEndToEnd(t *testing.T) {
 	if err := json.Unmarshal([]byte(whoamiRes.Content[0].Text), &whoamiOut); err != nil {
 		t.Fatalf("unmarshal whoami output: %v", err)
 	}
-	if whoamiOut.AgentID != registerOut.AgentID {
-		t.Fatalf("whoami AgentID: got %q, want %q (from register)", whoamiOut.AgentID, registerOut.AgentID)
+	if whoamiOut.AgentID != registered.AgentID {
+		t.Fatalf("whoami AgentID: got %q, want %q", whoamiOut.AgentID, registered.AgentID)
 	}
 }

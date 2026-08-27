@@ -226,6 +226,21 @@ func TestGatewayIntegrationBackendRejectsConfiguredProjectMismatch(t *testing.T)
 	}
 }
 
+func TestGatewayPrivateResponseDecoderIsClosed(t *testing.T) {
+	type result struct {
+		ProjectID string `json:"project_id"`
+	}
+	for _, raw := range []string{
+		`{"project_id":"project-a","credential_profile":"caller-claim"}`,
+		`{"project_id":"project-a"} {}`,
+	} {
+		var decoded result
+		if err := decodeClosedGatewayJSON([]byte(raw), &decoded); err == nil {
+			t.Fatalf("private response decoder accepted %s", raw)
+		}
+	}
+}
+
 func TestIntegrationStateFixture(t *testing.T) {
 	data, err := os.ReadFile("../../testdata/alpha/manifests/integration-state.json")
 	if err != nil {
