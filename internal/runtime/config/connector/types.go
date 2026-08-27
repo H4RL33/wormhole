@@ -106,11 +106,12 @@ type ConfirmedConnectorChange struct {
 type OperationStage string
 
 const (
-	StagePrepared   OperationStage = "prepared"
-	StageApplied    OperationStage = "applied"
-	StageVerified   OperationStage = "verified"
-	StageRolledBack OperationStage = "rolled_back"
-	StageComplete   OperationStage = "complete"
+	StagePrepared    OperationStage = "prepared"
+	StageApplied     OperationStage = "applied"
+	StageVerified    OperationStage = "verified"
+	StageRolledBack  OperationStage = "rolled_back"
+	StageComplete    OperationStage = "complete"
+	StageCompensated OperationStage = "compensated"
 )
 
 type ConnectorBackup struct {
@@ -126,6 +127,7 @@ type ConnectorBackup struct {
 type PrepareOperation struct {
 	Change          ConfirmedConnectorChange
 	BackupReference config.BackupReference
+	OwnerDigest     config.StateDigest
 }
 
 type OperationRecord struct {
@@ -138,6 +140,7 @@ type OperationRecord struct {
 	ExpectedPriorDigest config.StateDigest     `json:"expected_prior_digest"`
 	DesiredDigest       config.StateDigest     `json:"desired_digest"`
 	BackupReference     config.BackupReference `json:"backup_reference"`
+	OwnerDigest         config.StateDigest     `json:"owner_digest,omitempty"`
 	Stage               OperationStage         `json:"stage"`
 	CreatedAt           time.Time              `json:"created_at,omitempty"`
 	UpdatedAt           time.Time              `json:"updated_at,omitempty"`
@@ -172,7 +175,8 @@ type OperationJournal interface {
 }
 
 type CompletedOperationJournal interface {
-	Completed(context.Context, ConfirmedConnectorChange) (OperationRecord, bool, error)
+	CompletedFor(context.Context, ConfirmedConnectorChange, config.StateDigest) (OperationRecord, bool, error)
+	Advance(context.Context, string, OperationStage) error
 }
 
 type OperationCoordinator interface {

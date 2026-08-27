@@ -12,17 +12,24 @@ func ApplyTransactional(ctx context.Context, adapter Adapter, desired ConnectorE
 	if change.Action != OperationInstall || desired.State != EntryPresent {
 		return TransactionResult{}, config.ErrConfirmedPlanDrift
 	}
-	return executeTransactional(ctx, adapter, desired, change, backups, journal, coordinator)
+	return executeTransactional(ctx, adapter, desired, change, "", backups, journal, coordinator)
+}
+
+func ApplyTransactionalFor(ctx context.Context, adapter Adapter, desired ConnectorEntry, change ConfirmedConnectorChange, owner config.StateDigest, backups BackupStore, journal OperationJournal, coordinator OperationCoordinator) (TransactionResult, error) {
+	if _, err := config.ParseStateDigest(string(owner)); err != nil || change.Action != OperationInstall || desired.State != EntryPresent {
+		return TransactionResult{}, config.ErrConfirmedPlanDrift
+	}
+	return executeTransactional(ctx, adapter, desired, change, owner, backups, journal, coordinator)
 }
 
 func RemoveTransactional(ctx context.Context, adapter Adapter, change ConfirmedConnectorChange, backups BackupStore, journal OperationJournal, coordinator OperationCoordinator) (TransactionResult, error) {
 	if change.Action != OperationRemove {
 		return TransactionResult{}, config.ErrConfirmedPlanDrift
 	}
-	return executeTransactional(ctx, adapter, ConnectorEntry{State: EntryAbsent}, change, backups, journal, coordinator)
+	return executeTransactional(ctx, adapter, ConnectorEntry{State: EntryAbsent}, change, "", backups, journal, coordinator)
 }
 
-func executeTransactional(ctx context.Context, adapter Adapter, desired ConnectorEntry, change ConfirmedConnectorChange, backups BackupStore, journal OperationJournal, coordinator OperationCoordinator) (TransactionResult, error) {
+func executeTransactional(ctx context.Context, adapter Adapter, desired ConnectorEntry, change ConfirmedConnectorChange, owner config.StateDigest, backups BackupStore, journal OperationJournal, coordinator OperationCoordinator) (TransactionResult, error) {
 	if adapter == nil || backups == nil || journal == nil || coordinator == nil || ValidateConfirmedConnectorChange(change) != nil || adapter.AdapterName() != change.Adapter {
 		return TransactionResult{}, config.ErrConfirmedPlanDrift
 	}
@@ -67,7 +74,7 @@ func executeTransactional(ctx context.Context, adapter Adapter, desired Connecto
 		if err != nil {
 			return sanitizeConnectorError(err)
 		}
-		record, err := journal.Prepare(locked, PrepareOperation{Change: change, BackupReference: reference})
+		record, err := journal.Prepare(locked, PrepareOperation{Change: change, BackupReference: reference, OwnerDigest: owner})
 		if err != nil {
 			return sanitizeConnectorError(err)
 		}
@@ -134,16 +141,19 @@ func RecoverTransactions(ctx context.Context, adapter Adapter, name string, back
 
 // RollbackCompletedTransactional compensates an exact completed install using
 // only the raw prior retained by the connector subsystem's durable journal.
-func RollbackCompletedTransactional(ctx context.Context, adapter Adapter, change ConfirmedConnectorChange, backups BackupStore, completed CompletedOperationJournal, coordinator OperationCoordinator) error {
+func RollbackCompletedTransactional(ctx context.Context, adapter Adapter, change ConfirmedConnectorChange, owner config.StateDigest, backups BackupStore, completed CompletedOperationJournal, coordinator OperationCoordinator) error {
 	if adapter == nil || backups == nil || completed == nil || coordinator == nil || ValidateConfirmedConnectorChange(change) != nil ||
 		change.Action != OperationInstall || adapter.AdapterName() != change.Adapter {
+		return config.ErrConfirmedPlanDrift
+	}
+	if _, err := config.ParseStateDigest(string(owner)); err != nil {
 		return config.ErrConfirmedPlanDrift
 	}
 	return coordinator.WithOperationLock(ctx, change.Adapter, change.Name, func(locked context.Context) error {
 		if err := requireExactAdapterDiscovery(locked, adapter); err != nil {
 			return err
 		}
-		record, exists, err := completed.Completed(locked, change)
+		record, exists, err := completed.CompletedFor(locked, change, owner)
 		if err != nil {
 			return sanitizeConnectorError(err)
 		}
@@ -169,7 +179,10 @@ func RollbackCompletedTransactional(ctx context.Context, adapter Adapter, change
 			return sanitizeConnectorError(err)
 		}
 		if EqualConnectorEntry(current, backup.Prior) {
-			return sanitizeConnectorError(adapter.Verify(locked, backup.Prior))
+			if err := adapter.Verify(locked, backup.Prior); err != nil {
+				return sanitizeConnectorError(err)
+			}
+			return sanitizeConnectorError(completed.Advance(locked, record.OperationID, StageCompensated))
 		}
 		if !EqualConnectorEntry(current, backup.Desired) {
 			return config.ErrConfirmedPlanDrift
@@ -177,7 +190,10 @@ func RollbackCompletedTransactional(ctx context.Context, adapter Adapter, change
 		if err := adapter.Rollback(locked, plan); err != nil {
 			return sanitizeConnectorError(err)
 		}
-		return sanitizeConnectorError(adapter.Verify(locked, backup.Prior))
+		if err := adapter.Verify(locked, backup.Prior); err != nil {
+			return sanitizeConnectorError(err)
+		}
+		return sanitizeConnectorError(completed.Advance(locked, record.OperationID, StageCompensated))
 	})
 }
 

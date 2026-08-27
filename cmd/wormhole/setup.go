@@ -228,10 +228,10 @@ func (driver *productionSetupDriver) Plan(ctx context.Context, options setupOpti
 		readback, verifyErr := driver.gateway.Verify(ctx, localapi.SetupWorkingDirectoryRequest{WorkingDirectory: project.Root, Identity: identity, ExpectedTree: project.TreeDigest})
 		if verifyErr == nil && readback.Workspace.ProjectID == project.ProjectID && readback.Workspace.AcceptedCommitSHA == project.Commit &&
 			readback.Workspace.AcceptedTreeDigest == string(project.TreeDigest) && readback.Identity.DisplayName == identity.DisplayName &&
-			readback.Publication.Classification == publication && readback.Publication.BindingDigest == runtimeconfig.StateDigest(binding) && readback.CandidateDigest == project.TreeDigest {
+			readback.Publication.Classification == publication && readback.Publication.BindingDigest == runtimeconfig.StateDigest(binding) && readback.CandidatePresent && readback.CandidateDigest == project.TreeDigest {
 			details.Existing = &readback
 		}
-		if frozen == nil && details.Existing == nil && !gatewayStateKnownAbsent() {
+		if frozen == nil && details.Existing == nil {
 			return setupPlan{}, runtimeconfig.ErrConfirmedPlanDrift
 		}
 	}
@@ -279,7 +279,9 @@ func (driver *productionSetupDriver) Plan(ctx context.Context, options setupOpti
 			confirmedSetupChange(runtimeconfig.StagePublicationClassified, "publication", "classify", localapi.DigestSetupPublicationPredicate(localapi.SetupPublicationPredicate{
 				Classification: types.PublicationUnclassified, PolicyRevision: 1, ObservedOriginDigest: origin, TransitionKind: "bootstrap",
 			}), digestPublicationDesired(publication, runtimeconfig.StateDigest(binding))),
-			confirmedSetupChange(runtimeconfig.StageBaseImported, "base", "import", digestLiteral("base:not-acknowledged"), runtimeconfig.StateDigest(project.TreeDigest)),
+			confirmedSetupChange(runtimeconfig.StageBaseImported, "base", "import",
+				localapi.DigestSetupBasePredicate(localapi.SetupBasePredicate{CandidatePresent: false, CandidateDigest: project.TreeDigest, WorkspaceState: "clean"}),
+				localapi.DigestSetupBasePredicate(localapi.SetupBasePredicate{CandidatePresent: true, CandidateDigest: project.TreeDigest, WorkspaceState: "pending"})),
 		)
 	}
 	for _, name := range []connector.AdapterName{connector.AdapterCodex, connector.AdapterClaude} {
@@ -428,11 +430,12 @@ func (driver *productionSetupDriver) ReconcileStage(ctx context.Context, stage r
 			_, err := driver.verifyExistingSetup(ctx, plan.Selection, details)
 			return setupStageResult{}, err
 		}
-		if change.DesiredDigest != runtimeconfig.StateDigest(details.Project.TreeDigest) {
+		if change.DesiredDigest != localapi.DigestSetupBasePredicate(localapi.SetupBasePredicate{CandidatePresent: true, CandidateDigest: details.Project.TreeDigest, WorkspaceState: "pending"}) {
 			return setupStageResult{}, runtimeconfig.ErrConfirmedPlanDrift
 		}
 		readback, err := driver.gateway.Import(ctx, localapi.SetupImportRequest{
 			WorkingDirectory: details.Project.Root, ExpectedCommitSHA: details.Project.Commit, ExpectedTreeDigest: details.Project.TreeDigest,
+			ExpectedPriorDigest: change.PriorDigest, DesiredDigest: change.DesiredDigest,
 		})
 		if err != nil || readback.AcceptedCommitSHA != details.Project.Commit || readback.AcceptedTreeDigest != string(details.Project.TreeDigest) || readback.ImportedCandidateDigest != details.Project.TreeDigest || readback.Conflicted {
 			if errors.Is(err, runtimeconfig.ErrConfirmedPlanDrift) {
@@ -442,13 +445,13 @@ func (driver *productionSetupDriver) ReconcileStage(ctx context.Context, stage r
 		}
 		return setupStageResult{}, nil
 	case runtimeconfig.StageConnectorsApplied:
-		return driver.reconcileConnectors(ctx, plan.Selection)
+		return driver.reconcileConnectors(ctx, plan.Selection, setupConnectorOwner(journal.JournalID, plan.Selection.PlanDigest))
 	case runtimeconfig.StageFinalVerified:
 		if err := driver.gateway.Ready(ctx); err != nil {
 			return setupStageResult{}, runtimeconfig.ErrConfirmedPlanDrift
 		}
 		readback, err := driver.gateway.Verify(ctx, localapi.SetupWorkingDirectoryRequest{WorkingDirectory: details.Project.Root, Identity: plan.Selection.Identity, ExpectedTree: details.Project.TreeDigest})
-		if err != nil || readback.Workspace.ProjectID != details.Project.ProjectID || readback.Workspace.AcceptedCommitSHA != details.Project.Commit || readback.Workspace.AcceptedTreeDigest != string(details.Project.TreeDigest) || readback.Workspace.WorkspaceID != journal.WorkspaceID || readback.Identity.HumanPrincipalID != journal.IdentityPrincipalID || readback.Identity.DisplayName != plan.Selection.Identity.DisplayName || readback.Publication.Classification != details.PublicationClass || readback.Publication.BindingDigest != plan.Selection.PublicationBindingDigest || readback.CandidateDigest != details.Project.TreeDigest {
+		if err != nil || readback.Workspace.ProjectID != details.Project.ProjectID || readback.Workspace.AcceptedCommitSHA != details.Project.Commit || readback.Workspace.AcceptedTreeDigest != string(details.Project.TreeDigest) || readback.Workspace.WorkspaceID != journal.WorkspaceID || readback.Identity.HumanPrincipalID != journal.IdentityPrincipalID || readback.Identity.DisplayName != plan.Selection.Identity.DisplayName || readback.Publication.Classification != details.PublicationClass || readback.Publication.BindingDigest != plan.Selection.PublicationBindingDigest || !readback.CandidatePresent || readback.CandidateDigest != details.Project.TreeDigest {
 			return setupStageResult{}, runtimeconfig.ErrConfirmedPlanDrift
 		}
 		for _, name := range plan.Selection.ConnectorAdapters {
@@ -466,7 +469,7 @@ func (driver *productionSetupDriver) ReconcileStage(ctx context.Context, stage r
 func (driver *productionSetupDriver) verifyExistingSetup(ctx context.Context, selection runtimeconfig.SetupSelection, details productionSetupDetails) (localapi.SetupVerifyReadback, error) {
 	readback, err := driver.gateway.Verify(ctx, localapi.SetupWorkingDirectoryRequest{WorkingDirectory: details.Project.Root, Identity: selection.Identity, ExpectedTree: details.Project.TreeDigest})
 	if err != nil || readback.Workspace.ProjectID != details.Project.ProjectID || readback.Workspace.AcceptedCommitSHA != details.Project.Commit || readback.Workspace.AcceptedTreeDigest != string(details.Project.TreeDigest) ||
-		readback.Identity.DisplayName != selection.Identity.DisplayName || readback.Publication.Classification != details.PublicationClass || readback.Publication.BindingDigest != selection.PublicationBindingDigest || readback.CandidateDigest != details.Project.TreeDigest {
+		readback.Identity.DisplayName != selection.Identity.DisplayName || readback.Publication.Classification != details.PublicationClass || readback.Publication.BindingDigest != selection.PublicationBindingDigest || !readback.CandidatePresent || readback.CandidateDigest != details.Project.TreeDigest {
 		return localapi.SetupVerifyReadback{}, runtimeconfig.ErrConfirmedPlanDrift
 	}
 	return readback, nil
@@ -554,7 +557,7 @@ func (driver *productionSetupDriver) reconcileGateway(ctx context.Context, selec
 	return nil
 }
 
-func (driver *productionSetupDriver) reconcileConnectors(ctx context.Context, selection runtimeconfig.SetupSelection) (setupStageResult, error) {
+func (driver *productionSetupDriver) reconcileConnectors(ctx context.Context, selection runtimeconfig.SetupSelection, owner runtimeconfig.StateDigest) (setupStageResult, error) {
 	result := setupStageResult{ConnectorBackups: []runtimeconfig.BackupReference{}}
 	applied := []connector.ConfirmedConnectorChange{}
 	fail := func(cause error) (setupStageResult, error) {
@@ -564,7 +567,7 @@ func (driver *productionSetupDriver) reconcileConnectors(ctx context.Context, se
 			if driver.connectors.store == nil || adapter == nil {
 				return setupStageResult{}, runtimeconfig.ErrConfirmedPlanDrift
 			}
-			if err := connector.RollbackCompletedTransactional(ctx, adapter, change, driver.connectors.store, driver.connectors.store, driver.connectors.store); err != nil {
+			if err := connector.RollbackCompletedTransactional(ctx, adapter, change, owner, driver.connectors.store, driver.connectors.store, driver.connectors.store); err != nil {
 				return setupStageResult{}, err
 			}
 		}
@@ -633,7 +636,7 @@ func (driver *productionSetupDriver) reconcileConnectors(ctx context.Context, se
 				}
 				driver.connectors.store = store
 			}
-			record, found, completedErr := driver.connectors.store.CompletedTransition(ctx, name, "wormhole", connector.OperationInstall, change.PriorDigest, change.DesiredDigest)
+			record, found, completedErr := driver.connectors.store.CompletedTransition(ctx, name, "wormhole", connector.OperationInstall, change.PriorDigest, change.DesiredDigest, owner)
 			if completedErr != nil || !found {
 				if completedErr != nil {
 					return fail(completedErr)
@@ -648,12 +651,29 @@ func (driver *productionSetupDriver) reconcileConnectors(ctx context.Context, se
 		if observedDigest != change.PriorDigest {
 			return fail(runtimeconfig.ErrConfirmedPlanDrift)
 		}
+		if driver.connectors.store == nil {
+			store, openErr := connector.OpenStore()
+			if openErr != nil {
+				return fail(openErr)
+			}
+			driver.connectors.store = store
+		}
+		completed, found, completedErr := driver.connectors.store.CompletedTransition(ctx, name, "wormhole", connector.OperationInstall, change.PriorDigest, change.DesiredDigest, owner)
+		if completedErr != nil {
+			return fail(completedErr)
+		}
+		if found {
+			stale := connector.ConfirmedConnectorChange{Adapter: name, Name: "wormhole", Action: connector.OperationInstall, PlanDigest: completed.PlanDigest, ExpectedPriorDigest: change.PriorDigest, DesiredDigest: change.DesiredDigest}
+			if err := connector.RollbackCompletedTransactional(ctx, adapter, stale, owner, driver.connectors.store, driver.connectors.store, driver.connectors.store); err != nil {
+				return fail(err)
+			}
+		}
 		connectorPlan, err := adapter.Plan(ctx, prior, driver.connectors.desired)
 		if err != nil {
 			return fail(err)
 		}
 		confirmed := connector.ConfirmedConnectorChange{Adapter: name, Name: "wormhole", Action: connector.OperationInstall, PlanDigest: connectorPlan.Digest, ExpectedPriorDigest: change.PriorDigest, DesiredDigest: change.DesiredDigest}
-		transaction, err := driver.connectors.applyConfirmed(ctx, adapter, driver.connectors.desired, confirmed)
+		transaction, err := driver.connectors.applyConfirmedFor(ctx, adapter, driver.connectors.desired, confirmed, owner)
 		if err != nil {
 			return fail(err)
 		}
@@ -663,6 +683,13 @@ func (driver *productionSetupDriver) reconcileConnectors(ctx context.Context, se
 		}
 	}
 	return result, nil
+}
+
+func setupConnectorOwner(journalID string, planDigest runtimeconfig.StateDigest) runtimeconfig.StateDigest {
+	return digestValue(struct {
+		JournalID  string
+		PlanDigest runtimeconfig.StateDigest
+	}{JournalID: journalID, PlanDigest: planDigest})
 }
 
 func (driver *productionSetupDriver) observeProject(ctx context.Context) (setupProjectObservation, error) {
@@ -1074,12 +1101,18 @@ func renderSetupPlan(output io.Writer, plan setupPlan) {
 	if plan.Selection.PublicationVisibility == string(types.PublicationUnclassified) {
 		fmt.Fprintln(output, "  warning: unclassified publication keeps checkpoint blocked")
 	}
-	fmt.Fprintln(output, "  gateway: ensure one local service is ready")
-	fmt.Fprintln(output, "  workspace: register, classify, and import the accepted base")
-	if len(plan.Selection.ConnectorAdapters) == 0 {
-		fmt.Fprintln(output, "  connectors: none available")
-	} else {
-		fmt.Fprintf(output, "  connectors: %s\n", strings.Join(plan.Selection.ConnectorAdapters, ", "))
+	for _, stage := range orderedCLISetupStages {
+		count := 0
+		for _, change := range plan.Selection.Changes {
+			if change.Stage != stage {
+				continue
+			}
+			fmt.Fprintf(output, "  change %s %s %s: %s -> %s\n", change.Stage, change.Subject, change.Action, change.PriorDigest, change.DesiredDigest)
+			count++
+		}
+		if count == 0 {
+			fmt.Fprintf(output, "  no-op %s: verify exact desired state\n", stage)
+		}
 	}
 }
 

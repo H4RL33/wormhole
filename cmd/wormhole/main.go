@@ -81,8 +81,8 @@ usage: wormhole <command> [flags]
 commands:
   wormhole setup [flags]                 confirm and resume canonical local setup
   wormhole connector list <adapter>      inspect a native harness connector
-  wormhole connector install <adapter>   transactionally install a connector
-  wormhole connector remove <adapter>    transactionally remove a connector
+  wormhole connector install [--yes] <adapter>   transactionally install a connector
+  wormhole connector remove [--yes] <adapter>    transactionally remove a connector
   wormhole init                          interactive setup wizard
   wormhole whoami [flags]                show this agent's identity
   wormhole status [flags]                show local Gateway sync status (--profile required)

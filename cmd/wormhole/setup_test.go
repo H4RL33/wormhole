@@ -6,19 +6,25 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	runtimeconfig "github.com/H4RL33/wormhole/internal/runtime/config"
 	"github.com/H4RL33/wormhole/internal/runtime/config/connector"
 	"github.com/H4RL33/wormhole/internal/runtime/localapi"
 	"github.com/H4RL33/wormhole/internal/types"
+	state "github.com/H4RL33/wormhole/internal/types/projectstate"
 )
+
+var setupTestGitExecutable, _ = exec.LookPath("git")
 
 func TestSetupProvesGatewayStateAbsentBeforeFreezingUnavailablePlan(t *testing.T) {
 	data := filepath.Join(t.TempDir(), "data")
@@ -38,6 +44,86 @@ func TestSetupProvesGatewayStateAbsentBeforeFreezingUnavailablePlan(t *testing.T
 	}
 }
 
+func TestProductionSetupReadyGatewayRejectsNonAuthoritativeVerify(t *testing.T) {
+	if setupTestGitExecutable == "" {
+		t.Fatal("git test executable is unavailable")
+	}
+	root := setupPlanRepository(t)
+	t.Setenv("PATH", filepath.Dir(setupTestGitExecutable))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "absent-data-root"))
+	gateway := &readySetupGateway{verifyErr: localapi.ErrPrivateSetupRequest}
+	driver := &productionSetupDriver{
+		root: root, runner: runtimeconfig.NewCommandRunner(), gateway: gateway,
+		connectors: &productionConnectorCommands{
+			adapters: map[connector.AdapterName]connector.Adapter{}, unavailable: map[connector.AdapterName]bool{connector.AdapterCodex: true, connector.AdapterClaude: true},
+			desired: connector.ConnectorEntry{State: connector.EntryPresent, Scope: connector.ScopeUser, Transport: connector.TransportStdio, Command: "/usr/bin/wormhole", Args: []string{"mcp"}, Env: []connector.EnvironmentVariable{}},
+		},
+	}
+	_, err := driver.Plan(t.Context(), setupOptions{publication: string(types.PublicationUnclassified), name: "Alice Example"}, nil)
+	if !errors.Is(err, runtimeconfig.ErrConfirmedPlanDrift) {
+		t.Fatalf("ready Gateway non-authoritative verify error = %v", err)
+	}
+	if gateway.verifyCalls != 1 {
+		t.Fatalf("verify calls = %d", gateway.verifyCalls)
+	}
+}
+
+type readySetupGateway struct {
+	verifyErr   error
+	verifyCalls int
+}
+
+func (*readySetupGateway) Ready(context.Context) error { return nil }
+func (*readySetupGateway) Register(context.Context, localapi.SetupWorkspaceRequest) (localapi.SetupWorkspaceReadback, error) {
+	return localapi.SetupWorkspaceReadback{}, errors.New("unexpected register")
+}
+func (*readySetupGateway) EnsureIdentity(context.Context, localapi.SetupIdentityRequest) (localapi.SetupIdentityReadback, error) {
+	return localapi.SetupIdentityReadback{}, errors.New("unexpected identity")
+}
+func (*readySetupGateway) Classify(context.Context, localapi.SetupPublicationRequest) (localapi.SetupPublicationReadback, error) {
+	return localapi.SetupPublicationReadback{}, errors.New("unexpected publication")
+}
+func (*readySetupGateway) Import(context.Context, localapi.SetupImportRequest) (localapi.SetupImportReadback, error) {
+	return localapi.SetupImportReadback{}, errors.New("unexpected import")
+}
+func (g *readySetupGateway) Verify(context.Context, localapi.SetupWorkingDirectoryRequest) (localapi.SetupVerifyReadback, error) {
+	g.verifyCalls++
+	return localapi.SetupVerifyReadback{}, g.verifyErr
+}
+
+func setupPlanRepository(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	projectID := "00000000-0000-4000-8000-000000000055"
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	snapshot := state.Snapshot{
+		Config:  state.ConfigV1{SnapshotVersion: 1, ProjectID: projectID, Handle: types.ProjectHandle{Namespace: "acme", Name: "wormhole"}},
+		Project: state.ProjectV1{SchemaVersion: 1, Kind: "project", ID: projectID, Name: "Wormhole", Aliases: []string{}, CreatedAt: now, UpdatedAt: now, Extensions: state.ExtensionsV1{}},
+		Actors:  map[string]state.Record[state.ActorV1]{}, Tasks: map[string]state.Record[state.TaskV1]{}, TaskLinks: map[string]state.Record[state.TaskLinkV1]{},
+		Articles: map[string]state.KBRecord{}, Channels: map[string]state.Record[state.ChannelV1]{}, Events: map[string]state.EventV1{}, GitLinks: map[string]state.Record[state.GitLinkV1]{},
+	}
+	tree, err := state.EncodeTree(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range tree {
+		path := filepath.Join(root, ".wormhole", filepath.FromSlash(file.Path))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, file.Data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, args := range [][]string{{"init", "-q"}, {"config", "user.name", "Test"}, {"config", "user.email", "test@example.test"}, {"add", ".wormhole"}, {"commit", "-q", "-m", "snapshot"}} {
+		command := exec.Command(setupTestGitExecutable, append([]string{"-C", root}, args...)...)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+	}
+	return root
+}
+
 func TestSetupRendersAndConfirmsOneCompletePlanBeforeEffects(t *testing.T) {
 	events := []string{}
 	journal := newFakeSetupJournal(&events)
@@ -55,6 +141,12 @@ func TestSetupRendersAndConfirmsOneCompletePlanBeforeEffects(t *testing.T) {
 	}
 	if got := strings.Count(stdout.String(), "Apply this complete plan? [y/N]"); got != 1 {
 		t.Fatalf("confirmation count = %d, output %q", got, stdout.String())
+	}
+	for _, change := range testSetupSelection("local_only").Changes {
+		want := fmt.Sprintf("  change %s %s %s: %s -> %s", change.Stage, change.Subject, change.Action, change.PriorDigest, change.DesiredDigest)
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("rendered plan omitted confirmed change %q: %s", want, stdout.String())
+		}
 	}
 	selection := eventIndex(events, "selection")
 	if selection < 0 {
@@ -156,7 +248,8 @@ func TestProductionSetupConnectorFailureCompensatesFreshProcessCompletion(t *tes
 	absent := connector.ConnectorEntry{State: connector.EntryAbsent}
 	codex := &setupStateAdapter{name: connector.AdapterCodex, current: absent, version: "0.149.0"}
 	claude := &setupStateAdapter{name: connector.AdapterClaude, current: absent, version: "2.1.220", applyErr: errors.New("claude install failed")}
-	selection := runtimeconfig.SetupSelection{ConnectorAdapters: []string{"codex", "claude"}}
+	selection := runtimeconfig.SetupSelection{ConnectorAdapters: []string{"codex", "claude"}, PlanDigest: runtimeconfig.SHA256StateDigest([]byte("setup-attempt"))}
+	owner := setupConnectorOwner("00000000-0000-4000-8000-000000000099", selection.PlanDigest)
 	for _, adapter := range []*setupStateAdapter{codex, claude} {
 		plan, planErr := adapter.Plan(t.Context(), absent, desired)
 		if planErr != nil {
@@ -167,13 +260,13 @@ func TestProductionSetupConnectorFailureCompensatesFreshProcessCompletion(t *tes
 		selection.Changes = append(selection.Changes, runtimeconfig.ConfirmedChange{Stage: runtimeconfig.StageConnectorsApplied, Subject: "connector:" + string(adapter.name), Action: "install", PriorDigest: priorDigest, DesiredDigest: desiredDigest})
 		if adapter == codex {
 			change := connector.ConfirmedConnectorChange{Adapter: adapter.name, Name: "wormhole", Action: connector.OperationInstall, PlanDigest: plan.Digest, ExpectedPriorDigest: priorDigest, DesiredDigest: desiredDigest}
-			if _, err := connector.ApplyTransactional(t.Context(), adapter, desired, change, store, store, store); err != nil {
+			if _, err := connector.ApplyTransactionalFor(t.Context(), adapter, desired, change, owner, store, store, store); err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
 	driver := &productionSetupDriver{connectors: &productionConnectorCommands{store: store, desired: desired, adapters: map[connector.AdapterName]connector.Adapter{connector.AdapterCodex: codex, connector.AdapterClaude: claude}}}
-	if _, err := driver.reconcileConnectors(t.Context(), selection); err == nil {
+	if _, err := driver.reconcileConnectors(t.Context(), selection, owner); err == nil {
 		t.Fatal("connector failure unexpectedly succeeded")
 	}
 	if !connector.EqualConnectorEntry(codex.current, absent) || !connector.EqualConnectorEntry(claude.current, absent) {
@@ -182,6 +275,73 @@ func TestProductionSetupConnectorFailureCompensatesFreshProcessCompletion(t *tes
 	if codex.applyCalls != 1 {
 		t.Fatalf("fresh resume re-applied codex: calls=%d", codex.applyCalls)
 	}
+	if _, err := driver.reconcileConnectors(t.Context(), selection, owner); err == nil {
+		t.Fatal("retry connector failure unexpectedly succeeded")
+	}
+	if !connector.EqualConnectorEntry(codex.current, absent) || !connector.EqualConnectorEntry(claude.current, absent) {
+		t.Fatalf("retry connectors not restored: codex=%+v claude=%+v", codex.current, claude.current)
+	}
+	if codex.applyCalls != 2 {
+		t.Fatalf("retry did not apply exactly one successor: calls=%d", codex.applyCalls)
+	}
+}
+
+func TestProductionSetupConnectorResumeRetiresCompensationCrashBeforeSuccessor(t *testing.T) {
+	store, err := connector.OpenStoreAt(filepath.Join(t.TempDir(), "connectors"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := connector.ConnectorEntry{State: connector.EntryPresent, Scope: connector.ScopeUser, Transport: connector.TransportStdio, Command: "/usr/bin/wormhole", Args: []string{"mcp"}, Env: []connector.EnvironmentVariable{}}
+	absent := connector.ConnectorEntry{State: connector.EntryAbsent}
+	codex := &setupStateAdapter{name: connector.AdapterCodex, current: absent, version: "0.149.0"}
+	claude := &setupStateAdapter{name: connector.AdapterClaude, current: absent, version: "2.1.220", applyErr: errors.New("claude install failed")}
+	selection := runtimeconfig.SetupSelection{ConnectorAdapters: []string{"codex", "claude"}, PlanDigest: runtimeconfig.SHA256StateDigest([]byte("setup-compensation-crash"))}
+	owner := setupConnectorOwner("00000000-0000-4000-8000-000000000077", selection.PlanDigest)
+	priorDigest, _ := connector.DigestConnectorEntry(absent)
+	desiredDigest, _ := connector.DigestConnectorEntry(desired)
+	for _, adapter := range []*setupStateAdapter{codex, claude} {
+		selection.Changes = append(selection.Changes, runtimeconfig.ConfirmedChange{Stage: runtimeconfig.StageConnectorsApplied, Subject: "connector:" + string(adapter.name), Action: "install", PriorDigest: priorDigest, DesiredDigest: desiredDigest})
+	}
+	plan, err := codex.Plan(t.Context(), absent, desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	change := connector.ConfirmedConnectorChange{Adapter: connector.AdapterCodex, Name: "wormhole", Action: connector.OperationInstall, PlanDigest: plan.Digest, ExpectedPriorDigest: priorDigest, DesiredDigest: desiredDigest}
+	if _, err := connector.ApplyTransactionalFor(t.Context(), codex, desired, change, owner, store, store, store); err != nil {
+		t.Fatal(err)
+	}
+	crashing := &compensationAdvanceFailure{Store: store}
+	if err := connector.RollbackCompletedTransactional(t.Context(), codex, change, owner, store, crashing, store); err == nil {
+		t.Fatal("compensation journal crash unexpectedly succeeded")
+	}
+	if !connector.EqualConnectorEntry(codex.current, absent) {
+		t.Fatalf("compensation did not reach exact prior: %+v", codex.current)
+	}
+
+	driver := &productionSetupDriver{connectors: &productionConnectorCommands{store: store, desired: desired, adapters: map[connector.AdapterName]connector.Adapter{connector.AdapterCodex: codex, connector.AdapterClaude: claude}}}
+	if _, err := driver.reconcileConnectors(t.Context(), selection, owner); err == nil {
+		t.Fatal("connector failure unexpectedly succeeded")
+	}
+	if !connector.EqualConnectorEntry(codex.current, absent) || !connector.EqualConnectorEntry(claude.current, absent) {
+		t.Fatalf("fresh resume did not restore exact priors: codex=%+v claude=%+v", codex.current, claude.current)
+	}
+	if codex.applyCalls != 2 {
+		t.Fatalf("fresh resume did not apply exactly one successor: calls=%d", codex.applyCalls)
+	}
+	if _, found, err := store.CompletedTransition(t.Context(), connector.AdapterCodex, "wormhole", connector.OperationInstall, priorDigest, desiredDigest, owner); err != nil || found {
+		t.Fatalf("completed operation survived compensation recovery: found=%v err=%v", found, err)
+	}
+}
+
+type compensationAdvanceFailure struct {
+	*connector.Store
+}
+
+func (j *compensationAdvanceFailure) Advance(_ context.Context, _ string, stage connector.OperationStage) error {
+	if stage == connector.StageCompensated {
+		return errors.New("injected compensation journal crash")
+	}
+	return errors.New("unexpected compensation stage")
 }
 
 type setupStateAdapter struct {

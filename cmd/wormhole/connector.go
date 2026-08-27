@@ -2,8 +2,10 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -18,20 +20,23 @@ import (
 
 type connectorCommandDependencies interface {
 	Inspect(context.Context, connector.AdapterName) (connector.Availability, connector.ConnectorEntry, error)
-	Transaction(context.Context, connector.AdapterName, string) error
+	Plan(context.Context, connector.AdapterName, string, connector.ConnectorEntry) (connector.ConnectorEntry, connector.ConfirmedConnectorChange, error)
+	Transaction(context.Context, connector.AdapterName, connector.ConnectorEntry, connector.ConfirmedConnectorChange) error
 }
 
 type productionConnectorCommands struct {
 	store       *connector.Store
 	adapters    map[connector.AdapterName]connector.Adapter
 	desired     connector.ConnectorEntry
-	inspected   map[connector.AdapterName]connector.ConnectorEntry
 	unavailable map[connector.AdapterName]bool
 }
 
 func newProductionConnectorCommands() (connectorCommandDependencies, error) {
 	if runtime.GOOS != "linux" {
 		return nil, connector.ErrConnectorFilesystemUnsupported
+	}
+	if _, present := os.LookupEnv("CLAUDE_CONFIG_DIR"); present {
+		return nil, connector.ErrUnsupportedConnectorEntry
 	}
 	root, err := canonicalCurrentDirectory()
 	if err != nil {
@@ -43,9 +48,9 @@ func newProductionConnectorCommands() (connectorCommandDependencies, error) {
 	}
 	runner := runtimeconfig.NewCommandRunner()
 	commands := &productionConnectorCommands{
-		adapters:  map[connector.AdapterName]connector.Adapter{},
-		desired:   connector.ConnectorEntry{State: connector.EntryPresent, Scope: connector.ScopeUser, Transport: connector.TransportStdio, Command: wormholeExecutable, Args: []string{"mcp"}, Env: []connector.EnvironmentVariable{}},
-		inspected: map[connector.AdapterName]connector.ConnectorEntry{}, unavailable: map[connector.AdapterName]bool{},
+		adapters:    map[connector.AdapterName]connector.Adapter{},
+		desired:     connector.ConnectorEntry{State: connector.EntryPresent, Scope: connector.ScopeUser, Transport: connector.TransportStdio, Command: wormholeExecutable, Args: []string{"mcp"}, Env: []connector.EnvironmentVariable{}},
+		unavailable: map[connector.AdapterName]bool{},
 	}
 	if executable, executableErr := canonicalNativeExecutable("codex"); executableErr == nil {
 		adapter, adapterErr := connector.NewCodexAdapter(runner, executable, "wormhole")
@@ -53,23 +58,30 @@ func newProductionConnectorCommands() (connectorCommandDependencies, error) {
 			return nil, adapterErr
 		}
 		commands.adapters[connector.AdapterCodex] = adapter
-	} else {
+	} else if errors.Is(executableErr, exec.ErrNotFound) {
 		commands.unavailable[connector.AdapterCodex] = true
+	} else {
+		return nil, executableErr
 	}
 	if executable, executableErr := canonicalNativeExecutable("claude"); executableErr == nil {
 		home, homeErr := os.UserHomeDir()
-		if homeErr != nil || !filepath.IsAbs(home) {
-			commands.unavailable[connector.AdapterClaude] = true
+		if homeErr != nil {
+			return nil, homeErr
+		}
+		if !filepath.IsAbs(home) {
+			return nil, connector.ErrUnsupportedConnectorEntry
 		} else {
 			adapter, adapterErr := connector.NewClaudeAdapterAt(runner, executable, "wormhole", filepath.Join(home, ".claude.json"), root)
 			if adapterErr != nil {
-				commands.unavailable[connector.AdapterClaude] = true
+				return nil, adapterErr
 			} else {
 				commands.adapters[connector.AdapterClaude] = adapter
 			}
 		}
-	} else {
+	} else if errors.Is(executableErr, exec.ErrNotFound) {
 		commands.unavailable[connector.AdapterClaude] = true
+	} else {
+		return nil, executableErr
 	}
 	return commands, nil
 }
@@ -90,15 +102,13 @@ func (commands *productionConnectorCommands) Inspect(ctx context.Context, name c
 	if err != nil {
 		return connector.Availability{}, connector.ConnectorEntry{}, err
 	}
-	commands.inspected[name] = entry
 	return availability, entry, nil
 }
 
-func (commands *productionConnectorCommands) Transaction(ctx context.Context, name connector.AdapterName, action string) error {
+func (commands *productionConnectorCommands) Plan(ctx context.Context, name connector.AdapterName, action string, prior connector.ConnectorEntry) (connector.ConnectorEntry, connector.ConfirmedConnectorChange, error) {
 	adapter := commands.adapters[name]
-	prior, inspected := commands.inspected[name]
-	if adapter == nil || !inspected {
-		return connector.ErrConnectorUnavailable
+	if adapter == nil {
+		return connector.ConnectorEntry{}, connector.ConfirmedConnectorChange{}, connector.ErrConnectorUnavailable
 	}
 	desired := commands.desired
 	operation := connector.OperationInstall
@@ -107,26 +117,41 @@ func (commands *productionConnectorCommands) Transaction(ctx context.Context, na
 		operation = connector.OperationRemove
 	}
 	if connector.EqualConnectorEntry(prior, desired) {
-		return adapter.Verify(ctx, desired)
+		return desired, connector.ConfirmedConnectorChange{}, nil
 	}
 	plan, err := adapter.Plan(ctx, prior, desired)
 	if err != nil {
-		return err
+		return connector.ConnectorEntry{}, connector.ConfirmedConnectorChange{}, err
 	}
 	priorDigest, err := connector.DigestConnectorEntry(prior)
 	if err != nil {
-		return err
+		return connector.ConnectorEntry{}, connector.ConfirmedConnectorChange{}, err
 	}
 	desiredDigest, err := connector.DigestConnectorEntry(desired)
 	if err != nil {
-		return err
+		return connector.ConnectorEntry{}, connector.ConfirmedConnectorChange{}, err
 	}
 	change := connector.ConfirmedConnectorChange{Adapter: name, Name: "wormhole", Action: operation, PlanDigest: plan.Digest, ExpectedPriorDigest: priorDigest, DesiredDigest: desiredDigest}
-	_, err = commands.applyConfirmed(ctx, adapter, desired, change)
+	return desired, change, nil
+}
+
+func (commands *productionConnectorCommands) Transaction(ctx context.Context, name connector.AdapterName, desired connector.ConnectorEntry, change connector.ConfirmedConnectorChange) error {
+	adapter := commands.adapters[name]
+	if adapter == nil {
+		return connector.ErrConnectorUnavailable
+	}
+	if change == (connector.ConfirmedConnectorChange{}) {
+		return adapter.Verify(ctx, desired)
+	}
+	_, err := commands.applyConfirmed(ctx, adapter, desired, change)
 	return err
 }
 
 func (commands *productionConnectorCommands) applyConfirmed(ctx context.Context, adapter connector.Adapter, desired connector.ConnectorEntry, change connector.ConfirmedConnectorChange) (connector.TransactionResult, error) {
+	return commands.applyConfirmedFor(ctx, adapter, desired, change, "")
+}
+
+func (commands *productionConnectorCommands) applyConfirmedFor(ctx context.Context, adapter connector.Adapter, desired connector.ConnectorEntry, change connector.ConfirmedConnectorChange, owner runtimeconfig.StateDigest) (connector.TransactionResult, error) {
 	if commands.store == nil {
 		store, err := connector.OpenStore()
 		if err != nil {
@@ -136,6 +161,9 @@ func (commands *productionConnectorCommands) applyConfirmed(ctx context.Context,
 	}
 	if change.Action == connector.OperationRemove {
 		return connector.RemoveTransactional(ctx, adapter, change, commands.store, commands.store, commands.store)
+	}
+	if owner != "" {
+		return connector.ApplyTransactionalFor(ctx, adapter, desired, change, owner, commands.store, commands.store, commands.store)
 	}
 	return connector.ApplyTransactional(ctx, adapter, desired, change, commands.store, commands.store, commands.store)
 }
@@ -194,19 +222,43 @@ func runConnector(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		return 2
 	}
 	action := args[0]
-	yes := false
-	positionals := make([]string, 0, len(args)-1)
-	for _, value := range args[1:] {
-		if value == "--yes" {
-			yes = true
-			continue
-		}
-		positionals = append(positionals, value)
-	}
 	if action != "list" && action != "install" && action != "remove" {
 		fmt.Fprintln(stderr, "usage: wormhole connector list|install|remove <codex|claude> [--yes]")
 		return 2
 	}
+	flags := flag.NewFlagSet("wormhole connector "+action, flag.ContinueOnError)
+	var flagOutput bytes.Buffer
+	flags.SetOutput(&flagOutput)
+	yes := false
+	if action != "list" {
+		flags.BoolVar(&yes, "yes", false, "apply the rendered exact connector plan")
+	}
+	flags.Usage = func() {
+		if action == "list" {
+			fmt.Fprintln(&flagOutput, "usage: wormhole connector list <codex|claude>")
+		} else {
+			fmt.Fprintf(&flagOutput, "usage: wormhole connector %s [--yes] <codex|claude>\n", action)
+		}
+		flags.PrintDefaults()
+	}
+	flagArgs := make([]string, 0, len(args)-1)
+	positionals := make([]string, 0, len(args)-1)
+	for _, value := range args[1:] {
+		if strings.HasPrefix(value, "-") {
+			flagArgs = append(flagArgs, value)
+		} else {
+			positionals = append(positionals, value)
+		}
+	}
+	if err := flags.Parse(flagArgs); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			_, _ = io.Copy(stdout, &flagOutput)
+			return 0
+		}
+		_, _ = io.Copy(stderr, &flagOutput)
+		return 2
+	}
+	positionals = append(positionals, flags.Args()...)
 	if len(positionals) != 1 {
 		fmt.Fprintln(stderr, "wormhole connector: exactly one adapter is required")
 		return 2
@@ -245,7 +297,17 @@ func runConnector(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		fmt.Fprintln(stderr, "wormhole connector: native client unavailable")
 		return 1
 	}
+	desired, change, err := dependencies.Plan(ctx, adapter, action, entry)
+	if err != nil {
+		fmt.Fprintln(stderr, "wormhole connector: native connector planning failed")
+		return 1
+	}
 	fmt.Fprintf(stdout, "%s connector plan: %s wormhole\n", adapter, action)
+	if change == (connector.ConfirmedConnectorChange{}) {
+		fmt.Fprintln(stdout, "  no-op: exact desired state already present")
+	} else {
+		fmt.Fprintf(stdout, "  prior %s\n  desired %s\n  plan %s\n", change.ExpectedPriorDigest, change.DesiredDigest, change.PlanDigest)
+	}
 	if !yes {
 		fmt.Fprint(stdout, "Apply connector change? [y/N] ")
 		line, readErr := bufio.NewReader(io.LimitReader(stdin, 32)).ReadString('\n')
@@ -259,7 +321,7 @@ func runConnector(ctx context.Context, args []string, stdin io.Reader, stdout, s
 			return 1
 		}
 	}
-	if err := dependencies.Transaction(ctx, adapter, action); err != nil {
+	if err := dependencies.Transaction(ctx, adapter, desired, change); err != nil {
 		fmt.Fprintln(stderr, "wormhole connector: transaction failed")
 		return 1
 	}

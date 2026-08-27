@@ -853,6 +853,9 @@ func commandUsageLines(help string) map[string]parsedCommandUsage {
 			if field == "[flags]" {
 				continue
 			}
+			if strings.HasPrefix(field, "[--") {
+				continue
+			}
 			if strings.HasPrefix(field, "<") || strings.HasPrefix(field, "[") {
 				positionals = append(positionals, field)
 				continue

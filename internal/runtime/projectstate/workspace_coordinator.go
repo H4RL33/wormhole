@@ -208,7 +208,7 @@ func loadComposedWorkspaceRecord(ctx context.Context, tx *localstore.WorkspaceMu
 	if err != nil {
 		return composedWorkspace{}, err
 	}
-	return composedWorkspace{status: WorkspaceStatus{Binding: record.Binding, State: record.State, AcceptedSnapshot: record.Snapshot, CandidateDigest: view.Snapshot.Digest, OverlayGeneration: view.ThroughGeneration}, view: view, operations: operations, selectedStart: start, boundary: boundary}, nil
+	return composedWorkspace{status: WorkspaceStatus{Binding: record.Binding, State: record.State, AcceptedSnapshot: record.Snapshot, CandidatePresent: candidate != nil, CandidateDigest: view.Snapshot.Digest, OverlayGeneration: view.ThroughGeneration}, view: view, operations: operations, selectedStart: start, boundary: boundary}, nil
 }
 
 func selectCandidateStart(accepted state.Snapshot, candidate *localstore.WorkspaceCandidateRecord) (state.Snapshot, int64) {

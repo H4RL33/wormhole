@@ -328,7 +328,7 @@ func TestStatusExposesCandidateDigestAndOverlayGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if accepted.CandidateDigest != accepted.AcceptedSnapshot.Digest || accepted.OverlayGeneration != 0 {
+	if accepted.CandidatePresent || accepted.CandidateDigest != accepted.AcceptedSnapshot.Digest || accepted.OverlayGeneration != 0 {
 		t.Fatalf("clean status=%+v", accepted)
 	}
 }

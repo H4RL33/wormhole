@@ -86,9 +86,26 @@ type SetupWorkingDirectoryRequest struct {
 }
 
 type SetupImportRequest struct {
-	WorkingDirectory   string       `json:"working_directory"`
-	ExpectedCommitSHA  string       `json:"expected_commit_sha"`
-	ExpectedTreeDigest state.Digest `json:"expected_tree_digest"`
+	WorkingDirectory    string             `json:"working_directory"`
+	ExpectedCommitSHA   string             `json:"expected_commit_sha"`
+	ExpectedTreeDigest  state.Digest       `json:"expected_tree_digest"`
+	ExpectedPriorDigest config.StateDigest `json:"expected_prior_digest"`
+	DesiredDigest       config.StateDigest `json:"desired_digest"`
+}
+
+type SetupBasePredicate struct {
+	CandidatePresent  bool         `json:"candidate_present"`
+	CandidateDigest   state.Digest `json:"candidate_digest"`
+	OverlayGeneration int64        `json:"overlay_generation"`
+	WorkspaceState    string       `json:"workspace_state"`
+}
+
+func DigestSetupBasePredicate(predicate SetupBasePredicate) config.StateDigest {
+	data, err := json.Marshal(predicate)
+	if err != nil {
+		return ""
+	}
+	return config.SHA256StateDigest(data)
 }
 
 type SetupWorkspaceReadback struct {
@@ -122,10 +139,11 @@ type SetupImportReadback struct {
 }
 
 type SetupVerifyReadback struct {
-	Workspace       SetupWorkspaceReadback   `json:"workspace"`
-	Identity        SetupIdentityReadback    `json:"identity"`
-	Publication     SetupPublicationReadback `json:"publication"`
-	CandidateDigest state.Digest             `json:"candidate_digest"`
+	Workspace        SetupWorkspaceReadback   `json:"workspace"`
+	Identity         SetupIdentityReadback    `json:"identity"`
+	Publication      SetupPublicationReadback `json:"publication"`
+	CandidatePresent bool                     `json:"candidate_present"`
+	CandidateDigest  state.Digest             `json:"candidate_digest"`
 }
 
 // ConfigurePrivateRuntime installs the only binding and actor authorities used
@@ -281,6 +299,22 @@ func (s *Server) PrivateSetupImportRPC(ctx context.Context, req SetupImportReque
 	if binding.AcceptedCommitSHA != req.ExpectedCommitSHA || binding.AcceptedTreeDigest != string(req.ExpectedTreeDigest) {
 		return SetupImportReadback{}, config.ErrConfirmedPlanDrift
 	}
+	exactPrior := DigestSetupBasePredicate(SetupBasePredicate{CandidatePresent: false, CandidateDigest: req.ExpectedTreeDigest, WorkspaceState: "clean"})
+	exactDesired := DigestSetupBasePredicate(SetupBasePredicate{CandidatePresent: true, CandidateDigest: req.ExpectedTreeDigest, WorkspaceState: "pending"})
+	if req.ExpectedPriorDigest != exactPrior || req.DesiredDigest != exactDesired {
+		return SetupImportReadback{}, config.ErrConfirmedPlanDrift
+	}
+	status, err := s.projectState.Status(ctx, binding.Scope)
+	if err != nil || status.Binding != binding {
+		return SetupImportReadback{}, ErrPrivateSetupRequest
+	}
+	observed := DigestSetupBasePredicate(setupBasePredicate(status))
+	if observed == req.DesiredDigest {
+		return SetupImportReadback{AcceptedCommitSHA: binding.AcceptedCommitSHA, AcceptedTreeDigest: binding.AcceptedTreeDigest, ImportedCandidateDigest: status.CandidateDigest, Conflicted: status.State == "conflicted"}, nil
+	}
+	if observed != req.ExpectedPriorDigest {
+		return SetupImportReadback{}, config.ErrConfirmedPlanDrift
+	}
 	result, err := s.projectState.Import(ctx, projectstate.ImportRequest{
 		Scope: binding.Scope, Root: binding.Checkout.CanonicalPath, ExpectedWorkingTreeDigest: &req.ExpectedTreeDigest, Actor: actor,
 	})
@@ -290,11 +324,19 @@ func (s *Server) PrivateSetupImportRPC(ctx context.Context, req SetupImportReque
 		}
 		return SetupImportReadback{}, ErrPrivateSetupRequest
 	}
+	status, err = s.projectState.Status(ctx, binding.Scope)
+	if err != nil || DigestSetupBasePredicate(setupBasePredicate(status)) != req.DesiredDigest {
+		return SetupImportReadback{}, config.ErrConfirmedPlanDrift
+	}
 	return SetupImportReadback{
 		AcceptedCommitSHA: binding.AcceptedCommitSHA, AcceptedTreeDigest: binding.AcceptedTreeDigest,
 		ImportedCandidateDigest: result.ImportedCandidateDigest, ImportedChangeCount: result.ImportedChangeCount,
 		Conflicted: len(result.Conflicts) != 0,
 	}, nil
+}
+
+func setupBasePredicate(status projectstate.WorkspaceStatus) SetupBasePredicate {
+	return SetupBasePredicate{CandidatePresent: status.CandidatePresent, CandidateDigest: status.CandidateDigest, OverlayGeneration: status.OverlayGeneration, WorkspaceState: status.State}
 }
 
 func (s *Server) PrivateSetupVerifyRPC(ctx context.Context, req SetupWorkingDirectoryRequest) (SetupVerifyReadback, error) {
@@ -307,7 +349,7 @@ func (s *Server) PrivateSetupVerifyRPC(ctx context.Context, req SetupWorkingDire
 		return SetupVerifyReadback{}, ErrPrivateSetupRequest
 	}
 	profile, matches, err := s.identityStore.SelectedMatchesSetup(ctx, req.Identity)
-	if err != nil || !matches || profile.HumanPrincipalID != actor.HumanPrincipalID || status.CandidateDigest != req.ExpectedTree {
+	if err != nil || !matches || profile.HumanPrincipalID != actor.HumanPrincipalID || !status.CandidatePresent || status.CandidateDigest != req.ExpectedTree {
 		return SetupVerifyReadback{}, ErrPrivateSetupRequest
 	}
 	publication, err := s.projectState.PublicationConfiguration(ctx, binding.Scope)
@@ -320,7 +362,7 @@ func (s *Server) PrivateSetupVerifyRPC(ctx context.Context, req SetupWorkingDire
 	}
 	return SetupVerifyReadback{
 		Workspace: setupWorkspaceReadback(binding, status.State),
-		Identity:  setupIdentityReadback(profile), Publication: publicationReadback, CandidateDigest: status.CandidateDigest,
+		Identity:  setupIdentityReadback(profile), Publication: publicationReadback, CandidatePresent: status.CandidatePresent, CandidateDigest: status.CandidateDigest,
 	}, nil
 }
 

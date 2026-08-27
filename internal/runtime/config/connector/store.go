@@ -111,6 +111,11 @@ func (s *Store) Prepare(ctx context.Context, operation PrepareOperation) (Operat
 	if s == nil || ValidateConfirmedConnectorChange(operation.Change) != nil {
 		return OperationRecord{}, config.ErrConfirmedPlanDrift
 	}
+	if operation.OwnerDigest != "" {
+		if _, err := config.ParseStateDigest(string(operation.OwnerDigest)); err != nil {
+			return OperationRecord{}, config.ErrConfirmedPlanDrift
+		}
+	}
 	adapter, backupID, ok := parseConnectorBackupReference(operation.BackupReference)
 	if !ok || adapter != operation.Change.Adapter {
 		return OperationRecord{}, config.ErrConfirmedPlanDrift
@@ -127,7 +132,7 @@ func (s *Store) Prepare(ctx context.Context, operation PrepareOperation) (Operat
 			return config.ErrConfirmedPlanDrift
 		}
 		for _, candidate := range state.operations {
-			if candidate.Stage != StageComplete && candidate.Adapter == operation.Change.Adapter && candidate.Name == operation.Change.Name {
+			if !terminalOperationStage(candidate.Stage) && candidate.Adapter == operation.Change.Adapter && candidate.Name == operation.Change.Name {
 				return ErrAmbiguousConnectorOperation
 			}
 		}
@@ -139,7 +144,7 @@ func (s *Store) Prepare(ctx context.Context, operation PrepareOperation) (Operat
 			return err
 		}
 		now := s.clock().UTC()
-		record = OperationRecord{SchemaVersion: connectorSchemaVersion, OperationID: identifier, Adapter: operation.Change.Adapter, Name: operation.Change.Name, Action: operation.Change.Action, PlanDigest: operation.Change.PlanDigest, ExpectedPriorDigest: operation.Change.ExpectedPriorDigest, DesiredDigest: operation.Change.DesiredDigest, BackupReference: operation.BackupReference, Stage: StagePrepared, CreatedAt: now, UpdatedAt: now}
+		record = OperationRecord{SchemaVersion: connectorSchemaVersion, OperationID: identifier, Adapter: operation.Change.Adapter, Name: operation.Change.Name, Action: operation.Change.Action, PlanDigest: operation.Change.PlanDigest, ExpectedPriorDigest: operation.Change.ExpectedPriorDigest, DesiredDigest: operation.Change.DesiredDigest, BackupReference: operation.BackupReference, OwnerDigest: operation.OwnerDigest, Stage: StagePrepared, CreatedAt: now, UpdatedAt: now}
 		if validateOperationRecord(record) != nil {
 			return ErrInvalidConnectorStore
 		}
@@ -152,6 +157,27 @@ func (s *Store) Prepare(ctx context.Context, operation PrepareOperation) (Operat
 	return record, err
 }
 
+func (s *Store) Completed(ctx context.Context, change ConfirmedConnectorChange) (OperationRecord, bool, error) {
+	if ValidateConfirmedConnectorChange(change) != nil {
+		return OperationRecord{}, false, config.ErrConfirmedPlanDrift
+	}
+	var found OperationRecord
+	var exists bool
+	err := s.withStoreLock(ctx, func(_ int, state connectorStoreState) error {
+		for _, record := range state.operations {
+			if record.Stage != StageComplete || record.OwnerDigest != "" || record.Adapter != change.Adapter || record.Name != change.Name || record.Action != change.Action || record.PlanDigest != change.PlanDigest || record.ExpectedPriorDigest != change.ExpectedPriorDigest || record.DesiredDigest != change.DesiredDigest {
+				continue
+			}
+			if exists {
+				return ErrAmbiguousConnectorOperation
+			}
+			found, exists = record, true
+		}
+		return nil
+	})
+	return found, exists, err
+}
+
 func (s *Store) Active(ctx context.Context, adapter AdapterName, name string) (OperationRecord, bool, error) {
 	if !validAdapter(adapter) || !validConnectorName(name) {
 		return OperationRecord{}, false, ErrInvalidConnectorStore
@@ -160,7 +186,7 @@ func (s *Store) Active(ctx context.Context, adapter AdapterName, name string) (O
 	var exists bool
 	err := s.withStoreLock(ctx, func(_ int, state connectorStoreState) error {
 		for _, record := range state.operations {
-			if record.Adapter == adapter && record.Name == name && record.Stage != StageComplete {
+			if record.Adapter == adapter && record.Name == name && !terminalOperationStage(record.Stage) {
 				if exists {
 					return ErrAmbiguousConnectorOperation
 				}
@@ -174,8 +200,11 @@ func (s *Store) Active(ctx context.Context, adapter AdapterName, name string) (O
 
 // Completed returns the unique durable completion for the exact confirmed
 // transition. Callers cannot use it to recover a merely similar operation.
-func (s *Store) Completed(ctx context.Context, change ConfirmedConnectorChange) (OperationRecord, bool, error) {
+func (s *Store) CompletedFor(ctx context.Context, change ConfirmedConnectorChange, owner config.StateDigest) (OperationRecord, bool, error) {
 	if ValidateConfirmedConnectorChange(change) != nil {
+		return OperationRecord{}, false, config.ErrConfirmedPlanDrift
+	}
+	if _, err := config.ParseStateDigest(string(owner)); err != nil {
 		return OperationRecord{}, false, config.ErrConfirmedPlanDrift
 	}
 	var found OperationRecord
@@ -184,7 +213,7 @@ func (s *Store) Completed(ctx context.Context, change ConfirmedConnectorChange) 
 		for _, record := range state.operations {
 			if record.Stage != StageComplete || record.Adapter != change.Adapter || record.Name != change.Name ||
 				record.Action != change.Action || record.PlanDigest != change.PlanDigest ||
-				record.ExpectedPriorDigest != change.ExpectedPriorDigest || record.DesiredDigest != change.DesiredDigest {
+				record.ExpectedPriorDigest != change.ExpectedPriorDigest || record.DesiredDigest != change.DesiredDigest || record.OwnerDigest != owner {
 				continue
 			}
 			if exists {
@@ -199,7 +228,7 @@ func (s *Store) Completed(ctx context.Context, change ConfirmedConnectorChange) 
 
 // CompletedTransition finds the unique completed operation matching the
 // coordinator's exact high-level prior and desired predicates.
-func (s *Store) CompletedTransition(ctx context.Context, adapter AdapterName, name string, action OperationAction, prior, desired config.StateDigest) (OperationRecord, bool, error) {
+func (s *Store) CompletedTransition(ctx context.Context, adapter AdapterName, name string, action OperationAction, prior, desired, owner config.StateDigest) (OperationRecord, bool, error) {
 	if !validAdapter(adapter) || !validConnectorName(name) || (action != OperationInstall && action != OperationRemove) ||
 		prior == desired {
 		return OperationRecord{}, false, config.ErrConfirmedPlanDrift
@@ -210,12 +239,15 @@ func (s *Store) CompletedTransition(ctx context.Context, adapter AdapterName, na
 	if _, err := config.ParseStateDigest(string(desired)); err != nil {
 		return OperationRecord{}, false, config.ErrConfirmedPlanDrift
 	}
+	if _, err := config.ParseStateDigest(string(owner)); err != nil {
+		return OperationRecord{}, false, config.ErrConfirmedPlanDrift
+	}
 	var found OperationRecord
 	var exists bool
 	err := s.withStoreLock(ctx, func(_ int, state connectorStoreState) error {
 		for _, record := range state.operations {
 			if record.Stage != StageComplete || record.Adapter != adapter || record.Name != name || record.Action != action ||
-				record.ExpectedPriorDigest != prior || record.DesiredDigest != desired {
+				record.ExpectedPriorDigest != prior || record.DesiredDigest != desired || record.OwnerDigest != owner {
 				continue
 			}
 			if exists {
@@ -369,7 +401,7 @@ func loadConnectorStore(fd int) (connectorStoreState, []string, error) {
 		if priorErr != nil || desiredErr != nil || priorDigest != record.ExpectedPriorDigest || desiredDigest != record.DesiredDigest {
 			return state, nil, ErrInvalidConnectorStore
 		}
-		if record.Stage != StageComplete {
+		if !terminalOperationStage(record.Stage) {
 			pair := string(record.Adapter) + "\x00" + record.Name
 			if activePairs[pair] {
 				return state, nil, ErrAmbiguousConnectorOperation
@@ -484,6 +516,11 @@ func validateOperationRecord(record OperationRecord) error {
 	if record.SchemaVersion != connectorSchemaVersion || !types.CanonicalUUID(record.OperationID) || ValidateConfirmedConnectorChange(ConfirmedConnectorChange{Adapter: record.Adapter, Name: record.Name, Action: record.Action, PlanDigest: record.PlanDigest, ExpectedPriorDigest: record.ExpectedPriorDigest, DesiredDigest: record.DesiredDigest}) != nil || !validOperationStage(record.Stage) || record.CreatedAt.IsZero() || record.UpdatedAt.Before(record.CreatedAt) || !record.CreatedAt.Equal(record.CreatedAt.UTC()) || !record.UpdatedAt.Equal(record.UpdatedAt.UTC()) {
 		return ErrInvalidConnectorStore
 	}
+	if record.OwnerDigest != "" {
+		if _, err := config.ParseStateDigest(string(record.OwnerDigest)); err != nil {
+			return ErrInvalidConnectorStore
+		}
+	}
 	adapter, _, ok := parseConnectorBackupReference(record.BackupReference)
 	if !ok || adapter != record.Adapter {
 		return ErrInvalidConnectorStore
@@ -492,7 +529,7 @@ func validateOperationRecord(record OperationRecord) error {
 }
 
 func validOperationStage(stage OperationStage) bool {
-	return stage == StagePrepared || stage == StageApplied || stage == StageVerified || stage == StageRolledBack || stage == StageComplete
+	return stage == StagePrepared || stage == StageApplied || stage == StageVerified || stage == StageRolledBack || stage == StageComplete || stage == StageCompensated
 }
 func validOperationTransition(from, to OperationStage) bool {
 	if to == StageRolledBack {
@@ -501,7 +538,13 @@ func validOperationTransition(from, to OperationStage) bool {
 	if to == StageComplete {
 		return from == StageVerified || from == StageRolledBack
 	}
+	if to == StageCompensated {
+		return from == StageComplete
+	}
 	return (from == StagePrepared && to == StageApplied) || (from == StageApplied && to == StageVerified)
+}
+func terminalOperationStage(stage OperationStage) bool {
+	return stage == StageComplete || stage == StageCompensated
 }
 func actionForDesired(entry ConnectorEntry) OperationAction {
 	if entry.State == EntryAbsent {

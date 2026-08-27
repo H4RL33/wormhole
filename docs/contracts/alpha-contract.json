@@ -7653,12 +7653,14 @@
     "commands": [
       {
         "name": "connector install",
-        "usage": "connector install <adapter>",
-        "flags": [],
+        "usage": "connector install [--yes] <adapter>",
+        "flags": [
+          "yes"
+        ],
         "positionals": [
           "<adapter>"
         ],
-        "help_exit": 2
+        "help_exit": 0
       },
       {
         "name": "connector list",
@@ -7667,16 +7669,18 @@
         "positionals": [
           "<adapter>"
         ],
-        "help_exit": 2
+        "help_exit": 0
       },
       {
         "name": "connector remove",
-        "usage": "connector remove <adapter>",
-        "flags": [],
+        "usage": "connector remove [--yes] <adapter>",
+        "flags": [
+          "yes"
+        ],
         "positionals": [
           "<adapter>"
         ],
-        "help_exit": 2
+        "help_exit": 0
       },
       {
         "name": "config code-graph checkout set",

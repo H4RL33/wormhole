@@ -233,9 +233,53 @@ func TestPrivateSetupRPCEndToEndAcknowledgesPublicationAndImportedBase(t *testin
 	}
 	imported, err := server.PrivateSetupImportRPC(t.Context(), SetupImportRequest{
 		WorkingDirectory: root, ExpectedCommitSHA: commit, ExpectedTreeDigest: state.Digest(treeDigest),
+		ExpectedPriorDigest: DigestSetupBasePredicate(SetupBasePredicate{CandidatePresent: false, CandidateDigest: state.Digest(treeDigest), WorkspaceState: "clean"}),
+		DesiredDigest:       DigestSetupBasePredicate(SetupBasePredicate{CandidatePresent: true, CandidateDigest: state.Digest(treeDigest), WorkspaceState: "pending"}),
 	})
 	if err != nil || imported.Conflicted || imported.ImportedCandidateDigest != state.Digest(treeDigest) || imported.AcceptedCommitSHA != commit {
 		t.Fatalf("import = %+v, err %v", imported, err)
+	}
+	var importedAt, importedBy string
+	if err := store.DB().QueryRow(`SELECT imported_at, imported_by FROM workspace_candidates WHERE project_id=? AND workspace_id=?`, projectID, workspace.WorkspaceID).Scan(&importedAt, &importedBy); err != nil {
+		t.Fatal(err)
+	}
+	if later, err := server.PrivateSetupVerifyRPC(t.Context(), SetupWorkingDirectoryRequest{WorkingDirectory: root, Identity: types.ConfirmedIdentitySelection{DisplayName: "Alice Example"}, ExpectedTree: state.Digest(treeDigest)}); err != nil || !later.CandidatePresent || later.CandidateDigest != state.Digest(treeDigest) {
+		t.Fatalf("later-stage verify = %+v, err %v", later, err)
+	}
+	resumed, err := server.PrivateSetupImportRPC(t.Context(), SetupImportRequest{
+		WorkingDirectory: root, ExpectedCommitSHA: commit, ExpectedTreeDigest: state.Digest(treeDigest),
+		ExpectedPriorDigest: DigestSetupBasePredicate(SetupBasePredicate{CandidatePresent: false, CandidateDigest: state.Digest(treeDigest), WorkspaceState: "clean"}),
+		DesiredDigest:       DigestSetupBasePredicate(SetupBasePredicate{CandidatePresent: true, CandidateDigest: state.Digest(treeDigest), WorkspaceState: "pending"}),
+	})
+	if err != nil || resumed.ImportedCandidateDigest != state.Digest(treeDigest) {
+		t.Fatalf("resume import = %+v, err %v", resumed, err)
+	}
+	var resumedAt, resumedBy string
+	if err := store.DB().QueryRow(`SELECT imported_at, imported_by FROM workspace_candidates WHERE project_id=? AND workspace_id=?`, projectID, workspace.WorkspaceID).Scan(&resumedAt, &resumedBy); err != nil {
+		t.Fatal(err)
+	}
+	if importedAt != resumedAt || importedBy != resumedBy {
+		t.Fatalf("desired resume rewrote attribution: (%q,%q) -> (%q,%q)", importedAt, importedBy, resumedAt, resumedBy)
+	}
+	if _, err := store.DB().Exec(`UPDATE workspace_bindings SET status='clean' WHERE project_id=? AND workspace_id=?`, projectID, workspace.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.PrivateSetupImportRPC(t.Context(), SetupImportRequest{
+		WorkingDirectory: root, ExpectedCommitSHA: commit, ExpectedTreeDigest: state.Digest(treeDigest),
+		ExpectedPriorDigest: DigestSetupBasePredicate(SetupBasePredicate{CandidatePresent: false, CandidateDigest: state.Digest(treeDigest), WorkspaceState: "clean"}),
+		DesiredDigest:       DigestSetupBasePredicate(SetupBasePredicate{CandidatePresent: true, CandidateDigest: state.Digest(treeDigest), WorkspaceState: "pending"}),
+	}); !errors.Is(err, config.ErrConfirmedPlanDrift) {
+		t.Fatalf("third candidate error = %v", err)
+	}
+	var thirdAt, thirdBy, thirdStatus string
+	if err := store.DB().QueryRow(`SELECT c.imported_at, c.imported_by, w.status FROM workspace_candidates c JOIN workspace_bindings w USING(project_id,workspace_id) WHERE c.project_id=? AND c.workspace_id=?`, projectID, workspace.WorkspaceID).Scan(&thirdAt, &thirdBy, &thirdStatus); err != nil {
+		t.Fatal(err)
+	}
+	if thirdAt != importedAt || thirdBy != importedBy || thirdStatus != "clean" {
+		t.Fatalf("third candidate was mutated: (%q,%q,%q)", thirdAt, thirdBy, thirdStatus)
+	}
+	if _, err := store.DB().Exec(`UPDATE workspace_bindings SET status='pending' WHERE project_id=? AND workspace_id=?`, projectID, workspace.WorkspaceID); err != nil {
+		t.Fatal(err)
 	}
 	verified, err := server.PrivateSetupVerifyRPC(t.Context(), SetupWorkingDirectoryRequest{WorkingDirectory: root, Identity: types.ConfirmedIdentitySelection{DisplayName: "Alice Example"}, ExpectedTree: state.Digest(treeDigest)})
 	if err != nil || verified.Workspace.WorkspaceID != workspace.WorkspaceID || verified.Identity.HumanPrincipalID != profile.HumanPrincipalID || verified.Publication.BindingDigest != config.StateDigest(bindingDigest) {

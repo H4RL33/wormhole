@@ -40,6 +40,7 @@ type WorkspaceStatus struct {
 	Binding                   types.WorkspaceBinding
 	State                     string
 	AcceptedSnapshot          state.Snapshot
+	CandidatePresent          bool
 	CandidateDigest           state.Digest
 	OverlayGeneration         int64
 	PublicationClassification types.PublicationClassification

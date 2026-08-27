@@ -236,7 +236,8 @@ func TestConnectorStoreEnforcesDurableRecordLimit(t *testing.T) {
 }
 
 func TestConnectorStoreFindsOnlyExactCompletedOperation(t *testing.T) {
-	store, err := OpenStoreAt(filepath.Join(t.TempDir(), "connectors"))
+	root := filepath.Join(t.TempDir(), "connectors")
+	store, err := OpenStoreAt(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,6 +270,64 @@ func TestConnectorStoreFindsOnlyExactCompletedOperation(t *testing.T) {
 	change.DesiredDigest = config.SHA256StateDigest([]byte("conflict"))
 	if _, ok, err := store.Completed(t.Context(), change); err != nil || ok {
 		t.Fatalf("conflicting completion ok = %v, err = %v", ok, err)
+	}
+}
+
+func TestConnectorStoreCompensationSelectsExactSuccessorForSetupAttempt(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "connectors")
+	store, err := OpenStoreAt(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior := ConnectorEntry{State: EntryAbsent}
+	desired := ConnectorEntry{State: EntryPresent, Scope: ScopeUser, Transport: TransportStdio, Command: "/usr/bin/wormhole", Args: []string{"mcp"}, Env: []EnvironmentVariable{}}
+	plan, err := BuildChangePlan(AdapterCodex, "wormhole", OperationInstall, prior, desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priorDigest, _ := DigestConnectorEntry(prior)
+	desiredDigest, _ := DigestConnectorEntry(desired)
+	change := ConfirmedConnectorChange{Adapter: AdapterCodex, Name: "wormhole", Action: OperationInstall, PlanDigest: plan.Digest, ExpectedPriorDigest: priorDigest, DesiredDigest: desiredDigest}
+	owner := config.SHA256StateDigest([]byte("setup-journal-and-plan"))
+	adapter := &stateAdapter{name: AdapterCodex, connectorName: "wormhole", current: prior}
+	first, err := ApplyTransactionalFor(t.Context(), adapter, desired, change, owner, store, store, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RollbackCompletedTransactional(t.Context(), adapter, change, owner, store, store, store); err != nil {
+		t.Fatal(err)
+	}
+	firstRecord, found, err := store.CompletedFor(t.Context(), change, owner)
+	if err != nil || found {
+		t.Fatalf("compensated first completion remained selectable: %+v %v %v", firstRecord, found, err)
+	}
+	second, err := ApplyTransactionalFor(t.Context(), adapter, desired, change, owner, store, store, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, found, err := store.CompletedFor(t.Context(), change, owner)
+	if err != nil || !found || record.OperationID != second.OperationID || record.OperationID == first.OperationID {
+		t.Fatalf("successor = %+v found=%v err=%v first=%+v second=%+v", record, found, err, first, second)
+	}
+	store.fault = func(point string) error {
+		if point == "write_before_publish" {
+			return errors.New("crash before compensation journal advance")
+		}
+		return nil
+	}
+	if err := RollbackCompletedTransactional(t.Context(), adapter, change, owner, store, store, store); err == nil {
+		t.Fatal("compensation journal crash unexpectedly succeeded")
+	}
+	freshStore, err := OpenStoreAt(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh := &stateAdapter{name: AdapterCodex, connectorName: "wormhole", current: prior}
+	if err := RollbackCompletedTransactional(t.Context(), fresh, change, owner, freshStore, freshStore, freshStore); err != nil {
+		t.Fatal(err)
+	}
+	if !EqualConnectorEntry(fresh.current, prior) {
+		t.Fatalf("fresh compensation current=%+v", fresh.current)
 	}
 }
 
