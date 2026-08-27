@@ -1460,3 +1460,13 @@ finite-policy, and receipt codecs are implemented with no portable-state/reducer
 coupling. Focused/full shared-type tests, race, vet, and diff checks passed.
 Independent review approved after one fix round with Critical 0 / Important 0 /
 Minor 0. Task 3B (PostgreSQL 000021 and Fabric Activity authority) is next.
+
+Stage 3 Task 3B: complete (commits `d06261a` through `cadf895`, review fixes
+`0b4beac` and `1521ae0`). PostgreSQL 000021 now owns the non-authoritative
+Git-aware replica schema plus separate strict Activity policy, immutable ledger/
+receipt, lifecycle, and finite pruner authority with complete composite keys,
+forced RLS, fixed-search-path definers, and least-privilege pre-provisioned roles.
+Real v20/v21/up/down catalog, RLS/ACL, store, replay, cursor, lifecycle, pruning,
+race, alpha-contract, and full-vet gates passed; migrations 1-20 are unchanged.
+Independent review approved after one fix round with Critical 0 / Important 0 /
+Minor 0. Task 3C (Gateway exact-v8 hard cut and Activity repositories) is next.
