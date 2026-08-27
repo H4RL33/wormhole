@@ -12,30 +12,39 @@ the snapshot and ready checkpoint commit together.
 
 ## Ownership and startup seam
 
-Initial enrolment is a Gateway operation. The CLI collects human input,
-generates one attempt key, resolves a credential profile identifier, and sends
-one request over Gateway's existing same-user,
-OS-protected local MCP socket:
+Initial enrolment is a Gateway/Fabric MCP lifecycle. An operator-approved
+private control-plane client constructs the closed request, generates one
+attempt key, selects a credential profile identifier, and sends the request
+over Gateway's existing same-user, OS-protected local MCP socket:
 
 ```text
-operator-approved enrolment request -> local Gateway socket -> Gateway-owned Fabric client
+operator-approved private MCP client -> local Gateway socket -> Gateway-owned Fabric MCP client
 ```
 
-There is no CLI-to-Fabric fallback in this lifecycle. Gateway is the only
-component permitted to perform registration, persist the issued credential,
+The control client has no direct-to-Fabric fallback. Gateway is the only
+component permitted to call Fabric enrolment, persist the issued credential,
 bootstrap SQLite, start incremental synchronisation, and report readiness.
+
+The public `wormhole` CLI remains responsible for canonical `setup`, connector
+lifecycle, and the five `status`/`diff`/`import`/`checkpoint`/`stash` workspace
+operations. Those commands are not enrolment aliases and do not invoke this
+endpoint. Profile listing and identity inspection operate on credential
+profiles that a completed control-plane enrolment already persisted; neither
+constructs an enrolment request or persists a new profile.
 
 This creates an intentional pre-credential startup mode. `gatewayd` must be
 able to resolve its XDG socket/database paths, open the local socket, complete
 the MCP `initialize` sequence, and serve `wormhole.agent.enrol` before a
 credential profile exists. Normal credential-bound tools remain unchanged.
 The startup configuration seam must use `internal/runtime/config`-compatible
-values; `internal/runtime/localapi` must not import CLI configuration code.
+values; `internal/runtime/localapi` must not import command-package
+configuration code.
 
 Task 2 registers the pre-credential tool and its validation/schema contract.
 Its executor fails closed as unavailable until Task 3 wires registration and
 credential persistence. This prevents the design-only endpoint from silently
-performing a partial lifecycle or causing the CLI to call Fabric directly.
+performing a partial lifecycle or allowing its control client to call Fabric
+directly.
 
 The name `wormhole.agent.enrol` follows the RFC-0001 M2
 `wormhole.<pillar-noun>.<verb>` grammar by using the existing `agent` pillar;
@@ -60,7 +69,7 @@ omitting the field.
 | `repositories` | Requested repository scope. |
 | `roles` | Requested project roles. |
 | `requested_permissions` | Requested permission actions. |
-| `fabric_address` | Address used by Gateway's Fabric client. It is not a CLI remote target after the local request is sent. |
+| `fabric_address` | Address used only by Gateway's Fabric client after the local control client submits the request. |
 | `idempotency_key` | Canonical lowercase UUID identifying one user-approved attempt. |
 | `credential_profile` | Non-empty safe profile identifier resolved only beneath Gateway's credential root. |
 
@@ -71,12 +80,10 @@ against. A fresh daemon obtains this policy through the
 configuration. Missing or unreadable policy is deny-all and returns a policy
 error; request data and absent Passport credentials are never policy sources.
 
-For `--profile` and the existing derived default, Gateway resolves the safe
-profile below its credential directory. The legacy arbitrary `--token-file`
-destination is intentionally incompatible with this secure contract because
-it cannot be contained beneath the credential root. Task 3 must reject that
-flag with a clear deprecation message; it must not restore CLI credential
-writes or a direct Fabric fallback. Profile identifiers cannot contain path
+`credential_profile` is a wire field selected by the approved control client,
+not a public command-line option. Gateway resolves that safe identifier below
+its credential directory. The protocol accepts no caller-selected credential
+destination outside that root. Profile identifiers cannot contain path
 separators or `..`, so absolute, out-of-root, and symlink traversal paths cannot
 be expressed by the wire contract.
 
@@ -164,14 +171,15 @@ registration.
 
 ## Idempotency and crash boundaries
 
-The CLI generates a candidate key once per invocation after the user approves
-enrolment; it must not generate a new key inside an individual network retry.
+The approved control client generates a candidate key once per operator-approved
+enrolment attempt; it must not generate a new key inside an individual network
+retry.
 Before contacting Fabric, Gateway writes a non-secret SQLite attempt row with
 the project, canonical request digest, state, credential profile, and candidate
-key. A later CLI process may present another candidate key, but Gateway loads
-the active row for that profile and matching project/digest and reuses its
-stored key. The result reports that durable key, which the CLI accepts as the
-resumed attempt identifier. Gateway scopes keys by `project_id`.
+key. A later control-client call may present another candidate key, but Gateway
+loads the active row for that profile and matching project/digest and reuses
+its stored key. The result reports that durable key, which the control client
+treats as the resumed attempt identifier. Gateway scopes keys by `project_id`.
 
 Task 3 durably records the project, key, canonical request digest, state,
 credential profile, and non-secret identity references in Gateway SQLite. The

@@ -15,6 +15,7 @@ func TestStage2ActiveDocumentationHasNoRemovedPublicSurfaces(t *testing.T) {
 
 	removed := []*regexp.Regexp{
 		regexp.MustCompile(`(?i)\bwormhole\s+(?:init|join|connect)\b`),
+		regexp.MustCompile(`(?i)\bwormhole\s+(?:agent\s+)?enrol(?:l)?\b`),
 		regexp.MustCompile(`(?i)\bwormhole\s+config\s+(?:code[-_ ]graph|graph)\b`),
 		regexp.MustCompile(`(?i)\bwormhole\.code[_-]?graph\b`),
 		regexp.MustCompile(`(?i)\bcode\.graph\b`),
@@ -22,6 +23,10 @@ func TestStage2ActiveDocumentationHasNoRemovedPublicSurfaces(t *testing.T) {
 		regexp.MustCompile(`(?i)\b(?:enable|disable|configure|status|query|rebuild)\s+(?:the\s+)?code[-_ ]graph\b`),
 		regexp.MustCompile(`(?i)\bcode[-_ ]graph\s+(?:enable|disable|status|query|rebuild)\b`),
 		regexp.MustCompile(`(?i)(?:\bwormhole(?:\s+|[-_.])warpspeed\b|--warpspeed\b)`),
+		regexp.MustCompile("(?i)`?--token-file`?"),
+		regexp.MustCompile(`(?is)\benrol(?:l)?ment\b.{0,160}\b(?:the|a) CLI\s+(?:collects|generates|resolves|sends|submits|invokes|accepts|retries)\b`),
+		regexp.MustCompile(`(?is)\b(?:the|a later) CLI\s+(?:process\s+)?(?:collects|generates|resolves|sends|submits|invokes|accepts|retries|may present)\b.{0,160}\b(?:enrol(?:l)?ment|candidate key|idempotency key|attempt key)\b`),
+		regexp.MustCompile(`(?is)\b(?:enrol(?:l)?ment|candidate key|idempotency key|attempt key)\b.{0,160}\b(?:the|a) CLI\s+(?:collects|generates|resolves|sends|submits|invokes|accepts|retries)\b`),
 	}
 	for _, pattern := range removed {
 		if pattern.MatchString("wormhole connector install --yes claude") {
@@ -64,10 +69,13 @@ func TestStage2ActiveDocumentationHasNoRemovedPublicSurfaces(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
+		relative, _ := filepath.Rel(repoRoot, path)
+		if filepath.ToSlash(relative) == "docs/architecture/gateway-enrolment-lifecycle.md" && strings.Contains(string(content), "--profile") {
+			t.Errorf("%s retains a nonexistent public enrolment profile flag", filepath.ToSlash(relative))
+		}
 		for _, pattern := range removed {
 			if match := pattern.FindIndex(content); match != nil {
 				line := 1 + strings.Count(string(content[:match[0]]), "\n")
-				relative, _ := filepath.Rel(repoRoot, path)
 				t.Errorf("%s:%d retains removed public surface matching %q", filepath.ToSlash(relative), line, pattern)
 			}
 		}

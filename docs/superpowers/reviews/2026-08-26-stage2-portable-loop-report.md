@@ -84,6 +84,13 @@ artifacts), and the exact documented inventories are 27 Gateway tools and 20
 Fabric tools. Its command patterns use word boundaries and explicitly prove that
 `wormhole connector` is not a false positive.
 
+A final ownership correction extended that guard to reject invented public
+enrolment commands, enrolment-only command-line flags, and language assigning
+attempt-key or replay ownership to the CLI. RED identified the remaining active
+Gateway lifecycle prose. GREEN documents the actual operator-approved private
+MCP client → Gateway → Fabric MCP path and preserves the public CLI's separate
+setup, connector, workspace, profile-list, and identity-inspection ownership.
+
 ## Public cutover
 
 - CLI dispatch/help and the alpha inventory no longer contain the removed
@@ -107,6 +114,11 @@ Fabric tools. Its command patterns use word boundaries and explicitly prove that
   process guide distinguishes Gateway-owned fixture enrolment from public CLI
   setup, enumerates the exact 27/20 Gateway/Fabric registries, and labels dated
   July graph evidence and the preserved internal benchmark as non-live.
+- The live enrolment lifecycle assigns request construction, attempt-key
+  selection, replay handling, and credential-profile wire selection to the
+  operator-approved private MCP client. It makes no public enrolment command or
+  credential-destination flag claim; only Gateway calls Fabric and persists the
+  credential.
 
 The exact prescribed scan reports only `runConnector` and `wormhole connector`
 locations. Its `runConnect|wormhole (join|connect|init)` alternatives lack a word
