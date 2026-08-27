@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -110,6 +111,25 @@ func TestProcessSupervisorOwnerHelper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var admitted atomic.Int32
+	server.SetBeforeHandlerStartForTesting(func() {
+		if admitted.Add(1) == 1 {
+			return
+		}
+		if err := os.WriteFile(os.Getenv(supervisorOwnerHelperStarted), []byte("started"), 0o600); err != nil {
+			t.Error(err)
+			return
+		}
+		for {
+			if _, err := os.Stat(os.Getenv(supervisorOwnerHelperRelease)); err == nil {
+				return
+			} else if !errors.Is(err, os.ErrNotExist) {
+				t.Error(err)
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	})
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(ctx) }()
 	<-server.Serving()
@@ -137,18 +157,12 @@ func TestProcessSupervisorOwnerHelper(t *testing.T) {
 	if status.State != "offline" || status.PendingWrites != 0 {
 		t.Fatalf("local-only sync.status = %+v, want offline with zero pending writes", status)
 	}
-	if err := os.WriteFile(os.Getenv(supervisorOwnerHelperStarted), []byte("started"), 0o600); err != nil {
+	blockingConnection, err := net.Dial("unix", os.Getenv(supervisorOwnerHelperSocket))
+	if err != nil {
 		t.Fatal(err)
 	}
+	defer blockingConnection.Close()
 	<-ctx.Done()
-	for {
-		if _, err := os.Stat(os.Getenv(supervisorOwnerHelperRelease)); err == nil {
-			break
-		} else if !errors.Is(err, os.ErrNotExist) {
-			t.Fatal(err)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
 	if err := supervisor.Close(); err != nil {
 		t.Fatal(err)
 	}

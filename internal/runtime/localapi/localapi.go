@@ -207,6 +207,12 @@ func (s *Server) SetVersion(version string) {
 	s.version = version
 }
 
+// SetBeforeHandlerStartForTesting installs a deterministic admission barrier.
+// Tests must call it before Serve; production servers leave the hook nil.
+func (s *Server) SetBeforeHandlerStartForTesting(hook func()) {
+	s.testBeforeHandlerStart = hook
+}
+
 // SetSyncStatusProvider enables the read-only wormhole.sync.status tool.
 func (s *Server) SetSyncStatusProvider(provider SyncStatusProvider) {
 	s.statusProvider = provider
