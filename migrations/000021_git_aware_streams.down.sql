@@ -18,6 +18,10 @@ DROP TABLE fabric_activity_stream_sequences;
 DROP TABLE fabric_activity_policy_current;
 DROP TABLE fabric_activity_policy_versions;
 
+REVOKE SELECT ON TABLE fabric_streams, fabric_workspace_stream_bindings FROM wormhole_activity_owner;
+REVOKE UPDATE (updated_at) ON TABLE fabric_streams FROM wormhole_activity_owner;
+REVOKE UPDATE (detached_at) ON TABLE fabric_workspace_stream_bindings FROM wormhole_activity_owner;
+
 DROP TRIGGER fabric_stream_requests_immutable ON fabric_stream_requests;
 DROP TRIGGER fabric_stream_versions_immutable ON fabric_stream_versions;
 DROP FUNCTION reject_fabric_immutable_history();

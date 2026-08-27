@@ -750,6 +750,14 @@ ALTER FUNCTION fabric_accept_activity_v1 OWNER TO wormhole_activity_owner;
 ALTER FUNCTION fabric_transition_activity_lifecycle_v1 OWNER TO wormhole_activity_owner;
 ALTER FUNCTION fabric_prune_activities_v1 OWNER TO wormhole_activity_owner;
 
+-- The NOLOGIN Activity owner must take row locks on the portable stream and
+-- attachment parents without owning them. Column-limited UPDATE is the minimum
+-- PostgreSQL privilege that permits SELECT ... FOR UPDATE; runtime receives no
+-- corresponding portable-table privilege.
+GRANT SELECT ON TABLE fabric_streams, fabric_workspace_stream_bindings TO wormhole_activity_owner;
+GRANT UPDATE (updated_at) ON TABLE fabric_streams TO wormhole_activity_owner;
+GRANT UPDATE (detached_at) ON TABLE fabric_workspace_stream_bindings TO wormhole_activity_owner;
+
 REVOKE ALL ON TABLE fabric_activity_policy_versions, fabric_activity_policy_current,
     fabric_activity_stream_sequences, fabric_activities, fabric_activity_ingress_receipts,
     fabric_activity_lifecycle FROM PUBLIC;
