@@ -507,15 +507,152 @@ func decodeKnownPublicToolsCallParams(raw json.RawMessage, expectedName, authHea
 }
 
 func decodePublicArguments(raw json.RawMessage, destination any) error {
-	if _, err := decodeUniqueJSONObject(raw, nil); err != nil {
+	if err := rejectDuplicateJSONMembers(raw); err != nil {
 		return err
 	}
+
+	rawDecoder := json.NewDecoder(bytes.NewReader(raw))
+	rawDecoder.UseNumber()
+	var rawValue any
+	if err := rawDecoder.Decode(&rawValue); err != nil {
+		return err
+	}
+	if err := requireJSONEOF(rawDecoder); err != nil {
+		return err
+	}
+	if err := validatePublicInputSchema(rawValue, closedJSONSchemaForType(reflect.TypeOf(destination))); err != nil {
+		return err
+	}
+
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
 		return err
 	}
 	return requireJSONEOF(decoder)
+}
+
+func rejectDuplicateJSONMembers(raw json.RawMessage) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := rejectDuplicateJSONValue(decoder); err != nil {
+		return err
+	}
+	return requireJSONEOF(decoder)
+}
+
+func rejectDuplicateJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+
+	switch delimiter {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return errors.New("mcp: object key is not a string")
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return errors.New("mcp: duplicate JSON member")
+			}
+			seen[key] = struct{}{}
+			if err := rejectDuplicateJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		token, err = decoder.Token()
+		if err != nil || token != json.Delim('}') {
+			return errors.New("mcp: malformed JSON object")
+		}
+	case '[':
+		for decoder.More() {
+			if err := rejectDuplicateJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		token, err = decoder.Token()
+		if err != nil || token != json.Delim(']') {
+			return errors.New("mcp: malformed JSON array")
+		}
+	default:
+		return errors.New("mcp: malformed JSON value")
+	}
+	return nil
+}
+
+func validatePublicInputSchema(value any, schema map[string]any) error {
+	if constant, ok := schema["const"]; ok && !jsonValuesEqual(value, constant) {
+		return errors.New("mcp: JSON value does not match required constant")
+	}
+
+	schemaType, _ := schema["type"].(string)
+	switch schemaType {
+	case "object":
+		object, ok := value.(map[string]any)
+		if !ok {
+			return errors.New("mcp: expected JSON object")
+		}
+		for _, member := range schemaRequiredMembers(schema["required"]) {
+			if _, present := object[member]; !present {
+				return errors.New("mcp: missing required JSON member")
+			}
+		}
+		properties, _ := schema["properties"].(map[string]any)
+		for member, memberValue := range object {
+			if memberSchema, present := properties[member].(map[string]any); present {
+				if err := validatePublicInputSchema(memberValue, memberSchema); err != nil {
+					return err
+				}
+				continue
+			}
+			additional := schema["additionalProperties"]
+			if allowed, specified := additional.(bool); specified && !allowed {
+				return errors.New("mcp: unknown JSON member")
+			}
+			if additionalSchema, present := additional.(map[string]any); present {
+				if err := validatePublicInputSchema(memberValue, additionalSchema); err != nil {
+					return err
+				}
+			}
+		}
+	case "array":
+		array, ok := value.([]any)
+		if !ok {
+			return errors.New("mcp: expected JSON array")
+		}
+		items, ok := schema["items"].(map[string]any)
+		if !ok {
+			return nil
+		}
+		for _, item := range array {
+			if err := validatePublicInputSchema(item, items); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func schemaRequiredMembers(raw any) []string {
+	required, _ := raw.([]string)
+	return required
+}
+
+func jsonValuesEqual(left, right any) bool {
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftJSON, rightJSON)
 }
 
 func decodeUniqueJSONObject(raw json.RawMessage, allowed map[string]bool) (map[string]json.RawMessage, error) {

@@ -99,3 +99,62 @@ func TestDecodePublicArgumentsRejectsUnknownDuplicateAndTrailingJSON(t *testing.
 		t.Fatalf("decodePublicArguments = %+v, %v", got, err)
 	}
 }
+
+func TestDecodePublicArgumentsRejectsNestedSyncPushDuplicates(t *testing.T) {
+	for name, raw := range map[string]string{
+		"repository": `{"version":2,"attachment_ref":"attachment","repository":{"provider":"github","provider":"gitlab","immutable_id":"123","canonical_remote":"https://github.com/H4RL33/wormhole"},"canonical_ref":"refs/heads/main","base_commit_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base_tree_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","expected_stream_version":1,"expected_live_tree_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","operation":{"schema_version":1,"id":"operation","kind":"put_record","expected_view_digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","actor":{"actor_kind":"human","assurance":"public-key-continuity","occurred_at":"2026-08-28T12:00:00Z"}}}`,
+		"operation":  `{"version":2,"attachment_ref":"attachment","repository":{"provider":"github","immutable_id":"123","canonical_remote":"https://github.com/H4RL33/wormhole"},"canonical_ref":"refs/heads/main","base_commit_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base_tree_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","expected_stream_version":1,"expected_live_tree_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","operation":{"schema_version":1,"id":"operation-1","id":"operation-2","kind":"put_record","expected_view_digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","actor":{"actor_kind":"human","assurance":"public-key-continuity","occurred_at":"2026-08-28T12:00:00Z"}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var destination SyncPushV2Args
+			if err := decodePublicArguments(json.RawMessage(raw), &destination); err == nil {
+				t.Fatal("decodePublicArguments accepted a nested duplicate member")
+			}
+		})
+	}
+}
+
+func TestDecodePublicArgumentsRejectsMissingRequiredMember(t *testing.T) {
+	for name, raw := range map[string]string{
+		"top-level canonical ref": `{"version":2,"repository":{"provider":"github","immutable_id":"123","canonical_remote":"https://github.com/H4RL33/wormhole"},"base_commit_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base_tree_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`,
+		"nested immutable id":     `{"version":2,"repository":{"provider":"github","canonical_remote":"https://github.com/H4RL33/wormhole"},"canonical_ref":"refs/heads/main","base_commit_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base_tree_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var destination SyncAttachV2Args
+			if err := decodePublicArguments(json.RawMessage(raw), &destination); err == nil {
+				t.Fatal("decodePublicArguments accepted a missing required member")
+			}
+		})
+	}
+}
+
+func TestDecodePublicArgumentsRejectsWrongSyncVersion(t *testing.T) {
+	raw := `{"version":1,"repository":{"provider":"github","immutable_id":"123","canonical_remote":"https://github.com/H4RL33/wormhole"},"canonical_ref":"refs/heads/main","base_commit_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base_tree_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`
+	var destination SyncAttachV2Args
+	if err := decodePublicArguments(json.RawMessage(raw), &destination); err == nil {
+		t.Fatal("decodePublicArguments accepted sync version 1")
+	}
+}
+
+func TestDecodePublicArgumentsRejectsWrongActivityVersion(t *testing.T) {
+	raw := `{"version":2,"attachment_ref":"attachment","after_sequence":0,"limit":10}`
+	var destination ActivityPullV1Args
+	if err := decodePublicArguments(json.RawMessage(raw), &destination); err == nil {
+		t.Fatal("decodePublicArguments accepted Activity version 2")
+	}
+}
+
+func TestDecodePublicArgumentsAllowsDynamicKeysButRejectsDuplicates(t *testing.T) {
+	type dynamicArgs struct {
+		Version int               `json:"version" const:"1"`
+		Labels  map[string]string `json:"labels"`
+	}
+	var valid dynamicArgs
+	if err := decodePublicArguments(json.RawMessage(`{"version":1,"labels":{"arbitrary.key":"value"}}`), &valid); err != nil {
+		t.Fatalf("decodePublicArguments rejected an arbitrary dynamic key: %v", err)
+	}
+	var duplicate dynamicArgs
+	if err := decodePublicArguments(json.RawMessage(`{"version":1,"labels":{"arbitrary.key":"one","arbitrary.key":"two"}}`), &duplicate); err == nil {
+		t.Fatal("decodePublicArguments accepted a duplicate dynamic key")
+	}
+}
