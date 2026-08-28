@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/H4RL33/wormhole/internal/types"
+	"github.com/H4RL33/wormhole/internal/types/projectstate"
 )
 
 func publicProofFixture() *types.PublicRequestProof {
@@ -157,4 +158,84 @@ func TestDecodePublicArgumentsAllowsDynamicKeysButRejectsDuplicates(t *testing.T
 	if err := decodePublicArguments(json.RawMessage(`{"version":1,"labels":{"arbitrary.key":"one","arbitrary.key":"two"}}`), &duplicate); err == nil {
 		t.Fatal("decodePublicArguments accepted a duplicate dynamic key")
 	}
+}
+
+func TestDecodePublicArgumentsRejectsPrimitiveNulls(t *testing.T) {
+	type dynamicArgs struct {
+		Version int               `json:"version" const:"1"`
+		Labels  map[string]string `json:"labels"`
+	}
+	tests := []struct {
+		name        string
+		raw         string
+		destination func() any
+	}{
+		{
+			name:        "top-level required string",
+			raw:         `{"version":2,"repository":{"provider":"github","immutable_id":"123","canonical_remote":"https://github.com/H4RL33/wormhole"},"canonical_ref":null,"base_commit_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base_tree_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`,
+			destination: func() any { return &SyncAttachV2Args{} },
+		},
+		{
+			name:        "nested required string",
+			raw:         `{"version":2,"repository":{"provider":null,"immutable_id":"123","canonical_remote":"https://github.com/H4RL33/wormhole"},"canonical_ref":"refs/heads/main","base_commit_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base_tree_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`,
+			destination: func() any { return &SyncAttachV2Args{} },
+		},
+		{
+			name:        "dynamic map string value",
+			raw:         `{"version":1,"labels":{"arbitrary.key":null}}`,
+			destination: func() any { return &dynamicArgs{} },
+		},
+		{
+			name:        "pointer scalar",
+			raw:         syncPushArguments(`{"schema_version":1,"id":"operation","kind":"resurrect","expected_view_digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","actor":{"actor_kind":"human","assurance":"public-key-continuity","occurred_at":"2026-08-28T12:00:00Z"},"resurrect":{"key":{"Kind":"task","ID":"record"},"expected_tombstone_digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","record":{},"kb_body":null}}`),
+			destination: func() any { return &SyncPushV2Args{} },
+		},
+		{
+			name:        "time string",
+			raw:         syncPushArguments(`{"schema_version":1,"id":"operation","kind":"put_record","expected_view_digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","actor":{"actor_kind":"human","assurance":"public-key-continuity","occurred_at":null}}`),
+			destination: func() any { return &SyncPushV2Args{} },
+		},
+		{
+			name:        "byte string",
+			raw:         `{"Path":"records/file","Data":null}`,
+			destination: func() any { return &projectstate.File{} },
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := decodePublicArguments(json.RawMessage(test.raw), test.destination()); err == nil {
+				t.Fatal("decodePublicArguments accepted null for a non-nullable primitive schema")
+			}
+		})
+	}
+}
+
+func TestValidatePublicInputSchemaRejectsPrimitiveKindMismatches(t *testing.T) {
+	for name, test := range map[string]struct {
+		value  any
+		schema map[string]any
+	}{
+		"string":  {value: json.Number("1"), schema: map[string]any{"type": "string"}},
+		"integer": {value: "1", schema: map[string]any{"type": "integer"}},
+		"number":  {value: true, schema: map[string]any{"type": "number"}},
+		"boolean": {value: json.Number("1"), schema: map[string]any{"type": "boolean"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validatePublicInputSchema(test.value, test.schema); err == nil {
+				t.Fatal("validatePublicInputSchema accepted an incompatible primitive kind")
+			}
+		})
+	}
+}
+
+func TestValidatePublicInputSchemaLeavesUnconstrainedValuesOpen(t *testing.T) {
+	for _, value := range []any{nil, "value", json.Number("1"), true, []any{}, map[string]any{}} {
+		if err := validatePublicInputSchema(value, map[string]any{}); err != nil {
+			t.Fatalf("validatePublicInputSchema rejected unconstrained value %#v: %v", value, err)
+		}
+	}
+}
+
+func syncPushArguments(operation string) string {
+	return `{"version":2,"attachment_ref":"attachment","repository":{"provider":"github","immutable_id":"123","canonical_remote":"https://github.com/H4RL33/wormhole"},"canonical_ref":"refs/heads/main","base_commit_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base_tree_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","expected_stream_version":1,"expected_live_tree_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","operation":` + operation + `}`
 }

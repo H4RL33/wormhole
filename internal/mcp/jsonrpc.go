@@ -598,6 +598,18 @@ func validatePublicInputSchema(value any, schema map[string]any) error {
 
 	schemaType, _ := schema["type"].(string)
 	switch schemaType {
+	case "string":
+		if _, ok := value.(string); !ok {
+			return errors.New("mcp: expected JSON string")
+		}
+	case "integer", "number":
+		if _, ok := value.(json.Number); !ok {
+			return errors.New("mcp: expected JSON number")
+		}
+	case "boolean":
+		if _, ok := value.(bool); !ok {
+			return errors.New("mcp: expected JSON boolean")
+		}
 	case "object":
 		object, ok := value.(map[string]any)
 		if !ok {
