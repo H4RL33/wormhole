@@ -22,6 +22,9 @@ func (r *ActivityRepo) TransitionLifecycle(ctx context.Context, key types.Activi
 		if err != nil {
 			return err
 		}
+		if evidence.queue != nil && change.Kind == "delivery" && change.ReferenceID == key.ActivityID && change.NextState == "delivered" {
+			return fmt.Errorf("localstore: transition Activity lifecycle: %w", ErrActivityLifecycleConflict)
+		}
 		var selected *activityLifecycleEvidence
 		for index := range evidence.lifecycles {
 			candidate := &evidence.lifecycles[index]

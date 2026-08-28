@@ -237,3 +237,67 @@ total: (statements) 80.9%
 
 The review fix changes no schema epoch, compatibility boundary, transport,
 PostgreSQL object, MCP surface, promotion operation, or Task 3D+ behavior.
+
+## Re-review delivery-authority fix
+
+The re-review identified one remaining Important issue: the generic lifecycle
+API could mark an outbound queue's automatic `delivery/<activity_id>` row
+delivered without receipt evidence, while generic cancellation did not remove
+the retained queue row from send eligibility.
+
+### Delivery-authority RED evidence
+
+The causal public-method tests failed against the reviewed implementation for
+both reasons:
+
+```text
+TestActivityAutomaticDeliveryRequiresReceiptAcknowledgement:
+generic automatic delivery transition=<nil>
+
+TestActivityAutomaticDeliveryCancellationIsRetainedButNotSendable:
+cancelled automatic delivery remained sendable
+```
+
+### Delivery-authority implementation
+
+- `TransitionLifecycle` still strict-loads the complete Activity evidence, then
+  rejects every generic transition to `delivered` for the outbound queue's
+  automatic `delivery/<activity_id>` row. `AcknowledgeOutbound` remains the
+  sole receipt-backed delivery authority and its atomic receipt/queue/lifecycle
+  transaction is unchanged.
+- Generic transition to `cancelled` remains legal. The queue row and lifecycle
+  evidence remain retained, but `PendingOutbound` returns it as non-sendable
+  only after the central loader has validated its complete evidence.
+- The central relation validator permits only `pending` or `cancelled`
+  automatic delivery state for a pending queue, and requires both receipt
+  evidence and delivered lifecycle state for a delivered queue. Incoherent
+  generic-delivery evidence therefore fails closed.
+- Exact cancellation replay returns before any write, and terminal cancellation
+  remains eligible for complete bounded pruning only after its captured finite
+  expiry.
+
+### Delivery-authority GREEN evidence
+
+```text
+go test ./internal/runtime/localstore -run 'TestActivityAutomaticDelivery' -count=1
+ok github.com/H4RL33/wormhole/internal/runtime/localstore 0.046s
+
+go test ./internal/runtime/localstore -run TestActivity -count=1
+ok github.com/H4RL33/wormhole/internal/runtime/localstore 4.675s
+
+go test -race ./internal/runtime/localstore -run TestActivity -count=1
+ok github.com/H4RL33/wormhole/internal/runtime/localstore 98.708s
+
+go test ./internal/runtime/localstore -count=1
+ok github.com/H4RL33/wormhole/internal/runtime/localstore 11.028s
+
+make check
+total: (statements) 80.9%
+# exit 0; build, vet, integration-required tests, repository-wide race, coverage
+```
+
+The causal regressions prove byte-identical generic-delivery rejection, normal
+receipt acknowledgement after rejection, cancellation exclusion from pending
+sends, retained evidence before expiry, read-only exact cancellation replay,
+and complete evidence removal after finite expiry. This fix adds no schema,
+compatibility, transport, PostgreSQL, MCP, promotion, or Task 3D+ scope.

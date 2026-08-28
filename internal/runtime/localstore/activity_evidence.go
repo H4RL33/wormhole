@@ -334,8 +334,20 @@ func (l *activityEvidenceLoader) validateRelations(evidence *activityEvidence) e
 		return activityEvidenceConflict("validate", ErrActivityLifecycleConflict)
 	}
 	if evidence.queue != nil {
-		if delivery == nil || (evidence.queue.state == "delivered" && delivery.state != "delivered") {
+		if delivery == nil {
 			return activityEvidenceConflict("validate", ErrActivityLifecycleConflict)
+		}
+		switch evidence.queue.state {
+		case "pending":
+			if delivery.state != "pending" && delivery.state != "cancelled" {
+				return activityEvidenceConflict("validate", ErrActivityLifecycleConflict)
+			}
+		case "delivered":
+			if evidence.receipt == nil || delivery.state != "delivered" {
+				return activityEvidenceConflict("validate", ErrActivityLifecycleConflict)
+			}
+		default:
+			return activityEvidenceConflict("validate", ErrActivityReplayConflict)
 		}
 	}
 	return nil
@@ -360,11 +372,24 @@ func (e activityEvidence) recordForPolicy(version int64, digest projectstate.Dig
 	return record, nil
 }
 
-func (e activityEvidence) pendingRecord() (ActivityRecord, error) {
+func (e activityEvidence) pendingRecord() (ActivityRecord, bool, error) {
 	if e.queue == nil || e.queue.state != "pending" {
-		return ActivityRecord{}, activityEvidenceConflict("pending", ErrActivityReplayConflict)
+		return ActivityRecord{}, false, activityEvidenceConflict("pending", ErrActivityReplayConflict)
 	}
-	return e.recordForPolicy(e.queue.expectedVersion, e.queue.expectedDigest)
+	for _, lifecycle := range e.lifecycles {
+		if lifecycle.kind != "delivery" || lifecycle.reference != e.record.Key.ActivityID {
+			continue
+		}
+		if lifecycle.state == "cancelled" {
+			return ActivityRecord{}, false, nil
+		}
+		if lifecycle.state != "pending" {
+			return ActivityRecord{}, false, activityEvidenceConflict("pending", ErrActivityLifecycleConflict)
+		}
+		record, err := e.recordForPolicy(e.queue.expectedVersion, e.queue.expectedDigest)
+		return record, err == nil, err
+	}
+	return ActivityRecord{}, false, activityEvidenceConflict("pending", ErrActivityLifecycleConflict)
 }
 
 func (e activityEvidence) retainedRecord() (ActivityRecord, error) {

@@ -181,9 +181,12 @@ func (r *ActivityRepo) PendingOutbound(ctx context.Context, route types.Activity
 		if err != nil {
 			return nil, err
 		}
-		record, err := evidence.pendingRecord()
+		record, sendable, err := evidence.pendingRecord()
 		if err != nil {
 			return nil, err
+		}
+		if !sendable {
+			continue
 		}
 		records = append(records, cloneActivityRecord(record))
 	}
