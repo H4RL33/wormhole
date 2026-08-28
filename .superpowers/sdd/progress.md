@@ -1546,3 +1546,10 @@ changing retained private descriptors. Recursive duplicate keys, missing require
 members, wrong constants, explicit nulls, and primitive kind mismatches fail before
 typed decoding. Full tests, race, vet, and canonical `make check` passed at 80.9%
 coverage. Slice 1 Task 2 descriptor/schema infrastructure is next.
+
+Stage 3 Task 6 Slice 1 Task 2: complete (commit `3e7edf2`, independent review
+clean: Critical 0 / Important 0 / Minor 0). The single `V2Engine` shell preserves
+the exact local `wormhole.sync.status` offline/zero wire while permanent
+`CredentialSource` and `FabricRouteSource` owners keep Activity v1 buildable across
+the destructive cut. Full tests, focused race, vet, and canonical `make check`
+passed at 80.9% coverage. Slice 1 Task 3 atomic sync-v1 removal is next.
