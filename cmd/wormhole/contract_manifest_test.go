@@ -307,6 +307,26 @@ func TestAlphaContractEnvironmentAndPaths(t *testing.T) {
 
 }
 
+func TestAlphaContractFabricGitHubObserverEnvironment(t *testing.T) {
+	manifest := readAlphaCLIContract(t)
+	present := make(map[string]bool, len(manifest.Environment))
+	for _, name := range manifest.Environment {
+		present[name] = true
+	}
+	for _, required := range []string{
+		"WORMHOLE_GITHUB_API_BASE_URL",
+		"WORMHOLE_GITHUB_CREDENTIAL",
+		"WORMHOLE_GITHUB_CREDENTIAL_REF",
+	} {
+		if !present[required] {
+			t.Errorf("Fabric GitHub observer environment is missing %s", required)
+		}
+	}
+	if present["GITHUB_TOKEN"] {
+		t.Error("alpha environment inventory permits ambient GITHUB_TOKEN")
+	}
+}
+
 func TestAlphaContractMigrationsAndArtifacts(t *testing.T) {
 	manifest := readAlphaCLIContract(t)
 	entries, currentVersion := productionMigrationEntries(t)

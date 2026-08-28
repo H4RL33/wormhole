@@ -80,7 +80,9 @@ func LoadConfig() Config {
 			APIKey: getEnv("WORMHOLE_COHERE_API_KEY", ""),
 		},
 		GitHubObserver: GitHubObserverConfig{
-			APIBaseURL: "https://api.github.com",
+			APIBaseURL:    getEnv("WORMHOLE_GITHUB_API_BASE_URL", "https://api.github.com"),
+			CredentialRef: getEnv("WORMHOLE_GITHUB_CREDENTIAL_REF", ""),
+			Credential:    getEnv("WORMHOLE_GITHUB_CREDENTIAL", ""),
 		},
 		AdminKey: getEnv("WORMHOLE_ADMIN_KEY", ""),
 	}

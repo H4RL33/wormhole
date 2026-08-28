@@ -136,10 +136,42 @@ func TestValidateEmbeddingConfigRejectsMissingOrUnapprovedValues(t *testing.T) {
 }
 
 func TestLoadConfig_PrivateGitCredential(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "ambient-token-must-not-be-used")
+	t.Run("public default ignores ambient GitHub token", func(t *testing.T) {
+		unsetGitHubObserverEnvironment(t)
+		t.Setenv("GITHUB_TOKEN", "ambient-token-must-not-be-used")
 
-	cfg := LoadConfig()
-	if cfg.GitHubObserver.APIBaseURL != "https://api.github.com" || cfg.GitHubObserver.CredentialRef != "" || cfg.GitHubObserver.Credential != "" {
-		t.Fatal("LoadConfig imported an ambient credential or selected an unexpected GitHub API origin")
+		cfg := LoadConfig()
+		if cfg.GitHubObserver.APIBaseURL != "https://api.github.com" || cfg.GitHubObserver.CredentialRef != "" || cfg.GitHubObserver.Credential != "" {
+			t.Fatal("LoadConfig imported an ambient credential or selected an unexpected GitHub API origin")
+		}
+	})
+
+	t.Run("explicit Fabric server configuration", func(t *testing.T) {
+		unsetGitHubObserverEnvironment(t)
+		t.Setenv("GITHUB_TOKEN", "ambient-token-must-not-be-used")
+		t.Setenv("WORMHOLE_GITHUB_API_BASE_URL", "https://github.example.test/api/v3")
+		t.Setenv("WORMHOLE_GITHUB_CREDENTIAL_REF", "server:github-private")
+		t.Setenv("WORMHOLE_GITHUB_CREDENTIAL", "configured-server-credential")
+
+		cfg := LoadConfig()
+		if cfg.GitHubObserver.APIBaseURL != "https://github.example.test/api/v3" ||
+			cfg.GitHubObserver.CredentialRef != "server:github-private" ||
+			cfg.GitHubObserver.Credential != "configured-server-credential" {
+			t.Fatal("LoadConfig did not load the explicit Fabric-server GitHub observer configuration")
+		}
+	})
+}
+
+func unsetGitHubObserverEnvironment(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"WORMHOLE_GITHUB_API_BASE_URL",
+		"WORMHOLE_GITHUB_CREDENTIAL_REF",
+		"WORMHOLE_GITHUB_CREDENTIAL",
+	} {
+		t.Setenv(key, "")
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("unset %s: %v", key, err)
+		}
 	}
 }

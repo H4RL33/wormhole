@@ -1854,6 +1854,9 @@ git commit -m "feat: reconstruct versioned Fabric streams"
 - Modify: `internal/types/config_test.go`
 - Modify: `cmd/fabric/main.go`
 - Modify: `cmd/fabric/main_test.go`
+- Modify: `cmd/wormhole/contract_manifest_test.go`
+- Modify: `docs/contracts/alpha-contract.json`
+- Modify: `docs/superpowers/plans/2026-07-28-multifabric-identity-trial-implementation-plan.md`
 
 **Interfaces:**
 - Consumes: `types.RepositoryIdentity`, `projectstate.Tree`, Task 4 `RefObservation`.
@@ -1872,10 +1875,14 @@ func (f *FakeObserver) ObserveRef(context.Context, types.RepositoryIdentity, str
 ```
 
 The fourth `ObserveRef` argument is the Fabric-side `observer_credential_ref`; Gateway has no observer credential parameter.
+Task 5 owns live Fabric runtime publication of `WORMHOLE_GITHUB_API_BASE_URL`,
+`WORMHOLE_GITHUB_CREDENTIAL_REF`, and `WORMHOLE_GITHUB_CREDENTIAL` together with the
+matching frozen alpha environment inventory. Task 15 documents and verifies this
+already-shipped surface; it does not introduce or defer the runtime configuration.
 
 - [ ] **Step 1: Write failing fake-server and consistency tests**
 
-Add `TestGitHubObserverUsesProviderRepositoryID`, `TestGitHubObserverReadsTreeAtResolvedCommitNotMovingRef`, `TestGitHubObserverRejectsCommitMismatch`, `TestGitHubObserverFetchesOnlyWormholeBlobs`, `TestGitHubObserverPublicSendsNoAuthorization`, `TestGitHubObserverPrivateUsesServerCredentialOnly`, `TestGitHubObserverRejectsCredentialedRedirectBeforeFollow`, `TestGitHubObserverRejectsCrossOriginRedirect`, `TestGitHubObserverBoundsTree`, and `TestFakeObserverIsDeterministic`. In the moving-ref test, change the ref response after it returns commit A and make commit B contain different `.wormhole/` bytes; the result must be commit A and A's exact tree.
+Add `TestGitHubObserverUsesProviderRepositoryID`, `TestGitHubObserverReadsTreeAtResolvedCommitNotMovingRef`, `TestGitHubObserverRejectsCommitMismatch`, `TestGitHubObserverFetchesOnlyWormholeBlobs`, `TestGitHubObserverPublicSendsNoAuthorization`, `TestGitHubObserverPrivateUsesServerCredentialOnly`, `TestGitHubObserverRejectsCredentialedRedirectBeforeFollow`, `TestGitHubObserverRejectsCrossOriginRedirect`, `TestGitHubObserverBoundsTree`, and `TestFakeObserverIsDeterministic`. In the moving-ref test, change the ref response after it returns commit A and make commit B contain different `.wormhole/` bytes; the result must be commit A and A's exact tree. Add configuration and contract tests proving the three live Fabric environment values load exactly, incomplete/whitespace/control-bearing credential pairs fail closed, public defaults send no authorization, ambient `GITHUB_TOKEN` is ignored, and the frozen inventory contains only the explicit surface.
 
 - [ ] **Step 2: Run RED**
 
@@ -1899,16 +1906,27 @@ Verify repository response ID equals `N`, ref response name/SHA match, commit re
 
 Configure a dedicated `http.Client.CheckRedirect` that always returns `http.ErrUseLastResponse`; any 3xx is an observer error. This is mandatory for credentialed requests so `Authorization` cannot follow a redirect, and also applies to public requests for deterministic origin policy. Send `Authorization: Bearer ...` only when the repository binding is private, the credential reference resolves from Fabric config, and every request URL has the exact configured API scheme/host/port. Reject userinfo, query/fragment in the base URL, symlink/submodule entries, more than 10,000 entries, individual blobs over 1 MiB, aggregate bytes over 16 MiB, and paths outside `.wormhole/`. Do not call local Git or credential helpers.
 
+`LoadConfig` reads the API base, observer credential reference, and server-held
+credential only from the three Task-5-owned `WORMHOLE_GITHUB_*` names above. Empty
+reference and credential select public observation; any incomplete, whitespace-bearing,
+or control-bearing pair fails Fabric startup. Never read `GITHUB_TOKEN` or any Gateway
+credential source. Update the alpha environment inventory in the same change.
+
 - [ ] **Step 4: Run GREEN**
 
 Run: `go test ./internal/core/git ./cmd/fabric -run 'Test(GitHubObserver|FakeObserver|PrivateGitCredential)' -count=1`
 
 Expected: PASS; fake-server request logs contain no source blob and no redirected request.
 
+Run: `go test ./internal/types ./cmd/wormhole -run 'Test(LoadConfig_PrivateGitCredential|AlphaContract(EnvironmentAndPaths|FabricGitHubObserverEnvironment))' -count=1`
+
+Expected: PASS; the live Fabric-only values and exact frozen environment inventory
+agree, while ambient `GITHUB_TOKEN` remains absent.
+
 - [ ] **Step 5: Commit**
 
 ```bash
-git add internal/core/git internal/types/config.go internal/types/config_test.go cmd/fabric
+git add internal/core/git internal/types/config.go internal/types/config_test.go cmd/fabric cmd/wormhole/contract_manifest_test.go docs/contracts/alpha-contract.json docs/superpowers/plans/2026-07-28-multifabric-identity-trial-implementation-plan.md
 git commit -m "feat: observe exact canonical GitHub commits"
 ```
 
@@ -3209,6 +3227,10 @@ git commit -m "feat: recover legacy local Fabric state"
 - Consumes: shipped Tasks 1–14 and Slice-C setup.
 - Produces: truthful live command/schema/auth inventory plus reproducible exact-v8
   private-format and Postgres-20→21→23 migration gates.
+
+Task 15 documents and verifies Task 5's already-published Fabric GitHub observer
+environment surface; it does not add, defer, rename, or source runtime observer
+credentials.
 
 - [ ] **Step 1: Add failing contract assertions**
 

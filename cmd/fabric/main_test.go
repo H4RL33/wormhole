@@ -26,18 +26,46 @@ type countingStartupEmbedder struct {
 }
 
 func TestPrivateGitCredentialResolvesOnlyConfiguredFabricReference(t *testing.T) {
-	cfg := types.GitHubObserverConfig{
-		APIBaseURL: "https://api.github.com", CredentialRef: "server:github-private", Credential: "github-secret",
-	}
+	t.Setenv("GITHUB_TOKEN", "ambient-token-must-not-be-used")
+	t.Setenv("WORMHOLE_GITHUB_API_BASE_URL", "https://github.example.test/api/v3")
+	t.Setenv("WORMHOLE_GITHUB_CREDENTIAL_REF", "server:github-private")
+	t.Setenv("WORMHOLE_GITHUB_CREDENTIAL", "configured-server-credential")
+	cfg := types.LoadConfig().GitHubObserver
 	source := privateGitCredentialSource{config: cfg}
 	got, err := source.ReadServerCredential(context.Background(), "server:github-private")
-	if err != nil || got != "github-secret" {
-		t.Fatalf("ReadServerCredential did not return the configured secret: %v", err)
+	if err != nil || got != "configured-server-credential" {
+		t.Fatalf("ReadServerCredential did not return the configured Fabric-server credential: %v", err)
 	}
 	for _, reference := range []string{"", "server:other"} {
 		if secret, err := source.ReadServerCredential(context.Background(), reference); !errors.Is(err, errPrivateGitCredentialUnavailable) || secret != "" {
 			t.Fatalf("ReadServerCredential did not reject an unconfigured reference: %v", err)
 		}
+	}
+}
+
+func TestPrivateGitCredentialEnvironmentFailsClosed(t *testing.T) {
+	tests := []struct {
+		name, reference, credential string
+	}{
+		{name: "reference only", reference: "server:github-private"},
+		{name: "credential only", credential: "configured-server-credential"},
+		{name: "reference internal whitespace", reference: "server: github-private", credential: "configured-server-credential"},
+		{name: "credential internal whitespace", reference: "server:github-private", credential: "configured server credential"},
+		{name: "reference control", reference: "server:\u007fgithub-private", credential: "configured-server-credential"},
+		{name: "credential control", reference: "server:github-private", credential: "configured-server-credential\u007f"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("GITHUB_TOKEN", "ambient-token-must-not-be-used")
+			t.Setenv("WORMHOLE_GITHUB_API_BASE_URL", "https://api.github.com")
+			t.Setenv("WORMHOLE_GITHUB_CREDENTIAL_REF", test.reference)
+			t.Setenv("WORMHOLE_GITHUB_CREDENTIAL", test.credential)
+
+			cfg := types.LoadConfig()
+			if observer, err := newCanonicalGitObserver(cfg); !errors.Is(err, errPrivateGitCredentialUnavailable) || observer != nil {
+				t.Fatalf("newCanonicalGitObserver accepted incomplete or unsafe live private Git configuration: observer=%v error=%v", observer != nil, err)
+			}
+		})
 	}
 }
 
