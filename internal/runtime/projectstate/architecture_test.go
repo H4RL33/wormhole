@@ -387,15 +387,11 @@ func TestFabricHasNoCompileTimeOrRuntimeActivityPromotionSeam(t *testing.T) {
 	root := filepath.Join("..", "..", "..")
 	sources := architectureProductionGoSources(t, root)
 	for path, source := range sources {
-		if !(strings.HasPrefix(path, "cmd/fabric/") || strings.HasPrefix(path, "internal/core/") ||
-			strings.HasPrefix(path, "internal/mcp/") || strings.HasPrefix(path, "internal/storage/") ||
-			strings.HasPrefix(path, "internal/types/") || strings.HasPrefix(path, "internal/webui/")) {
+		if !fabricPromotionProductionSource(path) {
 			continue
 		}
-		for _, forbidden := range []string{"PromoteActivity", "ActivityPromotion", "dev.wormhole.promotion", "activity_promotion"} {
-			if strings.Contains(source, forbidden) {
-				t.Fatalf("Fabric production source %s contains promotion authority %q", path, forbidden)
-			}
+		if forbidden := fabricPromotionSourceMatch(source); forbidden != "" {
+			t.Fatalf("Fabric production source %s contains promotion authority %q", path, forbidden)
 		}
 	}
 	if err := filepath.WalkDir(filepath.Join(root, "migrations"), func(path string, entry os.DirEntry, err error) error {
@@ -409,7 +405,7 @@ func TestFabricHasNoCompileTimeOrRuntimeActivityPromotionSeam(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if regexp.MustCompile(`(?i)promot|dev[.]wormhole[.]promotion`).Match(data) {
+		if fabricPromotionShape.Match(data) {
 			relative, _ := filepath.Rel(root, path)
 			t.Fatalf("Fabric migration %s contains promotion-shaped runtime authority", filepath.ToSlash(relative))
 		}
@@ -417,6 +413,54 @@ func TestFabricHasNoCompileTimeOrRuntimeActivityPromotionSeam(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestFabricPromotionGuardCoverageIsCompleteAndCaseInsensitive(t *testing.T) {
+	t.Run("production surfaces", func(t *testing.T) {
+		for _, path := range []string{
+			"cmd/fabric/main.go",
+			"internal/core/events/events.go",
+			"internal/mcp/registry.go",
+			"internal/runtime/sync/activity_v1.go",
+			"internal/storage/postgres.go",
+			"internal/types/activity.go",
+			"internal/webui/server.go",
+		} {
+			if !fabricPromotionProductionSource(path) {
+				t.Errorf("Fabric production surface %s is not scanned", path)
+			}
+		}
+	})
+	t.Run("case insensitive promotion shape", func(t *testing.T) {
+		for _, source := range []string{"func PrOmOtE()", "type pRoMoTiOnReceipt struct{}", `const extension = "DEV.WORMHOLE.PROMOTION"`} {
+			if fabricPromotionSourceMatch(source) == "" {
+				t.Errorf("promotion-shaped source %q is not rejected", source)
+			}
+		}
+	})
+	t.Run("test and report files stay excluded", func(t *testing.T) {
+		for _, path := range []string{"internal/runtime/sync/activity_v1_test.go", ".superpowers/sdd/task-3E-report.md"} {
+			if fabricPromotionProductionSource(path) {
+				t.Errorf("non-production source %s is scanned", path)
+			}
+		}
+	})
+}
+
+func fabricPromotionProductionSource(path string) bool {
+	if filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+		return false
+	}
+	return strings.HasPrefix(path, "cmd/fabric/") || strings.HasPrefix(path, "internal/core/") ||
+		strings.HasPrefix(path, "internal/mcp/") || strings.HasPrefix(path, "internal/storage/") ||
+		strings.HasPrefix(path, "internal/runtime/sync/") || strings.HasPrefix(path, "internal/types/") ||
+		strings.HasPrefix(path, "internal/webui/")
+}
+
+var fabricPromotionShape = regexp.MustCompile(`(?i)promot|dev[.]wormhole[.]promotion`)
+
+func fabricPromotionSourceMatch(source string) string {
+	return fabricPromotionShape.FindString(source)
 }
 
 func TestPrepareRegisteredWorkspacesUsesExactFacadeOrdering(t *testing.T) {

@@ -283,3 +283,45 @@ no Critical, Important, or Minor findings.
 ### Concerns
 
 None.
+
+## Final architecture-guard remediation — 2026-08-28
+
+### Status
+
+DONE
+
+The final re-review found one remaining Minor architecture-test gap. No production code
+or later-scope behavior changed.
+
+### Causal RED evidence
+
+`TestFabricPromotionGuardCoverageIsCompleteAndCaseInsensitive` failed against the
+extracted `cb0bd81` guard behavior. It reported that
+`internal/runtime/sync/activity_v1.go` was not scanned and accepted mixed-case
+`PrOmOtE`, `pRoMoTiOnReceipt`, and `DEV.WORMHOLE.PROMOTION` tokens. The same regression
+confirmed that `_test.go` and report files remain outside the production scan.
+
+### Fix
+
+The no-Fabric-promotion guard now includes `internal/runtime/sync/`, covering the live
+Activity Fabric client and transport package. All scanned Go production surfaces and all
+SQL migrations share one case-insensitive promotion-shaped matcher. The causal coverage
+enumerates every frozen production family and explicitly keeps test and report files
+excluded.
+
+### Fresh verification
+
+```text
+$ go test ./internal/runtime/projectstate -run 'TestFabric(PromotionGuardCoverageIsCompleteAndCaseInsensitive|HasNoCompileTimeOrRuntimeActivityPromotionSeam)' -count=1
+ok github.com/H4RL33/wormhole/internal/runtime/projectstate 0.035s
+
+$ go test ./internal/runtime/projectstate -run 'Test(ProjectStateServiceStillOwnsExactlySixCoordinatorsWithPromotion|Fabric)' -count=1
+ok github.com/H4RL33/wormhole/internal/runtime/projectstate 0.042s
+
+$ git diff --check
+PASS
+```
+
+### Concerns
+
+None.
