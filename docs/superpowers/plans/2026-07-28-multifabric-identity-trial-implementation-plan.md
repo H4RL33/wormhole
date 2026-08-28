@@ -597,6 +597,17 @@ is forbidden until all five slices and the final Task-3 verification gate pass. 
 add MCP descriptors, Task-4 reconstruction, Task-5 observation, Task-6 attach wiring,
 Task-8 identity, Code Graph work, R07-R14 reduction, or private-format compatibility.
 
+The human-approved 2026-08-28 final-review correction further binds slices 3B through
+3D: each pull result carries deduplicated canonical historical-policy evidence for every
+distinct receipt policy version. Gateway strict-validates and atomically
+insert-or-exact-replays those immutable versions with deliveries and cursor, never
+advances the current-policy pointer from historical evidence, and performs any separate
+current-policy response CAS in the same transaction so all policy and batch evidence
+rolls back on missing, corrupt, changed, duplicate-conflicting, or wrong-route evidence.
+The same correction requires fresh profile-mode assurance validation before pull
+mutation and retained exposure, and restricts detached-route access to exact maintenance
+pruning while every live queue/pull/lifecycle/read path remains active-only.
+
 #### Task 3A: Freeze complete Activity routing and strict wire codecs
 
 **Files:**
@@ -849,12 +860,18 @@ type ActivityDelivery struct {
     ActivityDigest    projectstate.Digest
     Receipt           projectstate.ActivityReceiptV1
 }
-type PullActivityResult struct {
+type ActivityPolicyEvidence struct {
+    Stream       FabricActivityStreamKey
     PolicyJSON   []byte
     PolicyDigest projectstate.Digest
-    Deliveries   []ActivityDelivery
-    NextSequence int64
-    HasMore      bool
+}
+type PullActivityResult struct {
+    PolicyJSON         []byte
+    PolicyDigest       projectstate.Digest
+    HistoricalPolicies []ActivityPolicyEvidence
+    Deliveries         []ActivityDelivery
+    NextSequence       int64
+    HasMore            bool
 }
 type ActivityLifecycleTransition struct {
     Kind, ReferenceID, ExpectedState, NextState string
@@ -982,7 +999,10 @@ Exact replay returns the original receipt/sequence/policy/timestamp; a changed b
 digest preserves all rows. A stale policy returns `ErrActivityPolicyChanged` with the
 current canonical policy through a typed error and inserts no ledger, receipt, sequence,
 lifecycle, or audit row. Pull bounds are `1..500`; empty pulls advance to the captured
-high watermark without reading portable stream version.
+high watermark without reading portable stream version. Pull also joins every returned
+receipt to its exact immutable policy row, emits one deep-owned canonical evidence record
+per distinct receipt policy version in ascending version order, and fails closed on
+missing or changed route-bound policy evidence.
 
 Run: `WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'TestActivityStore' -count=1`
 
@@ -1131,12 +1151,20 @@ type ActivityPullDelivery struct {
     ActivityDigest    projectstate.Digest
     ReceiptJSON       []byte
 }
+type ActivityPolicyEvidence struct {
+    Route        types.ActivityRouteKey
+    PolicyJSON   []byte
+    PolicyDigest projectstate.Digest
+}
 type ActivityPullBatch struct {
-    PolicyJSON    []byte
-    ExpectedAfter int64
-    NextSequence  int64
-    HasMore       bool
-    Deliveries    []ActivityPullDelivery
+    PolicyJSON         []byte
+    HistoricalPolicies []ActivityPolicyEvidence
+    ExpectedPolicyVersion int64
+    ExpectedPolicyDigest  projectstate.Digest
+    ExpectedAfter      int64
+    NextSequence       int64
+    HasMore            bool
+    Deliveries         []ActivityPullDelivery
 }
 type ActivityLifecycleChange struct {
     Kind, ReferenceID, ExpectedState, NextState string
@@ -1283,9 +1311,16 @@ func TestActivityConcurrentEnqueueAckPullAndPruneKeepSiblingIsolation(t *testing
 ```
 
 Pull prevalidates the full policy and batch, requires ascending positive safe sequences,
-and advances only from the exact old cursor. Prune uses age OR cap, stable UUID ties,
+requires exactly one canonical historical policy per distinct receipt version, and
+advances only from the exact old cursor. Historical versions insert-or-exact-replay in
+the same immediate transaction without selecting the current pointer; any separately
+returned newer current policy uses an expected-old CAS in that transaction. Missing,
+corrupt, changed, duplicate-conflicting, or wrong-route evidence rolls back current and
+historical policy state, ledger, lifecycle, receipt, and cursor together. Prune uses age OR cap, stable UUID ties,
 `1..1000` batches, all-terminal/max-expiry rules, and deletes a promotion receipt before
-its restricted source parent only after its finite terminal retention.
+its restricted source parent only after its finite terminal retention. Its exact
+maintenance route check accepts a retained detached binding; queue, pull, lifecycle,
+pending delivery, and retained exposure continue to require an active binding.
 
 Run:
 
@@ -1355,12 +1390,21 @@ type ActivityPullRequest struct {
     AfterSequence int64
     Limit         int
 }
-type ActivityPullResponse struct {
+type ActivityPullPolicyStreamKey struct {
+    ProjectID, FabricInstanceID, StreamID, CanonicalRef string
+}
+type ActivityPullPolicyEvidence struct {
+    Stream       ActivityPullPolicyStreamKey
     PolicyJSON   []byte
     PolicyDigest projectstate.Digest
-    Deliveries   []localstore.ActivityPullDelivery
-    NextSequence int64
-    HasMore      bool
+}
+type ActivityPullResponse struct {
+    PolicyJSON         []byte
+    PolicyDigest       projectstate.Digest
+    HistoricalPolicies []ActivityPullPolicyEvidence
+    Deliveries         []localstore.ActivityPullDelivery
+    NextSequence       int64
+    HasMore            bool
 }
 type ActivityFabricClient interface {
     Accept(context.Context, ActivityAcceptRequest) (ActivityAcceptResponse, error)
@@ -1418,6 +1462,13 @@ queue. Every send/pull/presence cycle resolves route, profile, credential, and p
 again immediately before client construction. A policy-changed response strict-validates
 and CAS-replaces current policy, changes only pending expected-policy fields, and retries
 the same Activity ID/bytes/digest. Ack and pull delegate to Task-3C atomic methods.
+
+Pull strict-decodes and validates every delivery's actor assurance against that freshly
+resolved profile mode before performing any local mutation, then deep-copies the
+deduplicated historical-policy evidence and expected current-policy CAS into the atomic
+local batch.
+Retained exposure re-resolves the route/profile and validates every exact-route record
+against its mode before returning any record.
 
 The exact-workspace conflict gate precedes credential resolution/client/DNS/network and
 blocks only that binding. No SQLite transaction spans a network call. Presence validates

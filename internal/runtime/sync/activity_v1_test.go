@@ -541,10 +541,11 @@ func TestActivityTransportPullGapsAndCursorRollback(t *testing.T) {
 	second := activityTestDelivery(t, activityTestOrdinary(activityTestIDTwo, time.Date(2026, 8, 28, 10, 4, 1, 2, time.UTC)), source, 6, activityTestPolicy(1))
 	invalid := activityTestDelivery(t, activityTestOrdinary(activityTestIDThree, time.Date(2026, 8, 28, 10, 4, 2, 3, time.UTC)), source, 7, activityTestPolicy(1))
 	invalid.ActivityDigest = projectstate.Digest("sha256:" + strings.Repeat("f", 64))
+	historical := []ActivityPullPolicyEvidence{activityTestPullPolicyEvidence(t, fixture.activityKey[0], activityTestPolicy(1))}
 	responses := []ActivityPullResponse{
-		{PolicyJSON: policyRaw, PolicyDigest: policyDigest, Deliveries: []localstore.ActivityPullDelivery{first}, NextSequence: 5},
-		{PolicyJSON: policyRaw, PolicyDigest: policyDigest, Deliveries: []localstore.ActivityPullDelivery{second, invalid}, NextSequence: 7},
-		{PolicyJSON: policyRaw, PolicyDigest: policyDigest, Deliveries: []localstore.ActivityPullDelivery{second}, NextSequence: 7},
+		{PolicyJSON: policyRaw, PolicyDigest: policyDigest, HistoricalPolicies: historical, Deliveries: []localstore.ActivityPullDelivery{first}, NextSequence: 5},
+		{PolicyJSON: policyRaw, PolicyDigest: policyDigest, HistoricalPolicies: historical, Deliveries: []localstore.ActivityPullDelivery{second, invalid}, NextSequence: 7},
+		{PolicyJSON: policyRaw, PolicyDigest: policyDigest, HistoricalPolicies: historical, Deliveries: []localstore.ActivityPullDelivery{second}, NextSequence: 7},
 	}
 	client := &activityTestClient{pull: func(_ context.Context, request ActivityPullRequest) (ActivityPullResponse, error) {
 		response := responses[0]
@@ -576,6 +577,79 @@ func TestActivityTransportPullGapsAndCursorRollback(t *testing.T) {
 	}
 }
 
+func TestActivityTransportPullInstallsHistoricalPolicyIntoFreshV3Gateway(t *testing.T) {
+	fixture := newActivityTransportFixture(t, 1, false)
+	v3 := activityTestPolicy(3)
+	activityTestInstallCurrentPolicyDirect(t, fixture, fixture.activityKey[0], v3)
+	v2 := activityTestPolicy(2)
+	delivery := activityTestDelivery(t,
+		activityTestOrdinary(activityTestIDOne, time.Date(2026, 8, 28, 10, 4, 30, 0, time.UTC)),
+		types.WorkspaceID("00000000-0000-4000-8000-000000000099"), 1, v2)
+	v3Raw, v3Digest := activityTestPolicyEvidence(t, v3)
+	client := &activityTestClient{pull: func(context.Context, ActivityPullRequest) (ActivityPullResponse, error) {
+		return ActivityPullResponse{
+			PolicyJSON: v3Raw, PolicyDigest: v3Digest,
+			HistoricalPolicies: []ActivityPullPolicyEvidence{activityTestPullPolicyEvidence(t, fixture.activityKey[0], v2)},
+			Deliveries:         []localstore.ActivityPullDelivery{delivery}, NextSequence: 1,
+		}, nil
+	}}
+	transport := activityTestTransport(t, fixture, activityRouteSourceForFixture(fixture),
+		&activityTestCredentials{values: map[string]string{"keyring:activity-0": "token"}},
+		&activityTestConflictGate{open: map[types.WorkspaceScope]bool{}},
+		&activityTestClientFactory{client: client})
+	if err := transport.Pull(context.Background(), fixture.bindings[0].Workspace.Scope, 1); err != nil {
+		t.Fatal(err)
+	}
+	var versions string
+	if err := fixture.store.DB().QueryRow(`SELECT group_concat(policy_version, ',') FROM
+		(SELECT policy_version FROM activity_policy_versions ORDER BY policy_version)`).Scan(&versions); err != nil {
+		t.Fatal(err)
+	}
+	if versions != "2,3" {
+		t.Fatalf("fresh-v3 immutable policy history=%q, want 2,3", versions)
+	}
+	current, err := fixture.activities.CurrentPolicy(context.Background(), fixture.activityKey[0])
+	if err != nil || current.Policy.PolicyVersion != 3 || current.PolicyDigest != v3Digest {
+		t.Fatalf("current after historical install=(%+v,%v), want v3", current, err)
+	}
+	retained, err := transport.Retained(context.Background(), fixture.bindings[0].Workspace.Scope, 1)
+	if err != nil || len(retained) != 1 || retained[0].PolicyVersion != 2 {
+		t.Fatalf("retained v2 receipt=(%+v,%v)", retained, err)
+	}
+}
+
+func TestActivityTransportPullPolicyUpdateRollsBackWithRejectedBatch(t *testing.T) {
+	fixture := newActivityTransportFixture(t, 1, true)
+	v2 := activityTestPolicy(2)
+	delivery := activityTestDelivery(t,
+		activityTestOrdinary(activityTestIDOne, time.Date(2026, 8, 28, 10, 4, 31, 0, time.UTC)),
+		types.WorkspaceID("00000000-0000-4000-8000-000000000099"), 1, v2)
+	v3Raw, v3Digest := activityTestPolicyEvidence(t, activityTestPolicy(3))
+	client := &activityTestClient{pull: func(context.Context, ActivityPullRequest) (ActivityPullResponse, error) {
+		return ActivityPullResponse{
+			PolicyJSON: v3Raw, PolicyDigest: v3Digest,
+			HistoricalPolicies: []ActivityPullPolicyEvidence{activityTestPullPolicyEvidence(t, fixture.activityKey[0], v2)},
+			Deliveries:         []localstore.ActivityPullDelivery{delivery}, NextSequence: 1,
+		}, nil
+	}}
+	transport := activityTestTransport(t, fixture, activityRouteSourceForFixture(fixture),
+		&activityTestCredentials{values: map[string]string{"keyring:activity-0": "token"}},
+		&activityTestConflictGate{open: map[types.WorkspaceScope]bool{}},
+		&activityTestClientFactory{client: client})
+	if _, err := fixture.store.DB().Exec(`CREATE TRIGGER activity_atomic_pull_fault BEFORE INSERT ON activity_ingress_receipts
+		WHEN NEW.activity_id='a0000000-0000-4000-8000-000000000001'
+		BEGIN SELECT RAISE(ABORT,'injected Activity atomic pull fault'); END`); err != nil {
+		t.Fatal(err)
+	}
+	before := activitySemanticSnapshot(t, fixture.store.DB())
+	if err := transport.Pull(context.Background(), fixture.bindings[0].Workspace.Scope, 1); err == nil {
+		t.Fatal("rejected pull unexpectedly succeeded")
+	}
+	if after := activitySemanticSnapshot(t, fixture.store.DB()); !reflect.DeepEqual(before, after) {
+		t.Fatalf("rejected pull changed policy/evidence/cursor state: before=%v after=%v", before, after)
+	}
+}
+
 func activityTestDelivery(t *testing.T, activity projectstate.ActivityV1, source types.WorkspaceID, sequence int64, policy projectstate.EffectiveActivityPolicyV1) localstore.ActivityPullDelivery {
 	t.Helper()
 	raw, err := projectstate.CanonicalActivity(activity)
@@ -594,6 +668,38 @@ func activityTestDelivery(t *testing.T, activity projectstate.ActivityV1, source
 		t.Fatal(err)
 	}
 	return localstore.ActivityPullDelivery{SourceWorkspaceID: source, ActivityJSON: raw, ActivityDigest: digest, ReceiptJSON: receiptRaw}
+}
+
+func activityTestPullPolicyEvidence(t *testing.T, route types.ActivityRouteKey, policy projectstate.EffectiveActivityPolicyV1) ActivityPullPolicyEvidence {
+	t.Helper()
+	raw, digest := activityTestPolicyEvidence(t, policy)
+	return ActivityPullPolicyEvidence{
+		Stream: ActivityPullPolicyStreamKey{
+			ProjectID: route.RemoteProjectID, FabricInstanceID: route.FabricInstanceID,
+			StreamID: route.StreamID, CanonicalRef: route.CanonicalRef,
+		},
+		PolicyJSON: raw, PolicyDigest: digest,
+	}
+}
+
+func activityTestInstallCurrentPolicyDirect(t *testing.T, fixture *activityTransportFixture, route types.ActivityRouteKey,
+	policy projectstate.EffectiveActivityPolicyV1) {
+	t.Helper()
+	raw, digest := activityTestPolicyEvidence(t, policy)
+	const receivedAt = "2026-08-28T12:00:00.000000000Z"
+	arguments := []any{route.ProjectID, route.WorkspaceID, route.FabricInstanceID, route.RemoteProjectID, route.StreamID, route.CanonicalRef}
+	if _, err := fixture.store.DB().Exec(`INSERT INTO activity_policy_versions
+		(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,canonical_ref,policy_version,
+		 canonical_policy_json,policy_digest,terminal_retention_seconds,received_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)`, append(arguments, policy.PolicyVersion, raw, digest,
+		policy.TerminalRetentionSeconds, receivedAt)...); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.DB().Exec(`INSERT INTO activity_policy_current
+		(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,canonical_ref,policy_version,policy_digest,updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?)`, append(arguments, policy.PolicyVersion, digest, receivedAt)...); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestActivityTransportPresenceHasZeroDurableRowsAndVanishesOnRestart(t *testing.T) {
@@ -855,6 +961,100 @@ func TestActivityTransportBindsActorAssuranceToFabricModeBeforeEffects(t *testin
 	}
 }
 
+func TestActivityTransportPullBindsEveryActorAssuranceToFreshFabricModeBeforeMutation(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		mode      types.FabricMode
+		assurance types.Assurance
+	}{
+		{name: "private actor on public Fabric", mode: types.FabricModePublic, assurance: types.AssurancePrivateAuthenticated},
+		{name: "public actor on private Fabric", mode: types.FabricModePrivate, assurance: types.AssurancePublicKeyContinuity},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newActivityTransportFixture(t, 1, true)
+			routes := activityRouteSourceForFixture(fixture)
+			resolved := routes.routes[fixture.bindings[0].Workspace.Scope]
+			resolved.profile.Mode = test.mode
+			routes.routes[fixture.bindings[0].Workspace.Scope] = resolved
+
+			activity := activityTestOrdinary(activityTestIDOne, time.Date(2026, 8, 28, 10, 6, 50, 0, time.UTC))
+			activity.Actor.Assurance = test.assurance
+			delivery := activityTestDelivery(t, activity,
+				types.WorkspaceID("00000000-0000-4000-8000-000000000099"), 1, activityTestPolicy(1))
+			policyThreeRaw, policyThreeDigest := activityTestPolicyEvidence(t, activityTestPolicy(3))
+			client := &activityTestClient{pull: func(context.Context, ActivityPullRequest) (ActivityPullResponse, error) {
+				return ActivityPullResponse{
+					PolicyJSON: policyThreeRaw, PolicyDigest: policyThreeDigest,
+					Deliveries: []localstore.ActivityPullDelivery{delivery}, NextSequence: 1,
+				}, nil
+			}}
+			transport := activityTestTransport(t, fixture, routes,
+				&activityTestCredentials{values: map[string]string{"keyring:activity-0": "token"}},
+				&activityTestConflictGate{open: map[types.WorkspaceScope]bool{}},
+				&activityTestClientFactory{client: client})
+			before := activitySemanticSnapshot(t, fixture.store.DB())
+
+			err := transport.Pull(context.Background(), fixture.bindings[0].Workspace.Scope, 1)
+			if !errors.Is(err, projectstate.ErrInvalidActivity) {
+				t.Fatalf("pull assurance mismatch=%v, want ErrInvalidActivity", err)
+			}
+			if after := activitySemanticSnapshot(t, fixture.store.DB()); !reflect.DeepEqual(before, after) {
+				t.Fatalf("pull assurance mismatch mutated Activity state: before=%v after=%v", before, after)
+			}
+		})
+	}
+}
+
+func TestActivityTransportRetainedBindsEveryActorAssuranceToFreshFabricModeBeforeExposure(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		mode      types.FabricMode
+		assurance types.Assurance
+	}{
+		{name: "private actor on public Fabric", mode: types.FabricModePublic, assurance: types.AssurancePrivateAuthenticated},
+		{name: "public actor on private Fabric", mode: types.FabricModePrivate, assurance: types.AssurancePublicKeyContinuity},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newActivityTransportFixture(t, 1, true)
+			activity := activityTestOrdinary(activityTestIDOne, time.Date(2026, 8, 28, 10, 6, 51, 0, time.UTC))
+			activity.Actor.Assurance = test.assurance
+			delivery := activityTestDelivery(t, activity,
+				types.WorkspaceID("00000000-0000-4000-8000-000000000099"), 1, activityTestPolicy(1))
+			policyRaw, _ := activityTestPolicyEvidence(t, activityTestPolicy(1))
+			if err := fixture.activities.AcceptPullBatch(context.Background(), fixture.activityKey[0], localstore.ActivityPullBatch{
+				PolicyJSON: policyRaw,
+				HistoricalPolicies: []localstore.ActivityPolicyEvidence{{
+					Route: fixture.activityKey[0], PolicyJSON: policyRaw,
+					PolicyDigest: activityTestPullPolicyEvidence(t, fixture.activityKey[0], activityTestPolicy(1)).PolicyDigest,
+				}},
+				ExpectedAfter: 0, NextSequence: 1,
+				Deliveries: []localstore.ActivityPullDelivery{delivery},
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			routes := activityRouteSourceForFixture(fixture)
+			resolved := routes.routes[fixture.bindings[0].Workspace.Scope]
+			resolved.profile.Mode = test.mode
+			routes.routes[fixture.bindings[0].Workspace.Scope] = resolved
+			transport := activityTestTransport(t, fixture, routes, &activityTestCredentials{},
+				&activityTestConflictGate{open: map[types.WorkspaceScope]bool{}}, &activityTestClientFactory{})
+			before := activitySemanticSnapshot(t, fixture.store.DB())
+
+			records, err := transport.Retained(context.Background(), fixture.bindings[0].Workspace.Scope, 1)
+			if !errors.Is(err, projectstate.ErrInvalidActivity) {
+				t.Fatalf("retained assurance mismatch=%v, want ErrInvalidActivity", err)
+			}
+			if records != nil {
+				t.Fatalf("retained assurance mismatch exposed records=%+v", records)
+			}
+			if after := activitySemanticSnapshot(t, fixture.store.DB()); !reflect.DeepEqual(before, after) {
+				t.Fatalf("retained assurance mismatch mutated Activity state: before=%v after=%v", before, after)
+			}
+		})
+	}
+}
+
 func TestActivityTransportConflictBlocksOnlyExactBindingBeforeCredentialOrNetwork(t *testing.T) {
 	fixture := newActivityTransportFixture(t, 2, true)
 	routes := activityRouteSourceForFixture(fixture)
@@ -925,7 +1125,8 @@ func TestActivityTransportConflictRecheckIsAtomicWithAckAndPull(t *testing.T) {
 			types.WorkspaceID("00000000-0000-4000-8000-000000000099"), 1, activityTestPolicy(1))
 		client := &activityTestClient{pull: func(context.Context, ActivityPullRequest) (ActivityPullResponse, error) {
 			return ActivityPullResponse{PolicyJSON: policyRaw, PolicyDigest: policyDigest,
-				Deliveries: []localstore.ActivityPullDelivery{delivery}, NextSequence: 1}, nil
+				HistoricalPolicies: []ActivityPullPolicyEvidence{activityTestPullPolicyEvidence(t, fixture.activityKey[0], activityTestPolicy(1))},
+				Deliveries:         []localstore.ActivityPullDelivery{delivery}, NextSequence: 1}, nil
 		}}
 		gate := &activityLateConflictGate{store: fixture.store, workspaces: fixture.workspaces, scope: fixture.bindings[0].Workspace.Scope}
 		transport := activityTestTransport(t, fixture, activityRouteSourceForFixture(fixture),

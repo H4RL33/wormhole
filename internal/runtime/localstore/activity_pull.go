@@ -20,6 +20,12 @@ type validatedPullDelivery struct {
 	receiptJSON    []byte
 }
 
+type validatedHistoricalPolicy struct {
+	policy projectstate.EffectiveActivityPolicyV1
+	raw    []byte
+	digest projectstate.Digest
+}
+
 func (r *ActivityRepo) AcceptPullBatch(ctx context.Context, route types.ActivityRouteKey, batch ActivityPullBatch) error {
 	if err := validateActivityRoute(route); err != nil {
 		return err
@@ -32,11 +38,21 @@ func (r *ActivityRepo) AcceptPullBatch(ctx context.Context, route types.Activity
 	if err != nil {
 		return err
 	}
+	canonicalPolicyJSON, err := projectstate.CanonicalActivityPolicy(policy)
+	if err != nil || !bytes.Equal(canonicalPolicyJSON, batch.PolicyJSON) {
+		return fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityPolicyUnavailable)
+	}
+	if batch.ExpectedPolicyVersion < 0 || batch.ExpectedPolicyVersion > maximumActivityInteger ||
+		(batch.ExpectedPolicyVersion == 0) != (batch.ExpectedPolicyDigest == "") ||
+		(batch.ExpectedPolicyVersion > 0 && !activityDigestPattern.MatchString(string(batch.ExpectedPolicyDigest))) {
+		return fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityPolicyChanged)
+	}
 	if batch.ExpectedAfter < 0 || batch.ExpectedAfter > maximumActivityInteger ||
 		batch.NextSequence < batch.ExpectedAfter || batch.NextSequence > maximumActivityInteger || len(batch.Deliveries) > 500 {
 		return fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityCursorConflict)
 	}
 	validated := make([]validatedPullDelivery, 0, len(batch.Deliveries))
+	receiptPolicies := make(map[int64]projectstate.Digest, len(batch.Deliveries))
 	lastSequence := batch.ExpectedAfter
 	for _, delivery := range batch.Deliveries {
 		if !types.CanonicalUUID(string(delivery.SourceWorkspaceID)) {
@@ -55,6 +71,10 @@ func (r *ActivityRepo) AcceptPullBatch(ctx context.Context, route types.Activity
 			receipt.Sequence <= lastSequence || receipt.Sequence > batch.NextSequence {
 			return fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityReplayConflict)
 		}
+		if existing, found := receiptPolicies[receipt.PolicyVersion]; found && existing != receipt.PolicyDigest {
+			return fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityReplayConflict)
+		}
+		receiptPolicies[receipt.PolicyVersion] = receipt.PolicyDigest
 		lastSequence = receipt.Sequence
 		validated = append(validated, validatedPullDelivery{
 			source: delivery.SourceWorkspaceID, activity: activity,
@@ -69,6 +89,10 @@ func (r *ActivityRepo) AcceptPullBatch(ctx context.Context, route types.Activity
 	} else if batch.NextSequence < lastSequence {
 		return fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityCursorConflict)
 	}
+	historical, err := validateHistoricalPullPolicies(route, batch.HistoricalPolicies, receiptPolicies)
+	if err != nil {
+		return err
+	}
 
 	return r.withImmediate(ctx, "accept pull", func(conn *sql.Conn) error {
 		if err := requireActiveActivityRoute(ctx, conn, route); err != nil {
@@ -79,7 +103,17 @@ func (r *ActivityRepo) AcceptPullBatch(ctx context.Context, route types.Activity
 			return err
 		}
 		if current.PolicyDigest != policyDigest || !bytes.Equal(current.PolicyJSON, batch.PolicyJSON) {
-			return fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityPolicyChanged)
+			current, err = replaceActivityPolicyTx(ctx, conn, route, batch.ExpectedPolicyVersion,
+				batch.ExpectedPolicyDigest, policy, canonicalPolicyJSON, policyDigest)
+			if err != nil {
+				return err
+			}
+			if current.PolicyDigest != policyDigest || !bytes.Equal(current.PolicyJSON, canonicalPolicyJSON) {
+				return fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityPolicyChanged)
+			}
+		}
+		if err := installHistoricalPullPolicies(ctx, conn, route, historical); err != nil {
+			return err
 		}
 		var cursor int64
 		if err := conn.QueryRowContext(ctx, `SELECT after_sequence FROM activity_cursors
@@ -129,6 +163,89 @@ func (r *ActivityRepo) AcceptPullBatch(ctx context.Context, route types.Activity
 		}
 		return nil
 	})
+}
+
+func validateHistoricalPullPolicies(route types.ActivityRouteKey, evidence []ActivityPolicyEvidence, receipts map[int64]projectstate.Digest) ([]validatedHistoricalPolicy, error) {
+	if len(evidence) != len(receipts) {
+		return nil, fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityPolicyUnavailable)
+	}
+	validated := make([]validatedHistoricalPolicy, 0, len(evidence))
+	seen := make(map[int64]struct{}, len(evidence))
+	var priorVersion int64
+	for _, item := range evidence {
+		if item.Route != route {
+			return nil, fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityPolicyUnavailable)
+		}
+		policy, err := projectstate.DecodeActivityPolicy(item.PolicyJSON)
+		if err != nil {
+			return nil, fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityPolicyUnavailable)
+		}
+		digest, err := projectstate.DigestActivityPolicy(policy)
+		if err != nil || digest != item.PolicyDigest {
+			return nil, fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityPolicyUnavailable)
+		}
+		wantedDigest, required := receipts[policy.PolicyVersion]
+		if !required || wantedDigest != digest {
+			return nil, fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityReplayConflict)
+		}
+		if len(validated) != 0 && policy.PolicyVersion <= priorVersion {
+			return nil, fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityReplayConflict)
+		}
+		if _, duplicate := seen[policy.PolicyVersion]; duplicate {
+			return nil, fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityReplayConflict)
+		}
+		seen[policy.PolicyVersion] = struct{}{}
+		priorVersion = policy.PolicyVersion
+		validated = append(validated, validatedHistoricalPolicy{
+			policy: policy, raw: append([]byte(nil), item.PolicyJSON...), digest: digest,
+		})
+	}
+	return validated, nil
+}
+
+func installHistoricalPullPolicies(ctx context.Context, db activityDB, route types.ActivityRouteKey, policies []validatedHistoricalPolicy) error {
+	if len(policies) == 0 {
+		return nil
+	}
+	now, err := databaseActivityNow(ctx, db)
+	if err != nil {
+		return err
+	}
+	for _, evidence := range policies {
+		arguments := activityRouteArgs(route)
+		arguments = append(arguments, evidence.policy.PolicyVersion)
+		var storedRaw []byte
+		var storedDigest string
+		var retention int64
+		err := db.QueryRowContext(ctx, `SELECT canonical_policy_json,policy_digest,terminal_retention_seconds
+			FROM activity_policy_versions WHERE project_id=? AND workspace_id=? AND fabric_instance_id=? AND remote_project_id=?
+			AND stream_id=? AND canonical_ref=? AND policy_version=?`, arguments...).Scan(&storedRaw, &storedDigest, &retention)
+		if err == nil {
+			stored, decodeErr := projectstate.DecodeActivityPolicy(storedRaw)
+			storedComputed, digestErr := projectstate.DigestActivityPolicy(stored)
+			if decodeErr != nil || digestErr != nil || stored.PolicyVersion != evidence.policy.PolicyVersion ||
+				stored.TerminalRetentionSeconds != retention || string(storedComputed) != storedDigest {
+				return fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityPolicyUnavailable)
+			}
+			if storedComputed != evidence.digest || !bytes.Equal(storedRaw, evidence.raw) {
+				return fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityReplayConflict)
+			}
+			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("localstore: accept Activity pull historical policy: %w", err)
+		}
+		arguments = activityRouteArgs(route)
+		arguments = append(arguments, evidence.policy.PolicyVersion, evidence.raw, string(evidence.digest),
+			evidence.policy.TerminalRetentionSeconds, sqliteActivityTimestamp(now))
+		if _, err := db.ExecContext(ctx, `INSERT INTO activity_policy_versions
+			(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,canonical_ref,policy_version,
+			 canonical_policy_json,policy_digest,terminal_retention_seconds,received_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?)`, arguments...); err != nil {
+			return fmt.Errorf("localstore: accept Activity pull historical policy: %w", err)
+		}
+	}
+	return nil
 }
 
 func validateDuplicatePullWindow(ctx context.Context, db activityDB, route types.ActivityRouteKey, after, next int64, deliveries []validatedPullDelivery) error {

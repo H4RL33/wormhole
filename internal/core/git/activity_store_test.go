@@ -347,6 +347,135 @@ func TestActivityStorePullAdvancesAcrossPrunedGapsToCapturedHighWatermark(t *tes
 	}
 }
 
+func TestActivityStorePullExportsDeduplicatedHistoricalPolicyEvidence(t *testing.T) {
+	fixture := newActivityStoreFixture(t, "activity-pull-historical-policy")
+	first := testOrdinaryActivity(activityIDOne, fixture.actor, "under-v1")
+	if _, err := fixture.store.Accept(context.Background(), fixture.acceptInput(first)); err != nil {
+		t.Fatal(err)
+	}
+	v2 := testActivityPolicy(2, 3_000_000)
+	if _, err := fixture.store.PublishPolicy(context.Background(), fixture.stream, v2); err != nil {
+		t.Fatal(err)
+	}
+	v2Digest, err := projectstate.DigestActivityPolicy(v2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, id := range []string{activityIDTwo, activityIDThree} {
+		actor := fixture.actor
+		actor.OccurredAt = actor.OccurredAt.Add(time.Duration(index+1) * time.Second)
+		input := fixture.acceptInput(testOrdinaryActivity(id, actor, "under-v2"))
+		input.PolicyVersion, input.PolicyDigest = v2.PolicyVersion, v2Digest
+		if _, err := fixture.store.Accept(context.Background(), input); err != nil {
+			t.Fatal(err)
+		}
+	}
+	v3 := testActivityPolicy(3, 3_100_000)
+	if _, err := fixture.store.PublishPolicy(context.Background(), fixture.stream, v3); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := fixture.store.Pull(context.Background(), PullActivityInput{
+		Stream: fixture.stream, AttachmentRef: fixture.attachment, AfterSequence: 0, Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v3JSON, err := projectstate.CanonicalActivityPolicy(v3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(result.PolicyJSON, v3JSON) || len(result.Deliveries) != 3 {
+		t.Fatalf("pull current/deliveries = (%q,%d), want v3/3", result.PolicyJSON, len(result.Deliveries))
+	}
+	if len(result.HistoricalPolicies) != 2 {
+		t.Fatalf("historical policy count = %d, want 2", len(result.HistoricalPolicies))
+	}
+	for index, want := range []projectstate.EffectiveActivityPolicyV1{fixture.policy, v2} {
+		got := result.HistoricalPolicies[index]
+		if got.Stream != fixture.stream {
+			t.Fatalf("historical policy[%d] stream = %+v, want %+v", index, got.Stream, fixture.stream)
+		}
+		policy, err := projectstate.DecodeActivityPolicy(got.PolicyJSON)
+		if err != nil || !reflect.DeepEqual(policy, want) {
+			t.Fatalf("historical policy[%d] = (%+v,%v), want %+v", index, policy, err, want)
+		}
+		digest, err := projectstate.DigestActivityPolicy(want)
+		if err != nil || got.PolicyDigest != digest {
+			t.Fatalf("historical policy[%d] digest = (%q,%v), want %q", index, got.PolicyDigest, err, digest)
+		}
+	}
+}
+
+func TestActivityStorePullRejectsMissingOrNonCanonicalHistoricalPolicyEvidence(t *testing.T) {
+	t.Run("missing", func(t *testing.T) {
+		fixture := newActivityStoreFixture(t, "activity-pull-missing-historical-policy")
+		if _, err := fixture.store.Accept(context.Background(), fixture.acceptInput(
+			testOrdinaryActivity(activityIDOne, fixture.actor, "under-v1"))); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.store.PublishPolicy(context.Background(), fixture.stream, testActivityPolicy(2, 3_000_000)); err != nil {
+			t.Fatal(err)
+		}
+		tx, err := fixture.store.db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(`SET LOCAL session_replication_role = replica`); err != nil {
+			tx.Rollback()
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(`DELETE FROM fabric_activity_policy_versions
+			WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3 AND canonical_ref=$4 AND policy_version=1`,
+			fixture.stream.ProjectID, fixture.stream.FabricInstanceID, fixture.stream.StreamID, fixture.stream.CanonicalRef); err != nil {
+			tx.Rollback()
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.store.Pull(context.Background(), PullActivityInput{
+			Stream: fixture.stream, AttachmentRef: fixture.attachment, AfterSequence: 0, Limit: 10,
+		}); !errors.Is(err, ErrActivityReplayConflict) {
+			t.Fatalf("missing historical policy pull error = %v, want ErrActivityReplayConflict", err)
+		}
+	})
+
+	t.Run("non-canonical", func(t *testing.T) {
+		fixture := newActivityStoreFixture(t, "activity-pull-noncanonical-historical-policy")
+		if _, err := fixture.store.Accept(context.Background(), fixture.acceptInput(
+			testOrdinaryActivity(activityIDOne, fixture.actor, "under-v1"))); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.store.PublishPolicy(context.Background(), fixture.stream, testActivityPolicy(2, 3_000_000)); err != nil {
+			t.Fatal(err)
+		}
+		tx, err := fixture.store.db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(`SET LOCAL session_replication_role = replica`); err != nil {
+			tx.Rollback()
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(`UPDATE fabric_activity_policy_versions
+			SET canonical_policy_json=decode('20','hex') || canonical_policy_json
+			WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3 AND canonical_ref=$4 AND policy_version=1`,
+			fixture.stream.ProjectID, fixture.stream.FabricInstanceID, fixture.stream.StreamID, fixture.stream.CanonicalRef); err != nil {
+			tx.Rollback()
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.store.Pull(context.Background(), PullActivityInput{
+			Stream: fixture.stream, AttachmentRef: fixture.attachment, AfterSequence: 0, Limit: 10,
+		}); !errors.Is(err, ErrActivityReplayConflict) {
+			t.Fatalf("non-canonical historical policy pull error = %v, want ErrActivityReplayConflict", err)
+		}
+	})
+}
+
 func TestActivityStorePullRejectsInvalidCursorAndLimit(t *testing.T) {
 	fixture := newActivityStoreFixture(t, "activity-pull-bounds")
 	for _, input := range []PullActivityInput{

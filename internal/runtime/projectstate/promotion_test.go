@@ -617,7 +617,11 @@ func acceptPromotionActivity(t *testing.T, fixture promotionFixture, activity st
 		t.Fatal(err)
 	}
 	batch := localstore.ActivityPullBatch{
-		PolicyJSON: policyJSON, ExpectedAfter: expectedAfter, NextSequence: sequence, HasMore: false,
+		PolicyJSON: policyJSON,
+		HistoricalPolicies: []localstore.ActivityPolicyEvidence{{
+			Route: fixture.route, PolicyJSON: append([]byte(nil), policyJSON...), PolicyDigest: policyDigest,
+		}},
+		ExpectedAfter: expectedAfter, NextSequence: sequence, HasMore: false,
 		Deliveries: []localstore.ActivityPullDelivery{{SourceWorkspaceID: source, ActivityJSON: activityJSON, ActivityDigest: digest, ReceiptJSON: receiptJSON}},
 	}
 	if err := localstore.NewActivityRepo(fixture.store.DB()).AcceptPullBatch(context.Background(), fixture.route, batch); err != nil {

@@ -55,12 +55,23 @@ type ActivityPullDelivery struct {
 	ReceiptJSON       []byte
 }
 
+// ActivityPolicyEvidence is immutable canonical policy evidence for a receipt
+// version represented in an Activity pull batch.
+type ActivityPolicyEvidence struct {
+	Route        types.ActivityRouteKey
+	PolicyJSON   []byte
+	PolicyDigest projectstate.Digest
+}
+
 type ActivityPullBatch struct {
-	PolicyJSON    []byte
-	ExpectedAfter int64
-	NextSequence  int64
-	HasMore       bool
-	Deliveries    []ActivityPullDelivery
+	PolicyJSON            []byte
+	HistoricalPolicies    []ActivityPolicyEvidence
+	ExpectedPolicyVersion int64
+	ExpectedPolicyDigest  projectstate.Digest
+	ExpectedAfter         int64
+	NextSequence          int64
+	HasMore               bool
+	Deliveries            []ActivityPullDelivery
 }
 
 type ActivityLifecycleChange struct {
@@ -117,6 +128,20 @@ func requireActiveActivityRoute(ctx context.Context, db activityDB, route types.
 	err := db.QueryRowContext(ctx, `SELECT 1 FROM workspace_fabric_bindings
 		WHERE project_id=? AND workspace_id=? AND fabric_instance_id=? AND remote_project_id=?
 		AND stream_id=? AND canonical_ref=? AND state='active'`, activityRouteArgs(route)...).Scan(&present)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("localstore: Activity route: %w", ErrActivityNotFound)
+	}
+	if err != nil {
+		return fmt.Errorf("localstore: Activity route lookup: %w", err)
+	}
+	return nil
+}
+
+func requireExistingActivityRoute(ctx context.Context, db activityDB, route types.ActivityRouteKey) error {
+	var present int
+	err := db.QueryRowContext(ctx, `SELECT 1 FROM workspace_fabric_bindings
+		WHERE project_id=? AND workspace_id=? AND fabric_instance_id=? AND remote_project_id=?
+		AND stream_id=? AND canonical_ref=? AND state IN ('active','detached')`, activityRouteArgs(route)...).Scan(&present)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("localstore: Activity route: %w", ErrActivityNotFound)
 	}

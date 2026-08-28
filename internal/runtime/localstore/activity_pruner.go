@@ -16,7 +16,7 @@ func (r *ActivityRepo) Prune(ctx context.Context, route types.ActivityRouteKey, 
 	}
 	pruned := 0
 	err := r.withImmediate(ctx, "prune", func(conn *sql.Conn) error {
-		if err := requireActiveActivityRoute(ctx, conn, route); err != nil {
+		if err := requireExistingActivityRoute(ctx, conn, route); err != nil {
 			return err
 		}
 		arguments := activityRouteArgs(route)

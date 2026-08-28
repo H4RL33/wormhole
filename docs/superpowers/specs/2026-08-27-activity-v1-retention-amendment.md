@@ -4,6 +4,17 @@
 **Date:** 2026-08-27  
 **Scope:** Stage 3 Task 3 and the ActivityV1 seams consumed by later Stage 3 tasks
 
+**Approved contract correction (2026-08-28):** each Activity pull batch carries one
+deduplicated canonical historical-policy evidence record for every distinct policy
+version named by a returned receipt. Gateway strict-validates and atomically
+insert-or-exact-replays those immutable versions with the batch evidence and cursor,
+while historical evidence itself can never advance the current-policy pointer. When the
+separately returned current policy is newer, its expected-old CAS occurs in that same
+transaction. Missing, corrupt, changed, duplicate-conflicting, or wrong-route evidence
+rolls back the current-policy CAS, historical-policy inserts, Activity, lifecycle,
+receipt, and cursor changes together. This correction is part of the current Task-3
+contract; dated implementation and review evidence remains historical.
+
 ## 1. Decision and authority
 
 This amendment approves approach B: an immutable `ActivityV1` ledger, an immutable
@@ -327,6 +338,13 @@ validates the immutable policy version/digest captured by that source receipt, b
 not require a live Fabric call or a still-current remote policy. Policy outage therefore
 cannot block curation of evidence that Gateway already accepted under a valid policy.
 
+For pull, Fabric joins every returned receipt to the immutable policy version under
+which that Activity was accepted. The batch carries the canonical policy bytes and
+digest once for every distinct receipt policy version, deterministically ordered by
+policy version. This historical evidence is route-bound response evidence, never bearer
+authority and never a request-selected route. Fabric fails the pull rather than emit a
+delivery whose policy row is missing, malformed, changed, or belongs to another route.
+
 ## 7. Lifecycle and retention model
 
 Presence is memory-only. It may be validated and transmitted live after policy validation,
@@ -518,12 +536,20 @@ insert or exact-replay the immutable receipt;
 transition queue to delivered and its delivery lifecycle to delivered with one captured
 terminal time; commit. An unknown/changed receipt or wrong route rolls back.
 
-**Accept pull batch:** strict-validate the effective policy and every delivery, receipt,
-Activity, digest, origin workspace, and ascending sequence before writing. In one
-immediate transaction, exact-replay or insert all ledger/receipt/lifecycle rows, then
-advance `activity_cursors.after_sequence` from the exact expected old value to the batch
-result's `next_sequence`. A duplicate batch is read-only idempotent. Any invalid item,
-insert conflict, or cursor CAS failure rolls back the whole batch and cursor.
+**Accept pull batch:** strict-validate the effective current policy; every delivery,
+receipt, Activity, digest, origin workspace, and ascending sequence; and one
+deduplicated canonical historical-policy evidence record for every distinct receipt
+policy version before writing. Reject missing evidence, extra duplicate-conflicting
+evidence, digest/version mismatch, or evidence from another complete route. In one
+immediate transaction, insert-or-exact-replay the immutable historical policy versions
+without deriving any current-pointer change from that evidence; if the separately
+returned current policy differs, CAS `activity_policy_current` from its expected old
+version/digest and update only pending queue policy expectations in the same transaction;
+exact-replay or insert all ledger/receipt/lifecycle rows; then advance
+`activity_cursors.after_sequence` from the exact expected old value to the batch result's
+`next_sequence`. A duplicate batch is read-only idempotent. Any invalid item, policy
+replay conflict, insert conflict, or cursor CAS failure rolls back the current pointer,
+pending queue expectations, historical-policy rows, the whole batch, and cursor.
 
 **Change effective policy after server response:** require exact old current
 version/digest, strict-validate the next policy, insert or exact-replay its immutable
@@ -704,6 +730,10 @@ resolves the route, rejects negative or greater-than-high-watermark cursors, sna
 stream high watermark, and returns retained Activities with sequence greater than the
 cursor ordered ascending, bounded by `limit`. Each delivery
 contains source workspace ID, canonical Activity bytes/digest, and exact receipt.
+The same response contains canonical historical-policy evidence, deduplicated by policy
+version and ordered ascending, for exactly every distinct policy version named by those
+receipts. Its separately returned current policy remains the only current-pointer
+candidate; historical evidence can never advance that pointer.
 
 If another retained row exists after the last returned row, `next_sequence` is that last
 row and `has_more=true`. Otherwise `next_sequence` is the captured high watermark and
@@ -831,7 +861,19 @@ test. Minimum causal evidence is:
   the retained source policy without live Fabric contact;
 - presence has zero durable SQLite/PostgreSQL rows and vanishes on restart;
 - pull gaps/high-watermark semantics and cursor rollback on one invalid batch item;
+- v1 observed -> v2 accepted Activity -> v3 current pull, including a fresh Gateway at
+  v3, deduplicated historical-policy export, and exact replay without current-pointer
+  movement;
+- missing, corrupt, changed, duplicate-conflicting, digest/version-mismatched, and
+  wrong-route historical pull policy evidence rolls back every new historical policy,
+  current-policy CAS, Activity, lifecycle, receipt, and cursor row;
 - retry and exact server replay preserve bytes, digest, receipt, and sequence;
+- inbound pull and retained exposure bind every Activity actor assurance to the freshly
+  resolved profile mode in both directions before mutation or exposure;
+- maintenance pruning accepts the exact preserved detached route, while queue, pull,
+  lifecycle mutation, pending delivery, and retained exposure remain active-only;
+- detach -> expiry -> prune covers ordinary and terminal evidence, preserves
+  nonterminal/protected evidence, and leaves sibling routes unchanged;
 - Activity transport never invokes reducer/application or advances portable stream;
 - promotion exact-copies every source projection field, uses the distinct promoter,
   writes the sole closed extension, and atomically receipts/rolls back at every write;

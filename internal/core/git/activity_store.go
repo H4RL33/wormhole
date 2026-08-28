@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/lib/pq"
@@ -48,12 +49,21 @@ type ActivityDelivery struct {
 	Receipt           projectstate.ActivityReceiptV1
 }
 
-type PullActivityResult struct {
+// ActivityPolicyEvidence is canonical immutable policy evidence for receipts in a
+// pull result. It is intentionally internal transport state, not a public wire record.
+type ActivityPolicyEvidence struct {
+	Stream       FabricActivityStreamKey
 	PolicyJSON   []byte
 	PolicyDigest projectstate.Digest
-	Deliveries   []ActivityDelivery
-	NextSequence int64
-	HasMore      bool
+}
+
+type PullActivityResult struct {
+	PolicyJSON         []byte
+	PolicyDigest       projectstate.Digest
+	HistoricalPolicies []ActivityPolicyEvidence
+	Deliveries         []ActivityDelivery
+	NextSequence       int64
+	HasMore            bool
 }
 
 type ActivityLifecycleTransition struct {
@@ -248,9 +258,12 @@ func (s *ActivityStore) Pull(ctx context.Context, input PullActivityInput) (Pull
 		return PullActivityResult{}, fmt.Errorf("git: pull activity: %w", ErrActivityCursorConflict)
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT a.source_workspace_id,a.canonical_activity_json,a.activity_digest,
-		r.sequence,r.policy_version,r.policy_digest,r.accepted_at
+		r.sequence,r.policy_version,r.policy_digest,r.accepted_at,p.canonical_policy_json
 		FROM fabric_activities a JOIN fabric_activity_ingress_receipts r
 		USING(project_id,fabric_instance_id,stream_id,canonical_ref,source_workspace_id,activity_id)
+		LEFT JOIN fabric_activity_policy_versions p ON p.project_id=r.project_id AND p.fabric_instance_id=r.fabric_instance_id
+		AND p.stream_id=r.stream_id AND p.canonical_ref=r.canonical_ref AND p.policy_version=r.policy_version
+		AND p.policy_digest=r.policy_digest
 		WHERE a.project_id=$1 AND a.fabric_instance_id=$2 AND a.stream_id=$3 AND a.canonical_ref=$4
 		AND a.sequence>$5 AND a.sequence<=$6 ORDER BY a.sequence LIMIT $7`,
 		input.Stream.ProjectID, input.Stream.FabricInstanceID, input.Stream.StreamID, input.Stream.CanonicalRef,
@@ -259,13 +272,18 @@ func (s *ActivityStore) Pull(ctx context.Context, input PullActivityInput) (Pull
 		return PullActivityResult{}, fmt.Errorf("git: pull activity: query: %w", err)
 	}
 	defer rows.Close()
-	deliveries := make([]ActivityDelivery, 0, input.Limit)
+	type pulledDelivery struct {
+		delivery ActivityDelivery
+		policy   ActivityPolicyEvidence
+	}
+	pulled := make([]pulledDelivery, 0, input.Limit+1)
 	for rows.Next() {
 		var delivery ActivityDelivery
 		var digest string
 		var acceptedAt time.Time
+		var policyJSON []byte
 		if err := rows.Scan(&delivery.SourceWorkspaceID, &delivery.ActivityJSON, &digest,
-			&delivery.Receipt.Sequence, &delivery.Receipt.PolicyVersion, &delivery.Receipt.PolicyDigest, &acceptedAt); err != nil {
+			&delivery.Receipt.Sequence, &delivery.Receipt.PolicyVersion, &delivery.Receipt.PolicyDigest, &acceptedAt, &policyJSON); err != nil {
 			return PullActivityResult{}, fmt.Errorf("git: pull activity: scan: %w", err)
 		}
 		activity, err := projectstate.DecodeActivity(delivery.ActivityJSON)
@@ -288,14 +306,50 @@ func (s *ActivityStore) Pull(ctx context.Context, input PullActivityInput) (Pull
 		if _, err := projectstate.CanonicalActivityReceipt(delivery.Receipt); err != nil {
 			return PullActivityResult{}, fmt.Errorf("git: pull activity: invalid retained receipt: %w", ErrActivityReplayConflict)
 		}
-		deliveries = append(deliveries, delivery)
+		policy, err := projectstate.DecodeActivityPolicy(policyJSON)
+		if err != nil || policy.PolicyVersion != delivery.Receipt.PolicyVersion {
+			return PullActivityResult{}, fmt.Errorf("git: pull activity: invalid retained policy: %w", ErrActivityReplayConflict)
+		}
+		canonicalPolicyJSON, err := projectstate.CanonicalActivityPolicy(policy)
+		if err != nil || !bytes.Equal(canonicalPolicyJSON, policyJSON) {
+			return PullActivityResult{}, fmt.Errorf("git: pull activity: invalid retained policy: %w", ErrActivityReplayConflict)
+		}
+		policyDigest, err := projectstate.DigestActivityPolicy(policy)
+		if err != nil || policyDigest != delivery.Receipt.PolicyDigest {
+			return PullActivityResult{}, fmt.Errorf("git: pull activity: invalid retained policy: %w", ErrActivityReplayConflict)
+		}
+		pulled = append(pulled, pulledDelivery{delivery: delivery, policy: ActivityPolicyEvidence{
+			Stream: input.Stream, PolicyJSON: append([]byte(nil), policyJSON...), PolicyDigest: policyDigest,
+		}})
 	}
 	if err := rows.Err(); err != nil {
 		return PullActivityResult{}, fmt.Errorf("git: pull activity: iterate: %w", err)
 	}
-	hasMore := len(deliveries) > input.Limit
+	hasMore := len(pulled) > input.Limit
 	if hasMore {
-		deliveries = deliveries[:input.Limit]
+		pulled = pulled[:input.Limit]
+	}
+	deliveries := make([]ActivityDelivery, 0, len(pulled))
+	historicalByVersion := make(map[int64]ActivityPolicyEvidence, len(pulled))
+	for _, value := range pulled {
+		deliveries = append(deliveries, value.delivery)
+		version := value.delivery.Receipt.PolicyVersion
+		if prior, found := historicalByVersion[version]; found &&
+			(prior.PolicyDigest != value.policy.PolicyDigest || !bytes.Equal(prior.PolicyJSON, value.policy.PolicyJSON)) {
+			return PullActivityResult{}, fmt.Errorf("git: pull activity: inconsistent retained policy: %w", ErrActivityReplayConflict)
+		}
+		historicalByVersion[version] = value.policy
+	}
+	versions := make([]int64, 0, len(historicalByVersion))
+	for version := range historicalByVersion {
+		versions = append(versions, version)
+	}
+	sort.Slice(versions, func(i, j int) bool { return versions[i] < versions[j] })
+	historical := make([]ActivityPolicyEvidence, 0, len(versions))
+	for _, version := range versions {
+		evidence := historicalByVersion[version]
+		evidence.PolicyJSON = append([]byte(nil), evidence.PolicyJSON...)
+		historical = append(historical, evidence)
 	}
 	next := highWatermark
 	if hasMore && len(deliveries) > 0 {
@@ -305,11 +359,12 @@ func (s *ActivityStore) Pull(ctx context.Context, input PullActivityInput) (Pull
 		return PullActivityResult{}, fmt.Errorf("git: pull activity: commit: %w", err)
 	}
 	return PullActivityResult{
-		PolicyJSON:   append([]byte(nil), policyJSON...),
-		PolicyDigest: policyDigest,
-		Deliveries:   deliveries,
-		NextSequence: next,
-		HasMore:      hasMore,
+		PolicyJSON:         append([]byte(nil), policyJSON...),
+		PolicyDigest:       policyDigest,
+		HistoricalPolicies: historical,
+		Deliveries:         deliveries,
+		NextSequence:       next,
+		HasMore:            hasMore,
 	}, nil
 }
 

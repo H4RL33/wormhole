@@ -196,6 +196,131 @@ func TestActivityPrunerTerminalExpiryAndPromotionReceiptProtection(t *testing.T)
 	}
 }
 
+func TestActivityPrunerMaintainsDetachedRouteWithoutReactivatingLivePaths(t *testing.T) {
+	fixture := newLocalActivityFixture(t, true)
+	defer fixture.store.Close()
+	ctx := context.Background()
+	routes := NewFabricRouteRepo(fixture.store.DB())
+	workspaces := NewWorkspaceRepo(fixture.store.DB())
+
+	siblingWorkspaceID := "00000000-0000-4000-8000-000000000012"
+	siblingBinding := createBinding(t, workspaces, localActivityProjectID, siblingWorkspaceID,
+		"/activity-sibling", 102, 202)
+	siblingRemote := types.FabricBinding{
+		Workspace: siblingBinding, ProfileID: localActivityProfileID, FabricInstanceID: localActivityFabricID,
+		RemoteProjectID: localActivityRemoteID, StreamID: "40000000-0000-4000-8000-000000000002",
+		AttachmentRef: "50000000-0000-4000-8000-000000000002", CanonicalRef: siblingBinding.AcceptedRef,
+		Writable: true,
+	}
+	if err := routes.AttachWorkspace(ctx, siblingRemote); err != nil {
+		t.Fatal(err)
+	}
+	siblingRoute := types.ActivityRouteKey{
+		ProjectID: siblingBinding.Scope.ProjectID, WorkspaceID: siblingBinding.Scope.WorkspaceID,
+		FabricInstanceID: siblingRemote.FabricInstanceID, RemoteProjectID: siblingRemote.RemoteProjectID,
+		StreamID: siblingRemote.StreamID, CanonicalRef: siblingRemote.CanonicalRef,
+	}
+	if _, err := fixture.repo.ReplacePolicy(ctx, siblingRoute, 0, "", fixture.policy); err != nil {
+		t.Fatal(err)
+	}
+
+	old := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	ordinarySource := localActivitySourceWorkspace
+	ordinary := localPullDelivery(t, localOrdinaryActivity(localActivityIDOne, "detached ordinary", old),
+		ordinarySource, 1, fixture.policy)
+	if err := fixture.repo.AcceptPullBatch(ctx, fixture.route,
+		localPullBatch(t, fixture.policy, 0, 1, false, ordinary)); err != nil {
+		t.Fatal(err)
+	}
+
+	terminal, err := fixture.repo.QueueOutbound(ctx, fixture.route,
+		localOrdinaryActivity(localActivityIDTwo, "detached terminal", old.Add(time.Second)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.repo.AcknowledgeOutbound(ctx, terminal.Key, localReceipt(t, terminal, 2, testUTCNow())); err != nil {
+		t.Fatal(err)
+	}
+	pendingID := "a0000000-0000-4000-8000-000000000003"
+	pending, err := fixture.repo.QueueOutbound(ctx, fixture.route,
+		localOrdinaryActivity(pendingID, "detached protected", old.Add(2*time.Second)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	siblingSource := types.WorkspaceID("b0000000-0000-4000-8000-000000000002")
+	siblingID := "a0000000-0000-4000-8000-000000000004"
+	sibling := localPullDelivery(t, localOrdinaryActivity(siblingID, "active sibling", old),
+		siblingSource, 1, fixture.policy)
+	siblingBatch := localPullBatch(t, fixture.policy, 0, 1, false, sibling)
+	siblingBatch.HistoricalPolicies[0].Route = siblingRoute
+	if err := fixture.repo.AcceptPullBatch(ctx, siblingRoute, siblingBatch); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := routes.DetachWorkspace(ctx, types.WorkspaceScope{
+		ProjectID: localActivityProjectID, WorkspaceID: terminal.Key.Route.WorkspaceID,
+	}, localActivityFabricID); err != nil {
+		t.Fatal(err)
+	}
+	terminalAt := time.Date(2000, 1, 2, 0, 0, 0, 0, time.UTC)
+	expiresAt := terminalAt.Add(time.Duration(fixture.policy.TerminalRetentionSeconds) * time.Second)
+	if _, err := fixture.store.DB().Exec(`UPDATE activity_lifecycle SET terminal_at=?,expires_at=?,updated_at=?
+		WHERE project_id=? AND workspace_id=? AND activity_id=? AND lifecycle_kind='delivery'`,
+		sqliteActivityTimestamp(terminalAt), sqliteActivityTimestamp(expiresAt), sqliteActivityTimestamp(terminalAt),
+		fixture.route.ProjectID, fixture.route.WorkspaceID, terminal.Key.ActivityID); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := fixture.repo.QueueOutbound(ctx, fixture.route,
+		localOrdinaryActivity("a0000000-0000-4000-8000-000000000005", "must stay detached", testUTCNow())); !errors.Is(err, ErrActivityNotFound) {
+		t.Fatalf("detached queue error=%v, want ErrActivityNotFound", err)
+	}
+	if err := fixture.repo.AcceptPullBatch(ctx, fixture.route,
+		localPullBatch(t, fixture.policy, 1, 1, false)); !errors.Is(err, ErrActivityNotFound) {
+		t.Fatalf("detached pull error=%v, want ErrActivityNotFound", err)
+	}
+	if pendingRecords, err := fixture.repo.PendingOutbound(ctx, fixture.route, 10); !errors.Is(err, ErrActivityNotFound) || pendingRecords != nil {
+		t.Fatalf("detached pending queue=(%+v,%v), want nil ErrActivityNotFound", pendingRecords, err)
+	}
+	if cursor, err := fixture.repo.Cursor(ctx, fixture.route); !errors.Is(err, ErrActivityNotFound) || cursor != 0 {
+		t.Fatalf("detached cursor=(%d,%v), want 0 ErrActivityNotFound", cursor, err)
+	}
+	if err := fixture.repo.TransitionLifecycle(ctx, pending.Key, ActivityLifecycleChange{
+		Kind: "delivery", ReferenceID: pending.Key.ActivityID, ExpectedState: "pending", NextState: "cancelled",
+	}); !errors.Is(err, ErrActivityNotFound) {
+		t.Fatalf("detached lifecycle error=%v, want ErrActivityNotFound", err)
+	}
+	if retained, err := fixture.repo.Retained(ctx, fixture.route, 10); !errors.Is(err, ErrActivityNotFound) || retained != nil {
+		t.Fatalf("detached retained=(%+v,%v), want nil ErrActivityNotFound", retained, err)
+	}
+
+	if pruned, err := fixture.repo.Prune(ctx, fixture.route, ordinarySource, 10); err != nil || pruned != 1 {
+		t.Fatalf("detached ordinary prune=(%d,%v), want (1,nil)", pruned, err)
+	}
+	if pruned, err := fixture.repo.Prune(ctx, fixture.route, terminal.Key.SourceWorkspaceID, 10); err != nil || pruned != 1 {
+		t.Fatalf("detached terminal prune=(%d,%v), want (1,nil)", pruned, err)
+	}
+	wrongRoute := fixture.route
+	wrongRoute.CanonicalRef = "refs/heads/other"
+	if _, err := fixture.repo.Prune(ctx, wrongRoute, terminal.Key.SourceWorkspaceID, 10); !errors.Is(err, ErrActivityNotFound) {
+		t.Fatalf("detached wrong-route prune=%v, want ErrActivityNotFound", err)
+	}
+	var primaryIDs string
+	if err := fixture.store.DB().QueryRow(`SELECT group_concat(activity_id, ',') FROM
+		(SELECT activity_id FROM activity_ledger WHERE project_id=? AND workspace_id=? ORDER BY activity_id)`,
+		fixture.route.ProjectID, fixture.route.WorkspaceID).Scan(&primaryIDs); err != nil {
+		t.Fatal(err)
+	}
+	if primaryIDs != pendingID {
+		t.Fatalf("detached protected evidence=%q, want %q", primaryIDs, pendingID)
+	}
+	retained, err := fixture.repo.Retained(ctx, siblingRoute, 10)
+	if err != nil || len(retained) != 1 || retained[0].Key.ActivityID != siblingID {
+		t.Fatalf("active sibling retained=(%+v,%v)", retained, err)
+	}
+}
+
 func TestActivityConcurrentEnqueueAckPullAndPruneKeepSiblingIsolation(t *testing.T) {
 	fixture := newLocalActivityFixture(t, true)
 	defer fixture.store.Close()

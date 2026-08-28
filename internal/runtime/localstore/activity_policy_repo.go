@@ -108,73 +108,80 @@ func (r *ActivityRepo) ReplacePolicy(ctx context.Context, route types.ActivityRo
 		if err := requireActiveActivityRoute(ctx, conn, route); err != nil {
 			return err
 		}
-		current, currentErr := currentActivityPolicy(ctx, conn, route)
-		if currentErr == nil && current.Policy.PolicyVersion == next.PolicyVersion &&
-			current.PolicyDigest == digest && bytes.Equal(current.PolicyJSON, canonical) {
-			result = current
-			return nil
-		}
-		if errors.Is(currentErr, ErrActivityPolicyUnavailable) {
-			if expectedVersion != 0 || expectedDigest != "" || next.PolicyVersion != 1 {
-				return fmt.Errorf("localstore: replace Activity policy: %w", ErrActivityPolicyChanged)
-			}
-		} else if currentErr != nil {
-			return currentErr
-		} else if current.Policy.PolicyVersion != expectedVersion || current.PolicyDigest != expectedDigest ||
-			next.PolicyVersion <= current.Policy.PolicyVersion {
-			return fmt.Errorf("localstore: replace Activity policy: %w", ErrActivityPolicyChanged)
-		}
-		now, err := databaseActivityNow(ctx, conn)
-		if err != nil {
-			return err
-		}
-		nowEncoded := sqliteActivityTimestamp(now)
-		arguments := activityRouteArgs(route)
-		arguments = append(arguments, next.PolicyVersion, canonical, string(digest), next.TerminalRetentionSeconds, nowEncoded)
-		if _, err := conn.ExecContext(ctx, `INSERT INTO activity_policy_versions
-			(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,canonical_ref,policy_version,
-			 canonical_policy_json,policy_digest,terminal_retention_seconds,received_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?)`, arguments...); err != nil {
-			return fmt.Errorf("localstore: replace Activity policy: insert: %w", err)
-		}
-		arguments = activityRouteArgs(route)
-		arguments = append(arguments, next.PolicyVersion, string(digest), nowEncoded)
-		if currentErr != nil {
-			_, err = conn.ExecContext(ctx, `INSERT INTO activity_policy_current
-				(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,canonical_ref,policy_version,policy_digest,updated_at)
-				VALUES (?,?,?,?,?,?,?,?,?)`, arguments...)
-		} else {
-			arguments = []any{next.PolicyVersion, string(digest), nowEncoded, route.ProjectID, route.WorkspaceID,
-				route.FabricInstanceID, route.RemoteProjectID, route.StreamID, route.CanonicalRef,
-				expectedVersion, string(expectedDigest)}
-			var update sql.Result
-			update, err = conn.ExecContext(ctx, `UPDATE activity_policy_current SET policy_version=?,policy_digest=?,updated_at=?
-				WHERE project_id=? AND workspace_id=? AND fabric_instance_id=? AND remote_project_id=? AND stream_id=? AND canonical_ref=?
-				AND policy_version=? AND policy_digest=?`, arguments...)
-			if err == nil {
-				var rows int64
-				rows, err = update.RowsAffected()
-				if err == nil && rows != 1 {
-					err = ErrActivityPolicyChanged
-				}
-			}
-		}
-		if err != nil {
-			return fmt.Errorf("localstore: replace Activity policy: current: %w", err)
-		}
-		queueArguments := []any{next.PolicyVersion, string(digest), nowEncoded}
-		queueArguments = append(queueArguments, activityRouteArgs(route)...)
-		if _, err := conn.ExecContext(ctx, `UPDATE activity_outbound_queue
-			SET expected_policy_version=?,expected_policy_digest=?,updated_at=?
-			WHERE project_id=? AND workspace_id=? AND fabric_instance_id=? AND remote_project_id=? AND stream_id=? AND canonical_ref=? AND state='pending'`, queueArguments...); err != nil {
-			return fmt.Errorf("localstore: replace Activity policy: pending queue: %w", err)
-		}
-		result = ActivityPolicyRecord{Route: route, Policy: next, PolicyJSON: append([]byte(nil), canonical...), PolicyDigest: digest, ReceivedAt: now}
-		return nil
+		result, err = replaceActivityPolicyTx(ctx, conn, route, expectedVersion, expectedDigest, next, canonical, digest)
+		return err
 	})
 	if err != nil {
 		return ActivityPolicyRecord{}, err
 	}
 	result.PolicyJSON = append([]byte(nil), result.PolicyJSON...)
 	return result, nil
+}
+
+func replaceActivityPolicyTx(ctx context.Context, db activityDB, route types.ActivityRouteKey,
+	expectedVersion int64, expectedDigest projectstate.Digest, next projectstate.EffectiveActivityPolicyV1,
+	canonical []byte, digest projectstate.Digest) (ActivityPolicyRecord, error) {
+	current, currentErr := currentActivityPolicy(ctx, db, route)
+	if currentErr == nil && current.Policy.PolicyVersion == next.PolicyVersion &&
+		current.PolicyDigest == digest && bytes.Equal(current.PolicyJSON, canonical) {
+		return current, nil
+	}
+	if errors.Is(currentErr, ErrActivityPolicyUnavailable) {
+		if expectedVersion != 0 || expectedDigest != "" || next.PolicyVersion != 1 {
+			return ActivityPolicyRecord{}, fmt.Errorf("localstore: replace Activity policy: %w", ErrActivityPolicyChanged)
+		}
+	} else if currentErr != nil {
+		return ActivityPolicyRecord{}, currentErr
+	} else if current.Policy.PolicyVersion != expectedVersion || current.PolicyDigest != expectedDigest ||
+		next.PolicyVersion <= current.Policy.PolicyVersion {
+		return ActivityPolicyRecord{}, fmt.Errorf("localstore: replace Activity policy: %w", ErrActivityPolicyChanged)
+	}
+	now, err := databaseActivityNow(ctx, db)
+	if err != nil {
+		return ActivityPolicyRecord{}, err
+	}
+	nowEncoded := sqliteActivityTimestamp(now)
+	arguments := activityRouteArgs(route)
+	arguments = append(arguments, next.PolicyVersion, canonical, string(digest), next.TerminalRetentionSeconds, nowEncoded)
+	if _, err := db.ExecContext(ctx, `INSERT INTO activity_policy_versions
+		(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,canonical_ref,policy_version,
+		 canonical_policy_json,policy_digest,terminal_retention_seconds,received_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)`, arguments...); err != nil {
+		return ActivityPolicyRecord{}, fmt.Errorf("localstore: replace Activity policy: insert: %w", err)
+	}
+	arguments = activityRouteArgs(route)
+	arguments = append(arguments, next.PolicyVersion, string(digest), nowEncoded)
+	if currentErr != nil {
+		_, err = db.ExecContext(ctx, `INSERT INTO activity_policy_current
+			(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,canonical_ref,policy_version,policy_digest,updated_at)
+			VALUES (?,?,?,?,?,?,?,?,?)`, arguments...)
+	} else {
+		arguments = []any{next.PolicyVersion, string(digest), nowEncoded, route.ProjectID, route.WorkspaceID,
+			route.FabricInstanceID, route.RemoteProjectID, route.StreamID, route.CanonicalRef,
+			expectedVersion, string(expectedDigest)}
+		var update sql.Result
+		update, err = db.ExecContext(ctx, `UPDATE activity_policy_current SET policy_version=?,policy_digest=?,updated_at=?
+			WHERE project_id=? AND workspace_id=? AND fabric_instance_id=? AND remote_project_id=? AND stream_id=? AND canonical_ref=?
+			AND policy_version=? AND policy_digest=?`, arguments...)
+		if err == nil {
+			var rows int64
+			rows, err = update.RowsAffected()
+			if err == nil && rows != 1 {
+				err = ErrActivityPolicyChanged
+			}
+		}
+	}
+	if err != nil {
+		return ActivityPolicyRecord{}, fmt.Errorf("localstore: replace Activity policy: current: %w", err)
+	}
+	queueArguments := []any{next.PolicyVersion, string(digest), nowEncoded}
+	queueArguments = append(queueArguments, activityRouteArgs(route)...)
+	if _, err := db.ExecContext(ctx, `UPDATE activity_outbound_queue
+		SET expected_policy_version=?,expected_policy_digest=?,updated_at=?
+		WHERE project_id=? AND workspace_id=? AND fabric_instance_id=? AND remote_project_id=? AND stream_id=? AND canonical_ref=? AND state='pending'`, queueArguments...); err != nil {
+		return ActivityPolicyRecord{}, fmt.Errorf("localstore: replace Activity policy: pending queue: %w", err)
+	}
+	return ActivityPolicyRecord{
+		Route: route, Policy: next, PolicyJSON: append([]byte(nil), canonical...), PolicyDigest: digest, ReceivedAt: now,
+	}, nil
 }

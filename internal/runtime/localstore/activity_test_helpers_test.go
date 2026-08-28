@@ -42,6 +42,37 @@ func newLocalActivityFixture(t *testing.T, withPolicy bool) localActivityFixture
 	return newLocalActivityFixtureAt(t, path, withPolicy)
 }
 
+func newFreshLocalActivityFixtureAtPolicy(t *testing.T, policy projectstate.EffectiveActivityPolicyV1) localActivityFixture {
+	t.Helper()
+	fixture := newLocalActivityFixture(t, false)
+	raw, err := projectstate.CanonicalActivityPolicy(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := projectstate.DigestActivityPolicy(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := sqliteActivityTimestamp(testUTCNow())
+	arguments := activityRouteArgs(fixture.route)
+	arguments = append(arguments, policy.PolicyVersion, raw, string(digest), policy.TerminalRetentionSeconds, now)
+	if _, err := fixture.store.DB().Exec(`INSERT INTO activity_policy_versions
+		(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,canonical_ref,policy_version,
+		 canonical_policy_json,policy_digest,terminal_retention_seconds,received_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)`, arguments...); err != nil {
+		t.Fatal(err)
+	}
+	arguments = activityRouteArgs(fixture.route)
+	arguments = append(arguments, policy.PolicyVersion, string(digest), now)
+	if _, err := fixture.store.DB().Exec(`INSERT INTO activity_policy_current
+		(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,canonical_ref,policy_version,policy_digest,updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?)`, arguments...); err != nil {
+		t.Fatal(err)
+	}
+	fixture.policy = policy
+	return fixture
+}
+
 func newLocalActivityFixtureAt(t *testing.T, path string, withPolicy bool) localActivityFixture {
 	t.Helper()
 	store, err := Open(path)
@@ -166,7 +197,25 @@ func localPullBatch(t *testing.T, policy projectstate.EffectiveActivityPolicyV1,
 	if err != nil {
 		t.Fatal(err)
 	}
-	return ActivityPullBatch{PolicyJSON: policyJSON, ExpectedAfter: expected, NextSequence: next, HasMore: hasMore, Deliveries: deliveries}
+	batch := ActivityPullBatch{PolicyJSON: policyJSON, ExpectedAfter: expected, NextSequence: next, HasMore: hasMore, Deliveries: deliveries}
+	if len(deliveries) != 0 {
+		digest, err := projectstate.DigestActivityPolicy(policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		batch.HistoricalPolicies = []ActivityPolicyEvidence{{
+			Route: localActivityTestRoute(), PolicyJSON: append([]byte(nil), policyJSON...), PolicyDigest: digest,
+		}}
+	}
+	return batch
+}
+
+func localActivityTestRoute() types.ActivityRouteKey {
+	return types.ActivityRouteKey{
+		ProjectID: localActivityProjectID, WorkspaceID: localActivityWorkspaceID,
+		FabricInstanceID: localActivityFabricID, RemoteProjectID: localActivityRemoteID,
+		StreamID: localActivityStreamID, CanonicalRef: "refs/heads/main",
+	}
 }
 
 func activityTableCounts(t *testing.T, store *Store) map[string]int {

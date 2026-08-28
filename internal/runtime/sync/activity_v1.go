@@ -34,12 +34,23 @@ type ActivityPullRequest struct {
 	Limit         int
 }
 
-type ActivityPullResponse struct {
+type ActivityPullPolicyStreamKey struct {
+	ProjectID, FabricInstanceID, StreamID, CanonicalRef string
+}
+
+type ActivityPullPolicyEvidence struct {
+	Stream       ActivityPullPolicyStreamKey
 	PolicyJSON   []byte
 	PolicyDigest projectstate.Digest
-	Deliveries   []localstore.ActivityPullDelivery
-	NextSequence int64
-	HasMore      bool
+}
+
+type ActivityPullResponse struct {
+	PolicyJSON         []byte
+	PolicyDigest       projectstate.Digest
+	HistoricalPolicies []ActivityPullPolicyEvidence
+	Deliveries         []localstore.ActivityPullDelivery
+	NextSequence       int64
+	HasMore            bool
 }
 
 type ActivityPresenceRequest struct {
@@ -151,37 +162,26 @@ func (s *ActivityTransport) Pull(ctx context.Context, scope types.WorkspaceScope
 	if err != nil {
 		return classifyActivityError("pull", err, ErrFabricUnavailable)
 	}
-	policy, policyJSON, policyDigest, err := validateActivityPolicyEvidence(response.PolicyJSON, response.PolicyDigest)
+	_, policyJSON, _, err := validateActivityPolicyEvidence(response.PolicyJSON, response.PolicyDigest)
 	if err != nil {
 		return err
 	}
 	if len(response.Deliveries) > limit {
 		return fmt.Errorf("sync: Activity pull response: %w", localstore.ErrActivityCursorConflict)
 	}
-	if !sameActivityPolicy(cycle.policy, policy, policyJSON, policyDigest) {
-		replaced, err := s.activities.ReplacePolicy(ctx, cycle.route, cycle.policy.Policy.PolicyVersion,
-			cycle.policy.PolicyDigest, policy)
-		if err != nil {
-			return classifyActivityError("pull policy", err, ErrAttentionRequired)
-		}
-		if !sameActivityPolicy(replaced, policy, policyJSON, policyDigest) {
-			return fmt.Errorf("sync: Activity pull policy: %w", localstore.ErrActivityPolicyChanged)
-		}
+	deliveries, historicalPolicies, err := validatePulledBatchForProfile(
+		response.Deliveries, response.HistoricalPolicies, cycle.route, cycle.profile.Mode)
+	if err != nil {
+		return err
 	}
 	if err := s.requireUnconflicted(ctx, scope); err != nil {
 		return err
 	}
-	deliveries := make([]localstore.ActivityPullDelivery, len(response.Deliveries))
-	for index, delivery := range response.Deliveries {
-		deliveries[index] = localstore.ActivityPullDelivery{
-			SourceWorkspaceID: delivery.SourceWorkspaceID,
-			ActivityJSON:      append([]byte(nil), delivery.ActivityJSON...), ActivityDigest: delivery.ActivityDigest,
-			ReceiptJSON: append([]byte(nil), delivery.ReceiptJSON...),
-		}
-	}
 	err = s.activities.AcceptPullBatch(ctx, cycle.route, localstore.ActivityPullBatch{
-		PolicyJSON: append([]byte(nil), policyJSON...), ExpectedAfter: after,
-		NextSequence: response.NextSequence, HasMore: response.HasMore, Deliveries: deliveries,
+		PolicyJSON: append([]byte(nil), policyJSON...), HistoricalPolicies: historicalPolicies,
+		ExpectedPolicyVersion: cycle.policy.Policy.PolicyVersion, ExpectedPolicyDigest: cycle.policy.PolicyDigest,
+		ExpectedAfter: after, NextSequence: response.NextSequence,
+		HasMore: response.HasMore, Deliveries: deliveries,
 	})
 	return classifyActivityError("accept pull", err, ErrAttentionRequired)
 }
@@ -260,6 +260,14 @@ func (s *ActivityTransport) Retained(ctx context.Context, scope types.WorkspaceS
 	records, err := s.activities.Retained(ctx, resolved.route, limit)
 	if err != nil {
 		return nil, classifyActivityError("retained read", err, ErrAttentionRequired)
+	}
+	for _, record := range records {
+		if record.Key.Route != resolved.route {
+			return nil, fmt.Errorf("sync: retained Activity route changed: %w", ErrAttentionRequired)
+		}
+		if err := validateRemoteActivityForProfile(record.Activity, false, resolved.profile.Mode); err != nil {
+			return nil, err
+		}
 	}
 	return records, nil
 }
@@ -437,6 +445,78 @@ func validateRemoteActivityForProfile(activity projectstate.ActivityV1, presence
 		return projectstate.ErrInvalidActivity
 	}
 	return nil
+}
+
+func validatePulledBatchForProfile(deliveries []localstore.ActivityPullDelivery, policies []ActivityPullPolicyEvidence,
+	route types.ActivityRouteKey, mode types.FabricMode) ([]localstore.ActivityPullDelivery, []localstore.ActivityPolicyEvidence, error) {
+	validatedDeliveries := make([]localstore.ActivityPullDelivery, 0, len(deliveries))
+	receiptPolicies := make(map[int64]projectstate.Digest, len(deliveries))
+	for _, delivery := range deliveries {
+		activity, err := validatePulledActivityForProfile(delivery, mode)
+		if err != nil {
+			return nil, nil, err
+		}
+		receipt, err := projectstate.DecodeActivityReceipt(delivery.ReceiptJSON)
+		if err != nil || receipt.ActivityID != activity.ID || receipt.ActivityDigest != delivery.ActivityDigest {
+			return nil, nil, fmt.Errorf("sync: pulled Activity receipt: %w", localstore.ErrActivityReplayConflict)
+		}
+		if prior, found := receiptPolicies[receipt.PolicyVersion]; found && prior != receipt.PolicyDigest {
+			return nil, nil, fmt.Errorf("sync: pulled Activity receipt policy: %w", localstore.ErrActivityReplayConflict)
+		}
+		receiptPolicies[receipt.PolicyVersion] = receipt.PolicyDigest
+		validatedDeliveries = append(validatedDeliveries, localstore.ActivityPullDelivery{
+			SourceWorkspaceID: delivery.SourceWorkspaceID,
+			ActivityJSON:      append([]byte(nil), delivery.ActivityJSON...), ActivityDigest: delivery.ActivityDigest,
+			ReceiptJSON: append([]byte(nil), delivery.ReceiptJSON...),
+		})
+	}
+	if len(policies) != len(receiptPolicies) {
+		return nil, nil, fmt.Errorf("sync: pulled Activity policy evidence: %w", localstore.ErrActivityPolicyUnavailable)
+	}
+	validatedPolicies := make([]localstore.ActivityPolicyEvidence, 0, len(policies))
+	seen := make(map[int64]struct{}, len(policies))
+	var priorVersion int64
+	for _, evidence := range policies {
+		if evidence.Stream.ProjectID != route.RemoteProjectID || evidence.Stream.FabricInstanceID != route.FabricInstanceID ||
+			evidence.Stream.StreamID != route.StreamID || evidence.Stream.CanonicalRef != route.CanonicalRef {
+			return nil, nil, fmt.Errorf("sync: pulled Activity policy route: %w", localstore.ErrActivityPolicyUnavailable)
+		}
+		policy, canonical, digest, err := validateActivityPolicyEvidence(evidence.PolicyJSON, evidence.PolicyDigest)
+		if err != nil {
+			return nil, nil, fmt.Errorf("sync: pulled Activity policy evidence: %w", localstore.ErrActivityPolicyUnavailable)
+		}
+		wantedDigest, required := receiptPolicies[policy.PolicyVersion]
+		if !required || wantedDigest != digest {
+			return nil, nil, fmt.Errorf("sync: pulled Activity policy evidence: %w", localstore.ErrActivityReplayConflict)
+		}
+		if _, duplicate := seen[policy.PolicyVersion]; duplicate || (priorVersion != 0 && policy.PolicyVersion <= priorVersion) {
+			return nil, nil, fmt.Errorf("sync: pulled Activity policy evidence: %w", localstore.ErrActivityReplayConflict)
+		}
+		seen[policy.PolicyVersion] = struct{}{}
+		priorVersion = policy.PolicyVersion
+		validatedPolicies = append(validatedPolicies, localstore.ActivityPolicyEvidence{
+			Route: route, PolicyJSON: append([]byte(nil), canonical...), PolicyDigest: digest,
+		})
+	}
+	return validatedDeliveries, validatedPolicies, nil
+}
+
+func validatePulledActivityForProfile(delivery localstore.ActivityPullDelivery, mode types.FabricMode) (projectstate.ActivityV1, error) {
+	activity, err := projectstate.DecodeActivity(delivery.ActivityJSON)
+	if err != nil {
+		return projectstate.ActivityV1{}, err
+	}
+	digest, err := projectstate.DigestActivity(activity)
+	if err != nil {
+		return projectstate.ActivityV1{}, err
+	}
+	if digest != delivery.ActivityDigest {
+		return projectstate.ActivityV1{}, fmt.Errorf("sync: pulled Activity digest: %w", localstore.ErrActivityReplayConflict)
+	}
+	if err := validateRemoteActivityForProfile(activity, false, mode); err != nil {
+		return projectstate.ActivityV1{}, err
+	}
+	return activity, nil
 }
 
 func classifyActivityError(operation string, err, fallback error) error {
