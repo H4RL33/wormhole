@@ -1513,3 +1513,13 @@ passed with 80.9% coverage; migrations 1-20 remain byte-identical, migration 21 
 matches exact v20, v8 refuses former v7, dated history is untouched, and no production
 coverage tag exists. Final whole-Task review approved with Critical 0 / Important 0 /
 Minor 0. Task 3 is complete; Task 4 portable-stream reconstruction is next.
+
+Stage 3 Task 4: complete (commits `a21987b..deef074`, independent review clean:
+Critical 0 / Important 0 / Minor 0 after one fix round). Exact portable Fabric
+streams now attach per canonical branch, apply the shared ProjectState reducer in
+caller-owned transactions, reconstruct and causally validate every immutable version
+and replay outcome, preserve PostgreSQL causes, and guard accepted-default advances
+with an exact locked prior-state precondition. The complete forced-RLS route-isolation
+matrix, focused PostgreSQL suites, affected packages, and race gates passed; canonical
+`make check` passed at 80.8% merged statement coverage. No observer, MCP/public wiring,
+ActivityV1 coupling, or Task 5+ authority was included. Task 5 Git observation is next.
