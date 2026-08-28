@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/types"
@@ -136,14 +137,21 @@ func (tx *WorkspaceMutationTx) ActivityPromotionReceipt(ctx context.Context, sou
 	if err != nil {
 		return nil, WorkspaceOperation{}, err
 	}
-	operation, err := tx.readActivityPromotionOperation(ctx, record)
-	if err != nil {
-		return nil, WorkspaceOperation{}, err
-	}
 	evidence, err := newActivityEvidenceLoader().load(ctx, tx.conn, record.SourceKey)
 	if err != nil || evidence.record.ActivityDigest != record.SourceDigest || !evidence.promoted ||
 		!hasConfirmedActivityPromotionLifecycle(evidence, record) {
 		return nil, WorkspaceOperation{}, activityPromotionError("receipt evidence", ErrActivityReplayConflict)
+	}
+	if evidence.receipt == nil {
+		return nil, WorkspaceOperation{}, activityPromotionError("receipt source", ErrActivityReplayConflict)
+	}
+	source, err := evidence.recordForPolicy(evidence.receipt.receipt.PolicyVersion, evidence.receipt.receipt.PolicyDigest)
+	if err != nil {
+		return nil, WorkspaceOperation{}, activityPromotionError("receipt source", ErrActivityReplayConflict)
+	}
+	operation, err := tx.readActivityPromotionOperation(ctx, record, source)
+	if err != nil {
+		return nil, WorkspaceOperation{}, err
 	}
 	clone := record
 	return &clone, cloneWorkspaceOperation(operation), nil
@@ -191,10 +199,11 @@ func (tx *WorkspaceMutationTx) InsertActivityPromotionReceipt(ctx context.Contex
 	if tx == nil || tx.conn == nil || !validActivityPromotionReceipt(tx.scope, receipt) {
 		return activityPromotionError("insert receipt", ErrActivityReplayConflict)
 	}
-	if _, err := tx.readActivityPromotionOperation(ctx, receipt); err != nil {
+	source, _, err := tx.ActivityPromotionSource(ctx, receipt.SourceActivityID, receipt.SourceDigest)
+	if err != nil {
 		return err
 	}
-	if _, _, err := tx.ActivityPromotionSource(ctx, receipt.SourceActivityID, receipt.SourceDigest); err != nil {
+	if _, err := tx.readActivityPromotionOperation(ctx, receipt, source); err != nil {
 		return err
 	}
 	promoterJSON, err := state.CanonicalJSON(receipt.Promoter)
@@ -257,12 +266,12 @@ func (tx *WorkspaceMutationTx) ConfirmActivityPromotionLifecycle(ctx context.Con
 	return nil
 }
 
-func (tx *WorkspaceMutationTx) readActivityPromotionOperation(ctx context.Context, receipt ActivityPromotionReceiptRecord) (WorkspaceOperation, error) {
+func (tx *WorkspaceMutationTx) readActivityPromotionOperation(ctx context.Context, receipt ActivityPromotionReceiptRecord, source ActivityRecord) (WorkspaceOperation, error) {
 	operations, err := tx.queryWorkspaceOperations(ctx, `SELECT generation,operation_id,operation_json,state,stashed_by_stash_id
 		FROM workspace_overlay_operations WHERE project_id=? AND workspace_id=? AND operation_id=?`,
 		tx.scope.ProjectID, tx.scope.WorkspaceID, receipt.OperationID)
 	if err != nil {
-		return WorkspaceOperation{}, err
+		return WorkspaceOperation{}, activityPromotionError("read operation", ErrActivityReplayConflict)
 	}
 	if len(operations) != 1 {
 		return WorkspaceOperation{}, activityPromotionError("read operation", ErrActivityReplayConflict)
@@ -282,7 +291,49 @@ func (tx *WorkspaceMutationTx) readActivityPromotionOperation(ctx context.Contex
 	if !validPromotionEventExtension(*decoded.PutRecord.Record.Event, receipt.SourceActivityID, receipt.SourceDigest) {
 		return WorkspaceOperation{}, activityPromotionError("validate operation extension", ErrActivityReplayConflict)
 	}
+	expectedEvent, err := expectedActivityPromotionEvent(source, receipt)
+	if err != nil || !reflect.DeepEqual(*decoded.PutRecord.Record.Event, expectedEvent) {
+		return WorkspaceOperation{}, activityPromotionError("validate operation source projection", ErrActivityReplayConflict)
+	}
 	return operations[0], nil
+}
+
+func expectedActivityPromotionEvent(source ActivityRecord, receipt ActivityPromotionReceiptRecord) (state.EventV1, error) {
+	if source.Activity.Event == nil || source.Key.ActivityID != receipt.SourceActivityID || source.ActivityDigest != receipt.SourceDigest {
+		return state.EventV1{}, activityPromotionError("compose expected event", ErrActivityReplayConflict)
+	}
+	data, err := state.CanonicalJSON(activityPromotionExtensionDataV1{
+		SourceActivityID: source.Key.ActivityID, SourceActivityDigest: source.ActivityDigest,
+	})
+	if err != nil {
+		return state.EventV1{}, activityPromotionError("compose expected event extension", ErrActivityReplayConflict)
+	}
+	data, err = state.CanonicalJSON(json.RawMessage(data))
+	if err != nil {
+		return state.EventV1{}, activityPromotionError("canonicalize expected event extension", ErrActivityReplayConflict)
+	}
+	data = bytes.TrimSuffix(data, []byte{'\n'})
+	projection := source.Activity.Event
+	var note *string
+	if projection.Note != nil {
+		value := *projection.Note
+		note = &value
+	}
+	return state.EventV1{
+		SchemaVersion: 1,
+		Kind:          "event",
+		ID:            receipt.EventID,
+		ChannelID:     projection.ChannelID,
+		ActorID:       projection.ActorID,
+		EventType:     projection.EventType,
+		Payload:       bytes.Clone(projection.Payload),
+		Note:          note,
+		CreatedAt:     projection.CreatedAt,
+		Extensions: state.ExtensionsV1{activityPromotionExtensionName: {
+			SchemaVersion: 1,
+			Data:          data,
+		}},
+	}, nil
 }
 
 func validPromotionEventExtension(event state.EventV1, activityID string, digest state.Digest) bool {

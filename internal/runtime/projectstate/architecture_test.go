@@ -358,8 +358,28 @@ func TestProjectStateServiceStillOwnsExactlySixCoordinatorsWithPromotion(t *test
 		t.Fatalf("promotion facade must delegate once to the existing workspace coordinator:\n%s", body)
 	}
 	promotion := sources["internal/runtime/projectstate/promotion.go"]
-	if strings.Count(promotion, "c.withImmediateWorkspace(") != 1 || strings.Contains(promotion, "ApplyBatch(") || strings.Contains(promotion, "internal/core/") || strings.Contains(promotion, "internal/mcp") {
+	if strings.Count(promotion, "c.withImmediateWorkspace(") != 1 || strings.Count(promotion, "repo.ActivityPromotionReceipt(") != 1 ||
+		strings.Contains(promotion, "WithImmediateWorkspace(") || strings.Contains(promotion, "WithImmediateWorkspaceTransition(") ||
+		strings.Contains(promotion, "ApplyBatch(") || strings.Contains(promotion, "BEGIN") || strings.Contains(promotion, "COMMIT") ||
+		strings.Contains(promotion, "internal/core/") || strings.Contains(promotion, "internal/mcp") {
 		t.Fatalf("promotion must own one local transaction without nested facade/Fabric authority")
+	}
+	localPromotion := sources["internal/runtime/localstore/workspace_activity_promotion_repo.go"]
+	deferredReceipt := architectureMethodBody(localPromotion, "func (r *WorkspaceRepo) ActivityPromotionReceipt")
+	if strings.Count(deferredReceipt, "`BEGIN`") != 1 || strings.Count(deferredReceipt, "`COMMIT`") != 1 ||
+		strings.Contains(deferredReceipt, "BEGIN IMMEDIATE") || strings.Count(deferredReceipt, "tx.ActivityPromotionReceipt(") != 1 {
+		t.Fatalf("promotion post-commit confirmation must be the sole deferred transaction:\n%s", deferredReceipt)
+	}
+	txLocalPromotion := strings.Replace(localPromotion, deferredReceipt, "", 1)
+	for _, forbidden := range []string{"BEGIN", "COMMIT", "ROLLBACK", "WithImmediateWorkspace", ".withImmediate("} {
+		if strings.Contains(txLocalPromotion, forbidden) {
+			t.Fatalf("transaction-local promotion call graph opens nested transaction through %q", forbidden)
+		}
+	}
+	for _, method := range []string{"ActivityPromotionSource", "ActivityPromotionReceipt", "InsertActivityPromotionReceipt", "ConfirmActivityPromotionLifecycle"} {
+		if architectureMethodBody(localPromotion, "func (tx *WorkspaceMutationTx) "+method) == "" {
+			t.Fatalf("transaction-local promotion method %s is absent", method)
+		}
 	}
 }
 
@@ -367,7 +387,9 @@ func TestFabricHasNoCompileTimeOrRuntimeActivityPromotionSeam(t *testing.T) {
 	root := filepath.Join("..", "..", "..")
 	sources := architectureProductionGoSources(t, root)
 	for path, source := range sources {
-		if !(strings.HasPrefix(path, "cmd/fabric/") || strings.HasPrefix(path, "internal/core/") || strings.HasPrefix(path, "internal/mcp/")) {
+		if !(strings.HasPrefix(path, "cmd/fabric/") || strings.HasPrefix(path, "internal/core/") ||
+			strings.HasPrefix(path, "internal/mcp/") || strings.HasPrefix(path, "internal/storage/") ||
+			strings.HasPrefix(path, "internal/types/") || strings.HasPrefix(path, "internal/webui/")) {
 			continue
 		}
 		for _, forbidden := range []string{"PromoteActivity", "ActivityPromotion", "dev.wormhole.promotion", "activity_promotion"} {
@@ -376,17 +398,24 @@ func TestFabricHasNoCompileTimeOrRuntimeActivityPromotionSeam(t *testing.T) {
 			}
 		}
 	}
-	for _, path := range []string{
-		"migrations/000021_git_aware_streams.up.sql",
-		"migrations/000021_git_aware_streams.down.sql",
-	} {
-		data, err := os.ReadFile(filepath.Join(root, path))
+	if err := filepath.WalkDir(filepath.Join(root, "migrations"), func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
-			t.Fatal(err)
+			return err
+		}
+		if entry.IsDir() || filepath.Ext(path) != ".sql" {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
 		}
 		if regexp.MustCompile(`(?i)promot|dev[.]wormhole[.]promotion`).Match(data) {
-			t.Fatalf("Fabric migration %s contains promotion-shaped runtime authority", path)
+			relative, _ := filepath.Rel(root, path)
+			t.Fatalf("Fabric migration %s contains promotion-shaped runtime authority", filepath.ToSlash(relative))
 		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

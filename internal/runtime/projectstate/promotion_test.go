@@ -3,6 +3,7 @@ package projectstate
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -206,6 +207,40 @@ func TestPromotionExactRetryReturnsStoredEventAndOperation(t *testing.T) {
 	}
 }
 
+func TestPromotionRejectsCanonicalSourceDivergenceOnRetryAndUnknownCommit(t *testing.T) {
+	for _, corruption := range promotionCanonicalEventCorruptions(t) {
+		t.Run(corruption.name+"/retry", func(t *testing.T) {
+			fixture := newPromotionFixture(t, true)
+			if _, err := fixture.service.PromoteActivity(context.Background(), fixture.request); err != nil {
+				t.Fatal(err)
+			}
+			corruptPromotionOperation(t, fixture, corruption.mutate)
+
+			got, err := fixture.service.PromoteActivity(context.Background(), fixture.request)
+			if !errors.Is(err, ErrActivityPromotionConflict) || !reflect.DeepEqual(got, PromoteActivityResult{}) {
+				t.Fatalf("source-divergent retry=(%+v,%v), want zero and ErrActivityPromotionConflict", got, err)
+			}
+		})
+
+		t.Run(corruption.name+"/unknown commit", func(t *testing.T) {
+			fixture := newPromotionFixture(t, true)
+			real := fixture.service.workspace.withImmediateWorkspace
+			fixture.service.workspace.withImmediateWorkspace = func(ctx context.Context, scope types.WorkspaceScope, fn func(*localstore.WorkspaceMutationTx) error) error {
+				if err := real(ctx, scope, fn); err != nil {
+					return err
+				}
+				corruptPromotionOperation(t, fixture, corruption.mutate)
+				return fmt.Errorf("synthetic source-divergent ambiguity: %w", localstore.ErrCommitOutcomeUnknown)
+			}
+
+			got, err := fixture.service.PromoteActivity(context.Background(), fixture.request)
+			if !errors.Is(err, localstore.ErrCommitOutcomeUnknown) || !reflect.DeepEqual(got, PromoteActivityResult{}) {
+				t.Fatalf("source-divergent unknown commit=(%+v,%v), want zero and ErrCommitOutcomeUnknown", got, err)
+			}
+		})
+	}
+}
+
 func TestPromotionUsesRetainedPolicyWhenCurrentPolicyIsUnavailable(t *testing.T) {
 	fixture := newPromotionFixture(t, true)
 	if _, err := fixture.store.DB().Exec(`DELETE FROM activity_policy_current WHERE project_id=? AND workspace_id=?`,
@@ -310,10 +345,12 @@ func TestPromotionRollsBackAtEveryActivityReceiptAndOperationWrite(t *testing.T)
 		{"status", `CREATE TRIGGER promotion_fault BEFORE UPDATE OF status ON workspace_bindings WHEN NEW.status='pending' BEGIN SELECT RAISE(ABORT,'promotion status fault'); END`},
 		{"receipt", `CREATE TRIGGER promotion_fault BEFORE INSERT ON activity_promotion_receipts BEGIN SELECT RAISE(ABORT,'promotion receipt fault'); END`},
 		{"lifecycle", `CREATE TRIGGER promotion_fault BEFORE INSERT ON activity_lifecycle WHEN NEW.lifecycle_kind='receipt' BEGIN SELECT RAISE(ABORT,'promotion lifecycle fault'); END`},
+		{"revision", `CREATE TRIGGER promotion_fault BEFORE UPDATE OF workspace_revision ON workspace_bindings BEGIN SELECT RAISE(ABORT,'promotion revision fault'); END`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newPromotionFixture(t, true)
+			persistedBefore := readPromotionPersistedState(t, fixture)
 			before, err := fixture.service.View(context.Background(), fixture.binding.Scope)
 			if err != nil {
 				t.Fatal(err)
@@ -332,6 +369,10 @@ func TestPromotionRollsBackAtEveryActivityReceiptAndOperationWrite(t *testing.T)
 			}
 			if before.Snapshot.Digest != after.Snapshot.Digest || before.ThroughGeneration != after.ThroughGeneration {
 				t.Fatalf("failed promotion changed view from %+v to %+v", before, after)
+			}
+			persistedAfter := readPromotionPersistedState(t, fixture)
+			if !reflect.DeepEqual(persistedAfter, persistedBefore) {
+				t.Fatalf("failed promotion changed status/revision or durable rows\nbefore=%+v\nafter=%+v", persistedBefore, persistedAfter)
 			}
 			assertPromotionAbsent(t, fixture)
 		})
@@ -611,4 +652,151 @@ func promotionOtherDigest() state.Digest {
 
 func equalPromotionNote(left, right *string) bool {
 	return (left == nil) == (right == nil) && (left == nil || *left == *right)
+}
+
+type promotionOperationCorruption struct {
+	name   string
+	mutate func(*state.OperationV1)
+}
+
+func promotionCanonicalEventCorruptions(t *testing.T) []promotionOperationCorruption {
+	t.Helper()
+	return []promotionOperationCorruption{
+		{name: "operation ID", mutate: func(operation *state.OperationV1) {
+			operation.ID = "d1000000-0000-4000-8000-000000000002"
+		}},
+		{name: "promoter", mutate: func(operation *state.OperationV1) {
+			operation.Actor.HumanPrincipalID = "72000000-0000-4000-8000-000000000002"
+		}},
+		{name: "event ID", mutate: func(operation *state.OperationV1) {
+			operation.PutRecord.Record.Event.ID = "c1000000-0000-4000-8000-000000000002"
+		}},
+		{name: "channel ID", mutate: func(operation *state.OperationV1) {
+			operation.PutRecord.Record.Event.ChannelID = "81000000-0000-4000-8000-000000000002"
+		}},
+		{name: "source actor ID", mutate: func(operation *state.OperationV1) {
+			operation.PutRecord.Record.Event.ActorID = "61000000-0000-4000-8000-000000000002"
+		}},
+		{name: "event type", mutate: func(operation *state.OperationV1) {
+			operation.PutRecord.Record.Event.EventType = "review.requested"
+		}},
+		{name: "payload", mutate: func(operation *state.OperationV1) {
+			operation.PutRecord.Record.Event.Payload = json.RawMessage(`{"changed":true}`)
+		}},
+		{name: "note", mutate: func(operation *state.OperationV1) {
+			note := "changed canonical note"
+			operation.PutRecord.Record.Event.Note = &note
+		}},
+		{name: "created at", mutate: func(operation *state.OperationV1) {
+			operation.PutRecord.Record.Event.CreatedAt = operation.PutRecord.Record.Event.CreatedAt.Add(time.Second)
+		}},
+		{name: "sole extension", mutate: func(operation *state.OperationV1) {
+			extension := operation.PutRecord.Record.Event.Extensions["dev.wormhole.promotion"]
+			operation.PutRecord.Record.Event.Extensions["dev.wormhole.other"] = extension
+		}},
+		{name: "extension source ID", mutate: func(operation *state.OperationV1) {
+			setPromotionCorruptionExtension(t, operation, "a1000000-0000-4000-8000-000000000002", promotionGoldenSourceDigest)
+		}},
+		{name: "extension source digest", mutate: func(operation *state.OperationV1) {
+			setPromotionCorruptionExtension(t, operation, promotionSourceActivityID, promotionOtherDigest())
+		}},
+	}
+}
+
+func setPromotionCorruptionExtension(t *testing.T, operation *state.OperationV1, activityID string, digest state.Digest) {
+	t.Helper()
+	data, err := state.CanonicalJSON(struct {
+		SourceActivityID     string       `json:"source_activity_id"`
+		SourceActivityDigest state.Digest `json:"source_activity_digest"`
+	}{SourceActivityID: activityID, SourceActivityDigest: digest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation.PutRecord.Record.Event.Extensions["dev.wormhole.promotion"] = state.ExtensionV1{SchemaVersion: 1, Data: data}
+}
+
+func corruptPromotionOperation(t *testing.T, fixture promotionFixture, mutate func(*state.OperationV1)) {
+	t.Helper()
+	var raw []byte
+	if err := fixture.store.DB().QueryRow(`SELECT operation_json FROM workspace_overlay_operations
+		WHERE project_id=? AND workspace_id=? AND operation_id=?`, fixture.binding.Scope.ProjectID,
+		fixture.binding.Scope.WorkspaceID, promotionGeneratedOperationID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	operation, err := state.DecodeOperation(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutate(&operation)
+	canonical, err := state.CanonicalOperation(operation)
+	if err != nil {
+		t.Fatalf("corruption is not another canonical valid Operation: %v", err)
+	}
+	if _, err := fixture.store.DB().Exec(`UPDATE workspace_overlay_operations SET operation_json=?
+		WHERE project_id=? AND workspace_id=? AND operation_id=?`, canonical, fixture.binding.Scope.ProjectID,
+		fixture.binding.Scope.WorkspaceID, promotionGeneratedOperationID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type promotionPersistedState struct {
+	Status     string
+	Revision   int64
+	Operations [][]string
+	Receipts   [][]string
+	Lifecycles [][]string
+}
+
+func readPromotionPersistedState(t *testing.T, fixture promotionFixture) promotionPersistedState {
+	t.Helper()
+	var result promotionPersistedState
+	if err := fixture.store.DB().QueryRow(`SELECT status,workspace_revision FROM workspace_bindings
+		WHERE project_id=? AND workspace_id=?`, fixture.binding.Scope.ProjectID, fixture.binding.Scope.WorkspaceID).
+		Scan(&result.Status, &result.Revision); err != nil {
+		t.Fatal(err)
+	}
+	result.Operations = readPromotionRows(t, fixture.store.DB(), `SELECT * FROM workspace_overlay_operations
+		WHERE project_id=? AND workspace_id=? ORDER BY rowid`, fixture.binding.Scope.ProjectID, fixture.binding.Scope.WorkspaceID)
+	result.Receipts = readPromotionRows(t, fixture.store.DB(), `SELECT * FROM activity_promotion_receipts
+		WHERE local_project_id=? AND local_workspace_id=? ORDER BY rowid`, fixture.binding.Scope.ProjectID, fixture.binding.Scope.WorkspaceID)
+	result.Lifecycles = readPromotionRows(t, fixture.store.DB(), `SELECT * FROM activity_lifecycle
+		WHERE project_id=? AND workspace_id=? AND lifecycle_kind='receipt' ORDER BY rowid`, fixture.binding.Scope.ProjectID, fixture.binding.Scope.WorkspaceID)
+	return result
+}
+
+func readPromotionRows(t *testing.T, db *sql.DB, query string, arguments ...any) [][]string {
+	t.Helper()
+	rows, err := db.Query(query, arguments...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	columns, err := rows.Columns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make([][]string, 0)
+	for rows.Next() {
+		values := make([]sql.RawBytes, len(columns))
+		destinations := make([]any, len(values))
+		for index := range values {
+			destinations[index] = &values[index]
+		}
+		if err := rows.Scan(destinations...); err != nil {
+			t.Fatal(err)
+		}
+		row := make([]string, len(values))
+		for index, value := range values {
+			if value == nil {
+				row[index] = "<NULL>"
+				continue
+			}
+			row[index] = fmt.Sprintf("%d:%s", len(value), value)
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return result
 }

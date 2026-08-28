@@ -200,3 +200,86 @@ coverage: PASS (80.8%)
 
 None. No implementation defect was found during the independent completion audit, so no
 fix commit was required. Task 3E is ready for the parent Stage 3 Task 3 checkpoint/review.
+
+## Post-review remediation — 2026-08-28
+
+### Status
+
+DONE
+
+This section supersedes the earlier no-concerns conclusion. The subsequent independent
+review found one Important and two Minor gaps; all three are fixed in the current
+remediation commit without Task 4+ scope.
+
+### Causal RED evidence
+
+`TestPromotionRejectsCanonicalSourceDivergenceOnRetryAndUnknownCommit` first failed
+against `4008681`. Canonical stored Operations whose Events changed channel ID, source
+actor ID, event type, payload, note, or creation time were returned successfully on both
+ordinary retry and unknown-COMMIT confirmation. The matrix also exercises operation/Event
+IDs, the distinct promoter, sole-extension shape, source Activity ID, and source digest.
+The observed failure proved that canonical decoding and receipt metadata alone did not
+bind the stored Event back to the retained source projection.
+
+### Fixes
+
+- The transaction-local receipt reader now retains the strict-loaded Activity evidence,
+  projects its receipt-owned policy record, reconstructs the complete expected Event, and
+  deep-compares it with the Event inside the stored canonical Operation. The comparison
+  binds schema/kind, receipt-owned Event ID, exact channel/source actor/type/payload/note/
+  creation time, and the sole canonical `dev.wormhole.promotion` extension with exact
+  source ID/digest. Operation ID and distinct promoter checks remain enforced, while the
+  ProjectState replay layer retains request-side source/view digest and promoter checks.
+- Every canonical corruption case now returns zero plus
+  `ErrActivityPromotionConflict` on normal retry. The same corrupt durable evidence after
+  an ambiguous commit returns zero and preserves `ErrCommitOutcomeUnknown`.
+- The rollback matrix now injects failure into the final `workspace_revision` CAS. Every
+  fault compares exact pre/post workspace status and revision plus every column of scoped
+  operation, promotion-receipt, and receipt-lifecycle rows.
+- Architecture guards now inspect the promotion call graph and all four transaction-local
+  promotion methods for nested transaction acquisition, allowing only the separate
+  deferred read confirmation. The no-Fabric guard scans all Fabric production package
+  families (`cmd/fabric`, Core, MCP, storage, shared types, and web UI) and every SQL
+  migration for frozen promotion symbols/objects.
+
+### Fresh verification
+
+```text
+$ go test ./internal/runtime/localstore -run 'TestActivityPromotionTx' -count=1
+ok github.com/H4RL33/wormhole/internal/runtime/localstore 0.099s
+
+$ go test ./internal/runtime/projectstate -run 'Test(Promotion|ActivityExpiry|ProjectStateService.*Promotion|FabricHasNo)' -count=1
+ok github.com/H4RL33/wormhole/internal/runtime/projectstate 2.174s
+
+$ go test -race ./internal/runtime/localstore -run 'TestActivityPromotionTx' -count=1
+ok github.com/H4RL33/wormhole/internal/runtime/localstore 2.408s
+
+$ go test -race ./internal/runtime/projectstate -run 'TestPromotion' -count=1
+ok github.com/H4RL33/wormhole/internal/runtime/projectstate 13.440s
+
+$ go test ./internal/types/... ./internal/runtime/localstore ./internal/runtime/sync ./internal/runtime/projectstate -count=1
+ok github.com/H4RL33/wormhole/internal/types 0.005s
+ok github.com/H4RL33/wormhole/internal/types/projectstate 0.064s
+ok github.com/H4RL33/wormhole/internal/runtime/localstore 11.651s
+ok github.com/H4RL33/wormhole/internal/runtime/sync 1.927s
+ok github.com/H4RL33/wormhole/internal/runtime/projectstate 89.408s
+
+$ go test -race ./internal/runtime/localstore ./internal/runtime/sync ./internal/runtime/projectstate -run 'Test(Activity|Promotion)' -count=1
+ok github.com/H4RL33/wormhole/internal/runtime/localstore 101.163s
+ok github.com/H4RL33/wormhole/internal/runtime/sync 10.667s
+ok github.com/H4RL33/wormhole/internal/runtime/projectstate 14.696s
+
+$ make check
+build: PASS
+vet: PASS
+mandatory integration: PASS (projectstate 88.901s)
+repository race: PASS (localstore 198.934s; projectstate 319.838s)
+coverage: PASS (80.8%)
+```
+
+`git diff --check` passed. A fresh independent review of the remediation diff reported
+no Critical, Important, or Minor findings.
+
+### Concerns
+
+None.
