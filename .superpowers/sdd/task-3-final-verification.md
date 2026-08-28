@@ -189,3 +189,96 @@ stream reconstruction is not started by this checkpoint.
 `git status --short` was empty immediately before creating this report. After this report
 is committed, the final checkpoint must again have an empty `git status --short` and the
 commit must record Harley Welsh `<git@h4rl3y.xyz>` as both author and committer.
+
+## Post-final-review contract correction — 2026-08-28
+
+### Status
+
+GREEN at implementation head `bc8110d9b792e1db1d203cf6cc5c8ebf641d511b`.
+This section records new evidence after the dated final review; it does not rewrite that
+historical review record.
+
+The human-approved correction was recorded in the authoritative current Activity spec
+and Stage-3 plan. The implementation now:
+
+- exports one ascending, deduplicated, canonical, route-bound historical policy record
+  for every distinct receipt policy version in a Core pull;
+- strict-validates the complete pull before mutation and atomically CASes any separately
+  returned current policy together with historical-policy insert/exact-replay,
+  deliveries, lifecycle, cursor, and pending queue expectations;
+- validates every pulled and retained actor assurance against the freshly resolved
+  profile mode before mutation or exposure; and
+- permits only exact-route pruning maintenance for preserved detached bindings while
+  every queue, pull, lifecycle, pending, cursor, and retained path stays active-only.
+
+### Causal RED evidence
+
+- Core v1/v2 receipt policy evidence was absent before the new result shape existed.
+- A fresh-v3 Gateway could not accept a retained v2 receipt because the immutable v2
+  policy was unavailable locally.
+- Missing historical evidence returned success and advanced across the omitted delivery
+  when the Core query used an inner policy join.
+- Reversed historical evidence was accepted by the local repository.
+- Pull and retained exposure accepted both public/private assurance mismatch directions.
+- Detached-route pruning returned `ErrActivityNotFound` before the maintenance-only
+  existing-route check.
+- A pull whose delivery write failed left the separately replaced current policy at v3.
+
+Each RED was observed before its production fix. The last two review-discovered gaps
+were then re-reviewed; the independent reviewer reported no remaining Critical or
+Important finding.
+
+### Focused and PostgreSQL evidence
+
+```bash
+WORMHOLE_DATABASE_URL='postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable' \
+WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git \
+  -run '^TestActivityStorePull(ExportsDeduplicatedHistoricalPolicyEvidence|RejectsMissingOrNonCanonicalHistoricalPolicyEvidence)$' -count=1
+```
+
+Result: PASS, exit 0, no skip.
+
+```bash
+go test ./internal/runtime/projectstate -count=1
+```
+
+Result: PASS, exit 0, 88.605 seconds.
+
+```bash
+WORMHOLE_DATABASE_URL='postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable' \
+WORMHOLE_INTEGRATION_REQUIRED=1 go test -race \
+  ./internal/core/git ./internal/runtime/localstore ./internal/runtime/sync \
+  -run 'TestActivity(StorePull(ExportsDeduplicatedHistoricalPolicyEvidence|RejectsMissingOrNonCanonicalHistoricalPolicyEvidence)|Pull(InstallsHistoricalReceiptPolicyWithoutAdvancingCurrent|HistoricalPolicyEvidenceMustBeOrdered|HistoricalPolicyEvidenceMissingOrCorruptRollsBack)|PrunerMaintainsDetachedRouteWithoutReactivatingLivePaths|Transport(PullPolicyUpdateRollsBackWithRejectedBatch|PullInstallsHistoricalPolicyIntoFreshV3Gateway|PullBindsEveryActorAssuranceToFreshFabricModeBeforeMutation|RetainedBindsEveryActorAssuranceToFreshFabricModeBeforeExposure))$' -count=1
+```
+
+Result: PASS, exit 0, no race report.
+
+```text
+ok  github.com/H4RL33/wormhole/internal/core/git               1.155s
+ok  github.com/H4RL33/wormhole/internal/runtime/localstore     2.151s
+ok  github.com/H4RL33/wormhole/internal/runtime/sync           2.468s
+```
+
+### Repository gate
+
+```bash
+WORMHOLE_DATABASE_URL='postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable' make check
+```
+
+Result: PASS, exit 0. The target completed format checking, all three binary builds,
+`go vet ./...`, required PostgreSQL integration, full `-race`, merged atomic coverage,
+and the coverage exception check. No required integration package skipped. Decisive
+coverage output:
+
+```text
+total: (statements) 80.9%
+```
+
+```bash
+git diff --check
+```
+
+Result: PASS, exit 0, no output.
+
+No Task-4 reconstruction, MCP descriptor, public wiring, migration, or portable reducer
+surface was added by the correction.
