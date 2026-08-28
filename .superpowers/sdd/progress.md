@@ -1523,3 +1523,16 @@ with an exact locked prior-state precondition. The complete forced-RLS route-iso
 matrix, focused PostgreSQL suites, affected packages, and race gates passed; canonical
 `make check` passed at 80.8% merged statement coverage. No observer, MCP/public wiring,
 ActivityV1 coupling, or Task 5+ authority was included. Task 5 Git observation is next.
+
+Stage 3 Task 5: complete (commits `8ce6f3d..c7ddd63`, independent review clean:
+Critical 0 / Important 0 / Minor 0 after one fix round and an explicit human plan
+amendment). Fabric now observes one exact numeric-ID GitHub repository/ref/commit/tree
+chain, fetches only bounded `.wormhole/` blobs, rejects redirects and inconsistent
+provider evidence, and exposes deterministic fake observation for later protocol tests.
+Private observation uses only the separately configured Fabric-server
+`WORMHOLE_GITHUB_API_BASE_URL`, `WORMHOLE_GITHUB_CREDENTIAL_REF`, and
+`WORMHOLE_GITHUB_CREDENTIAL`; public observation sends no authorization and ambient
+`GITHUB_TOKEN` remains excluded. The alpha environment contract and Task 5/Task 15
+ownership text now match the shipped runtime surface. Focused security/config/contract
+and race suites passed; canonical `make check` passed at 80.9% coverage. Task 6 exact
+public proofs and explicit sync protocol v2 is next.
