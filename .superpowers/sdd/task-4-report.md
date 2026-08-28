@@ -144,3 +144,144 @@ PASS
 
 None. Task 4 is ready for independent review. Task 5 remains the owner of Git observation
 and Task 6 remains the owner of MCP/public attachment wiring.
+
+## Independent-review fixes (2026-08-28)
+
+Status: DONE. All four Important review findings were reproduced and fixed with
+RED-to-GREEN tests. The bounded Minor isolation-matrix gap was also closed.
+
+### Root causes
+
+1. `AttachInTx` incorrectly treated the repository's default ref as the only legal
+   canonical stream ref. Repository identity and an exact caller-supplied ref
+   observation are the attachment authority; default-ref equality belongs only to
+   accepted-default advancement.
+2. `AdvanceAcceptedDefaultInTx` locked the current stream but did not compare that
+   state with the caller's prior observation. A delayed transaction could therefore
+   accept a fresh Git observation against a newer Fabric proposal state.
+3. Stored versions and idempotency results were validated row-by-row. Their JSON,
+   digests, and foreign keys could be internally valid while the transition was not a
+   valid successor of the preceding version or the stored request/result pair was
+   causally inconsistent. Conflict replay also checked only digest columns, not the
+   required detail evidence.
+4. Attach collapsed every initial/workspace insert or workspace-read database failure
+   into `ErrStreamConflict`, discarding cancellation and PostgreSQL diagnostics. Only
+   the known one-writable-binding unique-constraint class is a semantic conflict.
+5. The isolation tests covered individual negative routes, but did not seed colliding
+   project/Fabric/topic-ref/workspace siblings together and prove both positive and
+   negative behavior across the complete route.
+
+### Files changed
+
+- `internal/core/git/streams.go`: branch-capable attach, accepted-state compare-and-swap,
+  full version-chain/reducer/conflict validation, strict request-result replay evidence,
+  and database-cause-preserving attach error classification.
+- `internal/core/git/streams_test.go`: regressions for all four Important findings plus
+  the complete colliding-sibling isolation matrix.
+- `.superpowers/sdd/task-4-report.md`: this fix record. The parent-owned dirty
+  `.superpowers/sdd/task-4-brief.md` was neither edited nor staged.
+
+### Exact RED commands and failure reasons
+
+Branch-capable canonical attachment:
+
+```text
+$ WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run '^TestAttachSupportsIsolatedCanonicalBranches$' -count=1
+--- FAIL: TestAttachSupportsIsolatedCanonicalBranches
+    streams_test.go:168: AttachInTx: git: attach stream: git: stream conflict
+FAIL
+```
+
+Accepted-state compare-and-swap:
+
+```text
+$ WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'TestAdvanceAccepted(RejectsDelayedStaleObservationWithoutMutation|ConcurrentPreconditionAllowsOneWinner)' -count=1
+# github.com/H4RL33/wormhole/internal/core/git [github.com/H4RL33/wormhole/internal/core/git.test]
+internal/core/git/streams_test.go: unknown field ExpectedVersion in struct literal of type AdvanceAcceptedInput
+internal/core/git/streams_test.go: unknown field ExpectedAcceptedCommitSHA in struct literal of type AdvanceAcceptedInput
+internal/core/git/streams_test.go: unknown field ExpectedAcceptedTreeDigest in struct literal of type AdvanceAcceptedInput
+internal/core/git/streams_test.go: unknown field ExpectedLiveTreeDigest in struct literal of type AdvanceAcceptedInput
+FAIL github.com/H4RL33/wormhole/internal/core/git [build failed]
+```
+
+Semantic chain and replay validation:
+
+```text
+$ WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'Test(ReadRejectsSemanticallyCorruptStoredTransitions|ApplyOperationReplayRejectsSemanticallyCorruptResult|ApplyOperationConflictReplayRejectsCorruptDetailEvidence)' -count=1
+FAIL: each valid-but-semantically-corrupt table case returned a transition with a nil
+error instead of a zero transition with ErrStreamCorrupt.
+
+$ WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'TestApplyOperationConflictReplayRejectsCorruptDetailEvidence/missing_expected_version' -count=1
+FAIL: missing expected_stream_version detail replayed successfully instead of returning
+ErrStreamCorrupt.
+```
+
+Database error preservation:
+
+```text
+$ WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run '^TestAttachPreservesDatabaseErrorCauses$' -count=1
+FAIL: the initial permission case returned ErrStreamConflict and lost SQLSTATE 42501;
+the cancelled workspace case returned ErrStreamConflict and lost context.Canceled; the
+one-writable constraint case retained ErrStreamConflict but lost SQLSTATE 23505.
+```
+
+### GREEN and final verification
+
+Each focused behavior passed after its production change:
+
+```text
+$ WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'TestAttach(SupportsIsolatedCanonicalBranches|PersistsVersionZeroLiveAndAcceptedTrees|RejectsRepositoryRefScopeAndTreeMismatches)' -count=1
+ok github.com/H4RL33/wormhole/internal/core/git 0.371s
+
+$ WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'TestAdvanceAccepted(RejectsDelayedStaleObservationWithoutMutation|ConcurrentPreconditionAllowsOneWinner|UsesExactObservedCommit|DivergencePreservesLiveAndPersistsConflict)' -count=1
+ok github.com/H4RL33/wormhole/internal/core/git 0.407s
+
+$ WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'Test(ReadRejectsSemanticallyCorruptStoredTransitions|ApplyOperationReplayRejectsSemanticallyCorruptResult|ApplyOperationConflictReplayRejectsCorruptDetailEvidence)' -count=1
+ok github.com/H4RL33/wormhole/internal/core/git 0.720s
+
+$ WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'TestApplyOperationConflictReplayRejectsCorruptDetailEvidence' -count=1
+ok github.com/H4RL33/wormhole/internal/core/git 0.290s
+
+$ WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run '^TestAttachPreservesDatabaseErrorCauses$' -count=1
+ok github.com/H4RL33/wormhole/internal/core/git 0.150s
+```
+
+The Minor complete-route isolation matrix passed on its first valid run because
+production route predicates were already complete; this was a missing-test finding, not
+a production RED:
+
+```text
+$ WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run '^TestStreamStoreCompleteRouteIsolation$' -count=1
+ok github.com/H4RL33/wormhole/internal/core/git 0.176s
+```
+
+Required real-PostgreSQL focused tests, relevant race tests, and full affected packages:
+
+```text
+$ WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'Test(StoredTree|Attach|ApplyOperation|Read(Reconstructs|Rejects)|AdvanceAccepted)' -count=1
+ok github.com/H4RL33/wormhole/internal/core/git 3.421s
+
+$ WORMHOLE_INTEGRATION_REQUIRED=1 go test -race ./internal/core/git -run 'Test(ApplyOperation|AdvanceAccepted)' -count=1
+ok github.com/H4RL33/wormhole/internal/core/git 4.116s
+
+$ WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/types/projectstate ./internal/core/git -count=1
+ok github.com/H4RL33/wormhole/internal/types/projectstate 0.093s
+ok github.com/H4RL33/wormhole/internal/core/git 6.288s
+```
+
+The repository-wide gate completed successfully after all production and test changes:
+
+```text
+$ make check
+build: PASS
+vet: PASS
+mandatory integration: PASS
+repository race: PASS
+coverage: PASS (80.8%)
+
+$ git diff --check
+PASS
+```
+
+The final scope scan again found no ActivityV1, MCP/public registration, observer
+implementation, or Task 5+ wiring. No concerns remain.

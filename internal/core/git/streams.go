@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/lib/pq"
+
 	"github.com/H4RL33/wormhole/internal/types"
 	"github.com/H4RL33/wormhole/internal/types/projectstate"
 )
@@ -58,9 +60,13 @@ type ApplyStreamOperationInput struct {
 }
 
 type AdvanceAcceptedInput struct {
-	Key  StreamKey
-	Ref  RefObservation
-	Tree projectstate.Tree
+	Key                        StreamKey
+	Ref                        RefObservation
+	Tree                       projectstate.Tree
+	ExpectedVersion            int64
+	ExpectedAcceptedCommitSHA  string
+	ExpectedAcceptedTreeDigest projectstate.Digest
+	ExpectedLiveTreeDigest     projectstate.Digest
 }
 
 type StreamTransition struct {
@@ -96,7 +102,7 @@ func (s *StreamStore) AttachInTx(ctx context.Context, tx *sql.Tx, scope types.Ac
 	if err != nil {
 		return StreamTransition{}, err
 	}
-	if repository.identity != input.Repository || repository.defaultRef != input.Ref.RefName {
+	if repository.identity != input.Repository {
 		return StreamTransition{}, fmt.Errorf("git: attach stream: %w", ErrStreamConflict)
 	}
 
@@ -113,7 +119,7 @@ func (s *StreamStore) AttachInTx(ctx context.Context, tx *sql.Tx, scope types.Ac
 			input.Key.ProjectID, input.Key.FabricInstanceID, input.Key.StreamID, input.Ref.RefName,
 			string(digest), input.Ref.CommitSHA)
 		if err != nil {
-			return StreamTransition{}, fmt.Errorf("git: attach stream: create stream: %w", ErrStreamConflict)
+			return StreamTransition{}, classifyStreamAttachDatabaseError("git: attach stream: create stream", err)
 		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO fabric_stream_versions
 			(project_id,fabric_instance_id,stream_id,canonical_ref,version,transition_kind,
@@ -132,7 +138,7 @@ func (s *StreamStore) AttachInTx(ctx context.Context, tx *sql.Tx, scope types.Ac
 		if stream.canonicalRef != input.Ref.RefName || stream.acceptedCommitSHA != input.Ref.CommitSHA || stream.acceptedDigest != digest {
 			return StreamTransition{}, fmt.Errorf("git: attach stream: %w", ErrStreamConflict)
 		}
-		loaded, loadErr := loadStreamVersionTx(ctx, tx, input.Key, stream.canonicalRef, stream.currentVersion, repository.identity)
+		loaded, loadErr := loadStreamVersionTx(ctx, tx, input.Key, stream.canonicalRef, stream.currentVersion, repository)
 		if loadErr != nil {
 			return StreamTransition{}, loadErr
 		}
@@ -173,7 +179,7 @@ func (s *StreamStore) Read(ctx context.Context, key StreamKey, version int64) (S
 	if !found || version > stream.currentVersion {
 		return StreamTransition{}, fmt.Errorf("git: read stream: %w", ErrStreamNotFound)
 	}
-	loaded, err := loadStreamVersionTx(ctx, tx, key, stream.canonicalRef, version, repository.identity)
+	loaded, err := loadStreamVersionTx(ctx, tx, key, stream.canonicalRef, version, repository)
 	if err != nil {
 		return StreamTransition{}, err
 	}
@@ -220,10 +226,10 @@ func (s *StreamStore) ApplyOperationInTx(ctx context.Context, tx *sql.Tx, scope 
 		return StreamTransition{}, err
 	}
 	if found {
-		return replayStreamRequest(ctx, tx, input, stream.canonicalRef, repository.identity, operation, canonical, operationDigest, actorJSON, request)
+		return replayStreamRequest(ctx, tx, input, stream.canonicalRef, repository, operation, canonical, operationDigest, actorJSON, request)
 	}
 
-	current, err := loadStreamVersionTx(ctx, tx, input.Key, stream.canonicalRef, stream.currentVersion, repository.identity)
+	current, err := loadStreamVersionTx(ctx, tx, input.Key, stream.canonicalRef, stream.currentVersion, repository)
 	if err != nil {
 		return StreamTransition{}, err
 	}
@@ -286,7 +292,11 @@ func (s *StreamStore) ApplyOperationInTx(ctx context.Context, tx *sql.Tx, scope 
 }
 
 func (s *StreamStore) AdvanceAcceptedDefaultInTx(ctx context.Context, tx *sql.Tx, scope types.ActorScope, input AdvanceAcceptedInput) (StreamTransition, error) {
-	if tx == nil || validateStreamScope(scope, input.Key) != nil || validateRefObservation(input.Ref) != nil {
+	if tx == nil || validateStreamScope(scope, input.Key) != nil || validateRefObservation(input.Ref) != nil ||
+		input.ExpectedVersion < 0 || input.ExpectedVersion > maximumStreamVersion ||
+		!streamCommitPattern.MatchString(input.ExpectedAcceptedCommitSHA) ||
+		!streamDigestPattern.MatchString(string(input.ExpectedAcceptedTreeDigest)) ||
+		!streamDigestPattern.MatchString(string(input.ExpectedLiveTreeDigest)) {
 		return StreamTransition{}, fmt.Errorf("git: advance accepted stream: %w", ErrStreamNotFound)
 	}
 	newAcceptedTree, newAcceptedSnapshot, newAcceptedDigest, err := prepareStreamTree(input.Tree, input.Key, input.Ref.Repository)
@@ -310,12 +320,18 @@ func (s *StreamStore) AdvanceAcceptedDefaultInTx(ctx context.Context, tx *sql.Tx
 	if !found || stream.canonicalRef != input.Ref.RefName {
 		return StreamTransition{}, fmt.Errorf("git: advance accepted stream: %w", ErrStreamNotFound)
 	}
-	current, err := loadStreamVersionTx(ctx, tx, input.Key, stream.canonicalRef, stream.currentVersion, repository.identity)
+	current, err := loadStreamVersionTx(ctx, tx, input.Key, stream.canonicalRef, stream.currentVersion, repository)
 	if err != nil {
 		return StreamTransition{}, err
 	}
 	if err := verifyCurrentStream(stream, current); err != nil {
 		return StreamTransition{}, err
+	}
+	if input.ExpectedVersion != current.transition.Version ||
+		input.ExpectedAcceptedCommitSHA != current.transition.AcceptedCommitSHA ||
+		input.ExpectedAcceptedTreeDigest != current.transition.Accepted.Digest ||
+		input.ExpectedLiveTreeDigest != current.transition.Live.Digest {
+		return StreamTransition{}, fmt.Errorf("git: advance accepted stream: stale observation: %w", ErrStreamConflict)
 	}
 	if current.transition.Version == maximumStreamVersion {
 		return StreamTransition{}, fmt.Errorf("git: advance accepted stream: %w", ErrStreamConflict)
@@ -389,6 +405,7 @@ type loadedStreamVersion struct {
 	operationJSON, actorJSON []byte
 	operationDigest          sql.NullString
 	transitionKind           string
+	operation                projectstate.OperationV1
 }
 
 type storedStreamRequest struct {
@@ -529,7 +546,7 @@ func attachWorkspaceTx(ctx context.Context, tx *sql.Tx, input AttachStreamInput,
 		input.Key.ProjectID, input.Key.FabricInstanceID, input.Key.StreamID, input.WorkspaceID,
 		repository.Provider, repository.ImmutableID, input.Ref.RefName, input.Writable)
 	if err != nil {
-		return fmt.Errorf("git: attach stream workspace: %w", ErrStreamConflict)
+		return classifyStreamAttachDatabaseError("git: attach stream workspace", err)
 	}
 	var provider, immutableID, canonicalRef string
 	var writable bool
@@ -539,59 +556,217 @@ func attachWorkspaceTx(ctx context.Context, tx *sql.Tx, input AttachStreamInput,
 		WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3 AND workspace_id=$4 AND ref_name=$5`,
 		input.Key.ProjectID, input.Key.FabricInstanceID, input.Key.StreamID, input.WorkspaceID, input.Ref.RefName).
 		Scan(&provider, &immutableID, &canonicalRef, &writable, &detachedAt)
-	if err != nil || provider != repository.Provider || immutableID != repository.ImmutableID || canonicalRef != input.Ref.RefName || writable != input.Writable || detachedAt.Valid {
+	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("git: attach stream workspace: %w", ErrStreamConflict)
+	}
+	if err != nil {
+		return fmt.Errorf("git: attach stream workspace: read: %w", err)
+	}
+	if provider != repository.Provider || immutableID != repository.ImmutableID || canonicalRef != input.Ref.RefName || writable != input.Writable || detachedAt.Valid {
+		return fmt.Errorf("git: attach stream workspace: binding mismatch: %w", ErrStreamConflict)
 	}
 	return nil
 }
 
-func loadStreamVersionTx(ctx context.Context, tx *sql.Tx, key StreamKey, canonicalRef string, version int64, repository types.RepositoryIdentity) (loadedStreamVersion, error) {
-	var loaded loadedStreamVersion
-	var acceptedCommit string
-	var liveDigest, acceptedDigest string
-	err := tx.QueryRowContext(ctx, `SELECT transition_kind,accepted_commit_sha,canonical_live_tree,live_tree_digest,
+func classifyStreamAttachDatabaseError(prefix string, err error) error {
+	var databaseError *pq.Error
+	if errors.As(err, &databaseError) && databaseError.Code == "23505" {
+		return fmt.Errorf("%s: %w: %w", prefix, ErrStreamConflict, err)
+	}
+	return fmt.Errorf("%s: %w", prefix, err)
+}
+
+func loadStreamVersionTx(ctx context.Context, tx *sql.Tx, key StreamKey, canonicalRef string, version int64, repository streamRepository) (loadedStreamVersion, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT version,transition_kind,accepted_commit_sha,canonical_live_tree,live_tree_digest,
 		canonical_accepted_tree,accepted_tree_digest,operation_id,canonical_operation_json,operation_digest,actor_envelope_json
 		FROM fabric_stream_versions
-		WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3 AND canonical_ref=$4 AND version=$5`,
-		key.ProjectID, key.FabricInstanceID, key.StreamID, canonicalRef, version).
-		Scan(&loaded.transitionKind, &acceptedCommit, &loaded.liveTree, &liveDigest, &loaded.acceptedTree, &acceptedDigest,
-			&loaded.operationID, &loaded.operationJSON, &loaded.operationDigest, &loaded.actorJSON)
-	if errors.Is(err, sql.ErrNoRows) {
-		return loadedStreamVersion{}, fmt.Errorf("git: stream version: %w", ErrStreamNotFound)
-	}
+		WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3 AND canonical_ref=$4 AND version<=$5
+		ORDER BY version`, key.ProjectID, key.FabricInstanceID, key.StreamID, canonicalRef, version)
 	if err != nil {
-		return loadedStreamVersion{}, fmt.Errorf("git: stream version: read: %w", err)
+		return loadedStreamVersion{}, fmt.Errorf("git: stream version: read chain: %w", err)
 	}
-	live, err := decodeStoredStreamSnapshot(loaded.liveTree, projectstate.Digest(liveDigest), key, repository)
-	if err != nil {
-		return loadedStreamVersion{}, err
-	}
-	accepted, err := decodeStoredStreamSnapshot(loaded.acceptedTree, projectstate.Digest(acceptedDigest), key, repository)
-	if err != nil {
-		return loadedStreamVersion{}, err
-	}
-	if !streamCommitPattern.MatchString(acceptedCommit) {
-		return loadedStreamVersion{}, fmt.Errorf("git: stream version: %w", ErrStreamCorrupt)
-	}
-	switch loaded.transitionKind {
-	case "operation":
-		if !loaded.operationID.Valid || !loaded.operationDigest.Valid || len(loaded.operationJSON) == 0 || len(loaded.actorJSON) == 0 {
-			return loadedStreamVersion{}, fmt.Errorf("git: stream version: %w", ErrStreamCorrupt)
+	defer rows.Close()
+
+	var chain []loadedStreamVersion
+	var expectedVersion int64
+	for rows.Next() {
+		var loaded loadedStreamVersion
+		var acceptedCommit, liveDigest, acceptedDigest string
+		if err := rows.Scan(&loaded.transition.Version, &loaded.transitionKind, &acceptedCommit, &loaded.liveTree, &liveDigest,
+			&loaded.acceptedTree, &acceptedDigest, &loaded.operationID, &loaded.operationJSON, &loaded.operationDigest, &loaded.actorJSON); err != nil {
+			return loadedStreamVersion{}, fmt.Errorf("git: stream version: scan chain: %w", err)
 		}
-		if _, err := validateStoredStreamOperation(loaded.operationID.String, loaded.operationJSON, projectstate.Digest(loaded.operationDigest.String), loaded.actorJSON); err != nil {
+		if loaded.transition.Version != expectedVersion {
+			return loadedStreamVersion{}, fmt.Errorf("git: stream version: nonconsecutive chain: %w", ErrStreamCorrupt)
+		}
+		live, err := decodeStoredStreamSnapshot(loaded.liveTree, projectstate.Digest(liveDigest), key, repository.identity)
+		if err != nil {
 			return loadedStreamVersion{}, err
 		}
-	case "initial", "accepted_ref":
-		if loaded.operationID.Valid || loaded.operationDigest.Valid || len(loaded.operationJSON) != 0 || len(loaded.actorJSON) != 0 {
+		accepted, err := decodeStoredStreamSnapshot(loaded.acceptedTree, projectstate.Digest(acceptedDigest), key, repository.identity)
+		if err != nil {
+			return loadedStreamVersion{}, err
+		}
+		if !streamCommitPattern.MatchString(acceptedCommit) {
 			return loadedStreamVersion{}, fmt.Errorf("git: stream version: %w", ErrStreamCorrupt)
 		}
+		switch loaded.transitionKind {
+		case "operation":
+			if !loaded.operationID.Valid || !loaded.operationDigest.Valid || len(loaded.operationJSON) == 0 || len(loaded.actorJSON) == 0 {
+				return loadedStreamVersion{}, fmt.Errorf("git: stream version: %w", ErrStreamCorrupt)
+			}
+			loaded.operation, err = validateStoredStreamOperation(loaded.operationID.String, loaded.operationJSON,
+				projectstate.Digest(loaded.operationDigest.String), loaded.actorJSON)
+			if err != nil {
+				return loadedStreamVersion{}, err
+			}
+		case "initial", "accepted_ref":
+			if loaded.operationID.Valid || loaded.operationDigest.Valid || len(loaded.operationJSON) != 0 || len(loaded.actorJSON) != 0 {
+				return loadedStreamVersion{}, fmt.Errorf("git: stream version: %w", ErrStreamCorrupt)
+			}
+		default:
+			return loadedStreamVersion{}, fmt.Errorf("git: stream version: %w", ErrStreamCorrupt)
+		}
+		loaded.transition.Key = key
+		loaded.transition.Live = live
+		loaded.transition.Accepted = accepted
+		loaded.transition.AcceptedCommitSHA = acceptedCommit
+		chain = append(chain, loaded)
+		expectedVersion++
+	}
+	if err := rows.Err(); err != nil {
+		return loadedStreamVersion{}, fmt.Errorf("git: stream version: read chain: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return loadedStreamVersion{}, fmt.Errorf("git: stream version: close chain: %w", err)
+	}
+	if len(chain) == 0 || chain[len(chain)-1].transition.Version != version {
+		return loadedStreamVersion{}, fmt.Errorf("git: stream version: %w", ErrStreamNotFound)
+	}
+	var previous *loadedStreamVersion
+	for index := range chain {
+		if err := validateStreamTransitionTx(ctx, tx, key, canonicalRef, repository, previous, chain[index]); err != nil {
+			return loadedStreamVersion{}, err
+		}
+		previous = &chain[index]
+	}
+	return chain[len(chain)-1], nil
+}
+
+func validateStreamTransitionTx(ctx context.Context, tx *sql.Tx, key StreamKey, canonicalRef string, repository streamRepository,
+	previous *loadedStreamVersion, current loadedStreamVersion) error {
+	corrupt := func(reason string) error {
+		return fmt.Errorf("git: stream transition: %s: %w", reason, ErrStreamCorrupt)
+	}
+	if previous == nil {
+		if current.transition.Version != 0 || current.transitionKind != "initial" ||
+			current.transition.Live.Digest != current.transition.Accepted.Digest ||
+			!bytes.Equal(current.liveTree, current.acceptedTree) {
+			return corrupt("invalid initial state")
+		}
+		return nil
+	}
+	if current.transition.Version != previous.transition.Version+1 || current.transitionKind == "initial" {
+		return corrupt("invalid version progression")
+	}
+
+	switch current.transitionKind {
+	case "operation":
+		if current.operation.ExpectedViewDigest != previous.transition.Live.Digest ||
+			current.transition.AcceptedCommitSHA != previous.transition.AcceptedCommitSHA ||
+			current.transition.Accepted.Digest != previous.transition.Accepted.Digest ||
+			!bytes.Equal(current.acceptedTree, previous.acceptedTree) {
+			return corrupt("operation changed base evidence")
+		}
+		reduced, err := projectstate.ApplyOperation(previous.transition.Live, current.operation)
+		if err != nil {
+			return corrupt("stored operation no longer reduces")
+		}
+		reducedTree, err := projectstate.EncodeTree(reduced)
+		if err != nil {
+			return corrupt("stored operation result cannot encode")
+		}
+		reducedStored, err := EncodeStoredTree(reducedTree)
+		if err != nil || reduced.Digest != current.transition.Live.Digest || !bytes.Equal(reducedStored, current.liveTree) {
+			return corrupt("operation result differs from shared reducer")
+		}
+		return nil
+	case "accepted_ref":
+		if canonicalRef != repository.defaultRef {
+			return corrupt("accepted ref is not repository default")
+		}
+		diverged := previous.transition.Live.Digest != previous.transition.Accepted.Digest ||
+			!bytes.Equal(previous.liveTree, previous.acceptedTree)
+		if diverged {
+			if current.transition.Live.Digest != previous.transition.Live.Digest ||
+				!bytes.Equal(current.liveTree, previous.liveTree) {
+				return corrupt("accepted ref replaced diverged live state")
+			}
+		} else if current.transition.Live.Digest != current.transition.Accepted.Digest ||
+			!bytes.Equal(current.liveTree, current.acceptedTree) {
+			return corrupt("accepted ref did not advance clean live state")
+		}
+		if err := validateAcceptedRefConflictTx(ctx, tx, key, canonicalRef, *previous, current, diverged); err != nil {
+			return err
+		}
+		return nil
 	default:
-		return loadedStreamVersion{}, fmt.Errorf("git: stream version: %w", ErrStreamCorrupt)
+		return corrupt("unknown transition kind")
 	}
-	loaded.transition = StreamTransition{
-		Key: key, Version: version, Live: live, Accepted: accepted, AcceptedCommitSHA: acceptedCommit,
+}
+
+func validateAcceptedRefConflictTx(ctx context.Context, tx *sql.Tx, key StreamKey, canonicalRef string,
+	previous, current loadedStreamVersion, diverged bool) error {
+	rows, err := tx.QueryContext(ctx, `SELECT state,base_tree_digest,ours_tree_digest,theirs_tree_digest,detail_json
+		FROM fabric_stream_conflicts
+		WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3 AND canonical_ref=$4
+		AND detected_at_version=$5 AND conflict_kind='git_base_diverged' ORDER BY conflict_id`,
+		key.ProjectID, key.FabricInstanceID, key.StreamID, canonicalRef, current.transition.Version)
+	if err != nil {
+		return fmt.Errorf("git: accepted ref conflict: read: %w", err)
 	}
-	return loaded, nil
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		count++
+		var state string
+		var base, ours, theirs projectstate.Digest
+		var detailJSON []byte
+		if err := rows.Scan(&state, &base, &ours, &theirs, &detailJSON); err != nil {
+			return fmt.Errorf("git: accepted ref conflict: scan: %w", err)
+		}
+		var detail struct {
+			OldAcceptedCommitSHA string `json:"old_accepted_commit_sha"`
+			NewAcceptedCommitSHA string `json:"new_accepted_commit_sha"`
+		}
+		if !diverged || count != 1 || (state != "open" && state != "resolved") ||
+			base != previous.transition.Accepted.Digest || ours != previous.transition.Live.Digest ||
+			theirs != current.transition.Accepted.Digest || decodeStrictStreamJSON(detailJSON, &detail) != nil ||
+			detail.OldAcceptedCommitSHA != previous.transition.AcceptedCommitSHA ||
+			detail.NewAcceptedCommitSHA != current.transition.AcceptedCommitSHA {
+			return fmt.Errorf("git: accepted ref conflict: %w", ErrStreamCorrupt)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("git: accepted ref conflict: read: %w", err)
+	}
+	if diverged != (count == 1) {
+		return fmt.Errorf("git: accepted ref conflict: evidence count: %w", ErrStreamCorrupt)
+	}
+	return nil
+}
+
+func decodeStrictStreamJSON(raw []byte, value any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return ErrStreamCorrupt
+	}
+	return nil
 }
 
 func decodeStoredStreamSnapshot(raw []byte, storedDigest projectstate.Digest, key StreamKey, repository types.RepositoryIdentity) (projectstate.Snapshot, error) {
@@ -717,17 +892,25 @@ func loadStreamRequestTx(ctx context.Context, tx *sql.Tx, key StreamKey, canonic
 	if err != nil {
 		return storedStreamRequest{}, false, fmt.Errorf("git: stream request: read: %w", err)
 	}
-	if _, err := validateStoredStreamOperation(request.operationID, request.operationJSON, projectstate.Digest(request.operationDigest), request.actorJSON); err != nil {
+	operation, err := validateStoredStreamOperation(request.operationID, request.operationJSON, projectstate.Digest(request.operationDigest), request.actorJSON)
+	if err != nil {
 		return storedStreamRequest{}, false, err
 	}
 	if request.expectedVersion < 0 || request.expectedVersion > maximumStreamVersion || request.resultVersion < 0 || request.resultVersion > maximumStreamVersion ||
 		!streamDigestPattern.MatchString(string(request.expectedDigest)) {
 		return storedStreamRequest{}, false, fmt.Errorf("git: stream request: %w", ErrStreamCorrupt)
 	}
+	if request.result == "applied" && (request.expectedVersion == maximumStreamVersion ||
+		request.resultVersion != request.expectedVersion+1 || request.expectedDigest != operation.ExpectedViewDigest || len(request.conflictJSON) != 0) {
+		return storedStreamRequest{}, false, fmt.Errorf("git: stream request: invalid applied result: %w", ErrStreamCorrupt)
+	}
+	if request.result == "conflict" && len(request.conflictJSON) == 0 {
+		return storedStreamRequest{}, false, fmt.Errorf("git: stream request: invalid conflict result: %w", ErrStreamCorrupt)
+	}
 	return request, true, nil
 }
 
-func replayStreamRequest(ctx context.Context, tx *sql.Tx, input ApplyStreamOperationInput, canonicalRef string, repository types.RepositoryIdentity,
+func replayStreamRequest(ctx context.Context, tx *sql.Tx, input ApplyStreamOperationInput, canonicalRef string, repository streamRepository,
 	operation projectstate.OperationV1, canonical []byte, digest projectstate.Digest, actorJSON []byte, request storedStreamRequest) (StreamTransition, error) {
 	if request.workspaceID != input.WorkspaceID || request.operationID != operation.ID || request.operationDigest != string(digest) ||
 		!bytes.Equal(request.operationJSON, canonical) || !bytes.Equal(request.actorJSON, actorJSON) ||
@@ -766,14 +949,29 @@ func validateOperationConflictTx(ctx context.Context, tx *sql.Tx, key StreamKey,
 	var kind, state string
 	var version int64
 	var base, ours, theirs projectstate.Digest
-	err := tx.QueryRowContext(ctx, `SELECT conflict_kind,state,detected_at_version,base_tree_digest,ours_tree_digest,theirs_tree_digest
+	var detailJSON []byte
+	err := tx.QueryRowContext(ctx, `SELECT conflict_kind,state,detected_at_version,base_tree_digest,ours_tree_digest,theirs_tree_digest,detail_json
 		FROM fabric_stream_conflicts
 		WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3 AND canonical_ref=$4 AND conflict_id=$5`,
 		key.ProjectID, key.FabricInstanceID, key.StreamID, canonicalRef, conflictID).
-		Scan(&kind, &state, &version, &base, &ours, &theirs)
-	if err != nil || kind != "operation_precondition" || (state != "open" && state != "resolved") ||
+		Scan(&kind, &state, &version, &base, &ours, &theirs, &detailJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("git: replay stream conflict: missing evidence: %w", ErrStreamCorrupt)
+	}
+	if err != nil {
+		return fmt.Errorf("git: replay stream conflict: read: %w", err)
+	}
+	var detail struct {
+		OperationID           string `json:"operation_id"`
+		ExpectedStreamVersion *int64 `json:"expected_stream_version"`
+		CurrentStreamVersion  *int64 `json:"current_stream_version"`
+	}
+	if kind != "operation_precondition" || (state != "open" && state != "resolved") ||
 		version != request.resultVersion || version != transition.Version || base != request.expectedDigest ||
-		ours != transition.Live.Digest || theirs != operation.ExpectedViewDigest {
+		ours != transition.Live.Digest || theirs != operation.ExpectedViewDigest ||
+		decodeStrictStreamJSON(detailJSON, &detail) != nil || detail.OperationID != operation.ID ||
+		detail.ExpectedStreamVersion == nil || *detail.ExpectedStreamVersion != request.expectedVersion ||
+		detail.CurrentStreamVersion == nil || *detail.CurrentStreamVersion != transition.Version {
 		return fmt.Errorf("git: replay stream conflict: %w", ErrStreamCorrupt)
 	}
 	return nil

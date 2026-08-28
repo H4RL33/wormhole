@@ -7,11 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/lib/pq"
 
 	"github.com/H4RL33/wormhole/internal/types"
 	"github.com/H4RL33/wormhole/internal/types/projectstate"
@@ -28,6 +31,7 @@ const (
 	streamTestRef         = "refs/heads/main"
 	streamTestCommitA     = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	streamTestCommitB     = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	streamTestCommitC     = "cccccccccccccccccccccccccccccccccccccccc"
 )
 
 type streamFixture struct {
@@ -129,9 +133,6 @@ func TestAttachRejectsRepositoryRefScopeAndTreeMismatches(t *testing.T) {
 		{"observation repository", func(_ *streamFixture, _ *types.ActorScope, input *AttachStreamInput) {
 			input.Ref.Repository.CanonicalRemote = "https://github.com/wormhole/other"
 		}},
-		{"default ref", func(_ *streamFixture, _ *types.ActorScope, input *AttachStreamInput) {
-			input.Ref.RefName = "refs/heads/topic"
-		}},
 		{"tree project", func(tested *streamFixture, _ *types.ActorScope, input *AttachStreamInput) {
 			input.Tree = streamTestTree(tested.t, "00000000-0000-4000-8000-000000000009", tested.repository)
 		}},
@@ -159,6 +160,105 @@ func TestAttachRejectsRepositoryRefScopeAndTreeMismatches(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAttachSupportsIsolatedCanonicalBranches(t *testing.T) {
+	main := newStreamFixture(t, "stream-branch-isolation")
+	mainInitial := main.attach()
+	topic := *main
+	topic.key.StreamID = "22222222-2222-4222-8222-222222222242"
+	topic.workspaceID = "33333333-3333-4333-8333-333333333342"
+	topic.ref.RefName = "refs/heads/topic"
+	topicInitial := topic.attach()
+
+	if topicInitial.Version != 0 || topicInitial.Live.Digest != mainInitial.Live.Digest {
+		t.Fatalf("topic attach = %+v, want isolated version zero", topicInitial)
+	}
+	mainApplied := main.apply(main.applyInput(mainInitial,
+		streamKBOperation(mainInitial.Live, main.scope.Actor, streamTestOperationA, "main only\n")))
+	topicRead, err := topic.store.Read(context.Background(), topic.key, 0)
+	if err != nil {
+		t.Fatalf("Read topic after main apply: %v", err)
+	}
+	if topicRead.Live.Digest != topicInitial.Live.Digest || topicRead.AcceptedCommitSHA != streamTestCommitA {
+		t.Fatalf("topic changed through main route: got %+v, initial %+v", topicRead, topicInitial)
+	}
+	if mainApplied.Live.Digest == topicRead.Live.Digest ||
+		countStreamRows(t, main.db, "fabric_stream_versions", main.key) != 2 ||
+		countStreamRows(t, topic.db, "fabric_stream_versions", topic.key) != 1 {
+		t.Fatalf("cross-ref isolation failed: main=%+v topic=%+v", mainApplied, topicRead)
+	}
+}
+
+func TestAttachPreservesDatabaseErrorCauses(t *testing.T) {
+	t.Run("initial stream insert permission failure", func(t *testing.T) {
+		fixture := newStreamFixture(t, "stream-attach-insert-permission")
+		lockRLSFixture(t, fixture.db)
+		const roleName = "stream_attach_insert_error_role"
+		_, _ = fixture.db.Exec(`DROP ROLE IF EXISTS ` + roleName)
+		if _, err := fixture.db.Exec(`CREATE ROLE ` + roleName + ` NOLOGIN`); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_, _ = fixture.db.Exec(`REVOKE ALL ON project_repository_bindings,fabric_streams FROM ` + roleName)
+			_, _ = fixture.db.Exec(`DROP ROLE IF EXISTS ` + roleName)
+		})
+		if _, err := fixture.db.Exec(`GRANT SELECT,UPDATE ON project_repository_bindings,fabric_streams TO ` + roleName); err != nil {
+			t.Fatal(err)
+		}
+		tx, err := fixture.db.BeginTx(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback()
+		if _, err := tx.Exec(`SET LOCAL ROLE ` + roleName); err != nil {
+			t.Fatal(err)
+		}
+		_, err = fixture.store.AttachInTx(context.Background(), tx, fixture.scope, fixture.attachInput())
+		var databaseError *pq.Error
+		if err == nil || errors.Is(err, ErrStreamConflict) || !errors.As(err, &databaseError) || databaseError.Code != "42501" {
+			t.Fatalf("initial insert permission error = %v (pq=%v), want retained SQLSTATE 42501 without ErrStreamConflict", err, databaseError)
+		}
+	})
+
+	t.Run("cancelled workspace insert", func(t *testing.T) {
+		fixture := newStreamFixture(t, "stream-attach-cancelled-workspace")
+		fixture.attach()
+		tx, err := fixture.db.BeginTx(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback()
+		if err := setStreamProject(context.Background(), tx, fixture.key.ProjectID); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		input := fixture.attachInput()
+		input.WorkspaceID = "33333333-3333-4333-8333-333333333342"
+		err = attachWorkspaceTx(ctx, tx, input, fixture.repository)
+		if !errors.Is(err, context.Canceled) || errors.Is(err, ErrStreamConflict) {
+			t.Fatalf("cancelled workspace insert error = %v, want retained context cancellation", err)
+		}
+	})
+
+	t.Run("known unique constraint retains semantic and driver errors", func(t *testing.T) {
+		fixture := newStreamFixture(t, "stream-attach-workspace-constraint")
+		fixture.attach()
+		topic := fixture.attachInput()
+		topic.Key.StreamID = "22222222-2222-4222-8222-222222222242"
+		topic.Ref.RefName = "refs/heads/topic"
+		tx, err := fixture.db.BeginTx(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback()
+		_, err = fixture.store.AttachInTx(context.Background(), tx, fixture.scope, topic)
+		var databaseError *pq.Error
+		if !errors.Is(err, ErrStreamConflict) || !errors.As(err, &databaseError) || databaseError.Code != "23505" {
+			t.Fatalf("workspace constraint error = %v (pq=%v), want ErrStreamConflict and SQLSTATE 23505", err, databaseError)
+		}
+	})
 }
 
 func TestApplyOperationPersistsCanonicalOperationAndResultTree(t *testing.T) {
@@ -218,11 +318,7 @@ func TestReadReconstructsEveryVersionAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	advanced := fixture.advance(AdvanceAcceptedInput{
-		Key:  fixture.key,
-		Ref:  RefObservation{Repository: fixture.repository, RefName: streamTestRef, CommitSHA: streamTestCommitB, ObservedAt: fixture.ref.ObservedAt.Add(time.Minute)},
-		Tree: newAcceptedTree,
-	})
+	advanced := fixture.advance(fixture.advanceInput(applied, streamTestCommitB, fixture.ref.ObservedAt.Add(time.Minute), newAcceptedTree))
 	if advanced.Version != 2 || advanced.Live.Digest != applied.Live.Digest || advanced.ConflictID == "" {
 		t.Fatalf("advanced transition = %+v", advanced)
 	}
@@ -459,6 +555,178 @@ func TestApplyOperationRequiresCompleteWorkspaceAndActorScope(t *testing.T) {
 	}
 }
 
+func TestStreamStoreCompleteRouteIsolation(t *testing.T) {
+	base := newStreamFixture(t, "stream-route-isolation-base")
+	baseInitial := base.attach()
+
+	otherProject := newStreamFixture(t, "stream-route-isolation-project")
+	otherProjectInitial := otherProject.attach()
+
+	crossFabric := *base
+	crossFabric.key.FabricInstanceID = "11111111-1111-4111-8111-111111111142"
+	crossFabric.repository = types.RepositoryIdentity{
+		Provider: "github", ImmutableID: "11111111111141118111111111111142",
+		CanonicalRemote: "https://github.com/wormhole/cross-fabric-" + base.key.ProjectID,
+	}
+	crossFabric.ref.Repository = crossFabric.repository
+	crossFabric.tree = streamTestTree(t, base.key.ProjectID, crossFabric.repository)
+	if _, err := base.db.Exec(`INSERT INTO project_repository_bindings
+		(project_id,fabric_instance_id,provider,provider_repository_id,canonical_remote,default_ref,visibility)
+		VALUES($1,$2,$3,$4,$5,$6,'public')`, base.key.ProjectID, crossFabric.key.FabricInstanceID,
+		crossFabric.repository.Provider, crossFabric.repository.ImmutableID, crossFabric.repository.CanonicalRemote, streamTestRef); err != nil {
+		t.Fatalf("seed cross-Fabric repository: %v", err)
+	}
+	crossFabricInitial := crossFabric.attach()
+
+	topic := *base
+	topic.key.StreamID = "22222222-2222-4222-8222-222222222242"
+	topic.workspaceID = "33333333-3333-4333-8333-333333333342"
+	topic.ref.RefName = "refs/heads/topic"
+	topicInitial := topic.attach()
+
+	restrictedDB := restrictedStreamDatabase(t, base.db)
+	restrictedStore := &StreamStore{db: restrictedDB}
+	secondWorkspace := base.attachInput()
+	secondWorkspace.WorkspaceID = "33333333-3333-4333-8333-333333333343"
+	tx, err := restrictedDB.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restrictedStore.AttachInTx(context.Background(), tx, base.scope, secondWorkspace); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("restricted same-route AttachInTx: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	input := base.applyInput(baseInitial,
+		streamKBOperation(baseInitial.Live, base.scope.Actor, streamTestOperationA, "base route only\n"))
+	tx, err = restrictedDB.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied, err := restrictedStore.ApplyOperationInTx(context.Background(), tx, base.scope, input)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("restricted base ApplyOperationInTx: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	accepted := applyStreamTestOperation(t, baseInitial.Accepted,
+		streamActorOperation(baseInitial.Accepted, base.scope.Actor, streamTestOperationB))
+	tx, err = restrictedDB.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	advanced, err := restrictedStore.AdvanceAcceptedDefaultInTx(context.Background(), tx, base.scope,
+		base.advanceInput(applied, streamTestCommitB, base.ref.ObservedAt.Add(time.Minute), encodeStreamTestSnapshot(t, accepted)))
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("restricted base AdvanceAcceptedDefaultInTx: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if advanced.Version != 2 {
+		t.Fatalf("restricted base advance = %+v", advanced)
+	}
+
+	for name, route := range map[string]struct {
+		fixture *streamFixture
+		initial StreamTransition
+	}{
+		"cross project": {otherProject, otherProjectInitial},
+		"cross Fabric":  {&crossFabric, crossFabricInitial},
+		"cross ref":     {&topic, topicInitial},
+	} {
+		t.Run(name+" remains byte-identical", func(t *testing.T) {
+			got, err := restrictedStore.Read(context.Background(), route.fixture.key, 0)
+			if err != nil {
+				t.Fatalf("restricted Read: %v", err)
+			}
+			if !reflect.DeepEqual(got, route.initial) || countStreamRows(t, base.db, "fabric_stream_versions", route.fixture.key) != 1 ||
+				countStreamRows(t, base.db, "fabric_stream_requests", route.fixture.key) != 0 ||
+				countStreamRows(t, base.db, "fabric_stream_conflicts", route.fixture.key) != 0 {
+				t.Fatalf("sibling route changed: got=%+v initial=%+v", got, route.initial)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name  string
+		scope types.ActorScope
+		input ApplyStreamOperationInput
+	}{
+		{"cross project", base.scope, ApplyStreamOperationInput{Key: otherProject.key, WorkspaceID: otherProject.workspaceID, ExpectedVersion: 0, ExpectedTreeDigest: otherProjectInitial.Live.Digest, Operation: streamActorOperation(otherProjectInitial.Live, base.scope.Actor, "66666666-6666-4666-8666-666666666663")}},
+		{"cross ref workspace", base.scope, ApplyStreamOperationInput{Key: base.key, WorkspaceID: topic.workspaceID, ExpectedVersion: advanced.Version, ExpectedTreeDigest: advanced.Live.Digest, Operation: streamActorOperation(advanced.Live, base.scope.Actor, "66666666-6666-4666-8666-666666666664")}},
+		{"cross stream workspace", base.scope, ApplyStreamOperationInput{Key: topic.key, WorkspaceID: base.workspaceID, ExpectedVersion: 0, ExpectedTreeDigest: topicInitial.Live.Digest, Operation: streamActorOperation(topicInitial.Live, base.scope.Actor, "66666666-6666-4666-8666-666666666665")}},
+	} {
+		t.Run("rejects "+test.name, func(t *testing.T) {
+			tx, err := restrictedDB.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			if _, err := restrictedStore.ApplyOperationInTx(context.Background(), tx, test.scope, test.input); err == nil {
+				t.Fatal("ApplyOperationInTx accepted mixed route")
+			}
+		})
+	}
+	for _, test := range []struct {
+		name    string
+		scope   types.ActorScope
+		fixture *streamFixture
+		initial StreamTransition
+		mutate  func(*AdvanceAcceptedInput)
+	}{
+		{"cross project", base.scope, otherProject, otherProjectInitial, func(*AdvanceAcceptedInput) {}},
+		{"cross Fabric", base.scope, &crossFabric, crossFabricInitial, func(input *AdvanceAcceptedInput) {
+			input.Ref = base.ref
+			input.Tree = base.tree
+		}},
+		{"cross ref", topic.scope, &topic, topicInitial, func(*AdvanceAcceptedInput) {}},
+	} {
+		t.Run("rejects "+test.name+" accepted advance", func(t *testing.T) {
+			beforeVersions := countStreamRows(t, base.db, "fabric_stream_versions", test.fixture.key)
+			input := test.fixture.advanceInput(test.initial, streamTestCommitB,
+				test.fixture.ref.ObservedAt.Add(time.Minute), test.fixture.tree)
+			test.mutate(&input)
+			tx, err := restrictedDB.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			if _, err := restrictedStore.AdvanceAcceptedDefaultInTx(context.Background(), tx, test.scope, input); err == nil {
+				t.Fatal("AdvanceAcceptedDefaultInTx accepted mixed route")
+			}
+			if got := countStreamRows(t, base.db, "fabric_stream_versions", test.fixture.key); got != beforeVersions {
+				t.Fatalf("mixed accepted advance mutated %s versions: before=%d after=%d", test.name, beforeVersions, got)
+			}
+		})
+	}
+	if got := countStreamRows(t, base.db, "fabric_stream_requests", base.key); got != 1 {
+		t.Fatalf("mixed routes mutated base requests=%d", got)
+	}
+	if _, err := restrictedStore.Read(context.Background(), StreamKey{
+		ProjectID: base.key.ProjectID, FabricInstanceID: crossFabric.key.FabricInstanceID, StreamID: topic.key.StreamID,
+	}, 0); !errors.Is(err, ErrStreamNotFound) {
+		t.Fatalf("mixed Fabric/ref Read error = %v, want ErrStreamNotFound", err)
+	}
+	for name, route := range map[string]*streamFixture{
+		"cross project": otherProject,
+		"cross Fabric":  &crossFabric,
+		"cross ref":     &topic,
+	} {
+		if versions := countStreamRows(t, base.db, "fabric_stream_versions", route.key); versions != 1 ||
+			countStreamRows(t, base.db, "fabric_stream_requests", route.key) != 0 ||
+			countStreamRows(t, base.db, "fabric_stream_conflicts", route.key) != 0 {
+			t.Fatalf("mixed route attempts mutated %s: versions=%d", name, versions)
+		}
+	}
+}
+
 func TestApplyOperationAndAdvanceLeaveTransactionOwnershipToCaller(t *testing.T) {
 	fixture := newStreamFixture(t, "stream-transaction-owner")
 	initial := fixture.attach()
@@ -489,11 +757,8 @@ func TestApplyOperationAndAdvanceLeaveTransactionOwnershipToCaller(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = fixture.store.AdvanceAcceptedDefaultInTx(context.Background(), tx, fixture.scope, AdvanceAcceptedInput{
-		Key:  fixture.key,
-		Ref:  RefObservation{Repository: fixture.repository, RefName: streamTestRef, CommitSHA: streamTestCommitB, ObservedAt: fixture.ref.ObservedAt.Add(time.Minute)},
-		Tree: nextTree,
-	})
+	_, err = fixture.store.AdvanceAcceptedDefaultInTx(context.Background(), tx, fixture.scope,
+		fixture.advanceInput(initial, streamTestCommitB, fixture.ref.ObservedAt.Add(time.Minute), nextTree))
 	if err != nil {
 		t.Fatalf("AdvanceAcceptedDefaultInTx: %v", err)
 	}
@@ -516,11 +781,7 @@ func TestAdvanceAcceptedUsesExactObservedCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	transition := fixture.advance(AdvanceAcceptedInput{
-		Key:  fixture.key,
-		Ref:  RefObservation{Repository: fixture.repository, RefName: streamTestRef, CommitSHA: streamTestCommitB, ObservedAt: fixture.ref.ObservedAt.Add(time.Minute)},
-		Tree: nextTree,
-	})
+	transition := fixture.advance(fixture.advanceInput(initial, streamTestCommitB, fixture.ref.ObservedAt.Add(time.Minute), nextTree))
 	if transition.Version != 1 || transition.AcceptedCommitSHA != streamTestCommitB || transition.Live.Digest != transition.Accepted.Digest || transition.ConflictID != "" {
 		t.Fatalf("advance transition = %+v", transition)
 	}
@@ -540,11 +801,7 @@ func TestAdvanceAcceptedUsesExactObservedCommit(t *testing.T) {
 		t.Run("rejects "+test.name+" mismatch", func(t *testing.T) {
 			mismatched := newStreamFixture(t, "stream-advance-mismatch-"+test.name)
 			base := mismatched.attach()
-			input := AdvanceAcceptedInput{
-				Key:  mismatched.key,
-				Ref:  RefObservation{Repository: mismatched.repository, RefName: streamTestRef, CommitSHA: streamTestCommitB, ObservedAt: mismatched.ref.ObservedAt.Add(time.Minute)},
-				Tree: mismatched.tree,
-			}
+			input := mismatched.advanceInput(base, streamTestCommitB, mismatched.ref.ObservedAt.Add(time.Minute), mismatched.tree)
 			test.mutate(&input)
 			tx, err := mismatched.db.BeginTx(context.Background(), nil)
 			if err != nil {
@@ -577,11 +834,7 @@ func TestAdvanceAcceptedDivergencePreservesLiveAndPersistsConflict(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	advanced := fixture.advance(AdvanceAcceptedInput{
-		Key:  fixture.key,
-		Ref:  RefObservation{Repository: fixture.repository, RefName: streamTestRef, CommitSHA: streamTestCommitB, ObservedAt: fixture.ref.ObservedAt.Add(time.Minute)},
-		Tree: acceptedTree,
-	})
+	advanced := fixture.advance(fixture.advanceInput(proposed, streamTestCommitB, fixture.ref.ObservedAt.Add(time.Minute), acceptedTree))
 	if advanced.Version != 2 || advanced.Live.Digest != proposed.Live.Digest || advanced.Accepted.Digest != acceptedSnapshot.Digest || advanced.ConflictID == "" {
 		t.Fatalf("divergent advance = %+v", advanced)
 	}
@@ -597,6 +850,121 @@ func TestAdvanceAcceptedDivergencePreservesLiveAndPersistsConflict(t *testing.T)
 	}
 	if kind != "git_base_diverged" || state != "open" || base != string(initial.Accepted.Digest) || ours != string(proposed.Live.Digest) || theirs != string(acceptedSnapshot.Digest) {
 		t.Fatalf("divergence conflict = %q %q %q %q %q", kind, state, base, ours, theirs)
+	}
+}
+
+func TestAdvanceAcceptedRejectsDelayedStaleObservationWithoutMutation(t *testing.T) {
+	fixture := newStreamFixture(t, "stream-advance-stale-observation")
+	initial := fixture.attach()
+	staleSnapshot, err := projectstate.ApplyOperation(initial.Accepted,
+		streamActorOperation(initial.Accepted, fixture.scope.Actor, streamTestOperationA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleTree, err := projectstate.EncodeTree(staleSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	laterSnapshot, err := projectstate.ApplyOperation(initial.Accepted,
+		streamKBOperation(initial.Accepted, fixture.scope.Actor, streamTestOperationB, "later accepted\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	laterTree, err := projectstate.EncodeTree(laterSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stale := fixture.advanceInput(initial, streamTestCommitB, fixture.ref.ObservedAt.Add(time.Minute), staleTree)
+	later := fixture.advanceInput(initial, streamTestCommitC, fixture.ref.ObservedAt.Add(2*time.Minute), laterTree)
+	winner := fixture.advance(later)
+	tx, err := fixture.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	got, err := fixture.store.AdvanceAcceptedDefaultInTx(context.Background(), tx, fixture.scope, stale)
+	if !errors.Is(err, ErrStreamConflict) || !reflect.DeepEqual(got, StreamTransition{}) {
+		t.Fatalf("delayed stale advance = (%+v,%v), want zero and ErrStreamConflict", got, err)
+	}
+	if versions, conflicts := countStreamRows(t, fixture.db, "fabric_stream_versions", fixture.key), countStreamRows(t, fixture.db, "fabric_stream_conflicts", fixture.key); versions != 2 || conflicts != 0 {
+		t.Fatalf("stale advance mutated versions=%d conflicts=%d", versions, conflicts)
+	}
+	current, err := fixture.store.Read(context.Background(), fixture.key, winner.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.AcceptedCommitSHA != streamTestCommitC || current.Accepted.Digest != laterSnapshot.Digest {
+		t.Fatalf("stale observation overwrote later accepted state: %+v", current)
+	}
+}
+
+func TestAdvanceAcceptedConcurrentPreconditionAllowsOneWinner(t *testing.T) {
+	fixture := newStreamFixture(t, "stream-advance-concurrent")
+	initial := fixture.attach()
+	inputs := make([]AdvanceAcceptedInput, 2)
+	for index, operationID := range []string{streamTestOperationA, streamTestOperationB} {
+		next, err := projectstate.ApplyOperation(initial.Accepted,
+			streamKBOperation(initial.Accepted, fixture.scope.Actor, operationID, fmt.Sprintf("accepted %d\n", index)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tree, err := projectstate.EncodeTree(next)
+		if err != nil {
+			t.Fatal(err)
+		}
+		commit := streamTestCommitB
+		if index == 1 {
+			commit = streamTestCommitC
+		}
+		inputs[index] = fixture.advanceInput(initial, commit, fixture.ref.ObservedAt.Add(time.Duration(index+1)*time.Minute), tree)
+	}
+
+	results := make([]StreamTransition, 2)
+	errorsSeen := make([]error, 2)
+	var start, workers sync.WaitGroup
+	start.Add(1)
+	workers.Add(2)
+	for index := range inputs {
+		go func(index int) {
+			defer workers.Done()
+			start.Wait()
+			tx, err := fixture.db.BeginTx(context.Background(), nil)
+			if err == nil {
+				defer tx.Rollback()
+				results[index], err = fixture.store.AdvanceAcceptedDefaultInTx(context.Background(), tx, fixture.scope, inputs[index])
+				if err == nil {
+					err = tx.Commit()
+				}
+			}
+			errorsSeen[index] = err
+		}(index)
+	}
+	start.Done()
+	workers.Wait()
+
+	winner := -1
+	for index, err := range errorsSeen {
+		if err == nil {
+			if winner != -1 {
+				t.Fatalf("multiple accepted-advance winners: results=%+v errors=%+v", results, errorsSeen)
+			}
+			winner = index
+			continue
+		}
+		if !errors.Is(err, ErrStreamConflict) {
+			t.Fatalf("concurrent advance %d error = %v, want ErrStreamConflict", index, err)
+		}
+	}
+	if winner == -1 || countStreamRows(t, fixture.db, "fabric_stream_versions", fixture.key) != 2 {
+		t.Fatalf("concurrent accepted advances = results=%+v errors=%+v", results, errorsSeen)
+	}
+	current, err := fixture.store.Read(context.Background(), fixture.key, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.AcceptedCommitSHA != inputs[winner].Ref.CommitSHA {
+		t.Fatalf("current accepted commit = %s, winner = %s", current.AcceptedCommitSHA, inputs[winner].Ref.CommitSHA)
 	}
 }
 
@@ -657,6 +1025,221 @@ func TestApplyOperationReplayRejectsCorruptStoredRequest(t *testing.T) {
 			}
 			if got := countStreamRows(t, fixture.db, "fabric_stream_versions", fixture.key); got != 2 {
 				t.Fatalf("corrupt replay created version: rows=%d", got)
+			}
+		})
+	}
+}
+
+func TestReadRejectsSemanticallyCorruptStoredTransitions(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*testing.T) (*streamFixture, int64)
+	}{
+		{
+			name: "initial live and accepted differ",
+			setup: func(t *testing.T) (*streamFixture, int64) {
+				fixture := newStreamFixture(t, "stream-semantic-initial")
+				initial := fixture.attach()
+				accepted := applyStreamTestOperation(t, initial.Accepted,
+					streamActorOperation(initial.Accepted, fixture.scope.Actor, streamTestOperationA))
+				replaceVersionTrees(t, fixture, 0, fixture.tree, encodeStreamTestSnapshot(t, accepted), streamTestCommitA)
+				return fixture, 0
+			},
+		},
+		{
+			name: "operation result does not match reducer",
+			setup: func(t *testing.T) (*streamFixture, int64) {
+				fixture := newStreamFixture(t, "stream-semantic-operation-result")
+				initial := fixture.attach()
+				fixture.apply(fixture.applyInput(initial,
+					streamKBOperation(initial.Live, fixture.scope.Actor, streamTestOperationA, "expected result\n")))
+				replaceVersionTrees(t, fixture, 1, fixture.tree, fixture.tree, streamTestCommitA)
+				return fixture, 1
+			},
+		},
+		{
+			name: "operation changes accepted state",
+			setup: func(t *testing.T) (*streamFixture, int64) {
+				fixture := newStreamFixture(t, "stream-semantic-operation-accepted")
+				initial := fixture.attach()
+				applied := fixture.apply(fixture.applyInput(initial,
+					streamKBOperation(initial.Live, fixture.scope.Actor, streamTestOperationA, "proposal\n")))
+				accepted := applyStreamTestOperation(t, initial.Accepted,
+					streamActorOperation(initial.Accepted, fixture.scope.Actor, streamTestOperationB))
+				replaceVersionTrees(t, fixture, 1, encodeStreamTestSnapshot(t, applied.Live), encodeStreamTestSnapshot(t, accepted), streamTestCommitB)
+				return fixture, 1
+			},
+		},
+		{
+			name: "accepted ref from clean base does not follow accepted tree",
+			setup: func(t *testing.T) (*streamFixture, int64) {
+				fixture := newStreamFixture(t, "stream-semantic-accepted-clean")
+				initial := fixture.attach()
+				accepted := applyStreamTestOperation(t, initial.Accepted,
+					streamActorOperation(initial.Accepted, fixture.scope.Actor, streamTestOperationA))
+				advanced := fixture.advance(fixture.advanceInput(initial, streamTestCommitB,
+					fixture.ref.ObservedAt.Add(time.Minute), encodeStreamTestSnapshot(t, accepted)))
+				replaceVersionTrees(t, fixture, 1, fixture.tree, encodeStreamTestSnapshot(t, advanced.Accepted), streamTestCommitB)
+				return fixture, 1
+			},
+		},
+		{
+			name: "accepted ref from diverged base replaces live tree",
+			setup: func(t *testing.T) (*streamFixture, int64) {
+				fixture := newStreamFixture(t, "stream-semantic-accepted-diverged")
+				initial := fixture.attach()
+				proposed := fixture.apply(fixture.applyInput(initial,
+					streamKBOperation(initial.Live, fixture.scope.Actor, streamTestOperationA, "proposal\n")))
+				accepted := applyStreamTestOperation(t, initial.Accepted,
+					streamActorOperation(initial.Accepted, fixture.scope.Actor, streamTestOperationB))
+				advanced := fixture.advance(fixture.advanceInput(proposed, streamTestCommitB,
+					fixture.ref.ObservedAt.Add(time.Minute), encodeStreamTestSnapshot(t, accepted)))
+				replaceVersionTrees(t, fixture, 2, fixture.tree, encodeStreamTestSnapshot(t, advanced.Accepted), streamTestCommitB)
+				return fixture, 2
+			},
+		},
+		{
+			name: "accepted ref from diverged base lacks exact conflict",
+			setup: func(t *testing.T) (*streamFixture, int64) {
+				fixture := newStreamFixture(t, "stream-semantic-accepted-conflict")
+				initial := fixture.attach()
+				proposed := fixture.apply(fixture.applyInput(initial,
+					streamKBOperation(initial.Live, fixture.scope.Actor, streamTestOperationA, "proposal\n")))
+				accepted := applyStreamTestOperation(t, initial.Accepted,
+					streamActorOperation(initial.Accepted, fixture.scope.Actor, streamTestOperationB))
+				advanced := fixture.advance(fixture.advanceInput(proposed, streamTestCommitB,
+					fixture.ref.ObservedAt.Add(time.Minute), encodeStreamTestSnapshot(t, accepted)))
+				if _, err := fixture.db.Exec(`DELETE FROM fabric_stream_conflicts
+					WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3 AND conflict_id=$4`,
+					fixture.key.ProjectID, fixture.key.FabricInstanceID, fixture.key.StreamID, advanced.ConflictID); err != nil {
+					t.Fatalf("delete divergence conflict: %v", err)
+				}
+				return fixture, 2
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture, version := test.setup(t)
+			fixture.reopen()
+			transition, err := fixture.store.Read(context.Background(), fixture.key, version)
+			if !errors.Is(err, ErrStreamCorrupt) || !reflect.DeepEqual(transition, StreamTransition{}) {
+				t.Fatalf("Read semantic corruption = (%+v,%v), want zero and ErrStreamCorrupt", transition, err)
+			}
+			stored := readStoredStreamVersion(t, fixture.db, fixture.key, version)
+			liveTree, err := DecodeStoredTree(stored.liveTree)
+			if err != nil {
+				t.Fatal(err)
+			}
+			live, err := projectstate.DecodeTree(liveTree)
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := ApplyStreamOperationInput{
+				Key: fixture.key, WorkspaceID: fixture.workspaceID, ExpectedVersion: version,
+				ExpectedTreeDigest: live.Digest,
+				Operation:          streamActorOperation(live, fixture.scope.Actor, "66666666-6666-4666-8666-666666666669"),
+			}
+			tx, err := fixture.db.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			transition, err = fixture.store.ApplyOperationInTx(context.Background(), tx, fixture.scope, input)
+			if !errors.Is(err, ErrStreamCorrupt) || !reflect.DeepEqual(transition, StreamTransition{}) {
+				t.Fatalf("later apply over semantic corruption = (%+v,%v), want zero and ErrStreamCorrupt", transition, err)
+			}
+		})
+	}
+}
+
+func TestApplyOperationReplayRejectsSemanticallyCorruptResult(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, *streamFixture, ApplyStreamOperationInput)
+		input  func(ApplyStreamOperationInput) ApplyStreamOperationInput
+	}{
+		{
+			name: "stored reducer result tree",
+			mutate: func(t *testing.T, fixture *streamFixture, _ ApplyStreamOperationInput) {
+				replaceVersionTrees(t, fixture, 1, fixture.tree, fixture.tree, streamTestCommitA)
+			},
+			input: func(input ApplyStreamOperationInput) ApplyStreamOperationInput { return input },
+		},
+		{
+			name: "result version does not follow expected version",
+			mutate: func(t *testing.T, fixture *streamFixture, input ApplyStreamOperationInput) {
+				replaceRequestExpectedVersion(t, fixture, input.Operation.ID, 1)
+			},
+			input: func(input ApplyStreamOperationInput) ApplyStreamOperationInput {
+				input.ExpectedVersion = 1
+				return input
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newStreamFixture(t, "stream-semantic-applied-replay-"+strings.ReplaceAll(test.name, " ", "-"))
+			initial := fixture.attach()
+			input := fixture.applyInput(initial,
+				streamKBOperation(initial.Live, fixture.scope.Actor, streamTestOperationA, "body\n"))
+			fixture.apply(input)
+			test.mutate(t, fixture, input)
+			fixture.reopen()
+
+			tx, err := fixture.db.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			transition, err := fixture.store.ApplyOperationInTx(context.Background(), tx, fixture.scope, test.input(input))
+			if !errors.Is(err, ErrStreamCorrupt) || !reflect.DeepEqual(transition, StreamTransition{}) {
+				t.Fatalf("semantic applied replay = (%+v,%v), want zero and ErrStreamCorrupt", transition, err)
+			}
+		})
+	}
+}
+
+func TestApplyOperationConflictReplayRejectsCorruptDetailEvidence(t *testing.T) {
+	tests := []struct {
+		name   string
+		detail map[string]any
+	}{
+		{"operation id", map[string]any{"operation_id": streamTestOperationA, "expected_stream_version": int64(0), "current_stream_version": int64(1)}},
+		{"expected version", map[string]any{"operation_id": streamTestOperationB, "expected_stream_version": int64(1), "current_stream_version": int64(1)}},
+		{"current version", map[string]any{"operation_id": streamTestOperationB, "expected_stream_version": int64(0), "current_stream_version": int64(0)}},
+		{"missing expected version", map[string]any{"operation_id": streamTestOperationB, "current_stream_version": int64(1)}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newStreamFixture(t, "stream-semantic-conflict-replay-"+strings.ReplaceAll(test.name, " ", "-"))
+			initial := fixture.attach()
+			fixture.apply(fixture.applyInput(initial,
+				streamKBOperation(initial.Live, fixture.scope.Actor, streamTestOperationA, "first\n")))
+			input := fixture.applyInput(initial, streamActorOperation(initial.Live, fixture.scope.Actor, streamTestOperationB))
+			conflicted := fixture.apply(input)
+			if conflicted.ConflictID == "" {
+				t.Fatal("expected conflict result")
+			}
+			detail, err := projectstate.CanonicalJSON(test.detail)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fixture.db.Exec(`UPDATE fabric_stream_conflicts SET detail_json=$1
+				WHERE project_id=$2 AND fabric_instance_id=$3 AND stream_id=$4 AND conflict_id=$5`,
+				detail, fixture.key.ProjectID, fixture.key.FabricInstanceID, fixture.key.StreamID, conflicted.ConflictID); err != nil {
+				t.Fatalf("replace conflict detail: %v", err)
+			}
+			fixture.reopen()
+
+			tx, err := fixture.db.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			transition, err := fixture.store.ApplyOperationInTx(context.Background(), tx, fixture.scope, input)
+			if !errors.Is(err, ErrStreamCorrupt) || !reflect.DeepEqual(transition, StreamTransition{}) {
+				t.Fatalf("semantic conflict replay = (%+v,%v), want zero and ErrStreamCorrupt", transition, err)
 			}
 		})
 	}
@@ -834,6 +1417,18 @@ func (f *streamFixture) apply(input ApplyStreamOperationInput) StreamTransition 
 	return transition
 }
 
+func (f *streamFixture) advanceInput(base StreamTransition, commit string, observedAt time.Time, tree projectstate.Tree) AdvanceAcceptedInput {
+	return AdvanceAcceptedInput{
+		Key:                        f.key,
+		Ref:                        RefObservation{Repository: f.repository, RefName: streamTestRef, CommitSHA: commit, ObservedAt: observedAt},
+		Tree:                       tree,
+		ExpectedVersion:            base.Version,
+		ExpectedAcceptedCommitSHA:  base.AcceptedCommitSHA,
+		ExpectedAcceptedTreeDigest: base.Accepted.Digest,
+		ExpectedLiveTreeDigest:     base.Live.Digest,
+	}
+}
+
 func (f *streamFixture) advance(input AdvanceAcceptedInput) StreamTransition {
 	f.t.Helper()
 	tx, err := f.db.BeginTx(context.Background(), nil)
@@ -999,6 +1594,211 @@ func replaceRequestOperationEvidence(t *testing.T, db *sql.DB, key StreamKey, wo
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func applyStreamTestOperation(t *testing.T, snapshot projectstate.Snapshot, operation projectstate.OperationV1) projectstate.Snapshot {
+	t.Helper()
+	result, err := projectstate.ApplyOperation(snapshot, operation)
+	if err != nil {
+		t.Fatalf("apply stream test operation: %v", err)
+	}
+	return result
+}
+
+func encodeStreamTestSnapshot(t *testing.T, snapshot projectstate.Snapshot) projectstate.Tree {
+	t.Helper()
+	tree, err := projectstate.EncodeTree(snapshot)
+	if err != nil {
+		t.Fatalf("encode stream test snapshot: %v", err)
+	}
+	return tree
+}
+
+type storedStreamConflictFixture struct {
+	id, kind, base, ours, theirs, state string
+	detail                              []byte
+	resolvedAt                          sql.NullTime
+}
+
+func replaceVersionTrees(t *testing.T, fixture *streamFixture, version int64, live, accepted projectstate.Tree, commit string) {
+	t.Helper()
+	stored := readStoredStreamVersion(t, fixture.db, fixture.key, version)
+	liveBytes, err := EncodeStoredTree(live)
+	if err != nil {
+		t.Fatalf("encode replacement live tree: %v", err)
+	}
+	liveDigest, err := projectstate.DigestTree(live)
+	if err != nil {
+		t.Fatalf("digest replacement live tree: %v", err)
+	}
+	acceptedBytes, err := EncodeStoredTree(accepted)
+	if err != nil {
+		t.Fatalf("encode replacement accepted tree: %v", err)
+	}
+	acceptedDigest, err := projectstate.DigestTree(accepted)
+	if err != nil {
+		t.Fatalf("digest replacement accepted tree: %v", err)
+	}
+
+	tx, err := fixture.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`SELECT set_config('wormhole.project_id',$1,true)`, fixture.key.ProjectID); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := tx.Query(`SELECT conflict_id,conflict_kind,base_tree_digest,ours_tree_digest,theirs_tree_digest,detail_json,state,resolved_at
+		FROM fabric_stream_conflicts WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3
+		AND canonical_ref=$4 AND detected_at_version=$5 ORDER BY conflict_id`,
+		fixture.key.ProjectID, fixture.key.FabricInstanceID, fixture.key.StreamID, fixture.ref.RefName, version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var conflicts []storedStreamConflictFixture
+	for rows.Next() {
+		var conflict storedStreamConflictFixture
+		if err := rows.Scan(&conflict.id, &conflict.kind, &conflict.base, &conflict.ours, &conflict.theirs,
+			&conflict.detail, &conflict.state, &conflict.resolvedAt); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		conflicts = append(conflicts, conflict)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`DELETE FROM fabric_stream_conflicts WHERE project_id=$1 AND fabric_instance_id=$2
+		AND stream_id=$3 AND canonical_ref=$4 AND detected_at_version=$5`, fixture.key.ProjectID,
+		fixture.key.FabricInstanceID, fixture.key.StreamID, fixture.ref.RefName, version); err != nil {
+		t.Fatalf("delete version conflicts for corruption: %v", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM fabric_stream_versions WHERE project_id=$1 AND fabric_instance_id=$2
+		AND stream_id=$3 AND canonical_ref=$4 AND version=$5`, fixture.key.ProjectID,
+		fixture.key.FabricInstanceID, fixture.key.StreamID, fixture.ref.RefName, version); err != nil {
+		t.Fatalf("delete version for semantic corruption: %v", err)
+	}
+	_, err = tx.Exec(`INSERT INTO fabric_stream_versions
+		(project_id,fabric_instance_id,stream_id,canonical_ref,version,transition_kind,accepted_commit_sha,
+		 canonical_live_tree,live_tree_digest,canonical_accepted_tree,accepted_tree_digest,
+		 operation_id,canonical_operation_json,operation_digest,actor_envelope_json)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+		fixture.key.ProjectID, fixture.key.FabricInstanceID, fixture.key.StreamID, fixture.ref.RefName, version,
+		stored.kind, commit, liveBytes, string(liveDigest), acceptedBytes, string(acceptedDigest),
+		stored.operationID, nullableJSON(stored.operationJSON), nullableString(stored.operationDigest), nullableJSON(stored.actorJSON))
+	if err != nil {
+		t.Fatalf("insert semantically corrupt version: %v", err)
+	}
+	for _, conflict := range conflicts {
+		_, err := tx.Exec(`INSERT INTO fabric_stream_conflicts
+			(project_id,fabric_instance_id,stream_id,canonical_ref,conflict_id,detected_at_version,conflict_kind,
+			 base_tree_digest,ours_tree_digest,theirs_tree_digest,detail_json,state,resolved_at)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, fixture.key.ProjectID,
+			fixture.key.FabricInstanceID, fixture.key.StreamID, fixture.ref.RefName, conflict.id, version, conflict.kind,
+			conflict.base, conflict.ours, conflict.theirs, conflict.detail, conflict.state, nullableTime(conflict.resolvedAt))
+		if err != nil {
+			t.Fatalf("restore version conflict after corruption: %v", err)
+		}
+	}
+	if _, err := tx.Exec(`UPDATE fabric_streams SET live_tree_digest=$1,accepted_tree_digest=$2,accepted_commit_sha=$3
+		WHERE project_id=$4 AND fabric_instance_id=$5 AND stream_id=$6 AND canonical_ref=$7 AND current_version=$8`,
+		string(liveDigest), string(acceptedDigest), commit, fixture.key.ProjectID, fixture.key.FabricInstanceID,
+		fixture.key.StreamID, fixture.ref.RefName, version); err != nil {
+		t.Fatalf("update current stream for semantic corruption: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func replaceRequestExpectedVersion(t *testing.T, fixture *streamFixture, operationID string, expectedVersion int64) {
+	t.Helper()
+	tx, err := fixture.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`SELECT set_config('wormhole.project_id',$1,true)`, fixture.key.ProjectID); err != nil {
+		t.Fatal(err)
+	}
+	var workspaceID, operationDigest, expectedDigest, result string
+	var operationJSON, actorJSON, conflictJSON []byte
+	var resultVersion int64
+	err = tx.QueryRow(`DELETE FROM fabric_stream_requests
+		WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3 AND ref_name=$4 AND operation_id=$5
+		RETURNING workspace_id,canonical_operation_json,operation_digest,expected_tree_digest,result,
+		result_stream_version,actor_envelope_json,conflict_json`, fixture.key.ProjectID, fixture.key.FabricInstanceID,
+		fixture.key.StreamID, fixture.ref.RefName, operationID).Scan(&workspaceID, &operationJSON, &operationDigest,
+		&expectedDigest, &result, &resultVersion, &actorJSON, &conflictJSON)
+	if err != nil {
+		t.Fatalf("delete request for semantic corruption: %v", err)
+	}
+	_, err = tx.Exec(`INSERT INTO fabric_stream_requests
+		(project_id,fabric_instance_id,stream_id,workspace_id,ref_name,operation_id,canonical_operation_json,
+		 operation_digest,expected_stream_version,expected_tree_digest,result,result_stream_version,
+		 actor_envelope_json,conflict_json)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, fixture.key.ProjectID,
+		fixture.key.FabricInstanceID, fixture.key.StreamID, workspaceID, fixture.ref.RefName, operationID,
+		operationJSON, operationDigest, expectedVersion, expectedDigest, result, resultVersion, actorJSON, nullableJSON(conflictJSON))
+	if err != nil {
+		t.Fatalf("insert semantically corrupt request: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func nullableString(value sql.NullString) any {
+	if !value.Valid {
+		return nil
+	}
+	return value.String
+}
+
+func nullableTime(value sql.NullTime) any {
+	if !value.Valid {
+		return nil
+	}
+	return value.Time
+}
+
+func restrictedStreamDatabase(t *testing.T, ownerDB *sql.DB) *sql.DB {
+	t.Helper()
+	lockRLSFixture(t, ownerDB)
+	const roleName = "stream_store_route_isolation_role"
+	const rolePassword = "stream_store_route_isolation_password"
+	_, _ = ownerDB.Exec(`DROP ROLE IF EXISTS ` + roleName)
+	if _, err := ownerDB.Exec(`CREATE ROLE ` + roleName + ` LOGIN PASSWORD '` + rolePassword + `'`); err != nil {
+		t.Fatalf("create restricted stream role: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = ownerDB.Exec(`REVOKE ALL ON project_repository_bindings,fabric_streams,fabric_stream_versions,
+			fabric_workspace_stream_bindings,fabric_stream_requests,fabric_stream_conflicts FROM ` + roleName)
+		_, _ = ownerDB.Exec(`DROP ROLE IF EXISTS ` + roleName)
+	})
+	if _, err := ownerDB.Exec(`GRANT SELECT,UPDATE ON project_repository_bindings TO ` + roleName); err != nil {
+		t.Fatalf("grant restricted repository privileges: %v", err)
+	}
+	if _, err := ownerDB.Exec(`GRANT SELECT,INSERT,UPDATE ON fabric_streams,fabric_workspace_stream_bindings TO ` + roleName); err != nil {
+		t.Fatalf("grant restricted current-state privileges: %v", err)
+	}
+	if _, err := ownerDB.Exec(`GRANT SELECT,INSERT ON fabric_stream_versions,fabric_stream_requests,fabric_stream_conflicts TO ` + roleName); err != nil {
+		t.Fatalf("grant restricted history privileges: %v", err)
+	}
+	databaseURL, err := url.Parse(types.LoadConfig().DatabaseURL)
+	if err != nil {
+		t.Fatalf("parse restricted database URL: %v", err)
+	}
+	databaseURL.User = url.UserPassword(roleName, rolePassword)
+	restrictedDB, err := sql.Open("postgres", databaseURL.String())
+	if err != nil {
+		t.Fatalf("open restricted stream database: %v", err)
+	}
+	t.Cleanup(func() { _ = restrictedDB.Close() })
+	if err := restrictedDB.PingContext(context.Background()); err != nil {
+		t.Fatalf("ping restricted stream database: %v", err)
+	}
+	return restrictedDB
 }
 
 func nullableJSON(raw []byte) any {
