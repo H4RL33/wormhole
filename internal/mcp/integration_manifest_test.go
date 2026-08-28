@@ -7,7 +7,6 @@ import (
 	"os"
 	"reflect"
 	"testing"
-	"time"
 
 	"github.com/H4RL33/wormhole/internal/core/identity"
 )
@@ -108,60 +107,6 @@ func TestIntegrationManifestStoreRejectsProhibitedKindsAndAuthorisesRevocation(t
 	history, err := store.History(context.Background(), projectID)
 	if err != nil || len(history) != 1 || history[0].RevokedAt == nil || history[0].Manifest.Entries[0].Content != manifest.Entries[0].Content {
 		t.Fatalf("revoked history = %+v, err %v", history, err)
-	}
-}
-
-func TestFabricManifestBootstrapAndIncrementalDistribution(t *testing.T) {
-	db := testDB(t)
-	manifestStore := NewIntegrationManifestStore(db)
-	identityStore := testIdentityStore(t)
-	tasksStore := testTasksStore(t)
-	kbStore := testKBStore(t)
-	eventsStore := testEventsStore(t)
-	projectID := mustCreateProject(t, "integration-manifest-distribution")
-	agentID, _ := mustRegisterAgentWithPerms(t, projectID, []string{IntegrationManifestPublishPermission})
-	scope := &identity.AuthenticatedScope{Agent: identity.Agent{ID: agentID}, ProjectID: projectID, Permissions: []string{IntegrationManifestPublishPermission}, Roles: []string{"contributor"}}
-	manifest := readFabricManifestFixture(t, "valid.json")
-	manifest.ProjectID = projectID
-	if _, err := manifestStore.Publish(context.Background(), scope, manifest); err != nil {
-		t.Fatal(err)
-	}
-
-	bootstrap := BootstrapTool(identityStore, tasksStore, kbStore, eventsStore, NewSyncRateLimiter(30, time.Minute), manifestStore)
-	result, err := bootstrap.Handler(context.Background(), scope, projectID, mustMarshal(t, BootstrapInput{NamespaceID: projectID, Version: SyncProtocolVersion}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var offered IntegrationManifestChange
-	if err := json.Unmarshal(result.(BootstrapOutput).OrgConfig.IntegrationManifestMetadata, &offered); err != nil {
-		t.Fatal(err)
-	}
-	if offered.Operation != IntegrationManifestOffered || offered.Manifest == nil || offered.Manifest.Entries[0].Content != manifest.Entries[0].Content {
-		t.Fatalf("bootstrap manifest = %+v", offered)
-	}
-
-	pull := IncrementalPullTool(tasksStore, kbStore, eventsStore, NewSyncRateLimiter(30, time.Minute), manifestStore)
-	result, err = pull.Handler(context.Background(), scope, projectID, mustMarshal(t, IncrementalPullInput{NamespaceID: projectID, Version: SyncProtocolVersion}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	found := false
-	for _, raw := range result.(IncrementalPullOutput).Updates {
-		var envelope syncUpdateEnvelope
-		if err := json.Unmarshal(raw, &envelope); err != nil {
-			t.Fatal(err)
-		}
-		if envelope.Type != "integration_manifest" {
-			continue
-		}
-		var change IntegrationManifestChange
-		if err := json.Unmarshal(envelope.Data, &change); err != nil {
-			t.Fatal(err)
-		}
-		found = change.Operation == IntegrationManifestOffered && change.ManifestDigest == manifest.ManifestDigest
-	}
-	if !found {
-		t.Fatalf("incremental updates lack manifest: %+v", result)
 	}
 }
 

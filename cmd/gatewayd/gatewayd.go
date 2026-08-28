@@ -18,7 +18,6 @@ import (
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/runtime/projectstate"
 	syncpkg "github.com/H4RL33/wormhole/internal/runtime/sync"
-	"github.com/H4RL33/wormhole/internal/types"
 )
 
 func Run(ctx context.Context, _ string) error {
@@ -45,17 +44,6 @@ func newRoutedSyncRepositories(store *localstore.Store) (routedSyncRepositories,
 		routes: localstore.NewFabricRouteRepo(store.DB()), workspaces: workspaces,
 		conflicts: workspaces, queue: syncpkg.NewQueueRepo(store.DB()), audit: syncpkg.NewAuditRepo(store.DB()),
 	}, nil
-}
-
-func newRoutedSyncEngine(ctx context.Context, store *localstore.Store, scope types.WorkspaceScope,
-	credentials syncpkg.CredentialSource, cfg syncpkg.Config) (*syncpkg.Engine, error) {
-	repositories, err := newRoutedSyncRepositories(store)
-	if err != nil {
-		return nil, err
-	}
-	return syncpkg.NewRouted(ctx, scope, repositories.routes, credentials, repositories.conflicts,
-		repositories.queue, repositories.audit, localstore.NewTaskRepo(store.DB(), localstore.NewEventRepo(store.DB())),
-		localstore.NewKBRepo(store.DB()), cfg)
 }
 
 type staleSocketRemovalHooks struct {

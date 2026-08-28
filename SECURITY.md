@@ -82,12 +82,13 @@ service boundary.
 
 ## Optional Fabric is not Stage 2
 
-The optional Fabric server has a separate 20-tool PostgreSQL-backed HTTP MCP
-inventory. Its PostgreSQL RLS, bearer-token and Passport authentication,
-credential hashing, server audit, and sync rate-limiting assumptions belong to
-that optional future deployment. They are not protections supplied by the live
-local-only Stage 2 Gateway, and Fabric is not a direct Stage 2 harness endpoint
-or acceptance authority.
+The optional Fabric server has a separate 16-tool private PostgreSQL-backed
+HTTP MCP registry. Its ten-tool public sync-v2 and Activity-v1 contract is
+descriptor-only and has no callable handler in this slice. PostgreSQL RLS,
+bearer-token and Passport authentication, credential hashing, and server audit
+belong to that optional deployment. They are not protections supplied by the
+live local-only Stage 2 Gateway, and Fabric is not a direct Stage 2 harness
+endpoint or acceptance authority.
 
 Any Fabric deployment requires its own authenticated HTTPS, secret handling,
 database-isolation, network-exposure, and operational review. See the

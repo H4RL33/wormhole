@@ -40,57 +40,16 @@ func TestHandleInitializeReportsConfiguredVersion(t *testing.T) {
 	}
 }
 
-func TestHandleToolsList_AllToolsPresent(t *testing.T) {
-	registry := NewFabricRegistry(FabricRegistryDependencies{})
-
-	result := HandleToolsList(registry)
-	m, ok := result.(map[string]any)
-	if !ok {
-		t.Fatalf("HandleToolsList() returned %T, want map[string]any", result)
+func TestHandleToolsList_AllPrivateToolsPresent(t *testing.T) {
+	result := HandleToolsList(NewFabricRegistry(FabricRegistryDependencies{}))
+	entries := result.(map[string]any)["tools"].([]toolListEntry)
+	if len(entries) != 16 {
+		t.Fatalf("got %d live private tools, want 16", len(entries))
 	}
-	entries, ok := m["tools"].([]toolListEntry)
-	if !ok {
-		t.Fatalf("tools field is %T, want []toolListEntry", m["tools"])
-	}
-
-	if len(entries) != 20 {
-		t.Fatalf("got %d tools, want 20", len(entries))
-	}
-
-	wantNames := []string{
-		"wormhole.agent.enrol",
-		"wormhole.agent.whoami",
-		"wormhole.task.create",
-		"wormhole.task.assign",
-		"wormhole.task.list",
-		"wormhole.task.update_status",
-		"wormhole.channel.create",
-		"wormhole.channel.post",
-		"wormhole.channel.list",
-		"wormhole.channel.subscribe",
-		"wormhole.kb.write",
-		"wormhole.kb.search",
-		"wormhole.kb.get",
-		"wormhole.kb.get_links",
-		"wormhole.git.link_commit",
-		"wormhole.git.request_review",
-		"wormhole.sync.bootstrap",
-		"wormhole.sync.incremental_pull",
-		"wormhole.sync.incremental_push",
-		"wormhole.sync.conflict_report",
-	}
-
-	got := map[string]bool{}
-	for _, e := range entries {
-		got[e.Name] = true
-	}
-	for _, name := range wantNames {
-		if !got[name] {
-			t.Errorf("missing tool %q in tools/list result", name)
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name, "wormhole.sync.") || strings.HasPrefix(entry.Name, "wormhole.activity.") {
+			t.Fatalf("unexpected public protocol registration %q", entry.Name)
 		}
-	}
-	if got["wormhole.agent.register"] {
-		t.Fatal("Fabric tools/list retains removed wormhole.agent.register")
 	}
 }
 

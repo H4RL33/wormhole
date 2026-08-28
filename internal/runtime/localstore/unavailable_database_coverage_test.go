@@ -8,7 +8,7 @@ import (
 )
 
 func TestLocalReplicaAndEnrolmentOperationsFailClosedWhenDatabaseIsUnavailable(t *testing.T) {
-	store := openBootstrapCoverageStore(t)
+	store := openCoverageStore(t)
 	db := store.DB()
 	events := NewEventRepo(db)
 	tasks := NewTaskRepo(db, events)

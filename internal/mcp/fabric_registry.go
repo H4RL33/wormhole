@@ -1,8 +1,6 @@
 package mcp
 
 import (
-	"time"
-
 	"github.com/H4RL33/wormhole/internal/core/events"
 	"github.com/H4RL33/wormhole/internal/core/git"
 	"github.com/H4RL33/wormhole/internal/core/identity"
@@ -11,8 +9,8 @@ import (
 	"github.com/H4RL33/wormhole/internal/core/tasks"
 )
 
-// FabricRegistryDependencies contains the stores used by Fabric's complete MCP
-// tool surface. Nil stores are valid when callers only inspect descriptors.
+// FabricRegistryDependencies contains the stores used by Fabric's private MCP
+// surface. Nil stores are valid when callers only inspect descriptors.
 type FabricRegistryDependencies struct {
 	Identity             *identity.Store
 	Events               *events.Store
@@ -23,14 +21,10 @@ type FabricRegistryDependencies struct {
 	IntegrationManifests *IntegrationManifestStore
 }
 
-// NewFabricRegistry composes the exact MCP registry served by Fabric.
+// NewFabricRegistry composes the exact private MCP registry served by Fabric.
+// Public sync-v2 and Activity-v1 contracts are descriptor-only until their
+// production assembler is delivered by a later slice.
 func NewFabricRegistry(deps FabricRegistryDependencies) *Registry {
-	const (
-		syncRequestLimit = 30
-		syncRateWindow   = time.Minute
-	)
-
-	syncRateLimiter := NewSyncRateLimiter(syncRequestLimit, syncRateWindow)
 	registry := NewRegistry()
 	register := func(tool Tool, resultExample any) {
 		tool.ResultExamples = map[string]any{"default": resultExample}
@@ -52,9 +46,5 @@ func NewFabricRegistry(deps FabricRegistryDependencies) *Registry {
 	register(SearchArticlesTool(deps.KB), SearchArticlesOutput{})
 	register(GetArticleTool(deps.KB), GetArticleOutput{})
 	register(GetArticleLinksTool(deps.KB), GetArticleLinksOutput{})
-	register(BootstrapTool(deps.Identity, deps.Tasks, deps.KB, deps.Events, syncRateLimiter, deps.IntegrationManifests), BootstrapOutput{})
-	register(IncrementalPullToolWithGit(deps.Tasks, deps.KB, deps.Events, deps.Git, syncRateLimiter, deps.IntegrationManifests), IncrementalPullOutput{})
-	register(IncrementalPushToolWithGit(deps.Tasks, deps.KB, deps.Events, deps.Git, syncRateLimiter), IncrementalPushOutput{})
-	register(ConflictReportTool(deps.Tasks, deps.KB, deps.Events, syncRateLimiter), ConflictReportOutput{})
 	return registry
 }

@@ -119,9 +119,10 @@ commands remain the only acceptance and transport mechanism.
 
 ## Optional Fabric boundary
 
-The optional Fabric binary has a separate authenticated 20-tool HTTP MCP
-inventory backed by PostgreSQL. Its tokens, RLS, semantic embedding provider,
-remote sync, enrolment, and permission model are server concerns. None is a
-claim about the live Stage 2 Gateway. Do not expose Fabric on a non-loopback
-network without authenticated HTTPS, secret handling, database isolation, and
-an explicit deployment review.
+The optional Fabric binary has a separate authenticated HTTP MCP boundary
+backed by PostgreSQL: exactly 16 private tools are live, while ten public
+sync-v2 and Activity-v1 contracts are descriptor-only and non-callable in
+Slice 1. Its tokens, RLS, semantic embedding provider, remote sync, enrolment,
+and permission model are server concerns. None is a claim about the live Stage
+2 Gateway. Do not expose Fabric on a non-loopback network without authenticated
+HTTPS, secret handling, database isolation, and an explicit deployment review.

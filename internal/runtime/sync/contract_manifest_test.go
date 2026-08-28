@@ -1,175 +1,58 @@
 package sync
 
 import (
-	"context"
 	"encoding/json"
+	"fmt"
 	"os"
-	"reflect"
-	"sort"
-	"strings"
 	"testing"
+
+	"github.com/H4RL33/wormhole/internal/types/projectstate"
 )
 
 type alphaSyncContract struct {
-	Mode         string `json:"mode"`
 	SyncProtocol struct {
-		Version   int               `json:"version"`
-		Methods   []alphaSyncMethod `json:"methods"`
-		WireTypes []alphaWireType   `json:"wire_types"`
+		Version              int      `json:"version"`
+		ActivityVersion      int      `json:"activity_version"`
+		PublicDescriptorOnly bool     `json:"public_descriptor_only"`
+		ToolsCallFields      []string `json:"tools_call_fields"`
+		SafeErrorFields      []string `json:"safe_error_fields"`
 	} `json:"sync_protocol"`
 }
 
-type alphaSyncMethod struct {
-	Name                  string   `json:"name"`
-	RequestFields         []string `json:"request_fields"`
-	OptionalRequestFields []string `json:"optional_request_fields"`
-}
-
-type alphaWireType struct {
-	Name   string   `json:"name"`
-	Fields []string `json:"fields"`
-}
-
-func TestAlphaContractSyncProtocol(t *testing.T) {
-	manifest := readAlphaSyncContract(t)
-	if manifest.Mode != "alpha-inventory" {
-		t.Fatalf("mode = %q, want alpha-inventory", manifest.Mode)
-	}
-	if SyncProtocolVersion != manifest.SyncProtocol.Version {
-		t.Fatalf("Gateway SyncProtocolVersion = %d, manifest = %d", SyncProtocolVersion, manifest.SyncProtocol.Version)
-	}
-
-	store, queueRepo, auditRepo, taskRepo, kbRepo := newApplyTestRepos(t)
-	engine := mustNewEngine(t, "http://unused.invalid", queueRepo, auditRepo, taskRepo, kbRepo, DefaultConfig())
-	if err := engine.ConfigureBootstrap(store, "agent-1", "passport-1", nil); err != nil {
-		t.Fatalf("ConfigureBootstrap: %v", err)
-	}
-
-	calls := map[string][]map[string]interface{}{}
-	engine.testCallSyncToolWithResultFn = func(_ context.Context, name string, args map[string]interface{}) (interface{}, error) {
-		calls[name] = append(calls[name], args)
-		switch name {
-		case "wormhole.sync.bootstrap":
-			return bootstrapForProject(routedTestProjectID), nil
-		case "wormhole.sync.incremental_pull":
-			return map[string]interface{}{"updates": []interface{}{}, "timestamp": "2026-07-23T00:00:00Z", "version": manifest.SyncProtocol.Version}, nil
-		case "wormhole.sync.incremental_push":
-			operation := retainedOperation(44)
-			return map[string]interface{}{
-				"items_received": 1,
-				"applied":        []map[string]interface{}{acknowledge(operation, "")},
-				"timestamp":      "2026-07-23T00:00:00Z",
-				"version":        manifest.SyncProtocol.Version,
-			}, nil
-		case "wormhole.sync.conflict_report":
-			return map[string]interface{}{"resolved_value": "server", "resolution_method": "last_write_wins", "version": manifest.SyncProtocol.Version}, nil
-		default:
-			t.Fatalf("unexpected sync method %q", name)
-			return nil, nil
-		}
-	}
-
-	ctx := context.Background()
-	operation := retainedOperation(44)
-	if err := engine.Bootstrap(ctx); err != nil {
-		t.Fatalf("Bootstrap: %v", err)
-	}
-	if err := engine.PullIncremental(ctx); err != nil {
-		t.Fatalf("PullIncremental: %v", err)
-	}
-	if err := engine.PullIncremental(ctx); err != nil {
-		t.Fatalf("PullIncremental with cursor: %v", err)
-	}
-	if _, err := queueRepo.Enqueue(ctx, testRemoteKey(t, queueRepo), operation, 0); err != nil {
-		t.Fatalf("Enqueue: %v", err)
-	}
-	if err := engine.pushBatch(ctx); err != nil {
-		t.Fatalf("pushBatch: %v", err)
-	}
-	if err := engine.ReportConflict(ctx, "task", "task-contract", "concurrent_update", "server", "local"); err != nil {
-		t.Fatalf("ReportConflict: %v", err)
-	}
-
-	actualMethods := make([]alphaSyncMethod, 0, len(calls))
-	for name, argumentSets := range calls {
-		fieldCounts := map[string]int{}
-		for _, args := range argumentSets {
-			version, ok := args["version"].(int)
-			if !ok {
-				t.Fatalf("%s version = %#v, want int", name, args["version"])
-			}
-			if version != manifest.SyncProtocol.Version {
-				t.Fatalf("%s version = %d, manifest = %d", name, version, manifest.SyncProtocol.Version)
-			}
-			for field := range args {
-				fieldCounts[field]++
-			}
-		}
-		fields := make([]string, 0, len(fieldCounts))
-		optionalFields := []string{}
-		for field, count := range fieldCounts {
-			fields = append(fields, field)
-			if count != len(argumentSets) {
-				optionalFields = append(optionalFields, field)
-			}
-		}
-		sort.Strings(fields)
-		sort.Strings(optionalFields)
-		actualMethods = append(actualMethods, alphaSyncMethod{
-			Name:                  name,
-			RequestFields:         fields,
-			OptionalRequestFields: optionalFields,
-		})
-	}
-	sort.Slice(actualMethods, func(i, j int) bool { return actualMethods[i].Name < actualMethods[j].Name })
-	if !reflect.DeepEqual(actualMethods, manifest.SyncProtocol.Methods) {
-		t.Fatalf("sync methods = %#v, manifest = %#v", actualMethods, manifest.SyncProtocol.Methods)
-	}
-
-	gatewayWireTypes := []alphaWireType{
-		{Name: "applied_item", Fields: jsonFieldNames(t, appliedItemWire{})},
-		{Name: "article_summary", Fields: jsonFieldNames(t, articleSummaryWire{})},
-		{Name: "bootstrap_response", Fields: jsonFieldNames(t, bootstrapResultWire{})},
-		{Name: "incremental_pull_response", Fields: jsonFieldNames(t, incrementalPullResultWire{})},
-		{Name: "incremental_pull_update", Fields: jsonFieldNames(t, syncUpdateEnvelopeWire{})},
-		{Name: "incremental_push_response", Fields: jsonFieldNames(t, incrementalPushResultWire{})},
-		{Name: "task_summary", Fields: jsonFieldNames(t, taskSummaryWire{})},
-	}
-	manifestWireTypes := make(map[string][]string, len(manifest.SyncProtocol.WireTypes))
-	for _, wireType := range manifest.SyncProtocol.WireTypes {
-		manifestWireTypes[wireType.Name] = wireType.Fields
-	}
-	for _, wireType := range gatewayWireTypes {
-		if !reflect.DeepEqual(wireType.Fields, manifestWireTypes[wireType.Name]) {
-			t.Errorf("Gateway %s fields = %v, manifest = %v", wireType.Name, wireType.Fields, manifestWireTypes[wireType.Name])
-		}
-	}
-}
-
-func readAlphaSyncContract(t *testing.T) alphaSyncContract {
-	t.Helper()
+func TestAlphaContractOwnsSharedV2RecordBoundary(t *testing.T) {
 	data, err := os.ReadFile("../../../docs/contracts/alpha-contract.json")
 	if err != nil {
-		t.Fatalf("read alpha contract: %v", err)
+		t.Fatal(err)
 	}
 	var manifest alphaSyncContract
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		t.Fatalf("decode alpha contract: %v", err)
+		t.Fatal(err)
 	}
-	return manifest
+	if manifest.SyncProtocol.Version != projectstate.SyncProtocolVersionV2 ||
+		manifest.SyncProtocol.ActivityVersion != 1 ||
+		!manifest.SyncProtocol.PublicDescriptorOnly {
+		t.Fatalf("sync protocol boundary = %+v", manifest.SyncProtocol)
+	}
+	wantCall := []string{"name", "arguments", "proof"}
+	wantError := []string{"code", "operation"}
+	if !equalStrings(manifest.SyncProtocol.ToolsCallFields, wantCall) ||
+		!equalStrings(manifest.SyncProtocol.SafeErrorFields, wantError) {
+		t.Fatalf("envelope=%q error=%q", manifest.SyncProtocol.ToolsCallFields, manifest.SyncProtocol.SafeErrorFields)
+	}
 }
 
-func jsonFieldNames(t *testing.T, value any) []string {
-	t.Helper()
-	valueType := reflect.TypeOf(value)
-	fields := make([]string, 0, valueType.NumField())
-	for i := 0; i < valueType.NumField(); i++ {
-		name := strings.Split(valueType.Field(i).Tag.Get("json"), ",")[0]
-		if name == "" || name == "-" {
-			t.Fatalf("%s field %s has no JSON name", valueType, valueType.Field(i).Name)
-		}
-		fields = append(fields, name)
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
 	}
-	sort.Strings(fields)
-	return fields
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func retainedOperation(sequence int) projectstate.OperationV1 {
+	return queueOperation(fmt.Sprintf("90000000-0000-4000-8000-%012d", sequence))
 }

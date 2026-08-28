@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"reflect"
+	"sort"
 	"testing"
 
 	"github.com/H4RL33/wormhole/internal/core/identity"
@@ -29,6 +31,30 @@ func TestRegistry_RegisterAndGet(t *testing.T) {
 	}
 	if got.Handler == nil {
 		t.Fatalf("Get: Handler is nil")
+	}
+}
+
+func TestFabricRegistryRetainsExactPrivateSixteen(t *testing.T) {
+	want := []string{
+		"wormhole.agent.enrol", "wormhole.agent.whoami",
+		"wormhole.channel.create", "wormhole.channel.list", "wormhole.channel.post", "wormhole.channel.subscribe",
+		"wormhole.git.link_commit", "wormhole.git.request_review",
+		"wormhole.kb.get", "wormhole.kb.get_links", "wormhole.kb.search", "wormhole.kb.write",
+		"wormhole.task.assign", "wormhole.task.create", "wormhole.task.list", "wormhole.task.update_status",
+	}
+	registry := NewFabricRegistry(FabricRegistryDependencies{})
+	got := make([]string, 0, len(registry.List()))
+	for _, tool := range registry.List() {
+		got = append(got, tool.Name)
+	}
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("private Fabric tools = %q, want %q", got, want)
+	}
+	for _, descriptor := range PublicFabricToolDescriptors() {
+		if _, live := registry.Get(descriptor.Name); live {
+			t.Fatalf("public descriptor %q is live before production assembly", descriptor.Name)
+		}
 	}
 }
 
@@ -76,19 +102,8 @@ func TestTool_JSONSerialization(t *testing.T) {
 	}
 }
 
-// TestRegistry_EveryAuthedToolDeclaresPermission guards against a future
-// tool shipping authenticated-but-ungated. Every RequiresAuth tool must
-// carry a non-empty RequiredPermission, except the deliberate auth-only
-// exemptions (self-identification and Gateway transport).
 func TestRegistry_EveryAuthedToolDeclaresPermission(t *testing.T) {
-	exempt := map[string]bool{
-		"wormhole.agent.whoami":          true,
-		"wormhole.sync.bootstrap":        true,
-		"wormhole.sync.incremental_pull": true,
-		"wormhole.sync.incremental_push": true,
-		"wormhole.sync.conflict_report":  true,
-	}
-
+	exempt := map[string]bool{"wormhole.agent.whoami": true}
 	registry := NewFabricRegistry(FabricRegistryDependencies{})
 	for _, tool := range registry.List() {
 		if !tool.RequiresAuth {

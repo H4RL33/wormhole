@@ -674,10 +674,9 @@ these RFC invariants or reintroduce last-write-wins.
 
 ### Transition constraints
 
-- The implemented version-one `wormhole.sync.bootstrap`, incremental pull/push,
-  and conflict-report envelopes remain frozen compatibility inventory until an
-  approved delivery slice introduces and tests a new protocol version. New
-  semantics must not be smuggled into version one.
+- Sync v1 has been destructively removed. Sync-v2 and Activity-v1 public values
+  are strict descriptor-only contract data until their approved production
+  assembler lands; no compatibility decoder or placeholder handler exists.
 - Local IPC continues to trust only processes able to connect through the
   same-user OS-protected socket or named pipe; it gains no ambient cross-user
   sharing or connector bearer-token fallback.

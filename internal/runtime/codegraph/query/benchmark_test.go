@@ -96,7 +96,7 @@ func TestBenchmarkCorpusContract(t *testing.T) {
 	wantQuestions := []string{
 		"Where is agent registration authenticated?",
 		"Trace a task status update into its emitted event.",
-		"Where are Gateway sync response versions validated?",
+		"Where are public sync-v2 descriptors, closed schemas, strict proof carriage, and safe failures frozen without live dispatch?",
 		"Which code writes Passport audit records?",
 		"Trace a local task write into the durable outbound queue.",
 		"Where is project isolation enforced for local SQLite queries?",

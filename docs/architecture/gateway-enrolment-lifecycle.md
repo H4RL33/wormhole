@@ -8,9 +8,10 @@ The Stage 2 Gateway is local-only, setup selects machine-private human and agent
 identity, and its 17-tool inventory contains no enrolment descriptor.
 
 Nothing below is a current user procedure, CLI promise, service bootstrap path,
-or Stage 2 acceptance dependency. The optional Fabric binary retains a
-server-side enrolment descriptor in its separate 20-tool inventory, but no
-current production Gateway route connects a harness to this lifecycle.
+or Stage 2 acceptance dependency. The optional Fabric binary has exactly 16
+live private tools, including server-side enrolment. Its ten public sync-v2 and
+Activity-v1 contracts are descriptor-only and non-callable in Slice 1; no
+current production Gateway route connects a harness to either surface.
 
 ## Preserved design goals
 
@@ -34,16 +35,18 @@ The historical design used these phases:
 
 ```text
 requested
-  -> remote_identity_issued
-  -> credential_persisted
-  -> bootstrap_pending
-  -> ready
+  -> registration_in_progress
+  -> registered
+  -> credentials_persisted
 ```
 
 Failures before credential persistence could retry the same remote attempt.
-Failures after credential persistence had to resume from the owner-private
-credential reference rather than return or recreate a token. Terminal binding
-or configuration errors remained failed until a human changed the plan.
+Slice 1 stops only after the matching owner-private credential and durable
+attempt both say `credentials_persisted`. A matching historical `ready`
+attempt remains terminal; matching `bootstrap_in_progress` and
+post-credential `recovery_required` survivors are atomically normalized
+to `credentials_persisted` without a remote call. Missing credentials
+remain on controlled reissue; no deleted bootstrap continuation runs.
 
 An implementation was required to compare exact request hashes and stable
 attempt keys before retrying. The same key with different binding fields was

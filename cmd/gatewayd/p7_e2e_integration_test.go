@@ -4,11 +4,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"os/user"
@@ -103,123 +99,6 @@ func gatewayQueueOperation(sequence string) projectstate.OperationV1 {
 	}
 }
 
-type gatewayTestCredentialSource struct{}
-
-func (gatewayTestCredentialSource) Read(_ context.Context, reference string) (string, error) {
-	if reference != "keyring:test" {
-		return "", fmt.Errorf("unexpected credential reference %q", reference)
-	}
-	return "test-token", nil
-}
-
-func gatewayTaskOperation(operationID string, task localstore.Task) projectstate.OperationV1 {
-	return projectstate.OperationV1{
-		SchemaVersion: 1, ID: operationID, Kind: projectstate.OperationPutRecord,
-		ExpectedViewDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		Actor: types.ActorEnvelope{ActorKind: types.ActorHuman,
-			HumanPrincipalID: "80000000-0000-4000-8000-000000000001",
-			Assurance:        types.AssuranceLocal, OccurredAt: time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)},
-		PutRecord: &projectstate.PutRecordV1{Record: projectstate.RecordValueV1{Task: &projectstate.TaskV1{
-			SchemaVersion: 1, Kind: "task", ID: task.ID, ParentTaskID: task.ParentTaskID,
-			Title: task.Title, Description: task.Description, Status: task.Status, Priority: task.Priority,
-			DueBy: task.DueBy, CreatedAt: task.CreatedAt, UpdatedAt: task.UpdatedAt,
-			Extensions: projectstate.ExtensionsV1{},
-		}}},
-	}
-}
-
-// gatewayStatefulFabric retains pushed task operations so a second routed
-// engine can bootstrap them into its independent SQLite replica.
-func gatewayStatefulFabric(t *testing.T, projectID string) *httptest.Server {
-	t.Helper()
-	var mu stdsync.Mutex
-	tasks := make(map[string]types.BootstrapTaskV1)
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
-			t.Errorf("Authorization=%q", got)
-		}
-		var request struct {
-			ID     json.RawMessage `json:"id"`
-			Method string          `json:"method"`
-			Params struct {
-				Name      string          `json:"name"`
-				Arguments json.RawMessage `json:"arguments"`
-			} `json:"params"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			http.Error(w, "invalid request", http.StatusBadRequest)
-			return
-		}
-		var result any
-		switch request.Params.Name {
-		case "wormhole.sync.incremental_push":
-			var arguments struct {
-				Items []struct {
-					EntityType string          `json:"entity_type"`
-					EntityID   string          `json:"entity_id"`
-					Payload    json.RawMessage `json:"payload"`
-				} `json:"items"`
-			}
-			if err := json.Unmarshal(request.Params.Arguments, &arguments); err != nil {
-				http.Error(w, "invalid push", http.StatusBadRequest)
-				return
-			}
-			applied := make([]map[string]any, 0, len(arguments.Items))
-			mu.Lock()
-			for _, item := range arguments.Items {
-				var operation projectstate.OperationV1
-				if err := json.Unmarshal(item.Payload, &operation); err != nil || operation.PutRecord == nil || operation.PutRecord.Record.Task == nil ||
-					item.EntityType != string(operation.Kind) || item.EntityID != operation.ID {
-					mu.Unlock()
-					http.Error(w, "invalid task operation", http.StatusBadRequest)
-					return
-				}
-				task := operation.PutRecord.Record.Task
-				tasks[task.ID] = types.BootstrapTaskV1{
-					ID: task.ID, ProjectID: projectID, ParentTaskID: task.ParentTaskID,
-					Title: task.Title, Description: task.Description, Status: task.Status, Priority: task.Priority,
-					DueBy: task.DueBy, CreatedAt: task.CreatedAt, UpdatedAt: task.UpdatedAt,
-				}
-				applied = append(applied, map[string]any{"id": operation.ID, "type": string(operation.Kind), "error": ""})
-			}
-			mu.Unlock()
-			result = map[string]any{"items_received": len(arguments.Items), "applied": applied,
-				"timestamp": time.Now().UTC().Format(time.RFC3339), "version": syncpkg.SyncProtocolVersion}
-		case "wormhole.sync.incremental_pull":
-			result = map[string]any{"updates": []any{}, "timestamp": time.Now().UTC().Format(time.RFC3339),
-				"version": syncpkg.SyncProtocolVersion}
-		case "wormhole.sync.bootstrap":
-			mu.Lock()
-			taskList := make([]types.BootstrapTaskV1, 0, len(tasks))
-			for _, task := range tasks {
-				taskList = append(taskList, task)
-			}
-			mu.Unlock()
-			bootstrap := gatewayTestBootstrapOutput(projectID, "test-agent", "test-passport")
-			org := bootstrap["org_config"].(types.BootstrapOrgConfigV1)
-			org.Tasks = taskList
-			bootstrap["org_config"] = org
-			bootstrap["task_list"] = taskList
-			result = bootstrap
-		default:
-			http.Error(w, "unknown tool", http.StatusNotFound)
-			return
-		}
-		resultBytes, err := json.Marshal(result)
-		if err != nil {
-			t.Errorf("marshal result: %v", err)
-			return
-		}
-		toolResult, err := json.Marshal(map[string]any{"content": []map[string]string{{"type": "text", "text": string(resultBytes)}}})
-		if err != nil {
-			t.Errorf("marshal tool result: %v", err)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": json.RawMessage(toolResult)})
-	}))
-}
-
 func TestP7_LocalQueueDeliveryLifecycle(t *testing.T) {
 	store, queue, key := gatewayQueueFixture(t, filepath.Join(t.TempDir(), "gateway.db"))
 	defer store.Close()
@@ -287,80 +166,6 @@ func TestP7_SyncQueueDurability(t *testing.T) {
 	pending, err := syncpkg.NewQueueRepo(reopened.DB()).ListPending(context.Background(), key, 100)
 	if err != nil || len(pending) != 1 || pending[0].Operation.ID != operation.ID {
 		t.Fatalf("reopened queue=(%+v,%v)", pending, err)
-	}
-}
-
-func TestP7_MultiRuntimeSync(t *testing.T) {
-	ctx := context.Background()
-	server := gatewayStatefulFabric(t, "00000000-0000-4000-8000-000000000001")
-	defer server.Close()
-	profileID := "10000000-0000-4000-8000-000000000001"
-	instanceID := "20000000-0000-4000-8000-000000000001"
-
-	storeA, queueA, keyA := gatewayQueueFixture(t, filepath.Join(t.TempDir(), "a.db"))
-	defer storeA.Close()
-	routesA := localstore.NewFabricRouteRepo(storeA.DB())
-	if err := routesA.UpdateProfile(ctx, profileID, instanceID, server.URL, "keyring:test"); err != nil {
-		t.Fatal(err)
-	}
-	tasksA := localstore.NewTaskRepo(storeA.DB(), localstore.NewEventRepo(storeA.DB()))
-	task, err := tasksA.CreateTask(ctx, keyA.ProjectID, "Runtime A task", "written offline", nil, 1, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	operation := gatewayTaskOperation("90000000-0000-4000-8000-000000000072", task)
-	if _, err := queueA.Enqueue(ctx, keyA, operation, 0); err != nil {
-		t.Fatal(err)
-	}
-	fast := syncpkg.DefaultConfig()
-	fast.BatchInterval, fast.LatencyCheckInterval, fast.PullInterval = 20*time.Millisecond, time.Hour, time.Hour
-	engineA, err := syncpkg.NewRouted(ctx, types.WorkspaceScope{ProjectID: keyA.ProjectID, WorkspaceID: keyA.WorkspaceID},
-		routesA, gatewayTestCredentialSource{}, localstore.NewWorkspaceRepo(storeA.DB()), queueA,
-		syncpkg.NewAuditRepo(storeA.DB()), tasksA, localstore.NewKBRepo(storeA.DB()), fast)
-	if err != nil {
-		t.Fatal(err)
-	}
-	engineA.Start(ctx)
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		pending, err := queueA.ListPending(ctx, keyA, 10)
-		if err != nil {
-			engineA.Stop()
-			t.Fatal(err)
-		}
-		if len(pending) == 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			engineA.Stop()
-			t.Fatal("runtime A push did not drain queue")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	engineA.Stop()
-
-	storeB, queueB, keyB := gatewayQueueFixture(t, filepath.Join(t.TempDir(), "b.db"))
-	defer storeB.Close()
-	routesB := localstore.NewFabricRouteRepo(storeB.DB())
-	if err := routesB.UpdateProfile(ctx, profileID, instanceID, server.URL, "keyring:test"); err != nil {
-		t.Fatal(err)
-	}
-	tasksB := localstore.NewTaskRepo(storeB.DB(), localstore.NewEventRepo(storeB.DB()))
-	engineB, err := syncpkg.NewRouted(ctx, types.WorkspaceScope{ProjectID: keyB.ProjectID, WorkspaceID: keyB.WorkspaceID},
-		routesB, gatewayTestCredentialSource{}, localstore.NewWorkspaceRepo(storeB.DB()), queueB,
-		syncpkg.NewAuditRepo(storeB.DB()), tasksB, localstore.NewKBRepo(storeB.DB()), syncpkg.DefaultConfig())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := engineB.ConfigureBootstrap(storeB, "test-agent", "test-passport", nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := engineB.Bootstrap(ctx); err != nil {
-		t.Fatal(err)
-	}
-	got, err := tasksB.GetTask(ctx, keyB.ProjectID, task.ID)
-	if err != nil || got.Title != task.Title {
-		t.Fatalf("runtime B task=(%+v,%v), want title %q", got, err, task.Title)
 	}
 }
 

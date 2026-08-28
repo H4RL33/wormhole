@@ -11,18 +11,21 @@ compatibility promise.
 
 ## Live MCP inventories
 
-`mcp_tools.gateway` and `mcp_tools.fabric` are separate authorities.
+`mcp_tools.gateway`, `mcp_tools.fabric`, and
+`mcp_tools.public_fabric_contract` are separate projections.
 
 - Gateway has exactly 17 live agent-facing descriptors: local presence,
   portable Channel/KB, clone-local operational activity, truthful offline sync
   status, and portable workspace operations.
-- Optional Fabric has exactly 20 authenticated HTTP descriptors backed by
+- Optional Fabric has exactly 16 live private HTTP descriptors backed by
   PostgreSQL. It is not a direct Stage 2 harness endpoint.
+- The Fabric public contract has exactly ten descriptor-only sync-v2 and
+  Activity-v1 values. They contain no handler and are not callable in Slice 1.
 
-The optional server inventory is not additive to Gateway. Server enrolment,
+The optional server projections are not additive to Gateway. Server enrolment,
 whoami, semantic KB search, task mutation, Git-link mutation, remote bootstrap,
-and remote sync are not in the Stage 2 Gateway inventory. A descriptor is live
-only in the registry where it appears.
+and remote sync are not in the Stage 2 Gateway inventory. A private descriptor
+is live only in `mcp_tools.fabric`; a public contract value is non-callable.
 
 Gateway `agent.register` is presence-only. Its public request identifies the
 target agent and optional local capabilities; it cannot supply owner, model,
@@ -64,11 +67,11 @@ confirmed digest, no-follow filesystem operations, journalled recovery, and
 drift preservation remain required. Their presence in `designed_interfaces`
 does not make a tool live.
 
-Fabric bootstrap and incremental records retain their strict server wire
-shapes, including integration offers/revocations. Optional Fabric semantic
-search retains generation-scoped ranking metadata and a structured degraded
-error with no lexical fallback. These are server contracts, not Stage 2
-Gateway claims.
+Public sync-v2 and Activity-v1 records retain strict closed descriptor shapes,
+proof beside arguments, and safe `{code,operation}` failure values. They remain
+non-callable until production assembly. Optional Fabric semantic search retains
+generation-scoped ranking metadata and a structured degraded error with no
+lexical fallback. These are server contracts, not Stage 2 Gateway claims.
 
 ## CLI and private protocol
 

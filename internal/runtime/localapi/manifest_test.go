@@ -10,20 +10,11 @@ import (
 	"testing"
 
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
-	syncpkg "github.com/H4RL33/wormhole/internal/runtime/sync"
 )
 
 const manifestTestToolDigest = "sha256:e7b41c9f7f3786cf7a8008d659a2fd1739842d10c158931a2c0f25c320211969"
 
-type recordingManifestReceiverConfigurer struct {
-	receiver syncpkg.IntegrationManifestReceiver
-}
-
-func (c *recordingManifestReceiverConfigurer) ConfigureIntegrationManifestReceiver(receiver syncpkg.IntegrationManifestReceiver) {
-	c.receiver = receiver
-}
-
-func TestIntegrationManifestServiceWiresGuidanceAndEnrolmentSyncReceiver(t *testing.T) {
+func TestIntegrationManifestServiceWiresGuidanceAndManagement(t *testing.T) {
 	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -35,10 +26,8 @@ func TestIntegrationManifestServiceWiresGuidanceAndEnrolmentSyncReceiver(t *test
 	}
 	server := &Server{}
 	server.SetIntegrationManifestService(service)
-	configurer := &recordingManifestReceiverConfigurer{}
-	server.configureIntegrationManifestReceiver(configurer)
-	if server.integrationGuidance != service || configurer.receiver != service {
-		t.Fatal("one manifest service was not wired to guidance and enrolment sync")
+	if server.integrationGuidance != service || server.integrationService != service {
+		t.Fatal("one manifest service was not wired to guidance and management")
 	}
 }
 
@@ -552,39 +541,6 @@ func TestIntegrationManifestServiceRejectsRepositoryRootRebinding(t *testing.T) 
 	}
 	if _, err := service.Plan(ctx, IntegrationApply, manifest.ProjectID, t.TempDir()); err == nil {
 		t.Fatal("active project was rebound to a different repository root")
-	}
-}
-
-func TestBootstrapRollbackMakesExactCachedTupleReofferable(t *testing.T) {
-	ctx := context.Background()
-	store, err := localstore.Open(filepath.Join(t.TempDir(), "wormholed.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	service, err := NewIntegrationManifestService(store)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifest := readIntegrationManifestFixture(t, "valid.json")
-	raw := marshalIntegrationManifestOffer(t, manifest)
-	roles := []string{"contributor"}
-	if err := service.ReceiveIntegrationManifest(ctx, manifest.ProjectID, "passport-1", roles, raw); err != nil {
-		t.Fatal(err)
-	}
-	if err := service.RollbackBootstrapIntegrationManifest(ctx, manifest.ProjectID, "passport-1", roles, raw); err != nil {
-		t.Fatal(err)
-	}
-	rolledBack, err := service.Status(ctx, manifest.ProjectID)
-	if err != nil || rolledBack.PendingManifestDigest != nil {
-		t.Fatalf("rolled-back candidate state = %+v, err %v", rolledBack, err)
-	}
-	if err := service.ReceiveIntegrationManifest(ctx, manifest.ProjectID, "passport-1", roles, raw); err != nil {
-		t.Fatal(err)
-	}
-	reoffered, err := service.Status(ctx, manifest.ProjectID)
-	if err != nil || reoffered.PendingManifestDigest == nil || *reoffered.PendingManifestDigest != manifest.ManifestDigest || reoffered.ApprovalState != "awaiting_approval" {
-		t.Fatalf("exact tuple was not re-offered: %+v, err %v", reoffered, err)
 	}
 }
 

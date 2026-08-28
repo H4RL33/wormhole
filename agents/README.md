@@ -46,8 +46,10 @@ must not leak into Core code.
 - One Gateway supports many registered projects and worktrees with distinct
   workspace IDs and overlays. `wormhole.sync.status` reports `offline` and zero
   pending writes.
-- Fabric remains an optional separately tested 20-tool PostgreSQL server. It is
-  not attached to the Stage 2 Gateway and is not a direct harness endpoint.
+- Fabric remains an optional separately tested PostgreSQL server. Its live
+  private registry has exactly 16 tools; its ten public sync-v2/Activity-v1
+  values are descriptor-only until production assembly. It is not attached to
+  the Stage 2 Gateway and is not a direct harness endpoint.
 - Isolated on-demand Code Graph workers are local, deterministic, model-free,
   and per checkout. They do not sync through Fabric.
 
@@ -97,8 +99,9 @@ checkpoint and recovery continue to share one coordinator gate. See
   checkpoint/stash operations, and stdio MCP bridge.
 - `gatewayd`: one per-user local-only supervisor, stable owner-private Unix
   socket, schema-v8 SQLite state, durable overlays, and 17-tool MCP registry.
-- `fabric`: optional 20-tool HTTP MCP server backed by PostgreSQL; not a Stage 2
-  Gateway dependency or acceptance authority.
+- `fabric`: optional HTTP MCP server backed by PostgreSQL, with 16 live private
+  tools and ten descriptor-only public contracts; not a Stage 2 Gateway
+  dependency or acceptance authority.
 
 ## Package Ownership and Dependency Bans
 

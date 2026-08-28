@@ -123,56 +123,6 @@ func NewIntegrationManifestService(store *localstore.Store) (*IntegrationManifes
 	return service, nil
 }
 
-// ReceiveIntegrationManifest implements sync.IntegrationManifestReceiver.
-// Passport presence is required here; project and singular-role binding are
-// validated again by the common bootstrap/incremental verifier below.
-func (s *IntegrationManifestService) ReceiveIntegrationManifest(ctx context.Context, projectID, passportID string, roles []string, raw json.RawMessage) error {
-	if passportID == "" {
-		return integrationVerificationError("missing_passport_binding")
-	}
-	return s.ReceiveFabricChange(ctx, IntegrationManifestBinding{ProjectID: projectID, Roles: roles}, raw)
-}
-
-func (s *IntegrationManifestService) RollbackBootstrapIntegrationManifest(ctx context.Context, projectID, passportID string, roles []string, raw json.RawMessage) error {
-	if passportID == "" || len(roles) != 1 {
-		return integrationVerificationError("invalid_bootstrap_rollback_binding")
-	}
-	var change rawIntegrationManifestChange
-	if !utf8.Valid(raw) || rejectDuplicateJSONMembers(raw) != nil || decodeClosedJSON(raw, &change) != nil ||
-		change.Operation != "offered" || change.ProjectID != projectID {
-		return integrationVerificationError("invalid_bootstrap_rollback_change")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	state, root, err := readIntegrationStateTx(ctx, tx, projectID)
-	if err != nil {
-		return err
-	}
-	if state.PendingManifestID == nil || state.PendingManifestVersion == nil || state.PendingManifestDigest == nil ||
-		*state.PendingManifestID != change.ManifestID || *state.PendingManifestVersion != change.ManifestVersion ||
-		*state.PendingManifestDigest != change.ManifestDigest {
-		return tx.Commit()
-	}
-	state.PendingManifestID = nil
-	state.PendingManifestVersion = nil
-	state.PendingManifestDigest = nil
-	if state.ActiveManifestID != nil {
-		state.ApprovalState = "approved"
-	} else {
-		state.ApprovalState = "none"
-		state.ConnectionState = "offline"
-	}
-	if err := writeIntegrationStateTx(ctx, tx, state, root); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
 type rawIntegrationManifestChange struct {
 	Operation       string          `json:"operation"`
 	ProjectID       string          `json:"project_id"`

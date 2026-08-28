@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/H4RL33/wormhole/internal/types"
 	"github.com/lib/pq"
 )
 
@@ -170,79 +169,6 @@ func (s *Store) BeginProjectTx(ctx context.Context, projectID string) (*sql.Tx, 
 		return nil, fmt.Errorf("identity: begin project tx: set project id: %w", err)
 	}
 	return tx, nil
-}
-
-// BeginBootstrapSnapshotTx starts the single repeatable-read, project-scoped
-// transaction used to compose a complete bootstrap snapshot (RFC-0003 §8.1).
-func (s *Store) BeginBootstrapSnapshotTx(ctx context.Context, projectID string) (*sql.Tx, error) {
-	if projectID == "" {
-		return nil, ErrInvalidScope
-	}
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
-	if err != nil {
-		return nil, fmt.Errorf("identity: begin bootstrap snapshot tx: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, "SELECT set_config('wormhole.project_id', $1, true)", projectID); err != nil {
-		_ = tx.Rollback()
-		return nil, fmt.Errorf("identity: begin bootstrap snapshot tx: set project id: %w", err)
-	}
-	return tx, nil
-}
-
-// ReadBootstrapIdentityInTx returns project, agent, Passport, and the already
-// authenticated permission scope from the caller-owned snapshot transaction.
-func (s *Store) ReadBootstrapIdentityInTx(ctx context.Context, tx *sql.Tx, projectID, agentID string, permissions []string) (types.BootstrapProjectV1, types.BootstrapIdentityV1, error) {
-	if tx == nil || projectID == "" || agentID == "" || permissions == nil {
-		return types.BootstrapProjectV1{}, types.BootstrapIdentityV1{}, ErrInvalidScope
-	}
-	var project types.BootstrapProjectV1
-	if err := tx.QueryRowContext(ctx,
-		`SELECT id, name, owner, created_at FROM projects WHERE id = $1`, projectID,
-	).Scan(&project.ID, &project.Name, &project.Owner, &project.CreatedAt); err != nil {
-		return types.BootstrapProjectV1{}, types.BootstrapIdentityV1{}, fmt.Errorf("identity: read bootstrap project: %w", err)
-	}
-
-	var identity types.BootstrapIdentityV1
-	var capabilities, repositories, roles []byte
-	if err := tx.QueryRowContext(ctx, `
-		SELECT a.id, a.owner, a.model, a.capabilities, a.created_at,
-		       p.id, p.agent_id, p.project_id, p.repositories, p.roles, p.issued_at
-		FROM agents a
-		JOIN passports p ON p.agent_id = a.id AND p.project_id = $1
-		WHERE a.id = $2`, projectID, agentID,
-	).Scan(
-		&identity.Agent.ID, &identity.Agent.Owner, &identity.Agent.Model, &capabilities, &identity.Agent.CreatedAt,
-		&identity.Passport.ID, &identity.Passport.AgentID, &identity.Passport.ProjectID, &repositories, &roles, &identity.Passport.IssuedAt,
-	); err != nil {
-		return types.BootstrapProjectV1{}, types.BootstrapIdentityV1{}, fmt.Errorf("identity: read bootstrap identity: %w", err)
-	}
-	if err := json.Unmarshal(capabilities, &identity.Agent.Capabilities); err != nil {
-		return types.BootstrapProjectV1{}, types.BootstrapIdentityV1{}, fmt.Errorf("identity: decode bootstrap capabilities: %w", err)
-	}
-	if err := json.Unmarshal(repositories, &identity.Passport.Repositories); err != nil {
-		return types.BootstrapProjectV1{}, types.BootstrapIdentityV1{}, fmt.Errorf("identity: decode bootstrap repositories: %w", err)
-	}
-	if err := json.Unmarshal(roles, &identity.Passport.Roles); err != nil {
-		return types.BootstrapProjectV1{}, types.BootstrapIdentityV1{}, fmt.Errorf("identity: decode bootstrap roles: %w", err)
-	}
-	identity.Agent.Capabilities = sortedUniqueStrings(identity.Agent.Capabilities)
-	identity.Passport.Repositories = sortedUniqueStrings(identity.Passport.Repositories)
-	identity.Passport.Roles = sortedUniqueStrings(identity.Passport.Roles)
-	identity.Permissions = sortedUniqueStrings(permissions)
-	return project, identity, nil
-}
-
-// BootstrapTimestampInTx reads Postgres's stable transaction timestamp so the
-// response cursor describes the same repeatable-read snapshot as every row.
-func (s *Store) BootstrapTimestampInTx(ctx context.Context, tx *sql.Tx) (time.Time, error) {
-	if tx == nil {
-		return time.Time{}, ErrInvalidScope
-	}
-	var timestamp time.Time
-	if err := tx.QueryRowContext(ctx, `SELECT transaction_timestamp()`).Scan(&timestamp); err != nil {
-		return time.Time{}, fmt.Errorf("identity: read bootstrap timestamp: %w", err)
-	}
-	return timestamp.UTC(), nil
 }
 
 func sortedUniqueStrings(values []string) []string {

@@ -17,7 +17,6 @@ func TestIdentityStoreOperationsFailClosedWhenDatabaseIsUnavailable(t *testing.T
 		call func() error
 	}{
 		{"begin project", func() error { _, err := s.BeginProjectTx(ctx, id); return err }},
-		{"begin bootstrap", func() error { _, err := s.BeginBootstrapSnapshotTx(ctx, id); return err }},
 		{"register", func() error {
 			_, _, _, err := s.Register(ctx, id, []string{}, "owner", "model", []string{}, []string{}, []string{})
 			return err

@@ -9,7 +9,7 @@ This guide covers the current user-facing local-only Stage 2 path. The binary's
 |---|---|
 | `wormhole` | Setup, portable workspace operations, connector management, and the stdio MCP bridge |
 | `gatewayd` | Owner-private local Unix-socket runtime backed by SQLite |
-| `fabric` | Optional PostgreSQL-backed 20-tool server; not a Stage 2 runtime dependency |
+| `fabric` | Optional PostgreSQL server with 16 live private tools and ten descriptor-only public contracts; not a Stage 2 runtime dependency |
 
 Build the local binaries with `make build`. Building `fabric` does not make it
 part of the Stage 2 Gateway topology.
@@ -92,8 +92,9 @@ workspace checkpoint/diff/import/stash/status. The stdio bridge supplies trusted
 private working-directory context to Gateway and strips it before public schema
 validation.
 
-The optional Fabric binary has a distinct exact 20-tool registry and is not a
-harness endpoint for this release.
+The optional Fabric binary has exactly 16 live private tools plus ten public
+sync-v2 and Activity-v1 descriptor values that are non-callable in Slice 1.
+Neither surface is a harness endpoint for this release.
 
 ## Private and portable paths
 

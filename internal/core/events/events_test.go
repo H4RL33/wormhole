@@ -157,11 +157,8 @@ func TestEnsureChannelIsIdempotentPerProject(t *testing.T) {
 	}
 }
 
-// TestCreateChannelWithID_PreservesClientID confirms CreateChannelWithID
-// inserts the row under the caller-supplied id instead of letting Postgres
-// assign a fresh gen_random_uuid() default (see sync.go's
-// IncrementalPushTool, which needs the server-side row to be findable by the
-// client's own local channel id).
+// This test proves the caller-supplied stable ID remains queryable exactly,
+// preserving portable import replay without depending on a retired transport.
 func TestCreateChannelWithID_PreservesClientID(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -274,11 +271,8 @@ func TestPublishEvent_Success(t *testing.T) {
 	}
 }
 
-// TestPublishEventWithID_PreservesClientID confirms PublishEventWithID
-// inserts the row under the caller-supplied id instead of letting Postgres
-// assign a fresh gen_random_uuid() default (see sync.go's
-// IncrementalPushTool, which needs the server-side row to be findable by the
-// client's own local event id).
+// This test proves the caller-supplied stable ID remains queryable exactly,
+// preserving portable import replay without depending on a retired transport.
 func TestPublishEventWithID_PreservesClientID(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

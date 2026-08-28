@@ -60,9 +60,11 @@ semantic search, task mutation, Git-link mutation, remote bootstrap, and live
 sync are not Gateway capabilities in this stage.
 
 The repository also builds an optional Fabric binary with a separately tested
-20-tool PostgreSQL-backed server inventory. That inventory is not attached to
-the Stage 2 Gateway, is not part of Stage 2 acceptance, and is not a direct
-harness endpoint. See [Automated alpha validation](docs/testing/alpha-validation.md).
+16-tool private PostgreSQL-backed registry. A separate ten-tool public sync-v2
+and Activity-v1 contract is descriptor-only until production assembly; it has
+no callable handlers. Neither surface is attached to the Stage 2 Gateway, is
+part of Stage 2 acceptance, or is a direct harness endpoint. See
+[Automated alpha validation](docs/testing/alpha-validation.md).
 
 ## State and authority
 

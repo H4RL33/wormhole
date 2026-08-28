@@ -147,10 +147,8 @@ func TestCreate_ReturnsPopulatedTask(t *testing.T) {
 	}
 }
 
-// TestCreateWithID_PreservesClientID confirms CreateWithID inserts the row
-// under the caller-supplied id instead of letting Postgres assign a fresh
-// gen_random_uuid() default (see sync.go's IncrementalPushTool, which needs
-// the server-side row to be findable by the client's own local task id).
+// This test proves the caller-supplied stable ID remains queryable exactly,
+// preserving portable import replay without depending on a retired transport.
 func TestCreateWithID_PreservesClientID(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

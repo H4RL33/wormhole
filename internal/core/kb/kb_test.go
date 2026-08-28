@@ -178,11 +178,8 @@ func TestEnsureBootstrapArticleIsIdempotentAndProjectScoped(t *testing.T) {
 	}
 }
 
-// TestWriteArticleWithID_PreservesClientID confirms WriteArticleWithID
-// inserts the row under the caller-supplied id instead of letting Postgres
-// assign a fresh gen_random_uuid() default (see sync.go's
-// IncrementalPushTool, which needs the server-side row to be findable by the
-// client's own local article id).
+// This test proves the caller-supplied stable ID remains queryable exactly,
+// preserving portable import replay without depending on a retired transport.
 func TestWriteArticleWithID_PreservesClientID(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

@@ -53,6 +53,11 @@ Run on 2026-07-26 with:
 The reporting run used the exact default benchmark command shown above from a
 clean detached worktree. Raw measured outcomes were:
 
+The measured `gateway-sync-response-version` row below is historical evidence
+for the removed pre-alpha v1 corpus. The active corpus now uses
+`public-sync-v2-contract-boundary`; it must be measured in the next Code Graph
+benchmark run and this document must not fabricate a result in advance.
+
 | Query | Duration (ns) | Source bytes | Irrelevant bytes | Omitted nodes / edges | Selected files / matches | Result |
 |---|---:|---:|---:|---:|---:|---|
 | agent-registration-authentication | 229004925 | 16380 | 5518 | 797 / 1072 | 26 / 64 | sufficient |
@@ -68,10 +73,9 @@ retained even where the expected answer artifacts were sufficient. The
 baseline produced no `useless` result. Two outcomes were explicitly
 incomplete:
 
-- `gateway-sync-response-version` missed relationship segment
-  `pushBatch calls decodeIncrementalPushResult` and authoritative edges
-  `Bootstrap calls validateBootstrapResult` and
-  `pushBatch calls decodeIncrementalPushResult`.
+- Historical `gateway-sync-response-version` missed its recorded v1
+  relationships. Those results remain evidence only and are not expectations
+  of the active `public-sync-v2-contract-boundary` corpus entry.
 - `local-sqlite-project-isolation` missed relationship segments
   `GetTask calls queryTask` and `ListPending uses_type QueueEntry`, plus
   authoritative expectations `GetTask calls queryTask` and

@@ -1,22 +1,23 @@
 package mcp
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"reflect"
 	"sort"
-	"strings"
 	"testing"
 )
 
 type alphaMCPContract struct {
-	Mode         string              `json:"mode"`
-	MCPTools     alphaMCPInventories `json:"mcp_tools"`
-	SyncProtocol alphaSyncProtocol   `json:"sync_protocol"`
+	Mode         string                  `json:"mode"`
+	MCPTools     alphaMCPInventories     `json:"mcp_tools"`
+	SyncProtocol alphaPublicSyncProtocol `json:"sync_protocol"`
 }
 
 type alphaMCPInventories struct {
-	Fabric []alphaFabricMCPTool `json:"fabric"`
+	Fabric               []alphaFabricMCPTool `json:"fabric"`
+	PublicFabricContract []ToolDescriptor     `json:"public_fabric_contract"`
 }
 
 type alphaFabricMCPTool struct {
@@ -47,14 +48,8 @@ type alphaSchemaProperty struct {
 	Schema alphaSchema `json:"schema"`
 }
 
-type alphaSyncProtocol struct {
-	Version   int             `json:"version"`
-	WireTypes []alphaWireType `json:"wire_types"`
-}
-
-type alphaWireType struct {
-	Name   string   `json:"name"`
-	Fields []string `json:"fields"`
+type alphaPublicSyncProtocol struct {
+	PublicSchemaDefinitions map[string]map[string]any `json:"public_schema_definitions"`
 }
 
 func TestAlphaContractMCPRegistry(t *testing.T) {
@@ -88,46 +83,35 @@ func fabricMCPContract(t *testing.T) []alphaFabricMCPTool {
 	return actual
 }
 
-func TestAlphaContractFabricSyncProtocol(t *testing.T) {
+func TestAlphaContractMatchesDescriptorOnlyPublicFabricTools(t *testing.T) {
 	manifest := readAlphaMCPContract(t)
-	if SyncProtocolVersion != manifest.SyncProtocol.Version {
-		t.Fatalf("Fabric SyncProtocolVersion = %d, manifest = %d", SyncProtocolVersion, manifest.SyncProtocol.Version)
+	golden := readPublicDescriptorGolden(t)
+	if !reflect.DeepEqual(manifest.MCPTools.PublicFabricContract, golden.Descriptors) ||
+		!reflect.DeepEqual(manifest.SyncProtocol.PublicSchemaDefinitions, golden.Definitions) {
+		t.Fatal("alpha public projection differs from checked-in descriptor authority")
 	}
-
-	pushItems, ok := reflect.TypeOf(IncrementalPushInput{}).FieldByName("Items")
-	if !ok {
-		t.Fatal("IncrementalPushInput has no Items field")
+	want := make([]ToolDescriptor, len(golden.Descriptors))
+	copy(want, golden.Descriptors)
+	for index := range want {
+		want[index].InputSchema = expandGoldenSchema(t, golden.Definitions, want[index].InputSchema).(map[string]any)
+		want[index].OutputSchema = expandGoldenSchema(t, golden.Definitions, want[index].OutputSchema).(map[string]any)
 	}
-	actual := []alphaWireType{
-		{Name: "applied_item", Fields: jsonFieldNames(t, reflect.TypeOf(AppliedItem{}))},
-		{Name: "article_summary", Fields: jsonFieldNames(t, reflect.TypeOf(ArticleSummary{}))},
-		{Name: "bootstrap_request", Fields: jsonFieldNames(t, reflect.TypeOf(BootstrapInput{}))},
-		{Name: "bootstrap_response", Fields: jsonFieldNames(t, reflect.TypeOf(BootstrapOutput{}))},
-		{Name: "conflict_report_request", Fields: jsonFieldNames(t, reflect.TypeOf(ConflictReportInput{}))},
-		{Name: "conflict_report_response", Fields: jsonFieldNames(t, reflect.TypeOf(ConflictReportOutput{}))},
-		{Name: "incremental_pull_request", Fields: jsonFieldNames(t, reflect.TypeOf(IncrementalPullInput{}))},
-		{Name: "incremental_pull_response", Fields: jsonFieldNames(t, reflect.TypeOf(IncrementalPullOutput{}))},
-		{Name: "incremental_pull_update", Fields: jsonFieldNames(t, reflect.TypeOf(syncUpdateEnvelope{}))},
-		{Name: "incremental_push_item", Fields: jsonFieldNames(t, pushItems.Type.Elem())},
-		{Name: "incremental_push_request", Fields: jsonFieldNames(t, reflect.TypeOf(IncrementalPushInput{}))},
-		{Name: "incremental_push_response", Fields: jsonFieldNames(t, reflect.TypeOf(IncrementalPushOutput{}))},
-		{Name: "integration_manifest_change", Fields: jsonFieldNames(t, reflect.TypeOf(IntegrationManifestChange{}))},
-		{Name: "sync_channel_create_payload", Fields: jsonFieldNames(t, reflect.TypeOf(syncChannelCreatePayload{}))},
-		{Name: "sync_channel_pull_payload", Fields: jsonFieldNames(t, reflect.TypeOf(syncChannelPullPayload{}))},
-		{Name: "sync_conflict_audit_payload", Fields: jsonFieldNames(t, reflect.TypeOf(syncConflictAuditPayload{}))},
-		{Name: "sync_event_create_payload", Fields: jsonFieldNames(t, reflect.TypeOf(syncEventCreatePayload{}))},
-		{Name: "sync_event_pull_payload", Fields: jsonFieldNames(t, reflect.TypeOf(syncEventPullPayload{}))},
-		{Name: "sync_git_link_payload", Fields: jsonFieldNames(t, reflect.TypeOf(syncGitLinkPayload{}))},
-		{Name: "sync_kb_create_payload", Fields: jsonFieldNames(t, reflect.TypeOf(syncKBCreatePayload{}))},
-		{Name: "sync_task_create_payload", Fields: jsonFieldNames(t, reflect.TypeOf(syncTaskCreatePayload{}))},
-		{Name: "sync_task_update_payload", Fields: jsonFieldNames(t, reflect.TypeOf(syncTaskUpdatePayload{}))},
-		{Name: "task_summary", Fields: jsonFieldNames(t, reflect.TypeOf(TaskSummary{}))},
+	actual := PublicFabricToolDescriptors()
+	for _, descriptor := range actual {
+		if _, live := NewFabricRegistry(FabricRegistryDependencies{}).Get(descriptor.Name); live {
+			t.Fatalf("public contract %q is live", descriptor.Name)
+		}
 	}
-	sort.Slice(actual, func(i, j int) bool { return actual[i].Name < actual[j].Name })
-	if !reflect.DeepEqual(actual, manifest.SyncProtocol.WireTypes) {
-		got, _ := json.MarshalIndent(actual, "", "  ")
-		want, _ := json.MarshalIndent(manifest.SyncProtocol.WireTypes, "", "  ")
-		t.Fatalf("Fabric sync wire contract drifted\nactual:\n%s\nmanifest:\n%s", got, want)
+	actualJSON, err := json.Marshal(actual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantJSON, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(actualJSON, wantJSON) {
+		t.Fatalf("live public descriptors differ from alpha golden\ngot:  %s\nwant: %s", actualJSON, wantJSON)
 	}
 }
 
@@ -261,19 +245,4 @@ func schemaSnapshot(t *testing.T, schema map[string]any) alphaSchema {
 		sort.Strings(snapshot.Required)
 	}
 	return snapshot
-}
-
-func jsonFieldNames(t *testing.T, valueType reflect.Type) []string {
-	t.Helper()
-	fields := make([]string, 0, valueType.NumField())
-	for i := 0; i < valueType.NumField(); i++ {
-		name := valueType.Field(i).Tag.Get("json")
-		name = strings.Split(name, ",")[0]
-		if name == "" || name == "-" {
-			t.Fatalf("%s field %s has no JSON name", valueType, valueType.Field(i).Name)
-		}
-		fields = append(fields, name)
-	}
-	sort.Strings(fields)
-	return fields
 }

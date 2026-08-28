@@ -1,5 +1,9 @@
 # Task 22 Manual Alpha Validation — July 2026
 
+> Historical evidence: this record measures the removed pre-alpha sync-v1
+> implementation. Its bootstrap/pull/push counts are not current contracts and
+> do not imply a compatibility path.
+
 ## Decision
 
 Gate C passes at repository commit

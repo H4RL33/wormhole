@@ -25,8 +25,6 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
-
-	"github.com/H4RL33/wormhole/internal/types"
 )
 
 var ErrPassportNotFound = errors.New("kb: agent not registered or has no passport for this project")
@@ -274,12 +272,10 @@ func (s *Store) PreparedBootstrapEmbedding(bootstrapKey string) ([]float32, erro
 
 func (s *Store) EmbeddingDescriptor() EmbeddingDescriptor { return s.embedder.Descriptor() }
 
-// WriteArticleWithID inserts a new article under the caller-supplied id
-// instead of letting Postgres assign one. This exists for
-// wormhole.sync.incremental_push (RFC-0003 §8.2), which must preserve the
-// client's local-first article id so the server-side row is findable by the
-// id the client already has; ordinary article writes (wormhole.kb.write)
-// have no local id to preserve and keep calling WriteArticle.
+// WriteArticleWithID inserts an article under a caller-supplied stable ID.
+// This supports portable project-state import while preserving project
+// scoping and replay safety; ordinary article writes keep using the
+// server-generated ID path.
 func (s *Store) WriteArticleWithID(ctx context.Context, id, projectID, agentID, title, body string, frontmatter json.RawMessage, linkTargetIDs []string, force bool) (Article, error) {
 	return s.writeArticleWithOptionalID(ctx, id, "", projectID, agentID, title, body, frontmatter, linkTargetIDs, force)
 }
@@ -825,35 +821,5 @@ func (s *Store) ListArticles(ctx context.Context, projectID string) ([]Article, 
 		return nil, fmt.Errorf("kb: list articles: commit: %w", err)
 	}
 
-	return articles, nil
-}
-
-// ListBootstrapInTx reads every project article through the caller's
-// repeatable-read transaction in the bootstrap contract's deterministic order.
-func (s *Store) ListBootstrapInTx(ctx context.Context, tx *sql.Tx, projectID string) ([]types.BootstrapArticleV1, error) {
-	if tx == nil || projectID == "" {
-		return nil, fmt.Errorf("kb: list bootstrap: invalid scope")
-	}
-	rows, err := tx.QueryContext(ctx, `
-		SELECT `+articleColumns+`
-		FROM kb_articles
-		WHERE project_id = $1
-		ORDER BY created_at DESC, id`, projectID)
-	if err != nil {
-		return nil, fmt.Errorf("kb: list bootstrap: query: %w", err)
-	}
-	defer rows.Close()
-	articles := make([]types.BootstrapArticleV1, 0)
-	for rows.Next() {
-		var article types.BootstrapArticleV1
-		if err := rows.Scan(&article.ID, &article.ProjectID, &article.Title, &article.Body,
-			&article.Frontmatter, &article.AuthorAgentID, &article.CreatedAt, &article.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("kb: list bootstrap: scan: %w", err)
-		}
-		articles = append(articles, article)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("kb: list bootstrap: iterate: %w", err)
-	}
 	return articles, nil
 }

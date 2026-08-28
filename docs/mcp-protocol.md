@@ -141,12 +141,19 @@ tokens, request headers, private keys, or environment contents.
 
 ## Optional Fabric protocol
 
-The optional Fabric binary has a separate 20-tool authenticated HTTP MCP
-registry backed by PostgreSQL. It retains server enrolment, identity, semantic
-KB, task, Git-link, and sync operations. That surface is Gateway-to-server
+The optional Fabric binary has a separate 16-tool private authenticated HTTP
+MCP registry backed by PostgreSQL. It retains server enrolment, identity,
+semantic KB, task, and Git-link operations. That surface is server
 design/coverage, not the live Stage 2 harness path and not a Stage 2 acceptance
 dependency.
 
-Fabric descriptors and sync wire records remain inventoried in
+Slice 1 also publishes exactly ten non-callable public descriptor values: six
+`wormhole.sync.*` v2 tools and four `wormhole.activity.*` v1 tools. Their
+`tools/call` contract carries `proof` beside `name` and `arguments`; their
+closed failure result contains only `code` and `operation`. They have no
+`Handler`, are absent from the live private registry, and cannot be dispatched
+until production assembly lands.
+
+Fabric private descriptors and public contract values remain inventoried in
 [`contracts/alpha-contract.json`](contracts/alpha-contract.json). Their
 presence does not authorise adding those names to Gateway `tools/list`.

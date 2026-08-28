@@ -8,34 +8,20 @@ import (
 
 func TestMCPAudit_ToolSurfaceCompleteness(t *testing.T) {
 	r := NewFabricRegistry(FabricRegistryDependencies{})
-
 	expectedTools := map[string]bool{
-		"wormhole.agent.enrol":           false, // Gateway-owned pre-credential path
-		"wormhole.agent.whoami":          true,
-		"wormhole.channel.create":        true,
-		"wormhole.channel.post":          true,
-		"wormhole.channel.subscribe":     true,
-		"wormhole.channel.list":          true,
-		"wormhole.task.create":           true,
-		"wormhole.task.assign":           true,
-		"wormhole.task.update_status":    true,
-		"wormhole.task.list":             true,
-		"wormhole.kb.search":             true,
-		"wormhole.kb.write":              true,
-		"wormhole.kb.get":                true,
-		"wormhole.kb.get_links":          true,
-		"wormhole.git.link_commit":       true,
-		"wormhole.git.request_review":    true,
-		"wormhole.sync.bootstrap":        true,
-		"wormhole.sync.conflict_report":  true,
-		"wormhole.sync.incremental_pull": true,
-		"wormhole.sync.incremental_push": true,
+		"wormhole.agent.enrol": false, "wormhole.agent.whoami": true,
+		"wormhole.channel.create": true, "wormhole.channel.post": true,
+		"wormhole.channel.subscribe": true, "wormhole.channel.list": true,
+		"wormhole.task.create": true, "wormhole.task.assign": true,
+		"wormhole.task.update_status": true, "wormhole.task.list": true,
+		"wormhole.kb.search": true, "wormhole.kb.write": true,
+		"wormhole.kb.get": true, "wormhole.kb.get_links": true,
+		"wormhole.git.link_commit": true, "wormhole.git.request_review": true,
 	}
-
 	for name, requiresAuth := range expectedTools {
 		tool, ok := r.Get(name)
 		if !ok {
-			t.Errorf("missing RFC-specified tool: %s", name)
+			t.Errorf("missing retained private tool: %s", name)
 			continue
 		}
 		if tool.RequiresAuth != requiresAuth {
@@ -43,7 +29,6 @@ func TestMCPAudit_ToolSurfaceCompleteness(t *testing.T) {
 		}
 	}
 
-	// Ensure no unexpected extra tools exist
 	for _, tool := range r.List() {
 		if _, ok := expectedTools[tool.Name]; !ok {
 			t.Errorf("unexpected tool registered: %s", tool.Name)

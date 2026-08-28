@@ -9,8 +9,6 @@ import (
 	"reflect"
 	"strings"
 	"time"
-
-	"github.com/H4RL33/wormhole/internal/types"
 )
 
 var ErrInvalidEventType = errors.New("events: invalid event type")
@@ -103,13 +101,10 @@ func (s *Store) EnsureChannelInTx(ctx context.Context, tx *sql.Tx, projectID, na
 	return channel, nil
 }
 
-// CreateChannelWithID inserts a new channel under the caller-supplied id
-// instead of letting Postgres assign one. This exists for
-// wormhole.sync.incremental_push (RFC-0003 §8.2), which must preserve the
-// client's local-first channel id so the server-side row is findable by the
-// id the client already has; ordinary channel creation
-// (wormhole.channel.create) has no local id to preserve and keeps calling
-// CreateChannel.
+// CreateChannelWithID inserts a channel under a caller-supplied stable ID.
+// This supports portable project-state import while preserving project
+// scoping and replay safety; ordinary channel creation keeps using the
+// server-generated ID path.
 func (s *Store) CreateChannelWithID(ctx context.Context, id, projectID, name string) (Channel, error) {
 	return s.createChannelWithOptionalID(ctx, id, projectID, name)
 }
@@ -202,55 +197,6 @@ func (s *Store) ListChannels(ctx context.Context, projectID string) ([]Channel, 
 	return channels, nil
 }
 
-// ListBootstrapInTx reads every channel and durable event in deterministic
-// order through the caller's project-scoped repeatable-read transaction.
-func (s *Store) ListBootstrapInTx(ctx context.Context, tx *sql.Tx, projectID string) ([]types.BootstrapChannelV1, []types.BootstrapEventV1, error) {
-	if tx == nil || projectID == "" {
-		return nil, nil, fmt.Errorf("events: list bootstrap: invalid scope")
-	}
-	channelRows, err := tx.QueryContext(ctx,
-		`SELECT `+channelColumns+` FROM channels WHERE project_id = $1 ORDER BY name, id`, projectID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("events: list bootstrap channels: query: %w", err)
-	}
-	channels := make([]types.BootstrapChannelV1, 0)
-	for channelRows.Next() {
-		var channel types.BootstrapChannelV1
-		if err := channelRows.Scan(&channel.ID, &channel.ProjectID, &channel.Name, &channel.CreatedAt); err != nil {
-			channelRows.Close()
-			return nil, nil, fmt.Errorf("events: list bootstrap channels: scan: %w", err)
-		}
-		channels = append(channels, channel)
-	}
-	if err := channelRows.Err(); err != nil {
-		channelRows.Close()
-		return nil, nil, fmt.Errorf("events: list bootstrap channels: iterate: %w", err)
-	}
-	if err := channelRows.Close(); err != nil {
-		return nil, nil, fmt.Errorf("events: list bootstrap channels: close: %w", err)
-	}
-
-	eventRows, err := tx.QueryContext(ctx,
-		`SELECT `+eventColumns+` FROM events WHERE project_id = $1 ORDER BY created_at, id`, projectID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("events: list bootstrap events: query: %w", err)
-	}
-	defer eventRows.Close()
-	events := make([]types.BootstrapEventV1, 0)
-	for eventRows.Next() {
-		var event types.BootstrapEventV1
-		if err := eventRows.Scan(&event.ID, &event.ProjectID, &event.ChannelID, &event.AgentID,
-			&event.EventType, &event.Payload, &event.Note, &event.CreatedAt); err != nil {
-			return nil, nil, fmt.Errorf("events: list bootstrap events: scan: %w", err)
-		}
-		events = append(events, event)
-	}
-	if err := eventRows.Err(); err != nil {
-		return nil, nil, fmt.Errorf("events: list bootstrap events: iterate: %w", err)
-	}
-	return channels, events, nil
-}
-
 func (s *Store) GetChannel(ctx context.Context, projectID, channelID string) (Channel, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -328,14 +274,10 @@ func (s *Store) PublishEvent(ctx context.Context, projectID, channelID, agentID,
 	return event, nil
 }
 
-// PublishEventWithID inserts a new event under the caller-supplied id
-// instead of letting Postgres assign one. This exists for
-// wormhole.sync.incremental_push (RFC-0003 §8.2), which must preserve the
-// client's local-first event id so the server-side row is findable by the
-// id the client already has; ordinary event publishing
-// (wormhole.event.publish and internal callers like
-// tasks.Store.UpdateStatus via PublishEventInTx) has no local id to
-// preserve and keeps calling PublishEvent / PublishEventInTx.
+// PublishEventWithID inserts an event under a caller-supplied stable ID. This
+// supports portable project-state import while preserving project scoping and
+// replay safety; ordinary event publication keeps using the server-generated
+// ID path.
 func (s *Store) PublishEventWithID(ctx context.Context, id, projectID, channelID, agentID, eventType string, payload json.RawMessage, note *string) (Event, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

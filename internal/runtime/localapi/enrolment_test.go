@@ -1,6 +1,7 @@
 package localapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -738,5 +739,132 @@ func TestEnrolmentResultValidationKeepsRecoveryExplicit(t *testing.T) {
 	}
 	if err := invalid.Validate(); !errors.Is(err, ErrInvalidEnrolmentResult) {
 		t.Fatalf("invalid recovery result error = %v", err)
+	}
+}
+
+func persistedEnrolmentReplayFixture(t *testing.T, state EnrolmentState) (*Server, EnrolmentRequest, *atomic.Int32) {
+	t.Helper()
+	var calls atomic.Int32
+	fabric := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls.Add(1)
+	}))
+	t.Cleanup(fabric.Close)
+	srv, _ := newMCPTestServer(t)
+	srv.httpClient = fabric.Client()
+	req := validEnrolmentRequest()
+	req.FabricAddress = fabric.URL
+	credentialsDir := filepath.Join(t.TempDir(), "credentials")
+	srv.SetEnrolmentRuntime(staticEnrolmentPolicySource{envelope: validEnrolmentEnvelope()}, credentialsDir)
+	requestHash, err := canonicalEnrolmentRequestHash(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, _, err := srv.store.ResolveEnrolmentAttempt(context.Background(), localstore.EnrolmentAttemptRecord{
+		ProjectID: req.ProjectID, IdempotencyKey: req.IdempotencyKey,
+		RequestHash: requestHash, State: string(EnrolmentRequested),
+		CredentialProfile: req.CredentialProfile,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.store.UpdateEnrolmentAttempt(context.Background(), stored,
+		string(state), "agent-1", "passport-1", state == EnrolmentReady); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtimeconfig.WriteCredentialProfile(credentialsDir, req.CredentialProfile, runtimeconfig.Credentials{
+		Server: req.FabricAddress, ProjectID: req.ProjectID, AgentID: "agent-1",
+		PassportID: "passport-1", Token: "never-return-this-secret",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return srv, req, &calls
+}
+
+func durableEnrolmentState(t *testing.T, srv *Server, req EnrolmentRequest) EnrolmentState {
+	t.Helper()
+	var state string
+	if err := srv.store.DB().QueryRowContext(context.Background(),
+		`SELECT state FROM enrolment_attempts WHERE project_id = ? AND idempotency_key = ?`,
+		req.ProjectID, req.IdempotencyKey).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	return EnrolmentState(state)
+}
+
+func TestRetainedEnrolmentNormalizesPostCredentialSurvivorsWithoutRemoteCall(t *testing.T) {
+	for _, state := range []EnrolmentState{EnrolmentBootstrapInProgress, EnrolmentRecoveryRequired} {
+		t.Run(string(state), func(t *testing.T) {
+			srv, req, calls := persistedEnrolmentReplayFixture(t, state)
+			got := srv.executeEnrolment(context.Background(), req)
+			if got.Code != EnrolmentCredentialsPersistedResult ||
+				got.State != EnrolmentCredentialsPersisted || !got.Retryable {
+				t.Fatalf("result = %+v", got)
+			}
+			if state := durableEnrolmentState(t, srv, req); state != EnrolmentCredentialsPersisted {
+				t.Fatalf("durable state = %q, want %q", state, EnrolmentCredentialsPersisted)
+			}
+			if calls.Load() != 0 {
+				t.Fatalf("remote calls = %d, want 0", calls.Load())
+			}
+		})
+	}
+}
+
+func TestRetainedEnrolmentPersistedReplayIsIdempotentWithoutRemoteCall(t *testing.T) {
+	srv, req, calls := persistedEnrolmentReplayFixture(t, EnrolmentCredentialsPersisted)
+	got := srv.executeEnrolment(context.Background(), req)
+	if got.Code != EnrolmentCredentialsPersistedResult ||
+		got.State != EnrolmentCredentialsPersisted || !got.Retryable {
+		t.Fatalf("result = %+v", got)
+	}
+	if state := durableEnrolmentState(t, srv, req); state != EnrolmentCredentialsPersisted {
+		t.Fatalf("durable state = %q", state)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("remote calls = %d, want 0", calls.Load())
+	}
+}
+
+func TestRetainedHistoricalReadyReplayRemainsTerminalWithoutRemoteCall(t *testing.T) {
+	srv, req, calls := persistedEnrolmentReplayFixture(t, EnrolmentReady)
+	got := srv.executeEnrolment(context.Background(), req)
+	if got.Code != EnrolmentSuccess || got.State != EnrolmentReady || got.Retryable {
+		t.Fatalf("result = %+v", got)
+	}
+	if state := durableEnrolmentState(t, srv, req); state != EnrolmentReady {
+		t.Fatalf("durable state = %q", state)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("remote calls = %d, want 0", calls.Load())
+	}
+}
+
+func TestRetainedEnrolmentNormalizationPersistenceFailureIsSafe(t *testing.T) {
+	srv, req, calls := persistedEnrolmentReplayFixture(t, EnrolmentBootstrapInProgress)
+	if _, err := srv.store.DB().Exec(`
+		CREATE TRIGGER fail_credentials_persisted
+		BEFORE UPDATE OF state ON enrolment_attempts
+		WHEN NEW.state = 'credentials_persisted'
+		BEGIN SELECT RAISE(ABORT, 'injected persistence failure'); END
+	`); err != nil {
+		t.Fatal(err)
+	}
+	got := srv.executeEnrolment(context.Background(), req)
+	if got.Code != EnrolmentCredentialPersistenceFailed ||
+		got.State != EnrolmentRecoveryRequired || !got.Retryable {
+		t.Fatalf("result = %+v", got)
+	}
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte("never-return-this-secret")) {
+		t.Fatalf("safe failure exposed credential: %s", raw)
+	}
+	if state := durableEnrolmentState(t, srv, req); state != EnrolmentBootstrapInProgress {
+		t.Fatalf("failed normalization mutated durable state to %q", state)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("remote calls = %d, want 0", calls.Load())
 	}
 }

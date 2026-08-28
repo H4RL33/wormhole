@@ -58,7 +58,7 @@ test proves:
 Harnesses connect to Gateway, whose live Stage 2 registry is closed at these
 17 tools.
 
-### Gateway MCP (17 tools)
+### Gateway MCP (17 live tools)
 
 ```text
 wormhole.agent.list
@@ -118,11 +118,11 @@ or contact the public network.
 
 ## Optional Fabric/PostgreSQL coverage
 
-The optional Fabric binary retains a distinct authenticated HTTP MCP inventory
-of exactly 20 tools. Fabric is not a direct harness endpoint and this coverage
-is not a Stage 2 acceptance dependency.
+The optional Fabric binary retains a distinct authenticated HTTP MCP private
+inventory of exactly 16 live tools. Fabric is not a direct harness endpoint and
+this coverage is not a Stage 2 acceptance dependency.
 
-### Fabric MCP (20 tools)
+### Fabric private MCP (16 live tools)
 
 ```text
 wormhole.agent.enrol
@@ -137,14 +137,25 @@ wormhole.kb.get
 wormhole.kb.get_links
 wormhole.kb.search
 wormhole.kb.write
-wormhole.sync.bootstrap
-wormhole.sync.conflict_report
-wormhole.sync.incremental_pull
-wormhole.sync.incremental_push
 wormhole.task.assign
 wormhole.task.create
 wormhole.task.list
 wormhole.task.update_status
+```
+
+### Fabric public contract (10 descriptor-only tools)
+
+```text
+wormhole.activity.accept
+wormhole.activity.lifecycle
+wormhole.activity.presence
+wormhole.activity.pull
+wormhole.sync.attach
+wormhole.sync.bootstrap
+wormhole.sync.conflict
+wormhole.sync.issue_agent_session
+wormhole.sync.pull
+wormhole.sync.push
 ```
 
 Fabric and PostgreSQL remain mandatory repository-quality boundaries even
@@ -152,17 +163,18 @@ though they are not part of the local-only Stage 2 process topology. The former
 combined Gateway/Fabric process tests were retired when Gateway removed remote
 tools and network wiring. Their executable replacement map is:
 
-| Retired combined assertion | Executable boundary replacements |
+| Retired or separated assertion | Executable boundary replacements |
 |---|---|
 | stdio bridge, Unix socket, local Gateway writes, private attribution, restart, checkpoint and portable clone convergence | `TestStage2LocalOnlyRealProcessAcceptance`; `TestConfiguredPrivateRuntimeDerivesAttributionAndIsolatesChannelAndKBHandlers`; `TestStage2ConfiguredSyncStatusReportsQueueFreeLocalOnlyState` |
-| Fabric HTTP MCP enrolment and Postgres pillar persistence | `TestM3_MCPSeededStateReflectedInDashboard`; `TestEnrolAgentTool_DurableReplayAndControlledReissue`; `TestEnrolAgentToolBootstrapFailureRollsBackAndRetryIsIdempotent` |
-| Fabric bootstrap, incremental push/pull, replay safety and routed-owner fidelity | `TestBootstrapTool_ReturnsCompleteDeterministicSnapshot`; `TestAlphaAcceptanceIncrementalTaskEventAndGitPropagationIsReplaySafe`; `TestIncrementalPushTool_IdenticalReplaySucceedsWithoutDuplicateEffects`; `TestIncrementalPushTool_AppliesRoutedTaskOwner` |
-| Fabric HTTP MCP authenticated bootstrap/push/pull, replay and routed-owner persistence | `TestFabricHTTPSyncRoundTripPersistsReplayAndOwner` |
-| server snapshot application and cross-runtime convergence | `TestBootstrap_AppliesServerTasksAndKBToLocalStore`; `TestPullIncremental_AppliesServerUpdatesToLocalStore`; `TestSyncLoopPullsWithEmptyQueue`; `TestP7_MultiRuntimeSync` |
-| durable offline queue, restart and reconnect | `TestP7_SyncQueueDurability`; `TestEngineQueuePersistence`; `TestOfflineQueueSurvivalNetworkFailure`; `TestOfflineQueueReconnect`; `TestLocalDurableWrites_SuccessSurvivesRestartWithPendingQueue` |
+| Fabric HTTP MCP enrolment and retained Postgres pillar persistence | `TestM3_MCPSeededStateReflectedInDashboard`; `TestEnrolAgentTool_DurableReplayAndControlledReissue`; `TestEnrolAgentToolBootstrapFailureRollsBackAndRetryIsIdempotent` |
+| Fabric sync-v1 snapshots, incremental transfer, and compatibility decoders | `TestFabricRegistryRetainsExactPrivateSixteen`; `TestPublicFabricToolDescriptorsAreExactSortedDescriptorValues`; `TestAlphaContractMatchesDescriptorOnlyPublicFabricTools`; `TestAlphaContractOwnsSharedV2RecordBoundary` |
+| Gateway sync-v1 engine construction and cross-runtime convergence | `TestV2EngineStatusPreservesExactLocalWire`; `TestNilV2EngineStatusFailsWithoutPanic`; existing Activity transport, localstore, policy, lifecycle, and promotion suites |
+| durable local queue, restart, and delivery bookkeeping | `TestP7_LocalQueueDeliveryLifecycle`; `TestP7_SyncQueueDurability`; the complete `internal/runtime/sync/queue_repo_test.go` suite |
 | single-Gateway multi-workspace and project isolation | `TestCrossWorkspacePrivateContextResolvesSiblingExactly`; `TestConfiguredPrivateRuntimeDerivesAttributionAndIsolatesChannelAndKBHandlers`; `TestWorkspaceScopeMismatchIsRejected`; `TestSyncQueueCrossNamespaceRejection` |
-| enrolment credential/bootstrap failure recovery and separated tool ownership | `TestEnrolmentResumesDurableAttemptAfterRestartAndReissuesOnce`; `TestEnrolmentBootstrapFailureRecoversWithoutReregistrationAndStartsIncrementalAfterCommit`; `TestStage2FinalPublicMCPInventory`; `TestAlphaContractMCPRegistry`; `TestFabricRegistryIncludesGatewayEnrolmentEndpoint` |
-| Fabric token, tenant and vector isolation | `TestMCP_MultiTenantIsolation`; `TestAgentEnrolmentsRLSHidesProjectBWhileScopedToProjectA`; `TestRestrictedRoleRLSOperationMatrix`; `TestRestrictedRoleRejectsCrossProjectForeignReferences`; `TestRestrictedRoleKBVectorQueryCannotCrossProject` |
+| enrolment credential/bootstrap continuation | `TestRetainedEnrolmentNormalizesPostCredentialSurvivorsWithoutRemoteCall`; `TestRetainedEnrolmentPersistedReplayIsIdempotentWithoutRemoteCall`; `TestRetainedHistoricalReadyReplayRemainsTerminalWithoutRemoteCall`; `TestRetainedEnrolmentNormalizationPersistenceFailureIsSafe`; `TestEnrolAgentTool_DurableReplayAndControlledReissue`; credential failure, restart/reissue, replay, concurrency, redaction, and transition-contract tests |
+| descriptor/protocol drift | `TestSyncV2MCPAliasesAreTypeIdentical`; `TestClosedSchemaHandlesAnonymousTimeBytesRawMapsInterfacesConstAndOneOf`; `TestPublicToolFailureResultHasExactCanonicalSafeBytes` |
+| production public sync/Activity execution | Descriptor-only in Slice 1; later slices own callable handler, auth, persistence, and production-assembly acceptance |
+| Fabric token, tenant, and vector isolation | `TestMCP_MultiTenantIsolation`; `TestAgentEnrolmentsRLSHidesProjectBWhileScopedToProjectA`; `TestRestrictedRoleRLSOperationMatrix`; `TestRestrictedRoleRejectsCrossProjectForeignReferences`; `TestRestrictedRoleKBVectorQueryCannotCrossProject` |
 
 No row restores a removed Gateway tool or makes Fabric part of Stage 2. The
 repository gate runs all of these tests with the database required, so a missing

@@ -477,8 +477,8 @@ func TestCredentialRecoveryFlow(t *testing.T) {
 		Token:     "token-regenerated", // different token, same identity
 	}
 
-	// In a real flow, the daemon would call wormhole.sync.bootstrap or similar
-	// to get the regenerated token. Here we just verify the identity is preserved.
+	// A later sync-v2 assembly may refresh this cache through a public handler;
+	// this test exercises only local multi-org routing.
 	if org.Credentials.AgentID != recoveredCred.AgentID {
 		t.Errorf("identity lost during recovery: got %q, want %q",
 			org.Credentials.AgentID, recoveredCred.AgentID)
@@ -629,17 +629,4 @@ func TestMultiOrgHandlerIsolation(t *testing.T) {
 	}
 
 	t.Logf("handler isolation verified: org-a and org-b tasks remain in separate namespaces")
-}
-
-// TestBootstrapLifecycle is a placeholder for the full bootstrap flow
-// (RFC-0003 §8.1: Authentication → Enrolment → Bootstrap → Sync → Normal Operation).
-// Full implementation comes in P6 with Coordination Server retrofit.
-func TestBootstrapLifecycle(t *testing.T) {
-	t.Logf("bootstrap lifecycle test (P5/P6): full flow with Coordination Server retry pending P6")
-	// Steps:
-	// 1. Authentication: wormhole CLI calls Gateway with server/credentials
-	// 2. Enrolment: Gateway registers with Fabric (via agent.register or sync.bootstrap)
-	// 3. Bootstrap: Gateway pulls initial org config, KB, tasks via wormhole.sync.bootstrap
-	// 4. Synchronisation: incremental sync via wormhole.sync.* tools
-	// 5. Normal operation: local reads/writes, async sync to server
 }

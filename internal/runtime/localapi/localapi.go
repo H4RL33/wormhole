@@ -153,7 +153,6 @@ type Server struct {
 	qr                    *syncpkg.QueueRepo
 	statusProvider        SyncStatusProvider
 	integrationGuidance   IntegrationGuidanceProvider
-	integrationReceiver   syncpkg.IntegrationManifestReceiver
 	integrationService    *IntegrationManifestService
 	recoveryOnlyProjects  sync.Map // map[projectID]struct{}
 	recoveryOnlyInventory atomic.Bool
@@ -197,10 +196,6 @@ type Server struct {
 	writeCredentialProfile func(string, string, config.Credentials) (string, error)
 	credentialProfileLocks sync.Map // map[profile]*sync.Mutex
 
-	enrolmentBootstrapMu      sync.Mutex
-	enrolmentBootstrapEnabled bool
-	enrolmentSyncConfig       syncpkg.Config
-	enrolmentSyncEngines      map[string]*syncpkg.Engine
 }
 
 func (s *Server) SetVersion(version string) {
@@ -225,14 +220,13 @@ func (s *Server) SetIntegrationGuidanceProvider(provider IntegrationGuidanceProv
 	s.integrationGuidance = provider
 }
 
-// SetIntegrationManifestService binds one authoritative service to both the
-// read-only MCP guidance surface and every sync engine created by enrolment.
+// SetIntegrationManifestService binds one authoritative service to the
+// read-only MCP guidance and local integration-management surfaces.
 func (s *Server) SetIntegrationManifestService(service *IntegrationManifestService) {
 	if service == nil {
 		return
 	}
 	s.integrationGuidance = service
-	s.integrationReceiver = service
 	s.integrationService = service
 }
 
@@ -359,7 +353,6 @@ func (s *Server) Close() error {
 		s.admissionMu.Unlock()
 
 		s.handlerWG.Wait()
-		s.stopEnrolmentSyncEngines()
 	})
 	return s.closeErr
 }

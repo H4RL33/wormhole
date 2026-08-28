@@ -227,10 +227,12 @@ Gateway serves agent, Channel, KB, sync-status, and workspace operations without
 Fabric or PostgreSQL. Operational activity and selected human/agent/session state
 remain private to the local Gateway.
 
-The repository also retains an optional 20-tool Fabric server and broader Core,
-sync, Code Graph, and integration-manifest packages. Those packages have their
-own rules below, but their presence does not make their tools or network paths a
-live Stage 2 Gateway feature. Governance is optional and must not leak into Core.
+The repository also retains an optional Fabric server whose live private
+registry has exactly 16 tools. Its ten public sync-v2 and Activity-v1 contracts
+are descriptor-only until production assembly. Broader Core, sync, Code Graph,
+and integration-manifest packages have their own rules below, but their presence
+does not make their tools or network paths a live Stage 2 Gateway feature.
+Governance is optional and must not leak into Core.
 
 ```text
 Human CLI                         Harness MCP bridges
@@ -467,8 +469,9 @@ the same layering pattern and isolation discipline.
   Outside such a slice, do not invent or silently drift a tool contract.
 - M2: Naming grammar is `wormhole.<namespace-noun>.<verb>`. The exact 17-tool Gateway
   inventory uses only `agent`, `channel`, `kb`, `sync.status`, and the Gateway-local
-  `workspace` status/diff/import/checkpoint/stash operations. The optional 20-tool
-  Fabric registry separately uses agent, channel, task, kb, git, and sync namespaces.
+  `workspace` status/diff/import/checkpoint/stash operations. The optional Fabric
+  live private registry has exactly 16 agent, channel, task, kb, and git tools; its
+  exact ten sync-v2 and Activity-v1 public contracts are descriptor-only in Slice 1.
   A namespace present in retained code is not automatically live in either registry.
   No other prefix may be added without an RFC change; `wormhole.governance.*` is
   governed by optional RFC-0002 and remains out of Core.

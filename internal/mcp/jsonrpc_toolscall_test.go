@@ -160,17 +160,10 @@ func TestHandleToolsCall_ToolHandlerErrorIsIsError(t *testing.T) {
 	}
 }
 
-// TestHandleToolsCall_ForwardsAuthResolvedProjectID is a regression test for
-// the dispatch bug first diagnosed by the retired combined Gateway/Fabric E2E
-// test. TestIncrementalPushTool_AppliesRoutedTaskOwner now exercises the
-// corresponding owner-fidelity invariant at the Fabric/Postgres boundary:
-// HandleToolsCall must forward scope.ProjectID (the auth-resolved project)
-// to tool.Handler, not the raw client-supplied project_id from
-// extractProjectID. The sync engine (internal/runtime/sync) never sends
-// project_id on its tool calls — it authenticates via bearer token only and
-// relies on dispatch to resolve the real project — so this test mirrors that
-// shape: a RequiresAuth tool called with arguments that omit project_id
-// entirely.
+// TestHandleToolsCall_ForwardsAuthResolvedProjectID guards the private MCP
+// boundary: a caller may omit the untrusted project_id comparison claim, but
+// dispatch must still pass the project resolved from its bearer credential to
+// the handler. Descriptor-only public tools do not use this private path.
 func TestHandleToolsCall_ForwardsAuthResolvedProjectID(t *testing.T) {
 	identityStore := testIdentityStore(t)
 	registry := NewRegistry()

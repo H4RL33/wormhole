@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -79,12 +78,9 @@ func (s *Store) Create(ctx context.Context, projectID, title, description string
 	return s.createWithOptionalID(ctx, "", projectID, title, description, parentTaskID, nil, priority, dueBy)
 }
 
-// CreateWithID inserts a new task under the caller-supplied id instead of
-// letting Postgres assign one. This exists for wormhole.sync.incremental_push
-// (RFC-0003 §8.2), which must preserve the client's local-first task id so
-// the server-side row is findable by the id the client already has; ordinary
-// task creation (wormhole.task.create) has no local id to preserve and keeps
-// calling Create.
+// CreateWithID inserts a task under a caller-supplied stable ID. This supports
+// portable project-state import while preserving project scoping and replay
+// safety; ordinary task creation keeps using the server-generated ID path.
 func (s *Store) CreateWithID(ctx context.Context, id, projectID, title, description string, parentTaskID *string, priority int, dueBy *time.Time) (Task, error) {
 	return s.createWithOptionalID(ctx, id, projectID, title, description, parentTaskID, nil, priority, dueBy)
 }
@@ -279,81 +275,6 @@ func (s *Store) List(ctx context.Context, projectID string, status *string) ([]T
 		return nil, fmt.Errorf("tasks: list: commit: %w", err)
 	}
 	return tasks, nil
-}
-
-// ListBootstrapInTx reads the complete project task graph through the caller's
-// repeatable-read transaction and returns a deterministic parent-before-child
-// topological order, breaking available-node ties by created_at then id.
-func (s *Store) ListBootstrapInTx(ctx context.Context, tx *sql.Tx, projectID string) ([]types.BootstrapTaskV1, error) {
-	if tx == nil || projectID == "" {
-		return nil, fmt.Errorf("tasks: list bootstrap: invalid scope")
-	}
-	rows, err := tx.QueryContext(ctx, `SELECT `+taskColumns+` FROM tasks WHERE project_id = $1 ORDER BY created_at, id`, projectID)
-	if err != nil {
-		return nil, fmt.Errorf("tasks: list bootstrap: query: %w", err)
-	}
-	defer rows.Close()
-
-	all := make([]types.BootstrapTaskV1, 0)
-	for rows.Next() {
-		var task types.BootstrapTaskV1
-		if err := rows.Scan(&task.ID, &task.ProjectID, &task.ParentTaskID, &task.Title, &task.Description,
-			&task.OwnerAgentID, &task.Status, &task.Priority, &task.DueBy, &task.CreatedAt, &task.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("tasks: list bootstrap: scan: %w", err)
-		}
-		all = append(all, task)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("tasks: list bootstrap: iterate: %w", err)
-	}
-
-	byID := make(map[string]types.BootstrapTaskV1, len(all))
-	children := make(map[string][]string, len(all))
-	indegree := make(map[string]int, len(all))
-	for _, task := range all {
-		byID[task.ID] = task
-		indegree[task.ID] = 0
-	}
-	for _, task := range all {
-		if task.ParentTaskID == nil {
-			continue
-		}
-		if _, ok := byID[*task.ParentTaskID]; !ok {
-			return nil, fmt.Errorf("tasks: list bootstrap: task %q references missing parent %q", task.ID, *task.ParentTaskID)
-		}
-		children[*task.ParentTaskID] = append(children[*task.ParentTaskID], task.ID)
-		indegree[task.ID]++
-	}
-	lessID := func(left, right string) bool {
-		a, b := byID[left], byID[right]
-		if a.CreatedAt.Equal(b.CreatedAt) {
-			return a.ID < b.ID
-		}
-		return a.CreatedAt.Before(b.CreatedAt)
-	}
-	ready := make([]string, 0, len(all))
-	for id, degree := range indegree {
-		if degree == 0 {
-			ready = append(ready, id)
-		}
-	}
-	ordered := make([]types.BootstrapTaskV1, 0, len(all))
-	for len(ready) > 0 {
-		sort.Slice(ready, func(i, j int) bool { return lessID(ready[i], ready[j]) })
-		id := ready[0]
-		ready = ready[1:]
-		ordered = append(ordered, byID[id])
-		for _, childID := range children[id] {
-			indegree[childID]--
-			if indegree[childID] == 0 {
-				ready = append(ready, childID)
-			}
-		}
-	}
-	if len(ordered) != len(all) {
-		return nil, fmt.Errorf("tasks: list bootstrap: task graph contains a cycle")
-	}
-	return ordered, nil
 }
 
 // UpdateStatus moves a task to newStatus, rejecting any transition not in

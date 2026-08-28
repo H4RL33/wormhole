@@ -33,11 +33,12 @@ bindings, selected human/agent/session identity, and credentials stay in
 machine-private state. They do not become portable merely because a portable
 Channel, KB record, or actor record refers to the same subject.
 
-Fabric is optional. Its PostgreSQL-backed 20-tool server surface is retained
-for separate non-Stage 2 testing; Gateway setup, normal local work, acceptance,
-restart, and clone equivalence do not require or contact it. Live Gateway tools
-do not expose Task, Git-link, semantic KB search, enrolment, or managed-guidance
-operations.
+Fabric is optional. Its PostgreSQL-backed live private registry has exactly 16
+tools; ten public sync-v2 and Activity-v1 contracts are descriptor-only and
+non-callable in Slice 1. Gateway setup, normal local work, acceptance, restart,
+and clone equivalence do not require or contact either surface. Live Gateway
+tools do not expose Task, Git-link, semantic KB search, enrolment, or
+managed-guidance operations.
 
 ## Documentation authority
 

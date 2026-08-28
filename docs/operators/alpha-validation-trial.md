@@ -69,8 +69,9 @@ denial, or non-denial failure.
 This Stage 2 trial does not exercise Fabric or PostgreSQL. It does not provision
 profiles, enrol remote identities, approve managed guidance, simulate a sync
 outage, or claim live Task, semantic search, Git-link, or guidance tools. The
-optional Fabric server's exact 20-tool registry is tested separately and is not
-a participant harness endpoint.
+optional Fabric server's exact 16-tool live private registry is tested
+separately. Its ten public sync-v2 and Activity-v1 contracts are descriptor-only
+and non-callable in Slice 1; neither surface is a participant harness endpoint.
 
 ### 2. Exercise portable records and private operations
 

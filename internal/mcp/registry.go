@@ -26,11 +26,9 @@ type Tool struct {
 	Description  string `json:"description"`
 	RequiresAuth bool   `json:"requires_auth"`
 	// RequiredPermission is the fine-grained permission string a caller's
-	// AuthenticatedScope must carry to invoke this tool (RFC-0001 §8.4). It
-	// is the tool Name minus the "wormhole." prefix. Empty means "any
-	// authenticated caller" and is used only for self-identification
-	// (whoami) and Gateway transport (sync.*). Meaningful only when
-	// RequiresAuth is true.
+	// AuthenticatedScope must carry to invoke this live private tool. Empty is
+	// reserved for the authenticated self-identification tool, whoami.
+	// Descriptor-only public contracts do not use Tool or Handler.
 	RequiredPermission string `json:"required_permission,omitempty"`
 	// ArgumentsExample is a zero-value instance of the tool's argument
 	// struct (e.g. CreateTaskInput{}), used by tools/list's schema

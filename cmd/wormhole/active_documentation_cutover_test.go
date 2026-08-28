@@ -82,9 +82,8 @@ func TestStage2ActiveDocumentationHasNoRemovedPublicSurfaces(t *testing.T) {
 	}
 }
 
-func TestStage2AlphaValidationDocumentsExactMCPInventories(t *testing.T) {
+func TestActiveValidationDocumentsLiveAndDescriptorOnlyMCPInventories(t *testing.T) {
 	t.Parallel()
-
 	content, err := os.ReadFile("../../docs/testing/alpha-validation.md")
 	if err != nil {
 		t.Fatal(err)
@@ -96,20 +95,25 @@ func TestStage2AlphaValidationDocumentsExactMCPInventories(t *testing.T) {
 		"wormhole.sync.status",
 		"wormhole.workspace.checkpoint", "wormhole.workspace.diff", "wormhole.workspace.import", "wormhole.workspace.stash", "wormhole.workspace.status",
 	}
-	wantFabric := []string{
+	wantPrivateFabric := []string{
 		"wormhole.agent.enrol", "wormhole.agent.whoami",
 		"wormhole.channel.create", "wormhole.channel.list", "wormhole.channel.post", "wormhole.channel.subscribe",
 		"wormhole.git.link_commit", "wormhole.git.request_review",
 		"wormhole.kb.get", "wormhole.kb.get_links", "wormhole.kb.search", "wormhole.kb.write",
-		"wormhole.sync.bootstrap", "wormhole.sync.conflict_report", "wormhole.sync.incremental_pull", "wormhole.sync.incremental_push",
 		"wormhole.task.assign", "wormhole.task.create", "wormhole.task.list", "wormhole.task.update_status",
+	}
+	wantPublicContract := []string{
+		"wormhole.activity.accept", "wormhole.activity.lifecycle", "wormhole.activity.presence", "wormhole.activity.pull",
+		"wormhole.sync.attach", "wormhole.sync.bootstrap", "wormhole.sync.conflict", "wormhole.sync.issue_agent_session",
+		"wormhole.sync.pull", "wormhole.sync.push",
 	}
 	for _, inventory := range []struct {
 		heading string
 		want    []string
 	}{
-		{heading: "### Gateway MCP (17 tools)", want: wantGateway},
-		{heading: "### Fabric MCP (20 tools)", want: wantFabric},
+		{heading: "### Gateway MCP (17 live tools)", want: wantGateway},
+		{heading: "### Fabric private MCP (16 live tools)", want: wantPrivateFabric},
+		{heading: "### Fabric public contract (10 descriptor-only tools)", want: wantPublicContract},
 	} {
 		got := markdownToolInventory(t, string(content), inventory.heading)
 		sort.Strings(got)
@@ -127,48 +131,51 @@ func TestStage2ActiveDocumentationStatesLocalOnlyAcceptanceBoundary(t *testing.T
 		"SECURITY.md": {
 			"local-only Stage 2 Gateway", "exactly 17 agent-facing tools", "Git is the sole acceptance authority",
 			"same-OS-user boundary", "selected human", "durable agent", "connection session",
-			"optional Fabric", "20-tool", "does not return a raw token",
+			"optional Fabric", "16-tool", "descriptor-only", "does not return a raw token",
 		},
 		"README.md": {
 			"17 agent-facing tools", "Git is the sole acceptance authority", "optional Fabric binary",
 			"hostile same-user processes", "operational activity", "machine-private",
 		},
 		"agents/README.md": {
-			"exactly 17", "optional Fabric", "Git is the sole accepted", "same-user",
+			"exactly 17", "optional Fabric", "Git is the sole accepted", "same-user", "exactly 16", "descriptor-only",
 		},
 		"docs/wiki/Security-Model.md": {
-			"Git acceptance authority", "Portable project state", "Operational state", "Machine-private state",
-			"hostile same-user process", "does not contact Fabric",
+			"exactly 16 private tools", "ten public", "descriptor-only", "non-callable",
 		},
 		"docs/testing/alpha-validation.md": {
 			"TestStage2LocalOnlyRealProcessAcceptance", "requires neither PostgreSQL nor Fabric",
-			"real `wormhole mcp` stdio bridge", "Gateway MCP (17 tools)", "Fabric MCP (20 tools)",
+			"real `wormhole mcp` stdio bridge", "Gateway MCP (17 live tools)",
+			"Fabric private MCP (16 live tools)", "Fabric public contract (10 descriptor-only tools)",
 			"service-manager installation is covered separately",
 		},
 		"docs/architecture/gateway-enrolment-lifecycle.md": {
-			"Historical/future optional-Fabric design", "not a live Stage 2 Gateway operation",
+			"exactly 16", "ten public", "descriptor-only", "credentials_persisted",
+			"bootstrap_in_progress", "recovery_required", "controlled reissue",
 		},
 		"docs/mcp-protocol.md": {
 			"17-tool", "private working-directory context", "removed before public schema validation",
-			"optional Fabric", "wormhole.workspace.status",
+			"optional Fabric", "wormhole.workspace.status", "16-tool private", "ten non-callable public descriptor",
 		},
 		"docs/contracts/README.md": {
-			"exactly 17", "exactly 20", "not in the Stage 2 Gateway inventory",
+			"exactly 17", "exactly 16", "exactly ten", "descriptor-only",
+			"not in the Stage 2 Gateway inventory",
 		},
 		"docs/compatibility.md": {
-			"17-tool", "optional 20-tool Fabric", "Git acceptance", "machine-private",
+			"17-tool", "16-tool private live registry", "ten-tool", "descriptor-only",
+			"Git acceptance", "machine-private",
 		},
 		"docs/wiki/Home.md": {
-			"local-only Stage 2", "Git is the sole acceptance authority", "Fabric is optional",
+			"exactly 16", "ten public", "descriptor-only", "non-callable",
 		},
 		"docs/wiki/CLI-Guide.md": {
-			"exact 17-tool Gateway", "not a Stage 2 runtime dependency", "ordinary Git",
+			"16 live private tools", "ten descriptor-only public contracts", "non-callable",
 		},
 		"docs/operators/alpha-validation-trial.md": {
-			"local-only Stage 2", "17-tool Gateway", "does not exercise Fabric", "second fresh clone",
+			"16-tool live private registry", "ten public", "descriptor-only", "non-callable",
 		},
 		"docs/implementation-rules.md": {
-			"exact 17-tool Gateway", "Stage 2 local-only runtime does not instantiate",
+			"exact 17-tool Gateway", "Stage 2 local-only runtime does not instantiate", "exactly 16", "descriptor-only",
 		},
 		"docs/testing/closed-trial-metrics.md": {
 			"current local-only Stage 2 trial", "compatibility-only schema labels",

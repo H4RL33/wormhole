@@ -398,8 +398,8 @@ func (result EnrolmentResult) Validate() error {
 }
 
 // handleEnrolmentContract validates and executes Gateway-owned registration
-// and credential persistence. Task 3 truthfully stops at credentials_persisted;
-// bootstrap and ready remain Task 4 concerns.
+// and credential persistence. Slice 1 stops at credentials_persisted; v2
+// bootstrap assembly resumes it later.
 func (s *Server) handleEnrolmentContract(ctx context.Context, args json.RawMessage) (any, error) {
 	var req EnrolmentRequest
 	decoder := json.NewDecoder(bytes.NewReader(args))
@@ -439,16 +439,34 @@ func (s *Server) executeEnrolment(ctx context.Context, req EnrolmentRequest) Enr
 	req.IdempotencyKey = attempt.IdempotencyKey
 
 	if credentials, readErr := runtimeconfig.ReadCredentialProfile(s.credentialsDir, req.CredentialProfile); readErr == nil {
-		if attempt.AgentID != "" && attempt.PassportID != "" && credentials.Server == req.FabricAddress &&
-			credentials.ProjectID == req.ProjectID && credentials.AgentID == attempt.AgentID &&
-			credentials.PassportID == attempt.PassportID && credentials.Token != "" {
-			if attempt.State == string(EnrolmentReady) {
+		validCredential := attempt.AgentID != "" && attempt.PassportID != "" &&
+			credentials.Server == req.FabricAddress && credentials.ProjectID == req.ProjectID &&
+			credentials.AgentID == attempt.AgentID && credentials.PassportID == attempt.PassportID &&
+			credentials.Token != ""
+		if validCredential {
+			switch attempt.State {
+			case string(EnrolmentReady):
+				// Ready is a historical terminal result; never move it backwards.
 				return enrolmentReady(req, attempt.AgentID, attempt.PassportID)
+			case string(EnrolmentCredentialsPersisted):
+				return enrolmentPersisted(req, attempt.AgentID, attempt.PassportID)
+			case string(EnrolmentBootstrapInProgress), string(EnrolmentRecoveryRequired):
+				// A valid matching credential proves that the deleted bootstrap
+				// continuation had already crossed the durable Slice-1 boundary.
+				if err := s.store.UpdateEnrolmentAttempt(ctx, attempt,
+					string(EnrolmentCredentialsPersisted), attempt.AgentID, attempt.PassportID, false); err != nil {
+					return enrolmentFailure(req, EnrolmentCredentialPersistenceFailed,
+						"Gateway could not durably checkpoint the credential boundary.", attempt.AgentID, attempt.PassportID)
+				}
+				return enrolmentPersisted(req, attempt.AgentID, attempt.PassportID)
+			default:
+				if err := s.store.UpdateEnrolmentAttempt(ctx, attempt,
+					string(EnrolmentCredentialsPersisted), attempt.AgentID, attempt.PassportID, false); err != nil {
+					return enrolmentFailure(req, EnrolmentCredentialPersistenceFailed,
+						"Gateway could not durably checkpoint the credential boundary.", attempt.AgentID, attempt.PassportID)
+				}
+				return enrolmentPersisted(req, attempt.AgentID, attempt.PassportID)
 			}
-			if attempt.State != string(EnrolmentRecoveryRequired) && attempt.State != string(EnrolmentBootstrapInProgress) && attempt.State != string(EnrolmentCredentialsPersisted) {
-				_ = s.store.UpdateEnrolmentAttempt(ctx, attempt, string(EnrolmentCredentialsPersisted), attempt.AgentID, attempt.PassportID, false)
-			}
-			return s.continueEnrolmentBootstrap(ctx, req, attempt, credentials)
 		}
 		_ = s.store.UpdateEnrolmentAttempt(ctx, attempt, string(EnrolmentFailed), attempt.AgentID, attempt.PassportID, true)
 		return enrolmentFailure(req, EnrolmentCredentialPersistenceFailed,
@@ -488,8 +506,12 @@ func (s *Server) executeEnrolment(ctx context.Context, req EnrolmentRequest) Enr
 		if readErr == nil {
 			if credentials.Server == req.FabricAddress && credentials.ProjectID == req.ProjectID &&
 				credentials.AgentID == attempt.AgentID && credentials.PassportID == attempt.PassportID && credentials.Token != "" {
-				_ = s.store.UpdateEnrolmentAttempt(ctx, attempt, string(EnrolmentCredentialsPersisted), attempt.AgentID, attempt.PassportID, false)
-				return s.continueEnrolmentBootstrap(ctx, req, attempt, credentials)
+				if err := s.store.UpdateEnrolmentAttempt(ctx, attempt,
+					string(EnrolmentCredentialsPersisted), attempt.AgentID, attempt.PassportID, false); err != nil {
+					return enrolmentFailure(req, EnrolmentCredentialPersistenceFailed,
+						"Gateway could not durably checkpoint the credential boundary.", attempt.AgentID, attempt.PassportID)
+				}
+				return enrolmentPersisted(req, attempt.AgentID, attempt.PassportID)
 			}
 			return enrolmentFailure(req, EnrolmentCredentialPersistenceFailed,
 				"The selected credential profile belongs to a different enrolment; choose another profile.", attempt.AgentID, attempt.PassportID)
@@ -532,10 +554,7 @@ func (s *Server) executeEnrolment(ctx context.Context, req EnrolmentRequest) Enr
 		return enrolmentFailure(req, EnrolmentCredentialPersistenceFailed,
 			"Gateway committed credentials but could not checkpoint the enrolment state.", attempt.AgentID, attempt.PassportID)
 	}
-	return s.continueEnrolmentBootstrap(ctx, req, attempt, runtimeconfig.Credentials{
-		Server: req.FabricAddress, ProjectID: req.ProjectID, AgentID: attempt.AgentID,
-		PassportID: attempt.PassportID, Token: registered.Token, IssuedAt: registered.IssuedAt, Role: role,
-	})
+	return enrolmentPersisted(req, attempt.AgentID, attempt.PassportID)
 }
 
 func (s *Server) lockCredentialProfile(profile string) func() {
@@ -637,6 +656,14 @@ func enrolmentPersisted(req EnrolmentRequest, agentID, passportID string) Enrolm
 		Version: EnrolmentProtocolVersion, Code: EnrolmentCredentialsPersistedResult,
 		State: EnrolmentCredentialsPersisted, IdempotencyKey: req.IdempotencyKey, Retryable: true,
 		AgentID: agentID, PassportID: passportID, CredentialProfile: req.CredentialProfile,
+	}
+}
+
+func enrolmentReady(req EnrolmentRequest, agentID, passportID string) EnrolmentResult {
+	return EnrolmentResult{
+		Version: EnrolmentProtocolVersion, Code: EnrolmentSuccess, State: EnrolmentReady,
+		IdempotencyKey: req.IdempotencyKey, Retryable: false, AgentID: agentID, PassportID: passportID,
+		CredentialProfile: req.CredentialProfile,
 	}
 }
 

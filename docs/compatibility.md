@@ -56,11 +56,12 @@ their `wormhole.workspace.*` MCP counterparts share one Gateway operation layer.
 For `public_git`, checkpoint requires the exact current publication-review digest.
 Wormhole writes the portable candidate but never stages, commits, or pushes it.
 
-The live Gateway is a closed local-only 17-tool registry. The optional 20-tool Fabric
-registry remains a separate PostgreSQL-backed server surface and is not attached
-to the Stage 2 Gateway. Server-only enrolment, identity lookup, semantic search,
-Task, Git-link, bootstrap, and remote sync names have no Gateway compatibility
-aliases. `wormhole.sync.status` is a truthful offline/zero-pending local read.
+The live Gateway is a closed local-only 17-tool registry. The optional Fabric
+surface has a 16-tool private live registry and a separate ten-tool
+descriptor-only public contract. Neither is attached to the Stage 2 Gateway.
+Server-only enrolment, identity lookup, semantic search, Task, Git-link,
+bootstrap, and remote sync names have no Gateway compatibility aliases.
+`wormhole.sync.status` is a truthful offline/zero-pending local read.
 
 Git acceptance is the only transition that makes a checkpointed portable tree
 the accepted base or transports it to another clone. A clean clone reconstructs

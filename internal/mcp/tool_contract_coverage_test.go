@@ -5,27 +5,15 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestToolHandlersRejectMalformedArgumentsAtContractBoundary(t *testing.T) {
 	tools := []Tool{
 		EnrolAgentTool(nil, nil, nil),
-		CreateTaskTool(nil),
-		AssignTaskTool(nil),
-		ListTasksTool(nil, nil),
-		UpdateTaskStatusTool(nil),
-		CreateChannelTool(nil),
-		PostEventTool(nil),
-		SubscribeChannelTool(nil),
-		WriteArticleTool(nil),
-		SearchArticlesTool(nil),
-		GetArticleTool(nil),
-		GetArticleLinksTool(nil),
-		LinkCommitTool(nil),
-		RequestReviewTool(nil),
-		IncrementalPushTool(nil, nil, nil, NewSyncRateLimiter(10, time.Minute)),
-		ConflictReportTool(nil, nil, nil, NewSyncRateLimiter(10, time.Minute)),
+		CreateTaskTool(nil), AssignTaskTool(nil), ListTasksTool(nil, nil), UpdateTaskStatusTool(nil),
+		CreateChannelTool(nil), PostEventTool(nil), SubscribeChannelTool(nil),
+		WriteArticleTool(nil), SearchArticlesTool(nil), GetArticleTool(nil), GetArticleLinksTool(nil),
+		LinkCommitTool(nil), RequestReviewTool(nil),
 	}
 	for _, tool := range tools {
 		t.Run(tool.Name, func(t *testing.T) {
