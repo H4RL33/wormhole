@@ -61,3 +61,39 @@ findings.
 
 None. No Task 4, MCP, public transport wiring, schema migration, or portable Activity
 authority was introduced.
+
+## Final re-review invariant remediation — 2026-08-28
+
+Implementation commit:
+
+```text
+de57d119960f67bec9828cbee67c4a1eb5d6a873 fix(activity): reject future receipt policies
+```
+
+The final re-review found that a response could assert current policy v2 while carrying
+a receipt and matching historical evidence for v3. Core, sync prevalidation, and direct
+local acceptance now each reject every receipt and evidence version greater than the
+same response current policy version with `ErrActivityReplayConflict` before mutation.
+
+Three causal REDs returned success before the fix: a corrupted Core current pointer,
+a fake-client transport response, and a direct local batch. The local and transport
+tests snapshot every Activity table, prove exact preimage preservation, and then prove a
+legitimate v3 policy advance succeeds. All three are GREEN after the fix.
+
+The authoritative current spec and plan state the exact invariant that receipt/evidence
+versions cannot exceed the response current policy. An independent review of the
+remediation reported no Critical, Important, or Minor findings.
+
+Verification:
+
+- required-PostgreSQL Core pull tests: PASS, no skip;
+- full affected Core/localstore/sync/projectstate packages: PASS in the same command,
+  including projectstate at 106.861 seconds;
+- focused three-layer race: PASS, no race report;
+- `make check`: PASS, including build, vet, required integration, full race, coverage,
+  and coverage-exception checking;
+- total merged atomic coverage: 80.9%; and
+- `git diff --check`: PASS.
+
+Concerns: none. No Task 4, MCP, public wiring, migration, reducer, or promotion authority
+was added.

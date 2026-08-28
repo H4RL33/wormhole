@@ -282,3 +282,89 @@ Result: PASS, exit 0, no output.
 
 No Task-4 reconstruction, MCP descriptor, public wiring, migration, or portable reducer
 surface was added by the correction.
+
+## Future receipt-policy ceiling remediation — 2026-08-28
+
+### Status
+
+GREEN at implementation head `de57d119960f67bec9828cbee67c4a1eb5d6a873`.
+
+The final re-review identified one remaining response-level monotonicity gap. Core pull,
+sync prevalidation, and local `AcceptPullBatch` independently validated current and
+historical policies but did not reject a receipt/evidence policy version greater than
+the response current policy version. A hostile current-v2/receipt-v3 response could
+therefore poison immutable local v3 history and block the later legitimate v3 advance.
+
+### Causal RED/GREEN evidence
+
+Before production changes, each new test returned success instead of
+`ErrActivityReplayConflict`:
+
+```text
+TestActivityStorePullRejectsReceiptPolicyNewerThanCurrent
+future receipt policy pull error = <nil>, want ErrActivityReplayConflict
+
+TestActivityPullRejectsHistoricalPolicyNewerThanCurrentWithoutPoisoning
+future historical policy error = <nil>, want ErrActivityReplayConflict
+
+TestActivityTransportPullRejectsReceiptPolicyNewerThanCurrentWithoutPoisoning
+future receipt policy pull error = <nil>, want ErrActivityReplayConflict
+```
+
+Core now compares both receipt and joined evidence versions to the repeatable-read
+current policy. Sync compares both to the strict-decoded response current policy before
+calling localstore. Localstore repeats both comparisons before entering its immediate
+transaction. The direct local and fake-client tests snapshot all eight Activity tables,
+assert exact preimage equality after rejection, and then successfully advance v2 to v3.
+
+### Focused, required PostgreSQL, and race evidence
+
+```bash
+WORMHOLE_DATABASE_URL='postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable' \
+WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run '^TestActivityStorePull' -count=1
+go test ./internal/runtime/localstore -run '^TestActivityPull' -count=1
+go test ./internal/runtime/sync -run '^TestActivityTransportPull' -count=1
+```
+
+Result: all PASS, Core required mode did not skip.
+
+```bash
+WORMHOLE_DATABASE_URL='postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable' \
+WORMHOLE_INTEGRATION_REQUIRED=1 go test \
+  ./internal/types/... ./internal/core/git ./internal/runtime/localstore \
+  ./internal/runtime/sync ./internal/runtime/projectstate -count=1
+```
+
+Result: PASS, exit 0. Projectstate completed in 106.861 seconds.
+
+```bash
+WORMHOLE_DATABASE_URL='postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable' \
+WORMHOLE_INTEGRATION_REQUIRED=1 go test -race \
+  ./internal/core/git ./internal/runtime/localstore ./internal/runtime/sync \
+  -run 'TestActivity(StorePull(RejectsReceiptPolicyNewerThanCurrent|ExportsDeduplicatedHistoricalPolicyEvidence|RejectsMissingOrNonCanonicalHistoricalPolicyEvidence)|Pull(RejectsHistoricalPolicyNewerThanCurrentWithoutPoisoning|InstallsHistoricalReceiptPolicyWithoutAdvancingCurrent|HistoricalPolicyEvidenceMissingOrCorruptRollsBack)|TransportPull(RejectsReceiptPolicyNewerThanCurrentWithoutPoisoning|PolicyUpdateRollsBackWithRejectedBatch|InstallsHistoricalPolicyIntoFreshV3Gateway))$' -count=1
+```
+
+Result: PASS, exit 0, no race report.
+
+```text
+ok  github.com/H4RL33/wormhole/internal/core/git               1.262s
+ok  github.com/H4RL33/wormhole/internal/runtime/localstore     2.014s
+ok  github.com/H4RL33/wormhole/internal/runtime/sync           2.047s
+```
+
+### Repository gate and review
+
+```bash
+WORMHOLE_DATABASE_URL='postgres://wormhole:wormhole@localhost:5432/wormhole?sslmode=disable' make check
+```
+
+Result: PASS, exit 0. Build, vet, required integration, full race, merged atomic
+coverage, and coverage-exception checks all passed. Decisive coverage output:
+
+```text
+total: (statements) 80.9%
+```
+
+Independent remediation review reported zero Critical, Important, and Minor findings.
+`git diff --check` passed. No Task 4, MCP, public wiring, migration, reducer, or new
+promotion authority was introduced.
