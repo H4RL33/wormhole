@@ -17,6 +17,12 @@ type EmbeddingConfig struct {
 	APIKey    string
 }
 
+type GitHubObserverConfig struct {
+	APIBaseURL    string
+	CredentialRef string
+	Credential    string
+}
+
 type Config struct {
 	ListenAddr          string
 	DatabaseURL         string
@@ -26,6 +32,7 @@ type Config struct {
 	KBMinLinksPolicy    int
 	KBMinLinksProcedure int
 	KBEmbedding         EmbeddingConfig
+	GitHubObserver      GitHubObserverConfig
 	AdminKey            string
 }
 
@@ -71,6 +78,9 @@ func LoadConfig() Config {
 		KBEmbedding: EmbeddingConfig{
 			Provider: "cohere", Model: "embed-v4.0", Version: "4.0", Dimension: 1024,
 			APIKey: getEnv("WORMHOLE_COHERE_API_KEY", ""),
+		},
+		GitHubObserver: GitHubObserverConfig{
+			APIBaseURL: "https://api.github.com",
 		},
 		AdminKey: getEnv("WORMHOLE_ADMIN_KEY", ""),
 	}

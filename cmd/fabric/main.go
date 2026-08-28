@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/H4RL33/wormhole/internal/core/events"
 	"github.com/H4RL33/wormhole/internal/core/git"
@@ -21,6 +24,46 @@ import (
 )
 
 var version = "dev"
+
+var errPrivateGitCredentialUnavailable = errors.New("fabric: private Git credential unavailable")
+
+type privateGitCredentialSource struct {
+	config types.GitHubObserverConfig
+}
+
+func (s privateGitCredentialSource) ReadServerCredential(ctx context.Context, reference string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if reference == "" || reference != s.config.CredentialRef || s.config.Credential == "" {
+		return "", errPrivateGitCredentialUnavailable
+	}
+	return s.config.Credential, nil
+}
+
+func newCanonicalGitObserver(cfg types.Config) (*git.GitHubObserver, error) {
+	configuredRef := cfg.GitHubObserver.CredentialRef != ""
+	configuredCredential := cfg.GitHubObserver.Credential != ""
+	if configuredRef != configuredCredential || !safePrivateGitValue(cfg.GitHubObserver.CredentialRef) || !safePrivateGitValue(cfg.GitHubObserver.Credential) {
+		return nil, errPrivateGitCredentialUnavailable
+	}
+	return git.NewGitHubObserver(cfg.GitHubObserver.APIBaseURL, privateGitCredentialSource{config: cfg.GitHubObserver})
+}
+
+func safePrivateGitValue(value string) bool {
+	if value == "" {
+		return true
+	}
+	if strings.TrimSpace(value) != value {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsSpace(character) || unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
+}
 
 var runServerMain = runServer
 
@@ -46,6 +89,9 @@ func fabricMCPHandler(registry *mcp.Registry, identityStore *identity.Store) htt
 // runServerWithOpen separates database acquisition from HTTP composition so
 // startup failures are observable without needing a live Postgres instance.
 func runServerWithOpen(cfg types.Config, openDB func(types.Config) (*sql.DB, error), serve func(*http.Server) error) error {
+	if _, err := newCanonicalGitObserver(cfg); err != nil {
+		return fmt.Errorf("configure canonical Git observer: %w", err)
+	}
 	if err := types.ValidateEmbeddingConfig(cfg.KBEmbedding); err != nil {
 		return fmt.Errorf("validate embedding configuration: %w", err)
 	}

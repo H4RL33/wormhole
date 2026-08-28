@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	coregit "github.com/H4RL33/wormhole/internal/core/git"
 	"github.com/H4RL33/wormhole/internal/core/kb"
 	"github.com/H4RL33/wormhole/internal/mcp"
 	"github.com/H4RL33/wormhole/internal/storage"
@@ -22,6 +23,52 @@ import (
 
 type countingStartupEmbedder struct {
 	calls int
+}
+
+func TestPrivateGitCredentialResolvesOnlyConfiguredFabricReference(t *testing.T) {
+	cfg := types.GitHubObserverConfig{
+		APIBaseURL: "https://api.github.com", CredentialRef: "server:github-private", Credential: "github-secret",
+	}
+	source := privateGitCredentialSource{config: cfg}
+	got, err := source.ReadServerCredential(context.Background(), "server:github-private")
+	if err != nil || got != "github-secret" {
+		t.Fatalf("ReadServerCredential did not return the configured secret: %v", err)
+	}
+	for _, reference := range []string{"", "server:other"} {
+		if secret, err := source.ReadServerCredential(context.Background(), reference); !errors.Is(err, errPrivateGitCredentialUnavailable) || secret != "" {
+			t.Fatalf("ReadServerCredential did not reject an unconfigured reference: %v", err)
+		}
+	}
+}
+
+func TestPrivateGitCredentialWiresGitHubObserverWithoutAmbientCredential(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "ambient-token-must-not-be-used")
+	cfg := types.LoadConfig()
+	cfg.GitHubObserver = types.GitHubObserverConfig{APIBaseURL: "https://api.github.com"}
+	observer, err := newCanonicalGitObserver(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observer == nil {
+		t.Fatal("newCanonicalGitObserver returned nil")
+	}
+	var _ coregit.CanonicalGitObserver = observer
+}
+
+func TestPrivateGitCredentialRejectsIncompleteOrUnsafeConfiguration(t *testing.T) {
+	tests := []types.GitHubObserverConfig{
+		{APIBaseURL: "https://api.github.com", CredentialRef: "server:github-private"},
+		{APIBaseURL: "https://api.github.com", Credential: "github-secret"},
+		{APIBaseURL: "https://api.github.com", CredentialRef: " server:github-private", Credential: "github-secret"},
+		{APIBaseURL: "https://api.github.com", CredentialRef: "server:github-private", Credential: " github-secret"},
+	}
+	for _, observerConfig := range tests {
+		cfg := types.LoadConfig()
+		cfg.GitHubObserver = observerConfig
+		if observer, err := newCanonicalGitObserver(cfg); !errors.Is(err, errPrivateGitCredentialUnavailable) || observer != nil {
+			t.Fatalf("newCanonicalGitObserver accepted unsafe private Git configuration: observer=%v error=%v", observer != nil, err)
+		}
+	}
 }
 
 func (*countingStartupEmbedder) Descriptor() kb.EmbeddingDescriptor {

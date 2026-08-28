@@ -134,3 +134,12 @@ func TestValidateEmbeddingConfigRejectsMissingOrUnapprovedValues(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadConfig_PrivateGitCredential(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "ambient-token-must-not-be-used")
+
+	cfg := LoadConfig()
+	if cfg.GitHubObserver.APIBaseURL != "https://api.github.com" || cfg.GitHubObserver.CredentialRef != "" || cfg.GitHubObserver.Credential != "" {
+		t.Fatal("LoadConfig imported an ambient credential or selected an unexpected GitHub API origin")
+	}
+}
