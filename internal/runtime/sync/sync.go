@@ -35,16 +35,6 @@ type bootstrapIntegrationManifestRollback interface {
 	RollbackBootstrapIntegrationManifest(ctx context.Context, projectID, passportID string, roles []string, raw json.RawMessage) error
 }
 
-// CredentialSource resolves only profile-owned credential references. The
-// returned secret is used for one request and is never retained by Engine.
-type CredentialSource interface {
-	Read(context.Context, string) (string, error)
-}
-
-type FabricRouteSource interface {
-	GetRoute(context.Context, types.WorkspaceScope) (types.FabricBinding, types.FabricProfile, error)
-}
-
 // Engine orchestrates the local sync lifecycle: bootstrap, incremental push/pull,
 // and batching (RFC-0003 §8). It holds per-org state including queue and audit repos.
 type Engine struct {
