@@ -1470,3 +1470,12 @@ Real v20/v21/up/down catalog, RLS/ACL, store, replay, cursor, lifecycle, pruning
 race, alpha-contract, and full-vet gates passed; migrations 1-20 are unchanged.
 Independent review approved after one fix round with Critical 0 / Important 0 /
 Minor 0. Task 3C (Gateway exact-v8 hard cut and Activity repositories) is next.
+
+Stage 3 Task 3C: complete (commits `f35b50a` through `a2c326b`, review fixes
+`8772f93` and `4f7d5a6`). Gateway now accepts only exact consolidated private
+schema v8 and provides route-complete strict Activity policy, immutable evidence,
+outbound queue/acknowledgement, pull cursor, lifecycle, promotion-receipt evidence,
+and finite pruning repositories. Former v7 and every non-v8 preimage are preserved
+and refused; Code Graph remains orthogonal. Fresh `make check` passed with repository-
+wide race and 80.9% coverage. Independent review approved after two fix rounds with
+Critical 0 / Important 0 / Minor 0. Task 3D (policy-gated Activity transport) is next.
