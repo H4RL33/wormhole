@@ -3,10 +3,13 @@ package sync
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -206,6 +209,32 @@ type activityTestConflictGate struct {
 	err  error
 }
 
+type activityLateConflictGate struct {
+	mu         sync.Mutex
+	store      *localstore.Store
+	workspaces *localstore.WorkspaceRepo
+	scope      types.WorkspaceScope
+	calls      int
+}
+
+func (g *activityLateConflictGate) HasOpenConflicts(ctx context.Context, scope types.WorkspaceScope) (bool, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.calls++
+	open, err := g.workspaces.HasOpenConflicts(ctx, scope)
+	if err != nil || open || scope != g.scope || g.calls != 2 {
+		return open, err
+	}
+	digest := sha256.Sum256([]byte("late-activity-conflict"))
+	conflictID := fmt.Sprintf("sha256:%x", digest)
+	_, err = g.store.DB().ExecContext(ctx, `INSERT INTO workspace_conflicts
+		(project_id,workspace_id,occurrence_id,conflict_id,record_kind,record_id,field_path,
+		 conflict_kind,base_json,ours_json,theirs_json,state)
+		VALUES (?,?,?,?,? ,?,'/title','same_field','{}','{}','{}','open')`,
+		scope.ProjectID, scope.WorkspaceID, conflictID, conflictID, "task", activityTestTaskID)
+	return open, err
+}
+
 func (g *activityTestConflictGate) HasOpenConflicts(_ context.Context, scope types.WorkspaceScope) (bool, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -221,7 +250,7 @@ func (g *activityTestConflictGate) set(scope types.WorkspaceScope, open bool) {
 type activityTestClient struct {
 	accept   func(context.Context, ActivityAcceptRequest) (ActivityAcceptResponse, error)
 	pull     func(context.Context, ActivityPullRequest) (ActivityPullResponse, error)
-	presence func(context.Context, string, []byte, projectstate.Digest) error
+	presence func(context.Context, ActivityPresenceRequest) (ActivityPresenceResponse, error)
 }
 
 func (c *activityTestClient) Accept(ctx context.Context, request ActivityAcceptRequest) (ActivityAcceptResponse, error) {
@@ -238,11 +267,11 @@ func (c *activityTestClient) Pull(ctx context.Context, request ActivityPullReque
 	return c.pull(ctx, request)
 }
 
-func (c *activityTestClient) SendPresence(ctx context.Context, attachment string, raw []byte, digest projectstate.Digest) error {
+func (c *activityTestClient) SendPresence(ctx context.Context, request ActivityPresenceRequest) (ActivityPresenceResponse, error) {
 	if c.presence == nil {
-		return errors.New("unexpected presence")
+		return ActivityPresenceResponse{}, errors.New("unexpected presence")
 	}
-	return c.presence(ctx, attachment, raw, digest)
+	return c.presence(ctx, request)
 }
 
 type activityTestClientFactory struct {
@@ -459,14 +488,14 @@ func TestActivityTransportPolicyChangeRetriesSameActivityBytes(t *testing.T) {
 	credentials := &activityTestCredentials{values: map[string]string{"keyring:activity-0": "token"}}
 	gate := &activityTestConflictGate{open: map[types.WorkspaceScope]bool{}}
 	policyOneRaw, policyOneDigest := activityTestPolicyEvidence(t, activityTestPolicy(1))
-	policyTwoRaw, policyTwoDigest := activityTestPolicyEvidence(t, activityTestPolicy(2))
+	policyThreeRaw, policyThreeDigest := activityTestPolicyEvidence(t, activityTestPolicy(3))
 	var requests []ActivityAcceptRequest
 	client := &activityTestClient{accept: func(_ context.Context, request ActivityAcceptRequest) (ActivityAcceptResponse, error) {
 		requests = append(requests, request)
 		if len(requests) == 1 {
-			return ActivityAcceptResponse{PolicyJSON: policyTwoRaw, PolicyDigest: policyTwoDigest, PolicyChanged: true}, nil
+			return ActivityAcceptResponse{PolicyJSON: policyThreeRaw, PolicyDigest: policyThreeDigest, PolicyChanged: true}, nil
 		}
-		return ActivityAcceptResponse{Receipt: activityTestReceipt(t, request, activityTestPolicy(2), 2), PolicyJSON: policyTwoRaw, PolicyDigest: policyTwoDigest}, nil
+		return ActivityAcceptResponse{Receipt: activityTestReceipt(t, request, activityTestPolicy(3), 2), PolicyJSON: policyThreeRaw, PolicyDigest: policyThreeDigest}, nil
 	}}
 	transport := activityTestTransport(t, fixture, routes, credentials, gate, &activityTestClientFactory{client: client})
 	scope := fixture.bindings[0].Workspace.Scope
@@ -479,7 +508,7 @@ func TestActivityTransportPolicyChangeRetriesSameActivityBytes(t *testing.T) {
 	if len(requests) != 2 || !bytes.Equal(requests[0].ActivityJSON, requests[1].ActivityJSON) || requests[0].ActivityDigest != requests[1].ActivityDigest {
 		t.Fatalf("policy retry changed immutable evidence: %+v", requests)
 	}
-	if requests[0].PolicyVersion != 1 || requests[0].PolicyDigest != policyOneDigest || requests[1].PolicyVersion != 2 || requests[1].PolicyDigest != policyTwoDigest {
+	if requests[0].PolicyVersion != 1 || requests[0].PolicyDigest != policyOneDigest || requests[1].PolicyVersion != 3 || requests[1].PolicyDigest != policyThreeDigest {
 		t.Fatalf("policy request pairs=%+v", requests)
 	}
 	var createdVersion, expectedVersion int64
@@ -488,8 +517,16 @@ func TestActivityTransportPolicyChangeRetriesSameActivityBytes(t *testing.T) {
 		FROM activity_outbound_queue WHERE activity_id=?`, activityTestIDOne).Scan(&createdVersion, &createdDigest, &expectedVersion, &expectedDigest); err != nil {
 		t.Fatal(err)
 	}
-	if createdVersion != 1 || createdDigest != string(policyOneDigest) || expectedVersion != 2 || expectedDigest != string(policyTwoDigest) {
+	if createdVersion != 1 || createdDigest != string(policyOneDigest) || expectedVersion != 3 || expectedDigest != string(policyThreeDigest) {
 		t.Fatalf("queue policy evidence=(%d,%s,%d,%s)", createdVersion, createdDigest, expectedVersion, expectedDigest)
+	}
+	var observedVersions string
+	if err := fixture.store.DB().QueryRow(`SELECT group_concat(policy_version, ',') FROM
+		(SELECT policy_version FROM activity_policy_versions ORDER BY policy_version)`).Scan(&observedVersions); err != nil {
+		t.Fatal(err)
+	}
+	if observedVersions != "1,3" {
+		t.Fatalf("observed immutable policy versions=%q, want 1,3", observedVersions)
 	}
 	_ = policyOneRaw
 }
@@ -564,26 +601,28 @@ func TestActivityTransportPresenceHasZeroDurableRowsAndVanishesOnRestart(t *test
 	routes := activityRouteSourceForFixture(fixture)
 	credentials := &activityTestCredentials{values: map[string]string{"keyring:activity-0": "token"}}
 	var sent int
-	client := &activityTestClient{presence: func(_ context.Context, attachment string, raw []byte, digest projectstate.Digest) error {
+	client := &activityTestClient{presence: func(_ context.Context, request ActivityPresenceRequest) (ActivityPresenceResponse, error) {
 		sent++
-		if attachment != fixture.bindings[0].AttachmentRef {
-			t.Fatalf("attachment=%q", attachment)
+		if request.AttachmentRef != fixture.bindings[0].AttachmentRef {
+			t.Fatalf("attachment=%q", request.AttachmentRef)
 		}
-		activity := activityTestDecode(t, raw)
+		activity := activityTestDecode(t, request.ActivityJSON)
 		computed, _ := projectstate.DigestActivity(activity)
-		if activity.Class != projectstate.ActivityPresenceV1 || computed != digest {
+		_, policyDigest := activityTestPolicyEvidence(t, activityTestPolicy(1))
+		if activity.Class != projectstate.ActivityPresenceV1 || computed != request.ActivityDigest ||
+			request.PolicyVersion != 1 || request.PolicyDigest != policyDigest {
 			t.Fatalf("presence evidence invalid")
 		}
-		return nil
+		return ActivityPresenceResponse{}, nil
 	}}
 	transport := activityTestTransport(t, fixture, routes, credentials, fixture.workspaces, &activityTestClientFactory{client: client})
-	before := activityDurableCounts(t, fixture)
+	before := activitySemanticSnapshot(t, fixture.store.DB())
 	if err := transport.SendPresence(context.Background(), fixture.bindings[0].Workspace.Scope,
 		activityTestPresence(activityTestIDOne, time.Date(2026, 8, 28, 10, 5, 0, 4, time.UTC))); err != nil {
 		t.Fatal(err)
 	}
-	after := activityDurableCounts(t, fixture)
-	if sent != 1 || fmt.Sprint(after) != fmt.Sprint(before) {
+	after := activitySemanticSnapshot(t, fixture.store.DB())
+	if sent != 1 || !reflect.DeepEqual(after, before) {
 		t.Fatalf("presence persisted: sent=%d before=%v after=%v", sent, before, after)
 	}
 	if err := fixture.store.Close(); err != nil {
@@ -594,21 +633,110 @@ func TestActivityTransportPresenceHasZeroDurableRowsAndVanishesOnRestart(t *test
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
-	for _, table := range []string{"activity_ledger", "activity_ingress_receipts", "activity_lifecycle", "activity_outbound_queue", "activity_promotion_receipts"} {
-		var count int
-		if err := reopened.DB().QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil || count != 0 {
-			t.Fatalf("restart %s rows=(%d,%v), want (0,nil)", table, count, err)
-		}
+	restarted := activitySemanticSnapshot(t, reopened.DB())
+	if !reflect.DeepEqual(restarted, before) {
+		t.Fatalf("restart retained presence state: before=%v restarted=%v", before, restarted)
 	}
 }
 
-func activityDurableCounts(t *testing.T, fixture *activityTransportFixture) []int {
+var activityTables = []string{
+	"activity_policy_versions", "activity_policy_current", "activity_ledger", "activity_ingress_receipts",
+	"activity_lifecycle", "activity_outbound_queue", "activity_cursors", "activity_promotion_receipts",
+}
+
+func activitySemanticSnapshot(t *testing.T, db *sql.DB) map[string][][]string {
 	t.Helper()
-	var counts []int
-	for _, table := range []string{"activity_ledger", "activity_ingress_receipts", "activity_lifecycle", "activity_outbound_queue", "activity_promotion_receipts"} {
-		counts = append(counts, activityTableCount(t, fixture, table))
+	snapshot := make(map[string][][]string, len(activityTables))
+	for _, table := range activityTables {
+		rows, err := db.Query(`SELECT * FROM ` + table + ` ORDER BY rowid`)
+		if err != nil {
+			t.Fatalf("snapshot %s: %v", table, err)
+		}
+		columns, err := rows.Columns()
+		if err != nil {
+			_ = rows.Close()
+			t.Fatalf("snapshot %s columns: %v", table, err)
+		}
+		for rows.Next() {
+			values := make([]any, len(columns))
+			destinations := make([]any, len(columns))
+			for index := range values {
+				destinations[index] = &values[index]
+			}
+			if err := rows.Scan(destinations...); err != nil {
+				_ = rows.Close()
+				t.Fatalf("snapshot %s scan: %v", table, err)
+			}
+			semantic := make([]string, len(values))
+			for index, value := range values {
+				switch typed := value.(type) {
+				case nil:
+					semantic[index] = "<null>"
+				case []byte:
+					semantic[index] = string(typed)
+				case time.Time:
+					semantic[index] = typed.UTC().Format(time.RFC3339Nano)
+				default:
+					semantic[index] = fmt.Sprint(typed)
+				}
+			}
+			snapshot[table] = append(snapshot[table], semantic)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			t.Fatalf("snapshot %s iterate: %v", table, err)
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatalf("snapshot %s close: %v", table, err)
+		}
+		if snapshot[table] == nil {
+			snapshot[table] = [][]string{}
+		}
 	}
-	return counts
+	return snapshot
+}
+
+func TestActivityTransportPresencePolicyChangeRetriesSameBytes(t *testing.T) {
+	fixture := newActivityTransportFixture(t, 1, true)
+	policyOneRaw, policyOneDigest := activityTestPolicyEvidence(t, activityTestPolicy(1))
+	policyThreeRaw, policyThreeDigest := activityTestPolicyEvidence(t, activityTestPolicy(3))
+	var requests []ActivityPresenceRequest
+	client := &activityTestClient{presence: func(_ context.Context, request ActivityPresenceRequest) (ActivityPresenceResponse, error) {
+		request.ActivityJSON = append([]byte(nil), request.ActivityJSON...)
+		requests = append(requests, request)
+		if len(requests) == 1 {
+			return ActivityPresenceResponse{PolicyJSON: policyThreeRaw, PolicyDigest: policyThreeDigest, PolicyChanged: true}, nil
+		}
+		return ActivityPresenceResponse{}, nil
+	}}
+	transport := activityTestTransport(t, fixture, activityRouteSourceForFixture(fixture),
+		&activityTestCredentials{values: map[string]string{"keyring:activity-0": "token"}}, fixture.workspaces,
+		&activityTestClientFactory{client: client})
+	activity := activityTestPresence(activityTestIDOne, time.Date(2026, 8, 28, 10, 5, 30, 5, time.UTC))
+	if err := transport.SendPresence(context.Background(), fixture.bindings[0].Workspace.Scope, activity); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 2 || !bytes.Equal(requests[0].ActivityJSON, requests[1].ActivityJSON) ||
+		requests[0].ActivityDigest != requests[1].ActivityDigest {
+		t.Fatalf("presence policy retry changed immutable evidence: %+v", requests)
+	}
+	if requests[0].PolicyVersion != 1 || requests[0].PolicyDigest != policyOneDigest ||
+		requests[1].PolicyVersion != 3 || requests[1].PolicyDigest != policyThreeDigest {
+		t.Fatalf("presence policy pairs=%+v", requests)
+	}
+	current, err := fixture.activities.CurrentPolicy(context.Background(), fixture.activityKey[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Policy.PolicyVersion != 3 || current.PolicyDigest != policyThreeDigest {
+		t.Fatalf("current policy=(%d,%s), want v3", current.Policy.PolicyVersion, current.PolicyDigest)
+	}
+	for _, table := range []string{"activity_ledger", "activity_ingress_receipts", "activity_lifecycle", "activity_outbound_queue", "activity_promotion_receipts"} {
+		if count := activityTableCount(t, fixture, table); count != 0 {
+			t.Fatalf("presence policy retry persisted %s rows=%d", table, count)
+		}
+	}
+	_ = policyOneRaw
 }
 
 func TestActivityTransportResolvesRouteCredentialAndPolicyEveryCycle(t *testing.T) {
@@ -648,6 +776,85 @@ func TestActivityTransportResolvesRouteCredentialAndPolicyEveryCycle(t *testing.
 	}
 }
 
+func TestActivityTransportMissingCredentialStopsBeforeFactory(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		reference string
+		values    map[string]string
+		wantReads int
+	}{
+		{name: "empty reference", values: map[string]string{}, wantReads: 0},
+		{name: "empty resolved token", reference: "keyring:empty", values: map[string]string{"keyring:empty": ""}, wantReads: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newActivityTransportFixture(t, 1, true)
+			routes := activityRouteSourceForFixture(fixture)
+			value := routes.routes[fixture.bindings[0].Workspace.Scope]
+			value.profile.CredentialRef = test.reference
+			routes.routes[fixture.bindings[0].Workspace.Scope] = value
+			credentials := &activityTestCredentials{values: test.values}
+			factory := &activityTestClientFactory{client: &activityTestClient{}}
+			transport := activityTestTransport(t, fixture, routes, credentials,
+				&activityTestConflictGate{open: map[types.WorkspaceScope]bool{}}, factory)
+			scope := fixture.bindings[0].Workspace.Scope
+			if err := transport.Queue(context.Background(), scope,
+				activityTestOrdinary(activityTestIDOne, time.Date(2026, 8, 28, 10, 6, 30, 0, time.UTC))); err != nil {
+				t.Fatal(err)
+			}
+			if err := transport.DeliverPending(context.Background(), scope, 1); !errors.Is(err, ErrAttentionRequired) {
+				t.Fatalf("missing credential error=%v, want ErrAttentionRequired", err)
+			}
+			if len(credentials.reads) != test.wantReads || len(factory.profiles) != 0 {
+				t.Fatalf("missing credential reached wrong boundary: reads=%v factory=%d", credentials.reads, len(factory.profiles))
+			}
+		})
+	}
+}
+
+func TestActivityTransportBindsActorAssuranceToFabricModeBeforeEffects(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		mode      types.FabricMode
+		assurance types.Assurance
+	}{
+		{name: "private actor on public Fabric", mode: types.FabricModePublic, assurance: types.AssurancePrivateAuthenticated},
+		{name: "public actor on private Fabric", mode: types.FabricModePrivate, assurance: types.AssurancePublicKeyContinuity},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newActivityTransportFixture(t, 1, true)
+			routes := activityRouteSourceForFixture(fixture)
+			value := routes.routes[fixture.bindings[0].Workspace.Scope]
+			value.profile.Mode = test.mode
+			routes.routes[fixture.bindings[0].Workspace.Scope] = value
+			credentials := &activityTestCredentials{values: map[string]string{"keyring:activity-0": "token"}}
+			var network int
+			client := &activityTestClient{presence: func(context.Context, ActivityPresenceRequest) (ActivityPresenceResponse, error) {
+				network++
+				return ActivityPresenceResponse{}, nil
+			}}
+			factory := &activityTestClientFactory{client: client}
+			transport := activityTestTransport(t, fixture, routes, credentials,
+				&activityTestConflictGate{open: map[types.WorkspaceScope]bool{}}, factory)
+			scope := fixture.bindings[0].Workspace.Scope
+			presence := activityTestPresence(activityTestIDOne, time.Date(2026, 8, 28, 10, 6, 40, 0, time.UTC))
+			presence.Actor.Assurance = test.assurance
+			if err := transport.SendPresence(context.Background(), scope, presence); !errors.Is(err, projectstate.ErrInvalidActivity) {
+				t.Fatalf("presence assurance mismatch=%v, want ErrInvalidActivity", err)
+			}
+			ordinary := activityTestOrdinary(activityTestIDTwo, time.Date(2026, 8, 28, 10, 6, 41, 0, time.UTC))
+			ordinary.Actor.Assurance = test.assurance
+			if err := transport.Queue(context.Background(), scope, ordinary); !errors.Is(err, projectstate.ErrInvalidActivity) {
+				t.Fatalf("queue assurance mismatch=%v, want ErrInvalidActivity", err)
+			}
+			if len(credentials.reads) != 0 || len(factory.profiles) != 0 || network != 0 ||
+				activityTableCount(t, fixture, "activity_ledger") != 0 {
+				t.Fatalf("assurance mismatch reached effects: reads=%v factory=%d network=%d ledger=%d",
+					credentials.reads, len(factory.profiles), network, activityTableCount(t, fixture, "activity_ledger"))
+			}
+		})
+	}
+}
+
 func TestActivityTransportConflictBlocksOnlyExactBindingBeforeCredentialOrNetwork(t *testing.T) {
 	fixture := newActivityTransportFixture(t, 2, true)
 	routes := activityRouteSourceForFixture(fixture)
@@ -680,6 +887,63 @@ func TestActivityTransportConflictBlocksOnlyExactBindingBeforeCredentialOrNetwor
 	}
 }
 
+func TestActivityTransportConflictRecheckIsAtomicWithAckAndPull(t *testing.T) {
+	t.Run("acknowledge", func(t *testing.T) {
+		fixture := newActivityTransportFixture(t, 1, true)
+		policyRaw, policyDigest := activityTestPolicyEvidence(t, activityTestPolicy(1))
+		client := &activityTestClient{accept: func(_ context.Context, request ActivityAcceptRequest) (ActivityAcceptResponse, error) {
+			return ActivityAcceptResponse{Receipt: activityTestReceipt(t, request, activityTestPolicy(1), 1), PolicyJSON: policyRaw, PolicyDigest: policyDigest}, nil
+		}}
+		gate := &activityLateConflictGate{store: fixture.store, workspaces: fixture.workspaces, scope: fixture.bindings[0].Workspace.Scope}
+		transport := activityTestTransport(t, fixture, activityRouteSourceForFixture(fixture),
+			&activityTestCredentials{values: map[string]string{"keyring:activity-0": "token"}}, gate,
+			&activityTestClientFactory{client: client})
+		activity := activityTestOrdinary(activityTestIDOne, time.Date(2026, 8, 28, 10, 7, 30, 0, time.UTC))
+		if err := transport.Queue(context.Background(), gate.scope, activity); err != nil {
+			t.Fatal(err)
+		}
+		if err := transport.DeliverPending(context.Background(), gate.scope, 1); !errors.Is(err, localstore.ErrWorkspaceConflicted) {
+			t.Fatalf("late-conflict acknowledgement=%v, want ErrWorkspaceConflicted", err)
+		}
+		var receipts, delivered int
+		if err := fixture.store.DB().QueryRow(`SELECT count(*) FROM activity_ingress_receipts`).Scan(&receipts); err != nil {
+			t.Fatal(err)
+		}
+		if err := fixture.store.DB().QueryRow(`SELECT count(*) FROM activity_outbound_queue WHERE state='delivered'`).Scan(&delivered); err != nil {
+			t.Fatal(err)
+		}
+		if receipts != 0 || delivered != 0 {
+			t.Fatalf("late conflict converged acknowledgement: receipts=%d delivered=%d", receipts, delivered)
+		}
+	})
+
+	t.Run("pull", func(t *testing.T) {
+		fixture := newActivityTransportFixture(t, 1, true)
+		policyRaw, policyDigest := activityTestPolicyEvidence(t, activityTestPolicy(1))
+		delivery := activityTestDelivery(t,
+			activityTestOrdinary(activityTestIDOne, time.Date(2026, 8, 28, 10, 7, 31, 0, time.UTC)),
+			types.WorkspaceID("00000000-0000-4000-8000-000000000099"), 1, activityTestPolicy(1))
+		client := &activityTestClient{pull: func(context.Context, ActivityPullRequest) (ActivityPullResponse, error) {
+			return ActivityPullResponse{PolicyJSON: policyRaw, PolicyDigest: policyDigest,
+				Deliveries: []localstore.ActivityPullDelivery{delivery}, NextSequence: 1}, nil
+		}}
+		gate := &activityLateConflictGate{store: fixture.store, workspaces: fixture.workspaces, scope: fixture.bindings[0].Workspace.Scope}
+		transport := activityTestTransport(t, fixture, activityRouteSourceForFixture(fixture),
+			&activityTestCredentials{values: map[string]string{"keyring:activity-0": "token"}}, gate,
+			&activityTestClientFactory{client: client})
+		if err := transport.Pull(context.Background(), gate.scope, 1); !errors.Is(err, localstore.ErrWorkspaceConflicted) {
+			t.Fatalf("late-conflict pull=%v, want ErrWorkspaceConflicted", err)
+		}
+		cursor, err := fixture.activities.Cursor(context.Background(), fixture.activityKey[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cursor != 0 || activityTableCount(t, fixture, "activity_ledger") != 0 {
+			t.Fatalf("late conflict converged pull: cursor=%d ledger=%d", cursor, activityTableCount(t, fixture, "activity_ledger"))
+		}
+	})
+}
+
 func TestActivityTransportNeverAppliesOperationOrAdvancesStream(t *testing.T) {
 	fixture := newActivityTransportFixture(t, 1, true)
 	routes := activityRouteSourceForFixture(fixture)
@@ -709,9 +973,15 @@ func TestActivityTransportNeverAppliesOperationOrAdvancesStream(t *testing.T) {
 	}
 	var afterStream int64
 	var afterOperations, afterPortableQueue int
-	_ = fixture.store.DB().QueryRow(`SELECT stream_version FROM fabric_cursors WHERE project_id=? AND workspace_id=?`, fixture.activityKey[0].ProjectID, fixture.activityKey[0].WorkspaceID).Scan(&afterStream)
-	_ = fixture.store.DB().QueryRow(`SELECT count(*) FROM workspace_overlay_operations`).Scan(&afterOperations)
-	_ = fixture.store.DB().QueryRow(`SELECT count(*) FROM sync_queue`).Scan(&afterPortableQueue)
+	if err := fixture.store.DB().QueryRow(`SELECT stream_version FROM fabric_cursors WHERE project_id=? AND workspace_id=?`, fixture.activityKey[0].ProjectID, fixture.activityKey[0].WorkspaceID).Scan(&afterStream); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.DB().QueryRow(`SELECT count(*) FROM workspace_overlay_operations`).Scan(&afterOperations); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.DB().QueryRow(`SELECT count(*) FROM sync_queue`).Scan(&afterPortableQueue); err != nil {
+		t.Fatal(err)
+	}
 	if beforeStream != afterStream || beforeOperations != afterOperations || beforePortableQueue != afterPortableQueue {
 		t.Fatalf("portable state changed: stream %d->%d operations %d->%d queue %d->%d", beforeStream, afterStream, beforeOperations, afterOperations, beforePortableQueue, afterPortableQueue)
 	}
@@ -776,6 +1046,56 @@ func TestActivityTransportErrorsRedactSecretsBytesActorsAndCompleteRoutes(t *tes
 				if value != "" && strings.Contains(err.Error(), value) {
 					t.Fatalf("error exposed forbidden value %q: %q", value, err)
 				}
+			}
+		})
+	}
+}
+
+func TestActivityTransportErrorsPreserveOnlySafeCauses(t *testing.T) {
+	safeCauses := []error{
+		context.Canceled,
+		context.DeadlineExceeded,
+		projectstate.ErrInvalidActivity,
+		projectstate.ErrUnknownActivityVersion,
+		projectstate.ErrInvalidActivityPolicy,
+		localstore.ErrActivityPolicyUnavailable,
+		localstore.ErrActivityPolicyChanged,
+		localstore.ErrActivityNotFound,
+		localstore.ErrActivityReplayConflict,
+		localstore.ErrActivityCursorConflict,
+		localstore.ErrActivityLifecycleConflict,
+		localstore.ErrWorkspaceConflicted,
+	}
+	for index, cause := range safeCauses {
+		t.Run(fmt.Sprintf("cause-%02d", index), func(t *testing.T) {
+			const forbidden = "secret-token|attachment|complete-route|actor-bytes"
+			wrapped := fmt.Errorf("%s: %w", forbidden, cause)
+
+			routeFixture := newActivityTransportFixture(t, 1, true)
+			routes := activityRouteSourceForFixture(routeFixture)
+			routes.err = wrapped
+			routeTransport := activityTestTransport(t, routeFixture, routes, &activityTestCredentials{},
+				&activityTestConflictGate{open: map[types.WorkspaceScope]bool{}}, &activityTestClientFactory{})
+			routeErr := routeTransport.Queue(context.Background(), routeFixture.bindings[0].Workspace.Scope,
+				activityTestOrdinary(activityTestIDOne, time.Date(2026, 8, 28, 10, 9, 30, 0, time.UTC)))
+			if !errors.Is(routeErr, cause) || strings.Contains(routeErr.Error(), forbidden) {
+				t.Fatalf("route classified error=%q, want safe cause %v without evidence", routeErr, cause)
+			}
+
+			fabricFixture := newActivityTransportFixture(t, 1, true)
+			client := &activityTestClient{accept: func(context.Context, ActivityAcceptRequest) (ActivityAcceptResponse, error) {
+				return ActivityAcceptResponse{}, wrapped
+			}}
+			fabricTransport := activityTestTransport(t, fabricFixture, activityRouteSourceForFixture(fabricFixture),
+				&activityTestCredentials{values: map[string]string{"keyring:activity-0": "token"}},
+				&activityTestConflictGate{open: map[types.WorkspaceScope]bool{}}, &activityTestClientFactory{client: client})
+			if err := fabricTransport.Queue(context.Background(), fabricFixture.bindings[0].Workspace.Scope,
+				activityTestOrdinary(activityTestIDOne, time.Date(2026, 8, 28, 10, 9, 31, 0, time.UTC))); err != nil {
+				t.Fatal(err)
+			}
+			fabricErr := fabricTransport.DeliverPending(context.Background(), fabricFixture.bindings[0].Workspace.Scope, 1)
+			if !errors.Is(fabricErr, cause) || strings.Contains(fabricErr.Error(), forbidden) {
+				t.Fatalf("Fabric classified error=%q, want safe cause %v without evidence", fabricErr, cause)
 			}
 		})
 	}

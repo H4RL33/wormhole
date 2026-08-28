@@ -265,6 +265,9 @@ func (r *ActivityRepo) AcknowledgeOutbound(ctx context.Context, key types.Activi
 		if !errors.Is(receiptErr, sql.ErrNoRows) {
 			return fmt.Errorf("localstore: acknowledge Activity receipt: %w", receiptErr)
 		}
+		if err := requireUnconflictedActivityWorkspace(ctx, conn, key.Route); err != nil {
+			return err
+		}
 		arguments := activityOriginArgs(key)
 		arguments = append(arguments, string(receipt.ActivityDigest), receipt.Sequence, receipt.PolicyVersion,
 			string(receipt.PolicyDigest), sqliteActivityTimestamp(receipt.AcceptedAt))

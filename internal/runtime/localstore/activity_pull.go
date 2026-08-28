@@ -100,6 +100,8 @@ func (r *ActivityRepo) AcceptPullBatch(ctx context.Context, route types.Activity
 			if err := validateDuplicatePullWindow(ctx, conn, route, batch.ExpectedAfter, batch.NextSequence, validated); err != nil {
 				return err
 			}
+		} else if err := requireUnconflictedActivityWorkspace(ctx, conn, route); err != nil {
+			return err
 		}
 		for _, delivery := range validated {
 			if err := acceptPulledActivity(ctx, conn, route, delivery, !duplicate); err != nil {

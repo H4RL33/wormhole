@@ -126,6 +126,18 @@ func requireActiveActivityRoute(ctx context.Context, db activityDB, route types.
 	return nil
 }
 
+func requireUnconflictedActivityWorkspace(ctx context.Context, conn *sql.Conn, route types.ActivityRouteKey) error {
+	scope := types.WorkspaceScope{ProjectID: route.ProjectID, WorkspaceID: route.WorkspaceID}
+	conflicted, err := (&WorkspaceMutationTx{conn: conn, scope: scope}).HasOpenConflicts(ctx)
+	if err != nil {
+		return fmt.Errorf("localstore: inspect Activity workspace conflicts: %w", err)
+	}
+	if conflicted {
+		return ErrWorkspaceConflicted
+	}
+	return nil
+}
+
 func activityRouteArgs(route types.ActivityRouteKey) []any {
 	return []any{route.ProjectID, route.WorkspaceID, route.FabricInstanceID, route.RemoteProjectID, route.StreamID, route.CanonicalRef}
 }

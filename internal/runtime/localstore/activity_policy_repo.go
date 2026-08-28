@@ -121,7 +121,7 @@ func (r *ActivityRepo) ReplacePolicy(ctx context.Context, route types.ActivityRo
 		} else if currentErr != nil {
 			return currentErr
 		} else if current.Policy.PolicyVersion != expectedVersion || current.PolicyDigest != expectedDigest ||
-			next.PolicyVersion != current.Policy.PolicyVersion+1 {
+			next.PolicyVersion <= current.Policy.PolicyVersion {
 			return fmt.Errorf("localstore: replace Activity policy: %w", ErrActivityPolicyChanged)
 		}
 		now, err := databaseActivityNow(ctx, conn)

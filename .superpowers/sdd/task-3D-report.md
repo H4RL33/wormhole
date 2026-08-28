@@ -139,3 +139,123 @@ portable/local work remains usable, and the next cycle re-resolves all authority
 
 None. Task 3D is ready for independent review. The complete Task 3 remains open for
 Task 3E and the final checkpoint.
+
+---
+
+## Independent-review fix wave
+
+Status: DONE
+
+Fix commit: this report's containing commit.
+
+### Human-approved presence amendment
+
+The independent review found that the original presence interface could neither tell
+Fabric which policy the Gateway had observed nor return canonical replacement policy
+evidence. On 2026-08-28 the human explicitly approved overriding that part of the brief:
+
+- a presence request carries the observed policy version and digest;
+- a stale-policy response carries the current canonical policy bytes and digest;
+- the Gateway strict-validates and CAS-installs that policy, then retries the identical
+  canonical Activity bytes and digest at most once; and
+- presence still writes no durable Activity state.
+
+This amendment supersedes the earlier report's claim that the original presence
+interface was kept verbatim. It does not add MCP/public wiring or Task 3E authority.
+
+### Review RED evidence
+
+Regressions were written and witnessed before the corresponding fixes:
+
+```text
+$ go test ./internal/runtime/localstore -run TestActivityPolicyCASAcceptsStrictObservedVersionJump -count=1
+--- FAIL: TestActivityPolicyCASAcceptsStrictObservedVersionJump
+    replace observed v1->v3: activity policy changed
+
+$ go test ./internal/runtime/sync -run TestActivityTransportConflictRecheckIsAtomicWithAckAndPull -count=1
+--- FAIL: TestActivityTransportConflictRecheckIsAtomicWithAckAndPull
+    acknowledge returned nil after the deterministic late conflict
+    pull returned nil after the deterministic late conflict
+
+$ go test ./internal/runtime/sync -run TestActivityTransportPresence -count=1
+internal/runtime/sync/activity_v1_test.go: undefined: ActivityPresenceRequest
+internal/runtime/sync/activity_v1_test.go: undefined: ActivityPresenceResponse
+```
+
+Temporary causal faults also proved the new credential, actor-assurance, and safe-error
+tests: disabling each guard made the empty reference/token reach the factory, made both
+public/private assurance mismatches succeed, and made all safe sentinel cases lose
+`errors.Is`, respectively. Each fault was restored before GREEN verification.
+
+### Review fixes
+
+- `AcknowledgeOutbound` and non-duplicate `AcceptPullBatch` now recheck the exact
+  workspace conflict inside their own `BEGIN IMMEDIATE` transaction immediately before
+  the first receipt/ledger/cursor mutation. A deterministic late-conflict test proves
+  neither acknowledgement nor pull can cross that transaction boundary.
+- Policy replacement accepts every strictly increasing observed version, retaining an
+  immutable row for each actually observed version. The v1-to-v3 regression verifies
+  history `{1,3}`, and downgrade/equal-version CAS remains rejected.
+- Presence implements the approved observed-policy handshake. A stale v1 response
+  installs strict canonical v3 evidence and performs exactly one retry with the same
+  Activity bytes and digest.
+- Empty credential references and empty credential tokens fail as attention-required
+  before client construction for accept, pull, and presence cycles.
+- Dependency text is discarded by a centralized fixed classifier while `errors.Is`
+  remains true for the known Activity/localstore sentinels and for
+  `context.Canceled`/`context.DeadlineExceeded`.
+- Public profiles require public key-continuity assurance and private profiles require
+  private-authenticated assurance before durable queue/client effects.
+- Every SQL `Scan` used by the never-applies-to-portable-operation regression is checked
+  and fails the test on read errors.
+- Presence immutability now compares semantic row snapshots, not counts, across all
+  eight Activity tables before send, after send, and after reopening the database:
+  policy versions/current, ledger, receipts, lifecycle, outbound queue, cursors, and
+  promotion receipts.
+
+### Review GREEN evidence
+
+```text
+$ go test ./internal/runtime/localstore -run 'TestActivity(Policy|Acknowledge|Pull)' -count=1
+ok github.com/H4RL33/wormhole/internal/runtime/localstore
+
+$ go test ./internal/runtime/sync -run TestActivityTransport -count=1
+ok github.com/H4RL33/wormhole/internal/runtime/sync 0.626s
+
+$ go test -race ./internal/runtime/localstore -run 'TestActivity(Concurrent|PolicyCASAcceptsStrictObservedVersionJump|Acknowledge|Pull)' -count=1
+ok github.com/H4RL33/wormhole/internal/runtime/localstore 4.185s
+
+$ go test -race ./internal/runtime/sync -run TestActivityTransport -count=1
+ok github.com/H4RL33/wormhole/internal/runtime/sync 10.727s
+
+$ go test ./internal/runtime/localstore ./internal/runtime/sync -count=1
+ok github.com/H4RL33/wormhole/internal/runtime/localstore 12.695s
+ok github.com/H4RL33/wormhole/internal/runtime/sync 2.216s
+
+$ go test -race ./internal/runtime/localstore ./internal/runtime/sync -count=1
+ok github.com/H4RL33/wormhole/internal/runtime/localstore 194.938s
+ok github.com/H4RL33/wormhole/internal/runtime/sync 29.022s
+
+$ go vet ./internal/runtime/localstore ./internal/runtime/sync
+PASS
+
+$ make check
+build: PASS
+vet: PASS
+mandatory integration: PASS
+race: PASS (projectstate 309.555s)
+coverage: PASS (80.8%)
+```
+
+An independent post-fix review approved the diff with no Critical or Important
+findings. `git diff --check` passed.
+
+### Completion check
+
+- Task sentence served: yes; every reviewed race, policy, credential, error, assurance,
+  SQL-scan, and schema-snapshot defect has a causal regression and minimal fix.
+- Decision source: the Task 3D brief, Activity amendment, Task 3C transaction contract,
+  independent review, and the human-approved presence amendment above.
+- Scope held: no MCP/public integration, no portable-operation ownership, and no Task 3E
+  promotion implementation.
+- Concerns: none.

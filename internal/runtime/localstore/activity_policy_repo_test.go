@@ -32,6 +32,49 @@ func TestActivityPolicyCASUpdatesOnlyPendingExpectedPolicy(t *testing.T) {
 	}
 }
 
+func TestActivityPolicyCASAcceptsStrictObservedVersionJump(t *testing.T) {
+	fixture := newLocalActivityFixture(t, true)
+	defer fixture.store.Close()
+	current, err := fixture.repo.CurrentPolicy(context.Background(), fixture.route)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed := localActivityPolicy(3, 3_000_000)
+	replaced, err := fixture.repo.ReplacePolicy(context.Background(), fixture.route,
+		current.Policy.PolicyVersion, current.PolicyDigest, observed)
+	if err != nil {
+		t.Fatalf("replace observed v1->v3: %v", err)
+	}
+	if !reflect.DeepEqual(replaced.Policy, observed) {
+		t.Fatalf("replaced policy=%+v, want %+v", replaced.Policy, observed)
+	}
+	rows, err := fixture.store.DB().Query(`SELECT policy_version FROM activity_policy_versions
+		WHERE project_id=? AND workspace_id=? AND fabric_instance_id=? AND remote_project_id=?
+		AND stream_id=? AND canonical_ref=? ORDER BY policy_version`, activityRouteArgs(fixture.route)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var versions []int64
+	for rows.Next() {
+		var version int64
+		if err := rows.Scan(&version); err != nil {
+			t.Fatal(err)
+		}
+		versions = append(versions, version)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(versions, []int64{1, 3}) {
+		t.Fatalf("observed immutable policy versions=%v, want [1 3]", versions)
+	}
+	if _, err := fixture.repo.ReplacePolicy(context.Background(), fixture.route,
+		3, replaced.PolicyDigest, localActivityPolicy(2, 3_000_000)); !errors.Is(err, ErrActivityPolicyChanged) {
+		t.Fatalf("policy downgrade=%v, want ErrActivityPolicyChanged", err)
+	}
+}
+
 func TestActivityPolicyFailedCASAndInjectedWritePreserveCurrentVersion(t *testing.T) {
 	fixture := newLocalActivityFixture(t, true)
 	defer fixture.store.Close()
