@@ -4,6 +4,25 @@
 **Date:** 2026-08-28  
 **Programme:** Stage 3 multi-Fabric, private identity, and four-VM trial
 
+## Controller clarification (2026-08-28 plan review)
+
+This clarification narrows implementation sequencing without changing the public wire:
+
+- The exact sync-v2 and Activity-v1 value records live in
+  `internal/types/projectstate/sync_protocol.go`, an allowed shared plain-value owner.
+  MCP owns aliases, schemas, descriptors, authentication dispatch, and handlers; runtime
+  imports the shared value owner and never imports `internal/mcp`.
+- Task 6 ships public-key-continuity sync only. The private authenticated registry keeps
+  its unrelated existing tools, but does not list or dispatch sync-v2 tools until Task 14
+  extends the same `MutationCoordinator` with in-transaction private issuer
+  revalidation. `Config.AdminKey` remains WebUI-only and is never an MCP bearer.
+- Bootstrap atomically installs portable binding/cursor state and either a validated
+  finite Activity policy or an explicit Activity-disabled state. The latter keeps
+  portable sync usable while every Activity queue/delivery operation fails closed.
+- The controller records the delivery base before Slice 1 and assigns a distinct worker
+  to the whole-range review after Slice 8. Slice implementers neither self-certify nor
+  push.
+
 ## Purpose
 
 Deliver one live, production-assembled sync v2 protocol for public-key-continuity and
