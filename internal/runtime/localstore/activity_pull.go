@@ -68,7 +68,8 @@ func (r *ActivityRepo) AcceptPullBatch(ctx context.Context, route types.Activity
 		}
 		receipt, err := projectstate.DecodeActivityReceipt(delivery.ReceiptJSON)
 		if err != nil || receipt.ActivityID != activity.ID || receipt.ActivityDigest != digest ||
-			receipt.Sequence <= lastSequence || receipt.Sequence > batch.NextSequence {
+			receipt.Sequence <= lastSequence || receipt.Sequence > batch.NextSequence ||
+			receipt.PolicyVersion > policy.PolicyVersion {
 			return fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityReplayConflict)
 		}
 		if existing, found := receiptPolicies[receipt.PolicyVersion]; found && existing != receipt.PolicyDigest {
@@ -89,7 +90,7 @@ func (r *ActivityRepo) AcceptPullBatch(ctx context.Context, route types.Activity
 	} else if batch.NextSequence < lastSequence {
 		return fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityCursorConflict)
 	}
-	historical, err := validateHistoricalPullPolicies(route, batch.HistoricalPolicies, receiptPolicies)
+	historical, err := validateHistoricalPullPolicies(route, policy.PolicyVersion, batch.HistoricalPolicies, receiptPolicies)
 	if err != nil {
 		return err
 	}
@@ -165,7 +166,8 @@ func (r *ActivityRepo) AcceptPullBatch(ctx context.Context, route types.Activity
 	})
 }
 
-func validateHistoricalPullPolicies(route types.ActivityRouteKey, evidence []ActivityPolicyEvidence, receipts map[int64]projectstate.Digest) ([]validatedHistoricalPolicy, error) {
+func validateHistoricalPullPolicies(route types.ActivityRouteKey, currentPolicyVersion int64,
+	evidence []ActivityPolicyEvidence, receipts map[int64]projectstate.Digest) ([]validatedHistoricalPolicy, error) {
 	if len(evidence) != len(receipts) {
 		return nil, fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityPolicyUnavailable)
 	}
@@ -179,6 +181,9 @@ func validateHistoricalPullPolicies(route types.ActivityRouteKey, evidence []Act
 		policy, err := projectstate.DecodeActivityPolicy(item.PolicyJSON)
 		if err != nil {
 			return nil, fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityPolicyUnavailable)
+		}
+		if policy.PolicyVersion > currentPolicyVersion {
+			return nil, fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityReplayConflict)
 		}
 		digest, err := projectstate.DigestActivityPolicy(policy)
 		if err != nil || digest != item.PolicyDigest {

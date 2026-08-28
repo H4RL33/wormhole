@@ -196,6 +196,50 @@ func TestActivityPullHistoricalPolicyEvidenceMustBeOrdered(t *testing.T) {
 	}
 }
 
+func TestActivityPullRejectsHistoricalPolicyNewerThanCurrentWithoutPoisoning(t *testing.T) {
+	v2 := localActivityPolicy(2, 3_000_000)
+	fixture := newFreshLocalActivityFixtureAtPolicy(t, v2)
+	defer fixture.store.Close()
+	v3 := localActivityPolicy(3, 3_100_000)
+	delivery := localPullDelivery(t, localOrdinaryActivity(localActivityIDOne, "future-v3", testUTCNow()),
+		localActivitySourceWorkspace, 1, v3)
+	batch := localPullBatch(t, v2, 0, 1, false, delivery)
+	v3JSON, err := projectstate.CanonicalActivityPolicy(v3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v3Digest, err := projectstate.DigestActivityPolicy(v3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch.HistoricalPolicies = []ActivityPolicyEvidence{{
+		Route: fixture.route, PolicyJSON: v3JSON, PolicyDigest: v3Digest,
+	}}
+	before := localActivitySemanticSnapshot(t, fixture.store.DB())
+	if err := fixture.repo.AcceptPullBatch(context.Background(), fixture.route, batch); !errors.Is(err, ErrActivityReplayConflict) {
+		t.Fatalf("future historical policy error = %v, want ErrActivityReplayConflict", err)
+	}
+	if after := localActivitySemanticSnapshot(t, fixture.store.DB()); !reflect.DeepEqual(before, after) {
+		t.Fatalf("future historical policy changed complete Activity preimage: before=%v after=%v", before, after)
+	}
+	current, err := fixture.repo.CurrentPolicy(context.Background(), fixture.route)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.repo.ReplacePolicy(context.Background(), fixture.route,
+		current.Policy.PolicyVersion, current.PolicyDigest, v3); err != nil {
+		t.Fatalf("legitimate v3 advance after rejection: %v", err)
+	}
+	var versions string
+	if err := fixture.store.DB().QueryRow(`SELECT group_concat(policy_version, ',') FROM
+		(SELECT policy_version FROM activity_policy_versions ORDER BY policy_version)`).Scan(&versions); err != nil {
+		t.Fatal(err)
+	}
+	if versions != "2,3" {
+		t.Fatalf("policy versions after legitimate advance = %q, want 2,3", versions)
+	}
+}
+
 func TestActivityPullHistoricalPolicyEvidenceMissingOrCorruptRollsBack(t *testing.T) {
 	fixture := newLocalActivityFixture(t, true)
 	defer fixture.store.Close()

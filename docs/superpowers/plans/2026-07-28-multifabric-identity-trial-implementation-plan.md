@@ -604,6 +604,9 @@ insert-or-exact-replays those immutable versions with deliveries and cursor, nev
 advances the current-policy pointer from historical evidence, and performs any separate
 current-policy response CAS in the same transaction so all policy and batch evidence
 rolls back on missing, corrupt, changed, duplicate-conflicting, or wrong-route evidence.
+Every returned receipt and historical-policy evidence version must be less than or equal
+to the separately returned current policy version and is rejected before mutation when
+that response-level monotonic bound is violated.
 The same correction requires fresh profile-mode assurance validation before pull
 mutation and retained exposure, and restricts detached-route access to exact maintenance
 pruning while every live queue/pull/lifecycle/read path remains active-only.
@@ -1002,7 +1005,8 @@ lifecycle, or audit row. Pull bounds are `1..500`; empty pulls advance to the ca
 high watermark without reading portable stream version. Pull also joins every returned
 receipt to its exact immutable policy row, emits one deep-owned canonical evidence record
 per distinct receipt policy version in ascending version order, and fails closed on
-missing or changed route-bound policy evidence.
+missing or changed route-bound policy evidence or any receipt/evidence version greater
+than the current policy captured in the same repeatable-read transaction.
 
 Run: `WORMHOLE_INTEGRATION_REQUIRED=1 go test ./internal/core/git -run 'TestActivityStore' -count=1`
 
@@ -1312,7 +1316,8 @@ func TestActivityConcurrentEnqueueAckPullAndPruneKeepSiblingIsolation(t *testing
 
 Pull prevalidates the full policy and batch, requires ascending positive safe sequences,
 requires exactly one canonical historical policy per distinct receipt version, and
-advances only from the exact old cursor. Historical versions insert-or-exact-replay in
+requires every receipt/evidence version to be no greater than the response current policy
+version before mutation, and advances only from the exact old cursor. Historical versions insert-or-exact-replay in
 the same immediate transaction without selecting the current pointer; any separately
 returned newer current policy uses an expected-old CAS in that transaction. Missing,
 corrupt, changed, duplicate-conflicting, or wrong-route evidence rolls back current and
@@ -1466,7 +1471,8 @@ the same Activity ID/bytes/digest. Ack and pull delegate to Task-3C atomic metho
 Pull strict-decodes and validates every delivery's actor assurance against that freshly
 resolved profile mode before performing any local mutation, then deep-copies the
 deduplicated historical-policy evidence and expected current-policy CAS into the atomic
-local batch.
+local batch. It rejects any receipt or historical evidence version greater than the
+strict-decoded response current policy version before invoking the local repository.
 Retained exposure re-resolves the route/profile and validates every exact-route record
 against its mode before returning any record.
 

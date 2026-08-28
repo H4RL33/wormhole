@@ -241,7 +241,7 @@ func (s *ActivityStore) Pull(ctx context.Context, input PullActivityInput) (Pull
 	if err != nil {
 		return PullActivityResult{}, fmt.Errorf("git: pull activity: binding: %w", err)
 	}
-	_, policyJSON, policyDigest, err := currentActivityPolicyTx(ctx, tx, input.Stream)
+	currentPolicy, policyJSON, policyDigest, err := currentActivityPolicyTx(ctx, tx, input.Stream)
 	if err != nil {
 		return PullActivityResult{}, err
 	}
@@ -303,11 +303,15 @@ func (s *ActivityStore) Pull(ctx context.Context, input PullActivityInput) (Pull
 		delivery.Receipt.ActivityID = activity.ID
 		delivery.Receipt.ActivityDigest = computed
 		delivery.Receipt.AcceptedAt = acceptedAt.UTC()
+		if delivery.Receipt.PolicyVersion > currentPolicy.PolicyVersion {
+			return PullActivityResult{}, fmt.Errorf("git: pull activity: future retained policy: %w", ErrActivityReplayConflict)
+		}
 		if _, err := projectstate.CanonicalActivityReceipt(delivery.Receipt); err != nil {
 			return PullActivityResult{}, fmt.Errorf("git: pull activity: invalid retained receipt: %w", ErrActivityReplayConflict)
 		}
 		policy, err := projectstate.DecodeActivityPolicy(policyJSON)
-		if err != nil || policy.PolicyVersion != delivery.Receipt.PolicyVersion {
+		if err != nil || policy.PolicyVersion != delivery.Receipt.PolicyVersion ||
+			policy.PolicyVersion > currentPolicy.PolicyVersion {
 			return PullActivityResult{}, fmt.Errorf("git: pull activity: invalid retained policy: %w", ErrActivityReplayConflict)
 		}
 		canonicalPolicyJSON, err := projectstate.CanonicalActivityPolicy(policy)

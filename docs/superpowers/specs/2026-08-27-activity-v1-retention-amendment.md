@@ -13,7 +13,10 @@ separately returned current policy is newer, its expected-old CAS occurs in that
 transaction. Missing, corrupt, changed, duplicate-conflicting, or wrong-route evidence
 rolls back the current-policy CAS, historical-policy inserts, Activity, lifecycle,
 receipt, and cursor changes together. This correction is part of the current Task-3
-contract; dated implementation and review evidence remains historical.
+contract. Every returned receipt and historical-policy evidence version must be less
+than or equal to the separately returned current policy version; a future version is a
+replay/policy conflict rejected before mutation. Dated implementation and review
+evidence remains historical.
 
 ## 1. Decision and authority
 
@@ -343,7 +346,8 @@ which that Activity was accepted. The batch carries the canonical policy bytes a
 digest once for every distinct receipt policy version, deterministically ordered by
 policy version. This historical evidence is route-bound response evidence, never bearer
 authority and never a request-selected route. Fabric fails the pull rather than emit a
-delivery whose policy row is missing, malformed, changed, or belongs to another route.
+delivery whose policy row is missing, malformed, changed, belongs to another route, or
+names a version greater than the current policy captured by that same pull transaction.
 
 ## 7. Lifecycle and retention model
 
@@ -540,7 +544,8 @@ terminal time; commit. An unknown/changed receipt or wrong route rolls back.
 receipt, Activity, digest, origin workspace, and ascending sequence; and one
 deduplicated canonical historical-policy evidence record for every distinct receipt
 policy version before writing. Reject missing evidence, extra duplicate-conflicting
-evidence, digest/version mismatch, or evidence from another complete route. In one
+evidence, digest/version mismatch, evidence from another complete route, or any receipt
+or evidence version greater than the separately returned current policy version. In one
 immediate transaction, insert-or-exact-replay the immutable historical policy versions
 without deriving any current-pointer change from that evidence; if the separately
 returned current policy differs, CAS `activity_policy_current` from its expected old
@@ -733,7 +738,8 @@ contains source workspace ID, canonical Activity bytes/digest, and exact receipt
 The same response contains canonical historical-policy evidence, deduplicated by policy
 version and ordered ascending, for exactly every distinct policy version named by those
 receipts. Its separately returned current policy remains the only current-pointer
-candidate; historical evidence can never advance that pointer.
+candidate; historical evidence can never advance that pointer, and no returned receipt
+or historical evidence version may be greater than that current policy version.
 
 If another retained row exists after the last returned row, `next_sequence` is that last
 row and `has_more=true`. Otherwise `next_sequence` is the captured high watermark and

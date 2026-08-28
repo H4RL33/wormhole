@@ -650,6 +650,47 @@ func TestActivityTransportPullPolicyUpdateRollsBackWithRejectedBatch(t *testing.
 	}
 }
 
+func TestActivityTransportPullRejectsReceiptPolicyNewerThanCurrentWithoutPoisoning(t *testing.T) {
+	fixture := newActivityTransportFixture(t, 1, false)
+	v2 := activityTestPolicy(2)
+	activityTestInstallCurrentPolicyDirect(t, fixture, fixture.activityKey[0], v2)
+	v2Raw, v2Digest := activityTestPolicyEvidence(t, v2)
+	v3 := activityTestPolicy(3)
+	delivery := activityTestDelivery(t,
+		activityTestOrdinary(activityTestIDOne, time.Date(2026, 8, 28, 10, 4, 32, 0, time.UTC)),
+		types.WorkspaceID("00000000-0000-4000-8000-000000000099"), 1, v3)
+	client := &activityTestClient{pull: func(context.Context, ActivityPullRequest) (ActivityPullResponse, error) {
+		return ActivityPullResponse{
+			PolicyJSON: v2Raw, PolicyDigest: v2Digest,
+			HistoricalPolicies: []ActivityPullPolicyEvidence{activityTestPullPolicyEvidence(t, fixture.activityKey[0], v3)},
+			Deliveries:         []localstore.ActivityPullDelivery{delivery}, NextSequence: 1,
+		}, nil
+	}}
+	transport := activityTestTransport(t, fixture, activityRouteSourceForFixture(fixture),
+		&activityTestCredentials{values: map[string]string{"keyring:activity-0": "token"}},
+		&activityTestConflictGate{open: map[types.WorkspaceScope]bool{}},
+		&activityTestClientFactory{client: client})
+	before := activitySemanticSnapshot(t, fixture.store.DB())
+	if err := transport.Pull(context.Background(), fixture.bindings[0].Workspace.Scope, 1); !errors.Is(err, localstore.ErrActivityReplayConflict) {
+		t.Fatalf("future receipt policy pull error = %v, want ErrActivityReplayConflict", err)
+	}
+	if after := activitySemanticSnapshot(t, fixture.store.DB()); !reflect.DeepEqual(before, after) {
+		t.Fatalf("future receipt policy changed Activity state: before=%v after=%v", before, after)
+	}
+	if _, err := fixture.activities.ReplacePolicy(context.Background(), fixture.activityKey[0],
+		v2.PolicyVersion, v2Digest, v3); err != nil {
+		t.Fatalf("legitimate v3 advance after rejection: %v", err)
+	}
+	var versions string
+	if err := fixture.store.DB().QueryRow(`SELECT group_concat(policy_version, ',') FROM
+		(SELECT policy_version FROM activity_policy_versions ORDER BY policy_version)`).Scan(&versions); err != nil {
+		t.Fatal(err)
+	}
+	if versions != "2,3" {
+		t.Fatalf("policy versions after legitimate advance = %q, want 2,3", versions)
+	}
+}
+
 func activityTestDelivery(t *testing.T, activity projectstate.ActivityV1, source types.WorkspaceID, sequence int64, policy projectstate.EffectiveActivityPolicyV1) localstore.ActivityPullDelivery {
 	t.Helper()
 	raw, err := projectstate.CanonicalActivity(activity)

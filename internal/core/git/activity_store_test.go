@@ -476,6 +476,37 @@ func TestActivityStorePullRejectsMissingOrNonCanonicalHistoricalPolicyEvidence(t
 	})
 }
 
+func TestActivityStorePullRejectsReceiptPolicyNewerThanCurrent(t *testing.T) {
+	fixture := newActivityStoreFixture(t, "activity-pull-future-receipt-policy")
+	v2 := testActivityPolicy(2, 3_000_000)
+	if _, err := fixture.store.PublishPolicy(context.Background(), fixture.stream, v2); err != nil {
+		t.Fatal(err)
+	}
+	v3 := testActivityPolicy(3, 3_100_000)
+	if _, err := fixture.store.PublishPolicy(context.Background(), fixture.stream, v3); err != nil {
+		t.Fatal(err)
+	}
+	v3Digest, err := projectstate.DigestActivityPolicy(v3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := fixture.acceptInput(testOrdinaryActivity(activityIDOne, fixture.actor, "under-v3"))
+	input.PolicyVersion, input.PolicyDigest = v3.PolicyVersion, v3Digest
+	if _, err := fixture.store.Accept(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.db.Exec(`UPDATE fabric_activity_policy_current SET policy_version=2
+		WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3 AND canonical_ref=$4`,
+		fixture.stream.ProjectID, fixture.stream.FabricInstanceID, fixture.stream.StreamID, fixture.stream.CanonicalRef); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.Pull(context.Background(), PullActivityInput{
+		Stream: fixture.stream, AttachmentRef: fixture.attachment, AfterSequence: 0, Limit: 10,
+	}); !errors.Is(err, ErrActivityReplayConflict) {
+		t.Fatalf("future receipt policy pull error = %v, want ErrActivityReplayConflict", err)
+	}
+}
+
 func TestActivityStorePullRejectsInvalidCursorAndLimit(t *testing.T) {
 	fixture := newActivityStoreFixture(t, "activity-pull-bounds")
 	for _, input := range []PullActivityInput{

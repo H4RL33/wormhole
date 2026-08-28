@@ -2,6 +2,7 @@ package localstore
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -232,4 +233,60 @@ func activityTableCounts(t *testing.T, store *Store) map[string]int {
 		counts[table] = count
 	}
 	return counts
+}
+
+func localActivitySemanticSnapshot(t *testing.T, db *sql.DB) map[string][][]string {
+	t.Helper()
+	tables := []string{
+		"activity_policy_versions", "activity_policy_current", "activity_ledger", "activity_ingress_receipts",
+		"activity_lifecycle", "activity_outbound_queue", "activity_cursors", "activity_promotion_receipts",
+	}
+	snapshot := make(map[string][][]string, len(tables))
+	for _, table := range tables {
+		rows, err := db.Query(`SELECT * FROM ` + table + ` ORDER BY rowid`)
+		if err != nil {
+			t.Fatalf("snapshot %s: %v", table, err)
+		}
+		columns, err := rows.Columns()
+		if err != nil {
+			_ = rows.Close()
+			t.Fatalf("snapshot %s columns: %v", table, err)
+		}
+		for rows.Next() {
+			values := make([]any, len(columns))
+			destinations := make([]any, len(columns))
+			for index := range values {
+				destinations[index] = &values[index]
+			}
+			if err := rows.Scan(destinations...); err != nil {
+				_ = rows.Close()
+				t.Fatalf("snapshot %s scan: %v", table, err)
+			}
+			semantic := make([]string, len(values))
+			for index, value := range values {
+				switch typed := value.(type) {
+				case nil:
+					semantic[index] = "<null>"
+				case []byte:
+					semantic[index] = string(typed)
+				case time.Time:
+					semantic[index] = typed.UTC().Format(time.RFC3339Nano)
+				default:
+					semantic[index] = fmt.Sprint(typed)
+				}
+			}
+			snapshot[table] = append(snapshot[table], semantic)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			t.Fatalf("snapshot %s iterate: %v", table, err)
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatalf("snapshot %s close: %v", table, err)
+		}
+		if snapshot[table] == nil {
+			snapshot[table] = [][]string{}
+		}
+	}
+	return snapshot
 }
