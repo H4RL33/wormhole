@@ -1,0 +1,410 @@
+package sync
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"reflect"
+
+	"github.com/H4RL33/wormhole/internal/runtime/localstore"
+	"github.com/H4RL33/wormhole/internal/types"
+	"github.com/H4RL33/wormhole/internal/types/projectstate"
+)
+
+const maximumActivityTransportBatch = 500
+
+type ActivityAcceptRequest struct {
+	AttachmentRef  string
+	PolicyVersion  int64
+	PolicyDigest   projectstate.Digest
+	ActivityJSON   []byte
+	ActivityDigest projectstate.Digest
+}
+
+type ActivityAcceptResponse struct {
+	Receipt       projectstate.ActivityReceiptV1
+	PolicyJSON    []byte
+	PolicyDigest  projectstate.Digest
+	PolicyChanged bool
+}
+
+type ActivityPullRequest struct {
+	AttachmentRef string
+	AfterSequence int64
+	Limit         int
+}
+
+type ActivityPullResponse struct {
+	PolicyJSON   []byte
+	PolicyDigest projectstate.Digest
+	Deliveries   []localstore.ActivityPullDelivery
+	NextSequence int64
+	HasMore      bool
+}
+
+type ActivityFabricClient interface {
+	Accept(context.Context, ActivityAcceptRequest) (ActivityAcceptResponse, error)
+	Pull(context.Context, ActivityPullRequest) (ActivityPullResponse, error)
+	SendPresence(context.Context, string, []byte, projectstate.Digest) error
+}
+
+type ActivityClientFactory interface {
+	Client(context.Context, types.FabricProfile, string) (ActivityFabricClient, error)
+}
+
+type ActivityTransport struct {
+	routes      FabricRouteSource
+	credentials CredentialSource
+	conflicts   localstore.WorkspaceConflictGate
+	activities  *localstore.ActivityRepo
+	clients     ActivityClientFactory
+}
+
+func NewActivityTransport(routes FabricRouteSource, credentials CredentialSource,
+	conflicts localstore.WorkspaceConflictGate, activities *localstore.ActivityRepo,
+	clients ActivityClientFactory) (*ActivityTransport, error) {
+	if activityNilDependency(routes) || activityNilDependency(credentials) ||
+		activityNilDependency(conflicts) || activities == nil || activityNilDependency(clients) {
+		return nil, errors.New("sync: Activity transport requires routes, credentials, conflict gate, activity repository, and client factory")
+	}
+	return &ActivityTransport{
+		routes: routes, credentials: credentials, conflicts: conflicts,
+		activities: activities, clients: clients,
+	}, nil
+}
+
+func (s *ActivityTransport) Queue(ctx context.Context, scope types.WorkspaceScope, activity projectstate.ActivityV1) error {
+	if s == nil {
+		return errors.New("sync: Activity transport unavailable")
+	}
+	if err := validateRemoteActivity(activity, false); err != nil {
+		return err
+	}
+	resolved, err := s.resolveRoutePolicy(ctx, scope)
+	if err != nil {
+		return err
+	}
+	if _, err := s.activities.QueueOutbound(ctx, resolved.route, activity); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *ActivityTransport) DeliverPending(ctx context.Context, scope types.WorkspaceScope, limit int) error {
+	if s == nil {
+		return errors.New("sync: Activity transport unavailable")
+	}
+	if limit < 1 || limit > maximumActivityTransportBatch {
+		return fmt.Errorf("sync: Activity delivery limit: %w", localstore.ErrActivityNotFound)
+	}
+	resolved, err := s.resolveRoutePolicy(ctx, scope)
+	if err != nil {
+		return err
+	}
+	records, err := s.activities.PendingOutbound(ctx, resolved.route, limit)
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		if err := s.deliverRecord(ctx, scope, record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *ActivityTransport) Pull(ctx context.Context, scope types.WorkspaceScope, limit int) error {
+	if s == nil {
+		return errors.New("sync: Activity transport unavailable")
+	}
+	if limit < 1 || limit > maximumActivityTransportBatch {
+		return fmt.Errorf("sync: Activity pull limit: %w", localstore.ErrActivityCursorConflict)
+	}
+	cycle, err := s.resolveNetworkCycle(ctx, scope)
+	if err != nil {
+		return err
+	}
+	after, err := s.activities.Cursor(ctx, cycle.route)
+	if err != nil {
+		return err
+	}
+	response, err := cycle.client.Pull(ctx, ActivityPullRequest{
+		AttachmentRef: cycle.binding.AttachmentRef, AfterSequence: after, Limit: limit,
+	})
+	if err != nil {
+		return fmt.Errorf("sync: Activity pull: %w", ErrFabricUnavailable)
+	}
+	policy, policyJSON, policyDigest, err := validateActivityPolicyEvidence(response.PolicyJSON, response.PolicyDigest)
+	if err != nil {
+		return err
+	}
+	if len(response.Deliveries) > limit {
+		return fmt.Errorf("sync: Activity pull response: %w", localstore.ErrActivityCursorConflict)
+	}
+	if !sameActivityPolicy(cycle.policy, policy, policyJSON, policyDigest) {
+		replaced, err := s.activities.ReplacePolicy(ctx, cycle.route, cycle.policy.Policy.PolicyVersion,
+			cycle.policy.PolicyDigest, policy)
+		if err != nil {
+			return err
+		}
+		if !sameActivityPolicy(replaced, policy, policyJSON, policyDigest) {
+			return fmt.Errorf("sync: Activity pull policy: %w", localstore.ErrActivityPolicyChanged)
+		}
+	}
+	if err := s.requireUnconflicted(ctx, scope); err != nil {
+		return err
+	}
+	deliveries := make([]localstore.ActivityPullDelivery, len(response.Deliveries))
+	for index, delivery := range response.Deliveries {
+		deliveries[index] = localstore.ActivityPullDelivery{
+			SourceWorkspaceID: delivery.SourceWorkspaceID,
+			ActivityJSON:      append([]byte(nil), delivery.ActivityJSON...), ActivityDigest: delivery.ActivityDigest,
+			ReceiptJSON: append([]byte(nil), delivery.ReceiptJSON...),
+		}
+	}
+	return s.activities.AcceptPullBatch(ctx, cycle.route, localstore.ActivityPullBatch{
+		PolicyJSON: append([]byte(nil), policyJSON...), ExpectedAfter: after,
+		NextSequence: response.NextSequence, HasMore: response.HasMore, Deliveries: deliveries,
+	})
+}
+
+func (s *ActivityTransport) SendPresence(ctx context.Context, scope types.WorkspaceScope, activity projectstate.ActivityV1) error {
+	if s == nil {
+		return errors.New("sync: Activity transport unavailable")
+	}
+	if err := validateRemoteActivity(activity, true); err != nil {
+		return err
+	}
+	canonical, err := projectstate.CanonicalActivity(activity)
+	if err != nil {
+		return err
+	}
+	digest, err := projectstate.DigestActivity(activity)
+	if err != nil {
+		return err
+	}
+	cycle, err := s.resolveNetworkCycle(ctx, scope)
+	if err != nil {
+		return err
+	}
+	if err := cycle.client.SendPresence(ctx, cycle.binding.AttachmentRef, append([]byte(nil), canonical...), digest); err != nil {
+		return fmt.Errorf("sync: Activity presence: %w", ErrFabricUnavailable)
+	}
+	return nil
+}
+
+func (s *ActivityTransport) Retained(ctx context.Context, scope types.WorkspaceScope, limit int) ([]localstore.ActivityRecord, error) {
+	if s == nil {
+		return nil, errors.New("sync: Activity transport unavailable")
+	}
+	if limit < 1 || limit > 1000 {
+		return nil, fmt.Errorf("sync: retained Activity limit: %w", localstore.ErrActivityNotFound)
+	}
+	resolved, err := s.resolveRoutePolicy(ctx, scope)
+	if err != nil {
+		return nil, err
+	}
+	return s.activities.Retained(ctx, resolved.route, limit)
+}
+
+type resolvedActivityRoute struct {
+	binding types.FabricBinding
+	profile types.FabricProfile
+	route   types.ActivityRouteKey
+	policy  localstore.ActivityPolicyRecord
+}
+
+type activityNetworkCycle struct {
+	resolvedActivityRoute
+	client ActivityFabricClient
+}
+
+func (s *ActivityTransport) deliverRecord(ctx context.Context, scope types.WorkspaceScope, record localstore.ActivityRecord) error {
+	immutableJSON := append([]byte(nil), record.ActivityJSON...)
+	immutableDigest := record.ActivityDigest
+	for attempt := 0; attempt < 2; attempt++ {
+		cycle, err := s.resolveNetworkCycle(ctx, scope)
+		if err != nil {
+			return err
+		}
+		if cycle.route != record.Key.Route {
+			return fmt.Errorf("sync: Activity delivery route changed: %w", ErrAttentionRequired)
+		}
+		request := ActivityAcceptRequest{
+			AttachmentRef: cycle.binding.AttachmentRef,
+			PolicyVersion: cycle.policy.Policy.PolicyVersion, PolicyDigest: cycle.policy.PolicyDigest,
+			ActivityJSON: append([]byte(nil), immutableJSON...), ActivityDigest: immutableDigest,
+		}
+		response, err := cycle.client.Accept(ctx, request)
+		if err != nil {
+			return fmt.Errorf("sync: Activity accept: %w", ErrFabricUnavailable)
+		}
+		policy, policyJSON, policyDigest, err := validateActivityPolicyEvidence(response.PolicyJSON, response.PolicyDigest)
+		if err != nil {
+			return err
+		}
+		if response.PolicyChanged {
+			if response.Receipt != (projectstate.ActivityReceiptV1{}) {
+				return fmt.Errorf("sync: Activity policy response: %w", localstore.ErrActivityPolicyChanged)
+			}
+			replaced, err := s.activities.ReplacePolicy(ctx, cycle.route, cycle.policy.Policy.PolicyVersion,
+				cycle.policy.PolicyDigest, policy)
+			if err != nil {
+				return err
+			}
+			if !sameActivityPolicy(replaced, policy, policyJSON, policyDigest) {
+				return fmt.Errorf("sync: Activity policy response: %w", localstore.ErrActivityPolicyChanged)
+			}
+			if attempt == 0 {
+				continue
+			}
+			return fmt.Errorf("sync: Activity policy changed twice: %w", localstore.ErrActivityPolicyChanged)
+		}
+		if !sameActivityPolicy(cycle.policy, policy, policyJSON, policyDigest) {
+			return fmt.Errorf("sync: Activity accept policy: %w", localstore.ErrActivityPolicyChanged)
+		}
+		if err := validateActivityReceiptForRecord(response.Receipt, record); err != nil {
+			return err
+		}
+		if err := s.requireUnconflicted(ctx, scope); err != nil {
+			return err
+		}
+		return s.activities.AcknowledgeOutbound(ctx, record.Key, response.Receipt)
+	}
+	return fmt.Errorf("sync: Activity policy retry exhausted: %w", localstore.ErrActivityPolicyChanged)
+}
+
+func (s *ActivityTransport) resolveNetworkCycle(ctx context.Context, scope types.WorkspaceScope) (activityNetworkCycle, error) {
+	resolved, err := s.resolveRoutePolicy(ctx, scope)
+	if err != nil {
+		return activityNetworkCycle{}, err
+	}
+	if err := s.requireUnconflicted(ctx, scope); err != nil {
+		return activityNetworkCycle{}, err
+	}
+	token := ""
+	if resolved.profile.CredentialRef != "" {
+		token, err = s.credentials.Read(ctx, resolved.profile.CredentialRef)
+		if err != nil {
+			return activityNetworkCycle{}, fmt.Errorf("sync: resolve Activity credential: %w", ErrAttentionRequired)
+		}
+	}
+	client, err := s.clients.Client(ctx, resolved.profile, token)
+	if err != nil || activityNilDependency(client) {
+		return activityNetworkCycle{}, fmt.Errorf("sync: create Activity client: %w", ErrFabricUnavailable)
+	}
+	return activityNetworkCycle{resolvedActivityRoute: resolved, client: client}, nil
+}
+
+func (s *ActivityTransport) resolveRoutePolicy(ctx context.Context, scope types.WorkspaceScope) (resolvedActivityRoute, error) {
+	if s == nil || activityNilDependency(s.routes) || s.activities == nil {
+		return resolvedActivityRoute{}, errors.New("sync: Activity transport unavailable")
+	}
+	binding, profile, err := s.routes.GetRoute(ctx, scope)
+	if err != nil {
+		return resolvedActivityRoute{}, fmt.Errorf("sync: resolve Activity route: %w", ErrAttentionRequired)
+	}
+	if binding.Workspace.Scope != scope || binding.AttachmentRef == "" || binding.CanonicalRef == "" ||
+		binding.ValidateWithProfile(profile) != nil {
+		return resolvedActivityRoute{}, fmt.Errorf("sync: validate Activity route: %w", ErrAttentionRequired)
+	}
+	route := activityRouteForTransport(binding)
+	if err := route.Validate(); err != nil {
+		return resolvedActivityRoute{}, fmt.Errorf("sync: validate Activity route: %w", ErrAttentionRequired)
+	}
+	policy, err := s.activities.CurrentPolicy(ctx, route)
+	if err != nil {
+		if errors.Is(err, localstore.ErrActivityPolicyUnavailable) {
+			return resolvedActivityRoute{}, err
+		}
+		return resolvedActivityRoute{}, fmt.Errorf("sync: read Activity policy: %w", ErrAttentionRequired)
+	}
+	decoded, canonical, digest, err := validateActivityPolicyEvidence(policy.PolicyJSON, policy.PolicyDigest)
+	if err != nil || policy.Route != route || policy.Policy != decoded || !sameActivityPolicy(policy, decoded, canonical, digest) {
+		return resolvedActivityRoute{}, fmt.Errorf("sync: validate Activity policy: %w", localstore.ErrActivityPolicyUnavailable)
+	}
+	return resolvedActivityRoute{binding: binding, profile: profile, route: route, policy: policy}, nil
+}
+
+func (s *ActivityTransport) requireUnconflicted(ctx context.Context, scope types.WorkspaceScope) error {
+	conflicted, err := s.conflicts.HasOpenConflicts(ctx, scope)
+	if err != nil {
+		if errors.Is(err, localstore.ErrWorkspaceConflicted) {
+			return err
+		}
+		return fmt.Errorf("sync: inspect Activity conflicts: %w", ErrAttentionRequired)
+	}
+	if conflicted {
+		return localstore.ErrWorkspaceConflicted
+	}
+	return nil
+}
+
+func validateRemoteActivity(activity projectstate.ActivityV1, presence bool) error {
+	if _, err := projectstate.CanonicalActivity(activity); err != nil {
+		return err
+	}
+	if presence != (activity.Class == projectstate.ActivityPresenceV1) {
+		return projectstate.ErrInvalidActivity
+	}
+	if activity.Actor.Assurance != types.AssurancePublicKeyContinuity &&
+		activity.Actor.Assurance != types.AssurancePrivateAuthenticated {
+		return projectstate.ErrInvalidActivity
+	}
+	return nil
+}
+
+func validateActivityPolicyEvidence(raw []byte, claimed projectstate.Digest) (projectstate.EffectiveActivityPolicyV1, []byte, projectstate.Digest, error) {
+	policy, err := projectstate.DecodeActivityPolicy(raw)
+	if err != nil {
+		return projectstate.EffectiveActivityPolicyV1{}, nil, "", err
+	}
+	canonical, err := projectstate.CanonicalActivityPolicy(policy)
+	if err != nil {
+		return projectstate.EffectiveActivityPolicyV1{}, nil, "", err
+	}
+	digest, err := projectstate.DigestActivityPolicy(policy)
+	if err != nil {
+		return projectstate.EffectiveActivityPolicyV1{}, nil, "", err
+	}
+	if digest != claimed {
+		return projectstate.EffectiveActivityPolicyV1{}, nil, "", projectstate.ErrInvalidActivityPolicy
+	}
+	return policy, canonical, digest, nil
+}
+
+func validateActivityReceiptForRecord(receipt projectstate.ActivityReceiptV1, record localstore.ActivityRecord) error {
+	if _, err := projectstate.CanonicalActivityReceipt(receipt); err != nil {
+		return err
+	}
+	if receipt.ActivityID != record.Key.ActivityID || receipt.ActivityDigest != record.ActivityDigest {
+		return fmt.Errorf("sync: Activity receipt: %w", localstore.ErrActivityReplayConflict)
+	}
+	return nil
+}
+
+func sameActivityPolicy(record localstore.ActivityPolicyRecord, policy projectstate.EffectiveActivityPolicyV1,
+	canonical []byte, digest projectstate.Digest) bool {
+	return record.Policy == policy && record.PolicyDigest == digest && reflect.DeepEqual(record.PolicyJSON, canonical)
+}
+
+func activityRouteForTransport(binding types.FabricBinding) types.ActivityRouteKey {
+	return types.ActivityRouteKey{
+		ProjectID: binding.Workspace.Scope.ProjectID, WorkspaceID: binding.Workspace.Scope.WorkspaceID,
+		FabricInstanceID: binding.FabricInstanceID, RemoteProjectID: binding.RemoteProjectID,
+		StreamID: binding.StreamID, CanonicalRef: binding.CanonicalRef,
+	}
+}
+
+func activityNilDependency(value any) bool {
+	if value == nil {
+		return true
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
+	}
+}
