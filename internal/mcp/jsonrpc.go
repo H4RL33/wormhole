@@ -192,12 +192,18 @@ func reflectStructSchemaWithOptions(t reflect.Type, options schemaOptions) (map[
 		}
 		fieldType := field.Type
 		optional := omitempty
-		if fieldType.Kind() == reflect.Ptr {
+		pointer := fieldType.Kind() == reflect.Ptr
+		if pointer {
 			fieldType = fieldType.Elem()
-			optional = true
+			if !options.closedObjects {
+				optional = true
+			}
 		}
 		schema := jsonSchemaForTypeWithOptions(fieldType, options)
 		applySchemaTags(schema, field)
+		if options.closedObjects && pointer && !omitempty {
+			schema = map[string]any{"anyOf": []any{schema, map[string]any{"type": "null"}}}
+		}
 		properties[name] = schema
 		if !optional {
 			required = appendUnique(required, name)
@@ -592,6 +598,15 @@ func rejectDuplicateJSONValue(decoder *json.Decoder) error {
 }
 
 func validatePublicInputSchema(value any, schema map[string]any) error {
+	if alternatives, ok := schema["anyOf"].([]any); ok {
+		for _, alternative := range alternatives {
+			alternativeSchema, ok := alternative.(map[string]any)
+			if ok && validatePublicInputSchema(value, alternativeSchema) == nil {
+				return nil
+			}
+		}
+		return errors.New("mcp: JSON value does not match any allowed schema")
+	}
 	if constant, ok := schema["const"]; ok && !jsonValuesEqual(value, constant) {
 		return errors.New("mcp: JSON value does not match required constant")
 	}
@@ -609,6 +624,10 @@ func validatePublicInputSchema(value any, schema map[string]any) error {
 	case "boolean":
 		if _, ok := value.(bool); !ok {
 			return errors.New("mcp: expected JSON boolean")
+		}
+	case "null":
+		if value != nil {
+			return errors.New("mcp: expected JSON null")
 		}
 	case "object":
 		object, ok := value.(map[string]any)
@@ -756,10 +775,9 @@ func HandleToolsCall(ctx context.Context, registry *Registry, identityStore *ide
 	// handlerProjectID starts as the raw client-supplied value (used only
 	// for the WhoAmI scoping check below) and is replaced with the
 	// auth-resolved scope.ProjectID once auth succeeds — every Tool.Handler
-	// treats its projectID parameter as already-authenticated (task.go,
-	// channel.go, kb.go compare a body field against it; sync.go's doc
-	// comments say so explicitly), so dispatch must hand it the resolved
-	// value, not the possibly-empty client-supplied one.
+	// treats its projectID parameter as already-authenticated, so dispatch
+	// must hand it the resolved value, not the possibly-empty client-supplied
+	// one.
 	var scope *identity.AuthenticatedScope
 	handlerProjectID := projectID
 	if tool.RequiresAuth {

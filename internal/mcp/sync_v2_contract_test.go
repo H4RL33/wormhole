@@ -211,6 +211,36 @@ type schemaFixture struct {
 	Choice   string            `json:"choice" enum:"one,two"`
 }
 
+type schemaPointerFixture struct {
+	Required *string `json:"required"`
+	Optional *string `json:"optional,omitempty"`
+}
+
+func TestClosedSchemaDistinguishesRequiredNullableAndOptionalPointers(t *testing.T) {
+	closedProperties, closedRequired := reflectStructSchemaWithOptions(
+		reflect.TypeOf(schemaPointerFixture{}), schemaOptions{closedObjects: true},
+	)
+	if !reflect.DeepEqual(closedRequired, []string{"required"}) {
+		t.Fatalf("closed required = %#v, want required pointer only", closedRequired)
+	}
+	wantRequired := map[string]any{"anyOf": []any{
+		map[string]any{"type": "string"}, map[string]any{"type": "null"},
+	}}
+	if !reflect.DeepEqual(closedProperties["required"], wantRequired) {
+		t.Fatalf("closed required pointer = %#v, want %#v", closedProperties["required"], wantRequired)
+	}
+	if !reflect.DeepEqual(closedProperties["optional"], map[string]any{"type": "string"}) {
+		t.Fatalf("closed optional pointer = %#v", closedProperties["optional"])
+	}
+
+	openProperties, openRequired := reflectStructSchema(reflect.TypeOf(schemaPointerFixture{}))
+	if len(openRequired) != 0 ||
+		!reflect.DeepEqual(openProperties["required"], map[string]any{"type": "string"}) ||
+		!reflect.DeepEqual(openProperties["optional"], map[string]any{"type": "string"}) {
+		t.Fatalf("legacy open pointer schema changed: properties=%#v required=%#v", openProperties, openRequired)
+	}
+}
+
 func TestClosedSchemaHandlesAnonymousTimeBytesRawMapsInterfacesConstAndOneOf(t *testing.T) {
 	schema := closedJSONSchemaForType(reflect.TypeOf(schemaFixture{}))
 	if schema["additionalProperties"] != false {

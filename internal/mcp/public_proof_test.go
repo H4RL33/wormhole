@@ -1,8 +1,11 @@
 package mcp
 
 import (
+	"bytes"
 	"encoding/json"
+	"os"
 	"testing"
+	"time"
 
 	"github.com/H4RL33/wormhole/internal/types"
 	"github.com/H4RL33/wormhole/internal/types/projectstate"
@@ -186,7 +189,7 @@ func TestDecodePublicArgumentsRejectsPrimitiveNulls(t *testing.T) {
 			destination: func() any { return &dynamicArgs{} },
 		},
 		{
-			name:        "pointer scalar",
+			name:        "omitempty pointer scalar",
 			raw:         syncPushArguments(`{"schema_version":1,"id":"operation","kind":"resurrect","expected_view_digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","actor":{"actor_kind":"human","assurance":"public-key-continuity","occurred_at":"2026-08-28T12:00:00Z"},"resurrect":{"key":{"Kind":"task","ID":"record"},"expected_tombstone_digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","record":{},"kb_body":null}}`),
 			destination: func() any { return &SyncPushV2Args{} },
 		},
@@ -208,6 +211,129 @@ func TestDecodePublicArgumentsRejectsPrimitiveNulls(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDecodePublicArgumentsAcceptsCanonicalRequiredNullablePointers(t *testing.T) {
+	t.Run("task record", func(t *testing.T) {
+		rawTask, err := os.ReadFile("../types/projectstate/testdata/v1/valid/.wormhole/state/v1/tasks/22222222-2222-4222-8222-222222222222.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var task projectstate.TaskV1
+		if err := json.Unmarshal(rawTask, &task); err != nil {
+			t.Fatal(err)
+		}
+		task.OwnerActorID = nil
+		operation := canonicalPublicOperation(projectstate.OperationPutRecord)
+		operation.PutRecord = &projectstate.PutRecordV1{Record: projectstate.RecordValueV1{Task: &task}}
+		if _, err := projectstate.CanonicalOperation(operation); err != nil {
+			t.Fatalf("CanonicalOperation rejected valid task: %v", err)
+		}
+		raw := marshalPublicArguments(t, publicSyncPushArguments(operation))
+		for _, member := range [][]byte{[]byte(`"parent_task_id":null`), []byte(`"owner_actor_id":null`), []byte(`"due_by":null`)} {
+			if !bytes.Contains(raw, member) {
+				t.Fatalf("marshaled task lacks %s: %s", member, raw)
+			}
+		}
+		var destination SyncPushV2Args
+		if err := decodePublicArguments(raw, &destination); err != nil {
+			t.Fatalf("decodePublicArguments rejected canonical task pointers: %v", err)
+		}
+	})
+
+	t.Run("tombstone operation", func(t *testing.T) {
+		operation := canonicalPublicOperation(projectstate.OperationTombstone)
+		operation.Tombstone = &projectstate.TombstoneOperationV1{
+			Key:                   projectstate.RecordKey{Kind: "task", ID: "22222222-2222-4222-8222-222222222222"},
+			ExpectedContentDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		}
+		if _, err := projectstate.CanonicalOperation(operation); err != nil {
+			t.Fatalf("CanonicalOperation rejected valid tombstone: %v", err)
+		}
+		raw := marshalPublicArguments(t, publicSyncPushArguments(operation))
+		if !bytes.Contains(raw, []byte(`"expected_body_digest":null`)) {
+			t.Fatalf("marshaled tombstone lacks required null digest: %s", raw)
+		}
+		var destination SyncPushV2Args
+		if err := decodePublicArguments(raw, &destination); err != nil {
+			t.Fatalf("decodePublicArguments rejected canonical tombstone pointer: %v", err)
+		}
+	})
+
+	t.Run("activity event", func(t *testing.T) {
+		occurredAt := time.Date(2026, 8, 29, 9, 30, 0, 0, time.UTC)
+		activity := projectstate.ActivityV1{
+			SchemaVersion: 1,
+			ID:            "99999999-9999-4999-8999-999999999991",
+			Class:         projectstate.ActivityOrdinaryV1,
+			Actor: types.ActorEnvelope{
+				ActorKind: types.ActorAgent, AgentID: "11111111-1111-4111-8111-111111111111",
+				AccountableHumanID: "22222222-2222-4222-8222-222222222222", SessionID: "33333333-3333-4333-8333-333333333333",
+				HarnessName: "codex", HarnessVersion: "1.0", ModelName: "gpt", ModelVersion: "5.6",
+				Assurance: types.AssurancePublicKeyContinuity, OccurredAt: occurredAt,
+			},
+			Event: &projectstate.ActivityEventProjectionV1{
+				ChannelID: "44444444-4444-4444-8444-444444444444", ActorID: "11111111-1111-4111-8111-111111111111",
+				EventType: "task.status_changed",
+				Payload:   json.RawMessage(`{"from_status":"wip","task_id":"55555555-5555-4555-8555-555555555555","to_status":"done"}`),
+				Note:      nil, CreatedAt: occurredAt,
+			},
+			CreatedAt: occurredAt,
+		}
+		if _, err := projectstate.CanonicalActivity(activity); err != nil {
+			t.Fatalf("CanonicalActivity rejected valid nil note: %v", err)
+		}
+		activityDigest, err := projectstate.DigestActivity(activity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw := marshalPublicArguments(t, ActivityAcceptV1Args{
+			Version: 1, AttachmentRef: "attachment", PolicyVersion: 1,
+			PolicyDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			Activity:     activity, ActivityDigest: activityDigest,
+		})
+		if !bytes.Contains(raw, []byte(`"note":null`)) {
+			t.Fatalf("marshaled activity lacks required null note: %s", raw)
+		}
+		var destination ActivityAcceptV1Args
+		if err := decodePublicArguments(raw, &destination); err != nil {
+			t.Fatalf("decodePublicArguments rejected canonical activity pointer: %v", err)
+		}
+	})
+}
+
+func canonicalPublicOperation(kind projectstate.OperationKind) projectstate.OperationV1 {
+	return projectstate.OperationV1{
+		SchemaVersion: 1, ID: "99999999-9999-4999-8999-999999999991", Kind: kind,
+		ExpectedViewDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Actor: types.ActorEnvelope{
+			ActorKind: types.ActorHuman, HumanPrincipalID: "11111111-1111-4111-8111-111111111111",
+			Assurance: types.AssuranceLocal, OccurredAt: time.Date(2026, 8, 29, 9, 30, 0, 0, time.UTC),
+		},
+	}
+}
+
+func publicSyncPushArguments(operation projectstate.OperationV1) SyncPushV2Args {
+	return SyncPushV2Args{
+		SyncV2Scope: SyncV2Scope{
+			Version: 2, AttachmentRef: "attachment",
+			Repository:   types.RepositoryIdentity{Provider: "github", ImmutableID: "123", CanonicalRemote: "https://github.com/H4RL33/wormhole"},
+			CanonicalRef: "refs/heads/main", BaseCommitSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			BaseTreeDigest:         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			ExpectedStreamVersion:  1,
+			ExpectedLiveTreeDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		},
+		Operation: operation,
+	}
+}
+
+func marshalPublicArguments(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }
 
 func TestValidatePublicInputSchemaRejectsPrimitiveKindMismatches(t *testing.T) {

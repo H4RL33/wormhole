@@ -5186,7 +5186,14 @@
             "type": "string"
           },
           "parent_task_id": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "title": {
             "type": "string"
@@ -5195,7 +5202,14 @@
             "type": "string"
           },
           "owner_actor_id": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "status": {
             "type": "string"
@@ -5204,8 +5218,15 @@
             "type": "integer"
           },
           "due_by": {
-            "type": "string",
-            "format": "date-time"
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "created_at": {
             "type": "string",
@@ -5223,10 +5244,13 @@
           "schema_version",
           "kind",
           "id",
+          "parent_task_id",
           "title",
           "description",
+          "owner_actor_id",
           "status",
           "priority",
+          "due_by",
           "created_at",
           "updated_at",
           "extensions"
@@ -5379,7 +5403,14 @@
           },
           "payload": {},
           "note": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "created_at": {
             "type": "string",
@@ -5397,6 +5428,7 @@
           "actor_id",
           "event_type",
           "payload",
+          "note",
           "created_at",
           "extensions"
         ],
@@ -5415,16 +5447,37 @@
             "type": "string"
           },
           "task_id": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "repository": {
             "type": "string"
           },
           "commit_sha": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "pr_url": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "summary": {
             "type": "string"
@@ -5444,7 +5497,10 @@
           "schema_version",
           "kind",
           "id",
+          "task_id",
           "repository",
+          "commit_sha",
+          "pr_url",
           "summary",
           "actor_id",
           "created_at",
@@ -5534,12 +5590,20 @@
             "type": "string"
           },
           "expected_body_digest": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
           "key",
-          "expected_content_digest"
+          "expected_content_digest",
+          "expected_body_digest"
         ],
         "additionalProperties": false
       },
@@ -5712,7 +5776,14 @@
           },
           "payload": {},
           "note": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "created_at": {
             "type": "string",
@@ -5724,6 +5795,7 @@
           "actor_id",
           "event_type",
           "payload",
+          "note",
           "created_at"
         ],
         "additionalProperties": false
