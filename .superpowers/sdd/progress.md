@@ -1501,3 +1501,15 @@ authority; architecture guards prove no Fabric promotion seam. Fresh `make check
 passed at 80.8% coverage. Independent review approved after two fix rounds with
 Critical 0 / Important 0 / Minor 0. All Task 3 slices are individually complete;
 the final cross-slice Task 3 verification/review gate is next.
+
+Stage 3 Task 3 final gate: complete (verification `a0f9244`; final remediation
+`bc8110d`, `acfcdaf`, `de57d11`, `fccb7c3`). Cross-slice review required historical
+receipt-policy evidence in pull, profile-mode assurance on inbound/exposure, detached-
+route maintenance pruning, and a current-policy ceiling over every receipt/evidence
+version. Core, transport, and localstore now enforce those contracts atomically; invalid
+batches preserve the exact preimage and cannot poison a later legitimate policy advance.
+Required PostgreSQL, focused cross-slice/race, full affected, and fresh `make check`
+passed with 80.9% coverage; migrations 1-20 remain byte-identical, migration 21 down
+matches exact v20, v8 refuses former v7, dated history is untouched, and no production
+coverage tag exists. Final whole-Task review approved with Critical 0 / Important 0 /
+Minor 0. Task 3 is complete; Task 4 portable-stream reconstruction is next.
