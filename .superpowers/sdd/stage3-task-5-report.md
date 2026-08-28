@@ -2,7 +2,7 @@
 
 ## Status
 
-DONE_WITH_CONCERNS
+DONE
 
 Implementation commit: `23710a7` (`feat: observe exact canonical GitHub commits`).
 
@@ -256,3 +256,182 @@ However, this exact-scope task does not publish new `WORMHOLE_GITHUB_*` environm
 names because doing so fails the frozen alpha inventory and Task 15 owns that contract
 update. A later contract-owning task must publish the live configuration surface before
 operators can enable private GitHub observation through `LoadConfig` alone.
+
+## Independent-review fix — live Fabric credential publication
+
+Status: DONE. The one Important review finding was reproduced and fixed in
+`ea83aa7` (`fix(fabric): publish GitHub observer config`). The earlier concern above is
+resolved by the user-approved Task 5 ownership clarification.
+
+### Root cause and design fit
+
+Production `main` calls only `types.LoadConfig`, but the initial Task 5 implementation
+hardcoded the public GitHub API base and left both observer credential fields empty.
+Private observation was therefore available only to programmatically constructed test
+configs. The prior attempt to publish the live names exposed a real sequencing
+contradiction because the frozen alpha inventory had not authorized them.
+
+The approved correction keeps the existing security boundary and publishes exactly
+three Fabric-process values:
+
+- `WORMHOLE_GITHUB_API_BASE_URL`
+- `WORMHOLE_GITHUB_CREDENTIAL_REF`
+- `WORMHOLE_GITHUB_CREDENTIAL`
+
+`LoadConfig` uses the repository's existing explicit `getEnv` convention. The existing
+Fabric startup constructor remains the fail-closed validator: reference and credential
+must both be empty for public observation or both be present and free of leading,
+trailing, internal whitespace and control characters. The GitHub observer remains the
+only component that turns a successfully resolved server credential into an outbound
+authorization header. `GITHUB_TOKEN`, Gateway credentials, local Git, and credential
+helpers remain outside the path.
+
+The implementation plan now states that Task 5 owns runtime publication plus the alpha
+environment inventory and that Task 15 only documents/verifies the already-shipped
+surface. Task 5's file list, tests, GREEN command, and commit command were updated
+accordingly; no Task 6 protocol work moved into this fix.
+
+### Files changed
+
+- `internal/types/config.go`: load the exact three Fabric-only environment values.
+- `internal/types/config_test.go`: prove safe public defaults, ambient-token exclusion,
+  and exact explicit loading.
+- `cmd/fabric/main_test.go`: prove the live credential resolves only its configured
+  reference and incomplete/whitespace/control-bearing live pairs fail closed.
+- `cmd/wormhole/contract_manifest_test.go`: assert the exact observer environment
+  surface and explicit exclusion of ambient `GITHUB_TOKEN`.
+- `docs/contracts/alpha-contract.json`: publish the three sorted live names.
+- `docs/superpowers/plans/2026-07-28-multifabric-identity-trial-implementation-plan.md`:
+  resolve Task 5/Task 15 runtime ownership.
+- `.superpowers/sdd/stage3-task-5-report.md`: record this fix wave.
+
+The ignored review and brief files were read as inputs but remained unstaged and
+uncommitted.
+
+### Exact RED evidence
+
+Tests were added before the production configuration or inventory changed:
+
+```text
+$ go test ./internal/types ./cmd/fabric ./cmd/wormhole -run 'Test(LoadConfig_PrivateGitCredential|PrivateGitCredential(ResolvesOnlyConfiguredFabricReference|EnvironmentFailsClosed)|AlphaContractFabricGitHubObserverEnvironment)' -count=1
+--- FAIL: TestLoadConfig_PrivateGitCredential/explicit_Fabric_server_configuration
+    LoadConfig did not load the explicit Fabric-server GitHub observer configuration
+--- FAIL: TestPrivateGitCredentialResolvesOnlyConfiguredFabricReference
+    ReadServerCredential did not return the configured Fabric-server credential:
+    fabric: private Git credential unavailable
+--- FAIL: TestPrivateGitCredentialEnvironmentFailsClosed/reference_only
+--- FAIL: TestPrivateGitCredentialEnvironmentFailsClosed/credential_only
+--- FAIL: TestPrivateGitCredentialEnvironmentFailsClosed/reference_internal_whitespace
+--- FAIL: TestPrivateGitCredentialEnvironmentFailsClosed/credential_internal_whitespace
+--- FAIL: TestPrivateGitCredentialEnvironmentFailsClosed/reference_control
+--- FAIL: TestPrivateGitCredentialEnvironmentFailsClosed/credential_control
+    each invalid case produced observer=true error=<nil>
+--- FAIL: TestAlphaContractFabricGitHubObserverEnvironment
+    Fabric GitHub observer environment is missing WORMHOLE_GITHUB_API_BASE_URL
+    Fabric GitHub observer environment is missing WORMHOLE_GITHUB_CREDENTIAL
+    Fabric GitHub observer environment is missing WORMHOLE_GITHUB_CREDENTIAL_REF
+FAIL
+```
+
+The failures were the expected missing-behavior RED: `LoadConfig` ignored the new
+surface, causing invalid live pairs to collapse to an apparently valid public config,
+and the contract had not published the names.
+
+After the minimal `LoadConfig` wiring, the configuration behavior passed:
+
+```text
+$ go test ./internal/types ./cmd/fabric -run 'Test(LoadConfig_PrivateGitCredential|PrivateGitCredential(ResolvesOnlyConfiguredFabricReference|EnvironmentFailsClosed))' -count=1
+ok github.com/H4RL33/wormhole/internal/types 0.003s
+ok github.com/H4RL33/wormhole/cmd/fabric 0.004s
+```
+
+The unchanged frozen inventory then gave the expected contract-specific RED:
+
+```text
+$ go test ./cmd/wormhole -run 'TestAlphaContract(EnvironmentAndPaths|FabricGitHubObserverEnvironment)' -count=1
+--- FAIL: TestAlphaContractEnvironmentAndPaths
+    production environment contained WORMHOLE_GITHUB_API_BASE_URL,
+    WORMHOLE_GITHUB_CREDENTIAL, and WORMHOLE_GITHUB_CREDENTIAL_REF; manifest did not
+--- FAIL: TestAlphaContractFabricGitHubObserverEnvironment
+    all three required Fabric GitHub observer names were missing
+FAIL
+```
+
+This proved the inventory update was required rather than an unrelated documentation
+edit. Adding exactly the three sorted names produced GREEN:
+
+```text
+$ go test ./cmd/wormhole -run 'TestAlphaContract(EnvironmentAndPaths|FabricGitHubObserverEnvironment)' -count=1
+ok github.com/H4RL33/wormhole/cmd/wormhole 0.086s
+```
+
+### Full affected, security, race, and contract verification
+
+The complete affected packages passed:
+
+```text
+$ go test ./internal/core/git ./internal/types ./cmd/fabric ./cmd/wormhole -count=1
+ok github.com/H4RL33/wormhole/internal/core/git 5.918s
+ok github.com/H4RL33/wormhole/internal/types 0.013s
+ok github.com/H4RL33/wormhole/cmd/fabric 0.178s
+ok github.com/H4RL33/wormhole/cmd/wormhole 6.312s
+```
+
+The focused race/security matrix passed. It covers public/no-authorization behavior,
+private exact-reference resolution, credential-error redaction, credentialed and public
+redirect refusal, unsafe API bases, live loading, invalid pairs, and both inventory
+assertions:
+
+```text
+$ go test -race ./internal/core/git ./internal/types ./cmd/fabric ./cmd/wormhole -run 'Test(GitHubObserver(PublicSendsNoAuthorization|PrivateUsesServerCredentialOnly|CredentialFailureDoesNotExposeSourceDetail|RejectsCredentialedRedirectBeforeFollow|RejectsCrossOriginRedirect|RejectsUnsafeAPIBaseURL)|LoadConfig_PrivateGitCredential|PrivateGitCredential|AlphaContract(EnvironmentAndPaths|FabricGitHubObserverEnvironment))' -count=1
+ok github.com/H4RL33/wormhole/internal/core/git 1.050s
+ok github.com/H4RL33/wormhole/internal/types 1.027s
+ok github.com/H4RL33/wormhole/cmd/fabric 1.031s
+ok github.com/H4RL33/wormhole/cmd/wormhole 1.569s
+```
+
+The alpha contract stability script passed without rewriting the inventory:
+
+```text
+$ .github/scripts/check-contract-manifest.sh
+Contract inventory is deterministic and unchanged.
+```
+
+The repository-wide gate passed on the fix tree:
+
+```text
+$ make check
+build: PASS
+vet: PASS
+mandatory integration: PASS
+repository race: PASS
+coverage: PASS (80.9%)
+```
+
+### Diff, scope, and self-review
+
+- Compared the fix with `a674f73`; the implementation commit contains exactly the six
+  runtime-config, tests, alpha inventory, and approved-plan files listed above. This
+  report is the only follow-up evidence file.
+- `git diff --check` passed before the fix commit. The environment names are sorted in
+  the inventory and the contract determinism script left the file byte-identical.
+- Production-only scans found no `GITHUB_TOKEN`, authorization logging, local process
+  execution, credential-helper access, ActivityV1, Code Graph, or new MCP/public
+  protocol behavior in the changed runtime files.
+- Re-read the review finding against the production `main` call chain and confirmed the
+  fix closes the actual operator path rather than only adjusting a test seam.
+- Confirmed explicit empty reference/credential retains the public default and existing
+  observer tests prove it reads no credential and sends no authorization header.
+- Confirmed incomplete, leading/trailing/internal whitespace, and control-bearing pairs
+  fail before database open; unsafe API bases still fail in the existing GitHub
+  constructor validation.
+- Confirmed neither configuration errors nor credential-source errors include the raw
+  configured reference, server credential, source detail, or ambient token.
+- Confirmed the plan's Task 5 file list, test requirements, GREEN gates, and commit scope
+  now agree with the shipped runtime surface, while Task 15 is explicitly documentation
+  and verification only for this already-live configuration.
+
+### Concerns
+
+None. The independent-review Important finding and the Task 5/Task 15 ownership
+contradiction are resolved without broadening the observer or protocol boundary.
