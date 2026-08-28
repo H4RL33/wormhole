@@ -141,6 +141,8 @@ func TestStage2ActiveDocumentationStatesLocalOnlyAcceptanceBoundary(t *testing.T
 			"exactly 17", "optional Fabric", "Git is the sole accepted", "same-user", "exactly 16", "descriptor-only",
 		},
 		"docs/wiki/Security-Model.md": {
+			"Git acceptance authority", "Portable project state", "Operational state", "Machine-private state",
+			"hostile same-user process", "does not contact Fabric",
 			"exactly 16 private tools", "ten public", "descriptor-only", "non-callable",
 		},
 		"docs/testing/alpha-validation.md": {
@@ -150,6 +152,7 @@ func TestStage2ActiveDocumentationStatesLocalOnlyAcceptanceBoundary(t *testing.T
 			"service-manager installation is covered separately",
 		},
 		"docs/architecture/gateway-enrolment-lifecycle.md": {
+			"Historical/future optional-Fabric design", "not a live Stage 2 Gateway operation",
 			"exactly 16", "ten public", "descriptor-only", "credentials_persisted",
 			"bootstrap_in_progress", "recovery_required", "controlled reissue",
 		},
@@ -166,12 +169,15 @@ func TestStage2ActiveDocumentationStatesLocalOnlyAcceptanceBoundary(t *testing.T
 			"Git acceptance", "machine-private",
 		},
 		"docs/wiki/Home.md": {
+			"local-only Stage 2", "Git is the sole acceptance authority", "Fabric is optional",
 			"exactly 16", "ten public", "descriptor-only", "non-callable",
 		},
 		"docs/wiki/CLI-Guide.md": {
+			"exact 17-tool Gateway", "not a Stage 2 runtime dependency", "ordinary Git",
 			"16 live private tools", "ten descriptor-only public contracts", "non-callable",
 		},
 		"docs/operators/alpha-validation-trial.md": {
+			"local-only Stage 2", "17-tool Gateway", "does not exercise Fabric", "second fresh clone",
 			"16-tool live private registry", "ten public", "descriptor-only", "non-callable",
 		},
 		"docs/implementation-rules.md": {
@@ -222,6 +228,65 @@ func TestStage2ActiveDocumentationStatesLocalOnlyAcceptanceBoundary(t *testing.T
 	} {
 		if strings.Contains(string(security), staleCurrentClaim) {
 			t.Errorf("SECURITY.md retains stale current-boundary claim %q", staleCurrentClaim)
+		}
+	}
+}
+
+func TestActiveOwnershipCommentsDescribeRetainedTransportNeutralBoundaries(t *testing.T) {
+	t.Parallel()
+
+	requirements := map[string][]string{
+		"docs/implementation-rules.md": {
+			"Activity-v1 transport, durable queue/audit repositories, the v2 status shell",
+			"shared route and credential interfaces",
+		},
+		"internal/runtime/localapi/localapi.go": {
+			"per-action permission contract at the local",
+			"MCP boundary before a handler can read or mutate replica state",
+			"fails closed before dispatch",
+		},
+		"internal/runtime/localstore/task_repo.go": {
+			"applies a complete caller-supplied task projection",
+			"does not claim a live remote transport",
+		},
+		"internal/mcp/jsonrpc_toolscall_test.go": {
+			"private dispatch derives project identity",
+			"authenticated bearer scope",
+			"Descriptor-only public tools do not use this private path.",
+		},
+	}
+	forbidden := map[string][]string{
+		"docs/implementation-rules.md": {
+			"bootstrap/incremental streams",
+		},
+		"internal/runtime/localapi/localapi.go": {
+			"online for sync bootstrap",
+			"incremental_push independently rechecks every queued item server-side",
+		},
+		"internal/runtime/localstore/task_repo.go": {
+			"Incremental pull calls this",
+		},
+		"internal/mcp/jsonrpc_toolscall_test.go": {
+			"sync engine's",
+			"internal/runtime/sync.Engine",
+			"namespace_id) — auth resolves",
+		},
+	}
+
+	for relative, fragments := range requirements {
+		content, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(relative)))
+		if err != nil {
+			t.Fatalf("read %s: %v", relative, err)
+		}
+		for _, fragment := range fragments {
+			if !strings.Contains(string(content), fragment) {
+				t.Errorf("%s does not state retained ownership %q", relative, fragment)
+			}
+		}
+		for _, fragment := range forbidden[relative] {
+			if strings.Contains(string(content), fragment) {
+				t.Errorf("%s retains deleted sync-v1 ownership claim %q", relative, fragment)
+			}
 		}
 	}
 }

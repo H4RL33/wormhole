@@ -298,9 +298,10 @@ func (r *TaskRepo) UpsertTask(ctx context.Context, namespaceID, taskID, title, d
 	return r.upsertTask(ctx, namespaceID, taskID, title, description, parentTaskID, ownerAgentID, status, priority, dueBy, nil, nil)
 }
 
-// UpsertTaskFromServer applies the complete authoritative Fabric task wire,
-// including its original timestamps. Incremental pull calls this only after
-// confirming no outbound writes remain for the namespace.
+// UpsertTaskFromServer applies a complete caller-supplied task projection,
+// including its original timestamps. The caller owns route, authorization,
+// and ordering preconditions; this repository validates and stores the row and
+// does not claim a live remote transport.
 func (r *TaskRepo) UpsertTaskFromServer(ctx context.Context, namespaceID, taskID, title, description string, parentTaskID, ownerAgentID *string, status string, priority int, dueBy *time.Time, createdAt, updatedAt time.Time) (Task, error) {
 	if createdAt.IsZero() || updatedAt.IsZero() {
 		return Task{}, errors.New("localstore/task: upsert from server: timestamps are required")

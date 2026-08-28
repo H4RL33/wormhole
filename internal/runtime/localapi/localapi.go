@@ -673,7 +673,7 @@ func (s *Server) SetAuthorizationAgent(projectID, agentID string) {
 }
 
 // WarmAuthorizationScopes refreshes the offline authorization cache for each
-// configured project while the daemon is already online for sync bootstrap.
+// configured optional-Fabric project binding before local dispatch begins.
 // Individual failures are returned after all bindings have been attempted;
 // callers may continue serving, in which case uncached privileged calls fail
 // closed at the local MCP boundary.
@@ -698,11 +698,10 @@ func (s *Server) WarmAuthorizationScopes(ctx context.Context) error {
 	return nil
 }
 
-// authorizeLocalTool enforces the same per-action permission contract as the
-// Coordination Server before a local MCP handler can read or mutate replica
-// state. The daemon uses the last authenticated whoami scope cached for the
-// requested project, which keeps already-enrolled agents functional offline;
-// incremental_push independently rechecks every queued item server-side.
+// authorizeLocalTool enforces the per-action permission contract at the local
+// MCP boundary before a handler can read or mutate replica state. It uses the
+// last authenticated whoami scope cached for the requested project; an absent
+// or mismatched credential identity fails closed before dispatch.
 func (s *Server) authorizeLocalTool(ctx context.Context, tool localTool, args json.RawMessage) error {
 	for _, requiredPermission := range tool.RequiredPermissions {
 		if err := s.authorizeLocalPermission(ctx, requiredPermission, args); err != nil {

@@ -287,7 +287,7 @@ the same layering pattern and isolation discipline.
 | `internal/runtime/localapi` | Stable local IPC, project-operation registry, cwd/workspace routing, and actor-envelope resolution | All sibling `internal/runtime/*` packages, `internal/types`, stdlib |
 | `internal/runtime/eventbus` | In-memory pub/sub for ephemeral events (presence, heartbeats); never persists | `internal/types`, stdlib |
 | `internal/runtime/scheduler` | Agent registration, presence tracking, capability matching, and retained scheduling primitives; no Stage 2 Task MCP surface | `internal/types`, stdlib |
-| `internal/runtime/sync` | Retained optional-Fabric clients, durable queues, bootstrap/incremental streams, Git-base preconditions, and conflict audit; not instantiated by the Stage 2 local-only supervisor | `internal/runtime/localstore`, `internal/types`, stdlib |
+| `internal/runtime/sync` | Activity-v1 transport, durable queue/audit repositories, the v2 status shell, and shared route and credential interfaces; not instantiated by the Stage 2 local-only supervisor | `internal/runtime/localstore`, `internal/types`, stdlib |
 | `internal/runtime/codegraph/config` | Disabled-by-default, workspace-scoped local Code Graph configuration | stdlib |
 | `internal/runtime/codegraph/golang` | Read-only Go compiler analysis into the language-neutral graph model | `golang.org/x/tools/go/packages`, stdlib |
 | `internal/runtime/codegraph/schema` | Pure canonical Code Graph SQLite catalog SQL, version, fingerprint, and read-only validation authority | stdlib |

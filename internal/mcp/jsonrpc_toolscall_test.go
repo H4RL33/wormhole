@@ -183,9 +183,9 @@ func TestHandleToolsCall_ForwardsAuthResolvedProjectID(t *testing.T) {
 		},
 	})
 
-	// Arguments omit project_id entirely, mirroring how the sync engine's
-	// tool calls never send it (internal/runtime/sync.Engine sends only
-	// namespace_id) — auth resolves the project from the bearer token alone.
+	// Arguments omit project_id to prove private dispatch derives project identity
+	// only from the authenticated bearer scope, never from caller-controlled
+	// arguments. Descriptor-only public tools do not use this private path.
 	callParams, _ := json.Marshal(toolsCallParams{Name: "test.needs.auth.projectid", Arguments: json.RawMessage(`{}`)})
 
 	result, rpcErr := HandleToolsCall(context.Background(), registry, identityStore, "Bearer "+registered.Token, callParams)
