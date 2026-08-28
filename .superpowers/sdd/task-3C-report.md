@@ -2,10 +2,11 @@
 
 ## Status
 
-Task 3C is complete. Gateway now accepts exactly the consolidated private schema
-v8 epoch and provides local durable Activity policy, ledger, queue, receipt,
-cursor, lifecycle, and pruning repositories. It does not add transport,
-PostgreSQL work, MCP surface, or a promotion operation.
+Task 3C implementation and its independent-review fix wave are complete;
+independent re-review is pending. Gateway accepts exactly the consolidated
+private schema v8 epoch and provides local durable Activity policy, ledger,
+queue, receipt, cursor, lifecycle, and pruning repositories. It does not add
+transport, PostgreSQL work, MCP surface, or a promotion operation.
 
 Implementation commits:
 
@@ -156,3 +157,83 @@ total: (statements) 80.8%
 No known functional concern or blocker. Task 3C intentionally creates only the
 promotion-receipt evidence table and pruning constraints; Task 3E owns the
 transaction-local promotion repository and operation.
+
+## Independent-review fix wave
+
+The independent review found three Important issues: persisted RFC3339 values
+discarded nanoseconds, acknowledged outbound rows did not project their
+receipt-owned server sequence, and repository reads trusted relational evidence
+without reconstructing the complete persisted proof.
+
+### Review-fix RED evidence
+
+The causal tests failed against the reviewed implementation for the expected
+reasons:
+
+```text
+TestActivityNanosecondEvidenceReplaysAndRetainsExactly:
+stored created_at="2026-08-28T12:00:00Z", want exact fixed-width UTC nanoseconds
+
+TestActivityPrunerUsesNanosecondCreationOrder:
+retained the older Activity after a one-row prune
+
+TestActivityPendingRejectsCorruptReferencedPolicyEvidence:
+PendingOutbound served corrupt policy bytes and captured digest
+
+TestActivityRetainedRejectsCorruptLedgerAndReceiptEvidence:
+Retained served corrupt created_at and receipt evidence
+
+TestActivityTransitionRejectsCorruptTerminalEvidence:
+TransitionLifecycle replay accepted corrupt terminal evidence
+
+TestActivityPruneRejectsInvalidMaximumExpirySibling:
+Prune accepted an invalid maximum-expiry sibling
+
+TestActivityPruneCorruptLaterCandidateRollsBackCompletePreimage:
+Prune accepted a corrupt later candidate
+```
+
+### Review-fix implementation
+
+- Activity timestamps now use one fixed-width, lexically sortable UTC
+  nanosecond representation. Canonical Activity/event creation times and exact
+  receipt acceptance times survive persistence and replay without truncation.
+- Receipt sequence and acceptance evidence are authoritative for acknowledged
+  outbound projections. Duplicate pull windows read receipt sequences, so an
+  exact queue -> acknowledge -> self-origin pull -> duplicate replay is
+  read-only while the immutable ledger sequence remains unchanged.
+- One central evidence loader strict-decodes and re-digests Activity and policy
+  bytes, compares actor/event/lifecycle/creation projections, reconstructs
+  receipt evidence, validates ledger/receipt sequence and acceptance relations,
+  validates queue policy references, and checks every lifecycle policy,
+  digest, retention, state, terminal time, and exact expiry relation.
+- `PendingOutbound`, `Retained`, `TransitionLifecycle`, and `Prune` all load
+  that complete evidence before serving or mutating. Prune validates the full
+  source-workspace preimage before deleting any child and computes age/cap and
+  maximum-expiry eligibility from the validated typed evidence.
+- Corruption errors retain stable sentinels and contain no canonical policy,
+  Activity, route, credential, or other secret-bearing evidence.
+
+### Review-fix GREEN evidence
+
+```text
+go test ./internal/runtime/localstore -run \
+  'TestActivity(Nanosecond|PrunerUsesNanosecond|PendingRejects|RetainedRejects|TransitionRejects|PruneRejects|PruneCorrupt|EvidenceErrors)' -count=1
+ok github.com/H4RL33/wormhole/internal/runtime/localstore 0.204s
+
+go test ./internal/runtime/localstore -run 'TestActivity' -count=1
+ok github.com/H4RL33/wormhole/internal/runtime/localstore 4.655s
+
+go test -race ./internal/runtime/localstore -run 'TestActivityConcurrent' -count=1
+ok github.com/H4RL33/wormhole/internal/runtime/localstore 1.652s
+
+go test ./internal/runtime/localstore -count=1
+ok github.com/H4RL33/wormhole/internal/runtime/localstore 11.127s
+
+make check
+total: (statements) 80.9%
+# exit 0; build, vet, integration-required tests, repository-wide race, coverage
+```
+
+The review fix changes no schema epoch, compatibility boundary, transport,
+PostgreSQL object, MCP surface, promotion operation, or Task 3D+ behavior.

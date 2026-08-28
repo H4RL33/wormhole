@@ -13,7 +13,10 @@ import (
 	"github.com/H4RL33/wormhole/internal/types/projectstate"
 )
 
-const maximumActivityInteger int64 = 9_007_199_254_740_991
+const (
+	maximumActivityInteger  int64 = 9_007_199_254_740_991
+	activityTimestampLayout       = "2006-01-02T15:04:05.000000000Z"
+)
 
 var (
 	ErrActivityPolicyUnavailable = errors.New("localstore: activity policy unavailable")
@@ -145,7 +148,15 @@ func databaseActivityNow(ctx context.Context, db activityDB) (time.Time, error) 
 }
 
 func sqliteActivityTimestamp(value time.Time) string {
-	return value.UTC().Format(time.RFC3339)
+	return value.UTC().Format(activityTimestampLayout)
+}
+
+func parseSQLiteActivityTimestamp(value string) (time.Time, error) {
+	parsed, err := time.Parse(activityTimestampLayout, value)
+	if err != nil || parsed.Format(activityTimestampLayout) != value {
+		return time.Time{}, ErrActivityReplayConflict
+	}
+	return parsed.UTC(), nil
 }
 
 func canonicalActivityEvidence(activity projectstate.ActivityV1) ([]byte, projectstate.Digest, []byte, error) {
@@ -173,7 +184,7 @@ type activityProjection struct {
 	eventChannelID, eventActorID, eventType sql.NullString
 	eventPayload                            []byte
 	eventNote                               sql.NullString
-	eventCreatedAt                          sql.NullTime
+	eventCreatedAt                          sql.NullString
 	lifecycleKind, lifecycleReference       sql.NullString
 }
 
@@ -185,7 +196,7 @@ func activityProjectionArgs(activity projectstate.ActivityV1) []any {
 		if activity.Event.Note != nil {
 			eventNote = *activity.Event.Note
 		}
-		eventCreatedAt = activity.Event.CreatedAt
+		eventCreatedAt = sqliteActivityTimestamp(activity.Event.CreatedAt)
 	}
 	var lifecycleKind, lifecycleReference any
 	if activity.Lifecycle != nil {
@@ -205,7 +216,7 @@ func (p activityProjection) matches(activity projectstate.ActivityV1) bool {
 		!bytes.Equal(p.eventPayload, activity.Event.Payload) ||
 		p.eventNote.Valid != (activity.Event.Note != nil) ||
 		(activity.Event.Note != nil && p.eventNote.String != *activity.Event.Note) ||
-		!p.eventCreatedAt.Valid || !p.eventCreatedAt.Time.UTC().Equal(activity.Event.CreatedAt) {
+		!p.eventCreatedAt.Valid || p.eventCreatedAt.String != sqliteActivityTimestamp(activity.Event.CreatedAt) {
 		return false
 	}
 	if activity.Lifecycle == nil {
@@ -216,48 +227,11 @@ func (p activityProjection) matches(activity projectstate.ActivityV1) bool {
 }
 
 func readActivityRecord(ctx context.Context, db activityDB, key types.ActivityOriginKey, policyVersion int64, policyDigest projectstate.Digest) (ActivityRecord, error) {
-	var raw, actorJSON []byte
-	var storedDigest, class string
-	var sequence sql.NullInt64
-	var acceptedAt time.Time
-	var projection activityProjection
-	err := db.QueryRowContext(ctx, `SELECT activity_class,canonical_activity_json,activity_digest,source_actor_json,
-		event_channel_id,event_actor_id,event_type,event_payload,event_note,event_created_at,
-		embedded_lifecycle_kind,embedded_lifecycle_reference_id,sequence,accepted_at
-		FROM activity_ledger WHERE project_id=? AND workspace_id=? AND fabric_instance_id=? AND remote_project_id=?
-		AND stream_id=? AND canonical_ref=? AND source_workspace_id=? AND activity_id=?`, activityOriginArgs(key)...).Scan(
-		&class, &raw, &storedDigest, &actorJSON,
-		&projection.eventChannelID, &projection.eventActorID, &projection.eventType, &projection.eventPayload,
-		&projection.eventNote, &projection.eventCreatedAt, &projection.lifecycleKind, &projection.lifecycleReference,
-		&sequence, &acceptedAt,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ActivityRecord{}, fmt.Errorf("localstore: read Activity: %w", ErrActivityNotFound)
-	}
+	evidence, err := newActivityEvidenceLoader().load(ctx, db, key)
 	if err != nil {
-		return ActivityRecord{}, fmt.Errorf("localstore: read Activity: %w", err)
+		return ActivityRecord{}, err
 	}
-	activity, err := projectstate.DecodeActivity(raw)
-	if err != nil || activity.ID != key.ActivityID || string(activity.Class) != class || !validRemoteActivity(activity) {
-		return ActivityRecord{}, fmt.Errorf("localstore: read Activity: %w", ErrActivityReplayConflict)
-	}
-	digest, err := projectstate.DigestActivity(activity)
-	if err != nil || string(digest) != storedDigest || !activityDigestPattern.MatchString(storedDigest) || !projection.matches(activity) {
-		return ActivityRecord{}, fmt.Errorf("localstore: read Activity: %w", ErrActivityReplayConflict)
-	}
-	canonicalActor, err := projectstate.CanonicalJSON(activity.Actor)
-	if err != nil || !bytes.Equal(actorJSON, canonicalActor) {
-		return ActivityRecord{}, fmt.Errorf("localstore: read Activity: %w", ErrActivityReplayConflict)
-	}
-	record := ActivityRecord{
-		Key: key, Activity: activity, ActivityJSON: append([]byte(nil), raw...), ActivityDigest: digest,
-		PolicyVersion: policyVersion, PolicyDigest: policyDigest, AcceptedAt: acceptedAt.UTC(),
-	}
-	if sequence.Valid {
-		value := sequence.Int64
-		record.Sequence = &value
-	}
-	return record, nil
+	return evidence.recordForPolicy(policyVersion, policyDigest)
 }
 
 func insertActivityLedger(ctx context.Context, db activityDB, key types.ActivityOriginKey, activity projectstate.ActivityV1, raw []byte, digest projectstate.Digest, actorJSON []byte, acceptedAt time.Time, sequence *int64) error {

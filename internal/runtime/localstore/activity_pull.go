@@ -113,7 +113,7 @@ func (r *ActivityRepo) AcceptPullBatch(ctx context.Context, route types.Activity
 		if err != nil {
 			return err
 		}
-		arguments := []any{batch.NextSequence, now}
+		arguments := []any{batch.NextSequence, sqliteActivityTimestamp(now)}
 		arguments = append(arguments, activityRouteArgs(route)...)
 		arguments = append(arguments, batch.ExpectedAfter)
 		result, err := conn.ExecContext(ctx, `UPDATE activity_cursors SET after_sequence=?,updated_at=?
@@ -132,9 +132,9 @@ func (r *ActivityRepo) AcceptPullBatch(ctx context.Context, route types.Activity
 func validateDuplicatePullWindow(ctx context.Context, db activityDB, route types.ActivityRouteKey, after, next int64, deliveries []validatedPullDelivery) error {
 	arguments := activityRouteArgs(route)
 	arguments = append(arguments, after, next)
-	rows, err := db.QueryContext(ctx, `SELECT source_workspace_id,activity_id,sequence FROM activity_ledger
+	rows, err := db.QueryContext(ctx, `SELECT source_workspace_id,activity_id,sequence FROM activity_ingress_receipts
 		WHERE project_id=? AND workspace_id=? AND fabric_instance_id=? AND remote_project_id=?
-		AND stream_id=? AND canonical_ref=? AND sequence>? AND sequence<=? ORDER BY sequence`, arguments...)
+		AND stream_id=? AND canonical_ref=? AND sequence>? AND sequence<=? ORDER BY sequence,source_workspace_id,activity_id`, arguments...)
 	if err != nil {
 		return fmt.Errorf("localstore: accept Activity pull replay: %w", err)
 	}
@@ -180,12 +180,11 @@ func acceptPulledActivity(ctx context.Context, db activityDB, route types.Activi
 		if storedDigest != string(delivery.activityDigest) || !bytes.Equal(storedRaw, delivery.activityJSON) {
 			return fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityReplayConflict)
 		}
-		stored, err := readIngressActivityReceipt(ctx, db, key)
-		if err != nil || !bytes.Equal(stored, delivery.receiptJSON) {
+		evidence, err := newActivityEvidenceLoader().load(ctx, db, key)
+		if err != nil || evidence.receipt == nil || !bytes.Equal(evidence.receipt.canonical, delivery.receiptJSON) {
 			return fmt.Errorf("localstore: accept Activity pull: %w", ErrActivityReplayConflict)
 		}
-		_, err = readActivityRecord(ctx, db, key, delivery.receipt.PolicyVersion, delivery.receipt.PolicyDigest)
-		return err
+		return nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("localstore: accept Activity pull lookup: %w", err)
@@ -218,29 +217,6 @@ func acceptPulledActivity(ctx context.Context, db activityDB, route types.Activi
 		}
 	}
 	return nil
-}
-
-func readIngressActivityReceipt(ctx context.Context, db activityDB, key types.ActivityOriginKey) ([]byte, error) {
-	var digest, policyDigest string
-	var sequence, policyVersion int64
-	var acceptedAt sql.NullTime
-	err := db.QueryRowContext(ctx, `SELECT activity_digest,sequence,policy_version,policy_digest,accepted_at
-		FROM activity_ingress_receipts WHERE project_id=? AND workspace_id=? AND fabric_instance_id=? AND remote_project_id=?
-		AND stream_id=? AND canonical_ref=? AND source_workspace_id=? AND activity_id=?`, activityOriginArgs(key)...).Scan(
-		&digest, &sequence, &policyVersion, &policyDigest, &acceptedAt,
-	)
-	if err != nil || !acceptedAt.Valid {
-		return nil, fmt.Errorf("localstore: read Activity receipt: %w", ErrActivityReplayConflict)
-	}
-	receipt := projectstate.ActivityReceiptV1{
-		SchemaVersion: 1, ActivityID: key.ActivityID, ActivityDigest: projectstate.Digest(digest), Sequence: sequence,
-		PolicyVersion: policyVersion, PolicyDigest: projectstate.Digest(policyDigest), AcceptedAt: acceptedAt.Time.UTC(),
-	}
-	canonical, err := projectstate.CanonicalActivityReceipt(receipt)
-	if err != nil {
-		return nil, fmt.Errorf("localstore: read Activity receipt: %w", ErrActivityReplayConflict)
-	}
-	return canonical, nil
 }
 
 func (r *ActivityRepo) Cursor(ctx context.Context, route types.ActivityRouteKey) (int64, error) {
@@ -276,27 +252,25 @@ func (r *ActivityRepo) Retained(ctx context.Context, route types.ActivityRouteKe
 	}
 	arguments := activityRouteArgs(route)
 	arguments = append(arguments, limit)
-	rows, err := r.db.QueryContext(ctx, `SELECT a.source_workspace_id,a.activity_id,
-		COALESCE(i.policy_version,q.created_policy_version),COALESCE(i.policy_digest,q.created_policy_digest)
+	rows, err := r.db.QueryContext(ctx, `SELECT a.source_workspace_id,a.activity_id
 		FROM activity_ledger a
 		LEFT JOIN activity_ingress_receipts i USING(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,canonical_ref,source_workspace_id,activity_id)
 		LEFT JOIN activity_outbound_queue q USING(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,canonical_ref,source_workspace_id,activity_id)
 		WHERE a.project_id=? AND a.workspace_id=? AND a.fabric_instance_id=? AND a.remote_project_id=?
 		AND a.stream_id=? AND a.canonical_ref=?
-		ORDER BY CASE WHEN a.sequence IS NULL THEN 1 ELSE 0 END,a.sequence,a.accepted_at,a.activity_id LIMIT ?`, arguments...)
+		ORDER BY CASE WHEN COALESCE(i.sequence,a.sequence) IS NULL THEN 1 ELSE 0 END,
+		COALESCE(i.sequence,a.sequence),COALESCE(i.accepted_at,a.accepted_at),a.activity_id LIMIT ?`, arguments...)
 	if err != nil {
 		return nil, fmt.Errorf("localstore: retained Activity query: %w", err)
 	}
 	type retainedKey struct {
-		source  types.WorkspaceID
-		id      string
-		version int64
-		digest  string
+		source types.WorkspaceID
+		id     string
 	}
 	keys := make([]retainedKey, 0)
 	for rows.Next() {
 		var value retainedKey
-		if err := rows.Scan(&value.source, &value.id, &value.version, &value.digest); err != nil {
+		if err := rows.Scan(&value.source, &value.id); err != nil {
 			_ = rows.Close()
 			return nil, fmt.Errorf("localstore: retained Activity scan: %w", err)
 		}
@@ -310,9 +284,14 @@ func (r *ActivityRepo) Retained(ctx context.Context, route types.ActivityRouteKe
 		return nil, fmt.Errorf("localstore: retained Activity close: %w", err)
 	}
 	records := make([]ActivityRecord, 0, len(keys))
+	loader := newActivityEvidenceLoader()
 	for _, value := range keys {
 		key := types.ActivityOriginKey{Route: route, SourceWorkspaceID: value.source, ActivityID: value.id}
-		record, err := readActivityRecord(ctx, r.db, key, value.version, projectstate.Digest(value.digest))
+		evidence, err := loader.load(ctx, r.db, key)
+		if err != nil {
+			return nil, err
+		}
+		record, err := evidence.retainedRecord()
 		if err != nil {
 			return nil, err
 		}

@@ -81,7 +81,7 @@ func TestActivityPrunerAgeOrCapOrderAndProtectedOverflow(t *testing.T) {
 			t.Fatal(err)
 		}
 		arguments := activityOriginArgs(key)
-		arguments = append(arguments, string(digest), sequence, fixture.policy.PolicyVersion, string(policyDigest), recent)
+		arguments = append(arguments, string(digest), sequence, fixture.policy.PolicyVersion, string(policyDigest), sqliteActivityTimestamp(recent))
 		if _, err := tx.ExecContext(context.Background(), `INSERT INTO activity_ingress_receipts
 			(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,canonical_ref,source_workspace_id,activity_id,
 			 activity_digest,sequence,policy_version,policy_digest,accepted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, arguments...); err != nil {
@@ -165,13 +165,17 @@ func TestActivityPrunerTerminalExpiryAndPromotionReceiptProtection(t *testing.T)
 	if sqliteExpiryParseable != 1 {
 		t.Fatalf("database-created lifecycle expiry is not SQLite-comparable: %v", storedExpiry)
 	}
-	if _, err := fixture.store.DB().Exec(`UPDATE activity_lifecycle SET terminal_at='2099-01-01T00:00:00Z',expires_at='2099-02-01T00:00:00Z' WHERE activity_id=?`, record.Key.ActivityID); err != nil {
+	if _, err := fixture.store.DB().Exec(`UPDATE activity_lifecycle SET terminal_at=?,expires_at=? WHERE activity_id=?`,
+		sqliteActivityTimestamp(time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)),
+		sqliteActivityTimestamp(time.Date(2099, 1, 31, 0, 0, 0, 0, time.UTC)), record.Key.ActivityID); err != nil {
 		t.Fatal(err)
 	}
 	if pruned, err := fixture.repo.Prune(context.Background(), fixture.route, record.Key.SourceWorkspaceID, 10); err != nil || pruned != 0 {
 		t.Fatalf("unexpired promotion prune=(%d,%v)", pruned, err)
 	}
-	if _, err := fixture.store.DB().Exec(`UPDATE activity_lifecycle SET terminal_at='2000-01-01T00:00:00Z',expires_at='2000-02-01T00:00:00Z' WHERE activity_id=?`, record.Key.ActivityID); err != nil {
+	if _, err := fixture.store.DB().Exec(`UPDATE activity_lifecycle SET terminal_at=?,expires_at=? WHERE activity_id=?`,
+		sqliteActivityTimestamp(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)),
+		sqliteActivityTimestamp(time.Date(2000, 1, 31, 0, 0, 0, 0, time.UTC)), record.Key.ActivityID); err != nil {
 		t.Fatal(err)
 	}
 	if pruned, err := fixture.repo.Prune(context.Background(), fixture.route, record.Key.SourceWorkspaceID, 10); err != nil || pruned != 1 {

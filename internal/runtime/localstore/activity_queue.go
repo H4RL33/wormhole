@@ -79,7 +79,8 @@ func (r *ActivityRepo) QueueOutbound(ctx context.Context, route types.ActivityRo
 		}
 		arguments := activityOriginArgs(key)
 		arguments = append(arguments, "pending", policy.Policy.PolicyVersion, string(policy.PolicyDigest),
-			policy.Policy.PolicyVersion, string(policy.PolicyDigest), 0, now, now, now)
+			policy.Policy.PolicyVersion, string(policy.PolicyDigest), 0, sqliteActivityTimestamp(now),
+			sqliteActivityTimestamp(now), sqliteActivityTimestamp(now))
 		if _, err := conn.ExecContext(ctx, `INSERT INTO activity_outbound_queue
 			(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,canonical_ref,source_workspace_id,activity_id,
 			 state,expected_policy_version,expected_policy_digest,created_policy_version,created_policy_digest,
@@ -103,7 +104,7 @@ func insertInitialActivityLifecycle(ctx context.Context, db activityDB, key type
 	}
 	arguments := activityOriginArgs(key)
 	arguments = append(arguments, kind, reference, state, policy.Policy.PolicyVersion, string(policy.PolicyDigest),
-		policy.Policy.TerminalRetentionSeconds, now)
+		policy.Policy.TerminalRetentionSeconds, sqliteActivityTimestamp(now))
 	result, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO activity_lifecycle
 		(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,canonical_ref,source_workspace_id,activity_id,
 		 lifecycle_kind,reference_id,state,policy_version,policy_digest,terminal_retention_seconds,updated_at)
@@ -145,35 +146,42 @@ func (r *ActivityRepo) PendingOutbound(ctx context.Context, route types.Activity
 	}
 	arguments := activityRouteArgs(route)
 	arguments = append(arguments, limit)
-	rows, err := r.db.QueryContext(ctx, `SELECT source_workspace_id,activity_id,expected_policy_version,expected_policy_digest
+	rows, err := r.db.QueryContext(ctx, `SELECT source_workspace_id,activity_id
 		FROM activity_outbound_queue WHERE project_id=? AND workspace_id=? AND fabric_instance_id=? AND remote_project_id=?
 		AND stream_id=? AND canonical_ref=? AND state='pending'
 		ORDER BY next_attempt_at,created_at,activity_id LIMIT ?`, arguments...)
 	if err != nil {
 		return nil, fmt.Errorf("localstore: pending Activity query: %w", err)
 	}
-	defer rows.Close()
 	type pendingKey struct {
-		source  types.WorkspaceID
-		id      string
-		version int64
-		digest  string
+		source types.WorkspaceID
+		id     string
 	}
 	keys := make([]pendingKey, 0)
 	for rows.Next() {
 		var value pendingKey
-		if err := rows.Scan(&value.source, &value.id, &value.version, &value.digest); err != nil {
+		if err := rows.Scan(&value.source, &value.id); err != nil {
+			_ = rows.Close()
 			return nil, fmt.Errorf("localstore: pending Activity scan: %w", err)
 		}
 		keys = append(keys, value)
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
 		return nil, fmt.Errorf("localstore: pending Activity iterate: %w", err)
 	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("localstore: pending Activity close: %w", err)
+	}
 	records := make([]ActivityRecord, 0, len(keys))
+	loader := newActivityEvidenceLoader()
 	for _, value := range keys {
 		key := types.ActivityOriginKey{Route: route, SourceWorkspaceID: value.source, ActivityID: value.id}
-		record, err := readActivityRecord(ctx, r.db, key, value.version, projectstate.Digest(value.digest))
+		evidence, err := loader.load(ctx, r.db, key)
+		if err != nil {
+			return nil, err
+		}
+		record, err := evidence.pendingRecord()
 		if err != nil {
 			return nil, err
 		}
@@ -267,7 +275,7 @@ func (r *ActivityRepo) AcknowledgeOutbound(ctx context.Context, key types.Activi
 		if err != nil {
 			return err
 		}
-		arguments = []any{now, now}
+		arguments = []any{sqliteActivityTimestamp(now), sqliteActivityTimestamp(now)}
 		arguments = append(arguments, activityOriginArgs(key)...)
 		result, err := conn.ExecContext(ctx, `UPDATE activity_outbound_queue SET state='delivered',delivered_at=?,updated_at=?
 			WHERE project_id=? AND workspace_id=? AND fabric_instance_id=? AND remote_project_id=? AND stream_id=? AND canonical_ref=?
@@ -282,7 +290,7 @@ func (r *ActivityRepo) AcknowledgeOutbound(ctx context.Context, key types.Activi
 			return fmt.Errorf("localstore: acknowledge Activity lifecycle: %w", ErrActivityLifecycleConflict)
 		}
 		expiresAt := now.Add(time.Duration(deliveryRetention) * time.Second)
-		arguments = []any{sqliteActivityTimestamp(now), sqliteActivityTimestamp(expiresAt), now}
+		arguments = []any{sqliteActivityTimestamp(now), sqliteActivityTimestamp(expiresAt), sqliteActivityTimestamp(now)}
 		arguments = append(arguments, activityOriginArgs(key)...)
 		result, err = conn.ExecContext(ctx, `UPDATE activity_lifecycle
 			SET state='delivered',terminal_at=?,expires_at=?,updated_at=?

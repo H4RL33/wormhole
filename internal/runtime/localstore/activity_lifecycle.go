@@ -3,7 +3,6 @@ package localstore
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"time"
 
@@ -19,22 +18,22 @@ func (r *ActivityRepo) TransitionLifecycle(ctx context.Context, key types.Activi
 		if err := requireActiveActivityRoute(ctx, conn, key.Route); err != nil {
 			return err
 		}
-		var current string
-		var retention int64
-		var terminalAt, expiresAt sql.NullTime
-		arguments := activityOriginArgs(key)
-		arguments = append(arguments, change.Kind, change.ReferenceID)
-		err := conn.QueryRowContext(ctx, `SELECT state,terminal_retention_seconds,terminal_at,expires_at
-			FROM activity_lifecycle WHERE project_id=? AND workspace_id=? AND fabric_instance_id=? AND remote_project_id=?
-			AND stream_id=? AND canonical_ref=? AND source_workspace_id=? AND activity_id=? AND lifecycle_kind=? AND reference_id=?`, arguments...).Scan(
-			&current, &retention, &terminalAt, &expiresAt,
-		)
-		if errors.Is(err, sql.ErrNoRows) {
+		evidence, err := newActivityEvidenceLoader().load(ctx, conn, key)
+		if err != nil {
+			return err
+		}
+		var selected *activityLifecycleEvidence
+		for index := range evidence.lifecycles {
+			candidate := &evidence.lifecycles[index]
+			if candidate.kind == change.Kind && candidate.reference == change.ReferenceID {
+				selected = candidate
+				break
+			}
+		}
+		if selected == nil {
 			return fmt.Errorf("localstore: transition Activity lifecycle: %w", ErrActivityNotFound)
 		}
-		if err != nil {
-			return fmt.Errorf("localstore: transition Activity lifecycle: %w", err)
-		}
+		current, retention := selected.state, selected.retention
 		if current == change.NextState {
 			if change.ExpectedState == current || allowedActivityLifecycleTransition(change.Kind, change.ExpectedState, current) {
 				return nil
@@ -53,7 +52,7 @@ func (r *ActivityRepo) TransitionLifecycle(ctx context.Context, key types.Activi
 			terminal = sqliteActivityTimestamp(now)
 			expires = sqliteActivityTimestamp(now.Add(time.Duration(retention) * time.Second))
 		}
-		arguments = []any{change.NextState, terminal, expires, now}
+		arguments := []any{change.NextState, terminal, expires, sqliteActivityTimestamp(now)}
 		arguments = append(arguments, activityOriginArgs(key)...)
 		arguments = append(arguments, change.Kind, change.ReferenceID, current)
 		result, err := conn.ExecContext(ctx, `UPDATE activity_lifecycle SET state=?,terminal_at=?,expires_at=?,updated_at=?

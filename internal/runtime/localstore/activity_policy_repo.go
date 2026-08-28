@@ -128,8 +128,9 @@ func (r *ActivityRepo) ReplacePolicy(ctx context.Context, route types.ActivityRo
 		if err != nil {
 			return err
 		}
+		nowEncoded := sqliteActivityTimestamp(now)
 		arguments := activityRouteArgs(route)
-		arguments = append(arguments, next.PolicyVersion, canonical, string(digest), next.TerminalRetentionSeconds, now)
+		arguments = append(arguments, next.PolicyVersion, canonical, string(digest), next.TerminalRetentionSeconds, nowEncoded)
 		if _, err := conn.ExecContext(ctx, `INSERT INTO activity_policy_versions
 			(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,canonical_ref,policy_version,
 			 canonical_policy_json,policy_digest,terminal_retention_seconds,received_at)
@@ -137,13 +138,13 @@ func (r *ActivityRepo) ReplacePolicy(ctx context.Context, route types.ActivityRo
 			return fmt.Errorf("localstore: replace Activity policy: insert: %w", err)
 		}
 		arguments = activityRouteArgs(route)
-		arguments = append(arguments, next.PolicyVersion, string(digest), now)
+		arguments = append(arguments, next.PolicyVersion, string(digest), nowEncoded)
 		if currentErr != nil {
 			_, err = conn.ExecContext(ctx, `INSERT INTO activity_policy_current
 				(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,canonical_ref,policy_version,policy_digest,updated_at)
 				VALUES (?,?,?,?,?,?,?,?,?)`, arguments...)
 		} else {
-			arguments = []any{next.PolicyVersion, string(digest), now, route.ProjectID, route.WorkspaceID,
+			arguments = []any{next.PolicyVersion, string(digest), nowEncoded, route.ProjectID, route.WorkspaceID,
 				route.FabricInstanceID, route.RemoteProjectID, route.StreamID, route.CanonicalRef,
 				expectedVersion, string(expectedDigest)}
 			var update sql.Result
@@ -161,7 +162,7 @@ func (r *ActivityRepo) ReplacePolicy(ctx context.Context, route types.ActivityRo
 		if err != nil {
 			return fmt.Errorf("localstore: replace Activity policy: current: %w", err)
 		}
-		queueArguments := []any{next.PolicyVersion, string(digest), now}
+		queueArguments := []any{next.PolicyVersion, string(digest), nowEncoded}
 		queueArguments = append(queueArguments, activityRouteArgs(route)...)
 		if _, err := conn.ExecContext(ctx, `UPDATE activity_outbound_queue
 			SET expected_policy_version=?,expected_policy_digest=?,updated_at=?
