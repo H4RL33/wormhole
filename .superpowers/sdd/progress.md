@@ -1489,3 +1489,15 @@ amendment carries the observed policy pair and permits one validated same-byte s
 policy retry while retaining zero durable presence state. Fresh `make check` passed at
 80.8% coverage. Independent review approved after one fix round with Critical 0 /
 Important 0 / Minor 0. Task 3E (Gateway-only atomic promotion) is next.
+
+Stage 3 Task 3E: complete (commits `c0ae036`, `ad99446`, `4008681`, review fixes
+`cb0bd81` and `b08d764`). ProjectState now owns one immediate Activity-promotion
+transaction that strict-binds retained source/policy/receipt/lifecycle evidence,
+exact-copies the promotable Event projection under a distinct promoter, appends the
+portable Operation, and atomically records immutable receipt/lifecycle proof. Exact
+replay and unknown-COMMIT confirmation rederive the complete Event from retained source;
+faults roll back through the final revision CAS; expiry cannot change portable/Git
+authority; architecture guards prove no Fabric promotion seam. Fresh `make check`
+passed at 80.8% coverage. Independent review approved after two fix rounds with
+Critical 0 / Important 0 / Minor 0. All Task 3 slices are individually complete;
+the final cross-slice Task 3 verification/review gate is next.
