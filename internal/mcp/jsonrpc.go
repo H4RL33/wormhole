@@ -1,16 +1,20 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/core/identity"
+	"github.com/H4RL33/wormhole/internal/types"
 )
 
 // RPCRequest is the JSON-RPC 2.0 request envelope (docs/mcp-protocol.md §3).
@@ -142,46 +146,73 @@ func buildInputSchema(tool Tool) map[string]any {
 	}
 }
 
-// reflectStructSchema walks t's exported fields and builds JSON Schema
-// properties + the required-field list. A field is required unless its
-// json tag carries ",omitempty" or its Go type is a pointer — this is a
-// mechanical rule; the protocol intentionally does not specify per-field
-// optionality.
+type schemaOptions struct {
+	closedObjects    bool
+	flattenAnonymous bool
+}
+
 func reflectStructSchema(t reflect.Type) (map[string]any, []string) {
+	return reflectStructSchemaWithOptions(t, schemaOptions{})
+}
+
+func reflectStructSchemaWithOptions(t reflect.Type, options schemaOptions) (map[string]any, []string) {
 	properties := map[string]any{}
 	required := []string{}
-
+	for t != nil && t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t == nil || t.Kind() != reflect.Struct {
+		return properties, required
+	}
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
+		if field.PkgPath != "" && !field.Anonymous {
+			continue
+		}
 		tag := field.Tag.Get("json")
+		if options.flattenAnonymous && field.Anonymous && (tag == "" || strings.HasPrefix(tag, ",")) {
+			nested := field.Type
+			for nested.Kind() == reflect.Ptr {
+				nested = nested.Elem()
+			}
+			if nested.Kind() == reflect.Struct && nested != reflect.TypeOf(time.Time{}) {
+				nestedProperties, nestedRequired := reflectStructSchemaWithOptions(nested, options)
+				for name, schema := range nestedProperties {
+					properties[name] = schema
+				}
+				for _, name := range nestedRequired {
+					required = appendUnique(required, name)
+				}
+				continue
+			}
+		}
 		name, omitempty := parseJSONTag(tag, field.Name)
 		if name == "-" {
 			continue
 		}
-
 		fieldType := field.Type
 		optional := omitempty
 		if fieldType.Kind() == reflect.Ptr {
 			fieldType = fieldType.Elem()
 			optional = true
 		}
-
-		schema := jsonSchemaForType(fieldType)
-		if enumTag := field.Tag.Get("enum"); enumTag != "" {
-			values := strings.Split(enumTag, ",")
-			enumValues := make([]any, len(values))
-			for i, v := range values {
-				enumValues[i] = v
-			}
-			schema["enum"] = enumValues
-		}
+		schema := jsonSchemaForTypeWithOptions(fieldType, options)
+		applySchemaTags(schema, field)
 		properties[name] = schema
 		if !optional {
-			required = append(required, name)
+			required = appendUnique(required, name)
 		}
 	}
-
 	return properties, required
+}
+
+func appendUnique(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
 }
 
 // parseJSONTag splits a struct field's json tag into its wire name and
@@ -206,10 +237,56 @@ func parseJSONTag(tag, fieldName string) (string, bool) {
 	return name, omitempty
 }
 
-// jsonSchemaForType maps a Go field type to a JSON Schema type object,
-// time.Time and json.RawMessage are special-cased by name
-// since reflect sees them as struct/[]byte respectively.
+func applySchemaTags(schema map[string]any, field reflect.StructField) {
+	if enumTag := field.Tag.Get("enum"); enumTag != "" {
+		values := strings.Split(enumTag, ",")
+		enumValues := make([]any, len(values))
+		for i, value := range values {
+			enumValues[i] = value
+		}
+		schema["enum"] = enumValues
+	}
+	constant := field.Tag.Get("const")
+	if constant == "" {
+		return
+	}
+	t := field.Type
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	switch t.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		if value, err := strconv.ParseInt(constant, 10, 64); err == nil {
+			schema["const"] = int(value)
+		}
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		if value, err := strconv.ParseUint(constant, 10, 64); err == nil {
+			schema["const"] = value
+		}
+	case reflect.Bool:
+		if value, err := strconv.ParseBool(constant); err == nil {
+			schema["const"] = value
+		}
+	default:
+		schema["const"] = constant
+	}
+}
+
 func jsonSchemaForType(t reflect.Type) map[string]any {
+	return jsonSchemaForTypeWithOptions(t, schemaOptions{})
+}
+
+func closedJSONSchemaForType(t reflect.Type) map[string]any {
+	return jsonSchemaForTypeWithOptions(t, schemaOptions{closedObjects: true, flattenAnonymous: true})
+}
+
+func jsonSchemaForTypeWithOptions(t reflect.Type, options schemaOptions) map[string]any {
+	if t == nil {
+		return map[string]any{}
+	}
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
 	switch {
 	case t == reflect.TypeOf(time.Time{}):
 		return map[string]any{"type": "string", "format": "date-time"}
@@ -217,21 +294,65 @@ func jsonSchemaForType(t reflect.Type) map[string]any {
 		return map[string]any{}
 	}
 
+	if !options.closedObjects {
+		switch t.Kind() {
+		case reflect.String:
+			return map[string]any{"type": "string"}
+		case reflect.Bool:
+			return map[string]any{"type": "boolean"}
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			return map[string]any{"type": "integer"}
+		case reflect.Slice:
+			return map[string]any{"type": "array", "items": jsonSchemaForTypeWithOptions(t.Elem(), options)}
+		case reflect.Struct:
+			properties, required := reflectStructSchemaWithOptions(t, options)
+			return map[string]any{"type": "object", "properties": properties, "required": required}
+		default:
+			return map[string]any{"type": "object"}
+		}
+	}
+
+	if t == reflect.TypeOf([]byte(nil)) {
+		return map[string]any{"type": "string", "contentEncoding": "base64"}
+	}
+
 	switch t.Kind() {
 	case reflect.String:
 		return map[string]any{"type": "string"}
 	case reflect.Bool:
 		return map[string]any{"type": "boolean"}
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		return map[string]any{"type": "integer"}
-	case reflect.Slice:
-		return map[string]any{"type": "array", "items": jsonSchemaForType(t.Elem())}
+	case reflect.Float32, reflect.Float64:
+		return map[string]any{"type": "number"}
+	case reflect.Slice, reflect.Array:
+		return map[string]any{"type": "array", "items": jsonSchemaForTypeWithOptions(t.Elem(), options)}
+	case reflect.Map:
+		if t.Key().Kind() != reflect.String {
+			return map[string]any{"type": "object"}
+		}
+		return map[string]any{"type": "object", "additionalProperties": jsonSchemaForTypeWithOptions(t.Elem(), options)}
+	case reflect.Interface:
+		return map[string]any{}
 	case reflect.Struct:
-		properties, required := reflectStructSchema(t)
-		return map[string]any{"type": "object", "properties": properties, "required": required}
+		properties, required := reflectStructSchemaWithOptions(t, options)
+		schema := map[string]any{"type": "object", "properties": properties, "required": required}
+		if options.closedObjects {
+			schema["additionalProperties"] = false
+		}
+		return schema
 	default:
-		return map[string]any{"type": "object"}
+		return map[string]any{}
 	}
+}
+
+func schemaOneOf(examples ...any) map[string]any {
+	variants := make([]any, 0, len(examples))
+	for _, example := range examples {
+		variants = append(variants, closedJSONSchemaForType(reflect.TypeOf(example)))
+	}
+	return map[string]any{"oneOf": variants}
 }
 
 // jsonResponseSchemaForType derives the encoded JSON shape of a successful
@@ -313,11 +434,136 @@ func reflectResponseStructSchema(t reflect.Type) (map[string]any, []string) {
 	return properties, required
 }
 
-// toolsCallParams is the tools/call method's params shape
-// (docs/mcp-protocol.md §4).
-type toolsCallParams struct {
-	Name      string          `json:"name"`
-	Arguments json.RawMessage `json:"arguments"`
+type ToolsCallParams struct {
+	Name      string                    `json:"name"`
+	Arguments json.RawMessage           `json:"arguments"`
+	Proof     *types.PublicRequestProof `json:"proof,omitempty"`
+}
+
+type toolsCallParams = ToolsCallParams
+
+func probeToolsCallName(raw json.RawMessage) (string, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return "", errors.New("mcp: unidentified tools/call")
+	}
+	name := ""
+	count := 0
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return "", errors.New("mcp: unidentified tools/call")
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return "", errors.New("mcp: unidentified tools/call")
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return "", errors.New("mcp: unidentified tools/call")
+		}
+		if key != "name" {
+			continue
+		}
+		count++
+		if count != 1 || json.Unmarshal(value, &name) != nil || name == "" {
+			return "", errors.New("mcp: unidentified tools/call")
+		}
+	}
+	if token, err = decoder.Token(); err != nil || token != json.Delim('}') {
+		return "", errors.New("mcp: unidentified tools/call")
+	}
+	if err := requireJSONEOF(decoder); err != nil || count != 1 {
+		return "", errors.New("mcp: unidentified tools/call")
+	}
+	return name, nil
+}
+
+func decodeKnownPublicToolsCallParams(raw json.RawMessage, expectedName, authHeader string) (ToolsCallParams, string) {
+	fields, err := decodeUniqueJSONObject(raw, map[string]bool{"name": true, "arguments": true, "proof": true})
+	if err != nil || fields["name"] == nil || fields["arguments"] == nil {
+		return ToolsCallParams{}, "invalid_request"
+	}
+	var params ToolsCallParams
+	if err := json.Unmarshal(fields["name"], &params.Name); err != nil || params.Name != expectedName {
+		return ToolsCallParams{}, "invalid_request"
+	}
+	if len(bytes.TrimSpace(fields["arguments"])) == 0 || bytes.TrimSpace(fields["arguments"])[0] != '{' || !json.Valid(fields["arguments"]) {
+		return ToolsCallParams{}, "invalid_request"
+	}
+	params.Arguments = append(json.RawMessage(nil), fields["arguments"]...)
+	if proofRaw := fields["proof"]; proofRaw != nil {
+		var proof types.PublicRequestProof
+		if err := decodePublicArguments(proofRaw, &proof); err != nil {
+			return ToolsCallParams{}, "invalid_request"
+		}
+		params.Proof = &proof
+	}
+	if params.Proof == nil || authHeader != "" {
+		return ToolsCallParams{}, "authentication_failed"
+	}
+	return params, ""
+}
+
+func decodePublicArguments(raw json.RawMessage, destination any) error {
+	if _, err := decodeUniqueJSONObject(raw, nil); err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	return requireJSONEOF(decoder)
+}
+
+func decodeUniqueJSONObject(raw json.RawMessage, allowed map[string]bool) (map[string]json.RawMessage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return nil, errors.New("mcp: expected JSON object")
+	}
+	fields := make(map[string]json.RawMessage)
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return nil, errors.New("mcp: object key is not a string")
+		}
+		if _, duplicate := fields[key]; duplicate {
+			return nil, errors.New("mcp: duplicate JSON member")
+		}
+		if allowed != nil && !allowed[key] {
+			return nil, errors.New("mcp: unknown JSON member")
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, err
+		}
+		fields[key] = value
+	}
+	if token, err = decoder.Token(); err != nil || token != json.Delim('}') {
+		return nil, errors.New("mcp: malformed JSON object")
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return nil, err
+	}
+	return fields, nil
+}
+
+func requireJSONEOF(decoder *json.Decoder) error {
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("mcp: trailing JSON value")
+		}
+		return err
+	}
+	return nil
 }
 
 // toolCallResultContent is the MCP content-wrapper item type.
