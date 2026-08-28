@@ -32,6 +32,39 @@ type activityPromotionExtensionDataV1 struct {
 	SourceActivityDigest state.Digest `json:"source_activity_digest"`
 }
 
+// ActivityPromotionReceipt reads one immutable promotion result in a coherent
+// deferred transaction. It is the read-only confirmation path after an
+// ambiguous writer commit and never acquires the SQLite writer barrier.
+func (r *WorkspaceRepo) ActivityPromotionReceipt(ctx context.Context, scope types.WorkspaceScope, sourceActivityID string) (*ActivityPromotionReceiptRecord, WorkspaceOperation, error) {
+	if r == nil || r.db == nil || !validWorkspaceScope(scope) || !types.CanonicalUUID(sourceActivityID) {
+		return nil, WorkspaceOperation{}, activityPromotionError("receipt", ErrActivityNotFound)
+	}
+	conn, err := r.db.Conn(ctx)
+	if err != nil {
+		return nil, WorkspaceOperation{}, fmt.Errorf("localstore: acquire Activity promotion receipt connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN`); err != nil {
+		return nil, WorkspaceOperation{}, fmt.Errorf("localstore: begin Activity promotion receipt read: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+	tx := &WorkspaceMutationTx{conn: conn, scope: scope}
+	receipt, operation, err := tx.ActivityPromotionReceipt(ctx, sourceActivityID)
+	if err != nil {
+		return nil, WorkspaceOperation{}, err
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return nil, WorkspaceOperation{}, fmt.Errorf("localstore: commit Activity promotion receipt read: %w", err)
+	}
+	committed = true
+	return receipt, operation, nil
+}
+
 // ActivityPromotionSource strict-loads the one retained source with activityID
 // in this transaction's immutable workspace and returns its receipt-owned
 // policy. Source IDs that are ambiguous across origins fail closed.
@@ -45,7 +78,7 @@ func (tx *WorkspaceMutationTx) ActivityPromotionSource(ctx context.Context, acti
 		ORDER BY fabric_instance_id,remote_project_id,stream_id,canonical_ref,source_workspace_id`,
 		tx.scope.ProjectID, tx.scope.WorkspaceID, activityID)
 	if err != nil {
-		return ActivityRecord{}, ActivityPolicyRecord{}, activityPromotionError("query source", ErrActivityReplayConflict)
+		return ActivityRecord{}, ActivityPolicyRecord{}, fmt.Errorf("localstore: query Activity promotion source: %w", err)
 	}
 	keys := make([]types.ActivityOriginKey, 0, 2)
 	for rows.Next() {
@@ -123,7 +156,7 @@ func (tx *WorkspaceMutationTx) readActivityPromotionReceipt(ctx context.Context,
 	var promotedAt string
 	err := tx.conn.QueryRowContext(ctx, `SELECT source_project_id,source_workspace_binding_id,source_fabric_instance_id,
 		source_remote_project_id,source_stream_id,source_canonical_ref,source_origin_workspace_id,source_activity_id,
-		source_activity_digest,event_id,operation_id,canonical_promoter_json,CAST(promoted_at AS TEXT)
+		source_activity_digest,event_id,operation_id,canonical_promoter_json,promoted_at||''
 		FROM activity_promotion_receipts WHERE local_project_id=? AND local_workspace_id=? AND source_activity_id=?`,
 		tx.scope.ProjectID, tx.scope.WorkspaceID, sourceActivityID).Scan(
 		&record.SourceKey.Route.ProjectID, &record.SourceKey.Route.WorkspaceID, &record.SourceKey.Route.FabricInstanceID,
@@ -135,7 +168,7 @@ func (tx *WorkspaceMutationTx) readActivityPromotionReceipt(ctx context.Context,
 		if errors.Is(err, sql.ErrNoRows) {
 			return ActivityPromotionReceiptRecord{}, sql.ErrNoRows
 		}
-		return ActivityPromotionReceiptRecord{}, activityPromotionError("read receipt", ErrActivityReplayConflict)
+		return ActivityPromotionReceiptRecord{}, fmt.Errorf("localstore: read Activity promotion receipt: %w", err)
 	}
 	record.SourceActivityID = sourceActivityID
 	record.Promoter, err = decodeCanonicalTransitionActor(promoterJSON)
@@ -179,7 +212,7 @@ func (tx *WorkspaceMutationTx) InsertActivityPromotionReceipt(ctx context.Contex
 		receipt.SourceKey.SourceWorkspaceID, receipt.SourceDigest, receipt.EventID, receipt.OperationID,
 		promoterJSON, sqliteActivityTimestamp(receipt.PromotedAt))
 	if err != nil {
-		return activityPromotionError("insert receipt", ErrActivityReplayConflict)
+		return fmt.Errorf("localstore: insert Activity promotion receipt: %w", err)
 	}
 	return nil
 }
@@ -219,7 +252,7 @@ func (tx *WorkspaceMutationTx) ConfirmActivityPromotionLifecycle(ctx context.Con
 		(project_id,workspace_id,fabric_instance_id,remote_project_id,stream_id,canonical_ref,source_workspace_id,activity_id,
 		 lifecycle_kind,reference_id,state,policy_version,policy_digest,terminal_retention_seconds,terminal_at,expires_at,updated_at)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, arguments...); err != nil {
-		return activityPromotionError("confirm lifecycle", ErrActivityLifecycleConflict)
+		return fmt.Errorf("localstore: confirm Activity promotion lifecycle: %w", err)
 	}
 	return nil
 }
@@ -228,7 +261,10 @@ func (tx *WorkspaceMutationTx) readActivityPromotionOperation(ctx context.Contex
 	operations, err := tx.queryWorkspaceOperations(ctx, `SELECT generation,operation_id,operation_json,state,stashed_by_stash_id
 		FROM workspace_overlay_operations WHERE project_id=? AND workspace_id=? AND operation_id=?`,
 		tx.scope.ProjectID, tx.scope.WorkspaceID, receipt.OperationID)
-	if err != nil || len(operations) != 1 {
+	if err != nil {
+		return WorkspaceOperation{}, err
+	}
+	if len(operations) != 1 {
 		return WorkspaceOperation{}, activityPromotionError("read operation", ErrActivityReplayConflict)
 	}
 	decoded, err := state.DecodeOperation(operations[0].OperationJSON)

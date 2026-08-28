@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/H4RL33/wormhole/internal/runtime/localstore"
 	"github.com/H4RL33/wormhole/internal/types"
@@ -11,8 +12,12 @@ import (
 )
 
 type workspaceCoordinator struct {
-	repo                  *localstore.WorkspaceRepo
-	readPublicationReview func(context.Context, types.WorkspaceScope) (publicationReviewResult, error)
+	repo                   *localstore.WorkspaceRepo
+	readPublicationReview  func(context.Context, types.WorkspaceScope) (publicationReviewResult, error)
+	withImmediateWorkspace withImmediateWorkspaceFunc
+	newEventID             func() (string, error)
+	newOperationID         func() (string, error)
+	now                    func() time.Time
 }
 
 func (c *workspaceCoordinator) status(ctx context.Context, scope types.WorkspaceScope) (WorkspaceStatus, error) {

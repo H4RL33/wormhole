@@ -98,8 +98,12 @@ func NewService(repo *localstore.WorkspaceRepo, config ServiceConfig) (*Service,
 	}
 	checkpoint := newCheckpointCoordinator(repo, publication, repo.WithImmediateWorkspace)
 	service := &Service{registration: registration, publication: publication, checkpoint: checkpoint,
-		gitBase:   newGitBaseCoordinator(repo),
-		workspace: &workspaceCoordinator{repo: repo, readPublicationReview: publication.readPublicationReview},
+		gitBase: newGitBaseCoordinator(repo),
+		workspace: &workspaceCoordinator{
+			repo: repo, readPublicationReview: publication.readPublicationReview,
+			withImmediateWorkspace: repo.WithImmediateWorkspace,
+			newEventID:             newPortablePromotionID, newOperationID: newPortablePromotionID, now: time.Now,
+		},
 		transition: &transitionCoordinator{repo: repo, readWorkingTree: ReadWorkingTreeNoFollow,
 			withImmediateWorkspace: repo.WithImmediateWorkspace,
 			now:                    time.Now, newStashID: newCanonicalStashID},
@@ -244,6 +248,13 @@ func (s *Service) ApplyBatch(ctx context.Context, scope types.WorkspaceScope, op
 		return WorkspaceStatus{}, localstore.ErrNotFound
 	}
 	return s.workspace.applyBatch(ctx, scope, operations)
+}
+
+func (s *Service) PromoteActivity(ctx context.Context, req PromoteActivityRequest) (PromoteActivityResult, error) {
+	if s == nil || s.workspace == nil {
+		return PromoteActivityResult{}, localstore.ErrNotFound
+	}
+	return s.workspace.promoteActivity(ctx, req)
 }
 
 func verifyBindingCheckout(binding types.WorkspaceBinding) error {

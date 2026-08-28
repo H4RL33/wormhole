@@ -124,10 +124,11 @@ func TestServiceWorkspaceCoordinatorAuthority(t *testing.T) {
 		t.Fatal("service.go must own a workspaceCoordinator")
 	}
 	delegates := map[string]string{
-		"Status":     "s.workspace.status(",
-		"Diff":       "s.workspace.diff(",
-		"Apply":      "s.workspace.apply(",
-		"ApplyBatch": "s.workspace.applyBatch(",
+		"Status":          "s.workspace.status(",
+		"Diff":            "s.workspace.diff(",
+		"Apply":           "s.workspace.apply(",
+		"ApplyBatch":      "s.workspace.applyBatch(",
+		"PromoteActivity": "s.workspace.promoteActivity(",
 	}
 	for method, delegation := range delegates {
 		body := architectureMethodBody(service, "func (s *Service) "+method)
@@ -328,13 +329,63 @@ func TestProjectstateServiceIsCoordinatorFacade(t *testing.T) {
 			t.Fatalf("Service retains lifecycle dependency %q", forbidden)
 		}
 	}
-	for _, method := range []string{"PublicationConfiguration", "ReconfigurePublication", "RegisterWorkspace", "ResolveWorkingDirectory", "RegisteredWorkspaces", "PrepareRegisteredWorkspaces", "ObserveGitBase", "RefreshWorkspace", "Status", "Diff", "Apply", "ApplyBatch", "Checkpoint", "Recover", "Import", "Stash", "RestoreStash"} {
+	for _, method := range []string{"PublicationConfiguration", "ReconfigurePublication", "RegisterWorkspace", "ResolveWorkingDirectory", "RegisteredWorkspaces", "PrepareRegisteredWorkspaces", "ObserveGitBase", "RefreshWorkspace", "Status", "Diff", "Apply", "ApplyBatch", "PromoteActivity", "Checkpoint", "Recover", "Import", "Stash", "RestoreStash"} {
 		body := architectureMethodBody(service, "func (s *Service) "+method)
 		if body == "" {
 			t.Fatalf("Service missing public facade method %s", method)
 		}
 		if strings.Contains(body, ".repo.") || strings.Contains(body, "WithImmediateWorkspace") || strings.Contains(body, "observePublication") || strings.Contains(body, "readWorkingTree(") || strings.Contains(body, "newStashID(") {
 			t.Fatalf("Service method %s retains direct lifecycle authority", method)
+		}
+	}
+}
+
+func TestProjectStateServiceStillOwnsExactlySixCoordinatorsWithPromotion(t *testing.T) {
+	serviceType := reflect.TypeOf(Service{})
+	if serviceType.NumField() != 6 {
+		t.Fatalf("Service fields=%d, want exactly six coordinator pointers", serviceType.NumField())
+	}
+	for index := 0; index < serviceType.NumField(); index++ {
+		if serviceType.Field(index).Type.Kind() != reflect.Pointer || !strings.HasSuffix(serviceType.Field(index).Type.Elem().Name(), "Coordinator") {
+			t.Fatalf("Service field %s has non-coordinator type %s", serviceType.Field(index).Name, serviceType.Field(index).Type)
+		}
+	}
+	root := filepath.Join("..", "..", "..")
+	sources := architectureProductionGoSources(t, root)
+	service := sources["internal/runtime/projectstate/service.go"]
+	body := architectureMethodBody(service, "func (s *Service) PromoteActivity")
+	if strings.Count(body, "s.workspace.promoteActivity(") != 1 || strings.Contains(body, "WithImmediateWorkspace") || strings.Contains(body, ".repo.") {
+		t.Fatalf("promotion facade must delegate once to the existing workspace coordinator:\n%s", body)
+	}
+	promotion := sources["internal/runtime/projectstate/promotion.go"]
+	if strings.Count(promotion, "c.withImmediateWorkspace(") != 1 || strings.Contains(promotion, "ApplyBatch(") || strings.Contains(promotion, "internal/core/") || strings.Contains(promotion, "internal/mcp") {
+		t.Fatalf("promotion must own one local transaction without nested facade/Fabric authority")
+	}
+}
+
+func TestFabricHasNoCompileTimeOrRuntimeActivityPromotionSeam(t *testing.T) {
+	root := filepath.Join("..", "..", "..")
+	sources := architectureProductionGoSources(t, root)
+	for path, source := range sources {
+		if !(strings.HasPrefix(path, "cmd/fabric/") || strings.HasPrefix(path, "internal/core/") || strings.HasPrefix(path, "internal/mcp/")) {
+			continue
+		}
+		for _, forbidden := range []string{"PromoteActivity", "ActivityPromotion", "dev.wormhole.promotion", "activity_promotion"} {
+			if strings.Contains(source, forbidden) {
+				t.Fatalf("Fabric production source %s contains promotion authority %q", path, forbidden)
+			}
+		}
+	}
+	for _, path := range []string{
+		"migrations/000021_git_aware_streams.up.sql",
+		"migrations/000021_git_aware_streams.down.sql",
+	} {
+		data, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if regexp.MustCompile(`(?i)promot|dev[.]wormhole[.]promotion`).Match(data) {
+			t.Fatalf("Fabric migration %s contains promotion-shaped runtime authority", path)
 		}
 	}
 }

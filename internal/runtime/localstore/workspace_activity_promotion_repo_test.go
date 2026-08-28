@@ -54,6 +54,26 @@ func TestActivityPromotionTxLoadsOneScopedSourceAndRetainedPolicy(t *testing.T) 
 		t.Fatal(err)
 	}
 
+	repo := NewWorkspaceRepo(fixture.store.DB())
+	for _, sibling := range []types.WorkspaceBinding{
+		createBinding(t, repo, localActivityProjectID, "00000000-0000-4000-8000-000000000012", "/promotion-sibling-workspace", 102, 202),
+		createBinding(t, repo, "00000000-0000-4000-8000-000000000002", localActivityWorkspaceID, "/promotion-sibling-project", 103, 203),
+	} {
+		err := repo.WithImmediateWorkspace(context.Background(), sibling.Scope, func(tx *WorkspaceMutationTx) error {
+			if _, _, err := tx.ActivityPromotionSource(context.Background(), record.Key.ActivityID, record.ActivityDigest); !errors.Is(err, ErrActivityNotFound) {
+				t.Fatalf("cross-scope source error=%v, want ErrActivityNotFound", err)
+			}
+			receipt, _, err := tx.ActivityPromotionReceipt(context.Background(), record.Key.ActivityID)
+			if err != nil || receipt != nil {
+				t.Fatalf("cross-scope receipt=(%+v,%v), want absent", receipt, err)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	ambiguous := newLocalActivityFixture(t, true)
 	defer ambiguous.store.Close()
 	first := insertPromotionSource(t, ambiguous, localActivitySourceWorkspace, localActivityIDOne, 1)

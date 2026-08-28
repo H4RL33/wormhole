@@ -246,13 +246,26 @@ finite policies; `activity_ledger` retains canonical durable Activity and exact
 projection evidence; `activity_ingress_receipts`, `activity_outbound_queue`, and
 `activity_cursors` own replay, retry, and high-watermark state;
 `activity_lifecycle` owns the four closed lifecycle machines; and
-`activity_promotion_receipts` is restricted future promotion evidence only.
+`activity_promotion_receipts` is immutable Gateway-local evidence for the one
+ProjectState promotion seam. It binds a local workspace/source Activity ID to
+the complete retained origin and digest, generated portable Event/Operation
+IDs, canonical local promoter, and promotion time. Its terminal
+`receipt/confirmed` lifecycle row captures the retained source policy's finite
+retention. The receipt, lifecycle terminalization, attributed portable
+operation append, and workspace status update commit in one ProjectState-owned
+`BEGIN IMMEDIATE`; exact replay strict-reads the receipt and canonical operation.
+After finite receipt expiry, the portable operation and Event remain ordinary
+Git-reviewable state.
 
 Presence has no row shape. Policy versions, ledger rows, and ingress receipts
 are immutable. Every child relation uses complete composite foreign keys, every
 multi-write repository operation uses one SQLite `BEGIN IMMEDIATE`, and the
 bounded pruner alone deletes eligible evidence in child-before-parent order.
 This catalog is neither portable ProjectState nor Code Graph state.
+Fabric has no promotion relation, function, trigger, store method, transport
+method, or MCP authority. It may later carry the already-portable operation
+through the existing proposal path, while independent Git observation remains
+the only acceptance authority.
 
 ## Migration 21: Git-aware portable replicas
 
