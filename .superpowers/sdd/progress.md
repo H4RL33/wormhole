@@ -1536,3 +1536,13 @@ Private observation uses only the separately configured Fabric-server
 ownership text now match the shipped runtime surface. Focused security/config/contract
 and race suites passed; canonical `make check` passed at 80.9% coverage. Task 6 exact
 public proofs and explicit sync protocol v2 is next.
+
+Stage 3 Task 6 Slice 1 Task 1: complete (commits `bc204dc..2e5c961`, independent
+review clean: Critical 0 / Important 0 / Minor 0 after two strict-parser fix rounds).
+The shared sync-v2/Activity-v1 values, repository-scope proof bytes, sibling proof
+envelope, recursively closed descriptor schemas, ten descriptor-only public tools,
+and closed safe public failures are frozen without registering live handlers or
+changing retained private descriptors. Recursive duplicate keys, missing required
+members, wrong constants, explicit nulls, and primitive kind mismatches fail before
+typed decoding. Full tests, race, vet, and canonical `make check` passed at 80.9%
+coverage. Slice 1 Task 2 descriptor/schema infrastructure is next.
