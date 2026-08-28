@@ -1479,3 +1479,13 @@ and finite pruning repositories. Former v7 and every non-v8 preimage are preserv
 and refused; Code Graph remains orthogonal. Fresh `make check` passed with repository-
 wide race and 80.9% coverage. Independent review approved after two fix rounds with
 Critical 0 / Important 0 / Minor 0. Task 3D (policy-gated Activity transport) is next.
+
+Stage 3 Task 3D: complete (commits `231fcd9`, `8bdd4f1`, review fix `bc088e5`).
+The separate internal Activity transport validates policy before every remote boundary,
+re-resolves route/profile/mode/credential/policy/conflict authority per cycle, preserves
+safe semantic/context causes while redacting dependency text, and delegates exact
+receipt/cursor convergence to Task 3C transactions. The human-approved presence
+amendment carries the observed policy pair and permits one validated same-byte stale-
+policy retry while retaining zero durable presence state. Fresh `make check` passed at
+80.8% coverage. Independent review approved after one fix round with Critical 0 /
+Important 0 / Minor 0. Task 3E (Gateway-only atomic promotion) is next.
