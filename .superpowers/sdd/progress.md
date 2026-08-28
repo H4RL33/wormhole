@@ -1553,3 +1553,15 @@ the exact local `wormhole.sync.status` offline/zero wire while permanent
 `CredentialSource` and `FabricRouteSource` owners keep Activity v1 buildable across
 the destructive cut. Full tests, focused race, vet, and canonical `make check`
 passed at 80.9% coverage. Slice 1 Task 3 atomic sync-v1 removal is next.
+
+Stage 3 Task 6 Slice 1: complete (range `bc204dc..e4f356f`, all three task
+reviews and final whole-slice review clean: Critical 0 / Important 0 / Minor 0).
+Sync v1, its bootstrap/incremental/conflict owners, callers, fixtures, and active
+compatibility promises are destructively removed. Fabric retains exactly sixteen
+live private non-sync tools and freezes ten descriptor-only public sync-v2/Activity
+tools; local status and Activity behavior remain intact. Enrolment stops truthfully
+at durable `credentials_persisted`. Closed schemas now reject duplicate/missing/
+wrong-kind evidence while representing valid canonical required-nullable pointer
+fields; retained private descriptor bytes are unchanged. Full repository, race,
+contract, documentation, import-boundary, and canonical `make check` gates passed
+at 80.3% coverage. Task 6 Slice 2 migration 22 and public-auth foundation is next.
