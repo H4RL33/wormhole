@@ -250,10 +250,10 @@ func migration22SeedDownActor(t *testing.T, tx *sql.Tx, r migration22DownRoute) 
 	}
 	return f
 }
-func migration22DownFingerprint(t *testing.T, tx *sql.Tx) string {
+func migration22DownFingerprint(t *testing.T, tx *sql.Tx, projectID string) string {
 	t.Helper()
 	var value string
-	err := tx.QueryRow(`SELECT md5(jsonb_build_object('version',(SELECT to_jsonb(v) FROM (SELECT version,dirty FROM schema_migrations) v),'catalog',(SELECT coalesce(jsonb_agg(to_jsonb(c) ORDER BY c.kind,c.name),'[]'::jsonb) FROM (SELECT 'relation' kind,relname name,relkind::text detail FROM pg_class WHERE relnamespace='public'::regnamespace UNION ALL SELECT 'constraint',conname,pg_get_constraintdef(oid,true) FROM pg_constraint WHERE connamespace='public'::regnamespace UNION ALL SELECT 'function',proname||'('||pg_get_function_identity_arguments(oid)||')',pg_get_functiondef(oid) FROM pg_proc WHERE pronamespace='public'::regnamespace AND prokind IN ('f','p'))c),'bindings',(SELECT coalesce(jsonb_agg(to_jsonb(x) ORDER BY x.attachment_ref),'[]'::jsonb) FROM fabric_workspace_stream_bindings x),'actors',(SELECT coalesce(jsonb_agg(to_jsonb(x) ORDER BY x.key_fingerprint),'[]'::jsonb) FROM fabric_public_actor_keys x),'sessions',(SELECT coalesce(jsonb_agg(to_jsonb(x) ORDER BY x.session_id),'[]'::jsonb) FROM fabric_public_agent_sessions x),'conflicts',(SELECT coalesce(jsonb_agg(to_jsonb(x) ORDER BY x.conflict_id),'[]'::jsonb) FROM fabric_stream_conflicts x),'audit',(SELECT coalesce(jsonb_agg(to_jsonb(x) ORDER BY x.seq),'[]'::jsonb) FROM audit_log x))::text)`).Scan(&value)
+	err := tx.QueryRow(`SELECT md5(jsonb_build_object('version',(SELECT to_jsonb(v) FROM (SELECT version,dirty FROM schema_migrations) v),'catalog',(SELECT coalesce(jsonb_agg(to_jsonb(c) ORDER BY c.kind,c.name),'[]'::jsonb) FROM (SELECT 'relation' kind,relname name,relkind::text detail FROM pg_class WHERE relnamespace='public'::regnamespace UNION ALL SELECT 'constraint',conname,pg_get_constraintdef(oid,true) FROM pg_constraint WHERE connamespace='public'::regnamespace UNION ALL SELECT 'function',proname||'('||pg_get_function_identity_arguments(oid)||')',pg_get_functiondef(oid) FROM pg_proc WHERE pronamespace='public'::regnamespace AND prokind IN ('f','p'))c),'bindings',(SELECT coalesce(jsonb_agg(to_jsonb(x) ORDER BY x.attachment_ref),'[]'::jsonb) FROM fabric_workspace_stream_bindings x WHERE x.project_id=$1),'actors',(SELECT coalesce(jsonb_agg(to_jsonb(x) ORDER BY x.key_fingerprint),'[]'::jsonb) FROM fabric_public_actor_keys x WHERE x.project_id=$1),'sessions',(SELECT coalesce(jsonb_agg(to_jsonb(x) ORDER BY x.session_id),'[]'::jsonb) FROM fabric_public_agent_sessions x WHERE x.project_id=$1),'conflicts',(SELECT coalesce(jsonb_agg(to_jsonb(x) ORDER BY x.conflict_id),'[]'::jsonb) FROM fabric_stream_conflicts x WHERE x.project_id=$1),'audit',(SELECT coalesce(jsonb_agg(to_jsonb(x) ORDER BY x.seq),'[]'::jsonb) FROM audit_log x WHERE x.project_id=$1))::text)`, projectID).Scan(&value)
 	if err != nil {
 		t.Fatalf("fingerprint down fixture: %v", err)
 	}
@@ -306,7 +306,7 @@ func TestMigration22DownRefusalMatrix(t *testing.T) {
 			defer tx.Rollback()
 			r := migration22SeedDownRoute(t, tx)
 			fixture(t, tx, r)
-			before := migration22DownFingerprint(t, tx)
+			before := migration22DownFingerprint(t, tx, r.projectID)
 			if _, err := tx.Exec(`SAVEPOINT down_refusal`); err != nil {
 				t.Fatal(err)
 			}
@@ -317,7 +317,7 @@ func TestMigration22DownRefusalMatrix(t *testing.T) {
 			if _, err := tx.Exec(`ROLLBACK TO SAVEPOINT down_refusal`); err != nil {
 				t.Fatal(err)
 			}
-			if after := migration22DownFingerprint(t, tx); after != before {
+			if after := migration22DownFingerprint(t, tx, r.projectID); after != before {
 				t.Fatalf("down refusal changed fingerprint: before=%s after=%s", before, after)
 			}
 		})
