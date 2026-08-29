@@ -268,6 +268,224 @@ func TestActivityStoreCurrentPolicyCASAndStaleIngressHaveZeroMutation(t *testing
 	}
 }
 
+func TestActivityPolicyChangedInTxDoesNotOpenNestedTransaction(t *testing.T) {
+	fixture := newActivityStoreFixture(t, "activity-policy-caller-tx")
+	next := testActivityPolicy(2, 3_000_000)
+	if _, err := fixture.store.PublishPolicy(context.Background(), fixture.stream, next); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := fixture.store.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`SAVEPOINT wormhole_accept_activity`); err != nil {
+		t.Fatal(err)
+	}
+	before := countActivityRowsTx(t, tx, fixture, activityIDOne)
+	_, err = fixture.store.AcceptInTx(context.Background(), tx, fixture.acceptInput(testOrdinaryActivity(activityIDOne, fixture.actor, "caller tx")))
+	var changed *ActivityPolicyChangedError
+	if !errors.As(err, &changed) || !errors.Is(err, ErrActivityPolicyChanged) {
+		t.Fatalf("AcceptInTx error = %v, want typed policy change", err)
+	}
+	wantJSON, _ := projectstate.CanonicalActivityPolicy(next)
+	if !bytes.Equal(changed.CurrentPolicyJSON, wantJSON) {
+		t.Fatalf("current policy evidence = %q, want %q", changed.CurrentPolicyJSON, wantJSON)
+	}
+	var one int
+	if err := tx.QueryRowContext(context.Background(), `SELECT 1`).Scan(&one); err != nil || one != 1 {
+		t.Fatalf("caller transaction unusable after policy change: one=%d err=%v", one, err)
+	}
+	if after := countActivityRowsTx(t, tx, fixture, activityIDOne); after != before {
+		t.Fatalf("policy failure mutated rows before=%v after=%v", before, after)
+	}
+	if _, err := tx.Exec(`ROLLBACK TO SAVEPOINT wormhole_accept_activity`); err != nil {
+		t.Fatalf("caller savepoint collision was consumed: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("caller rollback: %v", err)
+	}
+}
+
+func TestActivityAcceptInTxLeavesCommitAndRollbackToCaller(t *testing.T) {
+	fixture := newActivityStoreFixture(t, "activity-accept-caller-rollback")
+	tx, err := fixture.store.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = fixture.store.AcceptInTx(context.Background(), tx, fixture.acceptInput(testOrdinaryActivity(activityIDOne, fixture.actor, "rollback")))
+	if err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if got := countActivityRows(t, fixture, activityIDOne); got != [3]int{} {
+		t.Fatalf("rolled-back accept rows=%v", got)
+	}
+
+	tx, err = fixture.store.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = fixture.store.AcceptInTx(context.Background(), tx, fixture.acceptInput(testOrdinaryActivity(activityIDOne, fixture.actor, "commit"))); err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if got := countActivityRows(t, fixture, activityIDOne); got != [3]int{1, 1, 0} {
+		t.Fatalf("committed accept rows=%v", got)
+	}
+}
+
+func TestActivityPublishAndCurrentPolicyInTxLeaveTransactionToCaller(t *testing.T) {
+	fixture := newActivityStoreFixture(t, "activity-policy-caller-rollback")
+	next := testActivityPolicy(2, 3_000_000)
+	tx, err := fixture.store.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.PublishPolicyInTx(context.Background(), tx, fixture.stream, next); err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	current, err := fixture.store.CurrentPolicy(context.Background(), fixture.stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.PolicyVersion != fixture.policy.PolicyVersion {
+		t.Fatalf("rollback policy version=%d", current.PolicyVersion)
+	}
+	tx, err = fixture.store.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inside, err := fixture.store.CurrentPolicyInTx(context.Background(), tx, fixture.stream)
+	if err != nil || inside.PolicyVersion != fixture.policy.PolicyVersion {
+		tx.Rollback()
+		t.Fatalf("CurrentPolicyInTx=(%+v,%v)", inside, err)
+	}
+	if _, err := fixture.store.PublishPolicyInTx(context.Background(), tx, fixture.stream, next); err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	current, err = fixture.store.CurrentPolicy(context.Background(), fixture.stream)
+	if err != nil || current.PolicyVersion != next.PolicyVersion {
+		t.Fatalf("committed policy=(%+v,%v)", current, err)
+	}
+	conflict := next
+	conflict.TerminalRetentionSeconds++
+	tx, err = fixture.store.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`SAVEPOINT wormhole_publish_activity_policy`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.PublishPolicyInTx(context.Background(), tx, fixture.stream, conflict); !errors.Is(err, ErrActivityPolicyChanged) {
+		t.Fatalf("policy conflict error=%v", err)
+	}
+	inside, err = fixture.store.CurrentPolicyInTx(context.Background(), tx, fixture.stream)
+	if err != nil || inside.PolicyVersion != next.PolicyVersion {
+		t.Fatalf("caller transaction after conflict=(%+v,%v)", inside, err)
+	}
+	if _, err := tx.Exec(`ROLLBACK TO SAVEPOINT wormhole_publish_activity_policy`); err != nil {
+		t.Fatalf("caller policy savepoint collision was consumed: %v", err)
+	}
+}
+
+func TestActivityLifecycleInTxLeavesCommitAndRollbackToCaller(t *testing.T) {
+	fixture := newActivityStoreFixture(t, "activity-lifecycle-caller-rollback")
+	activity := testLifecycleActivity(activityIDOne, fixture, projectstate.ActivityLifecycleDeliveryV1, activityIDTwo, fixture.actor.OccurredAt)
+	if _, err := fixture.store.Accept(context.Background(), fixture.acceptInput(activity)); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := fixture.store.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := fixture.acceptInput(activity).Key
+	err = fixture.store.TransitionLifecycleInTx(context.Background(), tx, key, ActivityLifecycleTransition{Kind: "delivery", ReferenceID: activityIDTwo, ExpectedState: "pending", NextState: "delivered"})
+	if err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	var state string
+	if err := fixture.store.db.QueryRow(`SELECT state FROM fabric_activity_lifecycle WHERE project_id=$1 AND source_workspace_id=$2 AND activity_id=$3 AND lifecycle_kind='delivery'`, fixture.stream.ProjectID, fixture.workspace, activityIDOne).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "pending" {
+		t.Fatalf("rolled-back lifecycle state=%q", state)
+	}
+	tx, err = fixture.store.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.TransitionLifecycleInTx(context.Background(), tx, key, ActivityLifecycleTransition{Kind: "delivery", ReferenceID: activityIDTwo, ExpectedState: "pending", NextState: "delivered"}); err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.db.QueryRow(`SELECT state FROM fabric_activity_lifecycle WHERE project_id=$1 AND source_workspace_id=$2 AND activity_id=$3 AND lifecycle_kind='delivery'`, fixture.stream.ProjectID, fixture.workspace, activityIDOne).Scan(&state); err != nil || state != "delivered" {
+		t.Fatalf("committed lifecycle state=%q err=%v", state, err)
+	}
+	tx, err = fixture.store.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`SAVEPOINT wormhole_activity_lifecycle`); err != nil {
+		t.Fatal(err)
+	}
+	err = fixture.store.TransitionLifecycleInTx(context.Background(), tx, key, ActivityLifecycleTransition{Kind: "delivery", ReferenceID: activityIDTwo, ExpectedState: "pending", NextState: "cancelled"})
+	if !errors.Is(err, ErrActivityLifecycleConflict) {
+		t.Fatalf("lifecycle conflict error=%v", err)
+	}
+	if err := tx.QueryRow(`SELECT state FROM fabric_activity_lifecycle WHERE project_id=$1 AND source_workspace_id=$2 AND activity_id=$3 AND lifecycle_kind='delivery'`, fixture.stream.ProjectID, fixture.workspace, activityIDOne).Scan(&state); err != nil || state != "delivered" {
+		t.Fatalf("caller transaction after lifecycle conflict state=%q err=%v", state, err)
+	}
+	if _, err := tx.Exec(`ROLLBACK TO SAVEPOINT wormhole_activity_lifecycle`); err != nil {
+		t.Fatalf("caller lifecycle savepoint collision was consumed: %v", err)
+	}
+}
+
+func TestActivityPullReturnsOpaqueSourceRefNotWorkspaceID(t *testing.T) {
+	fixture := newActivityStoreFixture(t, "activity-pull-opaque-source")
+	activity := testOrdinaryActivity(activityIDOne, fixture.actor, "opaque")
+	if _, err := fixture.store.Accept(context.Background(), fixture.acceptInput(activity)); err != nil {
+		t.Fatal(err)
+	}
+	result, err := fixture.store.Pull(context.Background(), PullActivityInput{Stream: fixture.stream, AttachmentRef: fixture.attachment, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Deliveries) != 1 {
+		t.Fatalf("deliveries=%d", len(result.Deliveries))
+	}
+	var want string
+	if err := fixture.store.db.QueryRow(`SELECT activity_source_ref FROM fabric_workspace_stream_bindings WHERE project_id=$1 AND workspace_id=$2`, fixture.stream.ProjectID, fixture.workspace).Scan(&want); err != nil {
+		t.Fatal(err)
+	}
+	if result.Deliveries[0].SourceRef != want || result.Deliveries[0].SourceRef == fixture.workspace {
+		t.Fatalf("source ref=%q want opaque %q", result.Deliveries[0].SourceRef, want)
+	}
+}
+
 func TestActivityStoreExactReplayRequiresCurrentPairButReturnsOriginalPolicy(t *testing.T) {
 	fixture := newActivityStoreFixture(t, "activity-replay-policy")
 	activity := testOrdinaryActivity(activityIDOne, fixture.actor, "replay policy")
@@ -538,6 +756,18 @@ func countActivityRows(t *testing.T, fixture activityStoreFixture, activityID st
 		query := fmt.Sprintf(`SELECT count(*) FROM %s WHERE project_id=$1 AND activity_id=$2`, table)
 		if err := fixture.store.db.QueryRow(query, fixture.stream.ProjectID, activityID).Scan(&counts[index]); err != nil {
 			t.Fatalf("count %s: %v", table, err)
+		}
+	}
+	return counts
+}
+
+func countActivityRowsTx(t *testing.T, tx *sql.Tx, fixture activityStoreFixture, activityID string) [3]int {
+	t.Helper()
+	var counts [3]int
+	for index, table := range []string{"fabric_activities", "fabric_activity_ingress_receipts", "fabric_activity_lifecycle"} {
+		query := fmt.Sprintf(`SELECT count(*) FROM %s WHERE project_id=$1 AND activity_id=$2`, table)
+		if err := tx.QueryRow(query, fixture.stream.ProjectID, activityID).Scan(&counts[index]); err != nil {
+			t.Fatalf("count %s in transaction: %v", table, err)
 		}
 	}
 	return counts

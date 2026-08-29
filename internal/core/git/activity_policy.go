@@ -67,7 +67,7 @@ func (s *ActivityStore) CurrentPolicy(ctx context.Context, key FabricActivityStr
 	if err := setActivityProject(ctx, tx, key.ProjectID); err != nil {
 		return projectstate.EffectiveActivityPolicyV1{}, err
 	}
-	policy, _, _, err := currentActivityPolicyTx(ctx, tx, key)
+	policy, err := s.CurrentPolicyInTx(ctx, tx, key)
 	if err != nil {
 		return projectstate.EffectiveActivityPolicyV1{}, err
 	}
@@ -75,6 +75,20 @@ func (s *ActivityStore) CurrentPolicy(ctx context.Context, key FabricActivityStr
 		return projectstate.EffectiveActivityPolicyV1{}, fmt.Errorf("git: current activity policy: commit: %w", err)
 	}
 	return policy, nil
+}
+
+func (s *ActivityStore) CurrentPolicyInTx(ctx context.Context, tx *sql.Tx, key FabricActivityStreamKey) (projectstate.EffectiveActivityPolicyV1, error) {
+	if s == nil || s.db == nil || tx == nil {
+		return projectstate.EffectiveActivityPolicyV1{}, fmt.Errorf("git: current activity policy: %w", ErrActivityPolicyUnavailable)
+	}
+	if err := validateFabricActivityStreamKey(key); err != nil {
+		return projectstate.EffectiveActivityPolicyV1{}, err
+	}
+	if err := setActivityProject(ctx, tx, key.ProjectID); err != nil {
+		return projectstate.EffectiveActivityPolicyV1{}, err
+	}
+	policy, _, _, err := currentActivityPolicyTx(ctx, tx, key)
+	return policy, err
 }
 
 func currentActivityPolicyTx(ctx context.Context, tx *sql.Tx, key FabricActivityStreamKey) (projectstate.EffectiveActivityPolicyV1, []byte, projectstate.Digest, error) {
@@ -107,6 +121,25 @@ func (s *ActivityStore) PublishPolicy(ctx context.Context, key FabricActivityStr
 	if s == nil || s.db == nil {
 		return projectstate.EffectiveActivityPolicyV1{}, fmt.Errorf("git: publish activity policy: %w", ErrActivityPolicyUnavailable)
 	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return projectstate.EffectiveActivityPolicyV1{}, fmt.Errorf("git: publish activity policy: begin: %w", err)
+	}
+	defer tx.Rollback()
+	result, err := s.PublishPolicyInTx(ctx, tx, key, policy)
+	if err != nil {
+		return projectstate.EffectiveActivityPolicyV1{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return projectstate.EffectiveActivityPolicyV1{}, fmt.Errorf("git: publish activity policy: commit: %w", err)
+	}
+	return result, nil
+}
+
+func (s *ActivityStore) PublishPolicyInTx(ctx context.Context, tx *sql.Tx, key FabricActivityStreamKey, policy projectstate.EffectiveActivityPolicyV1) (projectstate.EffectiveActivityPolicyV1, error) {
+	if s == nil || s.db == nil || tx == nil {
+		return projectstate.EffectiveActivityPolicyV1{}, fmt.Errorf("git: publish activity policy: %w", ErrActivityPolicyUnavailable)
+	}
 	if err := validateFabricActivityStreamKey(key); err != nil {
 		return projectstate.EffectiveActivityPolicyV1{}, err
 	}
@@ -118,13 +151,12 @@ func (s *ActivityStore) PublishPolicy(ctx context.Context, key FabricActivityStr
 	if err != nil {
 		return projectstate.EffectiveActivityPolicyV1{}, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return projectstate.EffectiveActivityPolicyV1{}, fmt.Errorf("git: publish activity policy: begin: %w", err)
-	}
-	defer tx.Rollback()
 	if err := setActivityProject(ctx, tx, key.ProjectID); err != nil {
 		return projectstate.EffectiveActivityPolicyV1{}, err
+	}
+	savepoint := newActivitySavepoint("wormhole_publish_activity_policy")
+	if _, err := tx.ExecContext(ctx, `SAVEPOINT `+savepoint); err != nil {
+		return projectstate.EffectiveActivityPolicyV1{}, fmt.Errorf("git: publish activity policy: savepoint: %w", err)
 	}
 	var returnedJSON []byte
 	var returnedDigest string
@@ -137,7 +169,9 @@ func (s *ActivityStore) PublishPolicy(ctx context.Context, key FabricActivityStr
 		policy.TerminalMaximumAgeSeconds, policy.TerminalRetentionSeconds).
 		Scan(&returnedJSON, &returnedDigest, &returnedVersion)
 	if err != nil {
-		_ = tx.Rollback()
+		if recoveryErr := recoverActivitySavepoint(ctx, tx, savepoint); recoveryErr != nil {
+			return projectstate.EffectiveActivityPolicyV1{}, fmt.Errorf("git: publish activity policy: recover savepoint: %w (original: %v)", recoveryErr, err)
+		}
 		if activityDatabaseMessage(err) == "activity policy conflict" {
 			return projectstate.EffectiveActivityPolicyV1{}, fmt.Errorf("git: publish activity policy: %w", ErrActivityPolicyChanged)
 		}
@@ -147,14 +181,20 @@ func (s *ActivityStore) PublishPolicy(ctx context.Context, key FabricActivityStr
 		return projectstate.EffectiveActivityPolicyV1{}, fmt.Errorf("git: publish activity policy: database: %w", err)
 	}
 	if returnedVersion != policy.PolicyVersion || returnedDigest != string(digest) || !bytes.Equal(returnedJSON, canonical) {
+		if recoveryErr := recoverActivitySavepoint(ctx, tx, savepoint); recoveryErr != nil {
+			return projectstate.EffectiveActivityPolicyV1{}, fmt.Errorf("git: publish activity policy: recover invalid response: %w", recoveryErr)
+		}
 		return projectstate.EffectiveActivityPolicyV1{}, fmt.Errorf("git: publish activity policy: %w", ErrActivityPolicyChanged)
 	}
 	decoded, err := projectstate.DecodeActivityPolicy(returnedJSON)
 	if err != nil {
+		if recoveryErr := recoverActivitySavepoint(ctx, tx, savepoint); recoveryErr != nil {
+			return projectstate.EffectiveActivityPolicyV1{}, fmt.Errorf("git: publish activity policy: recover invalid response: %w", recoveryErr)
+		}
 		return projectstate.EffectiveActivityPolicyV1{}, fmt.Errorf("git: publish activity policy: invalid response: %w", ErrActivityPolicyChanged)
 	}
-	if err := tx.Commit(); err != nil {
-		return projectstate.EffectiveActivityPolicyV1{}, fmt.Errorf("git: publish activity policy: commit: %w", err)
+	if _, err := tx.ExecContext(ctx, `RELEASE SAVEPOINT `+savepoint); err != nil {
+		return projectstate.EffectiveActivityPolicyV1{}, fmt.Errorf("git: publish activity policy: release savepoint: %w", err)
 	}
 	return decoded, nil
 }

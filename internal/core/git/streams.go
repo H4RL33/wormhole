@@ -81,6 +81,8 @@ type StreamStore struct {
 	db *sql.DB
 }
 
+func NewStreamStore(db *sql.DB) *StreamStore { return &StreamStore{db: db} }
+
 func (s *StreamStore) AttachInTx(ctx context.Context, tx *sql.Tx, scope types.ActorScope, input AttachStreamInput) (StreamTransition, error) {
 	if tx == nil {
 		return StreamTransition{}, fmt.Errorf("git: attach stream: %w", ErrStreamNotFound)
@@ -98,7 +100,7 @@ func (s *StreamStore) AttachInTx(ctx context.Context, tx *sql.Tx, scope types.Ac
 	if err := setStreamProject(ctx, tx, input.Key.ProjectID); err != nil {
 		return StreamTransition{}, err
 	}
-	repository, err := readStreamRepositoryTx(ctx, tx, input.Key, true)
+	repository, err := readStreamRepositoryTx(ctx, tx, input.Key, false)
 	if err != nil {
 		return StreamTransition{}, err
 	}
@@ -206,7 +208,7 @@ func (s *StreamStore) ApplyOperationInTx(ctx context.Context, tx *sql.Tx, scope 
 	if err := setStreamProject(ctx, tx, input.Key.ProjectID); err != nil {
 		return StreamTransition{}, err
 	}
-	repository, err := readStreamRepositoryTx(ctx, tx, input.Key, true)
+	repository, err := readStreamRepositoryTx(ctx, tx, input.Key, false)
 	if err != nil {
 		return StreamTransition{}, err
 	}
@@ -292,6 +294,10 @@ func (s *StreamStore) ApplyOperationInTx(ctx context.Context, tx *sql.Tx, scope 
 }
 
 func (s *StreamStore) AdvanceAcceptedDefaultInTx(ctx context.Context, tx *sql.Tx, scope types.ActorScope, input AdvanceAcceptedInput) (StreamTransition, error) {
+	return s.advanceAcceptedRefInTx(ctx, tx, scope, input, true)
+}
+
+func (s *StreamStore) advanceAcceptedRefInTx(ctx context.Context, tx *sql.Tx, scope types.ActorScope, input AdvanceAcceptedInput, requireDefault bool) (StreamTransition, error) {
 	if tx == nil || validateStreamScope(scope, input.Key) != nil || validateRefObservation(input.Ref) != nil ||
 		input.ExpectedVersion < 0 || input.ExpectedVersion > maximumStreamVersion ||
 		!streamCommitPattern.MatchString(input.ExpectedAcceptedCommitSHA) ||
@@ -306,11 +312,11 @@ func (s *StreamStore) AdvanceAcceptedDefaultInTx(ctx context.Context, tx *sql.Tx
 	if err := setStreamProject(ctx, tx, input.Key.ProjectID); err != nil {
 		return StreamTransition{}, err
 	}
-	repository, err := readStreamRepositoryTx(ctx, tx, input.Key, true)
+	repository, err := readStreamRepositoryTx(ctx, tx, input.Key, false)
 	if err != nil {
 		return StreamTransition{}, err
 	}
-	if repository.identity != input.Ref.Repository || repository.defaultRef != input.Ref.RefName {
+	if repository.identity != input.Ref.Repository || (requireDefault && repository.defaultRef != input.Ref.RefName) {
 		return StreamTransition{}, fmt.Errorf("git: advance accepted stream: %w", ErrStreamConflict)
 	}
 	stream, found, err := findStreamTx(ctx, tx, input.Key, true)
@@ -692,9 +698,6 @@ func validateStreamTransitionTx(ctx context.Context, tx *sql.Tx, key StreamKey, 
 		}
 		return nil
 	case "accepted_ref":
-		if canonicalRef != repository.defaultRef {
-			return corrupt("accepted ref is not repository default")
-		}
 		diverged := previous.transition.Live.Digest != previous.transition.Accepted.Digest ||
 			!bytes.Equal(previous.liveTree, previous.acceptedTree)
 		if diverged {
@@ -819,7 +822,7 @@ func decodeStoredStreamActor(raw []byte) (types.ActorEnvelope, error) {
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		return types.ActorEnvelope{}, ErrStreamCorrupt
 	}
-	if actor.ValidateHistorical() != nil || (actor.Assurance != types.AssurancePublicKeyContinuity && actor.Assurance != types.AssurancePrivateAuthenticated) {
+	if actor.ValidateHistorical() != nil || (actor.Assurance != types.AssuranceLocal && actor.Assurance != types.AssurancePublicKeyContinuity && actor.Assurance != types.AssurancePrivateAuthenticated) {
 		return types.ActorEnvelope{}, ErrStreamCorrupt
 	}
 	canonical, err := projectstate.CanonicalJSON(actor)
@@ -857,24 +860,35 @@ func requireWritableWorkspaceTx(ctx context.Context, tx *sql.Tx, input ApplyStre
 
 func reconcileStreamOperation(scope types.ActorScope, supplied projectstate.OperationV1) (projectstate.OperationV1, []byte, projectstate.Digest, []byte, error) {
 	suppliedActor, err := projectstate.CanonicalJSON(supplied.Actor)
-	if err != nil || supplied.Actor.Validate() != nil {
+	if err != nil || supplied.Actor.Validate() != nil || scope.Actor.Validate() != nil || !sameStableAttribution(supplied.Actor, scope.Actor) {
 		return projectstate.OperationV1{}, nil, "", nil, fmt.Errorf("git: apply stream operation: %w", ErrStreamActor)
 	}
-	authoritativeActor, err := projectstate.CanonicalJSON(scope.Actor)
-	if err != nil || !bytes.Equal(suppliedActor, authoritativeActor) {
+	if scope.Actor.Assurance != types.AssurancePublicKeyContinuity && scope.Actor.Assurance != types.AssurancePrivateAuthenticated {
 		return projectstate.OperationV1{}, nil, "", nil, fmt.Errorf("git: apply stream operation: %w", ErrStreamActor)
 	}
-	operation := supplied
-	operation.Actor = scope.Actor
-	canonical, err := projectstate.CanonicalOperation(operation)
+	canonical, err := projectstate.CanonicalOperation(supplied)
 	if err != nil {
 		return projectstate.OperationV1{}, nil, "", nil, err
 	}
-	digest, err := projectstate.DigestCanonicalJSON(operation)
+	digest, err := projectstate.DigestCanonicalJSON(supplied)
 	if err != nil {
 		return projectstate.OperationV1{}, nil, "", nil, err
 	}
-	return operation, canonical, digest, authoritativeActor, nil
+	return supplied, canonical, digest, suppliedActor, nil
+}
+
+func sameStableAttribution(content, transport types.ActorEnvelope) bool {
+	if content.ActorKind != transport.ActorKind {
+		return false
+	}
+	switch content.ActorKind {
+	case types.ActorHuman:
+		return content.HumanPrincipalID == transport.HumanPrincipalID
+	case types.ActorAgent:
+		return content.AgentID == transport.AgentID && content.AccountableHumanID == transport.AccountableHumanID
+	default:
+		return false
+	}
 }
 
 func loadStreamRequestTx(ctx context.Context, tx *sql.Tx, key StreamKey, canonicalRef, operationID string) (storedStreamRequest, bool, error) {

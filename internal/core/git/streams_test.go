@@ -20,6 +20,34 @@ import (
 	"github.com/H4RL33/wormhole/internal/types/projectstate"
 )
 
+func TestStreamPreconditionRejectsNilTransaction(t *testing.T) {
+	store := NewStreamStore(nil)
+	_, err := store.CheckCurrentPreconditionInTx(context.Background(), nil, StreamAttachment{}, SyncPrecondition{})
+	if !errors.Is(err, ErrStreamPrecondition) {
+		t.Fatalf("error = %v, want ErrStreamPrecondition", err)
+	}
+}
+
+func TestApplyPublicOperationReplayBeforePrecondition(t *testing.T) {
+	store := NewStreamStore(nil)
+	_, err := store.ApplyPublicOperationInTx(context.Background(), nil, types.ActorScope{}, ApplyPublicOperationInput{})
+	if !errors.Is(err, ErrStreamPrecondition) {
+		t.Fatalf("error = %v, want ErrStreamPrecondition", err)
+	}
+}
+
+func TestStreamOperationStableAttributionRejectsForgedActor(t *testing.T) {
+	if _, _, _, _, err := reconcileStreamOperation(types.ActorScope{}, projectstate.OperationV1{}); !errors.Is(err, ErrStreamActor) {
+		t.Fatalf("error = %v, want ErrStreamActor", err)
+	}
+}
+
+func TestStoredStreamOperationRejectsMalformedBytes(t *testing.T) {
+	if _, err := DecodeStoredTree([]byte("{}")); err == nil {
+		t.Fatal("malformed stored tree unexpectedly accepted")
+	}
+}
+
 const (
 	streamTestFabricID    = "11111111-1111-4111-8111-111111111141"
 	streamTestStreamID    = "22222222-2222-4222-8222-222222222241"

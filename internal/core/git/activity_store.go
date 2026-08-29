@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/lib/pq"
 
 	"github.com/H4RL33/wormhole/internal/types"
@@ -43,10 +45,10 @@ type PullActivityInput struct {
 }
 
 type ActivityDelivery struct {
-	SourceWorkspaceID string
-	ActivityJSON      []byte
-	ActivityDigest    projectstate.Digest
-	Receipt           projectstate.ActivityReceiptV1
+	SourceRef      string
+	ActivityJSON   []byte
+	ActivityDigest projectstate.Digest
+	Receipt        projectstate.ActivityReceiptV1
 }
 
 // ActivityPolicyEvidence is canonical immutable policy evidence for receipts in a
@@ -90,6 +92,25 @@ func (s *ActivityStore) Accept(ctx context.Context, input AcceptActivityInput) (
 	if s == nil || s.db == nil {
 		return projectstate.ActivityReceiptV1{}, fmt.Errorf("git: accept activity: %w", ErrActivityNotFound)
 	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return projectstate.ActivityReceiptV1{}, fmt.Errorf("git: accept activity: begin: %w", err)
+	}
+	defer tx.Rollback()
+	receipt, err := s.AcceptInTx(ctx, tx, input)
+	if err != nil {
+		return projectstate.ActivityReceiptV1{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return projectstate.ActivityReceiptV1{}, fmt.Errorf("git: accept activity: commit: %w", err)
+	}
+	return receipt, nil
+}
+
+func (s *ActivityStore) AcceptInTx(ctx context.Context, tx *sql.Tx, input AcceptActivityInput) (projectstate.ActivityReceiptV1, error) {
+	if s == nil || s.db == nil {
+		return projectstate.ActivityReceiptV1{}, fmt.Errorf("git: accept activity: %w", ErrActivityNotFound)
+	}
 	if err := input.Key.validate(); err != nil {
 		return projectstate.ActivityReceiptV1{}, err
 	}
@@ -123,15 +144,21 @@ func (s *ActivityStore) Accept(ctx context.Context, input AcceptActivityInput) (
 		return projectstate.ActivityReceiptV1{}, fmt.Errorf("git: accept activity: %w", ErrActivityPolicyChanged)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return projectstate.ActivityReceiptV1{}, fmt.Errorf("git: accept activity: begin: %w", err)
+	if tx == nil {
+		return projectstate.ActivityReceiptV1{}, fmt.Errorf("git: accept activity: %w", ErrActivityNotFound)
 	}
-	defer tx.Rollback()
 	if err := setActivityProject(ctx, tx, input.Key.Stream.ProjectID); err != nil {
 		return projectstate.ActivityReceiptV1{}, err
 	}
 	arguments := activityAcceptArguments(input, canonical, digest, embeddedActor)
+	// PostgreSQL marks the transaction failed when the function raises an
+	// exception. A savepoint lets us clear that state while retaining the
+	// caller's transaction (and allows policyChangedErrorInTx to read the
+	// authoritative current policy).
+	savepoint := newActivitySavepoint("wormhole_accept_activity")
+	if _, err := tx.ExecContext(ctx, `SAVEPOINT `+savepoint); err != nil {
+		return projectstate.ActivityReceiptV1{}, fmt.Errorf("git: accept activity: savepoint: %w", err)
+	}
 	var receipt projectstate.ActivityReceiptV1
 	var returnedDigest string
 	err = tx.QueryRowContext(ctx, `SELECT activity_digest,sequence,policy_version,policy_digest,accepted_at
@@ -139,7 +166,9 @@ func (s *ActivityStore) Accept(ctx context.Context, input AcceptActivityInput) (
 		$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`, arguments...).
 		Scan(&returnedDigest, &receipt.Sequence, &receipt.PolicyVersion, &receipt.PolicyDigest, &receipt.AcceptedAt)
 	if err != nil {
-		_ = tx.Rollback()
+		if recoveryErr := recoverActivitySavepoint(ctx, tx, savepoint); recoveryErr != nil {
+			return projectstate.ActivityReceiptV1{}, fmt.Errorf("git: accept activity: recover savepoint: %w (original: %v)", recoveryErr, err)
+		}
 		switch activityDatabaseMessage(err) {
 		case "activity replay conflict":
 			return projectstate.ActivityReceiptV1{}, fmt.Errorf("git: accept activity: %w", ErrActivityReplayConflict)
@@ -148,7 +177,7 @@ func (s *ActivityStore) Accept(ctx context.Context, input AcceptActivityInput) (
 		case "activity policy unavailable":
 			return projectstate.ActivityReceiptV1{}, fmt.Errorf("git: accept activity: %w", ErrActivityPolicyUnavailable)
 		case "activity policy changed":
-			return projectstate.ActivityReceiptV1{}, s.policyChangedError(ctx, input.Key.Stream)
+			return projectstate.ActivityReceiptV1{}, s.policyChangedErrorInTx(ctx, tx, input.Key.Stream)
 		case "activity sequence unavailable":
 			return projectstate.ActivityReceiptV1{}, fmt.Errorf("git: accept activity: %w", ErrActivityCursorConflict)
 		default:
@@ -160,15 +189,33 @@ func (s *ActivityStore) Accept(ctx context.Context, input AcceptActivityInput) (
 	receipt.ActivityDigest = projectstate.Digest(returnedDigest)
 	receipt.AcceptedAt = receipt.AcceptedAt.UTC()
 	if receipt.ActivityDigest != digest {
+		if recoveryErr := recoverActivitySavepoint(ctx, tx, savepoint); recoveryErr != nil {
+			return projectstate.ActivityReceiptV1{}, fmt.Errorf("git: accept activity: recover invalid receipt: %w", recoveryErr)
+		}
 		return projectstate.ActivityReceiptV1{}, fmt.Errorf("git: accept activity: %w", ErrActivityReplayConflict)
 	}
 	if _, err := projectstate.CanonicalActivityReceipt(receipt); err != nil {
+		if recoveryErr := recoverActivitySavepoint(ctx, tx, savepoint); recoveryErr != nil {
+			return projectstate.ActivityReceiptV1{}, fmt.Errorf("git: accept activity: recover invalid receipt: %w", recoveryErr)
+		}
 		return projectstate.ActivityReceiptV1{}, fmt.Errorf("git: accept activity: invalid receipt: %w", ErrActivityReplayConflict)
 	}
-	if err := tx.Commit(); err != nil {
-		return projectstate.ActivityReceiptV1{}, fmt.Errorf("git: accept activity: commit: %w", err)
+	if _, err := tx.ExecContext(ctx, `RELEASE SAVEPOINT `+savepoint); err != nil {
+		return projectstate.ActivityReceiptV1{}, fmt.Errorf("git: accept activity: release savepoint: %w", err)
 	}
 	return receipt, nil
+}
+
+func newActivitySavepoint(prefix string) string {
+	return prefix + "_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+}
+
+func recoverActivitySavepoint(ctx context.Context, tx *sql.Tx, name string) error {
+	if _, err := tx.ExecContext(ctx, `ROLLBACK TO SAVEPOINT `+name); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `RELEASE SAVEPOINT `+name)
+	return err
 }
 
 func activityAcceptArguments(input AcceptActivityInput, canonical []byte, digest projectstate.Digest, actorJSON []byte) []any {
@@ -196,8 +243,8 @@ func activityAcceptArguments(input AcceptActivityInput, canonical []byte, digest
 	}
 }
 
-func (s *ActivityStore) policyChangedError(ctx context.Context, key FabricActivityStreamKey) error {
-	policy, err := s.CurrentPolicy(ctx, key)
+func (s *ActivityStore) policyChangedErrorInTx(ctx context.Context, tx *sql.Tx, key FabricActivityStreamKey) error {
+	policy, err := s.CurrentPolicyInTx(ctx, tx, key)
 	if err != nil {
 		return fmt.Errorf("git: accept activity: %w", ErrActivityPolicyChanged)
 	}
@@ -257,10 +304,12 @@ func (s *ActivityStore) Pull(ctx context.Context, input PullActivityInput) (Pull
 	if input.AfterSequence > highWatermark {
 		return PullActivityResult{}, fmt.Errorf("git: pull activity: %w", ErrActivityCursorConflict)
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT a.source_workspace_id,a.canonical_activity_json,a.activity_digest,
+	rows, err := tx.QueryContext(ctx, `SELECT b.activity_source_ref,a.canonical_activity_json,a.activity_digest,
 		r.sequence,r.policy_version,r.policy_digest,r.accepted_at,p.canonical_policy_json
 		FROM fabric_activities a JOIN fabric_activity_ingress_receipts r
 		USING(project_id,fabric_instance_id,stream_id,canonical_ref,source_workspace_id,activity_id)
+		JOIN fabric_workspace_stream_bindings b ON b.project_id=a.project_id AND b.fabric_instance_id=a.fabric_instance_id
+		AND b.stream_id=a.stream_id AND b.canonical_ref=a.canonical_ref AND b.workspace_id=a.source_workspace_id AND b.detached_at IS NULL
 		LEFT JOIN fabric_activity_policy_versions p ON p.project_id=r.project_id AND p.fabric_instance_id=r.fabric_instance_id
 		AND p.stream_id=r.stream_id AND p.canonical_ref=r.canonical_ref AND p.policy_version=r.policy_version
 		AND p.policy_digest=r.policy_digest
@@ -282,7 +331,7 @@ func (s *ActivityStore) Pull(ctx context.Context, input PullActivityInput) (Pull
 		var digest string
 		var acceptedAt time.Time
 		var policyJSON []byte
-		if err := rows.Scan(&delivery.SourceWorkspaceID, &delivery.ActivityJSON, &digest,
+		if err := rows.Scan(&delivery.SourceRef, &delivery.ActivityJSON, &digest,
 			&delivery.Receipt.Sequence, &delivery.Receipt.PolicyVersion, &delivery.Receipt.PolicyDigest, &acceptedAt, &policyJSON); err != nil {
 			return PullActivityResult{}, fmt.Errorf("git: pull activity: scan: %w", err)
 		}
