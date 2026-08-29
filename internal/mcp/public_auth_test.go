@@ -191,3 +191,55 @@ func TestPublicProofVerifierRejectsWrongFabricToolAndScope(t *testing.T) {
 		})
 	}
 }
+
+func TestPublicProofResolveVerifiedTrackedHumanRequiresOneCanonicalLiveKey(t *testing.T) {
+	f := newPublicProofTestFixture(t)
+	fingerprint := sha256.Sum256(f.publicKey)
+	verified := VerifiedPublicProof{
+		KeyFingerprint: "sha256:" + hex.EncodeToString(fingerprint[:]),
+	}
+	copy(verified.PublicKey[:], f.publicKey)
+	humanID := "22222222-2222-4222-8222-222222222222"
+	human := projectstate.ActorV1{
+		SchemaVersion: 1, Kind: "actor", ID: humanID, ActorKind: types.ActorHuman, DisplayName: "Human",
+		PublicKeys: []projectstate.PublicKeyV1{{KeyID: "primary", Algorithm: "ed25519", PublicKeyBase64: base64.StdEncoding.EncodeToString(f.publicKey)}},
+		Extensions: projectstate.ExtensionsV1{},
+	}
+	snapshot := projectstate.Snapshot{Actors: map[string]projectstate.Record[projectstate.ActorV1]{humanID: {Value: &human}}}
+	got, err := resolveVerifiedTrackedHuman(snapshot, verified)
+	if err != nil || got.ID != humanID {
+		t.Fatalf("resolved human = %+v, %v", got, err)
+	}
+
+	tests := map[string]func(*projectstate.Snapshot){
+		"missing": func(s *projectstate.Snapshot) { s.Actors = map[string]projectstate.Record[projectstate.ActorV1]{} },
+		"tombstoned": func(s *projectstate.Snapshot) {
+			record := s.Actors[humanID]
+			record.Tombstone = &projectstate.TombstoneV1{}
+			s.Actors[humanID] = record
+		},
+		"agent": func(s *projectstate.Snapshot) { s.Actors[humanID].Value.ActorKind = types.ActorAgent },
+		"noncanonical base64": func(s *projectstate.Snapshot) {
+			s.Actors[humanID].Value.PublicKeys[0].PublicKeyBase64 = strings.TrimSuffix(s.Actors[humanID].Value.PublicKeys[0].PublicKeyBase64, "=")
+		},
+		"duplicate key on human": func(s *projectstate.Snapshot) {
+			s.Actors[humanID].Value.PublicKeys = append(s.Actors[humanID].Value.PublicKeys, s.Actors[humanID].Value.PublicKeys[0])
+		},
+		"same key on another human": func(s *projectstate.Snapshot) {
+			other := *s.Actors[humanID].Value
+			other.ID = "33333333-3333-4333-8333-333333333333"
+			s.Actors[other.ID] = projectstate.Record[projectstate.ActorV1]{Value: &other}
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			copyHuman := human
+			copyHuman.PublicKeys = append([]projectstate.PublicKeyV1(nil), human.PublicKeys...)
+			candidate := projectstate.Snapshot{Actors: map[string]projectstate.Record[projectstate.ActorV1]{humanID: {Value: &copyHuman}}}
+			mutate(&candidate)
+			if _, err := resolveVerifiedTrackedHuman(candidate, verified); !errors.Is(err, identity.ErrPublicAuthentication) {
+				t.Fatalf("error = %v, want ErrPublicAuthentication", err)
+			}
+		})
+	}
+}

@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -96,4 +97,29 @@ func (v *PublicProofVerifier) verify(tool, scope string, args json.RawMessage, p
 func strictRawURL(value string, size int) ([]byte, bool) {
 	d, e := base64.RawURLEncoding.Strict().DecodeString(value)
 	return d, e == nil && len(d) == size && base64.RawURLEncoding.EncodeToString(d) == value
+}
+
+func resolveVerifiedTrackedHuman(snapshot projectstate.Snapshot, proof VerifiedPublicProof) (projectstate.ActorV1, error) {
+	var matched *projectstate.ActorV1
+	matches := 0
+	for _, record := range snapshot.Actors {
+		if record.Value == nil || record.Tombstone != nil || record.Value.ActorKind != types.ActorHuman {
+			continue
+		}
+		for _, key := range record.Value.PublicKeys {
+			decoded, err := base64.StdEncoding.DecodeString(key.PublicKeyBase64)
+			if err != nil || key.Algorithm != "ed25519" ||
+				base64.StdEncoding.EncodeToString(decoded) != key.PublicKeyBase64 || !bytes.Equal(decoded, proof.PublicKey[:]) {
+				continue
+			}
+			matches++
+			candidate := *record.Value
+			candidate.PublicKeys = append([]projectstate.PublicKeyV1(nil), record.Value.PublicKeys...)
+			matched = &candidate
+		}
+	}
+	if matches != 1 || matched == nil {
+		return projectstate.ActorV1{}, identity.ErrPublicAuthentication
+	}
+	return *matched, nil
 }
