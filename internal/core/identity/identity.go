@@ -132,6 +132,19 @@ type EnrolmentRegistrationResult struct {
 type AuditEntry struct {
 	ID        string
 	AgentID   string
+	ActorKind string
+	HumanPrincipalID string
+	AccountableHumanID string
+	SessionID string
+	HarnessName string
+	HarnessVersion string
+	ModelName string
+	ModelVersion string
+	Assurance string
+	OccurredAt time.Time
+	ActorEnvelopeJSON []byte
+	CanonicalPayloadJSON []byte
+	RequestDigest string
 	ProjectID string
 	Action    string
 	CreatedAt time.Time
