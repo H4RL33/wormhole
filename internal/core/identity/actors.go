@@ -54,7 +54,14 @@ func (s *Store) RecordActorActionInTx(ctx context.Context, tx *sql.Tx, scope typ
 		return AuditEntry{}, fmt.Errorf("identity: insert typed audit entry: %w", err)
 	}
 	e.AgentID, e.HumanPrincipalID, e.AccountableHumanID, e.SessionID = agentIDRead.String, humanIDRead.String, accountableRead.String, sessionRead.String
-	if e.ActorKind != string(actor.ActorKind) || !bytes.Equal(e.CanonicalPayloadJSON, canonicalPayload) || e.RequestDigest != requestDigest {
+	if !bytes.Equal(e.ActorEnvelopeJSON, envelope) || e.ActorKind != string(actor.ActorKind) ||
+		e.HarnessName != actor.HarnessName || e.HarnessVersion != actor.HarnessVersion ||
+		e.ModelName != actor.ModelName || e.ModelVersion != actor.ModelVersion ||
+		e.Assurance != string(actor.Assurance) || !e.OccurredAt.Equal(actor.OccurredAt) ||
+		e.ProjectID != scope.ProjectID || e.Action != action ||
+		!bytes.Equal(e.CanonicalPayloadJSON, canonicalPayload) || e.RequestDigest != requestDigest ||
+		(actor.ActorKind == types.ActorHuman && (agentIDRead.Valid || e.HumanPrincipalID != actor.HumanPrincipalID || accountableRead.Valid || sessionRead.Valid)) ||
+		(actor.ActorKind == types.ActorAgent && (humanIDRead.Valid || e.AgentID != actor.AgentID || e.AccountableHumanID != actor.AccountableHumanID || e.SessionID != actor.SessionID)) {
 		return AuditEntry{}, errors.New("identity: typed audit readback mismatch")
 	}
 	return e, nil
