@@ -5,10 +5,12 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"reflect"
 	"strings"
 	"sync"
@@ -633,5 +635,637 @@ func assertAttachFailure(t *testing.T, err error, code string) {
 	want := `{"code":"` + code + `","operation":"wormhole.sync.attach"}`
 	if err.Error() != want {
 		t.Fatalf("error = %q, want %q", err, want)
+	}
+}
+
+func TestSyncV2BootstrapAndPullReturnCompleteValidatedState(t *testing.T) {
+	f := newMutationFixture(t)
+	attached := f.attach(13)
+	resolver := realBoundResolver(t, f)
+	bootstrap, err := NewSyncV2BootstrapHandler(resolver, coregit.NewActivityStore(f.db))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pull, err := NewSyncV2PullHandler(resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	arguments := boundReadArguments(attached, 0)
+	raw := canonicalBoundArguments(t, arguments)
+	seed := sha256.Sum256([]byte(f.projectID))
+	beforeBootstrap := task2MutationSnapshot(t, f.db, f.projectID)
+	bootstrapResult, err := bootstrap.Handle(context.Background(), raw, signedBoundProof(t, f.fabricID, "wormhole.sync.bootstrap", raw, arguments.AttachmentRef, f.transport.OccurredAt, bytesOf(14, 32), seed[:]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bootstrapResult.Version != 2 || bootstrapResult.Changed || bootstrapResult.EffectiveActivityPolicy != f.policy {
+		t.Fatalf("bootstrap result = %+v", bootstrapResult)
+	}
+	assertSyncReadState(t, bootstrapResult.State, attached.State, f.tree)
+	afterBootstrap := task2MutationSnapshot(t, f.db, f.projectID)
+	assertTask2MutationDelta(t, beforeBootstrap, afterBootstrap, 1)
+
+	beforePull := afterBootstrap
+	pullResult, err := pull.Handle(context.Background(), raw, signedBoundProof(t, f.fabricID, "wormhole.sync.pull", raw, arguments.AttachmentRef, f.transport.OccurredAt, bytesOf(15, 32), seed[:]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pullResult.Version != 2 || pullResult.Changed {
+		t.Fatalf("pull result = %+v", pullResult)
+	}
+	assertSyncReadState(t, pullResult.State, attached.State, f.tree)
+	assertTask2MutationDelta(t, beforePull, task2MutationSnapshot(t, f.db, f.projectID), 1)
+}
+
+func TestSyncV2PullCorruptStreamRollsBackNonceForCorrectedRetry(t *testing.T) {
+	f := newMutationFixture(t)
+	attached := f.attach(61)
+	handler, err := NewSyncV2PullHandler(realBoundResolver(t, f))
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments := boundReadArguments(attached, 0)
+	raw := canonicalBoundArguments(t, arguments)
+	seed := sha256.Sum256([]byte(f.projectID))
+	proof := signedBoundProof(t, f.fabricID, "wormhole.sync.pull", raw, arguments.AttachmentRef, f.transport.OccurredAt, bytesOf(62, 32), seed[:])
+
+	corruptTask2CurrentStream(t, f.db, attached.Attachment, projectstate.Digest("sha256:"+strings.Repeat("f", 64)))
+	beforeFailure := task2MutationSnapshot(t, f.db, f.projectID)
+	_, err = handler.Handle(context.Background(), raw, proof)
+	assertSyncReadFailure(t, err, "wormhole.sync.pull", "internal_error")
+	assertTask2MutationDelta(t, beforeFailure, task2MutationSnapshot(t, f.db, f.projectID), 0)
+
+	corruptTask2CurrentStream(t, f.db, attached.Attachment, attached.State.Live.Digest)
+	beforeRetry := task2MutationSnapshot(t, f.db, f.projectID)
+	result, err := handler.Handle(context.Background(), raw, proof)
+	if err != nil {
+		t.Fatalf("corrected corrupt-stream retry with same nonce: %v", err)
+	}
+	assertSyncReadState(t, result.State, attached.State, f.tree)
+	assertTask2MutationDelta(t, beforeRetry, task2MutationSnapshot(t, f.db, f.projectID), 1)
+}
+
+func TestSyncV2BootstrapPolicyFailureRollsBackNonceForCorrectedRetry(t *testing.T) {
+	f := newMutationFixture(t)
+	attached := f.attach(16)
+	resolver := realBoundResolver(t, f)
+	handler, err := NewSyncV2BootstrapHandler(resolver, coregit.NewActivityStore(f.db))
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments := boundReadArguments(attached, 0)
+	raw := canonicalBoundArguments(t, arguments)
+	seed := sha256.Sum256([]byte(f.projectID))
+	proof := signedBoundProof(t, f.fabricID, "wormhole.sync.bootstrap", raw, arguments.AttachmentRef, f.transport.OccurredAt, bytesOf(17, 32), seed[:])
+	if _, err := f.db.Exec(`DELETE FROM fabric_activity_policy_current WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3`, f.projectID, f.fabricID, attached.Attachment.Key.StreamID); err != nil {
+		t.Fatal(err)
+	}
+	before := task2MutationSnapshot(t, f.db, f.projectID)
+	_, err = handler.Handle(context.Background(), raw, proof)
+	assertSyncReadFailure(t, err, "wormhole.sync.bootstrap", "activity_policy_required")
+	assertTask2MutationDelta(t, before, task2MutationSnapshot(t, f.db, f.projectID), 0)
+	if _, err := f.db.Exec(`INSERT INTO fabric_activity_policy_current(project_id,fabric_instance_id,stream_id,canonical_ref,policy_version) VALUES($1,$2,$3,$4,$5)`, f.projectID, f.fabricID, attached.Attachment.Key.StreamID, attached.Attachment.CanonicalRef, f.policy.PolicyVersion); err != nil {
+		t.Fatal(err)
+	}
+	beforeRetry := task2MutationSnapshot(t, f.db, f.projectID)
+	if _, err := handler.Handle(context.Background(), raw, proof); err != nil {
+		t.Fatalf("corrected retry with same nonce: %v", err)
+	}
+	assertTask2MutationDelta(t, beforeRetry, task2MutationSnapshot(t, f.db, f.projectID), 1)
+}
+
+func TestSyncV2BootstrapRejectsMalformedUnknownAndUnboundedPolicies(t *testing.T) {
+	for name, corrupt := range map[string]func([]byte) []byte{
+		"malformed": func([]byte) []byte { return []byte(`{`) },
+		"unknown": func(raw []byte) []byte {
+			return bytes.Replace(raw, []byte(`"schema_version":1`), []byte(`"schema_version":2`), 1)
+		},
+		"unbounded": func(raw []byte) []byte {
+			return bytes.Replace(raw, []byte(`"terminal_retention_seconds":2592000`), []byte(`"terminal_retention_seconds":31536001`), 1)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newMutationFixture(t)
+			attached := f.attach(byte(50 + len(name)))
+			handler, err := NewSyncV2BootstrapHandler(realBoundResolver(t, f), coregit.NewActivityStore(f.db))
+			if err != nil {
+				t.Fatal(err)
+			}
+			canonical, err := projectstate.CanonicalActivityPolicy(f.policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tx, err := f.db.Begin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = tx.Exec(`SET LOCAL session_replication_role=replica`); err == nil {
+				_, err = tx.Exec(`UPDATE fabric_activity_policy_versions SET canonical_policy_json=$1 WHERE project_id=$2 AND fabric_instance_id=$3 AND stream_id=$4`, corrupt(canonical), f.projectID, f.fabricID, attached.Attachment.Key.StreamID)
+			}
+			if err == nil {
+				err = tx.Commit()
+			} else {
+				_ = tx.Rollback()
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			arguments := boundReadArguments(attached, 0)
+			raw := canonicalBoundArguments(t, arguments)
+			seed := sha256.Sum256([]byte(f.projectID))
+			before := task2MutationSnapshot(t, f.db, f.projectID)
+			_, err = handler.Handle(context.Background(), raw, signedBoundProof(t, f.fabricID, "wormhole.sync.bootstrap", raw, arguments.AttachmentRef, f.transport.OccurredAt, bytesOf(60, 32), seed[:]))
+			assertSyncReadFailure(t, err, "wormhole.sync.bootstrap", "activity_policy_required")
+			assertTask2MutationDelta(t, before, task2MutationSnapshot(t, f.db, f.projectID), 0)
+		})
+	}
+}
+
+func TestPublicProofNonceReplayConcurrentPullConsumesOnce(t *testing.T) {
+	f := newMutationFixture(t)
+	attached := f.attach(18)
+	handler, err := NewSyncV2PullHandler(realBoundResolver(t, f))
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments := boundReadArguments(attached, 0)
+	raw := canonicalBoundArguments(t, arguments)
+	seed := sha256.Sum256([]byte(f.projectID))
+	proof := signedBoundProof(t, f.fabricID, "wormhole.sync.pull", raw, arguments.AttachmentRef, f.transport.OccurredAt, bytesOf(19, 32), seed[:])
+	before := task2MutationSnapshot(t, f.db, f.projectID)
+	start := make(chan struct{})
+	errs := make([]error, 2)
+	var wait sync.WaitGroup
+	for i := range errs {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			<-start
+			_, errs[index] = handler.Handle(context.Background(), raw, proof)
+		}(i)
+	}
+	close(start)
+	wait.Wait()
+	successes, failures := 0, 0
+	for _, err := range errs {
+		if err == nil {
+			successes++
+		} else if err.Error() == `{"code":"authentication_failed","operation":"wormhole.sync.pull"}` {
+			failures++
+		} else {
+			t.Fatalf("unexpected concurrent error: %v", err)
+		}
+	}
+	if successes != 1 || failures != 1 {
+		t.Fatalf("concurrent outcomes = %d success, %d authentication failure: %v", successes, failures, errs)
+	}
+	assertTask2MutationDelta(t, before, task2MutationSnapshot(t, f.db, f.projectID), 1)
+}
+
+func TestSyncV2PullChangedStateAndCursorRollback(t *testing.T) {
+	f := newMutationFixture(t)
+	attached := f.attach(20)
+	streams := coregit.NewStreamStore(f.db)
+	tx, err := identity.NewStore(f.db).BeginProjectTx(context.Background(), f.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	advanced, err := streams.AdvanceAcceptedObservedRefInTx(context.Background(), tx, types.ActorScope{ProjectID: f.projectID, Actor: f.transport}, coregit.AdvanceAcceptedInput{
+		Key:  attached.Attachment.Key,
+		Ref:  coregit.RefObservation{Repository: f.repository, RefName: f.observation.RefName, CommitSHA: strings.Repeat("b", 40), ObservedAt: f.observation.ObservedAt.Add(time.Minute)},
+		Tree: f.tree, ExpectedVersion: attached.State.Version,
+		ExpectedAcceptedCommitSHA: attached.State.AcceptedCommitSHA, ExpectedAcceptedTreeDigest: attached.State.Accepted.Digest,
+		ExpectedLiveTreeDigest: attached.State.Live.Digest,
+	})
+	if err == nil {
+		err = tx.Commit()
+	} else {
+		_ = tx.Rollback()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	attached.State = advanced
+	handler, err := NewSyncV2PullHandler(realBoundResolver(t, f))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := sha256.Sum256([]byte(f.projectID))
+	nonce := bytesOf(21, 32)
+
+	wrong := boundReadArguments(attached, advanced.Version+1)
+	wrongRaw := canonicalBoundArguments(t, wrong)
+	beforeWrong := task2MutationSnapshot(t, f.db, f.projectID)
+	_, err = handler.Handle(context.Background(), wrongRaw, signedBoundProof(t, f.fabricID, "wormhole.sync.pull", wrongRaw, wrong.AttachmentRef, f.transport.OccurredAt, nonce, seed[:]))
+	assertSyncReadFailure(t, err, "wormhole.sync.pull", "sync_precondition_failed")
+	afterWrong := task2MutationSnapshot(t, f.db, f.projectID)
+	assertTask2MutationDelta(t, beforeWrong, afterWrong, 0)
+
+	corrected := boundReadArguments(attached, 0)
+	correctedRaw := canonicalBoundArguments(t, corrected)
+	before := afterWrong
+	result, err := handler.Handle(context.Background(), correctedRaw, signedBoundProof(t, f.fabricID, "wormhole.sync.pull", correctedRaw, corrected.AttachmentRef, f.transport.OccurredAt, nonce, seed[:]))
+	if err != nil {
+		t.Fatalf("corrected cursor reused rolled-back nonce: %v", err)
+	}
+	if !result.Changed || result.State.StreamVersion != advanced.Version || result.State.AcceptedCommitSHA != advanced.AcceptedCommitSHA {
+		t.Fatalf("changed pull = %+v, want version %d", result, advanced.Version)
+	}
+	assertTask2MutationDelta(t, before, task2MutationSnapshot(t, f.db, f.projectID), 1)
+}
+
+func TestSyncV2PullRejectsEveryMismatchedSignedScopeAndWrongIssuer(t *testing.T) {
+	f := newMutationFixture(t)
+	attached := f.attach(22)
+	handler, err := NewSyncV2PullHandler(realBoundResolver(t, f))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := boundReadArguments(attached, 0)
+	seed := sha256.Sum256([]byte(f.projectID))
+	mutations := map[string]func(*SyncPullV2Args){
+		"repository": func(a *SyncPullV2Args) { a.Repository.ImmutableID = "987654321" },
+		"ref":        func(a *SyncPullV2Args) { a.CanonicalRef = "refs/heads/other" },
+		"commit":     func(a *SyncPullV2Args) { a.BaseCommitSHA = strings.Repeat("b", 40) },
+		"base tree":  func(a *SyncPullV2Args) { a.BaseTreeDigest = projectstate.Digest("sha256:" + strings.Repeat("b", 64)) },
+		"version":    func(a *SyncPullV2Args) { a.ExpectedStreamVersion++ },
+		"live tree": func(a *SyncPullV2Args) {
+			a.ExpectedLiveTreeDigest = projectstate.Digest("sha256:" + strings.Repeat("c", 64))
+		},
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			arguments := base
+			mutate(&arguments)
+			raw := canonicalBoundArguments(t, arguments)
+			proof := signedBoundProof(t, f.fabricID, "wormhole.sync.pull", raw, arguments.AttachmentRef, f.transport.OccurredAt, bytesOf(byte(30+len(name)), 32), seed[:])
+			before := task2MutationSnapshot(t, f.db, f.projectID)
+			_, err := handler.Handle(context.Background(), raw, proof)
+			assertSyncReadFailure(t, err, "wormhole.sync.pull", "sync_precondition_failed")
+			assertTask2MutationDelta(t, before, task2MutationSnapshot(t, f.db, f.projectID), 0)
+		})
+	}
+
+	raw := canonicalBoundArguments(t, base)
+	wrongSeed := sha256.Sum256([]byte("wrong-issuer"))
+	beforeWrongIssuer := task2MutationSnapshot(t, f.db, f.projectID)
+	_, err = handler.Handle(context.Background(), raw, signedBoundProof(t, f.fabricID, "wormhole.sync.pull", raw, base.AttachmentRef, f.transport.OccurredAt, bytesOf(40, 32), wrongSeed[:]))
+	assertSyncReadFailure(t, err, "wormhole.sync.pull", "authentication_failed")
+	assertTask2MutationDelta(t, beforeWrongIssuer, task2MutationSnapshot(t, f.db, f.projectID), 0)
+	unknown := base
+	unknown.AttachmentRef = uuid.NewString()
+	unknownRaw := canonicalBoundArguments(t, unknown)
+	beforeUnknown := task2MutationSnapshot(t, f.db, f.projectID)
+	_, err = handler.Handle(context.Background(), unknownRaw, signedBoundProof(t, f.fabricID, "wormhole.sync.pull", unknownRaw, unknown.AttachmentRef, f.transport.OccurredAt, bytesOf(41, 32), seed[:]))
+	assertSyncReadFailure(t, err, "wormhole.sync.pull", "attachment_not_found")
+	assertTask2MutationDelta(t, beforeUnknown, task2MutationSnapshot(t, f.db, f.projectID), 0)
+}
+
+func TestSyncV2PullRejectsInvalidArgumentsBeforeBoundResolution(t *testing.T) {
+	f := newMutationFixture(t)
+	attached := f.attach(23)
+	handler, err := NewSyncV2PullHandler(realBoundResolver(t, f))
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := string(canonicalBoundArguments(t, boundReadArguments(attached, 0)))
+	tests := map[string]struct {
+		raw, code string
+	}{
+		"unknown":        {strings.TrimSuffix(valid, `}`) + `,"project_id":"` + f.projectID + `"}`, "invalid_request"},
+		"duplicate":      {strings.Replace(valid, `"version":2`, `"version":2,"version":2`, 1), "invalid_request"},
+		"noncanonical":   {strings.Replace(valid, `{`, `{ `, 1), "invalid_request"},
+		"wrong version":  {strings.Replace(valid, `"version":2`, `"version":3`, 1), "unknown_version"},
+		"negative after": {strings.Replace(valid, `"after_version":0`, `"after_version":-1`, 1), "invalid_request"},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			before := task2MutationSnapshot(t, f.db, f.projectID)
+			_, err := handler.Handle(context.Background(), json.RawMessage(test.raw), types.PublicRequestProof{})
+			assertSyncReadFailure(t, err, "wormhole.sync.pull", test.code)
+			assertTask2MutationDelta(t, before, task2MutationSnapshot(t, f.db, f.projectID), 0)
+		})
+	}
+}
+
+func TestSyncV2PullForcedRLSCrossProjectResolution(t *testing.T) {
+	first := newMutationFixture(t)
+	second := newMutationFixture(t)
+	oldFabricID := second.fabricID
+	if _, err := second.db.Exec(`UPDATE project_repository_bindings SET fabric_instance_id=$1 WHERE project_id=$2 AND fabric_instance_id=$3`, first.fabricID, second.projectID, oldFabricID); err != nil {
+		t.Fatal(err)
+	}
+	second.fabricID = first.fabricID
+	firstAttached := first.attach(42)
+	secondAttached := second.attach(43)
+
+	runtimeDB := publicRuntimeDB(t)
+	verifier, err := NewPublicProofVerifier(first.fabricID, func() time.Time { return first.transport.OccurredAt })
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewPublicBoundProofResolver(first.fabricID, identity.NewStore(runtimeDB), coregit.NewStreamStore(runtimeDB), verifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewSyncV2PullHandler(resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for index, fixture := range []struct {
+		owner    *mutationFixture
+		attached InitialAttachResult
+	}{{first, firstAttached}, {second, secondAttached}} {
+		arguments := boundReadArguments(fixture.attached, 0)
+		raw := canonicalBoundArguments(t, arguments)
+		seed := sha256.Sum256([]byte(fixture.owner.projectID))
+		beforeFirst := task2MutationSnapshot(t, first.db, first.projectID)
+		beforeSecond := task2MutationSnapshot(t, second.db, second.projectID)
+		result, err := handler.Handle(context.Background(), raw, signedBoundProof(t, first.fabricID, "wormhole.sync.pull", raw, arguments.AttachmentRef, fixture.owner.transport.OccurredAt, bytesOf(byte(44+index), 32), seed[:]))
+		if err != nil || result.State.StreamVersion != fixture.attached.State.Version || result.State.LiveTreeDigest != fixture.attached.State.Live.Digest {
+			t.Fatalf("project %d forced-RLS pull = (%+v, %v)", index, result, err)
+		}
+		firstNonceDelta, secondNonceDelta := 0, 0
+		if fixture.owner == first {
+			firstNonceDelta = 1
+		} else {
+			secondNonceDelta = 1
+		}
+		assertTask2MutationDelta(t, beforeFirst, task2MutationSnapshot(t, first.db, first.projectID), firstNonceDelta)
+		assertTask2MutationDelta(t, beforeSecond, task2MutationSnapshot(t, second.db, second.projectID), secondNonceDelta)
+	}
+
+	spoofed := boundReadArguments(secondAttached, 0)
+	spoofed.Repository = first.repository
+	spoofedRaw := canonicalBoundArguments(t, spoofed)
+	secondSeed := sha256.Sum256([]byte(second.projectID))
+	beforeFirst := task2MutationSnapshot(t, first.db, first.projectID)
+	beforeSecond := task2MutationSnapshot(t, second.db, second.projectID)
+	_, err = handler.Handle(context.Background(), spoofedRaw, signedBoundProof(t, first.fabricID, "wormhole.sync.pull", spoofedRaw, spoofed.AttachmentRef, second.transport.OccurredAt, bytesOf(46, 32), secondSeed[:]))
+	assertSyncReadFailure(t, err, "wormhole.sync.pull", "sync_precondition_failed")
+	assertTask2MutationDelta(t, beforeFirst, task2MutationSnapshot(t, first.db, first.projectID), 0)
+	assertTask2MutationDelta(t, beforeSecond, task2MutationSnapshot(t, second.db, second.projectID), 0)
+}
+
+func TestSyncV2PullResolvesFreshAgentSessionScope(t *testing.T) {
+	f := newMutationFixture(t)
+	snapshot, err := projectstate.DecodeTree(f.tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentID := uuid.NewString()
+	agent := projectstate.ActorV1{
+		SchemaVersion: 1, Kind: "actor", ID: agentID, ActorKind: types.ActorAgent,
+		DisplayName: "Read Agent", PublicKeys: []projectstate.PublicKeyV1{}, Extensions: projectstate.ExtensionsV1{},
+	}
+	snapshot.Actors[agentID] = projectstate.Record[projectstate.ActorV1]{Value: &agent}
+	f.tree, err = projectstate.EncodeTree(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attached := f.attach(47)
+	tx, err := identity.NewStore(f.db).BeginProjectTx(context.Background(), f.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := f.coordinator.identity.IssuePublicAgentSessionInTx(context.Background(), tx, identity.PublicAgentSessionIssue{
+		ProjectID: f.projectID, FabricInstanceID: f.fabricID, StreamID: attached.Attachment.Key.StreamID,
+		WorkspaceID: attached.Attachment.WorkspaceID, CanonicalRef: attached.Attachment.CanonicalRef,
+		AttachmentRef: attached.Attachment.AttachmentRef, IssuerKeyFingerprint: f.fingerprint,
+		AgentID: agentID, HarnessName: "codex", HarnessVersion: "1", ModelName: "gpt", ModelVersion: "5",
+		SourceVersion: attached.Attachment.SourceVersion, IssuedAt: f.transport.OccurredAt,
+	})
+	if err == nil {
+		err = tx.Commit()
+	} else {
+		_ = tx.Rollback()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewSyncV2PullHandler(realBoundResolver(t, f))
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments := boundReadArguments(attached, 0)
+	raw := canonicalBoundArguments(t, arguments)
+	seed := sha256.Sum256([]byte(f.projectID))
+	proof := signedBoundSessionProof(t, f.fabricID, "wormhole.sync.pull", raw, arguments.AttachmentRef, session.SessionID, f.transport.OccurredAt, bytesOf(48, 32), seed[:])
+	beforeSuccess := task2MutationSnapshot(t, f.db, f.projectID)
+	result, err := handler.Handle(context.Background(), raw, proof)
+	if err != nil || result.State.StreamVersion != attached.State.Version {
+		t.Fatalf("agent-session pull = (%+v, %v)", result, err)
+	}
+	assertTask2MutationDelta(t, beforeSuccess, task2MutationSnapshot(t, f.db, f.projectID), 1)
+	if _, err := f.db.Exec(`UPDATE fabric_public_agent_sessions SET revoked_at=now() WHERE project_id=$1 AND session_id=$2`, f.projectID, session.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	proof = signedBoundSessionProof(t, f.fabricID, "wormhole.sync.pull", raw, arguments.AttachmentRef, session.SessionID, f.transport.OccurredAt, bytesOf(49, 32), seed[:])
+	beforeRevoked := task2MutationSnapshot(t, f.db, f.projectID)
+	_, err = handler.Handle(context.Background(), raw, proof)
+	assertSyncReadFailure(t, err, "wormhole.sync.pull", "authentication_failed")
+	assertTask2MutationDelta(t, beforeRevoked, task2MutationSnapshot(t, f.db, f.projectID), 0)
+}
+
+func publicRuntimeDB(t *testing.T) *sql.DB {
+	t.Helper()
+	databaseURL, err := url.Parse(types.LoadConfig().DatabaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := databaseURL.Query()
+	query.Set("options", "-c role=wormhole_fabric_runtime")
+	databaseURL.RawQuery = query.Encode()
+	db, err := sql.Open("postgres", databaseURL.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	var currentUser string
+	if err := db.QueryRow(`SELECT current_user`).Scan(&currentUser); err != nil || currentUser != "wormhole_fabric_runtime" {
+		t.Fatalf("runtime current_user = (%q, %v)", currentUser, err)
+	}
+	return db
+}
+
+func realBoundResolver(t *testing.T, f *mutationFixture) *PublicBoundProofResolver {
+	t.Helper()
+	verifier, err := NewPublicProofVerifier(f.fabricID, func() time.Time { return f.transport.OccurredAt })
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewPublicBoundProofResolver(f.fabricID, identity.NewStore(f.db), coregit.NewStreamStore(f.db), verifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolver
+}
+
+func boundReadArguments(attached InitialAttachResult, afterVersion int64) SyncPullV2Args {
+	return SyncPullV2Args{SyncV2Scope: SyncV2Scope{
+		Version: 2, AttachmentRef: attached.Attachment.AttachmentRef,
+		Repository: attached.Attachment.Repository, CanonicalRef: attached.Attachment.CanonicalRef,
+		BaseCommitSHA: attached.State.AcceptedCommitSHA, BaseTreeDigest: attached.State.Accepted.Digest,
+		ExpectedStreamVersion: attached.State.Version, ExpectedLiveTreeDigest: attached.State.Live.Digest,
+	}, AfterVersion: afterVersion}
+}
+
+func canonicalBoundArguments(t *testing.T, arguments SyncPullV2Args) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(arguments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonicalMutationJSON(t, raw)
+}
+
+func signedBoundProof(t *testing.T, fabricID, tool string, arguments json.RawMessage, attachment string, at time.Time, nonceSeed, keySeed []byte) types.PublicRequestProof {
+	return signedBoundSessionProof(t, fabricID, tool, arguments, attachment, "", at, nonceSeed, keySeed)
+}
+
+func signedBoundSessionProof(t *testing.T, fabricID, tool string, arguments json.RawMessage, attachment, sessionID string, at time.Time, nonceSeed, keySeed []byte) types.PublicRequestProof {
+	t.Helper()
+	privateKey := ed25519.NewKeyFromSeed(keySeed)
+	publicKey := privateKey.Public().(ed25519.PublicKey)
+	canonical, err := projectstate.CanonicalJSON(arguments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nonce [32]byte
+	copy(nonce[:], nonceSeed)
+	scope := "attachment:" + attachment
+	if sessionID != "" {
+		scope += ":session:" + sessionID
+	}
+	message, err := projectstate.PublicProofMessage(fabricID, tool, scope, canonical, at, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint := sha256.Sum256(publicKey)
+	return types.PublicRequestProof{
+		KeyID: "sha256:" + hex.EncodeToString(fingerprint[:]), PublicKey: base64.RawURLEncoding.EncodeToString(publicKey),
+		Timestamp: at.Format(time.RFC3339Nano), Nonce: base64.RawURLEncoding.EncodeToString(nonce[:]), Signature: base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, message)),
+		SessionID: sessionID,
+	}
+}
+
+func assertSyncReadState(t *testing.T, got SyncStateV2, want coregit.StreamTransition, wantTree projectstate.Tree) {
+	t.Helper()
+	if got.StreamVersion != want.Version || got.AcceptedCommitSHA != want.AcceptedCommitSHA || got.AcceptedTreeDigest != want.Accepted.Digest || got.LiveTreeDigest != want.Live.Digest || len(got.OpenConflictIDs) != 0 || !reflect.DeepEqual(got.AcceptedTree, wantTree) || !reflect.DeepEqual(got.LiveTree, wantTree) {
+		t.Fatalf("sync state = %+v, want transition %+v tree %#v", got, want, wantTree)
+	}
+}
+
+func assertSyncReadFailure(t *testing.T, err error, operation, code string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("error = nil, want %s", code)
+	}
+	want := `{"code":"` + code + `","operation":"` + operation + `"}`
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err, want)
+	}
+}
+
+type task2MutationState map[string][]string
+
+var task2MutationTables = []string{
+	"project_repository_bindings",
+	"fabric_streams",
+	"fabric_stream_versions",
+	"fabric_workspace_stream_bindings",
+	"fabric_stream_requests",
+	"fabric_stream_conflicts",
+	"fabric_activity_policy_versions",
+	"fabric_activity_policy_current",
+	"fabric_activity_stream_sequences",
+	"fabric_activities",
+	"fabric_activity_ingress_receipts",
+	"fabric_activity_lifecycle",
+	"fabric_public_actor_keys",
+	"fabric_public_agent_sessions",
+	"public_request_nonces",
+	"audit_log",
+}
+
+func task2MutationSnapshot(t *testing.T, db *sql.DB, projectID string) task2MutationState {
+	t.Helper()
+	state := make(task2MutationState, len(task2MutationTables))
+	for _, table := range task2MutationTables {
+		rows, err := db.Query(`SELECT to_jsonb(snapshot_row)::text FROM `+table+` snapshot_row WHERE project_id=$1 ORDER BY to_jsonb(snapshot_row)::text`, projectID)
+		if err != nil {
+			t.Fatalf("snapshot %s: %v", table, err)
+		}
+		for rows.Next() {
+			var row string
+			if err := rows.Scan(&row); err != nil {
+				rows.Close()
+				t.Fatalf("snapshot %s row: %v", table, err)
+			}
+			state[table] = append(state[table], row)
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatalf("snapshot %s close: %v", table, err)
+		}
+	}
+	return state
+}
+
+func assertTask2MutationDelta(t *testing.T, before, after task2MutationState, nonceDelta int) {
+	t.Helper()
+	for _, table := range task2MutationTables {
+		if table != "public_request_nonces" || nonceDelta == 0 {
+			if !reflect.DeepEqual(after[table], before[table]) {
+				t.Errorf("%s changed: before=%v after=%v", table, before[table], after[table])
+			}
+			continue
+		}
+		if len(after[table]) != len(before[table])+nonceDelta {
+			t.Errorf("%s row delta = %d, want %d", table, len(after[table])-len(before[table]), nonceDelta)
+			continue
+		}
+		remaining := make(map[string]int, len(after[table]))
+		for _, row := range after[table] {
+			remaining[row]++
+		}
+		for _, row := range before[table] {
+			remaining[row]--
+		}
+		added := 0
+		for _, count := range remaining {
+			if count < 0 {
+				t.Errorf("%s removed or changed an existing row", table)
+			}
+			added += count
+		}
+		if added != nonceDelta {
+			t.Errorf("%s added row count = %d, want %d", table, added, nonceDelta)
+		}
+	}
+}
+
+func corruptTask2CurrentStream(t *testing.T, db *sql.DB, attachment coregit.StreamAttachment, liveDigest projectstate.Digest) {
+	t.Helper()
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`SET LOCAL session_replication_role=replica`); err != nil {
+		t.Fatal(err)
+	}
+	result, err := tx.Exec(`UPDATE fabric_streams SET live_tree_digest=$1 WHERE project_id=$2 AND fabric_instance_id=$3 AND stream_id=$4 AND canonical_ref=$5`,
+		string(liveDigest), attachment.Key.ProjectID, attachment.Key.FabricInstanceID, attachment.Key.StreamID, attachment.CanonicalRef)
+	if err != nil {
+		t.Fatalf("corrupt current stream: %v", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil || rows != 1 {
+		t.Fatalf("corrupt current stream rows = (%d, %v), want 1", rows, err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
 	}
 }

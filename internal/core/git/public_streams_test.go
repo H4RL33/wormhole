@@ -423,6 +423,30 @@ func TestAttachmentReadsRejectCrossProjectFabricRefAndDetachedRows(t *testing.T)
 	}
 }
 
+func TestAttachmentReadsResolveOpaqueRefBeforeForcedRLS(t *testing.T) {
+	f := newStreamFixture(t, "public-attachment-resolver")
+	_, result := publicAttach(t, f, "sha256:"+strings.Repeat("6", 64))
+
+	projectID, err := f.store.ResolveAttachmentProject(context.Background(), result.Attachment.Key.FabricInstanceID, result.Attachment.AttachmentRef)
+	if err != nil || projectID != result.Attachment.Key.ProjectID {
+		t.Fatalf("ResolveAttachmentProject = (%q, %v), want (%q, nil)", projectID, err, result.Attachment.Key.ProjectID)
+	}
+	for _, lookup := range []AttachmentLookup{
+		{FabricInstanceID: uuid.NewString(), AttachmentRef: result.Attachment.AttachmentRef},
+		{FabricInstanceID: result.Attachment.Key.FabricInstanceID, AttachmentRef: uuid.NewString()},
+	} {
+		if _, err := f.store.ResolveAttachmentProject(context.Background(), lookup.FabricInstanceID, lookup.AttachmentRef); !errors.Is(err, ErrStreamNotFound) {
+			t.Fatalf("ResolveAttachmentProject(%+v) error = %v, want ErrStreamNotFound", lookup, err)
+		}
+	}
+	if _, err := f.db.Exec(`UPDATE fabric_workspace_stream_bindings SET writable=false,detached_at=now() WHERE project_id=$1 AND attachment_ref=$2`, result.Attachment.Key.ProjectID, result.Attachment.AttachmentRef); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.ResolveAttachmentProject(context.Background(), result.Attachment.Key.FabricInstanceID, result.Attachment.AttachmentRef); !errors.Is(err, ErrStreamNotFound) {
+		t.Fatalf("detached ResolveAttachmentProject error = %v, want ErrStreamNotFound", err)
+	}
+}
+
 func TestStreamPreconditionChecksEverySignedFieldBeforeReducer(t *testing.T) {
 	f := newStreamFixture(t, "public-precondition-fields")
 	_, result := publicAttach(t, f, "sha256:"+strings.Repeat("5", 64))

@@ -345,11 +345,49 @@ func (s *StreamStore) ResolveConflictInTx(ctx context.Context, tx *sql.Tx, scope
 	return st, nil
 }
 
+// ResolveAttachmentProject returns only the project owning one live opaque
+// attachment. The database function is the narrow security-definer boundary;
+// every subsequent route read still runs under the returned project's forced
+// RLS context.
+func (s *StreamStore) ResolveAttachmentProject(ctx context.Context, fabricInstanceID, attachmentRef string) (string, error) {
+	if s == nil || s.db == nil || !types.CanonicalUUID(fabricInstanceID) || !types.CanonicalUUID(attachmentRef) {
+		return "", fmt.Errorf("git: resolve attachment project: %w", ErrStreamNotFound)
+	}
+	var projectID sql.NullString
+	if err := s.db.QueryRowContext(ctx, `SELECT fabric_resolve_attachment_project_v1($1,$2)`, fabricInstanceID, attachmentRef).Scan(&projectID); err != nil {
+		return "", fmt.Errorf("git: resolve attachment project: %w", err)
+	}
+	if !projectID.Valid || !types.CanonicalUUID(projectID.String) {
+		return "", fmt.Errorf("git: resolve attachment project: %w", ErrStreamNotFound)
+	}
+	return projectID.String, nil
+}
+
 func (s *StreamStore) ReadAttachmentInTx(ctx context.Context, tx *sql.Tx, l AttachmentLookup) (StreamAttachmentState, error) {
 	return s.readAttachment(ctx, tx, l, false)
 }
 func (s *StreamStore) LockAttachmentInTx(ctx context.Context, tx *sql.Tx, l AttachmentLookup) (StreamAttachmentState, error) {
 	return s.readAttachment(ctx, tx, l, true)
+}
+
+// ValidateCurrentAttachmentStateInTx verifies that an already loaded transition
+// still agrees with the mutable current-stream summary in the caller's project
+// transaction. Public read handlers call this during response validation so a
+// contradictory summary fails closed before their nonce transaction commits.
+func (s *StreamStore) ValidateCurrentAttachmentStateInTx(ctx context.Context, tx *sql.Tx, a StreamAttachment, state StreamTransition) error {
+	if s == nil || s.db == nil || tx == nil || validateStreamAttachment(a, true) != nil || state.Key != a.Key {
+		return fmt.Errorf("git: validate current attachment state: %w", ErrStreamCorrupt)
+	}
+	stream, found, err := findStreamTx(ctx, tx, a.Key, true)
+	if err != nil {
+		return err
+	}
+	if !found || stream.canonicalRef != a.CanonicalRef || stream.currentVersion != state.Version ||
+		stream.liveDigest != state.Live.Digest || stream.acceptedDigest != state.Accepted.Digest ||
+		stream.acceptedCommitSHA != state.AcceptedCommitSHA {
+		return fmt.Errorf("git: validate current attachment state: %w", ErrStreamCorrupt)
+	}
+	return nil
 }
 
 func (s *StreamStore) readAttachment(ctx context.Context, tx *sql.Tx, l AttachmentLookup, lock bool) (StreamAttachmentState, error) {

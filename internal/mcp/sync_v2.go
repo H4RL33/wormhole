@@ -3,8 +3,10 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 	"time"
 
@@ -179,4 +181,237 @@ func NewSyncV2AttachHandler(fabricInstanceID, credentialRef string, observer cor
 		policySource:     policySource,
 		verifier:         verifier,
 	}, nil
+}
+
+type SyncV2BootstrapHandler struct {
+	resolver *PublicBoundProofResolver
+	activity *coregit.ActivityStore
+}
+
+func NewSyncV2BootstrapHandler(resolver *PublicBoundProofResolver, activity *coregit.ActivityStore) (*SyncV2BootstrapHandler, error) {
+	if resolver == nil || activity == nil {
+		return nil, identity.ErrInvalidPublicIdentity
+	}
+	return &SyncV2BootstrapHandler{resolver: resolver, activity: activity}, nil
+}
+
+func (h *SyncV2BootstrapHandler) Handle(ctx context.Context, raw json.RawMessage, proof types.PublicRequestProof) (SyncBootstrapV2Result, error) {
+	if h == nil || h.resolver == nil || h.activity == nil {
+		return SyncBootstrapV2Result{}, syncReadFailure("wormhole.sync.bootstrap", "internal_error")
+	}
+	var arguments SyncBootstrapV2Args
+	if decodePublicArguments(raw, &arguments) != nil || !isCanonicalJSONObject(raw) {
+		return SyncBootstrapV2Result{}, syncReadDecodeFailure("wormhole.sync.bootstrap", raw)
+	}
+	if !validSyncReadArguments(arguments.SyncV2Scope, arguments.AfterVersion) {
+		return SyncBootstrapV2Result{}, syncReadFailure("wormhole.sync.bootstrap", "invalid_request")
+	}
+	var result SyncBootstrapV2Result
+	err := h.resolver.Resolve(ctx, "wormhole.sync.bootstrap", raw, arguments.SyncV2Scope, proof, func(ctx context.Context, tx *sql.Tx, read VerifiedPublicBoundRead) error {
+		state, err := syncReadStateInTx(ctx, tx, h.resolver.streams, read)
+		if err != nil {
+			return err
+		}
+		if arguments.AfterVersion > state.StreamVersion {
+			return coregit.ErrStreamPrecondition
+		}
+		policy, err := h.activity.CurrentPolicyInTx(ctx, tx, coregit.FabricActivityStreamKey{
+			ProjectID: read.Attachment.Key.ProjectID, FabricInstanceID: read.Attachment.Key.FabricInstanceID,
+			StreamID: read.Attachment.Key.StreamID, CanonicalRef: read.Attachment.CanonicalRef,
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := projectstate.CanonicalActivityPolicy(policy); err != nil {
+			return coregit.ErrActivityPolicyUnavailable
+		}
+		result = SyncBootstrapV2Result{
+			Version: projectstate.SyncProtocolVersionV2, Changed: state.StreamVersion > arguments.AfterVersion,
+			State: state, EffectiveActivityPolicy: policy,
+		}
+		return validateSyncBootstrapResult(result, read, arguments.AfterVersion)
+	})
+	if err != nil {
+		code := syncReadErrorCode(err)
+		if errors.Is(err, coregit.ErrActivityPolicyUnavailable) || errors.Is(err, projectstate.ErrInvalidActivityPolicy) {
+			code = "activity_policy_required"
+		}
+		return SyncBootstrapV2Result{}, syncReadFailure("wormhole.sync.bootstrap", code)
+	}
+	return result, nil
+}
+
+type SyncV2PullHandler struct {
+	resolver *PublicBoundProofResolver
+}
+
+func NewSyncV2PullHandler(resolver *PublicBoundProofResolver) (*SyncV2PullHandler, error) {
+	if resolver == nil {
+		return nil, identity.ErrInvalidPublicIdentity
+	}
+	return &SyncV2PullHandler{resolver: resolver}, nil
+}
+
+func (h *SyncV2PullHandler) Handle(ctx context.Context, raw json.RawMessage, proof types.PublicRequestProof) (SyncPullV2Result, error) {
+	if h == nil || h.resolver == nil {
+		return SyncPullV2Result{}, syncReadFailure("wormhole.sync.pull", "internal_error")
+	}
+	var arguments SyncPullV2Args
+	if decodePublicArguments(raw, &arguments) != nil || !isCanonicalJSONObject(raw) {
+		return SyncPullV2Result{}, syncReadDecodeFailure("wormhole.sync.pull", raw)
+	}
+	if !validSyncReadArguments(arguments.SyncV2Scope, arguments.AfterVersion) {
+		return SyncPullV2Result{}, syncReadFailure("wormhole.sync.pull", "invalid_request")
+	}
+	var result SyncPullV2Result
+	err := h.resolver.Resolve(ctx, "wormhole.sync.pull", raw, arguments.SyncV2Scope, proof, func(ctx context.Context, tx *sql.Tx, read VerifiedPublicBoundRead) error {
+		state, err := syncReadStateInTx(ctx, tx, h.resolver.streams, read)
+		if err != nil {
+			return err
+		}
+		if arguments.AfterVersion > state.StreamVersion {
+			return coregit.ErrStreamPrecondition
+		}
+		result = SyncPullV2Result{
+			Version: projectstate.SyncProtocolVersionV2, Changed: state.StreamVersion > arguments.AfterVersion, State: state,
+		}
+		return validateSyncPullResult(result, read, arguments.AfterVersion)
+	})
+	if err != nil {
+		return SyncPullV2Result{}, syncReadFailure("wormhole.sync.pull", syncReadErrorCode(err))
+	}
+	return result, nil
+}
+
+const maximumPublicSyncVersion int64 = 9_007_199_254_740_991
+
+func validSyncReadArguments(scope SyncV2Scope, afterVersion int64) bool {
+	if scope.Version != projectstate.SyncProtocolVersionV2 || !types.CanonicalUUID(scope.AttachmentRef) ||
+		scope.ExpectedStreamVersion < 0 || scope.ExpectedStreamVersion > maximumPublicSyncVersion ||
+		afterVersion < 0 || afterVersion > maximumPublicSyncVersion ||
+		!validPublicSyncDigest(scope.ExpectedLiveTreeDigest) {
+		return false
+	}
+	probe := types.WorkspaceBinding{
+		Scope:      types.WorkspaceScope{ProjectID: "00000000-0000-4000-8000-000000000001", WorkspaceID: "00000000-0000-4000-8000-000000000002"},
+		Checkout:   types.CheckoutIdentity{CanonicalPath: "/wormhole-public-read-validation", Device: 1, Inode: 1},
+		Repository: scope.Repository, AcceptedRef: scope.CanonicalRef, AcceptedCommitSHA: scope.BaseCommitSHA,
+		AcceptedTreeDigest: string(scope.BaseTreeDigest),
+	}
+	return scope.Repository.Provider != "" && probe.Validate() == nil
+}
+
+func validPublicSyncDigest(digest projectstate.Digest) bool {
+	value := string(digest)
+	return len(value) == 71 && strings.HasPrefix(value, "sha256:") && strings.Trim(value[7:], "0123456789abcdef") == ""
+}
+
+func syncReadStateInTx(ctx context.Context, tx *sql.Tx, streams *coregit.StreamStore, read VerifiedPublicBoundRead) (SyncStateV2, error) {
+	if err := streams.ValidateCurrentAttachmentStateInTx(ctx, tx, read.Attachment, read.State); err != nil {
+		return SyncStateV2{}, err
+	}
+	acceptedTree, err := projectstate.EncodeTree(read.State.Accepted)
+	if err != nil {
+		return SyncStateV2{}, coregit.ErrStreamCorrupt
+	}
+	liveTree, err := projectstate.EncodeTree(read.State.Live)
+	if err != nil {
+		return SyncStateV2{}, coregit.ErrStreamCorrupt
+	}
+	acceptedDigest, err := projectstate.DigestTree(acceptedTree)
+	if err != nil || acceptedDigest != read.State.Accepted.Digest {
+		return SyncStateV2{}, coregit.ErrStreamCorrupt
+	}
+	liveDigest, err := projectstate.DigestTree(liveTree)
+	if err != nil || liveDigest != read.State.Live.Digest {
+		return SyncStateV2{}, coregit.ErrStreamCorrupt
+	}
+	conflicts, err := streams.OpenConflictIDsInTx(ctx, tx, read.Attachment)
+	if err != nil {
+		return SyncStateV2{}, err
+	}
+	if conflicts == nil {
+		conflicts = []string{}
+	}
+	return SyncStateV2{
+		StreamVersion: read.State.Version, AcceptedCommitSHA: read.State.AcceptedCommitSHA,
+		AcceptedTreeDigest: acceptedDigest, LiveTreeDigest: liveDigest,
+		AcceptedTree: acceptedTree, LiveTree: liveTree, OpenConflictIDs: conflicts,
+	}, nil
+}
+
+func validateSyncPullResult(result SyncPullV2Result, read VerifiedPublicBoundRead, afterVersion int64) error {
+	if result.Version != projectstate.SyncProtocolVersionV2 || result.Changed != (result.State.StreamVersion > afterVersion) {
+		return coregit.ErrStreamCorrupt
+	}
+	return validateSyncReadState(result.State, read)
+}
+
+func validateSyncBootstrapResult(result SyncBootstrapV2Result, read VerifiedPublicBoundRead, afterVersion int64) error {
+	if result.Version != projectstate.SyncProtocolVersionV2 || result.Changed != (result.State.StreamVersion > afterVersion) {
+		return coregit.ErrStreamCorrupt
+	}
+	if _, err := projectstate.CanonicalActivityPolicy(result.EffectiveActivityPolicy); err != nil {
+		return coregit.ErrActivityPolicyUnavailable
+	}
+	return validateSyncReadState(result.State, read)
+}
+
+func validateSyncReadState(state SyncStateV2, read VerifiedPublicBoundRead) error {
+	if state.StreamVersion != read.State.Version || state.AcceptedCommitSHA != read.State.AcceptedCommitSHA ||
+		state.AcceptedTreeDigest != read.State.Accepted.Digest || state.LiveTreeDigest != read.State.Live.Digest ||
+		state.StreamVersion < 0 || state.StreamVersion > maximumPublicSyncVersion || state.OpenConflictIDs == nil {
+		return coregit.ErrStreamCorrupt
+	}
+	if !sort.StringsAreSorted(state.OpenConflictIDs) {
+		return coregit.ErrStreamCorrupt
+	}
+	for index, id := range state.OpenConflictIDs {
+		if !types.CanonicalUUID(id) || index > 0 && state.OpenConflictIDs[index-1] == id {
+			return coregit.ErrStreamCorrupt
+		}
+	}
+	for _, tree := range []struct {
+		value  projectstate.Tree
+		digest projectstate.Digest
+	}{{state.AcceptedTree, state.AcceptedTreeDigest}, {state.LiveTree, state.LiveTreeDigest}} {
+		digest, err := projectstate.DigestTree(tree.value)
+		if err != nil || digest != tree.digest {
+			return coregit.ErrStreamCorrupt
+		}
+		snapshot, err := projectstate.DecodeTree(tree.value)
+		if err != nil || projectstate.Validate(snapshot) != nil || snapshot.Config.ProjectID != read.Attachment.Key.ProjectID || snapshot.Config.Repository != read.Attachment.Repository {
+			return coregit.ErrStreamCorrupt
+		}
+	}
+	return nil
+}
+
+func syncReadDecodeFailure(operation string, raw json.RawMessage) error {
+	version := attachVersion(raw)
+	if version != 0 && version != projectstate.SyncProtocolVersionV2 {
+		return syncReadFailure(operation, "unknown_version")
+	}
+	return syncReadFailure(operation, "invalid_request")
+}
+
+func syncReadErrorCode(err error) string {
+	switch {
+	case errors.Is(err, identity.ErrPublicAuthentication), errors.Is(err, identity.ErrPublicNonceReplay), errors.Is(err, identity.ErrInvalidPublicIdentity):
+		return "authentication_failed"
+	case errors.Is(err, coregit.ErrStreamNotFound):
+		return "attachment_not_found"
+	case errors.Is(err, coregit.ErrStreamPrecondition):
+		return "sync_precondition_failed"
+	default:
+		return "internal_error"
+	}
+}
+
+func syncReadFailure(operation, code string) error {
+	canonical, err := projectstate.CanonicalJSON(ToolFailureV1{Code: code, Operation: operation})
+	if err != nil {
+		return errors.New(`{"code":"internal_error","operation":"` + operation + `"}`)
+	}
+	return errors.New(string(bytes.TrimSuffix(canonical, []byte{'\n'})))
 }

@@ -1,9 +1,11 @@
 package mcp
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	coregit "github.com/H4RL33/wormhole/internal/core/git"
 	"github.com/H4RL33/wormhole/internal/core/identity"
 	"github.com/H4RL33/wormhole/internal/types"
 	"github.com/H4RL33/wormhole/internal/types/projectstate"
@@ -189,6 +192,50 @@ func TestPublicProofVerifierRejectsWrongFabricToolAndScope(t *testing.T) {
 				t.Fatalf("error=%v, want ErrPublicAuthentication", err)
 			}
 		})
+	}
+}
+
+func TestPublicProofBoundResolverRejectsInvalidDependencies(t *testing.T) {
+	f := newPublicProofTestFixture(t)
+	fabricID := "11111111-1111-4111-8111-111111111111"
+	streams := coregit.NewStreamStore(testDB(t))
+	identities := identity.NewStore(testDB(t))
+	for name, dependencies := range map[string]struct {
+		fabric   string
+		identity *identity.Store
+		streams  *coregit.StreamStore
+		verifier *PublicProofVerifier
+	}{
+		"nil identity": {fabric: fabricID, streams: streams, verifier: f.verifier},
+		"nil streams":  {fabric: fabricID, identity: identities, verifier: f.verifier},
+		"nil verifier": {fabric: fabricID, identity: identities, streams: streams},
+		"bad fabric":   {fabric: "not-a-uuid", identity: identities, streams: streams, verifier: f.verifier},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := NewPublicBoundProofResolver(dependencies.fabric, dependencies.identity, dependencies.streams, dependencies.verifier); !errors.Is(err, identity.ErrInvalidPublicIdentity) {
+				t.Fatalf("error = %v, want ErrInvalidPublicIdentity", err)
+			}
+		})
+	}
+}
+
+func TestPublicProofBoundRejectsMalformedProofBeforeSQL(t *testing.T) {
+	f := newPublicProofTestFixture(t)
+	resolver, err := NewPublicBoundProofResolver(
+		"11111111-1111-4111-8111-111111111111",
+		identity.NewStore(nil), coregit.NewStreamStore(nil), f.verifier,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := SyncV2Scope{AttachmentRef: "44444444-4444-4444-8444-444444444444"}
+	called := false
+	err = resolver.Resolve(context.Background(), "wormhole.sync.pull", f.arguments, scope, types.PublicRequestProof{}, func(context.Context, *sql.Tx, VerifiedPublicBoundRead) error {
+		called = true
+		return nil
+	})
+	if !errors.Is(err, identity.ErrPublicAuthentication) || called {
+		t.Fatalf("Resolve = (%v, callback=%v), want authentication failure before callback", err, called)
 	}
 }
 
