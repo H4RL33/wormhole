@@ -130,25 +130,25 @@ type EnrolmentRegistrationResult struct {
 // AuditEntry is one append-only record in an identity's audit trail
 // (RFC-0001 §8.4).
 type AuditEntry struct {
-	ID        string
-	AgentID   string
-	ActorKind string
-	HumanPrincipalID string
-	AccountableHumanID string
-	SessionID string
-	HarnessName string
-	HarnessVersion string
-	ModelName string
-	ModelVersion string
-	Assurance string
-	OccurredAt time.Time
-	ActorEnvelopeJSON []byte
+	ID                   string
+	AgentID              string
+	ActorKind            string
+	HumanPrincipalID     string
+	AccountableHumanID   string
+	SessionID            string
+	HarnessName          string
+	HarnessVersion       string
+	ModelName            string
+	ModelVersion         string
+	Assurance            string
+	OccurredAt           time.Time
+	ActorEnvelopeJSON    []byte
 	CanonicalPayloadJSON []byte
-	RequestDigest string
-	ProjectID string
-	Action    string
-	CreatedAt time.Time
-	Seq       int64
+	RequestDigest        string
+	ProjectID            string
+	Action               string
+	CreatedAt            time.Time
+	Seq                  int64
 }
 
 // Audit action names recorded by the identity service.
