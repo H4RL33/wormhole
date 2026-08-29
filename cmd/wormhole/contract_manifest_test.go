@@ -394,6 +394,21 @@ func TestAlphaContractMigrationsAndArtifacts(t *testing.T) {
 		},
 	}
 	assertMigrationVerificationSources(t, actualMigrations)
+	migration22Script, err := os.ReadFile("../../.github/scripts/test-migration-22.sh")
+	if err != nil {
+		t.Fatalf("read migration-22 gate: %v", err)
+	}
+	for _, required := range [][]byte{
+		[]byte("catalog_fingerprint"),
+		[]byte("000022_public_sync_v2.up.sql"),
+		[]byte("test_polluted_duplicate_attachment_ref"),
+		[]byte("test_down_refusal"),
+		[]byte("cmp \"$scratch/v21-before\" \"$scratch/v21-after\""),
+	} {
+		if !bytes.Contains(migration22Script, required) {
+			t.Errorf("migration-22 gate is missing %q", required)
+		}
+	}
 	if !reflect.DeepEqual(actualMigrations, manifest.Migrations) {
 		t.Fatalf("migrations = %#v, manifest = %#v", actualMigrations, manifest.Migrations)
 	}

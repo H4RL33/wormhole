@@ -298,19 +298,27 @@ func TestRestrictedRoleRLSOperationMatrix(t *testing.T) {
 			assertRLSRows(t, restricted, fx.projectB, fmt.Sprintf(`SELECT count(*) FROM %s WHERE id = $1`, tc.name), tc.rowID, 0)
 
 			assertRLSMutation(t, restricted, "", tc.updateSQL, []any{tc.rowID}, false)
-			assertRLSMutation(t, restricted, fx.projectA, tc.updateSQL, []any{tc.rowID}, true)
+			if tc.name == "audit_log" {
+				assertRLSMutationRejected(t, restricted, fx.projectA, tc.updateSQL, []any{tc.rowID})
+			} else {
+				assertRLSMutation(t, restricted, fx.projectA, tc.updateSQL, []any{tc.rowID}, true)
+			}
 			assertRLSMutation(t, restricted, fx.projectB, tc.updateSQL, []any{tc.rowID}, false)
 
 			deleteSQL := fmt.Sprintf(`DELETE FROM %s WHERE id = $1`, tc.name)
 			assertRLSMutation(t, restricted, "", deleteSQL, []any{tc.rowID}, false)
-			assertRLSMutation(t, restricted, fx.projectA, deleteSQL, []any{tc.rowID}, true)
+			if tc.name == "audit_log" || tc.name == "projects" {
+				assertRLSMutationRejected(t, restricted, fx.projectA, deleteSQL, []any{tc.rowID})
+			} else {
+				assertRLSMutation(t, restricted, fx.projectA, deleteSQL, []any{tc.rowID}, true)
+			}
 			assertRLSMutation(t, restricted, fx.projectB, deleteSQL, []any{tc.rowID}, false)
 
 			assertRLSInsert(t, restricted, "", tc.insertSQL, tc.insertArg, false)
 			if tc.name != "projects" {
 				assertRLSInsert(t, restricted, fx.projectA, tc.insertSQL, tc.insertArg, true)
 			} else {
-				assertProjectReplacementInsert(t, restricted, fx.projectA)
+				assertRLSInsert(t, restricted, fx.projectA, tc.insertSQL, tc.insertArg, false)
 			}
 			assertRLSInsert(t, restricted, fx.projectB, tc.insertSQL, tc.insertArg, false)
 		})
@@ -583,6 +591,15 @@ func assertRLSMutation(t *testing.T, db *sql.DB, projectID, query string, args [
 	}
 	if (rows == 1) != wantRow {
 		t.Fatalf("RLS mutation rows = %d, want row=%v (context %q)", rows, wantRow, projectID)
+	}
+}
+
+func assertRLSMutationRejected(t *testing.T, db *sql.DB, projectID, query string, args []any) {
+	t.Helper()
+	tx := beginRestrictedTx(t, db, projectID)
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(context.Background(), query, args...); err == nil {
+		t.Fatalf("RLS mutation unexpectedly succeeded (context %q)", projectID)
 	}
 }
 

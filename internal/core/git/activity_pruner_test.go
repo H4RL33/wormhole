@@ -104,7 +104,7 @@ func TestActivityPrunerBoundsBatchAndKeepsSiblingRoutes(t *testing.T) {
 		}
 	}
 	siblingWorkspace := "33333333-3333-4333-8333-333333333339"
-	siblingAttachment := "44444444-4444-4444-8444-444444444449"
+	siblingAttachment := migrationAttachmentRef(t.Name() + "/sibling")
 	migration21SeedWorkspaceWithAttachment(t, fixture.store.db, fixture.stream.ProjectID, fixture.stream.FabricInstanceID,
 		fixture.stream.StreamID, siblingWorkspace, siblingAttachment, fixture.stream.CanonicalRef)
 	old := time.Now().UTC().Add(-31 * 24 * time.Hour).Truncate(time.Microsecond)
@@ -130,7 +130,7 @@ func TestActivityPrunerConcurrentSiblingOriginsStayIsolated(t *testing.T) {
 	fixture := newActivityStoreFixture(t, "activity-pruner-concurrent-siblings")
 	siblingWorkspace := "33333333-3333-4333-8333-333333333338"
 	migration21SeedWorkspaceWithAttachment(t, fixture.store.db, fixture.stream.ProjectID, fixture.stream.FabricInstanceID,
-		fixture.stream.StreamID, siblingWorkspace, "44444444-4444-4444-8444-444444444448", fixture.stream.CanonicalRef)
+		fixture.stream.StreamID, siblingWorkspace, migrationAttachmentRef(t.Name()+"/sibling"), fixture.stream.CanonicalRef)
 	old := time.Now().UTC().Add(-31 * 24 * time.Hour).Truncate(time.Microsecond)
 	first := testOrdinaryActivity(activityIDOne, testActivityActor(old), "primary")
 	if _, err := fixture.store.Accept(context.Background(), fixture.acceptInput(first)); err != nil {

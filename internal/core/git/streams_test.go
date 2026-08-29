@@ -1279,7 +1279,7 @@ func streamOperationCorruptions() []operationCorruption {
 func newStreamFixture(t *testing.T, name string) *streamFixture {
 	t.Helper()
 	db := migration21DB(t)
-	requireMigration21(t, db)
+	requireGitAwareSchema(t, db)
 	projectID := migration21CreateProject(t, db, name)
 	t.Cleanup(func() {
 		cleanupDB, err := sql.Open("postgres", types.LoadConfig().DatabaseURL)

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 
 	"github.com/H4RL33/wormhole/internal/types"
@@ -51,17 +52,21 @@ func migration21DB(t *testing.T) *sql.DB {
 	return db
 }
 
-func requireMigration21(t *testing.T, db *sql.DB) {
+func requireGitAwareSchema(t *testing.T, db *sql.DB) int {
 	t.Helper()
 	var version int
 	var dirty bool
 	if err := db.QueryRow(`SELECT version, dirty FROM schema_migrations`).Scan(&version, &dirty); err != nil {
 		t.Fatalf("read migration version: %v", err)
 	}
-	if version != 21 || dirty {
-		t.Fatalf("migration version = %d dirty=%v, want 21 false", version, dirty)
+	if (version != 21 && version != 22) || dirty {
+		t.Fatalf("migration version = %d dirty=%v, want 21|22 false", version, dirty)
 	}
-	for _, table := range migration21Tables {
+	tables := append([]string{}, migration21Tables...)
+	if version == 22 {
+		tables = append(tables, "fabric_public_agent_sessions")
+	}
+	for _, table := range tables {
 		var exists bool
 		if err := db.QueryRow(`SELECT to_regclass('public.' || $1) IS NOT NULL`, table).Scan(&exists); err != nil {
 			t.Fatalf("look up %s: %v", table, err)
@@ -70,11 +75,16 @@ func requireMigration21(t *testing.T, db *sql.DB) {
 			t.Errorf("migration 21 relation %s is absent", table)
 		}
 	}
+	return version
+}
+
+func migrationAttachmentRef(_ string) string {
+	return uuid.NewString()
 }
 
 func TestMigration21StoresEveryVersionTreeAndOperationBytes(t *testing.T) {
 	db := migration21DB(t)
-	requireMigration21(t, db)
+	requireGitAwareSchema(t, db)
 
 	projectID := migration21CreateProject(t, db, "migration21-version-bytes")
 	instanceID := "11111111-1111-4111-8111-111111111111"
@@ -124,7 +134,7 @@ func TestMigration21StoresEveryVersionTreeAndOperationBytes(t *testing.T) {
 
 func TestMigration21DirectSQLRejectsCrossProjectStreamFKs(t *testing.T) {
 	db := migration21DB(t)
-	requireMigration21(t, db)
+	requireGitAwareSchema(t, db)
 	a := migration21CreateProject(t, db, "migration21-cross-project-a")
 	b := migration21CreateProject(t, db, "migration21-cross-project-b")
 	instanceID := "11111111-1111-4111-8111-111111111112"
@@ -138,7 +148,7 @@ func TestMigration21DirectSQLRejectsCrossProjectStreamFKs(t *testing.T) {
 
 func TestMigration21DirectSQLRejectsCrossStreamWorkspaceAndRequestFKs(t *testing.T) {
 	db := migration21DB(t)
-	requireMigration21(t, db)
+	requireGitAwareSchema(t, db)
 	projectID := migration21CreateProject(t, db, "migration21-cross-stream")
 	instanceID := "11111111-1111-4111-8111-111111111113"
 	streamA := "22222222-2222-4222-8222-222222222224"
@@ -157,7 +167,7 @@ func TestMigration21DirectSQLRejectsCrossStreamWorkspaceAndRequestFKs(t *testing
 
 func TestMigration21ActivityDirectSQLRejectsCrossProjectStreamAndWorkspaceFKs(t *testing.T) {
 	db := migration21DB(t)
-	requireMigration21(t, db)
+	requireGitAwareSchema(t, db)
 	a := migration21CreateProject(t, db, "migration21-activity-a")
 	b := migration21CreateProject(t, db, "migration21-activity-b")
 	instanceID := "11111111-1111-4111-8111-111111111114"
@@ -185,7 +195,7 @@ func TestMigration21ActivityDirectSQLRejectsCrossProjectStreamAndWorkspaceFKs(t 
 
 func TestMigration21ForcesRLSForEveryProjectTable(t *testing.T) {
 	db := migration21DB(t)
-	requireMigration21(t, db)
+	requireGitAwareSchema(t, db)
 	for _, table := range migration21Tables {
 		var enabled, forced bool
 		if err := db.QueryRow(`SELECT relrowsecurity,relforcerowsecurity FROM pg_class WHERE oid=to_regclass('public.'||$1)`, table).Scan(&enabled, &forced); err != nil {
@@ -210,7 +220,7 @@ func TestMigration21ForcesRLSForEveryProjectTable(t *testing.T) {
 
 func TestMigration21ActivityRolesAndPrivileges(t *testing.T) {
 	db := migration21DB(t)
-	requireMigration21(t, db)
+	requireGitAwareSchema(t, db)
 	for _, role := range []string{"wormhole_activity_owner", "wormhole_fabric_runtime", "wormhole_activity_maintenance"} {
 		var superuser, bypass bool
 		if err := db.QueryRow(`SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=$1`, role).Scan(&superuser, &bypass); err != nil {
@@ -276,7 +286,7 @@ func TestMigration21ActivityRolesAndPrivileges(t *testing.T) {
 	workspaceID := "33333333-3333-4333-8333-333333333339"
 	migration21SeedStream(t, db, projectID, instanceID, streamID, "refs/heads/main")
 	migration21SeedWorkspaceWithAttachment(t, db, projectID, instanceID, streamID, workspaceID,
-		"44444444-4444-4444-8444-444444444449", "refs/heads/main")
+		migrationAttachmentRef(t.Name()+"/role-binding"), "refs/heads/main")
 	stream := FabricActivityStreamKey{ProjectID: projectID, FabricInstanceID: instanceID, StreamID: streamID, CanonicalRef: "refs/heads/main"}
 	policy := testActivityPolicy(1, 2_592_000)
 	if _, err := NewActivityStore(db).PublishPolicy(context.Background(), stream, policy); err != nil {
@@ -342,7 +352,7 @@ func TestMigration21ActivityRolesAndPrivileges(t *testing.T) {
 
 func TestMigration21RejectsImmutableHistoryUpdateAndDirectActivityDelete(t *testing.T) {
 	db := migration21DB(t)
-	requireMigration21(t, db)
+	requireGitAwareSchema(t, db)
 	for _, table := range []string{"fabric_stream_versions", "fabric_stream_requests", "fabric_activity_policy_versions", "fabric_activities", "fabric_activity_ingress_receipts"} {
 		var triggerCount int
 		if err := db.QueryRow(`SELECT count(*) FROM pg_trigger WHERE tgrelid=to_regclass('public.'||$1) AND NOT tgisinternal AND tgenabled <> 'D'`, table).Scan(&triggerCount); err != nil {
@@ -368,7 +378,7 @@ func TestMigration21RejectsImmutableHistoryUpdateAndDirectActivityDelete(t *test
 	workspaceID := "33333333-3333-4333-8333-333333333338"
 	migration21SeedStream(t, db, projectID, instanceID, streamID, "refs/heads/main")
 	migration21SeedWorkspaceWithAttachment(t, db, projectID, instanceID, streamID, workspaceID,
-		"44444444-4444-4444-8444-444444444448", "refs/heads/main")
+		migrationAttachmentRef(t.Name()+"/role-binding"), "refs/heads/main")
 	stream := FabricActivityStreamKey{ProjectID: projectID, FabricInstanceID: instanceID, StreamID: streamID, CanonicalRef: "refs/heads/main"}
 	store := NewActivityStore(db)
 	policy := testActivityPolicy(1, 2_592_000)
@@ -411,7 +421,7 @@ func TestMigration21RejectsImmutableHistoryUpdateAndDirectActivityDelete(t *test
 
 func TestMigration21ContainsNoActivityPromotionAuthority(t *testing.T) {
 	db := migration21DB(t)
-	requireMigration21(t, db)
+	requireGitAwareSchema(t, db)
 	var names []string
 	rows, err := db.Query(`SELECT proname FROM pg_proc WHERE pronamespace='public'::regnamespace AND proname LIKE '%promot%'
 		UNION ALL SELECT relname FROM pg_class WHERE relnamespace='public'::regnamespace AND relname LIKE '%promot%'
@@ -475,8 +485,8 @@ func TestMigration21DownLeavesVersion20Shape(t *testing.T) {
 		}
 		return
 	}
-	if version != 21 || dirty {
-		t.Fatalf("migration version = %d dirty=%v, want clean 20 or 21", version, dirty)
+	if (version != 21 && version != 22) || dirty {
+		t.Fatalf("migration version = %d dirty=%v, want clean 20, 21, or 22", version, dirty)
 	}
 	// The workflow performs the actual down and reruns this test at version 20.
 }
@@ -519,7 +529,7 @@ func migration21SeedWorkspace(t *testing.T, db *sql.DB, projectID, instanceID, s
 	_, err := db.Exec(`INSERT INTO fabric_workspace_stream_bindings
 		(project_id,fabric_instance_id,stream_id,workspace_id,attachment_ref,repository_provider,repository_immutable_id,canonical_ref,ref_name,writable)
 		VALUES($1,$2,$3,$4,$5,'github',$6,$7,$7,true)`, projectID, instanceID, streamID, workspaceID,
-		"55555555-5555-4555-8555-555555555555", strings.ReplaceAll(instanceID, "-", ""), ref)
+		migrationAttachmentRef(t.Name()+"/workspace"), strings.ReplaceAll(instanceID, "-", ""), ref)
 	if err != nil {
 		t.Fatalf("seed workspace: %v", err)
 	}

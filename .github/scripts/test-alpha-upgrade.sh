@@ -2,7 +2,7 @@
 set -eu
 baseline_tag=v0.2.4-alpha
 baseline_version=12
-current_version=21
+current_version=22
 
 if test "${1:-}" = "--print-contract"; then
 	if test "$#" -ne 1; then

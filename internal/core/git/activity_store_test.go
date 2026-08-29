@@ -17,18 +17,17 @@ import (
 )
 
 const (
-	activityFabricID      = "11111111-1111-4111-8111-111111111121"
-	activityStreamID      = "22222222-2222-4222-8222-222222222221"
-	activityWorkspaceID   = "33333333-3333-4333-8333-333333333331"
-	activityAttachmentRef = "44444444-4444-4444-8444-444444444441"
-	activityIDOne         = "55555555-5555-4555-8555-555555555551"
-	activityIDTwo         = "55555555-5555-4555-8555-555555555552"
-	activityIDThree       = "55555555-5555-4555-8555-555555555553"
-	activityAgentID       = "66666666-6666-4666-8666-666666666661"
-	activityHumanID       = "77777777-7777-4777-8777-777777777771"
-	activitySessionID     = "88888888-8888-4888-8888-888888888881"
-	activityChannelID     = "99999999-9999-4999-8999-999999999991"
-	activityTaskID        = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+	activityFabricID    = "11111111-1111-4111-8111-111111111121"
+	activityStreamID    = "22222222-2222-4222-8222-222222222221"
+	activityWorkspaceID = "33333333-3333-4333-8333-333333333331"
+	activityIDOne       = "55555555-5555-4555-8555-555555555551"
+	activityIDTwo       = "55555555-5555-4555-8555-555555555552"
+	activityIDThree     = "55555555-5555-4555-8555-555555555553"
+	activityAgentID     = "66666666-6666-4666-8666-666666666661"
+	activityHumanID     = "77777777-7777-4777-8777-777777777771"
+	activitySessionID   = "88888888-8888-4888-8888-888888888881"
+	activityChannelID   = "99999999-9999-4999-8999-999999999991"
+	activityTaskID      = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
 )
 
 type activityStoreFixture struct {
@@ -43,10 +42,11 @@ type activityStoreFixture struct {
 func newActivityStoreFixture(t *testing.T, name string) activityStoreFixture {
 	t.Helper()
 	db := migration21DB(t)
-	requireMigration21(t, db)
+	requireGitAwareSchema(t, db)
 	projectID := migration21CreateProject(t, db, name)
 	migration21SeedStream(t, db, projectID, activityFabricID, activityStreamID, "refs/heads/main")
-	migration21SeedWorkspaceWithAttachment(t, db, projectID, activityFabricID, activityStreamID, activityWorkspaceID, activityAttachmentRef, "refs/heads/main")
+	attachmentRef := migrationAttachmentRef(t.Name() + "/primary")
+	migration21SeedWorkspaceWithAttachment(t, db, projectID, activityFabricID, activityStreamID, activityWorkspaceID, attachmentRef, "refs/heads/main")
 	fixture := activityStoreFixture{
 		store: NewActivityStore(db),
 		stream: FabricActivityStreamKey{
@@ -56,7 +56,7 @@ func newActivityStoreFixture(t *testing.T, name string) activityStoreFixture {
 			CanonicalRef:     "refs/heads/main",
 		},
 		workspace:  activityWorkspaceID,
-		attachment: activityAttachmentRef,
+		attachment: attachmentRef,
 		policy:     testActivityPolicy(1, 2_592_000),
 		actor:      testActivityActor(time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)),
 	}
@@ -609,7 +609,7 @@ func TestActivityErrorsDoNotExposePrivateEvidence(t *testing.T) {
 	if err == nil {
 		t.Fatal("Accept unexpectedly succeeded")
 	}
-	for _, forbidden := range []string{"secret-note-never-return", "private-secret-branch", activityAttachmentRef, activityAgentID, string(mustCanonicalActivity(t, activity))} {
+	for _, forbidden := range []string{"secret-note-never-return", "private-secret-branch", fixture.attachment, activityAgentID, string(mustCanonicalActivity(t, activity))} {
 		if forbidden != "" && strings.Contains(err.Error(), forbidden) {
 			t.Fatalf("error exposes private evidence %q: %v", forbidden, err)
 		}
