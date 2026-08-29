@@ -49,12 +49,15 @@ func newPublicSyncFixture(t *testing.T) publicSyncFixture {
 		streamID:    "22222222-2222-4222-8222-222222222231",
 		workspaceID: "33333333-3333-4333-8333-333333333231",
 		attachment:  freshAttachmentRef(t),
-		humanID:     "55555555-5555-4555-8555-555555555231",
-		agentID:     "66666666-6666-4666-8666-666666666231",
+		humanID:     freshAttachmentRef(t),
+		agentID:     freshAttachmentRef(t),
 		publicKey:   publicKey, fingerprint: "sha256:" + hex.EncodeToString(sum[:]),
 		now: time.Now().UTC().Truncate(time.Microsecond),
 	}
 	if err := db.QueryRow(`INSERT INTO projects(name,owner) VALUES($1,'test') RETURNING id`, "public-sync-"+t.Name()).Scan(&f.projectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO agents(id,owner,model) VALUES($1,'test','test-model')`, f.agentID); err != nil {
 		t.Fatal(err)
 	}
 	digest := "sha256:" + strings.Repeat("a", 64)
