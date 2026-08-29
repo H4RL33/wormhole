@@ -349,14 +349,20 @@ Only these four fixed-search-path, security-definer functions mutate Activity:
 - `fabric_prune_activities_v1`
 - `fabric_publish_activity_policy_v1`
 
-Deployment pre-provisions `wormhole_activity_owner` (NOLOGIN),
-`wormhole_fabric_runtime` (the process login), and
-`wormhole_activity_maintenance` (NOLOGIN). Migration 21 validates but never
-creates, alters, or drops those cluster roles. The owner owns only Activity
-relations/functions and has the minimum parent-table privileges needed to take
-portable binding locks. Runtime receives Activity `SELECT` and execution of
-accept/transition/policy publication, with no direct mutable-table DML.
-Maintenance receives pruner execution only.
+Deployment pre-provisions four exact roles. `wormhole_activity_owner` and
+`wormhole_activity_maintenance` are NOLOGIN/NOSUPERUSER/NOBYPASSRLS/NOINHERIT;
+`wormhole_fabric_runtime` is the sole LOGIN application role and remains
+NOSUPERUSER/NOBYPASSRLS/NOINHERIT; `wormhole_attachment_resolver` is the narrow
+NOLOGIN/NOSUPERUSER/BYPASSRLS/NOINHERIT owner of only the attachment-project resolver.
+All four have NOCREATEDB/NOCREATEROLE/NOREPLICATION, no memberships, and no per-role
+configuration. Numbered migrations own database-object ACLs but never role lifecycle.
+
+Migration 22 grants `wormhole_fabric_runtime` only the enumerated public-sync table
+SELECT/INSERT/UPDATE privileges required by live stores, resolver execution, and `USAGE`
+on `audit_log_seq_seq`; it grants no DELETE/TRUNCATE/REFERENCES/TRIGGER/schema-CREATE
+authority. The application never runs as the migration/schema owner or dev superuser.
+Migration up/down is a distinct cluster-administrator deployment operation because it
+must transfer and drop the resolver function after ownership passes to the resolver role.
 
 Every migration-21 project table has enabled and forced RLS. Both `USING` and
 `WITH CHECK` use exactly

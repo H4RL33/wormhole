@@ -19,6 +19,14 @@ This clarification narrows implementation sequencing without changing the public
 - Bootstrap atomically installs portable binding/cursor state and either a validated
   finite Activity policy or an explicit Activity-disabled state. The latter keeps
   portable sync usable while every Activity queue/delivery operation fails closed.
+- Production Fabric application queries execute as the exact pre-provisioned
+  `wormhole_fabric_runtime` login with no memberships. Migration 22 grants only its
+  enumerated minimum table DML, resolver execution, and `audit_log_seq_seq` usage;
+  application evidence never runs as the dev superuser. Schema migration is a separate,
+  intentionally cluster-administrator-capable deployment operation because the migrator
+  must transfer and later drop the security-definer resolver owned by the NOLOGIN
+  `BYPASSRLS` resolver role. Cluster-role creation/alteration/deletion remains outside
+  numbered migrations.
 - The controller records the delivery base before Slice 1 and assigns a distinct worker
   to the whole-range review after Slice 8. Slice implementers neither self-certify nor
   push.
@@ -216,10 +224,11 @@ unchanged. Migration 22:
 - creates the minimal attachment-to-project security-definer resolver.
 
 The resolver accepts Fabric instance and attachment UUID and returns only project UUID or
-null. Its dedicated NOLOGIN BYPASSRLS owner has SELECT only on the binding table. PUBLIC
-has no execute; only Fabric runtime roles may call it, and those roles remain NOBYPASSRLS.
-After resolution, every query runs in a normal project-scoped transaction under forced
-RLS.
+null. Its dedicated pre-provisioned NOLOGIN `BYPASSRLS` owner has `SELECT` only on the
+binding table. `PUBLIC` has no execute; only the exact `wormhole_fabric_runtime`
+application login may call it, and that login remains `NOBYPASSRLS`, `NOINHERIT`, and has
+no memberships. After resolution, every query runs in a normal project-scoped transaction
+under forced RLS.
 
 Migration ownership is destructively renumbered: Task 6 owns 22, private identity owns
 23, and legacy identity recovery owns 24. Later gates target schema 24. No compatibility

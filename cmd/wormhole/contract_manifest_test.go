@@ -125,6 +125,38 @@ func TestAlphaContractCLIConfigurationPrecedence(t *testing.T) {
 	}
 }
 
+func TestFabricDatabaseRoleProvisioningContract(t *testing.T) {
+	body, err := os.ReadFile("../../.github/scripts/provision-activity-roles.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range [][]byte{
+		[]byte("wormhole_activity_owner"),
+		[]byte("wormhole_fabric_runtime"),
+		[]byte("wormhole_activity_maintenance"),
+		[]byte("wormhole_attachment_resolver"),
+		[]byte("NOLOGIN NOSUPERUSER BYPASSRLS NOINHERIT NOCREATEDB NOCREATEROLE NOREPLICATION"),
+		[]byte("LOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT NOCREATEDB NOCREATEROLE NOREPLICATION"),
+		[]byte("ERRCODE = '55000'"),
+		[]byte("pg_catalog.pg_auth_members"),
+		[]byte("rolconfig"),
+	} {
+		if !bytes.Contains(body, required) {
+			t.Errorf("role provisioning contract is missing %q", required)
+		}
+	}
+	for _, forbidden := range [][]byte{
+		[]byte("ALTER ROLE"),
+		[]byte("GRANT wormhole_attachment_resolver"),
+		[]byte("GRANT wormhole_fabric_runtime"),
+		[]byte("PASSWORD"),
+	} {
+		if bytes.Contains(bytes.ToUpper(body), bytes.ToUpper(forbidden)) {
+			t.Errorf("role provisioning contract contains forbidden authority %q", forbidden)
+		}
+	}
+}
+
 func TestAlphaContractCLI(t *testing.T) {
 	manifest := readAlphaCLIContract(t)
 	if manifest.Mode != "alpha-inventory" {
