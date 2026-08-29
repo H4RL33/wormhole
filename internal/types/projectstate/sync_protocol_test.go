@@ -2,6 +2,7 @@ package projectstate
 
 import (
 	"encoding/json"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -96,5 +97,53 @@ func TestPublicAgentSessionIssueCarriesSharedAssuranceAndTime(t *testing.T) {
 	var got PublicAgentSessionIssueV2Result
 	if err := json.Unmarshal(raw, &got); err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("session round trip = %#v, %v; want %#v", got, err, want)
+	}
+}
+func TestPublicProofMessageGolden(t *testing.T) {
+	var nonce [32]byte
+	copy(nonce[:], []byte("01234567890123456789012345678901"))
+	got, err := PublicProofMessage(
+		"11111111-1111-4111-8111-111111111111",
+		"wormhole.sync.push",
+		"attachment:44444444-4444-4444-8444-444444444444:session:55555555-5555-4555-8555-555555555555",
+		[]byte("{\"version\":2}\n"),
+		time.Date(2026, 8, 29, 12, 0, 0, 123456789, time.UTC),
+		nonce,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "wormhole-public-v1\n" +
+		"11111111-1111-4111-8111-111111111111\n" +
+		"wormhole.sync.push\n" +
+		"attachment:44444444-4444-4444-8444-444444444444:session:55555555-5555-4555-8555-555555555555\n" +
+		"aab41f219a4fbdfdfc305d8b58700f569a96ed6112a6b62a95a7929dc3da3471\n" +
+		"2026-08-29T12:00:00.123456789Z\n" +
+		"MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE"
+	if string(got) != want {
+		t.Fatalf("proof message = %q, want %q", got, want)
+	}
+}
+
+func TestPublicProofMessageRejectsNonCanonicalAuthorityInputs(t *testing.T) {
+	var nonce [32]byte
+	validTime := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name, fabric, tool, scope string
+		arguments                 []byte
+		at                        time.Time
+	}{
+		{name: "fabric", tool: "wormhole.sync.pull", scope: "attachment:x", arguments: []byte("{}\n"), at: validTime},
+		{name: "tool newline", fabric: "11111111-1111-4111-8111-111111111111", tool: "wormhole.sync.pull\nother", scope: "attachment:x", arguments: []byte("{}\n"), at: validTime},
+		{name: "scope newline", fabric: "11111111-1111-4111-8111-111111111111", tool: "wormhole.sync.pull", scope: "attachment:x\nother", arguments: []byte("{}\n"), at: validTime},
+		{name: "arguments", fabric: "11111111-1111-4111-8111-111111111111", tool: "wormhole.sync.pull", scope: "attachment:x", at: validTime},
+		{name: "time", fabric: "11111111-1111-4111-8111-111111111111", tool: "wormhole.sync.pull", scope: "attachment:x", arguments: []byte("{}\n"), at: validTime.In(time.FixedZone("offset", 3600))},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := PublicProofMessage(test.fabric, test.tool, test.scope, test.arguments, test.at, nonce); !errors.Is(err, ErrInvalidPublicProofMessage) {
+				t.Fatalf("error=%v, want ErrInvalidPublicProofMessage", err)
+			}
+		})
 	}
 }
