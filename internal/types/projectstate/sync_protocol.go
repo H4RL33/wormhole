@@ -2,9 +2,11 @@ package projectstate
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/H4RL33/wormhole/internal/types"
@@ -13,6 +15,16 @@ import (
 const SyncProtocolVersionV2 = 2
 
 var ErrInvalidRepositoryScope = errors.New("projectstate: invalid repository scope")
+var ErrInvalidPublicProofMessage = errors.New("projectstate: invalid public proof message")
+
+func PublicProofMessage(fabricInstanceID, toolName, scope string, canonicalArguments []byte, timestamp time.Time, nonce [32]byte) ([]byte, error) {
+	if !types.CanonicalUUID(fabricInstanceID) || toolName == "" || scope == "" || len(canonicalArguments) == 0 || strings.ContainsAny(toolName, "\r\n") || strings.ContainsAny(scope, "\r\n") || timestamp.IsZero() || timestamp.Location() != time.UTC {
+		return nil, ErrInvalidPublicProofMessage
+	}
+	digest := sha256.Sum256(canonicalArguments)
+	message := "wormhole-public-v1\n" + fabricInstanceID + "\n" + toolName + "\n" + scope + "\n" + hex.EncodeToString(digest[:]) + "\n" + timestamp.Format(time.RFC3339Nano) + "\n" + base64.RawURLEncoding.EncodeToString(nonce[:])
+	return []byte(message), nil
+}
 
 type repositoryScopeProjection struct {
 	Provider     string `json:"provider"`
