@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -47,7 +48,7 @@ func newPublicSyncFixture(t *testing.T) publicSyncFixture {
 		fabricID:    "11111111-1111-4111-8111-111111112231",
 		streamID:    "22222222-2222-4222-8222-222222222231",
 		workspaceID: "33333333-3333-4333-8333-333333333231",
-		attachment:  "44444444-4444-4444-8444-444444444231",
+		attachment:  freshAttachmentRef(t),
 		humanID:     "55555555-5555-4555-8555-555555555231",
 		agentID:     "66666666-6666-4666-8666-666666666231",
 		publicKey:   publicKey, fingerprint: "sha256:" + hex.EncodeToString(sum[:]),
@@ -71,6 +72,17 @@ func newPublicSyncFixture(t *testing.T) publicSyncFixture {
 	}
 	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM projects WHERE id=$1`, f.projectID) })
 	return f
+}
+
+func freshAttachmentRef(t *testing.T) string {
+	t.Helper()
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		t.Fatal(err)
+	}
+	raw[6] = (raw[6] & 0x0f) | 0x40
+	raw[8] = (raw[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", raw[0:4], raw[4:6], raw[6:8], raw[8:10], raw[10:16])
 }
 
 func (f publicSyncFixture) observedActor(kind types.ActorKind, id string) projectstate.ActorV1 {
@@ -112,6 +124,9 @@ func TestActivatePublicHumanThenNonceThenIssuerClaimSatisfiesImmediateFKs(t *tes
 	}
 	if _, err := tx.Exec(`UPDATE fabric_workspace_stream_bindings SET source_version=0,public_issuer_key_fingerprint=$1 WHERE project_id=$2 AND fabric_instance_id=$3 AND attachment_ref=$4`, f.fingerprint, f.projectID, f.fabricID, f.attachment); err != nil {
 		t.Fatalf("claim issuer after key+nonce: %v", err)
+	}
+	if _, err := tx.Exec(`RESET ROLE`); err != nil {
+		t.Fatalf("reset runtime role for owner readback: %v", err)
 	}
 	var keys, nonces, claimed int
 	if err := tx.QueryRow(`SELECT (SELECT count(*) FROM fabric_public_actor_keys WHERE project_id=$1),(SELECT count(*) FROM public_request_nonces WHERE project_id=$1),(SELECT count(*) FROM fabric_workspace_stream_bindings WHERE project_id=$1 AND public_issuer_key_fingerprint IS NOT NULL)`, f.projectID).Scan(&keys, &nonces, &claimed); err != nil {
