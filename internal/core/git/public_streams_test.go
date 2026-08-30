@@ -166,6 +166,73 @@ func TestResolveConflictExactReplayChangedBytesAndRace(t *testing.T) {
 	}
 }
 
+func TestResolveConflictRejectsHistoricalOperationFromAnotherConflict(t *testing.T) {
+	f := newStreamFixture(t, "public-conflict-historical-replay")
+	_, claimed := publicAttach(t, f, "sha256:"+strings.Repeat("8", 64))
+	initial := claimed.State
+	operationA := streamKBOperation(initial.Live, f.scope.Actor, uuid.NewString(), "historical\n")
+	appliedA := f.apply(f.applyInput(initial, operationA))
+	accepted, err := projectstate.ApplyOperation(appliedA.Accepted, streamActorOperation(appliedA.Accepted, f.scope.Actor, uuid.NewString()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := projectstate.EncodeTree(accepted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	advanceInput := f.advanceInput(appliedA, streamTestCommitB, f.ref.ObservedAt.Add(time.Minute), tree)
+	advanceInput.ExpectedAcceptedCommitSHA, advanceInput.ExpectedAcceptedTreeDigest = appliedA.AcceptedCommitSHA, appliedA.Accepted.Digest
+	conflict := f.advance(advanceInput)
+	if conflict.ConflictID == "" {
+		t.Fatal("expected open conflict")
+	}
+	input := ResolveStreamConflictInput{Attachment: claimed.Attachment, ConflictID: conflict.ConflictID,
+		Precondition: publicPrecondition(claimed.Attachment, initial), Resolution: operationA}
+	tx, err := beginPublicRuntimeTx(f.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := publicRouteBytes(t, tx, claimed.Attachment.Key)
+	_, err = f.store.ResolveConflictInTx(context.Background(), tx, f.scope, input)
+	if !errors.Is(err, ErrOperationReplay) {
+		t.Fatalf("historical resolution error=%v", err)
+	}
+	if after := publicRouteBytes(t, tx, claimed.Attachment.Key); after != before {
+		t.Fatal("historical resolution changed route")
+	}
+	_ = tx.Rollback()
+	var state string
+	if err := f.db.QueryRow(`SELECT state FROM fabric_stream_conflicts WHERE project_id=$1 AND conflict_id=$2`, f.key.ProjectID, conflict.ConflictID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "open" {
+		t.Fatalf("conflict state=%s", state)
+	}
+	fresh := streamKBOperation(conflict.Live, f.scope.Actor, uuid.NewString(), "fresh resolution\n")
+	freshInput := ResolveStreamConflictInput{Attachment: claimed.Attachment, ConflictID: conflict.ConflictID,
+		Precondition: publicPrecondition(claimed.Attachment, conflict), Resolution: fresh}
+	tx, err = beginPublicRuntimeTx(f.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := f.store.ResolveConflictInTx(context.Background(), tx, f.scope, freshInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	tx, err = beginPublicRuntimeTx(f.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := f.store.ResolveConflictInTx(context.Background(), tx, f.scope, freshInput)
+	if err != nil || replayed.Version != resolved.Version || replayed.Live.Digest != resolved.Live.Digest {
+		t.Fatalf("fresh resolution replay=(%+v,%v), first=%+v", replayed, err, resolved)
+	}
+	_ = tx.Rollback()
+}
+
 func TestResolveConflictInTxClassifiesMissingDurableConflict(t *testing.T) {
 	f := newStreamFixture(t, "public-conflict-missing")
 	_, attached := publicAttach(t, f, "sha256:"+strings.Repeat("c", 64))

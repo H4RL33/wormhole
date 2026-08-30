@@ -2654,6 +2654,7 @@ func TestSyncV2ConflictBurnsNonceForAuthenticatedDenialsAndDomainFailures(t *tes
 		{"wrong signed scope", func(arguments *SyncConflictV2Args) { arguments.BaseCommitSHA = strings.Repeat("b", 40) }, "sync_precondition_failed"},
 		{"wrong stable actor", func(arguments *SyncConflictV2Args) { arguments.Resolution.Actor.HumanPrincipalID = uuid.NewString() }, "permission_denied"},
 		{"malformed resolution", func(arguments *SyncConflictV2Args) { arguments.Resolution.SchemaVersion = 2 }, "sync_precondition_failed"},
+		{"malformed resolution id", func(arguments *SyncConflictV2Args) { arguments.Resolution.ID = "not-a-uuid" }, "sync_precondition_failed"},
 	}
 	for index, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -2865,6 +2866,86 @@ func TestSyncV2ConflictExactReplayReturnsRecordedResolution(t *testing.T) {
 	}
 	after := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
 	assertTask2ExactRowDeltas(t, before, after, map[string]int{"public_request_nonces": 1, "audit_log": 1})
+}
+
+func TestSyncV2ConflictRejectsHistoricalAppliedOperationFromAnotherConflict(t *testing.T) {
+	fixture := newSyncV2ConflictHandlerFixture(t, 240)
+	historicalState := fixture.attached.State
+	a := syncV2PushOperation(fixture.owner, historicalState, uuid.NewString(), uuid.NewString())
+	historicalScope := syncV2PushArguments(fixture.attached, a).SyncV2Scope
+	tx, err := fixture.owner.coordinator.identity.BeginProjectTx(context.Background(), fixture.owner.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appliedA, err := fixture.streams.ApplyPublicOperationInTx(context.Background(), tx,
+		types.ActorScope{ProjectID: fixture.owner.projectID, Actor: fixture.owner.transport}, coregit.ApplyPublicOperationInput{
+			Attachment: fixture.attached.Attachment, Precondition: syncMutationPrecondition(historicalScope), Operation: a,
+		})
+	if err == nil {
+		err = tx.Commit()
+	} else {
+		_ = tx.Rollback()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptedOperation := syncV2PushOperation(fixture.owner, coregit.StreamTransition{Live: appliedA.Accepted}, uuid.NewString(), uuid.NewString())
+	accepted, err := projectstate.ApplyOperation(appliedA.Accepted, acceptedOperation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptedTree, err := projectstate.EncodeTree(accepted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err = fixture.owner.coordinator.identity.BeginProjectTx(context.Background(), fixture.owner.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflict, err := fixture.streams.AdvanceAcceptedObservedRefInTx(context.Background(), tx,
+		types.ActorScope{ProjectID: fixture.owner.projectID, Actor: fixture.owner.transport}, coregit.AdvanceAcceptedInput{
+			Key: fixture.attached.Attachment.Key,
+			Ref: coregit.RefObservation{Repository: fixture.owner.repository, RefName: fixture.owner.observation.RefName,
+				CommitSHA: strings.Repeat("b", 40), ObservedAt: fixture.owner.observation.ObservedAt.Add(time.Minute)},
+			Tree: acceptedTree, ExpectedVersion: appliedA.Version, ExpectedAcceptedCommitSHA: appliedA.AcceptedCommitSHA,
+			ExpectedAcceptedTreeDigest: appliedA.Accepted.Digest, ExpectedLiveTreeDigest: appliedA.Live.Digest,
+		})
+	if err == nil {
+		err = tx.Commit()
+	} else {
+		_ = tx.Rollback()
+	}
+	if err != nil || !types.CanonicalUUID(conflict.ConflictID) {
+		t.Fatalf("seed accepted/live conflict = (%+v,%v)", conflict, err)
+	}
+	historical := syncV2ConflictArguments(fixture.attached, conflict.ConflictID, a)
+	historical.SyncV2Scope = historicalScope
+	historicalRaw := canonicalSyncV2ConflictArguments(t, historical)
+	before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	_, err = fixture.handler.Handle(context.Background(), historicalRaw, syncV2ConflictProof(t, fixture.owner, historicalRaw, historical.AttachmentRef, 241))
+	assertSyncV2ConflictFailure(t, err, "sync_replay_conflict")
+	assertTask2ExactRowDeltas(t, before, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), map[string]int{"public_request_nonces": 1})
+	var state string
+	if err := fixture.owner.db.QueryRow(`SELECT state FROM fabric_stream_conflicts WHERE project_id=$1 AND conflict_id=$2`, fixture.owner.projectID, conflict.ConflictID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "open" {
+		t.Fatalf("conflict state=%s", state)
+	}
+	fresh := syncV2ConflictResolution(fixture.owner, conflict, uuid.NewString(), uuid.NewString())
+	current := fixture.attached
+	current.State = conflict
+	resolvedArgs := syncV2ConflictArguments(current, conflict.ConflictID, fresh)
+	first := resolveSyncV2Conflict(t, fixture, resolvedArgs, 242)
+	if first.Status != "resolved" || first.ConflictID != conflict.ConflictID || first.OperationID != fresh.ID || first.StreamVersion != conflict.Version+1 {
+		t.Fatalf("fresh resolution=%+v", first)
+	}
+	beforeReplay := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	replay := resolveSyncV2Conflict(t, fixture, resolvedArgs, 243)
+	if replay != first {
+		t.Fatalf("fresh resolution replay=%+v, first=%+v", replay, first)
+	}
+	assertTask2ExactRowDeltas(t, beforeReplay, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), map[string]int{"public_request_nonces": 1, "audit_log": 1})
 }
 
 func TestSyncV2ConflictChangedResolutionBytesReturnSafeReplayConflict(t *testing.T) {

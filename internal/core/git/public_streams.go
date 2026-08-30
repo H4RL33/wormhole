@@ -331,6 +331,17 @@ func (s *StreamStore) ResolveConflictInTx(ctx context.Context, tx *sql.Tx, scope
 	if state != "open" {
 		return StreamTransition{}, fmt.Errorf("git: resolve conflict: invalid stored state: %w", ErrStreamCorrupt)
 	}
+	if _, _, _, _, err := reconcileStreamOperation(scope, input.Resolution); err != nil {
+		return StreamTransition{}, err
+	}
+	// An open conflict must always be resolved by a new operation against the
+	// conflict's current view. Replaying an older applied request would return
+	// its historical transition and could otherwise falsely clear this row.
+	if _, found, err := loadStreamRequestTx(ctx, tx, locked.Key, locked.CanonicalRef, input.Resolution.ID); err != nil {
+		return StreamTransition{}, err
+	} else if found {
+		return StreamTransition{}, fmt.Errorf("git: resolve conflict: historical resolution: %w", ErrOperationReplay)
+	}
 	st, err := s.ApplyPublicOperationInTx(ctx, tx, scope, ApplyPublicOperationInput{Attachment: locked, Precondition: input.Precondition, Operation: input.Resolution})
 	if err != nil {
 		return StreamTransition{}, err
