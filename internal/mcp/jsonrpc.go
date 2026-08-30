@@ -798,8 +798,18 @@ func handlePublicToolsCall(ctx context.Context, tool Tool, authHeader string, ra
 		}
 		return publicFailureCallResult(tool.Name, "internal_error"), nil
 	}
-	example, ok := tool.ResultVariants[version]
-	if !ok || reflect.TypeOf(result) != reflect.TypeOf(example) {
+	examples, ok := tool.ResultVariants[version]
+	if !ok || len(examples) == 0 {
+		return publicFailureCallResult(tool.Name, "internal_error"), nil
+	}
+	var example any
+	for _, candidate := range examples {
+		if candidate != nil && reflect.TypeOf(result) == reflect.TypeOf(candidate) {
+			example = candidate
+			break
+		}
+	}
+	if example == nil {
 		return publicFailureCallResult(tool.Name, "internal_error"), nil
 	}
 	resultJSON, err := json.Marshal(result)

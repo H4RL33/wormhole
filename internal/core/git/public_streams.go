@@ -310,6 +310,9 @@ func (s *StreamStore) ResolveConflictInTx(ctx context.Context, tx *sql.Tx, scope
 	var resolutionVersion sql.NullInt64
 	var resolutionOperationID sql.NullString
 	if err := tx.QueryRowContext(ctx, `SELECT state,resolution_operation_id,resolution_version FROM fabric_stream_conflicts WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3 AND canonical_ref=$4 AND conflict_id=$5 FOR UPDATE`, locked.Key.ProjectID, locked.Key.FabricInstanceID, locked.Key.StreamID, locked.CanonicalRef, input.ConflictID).Scan(&state, &resolutionOperationID, &resolutionVersion); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return StreamTransition{}, fmt.Errorf("git: resolve conflict: %w", ErrStreamConflict)
+		}
 		return StreamTransition{}, fmt.Errorf("git: resolve conflict: %w", err)
 	}
 	if state == "resolved" {

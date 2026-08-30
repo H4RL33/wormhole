@@ -174,7 +174,7 @@ func TestPublicFabricRegistryVariantsMatchFrozenDescriptorSchemas(t *testing.T) 
 		if !bytes.Equal(gotInput, wantInput) {
 			t.Fatalf("%s live input schema drift\ngot:  %s\nwant: %s", tool.Name, gotInput, wantInput)
 		}
-		gotOutput, err := json.Marshal(schemaOneOf(tool.ResultVariants[2]))
+		gotOutput, err := json.Marshal(schemaOneOf(tool.ResultVariants[2]...))
 		if err != nil {
 			t.Fatal(err)
 		}

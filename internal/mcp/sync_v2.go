@@ -363,6 +363,62 @@ func (h *SyncV2PushHandler) Handle(ctx context.Context, raw json.RawMessage, pro
 	}, nil
 }
 
+type SyncV2ConflictHandler struct {
+	resolver    *PublicBoundProofResolver
+	coordinator *MutationCoordinator
+	streams     *coregit.StreamStore
+}
+
+func (h *SyncV2ConflictHandler) ready() bool {
+	return h != nil && h.resolver != nil && h.coordinator != nil && h.streams != nil
+}
+
+func NewSyncV2ConflictHandler(resolver *PublicBoundProofResolver, coordinator *MutationCoordinator, streams *coregit.StreamStore) (*SyncV2ConflictHandler, error) {
+	handler := &SyncV2ConflictHandler{resolver: resolver, coordinator: coordinator, streams: streams}
+	if !handler.ready() {
+		return nil, identity.ErrInvalidPublicIdentity
+	}
+	return handler, nil
+}
+
+func (h *SyncV2ConflictHandler) Handle(ctx context.Context, raw json.RawMessage, proof types.PublicRequestProof) (SyncConflictResolvedV2Result, error) {
+	if !h.ready() {
+		return SyncConflictResolvedV2Result{}, syncMutationFailure("wormhole.sync.conflict", "internal_error")
+	}
+	var arguments SyncConflictV2Args
+	if decodePublicArguments(raw, &arguments) != nil || !isCanonicalJSONObject(raw) {
+		return SyncConflictResolvedV2Result{}, syncReadDecodeFailure("wormhole.sync.conflict", raw)
+	}
+	if arguments.Version != projectstate.SyncProtocolVersionV2 || !types.CanonicalUUID(arguments.AttachmentRef) || !types.CanonicalUUID(arguments.ConflictID) {
+		return SyncConflictResolvedV2Result{}, syncMutationFailure("wormhole.sync.conflict", "invalid_request")
+	}
+	authorized, err := h.resolver.AuthorizeMutation(ctx, "wormhole.sync.conflict", raw, arguments.SyncV2Scope, proof)
+	if err != nil {
+		return SyncConflictResolvedV2Result{}, syncMutationFailure("wormhole.sync.conflict", syncMutationErrorCode(err))
+	}
+	var transition coregit.StreamTransition
+	err = h.coordinator.ExecutePublic(ctx, authorized, "sync.conflict", bytes.Clone(raw), func(ctx context.Context, tx *sql.Tx, verified VerifiedMutation) error {
+		var resolveErr error
+		transition, resolveErr = h.streams.ResolveConflictInTx(ctx, tx, verified.Scope, coregit.ResolveStreamConflictInput{
+			Attachment:   verified.Attachment,
+			ConflictID:   arguments.ConflictID,
+			Precondition: syncMutationPrecondition(arguments.SyncV2Scope),
+			Resolution:   arguments.Resolution,
+		})
+		return resolveErr
+	})
+	if err != nil {
+		return SyncConflictResolvedV2Result{}, syncMutationFailure("wormhole.sync.conflict", syncMutationErrorCode(err))
+	}
+	if transition.ConflictID != "" || transition.Key.ProjectID != authorized.Authority.Scope.ProjectID || transition.Version < 0 || transition.Version > maximumPublicSyncVersion || !validPublicSyncDigest(transition.Live.Digest) {
+		return SyncConflictResolvedV2Result{}, syncMutationFailure("wormhole.sync.conflict", "internal_error")
+	}
+	return SyncConflictResolvedV2Result{
+		Version: projectstate.SyncProtocolVersionV2, Status: "resolved", ConflictID: arguments.ConflictID,
+		OperationID: arguments.Resolution.ID, StreamVersion: transition.Version, LiveTreeDigest: transition.Live.Digest,
+	}, nil
+}
+
 func syncMutationPrecondition(scope SyncV2Scope) coregit.SyncPrecondition {
 	return coregit.SyncPrecondition{
 		Repository: scope.Repository, CanonicalRef: scope.CanonicalRef,

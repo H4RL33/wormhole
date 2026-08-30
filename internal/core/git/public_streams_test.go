@@ -166,6 +166,108 @@ func TestResolveConflictExactReplayChangedBytesAndRace(t *testing.T) {
 	}
 }
 
+func TestResolveConflictInTxClassifiesMissingDurableConflict(t *testing.T) {
+	f := newStreamFixture(t, "public-conflict-missing")
+	_, attached := publicAttach(t, f, "sha256:"+strings.Repeat("c", 64))
+	resolution := streamKBOperation(attached.State.Live, f.scope.Actor, uuid.NewString(), "missing conflict\n")
+	input := ResolveStreamConflictInput{
+		Attachment:   attached.Attachment,
+		ConflictID:   uuid.NewString(),
+		Precondition: publicPrecondition(attached.Attachment, attached.State),
+		Resolution:   resolution,
+	}
+	tx, err := beginPublicRuntimeTx(f.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	before := publicRouteBytes(t, tx, attached.Attachment.Key)
+	got, err := f.store.ResolveConflictInTx(context.Background(), tx, f.scope, input)
+	if !errors.Is(err, ErrStreamConflict) || !reflect.DeepEqual(got, StreamTransition{}) {
+		t.Fatalf("missing durable conflict = (%+v,%v), want ErrStreamConflict", got, err)
+	}
+	if after := publicRouteBytes(t, tx, attached.Attachment.Key); after != before {
+		t.Fatalf("missing durable conflict changed route rows\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
+func TestResolveConflictInTxRejectsReachableTypedNestedConflict(t *testing.T) {
+	f := newStreamFixture(t, "public-conflict-nested")
+	_, attached := publicAttach(t, f, "sha256:"+strings.Repeat("d", 64))
+	originalOperation := projectstate.OperationV1{
+		SchemaVersion: 1, ID: uuid.NewString(), Kind: projectstate.OperationTombstone,
+		ExpectedViewDigest: attached.State.Live.Digest, Actor: f.scope.Actor,
+		Tombstone: &projectstate.TombstoneOperationV1{
+			Key:                   projectstate.RecordKey{Kind: "actor", ID: streamTestActorID},
+			ExpectedContentDigest: projectstate.Digest("sha256:" + strings.Repeat("f", 64)),
+		},
+	}
+	original := applyPublic(t, f, attached.Attachment, publicPrecondition(attached.Attachment, attached.State), originalOperation)
+	if original.ConflictID == "" || original.Version != attached.State.Version {
+		t.Fatalf("typed original conflict = %+v", original)
+	}
+
+	resolution := originalOperation
+	resolution.ID = uuid.NewString()
+	resolutionTombstone := *originalOperation.Tombstone
+	resolutionTombstone.ExpectedContentDigest = projectstate.Digest("sha256:" + strings.Repeat("e", 64))
+	resolution.Tombstone = &resolutionTombstone
+	input := ResolveStreamConflictInput{
+		Attachment:   attached.Attachment,
+		ConflictID:   original.ConflictID,
+		Precondition: publicPrecondition(attached.Attachment, attached.State),
+		Resolution:   resolution,
+	}
+	tx, err := beginPublicRuntimeTx(f.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := publicRouteBytes(t, tx, attached.Attachment.Key)
+	got, err := f.store.ResolveConflictInTx(context.Background(), tx, f.scope, input)
+	if !errors.Is(err, ErrStreamPrecondition) || !reflect.DeepEqual(got, StreamTransition{}) {
+		_ = tx.Rollback()
+		t.Fatalf("nested typed conflict = (%+v,%v), want ErrStreamPrecondition", got, err)
+	}
+	var conflictRows, requestRows, originalOpen, nestedRequest int
+	if err := tx.QueryRow(`SELECT
+		(SELECT count(*) FROM fabric_stream_conflicts WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3),
+		(SELECT count(*) FROM fabric_stream_requests WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3),
+		(SELECT count(*) FROM fabric_stream_conflicts WHERE project_id=$1 AND conflict_id=$4 AND state='open'),
+		(SELECT count(*) FROM fabric_stream_requests WHERE project_id=$1 AND operation_id=$5)`,
+		attached.Attachment.Key.ProjectID, attached.Attachment.Key.FabricInstanceID, attached.Attachment.Key.StreamID,
+		original.ConflictID, resolution.ID).Scan(&conflictRows, &requestRows, &originalOpen, &nestedRequest); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if conflictRows != 2 || requestRows != 2 || originalOpen != 1 || nestedRequest != 1 {
+		_ = tx.Rollback()
+		t.Fatalf("in-transaction nested evidence conflicts=%d requests=%d original_open=%d nested_request=%d, want 2/2/1/1", conflictRows, requestRows, originalOpen, nestedRequest)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+
+	verifyTx, err := beginPublicRuntimeTx(f.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verifyTx.Rollback()
+	if after := publicRouteBytes(t, verifyTx, attached.Attachment.Key); after != before {
+		t.Fatalf("nested conflict rollback changed externally visible rows\nbefore=%s\nafter=%s", before, after)
+	}
+	if err := verifyTx.QueryRow(`SELECT
+		(SELECT count(*) FROM fabric_stream_conflicts WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3),
+		(SELECT count(*) FROM fabric_stream_requests WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3),
+		(SELECT count(*) FROM fabric_stream_requests WHERE project_id=$1 AND operation_id=$4)`,
+		attached.Attachment.Key.ProjectID, attached.Attachment.Key.FabricInstanceID, attached.Attachment.Key.StreamID,
+		resolution.ID).Scan(&conflictRows, &requestRows, &nestedRequest); err != nil {
+		t.Fatal(err)
+	}
+	if conflictRows != 1 || requestRows != 1 || nestedRequest != 0 {
+		t.Fatalf("post-rollback nested evidence conflicts=%d requests=%d nested_request=%d, want 1/1/0", conflictRows, requestRows, nestedRequest)
+	}
+}
+
 func publicAttach(t *testing.T, f *streamFixture, issuer string) (PublicAttachDraft, PublicAttachResult) {
 	t.Helper()
 	tx, err := beginPublicRuntimeTx(f.db)

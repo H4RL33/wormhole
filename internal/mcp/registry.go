@@ -48,7 +48,7 @@ type Tool struct {
 	// ArgumentVariants and ResultVariants explicitly bind public tool wire
 	// versions to their closed request and successful-result structs.
 	ArgumentVariants map[int]any   `json:"-"`
-	ResultVariants   map[int]any   `json:"-"`
+	ResultVariants   map[int][]any `json:"-"`
 	Handler          Handler       `json:"-"`
 	PublicHandler    PublicHandler `json:"-"`
 }

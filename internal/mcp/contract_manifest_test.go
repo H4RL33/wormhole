@@ -83,7 +83,7 @@ func fabricMCPContract(t *testing.T) []alphaFabricMCPTool {
 	return actual
 }
 
-func TestAlphaContractMatchesPublicFabricContract(t *testing.T) {
+func TestAlphaContractLiveProjectionHasFivePublicSyncTools(t *testing.T) {
 	manifest := readAlphaMCPContract(t)
 	golden := readPublicDescriptorGolden(t)
 	if !reflect.DeepEqual(manifest.MCPTools.PublicFabricContract, golden.Descriptors) ||
@@ -98,15 +98,22 @@ func TestAlphaContractMatchesPublicFabricContract(t *testing.T) {
 	}
 	actual := PublicFabricToolDescriptors()
 	publicRegistry := NewPublicFabricRegistry(readyPublicRegistryDependencies(t))
+	liveCount := 0
 	for _, descriptor := range actual {
 		if _, live := NewFabricRegistry(FabricRegistryDependencies{}).Get(descriptor.Name); live {
 			t.Fatalf("public contract %q leaked into private registry", descriptor.Name)
 		}
 		_, live := publicRegistry.Get(descriptor.Name)
-		wantLive := descriptor.Name == "wormhole.sync.attach" || descriptor.Name == "wormhole.sync.bootstrap" || descriptor.Name == "wormhole.sync.pull"
+		wantLive := descriptor.Name == "wormhole.sync.attach" || descriptor.Name == "wormhole.sync.bootstrap" || descriptor.Name == "wormhole.sync.conflict" || descriptor.Name == "wormhole.sync.pull" || descriptor.Name == "wormhole.sync.push"
 		if live != wantLive {
 			t.Fatalf("public contract %q live = %v, want %v", descriptor.Name, live, wantLive)
 		}
+		if live {
+			liveCount++
+		}
+	}
+	if liveCount != 5 || len(publicRegistry.List()) != 5 {
+		t.Fatalf("live public projection count = %d/%d, want 5/5", liveCount, len(publicRegistry.List()))
 	}
 	actualJSON, err := json.Marshal(actual)
 	if err != nil {

@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strconv"
 	"strings"
@@ -20,6 +21,16 @@ type jsonRPCV2Arguments struct {
 type jsonRPCV2Result struct {
 	Version int    `json:"version" const:"2"`
 	Value   string `json:"value"`
+}
+
+type jsonRPCV2AlternateResult struct {
+	Version   int    `json:"version" const:"2"`
+	Alternate string `json:"alternate"`
+}
+
+type jsonRPCV2UnlistedResult struct {
+	Version  int    `json:"version" const:"2"`
+	Unlisted string `json:"unlisted"`
 }
 
 func TestHandleInitialize(t *testing.T) {
@@ -74,7 +85,7 @@ func TestJSONRPCPublicDispatchSelectsAndStrictDecodesV2BeforeInvocation(t *testi
 		Name:             "wormhole.sync.pull",
 		Description:      "test public dispatch",
 		ArgumentVariants: map[int]any{2: jsonRPCV2Arguments{}},
-		ResultVariants:   map[int]any{2: jsonRPCV2Result{}},
+		ResultVariants:   map[int][]any{2: {jsonRPCV2Result{}}},
 		PublicHandler: func(_ context.Context, raw json.RawMessage, proof types.PublicRequestProof) (any, error) {
 			invocations++
 			var arguments jsonRPCV2Arguments
@@ -141,7 +152,7 @@ func TestJSONRPCPublicDispatchRejectsWrongSelectedResultVersion(t *testing.T) {
 				Name:             "wormhole.sync.pull",
 				Description:      "test public result validation",
 				ArgumentVariants: map[int]any{2: jsonRPCV2Arguments{}},
-				ResultVariants:   map[int]any{2: jsonRPCV2Result{}},
+				ResultVariants:   map[int][]any{2: {jsonRPCV2Result{}}},
 				PublicHandler: func(context.Context, json.RawMessage, types.PublicRequestProof) (any, error) {
 					return jsonRPCV2Result{Version: version, Value: "wrong-version"}, nil
 				},
@@ -176,7 +187,7 @@ func TestJSONRPCMalformedKnownPublicEnvelopeNeverFallsBackToPrivateDispatch(t *t
 	registry := NewRegistry()
 	registry.Register(Tool{
 		Name: "wormhole.sync.pull", ArgumentVariants: map[int]any{2: jsonRPCV2Arguments{}},
-		ResultVariants: map[int]any{2: jsonRPCV2Result{}},
+		ResultVariants: map[int][]any{2: {jsonRPCV2Result{}}},
 		PublicHandler: func(context.Context, json.RawMessage, types.PublicRequestProof) (any, error) {
 			t.Fatal("malformed public envelope invoked handler")
 			return nil, nil
@@ -187,6 +198,79 @@ func TestJSONRPCMalformedKnownPublicEnvelopeNeverFallsBackToPrivateDispatch(t *t
 	))
 	if rpcErr == nil || rpcErr.Code != RPCInvalidParams {
 		t.Fatalf("malformed public envelope error = %+v, want invalid params", rpcErr)
+	}
+}
+
+func TestJSONRPCPublicDispatchAcceptsEachPushResultAndRejectsUnlistedTypes(t *testing.T) {
+	for name, returned := range map[string]any{
+		"applied":    jsonRPCV2Result{Version: 2, Value: "applied"},
+		"conflict":   jsonRPCV2AlternateResult{Version: 2, Alternate: "conflict"},
+		"unlisted":   jsonRPCV2UnlistedResult{Version: 2, Unlisted: "no"},
+		"pointer":    &jsonRPCV2Result{Version: 2, Value: "pointer"},
+		"nil result": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			registry := NewRegistry()
+			registry.Register(Tool{
+				Name: "wormhole.sync.push", ArgumentVariants: map[int]any{2: jsonRPCV2Arguments{}},
+				ResultVariants: map[int][]any{2: {jsonRPCV2Result{}, jsonRPCV2AlternateResult{}}},
+				PublicHandler:  func(context.Context, json.RawMessage, types.PublicRequestProof) (any, error) { return returned, nil },
+			})
+			result, rpcErr := HandleToolsCall(context.Background(), registry, nil, "", publicToolsCallParams(t, "wormhole.sync.push", json.RawMessage(`{"version":2,"value":"ok"}`)))
+			if rpcErr != nil {
+				t.Fatalf("dispatch RPC error = %+v", rpcErr)
+			}
+			call := result.(toolCallResult)
+			if name == "applied" || name == "conflict" {
+				encoded, _ := json.Marshal(returned)
+				if call.IsError || len(call.Content) != 1 || call.Content[0].Text != string(encoded) {
+					t.Fatalf("listed result = %+v, want %s", call, encoded)
+				}
+				return
+			}
+			if !call.IsError || len(call.Content) != 1 || call.Content[0].Text != `{"code":"internal_error","operation":"wormhole.sync.push"}` {
+				t.Fatalf("unlisted result = %+v, want safe internal_error", call)
+			}
+		})
+	}
+}
+
+func TestJSONRPCPushAndConflictRejectBearerProofMixAndRedactHandlerCauses(t *testing.T) {
+	for _, operation := range []string{"wormhole.sync.push", "wormhole.sync.conflict"} {
+		t.Run(operation, func(t *testing.T) {
+			invocations := 0
+			registry := NewRegistry()
+			registry.Register(Tool{
+				Name: operation, ArgumentVariants: map[int]any{2: jsonRPCV2Arguments{}},
+				ResultVariants: map[int][]any{2: {jsonRPCV2Result{}}},
+				PublicHandler: func(context.Context, json.RawMessage, types.PublicRequestProof) (any, error) {
+					invocations++
+					return nil, errors.New("pq: wrapped database cause /private/path bearer-secret operation-body")
+				},
+			})
+			params := publicToolsCallParams(t, operation, json.RawMessage(`{"version":2,"value":"ok"}`))
+			mixed, rpcErr := HandleToolsCall(context.Background(), registry, nil, "Bearer private-secret", params)
+			if rpcErr != nil {
+				t.Fatalf("mixed proof/bearer RPC error = %+v", rpcErr)
+			}
+			mixedFailure := mixed.(toolCallResult)
+			if !mixedFailure.IsError || mixedFailure.Content[0].Text != `{"code":"authentication_failed","operation":"`+operation+`"}` || invocations != 0 {
+				t.Fatalf("mixed proof/bearer result = %+v invocations=%d", mixedFailure, invocations)
+			}
+			failed, rpcErr := HandleToolsCall(context.Background(), registry, nil, "", params)
+			if rpcErr != nil {
+				t.Fatalf("handler failure RPC error = %+v", rpcErr)
+			}
+			failure := failed.(toolCallResult)
+			if !failure.IsError || failure.Content[0].Text != `{"code":"internal_error","operation":"`+operation+`"}` || invocations != 1 {
+				t.Fatalf("redacted handler result = %+v invocations=%d", failure, invocations)
+			}
+			for _, secret := range []string{"wrapped database cause", "/private/path", "bearer-secret", "operation-body", "pq:"} {
+				if strings.Contains(failure.Content[0].Text, secret) {
+					t.Fatalf("handler failure leaked %q: %s", secret, failure.Content[0].Text)
+				}
+			}
+		})
 	}
 }
 

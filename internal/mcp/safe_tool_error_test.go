@@ -66,3 +66,27 @@ func TestSafeToolErrorSyncV2PushCodesHaveExactCanonicalBytes(t *testing.T) {
 		})
 	}
 }
+
+func TestSafeToolErrorSyncV2ConflictCodesHaveExactCanonicalBytes(t *testing.T) {
+	for _, code := range []string{
+		"invalid_request",
+		"authentication_failed",
+		"attachment_not_found",
+		"permission_denied",
+		"sync_precondition_failed",
+		"sync_conflict",
+		"sync_replay_conflict",
+		"internal_error",
+	} {
+		t.Run(code, func(t *testing.T) {
+			result, err := toolFailureResult("wormhole.sync.conflict", code)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := `{"code":"` + code + `","operation":"wormhole.sync.conflict"}`
+			if !result.IsError || len(result.Content) != 1 || result.Content[0].Type != "text" || result.Content[0].Text != want {
+				t.Fatalf("result = %+v, want exact %s", result, want)
+			}
+		})
+	}
+}

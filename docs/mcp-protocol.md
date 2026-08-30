@@ -156,21 +156,28 @@ project, workspace, Fabric, remote-project, stream, or actor routing IDs.
 At the local Stage 2 Gateway boundary these remain the ten non-callable public descriptor
 values: Gateway does not instantiate the public Fabric registry.
 
-The separate public Fabric registry can make only `wormhole.sync.attach`,
-`wormhole.sync.bootstrap`, and `wormhole.sync.pull` live, and only when their
-complete direct handlers are configured. Attach observes and authenticates the
+The separate public Fabric registry can make exactly
+`wormhole.sync.attach`, `wormhole.sync.bootstrap`, `wormhole.sync.pull`,
+`wormhole.sync.push`, and `wormhole.sync.conflict` live, each only when its
+complete direct handler is configured. Attach observes and authenticates the
 canonical repository/ref before deriving server-owned scope. Bootstrap and pull
 route through an opaque `attachment_ref`, revalidate the bound repository and
-stream evidence, and perform read-only state retrieval. Public failures are
-closed, bounded values containing only `code` and `operation`; unexpected
-internal errors are reduced to `internal_error` rather than exposing private
-state.
+stream evidence, and perform read-only state retrieval.
 
-`wormhole.sync.push`, `wormhole.sync.conflict`,
-`wormhole.sync.issue_agent_session`, and all four `wormhole.activity.*` values
-remain descriptor-only and unavailable to `tools/call`. Public sync is absent
-from the 16-tool private credential-authenticated registry. This does not ship
-Gateway transport or a private sync path.
+Push authenticates and burns the activated-key nonce before beginning one fresh
+atomic mutation-and-audit transaction. It preserves the canonical operation
+bytes and returns exactly either the applied result or the durable-conflict
+result. Conflict resolves one named durable conflict with a canonical operation;
+an exact replay returns the recorded operation, version, and digest, while
+changed resolution bytes fail as a replay conflict. Public failures are closed,
+bounded values containing only `code` and `operation`; unexpected internal
+errors are reduced to `internal_error` rather than exposing private state.
+
+`wormhole.sync.issue_agent_session` and all four `wormhole.activity.*` values
+remain descriptor-only and unavailable to `tools/call`. The 16-tool private
+credential-authenticated registry remains unchanged and contains no public sync
+tool. This slice does not ship Gateway transport, public production assembly,
+private sync, or any network path.
 
 Fabric private descriptors and public contract values remain inventoried in
 [`contracts/alpha-contract.json`](contracts/alpha-contract.json). Their

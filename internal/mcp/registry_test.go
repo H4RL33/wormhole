@@ -61,9 +61,9 @@ func TestFabricRegistryRetainsExactPrivateSixteen(t *testing.T) {
 	}
 }
 
-func TestPublicFabricRegistryExposesOnlyCompletedSyncV2Reads(t *testing.T) {
+func TestPublicFabricRegistryExposesOnlyCompletedSyncV2Handlers(t *testing.T) {
 	registry := NewPublicFabricRegistry(readyPublicRegistryDependencies(t))
-	want := []string{"wormhole.sync.attach", "wormhole.sync.bootstrap", "wormhole.sync.pull"}
+	want := []string{"wormhole.sync.attach", "wormhole.sync.bootstrap", "wormhole.sync.conflict", "wormhole.sync.pull", "wormhole.sync.push"}
 	got := make([]string, 0, len(registry.List()))
 	for _, tool := range registry.List() {
 		got = append(got, tool.Name)
@@ -73,7 +73,7 @@ func TestPublicFabricRegistryExposesOnlyCompletedSyncV2Reads(t *testing.T) {
 		if len(tool.ArgumentVariants) != 1 || tool.ArgumentVariants[2] == nil {
 			t.Fatalf("public tool %q argument variants = %#v, want v2 only", tool.Name, tool.ArgumentVariants)
 		}
-		if len(tool.ResultVariants) != 1 || tool.ResultVariants[2] == nil {
+		if len(tool.ResultVariants) != 1 || len(tool.ResultVariants[2]) == 0 {
 			t.Fatalf("public tool %q result variants = %#v, want v2 only", tool.Name, tool.ResultVariants)
 		}
 	}
@@ -83,7 +83,7 @@ func TestPublicFabricRegistryExposesOnlyCompletedSyncV2Reads(t *testing.T) {
 	}
 	for _, descriptor := range PublicFabricToolDescriptors() {
 		_, live := registry.Get(descriptor.Name)
-		wantLive := descriptor.Name == "wormhole.sync.attach" || descriptor.Name == "wormhole.sync.bootstrap" || descriptor.Name == "wormhole.sync.pull"
+		wantLive := descriptor.Name == "wormhole.sync.attach" || descriptor.Name == "wormhole.sync.bootstrap" || descriptor.Name == "wormhole.sync.conflict" || descriptor.Name == "wormhole.sync.pull" || descriptor.Name == "wormhole.sync.push"
 		if live != wantLive {
 			t.Fatalf("public descriptor %q live = %v, want %v", descriptor.Name, live, wantLive)
 		}
@@ -97,7 +97,9 @@ func TestPublicFabricRegistryRequiresEachCompleteHandler(t *testing.T) {
 	for name, dependencies := range map[string]PublicFabricRegistryDependencies{
 		"attach":    {Attach: &SyncV2AttachHandler{}},
 		"bootstrap": {Bootstrap: &SyncV2BootstrapHandler{}},
+		"conflict":  {Conflict: &SyncV2ConflictHandler{}},
 		"pull":      {Pull: &SyncV2PullHandler{}},
+		"push":      {Push: &SyncV2PushHandler{}},
 	} {
 		t.Run("incomplete "+name, func(t *testing.T) {
 			if got := len(NewPublicFabricRegistry(dependencies).List()); got != 0 {
@@ -112,6 +114,24 @@ func TestPublicFabricRegistryRequiresEachCompleteHandler(t *testing.T) {
 	}
 	if _, ok := registry.Get("wormhole.sync.pull"); !ok {
 		t.Fatal("pull-only public dependencies did not register wormhole.sync.pull")
+	}
+}
+
+func TestPublicFabricRegistryPushHasExactTwoResultVariants(t *testing.T) {
+	registry := NewPublicFabricRegistry(readyPublicRegistryDependencies(t))
+	push, ok := registry.Get("wormhole.sync.push")
+	if !ok {
+		t.Fatal("wormhole.sync.push is not live")
+	}
+	wantPush := []any{SyncPushAppliedV2Result{}, SyncPushConflictV2Result{}}
+	if len(push.ResultVariants) != 1 || !reflect.DeepEqual(push.ResultVariants[2], wantPush) {
+		t.Fatalf("push result variants = %#v, want %#v", push.ResultVariants, map[int][]any{2: wantPush})
+	}
+	for _, name := range []string{"wormhole.sync.attach", "wormhole.sync.bootstrap", "wormhole.sync.conflict", "wormhole.sync.pull"} {
+		tool, ok := registry.Get(name)
+		if !ok || len(tool.ResultVariants) != 1 || len(tool.ResultVariants[2]) != 1 || tool.ResultVariants[2][0] == nil {
+			t.Fatalf("%s result variants = %#v, want one non-nil v2 result", name, tool.ResultVariants)
+		}
 	}
 }
 
@@ -187,7 +207,15 @@ func readyPublicRegistryDependencies(t *testing.T) PublicFabricRegistryDependenc
 	if err != nil {
 		t.Fatal(err)
 	}
-	return PublicFabricRegistryDependencies{Attach: attach, Bootstrap: bootstrap, Pull: pull}
+	push, err := NewSyncV2PushHandler(resolver, coordinator, coregit.NewStreamStore(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflict, err := NewSyncV2ConflictHandler(resolver, coordinator, coregit.NewStreamStore(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return PublicFabricRegistryDependencies{Attach: attach, Bootstrap: bootstrap, Pull: pull, Push: push, Conflict: conflict}
 }
 
 func TestRegistry_GetMissing(t *testing.T) {

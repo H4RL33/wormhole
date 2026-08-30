@@ -2435,3 +2435,682 @@ func TestSyncV2PushConcurrentSameNonceAuthorizesOnce(t *testing.T) {
 		}
 	}
 }
+
+type syncV2ConflictFixture struct {
+	*syncV2PushFixture
+	handler           *SyncV2ConflictHandler
+	conflict          SyncPushConflictV2Result
+	conflictOperation projectstate.OperationV1
+}
+
+func newSyncV2ConflictHandlerFixture(t *testing.T, attachNonce byte) *syncV2ConflictFixture {
+	t.Helper()
+	push := newSyncV2PushFixture(t, attachNonce)
+	handler, err := NewSyncV2ConflictHandler(push.resolver, push.coordinator, push.streams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &syncV2ConflictFixture{syncV2PushFixture: push, handler: handler}
+}
+
+func newSyncV2ConflictFixture(t *testing.T, attachNonce, pushNonce byte) *syncV2ConflictFixture {
+	t.Helper()
+	fixture := newSyncV2ConflictHandlerFixture(t, attachNonce)
+	fixture.seedDurableConflict(t, pushNonce)
+	return fixture
+}
+
+func (f *syncV2ConflictFixture) seedDurableConflict(t *testing.T, nonce byte) {
+	t.Helper()
+	operation := projectstate.OperationV1{
+		SchemaVersion: 1, ID: uuid.NewString(), Kind: projectstate.OperationTombstone,
+		ExpectedViewDigest: f.attached.State.Live.Digest,
+		Actor: types.ActorEnvelope{
+			ActorKind: types.ActorHuman, HumanPrincipalID: f.owner.actor.ID,
+			Assurance: types.AssuranceLocal, OccurredAt: f.owner.transport.OccurredAt,
+		},
+		Tombstone: &projectstate.TombstoneOperationV1{
+			Key:                   projectstate.RecordKey{Kind: "actor", ID: f.owner.actor.ID},
+			ExpectedContentDigest: projectstate.Digest("sha256:" + strings.Repeat("f", 64)),
+		},
+	}
+	arguments := syncV2PushArguments(f.attached, operation)
+	raw := canonicalSyncV2PushArguments(t, arguments)
+	got, err := f.syncV2PushFixture.handler.Handle(context.Background(), raw, syncV2PushProof(t, f.owner, raw, arguments.AttachmentRef, nonce))
+	if err != nil {
+		t.Fatalf("seed typed push conflict: %v", err)
+	}
+	conflict, ok := got.(SyncPushConflictV2Result)
+	if !ok || !types.CanonicalUUID(conflict.ConflictID) || conflict.OperationID != operation.ID {
+		t.Fatalf("seed typed push conflict = (%T)%+v", got, got)
+	}
+	f.conflict, f.conflictOperation = conflict, operation
+}
+
+func syncV2ConflictResolution(f *mutationFixture, state coregit.StreamTransition, operationID, recordID string) projectstate.OperationV1 {
+	operation := syncV2PushOperation(f, state, operationID, recordID)
+	operation.PutRecord.Record.Actor.DisplayName = "Conflict Resolution Agent"
+	return operation
+}
+
+func syncV2ConflictArguments(attached InitialAttachResult, conflictID string, resolution projectstate.OperationV1) SyncConflictV2Args {
+	return SyncConflictV2Args{
+		SyncV2Scope: boundReadArguments(attached, 0).SyncV2Scope,
+		ConflictID:  conflictID,
+		Resolution:  resolution,
+	}
+}
+
+func canonicalSyncV2ConflictArguments(t *testing.T, arguments SyncConflictV2Args) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(arguments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonicalMutationJSON(t, raw)
+}
+
+func syncV2ConflictProof(t *testing.T, f *mutationFixture, raw json.RawMessage, attachment string, nonce byte) types.PublicRequestProof {
+	t.Helper()
+	seed := sha256.Sum256([]byte(f.projectID))
+	return signedBoundProof(t, f.fabricID, "wormhole.sync.conflict", raw, attachment, f.transport.OccurredAt, bytesOf(nonce, 32), seed[:])
+}
+
+func assertSyncV2ConflictFailure(t *testing.T, err error, code string) {
+	t.Helper()
+	assertSyncReadFailure(t, err, "wormhole.sync.conflict", code)
+}
+
+func resolveSyncV2Conflict(t *testing.T, fixture *syncV2ConflictFixture, arguments SyncConflictV2Args, nonce byte) SyncConflictResolvedV2Result {
+	t.Helper()
+	raw := canonicalSyncV2ConflictArguments(t, arguments)
+	got, err := fixture.handler.Handle(context.Background(), raw, syncV2ConflictProof(t, fixture.owner, raw, arguments.AttachmentRef, nonce))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+func executeAuthorizedSyncV2Conflict(ctx context.Context, fixture *syncV2ConflictFixture, authorized PublicMutationAuthority, arguments SyncConflictV2Args, raw json.RawMessage) (coregit.StreamTransition, error) {
+	var transition coregit.StreamTransition
+	err := fixture.coordinator.ExecutePublic(ctx, authorized, "sync.conflict", bytes.Clone(raw), func(ctx context.Context, tx *sql.Tx, verified VerifiedMutation) error {
+		var resolveErr error
+		transition, resolveErr = fixture.streams.ResolveConflictInTx(ctx, tx, verified.Scope, coregit.ResolveStreamConflictInput{
+			Attachment: verified.Attachment, ConflictID: arguments.ConflictID,
+			Precondition: syncMutationPrecondition(arguments.SyncV2Scope), Resolution: arguments.Resolution,
+		})
+		return resolveErr
+	})
+	return transition, err
+}
+
+func TestSyncV2ConflictConstructorFailsClosed(t *testing.T) {
+	db := testDB(t)
+	streams := coregit.NewStreamStore(db)
+	coordinator, err := NewMutationCoordinator(identity.NewStore(db), streams, coregit.NewActivityStore(db))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fabricID := uuid.NewString()
+	verifier, err := NewPublicProofVerifier(fabricID, func() time.Time { return time.Now().UTC() })
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewPublicBoundProofResolver(fabricID, identity.NewStore(db), streams, verifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, dependencies := range map[string]struct {
+		resolver    *PublicBoundProofResolver
+		coordinator *MutationCoordinator
+		streams     *coregit.StreamStore
+	}{
+		"resolver":    {coordinator: coordinator, streams: streams},
+		"coordinator": {resolver: resolver, streams: streams},
+		"streams":     {resolver: resolver, coordinator: coordinator},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := NewSyncV2ConflictHandler(dependencies.resolver, dependencies.coordinator, dependencies.streams); !errors.Is(err, identity.ErrInvalidPublicIdentity) {
+				t.Fatalf("constructor error = %v, want ErrInvalidPublicIdentity", err)
+			}
+		})
+	}
+	var zero *SyncV2ConflictHandler
+	if _, err := zero.Handle(context.Background(), nil, types.PublicRequestProof{}); err == nil || err.Error() != `{"code":"internal_error","operation":"wormhole.sync.conflict"}` {
+		t.Fatalf("nil handler error = %v", err)
+	}
+}
+
+func TestSyncV2ConflictRejectsInvalidArgumentsBeforeAuthorization(t *testing.T) {
+	fixture := newSyncV2ConflictHandlerFixture(t, 160)
+	resolution := syncV2ConflictResolution(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString())
+	validArguments := syncV2ConflictArguments(fixture.attached, uuid.NewString(), resolution)
+	validRaw := canonicalSyncV2ConflictArguments(t, validArguments)
+	valid := string(validRaw)
+	missingConflict, missingResolution := map[string]any{}, map[string]any{}
+	if err := json.Unmarshal(validRaw, &missingConflict); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(validRaw, &missingResolution); err != nil {
+		t.Fatal(err)
+	}
+	delete(missingConflict, "conflict_id")
+	delete(missingResolution, "resolution")
+	missingConflictRaw, _ := json.Marshal(missingConflict)
+	missingResolutionRaw, _ := json.Marshal(missingResolution)
+	nullConflict, nullResolution := map[string]any{}, map[string]any{}
+	_ = json.Unmarshal(validRaw, &nullConflict)
+	_ = json.Unmarshal(validRaw, &nullResolution)
+	nullConflict["conflict_id"], nullResolution["resolution"] = nil, nil
+	nullConflictRaw, _ := json.Marshal(nullConflict)
+	nullResolutionRaw, _ := json.Marshal(nullResolution)
+	tests := map[string]struct{ raw, code string }{
+		"unknown field":         {strings.TrimSuffix(valid, `}`) + `,"project_id":"` + fixture.owner.projectID + `"}`, "invalid_request"},
+		"duplicate":             {strings.Replace(valid, `"conflict_id":`, `"conflict_id":"`+uuid.NewString()+`","conflict_id":`, 1), "invalid_request"},
+		"missing conflict":      {string(missingConflictRaw), "invalid_request"},
+		"missing resolution":    {string(missingResolutionRaw), "invalid_request"},
+		"null conflict":         {string(nullConflictRaw), "invalid_request"},
+		"null resolution":       {string(nullResolutionRaw), "invalid_request"},
+		"trailing":              {valid + `{}`, "invalid_request"},
+		"noncanonical":          {strings.Replace(valid, `{`, `{ `, 1), "invalid_request"},
+		"wrong version":         {strings.Replace(valid, `"version":2`, `"version":3`, 1), "unknown_version"},
+		"noncanonical conflict": {strings.Replace(valid, validArguments.ConflictID, strings.ToUpper(validArguments.ConflictID), 1), "invalid_request"},
+		"malformed conflict":    {strings.Replace(valid, validArguments.ConflictID, "not-a-uuid", 1), "invalid_request"},
+		"private route":         {strings.TrimSuffix(valid, `}`) + `,"workspace_id":"` + uuid.NewString() + `"}`, "invalid_request"},
+		"wrong kind":            {strings.Replace(valid, `"expected_stream_version":0`, `"expected_stream_version":"zero"`, 1), "invalid_request"},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+			_, err := fixture.handler.Handle(context.Background(), json.RawMessage(test.raw), types.PublicRequestProof{})
+			assertSyncV2ConflictFailure(t, err, test.code)
+			assertTask2MutationDelta(t, before, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), 0)
+		})
+	}
+
+	unknown := validArguments
+	unknown.AttachmentRef = uuid.NewString()
+	unknownRaw := canonicalSyncV2ConflictArguments(t, unknown)
+	beforeUnknown := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	_, err := fixture.handler.Handle(context.Background(), unknownRaw, syncV2ConflictProof(t, fixture.owner, unknownRaw, unknown.AttachmentRef, 161))
+	assertSyncV2ConflictFailure(t, err, "attachment_not_found")
+	assertTask2MutationDelta(t, beforeUnknown, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), 0)
+
+	if _, err := fixture.owner.db.Exec(`UPDATE fabric_workspace_stream_bindings SET writable=false,detached_at=now() WHERE project_id=$1 AND attachment_ref=$2`, fixture.owner.projectID, fixture.attached.Attachment.AttachmentRef); err != nil {
+		t.Fatal(err)
+	}
+	beforeDetached := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	_, err = fixture.handler.Handle(context.Background(), validRaw, syncV2ConflictProof(t, fixture.owner, validRaw, validArguments.AttachmentRef, 162))
+	assertSyncV2ConflictFailure(t, err, "attachment_not_found")
+	assertTask2MutationDelta(t, beforeDetached, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), 0)
+}
+
+func TestSyncV2ConflictBurnsNonceForAuthenticatedDenialsAndDomainFailures(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*SyncConflictV2Args)
+		code   string
+	}{
+		{"wrong signed scope", func(arguments *SyncConflictV2Args) { arguments.BaseCommitSHA = strings.Repeat("b", 40) }, "sync_precondition_failed"},
+		{"wrong stable actor", func(arguments *SyncConflictV2Args) { arguments.Resolution.Actor.HumanPrincipalID = uuid.NewString() }, "permission_denied"},
+		{"malformed resolution", func(arguments *SyncConflictV2Args) { arguments.Resolution.SchemaVersion = 2 }, "sync_precondition_failed"},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newSyncV2ConflictFixture(t, byte(163+index*3), byte(164+index*3))
+			arguments := syncV2ConflictArguments(fixture.attached, fixture.conflict.ConflictID, syncV2ConflictResolution(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString()))
+			test.mutate(&arguments)
+			raw := canonicalSyncV2ConflictArguments(t, arguments)
+			before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+			_, err := fixture.handler.Handle(context.Background(), raw, syncV2ConflictProof(t, fixture.owner, raw, arguments.AttachmentRef, byte(165+index*3)))
+			assertSyncV2ConflictFailure(t, err, test.code)
+			assertTask2ExactRowDeltas(t, before, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), map[string]int{"public_request_nonces": 1})
+		})
+	}
+
+	t.Run("unknown conflict", func(t *testing.T) {
+		fixture := newSyncV2ConflictFixture(t, 172, 173)
+		arguments := syncV2ConflictArguments(fixture.attached, uuid.NewString(), syncV2ConflictResolution(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString()))
+		raw := canonicalSyncV2ConflictArguments(t, arguments)
+		before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+		_, err := fixture.handler.Handle(context.Background(), raw, syncV2ConflictProof(t, fixture.owner, raw, arguments.AttachmentRef, 174))
+		assertSyncV2ConflictFailure(t, err, "sync_conflict")
+		assertTask2ExactRowDeltas(t, before, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), map[string]int{"public_request_nonces": 1})
+	})
+
+	t.Run("cross route conflict", func(t *testing.T) {
+		fixture := newSyncV2ConflictFixture(t, 175, 176)
+		other := newSyncV2ConflictFixture(t, 177, 178)
+		arguments := syncV2ConflictArguments(fixture.attached, other.conflict.ConflictID, syncV2ConflictResolution(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString()))
+		raw := canonicalSyncV2ConflictArguments(t, arguments)
+		before, otherBefore := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), task2MutationSnapshot(t, other.owner.db, other.owner.projectID)
+		_, err := fixture.handler.Handle(context.Background(), raw, syncV2ConflictProof(t, fixture.owner, raw, arguments.AttachmentRef, 179))
+		assertSyncV2ConflictFailure(t, err, "sync_conflict")
+		assertTask2ExactRowDeltas(t, before, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), map[string]int{"public_request_nonces": 1})
+		assertTask2MutationDelta(t, otherBefore, task2MutationSnapshot(t, other.owner.db, other.owner.projectID), 0)
+	})
+
+	t.Run("reachable nested conflict", func(t *testing.T) {
+		fixture := newSyncV2ConflictFixture(t, 180, 181)
+		resolution := fixture.conflictOperation
+		resolution.ID = uuid.NewString()
+		resolutionTombstone := *fixture.conflictOperation.Tombstone
+		resolutionTombstone.ExpectedContentDigest = projectstate.Digest("sha256:" + strings.Repeat("e", 64))
+		resolution.Tombstone = &resolutionTombstone
+		arguments := syncV2ConflictArguments(fixture.attached, fixture.conflict.ConflictID, resolution)
+		raw := canonicalSyncV2ConflictArguments(t, arguments)
+		before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+		_, err := fixture.handler.Handle(context.Background(), raw, syncV2ConflictProof(t, fixture.owner, raw, arguments.AttachmentRef, 182))
+		assertSyncV2ConflictFailure(t, err, "sync_precondition_failed")
+		assertTask2ExactRowDeltas(t, before, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), map[string]int{"public_request_nonces": 1})
+	})
+
+	t.Run("already resolved with other operation", func(t *testing.T) {
+		fixture := newSyncV2ConflictFixture(t, 183, 184)
+		first := syncV2ConflictArguments(fixture.attached, fixture.conflict.ConflictID, syncV2ConflictResolution(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString()))
+		_ = resolveSyncV2Conflict(t, fixture, first, 185)
+		changed := first
+		changed.Resolution = syncV2ConflictResolution(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString())
+		raw := canonicalSyncV2ConflictArguments(t, changed)
+		before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+		_, err := fixture.handler.Handle(context.Background(), raw, syncV2ConflictProof(t, fixture.owner, raw, changed.AttachmentRef, 186))
+		assertSyncV2ConflictFailure(t, err, "sync_replay_conflict")
+		assertTask2ExactRowDeltas(t, before, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), map[string]int{"public_request_nonces": 1})
+	})
+
+	t.Run("stored resolution request corruption", func(t *testing.T) {
+		fixture := newSyncV2ConflictFixture(t, 187, 188)
+		arguments := syncV2ConflictArguments(fixture.attached, fixture.conflict.ConflictID, syncV2ConflictResolution(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString()))
+		_ = resolveSyncV2Conflict(t, fixture, arguments, 189)
+		corruptSyncV2PushRequest(t, fixture.owner.db, fixture.owner.projectID, arguments.Resolution.ID)
+		raw := canonicalSyncV2ConflictArguments(t, arguments)
+		before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+		_, err := fixture.handler.Handle(context.Background(), raw, syncV2ConflictProof(t, fixture.owner, raw, arguments.AttachmentRef, 190))
+		assertSyncV2ConflictFailure(t, err, "internal_error")
+		assertTask2ExactRowDeltas(t, before, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), map[string]int{"public_request_nonces": 1})
+	})
+
+	t.Run("audit failure", func(t *testing.T) {
+		fixture := newSyncV2ConflictFixture(t, 191, 192)
+		installAuditFailure(t, fixture.owner.db, fixture.owner.projectID, "sync.conflict")
+		arguments := syncV2ConflictArguments(fixture.attached, fixture.conflict.ConflictID, syncV2ConflictResolution(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString()))
+		raw := canonicalSyncV2ConflictArguments(t, arguments)
+		before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+		_, err := fixture.handler.Handle(context.Background(), raw, syncV2ConflictProof(t, fixture.owner, raw, arguments.AttachmentRef, 193))
+		assertSyncV2ConflictFailure(t, err, "internal_error")
+		assertTask2ExactRowDeltas(t, before, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), map[string]int{"public_request_nonces": 1})
+	})
+
+	t.Run("internal SQL failure", func(t *testing.T) {
+		fixture := newSyncV2ConflictFixture(t, 194, 195)
+		installSyncV2PushVersionFailure(t, fixture.owner.db, fixture.owner.projectID)
+		arguments := syncV2ConflictArguments(fixture.attached, fixture.conflict.ConflictID, syncV2ConflictResolution(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString()))
+		raw := canonicalSyncV2ConflictArguments(t, arguments)
+		before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+		_, err := fixture.handler.Handle(context.Background(), raw, syncV2ConflictProof(t, fixture.owner, raw, arguments.AttachmentRef, 196))
+		assertSyncV2ConflictFailure(t, err, "internal_error")
+		assertTask2ExactRowDeltas(t, before, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), map[string]int{"public_request_nonces": 1})
+	})
+
+	t.Run("post authorization detach", func(t *testing.T) {
+		fixture := newSyncV2ConflictFixture(t, 197, 198)
+		arguments := syncV2ConflictArguments(fixture.attached, fixture.conflict.ConflictID, syncV2ConflictResolution(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString()))
+		raw := canonicalSyncV2ConflictArguments(t, arguments)
+		beforeAuthorization := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+		authorized, err := fixture.resolver.AuthorizeMutation(context.Background(), "wormhole.sync.conflict", raw, arguments.SyncV2Scope, syncV2ConflictProof(t, fixture.owner, raw, arguments.AttachmentRef, 199))
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertTask2ExactRowDeltas(t, beforeAuthorization, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), map[string]int{"public_request_nonces": 1})
+		if _, err := fixture.owner.db.Exec(`UPDATE fabric_workspace_stream_bindings SET writable=false,detached_at=now() WHERE project_id=$1 AND attachment_ref=$2`, fixture.owner.projectID, fixture.attached.Attachment.AttachmentRef); err != nil {
+			t.Fatal(err)
+		}
+		beforeExecute := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+		_, err = executeAuthorizedSyncV2Conflict(context.Background(), fixture, authorized, arguments, raw)
+		if !errors.Is(err, coregit.ErrStreamNotFound) {
+			t.Fatalf("ExecutePublic error = %v, want ErrStreamNotFound", err)
+		}
+		assertTask2MutationDelta(t, beforeExecute, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), 0)
+	})
+}
+
+func TestSyncV2ConflictSafeFailureMappingAndRedaction(t *testing.T) {
+	for _, test := range []struct {
+		err  error
+		code string
+	}{
+		{identity.ErrPublicAuthentication, "authentication_failed"},
+		{identity.ErrPublicNonceReplay, "authentication_failed"},
+		{identity.ErrInvalidPublicIdentity, "authentication_failed"},
+		{coregit.ErrStreamNotFound, "attachment_not_found"},
+		{coregit.ErrStreamActor, "permission_denied"},
+		{coregit.ErrStreamPrecondition, "sync_precondition_failed"},
+		{coregit.ErrStreamConflict, "sync_conflict"},
+		{coregit.ErrOperationReplay, "sync_replay_conflict"},
+		{projectstate.ErrInvalidActorEnvelope, "sync_precondition_failed"},
+		{errors.New("pq: secret SQL /private/path attachment resolution body"), "internal_error"},
+	} {
+		if got := syncMutationErrorCode(test.err); got != test.code {
+			t.Errorf("syncMutationErrorCode(%v) = %q, want %q", test.err, got, test.code)
+		}
+		err := syncMutationFailure("wormhole.sync.conflict", test.code)
+		want := `{"code":"` + test.code + `","operation":"wormhole.sync.conflict"}`
+		if err == nil || err.Error() != want {
+			t.Errorf("safe error = %v, want %s", err, want)
+		}
+		for _, secret := range []string{"secret SQL", "/private/path", "attachment-ref-secret", "resolution body", "pq:"} {
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("safe error leaked %q: %s", secret, err)
+			}
+		}
+	}
+}
+
+func TestSyncV2ConflictResolvesDurableConflictWithExactOperationEvidenceAndAudit(t *testing.T) {
+	fixture := newSyncV2ConflictFixture(t, 200, 201)
+	resolution := syncV2ConflictResolution(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString())
+	arguments := syncV2ConflictArguments(fixture.attached, fixture.conflict.ConflictID, resolution)
+	raw := canonicalSyncV2ConflictArguments(t, arguments)
+	wantOperation, err := projectstate.CanonicalOperation(resolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPortableActor, err := projectstate.CanonicalJSON(resolution.Actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantAuditActor, err := json.Marshal(fixture.owner.transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	got, err := fixture.handler.Handle(context.Background(), raw, syncV2ConflictProof(t, fixture.owner, raw, arguments.AttachmentRef, 202))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Version != 2 || got.Status != "resolved" || got.ConflictID != fixture.conflict.ConflictID || got.OperationID != resolution.ID || got.StreamVersion != 1 || got.LiveTreeDigest == fixture.attached.State.Live.Digest {
+		t.Fatalf("resolved result = %+v", got)
+	}
+	var state, resolutionOperationID, auditAction string
+	var resolutionVersion int64
+	var requestOperation, versionOperation, requestActor, versionActor, auditPayload, auditActor []byte
+	if err := fixture.owner.db.QueryRow(`SELECT c.state,c.resolution_operation_id::text,c.resolution_version,
+		r.canonical_operation_json,v.canonical_operation_json,r.actor_envelope_json,v.actor_envelope_json,
+		a.action,a.canonical_payload_json::text::bytea,a.actor_envelope_json::text::bytea
+		FROM fabric_stream_conflicts c
+		JOIN fabric_stream_requests r ON r.project_id=c.project_id AND r.fabric_instance_id=c.fabric_instance_id AND r.stream_id=c.stream_id AND r.operation_id=c.resolution_operation_id
+		JOIN fabric_stream_versions v ON v.project_id=c.project_id AND v.fabric_instance_id=c.fabric_instance_id AND v.stream_id=c.stream_id AND v.version=c.resolution_version AND v.operation_id=c.resolution_operation_id
+		JOIN audit_log a ON a.project_id=c.project_id AND a.action='sync.conflict'
+		WHERE c.project_id=$1 AND c.conflict_id=$2`, fixture.owner.projectID, fixture.conflict.ConflictID).Scan(
+		&state, &resolutionOperationID, &resolutionVersion, &requestOperation, &versionOperation, &requestActor, &versionActor, &auditAction, &auditPayload, &auditActor); err != nil {
+		t.Fatal(err)
+	}
+	if state != "resolved" || resolutionOperationID != resolution.ID || resolutionVersion != got.StreamVersion || !bytes.Equal(requestOperation, wantOperation) || !bytes.Equal(versionOperation, wantOperation) || !bytes.Equal(requestActor, wantPortableActor) || !bytes.Equal(versionActor, wantPortableActor) || auditAction != "sync.conflict" || !bytes.Equal(auditPayload, raw) || !bytes.Equal(auditActor, wantAuditActor) {
+		t.Fatal("stored conflict resolution or audit evidence changed")
+	}
+	after := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	assertTask2ExactRowChanges(t, before, after,
+		map[string]int{"fabric_stream_versions": 1, "fabric_stream_requests": 1, "public_request_nonces": 1, "audit_log": 1},
+		map[string]int{"fabric_streams": 1, "fabric_stream_conflicts": 1})
+}
+
+func TestSyncV2ConflictExactReplayReturnsRecordedResolution(t *testing.T) {
+	fixture := newSyncV2ConflictFixture(t, 203, 204)
+	arguments := syncV2ConflictArguments(fixture.attached, fixture.conflict.ConflictID, syncV2ConflictResolution(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString()))
+	first := resolveSyncV2Conflict(t, fixture, arguments, 205)
+	before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	replayed := resolveSyncV2Conflict(t, fixture, arguments, 206)
+	if replayed != first {
+		t.Fatalf("exact conflict replay = %+v, want %+v", replayed, first)
+	}
+	after := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	assertTask2ExactRowDeltas(t, before, after, map[string]int{"public_request_nonces": 1, "audit_log": 1})
+}
+
+func TestSyncV2ConflictChangedResolutionBytesReturnSafeReplayConflict(t *testing.T) {
+	fixture := newSyncV2ConflictFixture(t, 207, 208)
+	arguments := syncV2ConflictArguments(fixture.attached, fixture.conflict.ConflictID, syncV2ConflictResolution(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString()))
+	_ = resolveSyncV2Conflict(t, fixture, arguments, 209)
+	changed := arguments
+	changed.Resolution = arguments.Resolution
+	changedRecord := *arguments.Resolution.PutRecord.Record.Actor
+	changedRecord.DisplayName = "Changed conflict resolution bytes"
+	changed.Resolution.PutRecord = &projectstate.PutRecordV1{Record: projectstate.RecordValueV1{Actor: &changedRecord}}
+	raw := canonicalSyncV2ConflictArguments(t, changed)
+	before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	_, err := fixture.handler.Handle(context.Background(), raw, syncV2ConflictProof(t, fixture.owner, raw, changed.AttachmentRef, 210))
+	assertSyncV2ConflictFailure(t, err, "sync_replay_conflict")
+	after := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	assertTask2ExactRowDeltas(t, before, after, map[string]int{"public_request_nonces": 1})
+}
+
+func TestSyncV2ConflictAgentStableAttributionAndForcedRLSIsolation(t *testing.T) {
+	t.Run("agent stable attribution", func(t *testing.T) {
+		push, session, agentID := newSyncV2PushAgentFixture(t, 211, true)
+		fixture := &syncV2ConflictFixture{syncV2PushFixture: push}
+		var err error
+		fixture.handler, err = NewSyncV2ConflictHandler(push.resolver, push.coordinator, push.streams)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.seedDurableConflict(t, 212)
+		resolution := syncV2ConflictResolution(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString())
+		resolution.Actor = types.ActorEnvelope{
+			ActorKind: types.ActorAgent, AgentID: agentID, AccountableHumanID: fixture.owner.actor.ID,
+			SessionID: uuid.NewString(), HarnessName: "historical", HarnessVersion: "0", ModelName: "old", ModelVersion: "1",
+			Assurance: types.AssuranceLocal, OccurredAt: fixture.owner.transport.OccurredAt.Add(-time.Minute),
+		}
+		arguments := syncV2ConflictArguments(fixture.attached, fixture.conflict.ConflictID, resolution)
+		raw := canonicalSyncV2ConflictArguments(t, arguments)
+		seed := sha256.Sum256([]byte(fixture.owner.projectID))
+		proof := signedBoundSessionProof(t, fixture.owner.fabricID, "wormhole.sync.conflict", raw, arguments.AttachmentRef, session.SessionID, fixture.owner.transport.OccurredAt, bytesOf(213, 32), seed[:])
+		got, err := fixture.handler.Handle(context.Background(), raw, proof)
+		if err != nil || got.OperationID != resolution.ID {
+			t.Fatalf("agent conflict resolution = (%+v,%v)", got, err)
+		}
+		wantOperation, _ := projectstate.CanonicalOperation(resolution)
+		wantActor, _ := projectstate.CanonicalJSON(resolution.Actor)
+		var requestOperation, requestActor, auditActor []byte
+		if err := fixture.owner.db.QueryRow(`SELECT r.canonical_operation_json,r.actor_envelope_json,a.actor_envelope_json::text::bytea
+			FROM fabric_stream_requests r JOIN audit_log a ON a.project_id=r.project_id AND a.action='sync.conflict'
+			WHERE r.project_id=$1 AND r.operation_id=$2`, fixture.owner.projectID, resolution.ID).Scan(&requestOperation, &requestActor, &auditActor); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(requestOperation, wantOperation) || !bytes.Equal(requestActor, wantActor) {
+			t.Fatal("agent conflict resolution rewrote portable attribution")
+		}
+		var transport types.ActorEnvelope
+		if err := json.Unmarshal(auditActor, &transport); err != nil {
+			t.Fatal(err)
+		}
+		if transport.ActorKind != types.ActorAgent || transport.AgentID != agentID || transport.AccountableHumanID != fixture.owner.actor.ID || transport.SessionID != session.SessionID || transport.HarnessName != session.HarnessName || transport.ModelName != session.ModelName || transport.Assurance != types.AssurancePublicKeyContinuity {
+			t.Fatalf("agent conflict audit actor = %+v, session=%+v", transport, session)
+		}
+	})
+
+	t.Run("forced RLS route isolation", func(t *testing.T) {
+		first, second := newMutationFixture(t), newMutationFixture(t)
+		oldFabricID := second.fabricID
+		if _, err := second.db.Exec(`UPDATE project_repository_bindings SET fabric_instance_id=$1 WHERE project_id=$2 AND fabric_instance_id=$3`, first.fabricID, second.projectID, oldFabricID); err != nil {
+			t.Fatal(err)
+		}
+		second.fabricID = first.fabricID
+		owners := []*mutationFixture{first, second}
+		runtimeDB := publicRuntimeDB(t)
+		streams := coregit.NewStreamStore(runtimeDB)
+		resolver := realBoundResolverForDB(t, first, runtimeDB)
+		coordinator, err := NewMutationCoordinator(identity.NewStore(runtimeDB), streams, coregit.NewActivityStore(runtimeDB))
+		if err != nil {
+			t.Fatal(err)
+		}
+		handler, err := NewSyncV2ConflictHandler(resolver, coordinator, streams)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixtures := make([]*syncV2ConflictFixture, 0, 2)
+		for index, owner := range owners {
+			attached := owner.attach(byte(214 + index*3))
+			push := newSyncV2PushFixtureForAttached(t, owner, attached)
+			fixture := &syncV2ConflictFixture{syncV2PushFixture: push, handler: handler}
+			fixture.seedDurableConflict(t, byte(215+index*3))
+			fixtures = append(fixtures, fixture)
+		}
+		for index, fixture := range fixtures {
+			arguments := syncV2ConflictArguments(fixture.attached, fixture.conflict.ConflictID, syncV2ConflictResolution(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString()))
+			raw := canonicalSyncV2ConflictArguments(t, arguments)
+			beforeFirst, beforeSecond := task2MutationSnapshot(t, first.db, first.projectID), task2MutationSnapshot(t, second.db, second.projectID)
+			seed := sha256.Sum256([]byte(fixture.owner.projectID))
+			got, err := handler.Handle(context.Background(), raw, signedBoundProof(t, first.fabricID, "wormhole.sync.conflict", raw, arguments.AttachmentRef, fixture.owner.transport.OccurredAt, bytesOf(byte(216+index*3), 32), seed[:]))
+			if err != nil || got.OperationID != arguments.Resolution.ID {
+				t.Fatalf("project %d resolution = (%+v,%v)", index, got, err)
+			}
+			afterFirst, afterSecond := task2MutationSnapshot(t, first.db, first.projectID), task2MutationSnapshot(t, second.db, second.projectID)
+			if fixture.owner == first {
+				if reflect.DeepEqual(afterFirst, beforeFirst) || !reflect.DeepEqual(afterSecond, beforeSecond) {
+					t.Fatal("first-project conflict resolution crossed RLS scope")
+				}
+			} else if reflect.DeepEqual(afterSecond, beforeSecond) || !reflect.DeepEqual(afterFirst, beforeFirst) {
+				t.Fatal("second-project conflict resolution crossed RLS scope")
+			}
+		}
+	})
+}
+
+func TestSyncV2ConflictConcurrentExactResolutionConverges(t *testing.T) {
+	fixture := newSyncV2ConflictFixture(t, 220, 221)
+	arguments := syncV2ConflictArguments(fixture.attached, fixture.conflict.ConflictID, syncV2ConflictResolution(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString()))
+	raw := canonicalSyncV2ConflictArguments(t, arguments)
+	beforeAuthorization := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	authorized := make([]PublicMutationAuthority, 2)
+	for index, nonce := range []byte{222, 223} {
+		var err error
+		authorized[index], err = fixture.resolver.AuthorizeMutation(context.Background(), "wormhole.sync.conflict", raw, arguments.SyncV2Scope, syncV2ConflictProof(t, fixture.owner, raw, arguments.AttachmentRef, nonce))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	afterAuthorization := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	assertTask2ExactRowDeltas(t, beforeAuthorization, afterAuthorization, map[string]int{"public_request_nonces": 2})
+	results := make([]coregit.StreamTransition, 2)
+	errs := raceAtRealAttachmentLock(t, fixture.owner.db, fixture.coordinator, coregit.AttachmentLookup{ProjectID: fixture.owner.projectID, FabricInstanceID: fixture.owner.fabricID, AttachmentRef: fixture.attached.Attachment.AttachmentRef}, []func() error{
+		func() error {
+			var err error
+			results[0], err = executeAuthorizedSyncV2Conflict(context.Background(), fixture, authorized[0], arguments, raw)
+			return err
+		},
+		func() error {
+			var err error
+			results[1], err = executeAuthorizedSyncV2Conflict(context.Background(), fixture, authorized[1], arguments, raw)
+			return err
+		},
+	})
+	if errs[0] != nil || errs[1] != nil || !reflect.DeepEqual(results[0], results[1]) || results[0].Version != 1 || results[0].ConflictID != "" {
+		t.Fatalf("exact resolution race = (%+v,%v) / (%+v,%v)", results[0], errs[0], results[1], errs[1])
+	}
+	after := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	assertTask2ExactRowChanges(t, afterAuthorization, after,
+		map[string]int{"fabric_stream_versions": 1, "fabric_stream_requests": 1, "audit_log": 2},
+		map[string]int{"fabric_streams": 1, "fabric_stream_conflicts": 1})
+}
+
+func TestSyncV2ConflictConcurrentChangedResolutionHasOneWinner(t *testing.T) {
+	fixture := newSyncV2ConflictFixture(t, 224, 225)
+	operationID, recordID := uuid.NewString(), uuid.NewString()
+	firstResolution := syncV2ConflictResolution(fixture.owner, fixture.attached.State, operationID, recordID)
+	secondResolution := firstResolution
+	changedRecord := *firstResolution.PutRecord.Record.Actor
+	changedRecord.DisplayName = "Changed concurrent resolution"
+	secondResolution.PutRecord = &projectstate.PutRecordV1{Record: projectstate.RecordValueV1{Actor: &changedRecord}}
+	arguments := []SyncConflictV2Args{
+		syncV2ConflictArguments(fixture.attached, fixture.conflict.ConflictID, firstResolution),
+		syncV2ConflictArguments(fixture.attached, fixture.conflict.ConflictID, secondResolution),
+	}
+	raw := []json.RawMessage{canonicalSyncV2ConflictArguments(t, arguments[0]), canonicalSyncV2ConflictArguments(t, arguments[1])}
+	beforeAuthorization := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	authorized := make([]PublicMutationAuthority, 2)
+	for index := range authorized {
+		var err error
+		authorized[index], err = fixture.resolver.AuthorizeMutation(context.Background(), "wormhole.sync.conflict", raw[index], arguments[index].SyncV2Scope, syncV2ConflictProof(t, fixture.owner, raw[index], arguments[index].AttachmentRef, byte(226+index)))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	afterAuthorization := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	assertTask2ExactRowDeltas(t, beforeAuthorization, afterAuthorization, map[string]int{"public_request_nonces": 2})
+	results := make([]coregit.StreamTransition, 2)
+	errs := raceAtRealAttachmentLock(t, fixture.owner.db, fixture.coordinator, coregit.AttachmentLookup{ProjectID: fixture.owner.projectID, FabricInstanceID: fixture.owner.fabricID, AttachmentRef: fixture.attached.Attachment.AttachmentRef}, []func() error{
+		func() error {
+			var err error
+			results[0], err = executeAuthorizedSyncV2Conflict(context.Background(), fixture, authorized[0], arguments[0], raw[0])
+			return err
+		},
+		func() error {
+			var err error
+			results[1], err = executeAuthorizedSyncV2Conflict(context.Background(), fixture, authorized[1], arguments[1], raw[1])
+			return err
+		},
+	})
+	successes, replays := 0, 0
+	for index, err := range errs {
+		switch {
+		case err == nil:
+			successes++
+			if results[index].Version != 1 {
+				t.Fatalf("winner transition = %+v", results[index])
+			}
+		case errors.Is(err, coregit.ErrOperationReplay):
+			replays++
+		default:
+			t.Fatalf("changed resolution race error %d = %v", index, err)
+		}
+	}
+	if successes != 1 || replays != 1 {
+		t.Fatalf("changed resolution race success=%d replay=%d", successes, replays)
+	}
+	after := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	assertTask2ExactRowChanges(t, afterAuthorization, after,
+		map[string]int{"fabric_stream_versions": 1, "fabric_stream_requests": 1, "audit_log": 1},
+		map[string]int{"fabric_streams": 1, "fabric_stream_conflicts": 1})
+}
+
+func TestSyncV2ConflictConcurrentSameNonceAuthorizesOnce(t *testing.T) {
+	fixture := newSyncV2ConflictFixture(t, 228, 229)
+	arguments := syncV2ConflictArguments(fixture.attached, fixture.conflict.ConflictID, syncV2ConflictResolution(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString()))
+	raw := canonicalSyncV2ConflictArguments(t, arguments)
+	proof := syncV2ConflictProof(t, fixture.owner, raw, arguments.AttachmentRef, 230)
+	before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	results := make([]SyncConflictResolvedV2Result, 2)
+	errs := raceAtRealAttachmentLock(t, fixture.owner.db, fixture.coordinator, coregit.AttachmentLookup{ProjectID: fixture.owner.projectID, FabricInstanceID: fixture.owner.fabricID, AttachmentRef: fixture.attached.Attachment.AttachmentRef}, []func() error{
+		func() error {
+			var err error
+			results[0], err = fixture.handler.Handle(context.Background(), raw, proof)
+			return err
+		},
+		func() error {
+			var err error
+			results[1], err = fixture.handler.Handle(context.Background(), raw, proof)
+			return err
+		},
+	})
+	successes, authenticationFailures := 0, 0
+	for index, err := range errs {
+		switch {
+		case err == nil:
+			successes++
+			if results[index].Status != "resolved" {
+				t.Fatalf("winner result = %+v", results[index])
+			}
+		case err.Error() == `{"code":"authentication_failed","operation":"wormhole.sync.conflict"}`:
+			authenticationFailures++
+		default:
+			t.Fatalf("same-nonce conflict race error %d = %v", index, err)
+		}
+	}
+	if successes != 1 || authenticationFailures != 1 {
+		t.Fatalf("same-nonce conflict outcomes success=%d auth=%d", successes, authenticationFailures)
+	}
+	after := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	assertTask2ExactRowChanges(t, before, after,
+		map[string]int{"fabric_stream_versions": 1, "fabric_stream_requests": 1, "public_request_nonces": 1, "audit_log": 1},
+		map[string]int{"fabric_streams": 1, "fabric_stream_conflicts": 1})
+}
