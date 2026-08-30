@@ -290,3 +290,257 @@ func TestPublicProofResolveVerifiedTrackedHumanRequiresOneCanonicalLiveKey(t *te
 		})
 	}
 }
+
+func mutationAuthorizationRequest(t *testing.T, f *mutationFixture, scope SyncV2Scope, nonceByte byte, sessionID string) (json.RawMessage, types.PublicRequestProof) {
+	t.Helper()
+	raw, err := json.Marshal(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = canonicalMutationJSON(t, raw)
+	seed := sha256.Sum256([]byte(f.projectID))
+	proof := signedBoundSessionProof(t, f.fabricID, "wormhole.sync.push", raw, scope.AttachmentRef, sessionID, f.transport.OccurredAt, bytesOf(nonceByte, 32), seed[:])
+	return raw, proof
+}
+
+func realBoundResolverForDB(t *testing.T, f *mutationFixture, db *sql.DB) *PublicBoundProofResolver {
+	t.Helper()
+	verifier, err := NewPublicProofVerifier(f.fabricID, func() time.Time { return f.transport.OccurredAt })
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewPublicBoundProofResolver(f.fabricID, identity.NewStore(db), coregit.NewStreamStore(db), verifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolver
+}
+
+func TestPublicBoundMutationAuthorizationBurnsNonceBeforeSignedRouteDenial(t *testing.T) {
+	tests := map[string]func(*SyncV2Scope){
+		"repository provider":         func(scope *SyncV2Scope) { scope.Repository.Provider = "gitlab" },
+		"repository immutable id":     func(scope *SyncV2Scope) { scope.Repository.ImmutableID = "987654321" },
+		"repository canonical remote": func(scope *SyncV2Scope) { scope.Repository.CanonicalRemote += "-moved" },
+		"canonical ref":               func(scope *SyncV2Scope) { scope.CanonicalRef = "refs/heads/other" },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			f := newMutationFixture(t)
+			attached := f.attach(1)
+			scope := boundReadArguments(attached, 0).SyncV2Scope
+			mutate(&scope)
+			raw, proof := mutationAuthorizationRequest(t, f, scope, 2, "")
+			before := task2MutationSnapshot(t, f.db, f.projectID)
+			resolver := realBoundResolverForDB(t, f, publicRuntimeDB(t))
+			_, err := resolver.AuthorizeMutation(context.Background(), "wormhole.sync.push", raw, scope, proof)
+			if !errors.Is(err, coregit.ErrStreamPrecondition) {
+				t.Fatalf("AuthorizeMutation error = %v, want ErrStreamPrecondition", err)
+			}
+			assertTask2MutationDelta(t, before, task2MutationSnapshot(t, f.db, f.projectID), 1)
+		})
+	}
+}
+
+func TestPublicBoundMutationAuthorizationBurnsNonceBeforeSessionDenial(t *testing.T) {
+	f := newMutationFixture(t)
+	attached := f.attach(3)
+	scope := boundReadArguments(attached, 0).SyncV2Scope
+	raw, proof := mutationAuthorizationRequest(t, f, scope, 4, "00000000-0000-4000-8000-000000000099")
+	before := task2MutationSnapshot(t, f.db, f.projectID)
+	_, err := realBoundResolverForDB(t, f, publicRuntimeDB(t)).AuthorizeMutation(context.Background(), "wormhole.sync.push", raw, scope, proof)
+	if !errors.Is(err, identity.ErrPublicAuthentication) {
+		t.Fatalf("AuthorizeMutation error = %v, want ErrPublicAuthentication", err)
+	}
+	assertTask2MutationDelta(t, before, task2MutationSnapshot(t, f.db, f.projectID), 1)
+}
+
+func TestPublicBoundMutationAuthorizationRejectsUnverifiedAndWrongIssuerWithoutNonce(t *testing.T) {
+	for _, name := range []string{"unverified", "wrong issuer"} {
+		t.Run(name, func(t *testing.T) {
+			f := newMutationFixture(t)
+			attached := f.attach(5)
+			scope := boundReadArguments(attached, 0).SyncV2Scope
+			raw, proof := mutationAuthorizationRequest(t, f, scope, 6, "")
+			if name == "wrong issuer" {
+				wrongSeed := sha256.Sum256([]byte("wrong-issuer-" + f.projectID))
+				proof = signedBoundProof(t, f.fabricID, "wormhole.sync.push", raw, scope.AttachmentRef, f.transport.OccurredAt, bytesOf(6, 32), wrongSeed[:])
+			} else {
+				signature, _ := base64.RawURLEncoding.DecodeString(proof.Signature)
+				signature[0] ^= 1
+				proof.Signature = base64.RawURLEncoding.EncodeToString(signature)
+			}
+			before := task2MutationSnapshot(t, f.db, f.projectID)
+			_, err := realBoundResolverForDB(t, f, publicRuntimeDB(t)).AuthorizeMutation(context.Background(), "wormhole.sync.push", raw, scope, proof)
+			if !errors.Is(err, identity.ErrPublicAuthentication) {
+				t.Fatalf("AuthorizeMutation error = %v, want ErrPublicAuthentication", err)
+			}
+			assertTask2MutationDelta(t, before, task2MutationSnapshot(t, f.db, f.projectID), 0)
+		})
+	}
+}
+
+func TestPublicBoundReadResolverStillRollsBackNonceOnReadFailure(t *testing.T) {
+	f := newMutationFixture(t)
+	attached := f.attach(7)
+	scope := boundReadArguments(attached, 0).SyncV2Scope
+	raw, _ := mutationAuthorizationRequest(t, f, scope, 8, "")
+	seed := sha256.Sum256([]byte(f.projectID))
+	proof := signedBoundProof(t, f.fabricID, "wormhole.sync.pull", raw, scope.AttachmentRef, f.transport.OccurredAt, bytesOf(8, 32), seed[:])
+	before := task2MutationSnapshot(t, f.db, f.projectID)
+	want := errors.New("read callback failed")
+	err := realBoundResolverForDB(t, f, publicRuntimeDB(t)).Resolve(context.Background(), "wormhole.sync.pull", raw, scope, proof, func(context.Context, *sql.Tx, VerifiedPublicBoundRead) error { return want })
+	if !errors.Is(err, want) {
+		t.Fatalf("Resolve error = %v, want callback sentinel", err)
+	}
+	assertTask2MutationDelta(t, before, task2MutationSnapshot(t, f.db, f.projectID), 0)
+}
+
+func TestPublicBoundMutationPreAuthorizationMissingAndDetachedBurnNoNonce(t *testing.T) {
+	for _, detached := range []bool{false, true} {
+		t.Run(map[bool]string{false: "missing", true: "detached"}[detached], func(t *testing.T) {
+			f := newMutationFixture(t)
+			attached := f.attach(9)
+			scope := boundReadArguments(attached, 0).SyncV2Scope
+			if !detached {
+				scope.AttachmentRef = "00000000-0000-4000-8000-000000000098"
+			} else if _, err := f.db.Exec(`UPDATE fabric_workspace_stream_bindings SET writable=false,detached_at=now() WHERE project_id=$1 AND attachment_ref=$2`, f.projectID, scope.AttachmentRef); err != nil {
+				t.Fatal(err)
+			}
+			raw, proof := mutationAuthorizationRequest(t, f, scope, 10, "")
+			before := task2MutationSnapshot(t, f.db, f.projectID)
+			_, err := realBoundResolverForDB(t, f, publicRuntimeDB(t)).AuthorizeMutation(context.Background(), "wormhole.sync.push", raw, scope, proof)
+			if !errors.Is(err, coregit.ErrStreamNotFound) {
+				t.Fatalf("AuthorizeMutation error = %v, want ErrStreamNotFound", err)
+			}
+			assertTask2MutationDelta(t, before, task2MutationSnapshot(t, f.db, f.projectID), 0)
+		})
+	}
+}
+
+func TestPublicBoundMutationAuthorizationConcurrentNonceHasOneWinner(t *testing.T) {
+	f := newMutationFixture(t)
+	attached := f.attach(17)
+	scope := boundReadArguments(attached, 0).SyncV2Scope
+	raw, proof := mutationAuthorizationRequest(t, f, scope, 18, "")
+	runtimeDB := publicRuntimeDB(t)
+	resolver := realBoundResolverForDB(t, f, runtimeDB)
+	coordinator, err := NewMutationCoordinator(identity.NewStore(runtimeDB), coregit.NewStreamStore(runtimeDB), coregit.NewActivityStore(runtimeDB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := task2MutationSnapshot(t, f.db, f.projectID)
+	authorities := make([]PublicMutationAuthority, 2)
+	errs := raceAtRealAttachmentLock(t, f.db, coordinator, coregit.AttachmentLookup{
+		ProjectID: f.projectID, FabricInstanceID: f.fabricID, AttachmentRef: attached.Attachment.AttachmentRef,
+	}, []func() error{
+		func() error {
+			var authorizeErr error
+			authorities[0], authorizeErr = resolver.AuthorizeMutation(context.Background(), "wormhole.sync.push", raw, scope, proof)
+			return authorizeErr
+		},
+		func() error {
+			var authorizeErr error
+			authorities[1], authorizeErr = resolver.AuthorizeMutation(context.Background(), "wormhole.sync.push", raw, scope, proof)
+			return authorizeErr
+		},
+	})
+	winners, replays := 0, 0
+	for index, err := range errs {
+		switch {
+		case err == nil:
+			winners++
+			if authorities[index].Authority.AttachmentRef != attached.Attachment.AttachmentRef {
+				t.Fatalf("winner authority = %+v", authorities[index])
+			}
+		case errors.Is(err, identity.ErrPublicNonceReplay):
+			replays++
+		default:
+			t.Fatalf("authorization %d error = %v", index, err)
+		}
+	}
+	if winners != 1 || replays != 1 {
+		t.Fatalf("authorization outcomes winners=%d replays=%d", winners, replays)
+	}
+	assertTask2MutationDelta(t, before, task2MutationSnapshot(t, f.db, f.projectID), 1)
+}
+
+func TestPublicBoundMutationAuthorizationForcedRLSCrossProjectAndFabricIsolation(t *testing.T) {
+	first := newMutationFixture(t)
+	second := newMutationFixture(t)
+	oldFabricID := second.fabricID
+	if _, err := second.db.Exec(`UPDATE project_repository_bindings SET fabric_instance_id=$1 WHERE project_id=$2 AND fabric_instance_id=$3`, first.fabricID, second.projectID, oldFabricID); err != nil {
+		t.Fatal(err)
+	}
+	second.fabricID = first.fabricID
+	fixtures := []struct {
+		owner    *mutationFixture
+		attached InitialAttachResult
+	}{{first, first.attach(19)}, {second, second.attach(20)}}
+	runtimeDB := publicRuntimeDB(t)
+	resolver := realBoundResolverForDB(t, first, runtimeDB)
+	for index, fixture := range fixtures {
+		scope := boundReadArguments(fixture.attached, 0).SyncV2Scope
+		raw, proof := mutationAuthorizationRequest(t, fixture.owner, scope, byte(21+index), "")
+		beforeFirst := task2MutationSnapshot(t, first.db, first.projectID)
+		beforeSecond := task2MutationSnapshot(t, second.db, second.projectID)
+		authorized, err := resolver.AuthorizeMutation(context.Background(), "wormhole.sync.push", raw, scope, proof)
+		if err != nil || authorized.Authority.Scope.ProjectID != fixture.owner.projectID {
+			t.Fatalf("project %d authorization = (%+v, %v)", index, authorized, err)
+		}
+		firstDelta, secondDelta := 0, 0
+		if fixture.owner == first {
+			firstDelta = 1
+		} else {
+			secondDelta = 1
+		}
+		assertTask2MutationDelta(t, beforeFirst, task2MutationSnapshot(t, first.db, first.projectID), firstDelta)
+		assertTask2MutationDelta(t, beforeSecond, task2MutationSnapshot(t, second.db, second.projectID), secondDelta)
+	}
+
+	wrongFabric := "00000000-0000-4000-8000-000000000097"
+	verifier, err := NewPublicProofVerifier(wrongFabric, func() time.Time { return first.transport.OccurredAt })
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongResolver, err := NewPublicBoundProofResolver(wrongFabric, identity.NewStore(runtimeDB), coregit.NewStreamStore(runtimeDB), verifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := boundReadArguments(fixtures[0].attached, 0).SyncV2Scope
+	raw := canonicalMutationJSON(t, mustMarshalJSON(t, scope))
+	seed := sha256.Sum256([]byte(first.projectID))
+	proof := signedBoundProof(t, wrongFabric, "wormhole.sync.push", raw, scope.AttachmentRef, first.transport.OccurredAt, bytesOf(23, 32), seed[:])
+	before := task2MutationSnapshot(t, first.db, first.projectID)
+	if _, err := wrongResolver.AuthorizeMutation(context.Background(), "wormhole.sync.push", raw, scope, proof); !errors.Is(err, coregit.ErrStreamNotFound) {
+		t.Fatalf("wrong-fabric authorization error = %v, want ErrStreamNotFound", err)
+	}
+	assertTask2MutationDelta(t, before, task2MutationSnapshot(t, first.db, first.projectID), 0)
+}
+
+func mustMarshalJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func TestPublicBoundMutationPostAuthorizationDetachKeepsBurnedNonce(t *testing.T) {
+	f := newMutationFixture(t)
+	attached := f.attach(24)
+	authorized, coordinator, raw := authorizeFixtureMutation(t, f, attached, 25)
+	if _, err := f.db.Exec(`UPDATE fabric_workspace_stream_bindings SET writable=false,detached_at=now() WHERE project_id=$1 AND attachment_ref=$2`, f.projectID, attached.Attachment.AttachmentRef); err != nil {
+		t.Fatal(err)
+	}
+	before := task2MutationSnapshot(t, f.db, f.projectID)
+	called := false
+	err := coordinator.ExecutePublic(context.Background(), authorized, "sync.push", raw, func(context.Context, *sql.Tx, VerifiedMutation) error {
+		called = true
+		return nil
+	})
+	if !errors.Is(err, coregit.ErrStreamNotFound) || called {
+		t.Fatalf("ExecutePublic = (called=%v, error=%v), want ErrStreamNotFound before callback", called, err)
+	}
+	assertTask2MutationDelta(t, before, task2MutationSnapshot(t, f.db, f.projectID), 0)
+}

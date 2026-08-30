@@ -239,6 +239,421 @@ func TestMutationCoordinatorRejectsInvalidCanonicalPayloadBeforeSQL(t *testing.T
 	}
 }
 
+func authorizeFixtureMutation(t *testing.T, f *mutationFixture, attached InitialAttachResult, nonceByte byte) (PublicMutationAuthority, *MutationCoordinator, []byte) {
+	t.Helper()
+	scope := boundReadArguments(attached, 0).SyncV2Scope
+	raw, proof := mutationAuthorizationRequest(t, f, scope, nonceByte, "")
+	runtimeDB := publicRuntimeDB(t)
+	authorized, err := realBoundResolverForDB(t, f, runtimeDB).AuthorizeMutation(context.Background(), "wormhole.sync.push", raw, scope, proof)
+	if err != nil {
+		t.Fatalf("AuthorizeMutation: %v", err)
+	}
+	coordinator, err := NewMutationCoordinator(identity.NewStore(runtimeDB), coregit.NewStreamStore(runtimeDB), coregit.NewActivityStore(runtimeDB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return authorized, coordinator, raw
+}
+
+func authorizeFixtureAgentMutation(t *testing.T, f *mutationFixture, nonceByte byte) (PublicMutationAuthority, *MutationCoordinator, []byte, identity.PublicAgentSession) {
+	t.Helper()
+	snapshot, err := projectstate.DecodeTree(f.tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentID := uuid.NewString()
+	agent := projectstate.ActorV1{
+		SchemaVersion: 1, Kind: "actor", ID: agentID, ActorKind: types.ActorAgent,
+		DisplayName: "Mutation Agent", PublicKeys: []projectstate.PublicKeyV1{}, Extensions: projectstate.ExtensionsV1{},
+	}
+	snapshot.Actors[agentID] = projectstate.Record[projectstate.ActorV1]{Value: &agent}
+	f.tree, err = projectstate.EncodeTree(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attached := f.attach(nonceByte)
+	tx, err := f.coordinator.identity.BeginProjectTx(context.Background(), f.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := f.coordinator.identity.IssuePublicAgentSessionInTx(context.Background(), tx, identity.PublicAgentSessionIssue{
+		ProjectID: f.projectID, FabricInstanceID: f.fabricID, StreamID: attached.Attachment.Key.StreamID,
+		WorkspaceID: attached.Attachment.WorkspaceID, CanonicalRef: attached.Attachment.CanonicalRef,
+		AttachmentRef: attached.Attachment.AttachmentRef, IssuerKeyFingerprint: f.fingerprint,
+		AgentID: agentID, HarnessName: "codex", HarnessVersion: "1", ModelName: "gpt", ModelVersion: "5",
+		SourceVersion: attached.Attachment.SourceVersion, IssuedAt: f.transport.OccurredAt,
+	})
+	if err == nil {
+		err = tx.Commit()
+	} else {
+		_ = tx.Rollback()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := boundReadArguments(attached, 0).SyncV2Scope
+	raw, _ := mutationAuthorizationRequest(t, f, scope, nonceByte+1, "")
+	seed := sha256.Sum256([]byte(f.projectID))
+	proof := signedBoundSessionProof(t, f.fabricID, "wormhole.sync.push", raw, scope.AttachmentRef, session.SessionID, f.transport.OccurredAt, bytesOf(nonceByte+1, 32), seed[:])
+	runtimeDB := publicRuntimeDB(t)
+	authorized, err := realBoundResolverForDB(t, f, runtimeDB).AuthorizeMutation(context.Background(), "wormhole.sync.push", raw, scope, proof)
+	if err != nil {
+		t.Fatalf("AuthorizeMutation agent: %v", err)
+	}
+	coordinator, err := NewMutationCoordinator(identity.NewStore(runtimeDB), coregit.NewStreamStore(runtimeDB), coregit.NewActivityStore(runtimeDB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return authorized, coordinator, raw, session
+}
+
+func TestMutationCoordinatorExecutePublicRejectsInvalidCommandBeforeMutationSQL(t *testing.T) {
+	coordinator, err := NewMutationCoordinator(identity.NewStore(nil), coregit.NewStreamStore(nil), coregit.NewActivityStore(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorized := PublicMutationAuthority{
+		Authority: identity.MutationAuthority{
+			Scope: types.ActorScope{ProjectID: "00000000-0000-4000-8000-000000000001", Actor: types.ActorEnvelope{
+				ActorKind: types.ActorHuman, HumanPrincipalID: "00000000-0000-4000-8000-000000000002",
+				Assurance: types.AssurancePublicKeyContinuity, OccurredAt: time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC),
+			}},
+		},
+		SignedScope: SyncV2Scope{Version: projectstate.SyncProtocolVersionV2},
+	}
+	for _, assurance := range []types.Assurance{types.AssuranceLocal, types.AssuranceLegacy, types.AssuranceUnknown, types.AssurancePrivateAuthenticated} {
+		t.Run(string(assurance), func(t *testing.T) {
+			candidate := authorized
+			candidate.Authority.Scope.Actor.Assurance = assurance
+			called := false
+			err := coordinator.ExecutePublic(context.Background(), candidate, "sync.push", []byte(`{"version":2}`), func(context.Context, *sql.Tx, VerifiedMutation) error {
+				called = true
+				return nil
+			})
+			if !errors.Is(err, errInvalidMutation) || called {
+				t.Fatalf("ExecutePublic = (called=%v, error=%v), want errInvalidMutation before SQL", called, err)
+			}
+		})
+	}
+	t.Run("session mismatch", func(t *testing.T) {
+		candidate := authorized
+		candidate.Authority.SessionID = "00000000-0000-4000-8000-000000000003"
+		called := false
+		err := coordinator.ExecutePublic(context.Background(), candidate, "sync.push", []byte(`{"version":2}`), func(context.Context, *sql.Tx, VerifiedMutation) error {
+			called = true
+			return nil
+		})
+		if !errors.Is(err, errInvalidMutation) || called {
+			t.Fatalf("ExecutePublic = (called=%v, error=%v), want errInvalidMutation before SQL", called, err)
+		}
+	})
+}
+
+func TestMutationCoordinatorExecutePublicRevalidatesFreshAttachmentIssuerSessionAndScope(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, *mutationFixture, *PublicMutationAuthority)
+		want   error
+	}{
+		{name: "non-writable attachment", want: identity.ErrPublicAuthentication, mutate: func(t *testing.T, f *mutationFixture, authorized *PublicMutationAuthority) {
+			if _, err := f.db.Exec(`UPDATE fabric_workspace_stream_bindings SET writable=false WHERE project_id=$1 AND attachment_ref=$2`, f.projectID, authorized.Authority.AttachmentRef); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "revoked issuer", want: identity.ErrPublicAuthentication, mutate: func(t *testing.T, f *mutationFixture, authorized *PublicMutationAuthority) {
+			if _, err := f.db.Exec(`UPDATE fabric_public_actor_keys SET revoked_at=now() WHERE project_id=$1 AND key_fingerprint=$2`, f.projectID, authorized.Authority.IssuerKeyFingerprint); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "signed repository", want: coregit.ErrStreamPrecondition, mutate: func(_ *testing.T, _ *mutationFixture, authorized *PublicMutationAuthority) {
+			authorized.SignedScope.Repository.ImmutableID = "987654321"
+		}},
+		{name: "signed ref", want: coregit.ErrStreamPrecondition, mutate: func(_ *testing.T, _ *mutationFixture, authorized *PublicMutationAuthority) {
+			authorized.SignedScope.CanonicalRef = "refs/heads/other"
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := newMutationFixture(t)
+			attached := f.attach(11)
+			authorized, coordinator, raw := authorizeFixtureMutation(t, f, attached, 12)
+			test.mutate(t, f, &authorized)
+			before := task2MutationSnapshot(t, f.db, f.projectID)
+			called := false
+			err := coordinator.ExecutePublic(context.Background(), authorized, "sync.push", raw, func(context.Context, *sql.Tx, VerifiedMutation) error {
+				called = true
+				return nil
+			})
+			if !errors.Is(err, test.want) || called {
+				t.Fatalf("ExecutePublic = (called=%v, error=%v), want %v before callback", called, err, test.want)
+			}
+			assertTask2MutationDelta(t, before, task2MutationSnapshot(t, f.db, f.projectID), 0)
+		})
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, *mutationFixture, identity.PublicAgentSession)
+	}{
+		{name: "revoked agent session", mutate: func(t *testing.T, f *mutationFixture, session identity.PublicAgentSession) {
+			if _, err := f.db.Exec(`UPDATE fabric_public_agent_sessions SET revoked_at=now() WHERE project_id=$1 AND session_id=$2`, f.projectID, session.SessionID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "altered session actor", mutate: func(t *testing.T, f *mutationFixture, session identity.PublicAgentSession) {
+			if _, err := f.db.Exec(`UPDATE fabric_public_agent_sessions SET agent_id=$1 WHERE project_id=$2 AND session_id=$3`, uuid.NewString(), f.projectID, session.SessionID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newMutationFixture(t)
+			authorized, coordinator, raw, session := authorizeFixtureAgentMutation(t, f, 28)
+			test.mutate(t, f, session)
+			before := task2MutationSnapshot(t, f.db, f.projectID)
+			called := false
+			err := coordinator.ExecutePublic(context.Background(), authorized, "sync.push", raw, func(context.Context, *sql.Tx, VerifiedMutation) error {
+				called = true
+				return nil
+			})
+			if !errors.Is(err, identity.ErrPublicAuthentication) || called {
+				t.Fatalf("ExecutePublic = (called=%v, error=%v), want authentication failure before callback", called, err)
+			}
+			assertTask2MutationDelta(t, before, task2MutationSnapshot(t, f.db, f.projectID), 0)
+		})
+	}
+}
+
+func TestMutationCoordinatorExecutePublicRejectsRemovedAcceptedTrackedHuman(t *testing.T) {
+	f := newMutationFixture(t)
+	attached := f.attach(35)
+	authorized, coordinator, raw := authorizeFixtureMutation(t, f, attached, 36)
+	removeAcceptedTrackedHuman(t, f.db, attached, f.actor.ID)
+	before := task2MutationSnapshot(t, f.db, f.projectID)
+	called := false
+	err := coordinator.ExecutePublic(context.Background(), authorized, "sync.push", raw, func(context.Context, *sql.Tx, VerifiedMutation) error {
+		called = true
+		return nil
+	})
+	if !errors.Is(err, identity.ErrPublicAuthentication) || called {
+		t.Fatalf("ExecutePublic = (called=%v, error=%v), want authentication failure before callback", called, err)
+	}
+	assertTask2MutationDelta(t, before, task2MutationSnapshot(t, f.db, f.projectID), 0)
+}
+
+func TestMutationCoordinatorExecutePublicDistinctNonceRaceRevalidatesFreshAttachment(t *testing.T) {
+	f := newMutationFixture(t)
+	attached := f.attach(32)
+	scope := boundReadArguments(attached, 0).SyncV2Scope
+	runtimeDB := publicRuntimeDB(t)
+	resolver := realBoundResolverForDB(t, f, runtimeDB)
+	coordinator, err := NewMutationCoordinator(identity.NewStore(runtimeDB), coregit.NewStreamStore(runtimeDB), coregit.NewActivityStore(runtimeDB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorized := make([]PublicMutationAuthority, 2)
+	raw := make([]json.RawMessage, 2)
+	for index := range authorized {
+		var proof types.PublicRequestProof
+		raw[index], proof = mutationAuthorizationRequest(t, f, scope, byte(33+index), "")
+		authorized[index], err = resolver.AuthorizeMutation(context.Background(), "wormhole.sync.push", raw[index], scope, proof)
+		if err != nil {
+			t.Fatalf("AuthorizeMutation %d: %v", index, err)
+		}
+	}
+	before := task2MutationSnapshot(t, f.db, f.projectID)
+	callbackCalls := 0
+	var callbackMu sync.Mutex
+	errs := raceAtRealAttachmentLock(t, f.db, coordinator, coregit.AttachmentLookup{
+		ProjectID: f.projectID, FabricInstanceID: f.fabricID, AttachmentRef: attached.Attachment.AttachmentRef,
+	}, []func() error{
+		func() error {
+			return coordinator.ExecutePublic(context.Background(), authorized[0], "sync.push.race.0", raw[0], func(ctx context.Context, tx *sql.Tx, _ VerifiedMutation) error {
+				callbackMu.Lock()
+				callbackCalls++
+				callbackMu.Unlock()
+				_, err := tx.ExecContext(ctx, `UPDATE fabric_workspace_stream_bindings SET writable=false WHERE project_id=$1 AND attachment_ref=$2`, f.projectID, attached.Attachment.AttachmentRef)
+				return err
+			})
+		},
+		func() error {
+			return coordinator.ExecutePublic(context.Background(), authorized[1], "sync.push.race.1", raw[1], func(ctx context.Context, tx *sql.Tx, _ VerifiedMutation) error {
+				callbackMu.Lock()
+				callbackCalls++
+				callbackMu.Unlock()
+				_, err := tx.ExecContext(ctx, `UPDATE fabric_workspace_stream_bindings SET writable=false WHERE project_id=$1 AND attachment_ref=$2`, f.projectID, attached.Attachment.AttachmentRef)
+				return err
+			})
+		},
+	})
+	winners, denied := 0, 0
+	for index, err := range errs {
+		switch {
+		case err == nil:
+			winners++
+		case errors.Is(err, identity.ErrPublicAuthentication):
+			denied++
+		default:
+			t.Fatalf("ExecutePublic race %d error = %v", index, err)
+		}
+	}
+	if winners != 1 || denied != 1 || callbackCalls != 1 {
+		t.Fatalf("race outcomes winners=%d denied=%d callbacks=%d", winners, denied, callbackCalls)
+	}
+	after := task2MutationSnapshot(t, f.db, f.projectID)
+	for _, table := range task2MutationTables {
+		switch table {
+		case "fabric_workspace_stream_bindings":
+			if len(after[table]) != len(before[table]) {
+				t.Errorf("%s row count changed", table)
+			}
+		case "audit_log":
+			if len(after[table]) != len(before[table])+1 {
+				t.Errorf("audit row delta=%d, want 1", len(after[table])-len(before[table]))
+			}
+		default:
+			if !reflect.DeepEqual(after[table], before[table]) {
+				t.Errorf("%s changed across distinct-nonce race", table)
+			}
+		}
+	}
+	var writable bool
+	if err := f.db.QueryRow(`SELECT writable FROM fabric_workspace_stream_bindings WHERE project_id=$1 AND attachment_ref=$2`, f.projectID, attached.Attachment.AttachmentRef).Scan(&writable); err != nil || writable {
+		t.Fatalf("post-race writable = (%v, %v), want false,nil", writable, err)
+	}
+}
+
+func TestMutationCoordinatorExecutePublicBurnedNonceSurvivesCallbackAndAuditFailure(t *testing.T) {
+	for _, auditFailure := range []bool{false, true} {
+		t.Run(map[bool]string{false: "callback", true: "audit"}[auditFailure], func(t *testing.T) {
+			f := newMutationFixture(t)
+			attached := f.attach(13)
+			authorized, coordinator, raw := authorizeFixtureMutation(t, f, attached, 14)
+			action := "sync.push.callback_failure"
+			want := errors.New("forced callback failure")
+			if auditFailure {
+				action = "sync.push.audit_failure"
+				installAuditFailure(t, f.db, f.projectID, action)
+			}
+			before := task2MutationSnapshot(t, f.db, f.projectID)
+			err := coordinator.ExecutePublic(context.Background(), authorized, action, raw, func(ctx context.Context, tx *sql.Tx, _ VerifiedMutation) error {
+				if _, err := tx.ExecContext(ctx, `UPDATE fabric_workspace_stream_bindings SET writable=false WHERE project_id=$1 AND attachment_ref=$2`, f.projectID, attached.Attachment.AttachmentRef); err != nil {
+					return err
+				}
+				if !auditFailure {
+					return want
+				}
+				return nil
+			})
+			if auditFailure {
+				if err == nil || !strings.Contains(err.Error(), "forced mutation audit failure") {
+					t.Fatalf("ExecutePublic error = %v, want forced audit failure", err)
+				}
+			} else if !errors.Is(err, want) {
+				t.Fatalf("ExecutePublic error = %v, want callback sentinel", err)
+			}
+			assertTask2MutationDelta(t, before, task2MutationSnapshot(t, f.db, f.projectID), 0)
+		})
+	}
+}
+
+func TestMutationCoordinatorExecutePublicRechecksMutableEvidenceInCoreCallback(t *testing.T) {
+	tests := map[string]func(*SyncV2Scope){
+		"base commit": func(scope *SyncV2Scope) { scope.BaseCommitSHA = strings.Repeat("b", 40) },
+		"base tree": func(scope *SyncV2Scope) {
+			scope.BaseTreeDigest = projectstate.Digest("sha256:" + strings.Repeat("b", 64))
+		},
+		"stream version": func(scope *SyncV2Scope) { scope.ExpectedStreamVersion++ },
+		"live tree": func(scope *SyncV2Scope) {
+			scope.ExpectedLiveTreeDigest = projectstate.Digest("sha256:" + strings.Repeat("c", 64))
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			f := newMutationFixture(t)
+			attached := f.attach(30)
+			authorized, coordinator, raw := authorizeFixtureMutation(t, f, attached, 31)
+			mutate(&authorized.SignedScope)
+			before := task2MutationSnapshot(t, f.db, f.projectID)
+			called := false
+			err := coordinator.ExecutePublic(context.Background(), authorized, "sync.push", raw, func(ctx context.Context, tx *sql.Tx, verified VerifiedMutation) error {
+				called = true
+				_, err := coordinator.streams.ApplyPublicOperationInTx(ctx, tx, verified.Scope, coregit.ApplyPublicOperationInput{
+					Attachment: verified.Attachment,
+					Precondition: coregit.SyncPrecondition{
+						Repository: authorized.SignedScope.Repository, CanonicalRef: authorized.SignedScope.CanonicalRef,
+						BaseCommitSHA: authorized.SignedScope.BaseCommitSHA, BaseTreeDigest: authorized.SignedScope.BaseTreeDigest,
+						ExpectedStreamVersion:  authorized.SignedScope.ExpectedStreamVersion,
+						ExpectedLiveTreeDigest: authorized.SignedScope.ExpectedLiveTreeDigest,
+					},
+					Operation: mutationPutActorOperation(f, attached.State, authorized.SignedScope.ExpectedLiveTreeDigest),
+				})
+				return err
+			})
+			if !errors.Is(err, coregit.ErrStreamPrecondition) || !called {
+				t.Fatalf("ExecutePublic = (called=%v, error=%v), want Core precondition rejection in callback", called, err)
+			}
+			assertTask2MutationDelta(t, before, task2MutationSnapshot(t, f.db, f.projectID), 0)
+		})
+	}
+}
+
+func TestMutationCoordinatorExecutePublicCommitsOneTypedAuditWithTransportActor(t *testing.T) {
+	f := newMutationFixture(t)
+	attached := f.attach(15)
+	authorized, coordinator, raw := authorizeFixtureMutation(t, f, attached, 16)
+	if err := coordinator.ExecutePublic(context.Background(), authorized, "sync.push", raw, func(context.Context, *sql.Tx, VerifiedMutation) error { return nil }); err != nil {
+		t.Fatalf("ExecutePublic: %v", err)
+	}
+	digest := sha256.Sum256(raw)
+	actorJSON, err := json.Marshal(authorized.Authority.Scope.Actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	var payload, storedActor []byte
+	var requestDigest, assurance string
+	if err := f.db.QueryRow(`SELECT count(*),min(canonical_payload_json::text)::bytea,min(actor_envelope_json::text)::bytea,min(request_digest),min(assurance) FROM audit_log WHERE project_id=$1 AND action='sync.push'`, f.projectID).Scan(&count, &payload, &storedActor, &requestDigest, &assurance); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || !bytes.Equal(payload, raw) || !bytes.Equal(storedActor, actorJSON) || requestDigest != "sha256:"+hex.EncodeToString(digest[:]) || assurance != string(types.AssurancePublicKeyContinuity) {
+		t.Fatalf("audit = count %d payload %s actor %s digest %s assurance %s", count, payload, storedActor, requestDigest, assurance)
+	}
+}
+
+func TestMutationCoordinatorExecutePublicDeferredCommitRejectionRollsBackDomainAndAudit(t *testing.T) {
+	f := newMutationFixture(t)
+	attached := f.attach(26)
+	authorized, coordinator, raw := authorizeFixtureMutation(t, f, attached, 27)
+	if _, err := f.db.Exec(`CREATE FUNCTION wormhole_test_reject_deferred_mutation_commit() RETURNS trigger
+		LANGUAGE plpgsql AS $$
+		BEGIN
+			IF NEW.action = 'sync.push.deferred_commit_failure' THEN
+				RAISE EXCEPTION 'forced deferred mutation commit failure';
+			END IF;
+			RETURN NEW;
+		END
+		$$;
+		CREATE CONSTRAINT TRIGGER wormhole_test_reject_deferred_mutation_commit
+		AFTER INSERT ON audit_log
+		DEFERRABLE INITIALLY DEFERRED
+		FOR EACH ROW EXECUTE FUNCTION wormhole_test_reject_deferred_mutation_commit()`); err != nil {
+		t.Fatalf("install deferred commit trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = f.db.Exec(`DROP TRIGGER IF EXISTS wormhole_test_reject_deferred_mutation_commit ON audit_log;
+			DROP FUNCTION IF EXISTS wormhole_test_reject_deferred_mutation_commit()`)
+	})
+	before := task2MutationSnapshot(t, f.db, f.projectID)
+	err := coordinator.ExecutePublic(context.Background(), authorized, "sync.push.deferred_commit_failure", raw, func(ctx context.Context, tx *sql.Tx, _ VerifiedMutation) error {
+		_, err := tx.ExecContext(ctx, `UPDATE fabric_workspace_stream_bindings SET writable=false WHERE project_id=$1 AND attachment_ref=$2`, f.projectID, attached.Attachment.AttachmentRef)
+		return err
+	})
+	if err == nil || !strings.Contains(err.Error(), "forced deferred mutation commit failure") {
+		t.Fatalf("ExecutePublic error = %v, want deferred commit failure", err)
+	}
+	assertTask2MutationDelta(t, before, task2MutationSnapshot(t, f.db, f.projectID), 0)
+}
+
 func TestExecuteInitialAttachRejectsNoncanonicalEvidenceBeforeSQL(t *testing.T) {
 	coordinator, err := NewMutationCoordinator(identity.NewStore(nil), coregit.NewStreamStore(nil), coregit.NewActivityStore(nil))
 	if err != nil {
@@ -532,6 +947,144 @@ func installAuditFailure(t *testing.T, db *sql.DB, projectID, action string) {
 	t.Cleanup(func() {
 		_, _ = db.Exec(fmt.Sprintf(`DROP TRIGGER IF EXISTS %s ON audit_log; DROP SCHEMA IF EXISTS %s CASCADE`, triggerName, schemaName))
 	})
+}
+
+func waitForBlockedMutationSessions(t *testing.T, adminDB *sql.DB, blockerPID int, want int) error {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var blocked int
+		err := adminDB.QueryRow(`WITH RECURSIVE blocked(pid) AS (
+			SELECT pid FROM pg_stat_activity
+			WHERE $1 = ANY(pg_blocking_pids(pid)) AND state='active' AND wait_event_type='Lock'
+			UNION
+			SELECT activity.pid FROM pg_stat_activity activity JOIN blocked upstream
+			ON upstream.pid = ANY(pg_blocking_pids(activity.pid))
+			WHERE activity.state='active' AND activity.wait_event_type='Lock'
+		)
+		SELECT count(*) FROM blocked`, blockerPID).Scan(&blocked)
+		if err != nil {
+			return fmt.Errorf("read blocked mutation sessions: %w", err)
+		}
+		if blocked >= want {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("blocked mutation sessions=%d, want at least %d", blocked, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func raceAtRealAttachmentLock(t *testing.T, adminDB *sql.DB, coordinator *MutationCoordinator, lookup coregit.AttachmentLookup, calls []func() error) []error {
+	t.Helper()
+	if len(calls) != 2 {
+		t.Fatalf("race call count=%d, want 2", len(calls))
+	}
+	blocker, err := coordinator.identity.BeginProjectTx(context.Background(), lookup.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback()
+	var blockerPID int
+	if err := blocker.QueryRow(`SELECT pg_backend_pid()`).Scan(&blockerPID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.streams.LockAttachmentInTx(context.Background(), blocker, lookup); err != nil {
+		t.Fatal(err)
+	}
+
+	ready := make(chan struct{}, len(calls))
+	errs := make([]error, len(calls))
+	var wait sync.WaitGroup
+	for index := range calls {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			ready <- struct{}{}
+			errs[index] = calls[index]()
+		}(index)
+	}
+	for range calls {
+		<-ready
+	}
+	if err := waitForBlockedMutationSessions(t, adminDB, blockerPID, len(calls)); err != nil {
+		_ = blocker.Rollback()
+		wait.Wait()
+		t.Fatalf("%v; call errors after release=%v", err, errs)
+	}
+	if err := blocker.Rollback(); err != nil {
+		wait.Wait()
+		t.Fatal(err)
+	}
+	wait.Wait()
+	return errs
+}
+
+func removeAcceptedTrackedHuman(t *testing.T, db *sql.DB, attached InitialAttachResult, humanID string) {
+	t.Helper()
+	snapshot := attached.State.Accepted
+	delete(snapshot.Actors, humanID)
+	tree, err := projectstate.EncodeTree(snapshot)
+	if err != nil {
+		t.Fatalf("encode accepted snapshot without tracked human: %v", err)
+	}
+	stored, err := coregit.EncodeStoredTree(tree)
+	if err != nil {
+		t.Fatalf("encode stored snapshot without tracked human: %v", err)
+	}
+	digest, err := projectstate.DigestTree(tree)
+	if err != nil {
+		t.Fatalf("digest snapshot without tracked human: %v", err)
+	}
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`SET LOCAL session_replication_role=replica`); err != nil {
+		t.Fatal(err)
+	}
+	versionResult, err := tx.Exec(`UPDATE fabric_stream_versions
+		SET canonical_live_tree=$1,live_tree_digest=$2,canonical_accepted_tree=$1,accepted_tree_digest=$2
+		WHERE project_id=$3 AND fabric_instance_id=$4 AND stream_id=$5 AND canonical_ref=$6 AND version=$7`,
+		stored, string(digest), attached.Attachment.Key.ProjectID, attached.Attachment.Key.FabricInstanceID,
+		attached.Attachment.Key.StreamID, attached.Attachment.CanonicalRef, attached.State.Version)
+	if err != nil {
+		t.Fatalf("rewrite accepted stream version without tracked human: %v", err)
+	}
+	streamResult, err := tx.Exec(`UPDATE fabric_streams SET live_tree_digest=$1,accepted_tree_digest=$1
+		WHERE project_id=$2 AND fabric_instance_id=$3 AND stream_id=$4 AND canonical_ref=$5`,
+		string(digest), attached.Attachment.Key.ProjectID, attached.Attachment.Key.FabricInstanceID,
+		attached.Attachment.Key.StreamID, attached.Attachment.CanonicalRef)
+	if err != nil {
+		t.Fatalf("rewrite current stream summary without tracked human: %v", err)
+	}
+	for name, result := range map[string]sql.Result{"version": versionResult, "stream": streamResult} {
+		rows, err := result.RowsAffected()
+		if err != nil || rows != 1 {
+			t.Fatalf("rewrite %s rows = (%d, %v), want (1,nil)", name, rows, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	readTx, err := identity.NewStore(db).BeginProjectTx(context.Background(), attached.Attachment.Key.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readTx.Rollback()
+	altered, err := coregit.NewStreamStore(db).LockAttachmentInTx(context.Background(), readTx, coregit.AttachmentLookup{
+		ProjectID: attached.Attachment.Key.ProjectID, FabricInstanceID: attached.Attachment.Key.FabricInstanceID,
+		AttachmentRef: attached.Attachment.AttachmentRef,
+	})
+	if err != nil {
+		t.Fatalf("read altered accepted snapshot: %v", err)
+	}
+	if _, exists := altered.State.Accepted.Actors[humanID]; exists {
+		t.Fatal("tracked human remains in altered accepted snapshot")
+	}
 }
 
 func quoteLiteral(value string) string {

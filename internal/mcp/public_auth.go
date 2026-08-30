@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -37,6 +38,13 @@ type VerifiedPublicBoundRead struct {
 }
 
 type PublicBoundReadFunc func(context.Context, *sql.Tx, VerifiedPublicBoundRead) error
+
+type boundPublicAuthority struct {
+	proof       VerifiedPublicProof
+	attached    coregit.StreamAttachmentState
+	authority   identity.MutationAuthority
+	decisionErr error
+}
 
 // PublicBoundProofResolver owns the complete authorization transaction for a
 // request signed against an opaque attachment. The callback may read additional
@@ -73,59 +81,114 @@ func (r *PublicBoundProofResolver) Resolve(ctx context.Context, tool string, raw
 	}
 	defer tx.Rollback()
 
-	attached, err := r.streams.LockAttachmentInTx(ctx, tx, coregit.AttachmentLookup{
-		ProjectID: projectID, FabricInstanceID: r.fabricInstanceID, AttachmentRef: scope.AttachmentRef,
-	})
+	bound, err := r.resolveBoundAuthorityInTx(ctx, tx, projectID, scope, verified)
 	if err != nil {
 		return err
 	}
-	if !completePublicAttachment(attached) {
-		return coregit.ErrStreamCorrupt
+	if bound.decisionErr != nil {
+		return bound.decisionErr
 	}
-	if verified.KeyFingerprint != attached.Attachment.IssuerKeyFingerprint {
-		return identity.ErrPublicAuthentication
-	}
-	if !syncScopeMatchesAttachment(scope, attached) {
+	if !syncScopeMatchesAttachment(scope, bound.attached) {
 		return coregit.ErrStreamPrecondition
 	}
-	human, err := resolveVerifiedTrackedHuman(attached.State.Accepted, verified)
-	if err != nil {
-		return err
-	}
-	actor := types.ActorEnvelope{
-		ActorKind: types.ActorHuman, HumanPrincipalID: human.ID,
-		Assurance: types.AssurancePublicKeyContinuity, OccurredAt: verified.Timestamp,
-	}
-	if verified.SessionID != "" {
-		actor, err = r.identity.ResolveHistoricalPublicSessionActorInTx(ctx, tx, r.fabricInstanceID, verified.SessionID, verified.Timestamp)
-		if err != nil || actor.AccountableHumanID != human.ID {
-			return identity.ErrPublicAuthentication
-		}
-	}
-	authority := identity.MutationAuthority{
-		Scope:            types.ActorScope{ProjectID: projectID, Actor: actor},
-		FabricInstanceID: attached.Attachment.Key.FabricInstanceID,
-		StreamID:         attached.Attachment.Key.StreamID, WorkspaceID: attached.Attachment.WorkspaceID,
-		CanonicalRef: attached.Attachment.CanonicalRef, AttachmentRef: attached.Attachment.AttachmentRef,
-		IssuerKeyFingerprint: attached.Attachment.IssuerKeyFingerprint, SessionID: verified.SessionID,
-	}
-	if _, err := r.identity.RevalidateMutationAuthorityInTx(ctx, tx, authority, authorityEvidence(attached)); err != nil {
-		return err
-	}
 	if err := r.identity.ConsumePublicNonceInTx(ctx, tx, identity.PublicNonceUse{
-		ProjectID: projectID, FabricInstanceID: attached.Attachment.Key.FabricInstanceID,
-		StreamID: attached.Attachment.Key.StreamID, CanonicalRef: attached.Attachment.CanonicalRef,
+		ProjectID: projectID, FabricInstanceID: bound.attached.Attachment.Key.FabricInstanceID,
+		StreamID: bound.attached.Attachment.Key.StreamID, CanonicalRef: bound.attached.Attachment.CanonicalRef,
 		KeyFingerprint: verified.KeyFingerprint, Claim: verified.Claim,
 	}); err != nil {
 		return err
 	}
-	if err := callback(ctx, tx, VerifiedPublicBoundRead{Proof: verified, Attachment: attached.Attachment, State: attached.State}); err != nil {
+	if err := callback(ctx, tx, VerifiedPublicBoundRead{Proof: bound.proof, Attachment: bound.attached.Attachment, State: bound.attached.State}); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (r *PublicBoundProofResolver) resolveBoundAuthorityInTx(ctx context.Context, tx *sql.Tx, projectID string, scope SyncV2Scope, verified VerifiedPublicProof) (boundPublicAuthority, error) {
+	attached, err := r.streams.LockAttachmentInTx(ctx, tx, coregit.AttachmentLookup{
+		ProjectID: projectID, FabricInstanceID: r.fabricInstanceID, AttachmentRef: scope.AttachmentRef,
+	})
+	if err != nil {
+		return boundPublicAuthority{}, err
+	}
+	if !completePublicAttachment(attached) {
+		return boundPublicAuthority{}, coregit.ErrStreamCorrupt
+	}
+	if verified.KeyFingerprint != attached.Attachment.IssuerKeyFingerprint {
+		return boundPublicAuthority{}, identity.ErrPublicAuthentication
+	}
+	bound := boundPublicAuthority{proof: verified, attached: attached}
+	human, actorErr := resolveVerifiedTrackedHuman(attached.State.Accepted, verified)
+	actor := types.ActorEnvelope{}
+	if actorErr == nil {
+		actor = types.ActorEnvelope{
+			ActorKind: types.ActorHuman, HumanPrincipalID: human.ID,
+			Assurance: types.AssurancePublicKeyContinuity, OccurredAt: verified.Timestamp,
+		}
+		if verified.SessionID != "" {
+			actor, actorErr = r.identity.ResolveHistoricalPublicSessionActorInTx(ctx, tx, r.fabricInstanceID, verified.SessionID, verified.Timestamp)
+			if actorErr == nil && actor.AccountableHumanID != human.ID {
+				actorErr = identity.ErrPublicAuthentication
+			}
+		}
+	}
+	if actorErr == nil {
+		bound.authority = identity.MutationAuthority{
+			Scope:            types.ActorScope{ProjectID: projectID, Actor: actor},
+			FabricInstanceID: attached.Attachment.Key.FabricInstanceID,
+			StreamID:         attached.Attachment.Key.StreamID, WorkspaceID: attached.Attachment.WorkspaceID,
+			CanonicalRef: attached.Attachment.CanonicalRef, AttachmentRef: attached.Attachment.AttachmentRef,
+			IssuerKeyFingerprint: attached.Attachment.IssuerKeyFingerprint, SessionID: verified.SessionID,
+		}
+		_, actorErr = r.identity.RevalidateMutationAuthorityInTx(ctx, tx, bound.authority, authorityEvidence(attached))
+	}
+	if actorErr != nil {
+		bound.decisionErr = identity.ErrPublicAuthentication
+	} else if !syncMutationScopeMatchesRoute(scope, attached) {
+		bound.decisionErr = coregit.ErrStreamPrecondition
+	}
+	return bound, nil
+}
+
+func (r *PublicBoundProofResolver) AuthorizeMutation(ctx context.Context, tool string, raw json.RawMessage, scope SyncV2Scope, proof types.PublicRequestProof) (PublicMutationAuthority, error) {
+	if r == nil || r.identity == nil || r.streams == nil || !r.verifier.readyForFabric(r.fabricInstanceID) {
+		return PublicMutationAuthority{}, identity.ErrInvalidPublicIdentity
+	}
+	verified, err := r.verifier.VerifyBound(tool, scope.AttachmentRef, raw, proof)
+	if err != nil {
+		return PublicMutationAuthority{}, err
+	}
+	projectID, err := r.streams.ResolveAttachmentProject(ctx, r.fabricInstanceID, scope.AttachmentRef)
+	if err != nil {
+		return PublicMutationAuthority{}, err
+	}
+	tx, err := r.identity.BeginProjectTx(ctx, projectID)
+	if err != nil {
+		return PublicMutationAuthority{}, err
+	}
+	defer tx.Rollback()
+
+	bound, err := r.resolveBoundAuthorityInTx(ctx, tx, projectID, scope, verified)
+	if err != nil {
+		return PublicMutationAuthority{}, err
+	}
+	if err := r.identity.ConsumePublicNonceInTx(ctx, tx, identity.PublicNonceUse{
+		ProjectID: projectID, FabricInstanceID: bound.attached.Attachment.Key.FabricInstanceID,
+		StreamID: bound.attached.Attachment.Key.StreamID, CanonicalRef: bound.attached.Attachment.CanonicalRef,
+		KeyFingerprint: verified.KeyFingerprint, Claim: verified.Claim,
+	}); err != nil {
+		return PublicMutationAuthority{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return PublicMutationAuthority{}, fmt.Errorf("mcp: commit public mutation authorization: %w", err)
+	}
+	if bound.decisionErr != nil {
+		return PublicMutationAuthority{}, bound.decisionErr
+	}
+	return PublicMutationAuthority{Authority: bound.authority, SignedScope: scope}, nil
 }
 
 func syncScopeMatchesAttachment(scope SyncV2Scope, attached coregit.StreamAttachmentState) bool {
@@ -135,6 +198,13 @@ func syncScopeMatchesAttachment(scope SyncV2Scope, attached coregit.StreamAttach
 		scope.CanonicalRef == attachment.CanonicalRef && scope.BaseCommitSHA == state.AcceptedCommitSHA &&
 		scope.BaseTreeDigest == state.Accepted.Digest && scope.ExpectedStreamVersion == state.Version &&
 		scope.ExpectedLiveTreeDigest == state.Live.Digest
+}
+
+func syncMutationScopeMatchesRoute(scope SyncV2Scope, attached coregit.StreamAttachmentState) bool {
+	return validSyncReadArguments(scope, 0) && completePublicAttachment(attached) &&
+		scope.AttachmentRef == attached.Attachment.AttachmentRef &&
+		scope.Repository == attached.Attachment.Repository &&
+		scope.CanonicalRef == attached.Attachment.CanonicalRef
 }
 
 func completePublicAttachment(attached coregit.StreamAttachmentState) bool {

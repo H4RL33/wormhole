@@ -31,6 +31,11 @@ type VerifiedMutation struct {
 
 type MutationFunc func(context.Context, *sql.Tx, VerifiedMutation) error
 
+type PublicMutationAuthority struct {
+	Authority   identity.MutationAuthority
+	SignedScope SyncV2Scope
+}
+
 type MutationCoordinator struct {
 	identity *identity.Store
 	streams  *coregit.StreamStore
@@ -78,6 +83,25 @@ func (m *MutationCoordinator) Execute(ctx context.Context, authority identity.Mu
 		return fmt.Errorf("mcp: commit mutation: %w", err)
 	}
 	return nil
+}
+
+func (m *MutationCoordinator) ExecutePublic(ctx context.Context, authorized PublicMutationAuthority, action string, canonicalPayload []byte, callback MutationFunc) error {
+	actor := authorized.Authority.Scope.Actor
+	if authorized.Authority.Scope.Validate() != nil ||
+		actor.Assurance != types.AssurancePublicKeyContinuity ||
+		authorized.Authority.SessionID != actor.SessionID ||
+		authorized.SignedScope.Version != projectstate.SyncProtocolVersionV2 || callback == nil {
+		return errInvalidMutation
+	}
+	return m.Execute(ctx, authorized.Authority, action, canonicalPayload, func(ctx context.Context, tx *sql.Tx, verified VerifiedMutation) error {
+		if !syncMutationScopeMatchesRoute(authorized.SignedScope, coregit.StreamAttachmentState{
+			Attachment: verified.Attachment,
+			State:      verified.State,
+		}) {
+			return coregit.ErrStreamPrecondition
+		}
+		return callback(ctx, tx, verified)
+	})
 }
 
 type InitialAttachCommand struct {
