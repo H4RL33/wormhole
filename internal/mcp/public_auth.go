@@ -49,14 +49,14 @@ type PublicBoundProofResolver struct {
 }
 
 func NewPublicBoundProofResolver(fabricInstanceID string, identityStore *identity.Store, streams *coregit.StreamStore, verifier *PublicProofVerifier) (*PublicBoundProofResolver, error) {
-	if !types.CanonicalUUID(fabricInstanceID) || identityStore == nil || streams == nil || verifier == nil || verifier.fabricInstanceID != fabricInstanceID {
+	if identityStore == nil || streams == nil || !verifier.readyForFabric(fabricInstanceID) {
 		return nil, identity.ErrInvalidPublicIdentity
 	}
 	return &PublicBoundProofResolver{fabricInstanceID: fabricInstanceID, identity: identityStore, streams: streams, verifier: verifier}, nil
 }
 
 func (r *PublicBoundProofResolver) Resolve(ctx context.Context, tool string, raw json.RawMessage, scope SyncV2Scope, proof types.PublicRequestProof, callback PublicBoundReadFunc) error {
-	if r == nil || r.identity == nil || r.streams == nil || r.verifier == nil || callback == nil {
+	if r == nil || r.identity == nil || r.streams == nil || !r.verifier.readyForFabric(r.fabricInstanceID) || callback == nil {
 		return identity.ErrInvalidPublicIdentity
 	}
 	verified, err := r.verifier.VerifyBound(tool, scope.AttachmentRef, raw, proof)
@@ -147,10 +147,14 @@ func completePublicAttachment(attached coregit.StreamAttachmentState) bool {
 }
 
 func NewPublicProofVerifier(id string, now func() time.Time) (*PublicProofVerifier, error) {
-	if !types.CanonicalUUID(id) || now == nil {
+	verifier := &PublicProofVerifier{fabricInstanceID: id, now: now}
+	if !verifier.readyForFabric(id) {
 		return nil, identity.ErrInvalidPublicIdentity
 	}
-	return &PublicProofVerifier{id, now}, nil
+	return verifier, nil
+}
+func (v *PublicProofVerifier) readyForFabric(fabricInstanceID string) bool {
+	return v != nil && types.CanonicalUUID(fabricInstanceID) && v.fabricInstanceID == fabricInstanceID && v.now != nil
 }
 func (v *PublicProofVerifier) VerifyInitialAttach(tool string, repo types.RepositoryIdentity, ref string, args json.RawMessage, p types.PublicRequestProof) (VerifiedPublicProof, error) {
 	if p.SessionID != "" {
@@ -173,6 +177,9 @@ func (v *PublicProofVerifier) VerifyBound(tool, attachment string, args json.Raw
 	return v.verify(tool, scope, args, p)
 }
 func (v *PublicProofVerifier) verify(tool, scope string, args json.RawMessage, p types.PublicRequestProof) (VerifiedPublicProof, error) {
+	if v == nil || !v.readyForFabric(v.fabricInstanceID) {
+		return VerifiedPublicProof{}, identity.ErrPublicAuthentication
+	}
 	key, ok := strictRawURL(p.PublicKey, ed25519.PublicKeySize)
 	if !ok {
 		return VerifiedPublicProof{}, identity.ErrPublicAuthentication

@@ -171,7 +171,7 @@ type SyncV2AttachHandler struct {
 func (h *SyncV2AttachHandler) ready() bool {
 	return h != nil && types.CanonicalUUID(h.fabricInstanceID) && h.credentialRef != "" &&
 		strings.TrimSpace(h.credentialRef) == h.credentialRef && !strings.ContainsAny(h.credentialRef, "\r\n") &&
-		h.observer != nil && h.coordinator != nil && h.policySource != nil && h.verifier != nil
+		h.observer != nil && h.coordinator != nil && h.policySource != nil && h.verifier.readyForFabric(h.fabricInstanceID)
 }
 
 func NewSyncV2AttachHandler(fabricInstanceID, credentialRef string, observer coregit.CanonicalGitObserver, coordinator syncAttachCoordinator, policySource SyncAttachPolicySource, verifier *PublicProofVerifier) (*SyncV2AttachHandler, error) {

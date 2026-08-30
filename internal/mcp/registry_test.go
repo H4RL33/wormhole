@@ -115,6 +115,25 @@ func TestPublicFabricRegistryRequiresEachCompleteHandler(t *testing.T) {
 	}
 }
 
+func TestPublicFabricRegistryRejectsAttachVerifierForWrongFabricOrWithoutClock(t *testing.T) {
+	for name, verifier := range map[string]*PublicProofVerifier{
+		"wrong Fabric": {fabricInstanceID: "11111111-1111-4111-8111-111111111112", now: func() time.Time { return time.Now().UTC() }},
+		"zero value":   {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ready := readyPublicRegistryDependencies(t)
+			ready.Attach.verifier = verifier
+			registry := NewPublicFabricRegistry(PublicFabricRegistryDependencies{Attach: ready.Attach})
+			if got := len(registry.List()); got != 0 {
+				t.Fatalf("invalid attach verifier registered %d tools, want 0", got)
+			}
+			if _, ok := registry.Get("wormhole.sync.attach"); ok {
+				t.Fatal("invalid attach verifier registered wormhole.sync.attach")
+			}
+		})
+	}
+}
+
 func TestPublicFabricRegistrySchemasMatchFrozenDescriptors(t *testing.T) {
 	registry := NewPublicFabricRegistry(readyPublicRegistryDependencies(t))
 	descriptors := make(map[string]ToolDescriptor)

@@ -76,6 +76,7 @@ func (s *attachCoordinatorStub) ReplayInitialAttach(context.Context, InitialAtta
 }
 
 func TestSyncV2AttachConstructorRejectsNilDependencies(t *testing.T) {
+	fabricID := "11111111-1111-4111-8111-111111111111"
 	verifier, err := NewPublicProofVerifier("11111111-1111-4111-8111-111111111111", func() time.Time {
 		return time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
 	})
@@ -86,6 +87,12 @@ func TestSyncV2AttachConstructorRejectsNilDependencies(t *testing.T) {
 	coordinator := syncAttachCoordinator(&attachCoordinatorStub{})
 	policy := SyncAttachPolicySource(&attachPolicySourceStub{})
 
+	wrongFabricVerifier, err := NewPublicProofVerifier("11111111-1111-4111-8111-111111111112", func() time.Time {
+		return time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
 		name        string
 		observer    coregit.CanonicalGitObserver
@@ -97,10 +104,12 @@ func TestSyncV2AttachConstructorRejectsNilDependencies(t *testing.T) {
 		{name: "coordinator", observer: observer, policy: policy, verifier: verifier},
 		{name: "policy", observer: observer, coordinator: coordinator, verifier: verifier},
 		{name: "verifier", observer: observer, coordinator: coordinator, policy: policy},
+		{name: "wrong verifier Fabric", observer: observer, coordinator: coordinator, policy: policy, verifier: wrongFabricVerifier},
+		{name: "zero verifier", observer: observer, coordinator: coordinator, policy: policy, verifier: &PublicProofVerifier{}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := NewSyncV2AttachHandler("11111111-1111-4111-8111-111111111111", "git-observer", test.observer, test.coordinator, test.policy, test.verifier); !errors.Is(err, identity.ErrInvalidPublicIdentity) {
+			if _, err := NewSyncV2AttachHandler(fabricID, "git-observer", test.observer, test.coordinator, test.policy, test.verifier); !errors.Is(err, identity.ErrInvalidPublicIdentity) {
 				t.Fatalf("error = %v, want ErrInvalidPublicIdentity", err)
 			}
 		})
@@ -308,22 +317,15 @@ func TestSyncV2AttachInitialExactAndDeniedRetryNonceSemantics(t *testing.T) {
 			t.Errorf("%s first delta = %d, want %d", table, afterFirst[table]-before[table], want)
 		}
 	}
+	afterFirstSnapshot := task2MutationSnapshot(t, f.db, f.projectID)
 
 	retryProof := signedAttachProof(t, f.fabricID, command.CanonicalRequest, f.transport.OccurredAt, bytesOf(4, 32), seed[:])
 	retry, err := handler.Handle(context.Background(), command.CanonicalRequest, retryProof)
 	if err != nil || retry != first {
 		t.Fatalf("exact retry = %+v, %v; want %+v", retry, err, first)
 	}
-	afterRetry := mutationCounts(t, f.db, f.projectID)
-	for table := range afterFirst {
-		want := 0
-		if table == "public_request_nonces" {
-			want = 1
-		}
-		if afterRetry[table]-afterFirst[table] != want {
-			t.Errorf("%s retry delta = %d, want %d", table, afterRetry[table]-afterFirst[table], want)
-		}
-	}
+	afterRetrySnapshot := task2MutationSnapshot(t, f.db, f.projectID)
+	assertTask2MutationDelta(t, afterFirstSnapshot, afterRetrySnapshot, 1)
 
 	changedCommit := strings.Repeat("b", 40)
 	observer.SetRef(f.repository, f.observation.RefName, changedCommit, f.tree)
@@ -338,21 +340,11 @@ func TestSyncV2AttachInitialExactAndDeniedRetryNonceSemantics(t *testing.T) {
 	deniedProof := signedAttachProof(t, f.fabricID, changedRaw, f.transport.OccurredAt, bytesOf(5, 32), seed[:])
 	_, err = handler.Handle(context.Background(), changedRaw, deniedProof)
 	assertAttachFailure(t, err, "sync_replay_conflict")
-	afterDenied := mutationCounts(t, f.db, f.projectID)
-	for table := range afterRetry {
-		want := 0
-		if table == "public_request_nonces" {
-			want = 1
-		}
-		if afterDenied[table]-afterRetry[table] != want {
-			t.Errorf("%s denied delta = %d, want %d", table, afterDenied[table]-afterRetry[table], want)
-		}
-	}
+	afterDeniedSnapshot := task2MutationSnapshot(t, f.db, f.projectID)
+	assertTask2MutationDelta(t, afterRetrySnapshot, afterDeniedSnapshot, 1)
 	_, err = handler.Handle(context.Background(), changedRaw, deniedProof)
 	assertAttachFailure(t, err, "authentication_failed")
-	if got := mutationCounts(t, f.db, f.projectID); !reflect.DeepEqual(got, afterDenied) {
-		t.Fatalf("reused denied nonce mutated state: before=%v after=%v", afterDenied, got)
-	}
+	assertTask2MutationDelta(t, afterDeniedSnapshot, task2MutationSnapshot(t, f.db, f.projectID), 0)
 }
 
 func TestSyncV2AttachDistinctHumansReceiveDistinctWorkspaces(t *testing.T) {
@@ -454,16 +446,14 @@ func TestSyncV2AttachAuditRollbackIsRedacted(t *testing.T) {
 	f := newMutationFixture(t)
 	handler, _ := realAttachHandler(t, f, f.tree)
 	installAuditFailure(t, f.db, f.projectID, "sync.attach")
-	before := mutationCounts(t, f.db, f.projectID)
+	before := task2MutationSnapshot(t, f.db, f.projectID)
 	raw := f.command(10).CanonicalRequest
 	seed := sha256.Sum256([]byte(f.projectID))
 	proof := signedAttachProof(t, f.fabricID, raw, f.transport.OccurredAt, bytesOf(10, 32), seed[:])
 	_, err := handler.Handle(context.Background(), raw, proof)
 	assertAttachFailure(t, err, "internal_error")
-	after := mutationCounts(t, f.db, f.projectID)
-	if !reflect.DeepEqual(after, before) {
-		t.Fatalf("audit failure changed state: before=%v after=%v", before, after)
-	}
+	after := task2MutationSnapshot(t, f.db, f.projectID)
+	assertTask2MutationDelta(t, before, after, 0)
 }
 
 func TestSyncV2AttachRejectsMalformedProofBeforeObservation(t *testing.T) {
