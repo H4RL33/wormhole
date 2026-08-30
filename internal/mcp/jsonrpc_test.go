@@ -1,12 +1,26 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/H4RL33/wormhole/internal/types"
 )
+
+type jsonRPCV2Arguments struct {
+	Version int    `json:"version" const:"2"`
+	Value   string `json:"value"`
+}
+
+type jsonRPCV2Result struct {
+	Version int    `json:"version" const:"2"`
+	Value   string `json:"value"`
+}
 
 func TestHandleInitialize(t *testing.T) {
 	result := HandleInitialize("0.2.4-alpha")
@@ -51,6 +65,138 @@ func TestHandleToolsList_AllPrivateToolsPresent(t *testing.T) {
 			t.Fatalf("unexpected public protocol registration %q", entry.Name)
 		}
 	}
+}
+
+func TestJSONRPCPublicDispatchSelectsAndStrictDecodesV2BeforeInvocation(t *testing.T) {
+	invocations := 0
+	registry := NewRegistry()
+	registry.Register(Tool{
+		Name:             "wormhole.sync.pull",
+		Description:      "test public dispatch",
+		ArgumentVariants: map[int]any{2: jsonRPCV2Arguments{}},
+		ResultVariants:   map[int]any{2: jsonRPCV2Result{}},
+		PublicHandler: func(_ context.Context, raw json.RawMessage, proof types.PublicRequestProof) (any, error) {
+			invocations++
+			var arguments jsonRPCV2Arguments
+			if err := json.Unmarshal(raw, &arguments); err != nil {
+				return nil, err
+			}
+			return jsonRPCV2Result{Version: arguments.Version, Value: arguments.Value}, nil
+		},
+	})
+
+	valid := publicToolsCallParams(t, "wormhole.sync.pull", json.RawMessage(`{"version":2,"value":"ok"}`))
+	result, rpcErr := HandleToolsCall(context.Background(), registry, nil, "", valid)
+	if rpcErr != nil {
+		t.Fatalf("valid public dispatch RPC error = %+v", rpcErr)
+	}
+	callResult := result.(toolCallResult)
+	if callResult.IsError || len(callResult.Content) != 1 || callResult.Content[0].Text != `{"version":2,"value":"ok"}` {
+		t.Fatalf("valid public result = %+v", callResult)
+	}
+	if invocations != 1 {
+		t.Fatalf("valid public invocations = %d, want 1", invocations)
+	}
+
+	for name, fixture := range map[string]struct {
+		arguments string
+		wantCode  string
+	}{
+		"missing":         {`{"value":"bad"}`, "invalid_request"},
+		"string":          {`{"version":"2","value":"bad"}`, "invalid_request"},
+		"fractional":      {`{"version":2.5,"value":"bad"}`, "invalid_request"},
+		"null":            {`{"version":null,"value":"bad"}`, "invalid_request"},
+		"unknown version": {`{"version":3,"value":"bad"}`, "unknown_version"},
+		"duplicate":       {`{"version":2,"version":2,"value":"bad"}`, "invalid_request"},
+		"unknown member":  {`{"version":2,"value":"bad","extra":true}`, "invalid_request"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			result, rpcErr := HandleToolsCall(context.Background(), registry, nil, "", publicToolsCallParams(t, "wormhole.sync.pull", json.RawMessage(fixture.arguments)))
+			if rpcErr != nil {
+				t.Fatalf("public rejection RPC error = %+v", rpcErr)
+			}
+			failure := result.(toolCallResult)
+			if !failure.IsError || len(failure.Content) != 1 {
+				t.Fatalf("public rejection result = %+v", failure)
+			}
+			var decoded ToolFailureV1
+			if err := json.Unmarshal([]byte(failure.Content[0].Text), &decoded); err != nil {
+				t.Fatalf("decode public failure: %v", err)
+			}
+			if decoded != (ToolFailureV1{Code: fixture.wantCode, Operation: "wormhole.sync.pull"}) {
+				t.Fatalf("public failure = %+v, want code %q", decoded, fixture.wantCode)
+			}
+			if invocations != 1 {
+				t.Fatalf("invalid public request invoked handler; invocations = %d", invocations)
+			}
+		})
+	}
+}
+
+func TestJSONRPCPublicDispatchRejectsWrongSelectedResultVersion(t *testing.T) {
+	for _, version := range []int{0, 3} {
+		t.Run(strconv.Itoa(version), func(t *testing.T) {
+			registry := NewRegistry()
+			registry.Register(Tool{
+				Name:             "wormhole.sync.pull",
+				Description:      "test public result validation",
+				ArgumentVariants: map[int]any{2: jsonRPCV2Arguments{}},
+				ResultVariants:   map[int]any{2: jsonRPCV2Result{}},
+				PublicHandler: func(context.Context, json.RawMessage, types.PublicRequestProof) (any, error) {
+					return jsonRPCV2Result{Version: version, Value: "wrong-version"}, nil
+				},
+			})
+			result, rpcErr := HandleToolsCall(context.Background(), registry, nil, "", publicToolsCallParams(t, "wormhole.sync.pull", json.RawMessage(`{"version":2,"value":"ok"}`)))
+			if rpcErr != nil {
+				t.Fatalf("wrong-version public result RPC error = %+v", rpcErr)
+			}
+			failure := result.(toolCallResult)
+			if !failure.IsError || len(failure.Content) != 1 {
+				t.Fatalf("wrong-version public result = %+v, want safe tool failure", failure)
+			}
+			var decoded ToolFailureV1
+			if err := json.Unmarshal([]byte(failure.Content[0].Text), &decoded); err != nil {
+				t.Fatalf("decode wrong-version failure: %v", err)
+			}
+			if decoded != (ToolFailureV1{Code: "internal_error", Operation: "wormhole.sync.pull"}) {
+				t.Fatalf("wrong-version failure = %+v", decoded)
+			}
+		})
+	}
+}
+
+func TestJSONRPCPublicVersionDecodeRejectsTrailingJSON(t *testing.T) {
+	tool := Tool{ArgumentVariants: map[int]any{2: jsonRPCV2Arguments{}}}
+	if _, code := decodeVersionedPublicArguments(tool, json.RawMessage(`{"version":2,"value":"bad"}{}`)); code != "invalid_request" {
+		t.Fatalf("trailing JSON code = %q, want invalid_request", code)
+	}
+}
+
+func TestJSONRPCMalformedKnownPublicEnvelopeNeverFallsBackToPrivateDispatch(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(Tool{
+		Name: "wormhole.sync.pull", ArgumentVariants: map[int]any{2: jsonRPCV2Arguments{}},
+		ResultVariants: map[int]any{2: jsonRPCV2Result{}},
+		PublicHandler: func(context.Context, json.RawMessage, types.PublicRequestProof) (any, error) {
+			t.Fatal("malformed public envelope invoked handler")
+			return nil, nil
+		},
+	})
+	_, rpcErr := HandleToolsCall(context.Background(), registry, nil, "", json.RawMessage(
+		`{"name":"wormhole.sync.pull","name":"wormhole.sync.pull","arguments":{"version":2,"value":"bad"}}`,
+	))
+	if rpcErr == nil || rpcErr.Code != RPCInvalidParams {
+		t.Fatalf("malformed public envelope error = %+v, want invalid params", rpcErr)
+	}
+}
+
+func publicToolsCallParams(t *testing.T, name string, arguments json.RawMessage) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(ToolsCallParams{Name: name, Arguments: arguments, Proof: publicProofFixture()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }
 
 func TestHandleToolsList_ProjectIDRequiredExceptWhoAmI(t *testing.T) {

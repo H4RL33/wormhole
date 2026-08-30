@@ -147,12 +147,30 @@ semantic KB, task, and Git-link operations. That surface is server
 design/coverage, not the live Stage 2 harness path and not a Stage 2 acceptance
 dependency.
 
-Slice 1 also publishes exactly ten non-callable public descriptor values: six
-`wormhole.sync.*` v2 tools and four `wormhole.activity.*` v1 tools. Their
-`tools/call` contract carries `proof` beside `name` and `arguments`; their
-closed failure result contains only `code` and `operation`. They have no
-`Handler`, are absent from the live private registry, and cannot be dispatched
-until production assembly lands.
+Fabric also publishes exactly ten public descriptor values: six
+`wormhole.sync.*` v2 tools and four `wormhole.activity.*` v1 tools. Public
+`tools/call` carries an Ed25519 continuity `proof` beside `name` and
+`arguments`; bearer credentials and public proof are mutually exclusive.
+Arguments are closed, version-selected objects and never accept client-supplied
+project, workspace, Fabric, remote-project, stream, or actor routing IDs.
+At the local Stage 2 Gateway boundary these remain the ten non-callable public descriptor
+values: Gateway does not instantiate the public Fabric registry.
+
+The separate public Fabric registry can make only `wormhole.sync.attach`,
+`wormhole.sync.bootstrap`, and `wormhole.sync.pull` live, and only when their
+complete direct handlers are configured. Attach observes and authenticates the
+canonical repository/ref before deriving server-owned scope. Bootstrap and pull
+route through an opaque `attachment_ref`, revalidate the bound repository and
+stream evidence, and perform read-only state retrieval. Public failures are
+closed, bounded values containing only `code` and `operation`; unexpected
+internal errors are reduced to `internal_error` rather than exposing private
+state.
+
+`wormhole.sync.push`, `wormhole.sync.conflict`,
+`wormhole.sync.issue_agent_session`, and all four `wormhole.activity.*` values
+remain descriptor-only and unavailable to `tools/call`. Public sync is absent
+from the 16-tool private credential-authenticated registry. This does not ship
+Gateway transport or a private sync path.
 
 Fabric private descriptors and public contract values remain inventoried in
 [`contracts/alpha-contract.json`](contracts/alpha-contract.json). Their

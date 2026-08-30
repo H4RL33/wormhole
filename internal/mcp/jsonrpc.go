@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -127,6 +128,22 @@ func HandleToolsList(registry *Registry) any {
 // a future struct declares ProjectID without omitempty, it would end up
 // duplicated in the required slice below.
 func buildInputSchema(tool Tool) map[string]any {
+	if len(tool.ArgumentVariants) > 0 {
+		versions := make([]int, 0, len(tool.ArgumentVariants))
+		for version := range tool.ArgumentVariants {
+			versions = append(versions, version)
+		}
+		sort.Ints(versions)
+		if len(versions) == 1 {
+			return closedJSONSchemaForType(reflect.TypeOf(tool.ArgumentVariants[versions[0]]))
+		}
+		variants := make([]any, 0, len(versions))
+		for _, version := range versions {
+			variants = append(variants, closedJSONSchemaForType(reflect.TypeOf(tool.ArgumentVariants[version])))
+		}
+		return map[string]any{"oneOf": variants}
+	}
+
 	properties := map[string]any{}
 	required := []string{}
 
@@ -734,6 +751,81 @@ func requireJSONEOF(decoder *json.Decoder) error {
 	return nil
 }
 
+func decodeVersionedPublicArguments(tool Tool, raw json.RawMessage) (int, string) {
+	fields, err := decodeUniqueJSONObject(raw, nil)
+	if err != nil || fields["version"] == nil {
+		return 0, "invalid_request"
+	}
+	versionRaw := bytes.TrimSpace(fields["version"])
+	if len(versionRaw) == 0 || bytes.Equal(versionRaw, []byte("null")) || bytes.ContainsAny(versionRaw, ".eE") {
+		return 0, "invalid_request"
+	}
+	version, err := strconv.Atoi(string(versionRaw))
+	if err != nil {
+		return 0, "invalid_request"
+	}
+	example, ok := tool.ArgumentVariants[version]
+	if !ok {
+		return 0, "unknown_version"
+	}
+	exampleType := reflect.TypeOf(example)
+	if exampleType == nil {
+		return 0, "invalid_request"
+	}
+	destination := reflect.New(exampleType)
+	if err := decodePublicArguments(raw, destination.Interface()); err != nil {
+		return 0, "invalid_request"
+	}
+	return version, ""
+}
+
+func handlePublicToolsCall(ctx context.Context, tool Tool, authHeader string, rawParams json.RawMessage) (any, *RPCError) {
+	params, code := decodeKnownPublicToolsCallParams(rawParams, tool.Name, authHeader)
+	if code != "" {
+		return publicFailureCallResult(tool.Name, code), nil
+	}
+	version, code := decodeVersionedPublicArguments(tool, params.Arguments)
+	if code != "" {
+		return publicFailureCallResult(tool.Name, code), nil
+	}
+	result, err := tool.PublicHandler(ctx, params.Arguments, *params.Proof)
+	if err != nil {
+		var failure ToolFailureV1
+		if decodePublicArguments(json.RawMessage(err.Error()), &failure) == nil && failure.Operation == tool.Name {
+			if encoded, encodeErr := toolFailureResult(failure.Operation, failure.Code); encodeErr == nil {
+				return encoded, nil
+			}
+		}
+		return publicFailureCallResult(tool.Name, "internal_error"), nil
+	}
+	example, ok := tool.ResultVariants[version]
+	if !ok || reflect.TypeOf(result) != reflect.TypeOf(example) {
+		return publicFailureCallResult(tool.Name, "internal_error"), nil
+	}
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		return publicFailureCallResult(tool.Name, "internal_error"), nil
+	}
+	validated := reflect.New(reflect.TypeOf(example))
+	if err := decodePublicArguments(resultJSON, validated.Interface()); err != nil {
+		return publicFailureCallResult(tool.Name, "internal_error"), nil
+	}
+	resultJSON, err = json.Marshal(validated.Elem().Interface())
+	if err != nil {
+		return publicFailureCallResult(tool.Name, "internal_error"), nil
+	}
+	return toolCallResult{Content: []toolCallResultContent{{Type: "text", Text: string(resultJSON)}}}, nil
+}
+
+func publicFailureCallResult(operation, code string) toolCallResult {
+	result, err := toolFailureResult(operation, code)
+	if err == nil {
+		return result
+	}
+	result, _ = toolFailureResult(operation, "internal_error")
+	return result
+}
+
 // toolCallResultContent is the MCP content-wrapper item type.
 type toolCallResultContent struct {
 	Type string `json:"type"`
@@ -757,6 +849,12 @@ type toolCallResult struct {
 // returning an error is NOT an RPC error — it's a successful result with
 // isError: true (§3).
 func HandleToolsCall(ctx context.Context, registry *Registry, identityStore *identity.Store, authHeader string, rawParams json.RawMessage) (any, *RPCError) {
+	if name, err := probeToolsCallName(rawParams); err == nil {
+		if tool, ok := registry.Get(name); ok && tool.PublicHandler != nil {
+			return handlePublicToolsCall(ctx, tool, authHeader, rawParams)
+		}
+	}
+
 	var params toolsCallParams
 	if err := json.Unmarshal(rawParams, &params); err != nil || params.Name == "" {
 		return nil, &RPCError{Code: RPCInvalidParams, Message: "tools/call requires params.name"}
@@ -765,6 +863,9 @@ func HandleToolsCall(ctx context.Context, registry *Registry, identityStore *ide
 	tool, ok := registry.Get(params.Name)
 	if !ok {
 		return nil, &RPCError{Code: RPCInvalidParams, Message: "unknown tool: " + params.Name}
+	}
+	if tool.PublicHandler != nil {
+		return nil, &RPCError{Code: RPCInvalidParams, Message: "invalid public tools/call"}
 	}
 
 	projectID, err := extractProjectID(params.Arguments)

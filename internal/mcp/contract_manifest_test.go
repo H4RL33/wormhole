@@ -83,7 +83,7 @@ func fabricMCPContract(t *testing.T) []alphaFabricMCPTool {
 	return actual
 }
 
-func TestAlphaContractMatchesDescriptorOnlyPublicFabricTools(t *testing.T) {
+func TestAlphaContractMatchesPublicFabricContract(t *testing.T) {
 	manifest := readAlphaMCPContract(t)
 	golden := readPublicDescriptorGolden(t)
 	if !reflect.DeepEqual(manifest.MCPTools.PublicFabricContract, golden.Descriptors) ||
@@ -97,9 +97,15 @@ func TestAlphaContractMatchesDescriptorOnlyPublicFabricTools(t *testing.T) {
 		want[index].OutputSchema = expandGoldenSchema(t, golden.Definitions, want[index].OutputSchema).(map[string]any)
 	}
 	actual := PublicFabricToolDescriptors()
+	publicRegistry := NewPublicFabricRegistry(readyPublicRegistryDependencies(t))
 	for _, descriptor := range actual {
 		if _, live := NewFabricRegistry(FabricRegistryDependencies{}).Get(descriptor.Name); live {
-			t.Fatalf("public contract %q is live", descriptor.Name)
+			t.Fatalf("public contract %q leaked into private registry", descriptor.Name)
+		}
+		_, live := publicRegistry.Get(descriptor.Name)
+		wantLive := descriptor.Name == "wormhole.sync.attach" || descriptor.Name == "wormhole.sync.bootstrap" || descriptor.Name == "wormhole.sync.pull"
+		if live != wantLive {
+			t.Fatalf("public contract %q live = %v, want %v", descriptor.Name, live, wantLive)
 		}
 	}
 	actualJSON, err := json.Marshal(actual)

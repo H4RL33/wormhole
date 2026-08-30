@@ -1,12 +1,15 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"reflect"
 	"sort"
 	"testing"
+	"time"
 
+	coregit "github.com/H4RL33/wormhole/internal/core/git"
 	"github.com/H4RL33/wormhole/internal/core/identity"
 )
 
@@ -56,6 +59,116 @@ func TestFabricRegistryRetainsExactPrivateSixteen(t *testing.T) {
 			t.Fatalf("public descriptor %q is live before production assembly", descriptor.Name)
 		}
 	}
+}
+
+func TestPublicFabricRegistryExposesOnlyCompletedSyncV2Reads(t *testing.T) {
+	registry := NewPublicFabricRegistry(readyPublicRegistryDependencies(t))
+	want := []string{"wormhole.sync.attach", "wormhole.sync.bootstrap", "wormhole.sync.pull"}
+	got := make([]string, 0, len(registry.List()))
+	for _, tool := range registry.List() {
+		got = append(got, tool.Name)
+		if tool.Handler != nil || tool.PublicHandler == nil || tool.RequiresAuth {
+			t.Fatalf("public tool %q has private dispatch metadata: %+v", tool.Name, tool)
+		}
+		if len(tool.ArgumentVariants) != 1 || tool.ArgumentVariants[2] == nil {
+			t.Fatalf("public tool %q argument variants = %#v, want v2 only", tool.Name, tool.ArgumentVariants)
+		}
+		if len(tool.ResultVariants) != 1 || tool.ResultVariants[2] == nil {
+			t.Fatalf("public tool %q result variants = %#v, want v2 only", tool.Name, tool.ResultVariants)
+		}
+	}
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("public Fabric tools = %q, want %q", got, want)
+	}
+	for _, descriptor := range PublicFabricToolDescriptors() {
+		_, live := registry.Get(descriptor.Name)
+		wantLive := descriptor.Name == "wormhole.sync.attach" || descriptor.Name == "wormhole.sync.bootstrap" || descriptor.Name == "wormhole.sync.pull"
+		if live != wantLive {
+			t.Fatalf("public descriptor %q live = %v, want %v", descriptor.Name, live, wantLive)
+		}
+	}
+}
+
+func TestPublicFabricRegistryRequiresEachCompleteHandler(t *testing.T) {
+	if got := len(NewPublicFabricRegistry(PublicFabricRegistryDependencies{}).List()); got != 0 {
+		t.Fatalf("empty public dependencies registered %d tools, want 0", got)
+	}
+	for name, dependencies := range map[string]PublicFabricRegistryDependencies{
+		"attach":    {Attach: &SyncV2AttachHandler{}},
+		"bootstrap": {Bootstrap: &SyncV2BootstrapHandler{}},
+		"pull":      {Pull: &SyncV2PullHandler{}},
+	} {
+		t.Run("incomplete "+name, func(t *testing.T) {
+			if got := len(NewPublicFabricRegistry(dependencies).List()); got != 0 {
+				t.Fatalf("incomplete non-nil %s registered %d tools, want 0", name, got)
+			}
+		})
+	}
+	ready := readyPublicRegistryDependencies(t)
+	registry := NewPublicFabricRegistry(PublicFabricRegistryDependencies{Pull: ready.Pull})
+	if got := len(registry.List()); got != 1 {
+		t.Fatalf("pull-only public dependencies registered %d tools, want 1", got)
+	}
+	if _, ok := registry.Get("wormhole.sync.pull"); !ok {
+		t.Fatal("pull-only public dependencies did not register wormhole.sync.pull")
+	}
+}
+
+func TestPublicFabricRegistrySchemasMatchFrozenDescriptors(t *testing.T) {
+	registry := NewPublicFabricRegistry(readyPublicRegistryDependencies(t))
+	descriptors := make(map[string]ToolDescriptor)
+	for _, descriptor := range PublicFabricToolDescriptors() {
+		descriptors[descriptor.Name] = descriptor
+	}
+	for _, entry := range HandleToolsList(registry).(map[string]any)["tools"].([]toolListEntry) {
+		got, err := json.Marshal(entry.InputSchema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := json.Marshal(descriptors[entry.Name].InputSchema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("%s public input schema drift\ngot:  %s\nwant: %s", entry.Name, got, want)
+		}
+		for _, forbidden := range []string{"project_id", "workspace_id", "fabric_instance_id", "remote_project_id", "stream_id", "actor_scope"} {
+			if bytes.Contains(got, []byte(`"`+forbidden+`"`)) {
+				t.Fatalf("%s public schema exposes forbidden routing field %q: %s", entry.Name, forbidden, got)
+			}
+		}
+	}
+}
+
+func readyPublicRegistryDependencies(t *testing.T) PublicFabricRegistryDependencies {
+	t.Helper()
+	fabricID := "11111111-1111-4111-8111-111111111111"
+	verifier, err := NewPublicProofVerifier(fabricID, func() time.Time { return time.Now().UTC() })
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewPublicBoundProofResolver(fabricID, identity.NewStore(nil), coregit.NewStreamStore(nil), verifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := NewMutationCoordinator(identity.NewStore(nil), coregit.NewStreamStore(nil), coregit.NewActivityStore(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	attach, err := NewSyncV2AttachHandler(fabricID, "test-observer", &coregit.FakeObserver{}, coordinator, staticAttachPolicySource{}, verifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootstrap, err := NewSyncV2BootstrapHandler(resolver, coregit.NewActivityStore(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pull, err := NewSyncV2PullHandler(resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return PublicFabricRegistryDependencies{Attach: attach, Bootstrap: bootstrap, Pull: pull}
 }
 
 func TestRegistry_GetMissing(t *testing.T) {

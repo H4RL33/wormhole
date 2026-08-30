@@ -152,6 +152,42 @@ func TestPublicFabricToolDescriptorsMatchCompleteIndependentGolden(t *testing.T)
 	}
 }
 
+func TestPublicFabricRegistryVariantsMatchFrozenDescriptorSchemas(t *testing.T) {
+	registry := NewPublicFabricRegistry(readyPublicRegistryDependencies(t))
+	descriptors := make(map[string]ToolDescriptor)
+	for _, descriptor := range PublicFabricToolDescriptors() {
+		descriptors[descriptor.Name] = descriptor
+	}
+	for _, tool := range registry.List() {
+		descriptor, ok := descriptors[tool.Name]
+		if !ok {
+			t.Fatalf("live public tool %q has no frozen descriptor", tool.Name)
+		}
+		gotInput, err := json.Marshal(buildInputSchema(tool))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantInput, err := json.Marshal(descriptor.InputSchema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(gotInput, wantInput) {
+			t.Fatalf("%s live input schema drift\ngot:  %s\nwant: %s", tool.Name, gotInput, wantInput)
+		}
+		gotOutput, err := json.Marshal(schemaOneOf(tool.ResultVariants[2]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantOutput, err := json.Marshal(descriptor.OutputSchema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(gotOutput, wantOutput) {
+			t.Fatalf("%s live output schema drift\ngot:  %s\nwant: %s", tool.Name, gotOutput, wantOutput)
+		}
+	}
+}
+
 func TestPublicDescriptorSchemasRejectPrivateRoutingFields(t *testing.T) {
 	forbidden := map[string]bool{
 		"project_id": true, "workspace_id": true, "fabric_instance_id": true,

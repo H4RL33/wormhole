@@ -22,7 +22,7 @@ type syncAttachCoordinator interface {
 }
 
 func (h *SyncV2AttachHandler) Handle(ctx context.Context, raw json.RawMessage, proof types.PublicRequestProof) (SyncAttachV2Result, error) {
-	if h == nil {
+	if !h.ready() {
 		return SyncAttachV2Result{}, syncAttachFailure("internal_error")
 	}
 	var arguments SyncAttachV2Args
@@ -168,19 +168,25 @@ type SyncV2AttachHandler struct {
 	verifier         *PublicProofVerifier
 }
 
+func (h *SyncV2AttachHandler) ready() bool {
+	return h != nil && types.CanonicalUUID(h.fabricInstanceID) && h.credentialRef != "" &&
+		strings.TrimSpace(h.credentialRef) == h.credentialRef && !strings.ContainsAny(h.credentialRef, "\r\n") &&
+		h.observer != nil && h.coordinator != nil && h.policySource != nil && h.verifier != nil
+}
+
 func NewSyncV2AttachHandler(fabricInstanceID, credentialRef string, observer coregit.CanonicalGitObserver, coordinator syncAttachCoordinator, policySource SyncAttachPolicySource, verifier *PublicProofVerifier) (*SyncV2AttachHandler, error) {
-	if !types.CanonicalUUID(fabricInstanceID) || credentialRef == "" || strings.TrimSpace(credentialRef) != credentialRef || strings.ContainsAny(credentialRef, "\r\n") ||
-		observer == nil || coordinator == nil || policySource == nil || verifier == nil {
-		return nil, identity.ErrInvalidPublicIdentity
-	}
-	return &SyncV2AttachHandler{
+	handler := &SyncV2AttachHandler{
 		fabricInstanceID: fabricInstanceID,
 		credentialRef:    credentialRef,
 		observer:         observer,
 		coordinator:      coordinator,
 		policySource:     policySource,
 		verifier:         verifier,
-	}, nil
+	}
+	if !handler.ready() {
+		return nil, identity.ErrInvalidPublicIdentity
+	}
+	return handler, nil
 }
 
 type SyncV2BootstrapHandler struct {
@@ -188,15 +194,20 @@ type SyncV2BootstrapHandler struct {
 	activity *coregit.ActivityStore
 }
 
+func (h *SyncV2BootstrapHandler) ready() bool {
+	return h != nil && h.resolver != nil && h.activity != nil
+}
+
 func NewSyncV2BootstrapHandler(resolver *PublicBoundProofResolver, activity *coregit.ActivityStore) (*SyncV2BootstrapHandler, error) {
-	if resolver == nil || activity == nil {
+	handler := &SyncV2BootstrapHandler{resolver: resolver, activity: activity}
+	if !handler.ready() {
 		return nil, identity.ErrInvalidPublicIdentity
 	}
-	return &SyncV2BootstrapHandler{resolver: resolver, activity: activity}, nil
+	return handler, nil
 }
 
 func (h *SyncV2BootstrapHandler) Handle(ctx context.Context, raw json.RawMessage, proof types.PublicRequestProof) (SyncBootstrapV2Result, error) {
-	if h == nil || h.resolver == nil || h.activity == nil {
+	if !h.ready() {
 		return SyncBootstrapV2Result{}, syncReadFailure("wormhole.sync.bootstrap", "internal_error")
 	}
 	var arguments SyncBootstrapV2Args
@@ -245,15 +256,20 @@ type SyncV2PullHandler struct {
 	resolver *PublicBoundProofResolver
 }
 
+func (h *SyncV2PullHandler) ready() bool {
+	return h != nil && h.resolver != nil
+}
+
 func NewSyncV2PullHandler(resolver *PublicBoundProofResolver) (*SyncV2PullHandler, error) {
-	if resolver == nil {
+	handler := &SyncV2PullHandler{resolver: resolver}
+	if !handler.ready() {
 		return nil, identity.ErrInvalidPublicIdentity
 	}
-	return &SyncV2PullHandler{resolver: resolver}, nil
+	return handler, nil
 }
 
 func (h *SyncV2PullHandler) Handle(ctx context.Context, raw json.RawMessage, proof types.PublicRequestProof) (SyncPullV2Result, error) {
-	if h == nil || h.resolver == nil {
+	if !h.ready() {
 		return SyncPullV2Result{}, syncReadFailure("wormhole.sync.pull", "internal_error")
 	}
 	var arguments SyncPullV2Args

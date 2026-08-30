@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 
 	"github.com/H4RL33/wormhole/internal/core/identity"
+	"github.com/H4RL33/wormhole/internal/types"
 )
 
 // Handler executes one MCP tool call. scope is nil when the tool's
@@ -18,6 +19,10 @@ import (
 // project-scoped bootstrap calls (e.g. registration) need it before any
 // token exists.
 type Handler func(ctx context.Context, scope *identity.AuthenticatedScope, projectID string, arguments json.RawMessage) (any, error)
+
+// PublicHandler executes one proof-authenticated public Fabric tool call. Public
+// calls carry no client-selected project scope and never use private credentials.
+type PublicHandler func(ctx context.Context, arguments json.RawMessage, proof types.PublicRequestProof) (any, error)
 
 // Tool is an MCP tool descriptor: name, docs, whether the auth middleware
 // must resolve a scope before dispatch, and the handler itself.
@@ -40,7 +45,12 @@ type Tool struct {
 	// instance of its canonical response type. Contract inventory uses these
 	// examples to derive response schemas without a second tool-name registry.
 	ResultExamples map[string]any `json:"-"`
-	Handler        Handler        `json:"-"`
+	// ArgumentVariants and ResultVariants explicitly bind public tool wire
+	// versions to their closed request and successful-result structs.
+	ArgumentVariants map[int]any   `json:"-"`
+	ResultVariants   map[int]any   `json:"-"`
+	Handler          Handler       `json:"-"`
+	PublicHandler    PublicHandler `json:"-"`
 }
 
 // Registry holds the set of MCP tools this server exposes. Empty at boot

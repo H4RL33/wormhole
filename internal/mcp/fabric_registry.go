@@ -1,12 +1,16 @@
 package mcp
 
 import (
+	"context"
+	"encoding/json"
+
 	"github.com/H4RL33/wormhole/internal/core/events"
 	"github.com/H4RL33/wormhole/internal/core/git"
 	"github.com/H4RL33/wormhole/internal/core/identity"
 	"github.com/H4RL33/wormhole/internal/core/kb"
 	"github.com/H4RL33/wormhole/internal/core/roles"
 	"github.com/H4RL33/wormhole/internal/core/tasks"
+	"github.com/H4RL33/wormhole/internal/types"
 )
 
 // FabricRegistryDependencies contains the stores used by Fabric's private MCP
@@ -46,5 +50,42 @@ func NewFabricRegistry(deps FabricRegistryDependencies) *Registry {
 	register(SearchArticlesTool(deps.KB), SearchArticlesOutput{})
 	register(GetArticleTool(deps.KB), GetArticleOutput{})
 	register(GetArticleLinksTool(deps.KB), GetArticleLinksOutput{})
+	return registry
+}
+
+// PublicFabricRegistryDependencies contains the complete direct handlers that
+// may be exposed by Fabric's proof-authenticated public MCP surface.
+type PublicFabricRegistryDependencies struct {
+	Attach    *SyncV2AttachHandler
+	Bootstrap *SyncV2BootstrapHandler
+	Pull      *SyncV2PullHandler
+}
+
+// NewPublicFabricRegistry composes Fabric's separate public MCP registry. A
+// tool becomes live only when its complete direct handler has been assembled.
+func NewPublicFabricRegistry(deps PublicFabricRegistryDependencies) *Registry {
+	registry := NewRegistry()
+	register := func(name, description string, arguments, result any, handler PublicHandler) {
+		registry.Register(Tool{
+			Name: name, Description: description,
+			ArgumentVariants: map[int]any{2: arguments}, ResultVariants: map[int]any{2: result},
+			PublicHandler: handler,
+		})
+	}
+	if deps.Attach.ready() {
+		register("wormhole.sync.attach", "Attach an observed canonical repository ref to public sync v2.", SyncAttachV2Args{}, SyncAttachV2Result{}, func(ctx context.Context, arguments json.RawMessage, proof types.PublicRequestProof) (any, error) {
+			return deps.Attach.Handle(ctx, arguments, proof)
+		})
+	}
+	if deps.Bootstrap.ready() {
+		register("wormhole.sync.bootstrap", "Read one complete validated sync v2 stream state and finite Activity policy.", SyncBootstrapV2Args{}, SyncBootstrapV2Result{}, func(ctx context.Context, arguments json.RawMessage, proof types.PublicRequestProof) (any, error) {
+			return deps.Bootstrap.Handle(ctx, arguments, proof)
+		})
+	}
+	if deps.Pull.ready() {
+		register("wormhole.sync.pull", "Read one complete validated sync v2 stream state.", SyncPullV2Args{}, SyncPullV2Result{}, func(ctx context.Context, arguments json.RawMessage, proof types.PublicRequestProof) (any, error) {
+			return deps.Pull.Handle(ctx, arguments, proof)
+		})
+	}
 	return registry
 }

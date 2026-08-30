@@ -92,7 +92,7 @@ func newMutationFixture(t *testing.T) *mutationFixture {
 		}},
 		Extensions: projectstate.ExtensionsV1{},
 	}
-	now := time.Date(2026, 8, 29, 10, 0, 0, 0, time.UTC)
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	transport := types.ActorEnvelope{
 		ActorKind:        types.ActorHuman,
 		HumanPrincipalID: humanID,
