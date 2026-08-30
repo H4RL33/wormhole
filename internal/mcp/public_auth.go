@@ -108,9 +108,18 @@ func (r *PublicBoundProofResolver) Resolve(ctx context.Context, tool string, raw
 }
 
 func (r *PublicBoundProofResolver) resolveBoundAuthorityInTx(ctx context.Context, tx *sql.Tx, projectID string, scope SyncV2Scope, verified VerifiedPublicProof) (boundPublicAuthority, error) {
-	attached, err := r.streams.LockAttachmentInTx(ctx, tx, coregit.AttachmentLookup{
-		ProjectID: projectID, FabricInstanceID: r.fabricInstanceID, AttachmentRef: scope.AttachmentRef,
-	})
+	bound, err := r.resolveAttachmentAuthorityInTx(ctx, tx, projectID, scope.AttachmentRef, verified)
+	if err != nil {
+		return boundPublicAuthority{}, err
+	}
+	if bound.decisionErr == nil && !syncMutationScopeMatchesRoute(scope, bound.attached) {
+		bound.decisionErr = coregit.ErrStreamPrecondition
+	}
+	return bound, nil
+}
+
+func (r *PublicBoundProofResolver) resolveAttachmentAuthorityInTx(ctx context.Context, tx *sql.Tx, projectID, attachmentRef string, verified VerifiedPublicProof) (boundPublicAuthority, error) {
+	attached, err := r.streams.LockAttachmentInTx(ctx, tx, coregit.AttachmentLookup{ProjectID: projectID, FabricInstanceID: r.fabricInstanceID, AttachmentRef: attachmentRef})
 	if err != nil {
 		return boundPublicAuthority{}, err
 	}
@@ -124,10 +133,7 @@ func (r *PublicBoundProofResolver) resolveBoundAuthorityInTx(ctx context.Context
 	human, actorErr := resolveVerifiedTrackedHuman(attached.State.Accepted, verified)
 	actor := types.ActorEnvelope{}
 	if actorErr == nil {
-		actor = types.ActorEnvelope{
-			ActorKind: types.ActorHuman, HumanPrincipalID: human.ID,
-			Assurance: types.AssurancePublicKeyContinuity, OccurredAt: verified.Timestamp,
-		}
+		actor = types.ActorEnvelope{ActorKind: types.ActorHuman, HumanPrincipalID: human.ID, Assurance: types.AssurancePublicKeyContinuity, OccurredAt: verified.Timestamp}
 		if verified.SessionID != "" {
 			actor, actorErr = r.identity.ResolveHistoricalPublicSessionActorInTx(ctx, tx, r.fabricInstanceID, verified.SessionID, verified.Timestamp)
 			if actorErr == nil && actor.AccountableHumanID != human.ID {
@@ -136,19 +142,12 @@ func (r *PublicBoundProofResolver) resolveBoundAuthorityInTx(ctx context.Context
 		}
 	}
 	if actorErr == nil {
-		bound.authority = identity.MutationAuthority{
-			Scope:            types.ActorScope{ProjectID: projectID, Actor: actor},
-			FabricInstanceID: attached.Attachment.Key.FabricInstanceID,
-			StreamID:         attached.Attachment.Key.StreamID, WorkspaceID: attached.Attachment.WorkspaceID,
-			CanonicalRef: attached.Attachment.CanonicalRef, AttachmentRef: attached.Attachment.AttachmentRef,
-			IssuerKeyFingerprint: attached.Attachment.IssuerKeyFingerprint, SessionID: verified.SessionID,
-		}
+		a := attached.Attachment
+		bound.authority = identity.MutationAuthority{Scope: types.ActorScope{ProjectID: projectID, Actor: actor}, FabricInstanceID: a.Key.FabricInstanceID, StreamID: a.Key.StreamID, WorkspaceID: a.WorkspaceID, CanonicalRef: a.CanonicalRef, AttachmentRef: a.AttachmentRef, IssuerKeyFingerprint: a.IssuerKeyFingerprint, SessionID: verified.SessionID}
 		_, actorErr = r.identity.RevalidateMutationAuthorityInTx(ctx, tx, bound.authority, authorityEvidence(attached))
 	}
 	if actorErr != nil {
 		bound.decisionErr = identity.ErrPublicAuthentication
-	} else if !syncMutationScopeMatchesRoute(scope, attached) {
-		bound.decisionErr = coregit.ErrStreamPrecondition
 	}
 	return bound, nil
 }
