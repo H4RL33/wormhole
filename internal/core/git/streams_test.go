@@ -498,6 +498,183 @@ func TestApplyOperationStaleVersionPersistsConflict(t *testing.T) {
 	}
 }
 
+func TestApplyOperationInTxRejectsInvalidAssuranceBeforeEveryStaleConflictBranch(t *testing.T) {
+	for _, assurance := range []types.Assurance{types.AssuranceLegacy, types.AssuranceUnknown} {
+		for _, mismatch := range []string{"version", "tree", "view"} {
+			t.Run(string(assurance)+"/"+mismatch, func(t *testing.T) {
+				fixture := newStreamFixture(t, "invalid-assurance-"+string(assurance)+"-"+mismatch)
+				initial := fixture.attach()
+				operation := streamActorOperation(initial.Live, fixture.scope.Actor, streamTestOperationA)
+				operation.Actor.Assurance = assurance
+				input := fixture.applyInput(initial, operation)
+				switch mismatch {
+				case "version":
+					input.ExpectedVersion++
+				case "tree":
+					input.ExpectedTreeDigest = streamTestDigest("c")
+				case "view":
+					input.Operation.ExpectedViewDigest = streamTestDigest("d")
+				}
+
+				tx, err := fixture.db.BeginTx(context.Background(), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				before := streamRouteSnapshotInTx(t, tx, fixture.key)
+				transition, err := fixture.store.ApplyOperationInTx(context.Background(), tx, fixture.scope, input)
+				kind, classified := projectstate.ClassifyOperationFailure(err)
+				if !errors.Is(err, projectstate.ErrInvalidActorEnvelope) || !classified || kind != projectstate.OperationFailureInvalid || !reflect.DeepEqual(transition, StreamTransition{}) {
+					t.Fatalf("ApplyOperationInTx = (%+v,%v), classification=(%q,%v), want typed invalid actor", transition, err, kind, classified)
+				}
+				if after := streamRouteSnapshotInTx(t, tx, fixture.key); after != before {
+					t.Fatalf("rejected operation changed rows\nbefore=%s\nafter=%s", before, after)
+				}
+				if err := tx.Commit(); err != nil {
+					t.Fatalf("commit rejected caller transaction: %v", err)
+				}
+				assertStreamRouteSnapshot(t, fixture.db, fixture.key, before)
+			})
+		}
+	}
+}
+
+func TestApplyOperationInTxPersistsTypedRecordStateConflict(t *testing.T) {
+	fixture := newStreamFixture(t, "typed-record-state-conflict")
+	initial := fixture.attach()
+	operation := projectstate.OperationV1{
+		SchemaVersion: 1, ID: streamTestOperationA, Kind: projectstate.OperationTombstone,
+		ExpectedViewDigest: initial.Live.Digest, Actor: fixture.scope.Actor,
+		Tombstone: &projectstate.TombstoneOperationV1{
+			Key:                   projectstate.RecordKey{Kind: "actor", ID: streamTestActorID},
+			ExpectedContentDigest: streamTestDigest("f"),
+		},
+	}
+	tx, err := fixture.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transition, err := fixture.store.ApplyOperationInTx(context.Background(), tx, fixture.scope, fixture.applyInput(initial, operation))
+	if err != nil {
+		t.Fatalf("ApplyOperationInTx: %v", err)
+	}
+	if transition.Version != initial.Version || transition.Live.Digest != initial.Live.Digest || transition.ConflictID == "" {
+		t.Fatalf("typed conflict transition = %+v, want current version/digest and conflict ID", transition)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if got := countStreamRows(t, fixture.db, "fabric_stream_versions", fixture.key); got != 1 {
+		t.Fatalf("version rows = %d, want 1", got)
+	}
+	if got := countStreamRows(t, fixture.db, "fabric_stream_requests", fixture.key); got != 1 {
+		t.Fatalf("request rows = %d, want 1", got)
+	}
+	if got := countStreamRows(t, fixture.db, "fabric_stream_conflicts", fixture.key); got != 1 {
+		t.Fatalf("conflict rows = %d, want 1", got)
+	}
+	var kind, state, result string
+	if err := fixture.db.QueryRow(`SELECT c.conflict_kind,c.state,r.result
+		FROM fabric_stream_conflicts c JOIN fabric_stream_requests r
+		ON r.project_id=c.project_id AND r.fabric_instance_id=c.fabric_instance_id AND r.stream_id=c.stream_id
+		AND r.ref_name=c.canonical_ref AND r.operation_id=$4
+		WHERE c.project_id=$1 AND c.fabric_instance_id=$2 AND c.stream_id=$3 AND c.conflict_id=$5`,
+		fixture.key.ProjectID, fixture.key.FabricInstanceID, fixture.key.StreamID, operation.ID, transition.ConflictID).
+		Scan(&kind, &state, &result); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "operation_precondition" || state != "open" || result != "conflict" {
+		t.Fatalf("stored typed conflict = kind %q state %q result %q", kind, state, result)
+	}
+}
+
+func TestApplyOperationInTxRejectsTypedInvalidOperationWithoutConflict(t *testing.T) {
+	for _, assurance := range []types.Assurance{types.AssuranceLegacy, types.AssuranceUnknown} {
+		t.Run(string(assurance), func(t *testing.T) {
+			fixture := newStreamFixture(t, "typed-invalid-"+string(assurance))
+			initial := fixture.attach()
+			operation := streamActorOperation(initial.Live, fixture.scope.Actor, streamTestOperationA)
+			operation.Actor.Assurance = assurance
+			tx, err := fixture.db.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := streamRouteSnapshotInTx(t, tx, fixture.key)
+			_, err = fixture.store.ApplyOperationInTx(context.Background(), tx, fixture.scope, fixture.applyInput(initial, operation))
+			kind, classified := projectstate.ClassifyOperationFailure(err)
+			if !errors.Is(err, projectstate.ErrInvalidActorEnvelope) || !classified || kind != projectstate.OperationFailureInvalid {
+				t.Fatalf("error=%v classification=(%q,%v), want typed invalid actor", err, kind, classified)
+			}
+			if after := streamRouteSnapshotInTx(t, tx, fixture.key); after != before {
+				t.Fatalf("typed invalid operation persisted rows\nbefore=%s\nafter=%s", before, after)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			assertStreamRouteSnapshot(t, fixture.db, fixture.key, before)
+		})
+	}
+}
+
+func TestApplyOperationInTxDoesNotPersistUnclassifiedPostApplyInvariantFailure(t *testing.T) {
+	fixture := newStreamFixture(t, "unclassified-post-apply")
+	initial := fixture.attach()
+	createdAt := fixture.scope.Actor.OccurredAt
+	task := projectstate.TaskV1{
+		SchemaVersion: 1, Kind: "task", ID: streamTestActorID, Title: "Cross-kind collision",
+		Description: "Individually valid task", Status: "todo", Priority: 1,
+		CreatedAt: createdAt, UpdatedAt: createdAt, Extensions: projectstate.ExtensionsV1{},
+	}
+	operation := projectstate.OperationV1{
+		SchemaVersion: 1, ID: streamTestOperationA, Kind: projectstate.OperationPutRecord,
+		ExpectedViewDigest: initial.Live.Digest, Actor: fixture.scope.Actor,
+		PutRecord: &projectstate.PutRecordV1{Record: projectstate.RecordValueV1{Task: &task}},
+	}
+	tx, err := fixture.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := streamRouteSnapshotInTx(t, tx, fixture.key)
+	transition, err := fixture.store.ApplyOperationInTx(context.Background(), tx, fixture.scope, fixture.applyInput(initial, operation))
+	if !errors.Is(err, projectstate.ErrInvalidSnapshot) || !reflect.DeepEqual(transition, StreamTransition{}) {
+		t.Fatalf("ApplyOperationInTx = (%+v,%v), want raw ErrInvalidSnapshot", transition, err)
+	}
+	if kind, classified := projectstate.ClassifyOperationFailure(err); classified || kind != "" {
+		t.Fatalf("unexpected classification=(%q,%v)", kind, classified)
+	}
+	if after := streamRouteSnapshotInTx(t, tx, fixture.key); after != before {
+		t.Fatalf("unclassified failure persisted rows\nbefore=%s\nafter=%s", before, after)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit rejected caller transaction: %v", err)
+	}
+	assertStreamRouteSnapshot(t, fixture.db, fixture.key, before)
+}
+
+func TestApplyOperationInTxRetainsVersionTreeDurableConflict(t *testing.T) {
+	for _, mismatch := range []string{"version", "tree", "view"} {
+		t.Run(mismatch, func(t *testing.T) {
+			fixture := newStreamFixture(t, "retained-durable-"+mismatch)
+			initial := fixture.attach()
+			input := fixture.applyInput(initial, streamActorOperation(initial.Live, fixture.scope.Actor, streamTestOperationA))
+			switch mismatch {
+			case "version":
+				input.ExpectedVersion++
+			case "tree":
+				input.ExpectedTreeDigest = streamTestDigest("b")
+			case "view":
+				input.Operation.ExpectedViewDigest = streamTestDigest("c")
+			}
+			transition := fixture.apply(input)
+			if transition.Version != initial.Version || transition.Live.Digest != initial.Live.Digest || transition.ConflictID == "" ||
+				countStreamRows(t, fixture.db, "fabric_stream_versions", fixture.key) != 1 ||
+				countStreamRows(t, fixture.db, "fabric_stream_requests", fixture.key) != 1 ||
+				countStreamRows(t, fixture.db, "fabric_stream_conflicts", fixture.key) != 1 {
+				t.Fatalf("retained conflict transition = %+v", transition)
+			}
+		})
+	}
+}
+
 func TestApplyOperationConcurrentExpectedVersionHasOneConflict(t *testing.T) {
 	fixture := newStreamFixture(t, "stream-concurrent")
 	initial := fixture.attach()
@@ -1487,6 +1664,36 @@ func (f *streamFixture) reopen() {
 	f.t.Cleanup(func() { _ = db.Close() })
 	f.db = db
 	f.store = &StreamStore{db: db}
+}
+
+func streamRouteSnapshotInTx(t *testing.T, tx *sql.Tx, key StreamKey) string {
+	t.Helper()
+	if _, err := tx.Exec(`SELECT set_config('wormhole.project_id',$1,true)`, key.ProjectID); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot string
+	err := tx.QueryRow(`SELECT jsonb_build_object(
+		'stream',(SELECT to_jsonb(s) FROM fabric_streams s WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3),
+		'versions',(SELECT coalesce(jsonb_agg(to_jsonb(v) ORDER BY version),'[]'::jsonb) FROM fabric_stream_versions v WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3),
+		'requests',(SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY operation_id),'[]'::jsonb) FROM fabric_stream_requests r WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3),
+		'conflicts',(SELECT coalesce(jsonb_agg(to_jsonb(c) ORDER BY conflict_id),'[]'::jsonb) FROM fabric_stream_conflicts c WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3))::text`,
+		key.ProjectID, key.FabricInstanceID, key.StreamID).Scan(&snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
+func assertStreamRouteSnapshot(t *testing.T, db *sql.DB, key StreamKey, want string) {
+	t.Helper()
+	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if got := streamRouteSnapshotInTx(t, tx, key); got != want {
+		t.Fatalf("committed stream rows changed\nwant=%s\ngot=%s", want, got)
+	}
 }
 
 type storedStreamVersion struct {

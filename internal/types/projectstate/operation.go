@@ -3,6 +3,7 @@ package projectstate
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/H4RL33/wormhole/internal/types"
@@ -62,6 +63,61 @@ type OperationV1 struct {
 	Resurrect          *ResurrectOperationV1 `json:"resurrect,omitempty"`
 }
 
+type OperationFailureKind string
+
+const (
+	OperationFailureInvalid       OperationFailureKind = "invalid"
+	OperationFailureStateConflict OperationFailureKind = "state_conflict"
+)
+
+type OperationFailure struct {
+	Kind OperationFailureKind
+	Err  error
+}
+
+func (e *OperationFailure) Error() string { return e.Err.Error() }
+
+func (e *OperationFailure) Unwrap() error { return e.Err }
+
+func operationFailure(kind OperationFailureKind, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &OperationFailure{Kind: kind, Err: err}
+}
+
+func ClassifyOperationFailure(err error) (OperationFailureKind, bool) {
+	var failure *OperationFailure
+	if !errors.As(err, &failure) || failure == nil || failure.Err == nil {
+		return "", false
+	}
+	return failure.Kind, true
+}
+
+func ValidateOperationForApply(operation OperationV1) error {
+	if err := validateOperation(operation); err != nil {
+		return operationFailure(OperationFailureInvalid, err)
+	}
+	if operation.Actor.Assurance == types.AssuranceLegacy || operation.Actor.Assurance == types.AssuranceUnknown {
+		return operationFailure(OperationFailureInvalid, fmt.Errorf("%w: historical assurance cannot issue operations", ErrInvalidActorEnvelope))
+	}
+	return nil
+}
+
+func stateDependentOperationFailure(err error) error {
+	if err == nil {
+		return nil
+	}
+	switch {
+	case errors.Is(err, ErrOperationPrecondition), errors.Is(err, ErrImmutableRecord),
+		errors.Is(err, ErrTombstoneDigest), errors.Is(err, ErrResurrectionDigest),
+		errors.Is(err, ErrBrokenReference):
+		return operationFailure(OperationFailureStateConflict, err)
+	default:
+		return err
+	}
+}
+
 func CanonicalOperation(operation OperationV1) ([]byte, error) {
 	if err := validateOperation(operation); err != nil {
 		return nil, err
@@ -93,34 +149,19 @@ func DecodeOperation(raw []byte) (OperationV1, error) {
 }
 
 func ApplyOperation(snapshot Snapshot, operation OperationV1) (Snapshot, error) {
-	if err := validateOperation(operation); err != nil {
+	if err := ValidateOperationForApply(operation); err != nil {
 		return snapshot, err
 	}
 	if operation.ExpectedViewDigest != snapshot.Digest {
-		return snapshot, fmt.Errorf("%w: expected view digest", ErrOperationPrecondition)
-	}
-	if operation.Actor.Assurance == types.AssuranceLegacy || operation.Actor.Assurance == types.AssuranceUnknown {
-		return snapshot, fmt.Errorf("%w: historical assurance cannot issue operations", ErrInvalidActorEnvelope)
+		return snapshot, operationFailure(OperationFailureStateConflict, fmt.Errorf("%w: expected view digest", ErrOperationPrecondition))
 	}
 	next := cloneSnapshot(snapshot)
-	var err error
-	switch operation.Kind {
-	case OperationPutRecord:
-		err = applyPutRecord(&next, operation.PutRecord.Record)
-	case OperationPutKBArticle:
-		err = applyPutKBArticle(&next, *operation.PutKBArticle)
-	case OperationTombstone:
-		err = applyTombstone(&next, operation.Actor, *operation.Tombstone)
-	case OperationResurrect:
-		err = applyResurrection(&next, *operation.Resurrect)
-	default:
-		err = fmt.Errorf("%w: operation kind %q", ErrUnknownKind, operation.Kind)
-	}
+	err := applyOperationPayload(&next, operation)
 	if err != nil {
-		return snapshot, err
+		return snapshot, stateDependentOperationFailure(err)
 	}
 	if err := Validate(next); err != nil {
-		return snapshot, err
+		return snapshot, stateDependentOperationFailure(err)
 	}
 	tree, err := EncodeTree(next)
 	if err != nil {
@@ -131,6 +172,21 @@ func ApplyOperation(snapshot Snapshot, operation OperationV1) (Snapshot, error) 
 		return snapshot, err
 	}
 	return next, nil
+}
+
+func applyOperationPayload(next *Snapshot, operation OperationV1) error {
+	switch operation.Kind {
+	case OperationPutRecord:
+		return applyPutRecord(next, operation.PutRecord.Record)
+	case OperationPutKBArticle:
+		return applyPutKBArticle(next, *operation.PutKBArticle)
+	case OperationTombstone:
+		return applyTombstone(next, operation.Actor, *operation.Tombstone)
+	case OperationResurrect:
+		return applyResurrection(next, *operation.Resurrect)
+	default:
+		return fmt.Errorf("%w: operation kind %q", ErrUnknownKind, operation.Kind)
+	}
 }
 
 func validateOperation(operation OperationV1) error {

@@ -550,6 +550,95 @@ func TestApplyPublicOperationExactReplayUsesHistoricalSignedPrecondition(t *test
 	}
 }
 
+func TestApplyPublicOperationTypedConflictExactReplayAndChangedBytes(t *testing.T) {
+	f := newStreamFixture(t, "public-typed-conflict-replay")
+	_, attached := publicAttach(t, f, "sha256:"+strings.Repeat("6", 64))
+	precondition := publicPrecondition(attached.Attachment, attached.State)
+	operation := projectstate.OperationV1{
+		SchemaVersion: 1, ID: streamTestOperationA, Kind: projectstate.OperationTombstone,
+		ExpectedViewDigest: attached.State.Live.Digest, Actor: f.scope.Actor,
+		Tombstone: &projectstate.TombstoneOperationV1{
+			Key:                   projectstate.RecordKey{Kind: "actor", ID: streamTestActorID},
+			ExpectedContentDigest: projectstate.Digest("sha256:" + strings.Repeat("f", 64)),
+		},
+	}
+	wantOperation, err := projectstate.CanonicalOperation(operation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantActor, err := projectstate.CanonicalJSON(operation.Actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := applyPublic(t, f, attached.Attachment, precondition, operation)
+	if first.Version != attached.State.Version || first.Live.Digest != attached.State.Live.Digest || first.ConflictID == "" {
+		t.Fatalf("typed conflict = %+v", first)
+	}
+	var requestOperation, requestActor []byte
+	if err := f.db.QueryRow(`SELECT canonical_operation_json,actor_envelope_json FROM fabric_stream_requests
+		WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3 AND operation_id=$4`,
+		attached.Attachment.Key.ProjectID, attached.Attachment.Key.FabricInstanceID, attached.Attachment.Key.StreamID, operation.ID).
+		Scan(&requestOperation, &requestActor); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(requestOperation, wantOperation) || !bytes.Equal(requestActor, wantActor) {
+		t.Fatalf("stored typed-conflict operation or actor bytes changed")
+	}
+	tx, err := beginPublicRuntimeTx(f.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterFirst := publicRouteBytes(t, tx, attached.Attachment.Key)
+	_ = tx.Rollback()
+	replayed := applyPublic(t, f, attached.Attachment, precondition, operation)
+	if !samePublicAttachTransition(first, replayed) {
+		t.Fatalf("exact typed-conflict replay = %+v, want %+v", replayed, first)
+	}
+	tx, err = beginPublicRuntimeTx(f.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterReplay := publicRouteBytes(t, tx, attached.Attachment.Key); afterReplay != afterFirst {
+		t.Fatalf("exact conflict replay changed rows\nbefore=%s\nafter=%s", afterFirst, afterReplay)
+	}
+	_ = tx.Rollback()
+
+	changed := []struct {
+		name   string
+		mutate func(*projectstate.OperationV1)
+	}{
+		{"operation", func(candidate *projectstate.OperationV1) {
+			candidate.Tombstone.ExpectedContentDigest = projectstate.Digest("sha256:" + strings.Repeat("e", 64))
+		}},
+		{"actor", func(candidate *projectstate.OperationV1) {
+			candidate.Actor.OccurredAt = candidate.Actor.OccurredAt.Add(time.Minute)
+		}},
+	}
+	for _, test := range changed {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := operation
+			tombstone := *operation.Tombstone
+			candidate.Tombstone = &tombstone
+			test.mutate(&candidate)
+			tx, err := beginPublicRuntimeTx(f.db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := publicRouteBytes(t, tx, attached.Attachment.Key)
+			transition, err := f.store.ApplyPublicOperationInTx(context.Background(), tx, f.scope, ApplyPublicOperationInput{Attachment: attached.Attachment, Precondition: precondition, Operation: candidate})
+			if !errors.Is(err, ErrOperationReplay) || !reflect.DeepEqual(transition, StreamTransition{}) {
+				t.Fatalf("changed replay = (%+v,%v), want ErrOperationReplay", transition, err)
+			}
+			if after := publicRouteBytes(t, tx, attached.Attachment.Key); after != before {
+				t.Fatalf("changed replay mutated rows\nbefore=%s\nafter=%s", before, after)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatalf("commit changed replay rejection: %v", err)
+			}
+		})
+	}
+}
+
 func TestStreamOperationStableActorMatchPreservesExactBytes(t *testing.T) {
 	f := newStreamFixture(t, "public-stable-actor-bytes")
 	_, attached := publicAttach(t, f, "sha256:"+strings.Repeat("7", 64))

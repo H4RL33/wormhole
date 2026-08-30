@@ -790,6 +790,118 @@ func TestApplyOperationCreatedAtImmutableOnOrdinaryUpdate(t *testing.T) {
 	}
 }
 
+func TestApplyOperationClassifiesInvalidAndStateDependentFailures(t *testing.T) {
+	snapshot := operationSnapshot(t)
+	invalid := []struct {
+		name   string
+		mutate func(*OperationV1)
+		want   error
+	}{
+		{"schema", func(operation *OperationV1) { operation.SchemaVersion = 2 }, ErrUnknownVersion},
+		{"id", func(operation *OperationV1) { operation.ID = "invalid" }, ErrOperationPrecondition},
+		{"payload", func(operation *OperationV1) { operation.PutRecord = nil }, ErrOperationPrecondition},
+		{"legacy assurance", func(operation *OperationV1) { operation.Actor.Assurance = types.AssuranceLegacy }, ErrInvalidActorEnvelope},
+		{"unknown assurance", func(operation *OperationV1) { operation.Actor.Assurance = types.AssuranceUnknown }, ErrInvalidActorEnvelope},
+	}
+	for _, test := range invalid {
+		t.Run("invalid/"+test.name, func(t *testing.T) {
+			operation := validPutTaskOperation(snapshot)
+			test.mutate(&operation)
+			_, err := ApplyOperation(snapshot, operation)
+			kind, ok := ClassifyOperationFailure(err)
+			if !ok || kind != OperationFailureInvalid || !errors.Is(err, test.want) {
+				t.Fatalf("ApplyOperation error = %v classification=(%q,%v), want invalid wrapping %v", err, kind, ok, test.want)
+			}
+		})
+	}
+
+	tombstoned, err := ApplyOperation(snapshot, OperationV1{
+		SchemaVersion: 1, ID: "99999999-9999-4999-8999-999999999980", Kind: OperationTombstone,
+		ExpectedViewDigest: snapshot.Digest, Actor: operationActor(),
+		Tombstone: &TombstoneOperationV1{Key: RecordKey{Kind: "task", ID: taskID}, ExpectedContentDigest: "sha256:87f7972dc4c0a198ece460bc094d35a981dc03c352ccfc2e0fb0280a60f5f3b0"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDependent := []struct {
+		name      string
+		snapshot  Snapshot
+		operation func(Snapshot) OperationV1
+		want      error
+	}{
+		{"stale view", snapshot, func(state Snapshot) OperationV1 {
+			operation := validPutTaskOperation(state)
+			operation.ExpectedViewDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+			return operation
+		}, ErrOperationPrecondition},
+		{"missing target", snapshot, func(state Snapshot) OperationV1 {
+			return OperationV1{SchemaVersion: 1, ID: "99999999-9999-4999-8999-999999999981", Kind: OperationTombstone, ExpectedViewDigest: state.Digest, Actor: operationActor(), Tombstone: &TombstoneOperationV1{Key: RecordKey{Kind: "task", ID: "88888888-8888-4888-8888-888888888888"}, ExpectedContentDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
+		}, ErrOperationPrecondition},
+		{"tombstoned target", tombstoned, func(state Snapshot) OperationV1 {
+			return OperationV1{SchemaVersion: 1, ID: "99999999-9999-4999-8999-999999999988", Kind: OperationTombstone, ExpectedViewDigest: state.Digest, Actor: operationActor(), Tombstone: &TombstoneOperationV1{Key: RecordKey{Kind: "task", ID: taskID}, ExpectedContentDigest: "sha256:87f7972dc4c0a198ece460bc094d35a981dc03c352ccfc2e0fb0280a60f5f3b0"}}
+		}, ErrOperationPrecondition},
+		{"tombstone digest", snapshot, func(state Snapshot) OperationV1 {
+			return OperationV1{SchemaVersion: 1, ID: "99999999-9999-4999-8999-999999999982", Kind: OperationTombstone, ExpectedViewDigest: state.Digest, Actor: operationActor(), Tombstone: &TombstoneOperationV1{Key: RecordKey{Kind: "task", ID: taskID}, ExpectedContentDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
+		}, ErrTombstoneDigest},
+		{"kb tombstone body digest", snapshot, func(state Snapshot) OperationV1 {
+			bodyDigest := Digest("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+			return OperationV1{SchemaVersion: 1, ID: "99999999-9999-4999-8999-999999999989", Kind: OperationTombstone, ExpectedViewDigest: state.Digest, Actor: operationActor(), Tombstone: &TombstoneOperationV1{Key: RecordKey{Kind: "kb_article", ID: articleID}, ExpectedContentDigest: "sha256:d4c95b4bf2332b5f815d0ee45f3bd0bfe1811530e61ad1e47e5f40c709cab08b", ExpectedBodyDigest: &bodyDigest}}
+		}, ErrTombstoneDigest},
+		{"resurrection digest", tombstoned, func(state Snapshot) OperationV1 {
+			record := cloneTask(*snapshot.Tasks[taskID].Value)
+			return OperationV1{SchemaVersion: 1, ID: "99999999-9999-4999-8999-999999999983", Kind: OperationResurrect, ExpectedViewDigest: state.Digest, Actor: operationActor(), Resurrect: &ResurrectOperationV1{Key: RecordKey{Kind: "task", ID: taskID}, ExpectedTombstoneDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Record: RecordValueV1{Task: &record}}}
+		}, ErrResurrectionDigest},
+		{"immutable event", snapshot, func(state Snapshot) OperationV1 {
+			event := state.Events[eventID]
+			event.EventType = "changed"
+			return OperationV1{SchemaVersion: 1, ID: "99999999-9999-4999-8999-999999999984", Kind: OperationPutRecord, ExpectedViewDigest: state.Digest, Actor: operationActor(), PutRecord: &PutRecordV1{Record: RecordValueV1{Event: &event}}}
+		}, ErrImmutableRecord},
+		{"immutable git link", snapshot, func(state Snapshot) OperationV1 {
+			link := cloneGitLink(*state.GitLinks[gitLinkID].Value)
+			link.Summary = "changed"
+			return OperationV1{SchemaVersion: 1, ID: "99999999-9999-4999-8999-999999999990", Kind: OperationPutRecord, ExpectedViewDigest: state.Digest, Actor: operationActor(), PutRecord: &PutRecordV1{Record: RecordValueV1{GitLink: &link}}}
+		}, ErrImmutableRecord},
+		{"immutable created at", snapshot, func(state Snapshot) OperationV1 {
+			task := cloneTask(*state.Tasks[taskID].Value)
+			task.CreatedAt = task.CreatedAt.Add(-time.Minute)
+			return OperationV1{SchemaVersion: 1, ID: "99999999-9999-4999-8999-999999999985", Kind: OperationPutRecord, ExpectedViewDigest: state.Digest, Actor: operationActor(), PutRecord: &PutRecordV1{Record: RecordValueV1{Task: &task}}}
+		}, ErrOperationPrecondition},
+		{"broken reference", snapshot, func(state Snapshot) OperationV1 {
+			task := cloneTask(*state.Tasks[taskID].Value)
+			missing := "88888888-8888-4888-8888-888888888888"
+			task.OwnerActorID = &missing
+			return OperationV1{SchemaVersion: 1, ID: "99999999-9999-4999-8999-999999999986", Kind: OperationPutRecord, ExpectedViewDigest: state.Digest, Actor: operationActor(), PutRecord: &PutRecordV1{Record: RecordValueV1{Task: &task}}}
+		}, ErrBrokenReference},
+	}
+	for _, test := range stateDependent {
+		t.Run("state/"+test.name, func(t *testing.T) {
+			_, err := ApplyOperation(test.snapshot, test.operation(test.snapshot))
+			kind, ok := ClassifyOperationFailure(err)
+			if !ok || kind != OperationFailureStateConflict || !errors.Is(err, test.want) {
+				t.Fatalf("ApplyOperation error = %v classification=(%q,%v), want state_conflict wrapping %v", err, kind, ok, test.want)
+			}
+		})
+	}
+}
+
+func TestApplyOperationLeavesUnexpectedInvariantFailureUnclassified(t *testing.T) {
+	snapshot := operationSnapshot(t)
+	actor := cloneActor(*snapshot.Actors[actorID].Value)
+	actor.ID = taskID
+	operation := OperationV1{
+		SchemaVersion: 1, ID: "99999999-9999-4999-8999-999999999987", Kind: OperationPutRecord,
+		ExpectedViewDigest: snapshot.Digest, Actor: operationActor(),
+		PutRecord: &PutRecordV1{Record: RecordValueV1{Actor: &actor}},
+	}
+	got, err := ApplyOperation(snapshot, operation)
+	if !errors.Is(err, ErrInvalidSnapshot) || !reflect.DeepEqual(got, snapshot) {
+		t.Fatalf("ApplyOperation = (%+v, %v), want unchanged ErrInvalidSnapshot", got, err)
+	}
+	if kind, ok := ClassifyOperationFailure(err); ok || kind != "" {
+		t.Fatalf("ClassifyOperationFailure = (%q,%v), want unclassified", kind, ok)
+	}
+}
+
 func stringPointer(value string) *string { return &value }
 
 func digestPointer(value Digest) *Digest { return &value }

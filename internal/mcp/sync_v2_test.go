@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"reflect"
 	"strings"
@@ -1236,6 +1237,41 @@ func assertTask2MutationDelta(t *testing.T, before, after task2MutationState, no
 	}
 }
 
+func assertTask2ExactRowDeltas(t *testing.T, before, after task2MutationState, want map[string]int) {
+	t.Helper()
+	assertTask2ExactRowChanges(t, before, after, want, nil)
+}
+
+func assertTask2ExactRowChanges(t *testing.T, before, after task2MutationState, want, replacements map[string]int) {
+	t.Helper()
+	for _, table := range task2MutationTables {
+		delta := want[table]
+		if len(after[table]) != len(before[table])+delta {
+			t.Errorf("%s row delta = %d, want %d", table, len(after[table])-len(before[table]), delta)
+			continue
+		}
+		remaining := make(map[string]int, len(after[table]))
+		for _, row := range after[table] {
+			remaining[row]++
+		}
+		for _, row := range before[table] {
+			remaining[row]--
+		}
+		added, removed := 0, 0
+		for _, count := range remaining {
+			if count < 0 {
+				removed -= count
+			} else {
+				added += count
+			}
+		}
+		wantReplacements := replacements[table]
+		if added != delta+wantReplacements || removed != wantReplacements {
+			t.Errorf("%s row changes = (added=%d,removed=%d), want (added=%d,removed=%d)", table, added, removed, delta+wantReplacements, wantReplacements)
+		}
+	}
+}
+
 func corruptTask2CurrentStream(t *testing.T, db *sql.DB, attachment coregit.StreamAttachment, liveDigest projectstate.Digest) {
 	t.Helper()
 	tx, err := db.BeginTx(context.Background(), nil)
@@ -1257,5 +1293,1145 @@ func corruptTask2CurrentStream(t *testing.T, db *sql.DB, attachment coregit.Stre
 	}
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+type syncV2PushFixture struct {
+	owner       *mutationFixture
+	attached    InitialAttachResult
+	handler     *SyncV2PushHandler
+	resolver    *PublicBoundProofResolver
+	coordinator *MutationCoordinator
+	streams     *coregit.StreamStore
+}
+
+func newSyncV2PushFixture(t *testing.T, attachNonce byte) *syncV2PushFixture {
+	t.Helper()
+	owner := newMutationFixture(t)
+	attached := owner.attach(attachNonce)
+	return newSyncV2PushFixtureForAttached(t, owner, attached)
+}
+
+func newSyncV2PushFixtureForAttached(t *testing.T, owner *mutationFixture, attached InitialAttachResult) *syncV2PushFixture {
+	t.Helper()
+	runtimeDB := publicRuntimeDB(t)
+	streams := coregit.NewStreamStore(runtimeDB)
+	resolver := realBoundResolverForDB(t, owner, runtimeDB)
+	coordinator, err := NewMutationCoordinator(identity.NewStore(runtimeDB), streams, coregit.NewActivityStore(runtimeDB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewSyncV2PushHandler(resolver, coordinator, streams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &syncV2PushFixture{owner: owner, attached: attached, handler: handler, resolver: resolver, coordinator: coordinator, streams: streams}
+}
+
+func newSyncV2PushAgentFixture(t *testing.T, attachNonce byte, durableAuditAgent bool) (*syncV2PushFixture, identity.PublicAgentSession, string) {
+	t.Helper()
+	owner := newMutationFixture(t)
+	snapshot, err := projectstate.DecodeTree(owner.tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentID := uuid.NewString()
+	agent := projectstate.ActorV1{
+		SchemaVersion: 1, Kind: "actor", ID: agentID, ActorKind: types.ActorAgent,
+		DisplayName: "Push Session Agent", PublicKeys: []projectstate.PublicKeyV1{}, Extensions: projectstate.ExtensionsV1{},
+	}
+	snapshot.Actors[agentID] = projectstate.Record[projectstate.ActorV1]{Value: &agent}
+	owner.tree, err = projectstate.EncodeTree(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if durableAuditAgent {
+		if _, err := owner.db.Exec(`INSERT INTO agents(id,owner,model) VALUES($1,'sync-v2-push-test','gpt')`, agentID); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := cleanupSyncV2PushAgent(owner.db, owner.projectID, agentID); err != nil {
+				t.Errorf("cleanup sync-v2 push agent %s: %v", agentID, err)
+			}
+		})
+	}
+	attached := owner.attach(attachNonce)
+	tx, err := owner.coordinator.identity.BeginProjectTx(context.Background(), owner.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := owner.coordinator.identity.IssuePublicAgentSessionInTx(context.Background(), tx, identity.PublicAgentSessionIssue{
+		ProjectID: owner.projectID, FabricInstanceID: owner.fabricID, StreamID: attached.Attachment.Key.StreamID,
+		WorkspaceID: attached.Attachment.WorkspaceID, CanonicalRef: attached.Attachment.CanonicalRef,
+		AttachmentRef: attached.Attachment.AttachmentRef, IssuerKeyFingerprint: owner.fingerprint,
+		AgentID: agentID, HarnessName: "codex", HarnessVersion: "1", ModelName: "gpt", ModelVersion: "5",
+		SourceVersion: attached.Attachment.SourceVersion, IssuedAt: owner.transport.OccurredAt,
+	})
+	if err == nil {
+		err = tx.Commit()
+	} else {
+		_ = tx.Rollback()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !durableAuditAgent {
+		t.Cleanup(func() {
+			if err := cleanupSyncV2PushAgentSession(owner.db, owner.projectID, agentID, session.SessionID); err != nil {
+				t.Errorf("cleanup sync-v2 push agent session %s: %v", session.SessionID, err)
+			}
+		})
+	}
+	return newSyncV2PushFixtureForAttached(t, owner, attached), session, agentID
+}
+
+func cleanupSyncV2PushAgentSession(db *sql.DB, projectID, agentID, sessionID string) (err error) {
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err == nil {
+			return
+		}
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			err = errors.Join(err, fmt.Errorf("rollback agent session cleanup: %w", rollbackErr))
+		}
+	}()
+	var version, immutableTriggers int
+	var dirty bool
+	if err = tx.QueryRow(`SELECT
+		(SELECT version FROM schema_migrations),
+		(SELECT dirty FROM schema_migrations),
+		(SELECT count(*) FROM pg_trigger WHERE tgrelid='audit_log'::regclass AND tgname='audit_log_immutable' AND tgenabled='O')`).
+		Scan(&version, &dirty, &immutableTriggers); err != nil {
+		return fmt.Errorf("read agent session cleanup schema: %w", err)
+	}
+	if version != 22 || dirty || immutableTriggers != 1 {
+		return fmt.Errorf("refuse agent session cleanup at schema (%d,%v) immutable_triggers=%d", version, dirty, immutableTriggers)
+	}
+	result, err := tx.Exec(`DELETE FROM fabric_public_agent_sessions WHERE project_id=$1 AND agent_id=$2 AND session_id=$3`, projectID, agentID, sessionID)
+	if err != nil {
+		return fmt.Errorf("delete exact public agent session: %w", err)
+	}
+	if rows, rowsErr := result.RowsAffected(); rowsErr != nil || rows != 1 {
+		return fmt.Errorf("public agent session delete rows = (%d,%v), want (1,nil)", rows, rowsErr)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit public agent session cleanup: %w", err)
+	}
+	var sessions, ownedAgents, enabledTriggers int
+	var replicationRole string
+	if err = db.QueryRow(`SELECT
+		(SELECT count(*) FROM fabric_public_agent_sessions WHERE project_id=$1 AND agent_id=$2 AND session_id=$3),
+		(SELECT count(*) FROM agents WHERE id=$2 AND owner='sync-v2-push-test'),
+		(SELECT count(*) FROM pg_trigger WHERE tgrelid='audit_log'::regclass AND tgname='audit_log_immutable' AND tgenabled='O'),
+		current_setting('session_replication_role')`, projectID, agentID, sessionID).
+		Scan(&sessions, &ownedAgents, &enabledTriggers, &replicationRole); err != nil {
+		return fmt.Errorf("verify public agent session cleanup: %w", err)
+	}
+	if sessions != 0 || ownedAgents != 0 || enabledTriggers != 1 || replicationRole != "origin" {
+		return fmt.Errorf("public agent session cleanup retained sessions=%d owned_agents=%d immutable_triggers=%d replication_role=%q", sessions, ownedAgents, enabledTriggers, replicationRole)
+	}
+	return nil
+}
+
+func cleanupSyncV2PushAgent(db *sql.DB, projectID, agentID string) (err error) {
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	var version int
+	var dirty bool
+	if err = tx.QueryRow(`SELECT version,dirty FROM schema_migrations`).Scan(&version, &dirty); err != nil {
+		return fmt.Errorf("read schema version: %w", err)
+	}
+	if version != 22 || dirty {
+		return fmt.Errorf("refuse agent cleanup at schema (%d,%v)", version, dirty)
+	}
+	var owner string
+	if err = tx.QueryRow(`SELECT owner FROM agents WHERE id=$1 FOR UPDATE`, agentID).Scan(&owner); err != nil {
+		return fmt.Errorf("lock owned agent: %w", err)
+	}
+	if owner != "sync-v2-push-test" {
+		return fmt.Errorf("refuse cleanup of agent owner %q", owner)
+	}
+	if _, err = tx.Exec(`LOCK TABLE audit_log IN ACCESS EXCLUSIVE MODE`); err != nil {
+		return fmt.Errorf("lock audit log: %w", err)
+	}
+	if _, err = tx.Exec(`DELETE FROM fabric_public_agent_sessions WHERE project_id=$1 AND agent_id=$2`, projectID, agentID); err != nil {
+		return fmt.Errorf("delete public agent sessions: %w", err)
+	}
+	if _, err = tx.Exec(`SET LOCAL session_replication_role=replica`); err != nil {
+		return fmt.Errorf("enter owner cleanup replication role: %w", err)
+	}
+	if _, err = tx.Exec(`DELETE FROM audit_log WHERE project_id=$1 AND agent_id=$2`, projectID, agentID); err != nil {
+		return fmt.Errorf("delete owned agent audit: %w", err)
+	}
+	if _, err = tx.Exec(`SET LOCAL session_replication_role=origin`); err != nil {
+		return fmt.Errorf("leave owner cleanup replication role: %w", err)
+	}
+	result, err := tx.Exec(`DELETE FROM agents WHERE id=$1 AND owner='sync-v2-push-test'`, agentID)
+	if err != nil {
+		return fmt.Errorf("delete owned agent: %w", err)
+	}
+	if rows, rowsErr := result.RowsAffected(); rowsErr != nil || rows != 1 {
+		return fmt.Errorf("owned agent delete rows = (%d,%v), want (1,nil)", rows, rowsErr)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit owned agent cleanup: %w", err)
+	}
+	var agents, sessions, audits, immutableTriggers int
+	if err = db.QueryRow(`SELECT
+		(SELECT count(*) FROM agents WHERE id=$1),
+		(SELECT count(*) FROM fabric_public_agent_sessions WHERE project_id=$2 AND agent_id=$1),
+		(SELECT count(*) FROM audit_log WHERE project_id=$2 AND agent_id=$1),
+		(SELECT count(*) FROM pg_trigger WHERE tgrelid='audit_log'::regclass AND tgname='audit_log_immutable' AND tgenabled='O')`, agentID, projectID).Scan(&agents, &sessions, &audits, &immutableTriggers); err != nil {
+		return fmt.Errorf("verify owned agent cleanup: %w", err)
+	}
+	if agents != 0 || sessions != 0 || audits != 0 || immutableTriggers != 1 {
+		return fmt.Errorf("owned agent cleanup retained agents=%d sessions=%d audits=%d immutable_triggers=%d", agents, sessions, audits, immutableTriggers)
+	}
+	return nil
+}
+
+func installSyncV2PushCASConflict(t *testing.T, db *sql.DB, projectID string) {
+	t.Helper()
+	suffix := strings.ReplaceAll(uuid.NewString(), "-", "")
+	schemaName := "sync_v2_push_cas_conflict_" + suffix
+	functionName := schemaName + ".advance_stream"
+	triggerName := "sync_v2_push_cas_conflict_tr_" + suffix
+	statement := fmt.Sprintf(`CREATE SCHEMA %s;
+		CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			IF NEW.project_id=%s::uuid AND NEW.transition_kind='operation' THEN
+				UPDATE fabric_streams SET current_version=NEW.version,updated_at=now()
+				WHERE project_id=NEW.project_id AND fabric_instance_id=NEW.fabric_instance_id
+				AND stream_id=NEW.stream_id AND canonical_ref=NEW.canonical_ref AND current_version=NEW.version-1;
+			END IF;
+			RETURN NEW;
+		END $$;
+		CREATE TRIGGER %s BEFORE INSERT ON fabric_stream_versions FOR EACH ROW EXECUTE FUNCTION %s()`,
+		schemaName, functionName, quoteLiteral(projectID), triggerName, functionName)
+	if _, err := db.Exec(statement); err != nil {
+		t.Fatalf("install sync v2 push CAS conflict: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := db.Exec(fmt.Sprintf(`DROP TRIGGER IF EXISTS %s ON fabric_stream_versions; DROP SCHEMA IF EXISTS %s CASCADE`, triggerName, schemaName)); err != nil {
+			t.Errorf("remove sync v2 push CAS conflict: %v", err)
+		}
+	})
+}
+
+func corruptSyncV2PushRequest(t *testing.T, db *sql.DB, projectID, operationID string) {
+	t.Helper()
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`SET LOCAL session_replication_role=replica`); err != nil {
+		t.Fatal(err)
+	}
+	result, err := tx.Exec(`UPDATE fabric_stream_requests SET canonical_operation_json=$1 WHERE project_id=$2 AND operation_id=$3`, []byte("{"), projectID, operationID)
+	if err != nil {
+		t.Fatalf("corrupt push request: %v", err)
+	}
+	if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+		t.Fatalf("corrupt push request rows = (%d,%v), want (1,nil)", rows, err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func installSyncV2PushVersionFailure(t *testing.T, db *sql.DB, projectID string) {
+	t.Helper()
+	suffix := strings.ReplaceAll(uuid.NewString(), "-", "")
+	schemaName := "sync_v2_push_sql_fail_" + suffix
+	functionName := schemaName + ".reject_version"
+	triggerName := "sync_v2_push_sql_fail_tr_" + suffix
+	statement := fmt.Sprintf(`CREATE SCHEMA %s;
+		CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			IF NEW.project_id=%s::uuid AND NEW.transition_kind='operation' THEN
+				RAISE EXCEPTION 'forced sync v2 push SQL failure';
+			END IF;
+			RETURN NEW;
+		END $$;
+		CREATE TRIGGER %s BEFORE INSERT ON fabric_stream_versions FOR EACH ROW EXECUTE FUNCTION %s()`,
+		schemaName, functionName, quoteLiteral(projectID), triggerName, functionName)
+	if _, err := db.Exec(statement); err != nil {
+		t.Fatalf("install sync v2 push SQL failure: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := db.Exec(fmt.Sprintf(`DROP TRIGGER IF EXISTS %s ON fabric_stream_versions; DROP SCHEMA IF EXISTS %s CASCADE`, triggerName, schemaName)); err != nil {
+			t.Errorf("remove sync v2 push SQL failure: %v", err)
+		}
+	})
+}
+
+func syncV2PushOperation(f *mutationFixture, state coregit.StreamTransition, operationID, recordID string) projectstate.OperationV1 {
+	record := projectstate.ActorV1{
+		SchemaVersion: 1, Kind: "actor", ID: recordID, ActorKind: types.ActorAgent,
+		DisplayName: "Push Agent", PublicKeys: []projectstate.PublicKeyV1{}, Extensions: projectstate.ExtensionsV1{},
+	}
+	actor := f.transport
+	actor.Assurance = types.AssuranceLocal
+	return projectstate.OperationV1{
+		SchemaVersion: 1, ID: operationID, Kind: projectstate.OperationPutRecord,
+		ExpectedViewDigest: state.Live.Digest, Actor: actor,
+		PutRecord: &projectstate.PutRecordV1{Record: projectstate.RecordValueV1{Actor: &record}},
+	}
+}
+
+func syncV2PushArguments(attached InitialAttachResult, operation projectstate.OperationV1) SyncPushV2Args {
+	return SyncPushV2Args{SyncV2Scope: boundReadArguments(attached, 0).SyncV2Scope, Operation: operation}
+}
+
+func canonicalSyncV2PushArguments(t *testing.T, arguments SyncPushV2Args) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(arguments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonicalMutationJSON(t, raw)
+}
+
+func syncV2PushProof(t *testing.T, f *mutationFixture, raw json.RawMessage, attachment string, nonce byte) types.PublicRequestProof {
+	t.Helper()
+	seed := sha256.Sum256([]byte(f.projectID))
+	return signedBoundProof(t, f.fabricID, "wormhole.sync.push", raw, attachment, f.transport.OccurredAt, bytesOf(nonce, 32), seed[:])
+}
+
+func assertSyncV2PushFailure(t *testing.T, err error, code string) {
+	t.Helper()
+	assertSyncReadFailure(t, err, "wormhole.sync.push", code)
+}
+
+func TestSyncV2PushConstructorFailsClosed(t *testing.T) {
+	db := testDB(t)
+	streams := coregit.NewStreamStore(db)
+	coordinator, err := NewMutationCoordinator(identity.NewStore(db), streams, coregit.NewActivityStore(db))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fabricID := uuid.NewString()
+	verifier, err := NewPublicProofVerifier(fabricID, func() time.Time { return time.Now().UTC() })
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewPublicBoundProofResolver(fabricID, identity.NewStore(db), streams, verifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, dependencies := range map[string]struct {
+		resolver    *PublicBoundProofResolver
+		coordinator *MutationCoordinator
+		streams     *coregit.StreamStore
+	}{
+		"resolver":    {coordinator: coordinator, streams: streams},
+		"coordinator": {resolver: resolver, streams: streams},
+		"streams":     {resolver: resolver, coordinator: coordinator},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := NewSyncV2PushHandler(dependencies.resolver, dependencies.coordinator, dependencies.streams); !errors.Is(err, identity.ErrInvalidPublicIdentity) {
+				t.Fatalf("constructor error = %v, want ErrInvalidPublicIdentity", err)
+			}
+		})
+	}
+	var zero *SyncV2PushHandler
+	if _, err := zero.Handle(context.Background(), nil, types.PublicRequestProof{}); err == nil || err.Error() != `{"code":"internal_error","operation":"wormhole.sync.push"}` {
+		t.Fatalf("nil handler error = %v", err)
+	}
+}
+
+func TestSyncV2PushRejectsInvalidArgumentsBeforeAuthorization(t *testing.T) {
+	f := newSyncV2PushFixture(t, 70)
+	operation := syncV2PushOperation(f.owner, f.attached.State, uuid.NewString(), uuid.NewString())
+	validRaw := canonicalSyncV2PushArguments(t, syncV2PushArguments(f.attached, operation))
+	valid := string(validRaw)
+	var missingObject map[string]any
+	if err := json.Unmarshal(validRaw, &missingObject); err != nil {
+		t.Fatal(err)
+	}
+	delete(missingObject, "operation")
+	missingRaw, err := json.Marshal(missingObject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nullObject map[string]any
+	if err := json.Unmarshal(validRaw, &nullObject); err != nil {
+		t.Fatal(err)
+	}
+	nullObject["operation"] = nil
+	nullRaw, err := json.Marshal(nullObject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := map[string]struct {
+		raw, code string
+	}{
+		"unknown":              {strings.TrimSuffix(valid, `}`) + `,"project_id":"` + f.owner.projectID + `"}`, "invalid_request"},
+		"duplicate":            {strings.Replace(valid, `"version":2`, `"version":2,"version":2`, 1), "invalid_request"},
+		"missing":              {string(missingRaw), "invalid_request"},
+		"null":                 {string(nullRaw), "invalid_request"},
+		"trailing":             {valid + `{}`, "invalid_request"},
+		"noncanonical":         {strings.Replace(valid, `{`, `{ `, 1), "invalid_request"},
+		"wrong version":        {strings.Replace(valid, `"version":2`, `"version":3`, 1), "unknown_version"},
+		"private route":        {strings.TrimSuffix(valid, `}`) + `,"workspace_id":"` + uuid.NewString() + `"}`, "invalid_request"},
+		"malformed attachment": {strings.Replace(valid, f.attached.Attachment.AttachmentRef, "not-a-uuid", 1), "invalid_request"},
+		"wrong kind":           {strings.Replace(valid, `"expected_stream_version":0`, `"expected_stream_version":"zero"`, 1), "invalid_request"},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			before := task2MutationSnapshot(t, f.owner.db, f.owner.projectID)
+			_, err := f.handler.Handle(context.Background(), json.RawMessage(test.raw), types.PublicRequestProof{})
+			assertSyncV2PushFailure(t, err, test.code)
+			assertTask2MutationDelta(t, before, task2MutationSnapshot(t, f.owner.db, f.owner.projectID), 0)
+		})
+	}
+
+	unknown := syncV2PushArguments(f.attached, operation)
+	unknown.AttachmentRef = uuid.NewString()
+	unknownRaw := canonicalSyncV2PushArguments(t, unknown)
+	beforeUnknown := task2MutationSnapshot(t, f.owner.db, f.owner.projectID)
+	_, err = f.handler.Handle(context.Background(), unknownRaw, syncV2PushProof(t, f.owner, unknownRaw, unknown.AttachmentRef, 71))
+	assertSyncV2PushFailure(t, err, "attachment_not_found")
+	assertTask2MutationDelta(t, beforeUnknown, task2MutationSnapshot(t, f.owner.db, f.owner.projectID), 0)
+
+	if _, err := f.owner.db.Exec(`UPDATE fabric_workspace_stream_bindings SET writable=false,detached_at=now() WHERE project_id=$1 AND attachment_ref=$2`, f.owner.projectID, f.attached.Attachment.AttachmentRef); err != nil {
+		t.Fatal(err)
+	}
+	detachedRaw := json.RawMessage(valid)
+	beforeDetached := task2MutationSnapshot(t, f.owner.db, f.owner.projectID)
+	_, err = f.handler.Handle(context.Background(), detachedRaw, syncV2PushProof(t, f.owner, detachedRaw, f.attached.Attachment.AttachmentRef, 72))
+	assertSyncV2PushFailure(t, err, "attachment_not_found")
+	assertTask2MutationDelta(t, beforeDetached, task2MutationSnapshot(t, f.owner.db, f.owner.projectID), 0)
+}
+
+func TestSyncV2PushBurnsNonceForAuthenticatedDomainAndScopeFailures(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*SyncPushV2Args)
+		code   string
+	}{
+		{"wrong signed scope", func(arguments *SyncPushV2Args) { arguments.BaseCommitSHA = strings.Repeat("b", 40) }, "sync_precondition_failed"},
+		{"invalid operation schema", func(arguments *SyncPushV2Args) { arguments.Operation.SchemaVersion = 2 }, "sync_precondition_failed"},
+		{"invalid operation kind", func(arguments *SyncPushV2Args) { arguments.Operation.Kind = projectstate.OperationKind("unknown") }, "sync_precondition_failed"},
+		{"invalid operation payload", func(arguments *SyncPushV2Args) { arguments.Operation.PutRecord = nil }, "sync_precondition_failed"},
+		{"stable human mismatch", func(arguments *SyncPushV2Args) { arguments.Operation.Actor.HumanPrincipalID = uuid.NewString() }, "permission_denied"},
+		{"legacy assurance", func(arguments *SyncPushV2Args) { arguments.Operation.Actor.Assurance = types.AssuranceLegacy }, "sync_precondition_failed"},
+		{"unknown assurance", func(arguments *SyncPushV2Args) { arguments.Operation.Actor.Assurance = types.AssuranceUnknown }, "sync_precondition_failed"},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newSyncV2PushFixture(t, byte(80+index*2))
+			arguments := syncV2PushArguments(fixture.attached, syncV2PushOperation(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString()))
+			test.mutate(&arguments)
+			raw := canonicalSyncV2PushArguments(t, arguments)
+			before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+			_, err := fixture.handler.Handle(context.Background(), raw, syncV2PushProof(t, fixture.owner, raw, arguments.AttachmentRef, byte(81+index*2)))
+			assertSyncV2PushFailure(t, err, test.code)
+			assertTask2MutationDelta(t, before, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), 1)
+		})
+	}
+
+	t.Run("audit failure", func(t *testing.T) {
+		fixture := newSyncV2PushFixture(t, 100)
+		installAuditFailure(t, fixture.owner.db, fixture.owner.projectID, "sync.push")
+		arguments := syncV2PushArguments(fixture.attached, syncV2PushOperation(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString()))
+		raw := canonicalSyncV2PushArguments(t, arguments)
+		before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+		_, err := fixture.handler.Handle(context.Background(), raw, syncV2PushProof(t, fixture.owner, raw, arguments.AttachmentRef, 101))
+		assertSyncV2PushFailure(t, err, "internal_error")
+		assertTask2MutationDelta(t, before, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), 1)
+	})
+
+	t.Run("deferred commit rejection", func(t *testing.T) {
+		fixture := newSyncV2PushFixture(t, 104)
+		if _, err := fixture.owner.db.Exec(`CREATE FUNCTION wormhole_test_reject_sync_push_commit() RETURNS trigger
+			LANGUAGE plpgsql AS $$
+			BEGIN
+				IF NEW.action = 'sync.push' THEN
+					RAISE EXCEPTION 'forced deferred sync push commit failure';
+				END IF;
+				RETURN NEW;
+			END
+			$$;
+			CREATE CONSTRAINT TRIGGER wormhole_test_reject_sync_push_commit
+			AFTER INSERT ON audit_log
+			DEFERRABLE INITIALLY DEFERRED
+			FOR EACH ROW EXECUTE FUNCTION wormhole_test_reject_sync_push_commit()`); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_, _ = fixture.owner.db.Exec(`DROP TRIGGER IF EXISTS wormhole_test_reject_sync_push_commit ON audit_log;
+				DROP FUNCTION IF EXISTS wormhole_test_reject_sync_push_commit()`)
+		})
+		arguments := syncV2PushArguments(fixture.attached, syncV2PushOperation(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString()))
+		raw := canonicalSyncV2PushArguments(t, arguments)
+		before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+		_, err := fixture.handler.Handle(context.Background(), raw, syncV2PushProof(t, fixture.owner, raw, arguments.AttachmentRef, 105))
+		assertSyncV2PushFailure(t, err, "internal_error")
+		assertTask2MutationDelta(t, before, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), 1)
+	})
+
+	t.Run("post-authorization detach", func(t *testing.T) {
+		fixture := newSyncV2PushFixture(t, 102)
+		arguments := syncV2PushArguments(fixture.attached, syncV2PushOperation(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString()))
+		raw := canonicalSyncV2PushArguments(t, arguments)
+		beforeAuthorization := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+		authorized, err := fixture.resolver.AuthorizeMutation(context.Background(), "wormhole.sync.push", raw, arguments.SyncV2Scope, syncV2PushProof(t, fixture.owner, raw, arguments.AttachmentRef, 103))
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertTask2MutationDelta(t, beforeAuthorization, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), 1)
+		if _, err := fixture.owner.db.Exec(`UPDATE fabric_workspace_stream_bindings SET writable=false,detached_at=now() WHERE project_id=$1 AND attachment_ref=$2`, fixture.owner.projectID, fixture.attached.Attachment.AttachmentRef); err != nil {
+			t.Fatal(err)
+		}
+		beforeExecute := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+		err = fixture.coordinator.ExecutePublic(context.Background(), authorized, "sync.push", raw, func(ctx context.Context, tx *sql.Tx, verified VerifiedMutation) error {
+			_, applyErr := fixture.streams.ApplyPublicOperationInTx(ctx, tx, verified.Scope, coregit.ApplyPublicOperationInput{Attachment: verified.Attachment, Precondition: syncMutationPrecondition(arguments.SyncV2Scope), Operation: arguments.Operation})
+			return applyErr
+		})
+		if !errors.Is(err, coregit.ErrStreamNotFound) {
+			t.Fatalf("ExecutePublic error = %v, want ErrStreamNotFound", err)
+		}
+		assertTask2MutationDelta(t, beforeExecute, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), 0)
+	})
+}
+
+func TestSyncV2PushRealPostAuthorizationFailuresBurnNonceAndRollBackCompleteRows(t *testing.T) {
+	db := testDB(t)
+	var negativeProjectID, negativeAgentID, negativeSessionID string
+	t.Run("stable agent mismatch", func(t *testing.T) {
+		fixture, session, agentID := newSyncV2PushAgentFixture(t, 106, false)
+		negativeProjectID, negativeAgentID, negativeSessionID = fixture.owner.projectID, agentID, session.SessionID
+		operation := syncV2PushOperation(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString())
+		operation.Actor = types.ActorEnvelope{
+			ActorKind: types.ActorAgent, AgentID: uuid.NewString(), AccountableHumanID: fixture.owner.actor.ID,
+			SessionID: uuid.NewString(), HarnessName: "historical", HarnessVersion: "0",
+			ModelName: "old", ModelVersion: "1", Assurance: types.AssuranceLocal,
+			OccurredAt: fixture.owner.transport.OccurredAt.Add(-time.Minute),
+		}
+		if operation.Actor.AgentID == agentID {
+			t.Fatal("agent mismatch fixture accidentally matched the live session")
+		}
+		arguments := syncV2PushArguments(fixture.attached, operation)
+		raw := canonicalSyncV2PushArguments(t, arguments)
+		seed := sha256.Sum256([]byte(fixture.owner.projectID))
+		proof := signedBoundSessionProof(t, fixture.owner.fabricID, "wormhole.sync.push", raw, arguments.AttachmentRef, session.SessionID, fixture.owner.transport.OccurredAt, bytesOf(107, 32), seed[:])
+		before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+		_, err := fixture.handler.Handle(context.Background(), raw, proof)
+		assertSyncV2PushFailure(t, err, "permission_denied")
+		assertTask2ExactRowDeltas(t, before, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), map[string]int{"public_request_nonces": 1})
+	})
+	if negativeSessionID != "" {
+		var retainedSessions, retainedOwnedAgents int
+		if err := db.QueryRow(`SELECT
+			(SELECT count(*) FROM fabric_public_agent_sessions WHERE project_id=$1 AND agent_id=$2 AND session_id=$3),
+			(SELECT count(*) FROM agents WHERE id=$2 AND owner='sync-v2-push-test')`, negativeProjectID, negativeAgentID, negativeSessionID).
+			Scan(&retainedSessions, &retainedOwnedAgents); err != nil {
+			t.Fatal(err)
+		}
+		if retainedSessions != 0 || retainedOwnedAgents != 0 {
+			t.Fatalf("negative agent fixture %s/%s/%s retained sessions=%d owned_agents=%d, want zero exact rows", negativeProjectID, negativeAgentID, negativeSessionID, retainedSessions, retainedOwnedAgents)
+		}
+	}
+
+	t.Run("reducer invalid semantic collision", func(t *testing.T) {
+		fixture := newSyncV2PushFixture(t, 108)
+		operation := syncV2PushOperation(fixture.owner, fixture.attached.State, uuid.NewString(), fixture.owner.projectID)
+		if err := projectstate.ValidateOperationForApply(operation); err != nil {
+			t.Fatalf("operation did not reach reducer: %v", err)
+		}
+		if _, err := projectstate.ApplyOperation(fixture.attached.State.Live, operation); !errors.Is(err, projectstate.ErrInvalidSnapshot) {
+			t.Fatalf("reducer error = %v, want ErrInvalidSnapshot", err)
+		} else if _, classified := projectstate.ClassifyOperationFailure(err); classified {
+			t.Fatalf("reducer ErrInvalidSnapshot was classified: %v", err)
+		}
+		arguments := syncV2PushArguments(fixture.attached, operation)
+		raw := canonicalSyncV2PushArguments(t, arguments)
+		before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+		_, err := fixture.handler.Handle(context.Background(), raw, syncV2PushProof(t, fixture.owner, raw, arguments.AttachmentRef, 109))
+		assertSyncV2PushFailure(t, err, "sync_precondition_failed")
+		assertTask2ExactRowDeltas(t, before, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), map[string]int{"public_request_nonces": 1})
+	})
+
+	t.Run("reachable stream conflict", func(t *testing.T) {
+		fixture := newSyncV2PushFixture(t, 150)
+		installSyncV2PushCASConflict(t, fixture.owner.db, fixture.owner.projectID)
+		operation := syncV2PushOperation(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString())
+		arguments := syncV2PushArguments(fixture.attached, operation)
+		raw := canonicalSyncV2PushArguments(t, arguments)
+		before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+		_, err := fixture.handler.Handle(context.Background(), raw, syncV2PushProof(t, fixture.owner, raw, arguments.AttachmentRef, 151))
+		assertSyncV2PushFailure(t, err, "sync_conflict")
+		assertTask2ExactRowDeltas(t, before, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), map[string]int{"public_request_nonces": 1})
+	})
+
+	t.Run("corrupt stored push evidence", func(t *testing.T) {
+		fixture := newSyncV2PushFixture(t, 152)
+		operation := syncV2PushOperation(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString())
+		arguments := syncV2PushArguments(fixture.attached, operation)
+		raw := canonicalSyncV2PushArguments(t, arguments)
+		if result, err := fixture.handler.Handle(context.Background(), raw, syncV2PushProof(t, fixture.owner, raw, arguments.AttachmentRef, 153)); err != nil {
+			t.Fatalf("seed push: %v", err)
+		} else if _, ok := result.(SyncPushAppliedV2Result); !ok {
+			t.Fatalf("seed push result type = %T", result)
+		}
+		corruptSyncV2PushRequest(t, fixture.owner.db, fixture.owner.projectID, operation.ID)
+		before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+		_, err := fixture.handler.Handle(context.Background(), raw, syncV2PushProof(t, fixture.owner, raw, arguments.AttachmentRef, 154))
+		assertSyncV2PushFailure(t, err, "internal_error")
+		assertTask2ExactRowDeltas(t, before, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), map[string]int{"public_request_nonces": 1})
+	})
+
+	t.Run("injected internal SQL failure", func(t *testing.T) {
+		fixture := newSyncV2PushFixture(t, 155)
+		installSyncV2PushVersionFailure(t, fixture.owner.db, fixture.owner.projectID)
+		operation := syncV2PushOperation(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString())
+		arguments := syncV2PushArguments(fixture.attached, operation)
+		raw := canonicalSyncV2PushArguments(t, arguments)
+		before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+		_, err := fixture.handler.Handle(context.Background(), raw, syncV2PushProof(t, fixture.owner, raw, arguments.AttachmentRef, 156))
+		assertSyncV2PushFailure(t, err, "internal_error")
+		assertTask2ExactRowDeltas(t, before, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), map[string]int{"public_request_nonces": 1})
+	})
+}
+
+func TestSyncV2PushSafeFailureMappingAndRedaction(t *testing.T) {
+	tests := []struct {
+		err  error
+		code string
+	}{
+		{identity.ErrPublicAuthentication, "authentication_failed"},
+		{identity.ErrPublicNonceReplay, "authentication_failed"},
+		{identity.ErrInvalidPublicIdentity, "authentication_failed"},
+		{coregit.ErrStreamNotFound, "attachment_not_found"},
+		{coregit.ErrStreamActor, "permission_denied"},
+		{coregit.ErrStreamPrecondition, "sync_precondition_failed"},
+		{coregit.ErrStreamConflict, "sync_conflict"},
+		{coregit.ErrOperationReplay, "sync_replay_conflict"},
+		{projectstate.ErrInvalidSnapshot, "sync_precondition_failed"},
+		{projectstate.ErrUnknownVersion, "sync_precondition_failed"},
+		{projectstate.ErrUnknownKind, "sync_precondition_failed"},
+		{projectstate.ErrInvalidActorEnvelope, "sync_precondition_failed"},
+		{projectstate.ErrBrokenReference, "sync_precondition_failed"},
+		{projectstate.ErrTrackedSecret, "sync_precondition_failed"},
+		{projectstate.ErrOperationPrecondition, "sync_precondition_failed"},
+		{projectstate.ErrImmutableRecord, "sync_precondition_failed"},
+		{projectstate.ErrTombstoneDigest, "sync_precondition_failed"},
+		{projectstate.ErrResurrectionDigest, "sync_precondition_failed"},
+		{errors.New("pq: secret SQL /private/path attachment operation body"), "internal_error"},
+	}
+	for _, test := range tests {
+		if got := syncMutationErrorCode(test.err); got != test.code {
+			t.Errorf("syncMutationErrorCode(%v) = %q, want %q", test.err, got, test.code)
+		}
+		err := syncMutationFailure("wormhole.sync.push", test.code)
+		want := `{"code":"` + test.code + `","operation":"wormhole.sync.push"}`
+		if err == nil || err.Error() != want {
+			t.Errorf("safe error = %v, want %s", err, want)
+		}
+		for _, secret := range []string{"secret SQL", "/private/path", "attachment-ref-secret", "operation body", "pq:"} {
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("safe error leaked %q: %s", secret, err)
+			}
+		}
+	}
+}
+
+func TestSyncV2PushAppliedPersistsCanonicalOperationBytesAndTypedHumanAudit(t *testing.T) {
+	fixture := newSyncV2PushFixture(t, 110)
+	operation := syncV2PushOperation(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString())
+	arguments := syncV2PushArguments(fixture.attached, operation)
+	raw := canonicalSyncV2PushArguments(t, arguments)
+	wantOperation, err := projectstate.CanonicalOperation(operation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	got, err := fixture.handler.Handle(context.Background(), raw, syncV2PushProof(t, fixture.owner, raw, arguments.AttachmentRef, 111))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, ok := got.(SyncPushAppliedV2Result)
+	if !ok || result.Version != 2 || result.Status != "applied" || result.OperationID != operation.ID || result.StreamVersion != 1 || result.LiveTreeDigest == fixture.attached.State.Live.Digest {
+		t.Fatalf("push result = (%T)%+v", got, got)
+	}
+	var requestOperation, versionOperation, requestActor, versionActor, auditPayload, auditActor []byte
+	var auditAction string
+	err = fixture.owner.db.QueryRow(`SELECT r.canonical_operation_json,v.canonical_operation_json,r.actor_envelope_json,v.actor_envelope_json,a.action,a.canonical_payload_json::text::bytea,a.actor_envelope_json::text::bytea
+		FROM fabric_stream_requests r JOIN fabric_stream_versions v
+		ON v.project_id=r.project_id AND v.fabric_instance_id=r.fabric_instance_id AND v.stream_id=r.stream_id AND v.operation_id=r.operation_id
+		JOIN audit_log a ON a.project_id=r.project_id AND a.action='sync.push'
+		WHERE r.project_id=$1 AND r.operation_id=$2`, fixture.owner.projectID, operation.ID).
+		Scan(&requestOperation, &versionOperation, &requestActor, &versionActor, &auditAction, &auditPayload, &auditActor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantAuditActor, err := json.Marshal(fixture.owner.transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPortableActor, err := projectstate.CanonicalJSON(operation.Actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(requestOperation, wantOperation) || !bytes.Equal(versionOperation, wantOperation) || !bytes.Equal(requestActor, wantPortableActor) || !bytes.Equal(versionActor, wantPortableActor) || auditAction != "sync.push" || !bytes.Equal(auditPayload, raw) || !bytes.Equal(auditActor, wantAuditActor) {
+		t.Fatalf("stored push/audit evidence changed")
+	}
+	after := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	for table, delta := range map[string]int{"fabric_stream_versions": 1, "fabric_stream_requests": 1, "public_request_nonces": 1, "audit_log": 1} {
+		if len(after[table])-len(before[table]) != delta {
+			t.Errorf("%s delta = %d, want %d", table, len(after[table])-len(before[table]), delta)
+		}
+	}
+	if len(after["fabric_stream_conflicts"]) != len(before["fabric_stream_conflicts"]) {
+		t.Fatal("applied push created conflict")
+	}
+}
+
+func TestSyncV2PushAgentStableAttributionUsesLiveSessionWithoutRewritingOperation(t *testing.T) {
+	fixture, session, agentID := newSyncV2PushAgentFixture(t, 112, true)
+	owner := fixture.owner
+	attached := fixture.attached
+	operation := syncV2PushOperation(owner, attached.State, uuid.NewString(), uuid.NewString())
+	operation.Actor = types.ActorEnvelope{
+		ActorKind: types.ActorAgent, AgentID: agentID, AccountableHumanID: owner.actor.ID,
+		SessionID: uuid.NewString(), HarnessName: "historical", HarnessVersion: "0",
+		ModelName: "old", ModelVersion: "1", Assurance: types.AssuranceLocal,
+		OccurredAt: owner.transport.OccurredAt.Add(-time.Minute),
+	}
+	arguments := syncV2PushArguments(attached, operation)
+	raw := canonicalSyncV2PushArguments(t, arguments)
+	seed := sha256.Sum256([]byte(owner.projectID))
+	proof := signedBoundSessionProof(t, owner.fabricID, "wormhole.sync.push", raw, arguments.AttachmentRef, session.SessionID, owner.transport.OccurredAt, bytesOf(113, 32), seed[:])
+	got, err := fixture.handler.Handle(context.Background(), raw, proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got.(SyncPushAppliedV2Result); !ok {
+		t.Fatalf("result type = %T, want SyncPushAppliedV2Result", got)
+	}
+	wantOperation, _ := projectstate.CanonicalOperation(operation)
+	wantPortableActor, _ := projectstate.CanonicalJSON(operation.Actor)
+	var requestOperation, versionOperation, requestActor, versionActor, auditActor []byte
+	if err := owner.db.QueryRow(`SELECT r.canonical_operation_json,v.canonical_operation_json,r.actor_envelope_json,v.actor_envelope_json,a.actor_envelope_json::text::bytea
+		FROM fabric_stream_requests r JOIN fabric_stream_versions v
+		ON v.project_id=r.project_id AND v.fabric_instance_id=r.fabric_instance_id AND v.stream_id=r.stream_id AND v.operation_id=r.operation_id
+		JOIN audit_log a ON a.project_id=r.project_id AND a.action='sync.push'
+		WHERE r.project_id=$1 AND r.operation_id=$2`, owner.projectID, operation.ID).
+		Scan(&requestOperation, &versionOperation, &requestActor, &versionActor, &auditActor); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(requestOperation, wantOperation) || !bytes.Equal(versionOperation, wantOperation) || !bytes.Equal(requestActor, wantPortableActor) || !bytes.Equal(versionActor, wantPortableActor) {
+		t.Fatal("portable agent operation or actor bytes were rewritten")
+	}
+	var transport types.ActorEnvelope
+	if err := json.Unmarshal(auditActor, &transport); err != nil {
+		t.Fatal(err)
+	}
+	if transport.ActorKind != types.ActorAgent || transport.AgentID != agentID || transport.AccountableHumanID != owner.actor.ID || transport.SessionID != session.SessionID ||
+		transport.HarnessName != session.HarnessName || transport.HarnessVersion != session.HarnessVersion || transport.ModelName != session.ModelName || transport.ModelVersion != session.ModelVersion ||
+		transport.Assurance != types.AssurancePublicKeyContinuity || transport.OccurredAt != owner.transport.OccurredAt {
+		t.Fatalf("audit transport actor = %+v, session=%+v", transport, session)
+	}
+}
+
+func TestSyncV2PushExactReplayReturnsOriginalAppliedResultAfterAdvance(t *testing.T) {
+	fixture := newSyncV2PushFixture(t, 114)
+	firstOperation := syncV2PushOperation(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString())
+	firstArguments := syncV2PushArguments(fixture.attached, firstOperation)
+	firstRaw := canonicalSyncV2PushArguments(t, firstArguments)
+	firstAny, err := fixture.handler.Handle(context.Background(), firstRaw, syncV2PushProof(t, fixture.owner, firstRaw, firstArguments.AttachmentRef, 115))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := firstAny.(SyncPushAppliedV2Result)
+	secondState := fixture.attached.State
+	secondState.Version, secondState.Live.Digest = first.StreamVersion, first.LiveTreeDigest
+	secondOperation := syncV2PushOperation(fixture.owner, secondState, uuid.NewString(), uuid.NewString())
+	secondArguments := syncV2PushArguments(fixture.attached, secondOperation)
+	secondArguments.ExpectedStreamVersion, secondArguments.ExpectedLiveTreeDigest = first.StreamVersion, first.LiveTreeDigest
+	secondRaw := canonicalSyncV2PushArguments(t, secondArguments)
+	secondAny, err := fixture.handler.Handle(context.Background(), secondRaw, syncV2PushProof(t, fixture.owner, secondRaw, secondArguments.AttachmentRef, 116))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := secondAny.(SyncPushAppliedV2Result)
+	if second.StreamVersion <= first.StreamVersion {
+		t.Fatalf("second result = %+v, first=%+v", second, first)
+	}
+	replayed, err := fixture.handler.Handle(context.Background(), firstRaw, syncV2PushProof(t, fixture.owner, firstRaw, firstArguments.AttachmentRef, 117))
+	if err != nil || replayed != first {
+		t.Fatalf("exact historical replay = (%+v,%v), want %+v", replayed, err, first)
+	}
+}
+
+func TestSyncV2PushChangedBytesForOperationIDReturnsSafeReplayConflict(t *testing.T) {
+	fixture := newSyncV2PushFixture(t, 118)
+	operation := syncV2PushOperation(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString())
+	arguments := syncV2PushArguments(fixture.attached, operation)
+	raw := canonicalSyncV2PushArguments(t, arguments)
+	if _, err := fixture.handler.Handle(context.Background(), raw, syncV2PushProof(t, fixture.owner, raw, arguments.AttachmentRef, 119)); err != nil {
+		t.Fatal(err)
+	}
+	changed := []struct {
+		name   string
+		mutate func(*projectstate.OperationV1)
+		code   string
+	}{
+		{"record bytes", func(candidate *projectstate.OperationV1) {
+			record := *operation.PutRecord.Record.Actor
+			record.DisplayName = "Changed push actor"
+			candidate.PutRecord = &projectstate.PutRecordV1{Record: projectstate.RecordValueV1{Actor: &record}}
+		}, "sync_replay_conflict"},
+		{"kind and payload", func(candidate *projectstate.OperationV1) {
+			candidate.Kind, candidate.PutRecord = projectstate.OperationPutKBArticle, nil
+			candidate.PutKBArticle = &projectstate.PutKBArticleV1{Record: projectstate.KBArticleV1{
+				SchemaVersion: 1, Kind: "kb_article", ID: uuid.NewString(), Title: "Changed kind",
+				Frontmatter: map[string]json.RawMessage{}, AuthorActorID: fixture.owner.actor.ID,
+				RelatedArticleIDs: []string{}, CreatedAt: fixture.owner.transport.OccurredAt,
+				UpdatedAt: fixture.owner.transport.OccurredAt, Extensions: projectstate.ExtensionsV1{},
+			}, Body: "changed kind\n"}
+		}, "sync_replay_conflict"},
+		{"stable actor tuple", func(candidate *projectstate.OperationV1) {
+			candidate.Actor.HumanPrincipalID = uuid.NewString()
+		}, "permission_denied"},
+	}
+	for index, test := range changed {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := arguments
+			candidate.Operation = operation
+			test.mutate(&candidate.Operation)
+			changedRaw := canonicalSyncV2PushArguments(t, candidate)
+			before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+			_, err := fixture.handler.Handle(context.Background(), changedRaw, syncV2PushProof(t, fixture.owner, changedRaw, candidate.AttachmentRef, byte(120+index)))
+			assertSyncV2PushFailure(t, err, test.code)
+			assertTask2MutationDelta(t, before, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), 1)
+		})
+	}
+}
+
+func TestSyncV2PushHistoricalReplayRejectsEveryChangedSignedFieldAndActorBytes(t *testing.T) {
+	fixture := newSyncV2PushFixture(t, 121)
+	operation := syncV2PushOperation(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString())
+	arguments := syncV2PushArguments(fixture.attached, operation)
+	raw := canonicalSyncV2PushArguments(t, arguments)
+	firstAny, err := fixture.handler.Handle(context.Background(), raw, syncV2PushProof(t, fixture.owner, raw, arguments.AttachmentRef, 122))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := firstAny.(SyncPushAppliedV2Result)
+	advancedState := fixture.attached.State
+	advancedState.Version, advancedState.Live.Digest = first.StreamVersion, first.LiveTreeDigest
+	advanceOperation := syncV2PushOperation(fixture.owner, advancedState, uuid.NewString(), uuid.NewString())
+	advanceArguments := syncV2PushArguments(fixture.attached, advanceOperation)
+	advanceArguments.ExpectedStreamVersion, advanceArguments.ExpectedLiveTreeDigest = first.StreamVersion, first.LiveTreeDigest
+	advanceRaw := canonicalSyncV2PushArguments(t, advanceArguments)
+	if _, err := fixture.handler.Handle(context.Background(), advanceRaw, syncV2PushProof(t, fixture.owner, advanceRaw, advanceArguments.AttachmentRef, 128)); err != nil {
+		t.Fatalf("advance before historical replay table: %v", err)
+	}
+	mutations := []struct {
+		name   string
+		mutate func(*SyncPushV2Args)
+	}{
+		{"base commit", func(candidate *SyncPushV2Args) { candidate.BaseCommitSHA = strings.Repeat("b", 40) }},
+		{"base tree", func(candidate *SyncPushV2Args) {
+			candidate.BaseTreeDigest = projectstate.Digest("sha256:" + strings.Repeat("b", 64))
+		}},
+		{"expected stream version", func(candidate *SyncPushV2Args) { candidate.ExpectedStreamVersion++ }},
+		{"expected live tree", func(candidate *SyncPushV2Args) {
+			candidate.ExpectedLiveTreeDigest = projectstate.Digest("sha256:" + strings.Repeat("c", 64))
+		}},
+		{"portable actor bytes", func(candidate *SyncPushV2Args) {
+			candidate.Operation.Actor.OccurredAt = candidate.Operation.Actor.OccurredAt.Add(time.Second)
+		}},
+	}
+	for index, test := range mutations {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := arguments
+			candidate.Operation = operation
+			test.mutate(&candidate)
+			candidateRaw := canonicalSyncV2PushArguments(t, candidate)
+			before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+			_, err := fixture.handler.Handle(context.Background(), candidateRaw, syncV2PushProof(t, fixture.owner, candidateRaw, candidate.AttachmentRef, byte(123+index)))
+			assertSyncV2PushFailure(t, err, "sync_replay_conflict")
+			assertTask2MutationDelta(t, before, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), 1)
+		})
+	}
+}
+
+func TestSyncV2PushReturnsSuccessfulDurableConflictAndExactReplay(t *testing.T) {
+	fixture := newSyncV2PushFixture(t, 130)
+	operation := projectstate.OperationV1{
+		SchemaVersion: 1, ID: uuid.NewString(), Kind: projectstate.OperationTombstone,
+		ExpectedViewDigest: fixture.attached.State.Live.Digest,
+		Actor:              types.ActorEnvelope{ActorKind: types.ActorHuman, HumanPrincipalID: fixture.owner.actor.ID, Assurance: types.AssuranceLocal, OccurredAt: fixture.owner.transport.OccurredAt},
+		Tombstone:          &projectstate.TombstoneOperationV1{Key: projectstate.RecordKey{Kind: "actor", ID: fixture.owner.actor.ID}, ExpectedContentDigest: projectstate.Digest("sha256:" + strings.Repeat("f", 64))},
+	}
+	arguments := syncV2PushArguments(fixture.attached, operation)
+	raw := canonicalSyncV2PushArguments(t, arguments)
+	beforeFirst := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	firstAny, err := fixture.handler.Handle(context.Background(), raw, syncV2PushProof(t, fixture.owner, raw, arguments.AttachmentRef, 131))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, ok := firstAny.(SyncPushConflictV2Result)
+	if !ok || first.Version != 2 || first.Status != "conflict" || first.OperationID != operation.ID || first.StreamVersion != fixture.attached.State.Version || first.LiveTreeDigest != fixture.attached.State.Live.Digest || !types.CanonicalUUID(first.ConflictID) {
+		t.Fatalf("conflict result = (%T)%+v", firstAny, firstAny)
+	}
+	afterFirst := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	assertTask2ExactRowDeltas(t, beforeFirst, afterFirst, map[string]int{
+		"fabric_stream_requests":  1,
+		"fabric_stream_conflicts": 1,
+		"public_request_nonces":   1,
+		"audit_log":               1,
+	})
+	var openConflicts int
+	if err := fixture.owner.db.QueryRow(`SELECT count(*) FROM fabric_stream_conflicts WHERE project_id=$1 AND conflict_id=$2 AND state='open'`, fixture.owner.projectID, first.ConflictID).Scan(&openConflicts); err != nil || openConflicts != 1 {
+		t.Fatalf("open conflict rows = (%d,%v), want (1,nil)", openConflicts, err)
+	}
+	beforeReplay := afterFirst
+	replayed, err := fixture.handler.Handle(context.Background(), raw, syncV2PushProof(t, fixture.owner, raw, arguments.AttachmentRef, 132))
+	if err != nil || replayed != first {
+		t.Fatalf("conflict replay = (%+v,%v), want %+v", replayed, err, first)
+	}
+	afterReplay := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	assertTask2ExactRowDeltas(t, beforeReplay, afterReplay, map[string]int{"public_request_nonces": 1, "audit_log": 1})
+	changed := arguments
+	changed.Operation = operation
+	changedTombstone := *operation.Tombstone
+	changedTombstone.ExpectedContentDigest = projectstate.Digest("sha256:" + strings.Repeat("e", 64))
+	changed.Operation.Tombstone = &changedTombstone
+	changedRaw := canonicalSyncV2PushArguments(t, changed)
+	beforeChanged := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	_, err = fixture.handler.Handle(context.Background(), changedRaw, syncV2PushProof(t, fixture.owner, changedRaw, changed.AttachmentRef, 133))
+	assertSyncV2PushFailure(t, err, "sync_replay_conflict")
+	assertTask2MutationDelta(t, beforeChanged, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), 1)
+}
+
+func TestSyncV2PushForcedRLSCrossProjectScopeIsolation(t *testing.T) {
+	first := newMutationFixture(t)
+	second := newMutationFixture(t)
+	oldFabricID := second.fabricID
+	if _, err := second.db.Exec(`UPDATE project_repository_bindings SET fabric_instance_id=$1 WHERE project_id=$2 AND fabric_instance_id=$3`, first.fabricID, second.projectID, oldFabricID); err != nil {
+		t.Fatal(err)
+	}
+	second.fabricID = first.fabricID
+	fixtures := []struct {
+		owner    *mutationFixture
+		attached InitialAttachResult
+	}{{first, first.attach(134)}, {second, second.attach(135)}}
+	runtimeDB := publicRuntimeDB(t)
+	streams := coregit.NewStreamStore(runtimeDB)
+	resolver := realBoundResolverForDB(t, first, runtimeDB)
+	coordinator, err := NewMutationCoordinator(identity.NewStore(runtimeDB), streams, coregit.NewActivityStore(runtimeDB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewSyncV2PushHandler(resolver, coordinator, streams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, item := range fixtures {
+		operation := syncV2PushOperation(item.owner, item.attached.State, uuid.NewString(), uuid.NewString())
+		arguments := syncV2PushArguments(item.attached, operation)
+		raw := canonicalSyncV2PushArguments(t, arguments)
+		seed := sha256.Sum256([]byte(item.owner.projectID))
+		beforeFirst := task2MutationSnapshot(t, first.db, first.projectID)
+		beforeSecond := task2MutationSnapshot(t, second.db, second.projectID)
+		got, err := handler.Handle(context.Background(), raw, signedBoundProof(t, first.fabricID, "wormhole.sync.push", raw, arguments.AttachmentRef, item.owner.transport.OccurredAt, bytesOf(byte(136+index), 32), seed[:]))
+		if err != nil {
+			t.Fatalf("project %d push: %v", index, err)
+		}
+		if result, ok := got.(SyncPushAppliedV2Result); !ok || result.OperationID != operation.ID {
+			t.Fatalf("project %d result = (%T)%+v", index, got, got)
+		}
+		afterFirst := task2MutationSnapshot(t, first.db, first.projectID)
+		afterSecond := task2MutationSnapshot(t, second.db, second.projectID)
+		if item.owner == first {
+			if reflect.DeepEqual(afterFirst, beforeFirst) || !reflect.DeepEqual(afterSecond, beforeSecond) {
+				t.Fatal("first-project push crossed RLS scope")
+			}
+		} else if reflect.DeepEqual(afterSecond, beforeSecond) || !reflect.DeepEqual(afterFirst, beforeFirst) {
+			t.Fatal("second-project push crossed RLS scope")
+		}
+	}
+}
+
+func executeAuthorizedSyncV2Push(ctx context.Context, fixture *syncV2PushFixture, authorized PublicMutationAuthority, arguments SyncPushV2Args, raw json.RawMessage) (coregit.StreamTransition, error) {
+	var transition coregit.StreamTransition
+	err := fixture.coordinator.ExecutePublic(ctx, authorized, "sync.push", bytes.Clone(raw), func(ctx context.Context, tx *sql.Tx, verified VerifiedMutation) error {
+		var applyErr error
+		transition, applyErr = fixture.streams.ApplyPublicOperationInTx(ctx, tx, verified.Scope, coregit.ApplyPublicOperationInput{
+			Attachment:   verified.Attachment,
+			Precondition: syncMutationPrecondition(arguments.SyncV2Scope),
+			Operation:    arguments.Operation,
+		})
+		return applyErr
+	})
+	return transition, err
+}
+
+func TestSyncV2PushConcurrentExactOperationDifferentNoncesConverges(t *testing.T) {
+	fixture := newSyncV2PushFixture(t, 140)
+	operation := syncV2PushOperation(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString())
+	arguments := syncV2PushArguments(fixture.attached, operation)
+	raw := canonicalSyncV2PushArguments(t, arguments)
+	beforeAuthorization := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	authorized := make([]PublicMutationAuthority, 2)
+	for index, nonce := range []byte{141, 142} {
+		var err error
+		authorized[index], err = fixture.resolver.AuthorizeMutation(context.Background(), "wormhole.sync.push", raw, arguments.SyncV2Scope, syncV2PushProof(t, fixture.owner, raw, arguments.AttachmentRef, nonce))
+		if err != nil {
+			t.Fatalf("AuthorizeMutation %d: %v", index, err)
+		}
+	}
+	afterAuthorization := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	assertTask2ExactRowDeltas(t, beforeAuthorization, afterAuthorization, map[string]int{"public_request_nonces": 2})
+	before := afterAuthorization
+	results := make([]coregit.StreamTransition, 2)
+	errs := raceAtRealAttachmentLock(t, fixture.owner.db, fixture.coordinator, coregit.AttachmentLookup{
+		ProjectID: fixture.owner.projectID, FabricInstanceID: fixture.owner.fabricID, AttachmentRef: fixture.attached.Attachment.AttachmentRef,
+	}, []func() error{
+		func() error {
+			var err error
+			results[0], err = executeAuthorizedSyncV2Push(context.Background(), fixture, authorized[0], arguments, raw)
+			return err
+		},
+		func() error {
+			var err error
+			results[1], err = executeAuthorizedSyncV2Push(context.Background(), fixture, authorized[1], arguments, raw)
+			return err
+		},
+	})
+	for index, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent exact %d: %v", index, err)
+		}
+	}
+	if !reflect.DeepEqual(results[0], results[1]) || results[0].Version != 1 || results[0].ConflictID != "" {
+		t.Fatalf("concurrent exact results = %+v / %+v", results[0], results[1])
+	}
+	after := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	assertTask2ExactRowChanges(t, before, after,
+		map[string]int{"fabric_stream_versions": 1, "fabric_stream_requests": 1, "audit_log": 2},
+		map[string]int{"fabric_streams": 1})
+}
+
+func TestSyncV2PushConcurrentChangedBytesSameOperationIDHasOneReplayConflict(t *testing.T) {
+	fixture := newSyncV2PushFixture(t, 143)
+	operationID := uuid.NewString()
+	arguments := []SyncPushV2Args{
+		syncV2PushArguments(fixture.attached, syncV2PushOperation(fixture.owner, fixture.attached.State, operationID, uuid.NewString())),
+		syncV2PushArguments(fixture.attached, syncV2PushOperation(fixture.owner, fixture.attached.State, operationID, uuid.NewString())),
+	}
+	raw := []json.RawMessage{canonicalSyncV2PushArguments(t, arguments[0]), canonicalSyncV2PushArguments(t, arguments[1])}
+	beforeAuthorization := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	authorized := make([]PublicMutationAuthority, 2)
+	for index := range authorized {
+		var err error
+		authorized[index], err = fixture.resolver.AuthorizeMutation(context.Background(), "wormhole.sync.push", raw[index], arguments[index].SyncV2Scope, syncV2PushProof(t, fixture.owner, raw[index], arguments[index].AttachmentRef, byte(144+index)))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	afterAuthorization := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	assertTask2ExactRowDeltas(t, beforeAuthorization, afterAuthorization, map[string]int{"public_request_nonces": 2})
+	before := afterAuthorization
+	results := make([]coregit.StreamTransition, 2)
+	errs := raceAtRealAttachmentLock(t, fixture.owner.db, fixture.coordinator, coregit.AttachmentLookup{
+		ProjectID: fixture.owner.projectID, FabricInstanceID: fixture.owner.fabricID, AttachmentRef: fixture.attached.Attachment.AttachmentRef,
+	}, []func() error{
+		func() error {
+			var err error
+			results[0], err = executeAuthorizedSyncV2Push(context.Background(), fixture, authorized[0], arguments[0], raw[0])
+			return err
+		},
+		func() error {
+			var err error
+			results[1], err = executeAuthorizedSyncV2Push(context.Background(), fixture, authorized[1], arguments[1], raw[1])
+			return err
+		},
+	})
+	successes, replays := 0, 0
+	for index, err := range errs {
+		switch {
+		case err == nil:
+			successes++
+			if results[index].Version != 1 {
+				t.Fatalf("winner transition = %+v", results[index])
+			}
+		case errors.Is(err, coregit.ErrOperationReplay):
+			replays++
+			if syncMutationErrorCode(err) != "sync_replay_conflict" {
+				t.Fatalf("replay safe mapping = %q", syncMutationErrorCode(err))
+			}
+		default:
+			t.Fatalf("race error %d = %v", index, err)
+		}
+	}
+	if successes != 1 || replays != 1 {
+		t.Fatalf("race outcomes successes=%d replays=%d", successes, replays)
+	}
+	after := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	assertTask2ExactRowChanges(t, before, after,
+		map[string]int{"fabric_stream_versions": 1, "fabric_stream_requests": 1, "audit_log": 1},
+		map[string]int{"fabric_streams": 1})
+}
+
+func TestSyncV2PushConcurrentSameNonceAuthorizesOnce(t *testing.T) {
+	fixture := newSyncV2PushFixture(t, 146)
+	operation := syncV2PushOperation(fixture.owner, fixture.attached.State, uuid.NewString(), uuid.NewString())
+	arguments := syncV2PushArguments(fixture.attached, operation)
+	raw := canonicalSyncV2PushArguments(t, arguments)
+	proof := syncV2PushProof(t, fixture.owner, raw, arguments.AttachmentRef, 147)
+	before := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	results := make([]any, 2)
+	errs := raceAtRealAttachmentLock(t, fixture.owner.db, fixture.coordinator, coregit.AttachmentLookup{
+		ProjectID: fixture.owner.projectID, FabricInstanceID: fixture.owner.fabricID, AttachmentRef: fixture.attached.Attachment.AttachmentRef,
+	}, []func() error{
+		func() error {
+			var err error
+			results[0], err = fixture.handler.Handle(context.Background(), raw, proof)
+			return err
+		},
+		func() error {
+			var err error
+			results[1], err = fixture.handler.Handle(context.Background(), raw, proof)
+			return err
+		},
+	})
+	successes, authenticationFailures := 0, 0
+	for index, err := range errs {
+		switch {
+		case err == nil:
+			successes++
+			if _, ok := results[index].(SyncPushAppliedV2Result); !ok {
+				t.Fatalf("winner result type = %T", results[index])
+			}
+		case err.Error() == `{"code":"authentication_failed","operation":"wormhole.sync.push"}`:
+			authenticationFailures++
+		default:
+			t.Fatalf("same-nonce race error %d = %v", index, err)
+		}
+	}
+	if successes != 1 || authenticationFailures != 1 {
+		t.Fatalf("same-nonce outcomes success=%d auth=%d", successes, authenticationFailures)
+	}
+	after := task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+	for table, delta := range map[string]int{"fabric_stream_versions": 1, "fabric_stream_requests": 1, "public_request_nonces": 1, "audit_log": 1} {
+		if len(after[table])-len(before[table]) != delta {
+			t.Errorf("%s delta=%d, want %d", table, len(after[table])-len(before[table]), delta)
+		}
 	}
 }

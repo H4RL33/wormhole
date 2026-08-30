@@ -230,6 +230,9 @@ func (s *StreamStore) ApplyOperationInTx(ctx context.Context, tx *sql.Tx, scope 
 	if found {
 		return replayStreamRequest(ctx, tx, input, stream.canonicalRef, repository, operation, canonical, operationDigest, actorJSON, request)
 	}
+	if err := projectstate.ValidateOperationForApply(operation); err != nil {
+		return StreamTransition{}, err
+	}
 
 	current, err := loadStreamVersionTx(ctx, tx, input.Key, stream.canonicalRef, stream.currentVersion, repository)
 	if err != nil {
@@ -246,6 +249,10 @@ func (s *StreamStore) ApplyOperationInTx(ctx context.Context, tx *sql.Tx, scope 
 	}
 	nextSnapshot, err := projectstate.ApplyOperation(current.transition.Live, operation)
 	if err != nil {
+		kind, classified := projectstate.ClassifyOperationFailure(err)
+		if classified && kind == projectstate.OperationFailureStateConflict {
+			return persistOperationConflict(ctx, tx, input, stream.canonicalRef, current, operation, canonical, operationDigest, actorJSON)
+		}
 		return StreamTransition{}, err
 	}
 	nextTree, err := projectstate.EncodeTree(nextSnapshot)

@@ -299,6 +299,107 @@ func (h *SyncV2PullHandler) Handle(ctx context.Context, raw json.RawMessage, pro
 	return result, nil
 }
 
+type SyncV2PushHandler struct {
+	resolver    *PublicBoundProofResolver
+	coordinator *MutationCoordinator
+	streams     *coregit.StreamStore
+}
+
+func (h *SyncV2PushHandler) ready() bool {
+	return h != nil && h.resolver != nil && h.coordinator != nil && h.streams != nil
+}
+
+func NewSyncV2PushHandler(resolver *PublicBoundProofResolver, coordinator *MutationCoordinator, streams *coregit.StreamStore) (*SyncV2PushHandler, error) {
+	handler := &SyncV2PushHandler{resolver: resolver, coordinator: coordinator, streams: streams}
+	if !handler.ready() {
+		return nil, identity.ErrInvalidPublicIdentity
+	}
+	return handler, nil
+}
+
+func (h *SyncV2PushHandler) Handle(ctx context.Context, raw json.RawMessage, proof types.PublicRequestProof) (any, error) {
+	if !h.ready() {
+		return nil, syncMutationFailure("wormhole.sync.push", "internal_error")
+	}
+	var arguments SyncPushV2Args
+	if decodePublicArguments(raw, &arguments) != nil || !isCanonicalJSONObject(raw) {
+		return nil, syncReadDecodeFailure("wormhole.sync.push", raw)
+	}
+	if arguments.Version != projectstate.SyncProtocolVersionV2 || !types.CanonicalUUID(arguments.AttachmentRef) {
+		return nil, syncMutationFailure("wormhole.sync.push", "invalid_request")
+	}
+	authorized, err := h.resolver.AuthorizeMutation(ctx, "wormhole.sync.push", raw, arguments.SyncV2Scope, proof)
+	if err != nil {
+		return nil, syncMutationFailure("wormhole.sync.push", syncMutationErrorCode(err))
+	}
+	var transition coregit.StreamTransition
+	err = h.coordinator.ExecutePublic(ctx, authorized, "sync.push", bytes.Clone(raw), func(ctx context.Context, tx *sql.Tx, verified VerifiedMutation) error {
+		var err error
+		transition, err = h.streams.ApplyPublicOperationInTx(ctx, tx, verified.Scope, coregit.ApplyPublicOperationInput{
+			Attachment:   verified.Attachment,
+			Precondition: syncMutationPrecondition(arguments.SyncV2Scope),
+			Operation:    arguments.Operation,
+		})
+		return err
+	})
+	if err != nil {
+		return nil, syncMutationFailure("wormhole.sync.push", syncMutationErrorCode(err))
+	}
+	if transition.Key.ProjectID != authorized.Authority.Scope.ProjectID || transition.Version < 0 || transition.Version > maximumPublicSyncVersion || !validPublicSyncDigest(transition.Live.Digest) || transition.AcceptedCommitSHA == "" {
+		return nil, syncMutationFailure("wormhole.sync.push", "internal_error")
+	}
+	if transition.ConflictID != "" {
+		if !types.CanonicalUUID(transition.ConflictID) {
+			return nil, syncMutationFailure("wormhole.sync.push", "internal_error")
+		}
+		return SyncPushConflictV2Result{
+			Version: projectstate.SyncProtocolVersionV2, Status: "conflict", OperationID: arguments.Operation.ID,
+			StreamVersion: transition.Version, LiveTreeDigest: transition.Live.Digest, ConflictID: transition.ConflictID,
+		}, nil
+	}
+	return SyncPushAppliedV2Result{
+		Version: projectstate.SyncProtocolVersionV2, Status: "applied", OperationID: arguments.Operation.ID,
+		StreamVersion: transition.Version, LiveTreeDigest: transition.Live.Digest,
+	}, nil
+}
+
+func syncMutationPrecondition(scope SyncV2Scope) coregit.SyncPrecondition {
+	return coregit.SyncPrecondition{
+		Repository: scope.Repository, CanonicalRef: scope.CanonicalRef,
+		BaseCommitSHA: scope.BaseCommitSHA, BaseTreeDigest: scope.BaseTreeDigest,
+		ExpectedStreamVersion: scope.ExpectedStreamVersion, ExpectedLiveTreeDigest: scope.ExpectedLiveTreeDigest,
+	}
+}
+
+func syncMutationFailure(operation, code string) error {
+	return syncReadFailure(operation, code)
+}
+
+func syncMutationErrorCode(err error) string {
+	switch {
+	case errors.Is(err, identity.ErrPublicAuthentication), errors.Is(err, identity.ErrPublicNonceReplay), errors.Is(err, identity.ErrInvalidPublicIdentity):
+		return "authentication_failed"
+	case errors.Is(err, coregit.ErrStreamNotFound):
+		return "attachment_not_found"
+	case errors.Is(err, coregit.ErrStreamActor):
+		return "permission_denied"
+	case errors.Is(err, coregit.ErrStreamPrecondition):
+		return "sync_precondition_failed"
+	case errors.Is(err, coregit.ErrStreamConflict):
+		return "sync_conflict"
+	case errors.Is(err, coregit.ErrOperationReplay):
+		return "sync_replay_conflict"
+	case errors.Is(err, projectstate.ErrInvalidSnapshot), errors.Is(err, projectstate.ErrUnknownVersion),
+		errors.Is(err, projectstate.ErrUnknownKind), errors.Is(err, projectstate.ErrBrokenReference),
+		errors.Is(err, projectstate.ErrInvalidActorEnvelope), errors.Is(err, projectstate.ErrTrackedSecret),
+		errors.Is(err, projectstate.ErrOperationPrecondition), errors.Is(err, projectstate.ErrImmutableRecord),
+		errors.Is(err, projectstate.ErrTombstoneDigest), errors.Is(err, projectstate.ErrResurrectionDigest):
+		return "sync_precondition_failed"
+	default:
+		return "internal_error"
+	}
+}
+
 const maximumPublicSyncVersion int64 = 9_007_199_254_740_991
 
 func validSyncReadArguments(scope SyncV2Scope, afterVersion int64) bool {
