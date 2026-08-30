@@ -263,22 +263,36 @@ func (s *ActivityStore) Pull(ctx context.Context, input PullActivityInput) (Pull
 	if s == nil || s.db == nil {
 		return PullActivityResult{}, fmt.Errorf("git: pull activity: %w", ErrActivityNotFound)
 	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
+	if err != nil {
+		return PullActivityResult{}, fmt.Errorf("git: pull activity: begin: %w", err)
+	}
+	defer tx.Rollback()
+	result, err := s.PullInTx(ctx, tx, input)
+	if err != nil {
+		return PullActivityResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return PullActivityResult{}, fmt.Errorf("git: commit Activity pull: %w", err)
+	}
+	return result, nil
+}
+
+func (s *ActivityStore) PullInTx(ctx context.Context, tx *sql.Tx, input PullActivityInput) (PullActivityResult, error) {
+	if s == nil || s.db == nil || tx == nil {
+		return PullActivityResult{}, fmt.Errorf("git: pull activity: %w", ErrActivityNotFound)
+	}
 	if err := validateFabricActivityStreamKey(input.Stream); err != nil {
 		return PullActivityResult{}, err
 	}
 	if !types.CanonicalUUID(input.AttachmentRef) || input.AfterSequence < 0 || input.AfterSequence > maximumActivitySequence || input.Limit < 1 || input.Limit > 500 {
 		return PullActivityResult{}, fmt.Errorf("git: pull activity: %w", ErrActivityCursorConflict)
 	}
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
-	if err != nil {
-		return PullActivityResult{}, fmt.Errorf("git: pull activity: begin: %w", err)
-	}
-	defer tx.Rollback()
 	if err := setActivityProject(ctx, tx, input.Stream.ProjectID); err != nil {
 		return PullActivityResult{}, err
 	}
 	var attached bool
-	err = tx.QueryRowContext(ctx, `SELECT true FROM fabric_workspace_stream_bindings
+	err := tx.QueryRowContext(ctx, `SELECT true FROM fabric_workspace_stream_bindings
 		WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3 AND canonical_ref=$4
 		AND attachment_ref=$5 AND detached_at IS NULL`, input.Stream.ProjectID, input.Stream.FabricInstanceID,
 		input.Stream.StreamID, input.Stream.CanonicalRef, input.AttachmentRef).Scan(&attached)
@@ -407,9 +421,6 @@ func (s *ActivityStore) Pull(ctx context.Context, input PullActivityInput) (Pull
 	next := highWatermark
 	if hasMore && len(deliveries) > 0 {
 		next = deliveries[len(deliveries)-1].Receipt.Sequence
-	}
-	if err := tx.Commit(); err != nil {
-		return PullActivityResult{}, fmt.Errorf("git: pull activity: commit: %w", err)
 	}
 	return PullActivityResult{
 		PolicyJSON:         append([]byte(nil), policyJSON...),

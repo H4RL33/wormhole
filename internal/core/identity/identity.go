@@ -170,10 +170,14 @@ func NewStore(db *sql.DB) *Store {
 // used by MCP workflows that must coordinate writes across isolated Core stores;
 // the caller owns commit and rollback.
 func (s *Store) BeginProjectTx(ctx context.Context, projectID string) (*sql.Tx, error) {
-	if projectID == "" {
+	return s.BeginProjectTxWithOptions(ctx, projectID, nil)
+}
+
+func (s *Store) BeginProjectTxWithOptions(ctx context.Context, projectID string, options *sql.TxOptions) (*sql.Tx, error) {
+	if s == nil || s.db == nil || projectID == "" {
 		return nil, ErrInvalidScope
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.db.BeginTx(ctx, options)
 	if err != nil {
 		return nil, fmt.Errorf("identity: begin project tx: %w", err)
 	}

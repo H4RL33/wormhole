@@ -38,6 +38,23 @@ func testStore(t *testing.T) *Store {
 	return NewStore(db)
 }
 
+func TestBeginProjectTxWithOptionsSetsIsolationAndProject(t *testing.T) {
+	store := testStore(t)
+	projectID := createProject(t, store, "tx-options")
+	tx, err := store.BeginProjectTxWithOptions(context.Background(), projectID, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	var isolation, readOnly, gotProject string
+	if err := tx.QueryRow(`SELECT current_setting('transaction_isolation'), current_setting('transaction_read_only'), current_setting('wormhole.project_id', true)`).Scan(&isolation, &readOnly, &gotProject); err != nil {
+		t.Fatal(err)
+	}
+	if isolation != "repeatable read" || readOnly != "off" || gotProject != projectID {
+		t.Fatalf("transaction = (%q,%q,%q), want repeatable read/off/%q", isolation, readOnly, gotProject, projectID)
+	}
+}
+
 func lockIdentityRLSFixture(t *testing.T, db *sql.DB) {
 	t.Helper()
 	conn, err := db.Conn(context.Background())

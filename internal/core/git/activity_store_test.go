@@ -307,6 +307,44 @@ func TestActivityPolicyChangedInTxDoesNotOpenNestedTransaction(t *testing.T) {
 	}
 }
 
+func TestActivityPullInTxUsesCallerSnapshot(t *testing.T) {
+	fixture := newActivityStoreFixture(t, "pull-in-tx-snapshot")
+	ctx := context.Background()
+	tx, err := fixture.store.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	before, err := fixture.store.CurrentPolicyInTx(ctx, tx, fixture.stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2 := testActivityPolicy(2, 3_000_000)
+	if _, err := fixture.store.PublishPolicy(ctx, fixture.stream, v2); err != nil {
+		t.Fatal(err)
+	}
+	input := fixture.acceptInput(testOrdinaryActivity(activityIDOne, fixture.actor, "after-snapshot"))
+	input.PolicyVersion = v2.PolicyVersion
+	input.PolicyDigest, err = projectstate.DigestActivityPolicy(v2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.Accept(ctx, input); err != nil {
+		t.Fatal(err)
+	}
+	got, err := fixture.store.PullInTx(ctx, tx, PullActivityInput{Stream: fixture.stream, AttachmentRef: fixture.attachment, AfterSequence: 0, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := projectstate.DecodeActivityPolicy(got.PolicyJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.PolicyVersion != before.PolicyVersion || len(got.Deliveries) != 0 || got.NextSequence != 0 {
+		t.Fatalf("mixed snapshot: policy=%d deliveries=%d next=%d", policy.PolicyVersion, len(got.Deliveries), got.NextSequence)
+	}
+}
+
 func TestActivityAcceptInTxLeavesCommitAndRollbackToCaller(t *testing.T) {
 	fixture := newActivityStoreFixture(t, "activity-accept-caller-rollback")
 	tx, err := fixture.store.db.BeginTx(context.Background(), nil)
