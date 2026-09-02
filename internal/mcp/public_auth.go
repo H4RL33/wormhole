@@ -135,7 +135,7 @@ func (r *PublicBoundProofResolver) resolveAttachmentAuthorityInTx(ctx context.Co
 	if actorErr == nil {
 		actor = types.ActorEnvelope{ActorKind: types.ActorHuman, HumanPrincipalID: human.ID, Assurance: types.AssurancePublicKeyContinuity, OccurredAt: verified.Timestamp}
 		if verified.SessionID != "" {
-			actor, actorErr = r.identity.ResolveHistoricalPublicSessionActorInTx(ctx, tx, r.fabricInstanceID, verified.SessionID, verified.Timestamp)
+			actor, actorErr = r.identity.ResolveHistoricalPublicSessionActorInTx(ctx, tx, authorityEvidence(attached), verified.SessionID, verified.Timestamp)
 			if actorErr == nil && actor.AccountableHumanID != human.ID {
 				actorErr = identity.ErrPublicAuthentication
 			}

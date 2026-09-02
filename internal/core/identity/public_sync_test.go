@@ -356,11 +356,11 @@ func TestRevalidateCurrentAndHistoricalPublicAuthority(t *testing.T) {
 	if err != nil || current.Actor.AgentID != f.agentID || current.Actor.AccountableHumanID != f.humanID {
 		t.Fatalf("current=%+v err=%v", current, err)
 	}
-	historical, err := f.store.ResolveHistoricalPublicSessionActorInTx(context.Background(), tx, f.fabricID, session.SessionID, f.now.Add(time.Hour))
+	historical, err := f.store.ResolveHistoricalPublicSessionActorInTx(context.Background(), tx, evidence, session.SessionID, f.now.Add(time.Hour))
 	if err != nil || historical.SessionID != session.SessionID {
 		t.Fatalf("historical=%+v err=%v", historical, err)
 	}
-	if _, err := f.store.ResolveHistoricalPublicSessionActorInTx(context.Background(), tx, f.fabricID, session.SessionID, session.ExpiresAt); !errors.Is(err, ErrPublicAuthentication) {
+	if _, err := f.store.ResolveHistoricalPublicSessionActorInTx(context.Background(), tx, evidence, session.SessionID, session.ExpiresAt); !errors.Is(err, ErrPublicAuthentication) {
 		t.Fatalf("expiry-boundary history error=%v, want authentication failure", err)
 	}
 	humanAuthority := MutationAuthority{Scope: humanScope, FabricInstanceID: f.fabricID, StreamID: f.streamID, WorkspaceID: f.workspaceID, CanonicalRef: "refs/heads/main", AttachmentRef: f.attachment, IssuerKeyFingerprint: f.fingerprint}

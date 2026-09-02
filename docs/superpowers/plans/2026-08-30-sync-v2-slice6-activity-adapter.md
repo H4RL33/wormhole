@@ -1831,9 +1831,9 @@ Expected: exit 0 and no output. Any migration, command assembly, HTTP, signer, p
 
 - [ ] **Step 2: Verify exact registry and version inventory**
 
-Run: `go test -v ./internal/mcp -run 'TestPublicFabricRegistryActivityV1InventoryAndIndependentReadiness|TestPublicFabricToolDescriptorsAreExactSortedDescriptorValues|TestPublicFabricRegistryVariantsMatchFrozenDescriptorSchemas' -count=1`
+Run: `go test -v ./internal/mcp -run 'TestFabricRegistryRetainsExactPrivateSixteen|TestPublicFabricRegistryActivityV1InventoryAndIndependentReadiness|TestPublicFabricToolDescriptorsAreExactSortedDescriptorValues|TestPublicFabricRegistryVariantsMatchFrozenDescriptorSchemas' -count=1`
 
-Expected: PASS with all three named tests visibly executed, public 9, private 16,
+Expected: PASS with all four named tests visibly executed, public 9, private 16,
 Activity version 1, sync version 2, and public session issuance absent.
 
 - [ ] **Step 3: Run focused integration and forced-RLS suites**

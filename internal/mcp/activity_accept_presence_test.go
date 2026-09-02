@@ -602,6 +602,83 @@ func TestActivityHandlersRequireFreshAuthorityAndAcceptHistoricalSessionAfterRol
 	}
 }
 
+func TestActivityHandlersRejectHistoricalSessionFromSiblingAttachment(t *testing.T) {
+	for _, endpoint := range []struct {
+		name      string
+		operation string
+		presence  bool
+	}{
+		{name: "accept", operation: "wormhole.activity.accept"},
+		{name: "presence", operation: "wormhole.activity.presence", presence: true},
+	} {
+		t.Run(endpoint.name, func(t *testing.T) {
+			pushFixture, currentSession, agentID := newSyncV2PushAgentFixture(t, 70, true)
+			fixture := newActivityHandlerFixtureForAttached(t, pushFixture.owner, pushFixture.attached)
+
+			originalObservation := fixture.owner.observation
+			fixture.owner.observation.RefName = "refs/heads/sibling"
+			sibling := fixture.owner.attach(71)
+			fixture.owner.observation = originalObservation
+
+			tx, err := fixture.coordinator.identity.BeginProjectTx(context.Background(), fixture.owner.projectID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			siblingSession, err := fixture.coordinator.identity.IssuePublicAgentSessionInTx(context.Background(), tx, identity.PublicAgentSessionIssue{
+				ProjectID: fixture.owner.projectID, FabricInstanceID: fixture.owner.fabricID,
+				StreamID: sibling.Attachment.Key.StreamID, WorkspaceID: sibling.Attachment.WorkspaceID,
+				CanonicalRef: sibling.Attachment.CanonicalRef, AttachmentRef: sibling.Attachment.AttachmentRef,
+				IssuerKeyFingerprint: fixture.owner.fingerprint, AgentID: agentID,
+				HarnessName: "codex", HarnessVersion: "1", ModelName: "gpt", ModelVersion: "5",
+				SourceVersion: sibling.Attachment.SourceVersion, IssuedAt: fixture.owner.transport.OccurredAt,
+			})
+			if err == nil {
+				err = tx.Commit()
+			} else {
+				_ = tx.Rollback()
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if siblingSession.ProjectID != currentSession.ProjectID || siblingSession.FabricInstanceID != currentSession.FabricInstanceID ||
+				siblingSession.AgentID != currentSession.AgentID || siblingSession.AccountableHumanID != currentSession.AccountableHumanID ||
+				siblingSession.StreamID == currentSession.StreamID || siblingSession.WorkspaceID == currentSession.WorkspaceID ||
+				siblingSession.CanonicalRef == currentSession.CanonicalRef || siblingSession.AttachmentRef == currentSession.AttachmentRef {
+				t.Fatalf("sessions do not isolate one stable actor across sibling attachments: target=%+v sibling=%+v", currentSession, siblingSession)
+			}
+
+			historicalActor := types.ActorEnvelope{
+				ActorKind: types.ActorAgent, AgentID: siblingSession.AgentID, AccountableHumanID: siblingSession.AccountableHumanID,
+				SessionID: siblingSession.SessionID, HarnessName: siblingSession.HarnessName, HarnessVersion: siblingSession.HarnessVersion,
+				ModelName: siblingSession.ModelName, ModelVersion: siblingSession.ModelVersion,
+				Assurance: types.AssurancePublicKeyContinuity, OccurredAt: fixture.owner.transport.OccurredAt,
+			}
+			activity := activityHandlerOrdinary(historicalActor, uuid.NewString(), "sibling attachment session")
+			if endpoint.presence {
+				activity = activityHandlerPresence(historicalActor, activity.ID)
+			}
+			arguments := activityHandlerArguments(t, fixture, activity)
+			raw := canonicalActivityHandlerArguments(t, arguments)
+			before := activityHandlerSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+			proof := activityHandlerProof(t, fixture, endpoint.operation, raw, 72, currentSession.SessionID)
+			if endpoint.presence {
+				_, err = fixture.presence.Handle(context.Background(), raw, proof)
+			} else {
+				_, err = fixture.accept.Handle(context.Background(), raw, proof)
+			}
+			assertSyncReadFailure(t, err, endpoint.operation, "invalid_activity")
+			after := activityHandlerSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+			wantAfter := before
+			if !endpoint.presence {
+				wantAfter.Nonces++
+			}
+			if after != wantAfter {
+				t.Fatalf("cross-attachment historical actor rows: before=%+v after=%+v want=%+v", before, after, wantAfter)
+			}
+		})
+	}
+}
+
 func TestActivityHandlersRejectInvalidHistoricalSessionAndStableAttribution(t *testing.T) {
 	for _, endpoint := range []struct {
 		name      string

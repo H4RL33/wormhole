@@ -57,7 +57,7 @@ func (h *ActivityAcceptHandler) Handle(ctx context.Context, raw json.RawMessage,
 	}
 	var accepted ActivityAcceptedV1Result
 	err = h.mutations.Execute(ctx, authorized.Authority, "activity.accept", canonical, func(ctx context.Context, tx *sql.Tx, verified VerifiedMutation) error {
-		if err := validateHistoricalActivityAuthorshipInTx(ctx, tx, h.auth.identity, verified.Attachment.Key.FabricInstanceID, args.Activity.Actor, verified.Scope.Actor); err != nil {
+		if err := validateHistoricalActivityAuthorshipInTx(ctx, tx, h.auth.identity, authorityEvidence(coregit.StreamAttachmentState{Attachment: verified.Attachment, State: verified.State}), args.Activity.Actor, verified.Scope.Actor); err != nil {
 			return err
 		}
 		receipt, err := h.activity.AcceptInTx(ctx, tx, coregit.AcceptActivityInput{
@@ -136,7 +136,7 @@ func (h *ActivityPresenceHandler) Handle(ctx context.Context, raw json.RawMessag
 	}
 	var result any
 	err := h.auth.ResolveActivityRead(ctx, operation, args.AttachmentRef, raw, proof, func(ctx context.Context, tx *sql.Tx, verified VerifiedActivityRead) error {
-		if err := validateHistoricalActivityAuthorshipInTx(ctx, tx, h.auth.identity, verified.Attachment.Key.FabricInstanceID, args.Activity.Actor, verified.Authority.Actor); err != nil {
+		if err := validateHistoricalActivityAuthorshipInTx(ctx, tx, h.auth.identity, authorityEvidence(coregit.StreamAttachmentState{Attachment: verified.Attachment, State: verified.State}), args.Activity.Actor, verified.Authority.Actor); err != nil {
 			return err
 		}
 		policy, err := h.activity.CurrentPolicyInTx(ctx, tx, activityStream(verified.Attachment))
@@ -166,7 +166,7 @@ func (h *ActivityPresenceHandler) Handle(ctx context.Context, raw json.RawMessag
 // validateHistoricalActivityAuthorshipInTx proves the immutable embedded actor
 // at the Activity occurrence time, then compares only stable identity with the
 // separately authenticated current request actor.
-func validateHistoricalActivityAuthorshipInTx(ctx context.Context, tx *sql.Tx, identities *identity.Store, fabricInstanceID string, embedded, current types.ActorEnvelope) error {
+func validateHistoricalActivityAuthorshipInTx(ctx context.Context, tx *sql.Tx, identities *identity.Store, evidence identity.PublicAuthorityEvidence, embedded, current types.ActorEnvelope) error {
 	if tx == nil || identities == nil || embedded.ValidateHistorical() != nil || current.Validate() != nil ||
 		embedded.Assurance != types.AssurancePublicKeyContinuity || current.Assurance != types.AssurancePublicKeyContinuity {
 		return projectstate.ErrInvalidActivity
@@ -180,7 +180,7 @@ func validateHistoricalActivityAuthorshipInTx(ctx context.Context, tx *sql.Tx, i
 		}
 	case types.ActorAgent:
 		var err error
-		historical, err = identities.ResolveHistoricalPublicSessionActorInTx(ctx, tx, fabricInstanceID, embedded.SessionID, embedded.OccurredAt)
+		historical, err = identities.ResolveHistoricalPublicSessionActorInTx(ctx, tx, evidence, embedded.SessionID, embedded.OccurredAt)
 		if err != nil {
 			return projectstate.ErrInvalidActivity
 		}

@@ -195,14 +195,14 @@ func (s *Store) RevalidateMutationAuthorityInTx(ctx context.Context, tx *sql.Tx,
 	}
 }
 
-func (s *Store) ResolveHistoricalPublicSessionActorInTx(ctx context.Context, tx *sql.Tx, fabricInstanceID, sessionID string, occurredAt time.Time) (types.ActorEnvelope, error) {
-	if tx == nil || !types.CanonicalUUID(fabricInstanceID) || !types.CanonicalUUID(sessionID) || occurredAt.IsZero() || occurredAt.Location() != time.UTC {
+func (s *Store) ResolveHistoricalPublicSessionActorInTx(ctx context.Context, tx *sql.Tx, evidence PublicAuthorityEvidence, sessionID string, occurredAt time.Time) (types.ActorEnvelope, error) {
+	if tx == nil || !validHistoricalSessionEvidence(evidence) || !types.CanonicalUUID(sessionID) || occurredAt.IsZero() || occurredAt.Location() != time.UTC {
 		return types.ActorEnvelope{}, ErrInvalidPublicIdentity
 	}
 	var agentID, humanID, harnessName, harnessVersion, modelName, modelVersion string
 	var issuedAt, expiresAt time.Time
 	var revokedAt sql.NullTime
-	err := tx.QueryRowContext(ctx, `SELECT agent_id,accountable_human_id,harness_name,harness_version,model_name,model_version,issued_at,expires_at,revoked_at FROM fabric_public_agent_sessions WHERE fabric_instance_id=$1 AND session_id=$2`, fabricInstanceID, sessionID).Scan(&agentID, &humanID, &harnessName, &harnessVersion, &modelName, &modelVersion, &issuedAt, &expiresAt, &revokedAt)
+	err := tx.QueryRowContext(ctx, `SELECT agent_id,accountable_human_id,harness_name,harness_version,model_name,model_version,issued_at,expires_at,revoked_at FROM fabric_public_agent_sessions WHERE project_id=$1 AND fabric_instance_id=$2 AND stream_id=$3 AND workspace_id=$4 AND canonical_ref=$5 AND attachment_ref=$6 AND issuer_key_fingerprint=$7 AND source_version=$8 AND session_id=$9`, evidence.ProjectID, evidence.FabricInstanceID, evidence.StreamID, evidence.WorkspaceID, evidence.CanonicalRef, evidence.AttachmentRef, evidence.IssuerKeyFingerprint, evidence.AttachmentSourceVersion, sessionID).Scan(&agentID, &humanID, &harnessName, &harnessVersion, &modelName, &modelVersion, &issuedAt, &expiresAt, &revokedAt)
 	if err != nil {
 		return types.ActorEnvelope{}, ErrPublicAuthentication
 	}
@@ -218,6 +218,13 @@ func (s *Store) ResolveHistoricalPublicSessionActorInTx(ctx context.Context, tx 
 		return types.ActorEnvelope{}, ErrPublicAuthentication
 	}
 	return actor, nil
+}
+
+func validHistoricalSessionEvidence(e PublicAuthorityEvidence) bool {
+	return validRoute(e.ProjectID, e.FabricInstanceID, e.StreamID, e.CanonicalRef) &&
+		types.CanonicalUUID(e.WorkspaceID) && types.CanonicalUUID(e.AttachmentRef) &&
+		validFingerprint(e.IssuerKeyFingerprint) && e.AttachmentSourceVersion >= 0 &&
+		e.CurrentStreamVersion >= e.AttachmentSourceVersion
 }
 
 func validActivation(in PublicHumanActivation) bool {

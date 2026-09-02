@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,6 +123,28 @@ func TestPublicFabricRegistryActivityV1InventoryAndIndependentReadiness(t *testi
 	base := readyPublicRegistryDependencies(t)
 	installReadyActivityHandlers(t, &base)
 	registry := NewPublicFabricRegistry(base)
+	wantNames := []string{
+		"wormhole.activity.accept", "wormhole.activity.lifecycle", "wormhole.activity.presence", "wormhole.activity.pull",
+		"wormhole.sync.attach", "wormhole.sync.bootstrap", "wormhole.sync.conflict", "wormhole.sync.pull", "wormhole.sync.push",
+	}
+	gotNames := make([]string, 0, len(registry.List()))
+	for _, tool := range registry.List() {
+		gotNames = append(gotNames, tool.Name)
+		wantVersion := 2
+		if strings.HasPrefix(tool.Name, "wormhole.activity.") {
+			wantVersion = 1
+		}
+		if len(tool.ArgumentVariants) != 1 || tool.ArgumentVariants[wantVersion] == nil || len(tool.ResultVariants) != 1 || len(tool.ResultVariants[wantVersion]) == 0 {
+			t.Fatalf("%s live versions = arguments %#v results %#v, want v%d only", tool.Name, tool.ArgumentVariants, tool.ResultVariants, wantVersion)
+		}
+	}
+	sort.Strings(gotNames)
+	if !reflect.DeepEqual(gotNames, wantNames) {
+		t.Fatalf("public Fabric tools = %q, want exact nine %q", gotNames, wantNames)
+	}
+	if _, live := registry.Get("wormhole.sync.issue_agent_session"); live {
+		t.Fatal("public Fabric registered wormhole.sync.issue_agent_session")
+	}
 	activityWant := map[string][]any{
 		"wormhole.activity.accept":   {ActivityAcceptedV1Result{}, ActivityPolicyChangedV1Result{}},
 		"wormhole.activity.presence": {ActivityPresenceAcceptedV1Result{}, ActivityPolicyChangedV1Result{}},
