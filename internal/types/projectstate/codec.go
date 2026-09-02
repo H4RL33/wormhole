@@ -29,6 +29,29 @@ func CanonicalJSON(value any) ([]byte, error) {
 	return buffer.Bytes(), nil
 }
 
+// CanonicalJSONObject returns the compact, recursively key-sorted object form
+// used on strict public wire boundaries. CanonicalJSON retains declaration
+// order for typed project-state files; public request objects require the
+// encoding/json object order independently of their Go struct declarations.
+func CanonicalJSONObject(value any) ([]byte, error) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("%w: canonical JSON object: %v", ErrInvalidSnapshot, err)
+	}
+	var object any
+	if err := json.Unmarshal(encoded, &object); err != nil {
+		return nil, fmt.Errorf("%w: canonical JSON object: %v", ErrInvalidSnapshot, err)
+	}
+	if _, ok := object.(map[string]any); !ok {
+		return nil, fmt.Errorf("%w: canonical JSON object: top-level value is not an object", ErrInvalidSnapshot)
+	}
+	canonical, err := json.Marshal(object)
+	if err != nil {
+		return nil, fmt.Errorf("%w: canonical JSON object: %v", ErrInvalidSnapshot, err)
+	}
+	return canonical, nil
+}
+
 func CanonicalMarkdown(body []byte) ([]byte, error) {
 	if !utf8.Valid(body) || bytes.IndexByte(body, 0) >= 0 {
 		return nil, fmt.Errorf("%w: Markdown must be NUL-free UTF-8", ErrInvalidSnapshot)

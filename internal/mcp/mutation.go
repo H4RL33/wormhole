@@ -300,14 +300,7 @@ func isCanonicalJSONObject(raw []byte) bool {
 	if len(raw) == 0 || rejectDuplicateJSONMembers(raw) != nil {
 		return false
 	}
-	var decoded any
-	if err := json.Unmarshal(raw, &decoded); err != nil {
-		return false
-	}
-	if _, ok := decoded.(map[string]any); !ok {
-		return false
-	}
-	canonical, err := json.Marshal(decoded)
+	canonical, err := projectstate.CanonicalJSONObject(json.RawMessage(raw))
 	return err == nil && bytes.Equal(canonical, raw)
 }
 

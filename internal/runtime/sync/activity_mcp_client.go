@@ -368,11 +368,11 @@ func (c *ActivityPublicClient) call(ctx context.Context, operation string, argum
 	if c == nil || activityNilDependency(c.caller) || c.profile.Mode != types.FabricModePublic || c.credentialRef == "" {
 		return nil, ErrFabricUnavailable
 	}
-	canonical, err := projectstate.CanonicalJSON(arguments)
+	canonical, err := projectstate.CanonicalJSONObject(arguments)
 	if err != nil {
 		return nil, ErrFabricUnavailable
 	}
-	raw, err := c.caller.CallActivity(ctx, c.profile, c.credentialRef, operation, bytes.TrimSuffix(canonical, []byte{'\n'}))
+	raw, err := c.caller.CallActivity(ctx, c.profile, c.credentialRef, operation, canonical)
 	if err != nil {
 		return nil, ErrFabricUnavailable
 	}

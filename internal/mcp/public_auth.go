@@ -274,8 +274,8 @@ func (v *PublicProofVerifier) verify(tool, scope string, args json.RawMessage, p
 	if now.Location() != time.UTC || at.Before(now.Add(-5*time.Minute)) || at.After(now.Add(30*time.Second)) {
 		return VerifiedPublicProof{}, identity.ErrPublicAuthentication
 	}
-	canonical, e := projectstate.CanonicalJSON(args)
-	if e != nil {
+	canonical, e := projectstate.CanonicalJSONObject(args)
+	if e != nil || !bytes.Equal(canonical, args) {
 		return VerifiedPublicProof{}, identity.ErrPublicAuthentication
 	}
 	var n [32]byte

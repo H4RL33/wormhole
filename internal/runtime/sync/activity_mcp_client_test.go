@@ -822,11 +822,10 @@ func activityMCPPolicyDigest(t *testing.T, policy projectstate.EffectiveActivity
 
 func assertActivityMCPCall(t *testing.T, caller *recordingActivityCaller, operation string, arguments any) {
 	t.Helper()
-	want, err := projectstate.CanonicalJSON(arguments)
+	want, err := projectstate.CanonicalJSONObject(arguments)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want = bytes.TrimSuffix(want, []byte{'\n'})
 	if caller.tool != operation || !bytes.Equal(caller.arguments, want) {
 		t.Fatalf("call=(%q,%s), want=(%q,%s)", caller.tool, caller.arguments, operation, want)
 	}

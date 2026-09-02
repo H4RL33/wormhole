@@ -597,7 +597,7 @@ func signedAttachProof(t *testing.T, fabricID string, arguments json.RawMessage,
 	if err != nil {
 		t.Fatal(err)
 	}
-	canonical, err := projectstate.CanonicalJSON(arguments)
+	canonical, err := projectstate.CanonicalJSONObject(arguments)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1120,7 +1120,7 @@ func signedBoundSessionProof(t *testing.T, fabricID, tool string, arguments json
 	t.Helper()
 	privateKey := ed25519.NewKeyFromSeed(keySeed)
 	publicKey := privateKey.Public().(ed25519.PublicKey)
-	canonical, err := projectstate.CanonicalJSON(arguments)
+	canonical, err := projectstate.CanonicalJSONObject(arguments)
 	if err != nil {
 		t.Fatal(err)
 	}

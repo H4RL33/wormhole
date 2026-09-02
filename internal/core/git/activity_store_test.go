@@ -892,3 +892,324 @@ func mustCanonicalActivity(t *testing.T, activity projectstate.ActivityV1) []byt
 	}
 	return canonical
 }
+
+func TestActivityStoreDependencyFailuresAreTyped(t *testing.T) {
+	ctx := context.Background()
+	checks := []struct {
+		name string
+		want error
+		call func(*ActivityStore) error
+	}{
+		{"accept", ErrActivityNotFound, func(s *ActivityStore) error { _, err := s.Accept(ctx, AcceptActivityInput{}); return err }},
+		{"accept in tx", ErrActivityNotFound, func(s *ActivityStore) error { _, err := s.AcceptInTx(ctx, nil, AcceptActivityInput{}); return err }},
+		{"pull", ErrActivityNotFound, func(s *ActivityStore) error { _, err := s.Pull(ctx, PullActivityInput{}); return err }},
+		{"pull in tx", ErrActivityNotFound, func(s *ActivityStore) error { _, err := s.PullInTx(ctx, nil, PullActivityInput{}); return err }},
+		{"current policy", ErrActivityPolicyUnavailable, func(s *ActivityStore) error { _, err := s.CurrentPolicy(ctx, FabricActivityStreamKey{}); return err }},
+		{"current policy in tx", ErrActivityPolicyUnavailable, func(s *ActivityStore) error {
+			_, err := s.CurrentPolicyInTx(ctx, nil, FabricActivityStreamKey{})
+			return err
+		}},
+		{"publish policy", ErrActivityPolicyUnavailable, func(s *ActivityStore) error {
+			_, err := s.PublishPolicy(ctx, FabricActivityStreamKey{}, projectstate.EffectiveActivityPolicyV1{})
+			return err
+		}},
+		{"publish policy in tx", ErrActivityPolicyUnavailable, func(s *ActivityStore) error {
+			_, err := s.PublishPolicyInTx(ctx, nil, FabricActivityStreamKey{}, projectstate.EffectiveActivityPolicyV1{})
+			return err
+		}},
+		{"transition lifecycle", ErrActivityNotFound, func(s *ActivityStore) error {
+			return s.TransitionLifecycle(ctx, FabricActivityOriginKey{}, ActivityLifecycleTransition{})
+		}},
+		{"transition lifecycle in tx", ErrActivityNotFound, func(s *ActivityStore) error {
+			return s.TransitionLifecycleInTx(ctx, nil, FabricActivityOriginKey{}, ActivityLifecycleTransition{})
+		}},
+	}
+	for _, check := range checks {
+		t.Run(check.name, func(t *testing.T) {
+			if err := check.call(nil); !errors.Is(err, check.want) {
+				t.Fatalf("nil store error = %v, want %v", err, check.want)
+			}
+		})
+	}
+
+	db, err := sql.Open("postgres", types.LoadConfig().DatabaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, beginCause := db.BeginTx(ctx, nil)
+	if beginCause == nil {
+		t.Fatal("closed database BeginTx error = nil")
+	}
+	closed := NewActivityStore(db)
+	validStream := FabricActivityStreamKey{
+		ProjectID: activityHumanID, FabricInstanceID: activityFabricID,
+		StreamID: activityStreamID, CanonicalRef: "refs/heads/main",
+	}
+	validPolicy := testActivityPolicy(1, 2_592_000)
+	policyDigest, err := projectstate.DigestActivityPolicy(validPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validActivity := testOrdinaryActivity(activityIDOne, testActivityActor(time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)), "closed database")
+	validAccept := AcceptActivityInput{
+		Key: FabricActivityOriginKey{
+			Stream: validStream, SourceWorkspaceID: activityWorkspaceID, ActivityID: validActivity.ID,
+		},
+		Activity: validActivity, IssuedActor: validActivity.Actor,
+		PolicyVersion: validPolicy.PolicyVersion, PolicyDigest: policyDigest,
+	}
+	validPull := PullActivityInput{Stream: validStream, AttachmentRef: activityWorkspaceID, Limit: 1}
+	validTransition := ActivityLifecycleTransition{
+		Kind: "delivery", ReferenceID: activityTaskID, ExpectedState: "pending", NextState: "delivered",
+	}
+	for _, check := range []struct {
+		name       string
+		wantPrefix string
+		call       func() error
+	}{
+		{"accept", "git: accept activity: begin:", func() error { _, err := closed.Accept(ctx, validAccept); return err }},
+		{"pull", "git: pull activity: begin:", func() error { _, err := closed.Pull(ctx, validPull); return err }},
+		{"current policy", "git: current activity policy: begin:", func() error { _, err := closed.CurrentPolicy(ctx, validStream); return err }},
+		{"publish policy", "git: publish activity policy: begin:", func() error {
+			_, err := closed.PublishPolicy(ctx, validStream, validPolicy)
+			return err
+		}},
+		{"transition lifecycle", "git: transition activity lifecycle: begin:", func() error {
+			return closed.TransitionLifecycle(ctx, validAccept.Key, validTransition)
+		}},
+	} {
+		t.Run("closed database "+check.name, func(t *testing.T) {
+			err := check.call()
+			if err == nil {
+				t.Fatal("closed database error = nil")
+			}
+			if !strings.HasPrefix(err.Error(), check.wantPrefix) {
+				t.Fatalf("closed database error = %v, want prefix %q", err, check.wantPrefix)
+			}
+			if !errors.Is(err, beginCause) {
+				t.Fatalf("closed database error = %v, want wrapped BeginTx cause %v", err, beginCause)
+			}
+		})
+	}
+}
+
+func TestActivityStoreRejectsMalformedContractsBeforeMutation(t *testing.T) {
+	ctx := context.Background()
+	fixture := newActivityStoreFixture(t, "activity-malformed-contracts")
+	activity := testOrdinaryActivity(activityIDOne, fixture.actor, "unchanged")
+	validInput := fixture.acceptInput(activity)
+
+	badStream := fixture.stream
+	badStream.CanonicalRef = ""
+	badOrigin := validInput.Key
+	badOrigin.Stream = badStream
+	for _, check := range []struct {
+		name string
+		call func() error
+	}{
+		{"accept", func() error {
+			input := validInput
+			input.Key = badOrigin
+			_, err := fixture.store.Accept(ctx, input)
+			return err
+		}},
+		{"pull", func() error {
+			_, err := fixture.store.Pull(ctx, PullActivityInput{Stream: badStream, AttachmentRef: fixture.attachment, Limit: 1})
+			return err
+		}},
+		{"current policy", func() error { _, err := fixture.store.CurrentPolicy(ctx, badStream); return err }},
+		{"publish policy", func() error { _, err := fixture.store.PublishPolicy(ctx, badStream, fixture.policy); return err }},
+		{"transition lifecycle", func() error { return fixture.store.TransitionLifecycle(ctx, badOrigin, ActivityLifecycleTransition{}) }},
+	} {
+		t.Run("invalid route "+check.name, func(t *testing.T) {
+			if err := check.call(); !errors.Is(err, ErrActivityNotFound) {
+				t.Fatalf("error = %v, want ErrActivityNotFound", err)
+			}
+		})
+	}
+
+	invalidOrigin := validInput
+	invalidOrigin.Key.SourceWorkspaceID = ""
+	if _, err := fixture.store.Accept(ctx, invalidOrigin); !errors.Is(err, ErrActivityNotFound) {
+		t.Fatalf("invalid origin error = %v, want ErrActivityNotFound", err)
+	}
+
+	invalidInputs := []struct {
+		name  string
+		input AcceptActivityInput
+		want  error
+	}{
+		{"mismatched activity id", func() AcceptActivityInput { in := validInput; in.Key.ActivityID = activityIDTwo; return in }(), projectstate.ErrInvalidActivity},
+		{"presence on durable ingress", func() AcceptActivityInput {
+			in := validInput
+			in.Activity.Class = projectstate.ActivityPresenceV1
+			return in
+		}(), projectstate.ErrInvalidActivity},
+		{"invalid activity", func() AcceptActivityInput { in := validInput; in.Activity.SchemaVersion = 2; return in }(), projectstate.ErrUnknownActivityVersion},
+		{"invalid issued actor", func() AcceptActivityInput { in := validInput; in.IssuedActor.AgentID = ""; return in }(), projectstate.ErrInvalidActivity},
+		{"invalid policy version", func() AcceptActivityInput { in := validInput; in.PolicyVersion = 0; return in }(), ErrActivityPolicyChanged},
+	}
+	for _, check := range invalidInputs {
+		t.Run(check.name, func(t *testing.T) {
+			if _, err := fixture.store.Accept(ctx, check.input); !errors.Is(err, check.want) {
+				t.Fatalf("Accept error = %v, want %v", err, check.want)
+			}
+		})
+	}
+	if _, err := fixture.store.AcceptInTx(ctx, nil, validInput); !errors.Is(err, ErrActivityNotFound) {
+		t.Fatalf("nil transaction error = %v, want ErrActivityNotFound", err)
+	}
+	if got := countActivityRows(t, fixture, activity.ID); got != [3]int{} {
+		t.Fatalf("rejected contracts mutated rows: %v", got)
+	}
+}
+
+func TestActivityStoreInTxMethodsPropagateFinishedTransaction(t *testing.T) {
+	ctx := context.Background()
+	fixture := newActivityStoreFixture(t, "activity-finished-transaction")
+	activity := testOrdinaryActivity(activityIDOne, fixture.actor, "not-written")
+	input := fixture.acceptInput(activity)
+	tx, err := fixture.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []struct {
+		name string
+		call func() error
+	}{
+		{"accept", func() error { _, err := fixture.store.AcceptInTx(ctx, tx, input); return err }},
+		{"pull", func() error {
+			_, err := fixture.store.PullInTx(ctx, tx, PullActivityInput{Stream: fixture.stream, AttachmentRef: fixture.attachment, Limit: 1})
+			return err
+		}},
+		{"current policy", func() error { _, err := fixture.store.CurrentPolicyInTx(ctx, tx, fixture.stream); return err }},
+		{"publish policy", func() error {
+			_, err := fixture.store.PublishPolicyInTx(ctx, tx, fixture.stream, fixture.policy)
+			return err
+		}},
+		{"transition lifecycle", func() error {
+			return fixture.store.TransitionLifecycleInTx(ctx, tx, input.Key, ActivityLifecycleTransition{Kind: "delivery", ReferenceID: activityTaskID, ExpectedState: "pending", NextState: "delivered"})
+		}},
+	} {
+		t.Run(check.name, func(t *testing.T) {
+			if err := check.call(); !errors.Is(err, sql.ErrTxDone) {
+				t.Fatalf("error = %v, want sql.ErrTxDone", err)
+			}
+		})
+	}
+	if got := countActivityRows(t, fixture, activity.ID); got != [3]int{} {
+		t.Fatalf("finished transaction mutated rows: %v", got)
+	}
+}
+
+func TestActivityLifecycleTransitionValidationMatrix(t *testing.T) {
+	for _, check := range []struct {
+		kind, from, to string
+		want           bool
+	}{
+		{"delivery", "pending", "pending", true},
+		{"conflict", "resolved", "resolved", true},
+		{"recovery", "blocked", "blocked", true},
+		{"receipt", "rejected", "rejected", true},
+		{"unknown", "pending", "pending", false},
+		{"unknown", "pending", "done", false},
+	} {
+		if got := validActivityLifecycleTransition(check.kind, check.from, check.to); got != check.want {
+			t.Errorf("validActivityLifecycleTransition(%q,%q,%q) = %v, want %v", check.kind, check.from, check.to, got, check.want)
+		}
+	}
+}
+
+func TestActivityStoreFailsClosedOnMissingOrCorruptRetainedEvidence(t *testing.T) {
+	ctx := context.Background()
+	t.Run("missing current policy", func(t *testing.T) {
+		fixture := newActivityStoreFixture(t, "activity-missing-current-policy")
+		if _, err := fixture.store.db.Exec(`DELETE FROM fabric_activity_policy_current WHERE project_id=$1`, fixture.stream.ProjectID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.store.CurrentPolicy(ctx, fixture.stream); !errors.Is(err, ErrActivityPolicyUnavailable) {
+			t.Fatalf("CurrentPolicy error = %v, want ErrActivityPolicyUnavailable", err)
+		}
+		if _, err := fixture.store.Pull(ctx, PullActivityInput{Stream: fixture.stream, AttachmentRef: fixture.attachment, Limit: 1}); !errors.Is(err, ErrActivityPolicyUnavailable) {
+			t.Fatalf("Pull error = %v, want ErrActivityPolicyUnavailable", err)
+		}
+	})
+
+	for _, check := range []struct {
+		name   string
+		column string
+		value  any
+	}{
+		{"malformed policy", "canonical_policy_json", []byte(`{}`)},
+		{"wrong policy digest", "policy_digest", "sha256:" + strings.Repeat("0", 64)},
+	} {
+		t.Run(check.name, func(t *testing.T) {
+			fixture := newActivityStoreFixture(t, "activity-corrupt-policy-"+check.name)
+			tx, err := fixture.store.db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			if _, err := tx.Exec(`SET LOCAL session_replication_role = replica`); err != nil {
+				t.Fatal(err)
+			}
+			query := `UPDATE fabric_activity_policy_versions SET ` + check.column + `=$1 WHERE project_id=$2`
+			if _, err := tx.Exec(query, check.value, fixture.stream.ProjectID); err != nil {
+				t.Fatal(err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fixture.store.CurrentPolicy(ctx, fixture.stream); !errors.Is(err, ErrActivityPolicyUnavailable) {
+				t.Fatalf("CurrentPolicy error = %v, want ErrActivityPolicyUnavailable", err)
+			}
+		})
+	}
+
+	t.Run("missing sequence", func(t *testing.T) {
+		fixture := newActivityStoreFixture(t, "activity-missing-sequence")
+		if _, err := fixture.store.db.Exec(`DELETE FROM fabric_activity_stream_sequences WHERE project_id=$1`, fixture.stream.ProjectID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.store.Pull(ctx, PullActivityInput{Stream: fixture.stream, AttachmentRef: fixture.attachment, Limit: 1}); !errors.Is(err, ErrActivityPolicyUnavailable) {
+			t.Fatalf("Pull error = %v, want ErrActivityPolicyUnavailable", err)
+		}
+	})
+
+	t.Run("corrupt retained activity", func(t *testing.T) {
+		fixture := newActivityStoreFixture(t, "activity-corrupt-retained")
+		activity := testOrdinaryActivity(activityIDOne, fixture.actor, "original")
+		if _, err := fixture.store.Accept(ctx, fixture.acceptInput(activity)); err != nil {
+			t.Fatal(err)
+		}
+		changedNote := "changed without digest"
+		activity.Event.Note = &changedNote
+		tx, err := fixture.store.db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback()
+		if _, err := tx.Exec(`SET LOCAL session_replication_role = replica`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(`UPDATE fabric_activities SET canonical_activity_json=$1 WHERE project_id=$2`, mustCanonicalActivity(t, activity), fixture.stream.ProjectID); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.store.Pull(ctx, PullActivityInput{Stream: fixture.stream, AttachmentRef: fixture.attachment, Limit: 1}); !errors.Is(err, ErrActivityReplayConflict) {
+			t.Fatalf("Pull error = %v, want ErrActivityReplayConflict", err)
+		}
+	})
+
+	if got := (&ActivityPolicyChangedError{}).Error(); got != "git: accept activity: policy changed" {
+		t.Fatalf("ActivityPolicyChangedError.Error() = %q", got)
+	}
+}

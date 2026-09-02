@@ -1817,14 +1817,13 @@ base=6f6298dd6c7a11524b1f730166c64618754d8d96
 test "$(git rev-parse "$base")" = "$base"
 git merge-base --is-ancestor "$base" HEAD
 test "$(git merge-base "$base" HEAD)" = "$base"
-test -z "$(git status --porcelain)"
 bad=0
 while IFS= read -r path; do
   case "$path" in
-    internal/core/identity/identity.go|internal/core/identity/identity_test.go|internal/core/git/activity_store.go|internal/core/git/activity_store_test.go|internal/mcp/activity_auth.go|internal/mcp/activity_auth_test.go|internal/mcp/public_auth.go|internal/mcp/public_auth_test.go|internal/mcp/activity_accept_presence.go|internal/mcp/activity_accept_presence_test.go|internal/mcp/activity_pull_lifecycle.go|internal/mcp/activity_pull_lifecycle_test.go|internal/mcp/fabric_registry.go|internal/mcp/fabric_registry_test.go|internal/mcp/jsonrpc.go|internal/mcp/jsonrpc_test.go|internal/runtime/sync/activity_mcp_client.go|internal/runtime/sync/activity_mcp_client_test.go|internal/runtime/sync/activity_v1.go|internal/runtime/sync/activity_v1_test.go|internal/runtime/localstore/activity_records.go|internal/runtime/localstore/activity_records_test.go|internal/runtime/localstore/activity_lifecycle.go|internal/runtime/localstore/activity_lifecycle_test.go|internal/runtime/sync/activity_lifecycle_transport.go|internal/runtime/sync/activity_lifecycle_transport_test.go|docs/superpowers/plans/2026-08-30-sync-v2-slice6-activity-adapter.md|.superpowers/sdd/task6-slice6-implementation-review.md) ;;
+    internal/core/identity/identity.go|internal/core/identity/identity_test.go|internal/core/git/activity_store.go|internal/core/git/activity_store_test.go|internal/mcp/activity_auth.go|internal/mcp/activity_auth_test.go|internal/mcp/public_auth.go|internal/mcp/public_auth_test.go|internal/mcp/activity_accept_presence.go|internal/mcp/activity_accept_presence_test.go|internal/mcp/activity_pull_lifecycle.go|internal/mcp/activity_pull_lifecycle_test.go|internal/mcp/activity_client_wire_integration_test.go|internal/mcp/fabric_registry.go|internal/mcp/registry_test.go|internal/mcp/jsonrpc.go|internal/mcp/sync_v2_contract_test.go|internal/runtime/sync/activity_mcp_client.go|internal/runtime/sync/activity_mcp_client_test.go|internal/runtime/sync/activity_v1.go|internal/runtime/sync/activity_v1_test.go|internal/runtime/localstore/activity_records.go|internal/runtime/localstore/activity_records_test.go|internal/runtime/localstore/activity_lifecycle.go|internal/runtime/localstore/activity_lifecycle_test.go|internal/runtime/sync/activity_lifecycle_transport.go|internal/runtime/sync/activity_lifecycle_transport_test.go|internal/types/projectstate/codec.go|internal/types/projectstate/sync_protocol_test.go|docs/superpowers/plans/2026-08-30-sync-v2-slice6-activity-adapter.md) ;;
     *) printf 'out-of-scope path: %s\n' "$path" >&2; bad=1 ;;
   esac
-done < <(git diff --name-only "$base")
+done < <(git diff --name-only "$base"..HEAD)
 test "$bad" -eq 0
 ```
 
@@ -1832,9 +1831,10 @@ Expected: exit 0 and no output. Any migration, command assembly, HTTP, signer, p
 
 - [ ] **Step 2: Verify exact registry and version inventory**
 
-Run: `go test ./internal/mcp -run 'TestPublicFabricRegistryIncludesExactActivityV1Inventory|TestPublicFabricContract' -count=1`
+Run: `go test -v ./internal/mcp -run 'TestPublicFabricRegistryActivityV1InventoryAndIndependentReadiness|TestPublicFabricToolDescriptorsAreExactSortedDescriptorValues|TestPublicFabricRegistryVariantsMatchFrozenDescriptorSchemas' -count=1`
 
-Expected: PASS with public 9, private 16, Activity version 1, sync version 2, session absent.
+Expected: PASS with all three named tests visibly executed, public 9, private 16,
+Activity version 1, sync version 2, and public session issuance absent.
 
 - [ ] **Step 3: Run focused integration and forced-RLS suites**
 

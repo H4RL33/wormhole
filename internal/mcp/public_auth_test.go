@@ -44,7 +44,7 @@ func newPublicProofTestFixture(t *testing.T) publicProofTestFixture {
 
 func (f publicProofTestFixture) signedProof(t *testing.T, tool, scope string, at time.Time, sessionID string) types.PublicRequestProof {
 	t.Helper()
-	canonical, err := projectstate.CanonicalJSON(f.arguments)
+	canonical, err := projectstate.CanonicalJSONObject(f.arguments)
 	if err != nil {
 		t.Fatal(err)
 	}

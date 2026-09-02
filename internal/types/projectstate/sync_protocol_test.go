@@ -147,3 +147,38 @@ func TestPublicProofMessageRejectsNonCanonicalAuthorityInputs(t *testing.T) {
 		})
 	}
 }
+
+func TestCanonicalJSONObjectRecursivelySortsStructKeysWithoutRewritingCanonicalWireBytes(t *testing.T) {
+	type nested struct {
+		Zulu  int `json:"zulu"`
+		Alpha int `json:"alpha"`
+	}
+	type arguments struct {
+		Version       int    `json:"version"`
+		Nested        nested `json:"nested"`
+		AttachmentRef string `json:"attachment_ref"`
+	}
+	want := []byte(`{"attachment_ref":"attachment","nested":{"alpha":1,"zulu":2},"version":1}`)
+	got, err := CanonicalJSONObject(arguments{
+		Version: 1, Nested: nested{Zulu: 2, Alpha: 1}, AttachmentRef: "attachment",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("CanonicalJSONObject = %s, want %s", got, want)
+	}
+	reencoded, err := CanonicalJSONObject(json.RawMessage(want))
+	if err != nil || !reflect.DeepEqual(reencoded, want) {
+		t.Fatalf("canonical wire round trip = (%s,%v), want (%s,nil)", reencoded, err, want)
+	}
+	normalized, err := CanonicalJSONObject(json.RawMessage(`{"version":1e0}`))
+	if err != nil || string(normalized) != `{"version":1}` {
+		t.Fatalf("canonical number = (%s,%v), want ({\"version\":1},nil)", normalized, err)
+	}
+	for _, value := range []any{json.RawMessage(`[1]`), json.RawMessage(`null`), func() {}} {
+		if got, err := CanonicalJSONObject(value); got != nil || err == nil {
+			t.Fatalf("CanonicalJSONObject(%T) = (%s,%v), want (nil,error)", value, got, err)
+		}
+	}
+}

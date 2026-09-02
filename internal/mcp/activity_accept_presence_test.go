@@ -403,6 +403,298 @@ func TestActivityPresenceActorMismatchRollsBackNonceAndAllRows(t *testing.T) {
 	assertTask2MutationDelta(t, before, task2MutationSnapshot(t, fixture.owner.db, fixture.owner.projectID), 0)
 }
 
+func TestActivityHandlersDeliverDelayedHumanActivityAfterRestart(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		operation string
+		presence  bool
+	}{
+		{name: "accept", operation: "wormhole.activity.accept"},
+		{name: "presence", operation: "wormhole.activity.presence", presence: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			created := newActivityHandlerFixture(t, 52)
+			historicalActor := created.owner.transport
+			historicalActor.OccurredAt = historicalActor.OccurredAt.Add(-10 * time.Minute)
+			activity := activityHandlerOrdinary(historicalActor, uuid.NewString(), "delayed after restart")
+			if test.presence {
+				activity = activityHandlerPresence(historicalActor, activity.ID)
+			}
+			arguments := activityHandlerArguments(t, created, activity)
+			raw := canonicalActivityHandlerArguments(t, arguments)
+
+			// Reconstruct every server-side owner after the immutable Activity bytes
+			// exist, modelling delivery by a restarted process after proof freshness.
+			restarted := newActivityHandlerFixtureForAttached(t, created.owner, created.attached)
+			before := activityHandlerSnapshot(t, created.owner.db, created.owner.projectID)
+			var (
+				got any
+				err error
+			)
+			proof := activityHandlerProof(t, restarted, test.operation, raw, 53, "")
+			if test.presence {
+				got, err = restarted.presence.Handle(context.Background(), raw, proof)
+			} else {
+				got, err = restarted.accept.Handle(context.Background(), raw, proof)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			after := activityHandlerSnapshot(t, created.owner.db, created.owner.projectID)
+			wantAfter := before
+			wantAfter.Nonces++
+			if test.presence {
+				if accepted, ok := got.(ActivityPresenceAcceptedV1Result); !ok || accepted.Status != "accepted" {
+					t.Fatalf("delayed presence result = (%T)%+v", got, got)
+				}
+			} else {
+				if accepted, ok := got.(ActivityAcceptedV1Result); !ok || accepted.Receipt.ActivityID != activity.ID {
+					t.Fatalf("delayed accept result = (%T)%+v", got, got)
+				}
+				wantAfter.Activities++
+				wantAfter.Receipts++
+				wantAfter.Audits++
+				wantActivity, _ := projectstate.CanonicalActivity(activity)
+				wantHistoricalActor, _ := projectstate.CanonicalJSON(historicalActor)
+				wantCurrentActor, _ := json.Marshal(created.owner.transport)
+				var storedActivity, storedActor, auditActor []byte
+				if err := created.owner.db.QueryRow(`SELECT a.canonical_activity_json,a.source_actor_json,l.actor_envelope_json::text::bytea
+					FROM fabric_activities a JOIN audit_log l ON l.project_id=a.project_id AND l.action='activity.accept'
+					WHERE a.project_id=$1 AND a.activity_id=$2`, created.owner.projectID, activity.ID).
+					Scan(&storedActivity, &storedActor, &auditActor); err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(storedActivity, wantActivity) || !bytes.Equal(storedActor, wantHistoricalActor) || !bytes.Equal(auditActor, wantCurrentActor) {
+					t.Fatal("delayed Activity was rewritten or audit did not retain fresh request authority")
+				}
+			}
+			if after != wantAfter {
+				t.Fatalf("delayed delivery rows: before=%+v after=%+v want=%+v", before, after, wantAfter)
+			}
+		})
+	}
+}
+
+func expireActivityCreationSessionAndIssueCurrent(t *testing.T, fixture *activityHandlerFixture, old identity.PublicAgentSession) (types.ActorEnvelope, identity.PublicAgentSession) {
+	t.Helper()
+	now := fixture.owner.transport.OccurredAt
+	issuedAt := now.Add(-25 * time.Hour)
+	expiresAt := now.Add(-time.Hour)
+	occurredAt := now.Add(-12 * time.Hour)
+	if _, err := fixture.owner.db.Exec(`UPDATE fabric_public_agent_sessions
+		SET issued_at=$1,expires_at=$2,revoked_at=$2
+		WHERE project_id=$3 AND session_id=$4`, issuedAt, expiresAt, fixture.owner.projectID, old.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := fixture.coordinator.identity.BeginProjectTx(context.Background(), fixture.owner.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := fixture.coordinator.identity.IssuePublicAgentSessionInTx(context.Background(), tx, identity.PublicAgentSessionIssue{
+		ProjectID: fixture.owner.projectID, FabricInstanceID: fixture.owner.fabricID,
+		StreamID: fixture.attached.Attachment.Key.StreamID, WorkspaceID: fixture.attached.Attachment.WorkspaceID,
+		CanonicalRef: fixture.attached.Attachment.CanonicalRef, AttachmentRef: fixture.attached.Attachment.AttachmentRef,
+		IssuerKeyFingerprint: fixture.owner.fingerprint, AgentID: old.AgentID,
+		HarnessName: "codex", HarnessVersion: "2", ModelName: "gpt", ModelVersion: "6",
+		SourceVersion: fixture.attached.Attachment.SourceVersion, IssuedAt: now,
+	})
+	if err == nil {
+		err = tx.Commit()
+	} else {
+		_ = tx.Rollback()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	historical := types.ActorEnvelope{
+		ActorKind: types.ActorAgent, AgentID: old.AgentID, AccountableHumanID: old.AccountableHumanID,
+		SessionID: old.SessionID, HarnessName: old.HarnessName, HarnessVersion: old.HarnessVersion,
+		ModelName: old.ModelName, ModelVersion: old.ModelVersion,
+		Assurance: types.AssurancePublicKeyContinuity, OccurredAt: occurredAt,
+	}
+	return historical, current
+}
+
+func TestActivityHandlersRequireFreshAuthorityAndAcceptHistoricalSessionAfterRollover(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		operation string
+		presence  bool
+	}{
+		{name: "accept", operation: "wormhole.activity.accept"},
+		{name: "presence", operation: "wormhole.activity.presence", presence: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			pushFixture, oldSession, _ := newSyncV2PushAgentFixture(t, 54, true)
+			created := newActivityHandlerFixtureForAttached(t, pushFixture.owner, pushFixture.attached)
+			historicalActor, currentSession := expireActivityCreationSessionAndIssueCurrent(t, created, oldSession)
+			activity := activityHandlerOrdinary(historicalActor, uuid.NewString(), "session rollover")
+			if test.presence {
+				activity = activityHandlerPresence(historicalActor, activity.ID)
+			}
+			arguments := activityHandlerArguments(t, created, activity)
+			raw := canonicalActivityHandlerArguments(t, arguments)
+
+			restarted := newActivityHandlerFixtureForAttached(t, created.owner, created.attached)
+			beforeExpired := activityHandlerSnapshot(t, created.owner.db, created.owner.projectID)
+			expiredProof := activityHandlerProof(t, restarted, test.operation, raw, 55, oldSession.SessionID)
+			var err error
+			if test.presence {
+				_, err = restarted.presence.Handle(context.Background(), raw, expiredProof)
+			} else {
+				_, err = restarted.accept.Handle(context.Background(), raw, expiredProof)
+			}
+			assertSyncReadFailure(t, err, test.operation, "authentication_failed")
+			afterExpired := activityHandlerSnapshot(t, created.owner.db, created.owner.projectID)
+			wantExpired := beforeExpired
+			wantExpired.Nonces++
+			if afterExpired != wantExpired {
+				t.Fatalf("expired request authority rows: before=%+v after=%+v want=%+v", beforeExpired, afterExpired, wantExpired)
+			}
+
+			beforeCurrent := afterExpired
+			currentProof := activityHandlerProof(t, restarted, test.operation, raw, 56, currentSession.SessionID)
+			var got any
+			if test.presence {
+				got, err = restarted.presence.Handle(context.Background(), raw, currentProof)
+			} else {
+				got, err = restarted.accept.Handle(context.Background(), raw, currentProof)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			afterCurrent := activityHandlerSnapshot(t, created.owner.db, created.owner.projectID)
+			wantCurrent := beforeCurrent
+			wantCurrent.Nonces++
+			if test.presence {
+				if accepted, ok := got.(ActivityPresenceAcceptedV1Result); !ok || accepted.Status != "accepted" {
+					t.Fatalf("rollover presence result = (%T)%+v", got, got)
+				}
+			} else {
+				if accepted, ok := got.(ActivityAcceptedV1Result); !ok || accepted.Receipt.ActivityID != activity.ID {
+					t.Fatalf("rollover accept result = (%T)%+v", got, got)
+				}
+				wantCurrent.Activities++
+				wantCurrent.Receipts++
+				wantCurrent.Audits++
+				wantHistoricalActor, _ := projectstate.CanonicalJSON(historicalActor)
+				var storedActor, auditActor []byte
+				if err := created.owner.db.QueryRow(`SELECT a.source_actor_json,l.actor_envelope_json::text::bytea
+					FROM fabric_activities a JOIN audit_log l ON l.project_id=a.project_id AND l.action='activity.accept'
+					WHERE a.project_id=$1 AND a.activity_id=$2`, created.owner.projectID, activity.ID).
+					Scan(&storedActor, &auditActor); err != nil {
+					t.Fatal(err)
+				}
+				var audited types.ActorEnvelope
+				if err := json.Unmarshal(auditActor, &audited); err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(storedActor, wantHistoricalActor) || audited.SessionID != currentSession.SessionID ||
+					audited.AgentID != historicalActor.AgentID || audited.AccountableHumanID != historicalActor.AccountableHumanID ||
+					audited.OccurredAt != created.owner.transport.OccurredAt {
+					t.Fatalf("historical/current attribution = stored %q audited %+v", storedActor, audited)
+				}
+			}
+			if afterCurrent != wantCurrent {
+				t.Fatalf("current rollover delivery rows: before=%+v after=%+v want=%+v", beforeCurrent, afterCurrent, wantCurrent)
+			}
+		})
+	}
+}
+
+func TestActivityHandlersRejectInvalidHistoricalSessionAndStableAttribution(t *testing.T) {
+	for _, endpoint := range []struct {
+		name      string
+		operation string
+		presence  bool
+	}{
+		{name: "accept", operation: "wormhole.activity.accept"},
+		{name: "presence", operation: "wormhole.activity.presence", presence: true},
+	} {
+		t.Run(endpoint.name, func(t *testing.T) {
+			pushFixture, oldSession, _ := newSyncV2PushAgentFixture(t, 57, true)
+			fixture := newActivityHandlerFixtureForAttached(t, pushFixture.owner, pushFixture.attached)
+			historicalActor, currentSession := expireActivityCreationSessionAndIssueCurrent(t, fixture, oldSession)
+			mutations := []struct {
+				name   string
+				mutate func(*types.ActorEnvelope)
+			}{
+				{name: "missing creation session", mutate: func(actor *types.ActorEnvelope) { actor.SessionID = uuid.NewString() }},
+				{name: "tampered creation session", mutate: func(actor *types.ActorEnvelope) { actor.HarnessVersion += "-tampered" }},
+				{name: "different stable agent", mutate: func(actor *types.ActorEnvelope) { actor.AgentID = uuid.NewString() }},
+				{name: "different accountable human", mutate: func(actor *types.ActorEnvelope) { actor.AccountableHumanID = uuid.NewString() }},
+				{name: "local assurance", mutate: func(actor *types.ActorEnvelope) { actor.Assurance = types.AssuranceLocal }},
+				{name: "private assurance", mutate: func(actor *types.ActorEnvelope) { actor.Assurance = types.AssurancePrivateAuthenticated }},
+			}
+			for index, mutation := range mutations {
+				t.Run(mutation.name, func(t *testing.T) {
+					actor := historicalActor
+					mutation.mutate(&actor)
+					activity := activityHandlerOrdinary(actor, uuid.NewString(), mutation.name)
+					if endpoint.presence {
+						activity = activityHandlerPresence(actor, activity.ID)
+					}
+					arguments := activityHandlerArguments(t, fixture, activity)
+					raw := canonicalActivityHandlerArguments(t, arguments)
+					before := activityHandlerSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+					proof := activityHandlerProof(t, fixture, endpoint.operation, raw, byte(58+index), currentSession.SessionID)
+					var err error
+					if endpoint.presence {
+						_, err = fixture.presence.Handle(context.Background(), raw, proof)
+					} else {
+						_, err = fixture.accept.Handle(context.Background(), raw, proof)
+					}
+					assertSyncReadFailure(t, err, endpoint.operation, "invalid_activity")
+					after := activityHandlerSnapshot(t, fixture.owner.db, fixture.owner.projectID)
+					wantAfter := before
+					if !endpoint.presence {
+						wantAfter.Nonces++
+					}
+					if after != wantAfter {
+						t.Fatalf("invalid historical actor rows: before=%+v after=%+v want=%+v", before, after, wantAfter)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestSameStableActivityAttributionIgnoresFreshEnvelopeButRejectsIdentityChanges(t *testing.T) {
+	occurredAt := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	historical := types.ActorEnvelope{
+		ActorKind: types.ActorAgent, AgentID: uuid.NewString(), AccountableHumanID: uuid.NewString(),
+		SessionID: uuid.NewString(), HarnessName: "codex", HarnessVersion: "1",
+		Assurance: types.AssurancePublicKeyContinuity, OccurredAt: occurredAt,
+	}
+	current := historical
+	current.SessionID = uuid.NewString()
+	current.HarnessVersion = "2"
+	current.OccurredAt = occurredAt.Add(time.Hour)
+	if !sameStableActivityAttribution(historical, current) {
+		t.Fatal("same agent/accountable-human tuple did not survive fresh session envelope")
+	}
+	for _, mutate := range []func(*types.ActorEnvelope){
+		func(actor *types.ActorEnvelope) { actor.AgentID = uuid.NewString() },
+		func(actor *types.ActorEnvelope) { actor.AccountableHumanID = uuid.NewString() },
+		func(actor *types.ActorEnvelope) { actor.ActorKind = types.ActorHuman },
+	} {
+		changed := current
+		mutate(&changed)
+		if sameStableActivityAttribution(historical, changed) {
+			t.Fatalf("changed stable attribution accepted: %+v", changed)
+		}
+	}
+	historicalHuman := types.ActorEnvelope{ActorKind: types.ActorHuman, HumanPrincipalID: uuid.NewString()}
+	currentHuman := historicalHuman
+	if !sameStableActivityAttribution(historicalHuman, currentHuman) {
+		t.Fatal("same human attribution rejected")
+	}
+	currentHuman.HumanPrincipalID = uuid.NewString()
+	if sameStableActivityAttribution(historicalHuman, currentHuman) {
+		t.Fatal("different human attribution accepted")
+	}
+}
+
 func TestActivityAcceptRejectsInvalidArgumentsAndProofBeforeMutation(t *testing.T) {
 	fixture := newActivityHandlerFixture(t, 60)
 	activity := activityHandlerOrdinary(fixture.owner.transport, uuid.NewString(), "strict input")
