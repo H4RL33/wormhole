@@ -766,6 +766,9 @@ func decodeVersionedPublicArguments(tool Tool, raw json.RawMessage) (int, string
 	}
 	example, ok := tool.ArgumentVariants[version]
 	if !ok {
+		if strings.HasPrefix(tool.Name, "wormhole.activity.") {
+			return 0, "unknown_activity_version"
+		}
 		return 0, "unknown_version"
 	}
 	exampleType := reflect.TypeOf(example)

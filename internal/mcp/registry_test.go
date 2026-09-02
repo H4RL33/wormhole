@@ -11,6 +11,7 @@ import (
 
 	coregit "github.com/H4RL33/wormhole/internal/core/git"
 	"github.com/H4RL33/wormhole/internal/core/identity"
+	"github.com/H4RL33/wormhole/internal/types"
 )
 
 func TestRegistry_RegisterAndGet(t *testing.T) {
@@ -114,6 +115,75 @@ func TestPublicFabricRegistryRequiresEachCompleteHandler(t *testing.T) {
 	}
 	if _, ok := registry.Get("wormhole.sync.pull"); !ok {
 		t.Fatal("pull-only public dependencies did not register wormhole.sync.pull")
+	}
+}
+
+func TestPublicFabricRegistryActivityV1InventoryAndIndependentReadiness(t *testing.T) {
+	base := readyPublicRegistryDependencies(t)
+	installReadyActivityHandlers(t, &base)
+	registry := NewPublicFabricRegistry(base)
+	activityWant := map[string][]any{
+		"wormhole.activity.accept":   {ActivityAcceptedV1Result{}, ActivityPolicyChangedV1Result{}},
+		"wormhole.activity.presence": {ActivityPresenceAcceptedV1Result{}, ActivityPolicyChangedV1Result{}},
+		"wormhole.activity.pull":     {ActivityPullV1Result{}}, "wormhole.activity.lifecycle": {ActivityLifecycleV1Result{}},
+	}
+	for name, wantResults := range activityWant {
+		tool, ok := registry.Get(name)
+		if !ok || !reflect.DeepEqual(tool.ResultVariants, map[int][]any{1: wantResults}) {
+			t.Fatalf("%s result union = %#v", name, tool.ResultVariants)
+		}
+		wantArgs := map[string]any{
+			"wormhole.activity.accept": ActivityAcceptV1Args{}, "wormhole.activity.presence": ActivityPresenceV1Args{},
+			"wormhole.activity.pull": ActivityPullV1Args{}, "wormhole.activity.lifecycle": ActivityLifecycleV1Args{},
+		}[name]
+		if !reflect.DeepEqual(tool.ArgumentVariants, map[int]any{1: wantArgs}) {
+			t.Fatalf("%s argument variants = %#v", name, tool.ArgumentVariants)
+		}
+		if _, err := tool.PublicHandler(context.Background(), json.RawMessage(`{"version":1}`), types.PublicRequestProof{}); err == nil {
+			t.Fatalf("%s handler was not invoked", name)
+		}
+	}
+	for name, incomplete := range map[string]PublicFabricRegistryDependencies{
+		"accept": {ActivityAccept: &ActivityAcceptHandler{}}, "presence": {ActivityPresence: &ActivityPresenceHandler{}},
+		"pull": {ActivityPull: &ActivityPullHandler{}}, "lifecycle": {ActivityLifecycle: &ActivityLifecycleHandler{}},
+	} {
+		if _, ok := NewPublicFabricRegistry(incomplete).Get("wormhole.activity." + name); ok {
+			t.Fatalf("incomplete %s registered", name)
+		}
+	}
+}
+
+func installReadyActivityHandlers(t *testing.T, base *PublicFabricRegistryDependencies) {
+	t.Helper()
+	fabricID := "11111111-1111-4111-8111-111111111111"
+	verifier, err := NewPublicProofVerifier(fabricID, func() time.Time { return time.Now().UTC() })
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := NewPublicBoundProofResolver(fabricID, identity.NewStore(nil), coregit.NewStreamStore(nil), verifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutations, err := NewMutationCoordinator(identity.NewStore(nil), coregit.NewStreamStore(nil), coregit.NewActivityStore(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	activity := coregit.NewActivityStore(nil)
+	base.ActivityAccept, err = NewActivityAcceptHandler(auth, mutations, activity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.ActivityPresence, err = NewActivityPresenceHandler(auth, activity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.ActivityPull, err = NewActivityPullHandler(auth, activity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.ActivityLifecycle, err = NewActivityLifecycleHandler(auth, mutations, activity)
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

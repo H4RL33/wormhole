@@ -153,7 +153,9 @@ func TestPublicFabricToolDescriptorsMatchCompleteIndependentGolden(t *testing.T)
 }
 
 func TestPublicFabricRegistryVariantsMatchFrozenDescriptorSchemas(t *testing.T) {
-	registry := NewPublicFabricRegistry(readyPublicRegistryDependencies(t))
+	deps := readyPublicRegistryDependencies(t)
+	installReadyActivityHandlers(t, &deps)
+	registry := NewPublicFabricRegistry(deps)
 	descriptors := make(map[string]ToolDescriptor)
 	for _, descriptor := range PublicFabricToolDescriptors() {
 		descriptors[descriptor.Name] = descriptor
@@ -174,7 +176,14 @@ func TestPublicFabricRegistryVariantsMatchFrozenDescriptorSchemas(t *testing.T) 
 		if !bytes.Equal(gotInput, wantInput) {
 			t.Fatalf("%s live input schema drift\ngot:  %s\nwant: %s", tool.Name, gotInput, wantInput)
 		}
-		gotOutput, err := json.Marshal(schemaOneOf(tool.ResultVariants[2]...))
+		version := 0
+		for candidate := range tool.ResultVariants {
+			if version != 0 {
+				t.Fatalf("%s has multiple result versions", tool.Name)
+			}
+			version = candidate
+		}
+		gotOutput, err := json.Marshal(schemaOneOf(tool.ResultVariants[version]...))
 		if err != nil {
 			t.Fatal(err)
 		}

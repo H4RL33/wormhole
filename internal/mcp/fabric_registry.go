@@ -56,47 +56,71 @@ func NewFabricRegistry(deps FabricRegistryDependencies) *Registry {
 // PublicFabricRegistryDependencies contains the complete direct handlers that
 // may be exposed by Fabric's proof-authenticated public MCP surface.
 type PublicFabricRegistryDependencies struct {
-	Attach    *SyncV2AttachHandler
-	Bootstrap *SyncV2BootstrapHandler
-	Pull      *SyncV2PullHandler
-	Push      *SyncV2PushHandler
-	Conflict  *SyncV2ConflictHandler
+	Attach            *SyncV2AttachHandler
+	Bootstrap         *SyncV2BootstrapHandler
+	Pull              *SyncV2PullHandler
+	Push              *SyncV2PushHandler
+	Conflict          *SyncV2ConflictHandler
+	ActivityAccept    *ActivityAcceptHandler
+	ActivityPresence  *ActivityPresenceHandler
+	ActivityPull      *ActivityPullHandler
+	ActivityLifecycle *ActivityLifecycleHandler
 }
 
 // NewPublicFabricRegistry composes Fabric's separate public MCP registry. A
 // tool becomes live only when its complete direct handler has been assembled.
 func NewPublicFabricRegistry(deps PublicFabricRegistryDependencies) *Registry {
 	registry := NewRegistry()
-	register := func(name, description string, arguments any, results []any, handler PublicHandler) {
+	register := func(version int, name, description string, arguments any, results []any, handler PublicHandler) {
 		registry.Register(Tool{
 			Name: name, Description: description,
-			ArgumentVariants: map[int]any{2: arguments}, ResultVariants: map[int][]any{2: results},
+			ArgumentVariants: map[int]any{version: arguments}, ResultVariants: map[int][]any{version: results},
 			PublicHandler: handler,
 		})
 	}
 	if deps.Attach.ready() {
-		register("wormhole.sync.attach", "Attach an observed canonical repository ref to public sync v2.", SyncAttachV2Args{}, []any{SyncAttachV2Result{}}, func(ctx context.Context, arguments json.RawMessage, proof types.PublicRequestProof) (any, error) {
+		register(2, "wormhole.sync.attach", "Attach an observed canonical repository ref to public sync v2.", SyncAttachV2Args{}, []any{SyncAttachV2Result{}}, func(ctx context.Context, arguments json.RawMessage, proof types.PublicRequestProof) (any, error) {
 			return deps.Attach.Handle(ctx, arguments, proof)
 		})
 	}
 	if deps.Bootstrap.ready() {
-		register("wormhole.sync.bootstrap", "Read one complete validated sync v2 stream state and finite Activity policy.", SyncBootstrapV2Args{}, []any{SyncBootstrapV2Result{}}, func(ctx context.Context, arguments json.RawMessage, proof types.PublicRequestProof) (any, error) {
+		register(2, "wormhole.sync.bootstrap", "Read one complete validated sync v2 stream state and finite Activity policy.", SyncBootstrapV2Args{}, []any{SyncBootstrapV2Result{}}, func(ctx context.Context, arguments json.RawMessage, proof types.PublicRequestProof) (any, error) {
 			return deps.Bootstrap.Handle(ctx, arguments, proof)
 		})
 	}
 	if deps.Pull.ready() {
-		register("wormhole.sync.pull", "Read one complete validated sync v2 stream state.", SyncPullV2Args{}, []any{SyncPullV2Result{}}, func(ctx context.Context, arguments json.RawMessage, proof types.PublicRequestProof) (any, error) {
+		register(2, "wormhole.sync.pull", "Read one complete validated sync v2 stream state.", SyncPullV2Args{}, []any{SyncPullV2Result{}}, func(ctx context.Context, arguments json.RawMessage, proof types.PublicRequestProof) (any, error) {
 			return deps.Pull.Handle(ctx, arguments, proof)
 		})
 	}
 	if deps.Push.ready() {
-		register("wormhole.sync.push", "Apply one canonical sync v2 operation or return its durable conflict.", SyncPushV2Args{}, []any{SyncPushAppliedV2Result{}, SyncPushConflictV2Result{}}, func(ctx context.Context, arguments json.RawMessage, proof types.PublicRequestProof) (any, error) {
+		register(2, "wormhole.sync.push", "Apply one canonical sync v2 operation or return its durable conflict.", SyncPushV2Args{}, []any{SyncPushAppliedV2Result{}, SyncPushConflictV2Result{}}, func(ctx context.Context, arguments json.RawMessage, proof types.PublicRequestProof) (any, error) {
 			return deps.Push.Handle(ctx, arguments, proof)
 		})
 	}
 	if deps.Conflict.ready() {
-		register("wormhole.sync.conflict", "Resolve one durable sync v2 conflict with a canonical operation.", SyncConflictV2Args{}, []any{SyncConflictResolvedV2Result{}}, func(ctx context.Context, arguments json.RawMessage, proof types.PublicRequestProof) (any, error) {
+		register(2, "wormhole.sync.conflict", "Resolve one durable sync v2 conflict with a canonical operation.", SyncConflictV2Args{}, []any{SyncConflictResolvedV2Result{}}, func(ctx context.Context, arguments json.RawMessage, proof types.PublicRequestProof) (any, error) {
 			return deps.Conflict.Handle(ctx, arguments, proof)
+		})
+	}
+	if deps.ActivityAccept.ready() {
+		register(1, "wormhole.activity.accept", "Accept durable Activity v1 or return current policy evidence.", ActivityAcceptV1Args{}, []any{ActivityAcceptedV1Result{}, ActivityPolicyChangedV1Result{}}, func(ctx context.Context, a json.RawMessage, p types.PublicRequestProof) (any, error) {
+			return deps.ActivityAccept.Handle(ctx, a, p)
+		})
+	}
+	if deps.ActivityLifecycle.ready() {
+		register(1, "wormhole.activity.lifecycle", "Apply a source-owned Activity v1 lifecycle transition.", ActivityLifecycleV1Args{}, []any{ActivityLifecycleV1Result{}}, func(ctx context.Context, a json.RawMessage, p types.PublicRequestProof) (any, error) {
+			return deps.ActivityLifecycle.Handle(ctx, a, p)
+		})
+	}
+	if deps.ActivityPresence.ready() {
+		register(1, "wormhole.activity.presence", "Accept ephemeral Activity v1 presence without durable Activity state.", ActivityPresenceV1Args{}, []any{ActivityPresenceAcceptedV1Result{}, ActivityPolicyChangedV1Result{}}, func(ctx context.Context, a json.RawMessage, p types.PublicRequestProof) (any, error) {
+			return deps.ActivityPresence.Handle(ctx, a, p)
+		})
+	}
+	if deps.ActivityPull.ready() {
+		register(1, "wormhole.activity.pull", "Pull ordered Activity v1 deliveries and policy evidence.", ActivityPullV1Args{}, []any{ActivityPullV1Result{}}, func(ctx context.Context, a json.RawMessage, p types.PublicRequestProof) (any, error) {
+			return deps.ActivityPull.Handle(ctx, a, p)
 		})
 	}
 	return registry
