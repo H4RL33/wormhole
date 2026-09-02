@@ -82,6 +82,47 @@ type ActivityRepo struct{ db *sql.DB }
 
 func NewActivityRepo(db *sql.DB) *ActivityRepo { return &ActivityRepo{db: db} }
 
+func (r *ActivityRepo) ResolveOrigin(ctx context.Context, route types.ActivityRouteKey, activityID string) (types.ActivityOriginKey, error) {
+	if err := validateActivityRoute(route); err != nil || !types.CanonicalUUID(activityID) {
+		return types.ActivityOriginKey{}, fmt.Errorf("localstore: resolve Activity origin: %w", ErrActivityNotFound)
+	}
+	var sources []types.WorkspaceID
+	err := r.withImmediate(ctx, "resolve origin", func(conn *sql.Conn) error {
+		if err := requireActiveActivityRoute(ctx, conn, route); err != nil {
+			return err
+		}
+		arguments := append(activityRouteArgs(route), activityID)
+		rows, err := conn.QueryContext(ctx, `SELECT source_workspace_id FROM activity_ledger
+			WHERE project_id=? AND workspace_id=? AND fabric_instance_id=? AND remote_project_id=?
+			AND stream_id=? AND canonical_ref=? AND activity_id=? ORDER BY source_workspace_id LIMIT 2`, arguments...)
+		if err != nil {
+			return fmt.Errorf("localstore: resolve Activity origin: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var source string
+			if err := rows.Scan(&source); err != nil {
+				return err
+			}
+			if !types.CanonicalUUID(source) {
+				return ErrActivityReplayConflict
+			}
+			sources = append(sources, types.WorkspaceID(source))
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return types.ActivityOriginKey{}, err
+	}
+	if len(sources) == 0 {
+		return types.ActivityOriginKey{}, fmt.Errorf("localstore: resolve Activity origin: %w", ErrActivityNotFound)
+	}
+	if len(sources) != 1 {
+		return types.ActivityOriginKey{}, fmt.Errorf("localstore: resolve Activity origin: %w", ErrActivityReplayConflict)
+	}
+	return types.ActivityOriginKey{Route: route, SourceWorkspaceID: sources[0], ActivityID: activityID}, nil
+}
+
 type activityDB interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)

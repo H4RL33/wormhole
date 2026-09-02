@@ -18,6 +18,9 @@ func (r *ActivityRepo) TransitionLifecycle(ctx context.Context, key types.Activi
 		if err := requireActiveActivityRoute(ctx, conn, key.Route); err != nil {
 			return err
 		}
+		if err := requireUnconflictedActivityWorkspace(ctx, conn, key.Route); err != nil {
+			return err
+		}
 		evidence, err := newActivityEvidenceLoader().load(ctx, conn, key)
 		if err != nil {
 			return err

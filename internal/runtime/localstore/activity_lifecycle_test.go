@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/H4RL33/wormhole/internal/types"
 	"github.com/H4RL33/wormhole/internal/types/projectstate"
 )
 
@@ -42,6 +44,32 @@ func snapshotAutomaticDelivery(t *testing.T, fixture localActivityFixture, activ
 		t.Fatal(err)
 	}
 	return snapshot
+}
+
+func TestActivityTransitionLifecycleConflictGateAndMutationAreAtomic(t *testing.T) {
+	fixture := newLocalActivityFixture(t, true)
+	defer fixture.store.Close()
+	record, err := fixture.repo.QueueOutbound(context.Background(), fixture.route, localOrdinaryActivity(localActivityIDOne, "atomic conflict", testUTCNow()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotAutomaticDelivery(t, fixture, record.Key.ActivityID)
+	workspaces := NewWorkspaceRepo(fixture.store.DB())
+	scope := types.WorkspaceScope{ProjectID: fixture.route.ProjectID, WorkspaceID: fixture.route.WorkspaceID}
+	evidence := WorkspaceConflictEvidence{ConflictID: "sha256:" + strings.Repeat("a", 64), Key: projectstate.RecordKey{Kind: "task", ID: localActivityTaskID}, FieldPath: "/title", ConflictKind: "same_field", BaseJSON: "{}", OursJSON: "{}", TheirsJSON: "{}"}
+	if err := workspaces.WithImmediateWorkspace(context.Background(), scope, func(tx *WorkspaceMutationTx) error {
+		_, err := tx.ReplaceOpenConflictOccurrences(context.Background(), []WorkspaceConflictEvidence{evidence}, testUTCNow())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	change := ActivityLifecycleChange{Kind: "delivery", ReferenceID: record.Key.ActivityID, ExpectedState: "pending", NextState: "cancelled"}
+	if err := fixture.repo.TransitionLifecycle(context.Background(), record.Key, change); !errors.Is(err, ErrWorkspaceConflicted) {
+		t.Fatalf("TransitionLifecycle=%v", err)
+	}
+	if after := snapshotAutomaticDelivery(t, fixture, record.Key.ActivityID); !reflect.DeepEqual(before, after) {
+		t.Fatalf("conflicted transition mutated evidence: before=%+v after=%+v", before, after)
+	}
 }
 
 func TestActivityAutomaticDeliveryRequiresReceiptAcknowledgement(t *testing.T) {
