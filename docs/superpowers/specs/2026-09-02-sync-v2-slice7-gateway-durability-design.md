@@ -1,6 +1,6 @@
 # Sync v2 Slice 7 Gateway Durability Amendment
 
-**Status:** pending written-spec approval and independent re-review
+**Status:** approved 2026-09-02; independent design re-review C0/I0/M0
 
 **Date:** 2026-09-02
 
@@ -167,6 +167,80 @@ the pair. A consumer may retain the returned values but cannot mutate durable ro
 Activity, queue, cursor, conflict, receipt, or binding identity because the interface
 has no write method and the values are copies. Any result used for attach/session work
 is immutable for that attempt; explicit human CLI rebind is the only rebinding path.
+
+### Internal implementation-seam correction
+
+Plan transcription exposed several internal seams that must be explicit for the
+approved flow to be implementable. They do not add or alter a public sync-v2 wire
+field, change the private-identity consumer boundary above, or activate production
+wiring.
+
+```go
+// package sync
+type V2CallAuthority struct {
+	CredentialRef string
+	AgentSession  *projectstate.PublicAgentSessionIssueV2Result
+}
+
+type AttachResult struct {
+	Wire           projectstate.SyncAttachV2Result
+	ActivityPolicy localstore.ActivityPolicyState
+}
+
+type BootstrapResult struct {
+	Wire           projectstate.SyncBootstrapV2Result
+	ActivityPolicy localstore.ActivityPolicyState
+}
+
+type V2FabricClientFactory interface {
+	AttachClient(context.Context, types.WorkspaceBinding, types.FabricProfile) (V2FabricClient, error)
+	Client(context.Context, types.FabricBinding, types.FabricProfile) (V2FabricClient, error)
+}
+
+type FabricAttachSource interface {
+	GetAttachTarget(context.Context, types.WorkspaceScope) (types.WorkspaceBinding, types.FabricProfile, error)
+}
+
+type RemoteReplicaImporter interface {
+	CaptureRemoteAttempt(context.Context, types.WorkspaceScope) (localstore.RemoteAttemptCapture, error)
+	ImportAcceptedTree(context.Context, localstore.RemoteReplicaImportRequest) (localstore.RemoteReplicaImportResult, error)
+	PrepareRemoteResolution(context.Context, localstore.PrepareRemoteResolutionRequest) (localstore.PrepareRemoteResolutionResult, error)
+}
+
+// package localstore
+type ActivityPolicyState struct {
+	State          string
+	Policy         *projectstate.EffectiveActivityPolicyV1
+	PolicyJSON     json.RawMessage
+	PolicyVersion  *int64
+	PolicyDigest   *projectstate.Digest
+	DisabledReason string
+	UpdatedAt      time.Time
+}
+
+type RemoteReplicaImportRequest struct {
+	// Other frozen expected-local, route, remote-state, and consequence fields remain.
+	ExpectedActivityPolicy *ActivityPolicyState // nil initial; nonnil ongoing
+}
+```
+
+Every client operation receives one immutable `V2CallAuthority`. A nil agent session
+selects attachment-scoped human proof; a copied nonnil session selects
+attachment-plus-session proof. `AttachClient` validates only the local workspace and
+explicit persisted public profile, permits only `Attach`, and therefore needs no
+server-generated IDs before attach. `Client` requires the complete active route,
+rejects `Attach`, and permits the remaining operations. `FabricAttachSource` is a
+read-only explicit human selection and never infers a profile from URL, alias,
+environment, public input, or last-used state.
+
+Attach and bootstrap retain their unchanged typed wire result while classifying the
+raw `effective_activity_policy` member into local canonical evidence. Enabled policy
+owns both a typed policy and copied canonical `PolicyJSON` whose version and digest
+match. Disabled policy owns neither and records exactly one closed reason. Initial
+import supplies the classified policy; ongoing import revalidates the deep-copied
+`ExpectedActivityPolicy`. `CaptureRemoteAttempt` provides the coherent pre-network
+ProjectState, route, cursor, policy, queue/conflict, and candidate evidence that the
+post-network transaction must revalidate.
 
 ### Future Code Graph seam (published, not implemented in Slice 7)
 
