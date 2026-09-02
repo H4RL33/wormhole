@@ -34,12 +34,7 @@ type ActivityPullRequest struct {
 	Limit         int
 }
 
-type ActivityPullPolicyStreamKey struct {
-	ProjectID, FabricInstanceID, StreamID, CanonicalRef string
-}
-
 type ActivityPullPolicyEvidence struct {
-	Stream       ActivityPullPolicyStreamKey
 	PolicyJSON   []byte
 	PolicyDigest projectstate.Digest
 }
@@ -67,10 +62,21 @@ type ActivityPresenceResponse struct {
 	PolicyChanged bool
 }
 
+type ActivityLifecycleRequest struct {
+	AttachmentRef string
+	ActivityID    string
+	Change        localstore.ActivityLifecycleChange
+}
+
+type ActivityLifecycleResponse struct {
+	State string
+}
+
 type ActivityFabricClient interface {
 	Accept(context.Context, ActivityAcceptRequest) (ActivityAcceptResponse, error)
 	Pull(context.Context, ActivityPullRequest) (ActivityPullResponse, error)
 	SendPresence(context.Context, ActivityPresenceRequest) (ActivityPresenceResponse, error)
+	Lifecycle(context.Context, ActivityLifecycleRequest) (ActivityLifecycleResponse, error)
 }
 
 type ActivityClientFactory interface {
@@ -474,14 +480,10 @@ func validatePulledBatchForProfile(deliveries []localstore.ActivityPullDelivery,
 	if len(policies) != len(receiptPolicies) {
 		return nil, nil, fmt.Errorf("sync: pulled Activity policy evidence: %w", localstore.ErrActivityPolicyUnavailable)
 	}
-	validatedPolicies := make([]localstore.ActivityPolicyEvidence, 0, len(policies))
+	validatedWirePolicies := make([]ActivityPullPolicyEvidence, 0, len(policies))
 	seen := make(map[int64]struct{}, len(policies))
 	var priorVersion int64
 	for _, evidence := range policies {
-		if evidence.Stream.ProjectID != route.RemoteProjectID || evidence.Stream.FabricInstanceID != route.FabricInstanceID ||
-			evidence.Stream.StreamID != route.StreamID || evidence.Stream.CanonicalRef != route.CanonicalRef {
-			return nil, nil, fmt.Errorf("sync: pulled Activity policy route: %w", localstore.ErrActivityPolicyUnavailable)
-		}
 		policy, canonical, digest, err := validateActivityPolicyEvidence(evidence.PolicyJSON, evidence.PolicyDigest)
 		if err != nil {
 			return nil, nil, fmt.Errorf("sync: pulled Activity policy evidence: %w", localstore.ErrActivityPolicyUnavailable)
@@ -498,8 +500,14 @@ func validatePulledBatchForProfile(deliveries []localstore.ActivityPullDelivery,
 		}
 		seen[policy.PolicyVersion] = struct{}{}
 		priorVersion = policy.PolicyVersion
+		validatedWirePolicies = append(validatedWirePolicies, ActivityPullPolicyEvidence{
+			PolicyJSON: append([]byte(nil), canonical...), PolicyDigest: digest,
+		})
+	}
+	validatedPolicies := make([]localstore.ActivityPolicyEvidence, 0, len(validatedWirePolicies))
+	for _, evidence := range validatedWirePolicies {
 		validatedPolicies = append(validatedPolicies, localstore.ActivityPolicyEvidence{
-			Route: route, PolicyJSON: append([]byte(nil), canonical...), PolicyDigest: digest,
+			Route: route, PolicyJSON: append([]byte(nil), evidence.PolicyJSON...), PolicyDigest: evidence.PolicyDigest,
 		})
 	}
 	return validatedDeliveries, validatedPolicies, nil

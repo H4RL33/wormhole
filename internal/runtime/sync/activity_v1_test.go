@@ -248,9 +248,13 @@ func (g *activityTestConflictGate) set(scope types.WorkspaceScope, open bool) {
 }
 
 type activityTestClient struct {
-	accept   func(context.Context, ActivityAcceptRequest) (ActivityAcceptResponse, error)
-	pull     func(context.Context, ActivityPullRequest) (ActivityPullResponse, error)
-	presence func(context.Context, ActivityPresenceRequest) (ActivityPresenceResponse, error)
+	accept            func(context.Context, ActivityAcceptRequest) (ActivityAcceptResponse, error)
+	pull              func(context.Context, ActivityPullRequest) (ActivityPullResponse, error)
+	presence          func(context.Context, ActivityPresenceRequest) (ActivityPresenceResponse, error)
+	lifecycleResponse ActivityLifecycleResponse
+	lifecycleErr      error
+	lifecycleRequests []ActivityLifecycleRequest
+	afterLifecycle    func()
 }
 
 func (c *activityTestClient) Accept(ctx context.Context, request ActivityAcceptRequest) (ActivityAcceptResponse, error) {
@@ -272,6 +276,18 @@ func (c *activityTestClient) SendPresence(ctx context.Context, request ActivityP
 		return ActivityPresenceResponse{}, errors.New("unexpected presence")
 	}
 	return c.presence(ctx, request)
+}
+
+func (c *activityTestClient) Lifecycle(_ context.Context, request ActivityLifecycleRequest) (ActivityLifecycleResponse, error) {
+	c.lifecycleRequests = append(c.lifecycleRequests, ActivityLifecycleRequest{
+		AttachmentRef: request.AttachmentRef,
+		ActivityID:    request.ActivityID,
+		Change:        request.Change,
+	})
+	if c.afterLifecycle != nil {
+		c.afterLifecycle()
+	}
+	return c.lifecycleResponse, c.lifecycleErr
 }
 
 type activityTestClientFactory struct {
@@ -711,14 +727,10 @@ func activityTestDelivery(t *testing.T, activity projectstate.ActivityV1, source
 	return localstore.ActivityPullDelivery{SourceWorkspaceID: source, ActivityJSON: raw, ActivityDigest: digest, ReceiptJSON: receiptRaw}
 }
 
-func activityTestPullPolicyEvidence(t *testing.T, route types.ActivityRouteKey, policy projectstate.EffectiveActivityPolicyV1) ActivityPullPolicyEvidence {
+func activityTestPullPolicyEvidence(t *testing.T, _ types.ActivityRouteKey, policy projectstate.EffectiveActivityPolicyV1) ActivityPullPolicyEvidence {
 	t.Helper()
 	raw, digest := activityTestPolicyEvidence(t, policy)
 	return ActivityPullPolicyEvidence{
-		Stream: ActivityPullPolicyStreamKey{
-			ProjectID: route.RemoteProjectID, FabricInstanceID: route.FabricInstanceID,
-			StreamID: route.StreamID, CanonicalRef: route.CanonicalRef,
-		},
 		PolicyJSON: raw, PolicyDigest: digest,
 	}
 }
